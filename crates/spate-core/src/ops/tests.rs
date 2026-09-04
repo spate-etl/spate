@@ -883,58 +883,185 @@ fn reporting_a_fatal_drains_every_stage_that_latched() {
     );
 }
 
-/// When two split branches each latch within one payload, the reported reason
-/// names the branch that recorded first, whichever index it has.
-/// Regression for #364.
+/// A split over two branches whose encoders each fail to finalize once a row of
+/// theirs ends `FATALFINISH`. A row prefixed `one` routes to the second branch,
+/// and the default target holds every row until the flush, so both branches
+/// seal in the same `flush_terminal` pass. The sink names are what the reported
+/// `component` distinguishes them by.
+fn finish_failing_split(zero_q: ShardQueues, one_q: ShardQueues) -> Box<dyn RunnableChain> {
+    let budget = Arc::new(InflightBudget::new());
+    let mut split = chain(LogDeser)
+        .flat_map::<Owned<Vec<u8>>, _>(split_body_owned)
+        .split(ErrorPolicy::Fail);
+    let zero = split.add::<Owned<Vec<u8>>, _, _>(
+        SelectiveFinishEncoder::default(),
+        ToZero,
+        SinkCtx::new("zero".into(), zero_q, Arc::clone(&budget)),
+    );
+    let one = split.add::<Owned<Vec<u8>>, _, _>(
+        SelectiveFinishEncoder::default(),
+        ToZero,
+        SinkCtx::new("one".into(), one_q, budget),
+    );
+    split
+        .route(move |b: Vec<u8>, out| {
+            if b.starts_with(b"one") {
+                out.emit(one, b);
+            } else {
+                out.emit(zero, b);
+            }
+        })
+        .build()
+}
+
+/// When two split branches each fail to finalize in one flush, the reported
+/// reason names the branch the seal loop reached first. A branch that finalizes
+/// cleanly after another has failed still ships its chunk.
 #[test]
-fn a_split_reports_the_fatal_its_branches_recorded_first() {
-    /// The component one payload reports. `first` is the branch index the
-    /// leading record routes to; the trailing record takes the other.
-    fn run(first: usize) -> String {
-        let (zero_q, _zero_rx) = shard_queues(1, 64);
+fn a_flush_reports_the_first_branch_that_failed_to_finalize() {
+    /// The component and reason one flush reports, and the rows that reached
+    /// branch `zero`.
+    fn run(rows: &str) -> (String, String, Vec<Vec<u8>>) {
+        let (zero_q, mut zero_rx) = shard_queues(1, 64);
         let (one_q, _one_rx) = shard_queues(1, 64);
+        let mut c = finish_failing_split(zero_q, one_q);
+
+        let bufs = payloads(&[rows]);
+        let (mut batch, _rx) = TestBatch::new(&bufs);
+        assert!(matches!(c.push_batch(&mut batch, 0), PushOutcome::Done));
+        let PushOutcome::Fatal(f) = c.flush() else {
+            panic!("expected fatal");
+        };
+        (f.component, f.reason, drain_rows(&mut zero_rx[0]))
+    }
+
+    // Both branches doomed: the seal loop reaches `zero` first whichever row
+    // arrived first, so the row order cannot change the answer.
+    let (component, reason, _) = run("a:zeroFATALFINISH|oneFATALFINISH");
+    assert_eq!(component, "sink.zero");
+    assert!(reason.contains("zeroFATALFINISH"), "{reason}");
+
+    let (component, reason, _) = run("a:oneFATALFINISH|zeroFATALFINISH");
+    assert_eq!(component, "sink.zero");
+    assert!(reason.contains("zeroFATALFINISH"), "{reason}");
+
+    // Only `one` doomed: it is the branch named, and `zero`'s chunk still ships.
+    let (component, reason, shipped) = run("a:zeroOK|oneFATALFINISH");
+    assert_eq!(component, "sink.one");
+    assert!(reason.contains("oneFATALFINISH"), "{reason}");
+    assert_eq!(
+        shipped,
+        vec![b"zeroOK".to_vec()],
+        "a branch that finalized cleanly must still ship its chunk"
+    );
+}
+
+/// Reporting a flush fatal drains every branch that latched, so a branch that
+/// was passed over does not fail a later batch on its reason.
+#[test]
+fn reporting_a_flush_fatal_drains_every_branch_that_latched() {
+    let (zero_q, _zero_rx) = shard_queues(1, 64);
+    let (one_q, _one_rx) = shard_queues(1, 64);
+    let mut c = finish_failing_split(zero_q, one_q);
+
+    let bufs = payloads(&["a:zeroFATALFINISH|oneFATALFINISH"]);
+    let (mut batch, _rx) = TestBatch::new(&bufs);
+    assert!(matches!(c.push_batch(&mut batch, 0), PushOutcome::Done));
+    assert!(matches!(c.flush(), PushOutcome::Fatal(_)));
+    drop(batch);
+
+    // `one` reported nothing, so a slot it still held would surface here.
+    let clean = payloads(&["b:oneok"]);
+    let (mut batch, _rx) = TestBatch::new(&clean);
+    let outcome = c.push_batch(&mut batch, 0);
+    assert!(
+        matches!(outcome, PushOutcome::Done),
+        "a branch passed over by the flush kept its reason: {outcome:?}"
+    );
+}
+
+/// A record that reaches the split after one branch has latched a fatal reaches
+/// no branch, whether it is a later record of the payload or a later emit of
+/// the same record. The batch after it is taken normally.
+/// Regression for #365.
+#[test]
+fn a_branch_fatal_stops_the_other_branches() {
+    /// The outcome of one payload, the rows that reached the `key` branch, and
+    /// the rows a clean batch after it reached. With `fan`, the route closure
+    /// emits the `FATALROW` to `key` as well, so the second emit of one record
+    /// follows the first emit's latch.
+    fn run(payload: &str, fan: bool) -> (PushOutcome, Vec<Vec<u8>>, Vec<Vec<u8>>) {
+        let (sub_q, _sub_rx) = shard_queues(1, 64);
+        let (key_q, mut key_rx) = shard_queues(1, 64);
         let budget = Arc::new(InflightBudget::new());
 
-        // Both branches take the same family and encoder; the sink names are
-        // what the reported `component` distinguishes them by.
         let mut split = chain(LogDeser)
             .flat_map::<SubF, _>(split_body)
             .split(ErrorPolicy::Fail);
-        let zero = split.add::<SubF, _, _>(
+        let sub = split.add::<SubF, _, _>(
             SubEncoder,
             ToZero,
-            SinkCtx::new("zero".into(), zero_q, Arc::clone(&budget)),
+            SinkCtx::new("sub".into(), sub_q, Arc::clone(&budget)),
         );
-        let one = split.add::<SubF, _, _>(
-            SubEncoder,
+        let key = split.add::<KeyF, _, _>(
+            KeyEncoder,
             ToZero,
-            SinkCtx::new("one".into(), one_q, budget),
+            SinkCtx::new("key".into(), key_q, budget),
         );
-        // Both rows are `FATALROW`, so arrival order alone decides which branch
-        // latches first; the closure counts records rather than reading them.
-        let mut seen = 0usize;
         let mut c = split
             .route(move |e: SubEvent<'_>, out| {
-                let idx = if seen == 0 { first } else { 1 - first };
-                seen += 1;
-                out.emit(if idx == 0 { zero } else { one }, e);
+                if e.chunk == b"FATALROW" {
+                    out.emit(sub, SubEvent { chunk: e.chunk });
+                    if fan {
+                        out.emit(key, KeyEvent { key: e.chunk });
+                    }
+                } else {
+                    out.emit(key, KeyEvent { key: e.chunk });
+                }
             })
             .build();
 
-        // One record per payload would drain the slot between them, so the two
-        // records have to reach the split inside one payload.
-        let bufs = payloads(&["a:FATALROW|FATALROW"]);
+        let bufs = payloads(&[payload]);
         let (mut batch, _rx) = TestBatch::new(&bufs);
-        let PushOutcome::Fatal(f) = c.push_batch(&mut batch, 0) else {
-            panic!("expected fatal");
-        };
-        f.component
+        let outcome = c.push_batch(&mut batch, 0);
+        // The branches hold their rows until a flush seals them, so a row that
+        // did reach `key` shows up here.
+        let _ = c.flush();
+        let reached = drain_rows(&mut key_rx[0]);
+        drop(batch);
+
+        // A split still holding the latch would swallow this batch instead.
+        let clean = payloads(&["b:kafter"]);
+        let (mut batch, _rx) = TestBatch::new(&clean);
+        assert!(matches!(c.push_batch(&mut batch, 0), PushOutcome::Done));
+        assert!(matches!(c.flush(), PushOutcome::Done));
+        (outcome, reached, drain_rows(&mut key_rx[0]))
     }
 
-    // The leading record routes to branch 1, which therefore latches before
-    // branch 0 does, so returning the lowest occupied index cannot pass both.
-    assert_eq!(run(1), "sink.one");
-    assert_eq!(run(0), "sink.zero");
+    /// The reason and rows one arm asserts on.
+    fn check(outcome: PushOutcome, rows: &[Vec<u8>], recovered: &[Vec<u8>], what: &str) {
+        let PushOutcome::Fatal(f) = outcome else {
+            panic!("expected the fatal, got {outcome:?}");
+        };
+        assert_eq!(f.component, "sink.sub");
+        assert!(rows.is_empty(), "{what} reached another branch: {rows:?}");
+        assert_eq!(
+            recovered,
+            [b"kafter".to_vec()],
+            "the batch after the fatal was swallowed"
+        );
+    }
+
+    let (outcome, rows, recovered) = run("a:FATALROW|after", false);
+    check(outcome, &rows, &recovered, "a record after the fatal");
+
+    let (outcome, rows, recovered) = run("a:FATALROW", true);
+    check(
+        outcome,
+        &rows,
+        &recovered,
+        "a second emit of the latching record",
+    );
 }
 
 /// A deserializer that emits a record and then fails reports the fatal the

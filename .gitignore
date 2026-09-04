@@ -32,6 +32,7 @@ website/node_modules
 website/build
 website/.docusaurus
 website/.cache-loader
+website/.wrangler
 # Generated rustdoc, staged into the site by the scheduled deploy (see .github/workflows/scheduled.yml)
 website/static/api
 # Generated third-party license texts, staged into the site by the same workflow.

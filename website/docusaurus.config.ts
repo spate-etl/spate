@@ -7,7 +7,7 @@ import { themes as prismThemes } from 'prism-react-renderer';
 import transclude from './src/remark/transclude';
 import repoLinks from './src/remark/repoLinks';
 import transcludeDeps from './src/plugins/transcludeDeps';
-// The site is deployed to Cloudflare Pages at https://spate.kainth.dev/.
+// The site is deployed as a Cloudflare Worker at https://spate.kainth.dev/.
 // organizationName/projectName drive the GitHub source links (githubUrl,
 // editUrl, footer, and every `repo:` link on a page), not the deployed URL.
 import {

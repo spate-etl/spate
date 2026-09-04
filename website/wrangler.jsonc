@@ -1,0 +1,20 @@
+// The documentation site as a Cloudflare Worker serving static assets. The
+// deploy job runs this from the build artifact without a checkout; keep it
+// self-contained.
+{
+  "$schema": "https://unpkg.com/wrangler/config-schema.json",
+  "name": "spate",
+  "compatibility_date": "2026-09-01",
+  "assets": {
+    "directory": "./build",
+    // rustdoc module pages link relative to a directory URL, so /api/ must keep
+    // its trailing slashes. drop-trailing-slash serves /api/<crate> and every
+    // stylesheet and sibling link then resolves one directory too high.
+    "html_handling": "auto-trailing-slash",
+    "not_found_handling": "404-page"
+  },
+  "routes": [
+    { "pattern": "spate.kainth.dev", "custom_domain": true }
+  ],
+  "observability": { "enabled": false }
+}

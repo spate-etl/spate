@@ -239,6 +239,11 @@ rather than on each release:
   so it reaches the code scanning rule and nothing the `main` ruleset holds.
 - **No required reviewer on the `crates-io` environment.** Adding one pauses
   a publish part way with nothing in the workflow explaining it.
+- **The `cloudflare-workers` environment**: secrets `CLOUDFLARE_API_TOKEN`
+  and `CLOUDFLARE_ACCOUNT_ID`, where the token needs Workers Scripts edit on
+  the account and Workers Routes plus DNS edit on the zone. The release
+  dispatches the docs tier, so a narrower token or a missing environment
+  leaves the site advertising the previous version.
 
 Unless a step failed and this page says otherwise, the workflow run and the
 registry are the record of a release; there is nothing to write down and no

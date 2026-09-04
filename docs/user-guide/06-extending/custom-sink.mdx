@@ -67,6 +67,15 @@ your encoder stays row-at-a-time, which is what most formats want. Because each
 shard has its own encoder clone, a buffered block belongs to exactly one shard's
 chunk and cannot interleave with another's.
 
+An error from `finish_chunk` stops the pipeline, and the stage drops whatever
+that call wrote into `buf` so no partial block ships. That stop is asynchronous.
+The chunk stays open until it lands, so a later seal may call `finish_chunk`
+again, by then possibly for more rows than the failed call held. Return `Ok`
+only from a call whose frame carries every row the chunk holds. What the call
+wrote is dropped and not the row count, so an encoder that had already moved its
+rows into `buf` when it failed re-encodes them, and keeps failing until it can.
+Rows no call finalizes replay, because their acknowledgments fail on teardown.
+
 ## The I/O half: `ShardWriter`
 
 One sealed batch out to one replica endpoint. The example's endpoint is a shard

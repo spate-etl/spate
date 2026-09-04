@@ -152,10 +152,14 @@ where
         // block into `buf` as one complete frame before sealing (a no-op for
         // row formats, which already wrote every row in `encode`). A finalize
         // failure means a broken encoder, not a bad record: record it fatal
-        // and ship nothing. The shard's captured acks fail on teardown, so
-        // the rows replay. A flush seals every shard after this one, so the
-        // latch keeps the first reason.
+        // and ship nothing. The shard keeps its rows and acks, which ship if a
+        // later finalize succeeds and fail on teardown otherwise. A flush seals
+        // every shard after this one, so the latch keeps the first reason.
+        let before = shard.buf.len();
         if let Err(e) = shard.encoder.finish_chunk(&mut shard.buf) {
+            // The encoder may have written a partial block; roll it back to
+            // the rows `encode` wrote, so the frame stays well-formed.
+            shard.buf.truncate(before);
             self.meter.0.fatal_error();
             self.fatal.0.get_or_insert_with(|| FatalError {
                 component: self.component.to_string(),

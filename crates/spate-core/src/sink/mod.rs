@@ -157,10 +157,19 @@ pub trait RowEncoder<F: RecFamily>: Send {
     /// columnar encoder's buffered rows are not silently dropped.
     ///
     /// An `Err` is fatal (a broken encoder, not a bad record). The stage
-    /// ships no partial frame and the buffered rows' acknowledgments fail on
-    /// teardown, so the data replays. Because a Native block concatenates
-    /// with the blocks around it, each `finish_chunk` frame is independently
-    /// valid, so workers still accumulate frames without re-encoding.
+    /// discards whatever the failed call wrote and ships no partial frame.
+    /// The stop it triggers is asynchronous, so the chunk stays open and a
+    /// later seal may call `finish_chunk` again for it, by which point the
+    /// chunk may hold rows the failed call never saw. Return `Ok` only from a
+    /// call whose frame carries every row the chunk holds. The stage discards
+    /// what the call wrote and not the row count, so an encoder that had
+    /// already moved its rows into `buf` when it failed re-encodes them, and
+    /// keeps failing until it can. Rows no call finalizes have their acknowledgments fail on
+    /// teardown, so the data replays.
+    ///
+    /// Because a Native block concatenates with the blocks around it, each
+    /// `finish_chunk` frame is independently valid, so workers still
+    /// accumulate frames without re-encoding.
     fn finish_chunk(&mut self, buf: &mut BytesMut) -> Result<(), SinkError> {
         let _ = buf;
         Ok(())

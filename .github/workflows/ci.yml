@@ -525,9 +525,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo +nightly fuzz list >targets.txt
-          # `|| true`: grep exits 1 on an empty file, and `set -e` would abort
-          # the assignment before the check below can name the problem.
-          targets=$(grep -c '' targets.txt || true)
+          targets=$(wc -l <targets.txt)
           if [[ "$targets" -eq 0 ]]; then
             echo "::error::the fuzz crate declares no target; this job built nothing"
             exit 1
@@ -562,7 +560,7 @@ jobs:
           # Materialised and counted, not streamed: a `while read` whose producer
           # died iterates zero times and exits 0, having warmed nothing.
           jq -r '.[] | [.package, .cargo_features] | @tsv' <<<"$BENCH_SHARDS" >arms.tsv
-          arms=$(grep -c '' arms.tsv)
+          arms=$(wc -l <arms.tsv)
           if [[ "$arms" -eq 0 ]]; then
             echo "::error::the bench matrix is empty; there is nothing to warm"
             exit 1

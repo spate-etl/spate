@@ -140,3 +140,15 @@ updates:
     # `default-days` only, as for github-actions above.
     cooldown:
       default-days: 7
+    # rustc 1.98.0 miscompiles generated vtables (rust-lang/rust#161441), and
+    # every `rust:1.98.0-*` image carries it. Delete this entry once a 1.98.1
+    # image exists, and take that instead.
+    #
+    # Both spellings are listed because the docker updater's matching against a
+    # suffixed tag is undocumented: whichever of the two it compares against,
+    # one of these matches and the other is inert.
+    #
+    # Tracked in #378.
+    ignore:
+      - dependency-name: "rust"
+        versions: ["1.98.0", "1.98.0-bookworm"]

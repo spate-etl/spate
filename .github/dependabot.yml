@@ -23,6 +23,24 @@ updates:
       semver-minor-days: 14
       semver-major-days: 14
 
+    # async-nats requires base64 ^0.22, and object_store, hyper-util, reqwest,
+    # tonic and rustls-native-certs all reach 0.22 as well, so base64 0.23 adds
+    # a second copy of the crate rather than replacing the first. The consts
+    # this workspace uses stay on the scalar engine either way, so the bump
+    # buys a duplicate and a THIRD-PARTY.md row and nothing else.
+    #
+    # Both update-types are named because the positional classification above
+    # applies here too: for a 0.x crate the breaking release moves the minor,
+    # so `semver-minor` is what reaches 0.22 -> 0.23, and `semver-major` covers
+    # a later 1.0. Patches on the 0.22 line still come through.
+    #
+    # Delete this when async-nats moves to ^0.23. Tracked in #379.
+    ignore:
+      - dependency-name: "base64"
+        update-types:
+          - "version-update:semver-minor"
+          - "version-update:semver-major"
+
     # Under Cargo's default `increase-if-necessary`, a manifest edit in a bump
     # signals a dependency moved outside its declared requirement.
     groups:

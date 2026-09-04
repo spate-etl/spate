@@ -305,7 +305,7 @@ publish."
         out=$(gh pr create --title "chore: release v$version" --label release \
             --head "release/v$version" --body "$body" 2>&1) ||
             fail "gh pr create failed: $out"
-        pr=$(printf '%s\n' "$out" | grep -oE '[0-9]+$' | tail -n 1)
+        pr=$(printf '%s\n' "$out" | grep -oE '[0-9]+$' | tail -n 1) || true
         [ -n "$pr" ] || fail "gh pr create printed no pull request number: $out"
     fi
     gh pr merge "$pr" --auto --squash --delete-branch ||

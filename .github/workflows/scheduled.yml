@@ -230,9 +230,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo +nightly fuzz list >targets.txt
-          # `|| true`: grep exits 1 on an empty file, and under `set -e` that
-          # aborts the assignment before the check below can name the problem.
-          targets=$(grep -c '' targets.txt || true)
+          targets=$(wc -l <targets.txt)
           if [[ "$targets" -eq 0 ]]; then
             echo "::error::the fuzz crate declares no target; this run proved nothing"
             exit 1
@@ -244,7 +242,7 @@ jobs:
         id: run
         run: |
           set -euo pipefail
-          targets=$(grep -c '' targets.txt || true)
+          targets=$(wc -l <targets.txt)
           echo "fuzzing $targets target(s) for ${MAX_TOTAL_TIME}s each"
           fuzzed=0
           crashed=""

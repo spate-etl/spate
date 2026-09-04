@@ -7,7 +7,7 @@ use crate::deser::{BytesPassthrough, Deserializer, EmitRecord, Owned, RecFamily}
 use crate::error::{DeserError, ErrorPolicy, SinkError};
 use crate::record::{PartitionId, RawPayload, Record};
 use crate::sink::{
-    EncodedChunk, KeyHashRouter, RecordRouter, RowEncoder, ShardRouter, shard_queues,
+    EncodedChunk, KeyHashRouter, RecordRouter, RowEncoder, ShardQueues, ShardRouter, shard_queues,
 };
 use crate::source::PayloadBatch;
 use bytes::BytesMut;
@@ -81,6 +81,35 @@ impl Deserializer<LogF> for LogDeser {
     }
 }
 
+/// Emits each `|`-separated chunk of the payload as a [`SubEvent`], and fails
+/// on reaching an `ERRTAIL` chunk, so one payload emits records and *then*
+/// errors.
+#[derive(Clone, Default)]
+struct EmitThenFailDeser;
+
+impl Deserializer<SubF> for EmitThenFailDeser {
+    fn deserialize<'buf>(
+        &mut self,
+        raw: &RawPayload<'buf>,
+        ack: &AckRef,
+        out: &mut dyn EmitRecord<'buf, SubEvent<'buf>>,
+    ) -> Result<(), DeserError> {
+        for chunk in raw.bytes.split(|&b| b == b'|') {
+            if chunk == b"ERRTAIL" {
+                return Err(DeserError::Malformed {
+                    reason: "poison".into(),
+                });
+            }
+            let _ = out.emit(Record {
+                payload: SubEvent { chunk },
+                meta: raw.meta(),
+                ack: ack.clone(),
+            });
+        }
+        Ok(())
+    }
+}
+
 /// Length-prefixed encoder for `SubEvent`; fails record-level on `BADROW`
 /// chunks and fatally on `FATALROW` chunks.
 #[derive(Clone, Default)]
@@ -146,6 +175,25 @@ struct VecEncoder;
 
 impl RowEncoder<Owned<Vec<u8>>> for VecEncoder {
     fn encode<'buf>(&mut self, rec: &Record<Vec<u8>>, buf: &mut BytesMut) -> Result<(), SinkError> {
+        buf.extend_from_slice(&(u32::try_from(rec.payload.len()).unwrap()).to_le_bytes());
+        buf.extend_from_slice(&rec.payload);
+        Ok(())
+    }
+}
+
+/// [`VecEncoder`] with a fatal row: encodes owned bytes and fails with an
+/// [`ErrorClass::Fatal`](crate::error::ErrorClass::Fatal) error on `FATALROW`.
+#[derive(Clone, Default)]
+struct FatalVecEncoder;
+
+impl RowEncoder<Owned<Vec<u8>>> for FatalVecEncoder {
+    fn encode<'buf>(&mut self, rec: &Record<Vec<u8>>, buf: &mut BytesMut) -> Result<(), SinkError> {
+        if rec.payload == b"FATALROW" {
+            return Err(SinkError::Client {
+                class: crate::error::ErrorClass::Fatal,
+                reason: "encoder broken".into(),
+            });
+        }
         buf.extend_from_slice(&(u32::try_from(rec.payload.len()).unwrap()).to_le_bytes());
         buf.extend_from_slice(&rec.payload);
         Ok(())
@@ -681,14 +729,6 @@ fn a_sink_handoff_reports_the_first_fatal_of_a_payload() {
 /// sink. Reversing the order reverses the reason.
 #[test]
 fn a_try_map_reports_the_first_fatal_of_a_payload() {
-    /// Split each body at `|` into owned rows, which puts the chain on the
-    /// owned builder tier where `try_map` takes a plain closure.
-    fn split_body_owned(e: LogEvent<'_>, em: &mut Emitter<'_, Owned<Vec<u8>>>) {
-        for chunk in e.body.split(|&b| b == b'|') {
-            em.emit(chunk.to_vec());
-        }
-    }
-
     /// The reason one payload reports, and the rows that reached shard 0.
     fn run(payload: &str) -> (String, Vec<Vec<u8>>) {
         let (queues, mut rxs) = shard_queues(1, 64);
@@ -740,6 +780,189 @@ fn a_try_map_reports_the_first_fatal_of_a_payload() {
         rows.is_empty(),
         "a row after the fatal was sealed: {rows:?}"
     );
+}
+
+/// Split each body at `|` into owned rows, which puts the chain on the owned
+/// builder tier where `try_map` takes a plain closure.
+fn split_body_owned(e: LogEvent<'_>, em: &mut Emitter<'_, Owned<Vec<u8>>>) {
+    for chunk in e.body.split(|&b| b == b'|') {
+        em.emit(chunk.to_vec());
+    }
+}
+
+/// A chain whose `try_map` and sink can each latch within one payload: the
+/// `try_map` fails `boom` under `Fail`, the encoder fails `FATALROW` fatally,
+/// and a `target_bytes` of 1 seals any row that reaches the shard buffer.
+fn try_map_and_sink_chain(queues: ShardQueues) -> Box<dyn RunnableChain> {
+    chain(LogDeser)
+        .flat_map::<Owned<Vec<u8>>, _>(split_body_owned)
+        .try_map(
+            |b: Vec<u8>| -> Result<Vec<u8>, &'static str> {
+                if b == b"boom" {
+                    Err("the try_map latched")
+                } else {
+                    Ok(b)
+                }
+            },
+            ErrorPolicy::Fail,
+        )
+        .sink(
+            FatalVecEncoder,
+            KeyHashRouter,
+            ChunkConfig {
+                target_bytes: 1,
+                encode_policy: ErrorPolicy::Fail,
+            },
+            queues,
+            Arc::new(InflightBudget::new()),
+        )
+        .build()
+}
+
+/// When a `try_map` and the sink each latch within one payload, the chain
+/// reports the one recorded first, whichever stage is nearer the source.
+/// Regression for #364.
+#[test]
+fn a_chain_reports_the_fatal_its_stages_recorded_first() {
+    /// The reason one payload reports, and the rows that reached shard 0.
+    fn run(payload: &str) -> (String, Vec<Vec<u8>>) {
+        let (queues, mut rxs) = shard_queues(1, 64);
+        let mut c = try_map_and_sink_chain(queues);
+        let bufs = payloads(&[payload]);
+        let (mut batch, _rx) = TestBatch::new(&bufs);
+        let PushOutcome::Fatal(f) = c.push_batch(&mut batch, 0) else {
+            panic!("expected fatal");
+        };
+        (f.reason, drain_rows(&mut rxs[0]))
+    }
+
+    // The sink latches on row 1 and the `try_map` on row 2, so the reason has
+    // to name the sink even though the `try_map` sits upstream of it.
+    let (sink_first, rows) = run("a:FATALROW|boom");
+    assert!(sink_first.contains("encoder broken"), "{sink_first}");
+    assert!(
+        rows.is_empty(),
+        "a row after the fatal was sealed: {rows:?}"
+    );
+
+    // Reversed, the `try_map` latches first and swallows the `FATALROW` that
+    // follows, so the sink never latches at all.
+    let (try_map_first, rows) = run("a:boom|FATALROW");
+    assert!(
+        try_map_first.contains("the try_map latched"),
+        "{try_map_first}"
+    );
+    assert!(
+        rows.is_empty(),
+        "a row after the fatal was sealed: {rows:?}"
+    );
+}
+
+/// Reporting a fatal drains every stage's slot, so a stage that latched and was
+/// passed over does not swallow a later batch's records.
+/// Regression for #364.
+#[test]
+fn reporting_a_fatal_drains_every_stage_that_latched() {
+    let (queues, mut rxs) = shard_queues(1, 64);
+    let mut c = try_map_and_sink_chain(queues);
+
+    // Latches the sink on row 1 and the `try_map` on row 2.
+    let bufs = payloads(&["a:FATALROW|boom"]);
+    let (mut batch, _rx) = TestBatch::new(&bufs);
+    assert!(matches!(c.push_batch(&mut batch, 0), PushOutcome::Fatal(_)));
+    drop(batch);
+    assert!(drain_rows(&mut rxs[0]).is_empty());
+
+    // A stage still holding its reason swallows these instead.
+    let clean = payloads(&["b:one|two"]);
+    let (mut batch, _rx) = TestBatch::new(&clean);
+    assert!(matches!(c.push_batch(&mut batch, 0), PushOutcome::Done));
+    assert_eq!(
+        drain_rows(&mut rxs[0]),
+        vec![b"one".to_vec(), b"two".to_vec()]
+    );
+}
+
+/// When two split branches each latch within one payload, the reported reason
+/// names the branch that recorded first, whichever index it has.
+/// Regression for #364.
+#[test]
+fn a_split_reports_the_fatal_its_branches_recorded_first() {
+    /// The component one payload reports. `first` is the branch index the
+    /// leading record routes to; the trailing record takes the other.
+    fn run(first: usize) -> String {
+        let (zero_q, _zero_rx) = shard_queues(1, 64);
+        let (one_q, _one_rx) = shard_queues(1, 64);
+        let budget = Arc::new(InflightBudget::new());
+
+        // Both branches take the same family and encoder; the sink names are
+        // what the reported `component` distinguishes them by.
+        let mut split = chain(LogDeser)
+            .flat_map::<SubF, _>(split_body)
+            .split(ErrorPolicy::Fail);
+        let zero = split.add::<SubF, _, _>(
+            SubEncoder,
+            ToZero,
+            SinkCtx::new("zero".into(), zero_q, Arc::clone(&budget)),
+        );
+        let one = split.add::<SubF, _, _>(
+            SubEncoder,
+            ToZero,
+            SinkCtx::new("one".into(), one_q, budget),
+        );
+        // Both rows are `FATALROW`, so arrival order alone decides which branch
+        // latches first; the closure counts records rather than reading them.
+        let mut seen = 0usize;
+        let mut c = split
+            .route(move |e: SubEvent<'_>, out| {
+                let idx = if seen == 0 { first } else { 1 - first };
+                seen += 1;
+                out.emit(if idx == 0 { zero } else { one }, e);
+            })
+            .build();
+
+        // One record per payload would drain the slot between them, so the two
+        // records have to reach the split inside one payload.
+        let bufs = payloads(&["a:FATALROW|FATALROW"]);
+        let (mut batch, _rx) = TestBatch::new(&bufs);
+        let PushOutcome::Fatal(f) = c.push_batch(&mut batch, 0) else {
+            panic!("expected fatal");
+        };
+        f.component
+    }
+
+    // The leading record routes to branch 1, which therefore latches before
+    // branch 0 does, so returning the lowest occupied index cannot pass both.
+    assert_eq!(run(1), "sink.one");
+    assert_eq!(run(0), "sink.zero");
+}
+
+/// A deserializer that emits a record and then fails reports the fatal the
+/// emitted record latched, not its own error.
+/// Regression for #364.
+#[test]
+fn a_deserializer_failure_does_not_outrank_a_stage_that_latched() {
+    let (queues, _rxs) = shard_queues(1, 64);
+    let mut c = chain(EmitThenFailDeser)
+        .deser_error_policy(ErrorPolicy::Fail)
+        .sink(
+            SubEncoder,
+            ToZero,
+            ChunkConfig {
+                target_bytes: 1,
+                encode_policy: ErrorPolicy::Fail,
+            },
+            queues,
+            Arc::new(InflightBudget::new()),
+        )
+        .build();
+
+    let bufs = payloads(&["FATALROW|ERRTAIL"]);
+    let (mut batch, _rx) = TestBatch::new(&bufs);
+    let PushOutcome::Fatal(f) = c.push_batch(&mut batch, 0) else {
+        panic!("expected fatal");
+    };
+    assert!(f.reason.contains("encoder broken"), "{}", f.reason);
 }
 
 /// When two shards fail to finalize in one flush, the reported reason names the

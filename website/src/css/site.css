@@ -1,9 +1,24 @@
 /* The marketing shell: the site navbar and footer, the containers and the
  * motion primitives every marketing page shares. Colours come from brand.css. */
 
+:root {
+  /* The frame every page sits in: the navbar's inner width and the docs
+   * layout share it, so a 4K display gets margins rather than a stretch. */
+  --spate-frame: 1440px;
+}
+
 .site-container {
   width: min(100% - 3rem, 1180px);
   margin-inline: auto;
+}
+
+/* The docs layout, sidebar to outline, sits in the same frame. The theme
+ * stamps `docs-wrapper` on the html element; the layout is the main
+ * wrapper's child. */
+html.docs-wrapper .main-wrapper > div {
+  width: 100%;
+  max-width: var(--spate-frame);
+  margin: 0 auto;
 }
 
 .site-main {
@@ -17,36 +32,44 @@
 
 /* Navbar ------------------------------------------------------------------ */
 
-.site-nav {
-  position: sticky;
-  top: 0;
-  z-index: 200;
+/* One navbar on every page: the theme's, with src/theme/Navbar/Content
+ * inside it. Translucent over the top of a page, a rule beneath it once
+ * scrolled. Its inner width is the site frame, so the lockup sits in the
+ * same place on the homepage and on a docs page at any viewport. */
+.navbar {
+  height: 4rem;
+  padding: 0 1.5rem;
+  border-bottom: 1px solid transparent;
+  box-shadow: none;
   background: color-mix(in srgb, var(--spate-bg) 72%, transparent);
   backdrop-filter: blur(12px);
-  border-bottom: 1px solid transparent;
   transition: border-color 0.2s ease, background-color 0.2s ease;
 }
 
-.site-nav--solid {
+.navbar[data-scrolled] {
   border-bottom-color: var(--spate-border);
   background: color-mix(in srgb, var(--spate-bg) 88%, transparent);
 }
 
-.site-nav__inner {
-  display: flex;
-  align-items: center;
+.navbar__inner {
+  max-width: var(--spate-frame);
+  margin: 0 auto;
+}
+
+.navbar__items {
   gap: 1.75rem;
-  height: 4rem;
 }
 
-.site-nav__brand {
-  display: flex;
-  align-items: center;
+.navbar__items--right {
+  gap: 0.75rem;
 }
 
-.site-nav__brand img {
-  display: block;
+.navbar__logo {
   height: 28px;
+}
+
+.navbar__brand {
+  margin-right: 0;
 }
 
 .site-nav__links {
@@ -57,22 +80,20 @@
   list-style: none;
 }
 
-.site-nav__links a {
+.site-nav__link {
   color: var(--spate-ink);
   font-weight: 500;
   font-size: 0.95rem;
   text-decoration: none;
 }
 
-.site-nav__links a:hover {
+.site-nav__link:hover {
   color: var(--spate-accent);
+  text-decoration: none;
 }
 
-.site-nav__tools {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  margin-left: auto;
+.site-nav__link--active {
+  color: var(--spate-primary-dark);
 }
 
 .site-nav__github {
@@ -91,6 +112,7 @@
 .site-nav__github:hover {
   border-color: var(--spate-accent);
   color: var(--spate-ink);
+  text-decoration: none;
 }
 
 .site-nav__stars {
@@ -102,81 +124,11 @@
   color: var(--spate-muted);
 }
 
-.site-nav__menu,
-.site-nav__close {
-  display: none;
-  align-items: center;
-  justify-content: center;
-  width: 2.5rem;
-  height: 2.5rem;
-  border: 1px solid var(--spate-border);
-  border-radius: var(--ifm-global-radius);
-  background: transparent;
-  color: var(--spate-ink);
-  cursor: pointer;
-}
-
-.site-nav__sheet {
-  width: min(100% - 2rem, 22rem);
-  margin: 1rem auto;
-  padding: 1rem 1.25rem 1.5rem;
-  border: 1px solid var(--spate-border);
-  border-radius: 12px;
-  background: var(--spate-surface);
-  color: var(--spate-ink);
-}
-
-.site-nav__sheet::backdrop {
-  background: rgba(0, 0, 0, 0.5);
-}
-
-.site-nav__sheet-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 1rem;
-}
-
-.site-nav__sheet-links {
-  display: flex;
-  flex-direction: column;
-  gap: 0.25rem;
-  margin: 0 0 1rem;
-  padding: 0;
-  list-style: none;
-}
-
-.site-nav__sheet-links a {
-  display: block;
-  padding: 0.75rem 0.5rem;
-  border-radius: 8px;
-  color: var(--spate-ink);
-  font-size: 1.05rem;
-  font-weight: 500;
-  text-decoration: none;
-}
-
-.site-nav__sheet-links a:hover {
-  background: var(--spate-surface-2);
-}
-
-.site-nav__sheet .site-nav__close {
-  display: inline-flex;
-}
-
-@media (max-width: 900px) {
+/* The theme's own mobile sidebar carries the links under 997px. */
+@media (max-width: 996px) {
   .site-nav__links,
-  .site-nav__inner .site-nav__github,
-  .site-nav__inner .site-nav__mode {
+  .navbar__items .site-nav__github {
     display: none;
-  }
-
-  .site-nav__menu {
-    display: inline-flex;
-  }
-
-  .site-nav__inner {
-    gap: 1rem;
   }
 }
 

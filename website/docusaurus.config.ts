@@ -167,7 +167,7 @@ const config: Config = {
         hashed: true,
         indexDocs: true,
         indexPages: true,
-        indexBlog: false,
+        indexBlog: true,
         // The user guide is read in place from the repo's docs/ tree; the
         // benchmark pages are rendered into .benchmarks before the build.
         docsDir: ['../docs', '.benchmarks'],
@@ -219,7 +219,25 @@ const config: Config = {
             [repoLinks, {githubUrl, sourceRef: SOURCE_REF}],
           ],
         },
-        blog: false,
+        blog: {
+          path: 'blog',
+          blogTitle: 'Blog',
+          blogDescription: 'Notes from building Spate: releases, benchmark runs, and what changed on the site.',
+          blogSidebarCount: 10,
+          showReadingTime: false,
+          // No archive page: the list is the archive.
+          archiveBasePath: null,
+          feedOptions: {
+            type: ['rss', 'atom'],
+            title: 'Spate blog',
+            description: 'Notes from building Spate.',
+            copyright: `Copyright © ${new Date().getFullYear()} Marcus Kainth.`,
+          },
+          // A post without a truncation marker lists in full; the list page
+          // should show openings.
+          onUntruncatedBlogPosts: 'throw',
+          editUrl: `${githubUrl}/edit/${SOURCE_REF}/website/blog/`,
+        },
         sitemap: {
           // Docusaurus reads the date from git for docs pages; the rest carry
           // none rather than a build timestamp.

@@ -12,6 +12,7 @@ export type NavItem = {label: string; to: string};
 export const NAV_ITEMS: NavItem[] = [
   {label: 'Docs', to: '/docs/user-guide/'},
   {label: 'Benchmarks', to: `/${BENCHMARKS_BASE}/`},
+  {label: 'Blog', to: '/blog/'},
   {label: 'Decisions', to: '/docs/adr/'},
 ];
 
@@ -57,6 +58,8 @@ export const FOOTER_COLUMNS: FooterColumn[] = [
       {label: 'Issues', href: `${githubUrl}/issues`},
       {label: 'Security policy', href: `${githubUrl}/blob/main/SECURITY.md`},
       {label: 'Code of conduct', href: `${githubUrl}/blob/main/CODE_OF_CONDUCT.md`},
+      {label: 'Blog', to: '/blog/'},
+      {label: 'RSS', to: 'pathname:///blog/rss.xml'},
     ],
   },
 ];

@@ -10,7 +10,7 @@
        width="380">
 </picture>
 
-**A high-performance, at-least-once ETL pipeline framework for Rust.**
+**At-least-once streaming ETL for Rust.**
 
 *spate* /speɪt/ — a river in sudden flood.
 

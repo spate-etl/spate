@@ -6,7 +6,7 @@ import type {SidebarsConfig} from '@docusaurus/plugin-content-docs';
 // so a reader who stops after the first page has still met the caveat.
 const sidebars: SidebarsConfig = {
   benchmarks: [
-    'index',
+    {type: 'link', label: 'Results', href: '/benchmarks'},
     'workload',
     {
       type: 'category',

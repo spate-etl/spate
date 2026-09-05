@@ -524,3 +524,22 @@ An exemption is a claim review checks, not a default.
 
 YAML, TOML and shell blocks are unaffected; their correctness is checked
 against the config structs by review (§ 3), not by a compiler.
+
+## 11. Site pages and the blog
+
+The homepage, the benchmarks landing, the brand page and the blog live under
+`website/src/pages/`, `website/src/components/` and `website/blog/`, outside
+`docs/`. They are not a Diátaxis quadrant, and § 1 and the impersonal voice in
+§ 7 do not govern them: the homepage names the connectors it ships in its
+inventory and the pipeline the benchmark measured, and a blog post is one
+person writing.
+
+The rest of § 7 holds: present tense, American English, sentence-case
+headings, link text that names its destination, and a quantitative claim
+that carries how it was established. § 10 holds too: a Rust snippet on a site
+page is rendered from a compiled source under `crates/`, through the same
+fences a docs page uses. A blog post is dated, so it may say "now" and
+"recently", as a decision record may.
+
+The benchmark's own pages, rendered from the submodule under `/benchmarks`,
+keep the benchmark repository's conventions, including its first person.

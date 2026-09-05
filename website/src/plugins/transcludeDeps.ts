@@ -2,8 +2,8 @@ import path from 'node:path';
 import type {Plugin} from '@docusaurus/types';
 
 /**
- * Register the pass-through loader that makes a docs page depend on the
- * sources its fences are rendered from.
+ * Register the pass-through loader that makes a docs page, or a page partial
+ * under src/pages, depend on the sources its fences are rendered from.
  *
  * See `./transcludeDepsLoader.cjs` for what the loader does and why a remark
  * plugin cannot do it. This half is only the wiring.
@@ -17,6 +17,7 @@ import type {Plugin} from '@docusaurus/types';
 export default function transcludeDepsPlugin(context: {siteDir: string}): Plugin {
   const repoRoot = path.resolve(context.siteDir, '..');
   const docsDir = path.join(repoRoot, 'docs');
+  const pagesDir = path.join(context.siteDir, 'src', 'pages');
   return {
     name: 'spate-transclude-deps',
     configureWebpack: () => ({
@@ -30,7 +31,7 @@ export default function transcludeDepsPlugin(context: {siteDir: string}): Plugin
             // A `pre` loader is always first, so the regex always sees fences.
             enforce: 'pre',
             test: /\.mdx?$/,
-            include: [docsDir],
+            include: [docsDir, pagesDir],
             use: [
               {
                 loader: path.resolve(__dirname, 'transcludeDepsLoader.cjs'),

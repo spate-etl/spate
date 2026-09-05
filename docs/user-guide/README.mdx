@@ -1,7 +1,7 @@
 # Spate User Guide
 
-Spate is a high-performance, at-least-once ETL pipeline framework in Rust.
-Its flagship shape is Kafka in, Avro decoding, a chain of operators you write
+Spate is an at-least-once streaming ETL framework for Rust. Its flagship
+shape is Kafka in, Avro decoding, a chain of operators you write
 in Rust, and sharded ClickHouse out — but every piece behind that shape is a
 small, stable trait, so you can swap in your own sources, sinks, and
 deserializers. You define the operator graph in code; YAML configures

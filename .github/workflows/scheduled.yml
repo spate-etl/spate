@@ -476,6 +476,8 @@ jobs:
         with:
           # Full history so Docusaurus can derive per-page "last updated" times.
           fetch-depth: 0
+          # The benchmark data the site renders under /benchmarks.
+          submodules: true
           persist-credentials: false
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -509,6 +511,10 @@ jobs:
           path: website/node_modules/.cache
           key: docusaurus-${{ runner.os }}-${{ hashFiles('website/package-lock.json') }}
           restore-keys: docusaurus-${{ runner.os }}-
+
+      - name: Test the site
+        working-directory: website
+        run: npm test
 
       - name: Build Docusaurus site
         working-directory: website

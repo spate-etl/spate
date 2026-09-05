@@ -1,0 +1,20 @@
+id = "testenv"
+class = "indicative"
+
+[host]
+description = "fixture"
+cores = 4
+
+[infra]
+partitions = 8
+
+[infra.broker]
+kind   = "redpanda"
+image  = "redpandadata/redpanda:v0"
+cpus   = "8"
+memory = "8g"
+
+[infra.clickhouse]
+image  = "clickhouse/clickhouse-server:0"
+cpus   = "5"
+memory = "12g"

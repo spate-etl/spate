@@ -1,0 +1,32 @@
+schema = 1
+
+[entrant]
+id       = "gamma"
+name     = "Gamma"
+homepage = "https://example.invalid"
+licence  = "Apache-2.0"
+vendor   = "third-party"
+kind     = "stream-processor"
+runtime  = "native"
+status   = "active"
+
+[maintainer]
+who = "spate-benchmark"
+reviewed_upstream = false
+
+[display]
+order = 30
+hue   = 30
+short = "Gamma"
+
+[guarantees]
+delivery    = "at-least-once"
+durability  = "offset-commit"
+interval_ms = 5000
+
+[[variants]]
+id       = "native"
+label    = "native"
+default  = true
+approach = "realistic"
+reports  = { wire_format = "native" }

@@ -1,0 +1,48 @@
+schema = 1
+
+[entrant]
+id       = "beta"
+name     = "Beta"
+homepage = "https://example.invalid"
+licence  = "Apache-2.0"
+vendor   = "someone-else"
+kind     = "stream-processor"
+runtime  = "native"
+status   = "active"
+
+[maintainer]
+who = "spate-benchmark"
+reviewed_upstream = false
+
+[display]
+order = 20
+hue   = 20
+short = "Beta"
+
+[guarantees]
+delivery    = "at-least-once"
+durability  = "offset-commit"
+interval_ms = 5000
+
+[[variants]]
+id       = "rowbinary"
+label    = "rowbinary"
+default  = true
+approach = "realistic"
+reports  = { wire_format = "rowbinary" }
+
+[[variants]]
+id        = "hand"
+label     = "hand"
+approach  = "stripped"
+unshipped = ["hand-rolled decode"]
+reports   = { wire_format = "rowbinary" }
+
+# Measured once, then broken by a later sweep in the same comparability group.
+# Holds the case where a refusal supersedes a number rather than sitting beside
+# it: the arm reads as failing, not as the figure it last managed.
+[[variants]]
+id       = "legacy"
+label    = "legacy"
+approach = "realistic"
+reports  = { wire_format = "rowbinary" }

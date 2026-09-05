@@ -797,6 +797,8 @@ if len(set(keys)) != len(keys):
         docs/METRICS.md
     check_flags false true false "the site tree rebuilds the site and needs no Rust build" \
         website/docusaurus.config.ts
+    check_flags false true false "the submodule list rebuilds the site and needs no Rust build" \
+        .gitmodules
     check_flags true false false "a bench source builds Rust and does not rebuild the site" \
         bench/src/lib.rs
     # The fuzz crate is outside the workspace, so the stable tier compiles none
@@ -1010,7 +1012,8 @@ else
             continue
             ;;
         # --- documentation and site sources: no Rust build needed ------------
-        docs/* | website/*)
+        # `.gitmodules` pins the benchmark data the site renders.
+        docs/* | website/* | .gitmodules)
             site=true
             continue
             ;;

@@ -898,6 +898,8 @@ jobs:
         with:
           # Full history so Docusaurus can derive per-page "last updated" times.
           fetch-depth: 0
+          # The benchmark data the site renders under /benchmarks.
+          submodules: true
           # The token in `.git/config` would reach `npm ci` and the site build.
           persist-credentials: false
 
@@ -927,6 +929,12 @@ jobs:
       - name: Typecheck the site
         working-directory: website
         run: npm run typecheck
+
+      # The benchmark data layer and the neutrality rule. Nothing in the build
+      # exercises them.
+      - name: Test the site
+        working-directory: website
+        run: npm test
 
       # `CI=true` registers client-redirects, so a redirect to a deleted page
       # fails the build.

@@ -102,6 +102,20 @@ updates:
         update-types: ["minor", "patch"]
 
   # -------------------------------------------- npm (documentation site) ----
+  # The benchmark data the site renders under /benchmarks. A bump reaches the
+  # deployed site at the next nightly docs build or a manual `tier: docs`
+  # dispatch; nothing deploys on push to main.
+  - package-ecosystem: gitsubmodule
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: wednesday
+    labels: ["dependencies", "area: website"]
+    commit-message:
+      prefix: "chore(docs)"
+    cooldown:
+      default-days: 3
+
   - package-ecosystem: npm
     directory: "/website"
     schedule:

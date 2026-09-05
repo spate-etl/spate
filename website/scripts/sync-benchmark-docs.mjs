@@ -86,6 +86,9 @@ function toFrontMatter(fields) {
 rmSync(docs, {recursive: true, force: true});
 mkdirSync(docs, {recursive: true});
 cpSync(join(root, 'docs'), docs, {recursive: true});
+// The results page is src/pages/benchmarks.tsx on the site layout; the
+// submodule's index would build to the same route.
+rmSync(join(docs, 'index.mdx'), {force: true});
 process.stdout.write(`copied benchmark/docs -> .benchmarks\n`);
 
 for (const spec of SYNCED) {

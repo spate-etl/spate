@@ -12,6 +12,17 @@ const css = readFileSync(join(here, '..', '..', 'src', 'css', 'brand.css'), 'utf
 function tokens(block) {
   const out = {};
   for (const m of block.matchAll(/--spate-([a-z0-9-]+):\s*(#[0-9a-f]{6})\s*;/gi)) out[m[1]] = m[2];
+  // A translucent tint is measured as the colour it composites to over the
+  // page ground, which is what a reader sees.
+  for (const m of block.matchAll(/--spate-([a-z0-9-]+):\s*rgba\((\d+),\s*(\d+),\s*(\d+),\s*([\d.]+)\)\s*;/gi)) {
+    const a = Number(m[5]);
+    for (const ground of ['bg', 'surface', 'surface-2']) {
+      if (!out[ground]) continue;
+      const over = [1, 3, 5].map((i) => parseInt(out[ground].slice(i, i + 2), 16));
+      const mixed = [m[2], m[3], m[4]].map((v, i) => Math.round(Number(v) * a + over[i] * (1 - a)));
+      out[`${m[1]}-over-${ground}`] = `#${mixed.map((v) => v.toString(16).padStart(2, '0')).join('')}`;
+    }
+  }
   return out;
 }
 const light = tokens(css.split("[data-theme='dark']")[0]);
@@ -40,6 +51,13 @@ const PAIRS = [
   ['accent-ink', 'accent', 4.5],
   ['primary-dark', 'bg', 4.5],
   ['primary-dark', 'surface-2', 4.5],
+  ['primary-dark', 'accent-soft-over-bg', 4.5],
+  ['ink', 'accent-soft-over-bg', 4.5],
+  ['muted', 'accent-soft-over-bg', 4.5],
+  ['ink', 'accent-soft-over-surface', 4.5],
+  ['muted', 'accent-soft-over-surface', 4.5],
+  ['ink', 'accent-soft-over-surface-2', 4.5],
+  ['muted', 'accent-soft-over-surface-2', 4.5],
   ['danger', 'bg', 4.5],
   ['warning', 'bg', 4.5],
   ['code-ink', 'code-bg', 4.5],

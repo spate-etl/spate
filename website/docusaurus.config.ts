@@ -1,6 +1,5 @@
 import type { Config, PluginConfig } from '@docusaurus/types';
 import type * as Preset from '@docusaurus/preset-classic';
-import { themes as prismThemes } from 'prism-react-renderer';
 // Extensionless on purpose: `moduleResolution: bundler` rejects an explicit
 // `.ts`, and Docusaurus loads this config through jiti, which transpiles
 // nested TypeScript imports and resolves `.ts` itself.
@@ -10,6 +9,8 @@ import transcludeDeps from './src/plugins/transcludeDeps';
 import benchData from './src/plugins/benchData';
 import socialProof from './src/plugins/socialProof';
 import {BENCHMARK_REPO, BENCHMARKS_BASE, NAV_ITEMS} from './src/data/nav';
+import {countInvariants} from './src/data/invariants';
+import prismTheme from './src/prismTheme';
 // The site is deployed as a Cloudflare Worker at https://spate.kainth.dev/.
 // organizationName/projectName drive the GitHub source links (githubUrl,
 // editUrl, footer, and every `repo:` link on a page), not the deployed URL.
@@ -67,7 +68,7 @@ const clientRedirects: PluginConfig = [
 
 const config: Config = {
   title: 'Spate',
-  tagline: 'High-performance, at-least-once ETL pipelines in Rust',
+  tagline: 'At-least-once streaming ETL for Rust.',
   favicon: 'img/favicon.svg',
 
   // The SVG favicon serves modern browsers; the ICO and the touch icon serve
@@ -80,6 +81,8 @@ const config: Config = {
 
   url: 'https://spate.kainth.dev',
   baseUrl: '/',
+  // Facts a page states that the repository, not the page, owns.
+  customFields: {invariants: countInvariants()},
   organizationName,
   projectName,
   trailingSlash: false,
@@ -88,6 +91,9 @@ const config: Config = {
   // standard: a link into a heading is a promise that the heading exists.
   onBrokenLinks: 'throw',
   onBrokenAnchors: 'throw',
+  // A page and a docs-instance page at one path would otherwise both build
+  // and only one of them serve.
+  onDuplicateRoutes: 'throw',
 
   i18n: {
     defaultLocale: 'en',
@@ -160,6 +166,7 @@ const config: Config = {
       {
         hashed: true,
         indexDocs: true,
+        indexPages: true,
         indexBlog: false,
         // The user guide is read in place from the repo's docs/ tree; the
         // benchmark pages are rendered into .benchmarks before the build.
@@ -213,8 +220,13 @@ const config: Config = {
           ],
         },
         blog: false,
+        pages: {
+          // The homepage renders a region of a compiled example through the
+          // same plugin the docs use (docs/STYLE.md § 10).
+          beforeDefaultRemarkPlugins: [transclude],
+        },
         theme: {
-          customCss: ['./src/css/custom.css', './src/css/site.css', './src/css/benchmarks.css'],
+          customCss: ['./src/css/custom.css', './src/css/site.css', './src/css/benchmarks.css', './src/css/home.css'],
         },
       } satisfies Preset.Options,
     ],
@@ -222,6 +234,8 @@ const config: Config = {
 
   themeConfig: {
     image: 'img/brand/social-spate.png',
+    // The theme emits the rest of the Open Graph set itself.
+    metadata: [{property: 'og:type', content: 'website'}],
     colorMode: {
       defaultMode: 'dark',
       respectPrefersColorScheme: true,
@@ -244,8 +258,9 @@ const config: Config = {
     // No footer config: src/theme/Footer renders the site footer from
     // src/data/nav.ts on every page.
     prism: {
-      theme: prismThemes.github,
-      darkTheme: prismThemes.dracula,
+      // One dark block on both grounds; see src/prismTheme.ts.
+      theme: prismTheme,
+      darkTheme: prismTheme,
       additionalLanguages: ['rust', 'toml', 'bash', 'yaml', 'docker', 'json'],
     },
   } satisfies Preset.ThemeConfig,

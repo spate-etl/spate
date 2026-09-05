@@ -100,7 +100,8 @@ h3 {
 .site-footer__col a,
 .home p a,
 .benchmarks-page p a,
-.bench-roster a,
+.bench-profile p a,
+.bench-profile li a,
 .field__legend a {
   text-decoration: underline;
   text-decoration-color: color-mix(in srgb, currentColor 30%, transparent);
@@ -114,7 +115,7 @@ h3 {
 .site-footer__col a:hover,
 .home p a:hover,
 .benchmarks-page p a:hover,
-.bench-roster a:hover {
+.bench-profile a:hover {
   text-decoration-color: currentColor;
 }
 
@@ -124,8 +125,12 @@ code {
   padding: 0.1rem 0.35rem;
 }
 
-.markdown a code {
-  color: inherit;
+/* Linked code sits on the code background, where the accent falls short of
+ * 4.5:1 on the light ground; the darker step clears it on every surface. */
+.markdown a code,
+.home a code,
+.bench-profile a code {
+  color: var(--spate-primary-dark);
 }
 
 /* Focus and motion ---------------------------------------------------------- */
@@ -148,6 +153,15 @@ code {
 
 /* Docs density -------------------------------------------------------------- */
 
+/* The sidebar sits on the page ground with no rule beside it. */
+.theme-doc-sidebar-container {
+  border-right: 0 !important;
+}
+
+.theme-doc-sidebar-menu {
+  padding: 0.75rem 0.5rem;
+}
+
 .menu__link {
   font-size: 0.9rem;
   padding: 0.35rem 0.6rem;
@@ -167,8 +181,72 @@ code {
   color: var(--spate-primary-dark);
 }
 
+/* Breadcrumbs as a quiet monospace path rather than pills. */
+.breadcrumbs {
+  font-family: var(--ifm-font-family-monospace);
+  font-size: 0.78rem;
+}
+
 .breadcrumbs__link {
-  font-size: 0.85rem;
+  padding: 0;
+  background: transparent;
+  color: var(--spate-muted);
+}
+
+.breadcrumbs__item--active .breadcrumbs__link {
+  background: transparent;
+  color: var(--spate-ink);
+}
+
+.breadcrumbs__item:not(:last-child)::after {
+  content: '/';
+  background: none;
+  opacity: 1;
+  width: auto;
+  height: auto;
+  margin: 0 0.5rem;
+  color: var(--spate-muted);
+  filter: none;
+}
+
+.breadcrumbs__link svg {
+  vertical-align: -0.15em;
+}
+
+/* The page outline names itself. */
+.theme-doc-toc-desktop::before {
+  content: 'On this page';
+  display: block;
+  margin: 0 0 0.6rem 0.8rem;
+  font-family: var(--ifm-font-family-monospace);
+  font-size: 0.7rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--spate-muted);
+}
+
+.table-of-contents {
+  border-left: 1px solid var(--spate-border);
+  padding-left: 0;
+}
+
+.table-of-contents__left-border {
+  border-left: 0;
+}
+
+.table-of-contents li {
+  margin: 0.35rem 0.8rem;
+}
+
+.table-of-contents__link {
+  display: block;
+  margin-left: -0.85rem;
+  padding-left: 0.75rem;
+  border-left: 2px solid transparent;
+}
+
+.table-of-contents__link--active {
+  border-left-color: var(--spate-primary-dark);
 }
 
 .pagination-nav__link {
@@ -203,8 +281,30 @@ code {
   border-left-color: var(--spate-danger);
 }
 
-.theme-admonition .admonition-icon svg {
-  fill: currentColor;
+/* A small monospace label in place of the icon and heading. */
+.theme-admonition [class*='admonitionHeading'] {
+  font-family: var(--ifm-font-family-monospace);
+  font-size: 0.7rem;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  margin-bottom: 0.4rem;
+}
+
+.theme-admonition [class*='admonitionIcon'] {
+  display: none;
+}
+
+.theme-admonition-note [class*='admonitionHeading'] {
+  color: var(--spate-muted);
+}
+
+.theme-admonition-warning [class*='admonitionHeading'] {
+  color: var(--spate-warning);
+}
+
+.theme-admonition-danger [class*='admonitionHeading'] {
+  color: var(--spate-danger);
 }
 
 /* Tables -------------------------------------------------------------------- */
@@ -223,13 +323,28 @@ table th {
   background: transparent;
 }
 
-/* Code blocks --------------------------------------------------------------- */
+/* Code blocks: one dark block on both grounds, with the file name as a quiet
+ * header when a fence carries one. */
 
 .theme-code-block {
   border: 1px solid var(--spate-border);
+  border-radius: 10px;
   box-shadow: none;
 }
 
 [data-theme='light'] .theme-code-block {
   border-color: transparent;
+}
+
+.theme-code-block [class*='codeBlockTitle'] {
+  padding: 0.6rem 1.25rem 0.1rem;
+  border-bottom: 0;
+  background: var(--prism-background-color);
+  font-family: var(--ifm-font-family-monospace);
+  font-size: 0.75rem;
+  color: #9aa1a9;
+}
+
+.theme-code-block [class*='codeBlockTitle'] + div pre {
+  padding-top: 0.6rem;
 }

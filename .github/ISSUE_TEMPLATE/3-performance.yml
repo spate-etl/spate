@@ -17,7 +17,7 @@ body:
         hardware under the published protocol. A number from a busy laptop is
         not comparable to one from a quiet host, and run-to-run spread on
         throughput is wide. The methodology and the
-        [published results](https://spate.kainth.dev/benchmarks/) live in the
+        [published results](https://spate.kainth.dev/benchmarks) live in the
         [benchmark repository](https://github.com/spate-etl/benchmark).
 
   - type: dropdown

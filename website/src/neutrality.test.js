@@ -31,7 +31,9 @@ const REPO = path.join(SITE, 'benchmark');
  */
 const ROOTS = [
   path.join(SITE, 'src', 'components', 'Results'),
+  path.join(SITE, 'src', 'components', 'benchmarks'),
   path.join(SITE, 'src', 'components', 'home'),
+  path.join(SITE, 'src', 'pages'),
   path.join(SITE, 'src', 'plugins', 'benchData'),
 ].filter((r) => fs.existsSync(r));
 const EXTENSIONS = new Set(['.ts', '.tsx', '.js', '.jsx', '.mjs', '.css']);
@@ -119,7 +121,7 @@ test('the vendor disclosure is driven by a descriptor field that some entrant se
   assert.equal(own.length, 1, 'exactly one entrant is run by the vendor of this benchmark');
 
   const component = fs.readFileSync(
-    path.join(SITE, 'src/components/Results/index.tsx'),
+    path.join(SITE, 'src/components/benchmarks/Field.tsx'),
     'utf8',
   );
   assert.match(

@@ -30,7 +30,7 @@ type Props = {
 export default function SiteLayout({title, description, exactTitle, className, children}: Props): React.JSX.Element {
   return (
     <LayoutProvider>
-      <PageMetadata title={title} description={description} />
+      <PageMetadata title={exactTitle ? undefined : title} description={description} />
       {exactTitle && (
         <Head>
           <title>{title}</title>

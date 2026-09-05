@@ -9,7 +9,7 @@ import repoLinks from './src/remark/repoLinks';
 import transcludeDeps from './src/plugins/transcludeDeps';
 import benchData from './src/plugins/benchData';
 import socialProof from './src/plugins/socialProof';
-import {NAV_ITEMS} from './src/data/nav';
+import {BENCHMARKS_BASE, NAV_ITEMS} from './src/data/nav';
 // The site is deployed as a Cloudflare Worker at https://spate.kainth.dev/.
 // organizationName/projectName drive the GitHub source links (githubUrl,
 // editUrl, footer, and every `repo:` link on a page), not the deployed URL.
@@ -43,9 +43,7 @@ import {
 const chConnector = '/docs/user-guide/connectors';
 
 // The benchmark: results, methodology and per-system pages, rendered from the
-// `website/benchmark` submodule. One value names the path so the docs instance,
-// the data plugin and the search index agree.
-const benchmarksBase = 'benchmarks';
+// `website/benchmark` submodule.
 const benchmarkRepo = 'https://github.com/spate-etl/benchmark';
 const clientRedirects: PluginConfig = [
   '@docusaurus/plugin-client-redirects',
@@ -133,17 +131,17 @@ const config: Config = {
     // Not conditional. It registers which sources a page's fences are rendered
     // from, and a warm-cache local rebuild needs that as much as CI does.
     transcludeDeps,
-    [benchData, {routeBasePath: benchmarksBase, repoUrl: benchmarkRepo}],
+    [benchData, {routeBasePath: BENCHMARKS_BASE, repoUrl: benchmarkRepo}],
     // Stars, downloads and releases, fetched at build time with a committed
     // fallback (src/data/social-proof.json).
     socialProof,
     [
       '@docusaurus/plugin-content-docs',
       {
-        id: benchmarksBase,
+        id: BENCHMARKS_BASE,
         // Written by scripts/sync-benchmark-docs.mjs before every build.
         path: '.benchmarks',
-        routeBasePath: benchmarksBase,
+        routeBasePath: BENCHMARKS_BASE,
         sidebarPath: './sidebars.benchmarks.ts',
         // The tree is generated, so git holds no history for it.
         showLastUpdateTime: false,
@@ -169,7 +167,7 @@ const config: Config = {
         // The user guide is read in place from the repo's docs/ tree; the
         // benchmark pages are rendered into .benchmarks before the build.
         docsDir: ['../docs', '.benchmarks'],
-        docsRouteBasePath: ['/docs', `/${benchmarksBase}`],
+        docsRouteBasePath: ['/docs', `/${BENCHMARKS_BASE}`],
         highlightSearchTermsOnTargetPage: true,
         explicitSearchResultPath: true,
       },

@@ -1,9 +1,12 @@
+/** The benchmark route's base path: the docs instance, the data plugin and the search index all key on it. */
+export const BENCHMARKS_BASE = 'benchmarks';
+
 /** The primary navigation, shared by the marketing navbar and the docs navbar. */
 export type NavItem = {label: string; to: string};
 
 export const NAV_ITEMS: NavItem[] = [
   {label: 'Docs', to: '/docs/user-guide/'},
-  {label: 'Benchmarks', to: '/benchmarks/'},
+  {label: 'Benchmarks', to: `/${BENCHMARKS_BASE}/`},
   {label: 'Decisions', to: '/docs/adr/'},
 ];
 
@@ -25,10 +28,10 @@ export const FOOTER_COLUMNS = (githubUrl: string): FooterColumn[] => [
   {
     title: 'Benchmarks',
     items: [
-      {label: 'Results', to: '/benchmarks/'},
-      {label: 'The fairness contract', to: '/benchmarks/contract/rules'},
-      {label: 'Environments', to: '/benchmarks/environments'},
-      {label: 'Reproducing this', to: '/benchmarks/reproduce'},
+      {label: 'Results', to: `/${BENCHMARKS_BASE}/`},
+      {label: 'The fairness contract', to: `/${BENCHMARKS_BASE}/contract/rules`},
+      {label: 'Environments', to: `/${BENCHMARKS_BASE}/environments`},
+      {label: 'Reproducing this', to: `/${BENCHMARKS_BASE}/reproduce`},
     ],
   },
   {

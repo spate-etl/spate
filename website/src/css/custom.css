@@ -97,7 +97,6 @@ h3 {
  * apart. Faint at rest, the full accent on hover and focus. */
 .markdown a:not(.button),
 .theme-doc-footer a,
-.footer a,
 .home p a,
 .benchmarks-page p a,
 .bench-roster a,
@@ -141,20 +140,6 @@ code {
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
   }
-}
-
-/* Navbar and footer --------------------------------------------------------- */
-
-.footer {
-  border-top: 1px solid var(--spate-border);
-}
-
-.footer__title {
-  font-size: 0.9rem;
-}
-
-.footer__link-item {
-  font-size: 0.9rem;
 }
 
 /* Docs density -------------------------------------------------------------- */

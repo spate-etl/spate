@@ -31,9 +31,9 @@ const StarIcon = () => (
  * star count, and the colour-mode toggle. The theme's layout around it keeps
  * the mobile sidebar, which is where the docs tree lives on a phone.
  *
- * Replaces the theme's Navbar/Content, which the swizzle CLI marks unsafe: a
- * theme upgrade that changes the mobile sidebar toggle or the logo component
- * is checked here rather than absorbed.
+ * The swizzle CLI marks this component unsafe, so a theme upgrade that
+ * changes the mobile sidebar toggle or the logo component needs a manual
+ * check here rather than an automatic merge.
  */
 export default function NavbarContent(): React.JSX.Element {
   const mobileSidebar = useNavbarMobileSidebar();

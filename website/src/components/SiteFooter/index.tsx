@@ -6,7 +6,7 @@ import React from 'react';
 import {FOOTER_COLUMNS} from '../../data/nav';
 import {githubUrl} from '../../repoUrl';
 
-/** The site footer, on the marketing pages directly and on the docs pages through the Footer wrapper. */
+/** The site's footer: the brand lockup and tagline beside the columns from `FOOTER_COLUMNS`. */
 export default function SiteFooter(): React.JSX.Element {
   const light = useBaseUrl('/img/brand/lockup-light.svg');
   const dark = useBaseUrl('/img/brand/lockup-dark.svg');

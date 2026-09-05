@@ -69,7 +69,7 @@ wrote it.
 Connectors ship as separate crates behind one feature each: Kafka in and out, a
 ClickHouse sink, an S3 backfill source, Avro and JSON formats, a coordination
 store for scaling out. Nothing is enabled by default. Writing your own source or
-sink is a supported path, not a fork.
+sink is a supported path.
 
 ## Why it is fast
 
@@ -83,9 +83,9 @@ million records a second is five million dispatch decisions a second that never
 happen ([ADR-0004](/docs/adr/static-operator-chain)).
 
 **Records borrow the source's buffers.** A record is a view into the bytes the
-source read, not a copy of them. Keeping that borrow alive across the erasure
-boundary needed a specific design, and it is the reason the framework has no
-per-record allocation on the hot path
+source read. Keeping that borrow alive across the erasure boundary needed a
+specific design, and it is the reason the framework has no per-record
+allocation on the hot path
 ([ADR-0013](/docs/adr/zero-copy-seam)).
 
 **Nothing on the hot path looks anything up.** Metric handles are registered at

@@ -242,7 +242,7 @@ const config: Config = {
           // Docusaurus reads the date from git for docs pages; the rest carry
           // none rather than a build timestamp.
           lastmod: 'date',
-          ignorePatterns: ['/search', '/blog/tags/**'],
+          ignorePatterns: ['/search', '/blog/tags/**', '/blog/authors', '/blog/authors/**'],
         },
         pages: {
           // The homepage renders a region of a compiled example through the

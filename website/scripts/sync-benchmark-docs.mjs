@@ -6,13 +6,19 @@
 // it, so each part is copied with front matter prepended. The output directory
 // is generated and gitignored: one source, rendered at build time.
 
-import {cpSync, mkdirSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
+import {cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
 import {dirname, join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..', 'benchmark');
 const docs = join(here, '..', '.benchmarks');
+
+if (!existsSync(join(root, 'docs'))) {
+  throw new Error(
+    `${root} is not checked out: run 'git submodule update --init' at the repository root.`,
+  );
+}
 
 /** Root document → docs page, with the front matter the site needs. */
 const SYNCED = [

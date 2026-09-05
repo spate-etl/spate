@@ -1,0 +1,38 @@
+schema = 1
+
+[entrant]
+id       = "alpha"
+name     = "Alpha"
+homepage = "https://example.invalid"
+licence  = "Apache-2.0"
+vendor   = "self"
+kind     = "stream-processor"
+runtime  = "native"
+status   = "active"
+
+[maintainer]
+who = "spate-benchmark"
+reviewed_upstream = false
+
+[display]
+order = 10
+hue   = 10
+short = "Alpha"
+
+[guarantees]
+delivery    = "at-least-once"
+durability  = "offset-commit"
+interval_ms = 5000
+
+[[variants]]
+id       = "native"
+label    = "native"
+default  = true
+approach = "realistic"
+reports  = { wire_format = "native" }
+
+[[variants]]
+id       = "rowbinary"
+label    = "rowbinary"
+approach = "realistic"
+reports  = { wire_format = "rowbinary" }

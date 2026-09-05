@@ -5,11 +5,13 @@
   "description": "Documentation site for Spate",
   "scripts": {
     "docusaurus": "docusaurus",
-    "start": "docusaurus start",
-    "build": "docusaurus build",
+    "sync": "node scripts/sync-benchmark-docs.mjs",
+    "start": "node scripts/sync-benchmark-docs.mjs && docusaurus start",
+    "build": "node scripts/sync-benchmark-docs.mjs && docusaurus build",
     "serve": "docusaurus serve",
     "clear": "docusaurus clear",
     "typecheck": "tsc",
+    "test": "node --test \"src/**/*.test.js\" \"src/**/*.test.ts\"",
     "write-translations": "docusaurus write-translations",
     "write-heading-ids": "docusaurus write-heading-ids"
   },
@@ -30,6 +32,7 @@
     "@docusaurus/module-type-aliases": "^3.10.1",
     "@docusaurus/tsconfig": "^3.10.1",
     "@docusaurus/types": "^3.10.1",
+    "smol-toml": "^1.8.0",
     "typescript": "~5.9.3"
   },
   "overrides": {
@@ -51,6 +54,6 @@
     ]
   },
   "engines": {
-    "node": ">=18.0"
+    "node": ">=22.6"
   }
 }

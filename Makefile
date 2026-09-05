@@ -224,6 +224,7 @@ fuzz: ## Fuzz one target: make fuzz TARGET=avro_wire_confluent SECS=60
 docs: ## Build the documentation site the way CI does
 	cd website && npm ci
 	cd website && npm run typecheck
+	cd website && npm test
 	cd website && CI=true npm run build
 
 docs-serve: ## Serve the site locally with hot reload

@@ -167,8 +167,9 @@ request.
 None of them sweeps this framework's own settings against each other end to end,
 and neither does the
 [benchmark repository](https://github.com/spate-etl/benchmark), which runs one
-fixed pipeline across several frameworks. The tiers here measure inside a single
-component. A claim no tier here can measure is stated as unmeasured.
+fixed pipeline across several frameworks and publishes the
+[results](https://spate.kainth.dev/benchmarks/). The tiers here measure inside a
+single component. A claim no tier here can measure is stated as unmeasured.
 
 ### The counted tier
 

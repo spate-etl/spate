@@ -7,6 +7,7 @@ import { themes as prismThemes } from 'prism-react-renderer';
 import transclude from './src/remark/transclude';
 import repoLinks from './src/remark/repoLinks';
 import transcludeDeps from './src/plugins/transcludeDeps';
+import benchData from './src/plugins/benchData';
 // The site is deployed as a Cloudflare Worker at https://spate.kainth.dev/.
 // organizationName/projectName drive the GitHub source links (githubUrl,
 // editUrl, footer, and every `repo:` link on a page), not the deployed URL.
@@ -38,6 +39,12 @@ import {
 // deleting a page means deleting any redirect aimed at it. This is only caught
 // with `CI=true` (see where the plugin is registered below).
 const chConnector = '/docs/user-guide/connectors';
+
+// The benchmark: results, methodology and per-system pages, rendered from the
+// `website/benchmark` submodule. One value names the path so the docs instance,
+// the data plugin and the search index agree.
+const benchmarksBase = 'benchmarks';
+const benchmarkRepo = 'https://github.com/spate-etl/benchmark';
 const clientRedirects: PluginConfig = [
   '@docusaurus/plugin-client-redirects',
   {
@@ -116,6 +123,26 @@ const config: Config = {
     // Not conditional. It registers which sources a page's fences are rendered
     // from, and a warm-cache local rebuild needs that as much as CI does.
     transcludeDeps,
+    [benchData, {routeBasePath: benchmarksBase, repoUrl: benchmarkRepo}],
+    [
+      '@docusaurus/plugin-content-docs',
+      {
+        id: benchmarksBase,
+        // Written by scripts/sync-benchmark-docs.mjs before every build.
+        path: '.benchmarks',
+        routeBasePath: benchmarksBase,
+        sidebarPath: './sidebars.benchmarks.ts',
+        // The tree is generated, so git holds no history for it.
+        showLastUpdateTime: false,
+        // The contract pages are rendered from methodology/; the rest sit in
+        // docs/ under the same name.
+        editUrl: ({docPath}) => {
+          const m = /^contract\/(rules|envelope|measurement|comparability)\.md$/.exec(docPath);
+          const source = m ? `methodology/${m[1] === 'rules' ? 'README' : m[1]}.md` : `docs/${docPath}`;
+          return `${benchmarkRepo}/edit/main/${source}`;
+        },
+      },
+    ],
   ],
 
   themes: [
@@ -126,9 +153,10 @@ const config: Config = {
         hashed: true,
         indexDocs: true,
         indexBlog: false,
-        // Source lives in the repo's ../docs tree (read in place), not website/docs.
-        docsDir: '../docs',
-        docsRouteBasePath: '/docs',
+        // The user guide is read in place from the repo's docs/ tree; the
+        // benchmark pages are rendered into .benchmarks before the build.
+        docsDir: ['../docs', '.benchmarks'],
+        docsRouteBasePath: ['/docs', `/${benchmarksBase}`],
         highlightSearchTermsOnTargetPage: true,
         explicitSearchResultPath: true,
       },
@@ -178,7 +206,7 @@ const config: Config = {
         },
         blog: false,
         theme: {
-          customCss: './src/css/custom.css',
+          customCss: ['./src/css/custom.css', './src/css/benchmarks.css'],
         },
       } satisfies Preset.Options,
     ],
@@ -201,6 +229,11 @@ const config: Config = {
         {
           to: '/docs/user-guide/',
           label: 'Docs',
+          position: 'left',
+        },
+        {
+          to: `/${benchmarksBase}/`,
+          label: 'Benchmarks',
           position: 'left',
         },
         {
@@ -237,6 +270,15 @@ const config: Config = {
             { label: 'Decisions', to: '/docs/adr/' },
             { label: 'Invariants', to: '/docs/INVARIANTS' },
             { label: 'Metrics', to: '/docs/METRICS' },
+          ],
+        },
+        {
+          title: 'Benchmarks',
+          items: [
+            { label: 'Results', to: `/${benchmarksBase}/` },
+            { label: 'The fairness contract', to: `/${benchmarksBase}/contract/rules` },
+            { label: 'Reproducing this', to: `/${benchmarksBase}/reproduce` },
+            { label: 'Repository', href: benchmarkRepo },
           ],
         },
         {

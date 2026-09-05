@@ -32,6 +32,8 @@ website/node_modules
 website/build
 website/.docusaurus
 website/.cache-loader
+# Benchmark pages rendered from the submodule by website/scripts/sync-benchmark-docs.mjs
+website/.benchmarks
 website/.wrangler
 # Generated third-party license texts, staged into the site by the same workflow.
 # The compact, diffable inventory (THIRD-PARTY.md) IS committed; only the

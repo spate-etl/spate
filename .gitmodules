@@ -1,0 +1,3 @@
+[submodule "website/benchmark"]
+	path = website/benchmark
+	url = https://github.com/spate-etl/benchmark

@@ -171,6 +171,9 @@ check-collected-region: ## The degenerate-region guard still recognizes both sha
 check-transclusions: ## Every transcluded region a docs page names exists
 	./scripts/transclude.sh --check
 
+check-brand: ## Every brand colour clears WCAG AA on the ground it sits on
+	node website/tools/brand/check-contrast.mjs
+
 check-adr: ## The decision records stay consistent with their index
 	./scripts/adr.sh --check
 
@@ -196,7 +199,7 @@ release-dry-run: ## The whole release locally, nothing pushed or uploaded: make 
 #
 #     UPDATE_EXAMPLES_INDEX=1 cargo test -p spate --test examples_index --locked
 
-ci-lint: zizmor shellcheck self-test check-perf-report check-gungraun-benches check-collected-region check-adr check-changelog check-transclusions check-release-version ## Every repository-metadata check
+ci-lint: zizmor shellcheck self-test check-perf-report check-gungraun-benches check-collected-region check-adr check-brand check-changelog check-transclusions check-release-version ## Every repository-metadata check
 
 ##@ Fuzz
 

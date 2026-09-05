@@ -99,7 +99,7 @@ export default function SystemPage({profile}: Props): React.JSX.Element {
 
   return (
     <Layout
-      title={e.entrant.name}
+      title={`${e.entrant.name} in the benchmark`}
       description={`How ${e.entrant.name} is configured and measured in the Spate Benchmark.`}
     >
       <main className="container margin-vert--lg bench-profile">

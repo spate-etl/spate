@@ -469,8 +469,8 @@ jobs:
     needs: plan
     if: needs.plan.outputs.nightly == 'true' || needs.plan.outputs.docs == 'true'
     timeout-minutes: 30
-    # The full build, with rustdoc and every dependency's license text on top.
-    # This produces what ships.
+    # The full build, with every dependency's license text on top. This
+    # produces what ships.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -488,31 +488,6 @@ jobs:
         with:
           tools: cargo-about@0.9.1
           shared-key: docs
-
-      - name: Build API reference (rustdoc)
-        run: cargo doc --workspace --no-deps --all-features --locked
-
-      # Under static/ so Docusaurus copies it into the build at <baseUrl>/api/.
-      - name: Stage API reference into static/api
-        run: |
-          rm -rf website/static/api
-          mkdir -p website/static/api
-          cp -r target/doc/. website/static/api/
-          # rustdoc emits no workspace-root index; redirect /api/ to the facade crate.
-          cat > website/static/api/index.html <<'EOF'
-          <!doctype html>
-          <html lang="en">
-            <head>
-              <meta charset="utf-8" />
-              <meta http-equiv="refresh" content="0; url=spate/index.html" />
-              <link rel="canonical" href="spate/index.html" />
-              <title>Spate API reference</title>
-            </head>
-            <body>
-              <a href="spate/index.html">Redirecting to the spate crate API reference…</a>
-            </body>
-          </html>
-          EOF
 
       # The script filters the first-party crates and generates
       # THIRD-PARTY.md the same way, so the page and the inventory agree.
@@ -548,12 +523,12 @@ jobs:
         run: |
           count=$(find website/build -type f | wc -l)
           echo "site files: $count"
-          if [ "$count" -lt 500 ]; then
+          if [ "$count" -lt 200 ]; then
             echo "::error::$count files; the build produced nothing usable."
             exit 1
           fi
-          if [ "$count" -gt 18000 ]; then
-            echo "::error::$count files, approaching the Workers static-assets limit of 20000."
+          if [ "$count" -gt 10000 ]; then
+            echo "::error::$count files; Workers static assets refuse a deployment over 20000."
             exit 1
           fi
 

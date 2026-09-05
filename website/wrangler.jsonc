@@ -7,9 +7,8 @@
   "compatibility_date": "2026-09-01",
   "assets": {
     "directory": "./build",
-    // rustdoc module pages link relative to a directory URL, so /api/ must keep
-    // its trailing slashes. drop-trailing-slash serves /api/<crate> and every
-    // stylesheet and sibling link then resolves one directory too high.
+    // Docusaurus builds with `trailingSlash: false`, so a page is `foo.html`
+    // and a directory index is `foo/index.html`; this serves both at `/foo`.
     "html_handling": "auto-trailing-slash",
     "not_found_handling": "404-page"
   },

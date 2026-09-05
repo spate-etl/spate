@@ -97,6 +97,7 @@ h3 {
  * apart. Faint at rest, the full accent on hover and focus. */
 .markdown a:not(.button),
 .theme-doc-footer a,
+.site-footer__col a,
 .home p a,
 .benchmarks-page p a,
 .bench-roster a,
@@ -109,8 +110,11 @@ h3 {
 
 .markdown a:not(.button):hover,
 .markdown a:not(.button):focus-visible,
+.theme-doc-footer a:hover,
+.site-footer__col a:hover,
 .home p a:hover,
-.benchmarks-page p a:hover {
+.benchmarks-page p a:hover,
+.bench-roster a:hover {
   text-decoration-color: currentColor;
 }
 

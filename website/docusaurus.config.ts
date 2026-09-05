@@ -9,7 +9,7 @@ import repoLinks from './src/remark/repoLinks';
 import transcludeDeps from './src/plugins/transcludeDeps';
 import benchData from './src/plugins/benchData';
 import socialProof from './src/plugins/socialProof';
-import {BENCHMARKS_BASE, NAV_ITEMS} from './src/data/nav';
+import {BENCHMARK_REPO, BENCHMARKS_BASE, NAV_ITEMS} from './src/data/nav';
 // The site is deployed as a Cloudflare Worker at https://spate.kainth.dev/.
 // organizationName/projectName drive the GitHub source links (githubUrl,
 // editUrl, footer, and every `repo:` link on a page), not the deployed URL.
@@ -42,9 +42,6 @@ import {
 // with `CI=true` (see where the plugin is registered below).
 const chConnector = '/docs/user-guide/connectors';
 
-// The benchmark: results, methodology and per-system pages, rendered from the
-// `website/benchmark` submodule.
-const benchmarkRepo = 'https://github.com/spate-etl/benchmark';
 const clientRedirects: PluginConfig = [
   '@docusaurus/plugin-client-redirects',
   {
@@ -131,7 +128,7 @@ const config: Config = {
     // Not conditional. It registers which sources a page's fences are rendered
     // from, and a warm-cache local rebuild needs that as much as CI does.
     transcludeDeps,
-    [benchData, {routeBasePath: BENCHMARKS_BASE, repoUrl: benchmarkRepo}],
+    [benchData, {routeBasePath: BENCHMARKS_BASE, repoUrl: BENCHMARK_REPO}],
     // Stars, downloads and releases, fetched at build time with a committed
     // fallback (src/data/social-proof.json).
     socialProof,
@@ -150,7 +147,7 @@ const config: Config = {
         editUrl: ({docPath}) => {
           const m = /^contract\/(rules|envelope|measurement|comparability)\.md$/.exec(docPath);
           const source = m ? `methodology/${m[1] === 'rules' ? 'README' : m[1]}.md` : `docs/${docPath}`;
-          return `${benchmarkRepo}/edit/main/${source}`;
+          return `${BENCHMARK_REPO}/edit/main/${source}`;
         },
       },
     ],

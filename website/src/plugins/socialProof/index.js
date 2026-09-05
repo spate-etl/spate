@@ -19,13 +19,13 @@ module.exports = function socialProof(context, options = {}) {
     name: PLUGIN,
 
     async loadContent() {
-      const fallback = JSON.parse(fs.readFileSync(fallbackPath, 'utf8'));
-      if (process.env.SPATE_SITE_OFFLINE === '1') return {...fallback, source: 'fallback'};
+      const readFallback = () => ({...JSON.parse(fs.readFileSync(fallbackPath, 'utf8')), source: 'fallback'});
+      if (process.env.SPATE_SITE_OFFLINE === '1') return readFallback();
       try {
         return {...(await fetchProof(options)), source: 'live'};
       } catch (e) {
         console.warn(`[${PLUGIN}] using the committed figures: ${e.message}`);
-        return {...fallback, source: 'fallback'};
+        return readFallback();
       }
     },
 

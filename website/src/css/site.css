@@ -194,7 +194,6 @@ html.docs-wrapper .main-wrapper > div {
 
 .site-footer__col a {
   color: var(--spate-muted);
-  text-decoration: none;
 }
 
 .site-footer__col a:hover {

@@ -1,6 +1,9 @@
 /** The benchmark route's base path: the docs instance, the data plugin and the search index all key on it. */
 export const BENCHMARKS_BASE = 'benchmarks';
 
+/** The benchmark harness's own repository, distinct from the framework's. */
+export const BENCHMARK_REPO = 'https://github.com/spate-etl/benchmark';
+
 /** The primary navigation, shared by the marketing navbar and the docs navbar. */
 export type NavItem = {label: string; to: string};
 
@@ -32,6 +35,7 @@ export const FOOTER_COLUMNS = (githubUrl: string): FooterColumn[] => [
       {label: 'The fairness contract', to: `/${BENCHMARKS_BASE}/contract/rules`},
       {label: 'Environments', to: `/${BENCHMARKS_BASE}/environments`},
       {label: 'Reproducing this', to: `/${BENCHMARKS_BASE}/reproduce`},
+      {label: 'Repository', href: BENCHMARK_REPO},
     ],
   },
   {

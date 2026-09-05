@@ -138,7 +138,8 @@ html.docs-wrapper .main-wrapper > div {
 /* The theme's own mobile sidebar carries the links under 997px. */
 @media (max-width: 996px) {
   .site-nav__links,
-  .navbar__items .site-nav__github {
+  .navbar__items .site-nav__github,
+  .site-nav__mode {
     display: none;
   }
 }

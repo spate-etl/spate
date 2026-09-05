@@ -1,3 +1,5 @@
+import {githubUrl} from '../repoUrl';
+
 /** The benchmark route's base path: the docs instance, the data plugin and the search index all key on it. */
 export const BENCHMARKS_BASE = 'benchmarks';
 
@@ -16,7 +18,7 @@ export const NAV_ITEMS: NavItem[] = [
 export type FooterColumn = {title: string; items: Array<{label: string; to?: string; href?: string}>};
 
 /** Footer columns. `to` is a site route, `href` an external address. */
-export const FOOTER_COLUMNS = (githubUrl: string): FooterColumn[] => [
+export const FOOTER_COLUMNS: FooterColumn[] = [
   {
     title: 'Docs',
     items: [

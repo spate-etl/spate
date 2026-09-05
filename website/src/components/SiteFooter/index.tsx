@@ -4,7 +4,6 @@ import ThemedImage from '@theme/ThemedImage';
 import React from 'react';
 
 import {FOOTER_COLUMNS} from '../../data/nav';
-import {githubUrl} from '../../repoUrl';
 
 /** The site's footer: the brand lockup and tagline beside the columns from `FOOTER_COLUMNS`. */
 export default function SiteFooter(): React.JSX.Element {
@@ -21,7 +20,7 @@ export default function SiteFooter(): React.JSX.Element {
             /speɪt/ · a river in sudden flood. At-least-once streaming ETL for Rust.
           </p>
         </div>
-        {FOOTER_COLUMNS(githubUrl).map((col) => (
+        {FOOTER_COLUMNS.map((col) => (
           <nav key={col.title} className="site-footer__col" aria-label={col.title}>
             <h2 className="site-footer__title">{col.title}</h2>
             <ul>

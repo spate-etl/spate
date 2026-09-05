@@ -2,8 +2,10 @@
 
 The Spate mark, the wordmark lockups, and the images uploaded to GitHub by hand.
 
-Everything in `website/static/img/brand/`, plus `logo.svg`, `logo-dark.svg` and
-`favicon.svg` in `website/static/img/`, is **generated**. Change
+Everything in `website/static/img/brand/`, plus `logo.svg`, `logo-dark.svg`,
+`favicon.svg` and `apple-touch-icon.png` in `website/static/img/`,
+`website/static/favicon.ico`, and the colour tokens in
+`website/src/css/brand.css`, is **generated**. Change
 [`brandgen.py`](brandgen.py) and re-run, rather than editing an asset:
 
 ```sh
@@ -23,23 +25,22 @@ bounds, never by its 32-unit canvas. The ink occupies `x 3.6→28.9`,
 `y 5.1→26.9`, so aligning to the canvas leaves it visually inset and floating
 above whatever sits beneath it.
 
-| Token | Light ground | Dark ground |
-| --- | --- | --- |
-| Node | `#d1500b` | `#ff8c4a` |
-| Edge | `#e65a0f` | `#ff8c4a` |
-| Core | `#f37831` | `#ffc9a8` |
-| Base | — | `#16181d` |
-
-These are the site's `--ifm-color-primary` ramp from
-[`src/css/custom.css`](../../src/css/custom.css). Changing one means changing
-both.
+The palette is the `TOKENS` and `RAMP` tables in `brandgen.py`, written to
+[`src/css/brand.css`](../../src/css/brand.css) as `--spate-*` custom properties
+and mapped onto Infima by [`src/css/custom.css`](../../src/css/custom.css). The
+mark's colours and the UI accent differ on the light ground: the mark is a
+graphic and reads at 3:1, while the accent carries link text and clears 4.5:1.
+`make check-brand` holds every pair to those floors.
 
 ## Typeface
 
 The wordmark is IBM Plex Sans, SemiBold at −0.022 em for `spate` and Regular at
 −0.012 em for a second word. Glyphs are shaped with HarfBuzz and baked to
 outlines, so no asset carries a font dependency and the repository never
-redistributes font software. The license surface is unchanged.
+redistributes font software. The site sets its text in the same family, served
+from the `@fontsource/ibm-plex-sans` and `@fontsource/ibm-plex-mono` packages
+(SIL Open Font License 1.1) at build time; those files are a dependency, not
+part of the repository.
 
 `brandgen.py` pins the upstream file by SHA-256. A digest mismatch stops the
 run, since the wordmark would otherwise be re-cut from a different source.
@@ -50,9 +51,11 @@ The site picks these up from the config. Nothing to do by hand:
 
 | Asset | Used by |
 | --- | --- |
-| `img/logo.svg`, `img/logo-dark.svg` | Navbar, via `logo.src` / `logo.srcDark` |
-| `img/favicon.svg` | Browser tab, via `favicon` |
+| `img/brand/lockup-light.svg`, `img/brand/lockup-dark.svg` | Navbar, via `logo.src` / `logo.srcDark` |
+| `img/logo.svg`, `img/logo-dark.svg` | The mark alone, for pages that set it beside their own text |
+| `img/favicon.svg`, `favicon.ico`, `img/apple-touch-icon.png` | Browser tab, search-result thumbnails and the iOS home screen, via `favicon` and `headTags` |
 | `img/brand/social-spate.png` | Open Graph card, via `themeConfig.image` |
+| `src/css/brand.css` | Every colour on the site, through `custom.css` |
 
 These three are uploaded by hand. GitHub exposes no REST endpoint for either
 kind, so there is nothing to script:

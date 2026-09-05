@@ -44,17 +44,33 @@ fi
 rendered=()
 render() {
     local src="$1" width="$2" out="$3"
-    resvg --width "$width" "$brand/$src" "$brand/$out"
-    rendered+=("$brand/$out")
-    echo "  static/img/brand/$out"
+    resvg --width "$width" "$src" "$out"
+    rendered+=("$out")
+    echo "  ${out#"$(dirname "$(dirname "$img")")/"}"
 }
 
 echo "rendering:"
-render avatar.svg           512  avatar.png
-render social-spate.svg     1280 social-spate.png
-render social-benchmark.svg 1280 social-benchmark.png
-render lockup-light.svg     880  lockup-light.png
-render lockup-dark.svg      880  lockup-dark.png
+render "$brand/avatar.svg"           512  "$brand/avatar.png"
+render "$brand/social-spate.svg"     1280 "$brand/social-spate.png"
+render "$brand/social-benchmark.svg" 1280 "$brand/social-benchmark.png"
+render "$brand/lockup-light.svg"     880  "$brand/lockup-light.png"
+render "$brand/lockup-dark.svg"      880  "$brand/lockup-dark.png"
+render "$brand/apple-touch-icon.svg" 180  "$img/apple-touch-icon.png"
 
 oxipng --quiet --opt 4 --strip safe "${rendered[@]}"
 echo "optimized ${#rendered[@]} PNGs"
+
+# favicon.ico at the site root, which browsers request without being told.
+# One 32px PNG inside an ICO container; every current browser reads it.
+favicon_png="$(mktemp -t favicon)"
+resvg --width 32 "$img/favicon.svg" "$favicon_png"
+oxipng --quiet --opt 4 --strip safe "$favicon_png"
+"$venv/bin/python" - "$favicon_png" "$img/../favicon.ico" <<'PY'
+import struct, sys
+png = open(sys.argv[1], "rb").read()
+header = struct.pack("<HHH", 0, 1, 1)
+entry = struct.pack("<BBBBHHII", 32, 32, 0, 0, 1, 32, len(png), 6 + 16)
+open(sys.argv[2], "wb").write(header + entry + png)
+PY
+rm -f "$favicon_png"
+echo "  static/favicon.ico"

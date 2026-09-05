@@ -73,6 +73,14 @@ const config: Config = {
   tagline: 'High-performance, at-least-once ETL pipelines in Rust',
   favicon: 'img/favicon.svg',
 
+  // The SVG favicon serves modern browsers; the ICO and the touch icon serve
+  // the rest and the search-result thumbnails. All three come out of
+  // website/tools/brand/generate.sh.
+  headTags: [
+    { tagName: 'link', attributes: { rel: 'icon', href: '/favicon.ico', sizes: '32x32' } },
+    { tagName: 'link', attributes: { rel: 'apple-touch-icon', href: '/img/apple-touch-icon.png' } },
+  ],
+
   url: 'https://spate.kainth.dev',
   baseUrl: '/',
   organizationName,
@@ -219,11 +227,10 @@ const config: Config = {
       respectPrefersColorScheme: true,
     },
     navbar: {
-      title: 'Spate',
       logo: {
-        alt: 'Spate logo',
-        src: 'img/logo.svg',
-        srcDark: 'img/logo-dark.svg',
+        alt: 'Spate',
+        src: 'img/brand/lockup-light.svg',
+        srcDark: 'img/brand/lockup-dark.svg',
       },
       items: [
         {

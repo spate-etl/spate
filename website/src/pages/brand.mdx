@@ -1,0 +1,71 @@
+---
+title: Brand
+description: The Spate mark, wordmark lockups, color tokens and typefaces, with the files to download and the rules for using them.
+---
+
+import BrandPalette from '@site/src/components/BrandPalette';
+
+# Brand
+
+The mark is a confluence: three sources feed one core and leave through one sink,
+the shape of a pipeline whose partitions fan into a single monomorphized loop.
+Every asset on this page is generated from one source in the repository, so a
+file here is never hand-edited.
+
+## The mark
+
+<div style={{display: 'flex', gap: '1rem', flexWrap: 'wrap', alignItems: 'stretch'}}>
+  <figure data-theme="light" style={{margin: 0, padding: '2rem', border: '1px solid var(--spate-border)', borderRadius: 8, background: 'var(--spate-bg)', flex: '1 1 200px', textAlign: 'center'}}>
+    <img src="/img/logo.svg" alt="The Spate mark on a light ground" width="96" height="96" />
+    <figcaption style={{color: 'var(--spate-muted)', fontSize: '0.85rem', marginTop: '0.75rem'}}>Light ground</figcaption>
+  </figure>
+  <figure data-theme="dark" style={{margin: 0, padding: '2rem', border: '1px solid var(--spate-border)', borderRadius: 8, background: 'var(--spate-bg)', flex: '1 1 200px', textAlign: 'center'}}>
+    <img src="/img/logo-dark.svg" alt="The Spate mark on a dark ground" width="96" height="96" />
+    <figcaption style={{color: 'var(--spate-muted)', fontSize: '0.85rem', marginTop: '0.75rem'}}>Dark ground</figcaption>
+  </figure>
+</div>
+
+Download: [mark, light](/img/logo.svg) · [mark, dark](/img/logo-dark.svg) ·
+[favicon](/img/favicon.svg) · [avatar, 512 px](/img/brand/avatar.png)
+
+## The lockup
+
+The wordmark is IBM Plex Sans SemiBold, tracked to −0.022 em, with the mark's
+ink centered on the x-height. Use the lockup where the name has to be read; use
+the mark alone where the name is already beside it.
+
+<div style={{display: 'flex', flexDirection: 'column', gap: '1rem'}}>
+  <div data-theme="light" style={{padding: '2.5rem', border: '1px solid var(--spate-border)', borderRadius: 8, background: 'var(--spate-bg)'}}>
+    <img src="/img/brand/lockup-light.svg" alt="Spate lockup on a light ground" style={{height: 56}} />
+  </div>
+  <div data-theme="dark" style={{padding: '2.5rem', border: '1px solid var(--spate-border)', borderRadius: 8, background: 'var(--spate-bg)'}}>
+    <img src="/img/brand/lockup-dark.svg" alt="Spate lockup on a dark ground" style={{height: 56}} />
+  </div>
+</div>
+
+Download: [lockup, light](/img/brand/lockup-light.svg) ([PNG](/img/brand/lockup-light.png)) ·
+[lockup, dark](/img/brand/lockup-dark.svg) ([PNG](/img/brand/lockup-dark.png)) ·
+[social card](/img/brand/social-spate.png)
+
+## Color
+
+One accent, two grounds. The mark's colors and the accent that carries link
+text differ on the light ground, because a graphic reads at 3:1 and text has to
+clear 4.5:1. Every pair below is checked by `make check-brand`.
+
+<BrandPalette />
+
+## Type
+
+IBM Plex Sans for text, IBM Plex Mono for code and figures, both under the SIL
+Open Font License. Headings are SemiBold with tight tracking; body text is
+Regular at 16 px on a 1.6 line height.
+
+## Rules
+
+- Keep clear space around the mark of at least the core square's width.
+- Do not recolor the mark. On a colored ground, use the lockup for the
+  ground's tone or the avatar, which carries its own ground.
+- Do not rotate, outline, add effects, or set the wordmark in another face.
+- The smallest the mark renders legibly is 16 px; below that, use the favicon.
+- Spate is written with a capital S in prose and in lowercase in the wordmark.

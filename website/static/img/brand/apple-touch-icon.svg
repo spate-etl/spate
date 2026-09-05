@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 180 180" width="180" height="180" role="img" aria-label="Spate">
+  <rect width="180" height="180" fill="#16181d"/>
+<g transform="translate(18.320 19.423) scale(4.411067)">
+    <g stroke="#ff8c4a" stroke-width="2.2" stroke-linecap="round" fill="none">
+      <path d="M7.7 9.3 L13.6 15.6"/>
+      <path d="M8.4 16 L13.6 16"/>
+      <path d="M7.7 22.7 L13.6 16.4"/>
+      <path d="M19.6 16 L23.0 16"/>
+    </g>
+    <circle cx="6" cy="7.5" r="2.4" fill="#ff8c4a"/>
+    <circle cx="6" cy="16" r="2.4" fill="#ff8c4a"/>
+    <circle cx="6" cy="24.5" r="2.4" fill="#ff8c4a"/>
+    <rect x="12.6" y="12.6" width="6.8" height="6.8" rx="1.6" fill="#ffc9a8"/>
+    <circle cx="26" cy="16" r="2.9" fill="#ff8c4a"/>
+  </g>
+</svg>

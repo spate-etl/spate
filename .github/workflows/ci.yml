@@ -102,6 +102,11 @@ jobs:
           # Version-pinned as well as SHA-pinned: a zizmor release can relax the
           # default audit policy this job rests on.
           tool: zizmor@1.28.0,shellcheck@0.11.0
+      # check-brand runs plain Node with no npm dependencies, so no cache or
+      # install step is needed.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
       # Without GH_TOKEN zizmor skips the API audits and reports "No findings",
       # exit 0, against a known-vulnerable action.
       - run: make zizmor
@@ -122,6 +127,8 @@ jobs:
       - run: make check-transclusions
 
       - run: make check-release-version
+
+      - run: make check-brand
 
   deny:
     name: Licenses and advisories

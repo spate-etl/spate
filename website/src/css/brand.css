@@ -14,7 +14,7 @@
   --spate-accent-soft: rgba(200, 72, 10, 0.08);
   --spate-mark-node: #d1500b;
   --spate-mark-edge: #e65a0f;
-  --spate-mark-core: #f37831;
+  --spate-mark-core: #f16413;
   --spate-code-bg: #17181c;
   --spate-code-ink: #e8e9ec;
   --spate-danger: #b8382c;
@@ -25,7 +25,7 @@
   --spate-primary: #c8480a;
   --spate-primary-light: #d95612;
   --spate-primary-lighter: #e6631f;
-  --spate-primary-lightest: #f37831;
+  --spate-primary-lightest: #f16413;
 }
 
 [data-theme='dark'] {

@@ -74,7 +74,8 @@ DARK_CORE = "#ffc9a8"
 
 LIGHT_NODE = "#d1500b"
 LIGHT_EDGE = "#e65a0f"
-LIGHT_CORE = "#f37831"
+LIGHT_CORE = "#f16413"
+LIGHT_ACCENT = "#c8480a"
 
 BANNER_TEXT = "#f4f5f6"
 BANNER_MUTED = "#9aa1a9"
@@ -87,7 +88,7 @@ TOKENS = {
         "ink": "#17181c",
         "muted": "#5f646c",
         "border": "#e2ded7",
-        "accent": "#c8480a",
+        "accent": LIGHT_ACCENT,
         "accent-ink": "#ffffff",
         "accent-soft": "rgba(200, 72, 10, 0.08)",
         "mark-node": LIGHT_NODE,
@@ -122,8 +123,8 @@ TOKENS = {
 # the accent rather than a computed ramp, so hover and active states stay
 # inside the same hue.
 RAMP = {
-    "light": ["#8f3307", "#a33a08", "#b64109", "#c8480a", "#d95612", "#e6631f", "#f37831"],
-    "dark": ["#e15200", "#ff6b18", "#ff7629", "#ff8c4a", "#ffa26b", "#ffad7c", "#ffc9a8"],
+    "light": ["#8f3307", "#a33a08", "#b64109", LIGHT_ACCENT, "#d95612", "#e6631f", LIGHT_CORE],
+    "dark": ["#e15200", "#ff6b18", "#ff7629", DARK_NODE, "#ffa26b", "#ffad7c", DARK_CORE],
 }
 
 WORD_WEIGHT, WORD_TRACK = 600, -0.022
@@ -326,20 +327,7 @@ def gen_marks():
         STATIC,
     )
 
-    # Avatar: full-bleed square with no corner radius, since GitHub rounds it.
-    # Ink fills 62% of the width, which keeps it clear of that rounding.
-    S = 512
-    ink_w = S * 0.62
-    body, _ = mark_by_ink(
-        DARK_NODE, DARK_NODE, DARK_CORE,
-        ink_w * MARK_INK_H / MARK_INK_W, (S - ink_w) / 2, S / 2,
-    )
-    write(
-        "avatar.svg",
-        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {S} {S}" '
-        f'width="{S}" height="{S}" role="img" aria-label="Spate">\n'
-        f'  <rect width="{S}" height="{S}" fill="{DARK_BASE}"/>\n{body}\n</svg>',
-    )
+    gen_square_icon(512, "avatar.svg")
 
 
 def gen_tokens():
@@ -364,21 +352,25 @@ def gen_tokens():
     write("brand.css", "\n".join(lines), STATIC.parent.parent / "src" / "css")
 
 
-def gen_touch_icon():
-    # Full-bleed square: iOS applies its own corner mask. Ink at 62% of the
-    # width, as for the avatar, so the mark clears that mask.
-    S = 180
-    ink_w = S * 0.62
+def gen_square_icon(size, name):
+    # Full-bleed square, no corner radius: the platform applies its own mask
+    # (GitHub for the avatar, iOS for the touch icon). Ink fills 62% of the
+    # width, which keeps it clear of that mask.
+    ink_w = size * 0.62
     body, _ = mark_by_ink(
         DARK_NODE, DARK_NODE, DARK_CORE,
-        ink_w * MARK_INK_H / MARK_INK_W, (S - ink_w) / 2, S / 2,
+        ink_w * MARK_INK_H / MARK_INK_W, (size - ink_w) / 2, size / 2,
     )
     write(
-        "apple-touch-icon.svg",
-        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {S} {S}" '
-        f'width="{S}" height="{S}" role="img" aria-label="Spate">\n'
-        f'  <rect width="{S}" height="{S}" fill="{DARK_BASE}"/>\n{body}\n</svg>',
+        name,
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {size} {size}" '
+        f'width="{size}" height="{size}" role="img" aria-label="Spate">\n'
+        f'  <rect width="{size}" height="{size}" fill="{DARK_BASE}"/>\n{body}\n</svg>',
     )
+
+
+def gen_touch_icon():
+    gen_square_icon(180, "apple-touch-icon.svg")
 
 
 def gen_lockups():

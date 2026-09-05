@@ -45,6 +45,7 @@ const PAIRS = [
   ['code-ink', 'code-bg', 4.5],
   ['mark-node', 'bg', 3],
   ['mark-edge', 'bg', 3],
+  ['mark-core', 'bg', 3],
   ['primary', 'bg', 3],
 ];
 

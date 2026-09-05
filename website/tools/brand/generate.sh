@@ -46,7 +46,7 @@ render() {
     local src="$1" width="$2" out="$3"
     resvg --width "$width" "$src" "$out"
     rendered+=("$out")
-    echo "  ${out#"$(dirname "$img")/"}"
+    echo "  ${out#"$(dirname "$(dirname "$img")")/"}"
 }
 
 echo "rendering:"
@@ -62,7 +62,7 @@ echo "optimized ${#rendered[@]} PNGs"
 
 # favicon.ico at the site root, which browsers request without being told.
 # One 32px PNG inside an ICO container; every current browser reads it.
-favicon_png="$(mktemp -t favicon).png"
+favicon_png="$(mktemp -t favicon)"
 resvg --width 32 "$img/favicon.svg" "$favicon_png"
 oxipng --quiet --opt 4 --strip safe "$favicon_png"
 "$venv/bin/python" - "$favicon_png" "$img/../favicon.ico" <<'PY'

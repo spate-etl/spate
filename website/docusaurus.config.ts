@@ -227,7 +227,6 @@ const config: Config = {
       respectPrefersColorScheme: true,
     },
     navbar: {
-      // The lockup carries the wordmark, so the navbar sets no title.
       logo: {
         alt: 'Spate',
         src: 'img/brand/lockup-light.svg',

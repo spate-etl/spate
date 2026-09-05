@@ -15,6 +15,7 @@ include versions.mk
         supply-chain zizmor shellcheck self-test check-perf-report \
         check-gungraun-benches check-collected-region \
         check-transclusions \
+        check-brand \
         check-adr adr-new \
         check-changelog changelog-new \
         check-release-version release-dry-run \

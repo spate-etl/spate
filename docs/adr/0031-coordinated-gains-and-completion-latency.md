@@ -1,3 +1,7 @@
+---
+description: "Lane gains extend the current epoch additively instead of forcing a full drain, and a lane reaching end of input triggers an eager terminal commit."
+---
+
 # ADR-0031 — Additive lane gains and eager terminal commits
 
 - **Status:** accepted

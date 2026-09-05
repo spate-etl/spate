@@ -1,3 +1,7 @@
+---
+description: "One worker per destination shard seals full batches and dispatches them across healthy replicas, rather than one writer per replica, to keep inserts large."
+---
+
 # ADR-0006 — One sink worker per shard, rotating across replicas
 
 - **Status:** accepted

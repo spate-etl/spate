@@ -1,3 +1,7 @@
+---
+description: "The coordination backend is injected at pipeline assembly rather than configured per connector, so adding a backend touches no connector code."
+---
+
 # ADR-0036 — The coordination backend is injected at assembly, never configured per connector
 
 - **Status:** accepted

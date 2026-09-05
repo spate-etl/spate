@@ -1,3 +1,7 @@
+---
+description: "Adopts the metrics crate itself as the instrumentation API, re-exported from spate-core, accepting its 0.x types as the one exception to the dependency policy."
+---
+
 # ADR-0008 — The `metrics` facade as the instrumentation API, with a Prometheus exporter
 
 - **Status:** accepted

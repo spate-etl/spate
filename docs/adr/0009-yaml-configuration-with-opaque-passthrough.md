@@ -1,3 +1,7 @@
+---
+description: "Configuration is YAML with a typed framework section and opaque per-component sections that each connector deserializes itself, keeping schemas connector-owned."
+---
+
 # ADR-0009 — YAML configuration with opaque per-component sections
 
 - **Status:** accepted

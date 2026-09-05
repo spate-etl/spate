@@ -1,3 +1,7 @@
+---
+description: "Splits the source API into a control-plane Source trait and a data-plane SourceLane, letting records borrow the source's buffers instead of being copied."
+---
+
 # ADR-0003 — A poll-based source API, split into a control plane and a data plane
 
 - **Status:** accepted

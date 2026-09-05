@@ -1,3 +1,7 @@
+---
+description: "A framework-owned driver in spate-core runs the source-coordination choreography once behind planner and coordinator seam traits, not per connector."
+---
+
 # ADR-0029 — Seam traits plus a framework-owned coordination driver
 
 - **Status:** accepted

@@ -1,3 +1,7 @@
+---
+description: "AggregatingMergeTree ingestion routes plain rows through a Null table and a Materialized View, since the sink never writes AggregateFunction columns directly."
+---
+
 # ClickHouse AggregatingMergeTree ingestion
 
 ClickHouse `AggregateFunction(func, …)` columns do not store values; they

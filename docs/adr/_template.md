@@ -1,3 +1,14 @@
+---
+description: "REPLACE-ME"
+---
+
+<!--
+  The description is what a search result shows under the record's title: one
+  or two sentences of 50 to 160 characters stating what was decided and the
+  consequence that matters most. A superseded record says so here, since a
+  reader arriving from a search must not take it for the current decision.
+-->
+
 <!--
   The ADR template. Copy it with `make adr-new SLUG=short-description`, which
   allocates the next number and fills in the date.
@@ -66,11 +77,12 @@
   `deprecated` is for a decision that stopped applying without anything
   replacing it, such as a knob that was removed rather than changed.
 
-  Status is a body line rather than YAML front matter, which is where upstream
-  MADR 4 puts it. `docs/STYLE.md` §8 forbids front matter on published pages:
-  a `title:` alongside an H1 renders the title twice. MADR's own ADR-0008
-  evaluated the plain-text-line alternative and scored it well on every axis
-  but one, so this is a trade we are making knowingly.
+  Status is a body line rather than a front-matter key, which is where
+  upstream MADR 4 puts it. `docs/STYLE.md` §8 allows one front-matter key on a
+  published page, `description`, and no `title:`, which alongside an H1 renders
+  the title twice. MADR's own ADR-0008 evaluated the plain-text-line
+  alternative and scored it well on every axis but one, so this is a trade we
+  are making knowingly.
 
   Date is the date the decision LANDED IN THE TREE, citable to the commit named
   under `More information`. Not the day it was first discussed, which is not

@@ -1,3 +1,7 @@
+---
+description: "Holds a rolling N-2 MSRV and bans 0.x dependency types from the public API, so a connector's breaking upgrade never becomes a breaking one for spate."
+---
+
 # ADR-0011 — A rolling N-2 MSRV, and no 0.x types in the public API
 
 - **Status:** accepted

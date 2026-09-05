@@ -1,3 +1,7 @@
+---
+description: "The Kafka sink resolves each batch's acknowledgment from a shared delivery-report countdown carried as the opaque pointer, avoiding a future per message."
+---
+
 # ADR-0016 — Kafka sink acknowledgments resolve from a per-batch delivery-report countdown
 
 - **Status:** accepted

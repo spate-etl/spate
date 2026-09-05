@@ -1,3 +1,7 @@
+---
+description: "Object-storage split identity is a truncated SHA-256 digest over sorted member keys, versions and a packing-version constant, not a concatenation."
+---
+
 # ADR-0034 — Split identity is a truncated digest over member keys, versions and a packing version
 
 - **Status:** accepted

@@ -1,3 +1,7 @@
+---
+description: "Every metric family and its labels, plus alerting starting points for sink, source, and coordination signals."
+---
+
 # Metrics
 
 Spate instruments every pipeline stage through the [`metrics`](https://crates.io/crates/metrics)

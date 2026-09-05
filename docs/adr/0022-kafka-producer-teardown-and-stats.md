@@ -1,3 +1,7 @@
+---
+description: "The Kafka sink relies on rdkafka's own producer Drop for teardown and defers per-partition statistics, keeping sink metric cardinality off partition count."
+---
+
 # ADR-0022 — Rely on rdkafka's own producer teardown; defer per-partition statistics
 
 - **Status:** accepted

@@ -1,3 +1,7 @@
+---
+description: "Numbered properties the engine holds to, such as at-least-once delivery and non-blocking sources, stated once for citation."
+---
+
 # Spate invariants
 
 The properties the engine is arranged around, and the only place they are stated

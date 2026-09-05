@@ -220,6 +220,12 @@ const config: Config = {
           ],
         },
         blog: false,
+        sitemap: {
+          // Docusaurus reads the date from git for docs pages; the rest carry
+          // none rather than a build timestamp.
+          lastmod: 'date',
+          ignorePatterns: ['/search', '/blog/tags/**'],
+        },
         pages: {
           // The homepage renders a region of a compiled example through the
           // same plugin the docs use (docs/STYLE.md § 10).

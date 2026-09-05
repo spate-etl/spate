@@ -1,3 +1,7 @@
+---
+description: "The Kafka sink encodes a private length-delimited framing for key, headers, payload and tombstone inside the sink contract's opaque byte frames."
+---
+
 # ADR-0019 — A connector-internal length-delimited framing inside the opaque chunk frames
 
 - **Status:** accepted

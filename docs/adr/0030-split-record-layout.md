@@ -1,3 +1,7 @@
+---
+description: "Each split persists as two records, an immutable spec and a small progress record, so compare-and-set commit cost stays independent of descriptor size."
+---
+
 # ADR-0030 — Two durable records per split: an immutable spec and a small progress record
 
 - **Status:** accepted

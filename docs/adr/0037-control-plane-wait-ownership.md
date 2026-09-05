@@ -1,3 +1,7 @@
+---
+description: "The coordination driver owns the single wait point, with a mandatory lane waker, so a finishing lane wakes it immediately instead of on the next poll."
+---
+
 # ADR-0037 — The driver owns the wait, not the coordination backend
 
 - **Status:** accepted

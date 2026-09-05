@@ -1,3 +1,7 @@
+---
+description: "Oversized Kafka records are rejected at encode time under the configured Skip or Fail policy, so a broker-side size error can only mean misconfiguration."
+---
+
 # ADR-0020 — Oversized records are caught at encode time, not at write time
 
 - **Status:** accepted

@@ -1,3 +1,7 @@
+---
+description: "Adopts one-file-per-decision MADR-format ADRs, replacing the decision-log table so a reversal creates a new record instead of overwriting the old one."
+---
+
 # ADR-0001 — Record architecture decisions in ADRs
 
 - **Status:** accepted

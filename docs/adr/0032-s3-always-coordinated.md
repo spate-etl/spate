@@ -1,3 +1,7 @@
+---
+description: "The object-storage source is always coordinated, using an in-process store for solo runs, and its earlier manifest checkpoint mechanism is removed."
+---
+
 # ADR-0032 — The object-storage source is always coordinated; the manifest checkpoint is deleted
 
 - **Status:** accepted

@@ -1,3 +1,7 @@
+---
+description: "ClickHouse insert columns derive from the row struct's field order via a new derive macro, replacing the configured columns list as the source of truth."
+---
+
 # ADR-0043 — The row struct is the ClickHouse insert column list, replacing configured `columns`
 
 - **Status:** accepted

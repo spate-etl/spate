@@ -92,19 +92,29 @@ h3 {
   --ifm-h3-font-size: 1.25rem;
 }
 
-/* A link inside running text is underlined, so it never depends on colour
- * alone: on the dark ground the accent and the ink sit under 3:1 apart. */
+/* A link inside running text carries a hairline under it, so it never relies
+ * on colour alone: on the dark ground the accent and the ink are under 3:1
+ * apart. Faint at rest, the full accent on hover and focus. */
 .markdown a:not(.button),
 .theme-doc-footer a,
-.footer a {
+.site-footer__col a,
+.home p a,
+.benchmarks-page p a,
+.bench-roster a,
+.field__legend a {
   text-decoration: underline;
-  text-decoration-color: color-mix(in srgb, currentColor 45%, transparent);
-  text-underline-offset: 0.18em;
+  text-decoration-color: color-mix(in srgb, currentColor 30%, transparent);
   text-decoration-thickness: 1px;
+  text-underline-offset: 0.22em;
 }
 
 .markdown a:not(.button):hover,
-.footer a:hover {
+.markdown a:not(.button):focus-visible,
+.theme-doc-footer a:hover,
+.site-footer__col a:hover,
+.home p a:hover,
+.benchmarks-page p a:hover,
+.bench-roster a:hover {
   text-decoration-color: currentColor;
 }
 
@@ -134,39 +144,6 @@ code {
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
   }
-}
-
-/* Navbar and footer --------------------------------------------------------- */
-
-.navbar {
-  border-bottom: 1px solid var(--spate-border);
-  box-shadow: none;
-  backdrop-filter: blur(10px);
-  background: color-mix(in srgb, var(--spate-bg) 82%, transparent);
-}
-
-.navbar__logo {
-  height: 1.7rem;
-}
-
-.navbar__link {
-  font-weight: 500;
-}
-
-.navbar__link--active {
-  color: var(--spate-primary-dark);
-}
-
-.footer {
-  border-top: 1px solid var(--spate-border);
-}
-
-.footer__title {
-  font-size: 0.9rem;
-}
-
-.footer__link-item {
-  font-size: 0.9rem;
 }
 
 /* Docs density -------------------------------------------------------------- */

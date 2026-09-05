@@ -1,0 +1,235 @@
+/* The marketing shell: the site navbar and footer, the containers and the
+ * motion primitives every marketing page shares. Colours come from brand.css. */
+
+:root {
+  /* The frame every page sits in: the navbar's inner width and the docs
+   * layout share it, so a 4K display gets margins rather than a stretch. */
+  --spate-frame: 1440px;
+}
+
+.site-container {
+  width: min(100% - 3rem, 1180px);
+  margin-inline: auto;
+}
+
+/* The docs layout, sidebar to outline, sits in the same frame. The theme
+ * stamps `docs-wrapper` on the html element; the layout is the main
+ * wrapper's child. */
+html.docs-wrapper .main-wrapper > div {
+  width: 100%;
+  max-width: var(--spate-frame);
+  margin: 0 auto;
+}
+
+.site-main {
+  flex: 1 0 auto;
+  min-height: 60vh;
+}
+
+.site-prose {
+  max-width: 46rem;
+  padding: 3rem 0 4rem;
+}
+
+/* Navbar ------------------------------------------------------------------ */
+
+/* One navbar on every page: the theme's, with src/theme/Navbar/Content
+ * inside it. Translucent over the top of a page, a rule beneath it once
+ * scrolled. Its inner width is the site frame, so the lockup sits in the
+ * same place on the homepage and on a docs page at any viewport. */
+.navbar {
+  height: 4rem;
+  padding: 0 1.5rem;
+  border-bottom: 1px solid transparent;
+  box-shadow: none;
+  background: color-mix(in srgb, var(--spate-bg) 72%, transparent);
+  transition: border-color 0.2s ease, background-color 0.2s ease;
+}
+
+/* The blur lives on a childless pseudo-element. A `backdrop-filter` on the
+ * navbar itself would make it the containing block for the theme's
+ * position:fixed phone menu, which would then be clipped to 4rem. */
+.navbar::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  backdrop-filter: blur(12px);
+}
+
+.navbar[data-scrolled] {
+  border-bottom-color: var(--spate-border);
+  background: color-mix(in srgb, var(--spate-bg) 88%, transparent);
+}
+
+.navbar__inner {
+  max-width: var(--spate-frame);
+  margin: 0 auto;
+}
+
+.navbar__items {
+  gap: 1.75rem;
+}
+
+.navbar__items--right {
+  gap: 0.75rem;
+}
+
+.navbar__logo {
+  height: 28px;
+}
+
+.navbar__brand {
+  margin-right: 0;
+}
+
+.site-nav__links {
+  display: flex;
+  gap: 1.5rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.site-nav__link {
+  color: var(--spate-ink);
+  font-weight: 500;
+  font-size: 0.95rem;
+  text-decoration: none;
+}
+
+.site-nav__link:hover {
+  color: var(--spate-accent);
+  text-decoration: none;
+}
+
+.site-nav__link--active {
+  color: var(--spate-primary-dark);
+}
+
+.site-nav__github {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  height: 2.25rem;
+  padding: 0 0.75rem;
+  border: 1px solid var(--spate-border);
+  border-radius: var(--ifm-global-radius);
+  color: var(--spate-ink);
+  font-size: 0.9rem;
+  text-decoration: none;
+}
+
+.site-nav__github:hover {
+  border-color: var(--spate-accent);
+  color: var(--spate-ink);
+  text-decoration: none;
+}
+
+.site-nav__stars {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-family: var(--ifm-font-family-monospace);
+  font-size: 0.8rem;
+  color: var(--spate-muted);
+}
+
+/* The theme's own mobile sidebar carries the links under 997px. */
+@media (max-width: 996px) {
+  .site-nav__links,
+  .navbar__items .site-nav__github,
+  .site-nav__mode {
+    display: none;
+  }
+}
+
+/* Footer ------------------------------------------------------------------ */
+
+.site-footer {
+  border-top: 1px solid var(--spate-border);
+  background: var(--spate-surface-2);
+  color: var(--spate-muted);
+  font-size: 0.9rem;
+}
+
+.site-footer__grid {
+  display: grid;
+  grid-template-columns: 1.4fr repeat(4, minmax(0, 1fr));
+  gap: 2rem;
+  padding: 3.5rem 0 2.5rem;
+}
+
+.site-footer__brand {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+}
+
+.site-footer__lockup img {
+  display: block;
+  height: 30px;
+}
+
+.site-footer__tagline {
+  margin: 0;
+  max-width: 17rem;
+  line-height: 1.5;
+}
+
+.site-footer__title {
+  margin: 0 0 0.6rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--spate-ink);
+}
+
+.site-footer__col ul {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.site-footer__col a {
+  color: var(--spate-muted);
+}
+
+.site-footer__col a:hover {
+  color: var(--spate-accent);
+}
+
+.site-footer__legal {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0 0 2rem;
+  font-size: 0.85rem;
+}
+
+@media (max-width: 900px) {
+  .site-footer__grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .site-footer__brand {
+    grid-column: 1 / -1;
+  }
+}
+
+/* Motion ------------------------------------------------------------------ */
+
+@media (prefers-reduced-motion: no-preference) {
+  html[data-motion] .reveal {
+    opacity: 0;
+    transform: translateY(14px);
+    transition: opacity 0.6s ease, transform 0.6s ease;
+  }
+
+  html[data-motion] .reveal.is-in {
+    opacity: 1;
+    transform: none;
+  }
+}

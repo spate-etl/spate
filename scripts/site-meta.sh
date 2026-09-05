@@ -18,11 +18,11 @@ fail() {
 }
 
 # Pages the site does not describe: the not-found page, the search page, the
-# generated license texts, and the client-redirect stubs, which carry only a
-# refresh.
+# generated license texts, the blog's generated author index, and the
+# client-redirect stubs, which carry only a refresh.
 skip() { # path
     case "$1" in
-    "$build/404.html" | "$build/search.html" | "$build/licenses/index.html") return 0 ;;
+    "$build/404.html" | "$build/search.html" | "$build/licenses/index.html" | "$build/blog/authors.html") return 0 ;;
     esac
     grep -qE 'http-equiv="?refresh"?' "$1"
 }

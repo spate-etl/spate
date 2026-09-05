@@ -39,9 +39,6 @@ export default function SiteFooter(): React.JSX.Element {
       </div>
       <div className="site-container site-footer__legal">
         <span>Copyright © {new Date().getFullYear()} Marcus Kainth. Spate is licensed under Apache-2.0.</span>
-        <a href={useBaseUrl('/blog/rss.xml')} className="site-footer__rss" hidden>
-          RSS
-        </a>
       </div>
     </footer>
   );

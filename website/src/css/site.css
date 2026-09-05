@@ -42,8 +42,18 @@ html.docs-wrapper .main-wrapper > div {
   border-bottom: 1px solid transparent;
   box-shadow: none;
   background: color-mix(in srgb, var(--spate-bg) 72%, transparent);
-  backdrop-filter: blur(12px);
   transition: border-color 0.2s ease, background-color 0.2s ease;
+}
+
+/* The blur lives on a childless pseudo-element. A `backdrop-filter` on the
+ * navbar itself would make it the containing block for the theme's
+ * position:fixed phone menu, which would then be clipped to 4rem. */
+.navbar::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  backdrop-filter: blur(12px);
 }
 
 .navbar[data-scrolled] {

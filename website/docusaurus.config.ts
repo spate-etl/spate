@@ -240,11 +240,6 @@ const config: Config = {
       items: [
         ...NAV_ITEMS.map((item) => ({to: item.to, label: item.label, position: 'left' as const})),
         {
-          href: 'https://docs.rs/spate',
-          label: 'API',
-          position: 'left',
-        },
-        {
           href: githubUrl,
           label: 'GitHub',
           position: 'right',

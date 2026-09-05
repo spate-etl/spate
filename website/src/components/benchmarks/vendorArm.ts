@@ -1,6 +1,6 @@
 import {usePluginData} from '@docusaurus/useGlobalData';
 
-import {EMPTY, PRIMARY, isRanked, type Data, type Entrant, type Env, type Row} from '../Results/data';
+import {EMPTY, PRIMARY, isRanked, type Attempt, type Data, type Entrant, type Env, type Row} from '../Results/data';
 
 export type VendorArm = {row: Row; entrant: Entrant; env: Env | undefined; basePath: string};
 
@@ -24,7 +24,7 @@ export function useVendorArm(): VendorArm | null {
 }
 
 /** The comparability group with the most arms, and its rows in the data's order. */
-export function useRichestGroup(): {rows: Row[]; entrants: Entrant[]; basePath: string; groupKey: string | null} {
+export function useRichestGroup(): {rows: Row[]; entrants: Entrant[]; basePath: string; groupKey: string | null; attempts: Attempt[]} {
   const data = (usePluginData('bench-data') as Data | undefined) ?? EMPTY;
   const rows = data.rows as Row[];
   const counts = new Map<string, number>();
@@ -36,6 +36,7 @@ export function useRichestGroup(): {rows: Row[]; entrants: Entrant[]; basePath: 
     entrants: data.entrants as Entrant[],
     basePath: data.basePath,
     groupKey: best,
+    attempts: best === null ? [] : (data.attempts as Attempt[]).filter((a) => a.group === best),
   };
 }
 

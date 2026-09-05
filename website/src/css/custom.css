@@ -100,7 +100,8 @@ h3 {
 .site-footer__col a,
 .home p a,
 .benchmarks-page p a,
-.bench-roster a,
+.bench-profile p a,
+.bench-profile li a,
 .field__legend a {
   text-decoration: underline;
   text-decoration-color: color-mix(in srgb, currentColor 30%, transparent);
@@ -114,7 +115,7 @@ h3 {
 .site-footer__col a:hover,
 .home p a:hover,
 .benchmarks-page p a:hover,
-.bench-roster a:hover {
+.bench-profile a:hover {
   text-decoration-color: currentColor;
 }
 
@@ -127,7 +128,8 @@ code {
 /* Linked code sits on the code background, where the accent falls short of
  * 4.5:1 on the light ground; the darker step clears it on every surface. */
 .markdown a code,
-.home a code {
+.home a code,
+.bench-profile a code {
   color: var(--spate-primary-dark);
 }
 

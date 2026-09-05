@@ -1,10 +1,10 @@
+import Link from '@docusaurus/Link';
 import clsx from 'clsx';
 import React from 'react';
 
 import {isPlotted, laneRank, niceCeil, unrankedBecause, type Entrant, type Row} from '../Results/data';
 import {fmt, unitLabel} from '../Results/format';
 import {specOf} from '../Results/columns';
-import {armAnchor} from '../Results/model';
 import {isoDate} from './vendorArm';
 
 type Props = {
@@ -61,17 +61,14 @@ export default function Field({rows, entrants, metric, basePath, compact}: Props
               className={clsx('field__lane', rank ? 'field__lane--ranked' : 'field__lane--context', !positioned && 'field__lane--empty')}>
               <span className="field__rank">{rank ?? '—'}</span>
               <span className="field__who">
-                {/* A plain anchor: the target is the arm's disclosure in the
-                    results table, which the table renders rather than a heading
-                    the build could check. */}
-                <a href={`${basePath.replace(/\/$/, '')}#${armAnchor(row.key)}`} className="field__name">
+                <Link to={`${basePath}systems/${row.entrant}`} className="field__name">
                   {name}
                   {ours && (
                     <span className="field__vendor" title="Run by the vendor of this benchmark">
                       {' '}†
                     </span>
                   )}
-                </a>
+                </Link>
                 {!compact && (
                   <span className="field__meta">
                     {label} · {row.wire_format ?? 'format not declared'} · {row.version ?? row.commit ?? 'version unknown'} ·{' '}

@@ -3,7 +3,6 @@ import React, {useState} from 'react';
 
 import Field from '../components/benchmarks/Field';
 import {isoDate, useRichestGroup, useVendorArm} from '../components/benchmarks/vendorArm';
-import Results from '../components/Results';
 import {defaultColumnsFor, specOf} from '../components/Results/columns';
 import {PRIMARY} from '../components/Results/data';
 import {fmt} from '../components/Results/format';
@@ -70,10 +69,11 @@ function Headline() {
 }
 
 function TheField() {
-  const {rows, entrants, basePath} = useRichestGroup();
+  const {rows, entrants, basePath, attempts} = useRichestGroup();
   const [metric, setMetric] = useState(PRIMARY);
   if (!rows.length) return null;
   const choices = defaultColumnsFor(metricsPresent(rows));
+  const byId = new Map(entrants.map((e) => [e.entrant.id, e]));
   return (
     <section className="bench-field" aria-labelledby="field-title">
       <div className="site-container">
@@ -97,7 +97,20 @@ function TheField() {
         </div>
         <div className="home-panel">
           <Field rows={rows} entrants={entrants} metric={metric} basePath={basePath} />
+          {attempts.length > 0 && (
+            <p className="field__legend">
+              Attempted in the newest sitting and produced no number:{' '}
+              {attempts
+                .map((a) => `${byId.get(a.entrant)?.entrant.name ?? a.entrant} (${a.variant_id}, ${a.status})`)
+                .join('; ')}
+              .
+            </p>
+          )}
         </div>
+        <p className="home-lead bench-field__more">
+          Each system name opens its profile: every arm it declared, the configuration behind each number, and
+          the deviations it declared.
+        </p>
       </div>
     </section>
   );
@@ -108,12 +121,6 @@ export default function BenchmarksPage(): React.JSX.Element {
     <SiteLayout title="Benchmarks" description={DESCRIPTION} className="benchmarks-page">
       <Headline />
       <TheField />
-      <section className="bench-results" aria-label="Every column, every arm">
-        <div className="site-container site-container--wide">
-          <h2 className="home-h2 home-h2--small">Every column, every arm</h2>
-          <Results />
-        </div>
-      </section>
     </SiteLayout>
   );
 }

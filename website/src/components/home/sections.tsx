@@ -419,9 +419,13 @@ export function Benchmarks(): React.JSX.Element | null {
   );
 }
 
-const PROBES = `readinessProbe: { httpGet: { path: /readyz, port: 9090 } }
-livenessProbe:  { httpGet: { path: /healthz, port: 9090 }, periodSeconds: 10 }
-terminationGracePeriodSeconds: 30   # above checkpoint.drain_timeout`;
+const PROBES = `readinessProbe:
+  httpGet: { path: /readyz, port: 9090 }
+livenessProbe:
+  httpGet: { path: /healthz, port: 9090 }
+  periodSeconds: 10
+# Above checkpoint.drain_timeout.
+terminationGracePeriodSeconds: 30`;
 
 export function Deploy(): React.JSX.Element {
   return (

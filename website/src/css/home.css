@@ -132,7 +132,7 @@
 
 .home-split {
   display: grid;
-  grid-template-columns: 1fr 1.25fr;
+  grid-template-columns: 1fr 1.5fr;
   gap: 3rem;
   align-items: start;
 }
@@ -155,6 +155,14 @@
 
 .home-split__code .theme-code-block {
   margin: 0;
+}
+
+/* Wrap long lines instead of leaving Infima's `overflow: auto` to scroll. */
+.home-split__code .theme-code-block pre {
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  /* `anywhere`: a single long token must not itself reopen the scrollbar. */
+  overflow-wrap: anywhere;
 }
 
 /* The one command a reader copies, as a pill rather than a block. */

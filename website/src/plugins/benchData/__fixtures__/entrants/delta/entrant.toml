@@ -1,0 +1,20 @@
+schema = 1
+
+[entrant]
+id       = "delta"
+name     = "Delta"
+homepage = "https://example.invalid"
+licence  = "Apache-2.0"
+vendor   = "third-party"
+kind     = "stream-processor"
+runtime  = "native"
+status   = "active"
+
+[maintainer]
+who = "spate-benchmark"
+reviewed_upstream = false
+
+[guarantees]
+delivery    = "at-least-once"
+durability  = "offset-commit"
+interval_ms = 5000

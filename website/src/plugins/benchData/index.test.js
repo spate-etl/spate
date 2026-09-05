@@ -55,6 +55,14 @@ test("every row's variant id is one its descriptor declares", async () => {
   }
 });
 
+test('an entrant with no declared display order sorts last, matching Results/data.ts', async () => {
+  const {entrants} = await load();
+  // `delta` declares no `[display]` block. `entrantOrder` in `Results/data.ts`
+  // falls back to `1e9` for the same case, and the two orderings must agree.
+  const ids = entrants.map((e) => e.entrant.id);
+  assert.equal(ids.at(-1), 'delta');
+});
+
 test('mode is a comparability axis, so drain and sustained never share one', async () => {
   const {rows} = await load();
   // `rows_per_s` means "how fast can this go" in drain and "the rate we asked
@@ -163,6 +171,15 @@ test('a sweep with no A/A control reports no floor rather than a wrong one', asy
   // "nothing has measured this" copy from; a zero would read as a rig that
   // does not move.
   assert.equal(find(rows, 'gamma', 'native').aa_spread, null);
+});
+
+test('a fallback sitting key does not attribute one entrant\'s A/A control to another', async () => {
+  const {rows} = await load();
+  // alpha's control and beta's rowbinary/hand records all predate
+  // `invocation_id` and fall on the same UTC day, so a sitting key that ignores
+  // the entrant would give beta the floor alpha's control measured.
+  assert.equal(find(rows, 'beta', 'rowbinary').aa_spread, null);
+  assert.equal(find(rows, 'beta', 'hand').aa_spread, null);
 });
 
 test('flags are the union across repetitions, not the newest one\'s', async () => {

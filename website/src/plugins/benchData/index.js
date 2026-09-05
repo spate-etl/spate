@@ -58,19 +58,10 @@ function repoRoot(siteDir) {
 /**
  * Reads one descriptor or environment profile.
  *
- * A real TOML parser, not the hand-rolled subset that used to live here. This is
- * the seam where the site has to agree with the harness about what a descriptor
- * says, and the two were parsing the same files with different implementations:
- * the Rust side uses the `toml` crate with `deny_unknown_fields`, while this side
- * mis-read an inline `key = "x" # note` as the value `x" # note`, reattached a
- * nested `[a.b]` under an open `[[array]]` to the root, and carried a
- * write-only `arrayMode` flag that betrayed the confusion. Anything mis-parsed
- * here is rendered beside a published number, and `entrants_are_valid` cannot
- * catch it because that test validates the other parser.
- *
- * `smol-toml` is dependency-free and build-time only, so the supply-chain
- * argument the old comment made against a real parser does not apply: it never
- * reaches a visitor's browser.
+ * This is the seam where the site has to agree with the harness about what a
+ * descriptor says: the Rust side parses the same files with the `toml` crate
+ * and `deny_unknown_fields`, and `entrants_are_valid` only checks that parser,
+ * not this one.
  *
  * A file that does not parse throws rather than yielding a partial object. A
  * silently half-read descriptor is how a system ends up on the page with its
@@ -105,7 +96,9 @@ function loadEntrants(root) {
       }
       return spec;
     })
-    .sort((a, b) => (a.display?.order ?? 0) - (b.display?.order ?? 0));
+    // An entrant that declares no order sorts last, matching
+    // `Results/data.ts`'s `entrantOrder`.
+    .sort((a, b) => (a.display?.order ?? 1e9) - (b.display?.order ?? 1e9));
 }
 
 function loadEnvironments(root) {
@@ -199,12 +192,18 @@ function variantKey(rec) {
  * Which sitting a record belongs to.
  *
  * `invocation_id` is minted once per `bench run` from harness 2 on, so a sitting
- * is identified exactly. The UTC calendar day is the fallback for records written
- * before the field existed, and it is only an approximation: a sweep crossing
- * midnight splits in two, and two sweeps on one day merge into one.
+ * is identified exactly. The fallback for records written before the field
+ * existed is the entrant plus the UTC calendar day, and it is only an
+ * approximation: a sweep crossing midnight splits in two, and two sweeps of the
+ * same entrant on one day merge into one. Keying the fallback on the entrant
+ * keeps it from merging two different entrants' sweeps that happen to fall on
+ * the same day.
  */
 function sittingKey(rec) {
-  return rec.run?.invocation_id || new Date(rec.run?.ts_ms ?? 0).toISOString().slice(0, 10);
+  return (
+    rec.run?.invocation_id ??
+    [rec.sut?.entrant, new Date(rec.run?.ts_ms ?? 0).toISOString().slice(0, 10)].join('|')
+  );
 }
 
 /** The arm a row or attempt belongs to, within its comparability group. */
@@ -256,31 +255,23 @@ function worstStatus(recs) {
  * of which [`latestSitting`] then publishes only the newest per arm.
  *
  * Repetitions within a single invocation are aggregated by median. Runs from
- * DIFFERENT sittings are not: they are aggregated separately and the older one is
- * dropped rather than merged. That is the correction to the framework site's
- * aggregator, which hashes only variant keys and so silently medians a re-run
- * months later into the original figure while captioning it with the newest date
- * — a mistake selection would otherwise reintroduce, since a superseded sitting
- * that had been medianed into its successor could never be dropped from it.
+ * DIFFERENT sittings are aggregated separately, and the older one is dropped
+ * rather than merged, so a superseded sitting can never be medianed into its
+ * successor and become impossible to drop from it.
  *
- * Three properties this function is responsible for, each of which it previously
- * got wrong:
+ * `infra_bound` records are kept, carried through with their status, and the
+ * page refuses to rank them: collapsing that status into "we never ran it"
+ * would erase the distinction `Status::InfraBound` exists to preserve.
+ * Configuration (`variant`) is part of a row's identity, so two sweeps of the
+ * same arm at different knob settings on the same day are never medianed into
+ * one number captioned as run-to-run spread.
  *
- * - **`infra_bound` records are kept.** They were dropped here by a
- *   `status !== 'ok'` filter, which made "we ran it and it blew the headroom
- *   limit" render identically to "we never ran it" — the exact distinction
- *   `Status::InfraBound` exists to preserve. They are kept, carried through with
- *   their status, and the page refuses to rank them.
- * - **Configuration is part of the identity.** The key omitted `variant`
- *   entirely, so two sweeps of the same arm at different knob settings on the
- *   same day were medianed into one number captioned as run-to-run spread.
- *
- * Known remaining limitation, and it costs more now than it used to: a record
- * carrying no `invocation_id` falls back to the UTC calendar day (see
- * [`sittingKey`]), so a sweep straddling midnight reads as two sittings — and
- * selection then drops the earlier half rather than merely listing it separately.
- * Every record the harness writes carries the field, so this reaches only ones
- * written before it existed.
+ * Known remaining limitation: a record carrying no `invocation_id` falls back to
+ * its entrant and the UTC calendar day (see [`sittingKey`]), so a sweep
+ * straddling midnight reads as two sittings, and selection then drops the
+ * earlier half rather than merely listing it separately. Every record the
+ * harness writes carries the field, so this reaches only ones written before it
+ * existed.
  */
 function summarise(records) {
   const byKey = new Map();

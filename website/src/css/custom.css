@@ -339,7 +339,7 @@ table th {
 .theme-code-block [class*='codeBlockTitle'] {
   padding: 0.6rem 1.25rem 0.1rem;
   border-bottom: 0;
-  background: var(--spate-code-bg);
+  background: var(--prism-background-color);
   font-family: var(--ifm-font-family-monospace);
   font-size: 0.75rem;
   color: #9aa1a9;

@@ -84,10 +84,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pipeline = pipeline
         .sink(sink)?
         .chains(|ctx| {
-            // Resolve the sink's chunking up front, from the per-sink YAML
-            // `chunk:` block or the 64 KiB default. Bind it before `with_metrics`
-            // moves `ctx.pipeline`, so the later `ctx.chunk()` doesn't borrow a
-            // moved ctx.
+            // Resolve the sink's chunking up front, from the
+            // per-sink YAML `chunk:` block or the 64 KiB
+            // default. Bind it before `with_metrics` moves
+            // `ctx.pipeline`, so the later `ctx.chunk()`
+            // doesn't borrow a moved ctx.
             let chunk_cfg = ctx.chunk();
             chain_owned::<Vec<u8>, _>(TestDeserializer::split_on(b','))
                 .with_metrics(ctx.pipeline, "main")
@@ -104,7 +105,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         // ANCHOR: options
         .runtime_options(RuntimeOptions {
-            handle_signals: false, // the demo triggers shutdown itself
+            // The demo shuts down itself.
+            handle_signals: false,
             ..RuntimeOptions::default()
         });
     // ANCHOR_END: options

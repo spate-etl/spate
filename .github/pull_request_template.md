@@ -11,22 +11,18 @@ Contributions are accepted under Apache-2.0 §5. There is no CLA to sign.
 <!--
 `Closes #123.` on a line of its own first, if an issue tracks this.
 
-Why before what. Open with the problem a user hits, then what the change does
-about it. "`ChunkWriter` drops the last frame" is a symptom of the
-implementation; "the final batch never reaches the sink on shutdown" is the
-problem.
+One sentence: why this exists. Then what it does, and where its scope stops.
+Open on the problem a user hits, not the symptom in the code: "the final batch
+never reaches the sink on shutdown", not "`ChunkWriter` drops the last frame".
 
-A few paragraphs, not the full account. The commit message carries the
-argument, dated and attached to the diff, so this space carries what a reviewer
-needs in order to decide: the approach, the decisions that were not forced, and
-what someone using the framework sees differently. An alternative earns a
-sentence here while the choice is still open. One the commit message has
-already settled does not.
+The commit message carries the argument for the approach, dated and attached to
+the diff. Cite it rather than restating it here.
 
 Say where this delivers less, more, or something other than the issue asked
 for. That comparison is the one a reviewer cannot make alone.
 
-Test evidence and deferred work go under `Anything else`.
+Deferred work goes under `Anything else`, and so does evidence that needs more
+than a clause.
 -->
 
 ## Invariants

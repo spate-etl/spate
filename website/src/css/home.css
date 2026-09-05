@@ -443,7 +443,7 @@
 }
 
 .home-shapes thead .home-shapes__spate {
-  color: var(--spate-accent);
+  color: var(--spate-ink);
 }
 
 @media (max-width: 760px) {
@@ -886,13 +886,16 @@
   margin: 0;
 }
 
-.bench-table {
+.bench-results {
   padding: 1rem 0 4rem;
 }
 
 /* The full table is wider than a phone; it scrolls inside its own frame
- * rather than widening the page. */
-.bench-table .site-container--wide {
+ * rather than widening the page. Positioned, so the table's absolutely
+ * placed marks take this frame as their containing block and stay inside
+ * the scroll region rather than widening the document. */
+.bench-results .site-container--wide {
+  position: relative;
   overflow-x: auto;
 }
 
@@ -900,7 +903,7 @@
   width: min(100% - 3rem, 1800px);
 }
 
-.bench-table .home-h2 {
+.bench-results .home-h2 {
   margin-bottom: 1rem;
 }
 

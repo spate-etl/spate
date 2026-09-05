@@ -38,7 +38,8 @@ manifest=Cargo.toml
 SNIPPET_FILES="README.md
 crates/spate/README.md
 docs/user-guide/01-getting-started/01-installation.mdx
-docs/user-guide/04-connectors/_securing-kafka.mdx"
+docs/user-guide/04-connectors/_securing-kafka.mdx
+website/src/components/home/sections.tsx"
 
 # Tracked files `--check` scans for snippet-shaped lines, minus the
 # exclusions below. Shell scripts are left out: this script's own self-test

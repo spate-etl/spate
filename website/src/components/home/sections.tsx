@@ -148,12 +148,12 @@ export function ProofStrip(): React.JSX.Element | null {
 }
 
 const SHAPES = ['Stream processor', 'Hand-rolled loop', 'Spate'] as const;
-const SHAPE_ROWS: Array<[string, string, string, string]> = [
+const shapeRows = (invariants: number | undefined): Array<[string, string, string, string]> => [
   ['The transform is written in', 'the runtime’s language', 'your language', 'Rust, monomorphized into the loop'],
   ['Profiler and allocator', 'the runtime’s', 'yours', 'yours'],
   ['Delivery guarantee', 'the runtime’s', 'your problem, in production', 'the framework’s · INV-1'],
   ['Backpressure and drain', 'the runtime’s', 'yours to build', 'the framework’s · INV-2, INV-5'],
-  ['Properties written down and tested', 'some', 'none', 'ten, numbered'],
+  ['Properties written down and tested', 'some', 'none', invariants ? `${invariants}, numbered` : 'numbered'],
 ];
 
 /**
@@ -162,6 +162,8 @@ const SHAPE_ROWS: Array<[string, string, string, string]> = [
  */
 export function Shapes(): React.JSX.Element {
   const [active, setActive] = useState<number | null>(null);
+  const invariants = useDocusaurusContext().siteConfig.customFields?.invariants;
+  const rows = shapeRows(typeof invariants === 'number' ? invariants : undefined);
   const tabs = useRef<Array<HTMLButtonElement | null>>([]);
   useEffect(() => setActive(2), []);
   const onKey = (e: React.KeyboardEvent, i: number) => {
@@ -213,7 +215,7 @@ export function Shapes(): React.JSX.Element {
             </tr>
           </thead>
           <tbody>
-            {SHAPE_ROWS.map(([h, a, b, c]) => (
+            {rows.map(([h, a, b, c]) => (
               <tr key={h}>
                 <th scope="row">{h}</th>
                 <td>{a}</td>

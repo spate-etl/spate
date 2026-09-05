@@ -124,8 +124,11 @@ code {
   padding: 0.1rem 0.35rem;
 }
 
-.markdown a code {
-  color: inherit;
+/* Linked code sits on the code background, where the accent falls short of
+ * 4.5:1 on the light ground; the darker step clears it on every surface. */
+.markdown a code,
+.home a code {
+  color: var(--spate-primary-dark);
 }
 
 /* Focus and motion ---------------------------------------------------------- */

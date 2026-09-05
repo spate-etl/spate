@@ -22,7 +22,7 @@
 [![OpenSSF Scorecard](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fapi.scorecard.dev%2Fprojects%2Fgithub.com%2Fspate-etl%2Fspate&query=%24.score&label=openssf%20scorecard&suffix=%20%2F%2010&color=blue)](https://scorecard.dev/viewer/?uri=github.com/spate-etl/spate)
 
 [Documentation](https://spate.kainth.dev/) ·
-[Benchmarks](https://spate.kainth.dev/benchmarks/) ·
+[Benchmarks](https://spate.kainth.dev/benchmarks) ·
 [Quickstart](https://spate.kainth.dev/docs/user-guide/getting-started/quickstart) ·
 [Examples](crates/spate/examples) ·
 [Changelog](CHANGELOG.md)

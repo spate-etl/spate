@@ -64,7 +64,7 @@ export default function Field({rows, entrants, metric, basePath, compact}: Props
                 {/* A plain anchor: the target is the arm's disclosure in the
                     results table, which the table renders rather than a heading
                     the build could check. */}
-                <a href={`${basePath}#${armAnchor(row.key)}`} className="field__name">
+                <a href={`${basePath.replace(/\/$/, '')}#${armAnchor(row.key)}`} className="field__name">
                   {name}
                   {ours && (
                     <span className="field__vendor" title="Run by the vendor of this benchmark">
@@ -76,10 +76,10 @@ export default function Field({rows, entrants, metric, basePath, compact}: Props
                   <span className="field__meta">
                     {label} · {row.wire_format ?? 'format not declared'} · {row.version ?? row.commit ?? 'version unknown'} ·{' '}
                     {isoDate(row.ts_ms)}
-                    {why ? ` · ${why}` : ''}
+                    {why && positioned ? ` · ${why}` : ''}
                   </span>
                 )}
-                {compact && why && <span className="field__meta">{why}</span>}
+                {compact && why && positioned && <span className="field__meta">{why}</span>}
               </span>
               <span className="field__track" aria-hidden="true">
                 {positioned && (

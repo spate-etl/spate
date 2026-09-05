@@ -108,7 +108,7 @@ export default function BenchmarksPage(): React.JSX.Element {
     <SiteLayout title="Benchmarks" description={DESCRIPTION} className="benchmarks-page">
       <Headline />
       <TheField />
-      <section className="bench-table" aria-label="Every column, every arm">
+      <section className="bench-results" aria-label="Every column, every arm">
         <div className="site-container site-container--wide">
           <h2 className="home-h2 home-h2--small">Every column, every arm</h2>
           <Results />

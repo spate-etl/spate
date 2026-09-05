@@ -1,3 +1,7 @@
+---
+description: "Object-storage failures are classified by scope, so an unreadable object poisons its split while a credential or configuration failure fails the pipeline."
+---
+
 # ADR-0035 — Object-level failures poison the split; credential and configuration failures are fatal
 
 - **Status:** accepted

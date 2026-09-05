@@ -1,3 +1,7 @@
+---
+description: "Split revocation asks the current owner to drain cooperatively first, then forces release at a deadline, bounding a rebalance despite a stalled worker."
+---
+
 # ADR-0039 — Split revocation is cooperative first, forced second
 
 - **Status:** accepted

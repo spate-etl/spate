@@ -1,3 +1,7 @@
+---
+description: "A revocation the leader withdraws is canceled without forcing a release, but a no-progress timeout still frees a split whose drain has stalled."
+---
+
 # ADR-0041 — A revocation the leader takes back is cancelled, leaving a no-progress timeout behind
 
 - **Status:** accepted

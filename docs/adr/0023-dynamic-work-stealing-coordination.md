@@ -1,3 +1,7 @@
+---
+description: "Distributes splits by leader-elected planning and pairwise peer-to-peer stealing toward a fair share. Superseded by ADR-0038."
+---
+
 # ADR-0023 — Dynamic work-stealing splits for source coordination
 
 - **Status:** superseded

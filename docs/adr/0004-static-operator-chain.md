@@ -1,3 +1,7 @@
+---
+description: "The operator chain is statically composed and monomorphized, with type erasure only at the chain boundary, so per-record dispatch costs an inlined call."
+---
+
 # ADR-0004 — A statically composed operator chain with one dynamic call per batch
 
 - **Status:** accepted

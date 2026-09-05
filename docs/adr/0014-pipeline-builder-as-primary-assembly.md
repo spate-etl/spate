@@ -1,3 +1,7 @@
+---
+description: "A non-generic Pipeline builder performs initialization in its constructor, making the metrics-exporter ordering hazard unconstructible rather than documented."
+---
+
 # ADR-0014 — A non-generic `Pipeline` builder that owns initialization
 
 - **Status:** accepted

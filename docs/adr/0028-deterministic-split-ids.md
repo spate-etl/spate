@@ -1,3 +1,7 @@
+---
+description: "Split ids are deterministic, content-derived and planner-generated, so a replan after leader failover creates no work and no duplicate identifiers."
+---
+
 # ADR-0028 — Split ids are deterministic and planner-derived
 
 - **Status:** accepted

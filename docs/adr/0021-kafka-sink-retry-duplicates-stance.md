@@ -1,3 +1,7 @@
+---
+description: "The Kafka writer retries any delivery failure that is not provably permanent, accepting that a whole-batch retry can duplicate an already-delivered prefix."
+---
+
 # ADR-0021 — Retry unless provably permanent, accepting known duplicates
 
 - **Status:** accepted

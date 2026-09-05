@@ -1,3 +1,7 @@
+---
+description: "Ownership safety rests solely on a monotonic revision checked by compare-and-set on every write; lease TTLs and watches affect latency only, never correctness."
+---
+
 # ADR-0026 — The durable record's compare-and-set revision is the only correctness mechanism
 
 - **Status:** accepted

@@ -1,3 +1,7 @@
+---
+description: "Forces acks=all and idempotence on the Kafka sink and rejects them, and their aliases, in the passthrough, since an override would silently lose data."
+---
+
 # ADR-0018 — `acks=all` and idempotence are forced, and denied in the passthrough
 
 - **Status:** accepted

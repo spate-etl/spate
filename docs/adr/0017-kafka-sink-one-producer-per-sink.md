@@ -1,3 +1,7 @@
+---
+description: "One producer serves a whole Kafka sink instance, with framework shards reduced to worker concurrency over clones rather than one client per shard."
+---
+
 # ADR-0017 — One producer per Kafka sink; shards are workers over clones
 
 - **Status:** accepted

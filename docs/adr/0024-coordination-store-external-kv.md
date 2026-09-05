@@ -1,3 +1,7 @@
+---
+description: "Coordination state lives in an external low-latency KV store behind a six-primitive trait, reversing an earlier compare-and-set design over object storage."
+---
+
 # ADR-0024 — An external low-latency KV store behind a six-primitive trait
 
 - **Status:** accepted

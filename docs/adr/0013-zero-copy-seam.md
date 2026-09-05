@@ -1,3 +1,7 @@
+---
+description: "Untyped payload batches cross the one erasure boundary so borrowed records never need to be named as a stored, lifetime-parameterized type."
+---
+
 # ADR-0013 — Untyped payload batches cross the erasure boundary, with a lifetime-to-type family
 
 - **Status:** accepted

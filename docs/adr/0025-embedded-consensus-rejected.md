@@ -1,3 +1,7 @@
+---
+description: "Rejects embedding consensus for work distribution, since a single compare-and-set already gives the fencing safety a voter set would only duplicate."
+---
+
 # ADR-0025 — Embedded consensus is not used for work distribution
 
 - **Status:** accepted

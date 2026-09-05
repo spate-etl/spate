@@ -1,3 +1,7 @@
+---
+description: "Ships spate-datagen, a first-party source generating one built-in storefront dataset with referential consistency, rejecting a configurable schema DSL."
+---
+
 # ADR-0042 — A first-party load generator shipping one named dataset, not a schema language
 
 - **Status:** accepted

@@ -371,8 +371,12 @@ Everywhere:
 - **Every category folder has a `_category_.json`** (`label`, and `position`
   where order isn't obvious) and a `README.mdx` landing page, so there are no
   dead-click categories.
-- **Pages carry no YAML frontmatter.** The H1 is the title; a frontmatter
-  `title:` alongside an H1 renders twice.
+- **Every page opens with frontmatter carrying `description`, and nothing
+  else.** The H1 is the title; a frontmatter `title:` alongside an H1 renders
+  twice. The description is what a search result shows under the page's
+  name: one or two sentences of 50 to 160 characters, opening with the
+  subject, in the page's own vocabulary. `make check-docs-meta` holds the
+  length and the absence of `title:`.
 - **Internal links are relative and extension-qualified** (`../foo/bar.mdx`).
   `onBrokenLinks: 'throw'` fails the build on a stale link, so `make docs` is
   the correctness gate for any move or rename.
@@ -417,7 +421,7 @@ The rules above do not all hold here, and each departure is deliberate:
 | § 1 vendor neutrality | Suspended | A decision about a connector cannot be restated in neutral vocabulary without becoming a different decision. |
 | § 7 present-tense, "never a changelog" | Suspended | A record is a point-in-time artifact by construction. It describes the decision as it stood, and dates it. |
 | § 7 insertion-safe prose | Suspended | Same reason. A count that was right when the decision was made stays right, because nothing is added to a record later. |
-| § 8 no YAML frontmatter | **Applies** | Records are published pages, so a frontmatter `title:` would render twice. Status is a body line instead. |
+| § 8 frontmatter | **Applies** | Records are published pages: each carries a `description` and no `title:`, which would render twice. Status is a body line, and the description of a superseded record says so. |
 
 **Accepted records are immutable.** Never rewrite one to say something
 different. That is the failure this section exists to prevent, and it has

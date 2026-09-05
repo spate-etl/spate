@@ -1,3 +1,7 @@
+---
+description: "Additive add_sink calls terminate the chain in a typed split that routes each record to one destination, moving fan-out off the database onto the pipeline."
+---
+
 # ADR-0015 — Additive `add_sink` and a typed split terminal
 
 - **Status:** accepted

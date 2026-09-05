@@ -1,3 +1,7 @@
+---
+description: "Record-level errors get only a Skip or Fail policy, both counted in metrics; the framework ships no dead-letter queue for operators to build themselves."
+---
+
 # ADR-0010 — Record error policies are Skip or Fail, with no dead-letter queue
 
 - **Status:** accepted

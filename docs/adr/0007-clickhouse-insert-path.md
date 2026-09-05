@@ -1,3 +1,7 @@
+---
+description: "The ClickHouse sink pre-encodes RowBinary frames on pipeline threads and writes direct to shard-local tables with a deterministic deduplication token."
+---
+
 # ADR-0007 — Pre-encoded RowBinary frames with a deterministic deduplication token
 
 - **Status:** accepted

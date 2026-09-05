@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://spate.kainth.dev/sitemap.xml

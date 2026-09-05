@@ -1,3 +1,7 @@
+---
+description: "Leader-computed sticky assignment on split weight replaces peer-to-peer work stealing, removing the partial-view bugs that stealing kept producing."
+---
+
 # ADR-0038 — Leader-computed sticky assignment replaces peer-to-peer work stealing
 
 - **Status:** accepted

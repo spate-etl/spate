@@ -1,3 +1,7 @@
+---
+description: "Acknowledgments are a refcounted per-batch handle resolving as delivered when its last clone drops, except sink-side collections, which fail on drop instead."
+---
+
 # ADR-0005 — Refcounted per-batch acknowledgments, resolved by drop
 
 - **Status:** accepted

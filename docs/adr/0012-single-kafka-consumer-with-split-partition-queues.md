@@ -1,3 +1,7 @@
+---
+description: "One Kafka consumer per process, using split_partition_queue, maps partitions onto pipeline threads, keeping consumer-group size independent of thread count."
+---
+
 # ADR-0012 — One Kafka consumer per process, with split partition queues
 
 - **Status:** accepted

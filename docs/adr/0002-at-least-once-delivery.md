@@ -1,3 +1,7 @@
+---
+description: "Delivery is at-least-once: a source offset commits only behind acknowledged data, and the duplicates a crash replay can produce are the sink's to absorb."
+---
+
 # ADR-0002 — At-least-once delivery, with duplicates pushed onto the destination
 
 - **Status:** accepted

@@ -172,6 +172,12 @@ check-collected-region: ## The degenerate-region guard still recognizes both sha
 check-transclusions: ## Every transcluded region a docs page names exists
 	./scripts/transclude.sh --check
 
+check-docs-meta: ## Every rendered docs page carries a description of the length a search result shows
+	./scripts/docs-meta.sh --check
+
+check-site-meta: ## Every built page carries a description (run after the site build)
+	./scripts/site-meta.sh --check
+
 check-brand: ## Every brand colour clears WCAG AA on the ground it sits on
 	node website/tools/brand/check-contrast.mjs
 
@@ -200,7 +206,7 @@ release-dry-run: ## The whole release locally, nothing pushed or uploaded: make 
 #
 #     UPDATE_EXAMPLES_INDEX=1 cargo test -p spate --test examples_index --locked
 
-ci-lint: zizmor shellcheck self-test check-perf-report check-gungraun-benches check-collected-region check-adr check-brand check-changelog check-transclusions check-release-version ## Every repository-metadata check
+ci-lint: zizmor shellcheck self-test check-perf-report check-gungraun-benches check-collected-region check-adr check-brand check-changelog check-transclusions check-docs-meta check-release-version ## Every repository-metadata check
 
 ##@ Fuzz
 
@@ -230,6 +236,7 @@ docs: ## Build the documentation site the way CI does
 	cd website && npm run typecheck
 	cd website && npm test
 	cd website && CI=true npm run build
+	./scripts/site-meta.sh --check
 
 docs-serve: ## Serve the site locally with hot reload
 	cd website && npm start

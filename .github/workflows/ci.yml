@@ -954,6 +954,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: npm run build
 
+      # The homepage, the brand page and the benchmark pages rendered from the
+      # submodule have no source under docs/ for ci-lint to check.
+      - name: Every built page carries a description
+        run: ./scripts/site-meta.sh --check
+
       - name: Site is within the Cloudflare file limit
         run: |
           count=$(find website/build -type f | wc -l)

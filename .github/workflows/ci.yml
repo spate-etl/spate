@@ -949,6 +949,9 @@ jobs:
         working-directory: website
         env:
           CI: "true"
+          # The social-proof plugin's GitHub calls; the per-repository limit
+          # instead of the per-address one shared runners exhaust.
+          GH_TOKEN: ${{ github.token }}
         run: npm run build
 
       - name: Site is within the Cloudflare file limit

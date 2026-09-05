@@ -6,6 +6,7 @@
   "scripts": {
     "docusaurus": "docusaurus",
     "sync": "node scripts/sync-benchmark-docs.mjs",
+    "refresh-proof": "node scripts/refresh-social-proof.mjs",
     "start": "node scripts/sync-benchmark-docs.mjs && docusaurus start",
     "build": "node scripts/sync-benchmark-docs.mjs && docusaurus build",
     "serve": "docusaurus serve",

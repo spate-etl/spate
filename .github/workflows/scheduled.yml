@@ -520,6 +520,9 @@ jobs:
         working-directory: website
         env:
           CI: "true"
+          # The social-proof plugin's GitHub calls; the per-repository limit
+          # instead of the per-address one shared runners exhaust.
+          GH_TOKEN: ${{ github.token }}
         run: npm run build
 
       # The floor is what stops an empty build reaching the deploy. The upload's

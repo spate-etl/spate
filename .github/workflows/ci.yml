@@ -939,10 +939,9 @@ jobs:
       - name: Site is within the Cloudflare file limit
         run: |
           count=$(find website/build -type f | wc -l)
-          echo "site files: $count (deploy build adds ~1300 rustdoc files)"
-          if [ "$count" -gt 15000 ]; then
-            echo "::error::$count files; the deploy build adds rustdoc on top and"
-            echo "::error::Workers static assets refuse a deployment over 20000 files."
+          echo "site files: $count"
+          if [ "$count" -gt 10000 ]; then
+            echo "::error::$count files; Workers static assets refuse a deployment over 20000."
             exit 1
           fi
 

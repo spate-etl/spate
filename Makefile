@@ -53,7 +53,7 @@ test: ## Unit and integration tests, no containers
 doctest: ## Doc tests, which nextest does not run
 	cargo test --workspace --all-features --locked --doc
 
-doc: ## Rustdoc as the site builds it, warnings denied
+doc: ## Rustdoc for every crate, warnings denied
 	RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --locked
 
 docsrs: ## Rustdoc as docs.rs builds it: per crate, on nightly (needs nightly)

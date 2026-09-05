@@ -1,0 +1,15 @@
+# The API reference lives on docs.rs. These keep the URLs the site once served
+# under /api/ alive. Workers static assets read this file from the build.
+/api https://docs.rs/spate 301
+/api/ https://docs.rs/spate 301
+/api/spate/* https://docs.rs/spate/latest/spate/:splat 301
+/api/spate_core/* https://docs.rs/spate-core/latest/spate_core/:splat 301
+/api/spate_avro/* https://docs.rs/spate-avro/latest/spate_avro/:splat 301
+/api/spate_json/* https://docs.rs/spate-json/latest/spate_json/:splat 301
+/api/spate_kafka/* https://docs.rs/spate-kafka/latest/spate_kafka/:splat 301
+/api/spate_clickhouse/* https://docs.rs/spate-clickhouse/latest/spate_clickhouse/:splat 301
+/api/spate_coordination/* https://docs.rs/spate-coordination/latest/spate_coordination/:splat 301
+/api/spate_datagen/* https://docs.rs/spate-datagen/latest/spate_datagen/:splat 301
+/api/spate_s3/* https://docs.rs/spate-s3/latest/spate_s3/:splat 301
+/api/spate_test/* https://docs.rs/spate-test/latest/spate_test/:splat 301
+/api/* https://docs.rs/spate 302

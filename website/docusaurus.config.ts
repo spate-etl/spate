@@ -210,16 +210,14 @@ const config: Config = {
         },
         {
           // Generated third-party license texts, published under
-          // <baseUrl>/licenses/ by CI alongside the rustdoc.
+          // <baseUrl>/licenses/ by CI.
           to: 'pathname:///licenses/',
           label: 'Licenses',
           position: 'right',
         },
         {
-          // Static rustdoc output published under <baseUrl>/api/ by CI.
-          // `pathname://` prefixes baseUrl and bypasses the SPA router.
-          to: 'pathname:///api/',
-          label: 'API (rustdoc)',
+          href: 'https://docs.rs/spate',
+          label: 'API',
           position: 'left',
         },
         {
@@ -244,7 +242,6 @@ const config: Config = {
         {
           title: 'Reference',
           items: [
-            { label: 'API (rustdoc)', to: 'pathname:///api/' },
             { label: 'docs.rs', href: 'https://docs.rs/spate' },
             { label: 'crates.io', href: 'https://crates.io/crates/spate' },
           ],

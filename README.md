@@ -209,9 +209,9 @@ The most useful contribution is one that proves a delivery guarantee wrong.
 
 ## Documentation
 
-The documentation site, the user guide plus the generated API reference,
-is published at **<https://spate.kainth.dev/>** (source in
-[`website/`](website), content in [`docs/`](docs)).
+The user guide is published at **<https://spate.kainth.dev/>** (source in
+[`website/`](website), content in [`docs/`](docs)). The API reference is on
+[docs.rs](https://docs.rs/spate).
 
 - [docs/INVARIANTS.md](docs/INVARIANTS.md) — the numbered properties the
   engine is arranged around.

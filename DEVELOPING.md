@@ -49,10 +49,10 @@ concurrently, where `cargo test` runs one binary at a time. Plain
 `cargo test --workspace` still works and is many times slower. nextest does not
 run doctests; `make doctest` does.
 
-`make doc` builds the API reference the way the site does, with
-`RUSTDOCFLAGS="-D warnings"`, so a broken intra-doc link fails the build
-instead of rendering as dead text on docs.rs. It does not reach bench support
-modules, which `cargo doc` never builds.
+`make doc` builds the API reference with `RUSTDOCFLAGS="-D warnings"`, so a
+broken intra-doc link fails the build instead of rendering as dead text on
+docs.rs. It does not reach bench support modules, which `cargo doc` never
+builds.
 
 The profiles in `.config/nextest.toml`:
 

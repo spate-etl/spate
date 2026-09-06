@@ -26,6 +26,12 @@ type Fam = Owned<Vec<u8>>;
 
 const PW: &str = "distributed-secret";
 
+#[derive(Clone, Serialize, ClickHouseRow)]
+struct IdName {
+    id: u64,
+    name: String,
+}
+
 /// A single-shard cluster from the server's default `remote_servers`,
 /// preferring `default` when the image defines it. The DDL guard only reads
 /// `system.clusters`/`system.tables`, so the shard never has to be
@@ -49,7 +55,6 @@ fn checked_sink(url: &str, cluster: &str, dist_table: &str) -> config::ClickHous
     let cfg: ClickHouseSinkConfig = serde_yaml::from_str(&format!(
         r#"
 table: orders
-columns: [id, name]
 shards:
   - replicas: ["{url}"]
 user: default
@@ -61,7 +66,10 @@ distributed_check:
 "#
     ))
     .expect("config yaml");
-    config::build(cfg).expect("valid sink config")
+    config::build(cfg)
+        .expect("valid sink config")
+        .with_row::<Owned<IdName>>()
+        .expect("valid columns")
 }
 
 /// The live oracle: the server's `xxHash64` over strings and both integer

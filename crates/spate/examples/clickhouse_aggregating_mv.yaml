@@ -26,9 +26,6 @@ source:
 sink:
   clickhouse:
     table: ${CLICKHOUSE_TABLE:-orders_null}
-    # Column order is the RowBinary wire contract: it must match the
-    # OrderRollup struct's field declaration order in the example.
-    columns: [region, placed_at, qty_by_sku]
     shards:
       - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
     user: ${CLICKHOUSE_USER:-default}

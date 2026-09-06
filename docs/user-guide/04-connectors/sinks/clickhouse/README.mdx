@@ -12,8 +12,10 @@ sealed batch with a deterministic `insert_deduplication_token`. RowBinary is
 the default; `format: native` encodes columnar blocks and inserts
 `FORMAT Native` instead; see [Native format](./native-format.mdx).
 
-Construct it from the pipeline's opaque section; the result is a
-`SinkBundle` that drops straight into the builder:
+Construct it from the pipeline's opaque section, then supply the row type
+with `with_row`, which generates the insert column list from
+`#[derive(ClickHouseRow)]`; the result is a `SinkBundle` that drops straight
+into the builder:
 
 ```rust file=crates/spate/examples/kafka_avro_to_clickhouse.rs region=sink
 ```
@@ -35,13 +37,17 @@ The `sink: { clickhouse: ... }` section deserializes into
 ([`spate-clickhouse/src/config.rs`](repo:crates/spate-clickhouse/src/config.rs));
 unknown fields are rejected with the offending key, and the retry/breaker
 values are validated at load (a bad multiplier or zero threshold fails startup
-instead of the write loop).
+instead of the write loop). The insert column list is not one of its keys:
+`#[derive(ClickHouseRow)]` on the row struct generates it from field
+declaration order, honoring `#[serde(rename = "...")]` for a flattened
+`Nested` column's dotted `outer.inner` name, and rejects a duplicate or
+malformed name at compile time; [Column types](./column-types.mdx) has the
+detail. `with_row` supplies the row type to the builder.
 
 ```yaml
 sink:
   clickhouse:
     table: orders_local            # or db.orders_local
-    columns: [id, name, amount]    # MUST match the row struct's field order
     shards:
       - replicas: ["http://ch-0-0:8123", "http://ch-0-1:8123"]
       - replicas: ["http://ch-1-0:8123", "http://ch-1-1:8123"]
@@ -57,7 +63,6 @@ sink:
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `table` | string | `required` | Target table, optionally `database.table`-qualified. |
-| `columns` | string list | `required` | Insert column list. A flattened `Nested` column is named `outer.inner`; [Column types](./column-types.mdx) has the detail. **Order is the wire contract** — must match the row struct's field declaration order. Duplicates rejected at load. |
 | `shards` | list of `{ replicas: [url], weight }` | `required` | One entry per shard, each with its replica HTTP(S) URLs. |
 | `shards[].weight` | integer | `1` | Distributed-parity weight: must equal this shard's `<weight>` in the cluster's `remote_servers` entry. Rejected at load if zero. Consumed by the router — see [Distributed parity](./distributed-parity.mdx). |
 | `database` | string | `none` | Default database for unqualified tables. |
@@ -119,13 +124,13 @@ only `Row: serde::Serialize`. Sink workers on the I/O runtime only merge
 frames, seal batches, and drive inserts; they never touch a record.
 
 :::warning
-RowBinary carries no column names; position is everything. The
-configured `columns` list and the row struct's **field declaration
-order** must match; reordering either is a breaking change to the
-pipeline. `validate_schema: names` (or `full`) plus
-`ClickHouseEncoder::with_schema` turns this contract into a fail-fast
-check; see [Schema validation](./schema-validation.mdx). Which column
-types each format writes is in
+RowBinary carries no column names; position is everything. The row
+struct's **field declaration order** is the insert column order
+(`#[derive(ClickHouseRow)]` generates it), so reordering the struct's
+fields is a breaking change to the pipeline. `validate_schema: names` (or
+`full`) plus `ClickHouseEncoder::with_schema` turns this contract into a
+fail-fast check; see [Schema validation](./schema-validation.mdx). Which
+column types each format writes is in
 [ClickHouse column types](./column-types.mdx), and the Rust field each
 one takes is in the crate's `rowbinary` module docs.
 :::

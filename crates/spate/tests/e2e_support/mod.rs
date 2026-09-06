@@ -48,9 +48,9 @@ use testcontainers::runners::SyncRunner;
 use testcontainers::{Container, GenericImage, ImageExt};
 use testcontainers_modules::kafka::apache::{KAFKA_PORT, Kafka};
 
-/// The record that travels end to end: Avro in (field names), RowBinary
-/// out (field order == the `columns` list in the pipeline config).
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+/// The record that travels end to end: Avro in (field names), RowBinary out
+/// (field order is `#[derive(ClickHouseRow)]`'s generated column list).
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, spate::clickhouse::ClickHouseRow)]
 pub struct Event {
     pub id: i64,
     pub name: String,
@@ -337,7 +337,9 @@ impl Harness {
                 .sink_config("default")
                 .expect("sink config"),
         )
-        .expect("sink");
+        .expect("sink")
+        .with_row::<spate::deser::Owned<Event>>()
+        .expect("valid columns");
 
         let chunk_bytes = params.chunk_bytes;
         let runtime = pipeline
@@ -459,7 +461,6 @@ deserializer:
 sink:
   clickhouse:
     table: {table}
-    columns: [id, name]
     shards:
 {shards_yaml}    user: default
     password: {password}

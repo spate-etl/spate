@@ -66,7 +66,7 @@
 // ANCHOR: imports
 use serde::{Deserialize, Serialize};
 use spate::avro::AvroDeserializerBuilder;
-use spate::clickhouse::{ClickHouseEncoder, DateTime64Millis};
+use spate::clickhouse::{ClickHouseEncoder, ClickHouseRow, DateTime64Millis};
 use spate::kafka::KafkaSource;
 use spate::prelude::*;
 use std::path::Path;
@@ -74,10 +74,10 @@ use std::path::Path;
 
 /// The two ends of the pipeline. `Deserialize` reads [`OrderPlaced`] from
 /// Avro, so its fields match the writer schema, including the nested `lines`
-/// array. `Serialize` writes [`OrderRow`] as RowBinary, where **field order
-/// must match the `columns` list in the YAML** (RowBinary carries no names;
-/// order is the wire contract). The chain's `try_map` turns one into the
-/// other.
+/// array. `Serialize` writes [`OrderRow`] as RowBinary, where field order is
+/// the wire contract (RowBinary carries no names); `#[derive(ClickHouseRow)]`
+/// generates the insert column list from that same order. The chain's
+/// `try_map` turns one into the other.
 // ANCHOR: record
 #[derive(Debug, Deserialize)]
 struct OrderPlaced {
@@ -104,7 +104,7 @@ struct OrderLine {
 /// One ClickHouse row. [`DateTime64Millis`] declares the timestamp's scale so
 /// `validate_schema: full` can check it against the column's declared
 /// precision (it still encodes as the raw `Int64`).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ClickHouseRow)]
 struct OrderRow {
     order_id: u64,
     customer_id: u32,
@@ -147,16 +147,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ANCHOR_END: deserializer
 
     // ── Sink: sharded ClickHouse ────────────────────────────────────────
-    // The connector turns its section into everything the builder needs:
-    // writer, per-shard replica endpoints, pool tuning, readiness probe.
+    // The connector turns its section into a builder holding everything but
+    // the row type: per-shard replica endpoints, pool tuning, readiness
+    // probe. `with_row` supplies it, generating the INSERT column list from
+    // `OrderRow`'s field declaration order.
     // ANCHOR: sink
     let sink = spate::clickhouse::config::from_component_config(
         pipeline.config().sink_config("default")?,
-    )?;
+    )?
+    .with_row::<Owned<OrderRow>>()?;
     // ANCHOR_END: sink
 
     // Opt-in fail-fast schema validation (`validate_schema: names|full` in
-    // the YAML) checks the configured columns against every replica's live
+    // the YAML) checks the derived columns against every replica's live
     // table before any thread spawns, and hands the encoder the expected
     // schema so the row struct is checked against it on the first record.
     // `off` (the default) returns None and issues no queries.

@@ -65,10 +65,12 @@
 //!
 //! # Column order is the wire contract
 //!
-//! RowBinary carries no column names. The configured `columns` list and
-//! the row struct's **field declaration order** must match; reordering
-//! either is a breaking change to the pipeline. See [`rowbinary`] for the
-//! full type mapping.
+//! RowBinary carries no column names: the row struct's **field declaration
+//! order** is the insert column order, and reordering it is a breaking
+//! change to the pipeline. `#[derive(ClickHouseRow)]` generates the column
+//! list from that order, honoring `#[serde(rename = "...")]` for a name no
+//! Rust identifier can spell (a flattened `Nested` table's dotted
+//! `outer.inner`). See [`rowbinary`] for the full type mapping.
 //!
 //! # Wiring
 //!
@@ -76,7 +78,6 @@
 //! sink:
 //!   clickhouse:
 //!     table: orders_local
-//!     columns: [id, name, amount]
 //!     shards:
 //!       - replicas: ["http://ch-0-0:8123", "http://ch-0-1:8123"]
 //!       - replicas: ["http://ch-1-0:8123", "http://ch-1-1:8123"]
@@ -85,12 +86,22 @@
 //!     settings: { input_format_binary_read_json_as_string: "1" }
 //! ```
 //!
+//! ```rust,ignore
+//! #[derive(Serialize, ClickHouseRow)]
+//! struct OrderRow { id: u64, name: String, amount: f64 }
+//!
+//! let sink = spate_clickhouse::config::from_component_config(section)?
+//!     .with_row::<Owned<OrderRow>>()?;
+//! ```
+//!
 //! [`config::from_component_config`] turns that section into a
-//! [`ClickHouseWriter`] (the framework's `ShardWriter`), per-shard
-//! [`ClickHouseEndpoint`]s, and the sink-pool configuration;
-//! [`ClickHouseEncoder`] is the matching `RowEncoder`, parameterized by a
-//! record family: owned rows use `Owned<Row>`, and the encode path itself
-//! needs only `Row: serde::Serialize`.
+//! [`config::ClickHouseSinkBuilder`], holding per-shard
+//! [`ClickHouseEndpoint`]s and the sink-pool configuration but no row type
+//! yet; [`config::ClickHouseSinkBuilder::with_row`] supplies it, generating
+//! the [`ClickHouseWriter`] (the framework's `ShardWriter`) from the row's
+//! declared columns. [`ClickHouseEncoder`] is the matching `RowEncoder`,
+//! parameterized by a record family: owned rows use `Owned<Row>`, and the
+//! encode path itself needs only `Row: serde::Serialize`.
 //!
 //! # Wire format
 //!

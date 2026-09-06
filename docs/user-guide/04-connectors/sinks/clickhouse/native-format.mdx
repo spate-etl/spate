@@ -69,10 +69,11 @@ a Kafka topic of Avro orders and the target table, and runs with
 ```
 
 `OrderLineRow` is the row the terminal stage encodes; the two types above it
-are what the chain decodes and explodes into it. Its field order is the
-positional contract against the configured `columns`, and `DateTime64Millis`
-declares the timestamp's scale, which is what lets `validate_schema: full`
-check it against the column's declared precision.
+are what the chain decodes and explodes into it. Its field declaration order
+is the positional contract, generated as the insert column list by
+`#[derive(ClickHouseRow)]`, and `DateTime64Millis` declares the timestamp's
+scale, which is what lets `validate_schema: full` check it against the
+column's declared precision.
 
 The encoder is built from the schema that sink fetched, where `sink` is the
 [ClickHouse sink](./README.mdx) constructed from its config section:

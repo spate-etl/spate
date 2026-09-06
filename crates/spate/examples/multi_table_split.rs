@@ -64,7 +64,7 @@
 
 use serde::{Deserialize, Serialize};
 use spate::avro::AvroDeserializerBuilder;
-use spate::clickhouse::{NativeEncoder, ShardKey};
+use spate::clickhouse::{ClickHouseRow, NativeEncoder, ShardKey};
 use spate::kafka::KafkaSource;
 use spate::prelude::*;
 use std::path::Path;
@@ -92,9 +92,10 @@ enum StorefrontEvent {
 }
 
 /// The payments table's row, and the decoded shape of the event that fills
-/// it. One type serves both, because the event is the row here. Field order
-/// matches the YAML `columns`; Native maps positionally.
-#[derive(Debug, Deserialize, Serialize)]
+/// it. One type serves both, because the event is the row here. Field
+/// declaration order is the insert column order (`#[derive(ClickHouseRow)]`);
+/// Native maps positionally.
+#[derive(Debug, Deserialize, Serialize, ClickHouseRow)]
 struct PaymentRow {
     order_id: u64,
     amount_cents: u64,
@@ -102,7 +103,7 @@ struct PaymentRow {
 
 /// The refunds table's row, which carries a `reason` a payment has no column
 /// for. That is why there are two tables rather than one wide one.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, ClickHouseRow)]
 struct RefundRow {
     order_id: u64,
     amount_cents: u64,
@@ -146,10 +147,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // here. Built before `add_sink` moves each sink into its worker pool.
     let payments_sink = spate::clickhouse::config::from_component_config(
         pipeline.config().sink_config("payments")?,
-    )?;
+    )?
+    .with_row::<Owned<PaymentRow>>()?;
     let refunds_sink = spate::clickhouse::config::from_component_config(
         pipeline.config().sink_config("refunds")?,
-    )?;
+    )?
+    .with_row::<Owned<RefundRow>>()?;
     let payments_router = payments_sink.router::<Owned<PaymentRow>>(payment_key);
     let refunds_router = refunds_sink.router::<Owned<RefundRow>>(refund_key);
     let payments_enc =

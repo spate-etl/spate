@@ -1,25 +1,28 @@
 //! Opt-in startup schema validation: fetch the target table's columns
-//! from every replica, fail fast (with a readable diff) when the
-//! configured columns cannot work, and hand the encoder a parsed,
-//! config-ordered schema for its first-record struct check.
+//! from every replica, fail fast (with a readable diff) when the row
+//! type's declared columns cannot work, and hand the encoder a parsed,
+//! struct-ordered schema for its first-record check.
 //!
 //! Two moments, two checks:
 //!
-//! - **Startup** (`validate`): the config's `columns` against
-//!   `system.columns` on every replica of every shard, catching missing
-//!   columns, non-insertable (MATERIALIZED/ALIAS) columns, and inter-replica
-//!   drift.
-//!   Config order differing from *table* order is not an error: the
-//!   `INSERT` column list maps by name, so only the struct must agree with
-//!   the config.
+//! - **Startup** (`validate`): [`ClickHouseRow::COLUMNS`](crate::ClickHouseRow::COLUMNS)
+//!   against `system.columns` on every replica of every shard, catching
+//!   missing columns, non-insertable (MATERIALIZED/ALIAS) columns, and
+//!   inter-replica drift.
+//!   Declaration order differing from *table* order is not an error: the
+//!   `INSERT` column list maps by name.
 //! - **First record** (`check_first_record`, driven by both encoders,
 //!   RowBinary's [`crate::ClickHouseEncoder::with_schema`] and the Native
 //!   encoder whenever its schema was fetched): the row struct's probed
 //!   field names, order, and, in `full` mode, type classes against the
-//!   configured columns, including wire-wrapper scale against the column's
+//!   declared columns, including wire-wrapper scale against the column's
 //!   declared parameters (`DateTime64Millis` into `DateTime64(6)`, or
-//!   `Decimal64<4>` into `Decimal(18, 2)`, fail here). This is where the
-//!   positional wire contract is enforced.
+//!   `Decimal64<4>` into `Decimal(18, 2)`, fail here). This still needs a
+//!   real record: `COLUMNS` is names and order alone, and a shape needs a
+//!   value to record. It also still catches a hand-written
+//!   `ClickHouseRowFamily` impl (see [`crate::ClickHouseRowFamily`]) or a
+//!   hand-written `Serialize` whose emission order disagrees with the
+//!   columns it declared.
 
 pub(crate) mod probe;
 pub(crate) mod typeparse;
@@ -55,7 +58,7 @@ pub enum SchemaError {
     Mismatch(String),
 }
 
-/// The validated, config-ordered expected schema. Produced by
+/// The validated, struct-ordered expected schema. Produced by
 /// [`crate::ClickHouseSink::validate_schema`]; consumed by
 /// [`crate::ClickHouseEncoder::with_schema`] for the first-record check.
 /// Opaque: holds no `clickhouse` crate types.
@@ -63,17 +66,18 @@ pub enum SchemaError {
 pub struct RowSchema {
     pub(crate) mode: SchemaValidation,
     pub(crate) table: String,
-    /// `(column name, parsed type, raw type string)` in **config** order.
+    /// `(column name, parsed type, raw type string)` in **struct** order.
     pub(crate) columns: Vec<(String, ChType, String)>,
 }
 
-/// What `build()` captures for a later `validate_schema()` call.
+/// What [`crate::config::ClickHouseSinkBuilder::with_row`] captures for a
+/// later `validate_schema()` call.
 #[derive(Clone, Debug)]
 pub(crate) struct SchemaCheck {
     pub(crate) mode: SchemaValidation,
     pub(crate) database: Option<String>,
     pub(crate) table: String,
-    pub(crate) columns: Vec<String>,
+    pub(crate) columns: &'static [&'static str],
 }
 
 /// One row of `system.columns`, crate-private.
@@ -149,8 +153,8 @@ fn table_column_list(cols: &[ColumnRow]) -> String {
         .join(", ")
 }
 
-/// If a configured column's declared type is an `AggregateFunction(...)`,
-/// return an actionable error explaining the correct ingestion path.
+/// If a declared column's type is an `AggregateFunction(...)`, return an
+/// actionable error explaining the correct ingestion path.
 ///
 /// The sink cannot write aggregate *states* directly: their wire form is the
 /// opaque, unframed, version-dependent internal serialization, and
@@ -168,7 +172,7 @@ fn aggregate_function_remedy(col: &str, type_: &str) -> Option<String> {
         return None;
     }
     Some(format!(
-        "configured column `{col}` has type `{type_}`: the sink cannot write \
+        "declared column `{col}` has type `{type_}`: the sink cannot write \
          aggregate states directly (their wire format is opaque and \
          version-dependent). Insert raw rows into an `ENGINE = Null` landing \
          table and let a `MATERIALIZED VIEW` compute the states \
@@ -223,14 +227,14 @@ pub(crate) async fn validate(
         reference.expect("config validation guarantees at least one replica");
 
     let mut findings = Vec::new();
-    for col in &check.columns {
-        match table_cols.iter().find(|c| c.name == *col) {
+    for &col in check.columns {
+        match table_cols.iter().find(|c| c.name == col) {
             None => findings.push(format!(
-                "configured column `{col}` does not exist in the table"
+                "declared column `{col}` does not exist in the table"
             )),
             Some(c) if c.default_kind == "MATERIALIZED" || c.default_kind == "ALIAS" => {
                 findings.push(format!(
-                    "configured column `{col}` is {} and cannot be inserted into",
+                    "declared column `{col}` is {} and cannot be inserted into",
                     c.default_kind
                 ));
             }
@@ -242,12 +246,12 @@ pub(crate) async fn validate(
         }
     }
     for c in &table_cols {
-        if !check.columns.contains(&c.name) && c.default_kind.is_empty() {
+        if !check.columns.contains(&c.name.as_str()) && c.default_kind.is_empty() {
             tracing::warn!(
                 table = %check.display_table(),
                 column = %c.name,
                 r#type = %c.type_,
-                "table column is not in the configured insert columns and has no DEFAULT; \
+                "table column is not in the declared insert columns and has no DEFAULT; \
                  the server will fill type-default values"
             );
         }
@@ -266,19 +270,23 @@ pub(crate) async fn validate(
             "  table columns:      {}",
             table_column_list(&table_cols)
         );
-        let _ = write!(msg, "  configured columns: {}", check.columns.join(", "));
+        let _ = write!(msg, "  declared columns:   {}", check.columns.join(", "));
         return Err(SchemaError::Mismatch(msg));
     }
 
     let columns = check
         .columns
         .iter()
-        .map(|name| {
+        .map(|&name| {
             let c = table_cols
                 .iter()
-                .find(|c| c.name == *name)
+                .find(|c| c.name == name)
                 .expect("checked above");
-            (name.clone(), typeparse::parse(&c.type_), c.type_.clone())
+            (
+                name.to_string(),
+                typeparse::parse(&c.type_),
+                c.type_.clone(),
+            )
         })
         .collect();
     Ok(Some(Arc::new(RowSchema {
@@ -289,13 +297,21 @@ pub(crate) async fn validate(
 }
 
 /// The first-record struct check: field names and order against the
-/// configured columns (both modes), plus class-based type compatibility
-/// per position (`full` mode). Returns the pre-formatted diff on failure.
+/// declared columns (both modes), plus class-based type compatibility per
+/// position (`full` mode). Returns the pre-formatted diff on failure.
+///
+/// This is not made redundant by `ClickHouseRow::COLUMNS` being a compile-time
+/// const: it compares that declared list against what the struct's `Serialize`
+/// impl *actually* emits, which is a real, independent check for a
+/// hand-written `Serialize` whose field order disagrees with declaration
+/// order, a hand-written `ClickHouseRowFamily` impl (see
+/// [`crate::ClickHouseRowFamily`]), or a `#[serde(skip_serializing_if)]`
+/// field that fires.
 pub(crate) fn check_first_record(schema: &RowSchema, fields: &[FieldShape]) -> Result<(), String> {
     let mut findings = Vec::new();
     if fields.len() != schema.columns.len() {
         findings.push(format!(
-            "row struct serialized {} field(s) but {} column(s) are configured \
+            "row struct serialized {} field(s) but {} column(s) are declared \
              (a #[serde(skip)] attribute shortens rows silently)",
             fields.len(),
             schema.columns.len()
@@ -304,7 +320,7 @@ pub(crate) fn check_first_record(schema: &RowSchema, fields: &[FieldShape]) -> R
     for (i, (field, (col, ty, ty_str))) in fields.iter().zip(&schema.columns).enumerate() {
         if field.name != col {
             findings.push(format!(
-                "position {i}: struct field `{}` vs configured column `{col}`",
+                "position {i}: struct field `{}` vs declared column `{col}`",
                 field.name
             ));
         } else if schema.mode == SchemaValidation::Full && !compatible(&field.shape, ty) {
@@ -319,7 +335,7 @@ pub(crate) fn check_first_record(schema: &RowSchema, fields: &[FieldShape]) -> R
         return Ok(());
     }
     let mut msg = format!(
-        "row struct does not match configured columns for {}:\n",
+        "row struct does not match declared columns for {}:\n",
         schema.table
     );
     for f in &findings {
@@ -332,7 +348,7 @@ pub(crate) fn check_first_record(schema: &RowSchema, fields: &[FieldShape]) -> R
     );
     let _ = write!(
         msg,
-        "  configured columns:                {}",
+        "  declared columns:                  {}",
         schema
             .columns
             .iter()
@@ -431,10 +447,10 @@ mod tests {
             &[("id", "UInt64"), ("name", "String"), ("amount", "Int64")],
         );
         let err = check_first_record(&s, &fields()).unwrap_err();
-        assert!(err.contains("position 1: struct field `amount` vs configured column `name`"));
-        assert!(err.contains("position 2: struct field `name` vs configured column `amount`"));
+        assert!(err.contains("position 1: struct field `amount` vs declared column `name`"));
+        assert!(err.contains("position 2: struct field `name` vs declared column `amount`"));
         assert!(err.contains("struct fields (declaration order): id, amount, name"));
-        assert!(err.contains("configured columns:                id, name, amount"));
+        assert!(err.contains("declared columns:                  id, name, amount"));
     }
 
     #[test]

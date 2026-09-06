@@ -42,7 +42,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let source = KafkaSource::from_component_config(&pipeline.config().source)?;
     let sink = spate::clickhouse::config::from_component_config(
         pipeline.config().sink_config("default")?,
-    )?;
+    )?
+    .with_row::<Owned<Row>>()?;
 
     let report = pipeline
         .sink(sink)?

@@ -6,13 +6,14 @@
 use bytes::BytesMut;
 use clickhouse::test::{Mock, handlers};
 use serde::{Deserialize, Serialize};
+use spate_clickhouse::ClickHouseRow;
 use spate_clickhouse::config::{self, ClickHouseSinkConfig};
 use spate_clickhouse::serialize_row;
 use spate_core::deser::Owned;
 use spate_core::error::{ErrorClass, SinkError};
 use spate_core::sink::{SealedBatch, ShardWriter};
 
-#[derive(Debug, Clone, PartialEq, clickhouse::Row, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, clickhouse::Row, Serialize, Deserialize, ClickHouseRow)]
 struct TestRow {
     id: u64,
     name: String,
@@ -25,14 +26,16 @@ fn sink_for(url: &str) -> config::ClickHouseSink {
         // decompression, so a decodable round-trip requires an uncompressed body.
         r#"
 table: orders
-columns: [id, name, score]
 compression: off
 shards:
   - replicas: ["{url}"]
 "#
     ))
     .expect("config yaml");
-    config::build(cfg).expect("valid sink config")
+    config::build(cfg)
+        .expect("valid sink config")
+        .with_row::<Owned<TestRow>>()
+        .expect("valid columns")
 }
 
 fn sealed(rows: &[TestRow], token: &str) -> SealedBatch {
@@ -179,7 +182,6 @@ fn sink_with(url: &str, mode: &str) -> config::ClickHouseSink {
         // so the schema-validation SELECTs must not request compression.
         r#"
 table: orders
-columns: [id, name, score]
 compression: off
 shards:
   - replicas: ["{url}"]
@@ -187,7 +189,10 @@ validate_schema: {mode}
 "#
     ))
     .expect("config yaml");
-    config::build(cfg).expect("valid sink config")
+    config::build(cfg)
+        .expect("valid sink config")
+        .with_row::<Owned<TestRow>>()
+        .expect("valid columns")
 }
 
 fn record<T>(payload: T) -> spate_core::record::Record<T> {
@@ -282,7 +287,7 @@ async fn struct_order_mismatch_is_fatal_at_the_first_record() {
         SinkError::Client { class, reason } => {
             assert_eq!(class, ErrorClass::Fatal, "{reason}");
             assert!(
-                reason.contains("position 0: struct field `name` vs configured column `id`"),
+                reason.contains("position 0: struct field `name` vs declared column `id`"),
                 "{reason}"
             );
         }
@@ -346,7 +351,7 @@ async fn native_full_mode_checks_wrapper_scale_against_fetched_precision() {
     use spate_clickhouse::{DateTime64Millis, NativeEncoder};
     use spate_core::sink::RowEncoder;
 
-    #[derive(Clone, Serialize)]
+    #[derive(Clone, Serialize, ClickHouseRow)]
     struct EventRow {
         id: u64,
         ts: DateTime64Millis,
@@ -360,7 +365,6 @@ async fn native_full_mode_checks_wrapper_scale_against_fetched_precision() {
         let cfg: ClickHouseSinkConfig = serde_yaml::from_str(&format!(
             r#"
 table: events
-columns: [id, ts]
 format: native
 compression: off
 shards:
@@ -369,7 +373,10 @@ validate_schema: {mode}
 "#
         ))
         .expect("config yaml");
-        config::build(cfg).expect("valid sink config")
+        config::build(cfg)
+            .expect("valid sink config")
+            .with_row::<Owned<EventRow>>()
+            .expect("valid columns")
     }
 
     // The live table is micro precision; the struct declares milli via the
@@ -419,7 +426,7 @@ async fn full_mode_checks_decimal_scale_against_the_fetched_column() {
     use spate_clickhouse::{ClickHouseEncoder, Decimal64, NativeEncoder};
     use spate_core::sink::RowEncoder;
 
-    #[derive(Clone, Serialize)]
+    #[derive(Clone, Serialize, ClickHouseRow)]
     struct PriceRow {
         id: u64,
         amount: Decimal64<4>,
@@ -433,7 +440,6 @@ async fn full_mode_checks_decimal_scale_against_the_fetched_column() {
         let cfg: ClickHouseSinkConfig = serde_yaml::from_str(&format!(
             r#"
 table: events
-columns: [id, amount]
 format: {format}
 compression: off
 shards:
@@ -442,7 +448,10 @@ validate_schema: {mode}
 "#
         ))
         .expect("config yaml");
-        config::build(cfg).expect("valid sink config")
+        config::build(cfg)
+            .expect("valid sink config")
+            .with_row::<Owned<PriceRow>>()
+            .expect("valid columns")
     }
 
     fn assert_fatal_scale_mismatch(err: SinkError) {
@@ -534,15 +543,15 @@ async fn missing_and_materialized_columns_fail_startup() {
     let msg = err.to_string();
     assert!(matches!(err, spate_clickhouse::SchemaError::Mismatch(_)));
     assert!(
-        msg.contains("configured column `name` does not exist in the table"),
+        msg.contains("declared column `name` does not exist in the table"),
         "{msg}"
     );
     assert!(
-        msg.contains("configured column `score` is MATERIALIZED and cannot be inserted into"),
+        msg.contains("declared column `score` is MATERIALIZED and cannot be inserted into"),
         "{msg}"
     );
     assert!(msg.contains("table columns:"), "{msg}");
-    assert!(msg.contains("configured columns: id, name, score"), "{msg}");
+    assert!(msg.contains("declared columns:   id, name, score"), "{msg}");
 }
 
 #[tokio::test]
@@ -585,7 +594,6 @@ async fn replica_disagreement_fails_startup() {
     let cfg: ClickHouseSinkConfig = serde_yaml::from_str(&format!(
         r#"
 table: orders
-columns: [id, name, score]
 compression: off
 shards:
   - replicas: ["{}", "{}"]
@@ -596,6 +604,8 @@ validate_schema: names
     ))
     .unwrap();
     let err = config::build(cfg)
+        .unwrap()
+        .with_row::<Owned<TestRow>>()
         .unwrap()
         .validate_schema()
         .await
@@ -796,10 +806,13 @@ fn checked_sink(url: &str, weights: &[u32], check: &str) -> config::ClickHouseSi
         .map(|w| format!("  - replicas: [\"{url}\"]\n    weight: {w}\n"))
         .collect();
     let cfg: ClickHouseSinkConfig = serde_yaml::from_str(&format!(
-        "table: orders\ncolumns: [id, name, score]\ncompression: off\nshards:\n{shards}{check}\n"
+        "table: orders\ncompression: off\nshards:\n{shards}{check}\n"
     ))
     .expect("config yaml");
-    config::build(cfg).expect("valid sink config")
+    config::build(cfg)
+        .expect("valid sink config")
+        .with_row::<Owned<TestRow>>()
+        .expect("valid columns")
 }
 
 const CHECK_ON_ID: &str =

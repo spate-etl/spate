@@ -59,13 +59,12 @@ deserializer:
         ]
 
 # One sink per destination table. Each is a full ClickHouse sink section — its
-# own columns, format, shards, and batch/linger — so per-table part sizing is
-# tuned independently.
+# own format, shards, and batch/linger — so per-table part sizing is tuned
+# independently.
 sinks:
   payments:
     clickhouse:
       table: ${CLICKHOUSE_PAYMENTS_TABLE:-payments}
-      columns: [order_id, amount_cents]
       format: native
       validate_schema: full
       shards:
@@ -82,7 +81,6 @@ sinks:
   refunds:
     clickhouse:
       table: ${CLICKHOUSE_REFUNDS_TABLE:-refunds}
-      columns: [order_id, amount_cents, reason]
       format: native
       validate_schema: full
       shards:

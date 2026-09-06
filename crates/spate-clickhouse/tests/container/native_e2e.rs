@@ -23,7 +23,7 @@ enum Level {
     Hi = 2,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, clickhouse::Row)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, clickhouse::Row, ClickHouseRow)]
 struct NativeRow {
     id: u64,
     b: bool,
@@ -51,32 +51,6 @@ struct NativeRow {
     pt: (f64, f64),
     opt: Option<f64>,
 }
-
-const COLUMNS: &[&str] = &[
-    "id",
-    "b",
-    "n",
-    "big_n",
-    "small",
-    "f",
-    "s",
-    "fs",
-    "uid",
-    "ip4",
-    "ip6",
-    "ts",
-    "e",
-    "price",
-    "cat",
-    "maybe_cat",
-    "tags",
-    "labels",
-    "scores",
-    "props",
-    "dims",
-    "pt",
-    "opt",
-];
 
 const DDL: &str = "CREATE TABLE native_wide (\
         id UInt64, b Bool, n Int32, big_n Int64, small UInt16, f Float64, \
@@ -153,10 +127,9 @@ async fn native_format_round_trips_through_a_real_server() {
         .await
         .expect("create native_wide");
 
-    let sink = sink_with(
+    let sink = sink_with::<Owned<NativeRow>>(
         &srv.url,
         "native_wide",
-        COLUMNS,
         "full",
         "format: native\nuser: default\npassword: native-secret\n",
     );
@@ -212,22 +185,20 @@ async fn native_full_mode_gates_datetime64_scale_against_a_real_table() {
         .await
         .expect("create dt_micro");
 
-    let sink = sink_with(
-        &srv.url,
-        "dt_micro",
-        &["id", "ts"],
-        "full",
-        "format: native\nuser: default\npassword: native-secret3\n",
-    );
-    let schema = sink.native_schema().await.expect("fetch native schema");
-
     // Milli-scaled wrapper into the micro column: without the gate every
     // timestamp would land ~1000x too small (January 1970).
-    #[derive(Clone, Serialize)]
+    #[derive(Clone, Serialize, ClickHouseRow)]
     struct MilliRow {
         id: u64,
         ts: DateTime64Millis,
     }
+    let sink = sink_with::<Owned<MilliRow>>(
+        &srv.url,
+        "dt_micro",
+        "full",
+        "format: native\nuser: default\npassword: native-secret3\n",
+    );
+    let schema = sink.native_schema().await.expect("fetch native schema");
     let mut enc = NativeEncoder::<Owned<MilliRow>>::new(Arc::clone(&schema));
     let err = encode_native_batch(
         &mut enc,
@@ -296,10 +267,9 @@ async fn native_lowcardinality_composites_render_correctly() {
         .await
         .expect("create native_wide");
 
-    let sink = sink_with(
+    let sink = sink_with::<Owned<NativeRow>>(
         &srv.url,
         "native_wide",
-        COLUMNS,
         "names",
         "format: native\nuser: default\npassword: native-secret2\n",
     );

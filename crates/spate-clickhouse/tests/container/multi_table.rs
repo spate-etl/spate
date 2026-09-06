@@ -23,10 +23,13 @@ async fn make_table(admin: &clickhouse::Client, table: &str) {
 
 fn sink_for_table(url: &str, table: &str) -> config::ClickHouseSink {
     let cfg: ClickHouseSinkConfig = serde_yaml::from_str(&format!(
-        "table: {table}\ncolumns: [id, name, amount]\nshards:\n  - replicas: [\"{url}\"]\n"
+        "table: {table}\nshards:\n  - replicas: [\"{url}\"]\n"
     ))
     .expect("config yaml");
-    config::build(cfg).expect("valid sink config")
+    config::build(cfg)
+        .expect("valid sink config")
+        .with_row::<Owned<Order>>()
+        .expect("valid columns")
 }
 
 async fn count_table(admin: &clickhouse::Client, table: &str) -> u64 {

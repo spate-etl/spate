@@ -100,9 +100,8 @@ thread_local! {
 /// Decode one complete JSON document from `bytes` into `T` (simd-json backend).
 ///
 /// Copies `bytes` into the reused thread-local scratch and parses that in place
-/// with reused [`Buffers`](simd_json::Buffers). simd-json 0.17 pads internally
-/// (the RUSTSEC-2019-0008 fix reads the final block through a padded stack
-/// buffer), so no trailing SIMD padding is appended. `T: DeserializeOwned`
+/// with reused [`Buffers`](simd_json::Buffers). simd-json pads internally, so
+/// no trailing SIMD padding is appended here. `T: DeserializeOwned`
 /// borrows nothing out of the scratch, so it is free to be overwritten next
 /// call.
 #[cfg(feature = "simd")]

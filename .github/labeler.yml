@@ -20,6 +20,10 @@
   - changed-files:
       - any-glob-to-any-file: crates/spate-clickhouse/**
 
+"crate: spate-clickhouse-derive":
+  - changed-files:
+      - any-glob-to-any-file: crates/spate-clickhouse-derive/**
+
 "crate: spate-s3":
   - changed-files:
       - any-glob-to-any-file: crates/spate-s3/**

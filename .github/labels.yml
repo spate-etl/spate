@@ -35,6 +35,10 @@
   color: "0052cc"
   description: "The ClickHouse sink"
 
+- name: "crate: spate-clickhouse-derive"
+  color: "0052cc"
+  description: "The #[derive(ClickHouseRow)] proc-macro"
+
 - name: "crate: spate-s3"
   color: "0052cc"
   description: "The S3 source"

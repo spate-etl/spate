@@ -79,6 +79,9 @@ component_management:
     - component_id: clickhouse
       name: spate-clickhouse
       paths: ["crates/spate-clickhouse/**"]
+    - component_id: clickhouse_derive
+      name: spate-clickhouse-derive
+      paths: ["crates/spate-clickhouse-derive/**"]
     - component_id: codecs
       name: codecs (avro, json)
       paths: ["crates/spate-avro/**", "crates/spate-json/**"]

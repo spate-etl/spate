@@ -100,6 +100,10 @@ thread spawns rather than at the first record. Because it queries every
 replica independently, it also catches replica drift, a replica whose table
 was altered out of step with the others.
 
+Both halves run once, at startup and at the first record; neither runs
+again. A table altered while the pipeline is already running is not
+re-checked.
+
 :::warning
 `validate_schema: off` means nothing is checked. A declared column the
 table lacks fails loudly (a server error on the first insert), but a field

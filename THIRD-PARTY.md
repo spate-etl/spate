@@ -41,7 +41,7 @@ exists to detect.
 
 | License | Crates |
 |---|---|
-| `MIT` | 307 |
+| `MIT` | 303 |
 | `Unicode-3.0` | 19 |
 | `Apache-2.0` | 13 |
 | `ISC` | 6 |
@@ -126,9 +126,9 @@ above from what is left. The elected license ids are unaffected either way.
 | `clap` | 4.6.6 | `MIT` |
 | `clap_builder` | 4.6.6 | `MIT` |
 | `clap_lex` | 1.1.0 | `MIT` |
-| `clickhouse` | 0.15.1 | `MIT` |
+| `clickhouse` | 0.15.2 | `MIT` |
 | `clickhouse-macros` | 0.3.0 | `MIT` |
-| `clickhouse-types` | 0.1.2 | `MIT` |
+| `clickhouse-types` | 0.1.3 | `MIT` |
 | `cmake` | 0.1.58 | `MIT` |
 | `const-oid` | 0.10.2 | `MIT` |
 | `const-oid` | 0.9.6 | `MIT` |
@@ -182,6 +182,7 @@ above from what is left. The elected license ids are unaffected either way.
 | `getrandom` | 0.4.3 | `MIT` |
 | `glob` | 0.3.3 | `MIT` |
 | `h2` | 0.4.16 | `MIT` |
+| `half` | 2.7.1 | `MIT` |
 | `halfbrown` | 0.4.0 | `MIT` |
 | `hashbag` | 0.1.13 | `MIT` |
 | `hashbrown` | 0.14.5 | `MIT` |
@@ -190,7 +191,6 @@ above from what is left. The elected license ids are unaffected either way.
 | `heck` | 0.4.1 | `MIT` |
 | `heck` | 0.5.0 | `MIT` |
 | `hex` | 0.4.3 | `MIT` |
-| `higher-kinded-types` | 0.2.1 | `MIT` |
 | `http` | 1.4.2 | `MIT` |
 | `http-body` | 1.0.1 | `MIT` |
 | `http-body-util` | 0.1.5 | `MIT` |
@@ -199,7 +199,7 @@ above from what is left. The elected license ids are unaffected either way.
 | `humantime` | 2.4.0 | `MIT` |
 | `humantime-serde` | 1.1.1 | `MIT` |
 | `hybrid-array` | 0.4.13 | `MIT` |
-| `hyper` | 1.11.0 | `MIT` |
+| `hyper` | 1.11.1 | `MIT` |
 | `hyper-rustls` | 0.27.9 | `MIT` |
 | `hyper-util` | 0.1.20 | `MIT` |
 | `iana-time-zone` | 0.1.65 | `MIT` |
@@ -224,8 +224,6 @@ above from what is left. The elected license ids are unaffected either way.
 | `log` | 0.4.33 | `MIT` |
 | `lz4_flex` | 0.11.6 | `MIT` |
 | `mach2` | 0.6.0 | `MIT` |
-| `macro_rules_attribute` | 0.2.2 | `MIT` |
-| `macro_rules_attribute-proc_macro` | 0.2.2 | `MIT` |
 | `matchers` | 0.2.0 | `MIT` |
 | `md-5` | 0.11.0 | `MIT` |
 | `memchr` | 2.8.2 | `MIT` |
@@ -236,7 +234,6 @@ above from what is left. The elected license ids are unaffected either way.
 | `minimal-lexical` | 0.2.1 | `MIT` |
 | `miniz_oxide` | 0.9.1 | `MIT` |
 | `mio` | 1.2.1 | `MIT` |
-| `never-say-never` | 6.6.666 | `MIT` |
 | `nix` | 0.31.3 | `MIT` |
 | `nom` | 7.1.3 | `MIT` |
 | `num-bigint` | 0.4.8 | `MIT` |
@@ -255,7 +252,6 @@ above from what is left. The elected license ids are unaffected either way.
 | `ouroboros_macro` | 0.18.5 | `MIT` |
 | `parking_lot` | 0.12.5 | `MIT` |
 | `parking_lot_core` | 0.9.12 | `MIT` |
-| `paste` | 1.0.15 | `MIT` |
 | `pem-rfc7468` | 0.7.0 | `MIT` |
 | `percent-encoding` | 2.3.2 | `MIT` |
 | `pin-project` | 1.1.13 | `MIT` |
@@ -263,13 +259,12 @@ above from what is left. The elected license ids are unaffected either way.
 | `pin-project-lite` | 0.2.17 | `MIT` |
 | `pkcs8` | 0.10.2 | `MIT` |
 | `pkg-config` | 0.3.33 | `MIT` |
-| `polonius-the-crab` | 0.5.0 | `MIT` |
 | `portable-atomic` | 1.13.1 | `MIT` |
 | `powerfmt` | 0.2.0 | `MIT` |
 | `ppv-lite86` | 0.2.21 | `MIT` |
 | `prettyplease` | 0.2.37 | `MIT` |
 | `proc-macro-crate` | 3.5.0 | `MIT` |
-| `proc-macro2` | 1.0.106 | `MIT` |
+| `proc-macro2` | 1.0.107 | `MIT` |
 | `proc-macro2-diagnostics` | 0.10.1 | `MIT` |
 | `procfs` | 0.18.0 | `MIT` |
 | `procfs-core` | 0.18.0 | `MIT` |
@@ -277,7 +272,7 @@ above from what is left. The elected license ids are unaffected either way.
 | `quanta` | 0.12.6 | `MIT` |
 | `quick-error` | 1.2.3 | `MIT` |
 | `quick-xml` | 0.41.0 | `MIT` |
-| `quote` | 1.0.46 | `MIT` |
+| `quote` | 1.0.47 | `MIT` |
 | `rand` | 0.10.2 | `MIT` |
 | `rand` | 0.8.6 | `MIT` |
 | `rand` | 0.9.4 | `MIT` |
@@ -335,7 +330,7 @@ above from what is left. The elected license ids are unaffected either way.
 | `signatory` | 0.27.1 | `MIT` |
 | `signature` | 2.2.0 | `MIT` |
 | `simd-adler32` | 0.3.9 | `MIT` |
-| `simd-json` | 0.17.3 | `MIT` |
+| `simd-json` | 0.18.1 | `MIT` |
 | `simdutf8` | 0.1.5 | `MIT` |
 | `slab` | 0.4.12 | `MIT` |
 | `smallvec` | 1.15.2 | `MIT` |
@@ -383,7 +378,7 @@ above from what is left. The elected license ids are unaffected either way.
 | `unicode-ident` | 1.0.24 | `MIT` |
 | `url` | 2.5.8 | `MIT` |
 | `utf8_iter` | 1.0.4 | `MIT` |
-| `uuid` | 1.24.1 | `MIT` |
+| `uuid` | 1.26.0 | `MIT` |
 | `value-trait` | 0.12.2 | `MIT` |
 | `vcpkg` | 0.2.15 | `MIT` |
 | `version_check` | 0.9.5 | `MIT` |
@@ -394,6 +389,7 @@ above from what is left. The elected license ids are unaffected either way.
 | `yaml_serde` | 0.10.4 | `MIT` |
 | `yansi` | 1.0.1 | `MIT` |
 | `zerocopy` | 0.8.52 | `MIT` |
+| `zerocopy-derive` | 0.8.52 | `MIT` |
 | `zeroize` | 1.9.0 | `MIT` |
 | `zmij` | 1.0.21 | `MIT` |
 | `zstd` | 0.13.3 | `MIT` |

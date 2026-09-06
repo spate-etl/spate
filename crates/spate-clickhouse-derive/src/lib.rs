@@ -12,6 +12,7 @@ mod validate;
 use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::quote;
+use syn::ext::IdentExt;
 use syn::spanned::Spanned;
 use syn::{Data, DataStruct, DeriveInput, Fields, FieldsNamed, parse_macro_input};
 
@@ -108,7 +109,7 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         let name = field_attrs
             .rename
             .map(|lit| lit.value())
-            .unwrap_or_else(|| ident.to_string());
+            .unwrap_or_else(|| ident.unraw().to_string());
 
         if !validate::is_column_name(&name) {
             errors.push(syn::Error::new_spanned(

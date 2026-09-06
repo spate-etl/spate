@@ -77,3 +77,14 @@ struct Borrowed<'a> {
 fn a_lifetime_parameter_carries_onto_the_impl() {
     assert_eq!(Borrowed::COLUMNS, &["id", "name"]);
 }
+
+#[derive(Serialize, ClickHouseRow)]
+struct WithRawIdentifier {
+    id: u64,
+    r#type: String,
+}
+
+#[test]
+fn a_raw_identifier_field_name_is_unraw_d() {
+    assert_eq!(WithRawIdentifier::COLUMNS, &["id", "type"]);
+}

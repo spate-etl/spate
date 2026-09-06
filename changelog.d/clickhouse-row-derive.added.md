@@ -5,4 +5,4 @@ the insert column list from the field declaration order. It honors
 as a flattened `Nested` table's dotted `outer.inner`, and rejects a duplicate
 name, a malformed name, `#[serde(flatten)]`, a container-level
 `#[serde(rename_all = "...")]`, and `#[serde(skip_serializing_if = "...")]` at
-compile time. Nothing in `spate-clickhouse` consumes it yet.
+compile time.

@@ -55,11 +55,11 @@ Some features read a system table beyond what the `INSERT` grant already
 exposes. The sink only ever **reads** them; it issues no DDL against them.
 
 :::note Reading `system.columns` needs no grant
-ClickHouse only shows a user the `system.columns`/`system.tables` rows for
-objects it has some grant on. Because the writer already holds `INSERT` on the
-target table, it sees that table's rows, and the schema fetch succeeds on the
-`INSERT` grant alone. A table the account has no grant on returns no rows,
-which the sink reports as a missing table.
+ClickHouse shows a user only the `system.columns` rows for objects it already
+holds a grant on. The writer holds `INSERT` on the target table, so it sees
+that table's columns and the schema fetch succeeds on that grant alone. A table
+the account has no grant on returns no rows, which the sink reports as a
+missing table.
 :::
 
 | Feature (config) | Extra grant | What the sink reads it for |

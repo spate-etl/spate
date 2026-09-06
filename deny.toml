@@ -4,12 +4,6 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
-ignore = [
-    # Reaches the shipped tree as clickhouse -> polonius-the-crab ->
-    # higher-kinded-types -> paste, so it appears in THIRD-PARTY.md. Re-check
-    # when clickhouse drops it.
-    { id = "RUSTSEC-2024-0436", reason = "unmaintained proc-macro under clickhouse; compile-time only, no runtime or network surface; no upgrade path" },
-]
 
 [licenses]
 version = 2

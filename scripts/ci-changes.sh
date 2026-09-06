@@ -74,6 +74,7 @@ container_suites_for() {
         spate-s3) echo "spate spate-s3" ;;
         spate-kafka) echo "spate spate-kafka" ;;
         spate-clickhouse) echo "spate spate-clickhouse" ;;
+        spate-clickhouse-derive) echo "spate spate-clickhouse" ;;
         # spate-json reaches spate-s3 as a dev-dependency: the object-store
         # framing bench frames with `NdjsonFramer`, so a change to the framer
         # can break spate-s3's suite.
@@ -92,8 +93,9 @@ container_suites_for() {
 
 # Every publishable crate, in the order `crates_now` lists them. The semver
 # gate's whole-graph selection.
-SEMVER_PKGS="spate spate-avro spate-clickhouse spate-coordination spate-core\
- spate-datagen spate-json spate-kafka spate-s3 spate-test"
+SEMVER_PKGS="spate spate-avro spate-clickhouse spate-clickhouse-derive\
+ spate-coordination spate-core spate-datagen spate-json spate-kafka spate-s3\
+ spate-test"
 
 # Reverse-dependency closure over non-dev edges: given a changed crate, whose
 # published API can its change move? `--self-test` checks it against
@@ -104,11 +106,17 @@ SEMVER_PKGS="spate spate-avro spate-clickhouse spate-coordination spate-core\
 # `spate-json` reaches `spate-s3` there and does not here.
 semver_closure_for() {
     case "$1" in
-        spate-core) echo "$SEMVER_PKGS" ;;
+        # Every crate but spate-clickhouse-derive depends on spate-core;
+        # spate-clickhouse-derive is a proc-macro crate with no runtime deps.
+        spate-core)
+            echo "spate spate-avro spate-clickhouse spate-coordination\
+ spate-core spate-datagen spate-json spate-kafka spate-s3 spate-test"
+            ;;
         spate-coordination) echo "spate spate-coordination spate-s3" ;;
         spate-s3) echo "spate spate-s3" ;;
         spate-avro) echo "spate spate-avro" ;;
         spate-clickhouse) echo "spate spate-clickhouse" ;;
+        spate-clickhouse-derive) echo "spate spate-clickhouse spate-clickhouse-derive" ;;
         spate-datagen) echo "spate spate-datagen" ;;
         spate-json) echo "spate spate-json" ;;
         spate-kafka) echo "spate spate-kafka" ;;
@@ -867,7 +875,12 @@ if len(set(keys)) != len(keys):
     # folds the two closures into one: the container table reaches four suites
     # from it through dev-dependencies, and no published API moves with them.
     all_semver=$(sorted_words "$SEMVER_PKGS")
-    check_semver "$all_semver" "a spate-core source file moves every published API" \
+    # spate-clickhouse-derive has no runtime dependency on spate-core, so it
+    # sits outside this closure alone.
+    core_semver=$(sorted_words "spate spate-avro spate-clickhouse\
+ spate-coordination spate-core spate-datagen spate-json spate-kafka spate-s3\
+ spate-test")
+    check_semver "$core_semver" "a spate-core source file moves every published API but spate-clickhouse-derive" \
         "crates/spate-core/src/lib.rs"
     check_semver "spate spate-kafka" "a connector moves its own API and the facade" \
         "crates/spate-kafka/src/lib.rs"

@@ -8,6 +8,7 @@ members = [
     "crates/spate-json",
     "crates/spate-kafka",
     "crates/spate-clickhouse",
+    "crates/spate-clickhouse-derive",
     "crates/spate-coordination",
     "crates/spate-datagen",
     "crates/spate-s3",
@@ -31,6 +32,7 @@ spate-avro = { version = "=0.2.0", path = "crates/spate-avro" }
 spate-json = { version = "=0.2.0", path = "crates/spate-json" }
 spate-kafka = { version = "=0.2.0", path = "crates/spate-kafka" }
 spate-clickhouse = { version = "=0.2.0", path = "crates/spate-clickhouse" }
+spate-clickhouse-derive = { version = "=0.2.0", path = "crates/spate-clickhouse-derive" }
 # Defaults off keeps async-nats out of a memory-only embedding.
 spate-coordination = { version = "=0.2.0", path = "crates/spate-coordination", default-features = false }
 spate-datagen = { version = "=0.2.0", path = "crates/spate-datagen" }
@@ -101,6 +103,14 @@ tempfile = "3"
 testcontainers = "0.27"
 testcontainers-modules = "0.15"
 proptest = "1.11"
+# spate-clickhouse-derive's proc-macro toolchain.
+syn = { version = "2", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"
+# Resolves the derive's emitted paths against whichever of spate-clickhouse or
+# the spate facade the invoking crate actually depends on.
+proc-macro-crate = "3"
+trybuild = "1"
 loom = "0.7"
 criterion = "0.8"
 # A normal (not dev) dependency, so cargo-about lists it in THIRD-PARTY.md.

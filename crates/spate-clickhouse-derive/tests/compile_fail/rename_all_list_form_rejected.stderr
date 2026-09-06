@@ -1,0 +1,5 @@
+error: #[derive(ClickHouseRow)] does not support a container-level `rename_all`; rename each column individually with `#[serde(rename = "...")]`
+ --> tests/compile_fail/rename_all_list_form_rejected.rs:4:9
+  |
+4 | #[serde(rename_all(serialize = "camelCase"))]
+  |         ^^^^^^^^^^

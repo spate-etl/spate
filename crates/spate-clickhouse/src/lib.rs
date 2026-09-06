@@ -100,11 +100,19 @@
 //! parse CPU and compressed wire size substantially. Build it from a fetched
 //! schema via [`ClickHouseSink::native_schema`] and [`NativeEncoder`].
 
+// `#[derive(ClickHouseRow)]` used inside this crate's own unit tests (part of
+// the lib target's own compilation, unlike an integration test under
+// `tests/`, which Cargo already links against this library under its crate
+// name without help) needs this to resolve `::spate_clickhouse::ClickHouseRow`.
+#[cfg(test)]
+extern crate self as spate_clickhouse;
+
 pub mod config;
 mod distributed;
 mod encoder;
 pub mod native;
 pub mod router;
+mod row;
 pub mod rowbinary;
 mod schema;
 pub mod serde;
@@ -119,7 +127,9 @@ pub use distributed::DistributedCheckError;
 pub use encoder::{ClickHouseEncoder, PreEncodedRows};
 pub use native::{NativeEncoder, NativeError, NativeSchema};
 pub use router::{DistributedRouter, KeyExtractor, ShardKey};
+pub use row::{ClickHouseRow, ClickHouseRowFamily};
 pub use rowbinary::{RowBinaryError, serialize_row};
 pub use schema::{RowSchema, SchemaError};
+pub use spate_clickhouse_derive::ClickHouseRow;
 pub use types::*;
 pub use writer::{ClickHouseEndpoint, ClickHouseWriter};

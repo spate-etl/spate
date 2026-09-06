@@ -1,0 +1,5 @@
+error: expected a string literal
+ --> tests/compile_fail/bad_rename_value.rs:6:22
+  |
+6 |     #[serde(rename = 123)]
+  |                      ^^^

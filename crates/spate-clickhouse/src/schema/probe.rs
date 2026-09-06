@@ -611,7 +611,13 @@ fn newtype_rule(name: &str) -> Option<fn(&ChType) -> bool> {
         "Time64Nanos" => {
             |ty| is_named(ty, &["Int64"]) || matches!(ty, ChType::Time64 { precision: 9 })
         }
-        "Int256" => |ty| is_named(ty, &["Int256"]),
+        // A `Decimal` above precision 38 is Int256-wide, and the wrapper is
+        // the documented carrier for one: the row holds `value * 10^S`, so
+        // the scale is the caller's and nothing here can check it.
+        "Int256" => |ty| {
+            is_named(ty, &["Int256"])
+                || matches!(ty, ChType::Decimal { precision, .. } if (39..=76).contains(precision))
+        },
         "UInt256" => |ty| is_named(ty, &["UInt256"]),
         _ => return None,
     })
@@ -896,6 +902,36 @@ mod tests {
         assert!(
             !compatible(&fields[1].shape, &parse("Nullable(Decimal(18, 4))")),
             "the Nullable prefix byte needs an Option field"
+        );
+    }
+
+    /// An `Int256` field carries a `Decimal` wider than precision 38, which is
+    /// the crate's documented storage for one.
+    ///
+    /// Regression for #410.
+    #[test]
+    fn int256_carries_a_decimal_above_precision_38() {
+        #[derive(Serialize)]
+        struct D {
+            big: Int256,
+            ubig: UInt256,
+        }
+        let fields = probe_row(&D {
+            big: Int256::from_i128(1),
+            ubig: UInt256::from_u128(1),
+        })
+        .unwrap();
+
+        assert!(compatible(&fields[0].shape, &parse("Decimal256(10)")));
+        assert!(compatible(&fields[0].shape, &parse("Decimal(76, 10)")));
+        assert!(compatible(&fields[0].shape, &parse("Decimal(39, 0)")));
+        assert!(
+            !compatible(&fields[0].shape, &parse("Decimal(38, 2)")),
+            "Decimal(38, _) is Int128-wide"
+        );
+        assert!(
+            !compatible(&fields[1].shape, &parse("Decimal256(10)")),
+            "there is no unsigned decimal"
         );
     }
 

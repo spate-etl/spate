@@ -77,6 +77,7 @@ struct WideRow {
     dec9: Decimal32<2>,
     dec18: Decimal64<4>,
     dec38: Decimal128<10>,
+    dec76: Int256,
     big: Int256,
     ubig: UInt256,
     lc: String,
@@ -102,6 +103,7 @@ const DDL: &str = "CREATE TABLE wide (\
         dt64 DateTime64(3, 'UTC'), dt64_6 DateTime64(6, 'UTC'), \
         e8 Enum8('lo' = -1, 'hi' = 2), e16 Enum16('big' = 300), \
         dec9 Decimal(9, 2), dec18 Decimal(18, 4), dec38 Decimal(38, 10), \
+        dec76 Decimal(76, 10), \
         big Int256, ubig UInt256, \
         lc LowCardinality(String), j JSON, \
         pt Point, ring Ring, poly Polygon, mpoly MultiPolygon, \
@@ -122,6 +124,7 @@ const LITERAL_INSERT: &str = "INSERT INTO wide VALUES (2, true, \
         toDateTime64(-1, 3, 'UTC'), '2023-11-14 22:13:20.000001', \
         'lo', 'big', \
         -150.12, 0.0001, toDecimal128('1234567890123456789.0123456789', 10), \
+        toDecimal256('-1234567890.1234567890', 10), \
         toInt256('-170141183460469231731687303715884105728'), \
         toUInt256('340282366920938463463374607431768211455'), \
         'repeat', '{\"a\":1,\"b\":\"x\"}', \
@@ -161,6 +164,7 @@ fn encoded_row() -> WideRow {
         dec9: Decimal32::<2>(-15_012),
         dec18: Decimal64::<4>(1),
         dec38: Decimal128::<10>(12_345_678_901_234_567_890_123_456_789),
+        dec76: Int256::from_i128(-12_345_678_901_234_567_890),
         big: Int256::from_i128(i128::MIN),
         ubig: UInt256::from_u128(u128::MAX),
         lc: "repeat".into(),

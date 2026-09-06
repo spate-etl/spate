@@ -101,10 +101,13 @@ replica independently, it also catches replica drift, a replica whose table
 was altered out of step with the others.
 
 :::warning
-`validate_schema: off` means nothing is checked, and a struct whose fields
-land in a differently-ordered live table writes garbage that ClickHouse may
-accept. Turn on at least `names` for any table not created in the
-same commit as the pipeline.
+`validate_schema: off` means nothing is checked. A declared column the
+table lacks fails loudly (a server error on the first insert), but a field
+whose type the column cannot take, or a hand-written `Serialize`/
+`ClickHouseRowFamily` implementation that emits fields in a different order
+from its own declared columns, does not: the bytes still leave for the
+wrong column with no protocol error. Turn on at least `names` for any table
+not created in the same commit as the pipeline.
 :::
 
 ## Related

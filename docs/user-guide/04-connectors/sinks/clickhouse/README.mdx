@@ -40,9 +40,9 @@ values are validated at load (a bad multiplier or zero threshold fails startup
 instead of the write loop). The insert column list is not one of its keys:
 `#[derive(ClickHouseRow)]` on the row struct generates it from field
 declaration order, honoring `#[serde(rename = "...")]` for a flattened
-`Nested` column's dotted `outer.inner` name; [Column
-types](./column-types.mdx) has the detail. `with_row` supplies the row type
-and rejects a duplicate or malformed name at compile time.
+`Nested` column's dotted `outer.inner` name, and rejects a duplicate or
+malformed name at compile time; [Column types](./column-types.mdx) has the
+detail. `with_row` supplies the row type to the builder.
 
 ```yaml
 sink:

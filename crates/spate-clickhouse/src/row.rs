@@ -29,3 +29,22 @@ pub trait ClickHouseRowFamily: RecFamily {
 impl<T: ClickHouseRow + Send + 'static> ClickHouseRowFamily for Owned<T> {
     const COLUMNS: &'static [&'static str] = T::COLUMNS;
 }
+
+#[cfg(test)]
+mod tests {
+    // `#[derive(ClickHouseRow)]` resolves `::spate_clickhouse` via
+    // `extern crate self as spate_clickhouse;` in `lib.rs` here: unlike an
+    // integration test under `tests/`, code inside `src/` is not
+    // automatically given the crate itself as an extern dependency.
+    #[derive(crate::ClickHouseRow)]
+    struct InCrate {
+        id: u64,
+    }
+
+    #[test]
+    fn a_row_derived_inside_the_crate_resolves() {
+        use crate::ClickHouseRow;
+        assert_eq!(InCrate::COLUMNS, &["id"]);
+        assert_eq!(InCrate { id: 1 }.id, 1);
+    }
+}

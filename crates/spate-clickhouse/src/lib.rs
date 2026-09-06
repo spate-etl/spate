@@ -100,6 +100,13 @@
 //! parse CPU and compressed wire size substantially. Build it from a fetched
 //! schema via [`ClickHouseSink::native_schema`] and [`NativeEncoder`].
 
+// `#[derive(ClickHouseRow)]` used inside this crate's own unit tests (part of
+// the lib target's own compilation, unlike an integration test under
+// `tests/`, which Cargo already links against this library under its crate
+// name without help) needs this to resolve `::spate_clickhouse::ClickHouseRow`.
+#[cfg(test)]
+extern crate self as spate_clickhouse;
+
 pub mod config;
 mod distributed;
 mod encoder;

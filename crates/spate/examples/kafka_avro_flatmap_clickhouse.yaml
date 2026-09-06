@@ -70,8 +70,6 @@ sink:
     # column's declared DateTime64(3) precision, so a milli/micro scale
     # mismatch fails fatally instead of landing 1970-era timestamps.
     # (`format: native` would upgrade `off` to `names` anyway: the encoder is
-    # type-driven and always fetches system.columns.)
-    validate_schema: full
     shards:
       - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
     # Scale-out: list shards in the cluster's remote_servers order (shard i

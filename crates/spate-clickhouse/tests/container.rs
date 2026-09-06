@@ -136,7 +136,7 @@ async fn server() -> Server {
     }
 }
 
-fn sink_for(url: &str) -> config::ClickHouseSink {
+async fn sink_for(url: &str) -> config::ClickHouseSink {
     let cfg: ClickHouseSinkConfig = serde_yaml::from_str(&format!(
         r#"
 table: orders
@@ -148,7 +148,8 @@ shards:
     config::build(cfg)
         .expect("valid sink config")
         .with_row::<Owned<Order>>()
-        .expect("valid columns")
+        .await
+        .expect("schema fetch")
 }
 
 fn sealed<T: Serialize>(rows: &[T], token: &str, frames: usize) -> SealedBatch {
@@ -206,18 +207,28 @@ fn record<T>(payload: T) -> spate_core::record::Record<T> {
     }
 }
 
-fn sink_with<F: ClickHouseRowFamily>(
+async fn sink_with<F: ClickHouseRowFamily>(
     url: &str,
     table: &str,
-    mode: &str,
     settings: &str,
 ) -> config::ClickHouseSink {
+    try_sink_with::<F>(url, table, settings)
+        .await
+        .expect("schema fetch and column check")
+}
+
+/// [`sink_with`] without the unwrap, for the tests whose subject is the
+/// failure.
+async fn try_sink_with<F: ClickHouseRowFamily>(
+    url: &str,
+    table: &str,
+    settings: &str,
+) -> Result<config::ClickHouseSink, spate_clickhouse::SchemaError> {
     let cfg: ClickHouseSinkConfig = serde_yaml::from_str(&format!(
         r#"
 table: {table}
 shards:
   - replicas: ["{url}"]
-validate_schema: {mode}
 {settings}
 "#
     ))
@@ -225,7 +236,7 @@ validate_schema: {mode}
     config::build(cfg)
         .expect("valid sink config")
         .with_row::<F>()
-        .expect("valid columns")
+        .await
 }
 
 /// Encode `rows` through a (possibly schema-checked) encoder into one
@@ -341,6 +352,8 @@ mod nested_flat;
 mod partition_dedup;
 #[path = "container/permissions.rs"]
 mod permissions;
+#[path = "container/rowbinary_header.rs"]
+mod rowbinary_header;
 #[path = "container/schema.rs"]
 mod schema;
 #[cfg(all(feature = "uuid", feature = "chrono", feature = "time"))]

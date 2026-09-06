@@ -4000,6 +4000,7 @@ dependencies = [
  "rust_decimal",
  "serde",
  "serde_repr",
+ "spate-clickhouse",
  "spate-clickhouse-derive",
  "spate-core",
  "spate-test",

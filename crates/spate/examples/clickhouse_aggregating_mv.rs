@@ -124,19 +124,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (source, handle) = memory_source();
 
     // ── Sink: ClickHouse, pointed at the Null landing table ────────────────
-    let sink = spate::clickhouse::config::from_component_config(
-        pipeline.config().sink_config("default")?,
-    )?
-    .with_row::<Owned<OrderRollup>>()?;
-
-    // Fail-fast validation against the *Null* table (plain columns). If this
-    // sink is ever repointed at the AggregatingMergeTree, validation fails
-    // here with an actionable "insert into a Null table + MV" error, because
-    // the sink cannot write aggregate states directly.
-    let encoder = match pipeline.block_on(sink.validate_schema())? {
-        Some(schema) => ClickHouseEncoder::<Owned<OrderRollup>>::with_schema(schema),
-        None => ClickHouseEncoder::<Owned<OrderRollup>>::new(),
-    };
+    // Validated against the *Null* table (plain columns). If this sink is ever
+    // repointed at the AggregatingMergeTree, `with_row` fails here with an
+    // actionable "insert into a Null table + MV" error, because the sink
+    // cannot write aggregate states directly.
+    let sink = pipeline.block_on(
+        spate::clickhouse::config::from_component_config(
+            pipeline.config().sink_config("default")?,
+        )?
+        .with_row::<Owned<OrderRollup>>(),
+    )?;
+    let encoder = ClickHouseEncoder::<Owned<OrderRollup>>::with_schema(sink.schema());
 
     // ── Chain: bytes -> OrderRollup -> RowBinary -> Null table ─────────────
     let runtime = pipeline

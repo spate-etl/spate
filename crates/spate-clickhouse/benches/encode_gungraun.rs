@@ -118,7 +118,7 @@ fn rowbinary_rig<T: Serialize + Send + 'static>(
     payloads: Vec<T>,
 ) -> Rig<ClickHouseEncoder<Owned<T>>, T> {
     Rig {
-        enc: ClickHouseEncoder::<Owned<T>>::new(),
+        enc: ClickHouseEncoder::<Owned<T>>::unchecked(),
         records: payloads.into_iter().map(record).collect(),
         buf: BytesMut::with_capacity(1 << 20),
     }

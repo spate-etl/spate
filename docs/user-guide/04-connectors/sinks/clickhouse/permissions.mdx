@@ -22,9 +22,10 @@ those are yours to grant and are not enumerated here.
 
 ## The minimal grant
 
-With the default configuration (`validate_schema: off`, `format: rowbinary`,
-no `distributed_check`) the sink issues exactly one kind of statement: the
-per-batch `INSERT`. One grant covers it:
+With no `distributed_check` block the sink issues two kinds of statement: the
+per-batch `INSERT`, and one `system.columns` read per replica at startup. One
+grant covers both, because ClickHouse shows an account the `system.columns`
+rows for the objects it already holds a grant on:
 
 ```sql
 GRANT INSERT ON analytics.orders_local TO spate_writer;

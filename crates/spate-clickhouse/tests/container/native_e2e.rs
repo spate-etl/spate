@@ -130,9 +130,9 @@ async fn native_format_round_trips_through_a_real_server() {
     let sink = sink_with::<Owned<NativeRow>>(
         &srv.url,
         "native_wide",
-        "full",
         "format: native\nuser: default\npassword: native-secret\n",
-    );
+    )
+    .await;
     assert_eq!(
         sink.writer.insert_sql(),
         "INSERT INTO `native_wide` (`id`, `b`, `n`, `big_n`, `small`, `f`, `s`, `fs`, `uid`, \
@@ -142,7 +142,6 @@ async fn native_format_round_trips_through_a_real_server() {
 
     let native_schema = sink
         .native_schema()
-        .await
         .expect("fetch native schema from system.columns");
     let mut encoder = NativeEncoder::<Owned<NativeRow>>::new(native_schema);
     let sent = rows();
@@ -162,15 +161,14 @@ async fn native_format_round_trips_through_a_real_server() {
     assert_eq!(got, sent, "Native round-trip must match what we encoded");
 }
 
-/// The scale-declaration gate against a real table: under
-/// `validate_schema: full` a wire wrapper whose scale disagrees with the
-/// column's declared precision fails fatally at the first record (before
-/// any block is built), and the matching wrapper lands the exact instant,
-/// verified by the server's own `toUnixTimestamp64Micro` rather than our
-/// decoder.
+/// The scale-declaration gate against a real table: a wire wrapper whose
+/// scale disagrees with the column's declared precision fails fatally at the
+/// first record (before any block is built), and the matching wrapper lands
+/// the exact instant, verified by the server's own `toUnixTimestamp64Micro`
+/// rather than our decoder.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn native_full_mode_gates_datetime64_scale_against_a_real_table() {
+async fn the_native_encoder_gates_datetime64_scale_against_a_real_table() {
     use spate_clickhouse::DateTime64Micros;
     use spate_core::error::{ErrorClass, SinkError};
     use std::sync::Arc;
@@ -195,10 +193,10 @@ async fn native_full_mode_gates_datetime64_scale_against_a_real_table() {
     let sink = sink_with::<Owned<MilliRow>>(
         &srv.url,
         "dt_micro",
-        "full",
         "format: native\nuser: default\npassword: native-secret3\n",
-    );
-    let schema = sink.native_schema().await.expect("fetch native schema");
+    )
+    .await;
+    let schema = sink.native_schema().expect("fetch native schema");
     let mut enc = NativeEncoder::<Owned<MilliRow>>::new(Arc::clone(&schema));
     let err = encode_native_batch(
         &mut enc,
@@ -270,10 +268,10 @@ async fn native_lowcardinality_composites_render_correctly() {
     let sink = sink_with::<Owned<NativeRow>>(
         &srv.url,
         "native_wide",
-        "names",
         "format: native\nuser: default\npassword: native-secret2\n",
-    );
-    let native_schema = sink.native_schema().await.expect("native schema");
+    )
+    .await;
+    let native_schema = sink.native_schema().expect("native schema");
     let mut encoder = NativeEncoder::<Owned<NativeRow>>::new(native_schema);
     let batch = encode_native_batch(&mut encoder, rows(), "native-2").expect("encode");
     sink.writer

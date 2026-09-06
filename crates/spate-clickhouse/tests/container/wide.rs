@@ -13,16 +13,16 @@
 // toString(row 1) == toString(row 2), which sidesteps both client-side
 // decode limits and hand-computed server formatting.
 //
-// `Time`/`Time64` columns are exercised at the unit/mock layers only:
-// they need ClickHouse ≥ 25.6 plus `enable_time_time64_type=1`, and this
-// test pins 26.3 (the current LTS line).
+// `Time`/`Time64` need `enable_time_time64_type=1`, which the DDL client and
+// the sink's `settings:` map both carry: the insert header names the column
+// type, so the setting has to be on for the type name to parse there too.
 
 use super::*;
 use ::chrono::{DateTime, TimeZone, Utc};
 use serde_repr::Serialize_repr;
 use spate_clickhouse::{
     ClickHouseEncoder, DateTime64Millis, Decimal32, Decimal64, Decimal128, Int256, MultiPolygon,
-    Point, Polygon, Ring, UInt256,
+    Point, Polygon, Ring, Time64Millis, TimeSeconds, UInt256,
 };
 use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -80,6 +80,10 @@ struct WideRow {
     dec76: Int256,
     big: Int256,
     ubig: UInt256,
+    t: TimeSeconds,
+    t64: Time64Millis,
+    v: Choice,
+    sagg: u64,
     lc: String,
     j: String,
     pt: Point,
@@ -89,6 +93,15 @@ struct WideRow {
     arr: Vec<Option<String>>,
     map: BTreeMap<String, u64>,
     n_f64: Option<f64>,
+}
+
+/// A `Variant(String, UInt64)` value. ClickHouse sorts a Variant's members by
+/// type name, so the declaration order here is the server's, not the DDL's.
+#[derive(Clone, Serialize)]
+enum Choice {
+    #[allow(dead_code)]
+    Text(String),
+    Num(u64),
 }
 
 const COLUMNS: &[&str] = WideRow::COLUMNS;
@@ -105,6 +118,8 @@ const DDL: &str = "CREATE TABLE wide (\
         dec9 Decimal(9, 2), dec18 Decimal(18, 4), dec38 Decimal(38, 10), \
         dec76 Decimal(76, 10), \
         big Int256, ubig UInt256, \
+        t Time, t64 Time64(3), \
+        v Variant(String, UInt64), sagg SimpleAggregateFunction(sum, UInt64), \
         lc LowCardinality(String), j JSON, \
         pt Point, ring Ring, poly Polygon, mpoly MultiPolygon, \
         arr Array(Nullable(String)), map Map(String, UInt64), \
@@ -127,6 +142,8 @@ const LITERAL_INSERT: &str = "INSERT INTO wide VALUES (2, true, \
         toDecimal256('-1234567890.1234567890', 10), \
         toInt256('-170141183460469231731687303715884105728'), \
         toUInt256('340282366920938463463374607431768211455'), \
+        CAST('01:02:03' AS Time), CAST('01:02:03.250' AS Time64(3)), \
+        CAST(7 AS UInt64), 42, \
         'repeat', '{\"a\":1,\"b\":\"x\"}', \
         (1.5, -2.5), [(0, 0), (10, 0), (10, 10)], [[(0, 0), (10, 0), (10, 10)]], \
         [[[(0, 0), (10, 0), (10, 10)]]], \
@@ -167,6 +184,13 @@ fn encoded_row() -> WideRow {
         dec76: Int256::from_i128(-12_345_678_901_234_567_890),
         big: Int256::from_i128(i128::MIN),
         ubig: UInt256::from_u128(u128::MAX),
+        t: TimeSeconds(3_723),
+        t64: Time64Millis(3_723_250),
+        // ClickHouse orders a Variant's members by type name, so `String` is
+        // discriminant 0 and `UInt64` is 1; the enum declares them in that
+        // order (see the rowbinary module docs).
+        v: Choice::Num(7),
+        sagg: 42,
         lc: "repeat".into(),
         j: "{\"a\":1,\"b\":\"x\"}".into(),
         pt: (1.5, -2.5),
@@ -186,7 +210,8 @@ async fn wide_type_table_round_trips() {
     let ddl_client = srv
         .admin
         .clone()
-        .with_setting("allow_experimental_json_type", "1");
+        .with_setting("allow_experimental_json_type", "1")
+        .with_setting("enable_time_time64_type", "1");
     ddl_client.query(DDL).execute().await.expect("create wide");
 
     // Row 1: full startup validation against the real system.columns,
@@ -194,15 +219,12 @@ async fn wide_type_table_round_trips() {
     let sink = sink_with::<Owned<WideRow>>(
         &srv.url,
         "wide",
-        "full",
         "user: default\npassword: wide-secret\n\
-             settings: { input_format_binary_read_json_as_string: \"1\" }",
-    );
-    let schema = sink
-        .validate_schema()
-        .await
-        .expect("startup validation against the real table")
-        .expect("full mode returns a schema");
+             settings: { input_format_binary_read_json_as_string: \"1\", \
+                         enable_time_time64_type: \"1\" }",
+    )
+    .await;
+    let schema = sink.schema();
     let mut encoder = ClickHouseEncoder::<Owned<WideRow>>::with_schema(schema);
     let batch =
         encode_batch(&mut encoder, vec![encoded_row()], "wide-1").expect("first-record check");

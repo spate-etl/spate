@@ -41,20 +41,20 @@ is in the `rowbinary` module of the
 | `Float32` | yes | yes | |
 | `Float64` | yes | yes | |
 | `String` | yes | yes | |
-| `FixedString(N)` | yes | yes | Native pads a short value to `N` with NUL; a RowBinary field is exactly `N` bytes |
+| `FixedString(N)` | yes | yes | Native pads a short `String` to `N` with NUL; a RowBinary field is exactly `N` bytes, so it takes a `[u8; N]` |
 | `Date` | yes | yes | |
 | `Date32` | yes | yes | |
 | `DateTime` | yes | yes | |
 | `DateTime64(P)` | yes | yes | Native emits the raw `Int64` without rescaling; see the scale warning on [Native format](./native-format.mdx) |
 | `Time` | yes | no | Needs ClickHouse 25.6 or later with `enable_time_time64_type=1` under `settings:` |
 | `Time64(P)` | yes | no | Needs ClickHouse 25.6 or later with `enable_time_time64_type=1` under `settings:` |
-| `Decimal(P, S)`, `P` of 38 or below | yes | yes | `Decimal32(S)`, `Decimal64(S)` and `Decimal128(S)` are the sugar for `P` of 9, 18 and 38. `validate_schema: full` checks the wrapper's declared scale against `S` |
+| `Decimal(P, S)`, `P` of 38 or below | yes | yes | `Decimal32(S)`, `Decimal64(S)` and `Decimal128(S)` are the sugar for `P` of 9, 18 and 38. The first-record check holds the wrapper's declared scale against `S` |
 | `Decimal(P, S)`, `P` above 38 | manual | no | The row carries an `Int256` holding the value already scaled by `10^S`. The width is checked against the column's precision band; the scaling is the row's to get right, since the field carries no scale to check |
 | `Decimal256(S)` | manual | no | Parses as a `Decimal` of precision 76, so the row above applies |
 | `Enum8` | yes | yes | |
 | `Enum16` | yes | yes | |
-| `UUID` | yes | yes | Needs `#[serde(with = "…uuid")]`. The bare `Uuid` impl serializes successfully into the wrong bytes, and only `validate_schema: full` catches it |
-| `IPv4` | yes | yes | Needs `#[serde(with = "…ipv4")]`. The bare `Ipv4Addr` impl serializes successfully into the wrong bytes, and only `validate_schema: full` catches it |
+| `UUID` | yes | yes | Needs `#[serde(with = "…uuid")]`. The bare `Uuid` impl serializes successfully into the wrong bytes, and the first-record check is what catches it |
+| `IPv4` | yes | yes | Needs `#[serde(with = "…ipv4")]`. The bare `Ipv4Addr` impl serializes successfully into the wrong bytes, and the first-record check is what catches it |
 | `IPv6` | yes | yes | `Ipv6Addr`'s own impl is correct |
 | `Nullable(T)` | yes | yes | Native accepts any inner it accepts on its own |
 | `Array(T)` | yes | yes | Native accepts any inner it accepts on its own |
@@ -87,10 +87,8 @@ compute the states into the target instead.
 [Ingesting into AggregatingMergeTree](./aggregating-mergetree.mdx) works that
 pattern end to end.
 
-Startup validation refuses such a column and names that pattern, under
-`validate_schema: names` and `full` alike. `format: native` upgrades `off` to
-`names`, so the check always runs there; a RowBinary sink left at
-`validate_schema: off` skips it.
+Building the sink refuses such a column and names that pattern, whichever
+format is configured.
 
 ## Related
 
@@ -98,5 +96,5 @@ Startup validation refuses such a column and names that pattern, under
   `format` key.
 - [Native format](./native-format.mdx) — what the columnar encoder buys, and
   the wrapper scale rule.
-- [Schema validation](./schema-validation.mdx) — the `validate_schema` modes
-  that decide which of the checks above run.
+- [Schema validation](./schema-validation.mdx) — the checks above, and when
+  each one runs.

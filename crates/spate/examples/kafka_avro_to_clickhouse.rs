@@ -102,8 +102,8 @@ struct OrderLine {
 }
 
 /// One ClickHouse row. [`DateTime64Millis`] declares the timestamp's scale so
-/// `validate_schema: full` can check it against the column's declared
-/// precision (it still encodes as the raw `Int64`).
+/// the first-record check can hold it against the column's declared precision
+/// (it still encodes as the raw `Int64`).
 #[derive(Debug, Serialize, ClickHouseRow)]
 struct OrderRow {
     order_id: u64,
@@ -150,24 +150,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The connector turns its section into a builder holding everything but
     // the row type: per-shard replica endpoints, pool tuning, readiness
     // probe. `with_row` supplies it, generating the INSERT column list from
-    // `OrderRow`'s field declaration order.
+    // `OrderRow`'s field declaration order, and fetches the live table's
+    // columns from every replica before any thread spawns. A column the table
+    // lacks, a non-insertable one, replica drift or an unreachable replica
+    // fails here with a readable diff.
     // ANCHOR: sink
-    let sink = spate::clickhouse::config::from_component_config(
-        pipeline.config().sink_config("default")?,
-    )?
-    .with_row::<Owned<OrderRow>>()?;
+    let sink = pipeline.block_on(
+        spate::clickhouse::config::from_component_config(
+            pipeline.config().sink_config("default")?,
+        )?
+        .with_row::<Owned<OrderRow>>(),
+    )?;
     // ANCHOR_END: sink
 
-    // Opt-in fail-fast schema validation (`validate_schema: names|full` in
-    // the YAML) checks the derived columns against every replica's live
-    // table before any thread spawns, and hands the encoder the expected
-    // schema so the row struct is checked against it on the first record.
-    // `off` (the default) returns None and issues no queries.
+    // The encoder carries that same schema, and checks the row struct against
+    // it on the first record each pipeline thread encodes.
     // ANCHOR: encoder
-    let encoder = match pipeline.block_on(sink.validate_schema())? {
-        Some(schema) => ClickHouseEncoder::<Owned<OrderRow>>::with_schema(schema),
-        None => ClickHouseEncoder::<Owned<OrderRow>>::new(),
-    };
+    let encoder = ClickHouseEncoder::<Owned<OrderRow>>::with_schema(sink.schema());
     // ANCHOR_END: encoder
 
     // ── The chain, and run ──────────────────────────────────────────────

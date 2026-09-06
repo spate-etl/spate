@@ -21,7 +21,7 @@ async fn make_table(admin: &clickhouse::Client, table: &str) {
         .expect("create table");
 }
 
-fn sink_for_table(url: &str, table: &str) -> config::ClickHouseSink {
+async fn sink_for_table(url: &str, table: &str) -> config::ClickHouseSink {
     let cfg: ClickHouseSinkConfig = serde_yaml::from_str(&format!(
         "table: {table}\nshards:\n  - replicas: [\"{url}\"]\n"
     ))
@@ -29,7 +29,8 @@ fn sink_for_table(url: &str, table: &str) -> config::ClickHouseSink {
     config::build(cfg)
         .expect("valid sink config")
         .with_row::<Owned<Order>>()
-        .expect("valid columns")
+        .await
+        .expect("schema fetch")
 }
 
 async fn count_table(admin: &clickhouse::Client, table: &str) -> u64 {
@@ -46,8 +47,8 @@ async fn sinks_write_to_independent_tables() {
     let srv = server().await; // also creates the unrelated `orders` table
     make_table(&srv.admin, "orders_a").await;
     make_table(&srv.admin, "orders_b").await;
-    let sink_a = sink_for_table(&srv.url, "orders_a");
-    let sink_b = sink_for_table(&srv.url, "orders_b");
+    let sink_a = sink_for_table(&srv.url, "orders_a").await;
+    let sink_b = sink_for_table(&srv.url, "orders_b").await;
 
     // Route even ids to table a, odd ids to table b, the shape a split
     // terminal produces, exercised straight against the two sinks' writers.
@@ -86,12 +87,18 @@ async fn sinks_write_to_independent_tables() {
 async fn a_failed_table_write_is_isolated_from_the_others() {
     let srv = server().await;
     make_table(&srv.admin, "orders_a").await;
-    let healthy = sink_for_table(&srv.url, "orders_a");
-    // A second sink pointed at an unreachable endpoint, a table whose shard
-    // is down. In a full pipeline this failing write stalls the source watermark
+    make_table(&srv.admin, "orders_b").await;
+    let healthy = sink_for_table(&srv.url, "orders_a").await;
+    // A second sink whose table is dropped out from under it after startup.
+    // In a full pipeline this failing write stalls the source watermark
     // (worst-status merge; see spate-test's split tests); here we prove the
     // failure is isolated to that sink and does not corrupt the healthy table.
-    let dead = sink_for_table("http://127.0.0.1:1", "orders_b");
+    let dead = sink_for_table(&srv.url, "orders_b").await;
+    srv.admin
+        .query("DROP TABLE orders_b")
+        .execute()
+        .await
+        .expect("drop");
 
     healthy
         .writer
@@ -104,7 +111,7 @@ async fn a_failed_table_write_is_isolated_from_the_others() {
         .await;
     assert!(
         result.is_err(),
-        "a write to an unreachable table must fail (a real pipeline then stalls its watermark)"
+        "a write to a dropped table must fail (a real pipeline then stalls its watermark)"
     );
     assert_eq!(
         count_table(&srv.admin, "orders_a").await,

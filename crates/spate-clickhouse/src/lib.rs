@@ -6,8 +6,9 @@
 //! Writes **directly to shard-local tables** through the official
 //! `clickhouse` crate: rows are encoded to RowBinary on the pipeline
 //! threads (this crate's own [serializer](rowbinary)), shipped as
-//! pre-formatted frames, and inserted one `INSERT ... FORMAT RowBinary`
-//! per sealed batch with a deterministic `insert_deduplication_token`.
+//! pre-formatted frames, and inserted one `INSERT ... FORMAT
+//! RowBinaryWithNamesAndTypes` per sealed batch with a deterministic
+//! `insert_deduplication_token`.
 //! Direct-to-shard writes beat `Distributed`-table inserts for an ETL
 //! writer: bigger blocks, less merge pressure, and a synchronous server
 //! acknowledgment that checkpointing depends on (`wait_end_of_query=1`;
@@ -65,12 +66,16 @@
 //!
 //! # Column order is the wire contract
 //!
-//! RowBinary carries no column names: the row struct's **field declaration
+//! The rows carry no column names: the row struct's **field declaration
 //! order** is the insert column order, and reordering it is a breaking
 //! change to the pipeline. `#[derive(ClickHouseRow)]` generates the column
 //! list from that order, honoring `#[serde(rename = "...")]` for a name no
 //! Rust identifier can spell (a flattened `Nested` table's dotted
 //! `outer.inner`). See [`rowbinary`] for the full type mapping.
+//!
+//! Each request body opens with a header naming those columns and the types
+//! `system.columns` reported for them, so the server checks the description
+//! against the table on every insert and rejects one that has drifted.
 //!
 //! # Wiring
 //!
@@ -90,26 +95,32 @@
 //! #[derive(Serialize, ClickHouseRow)]
 //! struct OrderRow { id: u64, name: String, amount: f64 }
 //!
-//! let sink = spate_clickhouse::config::from_component_config(section)?
-//!     .with_row::<Owned<OrderRow>>()?;
+//! let sink = pipeline.block_on(
+//!     spate_clickhouse::config::from_component_config(section)?
+//!         .with_row::<Owned<OrderRow>>(),
+//! )?;
+//! let encoder = ClickHouseEncoder::<Owned<OrderRow>>::with_schema(sink.schema());
 //! ```
 //!
 //! [`config::from_component_config`] turns that section into a
 //! [`config::ClickHouseSinkBuilder`], holding per-shard
 //! [`ClickHouseEndpoint`]s and the sink-pool configuration but no row type
-//! yet; [`config::ClickHouseSinkBuilder::with_row`] supplies it, generating
-//! the [`ClickHouseWriter`] (the framework's `ShardWriter`) from the row's
-//! declared columns. [`ClickHouseEncoder`] is the matching `RowEncoder`,
-//! parameterized by a record family: owned rows use `Owned<Row>`, and the
-//! encode path itself needs only `Row: serde::Serialize`.
+//! yet; [`config::ClickHouseSinkBuilder::with_row`] supplies it, reads the
+//! table's columns from every replica, and generates the
+//! [`ClickHouseWriter`] (the framework's `ShardWriter`) from both.
+//! [`ClickHouseEncoder`] is the matching `RowEncoder`, parameterized by a
+//! record family: owned rows use `Owned<Row>`, and the encode path itself
+//! needs only `Row: serde::Serialize`.
 //!
 //! # Wire format
 //!
-//! The default is row-wise **RowBinary** ([`rowbinary`]). An opt-in columnar
-//! **Native** encoder ([`native`], `format: native`) transposes each chunk
-//! into one self-describing block: it costs more client CPU but cuts server
-//! parse CPU and compressed wire size substantially. Build it from a fetched
-//! schema via [`ClickHouseSink::native_schema`] and [`NativeEncoder`].
+//! The default is row-wise **RowBinary** ([`rowbinary`]), sent as
+//! `RowBinaryWithNamesAndTypes`: one header per request body, then the rows.
+//! An opt-in columnar **Native** encoder ([`native`], `format: native`)
+//! transposes each chunk into one self-describing block instead: it costs
+//! more client CPU but cuts server parse CPU and compressed wire size
+//! substantially. Build it via [`ClickHouseSink::native_schema`] and
+//! [`NativeEncoder`].
 
 // `#[derive(ClickHouseRow)]` used inside this crate's own unit tests (part of
 // the lib target's own compilation, unlike an integration test under
@@ -127,12 +138,15 @@ mod row;
 pub mod rowbinary;
 mod schema;
 pub mod serde;
+#[cfg(feature = "testing")]
+#[doc(hidden)]
+pub mod testing;
 mod types;
 mod writer;
 
 pub use config::{
     ClickHouseSink, ClickHouseSinkConfig, Compression, DistributedCheckSection, Format,
-    SchemaValidation, from_component_config,
+    from_component_config,
 };
 pub use distributed::DistributedCheckError;
 pub use encoder::{ClickHouseEncoder, PreEncodedRows};

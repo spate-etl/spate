@@ -40,8 +40,13 @@ time = ["dep:time"]
 ## Checked conversions between `rust_decimal::Decimal` and the pre-scaled
 ## `Decimal32/64/128` wrappers.
 rust_decimal = ["dep:rust_decimal"]
+## Development-only seams: `testing::system_columns` for a `clickhouse` mock
+## that must answer the sink's schema fetch, and `ClickHouseEncoder::unchecked`
+## for the encode benches. Off by default and not enabled by the `spate` facade.
+testing = []
 
 [dev-dependencies]
+spate-clickhouse = { path = ".", features = ["testing"] }
 gungraun = { workspace = true }
 criterion = { workspace = true }
 clickhouse = { workspace = true, features = ["lz4", "zstd", "rustls-tls", "test-util"] }

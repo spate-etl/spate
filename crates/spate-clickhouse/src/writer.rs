@@ -1,5 +1,6 @@
 //! The I/O half of the sink: writing sealed batches to replica endpoints.
 
+use bytes::Bytes;
 use spate_core::error::{ErrorClass, SinkError};
 use spate_core::sink::{SealedBatch, ShardWriter};
 use std::fmt;
@@ -40,16 +41,17 @@ impl fmt::Debug for ClickHouseEndpoint {
 }
 
 /// Writes sealed batches: one `INSERT ... FORMAT <fmt>` per batch (the
-/// format, RowBinary or Native, is baked into `insert_sql`), carrying the
-/// batch's deduplication token so retries, including retries on other
-/// replicas, are idempotent within the server's dedup window. The transport is
-/// format-agnostic: frames concatenate to the request body (RowBinary rows
-/// or a stream of Native blocks). `write_batch` returning `Ok` is the
-/// durable-ack point (the server confirmed the insert, materialized views
-/// included, thanks to `wait_end_of_query=1`).
+/// format, RowBinaryWithNamesAndTypes or Native, is baked into `insert_sql`),
+/// carrying the batch's deduplication token so retries, including retries on
+/// other replicas, are idempotent within the server's dedup window. The
+/// transport is format-agnostic: frames concatenate to the request body
+/// (RowBinary rows behind their header, or a stream of Native blocks).
+/// `write_batch` returning `Ok` is the durable-ack point (the server confirmed
+/// the insert, materialized views included, thanks to `wait_end_of_query=1`).
 #[derive(Clone, Debug)]
 pub struct ClickHouseWriter {
     insert_sql: String,
+    header: Option<Bytes>,
     settings: Vec<(String, String)>,
     send_timeout: Option<Duration>,
     end_timeout: Option<Duration>,
@@ -58,12 +60,14 @@ pub struct ClickHouseWriter {
 impl ClickHouseWriter {
     pub(crate) fn new(
         insert_sql: String,
+        header: Option<Bytes>,
         settings: Vec<(String, String)>,
         send_timeout: Option<Duration>,
         end_timeout: Option<Duration>,
     ) -> Self {
         ClickHouseWriter {
             insert_sql,
+            header,
             settings,
             send_timeout,
             end_timeout,
@@ -91,9 +95,19 @@ impl ShardWriter for ClickHouseWriter {
             .with_setting("insert_deduplicate", "1")
             .with_setting("wait_end_of_query", "1")
             .with_setting("insert_deduplication_token", batch.dedup_token.clone())
+            // The server checks the header against the table only while these
+            // are on. They default on; setting them per insert keeps a server
+            // or profile default from turning the check off silently.
+            .with_setting("input_format_with_names_use_header", "1")
+            .with_setting("input_format_with_types_use_header", "1")
             .with_timeouts(self.send_timeout, self.end_timeout);
         for (name, value) in &self.settings {
             insert = insert.with_setting(name.clone(), value.clone());
+        }
+        // Once per request body, ahead of the rows, so a retry re-sends
+        // identical bytes under an identical token.
+        if let Some(header) = &self.header {
+            insert.send(header.clone()).await.map_err(classify)?;
         }
         for frame in &batch.frames {
             // `Bytes` clones are refcounted views, not copies.

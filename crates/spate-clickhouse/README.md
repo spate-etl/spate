@@ -3,9 +3,9 @@
 ClickHouse sink for the [Spate](https://github.com/spate-etl/spate)
 framework: rows encoded to RowBinary **on the pipeline threads** (this
 crate ships its own serde serializer), written directly to shard-local
-tables as one `INSERT ... FORMAT RowBinary` per sealed batch with a
-deterministic `insert_deduplication_token`, rotating replicas with
-circuit-breaker failover.
+tables as one `INSERT ... FORMAT RowBinaryWithNamesAndTypes` per sealed
+batch with a deterministic `insert_deduplication_token`, rotating replicas
+with circuit-breaker failover.
 
 Key types: `ClickHouseEncoder<T: Serialize>` (the CPU half),
 `ClickHouseWriter` (the I/O half), `config::from_component_config` (the
@@ -47,7 +47,9 @@ with `zstd:9`. `off` disables compression entirely.
 
 ## Column order is the wire contract
 
-RowBinary carries no column names: the row struct's field declaration
-order is the insert column order, and reordering it is a breaking change to
-the pipeline. `#[derive(ClickHouseRow)]` generates the column list from
-that order.
+The rows carry no column names: the row struct's field declaration order is
+the insert column order, and reordering it is a breaking change to the
+pipeline. `#[derive(ClickHouseRow)]` generates the column list from that
+order, and the header opening each request body names those columns and the
+types the table reported for them, so the server rejects a body that no
+longer describes the table.

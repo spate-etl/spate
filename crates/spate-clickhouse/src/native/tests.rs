@@ -429,10 +429,9 @@ fn zero_rows_produce_no_bytes() {
 }
 
 // The `encode` path (not `block_of`) runs the first-record struct check:
-// field names/order always, type classes when the schema carries `full`.
+// field names, order and type classes.
 mod first_record_check {
     use super::*;
-    use crate::config::SchemaValidation;
     use crate::schema::RowSchema;
     use crate::types::DateTime64Millis;
     use bytes::BytesMut;
@@ -456,11 +455,10 @@ mod first_record_check {
         }
     }
 
-    /// A schema as `native_schema()` would build it from a live table
-    /// fetched under `validate_schema: full`.
+    /// A schema as `native_schema()` would build it from a live table.
     fn full_schema(cols: &[(&str, &str)]) -> Arc<NativeSchema> {
         let expected = RowSchema {
-            mode: SchemaValidation::Full,
+            wire: crate::schema::Wire::Native,
             table: "`t`".into(),
             columns: cols
                 .iter()
@@ -570,21 +568,40 @@ mod first_record_check {
     }
 
     #[test]
-    fn static_schemas_check_names_only() {
-        // `from_columns` has no fetched truth: the wrapper mismatch that
-        // `full` rejects passes here (names-level check only).
+    fn static_schemas_check_the_types_they_declare() {
+        // `from_columns` has no fetched truth, so the check compares the row
+        // against the type strings the caller wrote. Those are the strings the
+        // block puts on the wire, so a disagreement here is one the server
+        // would see.
         #[derive(Serialize)]
         struct R {
             ts: DateTime64Millis,
         }
         let mut enc = NativeEncoder::<Owned<R>>::new(schema(&[("ts", "DateTime64(6)")]));
-        enc.encode(
+        let err = enc
+            .encode(
+                &record(R {
+                    ts: DateTime64Millis(1),
+                }),
+                &mut BytesMut::new(),
+            )
+            .expect_err("millis against a micros column");
+        match err {
+            SinkError::Client { class, reason } => {
+                assert_eq!(class, ErrorClass::Fatal);
+                assert!(reason.contains("DateTime64Millis"), "{reason}");
+            }
+            other => panic!("unexpected error shape: {other:?}"),
+        }
+
+        let mut ok = NativeEncoder::<Owned<R>>::new(schema(&[("ts", "DateTime64(3)")]));
+        ok.encode(
             &record(R {
                 ts: DateTime64Millis(1),
             }),
             &mut BytesMut::new(),
         )
-        .expect("static schemas stay at the name-level check");
+        .expect("the scale the wrapper declares");
     }
 
     #[test]

@@ -64,9 +64,9 @@ async fn nested_native_format_round_trips_through_a_real_server() {
     let sink = sink_with::<Owned<NestedRow>>(
         &srv.url,
         "nested_native",
-        "full",
         &format!("format: native\nuser: default\npassword: {password}\n"),
-    );
+    )
+    .await;
     assert_eq!(
         sink.writer.insert_sql(),
         "INSERT INTO `nested_native` (`id`, `tags.key`, `tags.value`) FORMAT Native"
@@ -74,7 +74,6 @@ async fn nested_native_format_round_trips_through_a_real_server() {
 
     let native_schema = sink
         .native_schema()
-        .await
         .expect("fetch native schema from system.columns");
     let mut encoder = spate_clickhouse::NativeEncoder::<Owned<NestedRow>>::new(native_schema);
     let sent = rows();
@@ -111,21 +110,17 @@ async fn nested_rowbinary_format_round_trips_through_a_real_server() {
     let sink = sink_with::<Owned<NestedRow>>(
         &srv.url,
         "nested_rowbinary",
-        "full",
         &format!("format: rowbinary\nuser: default\npassword: {password}\n"),
-    );
+    )
+    .await;
     assert_eq!(
         sink.writer.insert_sql(),
-        "INSERT INTO `nested_rowbinary` (`id`, `tags.key`, `tags.value`) FORMAT RowBinary"
+        "INSERT INTO `nested_rowbinary` (`id`, `tags.key`, `tags.value`) FORMAT RowBinaryWithNamesAndTypes"
     );
 
     // `full` mode: the flattened columns are ordinary `Array(String)`, so the
     // `Vec<String>` fields pass the per-position type check.
-    let schema = sink
-        .validate_schema()
-        .await
-        .expect("schema validates against the flattened columns")
-        .unwrap();
+    let schema = sink.schema();
     let mut encoder = spate_clickhouse::ClickHouseEncoder::<Owned<NestedRow>>::with_schema(schema);
     let sent = rows();
     let batch = encode_batch(&mut encoder, sent.clone(), "nested-rowbinary-1").expect("encode");

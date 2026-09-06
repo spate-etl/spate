@@ -79,7 +79,7 @@ fn both_encoders<T: Serialize + Send + 'static>(
         b.iter(|| encode_chunk(&mut enc, &records, &mut buf));
     });
 
-    let mut enc = ClickHouseEncoder::<Owned<T>>::new();
+    let mut enc = ClickHouseEncoder::<Owned<T>>::unchecked();
     g.bench_function(format!("rowbinary_{schema}"), |b| {
         b.iter(|| encode_chunk(&mut enc, &records, &mut buf));
     });

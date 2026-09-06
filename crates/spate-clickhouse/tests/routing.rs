@@ -1,6 +1,10 @@
 //! Docker-free routing seam test: the real [`DistributedRouter`], minted by
-//! [`ClickHouseSink::router`] from a validated weighted config, driven
+//! [`ClickHouseSinkBuilder::router`] from a validated weighted config, driven
 //! through the framework's actual terminal stage (`chain(...).sink(...)`).
+//!
+//! The router is taken from the builder rather than the sink so this stays
+//! server-free: placement is decided by the configured shard weights, which
+//! the schema fetch does not touch.
 //!
 //! The container suite proves placement parity against a live cluster; this
 //! test keeps the *wiring* (builder bound, per-record `route_record`
@@ -131,11 +135,8 @@ shards:
 "#,
     )
     .expect("config yaml");
-    let sink = config::build(cfg)
-        .expect("valid sink config")
-        .with_row::<Owned<SkuRow>>()
-        .expect("valid columns");
-    let router = sink.router::<Owned<SkuRow>>(sku_key);
+    let builder = config::build(cfg).expect("valid sink config");
+    let router = builder.router::<Owned<SkuRow>>(sku_key);
 
     let (queues, mut rxs) = shard_queues(2, 64);
     let mut c = chain(LineDeser)

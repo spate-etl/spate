@@ -57,10 +57,10 @@
 //!
 //! Caveat: the Native leaf writer does not rescale to the column's declared
 //! precision. Pointed at a `DateTime64(6)` column, these milli-scaled values
-//! would land as 1970-era timestamps. The wrapper makes that
-//! checkable: under the YAML's `validate_schema: full` a wrapper/precision
-//! mismatch fails fatally on the first record, before anything is inserted
-//! (a plain `i64` field declares no scale, so nothing could validate it).
+//! would land as 1970-era timestamps. The wrapper makes that checkable: a
+//! wrapper/precision mismatch fails fatally on the first record, before
+//! anything is inserted (a plain `i64` field declares no scale, so nothing
+//! could validate it).
 //!
 //! ```sql
 //! CREATE TABLE order_lines (
@@ -130,8 +130,8 @@ struct OrderLine {
 /// The `flat_map` output = one ClickHouse row. `#[derive(ClickHouseRow)]`
 /// generates the insert column list from field declaration order, which
 /// Native maps positionally. [`DateTime64Millis`] declares the timestamp's
-/// scale so `validate_schema: full` can check it against the column's
-/// declared precision (it still encodes as the raw `Int64`).
+/// scale so the first-record check can hold it against the column's declared
+/// precision (it still encodes as the raw `Int64`).
 #[derive(Debug, Serialize, ClickHouseRow)]
 struct OrderLineRow {
     order_id: u64,
@@ -177,14 +177,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .build_serde::<OrderPlaced>()?;
 
     // ── Sink: ClickHouse Native, sharded by order ───────────────────────
-    // `format: native` fetches `system.columns` and hands the encoder the
-    // real column types (so `placed_at`'s `DateTime64(3)` is laid out as an
-    // Int64). The encoder is `Clone`: the terminal stage mints one per shard.
+    // `with_row` fetches `system.columns`, which is where the encoder's real
+    // column types come from (so `placed_at`'s `DateTime64(3)` is laid out as
+    // an Int64). The encoder is `Clone`: the terminal stage mints one per
+    // shard.
     // ANCHOR: router
-    let sink = spate::clickhouse::config::from_component_config(
-        pipeline.config().sink_config("default")?,
-    )?
-    .with_row::<Owned<OrderLineRow>>()?;
+    let sink = pipeline.block_on(
+        spate::clickhouse::config::from_component_config(
+            pipeline.config().sink_config("default")?,
+        )?
+        .with_row::<Owned<OrderLineRow>>(),
+    )?;
     // No-op unless the YAML opts into `distributed_check`; with it, startup
     // fails fast if the sink topology drifts from the cluster + DDL.
     pipeline.block_on(sink.validate_distributed())?;
@@ -194,8 +197,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let router = sink.router::<Owned<OrderLineRow>>(order_key);
     // ANCHOR_END: router
     // ANCHOR: encoder
-    let native = pipeline.block_on(sink.native_schema())?;
-    let encoder = NativeEncoder::<Owned<OrderLineRow>>::new(native);
+    let encoder = NativeEncoder::<Owned<OrderLineRow>>::new(sink.native_schema()?);
     // ANCHOR_END: encoder
 
     // ── The chain, and run ──────────────────────────────────────────────

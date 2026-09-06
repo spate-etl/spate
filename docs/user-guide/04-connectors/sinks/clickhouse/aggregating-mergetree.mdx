@@ -19,11 +19,9 @@ plain rows; ClickHouse owns state construction and its versioning.
 
 :::warning
 Pointing the sink straight at an `AggregateFunction` column is a
-misconfiguration. With `validate_schema: names` or `full` (and always under
-`format: native`), the sink **fails fast at startup** with an error naming the
-column and the Null-table + MV remedy. With `validate_schema: off` there is no
-schema fetch, so nothing catches it. Set validation to `names` for these
-tables, or point the sink at the plain Null table as shown below.
+misconfiguration. The sink **fails fast at startup** with an error naming the
+column and the Null-table + MV remedy. Point it at the plain Null table as
+shown below.
 :::
 
 ## The pattern
@@ -67,7 +65,6 @@ Native already encode. The row struct's field order (`region`, `placed_at`,
 sink:
   clickhouse:
     table: orders_null
-    validate_schema: names
 ```
 
 Read the finalized values back with the `-Merge` combinators; the stored

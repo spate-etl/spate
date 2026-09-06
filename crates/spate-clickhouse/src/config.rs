@@ -88,13 +88,8 @@ pub struct ClickHouseSinkConfig {
     /// default (see [`Compression`]).
     #[serde(default)]
     pub compression: Compression,
-    /// Opt-in startup schema validation (see [`SchemaValidation`]).
-    /// `off` by default: today's behavior, no queries issued.
-    #[serde(default)]
-    pub validate_schema: SchemaValidation,
     /// Insert wire format (see [`Format`]). `rowbinary` by default;
-    /// `native` selects the columnar block format (which always fetches the
-    /// column schema).
+    /// `native` selects the columnar block format.
     #[serde(default)]
     pub format: Format,
     /// Opt-in startup parity check against the cluster topology and a
@@ -113,10 +108,11 @@ pub struct ClickHouseSinkConfig {
 /// ```
 ///
 /// `rowbinary` (default) streams rows; `native` transposes each chunk into a
-/// columnar block. Native is type-driven, so selecting it always fetches
-/// `system.columns`, and [`build`] upgrades `validate_schema: off` to
-/// [`SchemaValidation::Names`] so the encoder can learn each column's type.
-/// Pair it with [`crate::NativeEncoder`] on the chain (via
+/// columnar block. Both are self-describing on the wire: `rowbinary` sends
+/// `FORMAT RowBinaryWithNamesAndTypes` with a header naming each column and
+/// its type, and a Native block carries the same per column, so the server
+/// checks the schema on every insert rather than mapping bytes by position.
+/// Pair Native with [`crate::NativeEncoder`] on the chain (via
 /// [`ClickHouseSink::native_schema`]); RowBinary pairs with
 /// [`crate::ClickHouseEncoder`].
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -134,37 +130,10 @@ impl Format {
     /// The `FORMAT` keyword for the `INSERT` statement.
     fn keyword(self) -> &'static str {
         match self {
-            Format::RowBinary => "RowBinary",
+            Format::RowBinary => "RowBinaryWithNamesAndTypes",
             Format::Native => "Native",
         }
     }
-}
-
-/// When to check the row's declared columns against the live table (via
-/// [`ClickHouseSink::validate_schema`]).
-///
-/// ```yaml
-/// sink:
-///   clickhouse:
-///     validate_schema: full   # off | names | full
-/// ```
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-#[non_exhaustive]
-pub enum SchemaValidation {
-    /// No validation (default).
-    #[default]
-    Off,
-    /// At startup: every declared column exists and is insertable on
-    /// every replica. At the first record: struct field names and order
-    /// match the declared columns.
-    Names,
-    /// [`SchemaValidation::Names`] plus a class-based type-compatibility
-    /// check per position (permissive: a `u32` may feed `UInt32`,
-    /// `DateTime`, or `IPv4`; unknown server types always pass; the
-    /// `Nullable`-vs-`Option` mismatch always fails, which is wire
-    /// corruption).
-    Full,
 }
 
 /// Transport (HTTP-body) compression the client applies to insert requests.
@@ -261,7 +230,6 @@ impl ClickHouseSinkConfig {
             breaker: BreakerConfig::default(),
             timeouts: TimeoutSection::default(),
             compression: Compression::default(),
-            validate_schema: SchemaValidation::default(),
             format: Format::default(),
             distributed_check: None,
         }
@@ -394,13 +362,13 @@ impl Default for TimeoutSection {
     }
 }
 
-/// A validated sink configuration with no row type yet. [`with_row`](Self::with_row)
-/// supplies it and produces the runnable [`ClickHouseSink`].
+/// A validated sink configuration with no row type yet.
+/// [`with_row`](Self::with_row) supplies it, fetches the table's schema, and
+/// produces the runnable [`ClickHouseSink`].
 #[derive(Debug)]
-#[must_use = "call with_row::<F>() to get a runnable ClickHouseSink"]
+#[must_use = "await with_row::<F>() to get a runnable ClickHouseSink"]
 pub struct ClickHouseSinkBuilder {
     cfg: ClickHouseSinkConfig,
-    schema_mode: SchemaValidation,
     endpoints: Vec<Vec<ClickHouseEndpoint>>,
     probe_endpoints: Arc<Vec<Vec<ClickHouseEndpoint>>>,
     shard_weights: Arc<[u32]>,
@@ -409,19 +377,45 @@ pub struct ClickHouseSinkBuilder {
 }
 
 impl ClickHouseSinkBuilder {
-    /// Supplies the row type, generating the `INSERT` column list from
-    /// [`ClickHouseRowFamily::COLUMNS`](crate::ClickHouseRowFamily::COLUMNS).
+    /// Supplies the row type and fetches the table's schema, producing the
+    /// runnable sink.
     ///
-    /// `F` is not inferable from context, so name it:
-    /// `builder.with_row::<Owned<OrderRow>>()`. Fails on a bad column list
-    /// only for a hand-written `ClickHouseRowFamily` impl; `#[derive(ClickHouseRow)]`
-    /// rejects the same problems at compile time.
-    pub fn with_row<F: crate::ClickHouseRowFamily>(self) -> Result<ClickHouseSink, ConfigError> {
-        validate_columns(F::COLUMNS)?;
+    /// The `INSERT` column list comes from
+    /// [`ClickHouseRowFamily::COLUMNS`](crate::ClickHouseRowFamily::COLUMNS).
+    /// `system.columns` is read from every replica of every shard and checked
+    /// against that list, failing with a readable diff for a missing or
+    /// non-insertable column, replica drift, or a missing table. The fetched
+    /// types describe the rows on the wire in both formats, so there is no
+    /// sink without them.
+    ///
+    /// Run it on the builder's I/O runtime before the chain exists, via
+    /// `pipeline.block_on`. `F` is not inferable from context, so name it:
+    /// `builder.with_row::<Owned<OrderRow>>()`.
+    pub async fn with_row<F: crate::ClickHouseRowFamily>(
+        self,
+    ) -> Result<ClickHouseSink, SchemaError> {
+        validate_columns(F::COLUMNS).map_err(|e| SchemaError::Columns(e.to_string()))?;
+
+        let check = schema::SchemaCheck {
+            wire: match self.cfg.format {
+                Format::RowBinary => schema::Wire::RowBinary,
+                Format::Native => schema::Wire::Native,
+            },
+            database: self.cfg.database.clone(),
+            table: self.cfg.table.clone(),
+            columns: F::COLUMNS,
+        };
+        let schema = schema::validate(&check, &self.endpoints).await?;
 
         let insert_sql = insert_statement(&self.cfg.table, F::COLUMNS, self.cfg.format);
         let writer = ClickHouseWriter::new(
             insert_sql,
+            // A Native block names its own columns and types; a RowBinary body
+            // carries them once, ahead of the rows.
+            match self.cfg.format {
+                Format::RowBinary => Some(schema.header()),
+                Format::Native => None,
+            },
             self.cfg.settings.clone().into_iter().collect(),
             self.cfg.timeouts.send,
             self.cfg.timeouts.end,
@@ -437,16 +431,23 @@ impl ClickHouseSinkBuilder {
             endpoints: self.endpoints,
             pool: self.pool,
             format: self.cfg.format,
-            schema_check: schema::SchemaCheck {
-                mode: self.schema_mode,
-                database: self.cfg.database.clone(),
-                table: self.cfg.table.clone(),
-                columns: F::COLUMNS,
-            },
+            schema,
             probe_endpoints: self.probe_endpoints,
             shard_weights: self.shard_weights,
             distributed: self.distributed,
         })
+    }
+
+    /// A [`DistributedRouter`] over the configured shard topology, before the
+    /// schema fetch. Same placement as [`ClickHouseSink::router`], which is
+    /// the one to use once the sink exists.
+    ///
+    /// `F` is not inferable from the extractor fn item, so name it:
+    /// `builder.router::<Owned<OrderLineRow>>(order_key)`.
+    #[must_use]
+    pub fn router<F: RecFamily>(&self, extract: KeyExtractor<F>) -> DistributedRouter<F> {
+        DistributedRouter::new(extract, &self.shard_weights)
+            .expect("config validation guarantees at least one shard and weights >= 1")
     }
 }
 
@@ -461,8 +462,8 @@ pub struct ClickHouseSink {
     pub pool: SinkPoolConfig,
     /// The configured insert wire format.
     format: Format,
-    /// What `validate_schema()` will check, captured from the config.
-    schema_check: schema::SchemaCheck,
+    /// The live table's columns, fetched at `with_row`.
+    schema: Arc<RowSchema>,
     /// An independent client set for readiness probing: sharing the insert
     /// clients would report the write path healthy because probing keeps
     /// its connections warm.
@@ -474,19 +475,13 @@ pub struct ClickHouseSink {
 }
 
 impl ClickHouseSink {
-    /// Opt-in startup schema validation. Call **after**
-    /// [`with_row`](ClickHouseSinkBuilder::with_row) and **before**
-    /// `SinkPool::spawn` consumes `endpoints`; a failure here exits before
-    /// any pipeline thread or sink worker exists.
-    ///
-    /// Instant `Ok(None)` when `validate_schema: off`. Otherwise fetches
-    /// `system.columns` from every replica of every shard, fails fast
-    /// with a readable diff (missing / non-insertable columns, replica
-    /// drift, missing table), and returns the parsed schema to pass to
-    /// [`crate::ClickHouseEncoder::with_schema`] for the first-record
-    /// struct check.
-    pub async fn validate_schema(&self) -> Result<Option<Arc<RowSchema>>, SchemaError> {
-        schema::validate(&self.schema_check, &self.endpoints).await
+    /// The live table's columns, in the row struct's field order, as
+    /// [`with_row`](ClickHouseSinkBuilder::with_row) fetched them. Hand it to
+    /// [`crate::ClickHouseEncoder::with_schema`] for the first-record struct
+    /// check.
+    #[must_use]
+    pub fn schema(&self) -> Arc<RowSchema> {
+        Arc::clone(&self.schema)
     }
 
     /// The configured insert wire format.
@@ -495,23 +490,11 @@ impl ClickHouseSink {
         self.format
     }
 
-    /// Fetch the column schema and build a
-    /// [`NativeSchema`](crate::native::NativeSchema) for a
-    /// [`crate::NativeEncoder`]. `format: native` always fetches
-    /// `system.columns` (see [`Format`]), so this returns a schema whenever
-    /// Native is configured. Call after
-    /// [`with_row`](ClickHouseSinkBuilder::with_row), before the endpoints
-    /// are consumed, as with [`validate_schema`](Self::validate_schema).
-    pub async fn native_schema(&self) -> Result<Arc<crate::native::NativeSchema>, SchemaError> {
-        let schema = self.validate_schema().await?.ok_or_else(|| {
-            SchemaError::Mismatch(
-                "sink.clickhouse: `format: native` requires a fetched schema (build upgrades \
-                 validate_schema to at least `names`)"
-                    .into(),
-            )
-        })?;
-        crate::native::NativeSchema::from_row_schema(&schema)
-            .map_err(|e| SchemaError::Mismatch(format!("sink.clickhouse: {e}")))
+    /// A [`NativeSchema`](crate::native::NativeSchema) over the fetched
+    /// columns, for a [`crate::NativeEncoder`]. Fails for a column type the
+    /// Native encoder cannot lay out, before any row is encoded.
+    pub fn native_schema(&self) -> Result<Arc<crate::native::NativeSchema>, crate::NativeError> {
+        crate::native::NativeSchema::from_row_schema(&self.schema)
     }
 
     /// A readiness probe over every replica of every shard, using the
@@ -526,7 +509,7 @@ impl ClickHouseSink {
     /// A [`DistributedRouter`] over this sink's shard topology and
     /// configured weights. Its placement matches a `Distributed` table with
     /// sharding expression `xxHash64(<key column>)`. Infallible: the weights
-    /// were validated at [`build`], which runs before [`with_row`](ClickHouseSinkBuilder::with_row).
+    /// were validated at [`build`].
     ///
     /// `F` is not inferable from the extractor fn item (`Rec<'buf>`
     /// projections are not injective), so name it:
@@ -545,9 +528,7 @@ impl ClickHouseSink {
     /// returns wrong results under `optimize_skip_unused_shards`.
     ///
     /// Call **after** [`with_row`](ClickHouseSinkBuilder::with_row) and
-    /// **before** the pipeline consumes the sink, alongside
-    /// [`validate_schema`](Self::validate_schema) /
-    /// [`native_schema`](Self::native_schema).
+    /// **before** the pipeline consumes the sink.
     pub async fn validate_distributed(&self) -> Result<(), DistributedCheckError> {
         match &self.distributed {
             None => Ok(()),
@@ -587,14 +568,6 @@ pub fn from_component_config(
 /// Build from an already-deserialized config (programmatic use).
 pub fn build(cfg: ClickHouseSinkConfig) -> Result<ClickHouseSinkBuilder, ConfigError> {
     validate(&cfg)?;
-
-    // Native is type-driven: it must fetch each column's type, so it always
-    // queries `system.columns`. Upgrade `off` to `names` (this still does no
-    // strict per-type check unless the user asked for `full`).
-    let schema_mode = match (cfg.format, cfg.validate_schema) {
-        (Format::Native, SchemaValidation::Off) => SchemaValidation::Names,
-        (_, mode) => mode,
-    };
 
     // Two independent client sets: inserts and readiness probes must not
     // share connection pools (see `ClickHouseSink::probe_endpoints`).
@@ -637,7 +610,6 @@ pub fn build(cfg: ClickHouseSinkConfig) -> Result<ClickHouseSinkBuilder, ConfigE
 
     Ok(ClickHouseSinkBuilder {
         cfg,
-        schema_mode,
         endpoints,
         probe_endpoints,
         shard_weights,
@@ -755,6 +727,8 @@ fn validate(cfg: &ClickHouseSinkConfig) -> Result<(), ConfigError> {
         "insert_deduplication_token",
         "insert_deduplicate",
         "wait_end_of_query",
+        "input_format_with_names_use_header",
+        "input_format_with_types_use_header",
     ] {
         if cfg.settings.contains_key(reserved) {
             return fail(format!(
@@ -904,17 +878,14 @@ shards:
 
     #[test]
     fn minimal_config_builds_with_framework_defaults() {
-        let sink = from_component_config(&component(MINIMAL))
-            .unwrap()
-            .with_row::<Owned<IdName>>()
-            .unwrap();
+        let builder = from_component_config(&component(MINIMAL)).unwrap();
         assert_eq!(
-            sink.writer.insert_sql(),
-            "INSERT INTO `orders` (`id`, `name`) FORMAT RowBinary"
+            insert_statement("orders", IdName::COLUMNS, Format::RowBinary),
+            "INSERT INTO `orders` (`id`, `name`) FORMAT RowBinaryWithNamesAndTypes"
         );
-        assert_eq!(sink.endpoints.len(), 1);
-        assert_eq!(sink.endpoints[0].len(), 1);
-        assert_eq!(sink.pool, SinkPoolConfig::default());
+        assert_eq!(builder.endpoints.len(), 1);
+        assert_eq!(builder.endpoints[0].len(), 1);
+        assert_eq!(builder.pool, SinkPoolConfig::default());
     }
 
     #[test]
@@ -933,12 +904,10 @@ timeouts: { send: 5s, end: 60s }
 settings: { insert_quorum: "auto" }
 "#,
         ))
-        .unwrap()
-        .with_row::<Owned<IdOnly>>()
         .unwrap();
         assert_eq!(
-            sink.writer.insert_sql(),
-            "INSERT INTO `analytics`.`orders` (`id`) FORMAT RowBinary"
+            insert_statement("analytics.orders", IdOnly::COLUMNS, Format::RowBinary),
+            "INSERT INTO `analytics`.`orders` (`id`) FORMAT RowBinaryWithNamesAndTypes"
         );
         assert_eq!(sink.endpoints.len(), 2);
         assert_eq!(sink.endpoints[0].len(), 2);
@@ -981,23 +950,19 @@ settings: { insert_quorum: "auto" }
 
     #[test]
     fn a_flattened_nested_column_is_accepted_and_quoted_as_one_identifier() {
-        let sink = from_component_config(&component(
-            "table: events\nshards: [{replicas: [\"http://a\"]}]",
-        ))
-        .expect("valid sink config")
-        .with_row::<Owned<NestedTags>>()
-        .expect("dotted column names build");
+        validate_columns(NestedTags::COLUMNS).expect("dotted column names are valid");
         assert_eq!(
-            sink.writer.insert_sql(),
-            "INSERT INTO `events` (`id`, `tags.key`, `tags.value`) FORMAT RowBinary"
+            insert_statement("events", NestedTags::COLUMNS, Format::RowBinary),
+            "INSERT INTO `events` (`id`, `tags.key`, `tags.value`) \
+             FORMAT RowBinaryWithNamesAndTypes"
         );
     }
 
     /// `ClickHouseRowFamily` can be hand-written for a borrowed record
     /// family, bypassing the derive's compile-time checks entirely, so
-    /// `with_row` re-runs them at runtime.
-    #[test]
-    fn with_row_rejects_a_hand_written_familys_bad_columns() {
+    /// `with_row` re-runs them at runtime, before it reaches the server.
+    #[tokio::test]
+    async fn with_row_rejects_a_hand_written_familys_bad_columns() {
         use spate_core::deser::RecFamily;
 
         struct BadColumns;
@@ -1008,12 +973,18 @@ settings: { insert_quorum: "auto" }
             const COLUMNS: &'static [&'static str] = &["id", "id"];
         }
 
-        let err =
-            from_component_config(&component("table: t\nshards: [{replicas: [\"http://a\"]}]"))
-                .unwrap()
-                .with_row::<BadColumns>()
-                .unwrap_err();
-        assert!(err.to_string().contains("more than once"), "{err}");
+        // The replica is unroutable, so reaching it would surface as `Fetch`.
+        let err = from_component_config(&component(
+            "table: t\nshards: [{replicas: [\"http://127.0.0.1:1\"]}]",
+        ))
+        .unwrap()
+        .with_row::<BadColumns>()
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, SchemaError::Columns(ref m) if m.contains("more than once")),
+            "the column check runs before the fetch: {err}"
+        );
     }
 
     #[test]
@@ -1057,23 +1028,38 @@ settings: { insert_quorum: "auto" }
         assert!(sink.is_ok(), "boundary-valid config must build: {sink:?}");
     }
 
+    /// A configuration written against the three-mode `validate_schema` key
+    /// fails to load naming the key, rather than starting with the setting
+    /// quietly ignored.
     #[test]
-    fn validate_schema_modes_parse() {
+    fn a_stale_validate_schema_key_fails_to_parse() {
         let base = "table: t\nshards: [{replicas: [\"http://a\"]}]\n";
-        for (yaml, expected) in [
-            ("", SchemaValidation::Off),
-            ("validate_schema: off\n", SchemaValidation::Off),
-            ("validate_schema: names\n", SchemaValidation::Names),
-            ("validate_schema: full\n", SchemaValidation::Full),
-        ] {
-            let cfg: ClickHouseSinkConfig = serde_yaml::from_str(&format!("{base}{yaml}")).unwrap();
-            assert_eq!(cfg.validate_schema, expected, "for `{yaml}`");
+        for stale in ["off", "names", "full"] {
+            let err = serde_yaml::from_str::<ClickHouseSinkConfig>(&format!(
+                "{base}validate_schema: {stale}\n"
+            ))
+            .expect_err("the key is gone");
+            assert!(
+                err.to_string().contains("validate_schema"),
+                "the error must name the key: {err}"
+            );
         }
-        let err = serde_yaml::from_str::<ClickHouseSinkConfig>(&format!(
-            "{base}validate_schema: everything\n"
-        ))
-        .unwrap_err();
-        assert!(err.to_string().contains("everything"), "{err}");
+    }
+
+    /// The two header settings are managed per insert, so a configuration
+    /// cannot turn off the check the wire format exists for.
+    #[test]
+    fn the_header_settings_cannot_be_overridden() {
+        let base = "table: t\nshards: [{replicas: [\"http://a\"]}]\n";
+        for key in [
+            "input_format_with_names_use_header",
+            "input_format_with_types_use_header",
+        ] {
+            let err =
+                from_component_config(&component(&format!("{base}settings: {{ {key}: \"0\" }}")))
+                    .expect_err("a managed setting");
+            assert!(err.to_string().contains(key), "{err}");
+        }
     }
 
     #[test]
@@ -1148,34 +1134,18 @@ settings: { insert_quorum: "auto" }
         }
     }
 
+    /// Each format names itself in the `INSERT`, and only RowBinary carries
+    /// its schema separately: a Native block already names its own columns.
     #[test]
-    fn native_format_emits_native_sql_and_forces_a_schema_fetch() {
-        let sink = from_component_config(&component(
-            "table: t\nshards: [{replicas: [\"http://a\"]}]\nformat: native",
-        ))
-        .unwrap()
-        .with_row::<Owned<IdName>>()
-        .unwrap();
+    fn each_format_names_itself_in_the_insert_statement() {
         assert_eq!(
-            sink.writer.insert_sql(),
+            insert_statement("t", IdName::COLUMNS, Format::Native),
             "INSERT INTO `t` (`id`, `name`) FORMAT Native"
         );
-        assert_eq!(sink.format(), Format::Native);
-        // Native upgrades `validate_schema: off` to `names` so the encoder
-        // can learn each column's type from `system.columns`.
-        assert_eq!(sink.schema_check.mode, SchemaValidation::Names);
-    }
-
-    #[test]
-    fn native_format_keeps_an_explicit_full_validation_mode() {
-        let sink = from_component_config(&component(
-            "table: t\nshards: [{replicas: [\"http://a\"]}]\n\
-             format: native\nvalidate_schema: full",
-        ))
-        .unwrap()
-        .with_row::<Owned<IdOnly>>()
-        .unwrap();
-        assert_eq!(sink.schema_check.mode, SchemaValidation::Full);
+        assert_eq!(
+            insert_statement("t", IdName::COLUMNS, Format::RowBinary),
+            "INSERT INTO `t` (`id`, `name`) FORMAT RowBinaryWithNamesAndTypes"
+        );
     }
 
     #[test]
@@ -1251,8 +1221,6 @@ settings: { insert_quorum: "auto" }
              \x20 - replicas: [\"http://b\"]\n\
              \x20   weight: 10\n",
         ))
-        .unwrap()
-        .with_row::<Owned<IdOnly>>()
         .unwrap();
         // `&Vec<u8>` (not `&[u8]`) is forced by the KeyExtractor fn-pointer
         // type: its argument is `&'a Rec<'buf>` = `&'a Vec<u8>`.

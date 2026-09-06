@@ -81,19 +81,19 @@ fn the_native_schemas_match_their_row_structs() {
 fn rowbinary_encodes_every_schema() {
     assert!(
         drive(
-            ClickHouseEncoder::<Owned<_>>::new(),
+            ClickHouseEncoder::<Owned<_>>::unchecked(),
             rows::events(rows::ROWS)
         ) > 0
     );
     assert!(
         drive(
-            ClickHouseEncoder::<Owned<_>>::new(),
+            ClickHouseEncoder::<Owned<_>>::unchecked(),
             rows::metrics(rows::ROWS)
         ) > 0
     );
     assert!(
         drive(
-            ClickHouseEncoder::<Owned<_>>::new(),
+            ClickHouseEncoder::<Owned<_>>::unchecked(),
             rows::exotic(rows::ROWS)
         ) > 0
     );
@@ -125,7 +125,7 @@ fn the_corpora_are_pinned_across_revisions() {
     );
     assert_eq!(
         drive(
-            ClickHouseEncoder::<Owned<_>>::new(),
+            ClickHouseEncoder::<Owned<_>>::unchecked(),
             rows::events(rows::ROWS)
         ),
         125_738,
@@ -141,7 +141,7 @@ fn the_corpora_are_pinned_across_revisions() {
     );
     assert_eq!(
         drive(
-            ClickHouseEncoder::<Owned<_>>::new(),
+            ClickHouseEncoder::<Owned<_>>::unchecked(),
             rows::metrics(rows::ROWS)
         ),
         92_000,
@@ -157,7 +157,7 @@ fn the_corpora_are_pinned_across_revisions() {
     );
     assert_eq!(
         drive(
-            ClickHouseEncoder::<Owned<_>>::new(),
+            ClickHouseEncoder::<Owned<_>>::unchecked(),
             rows::exotic(rows::ROWS)
         ),
         170_463,

@@ -4,7 +4,7 @@ use super::*;
 #[ignore = "requires Docker"]
 async fn multi_frame_batches_land_and_read_back_exactly() {
     let srv = server().await;
-    let sink = sink_for(&srv.url);
+    let sink = sink_for(&srv.url).await;
 
     let expected = orders(0..1_000);
     let batch = sealed(&expected, "e2e-batch-1", 4);
@@ -27,7 +27,7 @@ async fn multi_frame_batches_land_and_read_back_exactly() {
 #[ignore = "requires Docker"]
 async fn same_token_dedupes_different_token_inserts() {
     let srv = server().await;
-    let sink = sink_for(&srv.url);
+    let sink = sink_for(&srv.url).await;
     let rows = orders(0..100);
 
     let batch = sealed(&rows, "dedup-proof", 2);
@@ -59,13 +59,17 @@ async fn same_token_dedupes_different_token_inserts() {
 #[ignore = "requires Docker"]
 async fn probe_reflects_connectivity() {
     let srv = server().await;
-    let sink = sink_for(&srv.url);
+    let sink = sink_for(&srv.url).await;
     sink.writer
         .probe(&sink.endpoints[0][0])
         .await
         .expect("probe healthy server");
 
-    let unreachable = sink_for("http://127.0.0.1:1");
+    // A server that goes away after the sink is built. Building needs a live
+    // server now, so unreachability has to be arranged rather than configured.
+    let doomed = server().await;
+    let unreachable = sink_for(&doomed.url).await;
+    drop(doomed);
     assert!(
         unreachable
             .writer

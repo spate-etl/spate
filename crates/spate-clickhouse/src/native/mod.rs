@@ -23,7 +23,7 @@
 
 mod column;
 mod dispatch;
-mod leaf;
+pub(crate) mod leaf;
 mod lowcard;
 
 use crate::schema::RowSchema;
@@ -87,11 +87,10 @@ pub enum NativeError {
         got: usize,
     },
     /// The first record's probed struct does not match the declared
-    /// columns (pre-formatted multi-line diff). Field names and order are
-    /// checked whenever the schema was fetched; under `validate_schema:
-    /// full` this also rejects class-incompatible types per position —
-    /// including a wire-wrapper scale that disagrees with the column
-    /// (`DateTime64Millis` into `DateTime64(6)`).
+    /// columns (pre-formatted multi-line diff): field names, order, and
+    /// class-incompatible types per position, including a wire-wrapper scale
+    /// that disagrees with the column (`DateTime64Millis` into
+    /// `DateTime64(6)`).
     #[error("{0}")]
     FirstRecord(String),
     /// A tuple/geo value serialized more elements than its column has.
@@ -142,15 +141,14 @@ impl NativeSchema {
     /// Build from a validated [`RowSchema`] (fetched from `system.columns`),
     /// failing fatally for any column whose type the encoder cannot lay out.
     ///
-    /// The schema's validation mode carries over to the encoder's
-    /// first-record check: under `validate_schema: full` each field's type
-    /// class is checked against the live column type, so a wire-wrapper
-    /// scale that disagrees with the table's declared precision
-    /// (`DateTime64Millis` into `DateTime64(6)`) fails on the first record
-    /// instead of silently landing wrong timestamps.
+    /// The encoder's first-record check compares each field's type class
+    /// against the live column type, so a wire-wrapper scale that disagrees
+    /// with the table's declared precision (`DateTime64Millis` into
+    /// `DateTime64(6)`) fails on the first record instead of silently landing
+    /// wrong timestamps.
     pub fn from_row_schema(schema: &RowSchema) -> Result<Arc<NativeSchema>, NativeError> {
         Self::from_expected(RowSchema {
-            mode: schema.mode,
+            wire: crate::schema::Wire::Native,
             table: schema.table.clone(),
             columns: schema.columns.clone(),
         })
@@ -171,14 +169,14 @@ impl NativeSchema {
     /// e.g. `[("id", "UInt64"), ("tags", "Array(LowCardinality(String))")]`.
     ///
     /// The normal path is [`ClickHouseSink::native_schema`](crate::ClickHouseSink::native_schema),
-    /// which fetches the real types from `system.columns`. Use this only when
+    /// which takes the real types from `system.columns`. Use this only when
     /// the schema is known statically; the type strings must match the
     /// server's column types exactly, or the server will reject the block.
-    /// The first-record check runs at name level only (there is no fetched
-    /// truth to compare type classes against).
+    /// The first-record check then compares the row against the types named
+    /// here rather than against the table.
     pub fn from_columns(specs: &[(&str, &str)]) -> Result<Arc<NativeSchema>, NativeError> {
         Self::from_expected(RowSchema {
-            mode: crate::config::SchemaValidation::Names,
+            wire: crate::schema::Wire::Native,
             table: "<static schema>".into(),
             columns: specs
                 .iter()

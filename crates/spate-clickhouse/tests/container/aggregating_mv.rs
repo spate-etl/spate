@@ -104,14 +104,14 @@ async fn create_null_and_mv(admin: &clickhouse::Client) {
 
 /// A sink pointed at the Null landing table, with MV dedup enabled so the
 /// per-batch token reaches the AggregatingMergeTree target.
-fn null_sink(url: &str) -> config::ClickHouseSink {
+async fn null_sink(url: &str) -> config::ClickHouseSink {
     sink_with::<Owned<OrderRollup>>(
         url,
         "orders_null",
-        "off",
         "user: default\npassword: agg-secret\n\
          settings: { deduplicate_blocks_in_dependent_materialized_views: \"1\" }",
     )
+    .await
 }
 
 async fn merged_min(admin: &clickhouse::Client, region: &str) -> u32 {
@@ -153,7 +153,7 @@ async fn aggregate_states_round_trip_through_null_and_mv() {
     let srv = bare_server("26.3", "agg-secret").await;
     create_target(&srv.admin).await;
     create_null_and_mv(&srv.admin).await;
-    let sink = null_sink(&srv.url);
+    let sink = null_sink(&srv.url).await;
 
     let ev = rollups();
     let batch = sealed(&ev, "agg-1", 1);
@@ -184,7 +184,7 @@ async fn mv_dedup_keeps_retries_exactly_once() {
     let srv = bare_server("26.3", "agg-secret").await;
     create_target(&srv.admin).await;
     create_null_and_mv(&srv.admin).await;
-    let sink = null_sink(&srv.url);
+    let sink = null_sink(&srv.url).await;
 
     let ev = rollups();
     let batch = sealed(&ev, "agg-dup", 1);
@@ -237,16 +237,13 @@ async fn direct_insert_into_aggregate_function_column_is_rejected() {
         last_placed_at: u32,
         qty_by_sku: u64,
     }
-    let sink = sink_with::<Owned<AggDirectRow>>(
+    let err = try_sink_with::<Owned<AggDirectRow>>(
         &srv.url,
         "orders_agg",
-        "names",
         "user: default\npassword: agg-secret\n",
-    );
-    let err = sink
-        .validate_schema()
-        .await
-        .expect_err("the sink must refuse to write aggregate states directly");
+    )
+    .await
+    .expect_err("the sink must refuse to write aggregate states directly");
     let msg = err.to_string();
     assert!(msg.contains("AggregateFunction"), "{msg}");
     assert!(msg.contains("Null"), "{msg}");

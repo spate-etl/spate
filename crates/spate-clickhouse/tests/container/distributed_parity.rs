@@ -420,7 +420,7 @@ async fn create_weighted_tables(c: &Cluster) {
 /// A sink over the given `(url, weight)` shards in order, writing the given
 /// shard-local table as RowBinary, with an optional `distributed_check:`
 /// block appended verbatim.
-fn parity_sink(
+async fn parity_sink(
     table: &str,
     shards: &[(&str, u32)],
     pw: &str,
@@ -443,7 +443,8 @@ fn parity_sink(
     config::build(cfg)
         .expect("valid sink config")
         .with_row::<Owned<LineRow>>()
-        .expect("valid columns")
+        .await
+        .expect("schema fetch")
 }
 
 /// Drive one full pipeline: memory source -> `BatchDeser` -> `flat_map`
@@ -459,6 +460,7 @@ async fn run_pipeline(sink: config::ClickHouseSink, payloads: &[String]) -> Drai
     let router = sink.router::<Owned<LineRow>>(sku_key);
     let pool_cfg = sink.pool;
     let writer = Arc::new(sink.writer.clone());
+    let schema = sink.schema();
     let endpoints = sink.endpoints; // partial move; the rest of `sink` drops at scope end
 
     let (queues, receivers) = shard_queues(num_shards, 256);
@@ -467,7 +469,7 @@ async fn run_pipeline(sink: config::ClickHouseSink, payloads: &[String]) -> Drai
     let mut driver = chain(BatchDeser)
         .flat_map::<Owned<LineRow>, _>(explode)
         .sink(
-            ClickHouseEncoder::<Owned<LineRow>>::new(),
+            ClickHouseEncoder::<Owned<LineRow>>::with_schema(schema),
             router,
             ChunkConfig::default(),
             queues,
@@ -605,7 +607,8 @@ async fn distributed_insert_and_sink_place_rows_identically() {
         &[(&c.node0.url, 1), (&c.node1.url, 1)],
         pw,
         None,
-    );
+    )
+    .await;
     let report = run_pipeline(sink, &payloads).await;
     assert_eq!(
         report.abandoned, 0,
@@ -825,7 +828,8 @@ async fn weighted_distributed_insert_and_sink_place_rows_identically() {
         &[(&c.node0.url, 9), (&c.node1.url, 10)],
         pw,
         Some(WEIGHTED_CHECK),
-    );
+    )
+    .await;
     sink.validate_distributed()
         .await
         .expect("the matching weighted config must pass the startup check");
@@ -834,7 +838,8 @@ async fn weighted_distributed_insert_and_sink_place_rows_identically() {
         &[(&c.node0.url, 1), (&c.node1.url, 1)],
         pw,
         Some(WEIGHTED_CHECK),
-    );
+    )
+    .await;
     let err = drifted
         .validate_distributed()
         .await

@@ -99,10 +99,10 @@ the lines on the way:
 ```
 
 :::warning
-RowBinary carries no column names, so **`OrderRow`'s field declaration
-order is the insert column order**. Order is the wire contract. The
-`validate_schema` option below catches a mismatch against the live table
-at startup instead of at 3 a.m.
+The rows carry no column names, so **`OrderRow`'s field declaration order is
+the insert column order**. Order is the wire contract. Building the sink
+checks the derived columns against the live table, so a mismatch surfaces at
+startup instead of at 3 a.m.
 :::
 
 ## 3. The YAML
@@ -160,9 +160,6 @@ sink:
       - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
     user: ${CLICKHOUSE_USER:-default}
     password: ${CLICKHOUSE_PASSWORD:-}
-    # Fail startup (and the first record) when the derived columns and the
-    # live table disagree: off | names | full.
-    validate_schema: full
     batch:
       max_rows: 500000
       max_bytes: 128MiB
@@ -201,8 +198,8 @@ Walking the assembly:
   and the shared I/O runtime. Point `SPATE_CONFIG` elsewhere to reconfigure
   without recompiling.
 - **`pipeline.io_handle()` / `pipeline.block_on(..)`** give connectors the
-  I/O runtime *before* `run`. The schema-registry fetcher and the
-  `validate_schema` pre-flight both use it.
+  I/O runtime *before* `run`. The schema-registry fetcher and the sink's
+  schema fetch both use it.
 - **`.sink(sink)`** spawns the sharded sink workers and wires the drain and
   the `/readyz` probe. The single `sink:` section above is addressed as
   `"default"`; a pipeline with several named sinks resolves each by name.

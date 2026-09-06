@@ -92,6 +92,8 @@ because the delivery guarantees are defined in terms of them:
 | `insert_deduplication_token` | Minted deterministically per sealed batch; overriding it breaks same-batch retry idempotence. |
 | `insert_deduplicate` | Must stay on for the token to mean anything. |
 | `wait_end_of_query` | Forced to `1` — the synchronous server acknowledgment *is* the durable-ack point the checkpointer commits behind. |
+| `input_format_with_names_use_header` | Forced to `1`. With it off the server ignores the insert header and maps the rows by position again. |
+| `input_format_with_types_use_header` | Forced to `1`, for the same reason: it is what compares the header's types against the table's. |
 
 ## Security (TLS)
 

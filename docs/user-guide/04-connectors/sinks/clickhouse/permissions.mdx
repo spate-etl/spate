@@ -38,9 +38,10 @@ Grant `INSERT` on the local table on **every replica of every shard**, not on
 a Distributed table, which the sink never inserts through.
 
 :::warning The writer profile must allow changing settings
-Every insert sets `insert_deduplicate`, `insert_deduplication_token`, and
-`wait_end_of_query` (these are managed by the sink and cannot be
-overridden), plus any keys from your `settings:` map. A `readonly = 1` profile,
+Every insert sets `insert_deduplicate`, `insert_deduplication_token`,
+`wait_end_of_query`, `input_format_with_names_use_header` and
+`input_format_with_types_use_header` (these are managed by the sink and cannot
+be overridden), plus any keys from your `settings:` map. A `readonly = 1` profile,
 or a settings **constraint** that pins any of these, fails the write. Keep the
 writer's profile at `readonly = 0` and leave those settings unconstrained. The
 tokens are what make retries idempotent; see the

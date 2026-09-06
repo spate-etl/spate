@@ -485,7 +485,7 @@ mod first_record_check {
     }
 
     #[test]
-    fn full_mode_rejects_a_wrapper_scale_mismatch() {
+    fn a_wrapper_scale_mismatch_is_rejected() {
         // The struct declares milli scale via the wire wrapper; the table
         // column is micro precision. Without this check every timestamp
         // would land ~1000x too small (1970-era); the raw Int64 layout
@@ -511,7 +511,7 @@ mod first_record_check {
     }
 
     #[test]
-    fn full_mode_accepts_a_matching_wrapper_scale_and_encodes_raw_int64() {
+    fn a_matching_wrapper_scale_encodes_the_raw_int64() {
         #[derive(Serialize)]
         struct R {
             ts: DateTime64Millis,
@@ -534,8 +534,8 @@ mod first_record_check {
     }
 
     #[test]
-    fn full_mode_rejects_a_class_incompatible_plain_field() {
-        // Not just wrappers: `full` brings the whole class matrix to the
+    fn a_class_incompatible_plain_field_is_rejected() {
+        // Not just wrappers: the whole class matrix reaches the
         // Native path (a u64 field cannot feed an Int64 column).
         #[derive(Serialize)]
         struct R {
@@ -550,8 +550,8 @@ mod first_record_check {
     }
 
     #[test]
-    fn full_mode_cannot_check_an_undeclared_scale() {
-        // A plain i64 declares no scale, so `full` has nothing to compare:
+    fn an_undeclared_scale_cannot_be_checked() {
+        // A plain i64 declares no scale, so there is nothing to compare:
         // the docs tell users to declare intent through the wrappers.
         #[derive(Serialize)]
         struct R {

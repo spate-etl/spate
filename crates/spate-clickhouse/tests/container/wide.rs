@@ -13,10 +13,10 @@
 // toString(row 1) == toString(row 2), which sidesteps both client-side
 // decode limits and hand-computed server formatting.
 //
-// `Time`/`Time64` are covered here from 26.3 on, where the type is enabled by
-// default. `enable_time_time64_type=1` is what a server between 25.6 and that
-// point needs, for the DDL and for the insert alike; `column-types.mdx` states
-// it as the user-facing requirement.
+// `Time`/`Time64` are covered from 26.3, which creates the columns without
+// `enable_time_time64_type=1`; 25.8 refuses the DDL without it. Neither
+// accepts the insert any differently for it, headed or not, so nothing here
+// carries the setting.
 
 use super::*;
 use ::chrono::{DateTime, TimeZone, Utc};

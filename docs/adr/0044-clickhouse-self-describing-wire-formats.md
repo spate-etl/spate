@@ -101,8 +101,9 @@ and the breaker surface writes that fail; this one succeeds.
 A container test, `rowbinary_header::a_same_width_alter_is_rejected_rather_than_silently_miswritten`,
 which is the reproduction from #410: it writes a batch, alters
 `Decimal(18, 4)` to `Decimal(18, 2)` and `DateTime64(3)` to `DateTime64(6)`,
-and asserts the next write fails with code 117. Reverting the format to plain
-`RowBinary` makes that write succeed, which is the defect.
+and asserts the next write fails with code 117. Putting the sink back on plain
+`RowBinary` — the format keyword and the body's header together — makes that
+write succeed, which is the defect.
 
 Structurally, `ClickHouseSink` is reachable only through `with_row`, which
 fetches, so a sink whose writer has no header cannot be constructed.

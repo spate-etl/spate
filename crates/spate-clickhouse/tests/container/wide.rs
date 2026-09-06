@@ -13,10 +13,10 @@
 // toString(row 1) == toString(row 2), which sidesteps both client-side
 // decode limits and hand-computed server formatting.
 //
-// `Time`/`Time64` need `enable_time_time64_type=1` to create the columns, so
-// the DDL client carries it. The sink's `settings:` map carries it too, which
-// 26.3 does not require for the insert; a server that reads the header's type
-// names under the same gate as the DDL would.
+// `Time`/`Time64` are covered here from 26.3 on, where the type is enabled by
+// default. `enable_time_time64_type=1` is what a server between 25.6 and that
+// point needs, for the DDL and for the insert alike; `column-types.mdx` states
+// it as the user-facing requirement.
 
 use super::*;
 use ::chrono::{DateTime, TimeZone, Utc};
@@ -211,8 +211,7 @@ async fn wide_type_table_round_trips() {
     let ddl_client = srv
         .admin
         .clone()
-        .with_setting("allow_experimental_json_type", "1")
-        .with_setting("enable_time_time64_type", "1");
+        .with_setting("allow_experimental_json_type", "1");
     ddl_client.query(DDL).execute().await.expect("create wide");
 
     // Row 1: full startup validation against the real system.columns,
@@ -221,8 +220,7 @@ async fn wide_type_table_round_trips() {
         &srv.url,
         "wide",
         "user: default\npassword: wide-secret\n\
-             settings: { input_format_binary_read_json_as_string: \"1\", \
-                         enable_time_time64_type: \"1\" }",
+             settings: { input_format_binary_read_json_as_string: \"1\" }",
     )
     .await;
     let schema = sink.schema();

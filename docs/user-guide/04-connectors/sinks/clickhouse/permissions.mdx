@@ -51,30 +51,26 @@ additional privilege.
 
 ## Grants by feature
 
-These features add read access to system tables. The sink only ever
-**reads** them; it issues no DDL against them.
+Some features read a system table beyond what the `INSERT` grant already
+exposes. The sink only ever **reads** them; it issues no DDL against them.
+
+:::note Reading `system.columns` needs no grant
+ClickHouse shows a user only the `system.columns` rows for objects it already
+holds a grant on. The writer holds `INSERT` on the target table, so it sees
+that table's columns and the schema fetch succeeds on that grant alone. A table
+the account has no grant on returns no rows, which the sink reports as a
+missing table.
+:::
 
 | Feature (config) | Extra grant | What the sink reads it for |
 |---|---|---|
-| `validate_schema: names` \| `full`, **or** `format: native` | `SELECT ON system.columns` | Fetch each column's name/type/default to validate the row contract (and, for Native, to lay out columnar bytes). `format: native` forces this on even when `validate_schema` is `off`. |
 | `distributed_check:` block present | `SELECT ON system.clusters`, `SELECT ON system.tables` | Read cluster topology (shard count/weights) and the Distributed table's engine DDL to confirm the sink's routing matches the cluster. |
 
 ```sql
--- Only if schema validation is on, or format: native (see Schema validation
--- and Native format).
-GRANT SELECT ON system.columns TO spate_writer;
-
 -- Only if the distributed_check startup guard is enabled (see Distributed parity).
 GRANT SELECT ON system.clusters TO spate_writer;
 GRANT SELECT ON system.tables  TO spate_writer;
 ```
-
-:::note System-table reads are already row-filtered
-ClickHouse only shows a user the `system.columns`/`system.tables` rows for
-objects it has some grant on. Because the writer already holds `INSERT` on the
-target table, it sees that table's rows, and no extra object grant is needed
-for introspection to succeed.
-:::
 
 The `distributed_check` guard reads from its `endpoint` (defaults to the first
 replica of shard 0; override it when the Distributed table lives on a front
@@ -83,15 +79,13 @@ endpoint.
 
 ## A complete role-based grant
 
-Putting it together for a fully-featured deployment (schema validation on,
-distributed check enabled). Run as an admin account that has
-`access_management` on each node:
+Putting it together for a fully-featured deployment (distributed check
+enabled). Run as an admin account that has `access_management` on each node:
 
 ```sql
 CREATE ROLE IF NOT EXISTS spate_sink;
 
 GRANT INSERT ON analytics.orders_local TO spate_sink;   -- on every shard node
-GRANT SELECT ON system.columns         TO spate_sink;   -- schema validation / native
 GRANT SELECT ON system.clusters        TO spate_sink;   -- distributed_check
 GRANT SELECT ON system.tables          TO spate_sink;   -- distributed_check
 
@@ -115,9 +109,9 @@ tables above. An account with only the grants on this page, and no
 
 - [ClickHouse sink](./README.mdx) — the full config reference; `user`/`password`
   name the account these grants apply to.
-- [Schema validation](./schema-validation.mdx) — the
-  `validate_schema` modes that pull in `SELECT ON system.columns`.
-- [Native format](./native-format.mdx) — `format: native`, which forces the
-  `system.columns` fetch on.
+- [Schema validation](./schema-validation.mdx) — the `system.columns` read the
+  `INSERT` grant already covers.
+- [Native format](./native-format.mdx) — `format: native`, which reads the
+  column types to lay out columnar bytes.
 - [Distributed parity](./distributed-parity.mdx) — the `distributed_check` guard
   that reads `system.clusters` and `system.tables`.

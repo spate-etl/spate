@@ -119,7 +119,7 @@ not created in the same commit as the pipeline.
 - [ClickHouse sink](./README.mdx) — the full sink configuration, including the
   deduplication window warning.
 - [Permissions](./permissions.mdx) — validation reads `system.columns`, which
-  needs a grant beyond the minimal `INSERT`-only role.
+  the target table's `INSERT` grant already covers.
 - [Assembling a pipeline](../../../03-guides/assembling-a-pipeline.mdx) — where
   `block_on` pre-steps fit in the builder flow.
 - [Error handling](../../../02-concepts/04-error-handling.mdx) — how fatal errors

@@ -285,12 +285,16 @@ where
 /// A pinned-version server. Newer official images set up a required
 /// password unless one is provided, so this always configures explicit
 /// credentials (unlike the module's ancient default image).
+///
+/// `default` holds `access_management`, which the image otherwise withholds,
+/// so a test can mint a restricted user and check what that user can reach.
 async fn bare_server(tag: &str, password: &str) -> Server {
     let container = started_only(
         ClickHouse::default()
             .with_tag(tag)
             .with_env_var("CLICKHOUSE_USER", "default")
-            .with_env_var("CLICKHOUSE_PASSWORD", password),
+            .with_env_var("CLICKHOUSE_PASSWORD", password)
+            .with_env_var("CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT", "1"),
     )
     .start()
     .await
@@ -335,6 +339,8 @@ mod native_edges;
 mod nested_flat;
 #[path = "container/partition_dedup.rs"]
 mod partition_dedup;
+#[path = "container/permissions.rs"]
+mod permissions;
 #[path = "container/schema.rs"]
 mod schema;
 #[cfg(all(feature = "uuid", feature = "chrono", feature = "time"))]

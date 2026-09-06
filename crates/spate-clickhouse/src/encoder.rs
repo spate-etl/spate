@@ -22,10 +22,10 @@ use std::sync::Arc;
 /// `Rec<'buf>` points into the payload buffer for zero-copy pipelines. Any
 /// family whose records implement `Serialize` at every lifetime encodes.
 ///
-/// The row struct's **field declaration order is the wire contract**: it
-/// must match the column list configured for the sink (see the crate docs).
-/// [`ClickHouseEncoder::with_schema`] checks that contract against the
-/// live table's schema on each pipeline thread's first record.
+/// The row struct's **field declaration order is the wire contract**: it is
+/// the insert column list `#[derive(ClickHouseRow)]` generates (see the
+/// crate docs). [`ClickHouseEncoder::with_schema`] checks that contract
+/// against the live table's schema on each pipeline thread's first record.
 #[derive(Debug)]
 pub struct ClickHouseEncoder<F> {
     check: Option<CheckState>,

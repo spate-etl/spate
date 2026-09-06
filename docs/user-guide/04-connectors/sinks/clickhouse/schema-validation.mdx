@@ -89,6 +89,11 @@ shape needs a value to record. A mismatch is a fatal error that stops the
 pipeline before the batch is sent. Steady-state cost after the first record
 is one predictable branch, with nothing on the per-record hot path.
 
+`with_row::<F>()` and `ClickHouseEncoder::<F>` take the record family
+independently, so nothing stops naming a different row type at each call
+site; agreement holds only when the same struct names both. Getting this
+wrong is exactly what the first-record half above still catches.
+
 Because the startup half derives its expected columns from the same struct
 the encoder serializes, a struct-vs-table disagreement is caught before any
 thread spawns rather than at the first record. Because it queries every

@@ -86,7 +86,7 @@ pub enum NativeError {
         /// Fields the row serialized.
         got: usize,
     },
-    /// The first record's probed struct does not match the configured
+    /// The first record's probed struct does not match the declared
     /// columns (pre-formatted multi-line diff). Field names and order are
     /// checked whenever the schema was fetched; under `validate_schema:
     /// full` this also rejects class-incompatible types per position —

@@ -1085,6 +1085,18 @@ settings: { insert_quorum: "auto" }
         assert!(err.to_string().contains("max_rowz"), "{err}");
     }
 
+    /// A YAML still holding the removed `columns` key fails to load, naming
+    /// the key, rather than silently ignoring it or shadowing the derived
+    /// column list.
+    #[test]
+    fn a_stale_columns_key_is_rejected_with_a_path() {
+        let err = from_component_config(&component(
+            "table: orders\ncolumns: [id]\nshards: [{replicas: [\"http://a\"]}]",
+        ))
+        .unwrap_err();
+        assert!(err.to_string().contains("columns"), "{err}");
+    }
+
     #[test]
     fn compression_parses_and_defaults_to_lz4() {
         let base = "table: t\nshards: [{replicas: [\"http://a\"]}]\n";

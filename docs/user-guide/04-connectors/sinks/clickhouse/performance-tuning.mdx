@@ -22,11 +22,14 @@ parts, little merge pressure), **overlap enough of them** to keep the server
 busy, and **spend client CPU and network only where they are scarce**.
 Almost every setting below is a lever on one of those goals.
 
-Some insert settings are fixed no matter how you tune, because they are the
-at-least-once contract: the sink always sends and **reserves** exactly
-`insert_deduplicate=1`, a per-batch `insert_deduplication_token`, and
-`wait_end_of_query=1`. These cannot be overridden through the `settings:`
-map; the config rejects them at load. Together they mean a successful insert is
+Some insert settings are fixed no matter how you tune. Three are the
+at-least-once contract: the sink always sends `insert_deduplicate=1`, a
+per-batch `insert_deduplication_token`, and `wait_end_of_query=1`. Two more
+are the wire format's: `input_format_with_names_use_header=1` and
+`input_format_with_types_use_header=1`, which are what make the server check
+the insert header against the table. All five are **reserved** — they cannot
+be overridden through the `settings:` map, and the config rejects them at
+load. Together they mean a successful insert is
 durably committed and a retried batch is deduplicated rather than doubled (the
 token is honored even on ClickHouse's async-insert path). Everything else under
 `settings:` is yours, **including `wait_for_async_insert`, which is *not*

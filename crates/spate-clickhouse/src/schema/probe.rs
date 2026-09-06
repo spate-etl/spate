@@ -403,19 +403,29 @@ impl ser::SerializeStruct for StructShape {
     }
 }
 
+/// Which encoder is asking. `FixedString(N)` is the one column class the two
+/// wire formats take a different Rust field for, so the check has to know.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Wire {
+    /// Row-wise: every field is exactly the column's width.
+    RowBinary,
+    /// Columnar: the writer pads a short `FixedString` value.
+    Native,
+}
+
 /// Class-based compatibility between a recorded shape and a parsed
 /// column type. Permissive except for the `Nullable` hard rule.
-pub(crate) fn compatible(shape: &Shape, ty: &ChType) -> bool {
+pub(crate) fn compatible(shape: &Shape, ty: &ChType, wire: Wire) -> bool {
     // LowCardinality is wire-transparent on insert.
     if let ChType::LowCardinality(inner) = ty {
-        return compatible(shape, inner);
+        return compatible(shape, inner, wire);
     }
 
     // The Nullable null-prefix byte is a wire-format difference:
     // Option-ness must match exactly, both directions, before any
     // permissiveness applies.
     match (shape, ty) {
-        (Shape::Option(inner), ChType::Nullable(t)) => return compatible(inner, t),
+        (Shape::Option(inner), ChType::Nullable(t)) => return compatible(inner, t, wire),
         (Shape::Option(_), _) | (_, ChType::Nullable(_)) => return false,
         _ => {}
     }
@@ -441,7 +451,7 @@ pub(crate) fn compatible(shape: &Shape, ty: &ChType) -> bool {
         }
         return match newtype_rule(name) {
             Some(rule) => rule(ty),
-            None => compatible(inner, ty),
+            None => compatible(inner, ty, wire),
         };
     }
 
@@ -449,7 +459,7 @@ pub(crate) fn compatible(shape: &Shape, ty: &ChType) -> bool {
     if let ChType::Named(n) = ty
         && let Some(equiv) = geo_equiv(n)
     {
-        return compatible(shape, &equiv);
+        return compatible(shape, &equiv, wire);
     }
 
     match shape {
@@ -476,26 +486,31 @@ pub(crate) fn compatible(shape: &Shape, ty: &ChType) -> bool {
         Shape::U128 => is_named(ty, &["UInt128"]),
         Shape::F32 => is_named(ty, &["Float32"]),
         Shape::F64 => is_named(ty, &["Float64"]),
-        Shape::Str | Shape::Bytes => is_named(ty, &["String", "JSON"]),
-        Shape::Seq(inner) => matches!(ty, ChType::Array(t) if compatible(inner, t)),
-        Shape::Map(k, v) => {
-            matches!(ty, ChType::Map(kt, vt) if compatible(k, kt) && compatible(v, vt))
+        // Native pads a short value into `FixedString(N)`; a RowBinary row
+        // has to supply exactly `N` bytes, which probes as a tuple of `u8`.
+        Shape::Str | Shape::Bytes => {
+            is_named(ty, &["String", "JSON"])
+                || (wire == Wire::Native && matches!(ty, ChType::FixedString(_)))
         }
-        Shape::Tuple(elems) => tuple_compatible(elems, ty),
+        Shape::Seq(inner) => matches!(ty, ChType::Array(t) if compatible(inner, t, wire)),
+        Shape::Map(k, v) => {
+            matches!(ty, ChType::Map(kt, vt) if compatible(k, kt, wire) && compatible(v, vt, wire))
+        }
+        Shape::Tuple(elems) => tuple_compatible(elems, ty, wire),
         Shape::Struct(fields) => {
             let shapes: Vec<Shape> = fields.iter().map(|f| f.shape.clone()).collect();
-            tuple_compatible(&shapes, ty)
+            tuple_compatible(&shapes, ty, wire)
         }
         // Handled by the early returns above.
         Shape::Option(_) | Shape::Newtype(..) | Shape::Unknown => true,
     }
 }
 
-fn tuple_compatible(elems: &[Shape], ty: &ChType) -> bool {
+fn tuple_compatible(elems: &[Shape], ty: &ChType, wire: Wire) -> bool {
     let all_u8 = || elems.iter().all(|s| matches!(s, Shape::U8));
     match ty {
         ChType::Tuple(ts) => {
-            elems.len() == ts.len() && elems.iter().zip(ts).all(|(s, t)| compatible(s, t))
+            elems.len() == ts.len() && elems.iter().zip(ts).all(|(s, t)| compatible(s, t, wire))
         }
         // [u8; N] probes as N U8 elements, the same wire as FixedString(N).
         ChType::FixedString(n) => elems.len() == *n as usize && all_u8(),
@@ -645,7 +660,7 @@ mod tests {
     use serde::Serialize;
 
     fn ok(shape: &Shape, ty: &str) -> bool {
-        compatible(shape, &parse(ty))
+        compatible(shape, &parse(ty), Wire::RowBinary)
     }
 
     #[test]
@@ -828,10 +843,18 @@ mod tests {
             }
         })
         .unwrap();
-        assert!(compatible(&millis[0].shape, &parse("DateTime64(3)")));
-        assert!(compatible(&millis[0].shape, &parse("Int64")));
+        assert!(compatible(
+            &millis[0].shape,
+            &parse("DateTime64(3)"),
+            Wire::RowBinary
+        ));
+        assert!(compatible(
+            &millis[0].shape,
+            &parse("Int64"),
+            Wire::RowBinary
+        ));
         assert!(
-            !compatible(&millis[0].shape, &parse("DateTime64(6)")),
+            !compatible(&millis[0].shape, &parse("DateTime64(6)"), Wire::RowBinary),
             "precision mismatch is exactly the bug this catches"
         );
 
@@ -847,11 +870,31 @@ mod tests {
             ubig: UInt256::from_u128(1),
         })
         .unwrap();
-        assert!(compatible(&fields[0].shape, &parse("Decimal(18, 4)")));
-        assert!(!compatible(&fields[0].shape, &parse("Decimal(9, 4)")));
-        assert!(compatible(&fields[1].shape, &parse("Int256")));
-        assert!(!compatible(&fields[1].shape, &parse("UInt256")));
-        assert!(compatible(&fields[2].shape, &parse("UInt256")));
+        assert!(compatible(
+            &fields[0].shape,
+            &parse("Decimal(18, 4)"),
+            Wire::RowBinary
+        ));
+        assert!(!compatible(
+            &fields[0].shape,
+            &parse("Decimal(9, 4)"),
+            Wire::RowBinary
+        ));
+        assert!(compatible(
+            &fields[1].shape,
+            &parse("Int256"),
+            Wire::RowBinary
+        ));
+        assert!(!compatible(
+            &fields[1].shape,
+            &parse("UInt256"),
+            Wire::RowBinary
+        ));
+        assert!(compatible(
+            &fields[2].shape,
+            &parse("UInt256"),
+            Wire::RowBinary
+        ));
 
         // Unknown newtype names fall through to the inner shape.
         #[derive(Serialize)]
@@ -861,8 +904,16 @@ mod tests {
             w: MyWrapper,
         }
         let fields = probe_row(&R2 { w: MyWrapper(1) }).unwrap();
-        assert!(compatible(&fields[0].shape, &parse("UInt32")));
-        assert!(compatible(&fields[0].shape, &parse("DateTime")));
+        assert!(compatible(
+            &fields[0].shape,
+            &parse("UInt32"),
+            Wire::RowBinary
+        ));
+        assert!(compatible(
+            &fields[0].shape,
+            &parse("DateTime"),
+            Wire::RowBinary
+        ));
     }
 
     #[test]
@@ -880,27 +931,47 @@ mod tests {
         })
         .unwrap();
 
-        assert!(compatible(&fields[1].shape, &parse("Decimal(18, 4)")));
+        assert!(compatible(
+            &fields[1].shape,
+            &parse("Decimal(18, 4)"),
+            Wire::RowBinary
+        ));
         assert!(
-            !compatible(&fields[1].shape, &parse("Decimal(18, 2)")),
+            !compatible(&fields[1].shape, &parse("Decimal(18, 2)"), Wire::RowBinary),
             "the scale must agree, not just the width"
         );
 
         // The Decimal64(S) sugar carries the same precision.
-        assert!(compatible(&fields[1].shape, &parse("Decimal64(4)")));
-        assert!(!compatible(&fields[1].shape, &parse("Decimal64(2)")));
+        assert!(compatible(
+            &fields[1].shape,
+            &parse("Decimal64(4)"),
+            Wire::RowBinary
+        ));
+        assert!(!compatible(
+            &fields[1].shape,
+            &parse("Decimal64(2)"),
+            Wire::RowBinary
+        ));
 
-        assert!(compatible(&fields[0].shape, &parse("Decimal(9, 2)")));
+        assert!(compatible(
+            &fields[0].shape,
+            &parse("Decimal(9, 2)"),
+            Wire::RowBinary
+        ));
         assert!(
-            !compatible(&fields[0].shape, &parse("Decimal(18, 2)")),
+            !compatible(&fields[0].shape, &parse("Decimal(18, 2)"), Wire::RowBinary),
             "Decimal32 is Int32-wide"
         );
         assert!(
-            compatible(&fields[2].shape, &parse("Decimal(38, 10)")),
+            compatible(&fields[2].shape, &parse("Decimal(38, 10)"), Wire::RowBinary),
             "a two-digit scale survives the name"
         );
         assert!(
-            !compatible(&fields[1].shape, &parse("Nullable(Decimal(18, 4))")),
+            !compatible(
+                &fields[1].shape,
+                &parse("Nullable(Decimal(18, 4))"),
+                Wire::RowBinary
+            ),
             "the Nullable prefix byte needs an Option field"
         );
     }
@@ -922,17 +993,89 @@ mod tests {
         })
         .unwrap();
 
-        assert!(compatible(&fields[0].shape, &parse("Decimal256(10)")));
-        assert!(compatible(&fields[0].shape, &parse("Decimal(76, 10)")));
-        assert!(compatible(&fields[0].shape, &parse("Decimal(39, 0)")));
+        assert!(compatible(
+            &fields[0].shape,
+            &parse("Decimal256(10)"),
+            Wire::RowBinary
+        ));
+        assert!(compatible(
+            &fields[0].shape,
+            &parse("Decimal(76, 10)"),
+            Wire::RowBinary
+        ));
+        assert!(compatible(
+            &fields[0].shape,
+            &parse("Decimal(39, 0)"),
+            Wire::RowBinary
+        ));
         assert!(
-            !compatible(&fields[0].shape, &parse("Decimal(38, 2)")),
+            !compatible(&fields[0].shape, &parse("Decimal(38, 2)"), Wire::RowBinary),
             "Decimal(38, _) is Int128-wide"
         );
         assert!(
-            !compatible(&fields[1].shape, &parse("Decimal256(10)")),
+            !compatible(&fields[1].shape, &parse("Decimal256(10)"), Wire::RowBinary),
             "there is no unsigned decimal"
         );
+    }
+
+    /// A date or time column takes the Rust integer whose signedness matches
+    /// the column's backing type, so the same eight bytes are accepted for
+    /// `Int64`-backed columns and refused for a `u64`.
+    #[test]
+    fn date_and_time_columns_follow_their_backing_signedness() {
+        // Unsigned on the server, unsigned in the row.
+        assert!(ok(&Shape::U16, "Date")); // UInt16
+        assert!(ok(&Shape::U32, "DateTime")); // UInt32
+        assert!(!ok(&Shape::I32, "DateTime"));
+
+        // Signed on the server, signed in the row. `DateTime64` and `Time64`
+        // carry instants before 1970 as negative ticks, which a `u64` cannot
+        // express, so the widths matching is not enough.
+        assert!(ok(&Shape::I32, "Date32")); // Int32
+        assert!(ok(&Shape::I32, "Time")); // Int32
+        assert!(ok(&Shape::I64, "DateTime64(3)")); // Int64
+        assert!(ok(&Shape::I64, "Time64(3)")); // Int64
+        assert!(!ok(&Shape::U64, "DateTime64(3)"));
+        assert!(!ok(&Shape::U64, "Time64(3)"));
+        assert!(!ok(&Shape::U16, "Date32"));
+    }
+
+    /// `FixedString(N)` is the one column class whose Rust field differs by
+    /// wire format: Native pads a short `String`, RowBinary needs the exact
+    /// bytes.
+    #[test]
+    fn fixed_string_takes_a_string_only_under_native() {
+        assert!(compatible(
+            &Shape::Str,
+            &parse("FixedString(8)"),
+            Wire::Native
+        ));
+        assert!(!compatible(
+            &Shape::Str,
+            &parse("FixedString(8)"),
+            Wire::RowBinary
+        ));
+
+        // The exact-width byte array is right under both.
+        let bytes = Shape::Tuple(vec![Shape::U8; 8]);
+        for wire in [Wire::RowBinary, Wire::Native] {
+            assert!(
+                compatible(&bytes, &parse("FixedString(8)"), wire),
+                "{wire:?}"
+            );
+        }
+
+        // Nesting carries the format through.
+        assert!(compatible(
+            &Shape::Seq(Box::new(Shape::Str)),
+            &parse("Array(FixedString(4))"),
+            Wire::Native
+        ));
+        assert!(!compatible(
+            &Shape::Seq(Box::new(Shape::Str)),
+            &parse("Array(FixedString(4))"),
+            Wire::RowBinary
+        ));
     }
 
     #[test]
@@ -969,12 +1112,18 @@ mod tests {
         .unwrap();
         assert!(compatible(
             &fields[0].shape,
-            &parse("Tuple(UInt32, String)")
+            &parse("Tuple(UInt32, String)"),
+            Wire::RowBinary
         ));
         assert!(compatible(
             &fields[0].shape,
-            &parse("Tuple(a UInt32, b String)")
+            &parse("Tuple(a UInt32, b String)"),
+            Wire::RowBinary
         ));
-        assert!(!compatible(&fields[0].shape, &parse("Tuple(UInt32)")));
+        assert!(!compatible(
+            &fields[0].shape,
+            &parse("Tuple(UInt32)"),
+            Wire::RowBinary
+        ));
     }
 }

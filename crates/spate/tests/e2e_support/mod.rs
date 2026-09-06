@@ -331,15 +331,18 @@ impl Harness {
                 .expect("avro")
                 .build_serde::<Event>()
                 .expect("apache builder");
-        let sink = spate::clickhouse::config::from_component_config(
-            pipeline
-                .config()
-                .sink_config("default")
-                .expect("sink config"),
-        )
-        .expect("sink")
-        .with_row::<spate::deser::Owned<Event>>()
-        .expect("valid columns");
+        let sink = pipeline.block_on(
+            spate::clickhouse::config::from_component_config(
+                pipeline
+                    .config()
+                    .sink_config("default")
+                    .expect("sink config"),
+            )
+            .expect("sink")
+            .with_row::<spate::deser::Owned<Event>>(),
+        );
+        let sink = sink.expect("schema fetch");
+        let schema = sink.schema();
 
         let chunk_bytes = params.chunk_bytes;
         let runtime = pipeline
@@ -353,7 +356,9 @@ impl Harness {
                     .with_metrics(ctx.pipeline, "main")
                     .try_map(Ok::<Event, &str>, ErrorPolicy::Skip)
                     .sink(
-                        ClickHouseEncoder::<spate::deser::Owned<Event>>::new(),
+                        ClickHouseEncoder::<spate::deser::Owned<Event>>::with_schema(
+                            schema.clone(),
+                        ),
                         KeyHashRouter,
                         ChunkConfig {
                             target_bytes: chunk_bytes,

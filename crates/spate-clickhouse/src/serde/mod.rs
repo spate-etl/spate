@@ -25,10 +25,9 @@
 //! ClickHouse columns. `Ipv4Addr` emits big-endian octets where `IPv4` is
 //! a little-endian `UInt32`, and both date/time crates emit string forms
 //! where every date and time column is a fixed-width integer. Omitting the
-//! attribute is silent data corruption, not an error. The sink's opt-in
-//! schema validation (`validate_schema: full`) catches the shape-level
-//! cases; the docs table in [`crate::rowbinary`] is the authoritative
-//! mapping.
+//! attribute is silent data corruption, not an error. The sink's
+//! first-record check catches the shape-level cases; the docs table in
+//! [`crate::rowbinary`] is the authoritative mapping.
 //!
 //! Wire semantics are rewritten from `clickhouse` 0.15.1's `src/serde.rs`,
 //! which is `MIT OR Apache-2.0`; this crate takes the Apache-2.0 branch, the

@@ -40,10 +40,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Connector construction: yours, one explicit line each.
     let source = KafkaSource::from_component_config(&pipeline.config().source)?;
-    let sink = spate::clickhouse::config::from_component_config(
-        pipeline.config().sink_config("default")?,
-    )?
-    .with_row::<Owned<Row>>()?;
+    let sink = pipeline.block_on(
+        spate::clickhouse::config::from_component_config(
+            pipeline.config().sink_config("default")?,
+        )?
+        .with_row::<Owned<Row>>(),
+    )?;
 
     let report = pipeline
         .sink(sink)?
@@ -112,10 +114,10 @@ I/O runtime is already alive, so:
   that needs one says so on its page.
 - `pipeline.block_on(future)` — run an async pre-flight step to completion
   on the I/O runtime, blocking the current thread. The canonical use is a
-  sink's pre-flight schema check
+  sink that reads the destination's schema before the chain exists
   (see [Schema validation](../04-connectors/sinks/clickhouse/schema-validation.mdx)):
 
-```rust file=crates/spate/examples/kafka_avro_to_clickhouse.rs region=encoder
+```rust file=crates/spate/examples/kafka_avro_to_clickhouse.rs region=sink
 ```
 
 ## Step 3: `.sink(bundle)` / `.sink_with(bundle, options)`

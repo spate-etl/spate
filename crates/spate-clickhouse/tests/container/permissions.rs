@@ -27,22 +27,16 @@ async fn insert_alone_reaches_system_columns() {
         srv.admin.query(ddl).execute().await.expect("ddl");
     }
 
-    let as_writer = |table: &str| {
-        sink_with::<Owned<Order>>(
-            &srv.url,
-            table,
-            "full",
-            "user: writer\npassword: writer-secret\n",
-        )
+    let as_writer = async |table: &str| {
+        try_sink_with::<Owned<Order>>(&srv.url, table, "user: writer\npassword: writer-secret\n")
+            .await
     };
 
     // The grant it holds: the fetch reads the table's columns and validates.
-    let sink = as_writer("orders");
-    let schema = sink
-        .validate_schema()
+    let sink = as_writer("orders")
         .await
-        .expect("INSERT alone reads system.columns")
-        .expect("full mode returns a schema");
+        .expect("INSERT alone reads system.columns");
+    let schema = sink.schema();
 
     // And the write the grant is for goes through, managed settings included.
     let mut encoder = spate_clickhouse::ClickHouseEncoder::<Owned<Order>>::with_schema(schema);
@@ -71,7 +65,6 @@ async fn insert_alone_reaches_system_columns() {
     // The grant it does not hold: `system.columns` returns no rows rather than
     // an error, so the table reads as absent.
     let err = as_writer("ledger")
-        .validate_schema()
         .await
         .expect_err("a table the writer cannot see");
     let msg = err.to_string();

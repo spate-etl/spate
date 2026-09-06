@@ -2,6 +2,14 @@
 //! Docker). The mock's `record` handler decodes request bodies through the
 //! crate's own RowBinary deserializer, so every row that round-trips here
 //! proves our serializer is wire-compatible with the crate's.
+//!
+//! That handler decodes from byte zero, so the rows it reads back are posted
+//! as a plain `FORMAT RowBinary` body rather than through the writer, whose
+//! body opens with a `RowBinaryWithNamesAndTypes` header. The writer's own
+//! framing is pinned by a byte test on the header and by the container tier.
+//!
+//! Building a sink reads `system.columns`, so every mock here queues that
+//! answer first: handlers are consumed in order.
 
 use bytes::BytesMut;
 use clickhouse::test::{Mock, handlers};
@@ -9,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use spate_clickhouse::ClickHouseRow;
 use spate_clickhouse::config::{self, ClickHouseSinkConfig};
 use spate_clickhouse::serialize_row;
+use spate_clickhouse::testing::{ColumnRow, system_columns};
 use spate_core::deser::Owned;
 use spate_core::error::{ErrorClass, SinkError};
 use spate_core::sink::{SealedBatch, ShardWriter};
@@ -20,12 +29,25 @@ struct TestRow {
     score: Option<f64>,
 }
 
-fn sink_for(url: &str) -> config::ClickHouseSink {
+/// The table matching `TestRow`.
+fn matching_columns() -> Vec<ColumnRow> {
+    system_columns(&[
+        ("id", "UInt64", ""),
+        ("name", "String", ""),
+        ("score", "Nullable(Float64)", ""),
+    ])
+}
+
+async fn sink_for(url: &str) -> config::ClickHouseSink {
+    sink_for_table(url, "orders").await
+}
+
+async fn sink_for_table(url: &str, table: &str) -> config::ClickHouseSink {
     let cfg: ClickHouseSinkConfig = serde_yaml::from_str(&format!(
         // `off`: the crate's `record` handler decodes the request body with no
         // decompression, so a decodable round-trip requires an uncompressed body.
         r#"
-table: orders
+table: {table}
 compression: off
 shards:
   - replicas: ["{url}"]
@@ -35,7 +57,8 @@ shards:
     config::build(cfg)
         .expect("valid sink config")
         .with_row::<Owned<TestRow>>()
-        .expect("valid columns")
+        .await
+        .expect("schema fetch and column check")
 }
 
 fn sealed(rows: &[TestRow], token: &str) -> SealedBatch {
@@ -69,18 +92,26 @@ fn rows(n: u64) -> Vec<TestRow> {
         .collect()
 }
 
+/// Post the frames of a sealed batch as a plain `FORMAT RowBinary` body, the
+/// shape `RecordControl::collect` can decode.
+async fn post_frames(url: &str, batch: &SealedBatch) {
+    let client = clickhouse::Client::default()
+        .with_url(url)
+        .with_compression(clickhouse::Compression::None);
+    let mut insert = client.insert_formatted_with("INSERT INTO orders FORMAT RowBinary".to_owned());
+    for frame in &batch.frames {
+        insert.send(frame.clone()).await.expect("send frame");
+    }
+    insert.end().await.expect("end");
+}
+
 #[tokio::test]
-async fn write_batch_lands_all_frames_decodable_by_the_crate() {
+async fn our_frames_decode_through_the_crates_deserializer() {
     let mock = Mock::new();
     let recorder = mock.add(handlers::record::<TestRow>());
-    let sink = sink_for(mock.url());
 
     let expected = rows(101);
-    let batch = sealed(&expected, "tok-1");
-    sink.writer
-        .write_batch(&sink.endpoints[0][0], &batch)
-        .await
-        .expect("write");
+    post_frames(mock.url(), &sealed(&expected, "tok-1")).await;
 
     let received: Vec<TestRow> = recorder.collect().await;
     assert_eq!(
@@ -89,11 +120,27 @@ async fn write_batch_lands_all_frames_decodable_by_the_crate() {
     );
 }
 
+/// A multi-frame batch is one request the server accepts. What the body
+/// contains is the container tier's to check: `provide` ignores it.
+#[tokio::test]
+async fn write_batch_sends_every_frame() {
+    let mock = Mock::new();
+    mock.add(handlers::provide(matching_columns()));
+    mock.add(handlers::provide::<u8>([]));
+    let sink = sink_for(mock.url()).await;
+
+    sink.writer
+        .write_batch(&sink.endpoints[0][0], &sealed(&rows(101), "tok-1"))
+        .await
+        .expect("write");
+}
+
 #[tokio::test]
 async fn transport_failures_are_retryable() {
     let mock = Mock::new();
+    mock.add(handlers::provide(matching_columns()));
     mock.add(handlers::failure(hyper::StatusCode::INTERNAL_SERVER_ERROR));
-    let sink = sink_for(mock.url());
+    let sink = sink_for(mock.url()).await;
 
     let err = sink
         .writer
@@ -109,9 +156,10 @@ async fn transport_failures_are_retryable() {
 #[tokio::test]
 async fn schema_class_exceptions_are_fatal() {
     let mock = Mock::new();
+    mock.add(handlers::provide(matching_columns()));
     // 60 = UNKNOWN_TABLE.
     mock.add(handlers::exception(60));
-    let sink = sink_for(mock.url());
+    let sink = sink_for(mock.url()).await;
 
     let err = sink
         .writer
@@ -129,9 +177,10 @@ async fn schema_class_exceptions_are_fatal() {
 #[tokio::test]
 async fn capacity_class_exceptions_stay_retryable() {
     let mock = Mock::new();
+    mock.add(handlers::provide(matching_columns()));
     // 252 = TOO_MANY_PARTS: transient merge pressure, retry is correct.
     mock.add(handlers::exception(252));
-    let sink = sink_for(mock.url());
+    let sink = sink_for(mock.url()).await;
 
     let err = sink
         .writer
@@ -148,51 +197,22 @@ async fn capacity_class_exceptions_stay_retryable() {
 
 // ---- startup schema validation ----------------------------------------------
 
-/// What the validator's `system.columns` query returns; the mock encodes
-/// it with the crate's own serializer, proving our fetch decodes the real
-/// wire shape.
-#[derive(Debug, Clone, clickhouse::Row, Serialize)]
-struct SysColumn {
-    name: String,
-    #[serde(rename = "type")]
-    type_: String,
-    default_kind: String,
-}
-
-fn sys_col(name: &str, type_: &str, default_kind: &str) -> SysColumn {
-    SysColumn {
-        name: name.into(),
-        type_: type_.into(),
-        default_kind: default_kind.into(),
-    }
-}
-
-/// The table matching `TestRow` / `sink_for`'s columns.
-fn matching_columns() -> Vec<SysColumn> {
-    vec![
-        sys_col("id", "UInt64", ""),
-        sys_col("name", "String", ""),
-        sys_col("score", "Nullable(Float64)", ""),
-    ]
-}
-
-fn sink_with(url: &str, mode: &str) -> config::ClickHouseSink {
+/// The error from building a sink whose schema fetch cannot succeed.
+async fn failed_sink(url: &str) -> spate_clickhouse::SchemaError {
     let cfg: ClickHouseSinkConfig = serde_yaml::from_str(&format!(
-        // `off`: the mock's `provide` handler returns uncompressed responses,
-        // so the schema-validation SELECTs must not request compression.
         r#"
 table: orders
 compression: off
 shards:
   - replicas: ["{url}"]
-validate_schema: {mode}
 "#
     ))
     .expect("config yaml");
     config::build(cfg)
         .expect("valid sink config")
         .with_row::<Owned<TestRow>>()
-        .expect("valid columns")
+        .await
+        .expect_err("the fetch must fail")
 }
 
 fn record<T>(payload: T) -> spate_core::record::Record<T> {
@@ -211,31 +231,16 @@ fn record<T>(payload: T) -> spate_core::record::Record<T> {
 }
 
 #[tokio::test]
-async fn off_mode_issues_no_queries() {
-    // No handlers queued: a request would error the fetch, and the mock
-    // itself panics on drop if a queued handler goes unconsumed, so a
-    // clean Ok(None) proves validation never talked to the server.
-    let dead = Mock::new();
-    let sink = sink_with(dead.url(), "off");
-    let schema = sink.validate_schema().await.expect("off must not fetch");
-    assert!(schema.is_none());
-}
-
-#[tokio::test]
 async fn matching_schema_passes_and_first_record_encodes() {
     use spate_core::sink::RowEncoder;
 
     let mock = Mock::new();
-    mock.add(handlers::provide::<SysColumn>(matching_columns()));
-    let sink = sink_with(mock.url(), "full");
-    let schema = sink
-        .validate_schema()
-        .await
-        .expect("validation passes")
-        .expect("names/full returns a schema");
+    mock.add(handlers::provide(matching_columns()));
+    let sink = sink_for(mock.url()).await;
+    let schema = sink.schema();
 
-    // The first-record struct check passes and the bytes are identical
-    // to an unvalidated encoder's.
+    // The first-record struct check passes and the bytes are the row's alone:
+    // the header is the writer's, not the encoder's.
     let mut encoder = spate_clickhouse::ClickHouseEncoder::<Owned<TestRow>>::with_schema(schema);
     let row = TestRow {
         id: 7,
@@ -268,9 +273,8 @@ async fn struct_order_mismatch_is_fatal_at_the_first_record() {
     }
 
     let mock = Mock::new();
-    mock.add(handlers::provide::<SysColumn>(matching_columns()));
-    let sink = sink_with(mock.url(), "names");
-    let schema = sink.validate_schema().await.unwrap().unwrap();
+    mock.add(handlers::provide(matching_columns()));
+    let schema = sink_for(mock.url()).await.schema();
 
     let mut encoder = spate_clickhouse::ClickHouseEncoder::<Owned<WrongOrder>>::with_schema(schema);
     let err = encoder
@@ -296,7 +300,7 @@ async fn struct_order_mismatch_is_fatal_at_the_first_record() {
 }
 
 #[tokio::test]
-async fn type_mismatch_fails_full_but_passes_names() {
+async fn a_type_mismatch_is_fatal_at_the_first_record() {
     use spate_core::sink::RowEncoder;
 
     // score: Option<u32> against Nullable(Float64), a wrong width/class.
@@ -313,15 +317,11 @@ async fn type_mismatch_fails_full_but_passes_names() {
     };
 
     let mock = Mock::new();
-    mock.add(handlers::provide::<SysColumn>(matching_columns()));
-    let schema = sink_with(mock.url(), "full")
-        .validate_schema()
-        .await
-        .unwrap()
-        .unwrap();
+    mock.add(handlers::provide(matching_columns()));
+    let schema = sink_for(mock.url()).await.schema();
     let err = spate_clickhouse::ClickHouseEncoder::<Owned<WrongType>>::with_schema(schema)
-        .encode(&record(wrong.clone()), &mut BytesMut::new())
-        .expect_err("full mode checks type classes");
+        .encode(&record(wrong), &mut BytesMut::new())
+        .expect_err("the type check runs on every sink");
     match err {
         SinkError::Client { class, reason } => {
             assert_eq!(class, ErrorClass::Fatal, "{reason}");
@@ -332,22 +332,10 @@ async fn type_mismatch_fails_full_but_passes_names() {
         }
         other => panic!("unexpected error shape: {other:?}"),
     }
-
-    // Same struct under `names`: permissiveness is by design.
-    let mock = Mock::new();
-    mock.add(handlers::provide::<SysColumn>(matching_columns()));
-    let schema = sink_with(mock.url(), "names")
-        .validate_schema()
-        .await
-        .unwrap()
-        .unwrap();
-    spate_clickhouse::ClickHouseEncoder::<Owned<WrongType>>::with_schema(schema)
-        .encode(&record(wrong), &mut BytesMut::new())
-        .expect("names mode skips type classes");
 }
 
 #[tokio::test]
-async fn native_full_mode_checks_wrapper_scale_against_fetched_precision() {
+async fn the_native_encoder_checks_wrapper_scale_against_the_fetched_precision() {
     use spate_clickhouse::{DateTime64Millis, NativeEncoder};
     use spate_core::sink::RowEncoder;
 
@@ -361,7 +349,7 @@ async fn native_full_mode_checks_wrapper_scale_against_fetched_precision() {
         ts: DateTime64Millis(1_700_000_000_000),
     };
 
-    fn native_sink(url: &str, mode: &str) -> config::ClickHouseSink {
+    async fn native_sink(url: &str) -> config::ClickHouseSink {
         let cfg: ClickHouseSinkConfig = serde_yaml::from_str(&format!(
             r#"
 table: events
@@ -369,30 +357,30 @@ format: native
 compression: off
 shards:
   - replicas: ["{url}"]
-validate_schema: {mode}
 "#
         ))
         .expect("config yaml");
         config::build(cfg)
             .expect("valid sink config")
             .with_row::<Owned<EventRow>>()
-            .expect("valid columns")
+            .await
+            .expect("schema fetch")
     }
 
     // The live table is micro precision; the struct declares milli via the
-    // wrapper. `full` rejects the first record before any block is built.
+    // wrapper, so the first record is rejected before any block is built.
     let mock = Mock::new();
-    mock.add(handlers::provide::<SysColumn>(vec![
-        sys_col("id", "UInt64", ""),
-        sys_col("ts", "DateTime64(6)", ""),
-    ]));
-    let schema = native_sink(mock.url(), "full")
-        .native_schema()
+    mock.add(handlers::provide(system_columns(&[
+        ("id", "UInt64", ""),
+        ("ts", "DateTime64(6)", ""),
+    ])));
+    let schema = native_sink(mock.url())
         .await
-        .expect("fetch native schema");
+        .native_schema()
+        .expect("build native schema");
     let err = NativeEncoder::<Owned<EventRow>>::new(schema)
         .encode(&record(row.clone()), &mut BytesMut::new())
-        .expect_err("full mode rejects the scale mismatch");
+        .expect_err("the scale mismatch is rejected");
     match err {
         SinkError::Client { class, reason } => {
             assert_eq!(class, ErrorClass::Fatal, "{reason}");
@@ -404,25 +392,23 @@ validate_schema: {mode}
         other => panic!("unexpected error shape: {other:?}"),
     }
 
-    // Matching precision encodes; `names` mode stays permissive by design.
-    for (mode, col_type) in [("full", "DateTime64(3)"), ("names", "DateTime64(6)")] {
-        let mock = Mock::new();
-        mock.add(handlers::provide::<SysColumn>(vec![
-            sys_col("id", "UInt64", ""),
-            sys_col("ts", col_type, ""),
-        ]));
-        let schema = native_sink(mock.url(), mode)
-            .native_schema()
-            .await
-            .expect("fetch native schema");
-        NativeEncoder::<Owned<EventRow>>::new(schema)
-            .encode(&record(row.clone()), &mut BytesMut::new())
-            .unwrap_or_else(|e| panic!("{mode} against {col_type} must encode: {e:?}"));
-    }
+    // The precision the wrapper declares encodes.
+    let mock = Mock::new();
+    mock.add(handlers::provide(system_columns(&[
+        ("id", "UInt64", ""),
+        ("ts", "DateTime64(3)", ""),
+    ])));
+    let schema = native_sink(mock.url())
+        .await
+        .native_schema()
+        .expect("build native schema");
+    NativeEncoder::<Owned<EventRow>>::new(schema)
+        .encode(&record(row), &mut BytesMut::new())
+        .expect("matching precision encodes");
 }
 
 #[tokio::test]
-async fn full_mode_checks_decimal_scale_against_the_fetched_column() {
+async fn both_encoders_check_decimal_scale_against_the_fetched_column() {
     use spate_clickhouse::{ClickHouseEncoder, Decimal64, NativeEncoder};
     use spate_core::sink::RowEncoder;
 
@@ -436,7 +422,7 @@ async fn full_mode_checks_decimal_scale_against_the_fetched_column() {
         amount: Decimal64::<4>(15_000),
     };
 
-    fn price_sink(url: &str, mode: &str, format: &str) -> config::ClickHouseSink {
+    async fn price_sink(url: &str, format: &str) -> config::ClickHouseSink {
         let cfg: ClickHouseSinkConfig = serde_yaml::from_str(&format!(
             r#"
 table: events
@@ -444,14 +430,14 @@ format: {format}
 compression: off
 shards:
   - replicas: ["{url}"]
-validate_schema: {mode}
 "#
         ))
         .expect("config yaml");
         config::build(cfg)
             .expect("valid sink config")
             .with_row::<Owned<PriceRow>>()
-            .expect("valid columns")
+            .await
+            .expect("schema fetch")
     }
 
     fn assert_fatal_scale_mismatch(err: SinkError) {
@@ -467,79 +453,63 @@ validate_schema: {mode}
         }
     }
 
-    fn mismatched_columns() -> Vec<SysColumn> {
-        vec![
-            sys_col("id", "UInt64", ""),
-            sys_col("amount", "Decimal(18, 2)", ""),
-        ]
+    fn mismatched_columns() -> Vec<ColumnRow> {
+        system_columns(&[("id", "UInt64", ""), ("amount", "Decimal(18, 2)", "")])
     }
 
     // The live column is scale 2 and the struct declares scale 4, so the
     // raw values are 100x the column's. RowBinary rejects the first
     // record, before any frame is written.
     let mock = Mock::new();
-    mock.add(handlers::provide::<SysColumn>(mismatched_columns()));
-    let schema = price_sink(mock.url(), "full", "rowbinary")
-        .validate_schema()
-        .await
-        .expect("startup validation passes")
-        .expect("full mode returns a schema");
+    mock.add(handlers::provide(mismatched_columns()));
+    let schema = price_sink(mock.url(), "rowbinary").await.schema();
     let err = ClickHouseEncoder::<Owned<PriceRow>>::with_schema(schema)
         .encode(&record(row.clone()), &mut BytesMut::new())
-        .expect_err("full mode rejects the scale mismatch");
+        .expect_err("the scale mismatch is rejected");
     assert_fatal_scale_mismatch(err);
 
-    // Native reaches the same check through its own fetched schema.
+    // Native reaches the same check through its own schema.
     let mock = Mock::new();
-    mock.add(handlers::provide::<SysColumn>(mismatched_columns()));
-    let schema = price_sink(mock.url(), "full", "native")
-        .native_schema()
+    mock.add(handlers::provide(mismatched_columns()));
+    let schema = price_sink(mock.url(), "native")
         .await
-        .expect("fetch native schema");
+        .native_schema()
+        .expect("build native schema");
     let err = NativeEncoder::<Owned<PriceRow>>::new(schema)
         .encode(&record(row.clone()), &mut BytesMut::new())
-        .expect_err("full mode rejects the scale mismatch");
+        .expect_err("the scale mismatch is rejected");
     assert_fatal_scale_mismatch(err);
 
-    // An agreeing scale encodes, and `names` stays permissive by design.
-    for (mode, col_type) in [("full", "Decimal(18, 4)"), ("names", "Decimal(18, 2)")] {
-        let columns = vec![sys_col("id", "UInt64", ""), sys_col("amount", col_type, "")];
+    // An agreeing scale encodes, in both formats.
+    let agreeing = || system_columns(&[("id", "UInt64", ""), ("amount", "Decimal(18, 4)", "")]);
 
-        let mock = Mock::new();
-        mock.add(handlers::provide::<SysColumn>(columns.clone()));
-        let schema = price_sink(mock.url(), mode, "rowbinary")
-            .validate_schema()
-            .await
-            .expect("startup validation passes")
-            .expect("both modes return a schema");
-        ClickHouseEncoder::<Owned<PriceRow>>::with_schema(schema)
-            .encode(&record(row.clone()), &mut BytesMut::new())
-            .unwrap_or_else(|e| panic!("rowbinary {mode} against {col_type} must encode: {e:?}"));
+    let mock = Mock::new();
+    mock.add(handlers::provide(agreeing()));
+    let schema = price_sink(mock.url(), "rowbinary").await.schema();
+    ClickHouseEncoder::<Owned<PriceRow>>::with_schema(schema)
+        .encode(&record(row.clone()), &mut BytesMut::new())
+        .expect("rowbinary encodes an agreeing scale");
 
-        let mock = Mock::new();
-        mock.add(handlers::provide::<SysColumn>(columns));
-        let schema = price_sink(mock.url(), mode, "native")
-            .native_schema()
-            .await
-            .expect("fetch native schema");
-        NativeEncoder::<Owned<PriceRow>>::new(schema)
-            .encode(&record(row.clone()), &mut BytesMut::new())
-            .unwrap_or_else(|e| panic!("native {mode} against {col_type} must encode: {e:?}"));
-    }
+    let mock = Mock::new();
+    mock.add(handlers::provide(agreeing()));
+    let schema = price_sink(mock.url(), "native")
+        .await
+        .native_schema()
+        .expect("build native schema");
+    NativeEncoder::<Owned<PriceRow>>::new(schema)
+        .encode(&record(row), &mut BytesMut::new())
+        .expect("native encodes an agreeing scale");
 }
 
 #[tokio::test]
 async fn missing_and_materialized_columns_fail_startup() {
     let mock = Mock::new();
-    mock.add(handlers::provide::<SysColumn>(vec![
-        sys_col("id", "UInt64", ""),
+    mock.add(handlers::provide(system_columns(&[
+        ("id", "UInt64", ""),
         // `name` is absent; `score` is MATERIALIZED.
-        sys_col("score", "Nullable(Float64)", "MATERIALIZED"),
-    ]));
-    let err = sink_with(mock.url(), "names")
-        .validate_schema()
-        .await
-        .expect_err("must fail");
+        ("score", "Nullable(Float64)", "MATERIALIZED"),
+    ])));
+    let err = failed_sink(mock.url()).await;
     let msg = err.to_string();
     assert!(matches!(err, spate_clickhouse::SchemaError::Mismatch(_)));
     assert!(
@@ -557,11 +527,8 @@ async fn missing_and_materialized_columns_fail_startup() {
 #[tokio::test]
 async fn empty_result_means_table_not_found() {
     let mock = Mock::new();
-    mock.add(handlers::provide::<SysColumn>(Vec::<SysColumn>::new()));
-    let err = sink_with(mock.url(), "names")
-        .validate_schema()
-        .await
-        .expect_err("must fail");
+    mock.add(handlers::provide(Vec::<ColumnRow>::new()));
+    let err = failed_sink(mock.url()).await;
     assert!(err.to_string().contains("not found"), "{err}");
 }
 
@@ -569,10 +536,7 @@ async fn empty_result_means_table_not_found() {
 async fn fetch_failures_fail_startup_distinguishably() {
     let mock = Mock::new();
     mock.add(handlers::failure(hyper::StatusCode::SERVICE_UNAVAILABLE));
-    let err = sink_with(mock.url(), "full")
-        .validate_schema()
-        .await
-        .expect_err("must fail");
+    let err = failed_sink(mock.url()).await;
     match err {
         spate_clickhouse::SchemaError::Fetch { table, .. } => {
             assert_eq!(table, "`orders`");
@@ -585,19 +549,18 @@ async fn fetch_failures_fail_startup_distinguishably() {
 async fn replica_disagreement_fails_startup() {
     let a = Mock::new();
     let b = Mock::new();
-    a.add(handlers::provide::<SysColumn>(matching_columns()));
-    b.add(handlers::provide::<SysColumn>(vec![
-        sys_col("id", "UInt64", ""),
-        sys_col("name", "String", ""),
-        sys_col("score", "Float64", ""), // drifted: no longer Nullable
-    ]));
+    a.add(handlers::provide(matching_columns()));
+    b.add(handlers::provide(system_columns(&[
+        ("id", "UInt64", ""),
+        ("name", "String", ""),
+        ("score", "Float64", ""), // drifted: no longer Nullable
+    ])));
     let cfg: ClickHouseSinkConfig = serde_yaml::from_str(&format!(
         r#"
 table: orders
 compression: off
 shards:
   - replicas: ["{}", "{}"]
-validate_schema: names
 "#,
         a.url(),
         b.url()
@@ -606,8 +569,6 @@ validate_schema: names
     let err = config::build(cfg)
         .unwrap()
         .with_row::<Owned<TestRow>>()
-        .unwrap()
-        .validate_schema()
         .await
         .expect_err("drift must fail");
     let msg = err.to_string();
@@ -622,8 +583,9 @@ async fn probe_fn_covers_every_replica_with_its_own_clients() {
     // Healthy server: the probe closure succeeds and hits the mock once
     // per replica per call.
     let mock = Mock::new();
+    mock.add(handlers::provide(matching_columns()));
+    let sink = sink_for(mock.url()).await;
     mock.add(handlers::provide::<u8>([1u8]));
-    let sink = sink_for(mock.url());
     let probe = sink.probe_fn();
     probe().await.expect("probe healthy replica");
 
@@ -636,26 +598,29 @@ async fn probe_fn_covers_every_replica_with_its_own_clients() {
     mock.add(handlers::provide::<u8>([1u8]));
     bundled_probe().await.expect("bundled probe works");
 
-    // Unreachable server: the probe fails.
+    // A server that stops answering after the sink is built: the probe fails.
     let dead = Mock::new();
+    dead.add(handlers::provide(matching_columns()));
+    let sink = sink_for(dead.url()).await;
     dead.add(handlers::failure(hyper::StatusCode::SERVICE_UNAVAILABLE));
-    let sink = sink_for(dead.url());
     assert!(sink.probe_fn()().await.is_err());
 }
 
 #[tokio::test]
 async fn probe_maps_select_one() {
     let mock = Mock::new();
+    mock.add(handlers::provide(matching_columns()));
+    let sink = sink_for(mock.url()).await;
     mock.add(handlers::provide::<u8>([1u8]));
-    let sink = sink_for(mock.url());
     sink.writer
         .probe(&sink.endpoints[0][0])
         .await
         .expect("probe ok");
 
     let dead = Mock::new();
+    dead.add(handlers::provide(matching_columns()));
+    let sink = sink_for(dead.url()).await;
     dead.add(handlers::failure(hyper::StatusCode::SERVICE_UNAVAILABLE));
-    let sink = sink_for(dead.url());
     assert!(sink.writer.probe(&sink.endpoints[0][0]).await.is_err());
 }
 
@@ -736,7 +701,6 @@ mod prop_round_trip {
             let received: Vec<PropRow> = RT.block_on(async {
                 let mock = Mock::new();
                 let recorder = mock.add(handlers::record::<PropRow>());
-                let sink = sink_for(mock.url());
 
                 let mut buf = BytesMut::new();
                 for row in &rows {
@@ -749,10 +713,7 @@ mod prop_round_trip {
                     bytes,
                     dedup_token: "prop".into(),
                 };
-                sink.writer
-                    .write_batch(&sink.endpoints[0][0], &batch)
-                    .await
-                    .expect("write");
+                post_frames(mock.url(), &batch).await;
                 recorder.collect().await
             });
             prop_assert_eq!(received, rows);
@@ -800,7 +761,15 @@ fn engine_row(engine: &str, engine_full: &str) -> EngineRow {
 
 /// A sink with per-shard weights and a `distributed_check` block, all
 /// replicas pointing at the mock.
-fn checked_sink(url: &str, weights: &[u32], check: &str) -> config::ClickHouseSink {
+///
+/// Built first in each test, so the schema answer it queues is consumed
+/// before the guard's own handlers go on the queue behind it.
+async fn checked_sink(mock: &Mock, weights: &[u32], check: &str) -> config::ClickHouseSink {
+    let url = mock.url();
+    // One replica per shard, and the fetch reads every one of them.
+    for _ in weights {
+        mock.add(handlers::provide(matching_columns()));
+    }
     let shards: String = weights
         .iter()
         .map(|w| format!("  - replicas: [\"{url}\"]\n    weight: {w}\n"))
@@ -812,7 +781,8 @@ fn checked_sink(url: &str, weights: &[u32], check: &str) -> config::ClickHouseSi
     config::build(cfg)
         .expect("valid sink config")
         .with_row::<Owned<TestRow>>()
-        .expect("valid columns")
+        .await
+        .expect("schema fetch")
 }
 
 const CHECK_ON_ID: &str =
@@ -821,6 +791,7 @@ const CHECK_ON_ID: &str =
 #[tokio::test]
 async fn distributed_check_passes_when_cluster_and_ddl_match() {
     let mock = Mock::new();
+    let sink = checked_sink(&mock, &[1, 1], CHECK_ON_ID).await;
     mock.add(handlers::provide::<ClusterRow>(vec![
         cluster_row(1, 1, "ch-0"),
         cluster_row(2, 1, "ch-1"),
@@ -829,17 +800,18 @@ async fn distributed_check_passes_when_cluster_and_ddl_match() {
         "Distributed",
         "Distributed('prod', 'db', 'orders', xxHash64(id))",
     )]));
-    let sink = checked_sink(mock.url(), &[1, 1], CHECK_ON_ID);
     sink.validate_distributed().await.expect("parity holds");
 }
 
 #[tokio::test]
 async fn distributed_check_off_issues_no_queries() {
-    // No handlers queued: a request would error, and the mock panics on
-    // drop if a queued handler goes unconsumed, so a clean Ok proves the
-    // guard never talked to the server without a `distributed_check` block.
-    let dead = Mock::new();
-    let sink = sink_for(dead.url());
+    // Only the schema fetch is answered. Nothing is queued behind it, and the
+    // mock panics on drop if a queued handler goes unconsumed, so a clean Ok
+    // proves the guard never talked to the server without a
+    // `distributed_check` block.
+    let mock = Mock::new();
+    mock.add(handlers::provide(matching_columns()));
+    let sink = sink_for(mock.url()).await;
     sink.validate_distributed()
         .await
         .expect("absent block must be a no-op");
@@ -848,12 +820,12 @@ async fn distributed_check_off_issues_no_queries() {
 #[tokio::test]
 async fn shard_count_mismatch_fails_the_distributed_check() {
     let mock = Mock::new();
+    let sink = checked_sink(&mock, &[1, 1], CHECK_ON_ID).await;
     mock.add(handlers::provide::<ClusterRow>(vec![
         cluster_row(1, 1, "ch-0"),
         cluster_row(2, 1, "ch-1"),
         cluster_row(3, 1, "ch-2"),
     ]));
-    let sink = checked_sink(mock.url(), &[1, 1], CHECK_ON_ID);
     let err = sink.validate_distributed().await.unwrap_err();
     let msg = err.to_string();
     assert!(
@@ -865,11 +837,11 @@ async fn shard_count_mismatch_fails_the_distributed_check() {
 #[tokio::test]
 async fn weight_mismatch_names_the_offending_shard() {
     let mock = Mock::new();
+    let sink = checked_sink(&mock, &[9, 10], CHECK_ON_ID).await;
     mock.add(handlers::provide::<ClusterRow>(vec![
         cluster_row(1, 9, "ch-0"),
         cluster_row(2, 1, "ch-1"),
     ]));
-    let sink = checked_sink(mock.url(), &[9, 10], CHECK_ON_ID);
     let err = sink.validate_distributed().await.unwrap_err();
     let msg = err.to_string();
     assert!(
@@ -881,6 +853,7 @@ async fn weight_mismatch_names_the_offending_shard() {
 #[tokio::test]
 async fn sharding_expression_mismatch_prints_both_sides() {
     let mock = Mock::new();
+    let sink = checked_sink(&mock, &[1], CHECK_ON_ID).await;
     mock.add(handlers::provide::<ClusterRow>(vec![cluster_row(
         1, 1, "ch-0",
     )]));
@@ -888,7 +861,6 @@ async fn sharding_expression_mismatch_prints_both_sides() {
         "Distributed",
         "Distributed('prod', 'db', 'orders', cityHash64(id))",
     )]));
-    let sink = checked_sink(mock.url(), &[1], CHECK_ON_ID);
     let err = sink.validate_distributed().await.unwrap_err();
     let msg = err.to_string();
     assert!(
@@ -904,6 +876,7 @@ async fn sharding_expression_mismatch_prints_both_sides() {
 #[tokio::test]
 async fn non_distributed_engine_fails_with_the_engine_name() {
     let mock = Mock::new();
+    let sink = checked_sink(&mock, &[1], CHECK_ON_ID).await;
     mock.add(handlers::provide::<ClusterRow>(vec![cluster_row(
         1, 1, "ch-0",
     )]));
@@ -911,7 +884,6 @@ async fn non_distributed_engine_fails_with_the_engine_name() {
         "ReplacingMergeTree",
         "ReplacingMergeTree(v) ORDER BY id",
     )]));
-    let sink = checked_sink(mock.url(), &[1], CHECK_ON_ID);
     let err = sink.validate_distributed().await.unwrap_err();
     assert!(
         err.to_string().contains("ReplacingMergeTree"),
@@ -925,8 +897,8 @@ async fn unknown_cluster_fails_distinguishably() {
 
     // An empty system.clusters result is a Mismatch (wrong cluster name)…
     let mock = Mock::new();
+    let sink = checked_sink(&mock, &[1], CHECK_ON_ID).await;
     mock.add(handlers::provide::<ClusterRow>(Vec::new()));
-    let sink = checked_sink(mock.url(), &[1], CHECK_ON_ID);
     let err = sink.validate_distributed().await.unwrap_err();
     assert!(
         matches!(&err, DistributedCheckError::Mismatch(m) if m.contains("not found")),
@@ -935,8 +907,8 @@ async fn unknown_cluster_fails_distinguishably() {
 
     // …while a failing query is a Fetch: connectivity, not configuration.
     let failing = Mock::new();
+    let sink = checked_sink(&failing, &[1], CHECK_ON_ID).await;
     failing.add(handlers::failure(hyper::StatusCode::SERVICE_UNAVAILABLE));
-    let sink = checked_sink(failing.url(), &[1], CHECK_ON_ID);
     let err = sink.validate_distributed().await.unwrap_err();
     assert!(
         matches!(&err, DistributedCheckError::Fetch { what, .. } if *what == "cluster topology"),

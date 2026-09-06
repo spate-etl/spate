@@ -30,10 +30,8 @@ sink:
       - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
     user: ${CLICKHOUSE_USER:-default}
     password: ${CLICKHOUSE_PASSWORD:-}
-    # Validate against the *Null* table's plain columns. Repointing this at
-    # the AggregatingMergeTree fails fast here: the sink cannot write
-    # aggregate states directly.
-    validate_schema: names
+    # Repointing this at the AggregatingMergeTree fails fast when the sink is
+    # built: it cannot write aggregate states directly.
     # Exactly-once through the Materialized View (ClickHouse >= 26.1): the
     # sink stamps an insert_deduplication_token per batch; this setting makes
     # that token cover the MV's writes into the target. The target also needs

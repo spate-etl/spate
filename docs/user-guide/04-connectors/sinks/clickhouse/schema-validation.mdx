@@ -1,24 +1,23 @@
 ---
-description: "ClickHouse schema validation checks the row struct's derived columns against the live table's schema before any row is sent."
+description: "ClickHouse schema validation checks the row struct against the live table before any row is sent, and the wire header re-checks it on every insert."
 ---
 
 # ClickHouse schema validation
 
 A ClickHouse pipeline has two descriptions of the same row: the columns
 `#[derive(ClickHouseRow)]` generates from the Rust row struct's field order,
-and the live table's schema. RowBinary, the wire format, carries **no column
-names**, so nothing catches a disagreement at the protocol level: misaligned
-columns are silent data corruption, not an error. Opt-in schema validation
-closes that gap at startup and at the first record, before any misaligned
-batch can be sent.
+and the live table's schema. Building the sink fetches the table's columns and
+holds one against the other, and the insert's wire format carries them so the
+server holds them again on every batch.
 
 ## The wire contract
 
-The sink sends `INSERT INTO t (col1, col2, ...) FORMAT RowBinary` with each
-row serialized field by field, in declaration order. The server maps bytes to
-columns purely by position, so the row struct's field order is the wire
-contract. `OrderRow` below is the row; the two types above it are what the
-chain decodes and totals into it. All three come from
+The sink sends `INSERT INTO t (col1, col2, ...) FORMAT
+RowBinaryWithNamesAndTypes` with each row serialized field by field, in
+declaration order. The body opens with a header naming every column and its
+type; the rows that follow are positional, so the row struct's field order is
+the wire contract. `OrderRow` below is the row; the two types above it are what
+the chain decodes and totals into it. All three come from
 [`kafka_avro_to_clickhouse.rs`](repo:crates/spate/examples/kafka_avro_to_clickhouse.rs),
 a complete program that builds under the `full` facade feature, as does the
 wiring further down:
@@ -31,30 +30,40 @@ column types each format writes is in
 [ClickHouse column types](./column-types.mdx); the Rust field each one takes
 lives in the `spate-clickhouse` crate's `rowbinary` module docs.
 
-## The three modes
+## The three checks
 
-`validate_schema` in the `sink: { clickhouse: ... }` section:
+| When | What |
+|---|---|
+| Building the sink | Every declared column exists and is insertable on **every replica of every shard**; replica drift and missing tables fail with a readable diff. |
+| The first record, per pipeline thread | Struct field names, order, and a class-based type-compatibility check per position. |
+| Every insert, server-side | The header's column names and types against the table's. |
 
-| Mode | Startup (before any thread spawns) | First record (per pipeline thread) |
-|---|---|---|
-| `off` (default) | Nothing — no queries issued. | Nothing. |
-| `names` | Every declared column exists and is insertable on **every replica of every shard**; replica drift and missing tables fail with a readable diff. | Struct field names and order match the declared columns. |
-| `full` | Everything `names` does. | `names` plus a class-based type-compatibility check per position. |
+The client-side type check is permissive about a column's *meaning* and strict
+about its width and signedness. A `u32` may feed `UInt32`, `DateTime` or
+`IPv4`, because all three are four unsigned bytes; server types the client does
+not know always pass. What it will not do is cross signedness at the same
+width: `DateTime64` and `Time64` are `Int64`-backed and take an `i64`, not a
+`u64`, because they carry instants before 1970 as negative values. Two
+mismatches always fail: `Nullable` on the server versus a non-`Option` field
+(or the reverse), and a wire wrapper whose declared scale disagrees with the
+column's. Both are wire corruption rather than judgment calls.
 
-The `full` type check is deliberately permissive: a `u32` may feed
-`UInt32`, `DateTime`, or `IPv4`; server types the client does not know
-always pass. One mismatch always fails regardless: `Nullable` on the server
-versus a non-`Option` field (or the reverse). That one is wire corruption,
-not a judgment call.
+The two client-side checks are not made redundant by the server's. The header
+carries the *table's* types, so the server never sees the struct's, and a
+`Decimal64<2>` field against a `Decimal(9, 2)` column is caught client-side or
+not at all.
 
 ## Wiring it up
 
-Validation is an async pre-flight step that runs on the builder's I/O runtime
-via `pipeline.block_on`, **after** `with_row` and **before** handing the sink
-to `.sink(...)`. A failure exits the process before any pipeline thread
-or sink worker exists. In `off` mode the call returns `Ok(None)` instantly
-and issues no queries, which is why the encoder is built from a `match`
-rather than behind a flag:
+The fetch is an async step that runs on the builder's I/O runtime via
+`pipeline.block_on`. A failure exits the process before any pipeline thread or
+sink worker exists:
+
+```rust file=crates/spate/examples/kafka_avro_to_clickhouse.rs region=sink
+```
+
+The sink hands the encoder the schema it fetched, so the two cannot describe
+different tables:
 
 ```rust file=crates/spate/examples/kafka_avro_to_clickhouse.rs region=encoder
 ```
@@ -65,61 +74,48 @@ with the matching YAML:
 sink:
   clickhouse:
     table: orders
-    validate_schema: full     # off | names | full
 ```
 
-## The two halves
+## What each check is for
 
-**Startup half** — `ClickHouseSink::validate_schema()` fetches
-`system.columns` from every replica and checks `OrderRow`'s *derived
-columns* against the *live tables*. It returns the parsed schema as an
-`Arc` of `RowSchema` (or `None` when `off`).
+**Building the sink** fetches `system.columns` from every replica and checks
+`OrderRow`'s *derived columns* against the *live tables*. Because it queries
+every replica independently, it also catches replica drift, a replica whose
+table was altered out of step with the others. It returns the parsed schema as
+an `Arc` of `RowSchema`, reachable from the sink as `schema()`.
 
-**First-record half** — `ClickHouseEncoder::with_schema(schema)` carries
-that expected schema into the encoder, which checks the first record each
-pipeline thread encodes: field names and order always, type classes in
-`full` mode. For an ordinary `#[derive(Serialize)]` struct this agrees with
-the derived columns by construction, so in practice it is a safety net
-rather than a live check: it still catches a hand-written `Serialize` impl
-whose emission order disagrees with declaration order, a hand-written
-`ClickHouseRowFamily` implementation (for a borrowed record family) whose
-declared columns disagree with what it actually serializes, and — the one
-case that needs a real value regardless — a type-class mismatch, since a
-shape needs a value to record. A mismatch is a fatal error that stops the
-pipeline before the batch is sent. Steady-state cost after the first record
-is one predictable branch, with nothing on the per-record hot path.
+**The first record** is where the struct is compared against that schema, on
+each pipeline thread. For an ordinary `#[derive(Serialize)]` struct this agrees
+with the derived columns by construction, so in practice it is a safety net: it
+still catches a hand-written `Serialize` impl whose emission order disagrees
+with declaration order, a hand-written `ClickHouseRowFamily` implementation
+(for a borrowed record family) whose declared columns disagree with what it
+actually serializes, and — the one case that needs a real value regardless — a
+type-class mismatch, since a shape needs a value to record. A mismatch is a
+fatal error that stops the pipeline before the batch is sent. Steady-state cost
+after the first record is one predictable branch, with nothing on the
+per-record hot path.
 
-`with_row::<F>()` and `ClickHouseEncoder::<F>` take the record family
-independently, so nothing stops naming a different row type at each call
-site; agreement holds only when the same struct names both. Getting this
-wrong is exactly what the first-record half above still catches.
+**Every insert** is the server's own check, against the header. This is the one
+that survives a table altered while the pipeline is already running: the client
+looked once, but the header travels with every batch, so an `ALTER` that keeps
+a column's byte width — a `Decimal` scale change within one precision band, a
+`DateTime64` precision change, a signedness change — is rejected as
+`INCORRECT_DATA` rather than silently storing rescaled values. The sink sends
+`input_format_with_names_use_header` and `input_format_with_types_use_header`
+with every insert so a server or profile default cannot turn that check off.
 
-Because the startup half derives its expected columns from the same struct
-the encoder serializes, a struct-vs-table disagreement is caught before any
-thread spawns rather than at the first record. Because it queries every
-replica independently, it also catches replica drift, a replica whose table
-was altered out of step with the others.
-
-Both halves run once, at startup and at the first record; neither runs
-again. A table altered while the pipeline is already running is not
-re-checked.
-
-:::warning
-`validate_schema: off` means nothing is checked. A declared column the
-table lacks fails loudly (a server error on the first insert), but a field
-whose type the column cannot take, or a hand-written `Serialize`/
-`ClickHouseRowFamily` implementation that emits fields in a different order
-from its own declared columns, does not: the bytes still leave for the
-wrong column with no protocol error. Turn on at least `names` for any table
-not created in the same commit as the pipeline.
-:::
+`ClickHouseEncoder::<F>` takes its record family independently of `with_row`,
+so nothing stops naming a different row type at each call site; agreement holds
+only when the same struct names both. Getting this wrong is exactly what the
+first-record check catches.
 
 ## Related
 
 - [ClickHouse sink](./README.mdx) — the full sink configuration, including the
   deduplication window warning.
-- [Permissions](./permissions.mdx) — validation reads `system.columns`, which
-  the target table's `INSERT` grant already covers.
+- [Permissions](./permissions.mdx) — the `system.columns` read, which the
+  target table's `INSERT` grant already covers.
 - [Assembling a pipeline](../../../03-guides/assembling-a-pipeline.mdx) — where
   `block_on` pre-steps fit in the builder flow.
 - [Error handling](../../../02-concepts/04-error-handling.mdx) — how fatal errors

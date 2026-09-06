@@ -24,52 +24,42 @@ use std::sync::Arc;
 ///
 /// The row struct's **field declaration order is the wire contract**: it is
 /// the insert column list `#[derive(ClickHouseRow)]` generates (see the
-/// crate docs). [`ClickHouseEncoder::with_schema`] checks that contract
-/// against the live table's schema on each pipeline thread's first record.
+/// crate docs). The encoder checks that contract against the live table's
+/// schema on each pipeline thread's first record.
 #[derive(Debug)]
 pub struct ClickHouseEncoder<F> {
-    check: Option<CheckState>,
+    expected: Arc<RowSchema>,
+    checked: bool,
     _row: PhantomData<fn(F)>,
 }
 
-#[derive(Debug)]
-struct CheckState {
-    expected: Arc<RowSchema>,
-    done: bool,
-}
-
 impl<F> ClickHouseEncoder<F> {
-    /// An encoder for the family's rows.
-    #[must_use]
-    pub fn new() -> Self {
-        ClickHouseEncoder {
-            check: None,
-            _row: PhantomData,
-        }
-    }
-
     /// An encoder that validates the row struct against `expected` (the
-    /// schema returned by [`crate::ClickHouseSink::validate_schema`]) on
-    /// the first record it encodes: field names and order always, type
-    /// classes in `full` mode. A mismatch is an
-    /// [`ErrorClass::Fatal`] error, which stops the pipeline before any
-    /// misaligned batch is sent. Steady-state cost after the first record
-    /// is one predictable branch.
+    /// schema from [`ClickHouseSink::schema`](crate::ClickHouseSink::schema))
+    /// on the first record it encodes: field names, order and type classes.
+    /// A mismatch is an [`ErrorClass::Fatal`] error, which stops the pipeline
+    /// before any misaligned batch is sent. Steady-state cost after the first
+    /// record is one predictable branch.
     #[must_use]
     pub fn with_schema(expected: Arc<RowSchema>) -> Self {
         ClickHouseEncoder {
-            check: Some(CheckState {
-                expected,
-                done: false,
-            }),
+            expected,
+            checked: false,
             _row: PhantomData,
         }
     }
-}
 
-impl<F> Default for ClickHouseEncoder<F> {
-    fn default() -> Self {
-        Self::new()
+    /// An encoder that skips the first-record check, for the encode
+    /// benchmarks, whose subject is the steady-state row loop.
+    #[cfg(feature = "testing")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn unchecked() -> Self {
+        ClickHouseEncoder {
+            expected: Arc::new(RowSchema::empty()),
+            checked: true,
+            _row: PhantomData,
+        }
     }
 }
 
@@ -78,10 +68,8 @@ impl<F> Clone for ClickHouseEncoder<F> {
         // Each pipeline thread's clone re-validates its own first record:
         // the check is cheap, and threads must not race a shared flag.
         ClickHouseEncoder {
-            check: self.check.as_ref().map(|c| CheckState {
-                expected: Arc::clone(&c.expected),
-                done: false,
-            }),
+            expected: Arc::clone(&self.expected),
+            checked: self.checked,
             _row: PhantomData,
         }
     }
@@ -97,20 +85,18 @@ where
         rec: &Record<F::Rec<'buf>>,
         buf: &mut BytesMut,
     ) -> Result<(), SinkError> {
-        if let Some(check) = &mut self.check
-            && !check.done
-        {
+        if !self.checked {
             let fields = schema::probe::probe_row(&rec.payload).map_err(|e| SinkError::Client {
                 class: ErrorClass::Fatal,
                 reason: format!("schema validation could not probe the row struct: {e}"),
             })?;
-            schema::check_first_record(&check.expected, &fields).map_err(|diff| {
+            schema::check_first_record(&self.expected, &fields).map_err(|diff| {
                 SinkError::Client {
                     class: ErrorClass::Fatal,
                     reason: diff,
                 }
             })?;
-            check.done = true;
+            self.checked = true;
         }
         rowbinary::serialize_row(&rec.payload, buf).map_err(|e| SinkError::Client {
             class: ErrorClass::RecordLevel,
@@ -136,9 +122,26 @@ impl RowEncoder<Owned<Vec<u8>>> for PreEncodedRows {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::schema::typeparse;
     use serde::Serialize;
     use spate_core::checkpoint::AckRef;
     use spate_core::record::{PartitionId, RecordMeta};
+
+    /// A schema as `with_row` would fetch it from a live table.
+    fn schema(cols: &[(&str, &str)]) -> Arc<RowSchema> {
+        Arc::new(RowSchema {
+            wire: crate::schema::Wire::RowBinary,
+            table: "`orders`".into(),
+            columns: cols
+                .iter()
+                .map(|(n, t)| ((*n).to_string(), typeparse::parse(t), (*t).to_string()))
+                .collect(),
+        })
+    }
+
+    fn id_name() -> Arc<RowSchema> {
+        schema(&[("id", "UInt64"), ("name", "String")])
+    }
 
     #[derive(Serialize)]
     struct Row {
@@ -175,7 +178,7 @@ mod tests {
             name: "x".into(),
         });
         let mut buf = BytesMut::new();
-        ClickHouseEncoder::<Owned<Row>>::new()
+        ClickHouseEncoder::<Owned<Row>>::with_schema(id_name())
             .encode(&rec, &mut buf)
             .unwrap();
         assert_eq!(buf.as_ref(), &[7, 0, 0, 0, 0, 0, 0, 0, 1, b'x']);
@@ -198,7 +201,7 @@ mod tests {
         let name = String::from("x");
         let (rec, _rx) = record(RowRef { id: 7, name: &name });
         let mut buf = BytesMut::new();
-        ClickHouseEncoder::<RowRefFam>::new()
+        ClickHouseEncoder::<RowRefFam>::with_schema(id_name())
             .encode(&rec, &mut buf)
             .unwrap();
         assert_eq!(buf.as_ref(), &[7, 0, 0, 0, 0, 0, 0, 0, 1, b'x']);
@@ -211,11 +214,55 @@ mod tests {
             c: char,
         }
         let (rec, _rx) = record(Bad { c: 'x' });
-        let err = ClickHouseEncoder::<Owned<Bad>>::new()
+        let err = ClickHouseEncoder::<Owned<Bad>>::unchecked()
             .encode(&rec, &mut BytesMut::new())
             .unwrap_err();
         match err {
             SinkError::Client { class, .. } => assert_eq!(class, ErrorClass::RecordLevel),
+            other => panic!("unexpected error shape: {other:?}"),
+        }
+    }
+
+    /// A field type the probe cannot describe stops the pipeline at the first
+    /// record, rather than failing every record for the life of the run.
+    #[test]
+    fn an_unprobeable_row_is_fatal_at_the_first_record() {
+        #[derive(Serialize)]
+        struct Bad {
+            c: char,
+        }
+        let (rec, _rx) = record(Bad { c: 'x' });
+        let err = ClickHouseEncoder::<Owned<Bad>>::with_schema(schema(&[("c", "String")]))
+            .encode(&rec, &mut BytesMut::new())
+            .unwrap_err();
+        match err {
+            SinkError::Client { class, reason } => {
+                assert_eq!(class, ErrorClass::Fatal);
+                assert!(
+                    reason.contains("could not probe the row struct"),
+                    "{reason}"
+                );
+            }
+            other => panic!("unexpected error shape: {other:?}"),
+        }
+    }
+
+    /// The struct check runs once per encoder, and a clone re-runs it, so a
+    /// pipeline thread never inherits another thread's verdict.
+    #[test]
+    fn a_clone_revalidates_its_own_first_record() {
+        let (rec, _rx) = record(Row {
+            id: 7,
+            name: "x".into(),
+        });
+        let mut enc = ClickHouseEncoder::<Owned<Row>>::with_schema(id_name());
+        enc.encode(&rec, &mut BytesMut::new()).unwrap();
+
+        let mut wrong =
+            ClickHouseEncoder::<Owned<Row>>::with_schema(schema(&[("id", "UInt64")])).clone();
+        let err = wrong.encode(&rec, &mut BytesMut::new()).unwrap_err();
+        match err {
+            SinkError::Client { class, .. } => assert_eq!(class, ErrorClass::Fatal),
             other => panic!("unexpected error shape: {other:?}"),
         }
     }

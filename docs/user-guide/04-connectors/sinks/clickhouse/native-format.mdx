@@ -55,8 +55,8 @@ CPU trade above.
 ## Enabling it
 
 `format: native` is **type-driven**. The encoder needs each column's
-ClickHouse type to lay bytes out columnar, so selecting it always fetches
-`system.columns` (it upgrades `validate_schema: off` to `names`).
+ClickHouse type to lay bytes out columnar, and takes it from the schema the
+sink fetched when the row type was supplied.
 
 The row is an ordinary `serde::Serialize` struct, the same one RowBinary
 takes.
@@ -72,8 +72,8 @@ a Kafka topic of Avro orders and the target table, and runs with
 are what the chain decodes and explodes into it. Its field declaration order
 is the positional contract, generated as the insert column list by
 `#[derive(ClickHouseRow)]`, and `DateTime64Millis` declares the timestamp's
-scale, which is what lets `validate_schema: full` check it against the
-column's declared precision.
+scale, which is what lets the first-record check hold it against the column's
+declared precision.
 
 The encoder is built from the schema that sink fetched, where `sink` is the
 [ClickHouse sink](./README.mdx) constructed from its config section:
@@ -95,10 +95,10 @@ The Native writer emits the raw little-endian integer and does not rescale
 it, so a `DateTime64(6)` column fed milli-scaled values silently lands wrong
 timestamps, and a `Decimal(18, 2)` column fed a `Decimal64<4>` value lands
 every row 100× too large. Declare the scale through the wrapper
-(`DateTime64Millis`, `Decimal64<2>`, …) and set `validate_schema: full`. A
-wrapper whose scale disagrees with the column then fails fatally on the
-first record, before anything is inserted. A plain `i64` field declares no
-scale, so nothing can validate it and the mismatch stays silent.
+(`DateTime64Millis`, `Decimal64<2>`, …): a wrapper whose scale disagrees with
+the column fails fatally on the first record, before anything is inserted. A
+plain `i64` field declares no scale, so nothing can validate it and the
+mismatch stays silent.
 :::
 
 ## Semantics that do **not** change

@@ -145,20 +145,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Each sink mints its own Native encoder (its table's column types) and an
     // order-sharded router, as a single-sink pipeline does, with N of them
     // here. Built before `add_sink` moves each sink into its worker pool.
-    let payments_sink = spate::clickhouse::config::from_component_config(
-        pipeline.config().sink_config("payments")?,
-    )?
-    .with_row::<Owned<PaymentRow>>()?;
-    let refunds_sink = spate::clickhouse::config::from_component_config(
-        pipeline.config().sink_config("refunds")?,
-    )?
-    .with_row::<Owned<RefundRow>>()?;
+    let payments_sink = pipeline.block_on(
+        spate::clickhouse::config::from_component_config(
+            pipeline.config().sink_config("payments")?,
+        )?
+        .with_row::<Owned<PaymentRow>>(),
+    )?;
+    let refunds_sink = pipeline.block_on(
+        spate::clickhouse::config::from_component_config(
+            pipeline.config().sink_config("refunds")?,
+        )?
+        .with_row::<Owned<RefundRow>>(),
+    )?;
     let payments_router = payments_sink.router::<Owned<PaymentRow>>(payment_key);
     let refunds_router = refunds_sink.router::<Owned<RefundRow>>(refund_key);
-    let payments_enc =
-        NativeEncoder::<Owned<PaymentRow>>::new(pipeline.block_on(payments_sink.native_schema())?);
-    let refunds_enc =
-        NativeEncoder::<Owned<RefundRow>>::new(pipeline.block_on(refunds_sink.native_schema())?);
+    let payments_enc = NativeEncoder::<Owned<PaymentRow>>::new(payments_sink.native_schema()?);
+    let refunds_enc = NativeEncoder::<Owned<RefundRow>>::new(refunds_sink.native_schema()?);
 
     // ── The chain, and run ──────────────────────────────────────────────
     // ANCHOR: install_sinks

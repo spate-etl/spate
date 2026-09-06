@@ -1,7 +1,7 @@
-//! Opt-in startup schema validation: fetch the target table's columns
-//! from every replica, fail fast (with a readable diff) when the row
-//! type's declared columns cannot work, and hand the encoder a parsed,
-//! struct-ordered schema for its first-record check.
+//! Startup schema validation: fetch the target table's columns from every
+//! replica, fail fast (with a readable diff) when the row type's declared
+//! columns cannot work, and hand the encoders a parsed, struct-ordered schema
+//! for their first-record check and their wire header.
 //!
 //! Two moments, two checks:
 //!
@@ -11,10 +11,8 @@
 //!   inter-replica drift.
 //!   Declaration order differing from *table* order is not an error: the
 //!   `INSERT` column list maps by name.
-//! - **First record** (`check_first_record`, driven by both encoders,
-//!   RowBinary's [`crate::ClickHouseEncoder::with_schema`] and the Native
-//!   encoder whenever its schema was fetched): the row struct's probed
-//!   field names, order, and, in `full` mode, type classes against the
+//! - **First record** (`check_first_record`, driven by both encoders): the
+//!   row struct's probed field names, order and type classes against the
 //!   declared columns, including wire-wrapper scale against the column's
 //!   declared parameters (`DateTime64Millis` into `DateTime64(6)`, or
 //!   `Decimal64<4>` into `Decimal(18, 2)`, fail here). This still needs a
@@ -23,14 +21,20 @@
 //!   `ClickHouseRowFamily` impl (see [`crate::ClickHouseRowFamily`]) or a
 //!   hand-written `Serialize` whose emission order disagrees with the
 //!   columns it declared.
+//!
+//! The server never sees the struct's types, only the table's, so the type
+//! check has no server-side counterpart: a `Decimal64<2>` field against a
+//! `Decimal(9, 2)` column is caught here or not at all.
 
 pub(crate) mod probe;
 pub(crate) mod typeparse;
 
-use crate::config::SchemaValidation;
+use crate::native::leaf::{put_leb128, put_string};
 use crate::writer::ClickHouseEndpoint;
+use bytes::{Bytes, BytesMut};
+pub(crate) use probe::Wire;
 use probe::{FieldShape, Shape, compatible};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::fmt::Write as _;
 use std::sync::Arc;
 use typeparse::ChType;
@@ -39,10 +43,10 @@ use typeparse::ChType;
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum SchemaError {
-    /// A replica's schema could not be fetched. The user opted into
-    /// fail-fast validation, so connectivity problems fail startup too —
-    /// the message keeps "could not fetch" and "mismatch" distinguishable
-    /// at a glance.
+    /// A replica's schema could not be fetched. The sink writes to every
+    /// replica, so one that cannot answer at startup is a degraded
+    /// deployment; the message keeps "could not fetch" and "mismatch"
+    /// distinguishable at a glance.
     #[error("sink.clickhouse: could not fetch schema for {table} from {url}: {reason}")]
     Fetch {
         /// The (possibly database-qualified) table.
@@ -56,37 +60,78 @@ pub enum SchemaError {
     /// multi-line diff).
     #[error("{0}")]
     Mismatch(String),
+    /// The declared column list cannot produce an `INSERT`. Reachable only
+    /// from a hand-written [`ClickHouseRowFamily`](crate::ClickHouseRowFamily)
+    /// impl; the derive rejects the same problems at compile time.
+    #[error("{0}")]
+    Columns(String),
 }
 
 /// The validated, struct-ordered expected schema. Produced by
-/// [`crate::ClickHouseSink::validate_schema`]; consumed by
-/// [`crate::ClickHouseEncoder::with_schema`] for the first-record check.
-/// Opaque: holds no `clickhouse` crate types.
+/// [`with_row`](crate::config::ClickHouseSinkBuilder::with_row); consumed by
+/// [`crate::ClickHouseEncoder::with_schema`] for the first-record check and by
+/// the writer for its wire header. Opaque: holds no `clickhouse` crate types.
 #[derive(Debug)]
 pub struct RowSchema {
-    pub(crate) mode: SchemaValidation,
+    /// Which encoder's rules the first-record check applies.
+    pub(crate) wire: Wire,
     pub(crate) table: String,
     /// `(column name, parsed type, raw type string)` in **struct** order.
     pub(crate) columns: Vec<(String, ChType, String)>,
 }
 
+impl RowSchema {
+    /// A schema with no columns, for the bench-only unchecked encoder.
+    #[cfg(feature = "testing")]
+    pub(crate) fn empty() -> RowSchema {
+        RowSchema {
+            wire: Wire::RowBinary,
+            table: "<unchecked>".into(),
+            columns: Vec::new(),
+        }
+    }
+
+    /// The `RowBinaryWithNamesAndTypes` header: a column count, then every
+    /// name, then every type, each length-prefixed.
+    ///
+    /// The type text is `system.columns`' own, sent back verbatim, so the
+    /// server compares its table against a string it produced.
+    pub(crate) fn header(&self) -> Bytes {
+        let mut buf = BytesMut::new();
+        put_leb128(&mut buf, self.columns.len() as u64);
+        for (name, ..) in &self.columns {
+            put_string(&mut buf, name.as_bytes());
+        }
+        for (.., raw) in &self.columns {
+            put_string(&mut buf, raw.as_bytes());
+        }
+        buf.freeze()
+    }
+}
+
 /// What [`crate::config::ClickHouseSinkBuilder::with_row`] captures for a
-/// later `validate_schema()` call.
+/// schema fetch.
 #[derive(Clone, Debug)]
 pub(crate) struct SchemaCheck {
-    pub(crate) mode: SchemaValidation,
+    pub(crate) wire: Wire,
     pub(crate) database: Option<String>,
     pub(crate) table: String,
     pub(crate) columns: &'static [&'static str],
 }
 
 /// One row of `system.columns`, crate-private.
-#[derive(Clone, Debug, PartialEq, Eq, clickhouse::Row, Deserialize)]
-pub(crate) struct ColumnRow {
-    pub(crate) name: String,
+// `pub` for the `testing` re-export. The `schema` module is private, so
+// without that feature nothing outside the crate can name this.
+#[cfg_attr(not(feature = "testing"), allow(unreachable_pub))]
+#[derive(Clone, Debug, PartialEq, Eq, clickhouse::Row, Deserialize, Serialize)]
+pub struct ColumnRow {
+    /// The column name.
+    pub name: String,
+    /// The declared ClickHouse type, verbatim.
     #[serde(rename = "type")]
-    pub(crate) type_: String,
-    pub(crate) default_kind: String,
+    pub type_: String,
+    /// `DEFAULT`, `MATERIALIZED`, `ALIAS`, or empty.
+    pub default_kind: String,
 }
 
 impl SchemaCheck {
@@ -181,16 +226,11 @@ fn aggregate_function_remedy(col: &str, type_: &str) -> Option<String> {
     ))
 }
 
-/// Startup validation against every replica of every shard. `Ok(None)`
-/// when the mode is `Off`; `Ok(Some(schema))` for the encoder otherwise.
+/// Startup validation against every replica of every shard.
 pub(crate) async fn validate(
     check: &SchemaCheck,
     endpoints: &[Vec<ClickHouseEndpoint>],
-) -> Result<Option<Arc<RowSchema>>, SchemaError> {
-    if check.mode == SchemaValidation::Off {
-        return Ok(None);
-    }
-
+) -> Result<Arc<RowSchema>, SchemaError> {
     // Every replica must agree: shard-local tables drift independently,
     // and a broken replica should surface now, not at its first rotated
     // write.
@@ -289,16 +329,16 @@ pub(crate) async fn validate(
             )
         })
         .collect();
-    Ok(Some(Arc::new(RowSchema {
-        mode: check.mode,
+    Ok(Arc::new(RowSchema {
+        wire: check.wire,
         table: check.display_table(),
         columns,
-    })))
+    }))
 }
 
-/// The first-record struct check: field names and order against the
-/// declared columns (both modes), plus class-based type compatibility per
-/// position (`full` mode). Returns the pre-formatted diff on failure.
+/// The first-record struct check: field names and order against the declared
+/// columns, plus class-based type compatibility per position. Returns the
+/// pre-formatted diff on failure.
 ///
 /// This is not made redundant by `ClickHouseRow::COLUMNS` being a compile-time
 /// const: it compares that declared list against what the struct's `Serialize`
@@ -323,7 +363,7 @@ pub(crate) fn check_first_record(schema: &RowSchema, fields: &[FieldShape]) -> R
                 "position {i}: struct field `{}` vs declared column `{col}`",
                 field.name
             ));
-        } else if schema.mode == SchemaValidation::Full && !compatible(&field.shape, ty) {
+        } else if !compatible(&field.shape, ty, schema.wire) {
             findings.push(format!(
                 "position {i}: struct field `{}` ({}) is not compatible with `{col}` {ty_str}",
                 field.name,
@@ -402,9 +442,9 @@ mod tests {
     use probe::probe_row;
     use serde::Serialize;
 
-    fn schema(mode: SchemaValidation, cols: &[(&str, &str)]) -> RowSchema {
+    fn schema(cols: &[(&str, &str)]) -> RowSchema {
         RowSchema {
-            mode,
+            wire: Wire::RowBinary,
             table: "`orders`".into(),
             columns: cols
                 .iter()
@@ -430,22 +470,14 @@ mod tests {
     }
 
     #[test]
-    fn matching_struct_passes_both_modes() {
-        for mode in [SchemaValidation::Names, SchemaValidation::Full] {
-            let s = schema(
-                mode,
-                &[("id", "UInt64"), ("amount", "Int64"), ("name", "String")],
-            );
-            assert_eq!(check_first_record(&s, &fields()), Ok(()));
-        }
+    fn matching_struct_passes() {
+        let s = schema(&[("id", "UInt64"), ("amount", "Int64"), ("name", "String")]);
+        assert_eq!(check_first_record(&s, &fields()), Ok(()));
     }
 
     #[test]
     fn field_order_mismatch_is_reported_per_position() {
-        let s = schema(
-            SchemaValidation::Names,
-            &[("id", "UInt64"), ("name", "String"), ("amount", "Int64")],
-        );
+        let s = schema(&[("id", "UInt64"), ("name", "String"), ("amount", "Int64")]);
         let err = check_first_record(&s, &fields()).unwrap_err();
         assert!(err.contains("position 1: struct field `amount` vs declared column `name`"));
         assert!(err.contains("position 2: struct field `name` vs declared column `amount`"));
@@ -454,26 +486,33 @@ mod tests {
     }
 
     #[test]
-    fn type_mismatches_only_fail_full_mode() {
-        let cols = [
+    fn a_type_mismatch_is_reported_per_position() {
+        let s = schema(&[
             ("id", "UInt64"),
             ("amount", "DateTime"), // i64 field is not a u32 DateTime
             ("name", "String"),
-        ];
-        let names = schema(SchemaValidation::Names, &cols);
-        assert_eq!(check_first_record(&names, &fields()), Ok(()));
-
-        let full = schema(SchemaValidation::Full, &cols);
-        let err = check_first_record(&full, &fields()).unwrap_err();
+        ]);
+        let err = check_first_record(&s, &fields()).unwrap_err();
         assert!(
             err.contains("struct field `amount` (i64) is not compatible with `amount` DateTime"),
             "{err}"
         );
     }
 
+    /// The header names each column and its type, in struct order, each
+    /// length-prefixed behind one count.
+    #[test]
+    fn the_header_names_every_column_then_every_type() {
+        let s = schema(&[("id", "UInt64"), ("name", "String")]);
+        assert_eq!(
+            s.header().as_ref(),
+            b"\x02\x02id\x04name\x06UInt64\x06String".as_slice(),
+        );
+    }
+
     #[test]
     fn field_count_mismatch_names_the_skip_footgun() {
-        let s = schema(SchemaValidation::Names, &[("id", "UInt64")]);
+        let s = schema(&[("id", "UInt64")]);
         let err = check_first_record(&s, &fields()).unwrap_err();
         assert!(err.contains("serialized 3 field(s) but 1 column(s)"));
         assert!(err.contains("#[serde(skip)]"));

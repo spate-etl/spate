@@ -68,9 +68,9 @@ async fn multi_partition_batch_stays_idempotent_per_partition() {
     let sink = sink_with::<Owned<DatedRow>>(
         &srv.url,
         "dated",
-        "off",
         "user: default\npassword: partition-secret\n",
-    );
+    )
+    .await;
 
     // 100 rows split across two adjacent dates (interleaved by id parity),
     // shipped as several frames to prove frame boundaries are irrelevant.
@@ -156,11 +156,11 @@ async fn single_partition_batch_forms_one_dedup_unit() {
     let sink = sink_with::<Owned<DatedRow>>(
         &srv.url,
         "dated",
-        "off",
         "user: default\npassword: partition-secret\n\
              settings: { max_insert_block_size: \"10\", min_insert_block_size_rows: \"0\", \
              min_insert_block_size_bytes: \"0\" }",
-    );
+    )
+    .await;
 
     // 100 rows, all in one partition (single date), one frame, one token.
     let rows: Vec<DatedRow> = (0..100).map(|id| DatedRow { id, dt: 20000 }).collect();

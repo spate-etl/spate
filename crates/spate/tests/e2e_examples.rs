@@ -911,9 +911,9 @@ fn clickhouse_aggregating_mv_example_builds_states() {
     // keys, and every eu-west total is 3, so a key-side regression that
     // collapsed all three into one would still add to 9. Reading the map back
     // through the state holds the sink's `Map(String, UInt64)` encoding end
-    // to end. `validate_schema: names` rejects an `AggregateFunction` column
-    // but does not check a field's shape against its column type; only `full`
-    // does that.
+    // to end. The sink refuses an `AggregateFunction` column outright, which
+    // is why this pipeline writes to a Null landing table and lets a
+    // materialized view build the states.
     assert_eq!(
         h.scalar(
             "SELECT toUInt64(length(m) = 3 AND m['KBD-01'] = 3 \

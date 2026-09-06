@@ -52,10 +52,10 @@ async fn int256_and_nested_geo_match_the_literal_row() {
     let sink = sink_with::<Owned<EdgeRow>>(
         &srv.url,
         "native_edges",
-        "full",
         "format: native\nuser: default\npassword: edges-secret\n",
-    );
-    let schema = sink.native_schema().await.expect("native schema");
+    )
+    .await;
+    let schema = sink.native_schema().expect("native schema");
     let mut encoder = NativeEncoder::<Owned<EdgeRow>>::new(schema);
     let batch = encode_native_batch(&mut encoder, vec![edge_row()], "edges-1").expect("encode");
     sink.writer

@@ -49,7 +49,7 @@ is in the `rowbinary` module of the
 | `Time` | yes | no | Needs ClickHouse 25.6 or later with `enable_time_time64_type=1` under `settings:` |
 | `Time64(P)` | yes | no | Needs ClickHouse 25.6 or later with `enable_time_time64_type=1` under `settings:` |
 | `Decimal(P, S)`, `P` of 38 or below | yes | yes | `Decimal32(S)`, `Decimal64(S)` and `Decimal128(S)` are the sugar for `P` of 9, 18 and 38. `validate_schema: full` checks the wrapper's declared scale against `S` |
-| `Decimal(P, S)`, `P` above 38 | manual | no | The row carries an `Int256` holding the value already scaled by `10^S`. `validate_schema: full` rejects that field against such a column, and the mode is sink-wide, so the whole sink drops to `names` and loses type checking on every column |
+| `Decimal(P, S)`, `P` above 38 | manual | no | The row carries an `Int256` holding the value already scaled by `10^S`. The width is checked against the column's precision band; the scaling is the row's to get right, since the field carries no scale to check |
 | `Decimal256(S)` | manual | no | Parses as a `Decimal` of precision 76, so the row above applies |
 | `Enum8` | yes | yes | |
 | `Enum16` | yes | yes | |

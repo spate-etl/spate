@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 /// the sink writes, not the rollup the view builds from it. Only `Serialize`
 /// is needed: the wire path is RowBinary and
 /// the tests read the merged aggregates back as scalars, not typed rows.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ClickHouseRow)]
 struct OrderRollup {
     region: String,
     placed_at: u32,                    // epoch seconds -> DateTime
@@ -105,10 +105,9 @@ async fn create_null_and_mv(admin: &clickhouse::Client) {
 /// A sink pointed at the Null landing table, with MV dedup enabled so the
 /// per-batch token reaches the AggregatingMergeTree target.
 fn null_sink(url: &str) -> config::ClickHouseSink {
-    sink_with(
+    sink_with::<Owned<OrderRollup>>(
         url,
         "orders_null",
-        &["region", "placed_at", "qty_by_sku"],
         "off",
         "user: default\npassword: agg-secret\n\
          settings: { deduplicate_blocks_in_dependent_materialized_views: \"1\" }",
@@ -231,10 +230,16 @@ async fn direct_insert_into_aggregate_function_column_is_rejected() {
     let srv = bare_server("26.3", "agg-secret").await;
     create_target(&srv.admin).await;
 
-    let sink = sink_with(
+    #[derive(Clone, Serialize, ClickHouseRow)]
+    struct AggDirectRow {
+        region: String,
+        first_placed_at: u32,
+        last_placed_at: u32,
+        qty_by_sku: u64,
+    }
+    let sink = sink_with::<Owned<AggDirectRow>>(
         &srv.url,
         "orders_agg",
-        &["region", "first_placed_at", "last_placed_at", "qty_by_sku"],
         "names",
         "user: default\npassword: agg-secret\n",
     );

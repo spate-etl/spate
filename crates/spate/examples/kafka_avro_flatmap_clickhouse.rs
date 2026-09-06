@@ -33,9 +33,9 @@
 //! 4. `sink.native_schema()` — fetches `system.columns` and builds the columnar
 //!    template; `NativeEncoder::new` mints one encoder per shard on `.clone()`.
 //! 5. `.flat_map` fans out the line array; `.filter` drops a line ordering no
-//!    units. Native column mapping is **positional** (the `OrderLineRow`
-//!    field order must equal the YAML `columns` order), with a first-record
-//!    field-name check off the hot path.
+//!    units. Native column mapping is **positional**, off `OrderLineRow`'s
+//!    field declaration order via `#[derive(ClickHouseRow)]`, with a
+//!    first-record field-name check off the hot path.
 //! 6. `sink.router::<Owned<OrderLineRow>>(order_key)` — a record-aware
 //!    [`DistributedRouter`](spate::clickhouse::DistributedRouter): each exploded
 //!    line routes by **its own** `order_id` field, placing every order's lines
@@ -96,7 +96,7 @@
 
 use serde::{Deserialize, Serialize};
 use spate::avro::AvroDeserializerBuilder;
-use spate::clickhouse::{DateTime64Millis, NativeEncoder, ShardKey};
+use spate::clickhouse::{ClickHouseRow, DateTime64Millis, NativeEncoder, ShardKey};
 use spate::kafka::KafkaSource;
 use spate::prelude::*;
 use std::path::Path;
@@ -127,12 +127,12 @@ struct OrderLine {
     unit_cents: u32,
 }
 
-/// The `flat_map` output = one ClickHouse row. **Field order must match the
-/// `columns` list in the YAML**, because Native maps fields positionally.
-/// [`DateTime64Millis`] declares the timestamp's scale so `validate_schema:
-/// full` can check it against the column's declared precision (it still
-/// encodes as the raw `Int64`).
-#[derive(Debug, Serialize)]
+/// The `flat_map` output = one ClickHouse row. `#[derive(ClickHouseRow)]`
+/// generates the insert column list from field declaration order, which
+/// Native maps positionally. [`DateTime64Millis`] declares the timestamp's
+/// scale so `validate_schema: full` can check it against the column's
+/// declared precision (it still encodes as the raw `Int64`).
+#[derive(Debug, Serialize, ClickHouseRow)]
 struct OrderLineRow {
     order_id: u64,
     placed_at: DateTime64Millis,
@@ -183,7 +183,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ANCHOR: router
     let sink = spate::clickhouse::config::from_component_config(
         pipeline.config().sink_config("default")?,
-    )?;
+    )?
+    .with_row::<Owned<OrderLineRow>>()?;
     // No-op unless the YAML opts into `distributed_check`; with it, startup
     // fails fast if the sink topology drifts from the cluster + DDL.
     pipeline.block_on(sink.validate_distributed())?;

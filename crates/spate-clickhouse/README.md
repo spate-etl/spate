@@ -47,6 +47,7 @@ with `zstd:9`. `off` disables compression entirely.
 
 ## Column order is the wire contract
 
-RowBinary carries no column names: the configured `columns` list and the
-row struct's field declaration order must match, and reordering either is
-a breaking change to the pipeline.
+RowBinary carries no column names: the row struct's field declaration
+order is the insert column order, and reordering it is a breaking change to
+the pipeline. `#[derive(ClickHouseRow)]` generates the column list from
+that order.

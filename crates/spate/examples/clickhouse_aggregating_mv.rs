@@ -71,7 +71,7 @@
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use serde::Serialize;
-use spate::clickhouse::ClickHouseEncoder;
+use spate::clickhouse::{ClickHouseEncoder, ClickHouseRow};
 use spate::prelude::*;
 use spate::source::LaneId;
 use spate_test::{TestDeserializer, memory_source};
@@ -80,10 +80,11 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 /// One placed order, already collapsed to a per-SKU quantity. `Serialize`
-/// writes it as RowBinary into the Null landing table, where **field order
-/// must match the `columns` list in the YAML** (RowBinary carries no names;
-/// order is the wire contract).
-#[derive(Clone, Debug, Serialize)]
+/// writes it as RowBinary into the Null landing table, where field order is
+/// the wire contract (RowBinary carries no names);
+/// `#[derive(ClickHouseRow)]` generates the insert column list from that
+/// same order.
+#[derive(Clone, Debug, Serialize, ClickHouseRow)]
 struct OrderRollup {
     region: String,
     placed_at: u32,                    // epoch seconds -> DateTime
@@ -125,7 +126,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ── Sink: ClickHouse, pointed at the Null landing table ────────────────
     let sink = spate::clickhouse::config::from_component_config(
         pipeline.config().sink_config("default")?,
-    )?;
+    )?
+    .with_row::<Owned<OrderRollup>>()?;
 
     // Fail-fast validation against the *Null* table (plain columns). If this
     // sink is ever repointed at the AggregatingMergeTree, validation fails

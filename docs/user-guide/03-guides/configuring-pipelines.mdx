@@ -53,7 +53,6 @@ deserializer:
 sink:
   clickhouse:
     table: ${CLICKHOUSE_TABLE:-orders}
-    columns: [order_id, customer_id, region, placed_at, total_cents]
     shards:
       - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
 ```
@@ -152,9 +151,9 @@ configuration:
 ```yaml
 sinks:
   type_a:
-    clickhouse: { table: events_a, columns: [...], batch: { linger: 1s }, ... }
+    clickhouse: { table: events_a, shards: [...], batch: { linger: 1s }, ... }
   type_b:
-    clickhouse: { table: events_b, columns: [...], batch: { linger: 5s }, ... }
+    clickhouse: { table: events_b, shards: [...], batch: { linger: 5s }, ... }
 ```
 
 The name is how the chain's [split terminal](../02-concepts/06-multi-sink.mdx)

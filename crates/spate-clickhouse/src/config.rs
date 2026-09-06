@@ -2,8 +2,10 @@
 //!
 //! The `sink: { clickhouse: { ... } }` YAML section deserializes into
 //! [`ClickHouseSinkConfig`]; [`from_component_config`] validates it and
-//! produces the writer, per-shard replica endpoints, and the framework's
-//! [`SinkPoolConfig`].
+//! produces a [`ClickHouseSinkBuilder`], per-shard replica endpoints, and the
+//! framework's [`SinkPoolConfig`]. [`ClickHouseSinkBuilder::with_row`]
+//! supplies the row type and produces the runnable [`ClickHouseSink`],
+//! including its writer.
 
 use crate::distributed::{self, DistributedCheckError};
 use crate::router::{DistributedRouter, KeyExtractor};
@@ -27,7 +29,6 @@ use std::time::Duration;
 /// sink:
 ///   clickhouse:
 ///     table: orders_local            # or db.orders_local
-///     columns: [id, name, amount]    # MUST match the row struct's field order
 ///     shards:
 ///       - replicas: ["http://ch-0-0:8123", "http://ch-0-1:8123"]
 ///       - replicas: ["http://ch-1-0:8123", "http://ch-1-1:8123"]
@@ -51,9 +52,6 @@ use std::time::Duration;
 pub struct ClickHouseSinkConfig {
     /// Target table, optionally `database.table`-qualified.
     pub table: String,
-    /// Column list for the `INSERT`. **Order is the wire contract**: it
-    /// must match the row struct's field declaration order.
-    pub columns: Vec<String>,
     /// Shard topology: one entry per shard, each with its replica URLs.
     /// Writes go directly to shard-local tables; replicas of a shard are
     /// rotated per batch.
@@ -142,8 +140,8 @@ impl Format {
     }
 }
 
-/// When to check the configured columns and row struct against the live
-/// table (via [`ClickHouseSink::validate_schema`]).
+/// When to check the row's declared columns against the live table (via
+/// [`ClickHouseSink::validate_schema`]).
 ///
 /// ```yaml
 /// sink:
@@ -157,9 +155,9 @@ pub enum SchemaValidation {
     /// No validation (default).
     #[default]
     Off,
-    /// At startup: every configured column exists and is insertable on
+    /// At startup: every declared column exists and is insertable on
     /// every replica. At the first record: struct field names and order
-    /// match the configured columns.
+    /// match the declared columns.
     Names,
     /// [`SchemaValidation::Names`] plus a class-based type-compatibility
     /// check per position (permissive: a `u32` may feed `UInt32`,
@@ -246,18 +244,12 @@ fn to_client_compression(c: Compression) -> clickhouse::Compression {
 }
 
 impl ClickHouseSinkConfig {
-    /// A config for `table`, the insert `columns` in row-struct field
-    /// order, and the shard topology. Every other field starts at its YAML
-    /// default.
+    /// A config for `table` and the shard topology. Every other field
+    /// starts at its YAML default.
     #[must_use]
-    pub fn new(
-        table: impl Into<String>,
-        columns: Vec<String>,
-        shards: Vec<ShardConfig>,
-    ) -> ClickHouseSinkConfig {
+    pub fn new(table: impl Into<String>, shards: Vec<ShardConfig>) -> ClickHouseSinkConfig {
         ClickHouseSinkConfig {
             table: table.into(),
-            columns,
             shards,
             database: None,
             user: None,
@@ -402,6 +394,62 @@ impl Default for TimeoutSection {
     }
 }
 
+/// A validated sink configuration with no row type yet. [`with_row`](Self::with_row)
+/// supplies it and produces the runnable [`ClickHouseSink`].
+#[derive(Debug)]
+#[must_use = "call with_row::<F>() to get a runnable ClickHouseSink"]
+pub struct ClickHouseSinkBuilder {
+    cfg: ClickHouseSinkConfig,
+    schema_mode: SchemaValidation,
+    endpoints: Vec<Vec<ClickHouseEndpoint>>,
+    probe_endpoints: Arc<Vec<Vec<ClickHouseEndpoint>>>,
+    shard_weights: Arc<[u32]>,
+    pool: SinkPoolConfig,
+    distributed: Option<distributed::DistributedCheck>,
+}
+
+impl ClickHouseSinkBuilder {
+    /// Supplies the row type, generating the `INSERT` column list from
+    /// [`ClickHouseRowFamily::COLUMNS`](crate::ClickHouseRowFamily::COLUMNS).
+    ///
+    /// `F` is not inferable from context, so name it:
+    /// `builder.with_row::<Owned<OrderRow>>()`. Fails on a bad column list
+    /// only for a hand-written `ClickHouseRowFamily` impl; `#[derive(ClickHouseRow)]`
+    /// rejects the same problems at compile time.
+    pub fn with_row<F: crate::ClickHouseRowFamily>(self) -> Result<ClickHouseSink, ConfigError> {
+        validate_columns(F::COLUMNS)?;
+
+        let insert_sql = insert_statement(&self.cfg.table, F::COLUMNS, self.cfg.format);
+        let writer = ClickHouseWriter::new(
+            insert_sql,
+            self.cfg.settings.clone().into_iter().collect(),
+            self.cfg.timeouts.send,
+            self.cfg.timeouts.end,
+        );
+        tracing::info!(
+            table = %self.cfg.table,
+            columns = ?F::COLUMNS,
+            "clickhouse insert columns",
+        );
+
+        Ok(ClickHouseSink {
+            writer,
+            endpoints: self.endpoints,
+            pool: self.pool,
+            format: self.cfg.format,
+            schema_check: schema::SchemaCheck {
+                mode: self.schema_mode,
+                database: self.cfg.database.clone(),
+                table: self.cfg.table.clone(),
+                columns: F::COLUMNS,
+            },
+            probe_endpoints: self.probe_endpoints,
+            shard_weights: self.shard_weights,
+            distributed: self.distributed,
+        })
+    }
+}
+
 /// Everything the framework needs to run this sink.
 #[derive(Debug)]
 pub struct ClickHouseSink {
@@ -426,9 +474,10 @@ pub struct ClickHouseSink {
 }
 
 impl ClickHouseSink {
-    /// Opt-in startup schema validation. Call **after** [`build`] and
-    /// **before** `SinkPool::spawn` consumes `endpoints`; a failure here
-    /// exits before any pipeline thread or sink worker exists.
+    /// Opt-in startup schema validation. Call **after**
+    /// [`with_row`](ClickHouseSinkBuilder::with_row) and **before**
+    /// `SinkPool::spawn` consumes `endpoints`; a failure here exits before
+    /// any pipeline thread or sink worker exists.
     ///
     /// Instant `Ok(None)` when `validate_schema: off`. Otherwise fetches
     /// `system.columns` from every replica of every shard, fails fast
@@ -450,8 +499,9 @@ impl ClickHouseSink {
     /// [`NativeSchema`](crate::native::NativeSchema) for a
     /// [`crate::NativeEncoder`]. `format: native` always fetches
     /// `system.columns` (see [`Format`]), so this returns a schema whenever
-    /// Native is configured. Call after [`build`], before the endpoints are
-    /// consumed, as with [`validate_schema`](Self::validate_schema).
+    /// Native is configured. Call after
+    /// [`with_row`](ClickHouseSinkBuilder::with_row), before the endpoints
+    /// are consumed, as with [`validate_schema`](Self::validate_schema).
     pub async fn native_schema(&self) -> Result<Arc<crate::native::NativeSchema>, SchemaError> {
         let schema = self.validate_schema().await?.ok_or_else(|| {
             SchemaError::Mismatch(
@@ -476,7 +526,7 @@ impl ClickHouseSink {
     /// A [`DistributedRouter`] over this sink's shard topology and
     /// configured weights. Its placement matches a `Distributed` table with
     /// sharding expression `xxHash64(<key column>)`. Infallible: the weights
-    /// were validated at [`build`].
+    /// were validated at [`build`], which runs before [`with_row`](ClickHouseSinkBuilder::with_row).
     ///
     /// `F` is not inferable from the extractor fn item (`Rec<'buf>`
     /// projections are not injective), so name it:
@@ -494,8 +544,9 @@ impl ClickHouseSink {
     /// diff. Placement/DDL drift does not error at query time; it silently
     /// returns wrong results under `optimize_skip_unused_shards`.
     ///
-    /// Call **after** [`build`] and **before** the pipeline consumes the
-    /// sink, alongside [`validate_schema`](Self::validate_schema) /
+    /// Call **after** [`with_row`](ClickHouseSinkBuilder::with_row) and
+    /// **before** the pipeline consumes the sink, alongside
+    /// [`validate_schema`](Self::validate_schema) /
     /// [`native_schema`](Self::native_schema).
     pub async fn validate_distributed(&self) -> Result<(), DistributedCheckError> {
         match &self.distributed {
@@ -524,15 +575,17 @@ impl SinkBundle for ClickHouseSink {
 }
 // ANCHOR_END: bundle
 
-/// Build a [`ClickHouseSink`] from the opaque `sink: { clickhouse: ... }`
+/// Build a [`ClickHouseSinkBuilder`] from the opaque `sink: { clickhouse: ... }`
 /// component section.
-pub fn from_component_config(section: &ComponentConfig) -> Result<ClickHouseSink, ConfigError> {
+pub fn from_component_config(
+    section: &ComponentConfig,
+) -> Result<ClickHouseSinkBuilder, ConfigError> {
     let cfg: ClickHouseSinkConfig = section.deserialize_into()?;
     build(cfg)
 }
 
 /// Build from an already-deserialized config (programmatic use).
-pub fn build(cfg: ClickHouseSinkConfig) -> Result<ClickHouseSink, ConfigError> {
+pub fn build(cfg: ClickHouseSinkConfig) -> Result<ClickHouseSinkBuilder, ConfigError> {
     validate(&cfg)?;
 
     // Native is type-driven: it must fetch each column's type, so it always
@@ -542,14 +595,6 @@ pub fn build(cfg: ClickHouseSinkConfig) -> Result<ClickHouseSink, ConfigError> {
         (Format::Native, SchemaValidation::Off) => SchemaValidation::Names,
         (_, mode) => mode,
     };
-
-    let insert_sql = insert_statement(&cfg.table, &cfg.columns, cfg.format);
-    let writer = ClickHouseWriter::new(
-        insert_sql,
-        cfg.settings.clone().into_iter().collect(),
-        cfg.timeouts.send,
-        cfg.timeouts.end,
-    );
 
     // Two independent client sets: inserts and readiness probes must not
     // share connection pools (see `ClickHouseSink::probe_endpoints`).
@@ -590,19 +635,13 @@ pub fn build(cfg: ClickHouseSinkConfig) -> Result<ClickHouseSink, ConfigError> {
 
     let pool = SinkPoolConfig::new(cfg.batch, cfg.inflight, cfg.retry, cfg.breaker);
 
-    Ok(ClickHouseSink {
-        writer,
+    Ok(ClickHouseSinkBuilder {
+        cfg,
+        schema_mode,
         endpoints,
-        pool,
-        format: cfg.format,
-        schema_check: schema::SchemaCheck {
-            mode: schema_mode,
-            database: cfg.database.clone(),
-            table: cfg.table.clone(),
-            columns: cfg.columns.clone(),
-        },
         probe_endpoints,
         shard_weights,
+        pool,
         distributed,
     })
 }
@@ -657,23 +696,6 @@ fn validate(cfg: &ClickHouseSinkConfig) -> Result<(), ConfigError> {
         // prefix-sum selection.
         if shard.weight == 0 {
             return fail(format!("shard {i} weight must be at least 1"));
-        }
-    }
-    if cfg.columns.is_empty() {
-        return fail("`columns` must list the insert columns in field order".into());
-    }
-    let mut seen = std::collections::HashSet::with_capacity(cfg.columns.len());
-    for col in &cfg.columns {
-        if !is_column_name(col) {
-            return fail(format!(
-                "column `{col}` is not a valid identifier (or dotted `outer.inner` name)"
-            ));
-        }
-        // Duplicate columns emit e.g. `INSERT INTO t (`id`, `id`)`, which
-        // ClickHouse rejects with DUPLICATE_COLUMN, a code the writer
-        // classifies retryable, so it would loop forever. Reject at load.
-        if !seen.insert(col.as_str()) {
-            return fail(format!("column `{col}` is listed more than once"));
         }
     }
     let table_parts: Vec<&str> = cfg.table.split('.').collect();
@@ -799,7 +821,35 @@ fn is_column_name(s: &str) -> bool {
     s.split('.').all(is_identifier)
 }
 
-fn insert_statement(table: &str, columns: &[String], format: Format) -> String {
+/// The runtime backstop for [`ClickHouseSinkBuilder::with_row`]:
+/// `#[derive(ClickHouseRow)]` rejects a duplicate, empty, or malformed
+/// column list at compile time, but a hand-written `ClickHouseRowFamily`
+/// impl (for a borrowed record family, which the blanket impl over
+/// [`Owned`](spate_core::deser::Owned) does not cover) bypasses the derive
+/// entirely.
+fn validate_columns(columns: &[&str]) -> Result<(), ConfigError> {
+    let fail = |msg: String| Err(ConfigError::Validation(format!("sink.clickhouse: {msg}")));
+    if columns.is_empty() {
+        return fail("ClickHouseRow::COLUMNS must list at least one column".into());
+    }
+    let mut seen = std::collections::HashSet::with_capacity(columns.len());
+    for &col in columns {
+        if !is_column_name(col) {
+            return fail(format!(
+                "column `{col}` is not a valid identifier (or dotted `outer.inner` name)"
+            ));
+        }
+        // Duplicate columns emit e.g. `INSERT INTO t (`id`, `id`)`, which
+        // ClickHouse rejects with DUPLICATE_COLUMN, a code the writer
+        // classifies retryable, so it would loop forever. Reject at load.
+        if !seen.insert(col) {
+            return fail(format!("column `{col}` is listed more than once"));
+        }
+    }
+    Ok(())
+}
+
+fn insert_statement(table: &str, columns: &[&str], format: Format) -> String {
     let table = table
         .split('.')
         .map(|p| format!("`{p}`"))
@@ -816,23 +866,48 @@ fn insert_statement(table: &str, columns: &[String], format: Format) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ClickHouseRow;
+    use serde::Serialize;
     use spate_core::config::ComponentConfig;
+    use spate_core::deser::Owned;
 
     fn component(yaml: &str) -> ComponentConfig {
         let value: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
         ComponentConfig::new("clickhouse", value)
     }
 
+    #[derive(Serialize, ClickHouseRow)]
+    struct IdOnly {
+        id: u64,
+    }
+
+    #[derive(Serialize, ClickHouseRow)]
+    struct IdName {
+        id: u64,
+        name: String,
+    }
+
+    #[derive(Serialize, ClickHouseRow)]
+    struct NestedTags {
+        id: u64,
+        #[serde(rename = "tags.key")]
+        tags_key: Vec<String>,
+        #[serde(rename = "tags.value")]
+        tags_value: Vec<String>,
+    }
+
     const MINIMAL: &str = r#"
 table: orders
-columns: [id, name]
 shards:
   - replicas: ["http://a:8123"]
 "#;
 
     #[test]
     fn minimal_config_builds_with_framework_defaults() {
-        let sink = from_component_config(&component(MINIMAL)).unwrap();
+        let sink = from_component_config(&component(MINIMAL))
+            .unwrap()
+            .with_row::<Owned<IdName>>()
+            .unwrap();
         assert_eq!(
             sink.writer.insert_sql(),
             "INSERT INTO `orders` (`id`, `name`) FORMAT RowBinary"
@@ -847,7 +922,6 @@ shards:
         let sink = from_component_config(&component(
             r#"
 table: analytics.orders
-columns: [id]
 shards:
   - replicas: ["http://a:8123", "http://b:8123"]
   - replicas: ["http://c:8123"]
@@ -859,6 +933,8 @@ timeouts: { send: 5s, end: 60s }
 settings: { insert_quorum: "auto" }
 "#,
         ))
+        .unwrap()
+        .with_row::<Owned<IdOnly>>()
         .unwrap();
         assert_eq!(
             sink.writer.insert_sql(),
@@ -877,50 +953,20 @@ settings: { insert_quorum: "auto" }
     #[test]
     fn validation_rejects_bad_configs() {
         let cases = [
-            ("table: orders\ncolumns: [id]\nshards: []", "shard"),
+            ("table: orders\nshards: []", "shard"),
+            ("table: orders\nshards: [{replicas: []}]", "replicas"),
+            ("table: orders\nshards: [{replicas: [\"tcp://x\"]}]", "http"),
             (
-                "table: orders\ncolumns: [id]\nshards: [{replicas: []}]",
-                "replicas",
-            ),
-            (
-                "table: orders\ncolumns: [id]\nshards: [{replicas: [\"tcp://x\"]}]",
-                "http",
-            ),
-            (
-                "table: orders\ncolumns: []\nshards: [{replicas: [\"http://a\"]}]",
-                "columns",
-            ),
-            (
-                "table: orders\ncolumns: [\"id; DROP\"]\nshards: [{replicas: [\"http://a\"]}]",
+                "table: \"or`ders\"\nshards: [{replicas: [\"http://a\"]}]",
                 "identifier",
             ),
             (
-                "table: \"or`ders\"\ncolumns: [id]\nshards: [{replicas: [\"http://a\"]}]",
+                "table: a.b.c\nshards: [{replicas: [\"http://a\"]}]",
                 "identifier",
             ),
             (
-                "table: a.b.c\ncolumns: [id]\nshards: [{replicas: [\"http://a\"]}]",
-                "identifier",
-            ),
-            (
-                "table: orders\ncolumns: [id]\nshards: [{replicas: [\"http://a\"]}]\nsettings: {insert_deduplication_token: \"x\"}",
+                "table: orders\nshards: [{replicas: [\"http://a\"]}]\nsettings: {insert_deduplication_token: \"x\"}",
                 "managed by the sink",
-            ),
-            (
-                "table: t\ncolumns: [\"tags.\"]\nshards: [{replicas: [\"http://a\"]}]",
-                "identifier",
-            ),
-            (
-                "table: t\ncolumns: [\".key\"]\nshards: [{replicas: [\"http://a\"]}]",
-                "identifier",
-            ),
-            (
-                "table: t\ncolumns: [\"a..b\"]\nshards: [{replicas: [\"http://a\"]}]",
-                "identifier",
-            ),
-            (
-                "table: t\ncolumns: [\"tags.k ey\"]\nshards: [{replicas: [\"http://a\"]}]",
-                "identifier",
             ),
         ];
         for (yaml, needle) in cases {
@@ -936,13 +982,38 @@ settings: { insert_quorum: "auto" }
     #[test]
     fn a_flattened_nested_column_is_accepted_and_quoted_as_one_identifier() {
         let sink = from_component_config(&component(
-        "table: events\ncolumns: [id, \"tags.key\", \"tags.value\"]\nshards: [{replicas: [\"http://a\"]}]",
-    ))
-    .expect("dotted column names load");
+            "table: events\nshards: [{replicas: [\"http://a\"]}]",
+        ))
+        .expect("valid sink config")
+        .with_row::<Owned<NestedTags>>()
+        .expect("dotted column names build");
         assert_eq!(
             sink.writer.insert_sql(),
             "INSERT INTO `events` (`id`, `tags.key`, `tags.value`) FORMAT RowBinary"
         );
+    }
+
+    /// `ClickHouseRowFamily` can be hand-written for a borrowed record
+    /// family, bypassing the derive's compile-time checks entirely, so
+    /// `with_row` re-runs them at runtime.
+    #[test]
+    fn with_row_rejects_a_hand_written_familys_bad_columns() {
+        use spate_core::deser::RecFamily;
+
+        struct BadColumns;
+        impl RecFamily for BadColumns {
+            type Rec<'buf> = Vec<u8>;
+        }
+        impl crate::ClickHouseRowFamily for BadColumns {
+            const COLUMNS: &'static [&'static str] = &["id", "id"];
+        }
+
+        let err =
+            from_component_config(&component("table: t\nshards: [{replicas: [\"http://a\"]}]"))
+                .unwrap()
+                .with_row::<BadColumns>()
+                .unwrap_err();
+        assert!(err.to_string().contains("more than once"), "{err}");
     }
 
     #[test]
@@ -951,7 +1022,7 @@ settings: { insert_quorum: "auto" }
         // runtime rather than failing at load if the rules are dropped. The
         // rules live in `RetryConfig::validate`; this asserts the ClickHouse
         // sink still applies them and still reports them under its prefix.
-        let base = "table: t\ncolumns: [id]\nshards: [{replicas: [\"http://a\"]}]\n";
+        let base = "table: t\nshards: [{replicas: [\"http://a\"]}]\n";
         let cases = [
             ("retry: { multiplier: 0.5 }", "multiplier"),
             ("retry: { multiplier: -2.0 }", "multiplier"),
@@ -979,7 +1050,7 @@ settings: { insert_quorum: "auto" }
     #[test]
     fn valid_retry_and_breaker_still_build() {
         let sink = from_component_config(&component(
-            "table: t\ncolumns: [id]\nshards: [{replicas: [\"http://a\"]}]\n\
+            "table: t\nshards: [{replicas: [\"http://a\"]}]\n\
              retry: { initial: 100ms, max: 10s, multiplier: 1.0, jitter: 0.0 }\n\
              breaker: { failure_threshold: 1, open_for: 5s, half_open_probes: 1 }",
         ));
@@ -988,7 +1059,7 @@ settings: { insert_quorum: "auto" }
 
     #[test]
     fn validate_schema_modes_parse() {
-        let base = "table: t\ncolumns: [id]\nshards: [{replicas: [\"http://a\"]}]\n";
+        let base = "table: t\nshards: [{replicas: [\"http://a\"]}]\n";
         for (yaml, expected) in [
             ("", SchemaValidation::Off),
             ("validate_schema: off\n", SchemaValidation::Off),
@@ -1006,18 +1077,9 @@ settings: { insert_quorum: "auto" }
     }
 
     #[test]
-    fn validation_rejects_duplicate_columns() {
-        let err = from_component_config(&component(
-            "table: t\ncolumns: [id, name, id]\nshards: [{replicas: [\"http://a\"]}]",
-        ))
-        .unwrap_err();
-        assert!(err.to_string().contains("more than once"), "{err}");
-    }
-
-    #[test]
     fn unknown_fields_are_rejected_with_a_path() {
         let err = from_component_config(&component(
-            "table: orders\ncolumns: [id]\nshards: [{replicas: [\"http://a\"]}]\nbatch: {max_rowz: 5}",
+            "table: orders\nshards: [{replicas: [\"http://a\"]}]\nbatch: {max_rowz: 5}",
         ))
         .unwrap_err();
         assert!(err.to_string().contains("max_rowz"), "{err}");
@@ -1025,7 +1087,7 @@ settings: { insert_quorum: "auto" }
 
     #[test]
     fn compression_parses_and_defaults_to_lz4() {
-        let base = "table: t\ncolumns: [id]\nshards: [{replicas: [\"http://a\"]}]\n";
+        let base = "table: t\nshards: [{replicas: [\"http://a\"]}]\n";
         for (yaml, expected) in [
             ("", Compression::Lz4),
             ("compression: off\n", Compression::None),
@@ -1043,7 +1105,7 @@ settings: { insert_quorum: "auto" }
 
     #[test]
     fn compression_rejects_invalid_strings_with_a_path() {
-        let base = "table: t\ncolumns: [id]\nshards: [{replicas: [\"http://a\"]}]\n";
+        let base = "table: t\nshards: [{replicas: [\"http://a\"]}]\n";
         for (value, needle) in [
             ("gzip", "unknown compression"),
             ("\"zstd:0\"", "[1, 22]"),
@@ -1063,7 +1125,7 @@ settings: { insert_quorum: "auto" }
 
     #[test]
     fn format_parses_and_defaults_to_rowbinary() {
-        let base = "table: t\ncolumns: [id]\nshards: [{replicas: [\"http://a\"]}]\n";
+        let base = "table: t\nshards: [{replicas: [\"http://a\"]}]\n";
         for (yaml, expected) in [
             ("", Format::RowBinary),
             ("format: rowbinary\n", Format::RowBinary),
@@ -1077,8 +1139,10 @@ settings: { insert_quorum: "auto" }
     #[test]
     fn native_format_emits_native_sql_and_forces_a_schema_fetch() {
         let sink = from_component_config(&component(
-            "table: t\ncolumns: [id, name]\nshards: [{replicas: [\"http://a\"]}]\nformat: native",
+            "table: t\nshards: [{replicas: [\"http://a\"]}]\nformat: native",
         ))
+        .unwrap()
+        .with_row::<Owned<IdName>>()
         .unwrap();
         assert_eq!(
             sink.writer.insert_sql(),
@@ -1093,20 +1157,19 @@ settings: { insert_quorum: "auto" }
     #[test]
     fn native_format_keeps_an_explicit_full_validation_mode() {
         let sink = from_component_config(&component(
-            "table: t\ncolumns: [id]\nshards: [{replicas: [\"http://a\"]}]\n\
+            "table: t\nshards: [{replicas: [\"http://a\"]}]\n\
              format: native\nvalidate_schema: full",
         ))
+        .unwrap()
+        .with_row::<Owned<IdOnly>>()
         .unwrap();
         assert_eq!(sink.schema_check.mode, SchemaValidation::Full);
     }
 
     #[test]
     fn validation_rejects_out_of_range_programmatic_zstd_level() {
-        let mut cfg = ClickHouseSinkConfig::new(
-            "t",
-            vec!["id".into()],
-            vec![ShardConfig::new(vec!["http://a".into()])],
-        );
+        let mut cfg =
+            ClickHouseSinkConfig::new("t", vec![ShardConfig::new(vec!["http://a".into()])]);
         cfg.compression = Compression::Zstd(99);
         let err = build(cfg).unwrap_err();
         assert!(err.to_string().contains("[1, 22]"), "{err}");
@@ -1120,7 +1183,6 @@ settings: { insert_quorum: "auto" }
         assert_eq!(
             ClickHouseSinkConfig::new(
                 "orders",
-                vec!["id".into(), "name".into()],
                 vec![ShardConfig::new(vec!["http://a:8123".into()])],
             ),
             from_yaml
@@ -1138,19 +1200,16 @@ settings: { insert_quorum: "auto" }
             from_yaml
         );
 
-        let mut cfg = ClickHouseSinkConfig::new(
-            "t",
-            vec!["id".into()],
-            vec![ShardConfig::new(vec!["http://a:8123".into()])],
-        );
+        let mut cfg =
+            ClickHouseSinkConfig::new("t", vec![ShardConfig::new(vec!["http://a:8123".into()])]);
         cfg.distributed_check = Some(DistributedCheckSection::new("prod", "db.t_dist", "id"));
-        build(cfg).expect("a config built entirely from `new` passes validation");
+        let _ = build(cfg).expect("a config built entirely from `new` passes validation");
     }
 
     #[test]
     fn shard_weights_parse_and_default_to_one() {
         let cfg: ClickHouseSinkConfig = serde_yaml::from_str(
-            "table: t\ncolumns: [id]\nshards:\n\
+            "table: t\nshards:\n\
              \x20 - replicas: [\"http://a\"]\n\
              \x20 - replicas: [\"http://b\"]\n\
              \x20   weight: 9\n",
@@ -1163,7 +1222,7 @@ settings: { insert_quorum: "auto" }
     #[test]
     fn zero_shard_weight_is_rejected() {
         let err = from_component_config(&component(
-            "table: t\ncolumns: [id]\nshards: [{replicas: [\"http://a\"], weight: 0}]",
+            "table: t\nshards: [{replicas: [\"http://a\"], weight: 0}]",
         ))
         .unwrap_err();
         assert!(err.to_string().contains("weight"), "{err}");
@@ -1172,15 +1231,16 @@ settings: { insert_quorum: "auto" }
     #[test]
     fn sink_router_captures_config_weights_in_order() {
         use crate::router::ShardKey;
-        use spate_core::deser::Owned;
 
         let sink = from_component_config(&component(
-            "table: t\ncolumns: [id]\nshards:\n\
+            "table: t\nshards:\n\
              \x20 - replicas: [\"http://a\"]\n\
              \x20   weight: 9\n\
              \x20 - replicas: [\"http://b\"]\n\
              \x20   weight: 10\n",
         ))
+        .unwrap()
+        .with_row::<Owned<IdOnly>>()
         .unwrap();
         // `&Vec<u8>` (not `&[u8]`) is forced by the KeyExtractor fn-pointer
         // type: its argument is `&'a Rec<'buf>` = `&'a Vec<u8>`.
@@ -1198,7 +1258,7 @@ settings: { insert_quorum: "auto" }
     #[test]
     fn distributed_check_parses_with_endpoint_defaulting_to_first_replica() {
         let sink = from_component_config(&component(
-            "table: t\ncolumns: [id]\nshards: [{replicas: [\"http://a:8123\"]}]\n\
+            "table: t\nshards: [{replicas: [\"http://a:8123\"]}]\n\
              distributed_check: { cluster: prod, table: db.t_dist, sharding_key: id }",
         ))
         .unwrap();
@@ -1211,7 +1271,7 @@ settings: { insert_quorum: "auto" }
 
     #[test]
     fn distributed_check_requires_exactly_one_of_key_or_expr() {
-        let base = "table: t\ncolumns: [id]\nshards: [{replicas: [\"http://a\"]}]\n";
+        let base = "table: t\nshards: [{replicas: [\"http://a\"]}]\n";
         for check in [
             "distributed_check: { cluster: c, table: t_dist }",
             "distributed_check: { cluster: c, table: t_dist, sharding_key: id, sharding_expr: \"xxHash64(id)\" }",
@@ -1226,7 +1286,7 @@ settings: { insert_quorum: "auto" }
 
     #[test]
     fn distributed_check_rejects_bad_cluster_table_key_and_endpoint() {
-        let base = "table: t\ncolumns: [id]\nshards: [{replicas: [\"http://a\"]}]\n";
+        let base = "table: t\nshards: [{replicas: [\"http://a\"]}]\n";
         let cases = [
             (
                 "distributed_check: { cluster: \"pr od\", table: t_dist, sharding_key: id }",

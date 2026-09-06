@@ -40,7 +40,7 @@ enum Level16 {
     Big = 300,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, ClickHouseRow)]
 struct WideRow {
     id: u64,
     b: bool,
@@ -90,12 +90,7 @@ struct WideRow {
     n_f64: Option<f64>,
 }
 
-const COLUMNS: &[&str] = &[
-    "id", "b", "c_i8", "c_i16", "c_i32", "c_i64", "c_i128", "c_u8", "c_u16", "c_u32", "c_u64",
-    "c_u128", "c_f32", "c_f64", "s", "fs", "uid", "ip4", "ip6", "d", "d32", "dt", "dt64", "dt64_6",
-    "e8", "e16", "dec9", "dec18", "dec38", "big", "ubig", "lc", "j", "pt", "ring", "poly", "mpoly",
-    "arr", "map", "n_f64",
-];
+const COLUMNS: &[&str] = WideRow::COLUMNS;
 
 const DDL: &str = "CREATE TABLE wide (\
         id UInt64, b Bool, \
@@ -192,10 +187,9 @@ async fn wide_type_table_round_trips() {
 
     // Row 1: full startup validation against the real system.columns,
     // then the encoder's first-record struct check, then the write.
-    let sink = sink_with(
+    let sink = sink_with::<Owned<WideRow>>(
         &srv.url,
         "wide",
-        COLUMNS,
         "full",
         "user: default\npassword: wide-secret\n\
              settings: { input_format_binary_read_json_as_string: \"1\" }",

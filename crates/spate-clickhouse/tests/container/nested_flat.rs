@@ -8,11 +8,14 @@
 
 use super::*;
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, clickhouse::Row)]
+// `clickhouse::Row` drives the read-back assertion through the official
+// client below; `ClickHouseRow` drives the sink under test. Different
+// purposes, neither in this crate's own public bound.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, clickhouse::Row, ClickHouseRow)]
 struct NestedRow {
     id: u64,
     // A Rust field cannot carry the dot, and the first-record check compares
-    // the serde name against the configured column.
+    // the serde name against the declared column.
     #[serde(rename = "tags.key")]
     tags_key: Vec<String>,
     #[serde(rename = "tags.value")]
@@ -20,8 +23,6 @@ struct NestedRow {
 }
 
 const TAG: &str = "26.3";
-
-const COLUMNS: &[&str] = &["id", "tags.key", "tags.value"];
 
 fn ddl(table: &str) -> String {
     format!(
@@ -60,10 +61,9 @@ async fn nested_native_format_round_trips_through_a_real_server() {
         .await
         .expect("create nested_native");
 
-    let sink = sink_with(
+    let sink = sink_with::<Owned<NestedRow>>(
         &srv.url,
         "nested_native",
-        COLUMNS,
         "full",
         &format!("format: native\nuser: default\npassword: {password}\n"),
     );
@@ -108,10 +108,9 @@ async fn nested_rowbinary_format_round_trips_through_a_real_server() {
         .await
         .expect("create nested_rowbinary");
 
-    let sink = sink_with(
+    let sink = sink_with::<Owned<NestedRow>>(
         &srv.url,
         "nested_rowbinary",
-        COLUMNS,
         "full",
         &format!("format: rowbinary\nuser: default\npassword: {password}\n"),
     );

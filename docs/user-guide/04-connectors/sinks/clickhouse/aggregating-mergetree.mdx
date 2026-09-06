@@ -60,13 +60,13 @@ GROUP BY region;
 ```
 
 The sink points at the **Null** table; its columns are all types RowBinary and
-Native already encode:
+Native already encode. The row struct's field order (`region`, `placed_at`,
+`qty_by_sku`) is the insert column order:
 
 ```yaml
 sink:
   clickhouse:
     table: orders_null
-    columns: [region, placed_at, qty_by_sku]   # order = the RowBinary wire contract
     validate_schema: names
 ```
 

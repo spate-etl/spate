@@ -6,6 +6,7 @@
 use bytes::BytesMut;
 use spate_clickhouse::config::{self, ClickHouseSinkConfig};
 use spate_clickhouse::serialize_row;
+use spate_clickhouse::{ClickHouseRow, ClickHouseRowFamily};
 use spate_core::deser::Owned;
 use spate_core::sink::SealedBatch;
 // The concern modules under tests/container/ reach the writer trait through
@@ -18,7 +19,7 @@ use testcontainers_modules::testcontainers::core::WaitFor;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
 use testcontainers_modules::testcontainers::{ContainerAsync, ContainerRequest, ImageExt};
 
-#[derive(Debug, Clone, PartialEq, clickhouse::Row, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, clickhouse::Row, Serialize, Deserialize, ClickHouseRow)]
 struct Order {
     id: u64,
     name: String,
@@ -139,13 +140,15 @@ fn sink_for(url: &str) -> config::ClickHouseSink {
     let cfg: ClickHouseSinkConfig = serde_yaml::from_str(&format!(
         r#"
 table: orders
-columns: [id, name, amount]
 shards:
   - replicas: ["{url}"]
 "#
     ))
     .expect("config yaml");
-    config::build(cfg).expect("valid sink config")
+    config::build(cfg)
+        .expect("valid sink config")
+        .with_row::<Owned<Order>>()
+        .expect("valid columns")
 }
 
 fn sealed<T: Serialize>(rows: &[T], token: &str, frames: usize) -> SealedBatch {
@@ -203,26 +206,26 @@ fn record<T>(payload: T) -> spate_core::record::Record<T> {
     }
 }
 
-fn sink_with(
+fn sink_with<F: ClickHouseRowFamily>(
     url: &str,
     table: &str,
-    columns: &[&str],
     mode: &str,
     settings: &str,
 ) -> config::ClickHouseSink {
     let cfg: ClickHouseSinkConfig = serde_yaml::from_str(&format!(
         r#"
 table: {table}
-columns: [{}]
 shards:
   - replicas: ["{url}"]
 validate_schema: {mode}
 {settings}
-"#,
-        columns.join(", ")
+"#
     ))
     .expect("config yaml");
-    config::build(cfg).expect("valid sink config")
+    config::build(cfg)
+        .expect("valid sink config")
+        .with_row::<F>()
+        .expect("valid columns")
 }
 
 /// Encode `rows` through a (possibly schema-checked) encoder into one

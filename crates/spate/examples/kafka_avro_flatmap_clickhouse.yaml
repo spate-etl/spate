@@ -62,9 +62,8 @@ sink:
   clickhouse:
     table: ${CLICKHOUSE_TABLE:-order_lines}
     # Columnar Native blocks: offloads parse CPU to the client and shrinks the
-    # wire on LowCardinality columns. Column order is the positional contract —
-    # it must match the OrderLineRow struct's field order in the example.
-    columns: [order_id, placed_at, sku, qty, unit_cents]
+    # wire on LowCardinality columns. Column order is positional, generated
+    # from the OrderLineRow struct's field order via #[derive(ClickHouseRow)].
     format: native
     # `full` checks type classes on the first record against the live table —
     # including the OrderLineRow struct's DateTime64Millis wrapper against the

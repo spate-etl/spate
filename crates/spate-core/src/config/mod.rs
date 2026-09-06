@@ -25,7 +25,6 @@
 //! sink:
 //!   clickhouse:                              # ClickHouseSinkConfig
 //!     table: orders_local
-//!     columns: [id, amount, ts]              # required; order is the wire contract
 //!     shards:
 //!       - { replicas: ["http://ch-0-0:8123", "http://ch-0-1:8123"] }
 //! admin: { listen: 0.0.0.0:9090 }           # /metrics, /healthz, /readyz
@@ -1015,7 +1014,6 @@ deserializer:
 sink:
   clickhouse:
     table: orders_local
-    columns: [id, amount, ts]
     shards:
       - { replicas: ["http://ch-0-0:8123", "http://ch-0-1:8123"] }
       - { replicas: ["http://ch-1-0:8123", "http://ch-1-1:8123"] }
@@ -1045,7 +1043,7 @@ metrics: { exporter: prometheus }
         assert_eq!(kafka.group_id, "orders-etl");
 
         // The avro body uses the nested `registry.url` shape, and the
-        // clickhouse body carries the required `columns`.
+        // clickhouse body carries its nested `shards` topology.
         #[derive(Debug, serde::Deserialize)]
         struct AvroProbe {
             registry: RegistryProbe,
@@ -1064,14 +1062,21 @@ metrics: { exporter: prometheus }
 
         #[derive(Debug, serde::Deserialize)]
         struct ChProbe {
-            columns: Vec<String>,
+            shards: Vec<ShardProbe>,
+        }
+        #[derive(Debug, serde::Deserialize)]
+        struct ShardProbe {
+            replicas: Vec<String>,
         }
         let ch: ChProbe = cfg
             .sink_config("default")
             .unwrap()
             .deserialize_into()
             .unwrap();
-        assert_eq!(ch.columns, ["id", "amount", "ts"]);
+        assert_eq!(
+            ch.shards[0].replicas,
+            ["http://ch-0-0:8123", "http://ch-0-1:8123"]
+        );
     }
 
     #[test]

@@ -130,7 +130,7 @@ impl NativeError {
 }
 
 /// The immutable, `clickhouse`-free column template a [`NativeEncoder`] is
-/// built from: the validated, config-ordered `(name, parsed type, raw type
+/// built from: the validated, struct-ordered `(name, parsed type, raw type
 /// string)` columns plus the validation mode they were fetched under, which
 /// the encoder's first-record struct check applies.
 #[derive(Debug)]
@@ -330,7 +330,7 @@ where
         _buf: &mut BytesMut,
     ) -> Result<(), SinkError> {
         // First record only: validate the row's probed struct against the
-        // configured columns off the per-row path. Positional dispatch would
+        // declared columns off the per-row path. Positional dispatch would
         // otherwise silently mis-column a same-wire-class field/column swap,
         // and (in `full` mode) a wire wrapper whose scale disagrees with the
         // column's declared precision would silently land wrong values.

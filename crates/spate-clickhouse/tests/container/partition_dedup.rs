@@ -15,7 +15,7 @@ use super::*;
 /// so distinct `dt` values land in distinct partitions under `PARTITION BY
 /// dt`. Only `Serialize` is needed: the wire path is RowBinary and the
 /// tests read back counts, not typed rows.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ClickHouseRow)]
 struct DatedRow {
     id: u64,
     dt: u16,
@@ -65,10 +65,9 @@ async fn multi_partition_batch_stays_idempotent_per_partition() {
         .await
         .expect("create dated");
 
-    let sink = sink_with(
+    let sink = sink_with::<Owned<DatedRow>>(
         &srv.url,
         "dated",
-        &["id", "dt"],
         "off",
         "user: default\npassword: partition-secret\n",
     );
@@ -154,10 +153,9 @@ async fn single_partition_batch_forms_one_dedup_unit() {
 
     // Force the parser to form many small blocks; the point is that they
     // still coalesce into one part per partition.
-    let sink = sink_with(
+    let sink = sink_with::<Owned<DatedRow>>(
         &srv.url,
         "dated",
-        &["id", "dt"],
         "off",
         "user: default\npassword: partition-secret\n\
              settings: { max_insert_block_size: \"10\", min_insert_block_size_rows: \"0\", \

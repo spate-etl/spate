@@ -7,7 +7,7 @@
 use super::*;
 use spate_clickhouse::{Int256, MultiPolygon, NativeEncoder, Polygon, Ring, UInt256};
 
-#[derive(Serialize)]
+#[derive(Serialize, ClickHouseRow)]
 struct EdgeRow {
     id: u64,
     big: Int256,
@@ -16,7 +16,7 @@ struct EdgeRow {
     mpoly: MultiPolygon,
 }
 
-const COLUMNS: &[&str] = &["id", "big", "ubig", "poly", "mpoly"];
+const COLUMNS: &[&str] = EdgeRow::COLUMNS;
 
 const DDL: &str = "CREATE TABLE native_edges (\
         id UInt64, big Int256, ubig UInt256, poly Polygon, mpoly MultiPolygon\
@@ -49,10 +49,9 @@ async fn int256_and_nested_geo_match_the_literal_row() {
         .await
         .expect("create native_edges");
 
-    let sink = sink_with(
+    let sink = sink_with::<Owned<EdgeRow>>(
         &srv.url,
         "native_edges",
-        COLUMNS,
         "full",
         "format: native\nuser: default\npassword: edges-secret\n",
     );

@@ -109,7 +109,6 @@ sharding expression the sink must reproduce exactly.
 sink:
   clickhouse:
     table: analytics.order_lines        # the LOCAL table, never the Distributed one
-    columns: [order_id, placed_at, sku, qty, unit_cents]
     shards:
       - replicas: ["http://ch-0:8123"]
         weight: 1

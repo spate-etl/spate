@@ -76,9 +76,10 @@ struct SkuBatch {
 }
 
 /// One exploded order line, in the sink's RowBinary shape and the read-back
-/// shape, in the `columns: [sku, unit, qty]` order. `Serialize` drives
-/// the sink encoder; `Row + Deserialize` drives the comparison read-back;
-/// `Ord` sorts the ground-truth for equality.
+/// shape, in field-declaration order. `Serialize` drives the sink encoder
+/// (and, via `ClickHouseRow`, its declared columns); `Row + Deserialize`
+/// drives the comparison read-back; `Ord` sorts the ground-truth for
+/// equality.
 #[derive(
     Debug,
     Clone,
@@ -89,6 +90,7 @@ struct SkuBatch {
     serde::Serialize,
     serde::Deserialize,
     clickhouse::Row,
+    ClickHouseRow,
 )]
 struct LineRow {
     sku: String,
@@ -430,7 +432,6 @@ fn parity_sink(
         .collect();
     let cfg: ClickHouseSinkConfig = serde_yaml::from_str(&format!(
         "table: {table}\n\
-         columns: [sku, unit, qty]\n\
          shards:\n{shard_lines}\
          user: default\n\
          password: {pw}\n\
@@ -439,7 +440,10 @@ fn parity_sink(
         check = check.unwrap_or_default(),
     ))
     .expect("sink config yaml");
-    config::build(cfg).expect("valid sink config")
+    config::build(cfg)
+        .expect("valid sink config")
+        .with_row::<Owned<LineRow>>()
+        .expect("valid columns")
 }
 
 /// Drive one full pipeline: memory source -> `BatchDeser` -> `flat_map`

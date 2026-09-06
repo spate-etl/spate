@@ -18,16 +18,17 @@ CPU and part control against server-side fan-out.
 ## Configuration: a `sinks:` map
 
 Replace the single `sink:` section with a `sinks:` map keyed by name. Each entry
-is a full, ordinary ClickHouse sink section with its own `table`, `columns`,
+is a full, ordinary ClickHouse sink section with its own `table`,
 `format`, `shards`, and `batch`/`inflight`, so per-table part sizing is tuned
 independently. The map key is the name the chain resolves with `ctx.sink(...)`.
+Each table's own insert columns come from its own row struct, via
+`#[derive(ClickHouseRow)]`.
 
 ```yaml
 sinks:
   payments:
     clickhouse:
       table: payments
-      columns: [order_id, amount_cents]           # this table's own columns/order
       format: native
       shards:
         - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
@@ -36,7 +37,6 @@ sinks:
   refunds:
     clickhouse:
       table: refunds
-      columns: [order_id, amount_cents, reason]   # a different schema
       format: native
       shards:
         - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
@@ -86,7 +86,7 @@ Each branch is a full ClickHouse sink, so everything on the
 [ClickHouse sink page](README.mdx) holds **per table**:
 
 - **Native (or RowBinary) encoding on pipeline threads**, positional against
-  that table's `columns`. Mixed formats across tables are fine; each sink
+  that table's row struct. Mixed formats across tables are fine; each sink
   chooses its own.
 - **Direct-to-shard writes** with `wait_end_of_query=1`; a table's write is its
   own durable-ack point. The split holds the source batch until *every* table it

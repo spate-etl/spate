@@ -9,7 +9,7 @@
 
 use bytes::BytesMut;
 use spate_clickhouse::config::{self, ClickHouseSinkConfig};
-use spate_clickhouse::{DistributedRouter, ShardKey};
+use spate_clickhouse::{ClickHouseRow, DistributedRouter, ShardKey};
 use spate_core::backpressure::InflightBudget;
 use spate_core::checkpoint::AckRef;
 use spate_core::deser::{Deserializer, EmitRecord, Owned};
@@ -21,7 +21,7 @@ use spate_core::source::PayloadBatch;
 use std::sync::Arc;
 
 /// The terminal record type: one SKU per row.
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, serde::Serialize, ClickHouseRow)]
 struct SkuRow {
     sku: String,
 }
@@ -123,7 +123,6 @@ fn sink_minted_router_places_rows_by_payload_key_through_the_terminal_stage() {
     let cfg: ClickHouseSinkConfig = serde_yaml::from_str(
         r#"
 table: t
-columns: [sku]
 shards:
   - replicas: ["http://ch-0:8123"]
     weight: 9
@@ -132,7 +131,10 @@ shards:
 "#,
     )
     .expect("config yaml");
-    let sink = config::build(cfg).expect("valid sink config");
+    let sink = config::build(cfg)
+        .expect("valid sink config")
+        .with_row::<Owned<SkuRow>>()
+        .expect("valid columns");
     let router = sink.router::<Owned<SkuRow>>(sku_key);
 
     let (queues, mut rxs) = shard_queues(2, 64);

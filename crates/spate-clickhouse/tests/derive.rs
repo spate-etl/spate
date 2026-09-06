@@ -88,3 +88,44 @@ struct WithRawIdentifier {
 fn a_raw_identifier_field_name_is_unraw_d() {
     assert_eq!(WithRawIdentifier::COLUMNS, &["id", "type"]);
 }
+
+#[derive(Serialize, ClickHouseRow)]
+struct WithSerializeOnlyRename {
+    id: u64,
+    #[serde(rename(serialize = "wire_name"))]
+    internal_name: String,
+}
+
+#[test]
+fn the_serialize_half_of_a_list_form_rename_names_the_column() {
+    assert_eq!(WithSerializeOnlyRename::COLUMNS, &["id", "wire_name"]);
+}
+
+// `crate` resolves from inside this crate's own test suite regardless of
+// what `crate_path::resolve` would otherwise find, so this exercises the
+// override without needing a crate that only depends on the `spate` facade.
+#[derive(Serialize, ClickHouseRow)]
+#[clickhouse(crate = "crate")]
+struct WithCrateOverride {
+    id: u64,
+}
+
+#[test]
+fn the_crate_override_names_the_column_list() {
+    assert_eq!(WithCrateOverride::COLUMNS, &["id"]);
+}
+
+/// A doc comment desugars to a `#[doc = "..."]` attribute alongside whatever
+/// `#[serde(...)]`/`#[clickhouse(...)]` attributes the struct carries, which
+/// every real row struct has and this derive has to skip over correctly.
+#[derive(Serialize, ClickHouseRow)]
+struct Documented {
+    id: u64,
+    #[serde(rename = "wire_name", default)]
+    name: String,
+}
+
+#[test]
+fn a_doc_comment_and_an_unrelated_serde_key_are_tolerated() {
+    assert_eq!(Documented::COLUMNS, &["id", "wire_name"]);
+}

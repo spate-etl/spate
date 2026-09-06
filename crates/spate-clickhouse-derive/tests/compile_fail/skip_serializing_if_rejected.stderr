@@ -1,0 +1,6 @@
+error: #[serde(skip_serializing_if = "...")] is not supported: a value-dependent skip shifts every later column on the rows it fires for, and RowBinary has no framing to recover from that. Use Option<T> against a Nullable column instead, which stays in COLUMNS unconditionally
+ --> tests/compile_fail/skip_serializing_if_rejected.rs:6:5
+  |
+6 | /     #[serde(skip_serializing_if = "Option::is_none")]
+7 | |     note: Option<String>,
+  | |________________________^

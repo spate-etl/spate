@@ -1,0 +1,6 @@
+error: #[serde(flatten)] is not supported: the derive cannot see the flattened type's own columns
+ --> tests/compile_fail/flatten_rejected.rs:6:5
+  |
+6 | /     #[serde(flatten)]
+7 | |     extra: Extra,
+  | |________________^

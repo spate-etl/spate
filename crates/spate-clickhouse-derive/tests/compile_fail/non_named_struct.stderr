@@ -1,0 +1,5 @@
+error: ClickHouseRow can only be derived for a struct with named fields
+ --> tests/compile_fail/non_named_struct.rs:4:8
+  |
+4 | struct TupleRow(u64, String);
+  |        ^^^^^^^^

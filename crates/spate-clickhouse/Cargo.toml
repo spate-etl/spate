@@ -16,6 +16,7 @@ bytes = { workspace = true }
 bytesize = { workspace = true }
 clickhouse = { workspace = true, features = ["lz4", "zstd", "rustls-tls"] }
 spate-core = { workspace = true }
+spate-clickhouse-derive = { workspace = true }
 foldhash = { workspace = true }
 humantime-serde = { workspace = true }
 serde = { workspace = true }

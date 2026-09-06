@@ -1,0 +1,27 @@
+error: column `tags.` is not a valid identifier (or dotted `outer.inner` name)
+ --> tests/compile_fail/bad_identifier.rs:6:5
+  |
+6 | /     #[serde(rename = "tags.")]
+7 | |     trailing_dot: u64,
+  | |_____________________^
+
+error: column `.key` is not a valid identifier (or dotted `outer.inner` name)
+ --> tests/compile_fail/bad_identifier.rs:8:5
+  |
+8 | /     #[serde(rename = ".key")]
+9 | |     leading_dot: u64,
+  | |____________________^
+
+error: column `a..b` is not a valid identifier (or dotted `outer.inner` name)
+  --> tests/compile_fail/bad_identifier.rs:10:5
+   |
+10 | /     #[serde(rename = "a..b")]
+11 | |     empty_segment: u64,
+   | |______________________^
+
+error: column `tags.k ey` is not a valid identifier (or dotted `outer.inner` name)
+  --> tests/compile_fail/bad_identifier.rs:12:5
+   |
+12 | /     #[serde(rename = "tags.k ey")]
+13 | |     embedded_space: u64,
+   | |_______________________^

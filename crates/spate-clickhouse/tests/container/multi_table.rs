@@ -85,17 +85,29 @@ async fn sinks_write_to_independent_tables() {
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn a_failed_table_write_is_isolated_from_the_others() {
+    use spate_core::error::{ErrorClass, SinkError};
+
     let srv = server().await;
     make_table(&srv.admin, "orders_a").await;
-    make_table(&srv.admin, "orders_b").await;
     let healthy = sink_for_table(&srv.url, "orders_a").await;
-    // A second sink whose table is dropped out from under it after startup.
-    // In a full pipeline this failing write stalls the source watermark
-    // (worst-status merge; see spate-test's split tests); here we prove the
-    // failure is isolated to that sink and does not corrupt the healthy table.
-    let dead = sink_for_table(&srv.url, "orders_b").await;
+
+    // A second sink on its own server, which then goes away: the shard is
+    // down. In a full pipeline that write is retried and stalls the source
+    // watermark (worst-status merge; see spate-test's split tests). The sink
+    // reads its table's schema when it is built, so the server has to be
+    // alive for that and unreachable afterwards.
+    let doomed = server().await;
+    make_table(&doomed.admin, "orders_b").await;
+    let unreachable = sink_for_table(&doomed.url, "orders_b").await;
+    drop(doomed);
+
+    // A third whose table is dropped out from under it: the same isolation
+    // property reached through a fatal server exception rather than a
+    // retryable transport failure.
+    make_table(&srv.admin, "orders_c").await;
+    let dropped = sink_for_table(&srv.url, "orders_c").await;
     srv.admin
-        .query("DROP TABLE orders_b")
+        .query("DROP TABLE orders_c")
         .execute()
         .await
         .expect("drop");
@@ -105,17 +117,41 @@ async fn a_failed_table_write_is_isolated_from_the_others() {
         .write_batch(&healthy.endpoints[0][0], &sealed(&orders(0..50), "a-1", 1))
         .await
         .expect("healthy table write succeeds");
-    let result = dead
+
+    let err = unreachable
         .writer
-        .write_batch(&dead.endpoints[0][0], &sealed(&orders(0..50), "b-1", 1))
-        .await;
-    assert!(
-        result.is_err(),
-        "a write to a dropped table must fail (a real pipeline then stalls its watermark)"
-    );
+        .write_batch(
+            &unreachable.endpoints[0][0],
+            &sealed(&orders(0..50), "b-1", 1),
+        )
+        .await
+        .expect_err("a write to a shard that is down must fail");
+    match err {
+        SinkError::Client { class, reason } => assert_eq!(
+            class,
+            ErrorClass::Retryable,
+            "a shard being down is retried, which is what stalls the watermark: {reason}"
+        ),
+        other => panic!("unexpected error shape: {other:?}"),
+    }
+
+    let err = dropped
+        .writer
+        .write_batch(&dropped.endpoints[0][0], &sealed(&orders(0..50), "c-1", 1))
+        .await
+        .expect_err("a write to a dropped table must fail");
+    match err {
+        SinkError::Client { class, reason } => assert_eq!(
+            class,
+            ErrorClass::Fatal,
+            "UNKNOWN_TABLE cannot succeed on retry: {reason}"
+        ),
+        other => panic!("unexpected error shape: {other:?}"),
+    }
+
     assert_eq!(
         count_table(&srv.admin, "orders_a").await,
         50,
-        "the healthy table is unaffected by the other sink's failure"
+        "the healthy table is unaffected by the other sinks' failures"
     );
 }

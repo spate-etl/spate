@@ -179,7 +179,7 @@ async fn schema_validation_first_record_scenarios() {
         "{reason}"
     );
 
-    // The Nullable hard rule, both directions, in full mode: a wire-format
+    // The Nullable hard rule, both directions: a wire-format
     // difference, not a type ambiguity.
     #[derive(Clone, Serialize, ClickHouseRow)]
     struct PlainAmount {
@@ -223,7 +223,7 @@ async fn schema_validation_first_record_scenarios() {
     assert!(fatal(err).contains("not compatible with `s` String"));
 
     // LowCardinality is transparent on insert: a plain String field
-    // passes full mode and the row lands.
+    // passes the check and the row lands.
     #[derive(Clone, Serialize, ClickHouseRow)]
     struct LcRow {
         id: u64,

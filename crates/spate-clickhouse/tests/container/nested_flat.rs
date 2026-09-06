@@ -118,7 +118,7 @@ async fn nested_rowbinary_format_round_trips_through_a_real_server() {
         "INSERT INTO `nested_rowbinary` (`id`, `tags.key`, `tags.value`) FORMAT RowBinaryWithNamesAndTypes"
     );
 
-    // `full` mode: the flattened columns are ordinary `Array(String)`, so the
+    // The flattened columns are ordinary `Array(String)`, so the
     // `Vec<String>` fields pass the per-position type check.
     let schema = sink.schema();
     let mut encoder = spate_clickhouse::ClickHouseEncoder::<Owned<NestedRow>>::with_schema(schema);

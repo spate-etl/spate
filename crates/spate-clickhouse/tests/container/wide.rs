@@ -13,9 +13,10 @@
 // toString(row 1) == toString(row 2), which sidesteps both client-side
 // decode limits and hand-computed server formatting.
 //
-// `Time`/`Time64` need `enable_time_time64_type=1`, which the DDL client and
-// the sink's `settings:` map both carry: the insert header names the column
-// type, so the setting has to be on for the type name to parse there too.
+// `Time`/`Time64` need `enable_time_time64_type=1` to create the columns, so
+// the DDL client carries it. The sink's `settings:` map carries it too, which
+// 26.3 does not require for the insert; a server that reads the header's type
+// names under the same gate as the DDL would.
 
 use super::*;
 use ::chrono::{DateTime, TimeZone, Utc};

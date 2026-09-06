@@ -14,3 +14,10 @@ is now async and returns the runnable sink, replacing
 `input_format_with_types_use_header` join the settings the sink manages, so a
 `settings:` map naming either is rejected at load. `NativeSchema::from_columns`
 now checks a row against the types it declares, not only their names.
+
+The type check running on every sink is what a pipeline previously on
+`validate_schema: off` or `names` will notice: a field whose width matches its
+column by coincidence is now rejected at the first record. A raw `u64` epoch
+against a `DateTime64` column is the likely one — that column is `Int64`-backed,
+so it takes an `i64`, or the `DateTime64Millis` wrapper, which pins the scale
+as well.

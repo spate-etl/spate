@@ -38,11 +38,15 @@ lives in the `spate-clickhouse` crate's `rowbinary` module docs.
 | The first record, per pipeline thread | Struct field names, order, and a class-based type-compatibility check per position. |
 | Every insert, server-side | The header's column names and types against the table's. |
 
-The client-side type check is deliberately permissive: a `u32` may feed
-`UInt32`, `DateTime`, or `IPv4`; server types the client does not know always
-pass. One mismatch always fails regardless: `Nullable` on the server versus a
-non-`Option` field (or the reverse). That one is wire corruption, not a
-judgment call.
+The client-side type check is permissive about a column's *meaning* and strict
+about its width and signedness. A `u32` may feed `UInt32`, `DateTime` or
+`IPv4`, because all three are four unsigned bytes; server types the client does
+not know always pass. What it will not do is cross signedness at the same
+width: `DateTime64` and `Time64` are `Int64`-backed and take an `i64`, not a
+`u64`, because they carry instants before 1970 as negative values. Two
+mismatches always fail: `Nullable` on the server versus a non-`Option` field
+(or the reverse), and a wire wrapper whose declared scale disagrees with the
+column's. Both are wire corruption rather than judgment calls.
 
 The two client-side checks are not made redundant by the server's. The header
 carries the *table's* types, so the server never sees the struct's, and a

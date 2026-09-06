@@ -53,7 +53,6 @@ sink:
       - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
     user: ${CLICKHOUSE_USER:-default}
     password: ${CLICKHOUSE_PASSWORD:-}
-    # Fail startup (and the first record) when the derived columns and the
     batch:
       max_rows: 500000
       max_bytes: 128MiB

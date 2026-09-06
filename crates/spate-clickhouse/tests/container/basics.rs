@@ -65,8 +65,9 @@ async fn probe_reflects_connectivity() {
         .await
         .expect("probe healthy server");
 
-    // A server that goes away after the sink is built. Building needs a live
-    // server now, so unreachability has to be arranged rather than configured.
+    // A server that goes away after the sink is built: the sink reads the
+    // table's schema when it is built, so an endpoint that never answers
+    // cannot produce one.
     let doomed = server().await;
     let unreachable = sink_for(&doomed.url).await;
     drop(doomed);

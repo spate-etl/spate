@@ -330,7 +330,7 @@ where
         // First record only: validate the row's probed struct against the
         // declared columns off the per-row path. Positional dispatch would
         // otherwise silently mis-column a same-wire-class field/column swap,
-        // and (in `full` mode) a wire wrapper whose scale disagrees with the
+        // and a wire wrapper whose scale disagrees with the
         // column's declared precision would silently land wrong values.
         // Best-effort safety, not a gate: `probe_row` errors for tuple/seq rows
         // (no field names) and other exotic-but-encodable shapes; skip the

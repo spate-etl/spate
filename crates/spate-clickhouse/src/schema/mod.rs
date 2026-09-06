@@ -81,11 +81,6 @@ pub struct RowSchema {
 }
 
 impl RowSchema {
-    /// The `RowBinaryWithNamesAndTypes` header: a column count, then every
-    /// name, then every type, each length-prefixed.
-    ///
-    /// The type text is `system.columns`' own, sent back verbatim, so the
-    /// server compares its table against a string it produced.
     /// A schema with no columns, for the bench-only unchecked encoder.
     #[cfg(feature = "testing")]
     pub(crate) fn empty() -> RowSchema {
@@ -96,6 +91,11 @@ impl RowSchema {
         }
     }
 
+    /// The `RowBinaryWithNamesAndTypes` header: a column count, then every
+    /// name, then every type, each length-prefixed.
+    ///
+    /// The type text is `system.columns`' own, sent back verbatim, so the
+    /// server compares its table against a string it produced.
     pub(crate) fn header(&self) -> Bytes {
         let mut buf = BytesMut::new();
         put_leb128(&mut buf, self.columns.len() as u64);

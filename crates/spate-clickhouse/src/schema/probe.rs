@@ -1018,6 +1018,28 @@ mod tests {
         );
     }
 
+    /// A date or time column takes the Rust integer whose signedness matches
+    /// the column's backing type, so the same eight bytes are accepted for
+    /// `Int64`-backed columns and refused for a `u64`.
+    #[test]
+    fn date_and_time_columns_follow_their_backing_signedness() {
+        // Unsigned on the server, unsigned in the row.
+        assert!(ok(&Shape::U16, "Date")); // UInt16
+        assert!(ok(&Shape::U32, "DateTime")); // UInt32
+        assert!(!ok(&Shape::I32, "DateTime"));
+
+        // Signed on the server, signed in the row. `DateTime64` and `Time64`
+        // carry instants before 1970 as negative ticks, which a `u64` cannot
+        // express, so the widths matching is not enough.
+        assert!(ok(&Shape::I32, "Date32")); // Int32
+        assert!(ok(&Shape::I32, "Time")); // Int32
+        assert!(ok(&Shape::I64, "DateTime64(3)")); // Int64
+        assert!(ok(&Shape::I64, "Time64(3)")); // Int64
+        assert!(!ok(&Shape::U64, "DateTime64(3)"));
+        assert!(!ok(&Shape::U64, "Time64(3)"));
+        assert!(!ok(&Shape::U16, "Date32"));
+    }
+
     /// `FixedString(N)` is the one column class whose Rust field differs by
     /// wire format: Native pads a short `String`, RowBinary needs the exact
     /// bytes.

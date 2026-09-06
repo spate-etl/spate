@@ -120,7 +120,8 @@ async fn our_frames_decode_through_the_crates_deserializer() {
     );
 }
 
-/// The writer's own body, header and all, is one accepted request.
+/// A multi-frame batch is one request the server accepts. What the body
+/// contains is the container tier's to check: `provide` ignores it.
 #[tokio::test]
 async fn write_batch_sends_every_frame() {
     let mock = Mock::new();
@@ -379,7 +380,7 @@ shards:
         .expect("build native schema");
     let err = NativeEncoder::<Owned<EventRow>>::new(schema)
         .encode(&record(row.clone()), &mut BytesMut::new())
-        .expect_err("full mode rejects the scale mismatch");
+        .expect_err("the scale mismatch is rejected");
     match err {
         SinkError::Client { class, reason } => {
             assert_eq!(class, ErrorClass::Fatal, "{reason}");

@@ -44,14 +44,14 @@ updates:
     # Under Cargo's default `increase-if-necessary`, a manifest edit in a bump
     # signals a dependency moved outside its declared requirement.
     groups:
-      # One pull request for everything semver-compatible. Majors stay out of
-      # the group so each arrives on its own.
+      # syn, quote and proc-macro2 release in lockstep; nothing else in this
+      # workspace has that guarantee, so nothing else is grouped.
       #
       # Grouping is Cargo-aware. For a 0.x crate 0.39 -> 0.40 classifies as
       # major and arrives as its own pull request, so the "minor" entry here
-      # only matches dependencies at 1.0 or above.
-      cargo-compatible:
-        patterns: ["*"]
+      # only matches these three at 1.0 or above.
+      proc-macro-trio:
+        patterns: ["syn", "quote", "proc-macro2"]
         update-types: ["minor", "patch"]
 
   # ----------------------------------------------- Cargo (fuzz harness) ----
@@ -72,10 +72,7 @@ updates:
       default-days: 7
       semver-minor-days: 14
       semver-major-days: 14
-    groups:
-      fuzz-compatible:
-        patterns: ["*"]
-        update-types: ["minor", "patch"]
+    # No group: nothing here releases in the lockstep that would justify one.
 
   # ------------------------------------------------------- GitHub Actions ----
   - package-ecosystem: github-actions

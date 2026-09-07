@@ -291,20 +291,87 @@
 
 .pipeline__edges {
   stroke: var(--spate-mark-edge);
-  opacity: 0.75;
+  fill: none;
 }
 
-.pipeline__nodes circle {
+/* The acknowledgement path is a control signal, thin and dashed. */
+.pipeline__signal {
+  stroke: var(--spate-muted);
+  fill: none;
+  stroke-dasharray: 3 4;
+  opacity: 0.85;
+}
+
+.pipeline__marker {
+  fill: var(--spate-muted);
+}
+
+.pipeline__nodes circle,
+.pipeline__nodes rect {
   fill: var(--spate-mark-node);
 }
 
-.pipeline__core {
+/* A replica set, drawn as overlapping discs the ground-coloured stroke separates. */
+.pipeline__stack circle {
+  fill: var(--spate-mark-node);
+  stroke: var(--spate-bg);
+  stroke-width: 2;
+}
+
+.pipeline__core rect {
   fill: var(--spate-mark-core);
+}
+
+.pipeline__core rect.behind {
+  fill: var(--spate-bg);
+  stroke: var(--spate-mark-core);
+  stroke-width: 1.5;
+}
+
+.pipeline__chain {
+  stroke: var(--spate-bg);
+  fill: var(--spate-bg);
+}
+
+.pipeline__chain path {
+  fill: none;
+}
+
+.pipeline__chain-arrow {
+  fill: var(--spate-bg);
+}
+
+.pipeline__queue rect {
+  fill: none;
+  stroke: var(--spate-border);
+}
+
+.pipeline__queue rect.fill {
+  fill: var(--spate-mark-core);
+  stroke: none;
 }
 
 .pipeline__records circle,
 .pipeline__still circle {
   fill: var(--spate-mark-core);
+}
+
+/* Ordered after the record fill so a still-frame acknowledgement keeps the signal colour. */
+.pipeline__signal-dots circle {
+  fill: var(--spate-muted);
+}
+
+/* The committed watermark, the one place the figure uses the accent. */
+.pipeline__gauge-track {
+  stroke: var(--spate-border);
+  fill: none;
+  stroke-width: 6;
+}
+
+.pipeline__gauge {
+  stroke: var(--spate-accent);
+  fill: none;
+  stroke-width: 6;
 }
 
 .pipeline__still {
@@ -315,12 +382,23 @@
   fill: var(--spate-muted);
 }
 
-.pipeline__paused {
-  fill: var(--spate-accent);
+/* The stalled lane, its record and its annotation. The record's selector carries the element so it
+   outranks the record fill above. */
+.pipeline__paused-edge {
+  stroke: var(--spate-dim);
+  fill: none;
+}
+
+.pipeline__paused,
+.pipeline__records circle.pipeline__paused,
+.pipeline__still circle.pipeline__paused {
+  fill: var(--spate-dim);
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .pipeline__records {
+  .pipeline__records,
+  .pipeline__signal-dots,
+  .pipeline__anim {
     display: none;
   }
 

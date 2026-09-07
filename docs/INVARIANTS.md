@@ -22,44 +22,47 @@ Numbering is append-only. A property that is ever retired keeps its number and
 is marked retired rather than freeing it for reuse, so a pull request from a
 year ago still means what it said.
 
-- **INV-1 — delivery is at-least-once.** A source watermark is never committed
-  past unacknowledged data, including across rebalances and shutdown. Everything
-  else exists to make this one affordable.
-- **INV-2 — source threads never block on a channel send.** Backpressure is
-  `try_send` plus `Source::pause` plus continuing to poll. A blocked poll loop
-  gets the consumer evicted from its group, which is a worse failure than the
-  one it was avoiding.
-- **INV-3 — the checkpoint tracker stays synchronous and free of async
-  runtimes.** It is loom-tested, and loom can only model what stays this shape.
-- **INV-4 — acks never block behind data.** The ack path is unbounded and
-  atomic. An ack queued behind the data it acknowledges is a deadlock waiting
-  for backpressure to arrive.
-- **INV-5 — the sink worker's intake path never awaits outside its `select!`.**
-  Anything it blocks on sits in a branch alongside the drain-deadline branch, or
-  the deadline is not polled while it waits and shutdown deadlocks.
-- **INV-6 — no connector types in `spate-core`'s public API**, and no 0.x
-  dependency types in any public trait bound. Those cannot enter our semver
-  surface. The `metrics` facade is the one sanctioned exception, because the
-  instrumentation API *is* that facade.
-- **INV-7 — record error policies are Skip or Fail only**, and both are surfaced
-  through metrics rather than only logged. There is no third policy
-  that drops a record without counting it.
-- **INV-8 — metrics handles are pre-registered at build time.** A metric name or
-  label resolved on the per-record path is a per-record allocation and a lookup
-  in the one place neither is affordable.
-- **INV-9 — every metric lives under the `spate_` umbrella.** The framework owns
-  the reserved stage roots; connector and user families register through a
-  `Meter`, which prefixes them and rejects a namespace shadowing a reserved
-  root. The one sanctioned exception is a metric registered on the raw `metrics`
-  facade, which is the deliberate opt-out for a name that must sit outside
-  `spate_`, for example an exporter's own series or one a downstream contract
-  fixes.
-- **INV-10 — a gauge series has exactly one live owner per process.** A
-  duplicate claim on the same key is refused rather than shared. Assembly makes
-  it fatal (`BuildError`/`StartError`); direct construction cannot fail a build,
-  so it logs and the loser becomes a *shadow*. It still counts, since counters
-  sum, but it publishes no gauge. Two live owners would be two writers racing to
-  describe one piece of state, and the exposition cannot show that happened.
+- <Anchor id="inv-1" />**INV-1 — delivery is at-least-once.** A source watermark
+  is never committed past unacknowledged data, including across rebalances and
+  shutdown. Everything else exists to make this one affordable.
+- <Anchor id="inv-2" />**INV-2 — source threads never block on a channel send.**
+  Backpressure is `try_send` plus `Source::pause` plus continuing to poll. A
+  blocked poll loop gets the consumer evicted from its group, which is a worse
+  failure than the one it was avoiding.
+- <Anchor id="inv-3" />**INV-3 — the checkpoint tracker stays synchronous and
+  free of async runtimes.** It is loom-tested, and loom can only model what
+  stays this shape.
+- <Anchor id="inv-4" />**INV-4 — acks never block behind data.** The ack path is
+  unbounded and atomic. An ack queued behind the data it acknowledges is a
+  deadlock waiting for backpressure to arrive.
+- <Anchor id="inv-5" />**INV-5 — the sink worker's intake path never awaits
+  outside its `select!`.** Anything it blocks on sits in a branch alongside the
+  drain-deadline branch, or the deadline is not polled while it waits and
+  shutdown deadlocks.
+- <Anchor id="inv-6" />**INV-6 — no connector types in `spate-core`'s public
+  API**, and no 0.x dependency types in any public trait bound. Those cannot
+  enter our semver surface. The `metrics` facade is the one sanctioned
+  exception, because the instrumentation API *is* that facade.
+- <Anchor id="inv-7" />**INV-7 — record error policies are Skip or Fail only**,
+  and both are surfaced through metrics rather than only logged. There is no
+  third policy that drops a record without counting it.
+- <Anchor id="inv-8" />**INV-8 — metrics handles are pre-registered at build
+  time.** A metric name or label resolved on the per-record path is a
+  per-record allocation and a lookup in the one place neither is affordable.
+- <Anchor id="inv-9" />**INV-9 — every metric lives under the `spate_`
+  umbrella.** The framework owns the reserved stage roots; connector and user
+  families register through a `Meter`, which prefixes them and rejects a
+  namespace shadowing a reserved root. The one sanctioned exception is a metric
+  registered on the raw `metrics` facade, which is the deliberate opt-out for a
+  name that must sit outside `spate_`, for example an exporter's own series or
+  one a downstream contract fixes.
+- <Anchor id="inv-10" />**INV-10 — a gauge series has exactly one live owner
+  per process.** A duplicate claim on the same key is refused rather than
+  shared. Assembly makes it fatal (`BuildError`/`StartError`); direct
+  construction cannot fail a build, so it logs and the loser becomes a *shadow*.
+  It still counts, since counters sum, but it publishes no gauge. Two live
+  owners would be two writers racing to describe one piece of state, and the
+  exposition cannot show that happened.
 
 ## Where the reasoning lives
 

@@ -8,6 +8,8 @@ const TOKENS: Array<{name: string; role: string}> = [
   {name: 'ink', role: 'Text'},
   {name: 'muted', role: 'Secondary text'},
   {name: 'border', role: 'Rules and borders'},
+  {name: 'dim', role: 'Graphic fill'},
+  {name: 'grid', role: 'Background texture'},
   {name: 'accent', role: 'Links and controls'},
   {name: 'mark-node', role: 'Mark: sources and sink'},
   {name: 'mark-core', role: 'Mark: core'},

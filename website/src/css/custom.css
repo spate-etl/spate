@@ -99,6 +99,7 @@ h3 {
 .theme-doc-footer a,
 .site-footer__col a,
 .home p a,
+.home-hero__chart-cap a,
 .benchmarks-page p a,
 .bench-profile p a,
 .bench-profile li a,
@@ -114,6 +115,7 @@ h3 {
 .theme-doc-footer a:hover,
 .site-footer__col a:hover,
 .home p a:hover,
+.home-hero__chart-cap a:hover,
 .benchmarks-page p a:hover,
 .bench-profile a:hover {
   text-decoration-color: currentColor;

@@ -8,12 +8,12 @@
 @import '@fontsource/ibm-plex-sans/500.css';
 @import '@fontsource/ibm-plex-sans/600.css';
 @import '@fontsource/ibm-plex-sans/700.css';
-@import '@fontsource/ibm-plex-mono/400.css';
+@import '@fontsource-variable/overpass-mono/index.css';
 @import './brand.css';
 
 :root {
   --ifm-font-family-base: 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
-  --ifm-font-family-monospace: 'IBM Plex Mono', ui-monospace, 'SFMono-Regular', Menlo, monospace;
+  --ifm-font-family-monospace: 'Overpass Mono Variable', ui-monospace, 'SFMono-Regular', Menlo, monospace;
   --ifm-font-size-base: 16px;
   --ifm-line-height-base: 1.6;
   --ifm-code-font-size: 88%;

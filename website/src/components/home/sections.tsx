@@ -14,6 +14,7 @@ import {useReveal} from '../motion/useReveal';
 import {isRanked, PRIMARY, type Row} from '../Results/data';
 import Incident from './Incident';
 import Pipeline from './Pipeline';
+import Responsibilities from './Responsibilities';
 
 /** The heading takes `${id}-title`, which the enclosing section names in `aria-labelledby`. */
 function SectionHead({
@@ -262,6 +263,7 @@ export function Delivery(): React.JSX.Element {
       eyebrow="Delivery under pressure"
       title="Backpressure, errors and shutdown have defined outcomes."
       lead="When sink queues fill, source lanes pause while polling continues. Record errors follow an explicit Skip or Fail policy. Shutdown drains until completion or a configured deadline, committing only acknowledged data.">
+      <Responsibilities />
       <Incident />
       <p className="home-delivery__links">
         See the <Link to="/docs/user-guide/concepts/delivery-guarantees/">delivery guarantees</Link> and{' '}

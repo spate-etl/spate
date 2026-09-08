@@ -36,10 +36,27 @@ jobs:
             build-mode: none
           - language: rust
             build-mode: none
+          - language: javascript-typescript
+            build-mode: none
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      # `npm ci` only populates node_modules so the extractor can resolve real
+      # Docusaurus/React types; CodeQL still extracts under build-mode: none,
+      # no `npm run build` involved.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        if: matrix.language == 'javascript-typescript'
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: website/package-lock.json
+
+      - name: Install website dependencies
+        if: matrix.language == 'javascript-typescript'
+        working-directory: website
+        run: npm ci
 
       # `build-mode: none` reads the sources directly, so no cargo build runs
       # and the job needs no Rust toolchain.
@@ -53,6 +70,8 @@ jobs:
           config: |
             paths-ignore:
               - 'crates/*/tests/**'
+              - 'website/**/*.test.ts'
+              - 'website/**/*.test.js'
 
       # `category` keeps each language's results in its own SARIF namespace, so
       # one language's run does not retire the other's alerts.

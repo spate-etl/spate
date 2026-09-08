@@ -75,7 +75,7 @@ DARK_CORE = "#ffc9a8"
 LIGHT_NODE = "#d1500b"
 LIGHT_EDGE = "#e65a0f"
 LIGHT_CORE = "#f16413"
-LIGHT_ACCENT = "#c8480a"
+LIGHT_ACCENT = "#c04409"
 
 BANNER_TEXT = "#f4f5f6"
 BANNER_MUTED = "#9aa1a9"
@@ -92,7 +92,7 @@ TOKENS = {
         "grid": "rgba(23, 24, 28, 0.035)",
         "accent": LIGHT_ACCENT,
         "accent-ink": "#ffffff",
-        "accent-soft": "rgba(200, 72, 10, 0.08)",
+        "accent-soft": "rgba(192, 68, 9, 0.08)",
         "mark-node": LIGHT_NODE,
         "mark-edge": LIGHT_EDGE,
         "mark-core": LIGHT_CORE,

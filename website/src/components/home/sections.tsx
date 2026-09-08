@@ -2,7 +2,7 @@ import Link from '@docusaurus/Link';
 import CodeBlock from '@theme/CodeBlock';
 import MDXContent from '@theme/MDXContent';
 import clsx from 'clsx';
-import React from 'react';
+import React, {useState} from 'react';
 
 import {CONNECTORS} from '../../data/connectors';
 import {FAQ} from '../../data/faq';
@@ -140,6 +140,37 @@ function HeroField(): React.JSX.Element | null {
   );
 }
 
+const QUICKSTART = '/docs/user-guide/getting-started/quickstart/';
+const INSTALL_COMMAND = 'cargo add spate --features kafka,clickhouse,avro';
+
+function InstallCommand(): React.JSX.Element {
+  const [status, setStatus] = useState('');
+  const [copying, setCopying] = useState(false);
+  async function copy() {
+    setStatus('');
+    setCopying(true);
+    try {
+      await navigator.clipboard.writeText(INSTALL_COMMAND);
+      setStatus('Command copied.');
+    } catch {
+      setStatus('Could not copy. Select and copy the command above.');
+    } finally {
+      setCopying(false);
+    }
+  }
+  return (
+    <div className="home-install">
+      <p className="home-muted">Add Spate to an existing Cargo project</p>
+      <div className="home-install__row">
+        <code className="home-cmd"><span aria-hidden="true">$ </span>{INSTALL_COMMAND}</code>
+        <button type="button" className="home-btn home-btn--ghost" onClick={copy}
+          disabled={copying} aria-label="Copy installation command">Copy</button>
+      </div>
+      <p className="home-install__status" role="status" aria-live="polite" aria-atomic="true">{status}</p>
+    </div>
+  );
+}
+
 export function Hero(): React.JSX.Element {
   return (
     <section className="home-hero" aria-labelledby="hero-title">
@@ -161,9 +192,7 @@ export function Hero(): React.JSX.Element {
               Read the benchmarks
             </Link>
           </div>
-          <code className="home-cmd home-hero__cmd">
-            <span aria-hidden="true">$ </span>cargo add spate --features kafka,clickhouse,avro
-          </code>
+          <InstallCommand />
         </div>
         <HeroField />
       </div>
@@ -250,24 +279,41 @@ export function Code(): React.JSX.Element {
       id="taste"
       eyebrow="A taste"
       title="Operators are closures. The chain is one loop."
-      lead="YAML carries the tuning and connector configuration, never the topology. This program runs against in-memory mocks, so it needs no infrastructure."
+      lead={
+        <>
+          The example splits comma-separated input into fields. Each <code>word</code> is a{' '}
+          <code>Vec&lt;u8&gt;</code> containing one field’s bytes.
+        </>
+      }
       aside={
         <>
           <p>
-            The whole program is{' '}
-            <Link href={`${githubUrl}/blob/main/crates/spate/examples/memory_pipeline.rs`}>
-              <code>memory_pipeline.rs</code>
-            </Link>
-            , rendered here from the compiled source.
+            The filter removes empty fields. The map uppercases each remaining field.
+            The excerpt shows those two steps.
           </p>
-          <code className="home-cmd">
-            <span aria-hidden="true">$ </span>cargo run -p spate --example memory_pipeline
-          </code>
+          <p>
+            See the{' '}
+            <Link href={`${githubUrl}/blob/main/crates/spate/examples/memory_pipeline.rs`}>
+              complete program
+            </Link>{' '}
+            for the source, sink and pipeline setup.
+          </p>
+          <Link className="home-btn home-btn--primary" to={QUICKSTART}>
+            Run the in-memory example
+          </Link>
         </>
       }>
       <MDXContent>
         <Taste />
       </MDXContent>
+      <dl className="home-example-flow">
+        <div><dt>Input</dt><dd><code>delta,,epsilon</code></dd></div>
+        <div>
+          <dt><code>word</code> values</dt>
+          <dd><code>b"delta"</code>, <code>b""</code> (empty), <code>b"epsilon"</code></dd>
+        </div>
+        <div><dt>Output</dt><dd><code>DELTA</code>, <code>EPSILON</code></dd></div>
+      </dl>
     </SplitSection>
   );
 }

@@ -298,8 +298,34 @@
   max-width: 34rem;
 }
 
-.home-hero__cmd {
-  margin-top: -0.25rem;
+.home-install p {
+  margin: 0;
+  font-size: 0.85rem;
+}
+
+.home-install__row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: stretch;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+.home-install__row .home-cmd {
+  align-self: stretch;
+  min-width: 0;
+  margin: 0;
+}
+
+.home-install__row .home-btn {
+  height: auto;
+  min-height: 3rem;
+  justify-content: center;
+}
+
+.home-install__status {
+  min-height: 2.8em;
+  padding-top: 0.4rem;
 }
 
 .home-hero__chart {
@@ -1281,4 +1307,30 @@
   .home-hero__chart .field__axis-label {
     grid-column: 2 / span 2;
   }
+}
+
+.home-example-flow {
+  margin: 1rem 0 0;
+}
+
+.home-example-flow > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1rem;
+  padding: 0.65rem 0;
+  border-bottom: 1px solid var(--spate-border);
+}
+
+.home-example-flow dt {
+  flex: 0 0 7rem;
+}
+
+.home-example-flow dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+#taste .home-split__code {
+  align-self: center;
 }

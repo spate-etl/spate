@@ -294,9 +294,9 @@ check_page() { # file
 # Scaffolds are excluded by name: `crates/spate-NAME/src/config.rs` in a
 # `_template` file is a shape, not a path that resolves.
 pages_into() { # destination
-    if ! find "$docs" -type f \( -name '*.md' -o -name '*.mdx' \) \
+    if ! find "$docs" website/src/pages -type f \( -name '*.md' -o -name '*.mdx' \) \
         ! -name '_template.*' -print0 >"$1"; then
-        echo "transclude.sh: could not enumerate $docs" >&2
+        echo "transclude.sh: could not enumerate $docs and website/src/pages" >&2
         return 1
     fi
 }

@@ -126,15 +126,6 @@ html.docs-wrapper .main-wrapper > div {
   text-decoration: none;
 }
 
-.site-nav__stars {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.25rem;
-  font-family: var(--ifm-font-family-monospace);
-  font-size: 0.8rem;
-  color: var(--spate-muted);
-}
-
 /* The theme's own mobile sidebar carries the links under 997px. */
 @media (max-width: 996px) {
   .site-nav__links,
@@ -201,6 +192,44 @@ html.docs-wrapper .main-wrapper > div {
   color: var(--spate-accent);
 }
 
+.site-footer__facts {
+  padding: 0 0 1.5rem;
+}
+
+.site-footer__facts-row {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 0.9rem 1.5rem;
+  margin: 0;
+  padding: 1.25rem 0 0;
+  border-top: 1px solid var(--spate-border);
+  list-style: none;
+}
+
+.site-footer__facts-row li {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.site-footer__fact-n {
+  font-size: 1.1rem;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+  color: var(--spate-ink);
+}
+
+.site-footer__fact-l {
+  font-size: 0.8rem;
+}
+
+.site-footer__asof {
+  margin: 0.9rem 0 0;
+  font-family: var(--ifm-font-family-monospace);
+  font-size: 0.8rem;
+}
+
 .site-footer__legal {
   display: flex;
   justify-content: space-between;
@@ -216,6 +245,16 @@ html.docs-wrapper .main-wrapper > div {
 
   .site-footer__brand {
     grid-column: 1 / -1;
+  }
+
+  .site-footer__facts-row {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 560px) {
+  .site-footer__facts-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 

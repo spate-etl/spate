@@ -1,7 +1,7 @@
 // Publishes the social-proof figures as global data.
 //
 // A build fetches them live and falls back to the committed
-// src/data/social-proof.json when the network or either API is unavailable,
+// src/data/social-proof.json when crates.io or the network is unavailable,
 // so an offline build still succeeds and the page always carries the date the
 // figures are from. `SPATE_SITE_OFFLINE=1` skips the fetch outright;
 // `npm run refresh-proof` rewrites the committed file.

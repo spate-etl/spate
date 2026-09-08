@@ -8,11 +8,9 @@ import {
   Code,
   Connectors,
   Deploy,
-  Facts,
   Faq,
   Hero,
   HowItWorks,
-  Install,
   WhyFast,
   SUBLINE,
 } from '../components/home/sections';
@@ -58,8 +56,6 @@ export default function Home(): React.JSX.Element {
       <Code />
       <Connectors />
       <Deploy />
-      <Install />
-      <Facts />
       <Faq />
     </SiteLayout>
   );

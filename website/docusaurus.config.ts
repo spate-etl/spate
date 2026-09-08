@@ -135,7 +135,7 @@ const config: Config = {
     // from, and a warm-cache local rebuild needs that as much as CI does.
     transcludeDeps,
     [benchData, {routeBasePath: BENCHMARKS_BASE, repoUrl: BENCHMARK_REPO}],
-    // Stars, downloads and releases, fetched at build time with a committed
+    // Downloads and the newest version, fetched at build time with a committed
     // fallback (src/data/social-proof.json).
     socialProof,
     [

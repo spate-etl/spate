@@ -24,7 +24,7 @@ export function useVendorArm(): VendorArm | null {
 }
 
 /** The comparability group with the most arms, and its rows in the data's order. */
-export function useRichestGroup(): {rows: Row[]; entrants: Entrant[]; basePath: string; groupKey: string | null; attempts: Attempt[]} {
+export function useRichestGroup(): {rows: Row[]; entrants: Entrant[]; environments: Env[]; basePath: string; groupKey: string | null; attempts: Attempt[]} {
   const data = (usePluginData('bench-data') as Data | undefined) ?? EMPTY;
   const rows = data.rows as Row[];
   const counts = new Map<string, number>();
@@ -34,6 +34,7 @@ export function useRichestGroup(): {rows: Row[]; entrants: Entrant[]; basePath: 
   return {
     rows: best === null ? [] : rows.filter((r) => r.group === best),
     entrants: data.entrants as Entrant[],
+    environments: data.environments as Env[],
     basePath: data.basePath,
     groupKey: best,
     attempts: best === null ? [] : (data.attempts as Attempt[]).filter((a) => a.group === best),

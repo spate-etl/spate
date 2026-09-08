@@ -8,10 +8,8 @@ import {CONNECTORS} from '../../data/connectors';
 import {FAQ} from '../../data/faq';
 import {githubUrl} from '../../repoUrl';
 import Taste from '../../pages/_home/taste.mdx';
-import Field from '../benchmarks/Field';
-import {useRichestGroup} from '../benchmarks/vendorArm';
 import {useReveal} from '../motion/useReveal';
-import {isRanked, PRIMARY, type Row} from '../Results/data';
+import HeroBenchmark from './HeroBenchmark';
 import Incident from './Incident';
 import Pipeline from './Pipeline';
 import Responsibilities from './Responsibilities';
@@ -102,45 +100,6 @@ function Section({
   );
 }
 
-/**
- * Each entrant's best headline-eligible arm by the primary metric, one lane per
- * system.
- */
-function headlineLanes(rows: Row[]): Row[] {
-  const eligible = rows.filter((r) => isRanked(r) && r.metrics[PRIMARY]);
-  const hib = eligible[0]?.metrics[PRIMARY].higher_is_better ?? true;
-  const best = new Map<string, Row>();
-  for (const r of eligible) {
-    const held = best.get(r.entrant);
-    const v = r.metrics[PRIMARY].value;
-    const h = held?.metrics[PRIMARY].value;
-    if (h === undefined || (hib ? v > h : v < h)) best.set(r.entrant, r);
-  }
-  return [...best.values()];
-}
-
-/**
- * The benchmark chart in the fold, every figure and label read from the
- * published results. Renders nothing when no results are published.
- */
-function HeroField(): React.JSX.Element | null {
-  const {rows, entrants, basePath} = useRichestGroup();
-  const lanes = headlineLanes(rows);
-  if (!lanes.length) return null;
-  const systems = new Set(lanes.map((r) => r.entrant)).size;
-  return (
-    <figure className="home-hero__chart">
-      <div className="home-panel home-hero__panel">
-        <Field rows={lanes} entrants={entrants} metric={PRIMARY} basePath={basePath} compact />
-      </div>
-      <figcaption className="home-hero__chart-cap">
-        {systems} systems, one fixed pipeline, one machine, each at its best headline-eligible arm.{' '}
-        <Link to={basePath}>All results and the fairness contract →</Link>
-      </figcaption>
-    </figure>
-  );
-}
-
 const QUICKSTART = '/docs/user-guide/getting-started/quickstart/';
 const INSTALL_COMMAND = 'cargo add spate --features kafka,clickhouse,avro';
 
@@ -200,7 +159,7 @@ export function Hero(): React.JSX.Element {
           </div>
           <InstallCommand />
         </div>
-        <HeroField />
+        <HeroBenchmark />
       </div>
     </section>
   );

@@ -350,6 +350,61 @@
   padding: 1.25rem 1.25rem 1rem;
 }
 
+.home-hero__chart-cap p {
+  margin: 0 0 0.5rem;
+}
+
+.home-benchmark__mobile {
+  display: none;
+}
+
+.home-benchmark__label {
+  margin: 0 0 0.5rem;
+  font-weight: 600;
+}
+
+.home-benchmark__metric {
+  margin: 0 0 0.5rem;
+}
+
+.home-benchmark__metric strong {
+  font-family: var(--ifm-font-family-monospace);
+  font-size: 2.5rem;
+  line-height: 1.2;
+  color: var(--spate-ink);
+}
+
+.home-benchmark__metric span {
+  display: block;
+}
+
+.home-benchmark__spread {
+  margin: 0 0 0.5rem;
+  font-size: 0.85rem;
+  color: var(--spate-muted);
+}
+
+.home-benchmark__compare {
+  margin-top: 1rem;
+  border-top: 1px solid var(--spate-border);
+}
+
+.home-benchmark__compare summary {
+  padding-block: 0.85rem;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.home-benchmark__compare summary:focus-visible {
+  outline: 2px solid var(--spate-accent);
+  outline-offset: 3px;
+}
+
+@media (max-width: 560px) {
+  .home-benchmark__desktop { display: none; }
+  .home-benchmark__mobile { display: block; }
+}
+
 /* laneRank puts the ranked arms first, so this is rank 1. */
 .home-hero__chart .field__lane--ranked:first-child {
   margin-inline: calc(-0.65rem - 3px) -0.65rem;
@@ -1118,6 +1173,17 @@
 }
 
 @media (max-width: 560px) {
+  .home-hero {
+    overflow: clip;
+  }
+
+  /* The decorative layer has a fixed height independent of the disclosure. */
+  .home-hero__substrate {
+    bottom: auto;
+    height: 90rem;
+    mask-image: linear-gradient(180deg, transparent 0 36rem, #000 58rem 80rem, transparent 90rem);
+  }
+
   .home-grid--4,
   .home-stages {
     grid-template-columns: 1fr;

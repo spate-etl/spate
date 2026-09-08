@@ -92,8 +92,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let chunk_cfg = ctx.chunk();
             chain_owned::<Vec<u8>, _>(TestDeserializer::split_on(b','))
                 .with_metrics(ctx.pipeline, "main")
+                // ANCHOR: transform
                 .filter(|word: &Vec<u8>| !word.is_empty())
                 .map(|word: Vec<u8>| word.to_ascii_uppercase())
+                // ANCHOR_END: transform
                 .sink(
                     TestEncoder,
                     KeyHashRouter,

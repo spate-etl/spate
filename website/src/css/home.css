@@ -899,44 +899,6 @@
   opacity: 0.7;
 }
 
-/* Hub --------------------------------------------------------------------- */
-
-.home-hub {
-  display: block;
-  width: min(100%, 900px);
-  margin: 0 auto 2rem;
-}
-
-.home-hub__edges {
-  stroke: var(--spate-mark-edge);
-  opacity: 0.6;
-}
-
-.home-hub__node {
-  fill: var(--spate-mark-node);
-}
-
-.home-hub__label {
-  fill: var(--spate-ink);
-  font-size: 14px;
-}
-
-.home-hub__core {
-  fill: var(--spate-mark-core);
-}
-
-.home-hub__core-label {
-  fill: var(--spate-accent-ink);
-  font-size: 14px;
-  font-weight: 600;
-}
-
-.home-hub__mono {
-  fill: var(--spate-muted);
-  font-family: var(--ifm-font-family-monospace);
-  font-size: 12px;
-}
-
 /* Facts ------------------------------------------------------------------- */
 
 .home-facts {

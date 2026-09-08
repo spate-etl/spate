@@ -274,50 +274,6 @@ export function Code(): React.JSX.Element {
   );
 }
 
-function Hub() {
-  const left = [
-    ['Kafka', 50],
-    ['S3', 100],
-    ['Datagen', 150],
-  ] as const;
-  const right = [
-    ['ClickHouse', 70],
-    ['Kafka', 130],
-  ] as const;
-  return (
-    <svg className="home-hub" viewBox="0 0 900 200" fill="none" aria-hidden="true">
-      <g className="home-hub__edges" strokeWidth="1.4" strokeLinecap="round">
-        {left.map(([, y]) => (
-          <path key={y} d={`M150 ${y} L400 100`} />
-        ))}
-        {right.map(([, y]) => (
-          <path key={y} d={`M500 100 L750 ${y}`} />
-        ))}
-        <path d="M450 60 L450 40" strokeDasharray="3 4" />
-        <path d="M450 140 L450 160" strokeDasharray="3 4" />
-      </g>
-      {[...left.map(([l, y]) => [l, 150, y] as const), ...right.map(([l, y]) => [l, 750, y] as const)].map(([l, x, y]) => (
-        <g key={`${l}-${x}-${y}`}>
-          <circle className="home-hub__node" cx={x} cy={y} r="7" />
-          <text className="home-hub__label" x={x < 400 ? x - 14 : x + 14} y={y + 5} textAnchor={x < 400 ? 'end' : 'start'}>
-            {l}
-          </text>
-        </g>
-      ))}
-      <rect className="home-hub__core" x="400" y="70" width="100" height="60" rx="10" />
-      <text className="home-hub__core-label" x="450" y="105" textAnchor="middle">
-        one loop
-      </text>
-      <text className="home-hub__mono" x="450" y="30" textAnchor="middle">
-        avro · json
-      </text>
-      <text className="home-hub__mono" x="450" y="178" textAnchor="middle">
-        coordination
-      </text>
-    </svg>
-  );
-}
-
 export function Connectors(): React.JSX.Element {
   return (
     <Section
@@ -325,7 +281,6 @@ export function Connectors(): React.JSX.Element {
       eyebrow="Connectors"
       title="Each connector is one crate behind one feature."
       lead="Nothing is enabled by default. A pipeline that only writes to one sink never compiles the others.">
-      <Hub />
       <ul className="home-grid home-grid--4">
         {CONNECTORS.map((c) => (
           <li key={c.crate} className="home-card">

@@ -286,7 +286,10 @@ export function HowItWorks(): React.JSX.Element {
             <div className="home-stage__head">
               <span className="home-stage__dot" aria-hidden="true" />
               <span className="home-stage__name">{name}</span>
-              <Link className="home-chip" to="/docs/INVARIANTS" aria-label={`${name}: invariant ${inv}`}>
+              <Link
+                className="home-chip"
+                to={`/docs/INVARIANTS#${inv.toLowerCase()}`}
+                aria-label={`${name}: invariant ${inv}`}>
                 {inv}
               </Link>
             </div>

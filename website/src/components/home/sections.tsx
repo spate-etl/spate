@@ -278,7 +278,12 @@ export function Connectors(): React.JSX.Element {
       id="connectors"
       eyebrow="Connectors"
       title="Each connector is one crate behind one feature."
-      lead="Nothing is enabled by default. A pipeline that only writes to one sink never compiles the others.">
+      lead={
+        <>
+          Nothing is enabled by default. A pipeline that only writes to one sink never compiles the others. Finer knobs
+          are separate features, listed on <Link href="https://docs.rs/spate">docs.rs</Link> with what they pull in.
+        </>
+      }>
       <ul className="home-grid home-grid--4">
         {CONNECTORS.map((c) => (
           <li key={c.crate} className="home-card">
@@ -343,26 +348,6 @@ export function Deploy(): React.JSX.Element {
         </>
       }>
       <CodeBlock language="yaml">{PROBES}</CodeBlock>
-    </SplitSection>
-  );
-}
-
-const INSTALL = `[dependencies]
-spate = { version = "0.2", features = ["kafka", "clickhouse", "avro"] }`;
-
-export function Install(): React.JSX.Element {
-  return (
-    <SplitSection
-      id="install"
-      eyebrow="Install"
-      title="Add the facade. Turn on what you use."
-      lead={
-        <>
-          Each connector feature turns on one crate. Finer knobs are separate features, listed on{' '}
-          <Link href="https://docs.rs/spate">docs.rs</Link> with what they pull in.
-        </>
-      }>
-      <CodeBlock language="toml">{INSTALL}</CodeBlock>
     </SplitSection>
   );
 }

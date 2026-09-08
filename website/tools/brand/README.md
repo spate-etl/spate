@@ -37,10 +37,10 @@ graphic and reads at 3:1, while the accent carries link text and clears 4.5:1.
 The wordmark is IBM Plex Sans, SemiBold at −0.022 em for `spate` and Regular at
 −0.012 em for a second word. Glyphs are shaped with HarfBuzz and baked to
 outlines, so no asset carries a font dependency and the repository never
-redistributes font software. The site sets its text in the same family, served
-from the `@fontsource/ibm-plex-sans` and `@fontsource/ibm-plex-mono` packages
-(SIL Open Font License 1.1) at build time; those files are a dependency, not
-part of the repository.
+redistributes font software. The site sets its text in the same family and its
+code in Overpass Mono, served from the `@fontsource/ibm-plex-sans` and
+`@fontsource-variable/overpass-mono` packages (SIL Open Font License 1.1) at
+build time; those files are a dependency, not part of the repository.
 
 `brandgen.py` pins the upstream file by SHA-256. A digest mismatch stops the
 run, since the wordmark would otherwise be re-cut from a different source.

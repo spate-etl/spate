@@ -51,10 +51,10 @@ export default function Home(): React.JSX.Element {
         <script type="application/ld+json">{JSON.stringify(ld)}</script>
       </Head>
       <Hero />
-      <WhyFast />
-      <HowItWorks />
       <Code />
       <Connectors />
+      <WhyFast />
+      <HowItWorks />
       <Deploy />
       <Faq />
     </SiteLayout>

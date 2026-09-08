@@ -184,6 +184,11 @@ export function Hero(): React.JSX.Element {
             Spate owns delivery.
           </h1>
           <p className="home-lead home-hero__lead">{SUBLINE}</p>
+          <p className="home-hero__workflow">
+            <Link to="/docs/user-guide/getting-started/first-pipeline/">
+              Kafka → Avro transforms in Rust → ClickHouse
+            </Link>
+          </p>
           <div className="home-ctas">
             <Link className="home-btn home-btn--primary" to="/docs/user-guide/getting-started/">
               Get started

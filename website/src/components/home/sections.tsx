@@ -200,7 +200,7 @@ const STAGES: Array<[string, string, string]> = [
   [
     'Load',
     'INV-5',
-    'Sinks are sharded and replicated on a shared I/O runtime. Bounded per-shard queues are the backpressure signal that reaches all the way back to Extract.',
+    'Sinks are sharded and replicated on a shared I/O runtime. Everything the intake path of a sink worker blocks on waits alongside the drain deadline, so the deadline stays polled while the worker is blocked.',
   ],
   [
     'Observe',

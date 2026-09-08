@@ -1338,3 +1338,10 @@
 #taste .home-split__code {
   align-self: center;
 }
+
+.home-performance__links,
+.home-delivery__links {
+  margin: 1.5rem 0 0;
+  color: var(--spate-muted);
+  text-align: center;
+}

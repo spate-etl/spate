@@ -205,75 +205,68 @@ export function Hero(): React.JSX.Element {
   );
 }
 
+const DESIGN_CHOICES: Array<[string, string]> = [
+  [
+    'Compile the operators',
+    'Map and filter compose through concrete Rust types. The compiler can inline calls between operators, avoiding a virtual dispatch step at each operator.',
+  ],
+  [
+    'Borrow record fields',
+    'Borrowing decoders let records refer to the source buffer through the chain, avoiding an owned copy of every field. Codecs and user transforms can still allocate.',
+  ],
+  [
+    'Keep CPU work together',
+    'A pipeline thread decodes, transforms and encodes each payload. Records stay on that thread until encoding; a shared I/O runtime handles sink writes.',
+  ],
+  [
+    'Write in batches',
+    'Sink workers combine encoded chunks using row, byte and time thresholds. Each sink write carries a batch, spreading the call overhead across its records.',
+  ],
+];
+
 export function WhyFast(): React.JSX.Element {
   return (
     <Section
       id="why-fast"
       center
-      eyebrow="Why spate is fast"
-      title="Your function is compiled into the loop, and the loop runs in your process."
-      lead="A general-purpose stream processor runs your transformation inside a runtime you do not own, and every record crosses into your function and back out. A consumer loop you write yourself runs in your process with your allocator and your profiler, and each delivery guarantee exists once you have written it. Spate compiles your transformation into a loop that runs in your process, while delivery, backpressure, checkpointing and drain belong to the framework and hold to properties that are numbered and tested.">
-      <Incident />
-    </Section>
-  );
-}
-
-const STAGES: Array<[string, string, string]> = [
-  [
-    'Extract',
-    'INV-2',
-    'One consumer per process. Partitions fan out across CPU-pinned threads as zero-copy lanes. A thread that cannot keep up pauses its lanes and keeps polling; it never blocks on a channel send.',
-  ],
-  [
-    'Transform',
-    'INV-7',
-    'Operators are stateful closures chained in Rust. A chain compiles to a single loop over borrowed records with no per-record allocation. Failure is Skip or Fail, never a silent drop.',
-  ],
-  [
-    'Load',
-    'INV-5',
-    'Sinks are sharded and replicated on a shared I/O runtime. Everything the intake path of a sink worker blocks on waits alongside the drain deadline, so the deadline stays polled while the worker is blocked.',
-  ],
-  [
-    'Observe',
-    'INV-1',
-    'A source watermark advances only behind data the sink has acknowledged as durable, so commits trail delivery. Metrics ride the metrics facade; probes ship on the admin server.',
-  ],
-];
-
-export function HowItWorks(): React.JSX.Element {
-  return (
-    <Section
-      id="how"
-      eyebrow="How it works"
-      title="One process runs one pipeline, in four stages."
-      lead={
-        <>
-          The property each stage holds to is stated and numbered in the{' '}
-          <Link to="/docs/INVARIANTS">invariants</Link>.
-        </>
-      }>
-      <div className="home-how__art">
+      eyebrow="Performance by design"
+      title="Why is Spate fast?"
+      lead="Your transforms compile into the pipeline. Operators compose into one chain, records can borrow their input data, and sink writes are batched.">
+      <div id="how" className="home-how__art">
         <Pipeline className="pipeline" />
       </div>
-      <ol className="home-stages">
-        {STAGES.map(([name, inv, body], i) => (
+      <ul className="home-stages">
+        {DESIGN_CHOICES.map(([name, body]) => (
           <li key={name} className="home-stage">
             <div className="home-stage__head">
               <span className="home-stage__dot" aria-hidden="true" />
               <span className="home-stage__name">{name}</span>
-              <Link
-                className="home-chip"
-                to={`/docs/INVARIANTS#${inv.toLowerCase()}`}
-                aria-label={`${name}: invariant ${inv}`}>
-                {inv}
-              </Link>
             </div>
             <p>{body}</p>
-            {i < STAGES.length - 1 && <span className="home-stage__edge" aria-hidden="true" />}
           </li>
         ))}
-      </ol>
+      </ul>
+      <p className="home-performance__links">
+        The <Link to="/docs/user-guide/concepts/architecture/">architecture guide</Link> explains the execution
+        model. The <Link to="/benchmarks/">benchmarks</Link> measure the complete pipeline on the published workload.
+      </p>
+    </Section>
+  );
+}
+
+export function Delivery(): React.JSX.Element {
+  return (
+    <Section
+      id="delivery"
+      center
+      eyebrow="Delivery under pressure"
+      title="Backpressure, errors and shutdown have defined outcomes."
+      lead="When sink queues fill, source lanes pause while polling continues. Record errors follow an explicit Skip or Fail policy. Shutdown drains until completion or a configured deadline, committing only acknowledged data.">
+      <Incident />
+      <p className="home-delivery__links">
+        See the <Link to="/docs/user-guide/concepts/delivery-guarantees/">delivery guarantees</Link> and{' '}
+        <Link to="/docs/INVARIANTS">numbered invariants</Link> for the contract.
+      </p>
     </Section>
   );
 }

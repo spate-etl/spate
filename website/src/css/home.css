@@ -560,27 +560,31 @@
   color: var(--spate-accent);
 }
 
-/* The incident figure ------------------------------------------------------
- *
- * Ownership is coded by form, not by hue: the four mark tokens collapse to two
- * in dark. Hatched is the runtime's, accent is yours, dashed accent is yours to
- * write, ink is the framework's. */
+/* The incident figure ------------------------------------------------------ */
 
-.incident__defs {
-  position: absolute;
-  width: 0;
-  height: 0;
-}
-
-.incident__hatch {
-  stroke: var(--spate-dim);
-  opacity: 0.35;
-}
-
-.incident__panels {
+.incident {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 1.5rem;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 2rem;
+  align-items: center;
+  margin-top: 2.5rem;
+}
+
+.incident__events {
+  margin: 0;
+}
+
+.incident__events > div + div {
+  margin-top: 1.5rem;
+}
+
+.incident__events dt {
+  font-weight: 600;
+}
+
+.incident__events dd {
+  margin: 0.4rem 0 0;
+  color: var(--spate-muted);
 }
 
 .incident__panel {
@@ -623,13 +627,6 @@
   font-size: 8.5px;
 }
 
-.incident__q {
-  font-family: var(--ifm-font-family-monospace);
-  font-size: 15px;
-  font-weight: 700;
-  fill: var(--spate-accent);
-}
-
 .incident__node {
   fill: var(--spate-mark-node);
 }
@@ -661,14 +658,6 @@
   fill: var(--spate-muted);
 }
 
-.incident__runtime {
-  stroke: var(--spate-dim);
-}
-
-.incident__runtime-t {
-  fill: var(--spate-dim);
-}
-
 .incident__mine {
   stroke: var(--spate-accent);
   fill: var(--spate-accent-soft);
@@ -684,12 +673,6 @@
 
 .incident__on-accent {
   fill: var(--spate-accent-ink);
-}
-
-.incident__todo {
-  stroke: var(--spate-accent);
-  stroke-dasharray: 3 3;
-  fill: none;
 }
 
 .incident__fw {
@@ -711,160 +694,14 @@
   fill: var(--spate-ink);
 }
 
-.incident--motion .incident__tick.incident__anim {
-  animation-name: incident-blink;
-  animation-duration: 0.6s;
-  animation-timing-function: steps(1);
-  animation-iteration-count: infinite;
-}
-
-@keyframes incident-blink {
-  50% {
-    opacity: 0.15;
-  }
-}
-
-/* The clock the three panels share. */
-.incident__timeline {
-  position: relative;
-  height: 3.2rem;
-  max-width: 720px;
-  margin: 1.75rem auto 0;
-}
-
-.incident__tl-track {
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: 0.5rem;
-  height: 2px;
-  background: var(--spate-border);
-}
-
-.incident__tl-cursor {
-  position: absolute;
-  top: -4px;
-  width: 10px;
-  height: 10px;
-  margin-left: -5px;
-  border-radius: 50%;
-  background: var(--spate-mark-core);
-}
-
-.incident--motion .incident__tl-cursor.incident__anim {
-  animation-name: incident-tl;
-  animation-duration: 12s;
-  animation-timing-function: linear;
-  animation-iteration-count: infinite;
-}
-
-@keyframes incident-tl {
-  from {
-    left: 0;
-  }
-
-  to {
-    left: 100%;
-  }
-}
-
-.incident__tl-mark {
-  position: absolute;
-  top: -3px;
-  width: 1px;
-  height: 8px;
-  background: var(--spate-muted);
-}
-
-.incident__tl-mark span {
-  position: absolute;
-  top: 12px;
-  left: 0;
-  transform: translateX(-50%);
-  white-space: nowrap;
-  font-family: var(--ifm-font-family-monospace);
-  font-size: 0.7rem;
-  color: var(--spate-muted);
-}
-
-.incident__tl-note {
-  position: absolute;
-  left: 0;
-  top: 2.1rem;
-  font-family: var(--ifm-font-family-monospace);
-  font-size: 0.7rem;
-  color: var(--spate-dim);
-}
-
-/* The still frame is what the server renders, and what a reader keeps when the
- * keyframes never arrive, when motion is not wanted, or when the browser cannot
- * place a record on a path. */
-.incident__anim {
-  display: none;
-}
-
-.incident--motion .incident__anim {
-  display: initial;
-}
-
-.incident--motion .incident__still {
-  display: none;
-}
-
-/* Off screen an animation is main-thread work with nothing to show. This is the
- * only rule that sets `animation-play-state`, which is why every animation in
- * the figure is declared as longhands. */
-.incident--offscreen .incident__anim {
-  animation-play-state: paused;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .incident--motion .incident__anim {
-    display: none;
-  }
-
-  .incident--motion .incident__still {
-    display: initial;
-  }
-}
-
-@supports not (offset-path: path('M 0 0')) {
-  .incident--motion .incident__anim {
-    display: none;
-  }
-
-  .incident--motion .incident__still {
-    display: initial;
-  }
-}
-
-@media (max-width: 860px) {
-  .incident__panels {
+@media (max-width: 768px) {
+  .incident {
     grid-template-columns: 1fr;
-  }
-
-  .incident__panel {
-    width: 100%;
-    max-width: 26rem;
-    margin-inline: auto;
+    gap: 1.5rem;
   }
 }
 
-/* Too little track for three labels in a row. */
 @media (max-width: 560px) {
-  .incident__timeline {
-    height: 4.2rem;
-  }
-
-  .incident__tl-mark--low span {
-    top: 26px;
-  }
-
-  .incident__tl-note {
-    top: 3rem;
-  }
-
-  /* The panel draws at 0.856 here, which puts 8.5 user units under 7.5 CSS px. */
   .incident__mono {
     font-size: 10px;
   }
@@ -1344,4 +1181,85 @@
   margin: 1.5rem 0 0;
   color: var(--spate-muted);
   text-align: center;
+}
+
+.home-responsibilities > h3 {
+  margin-bottom: 0.5rem;
+}
+
+.home-responsibilities > p {
+  color: var(--spate-muted);
+}
+
+.home-responsibilities__table {
+  display: table;
+  width: 100%;
+  table-layout: fixed;
+  margin: 1.5rem 0 0;
+  border-collapse: collapse;
+}
+
+.home-responsibilities__table th,
+.home-responsibilities__table td {
+  padding: 1rem;
+  border: 1px solid var(--spate-border);
+  text-align: left;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+
+.home-responsibilities__table th {
+  font-weight: 600;
+}
+
+.home-responsibilities__table td {
+  color: var(--spate-muted);
+}
+
+.home-responsibilities__table tr {
+  background: var(--spate-surface);
+}
+
+.home-responsibilities__groups {
+  display: none;
+}
+
+@media (max-width: 768px) {
+  .home-responsibilities__table {
+    display: none;
+  }
+
+  .home-responsibilities__groups {
+    display: grid;
+    gap: 1rem;
+  }
+
+  .home-responsibilities__group {
+    padding: 1.25rem;
+    border: 1px solid var(--spate-border);
+    border-radius: 12px;
+    background: var(--spate-surface);
+  }
+
+  .home-responsibilities__group h4 {
+    margin: 0 0 1rem;
+    font-size: 1.05rem;
+  }
+
+  .home-responsibilities__group dl {
+    margin: 0;
+  }
+
+  .home-responsibilities__group dl > div + div {
+    margin-top: 1rem;
+  }
+
+  .home-responsibilities__group dt {
+    font-weight: 600;
+  }
+
+  .home-responsibilities__group dd {
+    margin: 0.25rem 0 0;
+    color: var(--spate-muted);
+  }
 }

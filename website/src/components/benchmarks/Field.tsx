@@ -13,7 +13,7 @@ type Props = {
   /** Metric id; the primary column by default. */
   metric: string;
   basePath: string;
-  /** Fewer labels and no per-arm meta line. */
+  /** Reduces the per-arm meta line to the version and any unranked reason. */
   compact?: boolean;
 };
 
@@ -33,6 +33,18 @@ export default function Field({rows, entrants, metric, basePath, compact}: Props
   const max = niceCeil(Math.max(0, ...plotted.map((r) => r.metrics[metric].hi)));
   const unit = proto?.unit ?? '';
   const hib = proto?.higher_is_better ?? true;
+  // Each mark the legend names only where a lane carries it.
+  const notes = [
+    'The capsule spans the smallest to the largest repetition; the notch is the median.',
+    ...(order.some((r) => !ranked.has(r.key)) ? ['Gray is shown, not ranked.'] : []),
+    ...(order.some((r) => !(isPlotted(r) && r.metrics[metric]))
+      ? ['An empty lane is a number the contract disowns.']
+      : []),
+    ...(order.some((r) => byId.get(r.entrant)?.entrant.vendor === 'self')
+      ? ['† marks a system run by the author of this benchmark.']
+      : []),
+    'No system has a color.',
+  ];
 
   return (
     <div className={clsx('field', compact && 'field--compact')}>
@@ -55,6 +67,7 @@ export default function Field({rows, entrants, metric, basePath, compact}: Props
           const ours = e?.entrant.vendor === 'self';
           const name = e?.display?.short ?? e?.entrant.name ?? row.entrant;
           const label = e?.variants?.find((v) => v.id === row.variant_id)?.label ?? row.variant_id;
+          const terse = [row.version ?? row.commit, positioned ? why : ''].filter(Boolean).join(' · ');
           return (
             <li
               key={row.key}
@@ -76,7 +89,7 @@ export default function Field({rows, entrants, metric, basePath, compact}: Props
                     {why && positioned ? ` · ${why}` : ''}
                   </span>
                 )}
-                {compact && why && positioned && <span className="field__meta">{why}</span>}
+                {compact && terse && <span className="field__meta">{terse}</span>}
               </span>
               <span className="field__track" aria-hidden="true">
                 {positioned && (
@@ -101,11 +114,7 @@ export default function Field({rows, entrants, metric, basePath, compact}: Props
           );
         })}
       </ol>
-      <p className="field__legend">
-        The capsule spans the smallest to the largest repetition; the notch is the median. Gray is shown, not ranked.
-        An empty lane is a number the contract disowns. † marks a system run by the author of this benchmark. No
-        system has a color.
-      </p>
+      <p className="field__legend">{notes.join(' ')}</p>
     </div>
   );
 }

@@ -11,10 +11,9 @@ import {FAQ} from '../../data/faq';
 import {githubUrl} from '../../repoUrl';
 import Taste from '../../pages/_home/taste.mdx';
 import Field from '../benchmarks/Field';
-import {isoDate, useRichestGroup, useVendorArm} from '../benchmarks/vendorArm';
+import {useRichestGroup} from '../benchmarks/vendorArm';
 import {useReveal} from '../motion/useReveal';
-import {PRIMARY} from '../Results/data';
-import {fmt} from '../Results/format';
+import {isRanked, PRIMARY, type Row} from '../Results/data';
 import Pipeline from './Pipeline';
 
 /** The heading takes `${id}-title`, which the enclosing section names in `aria-labelledby`. */
@@ -101,9 +100,49 @@ function Section({
   );
 }
 
+/**
+ * Each entrant's best headline-eligible arm by the primary metric, one lane per
+ * system.
+ */
+function headlineLanes(rows: Row[]): Row[] {
+  const eligible = rows.filter((r) => isRanked(r) && r.metrics[PRIMARY]);
+  const hib = eligible[0]?.metrics[PRIMARY].higher_is_better ?? true;
+  const best = new Map<string, Row>();
+  for (const r of eligible) {
+    const held = best.get(r.entrant);
+    const v = r.metrics[PRIMARY].value;
+    const h = held?.metrics[PRIMARY].value;
+    if (h === undefined || (hib ? v > h : v < h)) best.set(r.entrant, r);
+  }
+  return [...best.values()];
+}
+
+/**
+ * The benchmark chart in the fold, every figure and label read from the
+ * published results. Renders nothing when no results are published.
+ */
+function HeroField(): React.JSX.Element | null {
+  const {rows, entrants, basePath} = useRichestGroup();
+  const lanes = headlineLanes(rows);
+  if (!lanes.length) return null;
+  const systems = new Set(lanes.map((r) => r.entrant)).size;
+  return (
+    <figure className="home-hero__chart">
+      <div className="home-panel home-hero__panel">
+        <Field rows={lanes} entrants={entrants} metric={PRIMARY} basePath={basePath} compact />
+      </div>
+      <figcaption className="home-hero__chart-cap">
+        {systems} systems, one fixed pipeline, one machine, each at its best headline-eligible arm.{' '}
+        <Link to={basePath}>All results and the fairness contract →</Link>
+      </figcaption>
+    </figure>
+  );
+}
+
 export function Hero(): React.JSX.Element {
   return (
     <section className="home-hero" aria-labelledby="hero-title">
+      <div className="home-hero__substrate" aria-hidden="true" />
       <div className="site-container home-hero__grid">
         <div className="home-hero__copy">
           <span className="home-eyebrow">spate /speɪt/ · a river in sudden flood</span>
@@ -121,42 +160,11 @@ export function Hero(): React.JSX.Element {
               Read the benchmarks
             </Link>
           </div>
+          <code className="home-cmd home-hero__cmd">
+            <span aria-hidden="true">$ </span>cargo add spate --features kafka,clickhouse,avro
+          </code>
         </div>
-        <div className="home-hero__art">
-          <Pipeline className="pipeline" />
-        </div>
-      </div>
-    </section>
-  );
-}
-
-export function ProofStrip(): React.JSX.Element | null {
-  const arm = useVendorArm();
-  if (!arm) return null;
-  const {row, env, basePath} = arm;
-  const tiles: Array<[string, string]> = [
-    [PRIMARY, 'rows/s per core'],
-    ['rows_per_s', 'rows/s'],
-    ['cores_used', 'cores'],
-    ['peak_anon_bytes', 'peak memory'],
-  ].filter(([id]) => row.metrics[id]) as Array<[string, string]>;
-  return (
-    <section className="home-proof" aria-label="Benchmark headline figures">
-      <div className="site-container">
-        <div className="home-proof__tiles">
-          {tiles.map(([id, label]) => (
-            <div key={id} className="home-proof__tile">
-              <span className="home-proof__value">{fmt(row.metrics[id].value, row.metrics[id].unit)}</span>
-              <span className="home-proof__label">{label}</span>
-            </div>
-          ))}
-        </div>
-        <p className="home-proof__prov">
-          Measured on one fixed pipeline, {row.variant_id} arm, at-least-once. {row.version ?? row.commit} ·{' '}
-          {env?.id ?? row.env_id} · harness v{row.harness_version} · {isoDate(row.ts_ms)} ·{' '}
-          <span title="Run by the vendor of this benchmark">vendor-run †</span> ·{' '}
-          <Link to={`${basePath}contract/rules`}>how this was measured</Link>
-        </p>
+        <HeroField />
       </div>
     </section>
   );
@@ -280,6 +288,9 @@ export function HowItWorks(): React.JSX.Element {
           <Link to="/docs/INVARIANTS">invariants</Link>.
         </>
       }>
+      <div className="home-how__art">
+        <Pipeline className="pipeline" />
+      </div>
       <ol className="home-stages">
         {STAGES.map(([name, inv, body], i) => (
           <li key={name} className="home-stage">
@@ -411,28 +422,6 @@ export function Connectors(): React.JSX.Element {
           </div>
         </li>
       </ul>
-    </Section>
-  );
-}
-
-export function Benchmarks(): React.JSX.Element | null {
-  const {rows, entrants, basePath} = useRichestGroup();
-  if (!rows.length) return null;
-  const systems = new Set(rows.map((r) => r.entrant)).size;
-  return (
-    <Section
-      id="benchmarks"
-      eyebrow="Benchmarks"
-      title={`${systems} systems, one fixed pipeline, one machine.`}
-      lead="Every system consumes the same topic, decodes and flattens each message, applies the same filters and lands the rows in the same warehouse. Nothing published is reported by the system that produced it.">
-      <div className="home-panel">
-        <Field rows={rows} entrants={entrants} metric={PRIMARY} basePath={basePath} compact />
-      </div>
-      <div className="home-ctas home-ctas--after">
-        <Link className="home-btn home-btn--ghost" to={basePath}>
-          All results and the fairness contract →
-        </Link>
-      </div>
     </Section>
   );
 }

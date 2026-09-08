@@ -5,7 +5,6 @@ import React from 'react';
 
 import SiteLayout from '../components/SiteLayout';
 import {
-  Benchmarks,
   Code,
   Connectors,
   Deploy,
@@ -14,7 +13,6 @@ import {
   Hero,
   HowItWorks,
   Install,
-  ProofStrip,
   Shapes,
   SUBLINE,
 } from '../components/home/sections';
@@ -55,12 +53,10 @@ export default function Home(): React.JSX.Element {
         <script type="application/ld+json">{JSON.stringify(ld)}</script>
       </Head>
       <Hero />
-      <ProofStrip />
       <Shapes />
       <HowItWorks />
       <Code />
       <Connectors />
-      <Benchmarks />
       <Deploy />
       <Install />
       <Facts />

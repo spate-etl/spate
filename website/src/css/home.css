@@ -298,6 +298,10 @@
   max-width: 34rem;
 }
 
+.home-hero__workflow {
+  margin: 0;
+}
+
 .home-install p {
   margin: 0;
   font-size: 0.85rem;

@@ -4,7 +4,7 @@ import {usePluginData} from '@docusaurus/useGlobalData';
 import CodeBlock from '@theme/CodeBlock';
 import MDXContent from '@theme/MDXContent';
 import clsx from 'clsx';
-import React, {useEffect, useRef, useState} from 'react';
+import React from 'react';
 
 import {CONNECTORS} from '../../data/connectors';
 import {FAQ} from '../../data/faq';
@@ -14,6 +14,7 @@ import Field from '../benchmarks/Field';
 import {useRichestGroup} from '../benchmarks/vendorArm';
 import {useReveal} from '../motion/useReveal';
 import {isRanked, PRIMARY, type Row} from '../Results/data';
+import Incident from './Incident';
 import Pipeline from './Pipeline';
 
 /** The heading takes `${id}-title`, which the enclosing section names in `aria-labelledby`. */
@@ -79,6 +80,7 @@ function Section({
   lead,
   children,
   className,
+  center,
 }: {
   id: string;
   eyebrow?: string;
@@ -86,12 +88,13 @@ function Section({
   lead?: React.ReactNode;
   children: React.ReactNode;
   className?: string;
+  center?: boolean;
 }) {
   const ref = useReveal<HTMLElement>();
   return (
     <section id={id} ref={ref} className={clsx('home-section reveal', className)} aria-labelledby={`${id}-title`}>
       <div className="site-container">
-        <div className="home-section__head">
+        <div className={clsx('home-section__head', center && 'home-section__head--center')}>
           <SectionHead id={id} eyebrow={eyebrow} title={title} lead={lead} />
         </div>
         {children}
@@ -170,85 +173,15 @@ export function Hero(): React.JSX.Element {
   );
 }
 
-const SHAPES = ['Stream processor', 'Hand-rolled loop', 'Spate'] as const;
-const shapeRows = (invariants: number | undefined): Array<[string, string, string, string]> => [
-  ['The transform is written in', 'the runtime’s language', 'your language', 'Rust, monomorphized into the loop'],
-  ['Profiler and allocator', 'the runtime’s', 'yours', 'yours'],
-  ['Delivery guarantee', 'the runtime’s', 'your problem, in production', 'the framework’s · INV-1'],
-  ['Backpressure and drain', 'the runtime’s', 'yours to build', 'the framework’s · INV-2, INV-5'],
-  ['Properties written down and tested', 'some', 'none', invariants ? `${invariants}, numbered` : 'numbered'],
-];
-
-/**
- * The three-shape comparison. Every column is in the markup; the tabs hide
- * columns only once script runs, so the server-rendered page reads whole.
- */
-export function Shapes(): React.JSX.Element {
-  const [active, setActive] = useState<number | null>(null);
-  const invariants = useDocusaurusContext().siteConfig.customFields?.invariants;
-  const rows = shapeRows(typeof invariants === 'number' ? invariants : undefined);
-  const tabs = useRef<Array<HTMLButtonElement | null>>([]);
-  useEffect(() => setActive(2), []);
-  const onKey = (e: React.KeyboardEvent, i: number) => {
-    const n = SHAPES.length;
-    const next = e.key === 'ArrowRight' ? (i + 1) % n : e.key === 'ArrowLeft' ? (i + n - 1) % n : null;
-    if (next === null) return;
-    e.preventDefault();
-    setActive(next);
-    tabs.current[next]?.focus();
-  };
+export function WhyFast(): React.JSX.Element {
   return (
     <Section
-      id="shapes"
-      eyebrow="Why a third shape"
-      title="Moving a stream into a warehouse usually means choosing between two shapes."
-      lead="Take a general-purpose stream processor and inherit its guarantees with its language. Write the loop yourself and every guarantee becomes your problem. Spate is the third shape.">
-      <div role="tablist" aria-label="Shape" className="home-tabs">
-        {SHAPES.map((s, i) => (
-          <button
-            key={s}
-            ref={(el) => {
-              tabs.current[i] = el;
-            }}
-            type="button"
-            role="tab"
-            id={`shape-tab-${i}`}
-            aria-selected={active === i}
-            aria-controls="shapes-table"
-            tabIndex={active === null || active === i ? 0 : -1}
-            className={clsx('home-tab', active === i && 'home-tab--on')}
-            onClick={() => setActive(i)}
-            onKeyDown={(e) => onKey(e, i)}>
-            {s}
-          </button>
-        ))}
-      </div>
-      <div className="home-table-wrap">
-        <table id="shapes-table" className={clsx('home-shapes', active !== null && `home-shapes--focus-${active}`)}>
-          <thead>
-            <tr>
-              <th scope="col">
-                <span className="sr-only">Property</span>
-              </th>
-              {SHAPES.map((s, i) => (
-                <th key={s} scope="col" className={clsx(i === 2 && 'home-shapes__spate')}>
-                  {s}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map(([h, a, b, c]) => (
-              <tr key={h}>
-                <th scope="row">{h}</th>
-                <td>{a}</td>
-                <td>{b}</td>
-                <td className="home-shapes__spate">{c}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      id="why-fast"
+      center
+      eyebrow="Why spate is fast"
+      title="Your function is compiled into the loop, and the loop runs in your process."
+      lead="A general-purpose stream processor runs your transformation inside a runtime you do not own, and every record crosses into your function and back out. A consumer loop you write yourself runs in your process with your allocator and your profiler, and each delivery guarantee exists once you have written it. Spate compiles your transformation into a loop that runs in your process, while delivery, backpressure, checkpointing and drain belong to the framework and hold to properties that are numbered and tested.">
+      <Incident />
     </Section>
   );
 }

@@ -13,7 +13,7 @@ import {
   Hero,
   HowItWorks,
   Install,
-  Shapes,
+  WhyFast,
   SUBLINE,
 } from '../components/home/sections';
 import {FAQ} from '../data/faq';
@@ -53,7 +53,7 @@ export default function Home(): React.JSX.Element {
         <script type="application/ld+json">{JSON.stringify(ld)}</script>
       </Head>
       <Hero />
-      <Shapes />
+      <WhyFast />
       <HowItWorks />
       <Code />
       <Connectors />

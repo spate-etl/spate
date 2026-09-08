@@ -126,6 +126,13 @@
   margin-bottom: 2.25rem;
 }
 
+/* Centred when the section's artifacts sit below the head rather than beside it. */
+.home-section__head--center {
+  align-items: center;
+  margin-inline: auto;
+  text-align: center;
+}
+
 .home-split {
   display: grid;
   grid-template-columns: 1fr 1.5fr;
@@ -497,7 +504,7 @@
   color: var(--spate-muted);
 }
 
-/* Three shapes ------------------------------------------------------------ */
+/* Tabs -------------------------------------------------------------------- */
 
 .home-tabs {
   display: flex;
@@ -523,73 +530,313 @@
   color: var(--spate-accent);
 }
 
-.home-table-wrap {
-  overflow-x: auto;
+/* The incident figure ------------------------------------------------------
+ *
+ * Ownership is coded by form, not by hue: the four mark tokens collapse to two
+ * in dark. Hatched is the runtime's, accent is yours, dashed accent is yours to
+ * write, ink is the framework's. */
+
+.incident__defs {
+  position: absolute;
+  width: 0;
+  height: 0;
+}
+
+.incident__hatch {
+  stroke: var(--spate-dim);
+  opacity: 0.35;
+}
+
+.incident__panels {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1.5rem;
+}
+
+.incident__panel {
+  margin: 0;
+  padding: 1rem 1rem 0.9rem;
   border: 1px solid var(--spate-border);
   border-radius: 12px;
   background: var(--spate-surface);
 }
 
-.home-shapes {
+.incident__panel > svg {
+  display: block;
   width: 100%;
-  margin: 0;
-  border-collapse: collapse;
-  font-size: 0.95rem;
-  display: table;
+  height: auto;
+  overflow: visible;
 }
 
-.home-shapes th,
-.home-shapes td {
-  padding: 0.85rem 1.2rem;
-  text-align: left;
-  border-bottom: 1px solid var(--spate-border);
-  border-left: 1px solid var(--spate-border);
-  background: transparent;
-  vertical-align: top;
-}
-
-.home-shapes th:first-child,
-.home-shapes td:first-child {
-  border-left: 0;
-}
-
-.home-shapes thead th {
-  font-weight: 600;
-  color: var(--spate-ink);
-}
-
-.home-shapes tbody th {
-  font-weight: 400;
+.incident__panel figcaption {
+  margin-top: 0.75rem;
+  font-size: 0.85rem;
+  line-height: 1.5;
   color: var(--spate-muted);
 }
 
-.home-shapes tr:last-child th,
-.home-shapes tr:last-child td {
-  border-bottom: 0;
-}
-
-.home-shapes .home-shapes__spate {
-  background: var(--spate-accent-soft);
-}
-
-.home-shapes thead .home-shapes__spate {
+.incident__panel figcaption b {
+  display: block;
   color: var(--spate-ink);
+  font-weight: 600;
 }
 
-@media (max-width: 760px) {
-  .home-shapes--focus-0 td:nth-child(3),
-  .home-shapes--focus-0 td:nth-child(4),
-  .home-shapes--focus-0 th:nth-child(3),
-  .home-shapes--focus-0 th:nth-child(4),
-  .home-shapes--focus-1 td:nth-child(2),
-  .home-shapes--focus-1 td:nth-child(4),
-  .home-shapes--focus-1 th:nth-child(2),
-  .home-shapes--focus-1 th:nth-child(4),
-  .home-shapes--focus-2 td:nth-child(2),
-  .home-shapes--focus-2 td:nth-child(3),
-  .home-shapes--focus-2 th:nth-child(2),
-  .home-shapes--focus-2 th:nth-child(3) {
+/* `:where` keeps this at zero specificity, so every class below it wins: the
+ * type selector alone would outrank them all and flatten the figure to muted. */
+:where(.incident text) {
+  font-size: 10px;
+  fill: var(--spate-muted);
+}
+
+.incident__mono {
+  font-family: var(--ifm-font-family-monospace);
+  font-size: 8.5px;
+}
+
+.incident__q {
+  font-family: var(--ifm-font-family-monospace);
+  font-size: 15px;
+  font-weight: 700;
+  fill: var(--spate-accent);
+}
+
+.incident__node {
+  fill: var(--spate-mark-node);
+}
+
+.incident__rec {
+  fill: var(--spate-mark-core);
+}
+
+/* A record leaving the path under an error policy. */
+.incident__skip,
+.incident__paused {
+  fill: var(--spate-dim);
+}
+
+.incident__path {
+  stroke: var(--spate-mark-edge);
+  stroke-width: 1.25;
+  fill: none;
+  opacity: 0.7;
+}
+
+.incident__ret {
+  stroke: var(--spate-muted);
+  stroke-dasharray: 3 4;
+  fill: none;
+}
+
+.incident__ack {
+  fill: var(--spate-muted);
+}
+
+.incident__runtime {
+  stroke: var(--spate-dim);
+}
+
+.incident__runtime-t {
+  fill: var(--spate-dim);
+}
+
+.incident__mine {
+  stroke: var(--spate-accent);
+  fill: var(--spate-accent-soft);
+}
+
+.incident__mine-t {
+  fill: var(--spate-accent);
+}
+
+.incident__mine-fill {
+  fill: var(--spate-accent);
+}
+
+.incident__on-accent {
+  fill: var(--spate-accent-ink);
+}
+
+.incident__todo {
+  stroke: var(--spate-accent);
+  stroke-dasharray: 3 3;
+  fill: none;
+}
+
+.incident__fw {
+  stroke: var(--spate-ink);
+  stroke-width: 1.25;
+  fill: none;
+}
+
+.incident__fw-t {
+  fill: var(--spate-ink);
+}
+
+.incident__track {
+  stroke: var(--spate-border);
+  fill: none;
+}
+
+.incident__tick {
+  fill: var(--spate-ink);
+}
+
+.incident--motion .incident__tick.incident__anim {
+  animation-name: incident-blink;
+  animation-duration: 0.6s;
+  animation-timing-function: steps(1);
+  animation-iteration-count: infinite;
+}
+
+@keyframes incident-blink {
+  50% {
+    opacity: 0.15;
+  }
+}
+
+/* The clock the three panels share. */
+.incident__timeline {
+  position: relative;
+  height: 3.2rem;
+  max-width: 720px;
+  margin: 1.75rem auto 0;
+}
+
+.incident__tl-track {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0.5rem;
+  height: 2px;
+  background: var(--spate-border);
+}
+
+.incident__tl-cursor {
+  position: absolute;
+  top: -4px;
+  width: 10px;
+  height: 10px;
+  margin-left: -5px;
+  border-radius: 50%;
+  background: var(--spate-mark-core);
+}
+
+.incident--motion .incident__tl-cursor.incident__anim {
+  animation-name: incident-tl;
+  animation-duration: 12s;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+}
+
+@keyframes incident-tl {
+  from {
+    left: 0;
+  }
+
+  to {
+    left: 100%;
+  }
+}
+
+.incident__tl-mark {
+  position: absolute;
+  top: -3px;
+  width: 1px;
+  height: 8px;
+  background: var(--spate-muted);
+}
+
+.incident__tl-mark span {
+  position: absolute;
+  top: 12px;
+  left: 0;
+  transform: translateX(-50%);
+  white-space: nowrap;
+  font-family: var(--ifm-font-family-monospace);
+  font-size: 0.7rem;
+  color: var(--spate-muted);
+}
+
+.incident__tl-note {
+  position: absolute;
+  left: 0;
+  top: 2.1rem;
+  font-family: var(--ifm-font-family-monospace);
+  font-size: 0.7rem;
+  color: var(--spate-dim);
+}
+
+/* The still frame is what the server renders, and what a reader keeps when the
+ * keyframes never arrive, when motion is not wanted, or when the browser cannot
+ * place a record on a path. */
+.incident__anim {
+  display: none;
+}
+
+.incident--motion .incident__anim {
+  display: initial;
+}
+
+.incident--motion .incident__still {
+  display: none;
+}
+
+/* Off screen an animation is main-thread work with nothing to show. This is the
+ * only rule that sets `animation-play-state`, which is why every animation in
+ * the figure is declared as longhands. */
+.incident--offscreen .incident__anim {
+  animation-play-state: paused;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .incident--motion .incident__anim {
     display: none;
+  }
+
+  .incident--motion .incident__still {
+    display: initial;
+  }
+}
+
+@supports not (offset-path: path('M 0 0')) {
+  .incident--motion .incident__anim {
+    display: none;
+  }
+
+  .incident--motion .incident__still {
+    display: initial;
+  }
+}
+
+@media (max-width: 860px) {
+  .incident__panels {
+    grid-template-columns: 1fr;
+  }
+
+  .incident__panel {
+    width: 100%;
+    max-width: 26rem;
+    margin-inline: auto;
+  }
+}
+
+/* Too little track for three labels in a row. */
+@media (max-width: 560px) {
+  .incident__timeline {
+    height: 4.2rem;
+  }
+
+  .incident__tl-mark--low span {
+    top: 26px;
+  }
+
+  .incident__tl-note {
+    top: 3rem;
+  }
+
+  /* The panel draws at 0.856 here, which puts 8.5 user units under 7.5 CSS px. */
+  .incident__mono {
+    font-size: 10px;
   }
 }
 

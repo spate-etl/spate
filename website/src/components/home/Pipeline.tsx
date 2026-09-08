@@ -176,6 +176,7 @@ export default function Pipeline({className}: Props): React.JSX.Element {
     </rect>
   );
   return (
+    <figure className="pipeline-figure">
     <svg
       className={className}
       viewBox="0 0 520 300"
@@ -397,6 +398,21 @@ export default function Pipeline({className}: Props): React.JSX.Element {
           </text>
         </g>
       </g>
+      <g className="pipeline__key-markers" fontFamily="var(--ifm-font-family-monospace)" fontSize="24" textAnchor="middle" aria-hidden="true">
+        <text x="60" y="110">1</text>
+        <text x="261" y="238">2</text>
+        <text x="417" y="76">3</text>
+        <text x="492" y="238">4</text>
+        <text x="131" y="294">5</text>
+      </g>
     </svg>
+    <ol className="pipeline__key" aria-label="Pipeline diagram key">
+      <li><b>Source.</b> Partition lanes carry records; paused lanes keep polling.</li>
+      <li><b>Operators.</b> Each pinned thread runs one operator chain.</li>
+      <li><b>Bounded queues.</b> Encoded chunks wait for their sink shard.</li>
+      <li><b>Replicas.</b> Sink writes return acknowledgements.</li>
+      <li><b>Checkpointer.</b> Acknowledgements return through an unbounded channel; committed watermarks advance behind them.</li>
+    </ol>
+    </figure>
   );
 }

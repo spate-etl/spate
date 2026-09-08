@@ -1,6 +1,4 @@
 import Link from '@docusaurus/Link';
-import useDocusaurusContext from '@docusaurus/useDocusaurusContext';
-import {usePluginData} from '@docusaurus/useGlobalData';
 import CodeBlock from '@theme/CodeBlock';
 import MDXContent from '@theme/MDXContent';
 import clsx from 'clsx';
@@ -366,36 +364,6 @@ export function Install(): React.JSX.Element {
       }>
       <CodeBlock language="toml">{INSTALL}</CodeBlock>
     </SplitSection>
-  );
-}
-
-type Proof = {stars?: number; releases?: number; downloads?: number; version?: string; asOf?: string};
-
-export function Facts(): React.JSX.Element {
-  const proof = (usePluginData('social-proof') as Proof | undefined) ?? {};
-  const {siteConfig} = useDocusaurusContext();
-  const invariants = siteConfig.customFields?.invariants;
-  const facts: Array<[string, string]> = [
-    [proof.version ?? '0.x', 'latest release'],
-    ['Apache-2.0', 'license, no CLA'],
-    ['1.94', 'MSRV, edition 2024'],
-    ...(typeof invariants === 'number' ? [[String(invariants), 'numbered invariants'] as [string, string]] : []),
-    ...(typeof proof.downloads === 'number' ? [[proof.downloads.toLocaleString('en-US'), 'crates.io downloads'] as [string, string]] : []),
-  ];
-  return (
-    <section className="home-facts" aria-label="Project facts">
-      <div className="site-container">
-        <ul className="home-facts__row">
-          {facts.map(([n, l]) => (
-            <li key={l}>
-              <span className="home-facts__n">{n}</span>
-              <span className="home-facts__l">{l}</span>
-            </li>
-          ))}
-        </ul>
-        {proof.asOf && <p className="home-mono home-muted home-facts__asof">Figures as of {proof.asOf}.</p>}
-      </div>
-    </section>
   );
 }
 

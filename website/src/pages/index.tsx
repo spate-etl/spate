@@ -8,7 +8,6 @@ import {
   Code,
   Connectors,
   Deploy,
-  Facts,
   Faq,
   Hero,
   HowItWorks,
@@ -59,7 +58,6 @@ export default function Home(): React.JSX.Element {
       <Connectors />
       <Deploy />
       <Install />
-      <Facts />
       <Faq />
     </SiteLayout>
   );

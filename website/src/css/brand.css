@@ -9,6 +9,8 @@
   --spate-ink: #17181c;
   --spate-muted: #5f646c;
   --spate-border: #e2ded7;
+  --spate-dim: #6b7280;
+  --spate-grid: rgba(23, 24, 28, 0.035);
   --spate-accent: #c8480a;
   --spate-accent-ink: #ffffff;
   --spate-accent-soft: rgba(200, 72, 10, 0.08);
@@ -35,6 +37,8 @@
   --spate-ink: #f4f5f6;
   --spate-muted: #9aa1a9;
   --spate-border: #2b303a;
+  --spate-dim: #7d848f;
+  --spate-grid: rgba(244, 245, 246, 0.028);
   --spate-accent: #ff8c4a;
   --spate-accent-ink: #16181d;
   --spate-accent-soft: rgba(255, 140, 74, 0.10);

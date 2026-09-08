@@ -64,6 +64,9 @@ const PAIRS = [
   ['mark-node', 'bg', 3],
   ['mark-edge', 'bg', 3],
   ['mark-core', 'bg', 3],
+  ['dim', 'bg', 3],
+  ['dim', 'surface', 3],
+  ['dim', 'surface-2', 3],
   ['primary', 'bg', 3],
 ];
 

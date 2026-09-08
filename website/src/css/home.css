@@ -432,6 +432,39 @@
   margin-bottom: 2.5rem;
 }
 
+.pipeline-figure {
+  width: min(100%, 720px);
+  margin: 0;
+}
+
+.pipeline__key,
+.pipeline__key-markers {
+  display: none;
+}
+
+@media (max-width: 600px) {
+  .pipeline__labels {
+    display: none;
+  }
+
+  .pipeline__key-markers {
+    display: block;
+    fill: var(--spate-ink);
+  }
+
+  .pipeline__key {
+    display: block;
+    margin: 1rem 0 0;
+    padding-left: 1.5rem;
+    font-size: 0.9rem;
+    color: var(--spate-muted);
+  }
+
+  .pipeline__key li + li {
+    margin-top: 0.5rem;
+  }
+}
+
 .pipeline {
   width: min(100%, 720px);
   overflow: visible;
@@ -625,21 +658,47 @@
   margin-top: 2.5rem;
 }
 
-.incident__events {
-  margin: 0;
+.incident__controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
 }
 
-.incident__events > div + div {
+.incident__controls .home-btn {
+  padding: 0.6rem 0.85rem;
+}
+
+.incident__controls [aria-pressed='true'] {
+  border-color: var(--spate-accent);
+  background: var(--spate-accent-soft);
+}
+
+.incident__controls :disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.incident__explanation {
+  min-height: 10rem;
   margin-top: 1.5rem;
 }
 
-.incident__events dt {
-  font-weight: 600;
+.incident__explanation h3 {
+  font-size: 1.15rem;
 }
 
-.incident__events dd {
-  margin: 0.4rem 0 0;
+.incident__explanation p,
+.incident__hint {
   color: var(--spate-muted);
+}
+
+.incident__hint {
+  margin: 0.75rem 0 0;
+  font-size: 0.85rem;
+}
+
+.home-connector__filename {
+  overflow-wrap: anywhere;
 }
 
 .incident__panel {
@@ -673,13 +732,12 @@
 /* `:where` keeps this at zero specificity, so every class below it wins: the
  * type selector alone would outrank them all and flatten the figure to muted. */
 :where(.incident text) {
-  font-size: 10px;
+  font-size: 14px;
   fill: var(--spate-muted);
 }
 
 .incident__mono {
   font-family: var(--ifm-font-family-monospace);
-  font-size: 8.5px;
 }
 
 .incident__node {
@@ -756,9 +814,9 @@
   }
 }
 
-@media (max-width: 560px) {
-  .incident__mono {
-    font-size: 10px;
+@media (max-width: 768px) {
+  :where(.incident text) {
+    font-size: 19px;
   }
 }
 

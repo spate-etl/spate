@@ -312,7 +312,7 @@ export function Connectors(): React.JSX.Element {
           <p>A source or sink is a small trait. Writing your own is a supported path.</p>
           <div className="home-card__foot">
             <Link to="/docs/user-guide/extending/">Extending</Link>
-            <Link href={`${githubUrl}/blob/main/crates/spate/examples/custom_source_sink.rs`} className="home-mono">
+            <Link href={`${githubUrl}/blob/main/crates/spate/examples/custom_source_sink.rs`} className="home-mono home-connector__filename">
               custom_source_sink.rs
             </Link>
           </div>

@@ -1,6 +1,6 @@
 import Link from '@docusaurus/Link';
 import clsx from 'clsx';
-import React from 'react';
+import React, {useId} from 'react';
 
 import {isPlotted, laneRank, niceCeil, unrankedBecause, type Entrant, type Row} from '../Results/data';
 import {fmt, unitLabel} from '../Results/format';
@@ -25,14 +25,16 @@ type Props = {
  * the median as its notch, and the axis starts at zero and prints its end.
  */
 export default function Field({rows, entrants, metric, basePath, compact}: Props): React.JSX.Element {
+  const labelId = useId();
   const byId = new Map(entrants.map((e) => [e.entrant.id, e]));
   const {order, ranked} = laneRank(rows, byId);
   const spec = specOf(metric);
   const plotted = order.filter((r) => isPlotted(r) && r.metrics[metric]);
-  const proto = plotted[0]?.metrics[metric];
+  const proto = plotted[0]?.metrics[metric] ?? order.find((r) => r.metrics[metric])?.metrics[metric];
   const max = niceCeil(Math.max(0, ...plotted.map((r) => r.metrics[metric].hi)));
   const unit = proto?.unit ?? '';
   const hib = proto?.higher_is_better ?? true;
+  const units = spec.unitLabel ?? unitLabel(unit);
   // Each mark the legend names only where a lane carries it.
   const notes = [
     'The capsule spans the smallest to the largest repetition; the notch is the median.',
@@ -48,15 +50,15 @@ export default function Field({rows, entrants, metric, basePath, compact}: Props
 
   return (
     <div className={clsx('field', compact && 'field--compact')}>
-      <div className="field__axis" aria-hidden="true">
-        <span className="field__axis-zero">0</span>
-        <span className="field__axis-label">
+      <div className="field__axis">
+        <span className="field__axis-zero" aria-hidden="true">0</span>
+        <span className="field__axis-label" id={labelId}>
           {spec.label}
-          {unitLabel(unit) ? `, ${unitLabel(unit)}` : ''} · {hib ? 'higher is better →' : '← lower is better'}
+          {units ? `, ${units}` : ''} · {hib ? 'higher is better' : 'lower is better'}<span aria-hidden="true">{hib ? ' →' : ' ←'}</span>
         </span>
-        <span className="field__axis-end">{fmt(max, unit)}</span>
+        <span className="field__axis-end" aria-hidden="true">{fmt(max, unit)}</span>
       </div>
-      <ol className="field__lanes">
+      <ol className="field__lanes" aria-labelledby={labelId}>
         {order.map((row) => {
           const e = byId.get(row.entrant);
           const m = row.metrics[metric];

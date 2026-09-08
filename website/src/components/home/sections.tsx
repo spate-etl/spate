@@ -369,7 +369,7 @@ export function Install(): React.JSX.Element {
 
 export function Faq(): React.JSX.Element {
   return (
-    <SplitSection id="faq" eyebrow="Questions" title="The ones a streaming engineer asks first.">
+    <SplitSection id="faq" title="A streaming engineer asks these first.">
       <div className="home-faq">
         {FAQ.map((item, i) => (
           <details key={item.q} open={i === 0}>

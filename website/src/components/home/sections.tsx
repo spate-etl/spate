@@ -17,6 +17,29 @@ import {PRIMARY} from '../Results/data';
 import {fmt} from '../Results/format';
 import Pipeline from './Pipeline';
 
+/** The heading takes `${id}-title`, which the enclosing section names in `aria-labelledby`. */
+function SectionHead({
+  id,
+  eyebrow,
+  title,
+  lead,
+}: {
+  id: string;
+  eyebrow?: string;
+  title: string;
+  lead?: React.ReactNode;
+}) {
+  return (
+    <>
+      {eyebrow && <span className="home-eyebrow">{eyebrow}</span>}
+      <h2 id={`${id}-title`} className="home-h2">
+        {title}
+      </h2>
+      {lead && <p className="home-lead">{lead}</p>}
+    </>
+  );
+}
+
 function SplitSection({
   id,
   eyebrow,
@@ -26,7 +49,7 @@ function SplitSection({
   children,
 }: {
   id: string;
-  eyebrow: string;
+  eyebrow?: string;
   title: string;
   lead?: React.ReactNode;
   aside?: React.ReactNode;
@@ -37,11 +60,7 @@ function SplitSection({
     <section id={id} ref={ref} className="home-section reveal" aria-labelledby={`${id}-title`}>
       <div className="site-container home-split">
         <div className="home-split__aside">
-          <span className="home-eyebrow">{eyebrow}</span>
-          <h2 id={`${id}-title`} className="home-h2">
-            {title}
-          </h2>
-          {lead && <p className="home-lead">{lead}</p>}
+          <SectionHead id={id} eyebrow={eyebrow} title={title} lead={lead} />
           {aside}
         </div>
         <div className="home-split__code">{children}</div>
@@ -63,7 +82,7 @@ function Section({
   className,
 }: {
   id: string;
-  eyebrow: string;
+  eyebrow?: string;
   title: string;
   lead?: React.ReactNode;
   children: React.ReactNode;
@@ -74,11 +93,7 @@ function Section({
     <section id={id} ref={ref} className={clsx('home-section reveal', className)} aria-labelledby={`${id}-title`}>
       <div className="site-container">
         <div className="home-section__head">
-          <span className="home-eyebrow">{eyebrow}</span>
-          <h2 id={`${id}-title`} className="home-h2">
-            {title}
-          </h2>
-          {lead && <p className="home-lead">{lead}</p>}
+          <SectionHead id={id} eyebrow={eyebrow} title={title} lead={lead} />
         </div>
         {children}
       </div>

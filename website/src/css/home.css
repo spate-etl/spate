@@ -5,9 +5,8 @@
   display: block;
   font-family: var(--ifm-font-family-monospace);
   font-size: 0.8rem;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--spate-accent);
+  letter-spacing: 0.03em;
+  color: var(--spate-muted);
 }
 
 .home-h1 {
@@ -120,6 +119,7 @@
 
 .home-section {
   padding: 4.5rem 0;
+  border-top: 1px solid var(--spate-border);
 }
 
 .home-section__head {

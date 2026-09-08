@@ -48,6 +48,7 @@ const PAIRS = [
   ['muted', 'surface-2', 4.5],
   ['accent', 'bg', 4.5],
   ['accent', 'surface', 4.5],
+  ['accent', 'surface-2', 4.5],
   ['accent-ink', 'accent', 4.5],
   ['primary-dark', 'bg', 4.5],
   ['primary-dark', 'surface-2', 4.5],

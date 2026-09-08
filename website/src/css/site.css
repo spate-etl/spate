@@ -126,15 +126,6 @@ html.docs-wrapper .main-wrapper > div {
   text-decoration: none;
 }
 
-.site-nav__stars {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.25rem;
-  font-family: var(--ifm-font-family-monospace);
-  font-size: 0.8rem;
-  color: var(--spate-muted);
-}
-
 /* The theme's own mobile sidebar carries the links under 997px. */
 @media (max-width: 996px) {
   .site-nav__links,

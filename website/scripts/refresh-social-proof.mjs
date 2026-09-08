@@ -1,4 +1,4 @@
-// Rewrites src/data/social-proof.json from the live sources. Run it when the
+// Rewrites src/data/social-proof.json from crates.io. Run it when the
 // committed figures are stale; a build that can reach the network fetches
 // live figures itself.
 import {writeFileSync} from 'node:fs';

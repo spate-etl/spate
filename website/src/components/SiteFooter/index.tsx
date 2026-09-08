@@ -7,7 +7,7 @@ import React from 'react';
 
 import {FOOTER_COLUMNS} from '../../data/nav';
 
-type Proof = {stars?: number; releases?: number; downloads?: number; version?: string; asOf?: string};
+type Proof = {downloads?: number; version?: string; asOf?: string};
 
 /** The row of project figures: the release falls back to `0.x`, and the invariant and download counts appear only when their source published one. */
 function Facts(): React.JSX.Element {

@@ -826,9 +826,10 @@ if len(set(keys)) != len(keys):
     check_flags true true true "the pinned tool versions select the fuzz job" \
         versions.mk
 
-    # The manifest gate's selection, asserted the same way. Source changes do
-    # not select it: the nightly backstop covers packaging breaks a manifest
-    # list cannot see, and selecting on source would run it on every merge.
+    # The manifest gates' selection, asserted the same way. Source changes do
+    # not select them: the nightly backstop covers a packaging or floor break
+    # a manifest list cannot see, and selecting on source would run them on
+    # every merge.
     check_manifests() { # want, desc, paths...
         local want="$1" desc="$2"
         shift 2
@@ -842,9 +843,9 @@ if len(set(keys)) != len(keys):
             path_case_failed=1
         fi
     }
-    check_manifests true "the lockfile reaches packaging" Cargo.lock
-    check_manifests true "the workspace manifest reaches packaging" Cargo.toml
-    check_manifests true "a crate manifest reaches packaging" crates/spate-core/Cargo.toml
+    check_manifests true "the lockfile reaches the manifest gates" Cargo.lock
+    check_manifests true "the workspace manifest reaches the manifest gates" Cargo.toml
+    check_manifests true "a crate manifest reaches the manifest gates" crates/spate-core/Cargo.toml
     check_manifests true "the bump tool is the gate's own apparatus" scripts/release-version.sh
     check_manifests true "the selector is the gate's own apparatus" scripts/ci-changes.sh
     check_manifests false "a crate source does not select the gate" crates/spate-core/src/lib.rs
@@ -1197,14 +1198,15 @@ done
 container_args="${container_args# }"
 
 # ---------------------------------------------------------------------------
-# Manifest reach, for the publish dry-run gate.
+# Manifest reach, for the publish dry-run and minimal-versions gates.
 # ---------------------------------------------------------------------------
-# The set of files that can change whether `cargo package` succeeds: the
-# manifests and lockfile, plus the gate's own apparatus — the bump tool, this
-# selector, and the workflow that wires them — so an edit that narrows the
-# gate is itself gated, the same rule the bench arm applies. The READMEs are
-# packaged but cannot fail packaging; their versions are held by
-# check-release-version, which runs on every event.
+# The set of files that can change whether `cargo package` succeeds or
+# whether the declared floors still resolve: the manifests and lockfile,
+# plus the gate's own apparatus — the bump tool, this selector, and the
+# workflow that wires them — so an edit that narrows the gate is itself
+# gated, the same rule the bench arm applies. The READMEs are packaged but
+# cannot fail packaging; their versions are held by check-release-version,
+# which runs on every event.
 path_is_manifest() {
     case "$1" in
     Cargo.toml | Cargo.lock | crates/*/Cargo.toml | bench/Cargo.toml) return 0 ;;
@@ -1215,10 +1217,11 @@ path_is_manifest() {
 }
 
 # Its own diff on push: push mode force-runs every job above as the last line
-# of defence, while the dry run is selected on manifest reach alone, so
-# `force_all` would pin it on for every merge. A diff that cannot be resolved
-# (a force push, the zero SHA of a branch creation) fails closed to true, and
-# the nightly backstop in scheduled.yml covers what a path list misses.
+# of defence, while these two gates select on manifest reach alone, so
+# `force_all` would pin them on for every merge. A diff that cannot be
+# resolved (a force push, the zero SHA of a branch creation) fails closed to
+# true, and the nightly backstop in scheduled.yml covers what a path list
+# misses.
 manifests=false
 if [[ "$mode" == "push" ]]; then
     manifest_diff=$(mktemp)

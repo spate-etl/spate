@@ -105,8 +105,8 @@ testcontainers-modules = "0.15"
 proptest = "1.11"
 # spate-clickhouse-derive's proc-macro toolchain.
 syn = { version = "3", features = ["full"] }
-quote = "1"
-proc-macro2 = "1"
+quote = "1.0.35"
+proc-macro2 = "1.0.91"
 # Resolves the derive's emitted paths against whichever of spate-clickhouse or
 # the spate facade the invoking crate actually depends on.
 proc-macro-crate = "3"

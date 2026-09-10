@@ -342,8 +342,8 @@ above from what is left. The elected license ids are unaffected either way.
 | `strsim` | 0.11.1 | `MIT` |
 | `strum` | 0.28.0 | `MIT` |
 | `strum_macros` | 0.28.0 | `MIT` |
-| `syn` | 2.0.118 | `MIT` |
-| `syn` | 3.0.3 | `MIT` |
+| `syn` | 2.0.119 | `MIT` |
+| `syn` | 3.0.5 | `MIT` |
 | `synstructure` | 0.13.2 | `MIT` |
 | `tempfile` | 3.27.0 | `MIT` |
 | `thiserror` | 2.0.20 | `MIT` |

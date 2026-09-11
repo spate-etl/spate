@@ -7,7 +7,7 @@
 // round-trip, (2) at-least-once retries stay exactly-once through the view
 // (ClickHouse >= 26.1 + deduplicate_blocks_in_dependent_materialized_views),
 // and (3) pointing the sink straight at an AggregateFunction column is
-// rejected with an actionable error. Pin 26.3 (the LTS the docs target).
+// rejected with an actionable error.
 
 use super::*;
 use std::collections::BTreeMap;
@@ -150,7 +150,7 @@ async fn merged_sum(admin: &clickhouse::Client, region: &str, key: &str) -> u64 
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn aggregate_states_round_trip_through_null_and_mv() {
-    let srv = bare_server("26.3", "agg-secret").await;
+    let srv = bare_server("agg-secret").await;
     create_target(&srv.admin).await;
     create_null_and_mv(&srv.admin).await;
     let sink = null_sink(&srv.url).await;
@@ -181,7 +181,7 @@ async fn aggregate_states_round_trip_through_null_and_mv() {
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn mv_dedup_keeps_retries_exactly_once() {
-    let srv = bare_server("26.3", "agg-secret").await;
+    let srv = bare_server("agg-secret").await;
     create_target(&srv.admin).await;
     create_null_and_mv(&srv.admin).await;
     let sink = null_sink(&srv.url).await;
@@ -227,7 +227,7 @@ async fn mv_dedup_keeps_retries_exactly_once() {
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn direct_insert_into_aggregate_function_column_is_rejected() {
-    let srv = bare_server("26.3", "agg-secret").await;
+    let srv = bare_server("agg-secret").await;
     create_target(&srv.admin).await;
 
     #[derive(Clone, Serialize, ClickHouseRow)]

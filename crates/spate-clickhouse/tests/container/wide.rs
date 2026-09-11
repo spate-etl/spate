@@ -207,7 +207,7 @@ fn encoded_row() -> WideRow {
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn wide_type_table_round_trips() {
-    let srv = bare_server("26.3", "wide-secret").await;
+    let srv = bare_server("wide-secret").await;
     let ddl_client = srv
         .admin
         .clone()

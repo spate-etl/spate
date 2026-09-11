@@ -13,7 +13,7 @@ use super::*;
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn insert_alone_reaches_system_columns() {
-    let srv = bare_server("26.3", "admin-secret").await;
+    let srv = bare_server("admin-secret").await;
     for ddl in [
         "CREATE TABLE orders (id UInt64, name String, amount Nullable(Float64)) \
          ENGINE = MergeTree ORDER BY id \

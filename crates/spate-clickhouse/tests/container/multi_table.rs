@@ -23,7 +23,7 @@ async fn make_table(admin: &clickhouse::Client, table: &str) {
 
 async fn sink_for_table(url: &str, table: &str) -> config::ClickHouseSink {
     let cfg: ClickHouseSinkConfig = serde_yaml::from_str(&format!(
-        "table: {table}\nshards:\n  - replicas: [\"{url}\"]\n"
+        "table: {table}\nshards:\n  - replicas: [\"{url}\"]\n{SERVER_CREDENTIALS}"
     ))
     .expect("config yaml");
     config::build(cfg)

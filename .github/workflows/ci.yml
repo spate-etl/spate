@@ -48,6 +48,10 @@ jobs:
       manifests: ${{ steps.classify.outputs.manifests }}
       # A JSON array of `{package, arm, cargo_features}` objects, one per shard.
       bench-shards: ${{ steps.classify.outputs.bench-shards }}
+      # A JSON array of `{lane}` objects: the ClickHouse lanes needing a job
+      # beyond the `lts` one `containers` runs. Empty when the two lanes
+      # resolve to the same image, which they do until `stable` moves ahead.
+      clickhouse-lanes: ${{ steps.classify.outputs.clickhouse-lanes }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -125,6 +129,8 @@ jobs:
       - run: make check-collected-region
 
       - run: make check-transclusions
+
+      - run: make check-supported-versions
 
       - run: make check-release-version
 
@@ -887,6 +893,12 @@ jobs:
           tools: nextest@0.9.140
           # Separate key: the `#[ignore]`d suites link binaries `test` does not.
           shared-key: docker
+      # By digest, and re-tagged locally, so the suite runs the pinned bytes.
+      # testcontainers creates the container before it pulls, so the local tag
+      # is what it finds.
+      - name: Pull the pinned ClickHouse image
+        if: contains(needs.changes.outputs.container-args, 'spate-clickhouse')
+        run: ./scripts/container-image.sh --pull clickhouse
       # Serial: 2 cores and ~7 GB across SeaweedFS, NATS, Kafka and ClickHouse
       # OOMs in parallel.
       - name: Container suites
@@ -912,6 +924,67 @@ jobs:
         if: always()
         with:
           name: junit-nextest-docker
+          path: target/nextest/docker/junit.xml
+
+  # The ClickHouse server versions beyond the one `containers` runs: the older
+  # supported LTS line, and the newest release once it moves ahead of that LTS.
+  # `ci/clickhouse/<lane>/Dockerfile` pins each, and Dependabot moves them.
+  clickhouse-versions:
+    name: ClickHouse ${{ matrix.lane }}
+    runs-on: ubuntu-latest
+    needs: [changes, lint, workflows]
+    # A matrix expanding to zero jobs is a workflow-level error, and a false
+    # `if:` is what prevents the expansion. The classifier already empties the
+    # array unless the ClickHouse suite was selected, so this one clause covers
+    # both questions.
+    if: needs.changes.outputs.clickhouse-lanes != '[]'
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      checks: write
+    strategy:
+      # `ci-gate` counts `cancelled` as failure, so fail-fast would turn one
+      # real failure into several unattributable ones.
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.changes.outputs.clickhouse-lanes) }}
+    env:
+      SPATE_CLICKHOUSE_LANE: ${{ matrix.lane }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          tools: nextest@0.9.140
+          shared-key: docker
+          # A consumer of the entry `containers` owns. These legs build one
+          # crate and would otherwise win the race to write a cache holding the
+          # whole container tier.
+          cache-save: never
+      - name: Pull the pinned ClickHouse image
+        run: ./scripts/container-image.sh --pull clickhouse "$SPATE_CLICKHOUSE_LANE"
+      - name: ClickHouse suite
+        run: |
+          cargo nextest run --profile docker -p spate-clickhouse --all-features \
+            --locked --run-ignored ignored-only --test-threads 1
+
+      # Both names carry the lane: upload-artifact rejects a duplicate name
+      # within one run, and two checks sharing a name are unattributable.
+      - name: Publish ClickHouse test report
+        uses: mikepenz/action-junit-report@a9170d5795813c01ab4901ffb045b52bab4ab09d # v6.5.0
+        if: always()
+        with:
+          report_paths: target/nextest/docker/junit.xml
+          check_name: ClickHouse ${{ matrix.lane }} test results
+          detailed_summary: true
+          include_passed: false
+          flaky_summary: true
+          fail_on_failure: false
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: junit-nextest-clickhouse-${{ matrix.lane }}
           path: target/nextest/docker/junit.xml
 
   site:
@@ -993,7 +1066,7 @@ jobs:
     # Without `always()` this job is itself skipped when a dependency fails, and
     # a skipped check reports as *success* to branch protection.
     if: always()
-    needs: [changes, lint, workflows, deny, changelog, semver, semver-baseline, publish-dry-run, minimal-versions, test, doctests, docsrs, features, msrv, containers, site, loom, alloc-assertions, fuzz, perf-warm, perf-counters, perf-report]
+    needs: [changes, lint, workflows, deny, changelog, semver, semver-baseline, publish-dry-run, minimal-versions, test, doctests, docsrs, features, msrv, containers, clickhouse-versions, site, loom, alloc-assertions, fuzz, perf-warm, perf-counters, perf-report]
     steps:
       - name: Evaluate dependency results
         env:

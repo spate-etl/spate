@@ -42,7 +42,7 @@ fn edge_row() -> EdgeRow {
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn int256_and_nested_geo_match_the_literal_row() {
-    let srv = bare_server("26.3", "edges-secret").await;
+    let srv = bare_server("edges-secret").await;
     srv.admin
         .query(DDL)
         .execute()

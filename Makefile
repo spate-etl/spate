@@ -14,7 +14,7 @@ include versions.mk
         deny attribution \
         supply-chain zizmor shellcheck self-test check-perf-report \
         check-gungraun-benches check-collected-region \
-        check-transclusions \
+        check-transclusions check-supported-versions \
         check-brand \
         check-adr adr-new \
         check-changelog changelog-new \
@@ -63,7 +63,15 @@ docsrs: ## Rustdoc as docs.rs builds it: per crate, on nightly (needs nightly)
 test-examples: ## Just the examples, run as tests (subset of test)
 	cargo nextest run -p spate --all-features --locked -E 'kind(example)'
 
-test-docker: ## Container-backed suites (needs Docker)
+# The pull discovers every service under `ci/` and takes each one's lane from
+# `SPATE_<SERVICE>_LANE`, so adding a pinned service needs no edit here. Select
+# a lane through the environment:
+#
+#   SPATE_CLICKHOUSE_LANE=stable make test-docker
+#
+# `ci/README.md` has the account.
+test-docker: ## Container-backed suites (needs Docker; lanes per ci/README.md)
+	./scripts/container-image.sh --pull-all
 	cargo nextest run --profile docker --workspace --all-features --locked \
 		--run-ignored ignored-only
 
@@ -157,6 +165,8 @@ shellcheck: ## Lint the shell scripts
 self-test: ## The CI classifiers still match the crate graph
 	./scripts/ci-changes.sh --self-test
 	./scripts/semver-checks.sh --self-test
+	./scripts/container-image.sh --self-test
+	./scripts/supported-versions.sh --self-test
 
 check-perf-report: ## The perf report's flag file stays parseable by perf-label.yml
 	./scripts/gungraun-report.sh --self-test
@@ -174,6 +184,9 @@ check-transclusions: ## Every transcluded region a docs page names exists
 
 check-docs-meta: ## Every rendered docs page carries a description of the length a search result shows
 	./scripts/docs-meta.sh --check
+
+check-supported-versions: ## Every supported-versions table matches the servers CI pins
+	./scripts/supported-versions.sh --check
 
 check-site-meta: ## Every built page carries a description (run after the site build)
 	./scripts/site-meta.sh --check
@@ -206,7 +219,7 @@ release-dry-run: ## The whole release locally, nothing pushed or uploaded: make 
 #
 #     UPDATE_EXAMPLES_INDEX=1 cargo test -p spate --test examples_index --locked
 
-ci-lint: zizmor shellcheck self-test check-perf-report check-gungraun-benches check-collected-region check-adr check-brand check-changelog check-transclusions check-docs-meta check-release-version ## Every repository-metadata check
+ci-lint: zizmor shellcheck self-test check-perf-report check-gungraun-benches check-collected-region check-adr check-brand check-changelog check-transclusions check-docs-meta check-supported-versions check-release-version ## Every repository-metadata check
 
 ##@ Fuzz
 

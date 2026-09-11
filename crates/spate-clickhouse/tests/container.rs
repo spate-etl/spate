@@ -49,6 +49,70 @@ const READY_TIMEOUT: Duration = Duration::from_secs(60);
 /// How much of a failed node's stderr the panic carries.
 const LOG_TAIL: usize = 40;
 
+/// The password every fixture in this binary gives the `default` user.
+const SERVER_PASSWORD: &str = "container-secret";
+
+/// The `settings` fragment naming [`SERVER_PASSWORD`], for the helpers that
+/// take one.
+const SERVER_CREDENTIALS: &str = "user: default\npassword: container-secret\n";
+
+/// The image pinned by the lane in `SPATE_CLICKHOUSE_LANE`, as `name` and
+/// `tag`, read from `ci/clickhouse/<lane>/Dockerfile`. Falls back to the lane
+/// named in `ci/clickhouse/PRIMARY`.
+///
+/// The digest beside the tag is dropped: testcontainers builds its reference as
+/// `name:tag` and has no digest form. `scripts/container-image.sh --pull` is
+/// what makes the tag resolve to the pinned bytes, and CI and `make test-docker`
+/// run it first.
+///
+/// Panics on a lane with no manifest, so a typo in the CI matrix fails the job.
+fn lane_image() -> (String, String) {
+    let lane = std::env::var("SPATE_CLICKHOUSE_LANE").unwrap_or_else(|_| primary_lane());
+    image_for_lane(&lane)
+}
+
+/// The lane `ci/clickhouse/PRIMARY` names, which is the one CI runs for the
+/// whole container tier.
+fn primary_lane() -> String {
+    let path = ci_dir().join("PRIMARY");
+    let text =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let lane = text.lines().next().unwrap_or_default().trim().to_owned();
+    assert!(!lane.is_empty(), "{} is empty", path.display());
+    lane
+}
+
+/// The directory holding this service's lanes.
+fn ci_dir() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("ci/clickhouse")
+}
+
+/// [`lane_image`] for a named lane, so a test can cover every one of them.
+///
+/// `cargo test` runs this binary's tests in one process, where `set_var` beside
+/// another thread's `getenv` is undefined behaviour.
+fn image_for_lane(lane: &str) -> (String, String) {
+    let manifest = ci_dir().join(lane).join("Dockerfile");
+    let text = std::fs::read_to_string(&manifest)
+        .unwrap_or_else(|e| panic!("read {}: {e}", manifest.display()));
+    parse_from_line(&text).unwrap_or_else(|| panic!("{} has no FROM line", manifest.display()))
+}
+
+/// Splits the `name:tag` of a Dockerfile's first `FROM` into its two halves,
+/// discarding any `@sha256:` digest.
+fn parse_from_line(dockerfile: &str) -> Option<(String, String)> {
+    let reference = dockerfile
+        .lines()
+        .find_map(|line| line.strip_prefix("FROM "))?
+        .split_whitespace()
+        .next()?;
+    let tagged = reference.split_once('@').map_or(reference, |(t, _)| t);
+    let (name, tag) = tagged.rsplit_once(':')?;
+    Some((name.to_owned(), tag.to_owned()))
+}
+
 /// Hand readiness to the caller: `.start()` returns once the container is
 /// started, without waiting on any condition.
 ///
@@ -111,16 +175,10 @@ async fn wait_for_queries(
     }
 }
 
+/// [`bare_server`] with `orders` already created.
 async fn server() -> Server {
-    let container = started_only(ClickHouse::default())
-        .start()
-        .await
-        .expect("start clickhouse");
-    let port = container.get_host_port_ipv4(8123).await.expect("port");
-    let url = format!("http://127.0.0.1:{port}");
-    let admin = clickhouse::Client::default().with_url(&url);
-    wait_for_queries(&container, &admin, "clickhouse").await;
-    admin
+    let srv = bare_server(SERVER_PASSWORD).await;
+    srv.admin
         .query(
             "CREATE TABLE orders (id UInt64, name String, amount Nullable(Float64)) \
              ENGINE = MergeTree ORDER BY id \
@@ -129,11 +187,7 @@ async fn server() -> Server {
         .execute()
         .await
         .expect("create table");
-    Server {
-        _container: container,
-        url,
-        admin,
-    }
+    srv
 }
 
 async fn sink_for(url: &str) -> config::ClickHouseSink {
@@ -142,6 +196,7 @@ async fn sink_for(url: &str) -> config::ClickHouseSink {
 table: orders
 shards:
   - replicas: ["{url}"]
+{SERVER_CREDENTIALS}
 "#
     ))
     .expect("config yaml");
@@ -293,15 +348,15 @@ where
     })
 }
 
-/// A pinned-version server. Newer official images set up a required
-/// password unless one is provided, so this always configures explicit
-/// credentials (unlike the module's ancient default image).
+/// A server on the lane [`lane_image`] selects, with no tables created.
 ///
 /// `default` holds `access_management`, which the image otherwise withholds,
 /// so a test can mint a restricted user and check what that user can reach.
-async fn bare_server(tag: &str, password: &str) -> Server {
+async fn bare_server(password: &str) -> Server {
+    let (name, tag) = lane_image();
     let container = started_only(
         ClickHouse::default()
+            .with_name(name)
             .with_tag(tag)
             .with_env_var("CLICKHOUSE_USER", "default")
             .with_env_var("CLICKHOUSE_PASSWORD", password)
@@ -322,6 +377,49 @@ async fn bare_server(tag: &str, password: &str) -> Server {
         url,
         admin,
     }
+}
+
+/// Every shipped lane resolves to a ClickHouse image, and its manifest pins a
+/// digest beside the tag.
+#[test]
+fn every_lane_resolves_to_a_digest_pinned_clickhouse_image() {
+    for lane in ["lts", "lts-previous", "stable"] {
+        let (name, tag) = image_for_lane(lane);
+        assert_eq!(name, "clickhouse/clickhouse-server", "lane {lane}");
+        assert!(!tag.is_empty(), "lane {lane} has an empty tag");
+
+        let manifest = ci_dir().join(lane).join("Dockerfile");
+        let text = std::fs::read_to_string(&manifest).expect("read manifest");
+        let digest = text
+            .lines()
+            .find_map(|l| l.strip_prefix("FROM "))
+            .and_then(|l| l.split_whitespace().next())
+            .and_then(|r| r.split_once("@sha256:"))
+            .map(|(_, d)| d.to_owned())
+            .unwrap_or_else(|| panic!("lane {lane} is not pinned by digest"));
+        assert_eq!(digest.len(), 64, "lane {lane} digest: {digest}");
+        assert!(
+            digest.bytes().all(|b| b.is_ascii_hexdigit()),
+            "lane {lane} digest is not hex: {digest}"
+        );
+    }
+}
+
+/// The `FROM` parse takes the first line only, and drops the digest.
+#[test]
+fn the_from_parse_splits_name_from_tag_and_drops_the_digest() {
+    let parsed = parse_from_line(
+        "# a comment\n\nFROM clickhouse/clickhouse-server:26.8.2.7@sha256:abc AS build\n\
+         FROM ignored/second:1\n",
+    );
+    assert_eq!(
+        parsed,
+        Some((
+            "clickhouse/clickhouse-server".to_owned(),
+            "26.8.2.7".to_owned()
+        ))
+    );
+    assert_eq!(parse_from_line("# no FROM here\n"), None);
 }
 
 // The tests are split by concern into the modules below; the shared fixtures

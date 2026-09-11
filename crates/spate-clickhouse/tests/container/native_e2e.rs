@@ -120,7 +120,7 @@ fn rows() -> Vec<NativeRow> {
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn native_format_round_trips_through_a_real_server() {
-    let srv = bare_server("26.3", "native-secret").await;
+    let srv = bare_server("native-secret").await;
     srv.admin
         .query(DDL)
         .execute()
@@ -173,7 +173,7 @@ async fn the_native_encoder_gates_datetime64_scale_against_a_real_table() {
     use spate_core::error::{ErrorClass, SinkError};
     use std::sync::Arc;
 
-    let srv = bare_server("26.3", "native-secret3").await;
+    let srv = bare_server("native-secret3").await;
     srv.admin
         .query(
             "CREATE TABLE dt_micro (id UInt64, ts DateTime64(6, 'UTC')) \
@@ -258,7 +258,7 @@ async fn the_native_encoder_gates_datetime64_scale_against_a_real_table() {
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn native_lowcardinality_composites_render_correctly() {
-    let srv = bare_server("26.3", "native-secret2").await;
+    let srv = bare_server("native-secret2").await;
     srv.admin
         .query(DDL)
         .execute()

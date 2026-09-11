@@ -181,3 +181,56 @@ updates:
     ignore:
       - dependency-name: "rust"
         versions: ["1.98.0", "1.98.0-bookworm"]
+
+  # ------------------------------------- Docker (ClickHouse test matrix) ----
+  # `ci/clickhouse/<lane>/Dockerfile` pins the server each lane of the version
+  # matrix runs. Nothing builds them; a Dockerfile is what the docker ecosystem
+  # reads, and it moves the tag and the digest together.
+  #
+  # Both entries pin an exact four-component tag, for the reason #376 gives: a
+  # bump diff has to say which patch version it moved to.
+  #
+  # The two LTS lanes, held on their lines. `ignore` matches the first two
+  # segments, so `26.3.33.24` excludes everything from 26.4 up and admits
+  # `26.3.34.x`. Moving a line to the next LTS is a maintainer edit.
+  - package-ecosystem: docker
+    directories:
+      - "/ci/clickhouse/lts-previous"
+      - "/ci/clickhouse/lts"
+    # Monthly: 26.3 published six patch releases in ten days, and a
+    # test-fixture pin gains nothing from chasing each one.
+    schedule:
+      interval: monthly
+      day: friday
+    open-pull-requests-limit: 2
+    labels: ["dependencies", "area: ci"]
+    commit-message:
+      prefix: "chore(ci)"
+    cooldown:
+      default-days: 7
+    # One pull request for both lanes: the same image under two policies.
+    groups:
+      clickhouse-lts:
+        patterns: ["clickhouse/clickhouse-server"]
+    ignore:
+      - dependency-name: "clickhouse/clickhouse-server"
+        update-types:
+          - "version-update:semver-minor"
+          - "version-update:semver-major"
+
+  # The newest release, whatever it is. No `ignore`, so this is the lane a
+  # server change reaches first, and weekly so it reaches it within a week.
+  #
+  # When a release breaks the suite, this pull request goes red and stays open.
+  # DEVELOPING.md carries what to do next.
+  - package-ecosystem: docker
+    directory: "/ci/clickhouse/stable"
+    schedule:
+      interval: weekly
+      day: friday
+    open-pull-requests-limit: 1
+    labels: ["dependencies", "area: ci"]
+    commit-message:
+      prefix: "chore(ci)"
+    cooldown:
+      default-days: 7

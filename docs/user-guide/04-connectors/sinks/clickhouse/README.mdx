@@ -115,6 +115,23 @@ Client-certificate (**mTLS**) authentication is not supported. For the
 framework-wide view of transport security across connectors, see
 [Securing connections](../../../03-guides/securing-connections.mdx).
 
+## Supported server versions
+
+| ClickHouse | Support |
+| --- | --- |
+| 26.8 LTS | Guaranteed |
+| 26.3 LTS | Guaranteed |
+| Newest stable release | Guaranteed |
+
+Guaranteed means every change to this sink is exercised against that server
+before it ships, and a defect you hit on one is a defect this project fixes.
+The set is the two LTS lines ClickHouse still supports, plus whatever the newest
+stable release is on the day.
+
+Other versions usually work. The wire formats this sink uses have been stable
+across releases for years, and nothing here refuses to connect to a server
+outside the table.
+
 ## RowBinary on pipeline threads
 
 Encoding is CPU work, so it happens on the pinned pipeline threads:

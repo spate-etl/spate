@@ -265,12 +265,15 @@ fn cluster_xml(pw: &str, h0: &str, h1: &str) -> String {
     )
 }
 
-/// Start one node: pinned 26.3, password auth, joined to `net` under the
-/// hostname `host`, with the cluster XML dropped into `config.d` before boot.
+/// Start one node on the selected lane: password auth, joined to `net` under
+/// the hostname `host`, with the cluster XML dropped into `config.d` before
+/// boot.
 async fn start_node(pw: &str, net: &str, host: &str, xml: &str) -> Node {
+    let (image, tag) = lane_image();
     let container = started_only(
         ClickHouse::default()
-            .with_tag("26.3")
+            .with_name(image)
+            .with_tag(tag)
             .with_env_var("CLICKHOUSE_USER", "default")
             .with_env_var("CLICKHOUSE_PASSWORD", pw)
             .with_network(net)

@@ -69,6 +69,13 @@ The profiles in `.config/nextest.toml`:
 Container-backed tests use testcontainers and are `#[ignore]`d, so a normal run
 skips them. `make test-docker` is what selects them.
 
+A suite that boots a real server runs it at a pinned version, one lane per
+release line the vendor still supports, selected by a `SPATE_<SERVICE>_LANE`
+variable and pinned by tag and digest under `ci/<service>/`. CI runs the primary
+lane for the whole tier and gives every other lane a job of its own.
+[`ci/`](ci/README.md) is the account, and the services it covers are listed
+there rather than here.
+
 One suite sits outside even that. `spate`'s `e2e_examples` drives the shipped
 example binaries, those whose stanza carries no `test = true`, against real
 servers, stopping the ones with no stop condition with `SIGTERM` and asserting

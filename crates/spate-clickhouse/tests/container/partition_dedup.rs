@@ -4,8 +4,8 @@
 // table's PARTITION BY column, and stamps one `insert_deduplication_token` per
 // batch (reused verbatim on retries). So a single INSERT routinely spans
 // several partitions (e.g. two dates) under one token. These tests pin down
-// what ClickHouse 26.3 does with that, since the at-least-once guarantee
-// leans on it. Both pin `26.3` (the LTS the docs target) and use a
+// what ClickHouse does with that, since the at-least-once guarantee
+// leans on it. Both use a
 // non-replicated MergeTree with an explicit dedup window, the framework's
 // documented "you must set the window" case.
 
@@ -54,7 +54,7 @@ async fn active_parts(admin: &clickhouse::Client) -> u64 {
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn multi_partition_batch_stays_idempotent_per_partition() {
-    let srv = bare_server("26.3", "partition-secret").await;
+    let srv = bare_server("partition-secret").await;
     srv.admin
         .query(
             "CREATE TABLE dated (id UInt64, dt Date) ENGINE = MergeTree \
@@ -135,7 +135,7 @@ async fn multi_partition_batch_stays_idempotent_per_partition() {
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn single_partition_batch_forms_one_dedup_unit() {
-    let srv = bare_server("26.3", "partition-secret").await;
+    let srv = bare_server("partition-secret").await;
     srv.admin
         .query(
             "CREATE TABLE dated (id UInt64, dt Date) ENGINE = MergeTree \

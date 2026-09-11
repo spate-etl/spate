@@ -16,7 +16,7 @@ async fn schema_validation_startup_scenarios() {
     }
 
     // Happy path: the fetch against the real system.columns.
-    sink_with::<Owned<Order>>(&srv.url, "orders", "").await;
+    sink_with::<Owned<Order>>(&srv.url, "orders", SERVER_CREDENTIALS).await;
 
     // A declared column the table does not have.
     #[derive(Clone, Serialize, ClickHouseRow)]
@@ -24,7 +24,7 @@ async fn schema_validation_startup_scenarios() {
         id: u64,
         nope: u64,
     }
-    let err = try_sink_with::<Owned<IdNope>>(&srv.url, "orders", "")
+    let err = try_sink_with::<Owned<IdNope>>(&srv.url, "orders", SERVER_CREDENTIALS)
         .await
         .expect_err("missing column");
     assert!(err.to_string().contains("`nope` does not exist"), "{err}");
@@ -35,7 +35,7 @@ async fn schema_validation_startup_scenarios() {
         id: u64,
         twice: u64,
     }
-    let err = try_sink_with::<Owned<IdTwice>>(&srv.url, "mat", "")
+    let err = try_sink_with::<Owned<IdTwice>>(&srv.url, "mat", SERVER_CREDENTIALS)
         .await
         .expect_err("non-insertable column");
     assert!(err.to_string().contains("MATERIALIZED"), "twice: {err}");
@@ -45,7 +45,7 @@ async fn schema_validation_startup_scenarios() {
         id: u64,
         al: u64,
     }
-    let err = try_sink_with::<Owned<IdAl>>(&srv.url, "mat", "")
+    let err = try_sink_with::<Owned<IdAl>>(&srv.url, "mat", SERVER_CREDENTIALS)
         .await
         .expect_err("non-insertable column");
     assert!(err.to_string().contains("ALIAS"), "al: {err}");
@@ -55,7 +55,7 @@ async fn schema_validation_startup_scenarios() {
     struct IdOnly {
         id: u64,
     }
-    let err = try_sink_with::<Owned<IdOnly>>(&srv.url, "no_such_table", "")
+    let err = try_sink_with::<Owned<IdOnly>>(&srv.url, "no_such_table", SERVER_CREDENTIALS)
         .await
         .expect_err("missing table");
     assert!(err.to_string().contains("not found"), "{err}");
@@ -63,7 +63,7 @@ async fn schema_validation_startup_scenarios() {
     // Unconfigured table columns warn but pass; the server fills the
     // DEFAULT and the type default on insert. The insert column list is
     // narrower than the table, so the header describes a subset of it.
-    let sink = sink_with::<Owned<IdOnly>>(&srv.url, "extras", "").await;
+    let sink = sink_with::<Owned<IdOnly>>(&srv.url, "extras", SERVER_CREDENTIALS).await;
     let schema = sink.schema();
     let mut encoder = spate_clickhouse::ClickHouseEncoder::<Owned<IdOnly>>::with_schema(schema);
     let batch = encode_batch(&mut encoder, vec![IdOnly { id: 1 }], "extras-1").expect("encode");
@@ -115,7 +115,7 @@ async fn schema_validation_first_record_scenarios() {
         id: u64,
         amount: Option<f64>,
     }
-    let sink = sink_with::<Owned<Reordered>>(&srv.url, "orders", "").await;
+    let sink = sink_with::<Owned<Reordered>>(&srv.url, "orders", SERVER_CREDENTIALS).await;
     let schema = sink.schema();
     let mut encoder = spate_clickhouse::ClickHouseEncoder::<Owned<Reordered>>::with_schema(schema);
     let batch = encode_batch(
@@ -142,7 +142,7 @@ async fn schema_validation_first_record_scenarios() {
 
     // The same struct against declared order [id, name, amount]: the
     // positional wire contract breaks, and the first record says so.
-    let sink = sink_with::<Owned<Order>>(&srv.url, "orders", "").await;
+    let sink = sink_with::<Owned<Order>>(&srv.url, "orders", SERVER_CREDENTIALS).await;
     let schema = sink.schema();
     let mut encoder = spate_clickhouse::ClickHouseEncoder::<Owned<Reordered>>::with_schema(schema);
     let err = encode_batch(
@@ -168,7 +168,7 @@ async fn schema_validation_first_record_scenarios() {
         id: u64,
         x: i32,
     }
-    let sink = sink_with::<Owned<I32X>>(&srv.url, "dt_col", "").await;
+    let sink = sink_with::<Owned<I32X>>(&srv.url, "dt_col", SERVER_CREDENTIALS).await;
     let schema = sink.schema();
     let mut encoder = spate_clickhouse::ClickHouseEncoder::<Owned<I32X>>::with_schema(schema);
     let err = encode_batch(&mut encoder, vec![I32X { id: 1, x: 100 }], "dt-1")
@@ -187,7 +187,7 @@ async fn schema_validation_first_record_scenarios() {
         name: String,
         amount: f64, // column is Nullable(Float64)
     }
-    let sink = sink_with::<Owned<PlainAmount>>(&srv.url, "orders", "").await;
+    let sink = sink_with::<Owned<PlainAmount>>(&srv.url, "orders", SERVER_CREDENTIALS).await;
     let schema = sink.schema();
     let mut encoder =
         spate_clickhouse::ClickHouseEncoder::<Owned<PlainAmount>>::with_schema(schema);
@@ -208,7 +208,7 @@ async fn schema_validation_first_record_scenarios() {
         id: u64,
         s: Option<String>, // column is plain String
     }
-    let sink = sink_with::<Owned<OptS>>(&srv.url, "plain_s", "").await;
+    let sink = sink_with::<Owned<OptS>>(&srv.url, "plain_s", SERVER_CREDENTIALS).await;
     let schema = sink.schema();
     let mut encoder = spate_clickhouse::ClickHouseEncoder::<Owned<OptS>>::with_schema(schema);
     let err = encode_batch(
@@ -229,7 +229,7 @@ async fn schema_validation_first_record_scenarios() {
         id: u64,
         lc: String,
     }
-    let sink = sink_with::<Owned<LcRow>>(&srv.url, "lowcard", "").await;
+    let sink = sink_with::<Owned<LcRow>>(&srv.url, "lowcard", SERVER_CREDENTIALS).await;
     let schema = sink.schema();
     let mut encoder = spate_clickhouse::ClickHouseEncoder::<Owned<LcRow>>::with_schema(schema);
     let batch = encode_batch(
@@ -275,7 +275,7 @@ async fn schema_validation_first_record_scenarios() {
             .expect("read back")
     };
 
-    let sink = sink_with::<Owned<Scale4>>(&srv.url, "dec_col", "").await;
+    let sink = sink_with::<Owned<Scale4>>(&srv.url, "dec_col", SERVER_CREDENTIALS).await;
     let schema = sink.schema();
     let mut encoder = spate_clickhouse::ClickHouseEncoder::<Owned<Scale4>>::with_schema(schema);
     let err = encode_batch(
@@ -296,7 +296,7 @@ async fn schema_validation_first_record_scenarios() {
     // The agreeing scale encodes and stores the value. Without the check
     // above, the same row against a scale-2 column stores 150 rather than
     // 1.5: same width, so nothing on the wire objects.
-    let sink = sink_with::<Owned<Scale2>>(&srv.url, "dec_col", "").await;
+    let sink = sink_with::<Owned<Scale2>>(&srv.url, "dec_col", SERVER_CREDENTIALS).await;
     let schema = sink.schema();
     let mut encoder = spate_clickhouse::ClickHouseEncoder::<Owned<Scale2>>::with_schema(schema);
     let batch = encode_batch(

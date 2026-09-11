@@ -22,8 +22,6 @@ struct NestedRow {
     tags_value: Vec<String>,
 }
 
-const TAG: &str = "26.3";
-
 fn ddl(table: &str) -> String {
     format!(
         "CREATE TABLE {table} (id UInt64, tags Nested(key String, value String)) \
@@ -54,7 +52,7 @@ fn rows() -> Vec<NestedRow> {
 #[ignore = "requires Docker"]
 async fn nested_native_format_round_trips_through_a_real_server() {
     let password = "nested-native-secret";
-    let srv = bare_server(TAG, password).await;
+    let srv = bare_server(password).await;
     srv.admin
         .query(&ddl("nested_native"))
         .execute()
@@ -100,7 +98,7 @@ async fn nested_native_format_round_trips_through_a_real_server() {
 #[ignore = "requires Docker"]
 async fn nested_rowbinary_format_round_trips_through_a_real_server() {
     let password = "nested-rowbinary-secret";
-    let srv = bare_server(TAG, password).await;
+    let srv = bare_server(password).await;
     srv.admin
         .query(&ddl("nested_rowbinary"))
         .execute()

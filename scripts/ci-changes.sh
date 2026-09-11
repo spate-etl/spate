@@ -227,6 +227,34 @@ bench_shards_json() {
     printf '%s]\n' "$out"
 }
 
+# The ClickHouse lanes needing a job of their own, as `strategy.matrix.include`
+# entries. Takes the selected suite list; empty unless spate-clickhouse is in it.
+#
+# `container-image.sh --extra-lanes` decides which, so the lane names live in
+# `ci/clickhouse/` and adding or repointing one needs no edit here. It drops any
+# lane resolving to the primary lane's image, which `containers` has run already.
+#
+# Lane names come from directory names under a CODEOWNERS path, and the emitted
+# document is one line for the same reason the bench shards are.
+#
+# Sets `clickhouse_lanes` as a global. The `note:` line goes to stdout beside
+# every other one, which a captured return value would swallow.
+set_clickhouse_lanes() { # selected suites
+    local lane out="[" first=1
+    clickhouse_lanes="[]"
+    case " $1 " in
+    *" spate-clickhouse "*) ;;
+    *) return ;;
+    esac
+    for lane in $(./scripts/container-image.sh --extra-lanes clickhouse); do
+        [[ "$first" -eq 1 ]] || out+=","
+        out+="{\"lane\":\"$lane\"}"
+        first=0
+    done
+    clickhouse_lanes="$out]"
+    echo "note: ClickHouse lanes needing their own job: $clickhouse_lanes"
+}
+
 # ---------------------------------------------------------------------------
 # Self-test: assert the tables above still match the real dependency graph.
 #
@@ -677,6 +705,7 @@ if len(set(keys)) != len(keys):
         list=$(mktemp)
         printf '%s\0' "$@" >"$list"
         env -u PR_LABELS -u EVENT_NAME GITHUB_OUTPUT="$dest" \
+            SPATE_CI_ROOT="${SPATE_CI_ROOT:-ci}" \
             "$0" --classify-paths "$list" >/dev/null
         rm -f "$list"
     }
@@ -868,6 +897,72 @@ if len(set(keys)) != len(keys):
             path_case_failed=1
         fi
     }
+    # The pinned server images. A lane bump reaches the ClickHouse suite and
+    # nothing else, and the lane matrix drops any lane the `containers` job
+    # already covers.
+    check_lanes() { # want_args, want_lanes, desc, paths...
+        local want_args="$1" want_lanes="$2" desc="$3"
+        shift 3
+        local out got_args got_lanes
+        out=$(mktemp)
+        classify_into "$out" "$@"
+        got_args=$(sed -n 's/^container-args=//p' "$out")
+        got_lanes=$(sed -n 's/^clickhouse-lanes=//p' "$out")
+        rm -f "$out"
+        if [[ "$got_args" != "$want_args" || "$got_lanes" != "$want_lanes" ]]; then
+            echo "::error::$desc: expected container-args='$want_args' clickhouse-lanes='$want_lanes',"
+            echo "got container-args='$got_args' clickhouse-lanes='$got_lanes' for: $*"
+            path_case_failed=1
+        fi
+    }
+    # Against a fixture tree, so a bump moving a real pin cannot fail this. The
+    # lanes each carry a distinct image, which is the shape a diverged `stable`
+    # produces and the one a live-pin expectation would have broken on.
+    lane_fixture=$(mktemp -d)
+    mkdir -p "$lane_fixture/clickhouse/lts" \
+        "$lane_fixture/clickhouse/lts-previous" \
+        "$lane_fixture/clickhouse/stable"
+    echo "lts" >"$lane_fixture/clickhouse/PRIMARY"
+    for pair in "lts:9.4.1.2" "lts-previous:9.1.7.3" "stable:9.5.0.1"; do
+        printf 'FROM vendor/db:%s@sha256:%s\n' "${pair#*:}" \
+            "$(printf '0%.0s' $(seq 1 64))" \
+            >"$lane_fixture/clickhouse/${pair%%:*}/Dockerfile"
+    done
+    SPATE_CI_ROOT="$lane_fixture" \
+        check_lanes "-p spate -p spate-clickhouse" \
+        '[{"lane":"lts-previous"},{"lane":"stable"}]' \
+        "a lane bump selects the ClickHouse suite alone, on every lane that differs" \
+        ci/clickhouse/stable/Dockerfile
+    rm -rf "$lane_fixture"
+
+    check_lanes "-p spate -p spate-s3" "[]" \
+        "an unrelated suite carries no lanes" \
+        crates/spate-s3/src/lib.rs
+
+    # The Dependabot deferral empties every suite. An image bump is the one
+    # diff it exempts, since the bump is what the suite checks. Driven through
+    # the environment: `--classify-paths` leaves PR_AUTHOR unset.
+    check_lanes_as_dependabot() { # want_containers, desc, paths...
+        local want="$1" desc="$2"
+        shift 2
+        local out list got
+        out=$(mktemp)
+        list=$(mktemp)
+        printf '%s\0' "$@" >"$list"
+        env -u PR_LABELS EVENT_NAME=pull_request PR_AUTHOR='dependabot[bot]' \
+            GITHUB_OUTPUT="$out" "$0" --classify-paths "$list" >/dev/null
+        got=$(sed -n 's/^containers=//p' "$out")
+        rm -f "$out" "$list"
+        if [[ "$got" != "$want" ]]; then
+            echo "::error::$desc: expected containers=$want, got containers=$got for: $*"
+            path_case_failed=1
+        fi
+    }
+    check_lanes_as_dependabot true "a dependabot image bump still runs its suite" \
+        ci/clickhouse/lts/Dockerfile
+    check_lanes_as_dependabot false "a dependabot lockfile bump stays deferred" \
+        Cargo.lock
+
     check_manifests_env false "an empty push diff selects nothing" "$(git rev-parse HEAD)"
     check_manifests_env true "the zero SHA fails closed" "0000000000000000000000000000000000000000"
     check_manifests_env true "an unreachable before fails closed" "4242424242424242424242424242424242424242"
@@ -978,6 +1073,10 @@ bench=false
 bench_pkgs=""
 suites=""
 semver_pkgs=""
+# The suites reached by a change under `ci/`, where the pinned server images
+# live. Held separately from `suites` because the Dependabot deferral below
+# empties that list, and an image bump is exempt from it.
+image_suites=""
 
 if [[ "$force_all" == "1" ]]; then
     rust=true
@@ -1046,6 +1145,12 @@ else
             crate="${file#crates/}"
             crate="${crate%%/*}"
             suites="$suites $(container_suites_for "$crate")"
+            ;;
+        # The pinned server image one suite runs against. Reaches that suite
+        # alone; booting Kafka, NATS and SeaweedFS for it proves nothing.
+        ci/clickhouse/*)
+            image_suites="$image_suites $(container_suites_for spate-clickhouse)"
+            suites="$suites $image_suites"
             ;;
         # A dependency or lint change moves the whole graph. So does a change to
         # the workflows, the composite action, the Makefile the workflow steps
@@ -1133,6 +1238,13 @@ fi
 if [[ "${PR_AUTHOR:-}" == "dependabot[bot]" && "${EVENT_NAME:-}" == "pull_request" ]]; then
     echo "note: dependabot pull request; container suites deferred to push-to-main."
     suites=""
+    # A bump to a pinned server image changes what the container suite runs
+    # against, so deferring it defers the only check that would object. The
+    # argument above covers a lockfile diff, which this is not.
+    if [[ -n "$image_suites" ]]; then
+        echo "note: the diff pins a server image; its suites run here anyway."
+        suites="$image_suites"
+    fi
 fi
 
 # The release pull request release.yml opens is the same trade: its diff is
@@ -1196,6 +1308,9 @@ for pkg in $container_pkgs; do
     container_args="$container_args -p $pkg"
 done
 container_args="${container_args# }"
+
+# Which ClickHouse lanes need a job beyond the `lts` one `containers` runs.
+set_clickhouse_lanes "$container_pkgs"
 
 # ---------------------------------------------------------------------------
 # Manifest reach, for the publish dry-run and minimal-versions gates.
@@ -1269,4 +1384,5 @@ fi
     # file, so a multi-line value would need heredoc delimiters and a value
     # containing the delimiter is a known output-injection vector.
     echo "bench-shards=$bench_shards"
+    echo "clickhouse-lanes=$clickhouse_lanes"
 } | tee -a "${GITHUB_OUTPUT:-/dev/stdout}"

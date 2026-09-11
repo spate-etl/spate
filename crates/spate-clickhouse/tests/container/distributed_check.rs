@@ -10,7 +10,7 @@
 //      out of `system.tables` and agrees (or, on drift, disagrees with a
 //      diff naming both expressions).
 //
-// The stock 26.3 image ships a handful of single-shard clusters in its
+// The stock image ships a handful of single-shard clusters in its
 // default `remote_servers` (e.g. `default` / `test_shard_localhost`); the
 // guard tests build their `Distributed` table over whichever one is present,
 // so a single container is enough, with no cluster wiring required.
@@ -80,7 +80,7 @@ distributed_check:
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn server_hash_parity_holds_for_string_and_u64_keys() {
-    let srv = bare_server("26.3", PW).await;
+    let srv = bare_server(PW).await;
 
     // `hex()` renders the 64-bit hash as 16 uppercase hex digits, which is
     // what `{:016X}` produces from our computed hash, so the two sides are
@@ -126,7 +126,7 @@ async fn server_hash_parity_holds_for_string_and_u64_keys() {
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn distributed_check_passes_against_a_real_distributed_table() {
-    let srv = bare_server("26.3", PW).await;
+    let srv = bare_server(PW).await;
     let cluster = single_shard_cluster(&srv.admin).await;
 
     srv.admin
@@ -162,7 +162,7 @@ async fn distributed_check_passes_against_a_real_distributed_table() {
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn drifted_sharding_expression_fails_against_a_real_table() {
-    let srv = bare_server("26.3", PW).await;
+    let srv = bare_server(PW).await;
     let cluster = single_shard_cluster(&srv.admin).await;
 
     srv.admin

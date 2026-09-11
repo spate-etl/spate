@@ -35,7 +35,7 @@ fn row(id: u8) -> DriftRow {
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn a_same_width_alter_is_rejected_rather_than_silently_miswritten() {
-    let srv = bare_server("26.3", "drift-secret").await;
+    let srv = bare_server("drift-secret").await;
     srv.admin.query(DDL).execute().await.expect("ddl");
 
     let sink = sink_with::<Owned<DriftRow>>(

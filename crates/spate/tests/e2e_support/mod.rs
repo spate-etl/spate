@@ -99,14 +99,13 @@ impl Harness {
         let kafka_port = kafka.get_host_port_ipv4(KAFKA_PORT).expect("kafka port");
         let brokers = format!("127.0.0.1:{kafka_port}");
 
-        // Pinned modern ClickHouse with a password; the stock module image
-        // (23.3-alpine, no auth) is unrepresentative of production.
-        let ch = GenericImage::new("clickhouse/clickhouse-server", "26.3")
+        // The same pinned server the ClickHouse suite runs, fetched by digest
+        // and re-tagged so this starts the pinned bytes.
+        let (ch_image, ch_tag) = pinned_clickhouse();
+        let ch = GenericImage::new(&ch_image, &ch_tag)
             .with_env_var("CLICKHOUSE_PASSWORD", CH_PASSWORD)
             .start()
-            .expect(
-                "start ClickHouse container (first run pulls clickhouse/clickhouse-server:26.3)",
-            );
+            .unwrap_or_else(|e| panic!("start ClickHouse container {ch_image}:{ch_tag}: {e}"));
         let ch_port = ch.get_host_port_ipv4(8123).expect("clickhouse port");
         let ch_url = format!("http://127.0.0.1:{ch_port}");
         // GenericImage has no ready condition; /ping is unauthenticated
@@ -513,6 +512,32 @@ impl RunningPipeline {
 }
 
 // ── Plumbing ───────────────────────────────────────────────────────────
+
+/// The ClickHouse image the selected lane pins, pulled by digest and re-tagged,
+/// as `name` and `tag`.
+///
+/// Shells out to `scripts/container-image.sh`, so the pin has one parser and
+/// cannot drift between this crate and `spate-clickhouse`.
+fn pinned_clickhouse() -> (String, String) {
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("scripts/container-image.sh");
+    let out = Command::new(&script)
+        .args(["--pull", "clickhouse"])
+        .output()
+        .unwrap_or_else(|e| panic!("run {}: {e}", script.display()));
+    assert!(
+        out.status.success(),
+        "{} --pull clickhouse failed: {}",
+        script.display(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let reference = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    let (name, tag) = reference
+        .rsplit_once(':')
+        .unwrap_or_else(|| panic!("no tag in {reference}"));
+    (name.to_owned(), tag.to_owned())
+}
 
 fn docker(args: &[&str]) {
     let out = Command::new("docker")

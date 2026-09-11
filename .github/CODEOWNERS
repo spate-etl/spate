@@ -15,8 +15,13 @@
 
 # CI definitions, the composite action, and the changed-path classifier that
 # decides which jobs run at all.
+#
+# `/ci/` holds the pinned server images the container suites run against. Which
+# server a suite proves its claims on is the same kind of decision as which job
+# runs at all, and Dependabot is what edits those files.
 /.github/               @MarcusKainth
 /scripts/               @MarcusKainth
+/ci/                    @MarcusKainth
 
 # Supply-chain surface: the license/advisory/bans policy, the resolved graph
 # every gate is evaluated against, and the generated attribution inventory.

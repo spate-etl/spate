@@ -199,13 +199,34 @@ test('the facet values written into the markup match the facets offered', () => 
 // Show classes — rule 3
 // ---------------------------------------------------------------------------
 
-test('rule 3: realistic is the only class on by default', () => {
+test('rule 3: both publishable classes are on by default, stripped is not', () => {
   const classes = showClassesFor(['realistic', 'stripped', 'tuned']);
   assert.deepEqual(
     classes.filter((c) => c.on).map((c) => c.id),
-    ['realistic'],
-    'the contract says the site defaults every chart to realistic',
+    ['realistic', 'tuned'],
+    'the contract shows every system at its measured best, labelled',
   );
+  assert.deepEqual(
+    classes.filter((c) => !c.on).map((c) => c.id),
+    ['stripped'],
+    'code the project does not ship, or a dropped guarantee, stays off by default',
+  );
+});
+
+test('rule 3: a tuned arm is ranked, plotted and shown, and only stripped is not', () => {
+  const tuned = armWith('ok', 'tuned');
+  assert.equal(unrankedBecause(tuned), '', 'tuned is headline-eligible');
+  assert.equal(isPlotted(tuned), true);
+  assert.equal(showClassOf(tuned), 'tuned');
+
+  const stripped = armWith('ok', 'stripped');
+  assert.equal(
+    unrankedBecause(stripped),
+    'stripped',
+    'unshipped code and dropped guarantees stay out of the ranking, ours included',
+  );
+
+  assert.equal(unrankedBecause(armWith('infra_bound', 'tuned')), 'infra-bound');
 });
 
 test('show classes keep their documented order and only offer what is present', () => {

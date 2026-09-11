@@ -11,7 +11,7 @@ import {headlineLanes, vendorLane} from './benchmark';
 type Props = {rows: Row[]; entrants: Entrant[]; environments: Env[]; basePath: string};
 
 export function BenchmarkEvidence({rows, entrants, environments, basePath}: Props): React.JSX.Element | null {
-  const lanes = headlineLanes(rows);
+  const lanes = headlineLanes(rows, entrants);
   if (!lanes.length) return (
     <figure className="home-hero__chart">
       <figcaption className="home-hero__chart-cap">

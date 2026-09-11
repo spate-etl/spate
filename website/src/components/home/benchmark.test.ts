@@ -17,16 +17,41 @@ const row = (id: string, value: number, overrides: Partial<Row> = {}): Row => ({
 
 test('summary uses the same best eligible configuration as the chart', () => {
   const best = row('renamed-vendor', 200);
+  const entrants = [entrant('renamed-vendor', 'self'), entrant('competitor')];
   const rows = [row('renamed-vendor', 100), best, row('competitor', 150),
     row('renamed-vendor', 900, {status: 'infra_bound'}),
     row('renamed-vendor', 800, {approach: 'tuned'}),
     row('renamed-vendor', 700, {approach: 'stripped'}),
     row('renamed-vendor', 600, {metrics: {}})];
   const original = structuredClone(rows);
-  const lanes = headlineLanes(rows);
+  const lanes = headlineLanes(rows, entrants);
   assert.deepEqual(lanes.map((r) => r.metrics[PRIMARY].value), [200, 150]);
-  assert.equal(vendorLane(lanes, [entrant('renamed-vendor', 'self'), entrant('competitor')]), best);
+  assert.equal(vendorLane(lanes, entrants), best);
   assert.deepEqual(rows, original);
+});
+
+test('the vendor lane is held to realistic while competitors show their tuned best', () => {
+  const entrants = [entrant('vendor', 'self'), entrant('competitor')];
+  const lanes = headlineLanes(
+    [row('vendor', 200), row('vendor', 800, {approach: 'tuned'}),
+      row('competitor', 150), row('competitor', 600, {approach: 'tuned'})],
+    entrants,
+  );
+  assert.deepEqual(
+    lanes.map((r) => [r.entrant, r.metrics[PRIMARY].value, r.approach]),
+    [['vendor', 200, 'realistic'], ['competitor', 600, 'tuned']],
+  );
+  assert.equal(vendorLane(lanes, entrants)?.approach, 'realistic');
+});
+
+test('a vendor with no realistic result in the group gets no lane rather than a tuned one', () => {
+  const entrants = [entrant('vendor', 'self'), entrant('competitor')];
+  const lanes = headlineLanes(
+    [row('vendor', 800, {approach: 'tuned'}), row('competitor', 150)],
+    entrants,
+  );
+  assert.deepEqual(lanes.map((r) => r.entrant), ['competitor']);
+  assert.equal(vendorLane(lanes, entrants), undefined);
 });
 
 test('vendor metadata determines the summary independently of names and entrant ids', () => {

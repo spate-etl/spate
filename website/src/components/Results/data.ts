@@ -216,7 +216,7 @@ export const PRIMARY = PRIMARY_COLUMN;
  */
 export function unrankedBecause(r: Row): string {
   if (r.status === 'infra_bound') return 'infra-bound';
-  if (r.approach !== 'realistic') return r.approach;
+  if (r.approach === 'stripped') return r.approach;
   return '';
 }
 
@@ -228,8 +228,8 @@ export const isRanked = (r: Row) => unrankedBecause(r) === '';
  * Ranking and positioning are different permissions and conflating them costs
  * the page something either way.
  *
- * A `tuned` or `stripped` arm's number is sound; what is wrong with it is the
- * configuration, not the measurement. Rule 3 bars it from the headline, and
+ * A `stripped` arm's number is sound; what is wrong with it is the
+ * configuration, not the measurement. Rule 3 bars it from the ranking, and
  * METHODOLOGY's stated purpose for the category is that "the delta quantifies"
  * a specific effect — which a reader cannot see if the arm is exiled to a list
  * below the chart. So it is positioned on the same axis, in an outline mark,

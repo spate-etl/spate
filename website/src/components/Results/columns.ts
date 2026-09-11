@@ -306,12 +306,12 @@ export function facetsOf(entrants: FacetSource[]): Facet[] {
 /** The class that decides whether an arm is shown: its declared approach. */
 export const REALISTIC = 'realistic';
 
+/** The approaches rule 3 publishes by default. */
+const PUBLISHED = new Set(['realistic', 'tuned']);
+
 /**
- * Rule 3 of the fairness contract states that the site "defaults every chart to
- * realistic". That is the default below because the contract says so, not
- * because it flatters anything — and everything else is one click away and
- * never hidden from a reader who asks. `tuned` and `stripped` exist precisely to
- * quantify an effect, so a reader who wants the delta can have it.
+ * Rule 3 of the fairness contract publishes `realistic` and `tuned` by default.
+ * `stripped` is one click away and never hidden from a reader who asks.
  *
  * These are APPROACHES — what the descriptor declared the configuration to be —
  * and nothing else belongs here. `infra-bound` used to, and being an unticked
@@ -323,8 +323,8 @@ export const REALISTIC = 'realistic';
 const SHOW_ORDER = ['realistic', 'tuned', 'stripped'];
 
 const SHOW_GLOSS: Record<string, string> = {
-  realistic: 'headline-eligible',
-  tuned: 'rule-1 compliant, but not a configuration a typical user would deploy',
+  realistic: 'what a competent user would deploy',
+  tuned: 'not a configuration a typical user would deploy',
   stripped: 'uses code the system does not ship, or drops a guarantee',
   undeclared: 'the descriptor did not say, which validation should have caught',
 };
@@ -346,6 +346,6 @@ export function showClassesFor(present: Iterable<string>): ShowClass[] {
   return [...known, ...extra].map((id) => ({
     id,
     gloss: SHOW_GLOSS[id] ?? 'not a class this site has a description for',
-    on: id === REALISTIC,
+    on: PUBLISHED.has(id),
   }));
 }

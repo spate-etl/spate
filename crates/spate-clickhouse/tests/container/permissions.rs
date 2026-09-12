@@ -146,8 +146,7 @@ distributed_check:
         .await
     };
 
-    // The grant the page used to name. The row stays filtered out, so the
-    // guard reports the table as absent.
+    // The row stays filtered out, so the guard reports the table as absent.
     let err = guard("sys_reader")
         .await
         .expect_err("SELECT ON system.tables must not reveal the Distributed table");
@@ -170,6 +169,16 @@ distributed_check:
     let err = guard("no_clusters")
         .await
         .expect_err("the topology read needs SELECT ON system.clusters");
+    assert!(
+        matches!(
+            err,
+            spate_clickhouse::DistributedCheckError::Fetch {
+                what: "cluster topology",
+                ..
+            }
+        ),
+        "the topology read should be refused for lack of the grant, got: {err}"
+    );
     assert!(
         err.to_string().contains("system.clusters"),
         "the failure must name the grant it lacks: {err}"

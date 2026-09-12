@@ -223,11 +223,16 @@ ci-lint: zizmor shellcheck self-test check-perf-report check-gungraun-benches ch
 
 ##@ Fuzz
 
+# The nightly the fuzz targets build under. A dated channel and the bare one
+# are different toolchains to rustup, so a pinned build has to pass the name it
+# installed.
+NIGHTLY ?= nightly
+
 fuzz-install: ## Install cargo-fuzz at the pinned version
 	cargo install cargo-fuzz --locked --version $(CARGO_FUZZ_VERSION)
 
 fuzz-build: ## Build every fuzz target
-	cargo +nightly fuzz build
+	cargo +$(NIGHTLY) fuzz build
 
 SECS ?= 60
 
@@ -236,7 +241,7 @@ SECS ?= 60
 # the committed seeds alone.
 fuzz: ## Fuzz one target: make fuzz TARGET=avro_wire_confluent SECS=60
 	mkdir -p fuzz/corpus/$(TARGET) fuzz/target/corpus/$(TARGET)
-	cargo +nightly fuzz run "$(TARGET)" fuzz/target/corpus/$(TARGET) \
+	cargo +$(NIGHTLY) fuzz run "$(TARGET)" fuzz/target/corpus/$(TARGET) \
 	  fuzz/corpus/$(TARGET) -- -max_total_time="$(SECS)"
 
 ##@ Docs

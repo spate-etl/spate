@@ -74,6 +74,23 @@ updates:
       semver-major-days: 14
     # No group: nothing here releases in the lockstep that would justify one.
 
+  # --------------------------------------------------- Rust (the nightly) ----
+  # The dated nightly every job needing one installs. Nothing else moves it:
+  # no workflow here pushes to git.
+  #
+  # No cooldown. This ecosystem's releases carry no date, so the check has
+  # nothing to compare and never holds a bump back. The weekly schedule is the
+  # whole pacing.
+  - package-ecosystem: rust-toolchain
+    directory: "/.github/toolchains/nightly"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 1
+    labels: ["dependencies", "area: ci"]
+    commit-message:
+      prefix: "chore(ci)"
+
   # ------------------------------------------------------- GitHub Actions ----
   - package-ecosystem: github-actions
     # `/` reaches `.github/workflows/` and nothing else. A composite action's

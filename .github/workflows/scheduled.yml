@@ -208,9 +208,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: ./.github/actions/setup-rust
+      - id: rust
+        uses: ./.github/actions/setup-rust
         with:
-          toolchain: nightly
+          toolchain-file: .github/toolchains/nightly/rust-toolchain.toml
           shared-key: fuzz
 
       - run: make fuzz-install
@@ -227,9 +228,12 @@ jobs:
 
       - name: Build every fuzz target
         id: build
+        # `+nightly` would name the floating channel and resolve past the pin.
+        env:
+          NIGHTLY: ${{ steps.rust.outputs.toolchain }}
         run: |
           set -euo pipefail
-          cargo +nightly fuzz list >targets.txt
+          cargo "+$NIGHTLY" fuzz list >targets.txt
           targets=$(wc -l <targets.txt)
           if [[ "$targets" -eq 0 ]]; then
             echo "::error::the fuzz crate declares no target; this run proved nothing"
@@ -240,6 +244,8 @@ jobs:
 
       - name: Fuzz every target
         id: run
+        env:
+          NIGHTLY: ${{ steps.rust.outputs.toolchain }}
         run: |
           set -euo pipefail
           targets=$(wc -l <targets.txt)
@@ -249,7 +255,7 @@ jobs:
           while IFS= read -r target; do
             [[ -n "$target" ]] || continue
             echo "::group::$target"
-            if ! cargo +nightly fuzz run "$target" -- \
+            if ! cargo "+$NIGHTLY" fuzz run "$target" -- \
               -max_total_time="$MAX_TOTAL_TIME" -print_final_stats=1; then
               crashed="$crashed $target"
             fi
@@ -291,6 +297,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          # The reader reproduces under the toolchain the crash was found on.
+          # Sanitizer codegen moves between nightlies, and a floating channel
+          # can fail to reproduce it.
+          NIGHTLY: ${{ steps.rust.outputs.toolchain }}
         run: |
           set -euo pipefail
           title='A fuzz target found a crashing input'
@@ -314,7 +324,7 @@ jobs:
               'Reproduce it against the downloaded file:' \
               '' \
               '```sh' \
-              'cargo +nightly fuzz run <target> <path-to-the-input>' \
+              "cargo +${NIGHTLY} fuzz run <target> <path-to-the-input>" \
               '```' \
               '' \
               'A panic on malformed bytes is a bug in the decoder, so the fix' \
@@ -340,7 +350,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-rust
         with:
-          toolchain: nightly
+          toolchain-file: .github/toolchains/nightly/rust-toolchain.toml
           shared-key: minimal-versions
       - name: Resolve every direct dependency to its declared floor
         id: resolve
@@ -601,6 +611,86 @@ jobs:
   # ===========================================================================
   # WEEKLY
   # ===========================================================================
+  beta:
+    name: Build and test on beta
+    runs-on: ubuntu-latest
+    needs: plan
+    if: needs.plan.outputs.weekly == 'true'
+    # Uncached, so both steps build from cold, librdkafka and OpenSSL included.
+    timeout-minutes: 60
+    # Every other Rust job takes whatever `stable` resolves to on the day, so a
+    # toolchain regression reaches `main` and every open pull request in the
+    # same hour. Beta is that release about six weeks early. Beta publishes
+    # roughly every six days, so a weekly run still leaves about five weeks.
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          toolchain: beta
+          components: clippy
+          tools: nextest@0.9.140
+          # No shared key. An entry keyed on beta's compiler shares nothing
+          # with the stable trees and would evict them from the 10 GB budget.
+
+      # A new clippy lint is the most common way a release reds this
+      # repository, and `make clippy` denies warnings. A compile break stops
+      # the run here, where `make test` would report the same error again.
+      - id: clippy
+        run: make clippy
+      - id: test
+        run: make test
+
+      # Gated on the named steps, not `failure()`: a checkout or toolchain
+      # failure would file an issue asserting beta breaks the tree.
+      #
+      # Neither title's words are a subset of the other's. The search below is
+      # an unquoted AND over the title's terms, so a title contained in another
+      # would comment on the wrong issue.
+      - name: Report the failure as an issue
+        if: >-
+          failure() &&
+          (steps.clippy.conclusion == 'failure' ||
+           steps.test.conclusion == 'failure')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          CLIPPY_FAILED: ${{ steps.clippy.conclusion == 'failure' }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2016
+          if [ "$CLIPPY_FAILED" = "true" ]; then
+            title='Clippy fails on the beta toolchain'
+            body_head='`make clippy` failed on beta. Once beta becomes stable this'
+            body_head2='blocks every pull request, because the lint job denies warnings.'
+          else
+            title='Tests fail on the beta toolchain'
+            body_head='`make test` failed on beta while `make clippy` passed.'
+            body_head2='Clippy stops at the check build, so this is codegen, linking or behavior.'
+          fi
+          existing=$(gh issue list --state open --search "$title in:title" \
+            --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "Still failing: ${RUN_URL}"
+            exit 0
+          fi
+          # shellcheck disable=SC2016
+          gh issue create --title "$title" --body "$(
+            printf '%s\n' \
+              "$body_head" \
+              "$body_head2" \
+              '' \
+              "Run: ${RUN_URL}" \
+              '' \
+              'Beta reaches stable within six weeks, at which point this' \
+              'blocks every open pull request at once. The run log names the' \
+              'release it was found on.'
+          )"
+
   features-powerset:
     name: Feature powerset (exhaustive)
     runs-on: ubuntu-latest
@@ -802,9 +892,9 @@ jobs:
           fi
 
   # ===========================================================================
-  # Catch-all failure reporting. `advisories`, `minimal-versions` and `fuzz`
-  # file their own issues and are absent from `needs` below so they are not
-  # reported twice.
+  # Catch-all failure reporting. `attribution`, `advisories`, `fuzz`,
+  # `minimal-versions`, `publish-dry-run` and `beta` file their own issues and
+  # are absent from `needs` below so they are not reported twice.
   # ===========================================================================
   report:
     name: Report scheduled failures

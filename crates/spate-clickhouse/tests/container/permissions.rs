@@ -3,8 +3,10 @@
 // The permissions page tells an operator which grants to hand the writer, and
 // a claim there that is too generous costs a real deployment a grant it did
 // not need. `system.columns` is row-filtered by what the user can already see,
-// so `INSERT` on the target table is enough to introspect it. This holds that
-// page to a server rather than to reasoning.
+// so `INSERT` on the target table is enough to introspect it. `system.tables`
+// is filtered the same way, so the `distributed_check` guard reaches a
+// `Distributed` table through a grant on that table. This holds that page to a
+// server rather than to reasoning.
 
 use super::*;
 
@@ -71,5 +73,113 @@ async fn insert_alone_reaches_system_columns() {
     assert!(
         msg.contains("not found (or not visible to this user)"),
         "row filtering should read as an absent table, got: {msg}"
+    );
+}
+
+/// Three accounts against one `Distributed` table. `SELECT ON system.tables`
+/// leaves its row filtered out, `SHOW TABLES` on the table makes it visible,
+/// and the topology read needs `SELECT ON system.clusters`.
+///
+/// Regression for #415.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn distributed_check_sees_the_table_through_a_grant_on_it() {
+    let srv = bare_server("admin-secret").await;
+    let cluster = single_shard_cluster(&srv.admin).await;
+
+    let mut ddl = vec![
+        "CREATE TABLE orders (id UInt64, name String, amount Nullable(Float64)) \
+         ENGINE = MergeTree ORDER BY id"
+            .to_owned(),
+        format!(
+            "CREATE TABLE orders_dist AS orders ENGINE = \
+             Distributed('{cluster}', currentDatabase(), 'orders', xxHash64(name))"
+        ),
+    ];
+    for (user, grants) in [
+        (
+            "sys_reader",
+            ["SELECT ON system.clusters", "SELECT ON system.tables"].as_slice(),
+        ),
+        (
+            "obj_reader",
+            [
+                "SELECT ON system.clusters",
+                "SHOW TABLES ON default.orders_dist",
+            ]
+            .as_slice(),
+        ),
+        (
+            "no_clusters",
+            ["SHOW TABLES ON default.orders_dist"].as_slice(),
+        ),
+    ] {
+        ddl.push(format!("CREATE USER {user} IDENTIFIED BY '{user}-secret'"));
+        // Each account needs INSERT on the local table for the sink to build
+        // at all, before the guard runs.
+        ddl.push(format!("GRANT INSERT ON default.orders TO {user}"));
+        for grant in grants {
+            ddl.push(format!("GRANT {grant} TO {user}"));
+        }
+    }
+    for stmt in &ddl {
+        srv.admin.query(stmt).execute().await.expect("ddl");
+    }
+
+    let guard = async |user: &str| {
+        sink_with::<Owned<Order>>(
+            &srv.url,
+            "orders",
+            &format!(
+                r#"
+user: {user}
+password: {user}-secret
+distributed_check:
+  cluster: {cluster}
+  table: orders_dist
+  sharding_key: name
+"#
+            ),
+        )
+        .await
+        .validate_distributed()
+        .await
+    };
+
+    // The row stays filtered out, so the guard reports the table as absent.
+    let err = guard("sys_reader")
+        .await
+        .expect_err("SELECT ON system.tables must not reveal the Distributed table");
+    let spate_clickhouse::DistributedCheckError::Mismatch(msg) = &err else {
+        panic!("the topology read must succeed, leaving the table as the failure: {err}");
+    };
+    assert!(
+        msg.contains("`orders_dist`") && msg.contains("not found (or not visible to this user)"),
+        "row filtering should read as an absent Distributed table, got: {msg}"
+    );
+
+    // The grant the page names, holding nothing on `system.tables`.
+    guard("obj_reader")
+        .await
+        .expect("SHOW TABLES on the Distributed table must make its DDL readable");
+
+    // `system.clusters` is not reached by any object grant.
+    let err = guard("no_clusters")
+        .await
+        .expect_err("the topology read needs SELECT ON system.clusters");
+    let spate_clickhouse::DistributedCheckError::Fetch { what, reason, .. } = &err else {
+        panic!("the topology read should be refused for lack of the grant, got: {err}");
+    };
+    assert_eq!(
+        *what, "cluster topology",
+        "the guard failed at the wrong query"
+    );
+    assert!(
+        reason.contains("ACCESS_DENIED"),
+        "the server should refuse the read outright, got: {reason}"
+    );
+    assert!(
+        reason.contains("SELECT ON system.clusters"),
+        "the refusal should name the grant the page prescribes, got: {reason}"
     );
 }

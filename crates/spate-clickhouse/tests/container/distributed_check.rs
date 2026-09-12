@@ -32,23 +32,6 @@ struct IdName {
     name: String,
 }
 
-/// A single-shard cluster from the server's default `remote_servers`,
-/// preferring `default` when the image defines it. The DDL guard only reads
-/// `system.clusters`/`system.tables`, so the shard never has to be
-/// reachable; any single-shard cluster is a valid fixture.
-async fn single_shard_cluster(admin: &clickhouse::Client) -> String {
-    admin
-        .query(
-            "SELECT cluster FROM system.clusters \
-             GROUP BY cluster HAVING max(shard_num) = 1 \
-             ORDER BY cluster = 'default' DESC, cluster \
-             LIMIT 1",
-        )
-        .fetch_one::<String>()
-        .await
-        .expect("the stock image ships at least one single-shard cluster")
-}
-
 /// Build a sink whose `distributed_check` targets `dist_table` over
 /// `cluster`, keyed on `name` (expected DDL expression `xxHash64(name)`).
 async fn checked_sink(url: &str, cluster: &str, dist_table: &str) -> config::ClickHouseSink {

@@ -1,5 +1,5 @@
 ---
-description: "ClickHouse permissions list the grants the sink machinery needs: a minimal INSERT, plus SELECT on system tables for optional features."
+description: "ClickHouse permissions list the grants the sink machinery needs: a minimal INSERT, plus a SELECT on system.clusters and a grant on the Distributed table."
 ---
 
 # ClickHouse permissions
@@ -56,28 +56,30 @@ additional privilege.
 Some features read a system table beyond what the `INSERT` grant already
 exposes. The sink only ever **reads** them; it issues no DDL against them.
 
-:::note Reading `system.columns` needs no grant
-ClickHouse shows a user only the `system.columns` rows for objects it already
-holds a grant on. The writer holds `INSERT` on the target table, so it sees
-that table's columns and the schema fetch succeeds on that grant alone. A table
-the account has no grant on returns no rows, which the sink reports as a
-missing table.
+:::note Reading `system.columns` and `system.tables` needs no grant on them
+ClickHouse shows a user only the `system.columns` and `system.tables` rows for
+objects the user already holds a grant on. The writer's `INSERT` on the target
+table makes that table's columns visible to the schema fetch, and `SHOW TABLES`
+on the Distributed table makes its row visible to the `distributed_check`
+guard. An object the account holds no grant on returns no rows, and the sink
+reports that as a missing table.
 :::
 
 | Feature (config) | Extra grant | What the sink reads it for |
 |---|---|---|
-| `distributed_check:` block present | `SELECT ON system.clusters`, `SELECT ON system.tables` | Read cluster topology (shard count/weights) and the Distributed table's engine DDL to confirm the sink's routing matches the cluster. |
+| `distributed_check:` block present | `SELECT ON system.clusters`, plus a grant on the table `distributed_check.table` names (`SHOW TABLES` is enough) | Read cluster topology (shard count/weights) and the Distributed table's engine DDL to confirm the sink's routing matches the cluster. |
 
 ```sql
 -- Only if the distributed_check startup guard is enabled (see Distributed parity).
 GRANT SELECT ON system.clusters TO spate_writer;
-GRANT SELECT ON system.tables  TO spate_writer;
+-- system.tables shows the Distributed table's row only to an account holding a
+-- grant on that table. SHOW TABLES is enough.
+GRANT SHOW TABLES ON analytics.orders_dist TO spate_writer;
 ```
 
 The `distributed_check` guard reads from its `endpoint` (defaults to the first
 replica of shard 0; override it when the Distributed table lives on a front
-node). Grant its system-table `SELECT`s on whichever node serves that
-endpoint.
+node). Both grants above belong on whichever node serves that endpoint.
 
 ## A complete role-based grant
 
@@ -87,9 +89,9 @@ enabled). Run as an admin account that has `access_management` on each node:
 ```sql
 CREATE ROLE IF NOT EXISTS spate_sink;
 
-GRANT INSERT ON analytics.orders_local TO spate_sink;   -- on every shard node
-GRANT SELECT ON system.clusters        TO spate_sink;   -- distributed_check
-GRANT SELECT ON system.tables          TO spate_sink;   -- distributed_check
+GRANT INSERT ON analytics.orders_local     TO spate_sink;   -- on every shard node
+GRANT SELECT ON system.clusters            TO spate_sink;   -- distributed_check
+GRANT SHOW TABLES ON analytics.orders_dist TO spate_sink;   -- distributed_check
 
 CREATE USER IF NOT EXISTS spate_writer
     IDENTIFIED BY '...'

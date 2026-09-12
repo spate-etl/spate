@@ -20,7 +20,8 @@
 #
 #   {"spate_shard": {"package": "spate-json",
 #                    "features": "simd",
-#                    "baseline": "main @ 0123456789ab"}}
+#                    "baseline": "main @ 0123456789ab",
+#                    "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)"}}
 #
 #   package   the cargo package built, for the Shard column.
 #   features  the feature arm's label; the empty string (or an absent key)
@@ -29,6 +30,10 @@
 #             measured no baseline, and its rows read *no baseline* rather
 #             than *new*: one job's merge-base leg can fail while another's
 #             succeeds. An absent key falls back to <baseline-label>.
+#   rustc     the compiler both legs of that job ran under. Codegen moves a
+#             count, so a number read later needs it. Empty or absent renders
+#             nothing. Shards are separate jobs, so every distinct value is
+#             named.
 #
 # Without the stamp, `package` falls back to the last segment of `package_dir`
 # and the feature arm is left blank rather than guessed. Two rows that still
@@ -92,6 +97,16 @@ if [[ "${1:-}" == "--self-test" ]]; then
         '{"version":"6","spate_shard":{"package":"spate-json","features":"simd","baseline":"main @ 0123456789ab"},"package_dir":"/w/crates/spate-json","module_path":"decode_gungraun::decode::decode_value","id":"flat_record","profiles":[{"tool":"Callgrind","summaries":{"total":{"summary":{"Callgrind":{"Ir":{"metrics":{"Both":[{"Int":61000},{"Int":60000}]},"diffs":{"diff_pct":"1.67"}}}}}}}]}' \
         '{"version":"6","spate_shard":{"package":"spate-core","features":"default","baseline":""},"package_dir":"/w/crates/spate-core","module_path":"chain_gungraun::chain::forward","id":"one_stage","profiles":[{"tool":"Callgrind","summaries":{"total":{"summary":{"Callgrind":{"Ir":{"metrics":{"Left":{"Int":50000}}}}}}}}]}' \
         >"$tmp/matrix.jsonl"
+    # Two jobs that agree on the compiler, and two that disagree. Every
+    # distinct value is named, so a split matrix shows as one.
+    printf '%s\n' \
+        '{"version":"6","spate_shard":{"package":"spate-json","features":"default","baseline":"","rustc":"rustc 1.98.1 (48a229cea 2026-09-01)"},"package_dir":"/w/crates/spate-json","module_path":"decode_gungraun::decode::decode_value","id":"flat_record","profiles":[{"tool":"Callgrind","summaries":{"total":{"summary":{"Callgrind":{"Ir":{"metrics":{"Left":{"Int":100000}}}}}}}}]}' \
+        '{"version":"6","spate_shard":{"package":"spate-core","features":"default","baseline":"","rustc":"rustc 1.98.1 (48a229cea 2026-09-01)"},"package_dir":"/w/crates/spate-core","module_path":"chain_gungraun::chain::forward","id":"one_stage","profiles":[{"tool":"Callgrind","summaries":{"total":{"summary":{"Callgrind":{"Ir":{"metrics":{"Left":{"Int":50000}}}}}}}}]}' \
+        >"$tmp/stamped.jsonl"
+    printf '%s\n' \
+        '{"version":"6","spate_shard":{"package":"spate-json","features":"default","baseline":"","rustc":"rustc 1.98.1 (48a229cea 2026-09-01)"},"package_dir":"/w/crates/spate-json","module_path":"decode_gungraun::decode::decode_value","id":"flat_record","profiles":[{"tool":"Callgrind","summaries":{"total":{"summary":{"Callgrind":{"Ir":{"metrics":{"Left":{"Int":100000}}}}}}}}]}' \
+        '{"version":"6","spate_shard":{"package":"spate-core","features":"default","baseline":"","rustc":"rustc 1.99.0 (aaaaaaaaa 2026-10-13)"},"package_dir":"/w/crates/spate-core","module_path":"chain_gungraun::chain::forward","id":"one_stage","profiles":[{"tool":"Callgrind","summaries":{"total":{"summary":{"Callgrind":{"Ir":{"metrics":{"Left":{"Int":50000}}}}}}}}]}' \
+        >"$tmp/split-rustc.jsonl"
     # Two jobs that stamped themselves identically: an aggregation bug the
     # report has to name rather than average over.
     printf '%s\n' \
@@ -136,6 +151,17 @@ if [[ "${1:-}" == "--self-test" ]]; then
     if grep -q "Duplicate shard identity" "$tmp/report.md"; then
         fail_self "matrix fixture: distinct shards were reported as a collision"
     fi
+
+    # The compiler both legs ran under, named once when every shard agrees.
+    "$under_test" --regressions-out "$tmp/flag" "$tmp/stamped.jsonl" self-test >"$tmp/report.md"
+    count_is 1 "Built by rustc 1.98.1 (48a229cea 2026-09-01)." "stamped fixture"
+
+    "$under_test" --regressions-out "$tmp/flag" "$tmp/split-rustc.jsonl" self-test >"$tmp/report.md"
+    count_is 1 "Built by rustc 1.98.1 (48a229cea 2026-09-01), rustc 1.99.0 (aaaaaaaaa 2026-10-13)." "split-rustc fixture"
+
+    # An unstamped run names no compiler at all.
+    "$under_test" --regressions-out "$tmp/flag" "$tmp/matrix.jsonl" self-test >"$tmp/report.md"
+    count_is 0 "Built by" "matrix fixture"
 
     "$under_test" --regressions-out "$tmp/flag" "$tmp/collide.jsonl" self-test >"$tmp/report.md"
     grep -q "Duplicate shard identity" "$tmp/report.md" \
@@ -225,6 +251,7 @@ jq_defs='
     def shard_name:
         shard_package + (shard_features | if . == "" then "" else " (\(.))" end);
     def shard_baseline($fallback): .spate_shard.baseline // $fallback;
+    def shard_rustc: .spate_shard.rustc // "";
     # A bench with no comparison is new if its shard measured a baseline, and
     # uncompared if that shard produced none.
     def absent_label($fallback):
@@ -258,8 +285,12 @@ report=$(jq -r -s --arg base "$baseline_label" \
        then ($bases[0] | if . == "" then "no baseline" else . end)
        else "baseline" end) as $base_header
     | ([$rows[] | row_key] | group_by(.) | map(select(length > 1) | .[0])) as $dupes
+    | ([$rows[] | shard_rustc] | map(select(. != "")) | unique) as $rustcs
     | "## Instruction counts",
     "",
+    (if ($rustcs | length) > 0 then
+        "Built by \($rustcs | join(", ")).", ""
+     else empty end),
     "Callgrind instructions (`Ir`) per bench: pull request vs \($base_header).",
     "Advisory: numbers never block a merge; a bench that stops running does.",
     "A **bold** delta crossed a provisional threshold and syncs the",

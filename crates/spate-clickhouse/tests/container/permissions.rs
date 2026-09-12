@@ -150,14 +150,12 @@ distributed_check:
     let err = guard("sys_reader")
         .await
         .expect_err("SELECT ON system.tables must not reveal the Distributed table");
+    let spate_clickhouse::DistributedCheckError::Mismatch(msg) = &err else {
+        panic!("the topology read must succeed, leaving the table as the failure: {err}");
+    };
     assert!(
-        matches!(err, spate_clickhouse::DistributedCheckError::Mismatch(_)),
-        "the topology read must succeed, leaving the table as the failure: {err}"
-    );
-    assert!(
-        err.to_string()
-            .contains("not found (or not visible to this user)"),
-        "row filtering should read as an absent table, got: {err}"
+        msg.contains("`orders_dist`") && msg.contains("not found (or not visible to this user)"),
+        "row filtering should read as an absent Distributed table, got: {msg}"
     );
 
     // The grant the page names, holding nothing on `system.tables`.
@@ -169,18 +167,19 @@ distributed_check:
     let err = guard("no_clusters")
         .await
         .expect_err("the topology read needs SELECT ON system.clusters");
-    assert!(
-        matches!(
-            err,
-            spate_clickhouse::DistributedCheckError::Fetch {
-                what: "cluster topology",
-                ..
-            }
-        ),
-        "the topology read should be refused for lack of the grant, got: {err}"
+    let spate_clickhouse::DistributedCheckError::Fetch { what, reason, .. } = &err else {
+        panic!("the topology read should be refused for lack of the grant, got: {err}");
+    };
+    assert_eq!(
+        *what, "cluster topology",
+        "the guard failed at the wrong query"
     );
     assert!(
-        err.to_string().contains("system.clusters"),
-        "the failure must name the grant it lacks: {err}"
+        reason.contains("ACCESS_DENIED"),
+        "the server should refuse the read outright, got: {reason}"
+    );
+    assert!(
+        reason.contains("SELECT ON system.clusters"),
+        "the refusal should name the grant the page prescribes, got: {reason}"
     );
 }

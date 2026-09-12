@@ -128,8 +128,9 @@ verified form, where the check builds `xxHash64(<key>)` for you) or `sharding_ex
 `endpoint` defaults to the first replica of shard 0; override it when the
 `Distributed` table lives on a front node outside the `shards` list.
 
-The guard reads `system.clusters` and `system.tables` from that endpoint, so
-the sink account needs `SELECT` on both; see
+The guard reads `system.clusters` and `system.tables` from that endpoint. The
+sink account needs `SELECT ON system.clusters` there, plus a grant on the
+`Distributed` table so its `system.tables` row is visible; see
 [Permissions](./permissions.mdx#grants-by-feature).
 
 ### 4. The router
@@ -247,8 +248,8 @@ dedup tokens and the collapse pattern apply as usual. See
   deterministic.
 - [ClickHouse sink](./README.mdx) — the full config reference and
   [why the sink writes direct-to-shard](./README.mdx#why-direct-to-shard-not-a-distributed-table).
-- [Permissions](./permissions.mdx) — the `system.clusters` / `system.tables`
-  grants the `distributed_check` guard needs.
+- [Permissions](./permissions.mdx) — the grants the `distributed_check` guard
+  needs.
 - [ADR-0006](../../../../adr/0006-per-shard-sink-workers.md) — the routing seam and the
   two-tier router model.
 - [Performance tuning](./performance-tuning.mdx) — sizing shards, batches, and

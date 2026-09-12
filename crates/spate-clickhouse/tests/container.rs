@@ -379,6 +379,23 @@ async fn bare_server(password: &str) -> Server {
     }
 }
 
+/// A single-shard cluster from the server's default `remote_servers`,
+/// preferring `default` when the image defines it. The DDL guard only reads
+/// `system.clusters`/`system.tables`, so the shard never has to be
+/// reachable; any single-shard cluster is a valid fixture.
+async fn single_shard_cluster(admin: &clickhouse::Client) -> String {
+    admin
+        .query(
+            "SELECT cluster FROM system.clusters \
+             GROUP BY cluster HAVING max(shard_num) = 1 \
+             ORDER BY cluster = 'default' DESC, cluster \
+             LIMIT 1",
+        )
+        .fetch_one::<String>()
+        .await
+        .expect("the stock image ships at least one single-shard cluster")
+}
+
 /// Every shipped lane resolves to a ClickHouse image, and its manifest pins a
 /// digest beside the tag.
 #[test]

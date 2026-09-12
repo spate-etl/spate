@@ -139,7 +139,7 @@ above from what is left. The elected license ids are unaffected either way.
 | `cpufeatures` | 0.3.0 | `MIT` |
 | `crc-fast` | 1.10.0 | `MIT` |
 | `crc32fast` | 1.5.0 | `MIT` |
-| `crossbeam-channel` | 0.5.16 | `MIT` |
+| `crossbeam-channel` | 0.5.17 | `MIT` |
 | `crossbeam-epoch` | 0.9.20 | `MIT` |
 | `crossbeam-utils` | 0.8.21 | `MIT` |
 | `crypto-common` | 0.1.7 | `MIT` |

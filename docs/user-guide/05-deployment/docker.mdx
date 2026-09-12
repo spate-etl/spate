@@ -21,24 +21,9 @@ docker run -e KAFKA_BROKERS=broker:9092 -e CLICKHOUSE_URL=http://ch:8123 \
            -p 9090:9090 spate-pipeline
 ```
 
-The Dockerfile is two stages (lifted from
-[`examples/docker/Dockerfile`](repo:examples/docker/Dockerfile)):
+The Dockerfile is two stages:
 
-```dockerfile
-FROM rust:1.98.1-bookworm@sha256:9a73a5088750b4c95158ab26629c854c3d6fc4b173cb7bc8079ad252d8ed7bfa AS builder
-WORKDIR /build
-COPY . .
-RUN cargo build --release -p spate --example kafka_avro_to_clickhouse --features full \
-    && cp target/release/examples/kafka_avro_to_clickhouse /build/pipeline
-
-# Distroless: glibc + libgcc only, no shell, runs as nonroot (65532).
-FROM gcr.io/distroless/cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f
-COPY --from=builder /build/pipeline /usr/local/bin/pipeline
-COPY --from=builder /build/crates/spate/examples/kafka_avro_to_clickhouse.yaml /etc/spate/pipeline.yaml
-
-ENV SPATE_CONFIG=/etc/spate/pipeline.yaml
-EXPOSE 9090
-ENTRYPOINT ["/usr/local/bin/pipeline"]
+```dockerfile file=examples/docker/Dockerfile region=image
 ```
 
 Why this shape:

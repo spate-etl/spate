@@ -1,5 +1,5 @@
 /**
- * Render a fenced code block from a region of a compiled source file.
+ * Render a fenced code block from a region of a source file.
  *
  * A page names the source and the region on the info string and leaves the
  * fence empty:
@@ -16,9 +16,8 @@
  * own, so `# ANCHOR: x` in a YAML file beside an example works the same way.
  *
  * Nothing compiles a fenced block in an `.mdx` file, so a hand-written snippet
- * survives every gate this repository has. Anything under `crates/` is compiled
- * by `cargo clippy --workspace --all-targets`, which `make gates` runs. See
- * `docs/STYLE.md` § 10.
+ * survives every gate this repository has. The source a fence points at carries
+ * a check of its own. See `docs/STYLE.md` § 10.
  *
  * Every failure below throws, and there is no way to switch that off.
  *
@@ -37,8 +36,10 @@ const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
 // Which trees a page may quote from. `crates/` rather than
 // `crates/spate/examples/` because a trait definition worth quoting lives in a
 // connector's `src/`, and `clippy --workspace --all-targets` compiles all of it
-// alike. `docs/STYLE.md` § 10 states the editorial preference for an example.
-const ALLOWED_PREFIXES = ['crates/'];
+// alike. `examples/` holds the files a reader deploys, which dependency
+// automation edits and no documentation page can follow. `docs/STYLE.md` § 10
+// states the grounds for both and the editorial preference for an example.
+const ALLOWED_PREFIXES = ['crates/', 'examples/'];
 
 // `ANCHOR_END` contains `ANCHOR`, so the end pattern is always tested FIRST.
 // Neither carries the `g` flag on purpose: a global regex keeps `lastIndex`
@@ -234,8 +235,7 @@ function resolveSource(rel: string): string {
   if (!ALLOWED_PREFIXES.some((p) => rel.startsWith(p))) {
     throw new Error(
       `file="${rel}" is outside the trees a page may quote from ` +
-        `(${ALLOWED_PREFIXES.join(', ')}). Only compiled sources are ` +
-        `transcludable. See docs/STYLE.md § 10.`,
+        `(${ALLOWED_PREFIXES.join(', ')}). See docs/STYLE.md § 10.`,
     );
   }
   const abs = path.join(REPO_ROOT, rel);
@@ -330,8 +330,9 @@ export default function remarkTransclude() {
               (known.length > 0
                 ? `It defines: ${known.join(', ')}.`
                 : 'It defines no regions at all.') +
-              `\n  Add \`// ANCHOR: ${regionAttr}\` and \`// ANCHOR_END: ` +
-              `${regionAttr}\` around the lines this page shows.`,
+              `\n  Add \`ANCHOR: ${regionAttr}\` and \`ANCHOR_END: ` +
+              `${regionAttr}\` around the lines this page shows, in the ` +
+              `source's own comment syntax.`,
           );
         }
         slice = index.lines.slice(region.start + 1, region.end);

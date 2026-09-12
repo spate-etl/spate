@@ -1,5 +1,5 @@
 /**
- * Render a fenced code block from a region of a compiled source file.
+ * Render a fenced code block from a region of a source file.
  *
  * A page names the source and the region on the info string and leaves the
  * fence empty:

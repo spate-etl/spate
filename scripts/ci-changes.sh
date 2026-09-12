@@ -776,11 +776,12 @@ if len(set(keys)) != len(keys):
     # The three coarse outputs, asserted together because one arm decides all
     # of them and the regression worth catching turns off exactly one.
     #
-    # `site` is the transclusion rule: a page's Rust snippets are regions of a
-    # file under `crates/`. `rust` is asserted nowhere else, and an arm that
-    # sets `site` and then `continue`s would turn off clippy and the test suite
-    # for an examples-only pull request. `fuzz` selects the only job that
-    # compiles the fuzz harness.
+    # `site` is the transclusion rule: a page renders regions of files under
+    # `crates/` and `examples/`. `rust` is asserted nowhere else, and an arm
+    # that sets `site` and then `continue`s turns off clippy and the test suite,
+    # which is right only where the tree holds nothing a compiler reads. A pull
+    # request touching `crates/spate/examples/` needs both. `fuzz` selects the
+    # only job that compiles the fuzz harness.
     check_flags() { # want_rust, want_site, want_fuzz, desc, paths...
         local want_rust="$1" want_site="$2" want_fuzz="$3" desc="$4"
         shift 4
@@ -829,6 +830,10 @@ if len(set(keys)) != len(keys):
         crates/spate-core/src/lib.rs
     check_flags true true false "a transcluded example rebuilds the site" \
         examples/docker/Dockerfile
+    # Prose in the same tree compiles into nothing, so it keeps the site
+    # rebuild and drops the Rust build.
+    check_flags false true false "prose under examples/ needs no Rust build" \
+        examples/docker/README.md
     # A crate `fuzz/` does not depend on cannot break `cargo fuzz build`.
     check_flags true true false "a crate outside the fuzz graph leaves it alone" \
         crates/spate-kafka/src/lib.rs
@@ -1111,8 +1116,13 @@ else
             site=true
             ;;
         # Also transcludable (docs/STYLE.md § 10), so an edit here can change a
-        # rendered page. Falls through to `rust` as every non-matching path
-        # does, since nothing distinguishes this tree from code on that axis.
+        # rendered page. Prose takes its own arm ahead of the `*.md` one below,
+        # which would otherwise drop the site rebuild. It compiles into nothing,
+        # so `rust` stays off.
+        examples/*.md)
+            site=true
+            continue
+            ;;
         examples/*)
             site=true
             ;;

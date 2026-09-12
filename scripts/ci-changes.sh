@@ -763,6 +763,10 @@ if len(set(keys)) != len(keys):
             "crates/$unbenched/src/lib.rs"
     fi
     check_paths false "" "docs select nothing" docs/METRICS.md
+    # The counted tier builds on stable, so the nightly pin sits outside its
+    # apparatus and forces no re-measurement.
+    check_paths false "" "the nightly pin does not select a benched crate" \
+        ".github/toolchains/nightly/rust-toolchain.toml"
     # Every file that can change what the counter tier measures, in the same
     # order as the `case` arm it mirrors. A file added to one and not the other
     # silently stops forcing a full re-measurement.
@@ -861,6 +865,10 @@ if len(set(keys)) != len(keys):
     # version reaches it.
     check_flags true true true "the pinned tool versions select the fuzz job" \
         versions.mk
+    # The nightly pin. Without this the bump that moves it is the one change
+    # that runs none of the jobs taking it.
+    check_flags true false true "the nightly pin selects the jobs that take it" \
+        ".github/toolchains/nightly/rust-toolchain.toml"
 
     # The manifest gates' selection, asserted the same way. Source changes do
     # not select them: the nightly backstop covers a packaging or floor break
@@ -884,6 +892,9 @@ if len(set(keys)) != len(keys):
     check_manifests true "a crate manifest reaches the manifest gates" crates/spate-core/Cargo.toml
     check_manifests true "the bump tool is the gate's own apparatus" scripts/release-version.sh
     check_manifests true "the selector is the gate's own apparatus" scripts/ci-changes.sh
+    # The floors job resolves under the pinned nightly and gates on this
+    # output.
+    check_manifests true "the nightly pin is the gate's own apparatus" ".github/toolchains/nightly/rust-toolchain.toml"
     check_manifests false "a crate source does not select the gate" crates/spate-core/src/lib.rs
     check_manifests false "a README does not select the gate" crates/spate/README.md
     check_manifests false "a docs page does not select the gate" docs/METRICS.md
@@ -1129,7 +1140,11 @@ else
         scripts/* | bench/*) ;;
         # CI definitions decide what every other job does.
         .github/workflows/* | .github/actions/*) ;;
-        # The rest of `.github/` cannot reach a Rust build or the site.
+        # The toolchain pins CI installs. Falling through reaches the whole
+        # stable tier for a one-line bump, since a compiler reaches every job
+        # and only some of them name a pin.
+        .github/toolchains/*) ;;
+        # The rest of `.github/` reaches no Rust build and no site build.
         .github/*)
             continue
             ;;
@@ -1230,12 +1245,12 @@ else
         esac
 
         # The fuzz job's own apparatus: the workflow that runs it, the composite
-        # action that gives it a nightly toolchain, the make targets it calls
-        # and the version they install, and this selector, which decides
-        # whether it runs at all.
+        # action that gives it a nightly toolchain, the pin that names which
+        # nightly, the make targets it calls and the version they install, and
+        # this selector, which decides whether it runs at all.
         case "$file" in
         scripts/ci-changes.sh | .github/workflows/ci.yml | .github/actions/* | \
-            Makefile | versions.mk)
+            .github/toolchains/* | Makefile | versions.mk)
             fuzz=true
             ;;
         crates/*)
@@ -1335,16 +1350,16 @@ set_clickhouse_lanes "$container_pkgs"
 # ---------------------------------------------------------------------------
 # The set of files that can change whether `cargo package` succeeds or
 # whether the declared floors still resolve: the manifests and lockfile,
-# plus the gate's own apparatus — the bump tool, this selector, and the
-# workflow that wires them — so an edit that narrows the gate is itself
-# gated, the same rule the bench arm applies. The READMEs are packaged but
-# cannot fail packaging; their versions are held by check-release-version,
-# which runs on every event.
+# plus the gate's own apparatus — the bump tool, this selector, the workflow
+# that wires them, and the nightly the floors job resolves under — so an edit
+# that narrows the gate is itself gated, the same rule the bench arm applies.
+# The READMEs are packaged but cannot fail packaging; their versions are held
+# by check-release-version, which runs on every event.
 path_is_manifest() {
     case "$1" in
     Cargo.toml | Cargo.lock | crates/*/Cargo.toml | bench/Cargo.toml) return 0 ;;
     scripts/release-version.sh | scripts/ci-changes.sh) return 0 ;;
-    .github/workflows/ci.yml) return 0 ;;
+    .github/workflows/ci.yml | .github/toolchains/*) return 0 ;;
     esac
     return 1
 }

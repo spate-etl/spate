@@ -1,0 +1,10 @@
+# The nightly CI installs, named by `toolchain-file` on the setup-rust action
+# and bumped by Dependabot, which looks for this filename under the directory
+# it is pointed at.
+#
+# Keep it off the repository root. A toolchain file there outranks the default
+# that installing a toolchain sets, so it would capture every job, including
+# the MSRV check.
+
+[toolchain]
+channel = "nightly-2026-09-05"

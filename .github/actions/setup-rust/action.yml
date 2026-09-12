@@ -12,6 +12,12 @@ inputs:
     description: Rust toolchain to install (stable, nightly, or a version like "1.94").
     required: false
     default: stable
+  toolchain-file:
+    description: >
+      Path to a file holding a `channel = "..."` line to install instead of
+      `toolchain`. Takes precedence where both are given.
+    required: false
+    default: ""
   components:
     description: Comma-separated rustup components, e.g. "rustfmt, clippy".
     required: false
@@ -39,13 +45,52 @@ inputs:
     required: false
     default: auto
 
+outputs:
+  toolchain:
+    description: >
+      The toolchain that was installed and made default. `cargo +<toolchain>`
+      needs it, since a bare `+nightly` names a different toolchain and
+      resolves the floating channel.
+    value: ${{ steps.resolve.outputs.toolchain }}
+  rustc:
+    description: The installed compiler's one-line version, as `rustc --version` prints it.
+    value: ${{ steps.record.outputs.rustc }}
+
 runs:
   using: composite
   steps:
+    # The path goes through `env:`. Interpolating it into the `run:` block
+    # splices the caller's text into generated shell.
+    - id: resolve
+      env:
+        TOOLCHAIN: ${{ inputs.toolchain }}
+        TOOLCHAIN_FILE: ${{ inputs.toolchain-file }}
+      run: |
+        set -euo pipefail
+        if [[ -n "$TOOLCHAIN_FILE" ]]; then
+          TOOLCHAIN=$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)"[[:space:]]*$/\1/p' "$TOOLCHAIN_FILE")
+          if [[ -z "$TOOLCHAIN" ]]; then
+            echo "::error::$TOOLCHAIN_FILE declares no channel"
+            exit 1
+          fi
+        fi
+        echo "toolchain=$TOOLCHAIN" >>"$GITHUB_OUTPUT"
+      shell: bash
+
     - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
       with:
-        toolchain: ${{ inputs.toolchain }}
+        toolchain: ${{ steps.resolve.outputs.toolchain }}
         components: ${{ inputs.components }}
+
+    # Which compiler produced this job's result, on the job's own page. The
+    # short form already carries the commit hash and date.
+    - id: record
+      run: |
+        set -euo pipefail
+        rustc=$(rustc --version)
+        echo "rustc=$rustc" >>"$GITHUB_OUTPUT"
+        echo "$rustc" >>"$GITHUB_STEP_SUMMARY"
+      shell: bash
 
     - if: inputs.tools != ''
       uses: taiki-e/install-action@7b8d4719ee4aaa279bdf55df38dacb9ebfe12a6c # v2.87.6

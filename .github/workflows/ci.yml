@@ -369,7 +369,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-rust
         with:
-          toolchain: nightly
+          toolchain-file: .github/toolchains/nightly/rust-toolchain.toml
           shared-key: minimal-versions
       - name: Resolve every direct dependency to its declared floor
         run: cargo generate-lockfile -Z direct-minimal-versions
@@ -486,13 +486,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: ./.github/actions/setup-rust
+      - id: rust
+        uses: ./.github/actions/setup-rust
         with:
-          toolchain: nightly
+          toolchain-file: .github/toolchains/nightly/rust-toolchain.toml
           # Its own entry: a nightly rustdoc build shares no artefact with the
           # stable dev-profile trees the other jobs cache.
           shared-key: docsrs
       - run: make docsrs
+        env:
+          NIGHTLY: ${{ steps.rust.outputs.toolchain }}
 
   features:
     name: Feature matrix (each feature)
@@ -542,10 +545,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: ./.github/actions/setup-rust
+      - id: rust
+        uses: ./.github/actions/setup-rust
         with:
           # libFuzzer's `-Z sanitizer` codegen is nightly-only.
-          toolchain: nightly
+          toolchain-file: .github/toolchains/nightly/rust-toolchain.toml
           # Its own entry: every artefact here is an instrumented release build
           # and shares nothing with the dev-profile trees the other jobs cache.
           shared-key: fuzz
@@ -555,9 +559,12 @@ jobs:
       - run: make fuzz-install
 
       - name: Build every fuzz target
+        # `+nightly` would name the floating channel and resolve past the pin.
+        env:
+          NIGHTLY: ${{ steps.rust.outputs.toolchain }}
         run: |
           set -euo pipefail
-          cargo +nightly fuzz list >targets.txt
+          cargo "+$NIGHTLY" fuzz list >targets.txt
           targets=$(wc -l <targets.txt)
           if [[ "$targets" -eq 0 ]]; then
             echo "::error::the fuzz crate declares no target; this job built nothing"
@@ -633,7 +640,8 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
-      - uses: ./.github/actions/setup-rust
+      - id: rust
+        uses: ./.github/actions/setup-rust
         with:
           shared-key: bench
           # A pure consumer of the entry `perf-warm` owns.
@@ -762,12 +770,16 @@ jobs:
       # A gungraun summary carries the package only as a directory path and the
       # feature arm not at all, so shard identity is stamped here for
       # `scripts/gungraun-report.sh`. Empty `baseline` renders as *no baseline*.
+      #
+      # The compiler is stamped alongside it. Codegen moves a count, and both
+      # legs of this job run under one toolchain.
       - name: Stamp this shard's summaries
         env:
           PACKAGE: ${{ matrix.package }}
           ARM: ${{ matrix.arm }}
           BASE_MEASURED: ${{ steps.base.outputs.measured }}
           MERGE_BASE: ${{ steps.base.outputs.merge-base }}
+          RUSTC: ${{ steps.rust.outputs.rustc }}
         run: |
           set -euo pipefail
           if [[ ! -d target/gungraun ]]; then
@@ -786,7 +798,8 @@ jobs:
           fi
           mkdir -p shard
           jq -c --arg p "$PACKAGE" --arg a "$ARM" --arg b "$baseline" \
-            '. + {spate_shard: {package: $p, features: $a, baseline: $b}}' \
+            --arg r "$RUSTC" \
+            '. + {spate_shard: {package: $p, features: $a, baseline: $b, rustc: $r}}' \
             raw.jsonl >"shard/$PACKAGE.$ARM.jsonl"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

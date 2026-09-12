@@ -2230,9 +2230,9 @@ dependencies = [
 
 [[package]]
 name = "schema_registry_converter"
-version = "4.10.0"
+version = "5.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "39e055305f8f1d7ae335613ef6bbe8596296706dc7c16953789468061c800ddf"
+checksum = "8b676292e1f89f166eae0de740a51c6f9718581cf97ee621781a31a93f490f3d"
 dependencies = [
  "byteorder",
  "dashmap",

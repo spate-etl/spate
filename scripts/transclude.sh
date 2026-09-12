@@ -2,7 +2,7 @@
 #
 # The repository-pointer gate: every `file=`/`region=` fence on a documentation
 # page names a source and a region that exist, every `repo:` link names a path
-# that exists, and every anchor marker under `crates/` is well formed.
+# that exists, and every anchor marker in a transcludable tree is well formed.
 #
 # The remark plugins throw on the same things during the site build, which
 # caches MDX modules and can serve a cached page against a source that has since
@@ -27,10 +27,9 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 docs=docs
-# The trees a page may quote from. Anything here is compiled by
-# `cargo clippy --workspace --all-targets`. Keep in step with ALLOWED_PREFIXES
-# in website/src/remark/transclude.ts.
-allowed_prefix=crates/
+# The trees a page may quote from, and the roots the orphaned-region scan walks.
+# Keep in step with ALLOWED_PREFIXES in website/src/remark/transclude.ts.
+allowed_prefixes=(crates/ examples/)
 
 failures=0
 
@@ -59,6 +58,16 @@ meta_value() { # info, key
         ;;
     *) printf '%s' "${rest%% *}" ;;
     esac
+}
+
+# Is this source under a tree a page may quote from? The trailing slash is part
+# of each prefix, so `examplesX/y` does not pass as `examples/`.
+prefix_allowed() { # path
+    local p
+    for p in ${allowed_prefixes[@]+"${allowed_prefixes[@]}"}; do
+        case "$1" in "$p"*) return 0 ;; esac
+    done
+    return 1
 }
 
 # Is this line a fence delimiter? Echoes the run of markers if so.
@@ -252,8 +261,11 @@ check_page() { # file
                             fail_at "$page" "$openline" \
                                 "file=\"$src\" must be a repository-relative path with no \`..\`"
                             ;;
-                        "$allowed_prefix"*)
-                            if [ ! -f "$src" ]; then
+                        *)
+                            if ! prefix_allowed "$src"; then
+                                fail_at "$page" "$openline" \
+                                    "file=\"$src\" is outside the transcludable trees (${allowed_prefixes[*]})"
+                            elif [ ! -f "$src" ]; then
                                 fail_at "$page" "$openline" "file=\"$src\" does not exist"
                             elif [ -n "$region" ] && ! region_ok "$src" "$region"; then
                                 fail_at "$page" "$openline" \
@@ -261,10 +273,6 @@ check_page() { # file
                             else
                                 printf '%s\t%s\n' "$src" "$region"
                             fi
-                            ;;
-                        *)
-                            fail_at "$page" "$openline" \
-                                "file=\"$src\" is outside $allowed_prefix"
                             ;;
                         esac
                     fi
@@ -301,16 +309,17 @@ pages_into() { # destination
     fi
 }
 
-# Every file under crates/ that carries a marker.
+# Every file in a transcludable tree that carries a marker.
 #
 # grep's exit 1 means "no matches", a legitimate state; exit 2 or more is a real
 # error. Distinguished explicitly rather than swallowed with `|| true`, which
 # would hide a permissions failure.
 marked_sources_into() { # destination
     local rc=0
-    grep -rlE 'ANCHOR(_END)?:' "$allowed_prefix" >"$1" 2>/dev/null || rc=$?
+    grep -rlE 'ANCHOR(_END)?:' ${allowed_prefixes[@]+"${allowed_prefixes[@]}"} \
+        >"$1" 2>/dev/null || rc=$?
     if [ "$rc" -gt 1 ]; then
-        echo "transclude.sh: grep failed scanning $allowed_prefix (exit $rc)" >&2
+        echo "transclude.sh: grep failed scanning ${allowed_prefixes[*]} (exit $rc)" >&2
         return 1
     fi
     return 0
@@ -336,8 +345,8 @@ run_check() {
 
     collect >"$used"
 
-    # Every marker set under crates/ is well formed, whether a page uses it or
-    # not.
+    # Every marker set in a transcludable tree is well formed, whether a page
+    # uses it or not.
     marked_sources_into "$sources" || return 1
     while IFS= read -r file; do
         [ -n "$file" ] || continue
@@ -449,7 +458,14 @@ self_test() {
     failures=0
     check_page "$tmp/outside.md" >/dev/null 2>&1
     [ "$failures" -gt 0 ] && rc=1 || rc=0
-    st "source outside crates/ rejected" "1" "$rc"
+    st "source outside the allowed trees rejected" "1" "$rc"
+
+    # prefix_allowed: each tree, and the trailing slash that separates
+    # `examples/` from a sibling whose name starts with it.
+    st "crates/ accepted" "0" "$(prefix_allowed crates/spate/src/lib.rs && echo 0 || echo 1)"
+    st "examples/ accepted" "0" "$(prefix_allowed examples/docker/Dockerfile && echo 0 || echo 1)"
+    st "unlisted tree rejected" "1" "$(prefix_allowed docs/STYLE.md && echo 0 || echo 1)"
+    st "prefix is not a bare substring" "1" "$(prefix_allowed examplesX/y && echo 0 || echo 1)"
 
     # check_repo_links: a link is checked against the tree, not against the
     # `crates/` prefix: a page may point at any file in the repository.

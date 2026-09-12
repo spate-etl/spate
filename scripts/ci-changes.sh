@@ -827,6 +827,8 @@ if len(set(keys)) != len(keys):
     fi
     check_flags true true true "a crate source builds Rust and rebuilds the site" \
         crates/spate-core/src/lib.rs
+    check_flags true true false "a transcluded example rebuilds the site" \
+        examples/docker/Dockerfile
     # A crate `fuzz/` does not depend on cannot break `cargo fuzz build`.
     check_flags true true false "a crate outside the fuzz graph leaves it alone" \
         crates/spate-kafka/src/lib.rs
@@ -1106,6 +1108,12 @@ else
         # tree, because a `file=` attribute may point anywhere under it and a
         # narrower list goes stale by failing OPEN.
         crates/*)
+            site=true
+            ;;
+        # Also transcludable (docs/STYLE.md § 10), so an edit here can change a
+        # rendered page. Falls through to `rust` as every non-matching path
+        # does, since nothing distinguishes this tree from code on that axis.
+        examples/*)
             site=true
             ;;
         scripts/* | bench/*) ;;

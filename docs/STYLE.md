@@ -526,8 +526,19 @@ Exempt, because transcluding them costs more than it protects:
 
 An exemption is a claim review checks, not a default.
 
-YAML, TOML and shell blocks are unaffected; their correctness is checked
-against the config structs by review (§ 3), not by a compiler.
+### Sources outside `crates/`
+
+A page may also render a fence from a file under `examples/`, the tree a reader
+deploys from. Nothing compiles those files, so the clippy argument above does
+not reach them. `make check-transclusions` still fails when the region moves.
+Dependency automation edits these files and reads no documentation page, so a
+copy of the lines it maintains falls behind at the next bump (§ 5).
+`examples/docker/Dockerfile` is the worked case, with image pins that move on a
+schedule the page cannot follow.
+
+`file=` accepts `crates/` and `examples/`. A YAML, TOML or shell block written
+for the page, with no file in the repository behind it, is unaffected; its
+correctness is checked against the config structs by review (§ 3).
 
 ## 11. Site pages and the blog
 

@@ -201,8 +201,8 @@ const config: Config = {
             '**/__tests__/**',
             'STYLE.md',
           ],
-          // Renders `file=`/`region=` fences from the compiled sources under
-          // `crates/` (docs/STYLE.md § 10). Registered BEFORE the defaults
+          // Renders `file=`/`region=` fences from the sources under `crates/`
+          // and `examples/` (docs/STYLE.md § 10). Registered BEFORE the defaults
           // rather than after them (`remarkPlugins`) for two reasons: the
           // default list ends with plugins that mutate the tree and can throw
           // first under this site's `onBrokenMarkdownLinks: 'throw'`, so a

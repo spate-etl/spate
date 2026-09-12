@@ -7,6 +7,7 @@
 # beyond the rust image's toolchain); expect the first build to take several
 # minutes. For CI, layer a cargo-chef stage in front to cache dependencies.
 
+# ANCHOR: image
 FROM rust:1.98.1-bookworm@sha256:9a73a5088750b4c95158ab26629c854c3d6fc4b173cb7bc8079ad252d8ed7bfa AS builder
 WORKDIR /build
 COPY . .
@@ -26,3 +27,4 @@ ENV SPATE_CONFIG=/etc/spate/pipeline.yaml
 EXPOSE 9090
 
 ENTRYPOINT ["/usr/local/bin/pipeline"]
+# ANCHOR_END: image

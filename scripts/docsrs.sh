@@ -24,8 +24,13 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-if ! cargo +nightly --version >/dev/null 2>&1; then
-  echo "docsrs.sh: needs the nightly toolchain (rustup toolchain install nightly)" >&2
+# The nightly rustdoc runs under. A dated channel and the bare one are
+# different toolchains to rustup, so a pinned build has to pass the name it
+# installed.
+nightly="${NIGHTLY:-nightly}"
+
+if ! cargo "+$nightly" --version >/dev/null 2>&1; then
+  echo "docsrs.sh: needs the $nightly toolchain (rustup toolchain install $nightly)" >&2
   exit 1
 fi
 
@@ -72,14 +77,14 @@ while IFS=$'\x1f' read -r name flags docargs rustcargs unsupported; do
   # `broken_intra_doc_links` denied on top of the crate's own args: a dangling
   # link renders as dead text on the published page, and the docs.rs build
   # reports it nowhere. Denied by name rather than through `-D warnings`, which
-  # hands an unpinned nightly the power to block every merge in the repository
-  # the day rustdoc gains a lint. `make doc` holds the whole warning surface, on
-  # stable, where a new lint arrives with a release worth reacting to.
+  # would make every merge wait on the next rustdoc lint. Such a lint arrives
+  # with a toolchain bump, at a moment unrelated to the change under review.
+  # `make doc` holds the whole warning surface, on stable.
   # Unquoted on purpose; each field is a space-separated argument list.
   # shellcheck disable=SC2086
   if ! RUSTFLAGS="${RUSTFLAGS:-} $rustcargs" \
     RUSTDOCFLAGS="$docargs -D rustdoc::broken_intra_doc_links" \
-    cargo +nightly doc -p "$name" --no-deps --locked $flags; then
+    cargo "+$nightly" doc -p "$name" --no-deps --locked $flags; then
     echo "::error::rustdoc failed for $name as docs.rs would build it"
     failed=$((failed + 1))
   fi

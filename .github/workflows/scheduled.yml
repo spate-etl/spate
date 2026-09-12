@@ -208,9 +208,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: ./.github/actions/setup-rust
+      - id: rust
+        uses: ./.github/actions/setup-rust
         with:
-          toolchain: nightly
+          toolchain-file: .github/toolchains/nightly/rust-toolchain.toml
           shared-key: fuzz
 
       - run: make fuzz-install
@@ -227,9 +228,12 @@ jobs:
 
       - name: Build every fuzz target
         id: build
+        # `+nightly` would name the floating channel and resolve past the pin.
+        env:
+          NIGHTLY: ${{ steps.rust.outputs.toolchain }}
         run: |
           set -euo pipefail
-          cargo +nightly fuzz list >targets.txt
+          cargo "+$NIGHTLY" fuzz list >targets.txt
           targets=$(wc -l <targets.txt)
           if [[ "$targets" -eq 0 ]]; then
             echo "::error::the fuzz crate declares no target; this run proved nothing"
@@ -240,6 +244,8 @@ jobs:
 
       - name: Fuzz every target
         id: run
+        env:
+          NIGHTLY: ${{ steps.rust.outputs.toolchain }}
         run: |
           set -euo pipefail
           targets=$(wc -l <targets.txt)
@@ -249,7 +255,7 @@ jobs:
           while IFS= read -r target; do
             [[ -n "$target" ]] || continue
             echo "::group::$target"
-            if ! cargo +nightly fuzz run "$target" -- \
+            if ! cargo "+$NIGHTLY" fuzz run "$target" -- \
               -max_total_time="$MAX_TOTAL_TIME" -print_final_stats=1; then
               crashed="$crashed $target"
             fi
@@ -291,6 +297,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          # The reader reproduces under the toolchain the crash was found on.
+          # Sanitizer codegen moves between nightlies, and a floating channel
+          # can fail to reproduce it.
+          NIGHTLY: ${{ steps.rust.outputs.toolchain }}
         run: |
           set -euo pipefail
           title='A fuzz target found a crashing input'
@@ -314,7 +324,7 @@ jobs:
               'Reproduce it against the downloaded file:' \
               '' \
               '```sh' \
-              'cargo +nightly fuzz run <target> <path-to-the-input>' \
+              "cargo +${NIGHTLY} fuzz run <target> <path-to-the-input>" \
               '```' \
               '' \
               'A panic on malformed bytes is a bug in the decoder, so the fix' \
@@ -340,7 +350,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-rust
         with:
-          toolchain: nightly
+          toolchain-file: .github/toolchains/nightly/rust-toolchain.toml
           shared-key: minimal-versions
       - name: Resolve every direct dependency to its declared floor
         id: resolve

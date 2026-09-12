@@ -306,7 +306,7 @@ above from what is left. The elected license ids are unaffected either way.
 | `rustversion` | 1.0.22 | `MIT` |
 | `rusty-fork` | 0.3.1 | `MIT` |
 | `same-file` | 1.0.6 | `MIT` |
-| `schema_registry_converter` | 4.10.0 | `MIT` |
+| `schema_registry_converter` | 5.0.0 | `MIT` |
 | `scopeguard` | 1.2.0 | `MIT` |
 | `security-framework` | 3.7.0 | `MIT` |
 | `security-framework-sys` | 2.17.0 | `MIT` |

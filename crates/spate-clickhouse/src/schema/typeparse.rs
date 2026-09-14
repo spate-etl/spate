@@ -6,7 +6,8 @@
 //! compare a column against a row struct's serde shape. Anything it does
 //! not recognize collapses to [`ChType::Other`], which the comparison
 //! treats as always-compatible; unknown server types must never fail
-//! validation.
+//! validation. `SimpleAggregateFunction(f, T)` parses as `T`, the type it
+//! stores, with no `ChType` variant of its own.
 
 /// A parsed ClickHouse column type, shallow enough for class-based
 /// compatibility checks.
@@ -84,6 +85,11 @@ fn try_parse(s: &str) -> Option<ChType> {
     Some(match (name, args.as_slice()) {
         ("Nullable", [t]) => ChType::Nullable(Box::new(parse(t))),
         ("LowCardinality", [t]) => ChType::LowCardinality(Box::new(parse(t))),
+        // The function name can't change the storage type (ClickHouse
+        // requires the result type to equal argument_types[0]), so only
+        // the first type argument matters; `..` covers the rest since
+        // argument_types is not fixed-arity in ClickHouse's own grammar.
+        ("SimpleAggregateFunction", [_func, t, ..]) => parse(t),
         ("Array", [t]) => ChType::Array(Box::new(parse(t))),
         ("Map", [k, v]) => ChType::Map(Box::new(parse(k)), Box::new(parse(v))),
         ("Tuple", elems) if !elems.is_empty() => {
@@ -316,7 +322,8 @@ mod tests {
     fn unknown_types_collapse_to_other() {
         for s in [
             "AggregateFunction(sum, UInt64)",
-            "SimpleAggregateFunction(max, DateTime)",
+            // Too few arguments for SimpleAggregateFunction's [_func, t, ..].
+            "SimpleAggregateFunction(sum)",
             "Variant(Int64, String)",
             "Nested(a UInt32, b String)",
             "Dynamic",
@@ -332,5 +339,25 @@ mod tests {
         assert!(matches!(parse("Array(UInt32"), ChType::Other(_)));
         assert!(matches!(parse("Tuple)("), ChType::Other(_)));
         assert!(matches!(parse(""), ChType::Other(_)));
+    }
+
+    #[test]
+    fn simple_aggregate_function_parses_as_its_stored_type() {
+        assert_eq!(
+            parse("SimpleAggregateFunction(sum, UInt64)"),
+            parse("UInt64")
+        );
+        assert_eq!(
+            parse("SimpleAggregateFunction(anyLast, LowCardinality(String))"),
+            parse("LowCardinality(String)")
+        );
+        assert_eq!(
+            parse("SimpleAggregateFunction(sumMap, Map(String, UInt64))"),
+            parse("Map(String, UInt64)")
+        );
+        assert_eq!(
+            parse("SimpleAggregateFunction(max, Nullable(DateTime))"),
+            parse("Nullable(DateTime)")
+        );
     }
 }

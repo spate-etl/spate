@@ -1,6 +1,8 @@
-// The 256-bit integers and nested Geo shapes: the client cannot decode
-// Int256/UInt256, and the nested Array-of-Array offset layout of Polygon /
-// MultiPolygon is otherwise only byte-unit tested. Prove them against a real
+// The 256-bit integers, nested Geo shapes, and a SimpleAggregateFunction over
+// LowCardinality: the client cannot decode Int256/UInt256, the nested
+// Array-of-Array offset layout of Polygon/MultiPolygon and the
+// SimpleAggregateFunction wrapper's effect on LowCardinality's dictionary
+// prefix are otherwise only byte-unit tested. Prove them against a real
 // server via the toString oracle: row 1 through the Native encoder, row 2 as
 // server-parsed literals, compared column by column.
 
@@ -14,19 +16,22 @@ struct EdgeRow {
     ubig: UInt256,
     poly: Polygon,
     mpoly: MultiPolygon,
+    sagg: String,
 }
 
 const COLUMNS: &[&str] = EdgeRow::COLUMNS;
 
 const DDL: &str = "CREATE TABLE native_edges (\
-        id UInt64, big Int256, ubig UInt256, poly Polygon, mpoly MultiPolygon\
+        id UInt64, big Int256, ubig UInt256, poly Polygon, mpoly MultiPolygon, \
+        sagg SimpleAggregateFunction(anyLast, LowCardinality(String))\
     ) ENGINE = MergeTree ORDER BY id";
 
 // Row id=2: the same values as [`edge_row`], as server-parsed literals.
 const LITERAL_INSERT: &str = "INSERT INTO native_edges VALUES (2, \
         toInt256('-170141183460469231731687303715884105728'), \
         toUInt256('340282366920938463463374607431768211455'), \
-        [[(0, 0), (10, 0), (10, 10)]], [[[(0, 0), (10, 0), (10, 10)]]])";
+        [[(0, 0), (10, 0), (10, 10)]], [[[(0, 0), (10, 0), (10, 10)]]], \
+        'repeat')";
 
 fn edge_row() -> EdgeRow {
     let ring: Ring = vec![(0.0, 0.0), (10.0, 0.0), (10.0, 10.0)];
@@ -36,6 +41,7 @@ fn edge_row() -> EdgeRow {
         ubig: UInt256::from_u128(u128::MAX),
         poly: vec![ring.clone()],
         mpoly: vec![vec![ring]],
+        sagg: "repeat".into(),
     }
 }
 

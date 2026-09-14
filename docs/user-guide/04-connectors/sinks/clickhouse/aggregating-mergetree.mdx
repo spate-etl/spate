@@ -131,9 +131,9 @@ client.
 `SimpleAggregateFunction(func, T)` is a separate case that stores the **plain
 value** `T` (the partial state equals the final value, e.g. for `min`/`max`/
 `sumMap`), so those columns *are* directly insertable and are not subject to
-any of the above. They take `format: rowbinary`, where the row declares the
-field `T` takes; the Native encoder does not model the type and rejects the
-column. Use them when you control the schema and the function qualifies.
+any of the above. The row declares the field `T` takes for either format, for
+any `T` that format writes on its own. Use them when you control the schema
+and the function qualifies.
 
 ## Related
 

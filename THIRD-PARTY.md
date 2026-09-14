@@ -68,7 +68,7 @@ above from what is left. The elected license ids are unaffected either way.
 |---|---|---|
 | `apache-avro` | 0.22.0 | `Apache-2.0` |
 | `async-nats` | 0.50.0 | `Apache-2.0` |
-| `aws-lc-sys` | 0.42.0 | `Apache-2.0` |
+| `aws-lc-sys` | 0.45.0 | `Apache-2.0` |
 | `bytesize` | 2.7.0 | `Apache-2.0` |
 | `clang-sys` | 1.8.1 | `Apache-2.0` |
 | `dunce` | 1.0.5 | `Apache-2.0` |
@@ -79,18 +79,18 @@ above from what is left. The elected license ids are unaffected either way.
 | `ryu` | 1.0.23 | `Apache-2.0` |
 | `sketches-ddsketch` | 0.3.1 | `Apache-2.0` |
 | `sync_wrapper` | 1.0.2 | `Apache-2.0` |
-| `aws-lc-sys` | 0.42.0 | `BSD-3-Clause` |
+| `aws-lc-sys` | 0.45.0 | `BSD-3-Clause` |
 | `bindgen` | 0.72.1 | `BSD-3-Clause` |
 | `curve25519-dalek` | 4.1.3 | `BSD-3-Clause` |
 | `ed25519-dalek` | 2.2.0 | `BSD-3-Clause` |
 | `subtle` | 2.6.1 | `BSD-3-Clause` |
 | `webpki-roots` | 0.26.11 | `CDLA-Permissive-2.0` |
 | `webpki-roots` | 1.0.8 | `CDLA-Permissive-2.0` |
-| `aws-lc-rs` | 1.17.1 | `ISC` |
-| `aws-lc-sys` | 0.42.0 | `ISC` |
+| `aws-lc-rs` | 1.18.1 | `ISC` |
+| `aws-lc-sys` | 0.45.0 | `ISC` |
 | `libloading` | 0.8.9 | `ISC` |
 | `ring` | 0.17.14 | `ISC` |
-| `rustls-webpki` | 0.103.13 | `ISC` |
+| `rustls-webpki` | 0.103.15 | `ISC` |
 | `untrusted` | 0.9.0 | `ISC` |
 | `adler2` | 2.0.1 | `MIT` |
 | `aho-corasick` | 1.1.4 | `MIT` |
@@ -101,7 +101,7 @@ above from what is left. The elected license ids are unaffected either way.
 | `async-trait` | 0.1.92 | `MIT` |
 | `atomic-waker` | 1.1.2 | `MIT` |
 | `autocfg` | 1.5.1 | `MIT` |
-| `aws-lc-sys` | 0.42.0 | `MIT` |
+| `aws-lc-sys` | 0.45.0 | `MIT` |
 | `base64` | 0.22.1 | `MIT` |
 | `base64ct` | 1.8.3 | `MIT` |
 | `bigdecimal` | 0.4.10 | `MIT` |
@@ -299,7 +299,7 @@ above from what is left. The elected license ids are unaffected either way.
 | `rustc-hash` | 2.1.3 | `MIT` |
 | `rustc_version` | 0.4.1 | `MIT` |
 | `rustix` | 1.1.4 | `MIT` |
-| `rustls` | 0.23.41 | `MIT` |
+| `rustls` | 0.23.45 | `MIT` |
 | `rustls-native-certs` | 0.8.4 | `MIT` |
 | `rustls-pki-types` | 1.15.0 | `MIT` |
 | `rustls-platform-verifier` | 0.7.0 | `MIT` |

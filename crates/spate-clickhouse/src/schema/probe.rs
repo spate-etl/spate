@@ -764,6 +764,21 @@ mod tests {
     }
 
     #[test]
+    fn simple_aggregate_function_checks_against_its_stored_type() {
+        assert!(ok(&Shape::U64, "SimpleAggregateFunction(sum, UInt64)"));
+        assert!(!ok(&Shape::Str, "SimpleAggregateFunction(sum, UInt64)"));
+        // The Nullable hard rule still applies once the type resolves.
+        assert!(!ok(
+            &Shape::U32,
+            "SimpleAggregateFunction(anyLast, Nullable(UInt32))"
+        ));
+        assert!(ok(
+            &Shape::Option(Box::new(Shape::U32)),
+            "SimpleAggregateFunction(anyLast, Nullable(UInt32))"
+        ));
+    }
+
+    #[test]
     fn class_matrix_is_permissive_where_the_wire_matches() {
         assert!(ok(&Shape::U32, "UInt32"));
         assert!(ok(&Shape::U32, "DateTime"));

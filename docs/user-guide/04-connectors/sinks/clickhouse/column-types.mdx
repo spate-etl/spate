@@ -73,7 +73,7 @@ is in the `rowbinary` module of the
 | `JSON` | yes | no | A `String` of JSON text, with `input_format_binary_read_json_as_string: "1"` under `settings:` |
 | `Variant(…)` | manual | no | The discriminant byte follows the Rust enum's declaration order and the server orders member types by name, so the row declares its variants in the server's order; `Nullable(Variant)` has no representation |
 | `Dynamic` | no | no | |
-| `SimpleAggregateFunction(f, T)` | yes | no | The column stores the plain `T`, so the row declares the field `T` takes |
+| `SimpleAggregateFunction(f, T)` | yes | yes | The column stores the plain `T`, so the row declares the field `T` takes; Native accepts any inner it accepts on its own |
 | `AggregateFunction(f, T)` | no | no | See [Aggregate states](#aggregate-states) |
 | Any other type | no | no | Neither format is written for it. Native recognizes a closed set and refuses the rest at construction; RowBinary has no wrapper, and a plain field lands correctly only where the type's wire form happens to match one |
 

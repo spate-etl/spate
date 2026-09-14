@@ -61,9 +61,10 @@ This framework is a library that runs inside your own pipelines.
   capacity larger than available memory.
 - Advisories against a dependency where the vulnerable code path is not
   reachable from this framework. Those are still worth reporting, and are
-  triaged as maintenance rather than as an incident. `deny.toml` records every
-  advisory this project has accepted, each with its reason and the condition for
-  removing it.
+  triaged as maintenance rather than as an incident. Every advisory this project
+  has accepted is recorded where the tool reporting it is configured, in
+  `deny.toml` for cargo-deny and in an `osv-scanner.toml` beside each lockfile,
+  with its reason and the condition for removing it.
 - Anything requiring an attacker who already has the ability to run code in your
   pipeline process.
 

@@ -47,7 +47,7 @@ fn edge_row() -> EdgeRow {
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn int256_and_nested_geo_match_the_literal_row() {
+async fn native_edge_case_columns_match_the_literal_row() {
     let srv = bare_server("edges-secret").await;
     srv.admin
         .query(DDL)

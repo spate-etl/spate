@@ -101,10 +101,14 @@ Settings → Privacy & Security → Developer Tools* to exempt it.
 CI picks the container suites from the paths a pull request changed. Which
 counted benches run is derived the same way, from the benches themselves: a crate
 with a bench selects its own, `spate-core` selects every benched crate because
-everything depends on it, and a crate without one selects nothing. The semver
-gate follows a third closure over the same paths, this one over the non-dev
-dependency edges: a connector change checks that connector and the facade, and
-a `spate-core` change checks every published crate.
+everything depends on it, and a crate without one selects nothing. A named set
+of paths under `crates/spate-core/src` selects the loom job. A self-test holds
+that set against every file in the tree carrying a loom cfg or import, so a
+file gaining one with no matching path fails `--self-test` instead of running
+unmodelled. The semver gate follows a third closure over
+the same paths, this one over the non-dev dependency edges: a connector
+change checks that connector and the facade, and a `spate-core` change checks
+every published crate.
 
 For a change whose reach those paths do not show, such as a refactor moving code
 between crates or a dependency swap, a maintainer can label the pull request

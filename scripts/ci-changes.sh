@@ -283,6 +283,8 @@ apply_ci_labels() {
     echo "$suites"
 }
 
+# The loom models, also selected by path below. The label is for a change
+# whose effect on those primitives the paths cannot see.
 ci_label_wants_loom() {
     local labels=",${1:-},"
     [[ "$labels" == *",ci: loom,"* ]]
@@ -779,6 +781,48 @@ if len(set(keys)) != len(keys):
             "$apparatus"
     done
 
+    # The loom path rule. The surface comes from the tree, not from a list
+    # named here, so a new loom cfg or import fails this check until the
+    # rule in the classification loop catches up. The grep matches the loom
+    # cfg shapes the tree uses today (`cfg(loom)`, `cfg(not(loom))`,
+    # `cfg(all(test, loom))`) and a `loom::` import; it does not parse cfg
+    # expressions, so a predicate written a different way, such as
+    # `cfg(any(loom, ...))`, would not match. It also stops at the file
+    # carrying the marker: a file that reaches loom's swapped types through
+    # `checkpoint::sync` without naming loom itself carries none of these
+    # and is invisible to it.
+    check_loom() { # want, desc, paths...
+        local want="$1" desc="$2"
+        shift 2
+        local out got
+        out=$(mktemp)
+        classify_into "$out" "$@"
+        got=$(sed -n 's/^loom=//p' "$out")
+        rm -f "$out"
+        if [[ "$got" != "$want" ]]; then
+            echo "::error::$desc: expected loom=$want, got loom=$got for: $*"
+            path_case_failed=1
+        fi
+    }
+    loom_surface=$(grep -rlE 'cfg\(loom\)|cfg\(not\(loom\)\)|cfg\(all\(test, loom\)\)|loom::' \
+        "$repo_root/crates/spate-core/src" --include='*.rs' 2>/dev/null || true)
+    if [[ -z "$loom_surface" ]]; then
+        echo "::error::no file under crates/spate-core/src carries a loom cfg or import; the check below asserts nothing."
+        path_case_failed=1
+    fi
+    while IFS= read -r f; do
+        [[ -n "$f" ]] || continue
+        rel="${f#"$repo_root"/}"
+        check_loom true "'$rel' models a loom primitive" "$rel"
+    done <<<"$loom_surface"
+    check_loom false "an unrelated crate source selects no loom models" \
+        crates/spate-kafka/src/lib.rs
+    check_loom false "docs select no loom models" docs/INVARIANTS.md
+    # The loom job's own apparatus, mirroring the bench apparatus loop above.
+    for apparatus in scripts/ci-changes.sh .github/workflows/ci.yml Makefile; do
+        check_loom true "$apparatus selects the loom models" "$apparatus"
+    done
+
     # The three coarse outputs, asserted together because one arm decides all
     # of them and the regression worth catching turns off exactly one.
     #
@@ -1019,6 +1063,34 @@ if len(set(keys)) != len(keys):
     mq_orphan=$(git -c user.name=self-test -c user.email=self-test@invalid \
         commit-tree "$(git rev-parse 'HEAD^{tree}')" -m "ci-changes self-test")
     check_manifests_mq true "a base sharing no history fails closed" "$mq_orphan" "$mq_head"
+    # `force_all` selects loom for a merge group or a pull request falling
+    # back to it (no usable diff), but not for push, schedule or dispatch: a
+    # merge group runs the models before the merge lands, a pull request's
+    # own diff failure cannot rule out the change touching them, and a later
+    # push re-runs nothing new.
+    out=$(mktemp)
+    env -u PR_LABELS EVENT_NAME=merge_group MERGE_BASE_SHA="$mq_orphan" \
+        MERGE_HEAD_SHA="$mq_head" GITHUB_OUTPUT="$out" "$0" >/dev/null
+    if [[ "$(sed -n 's/^loom=//p' "$out")" != "true" ]]; then
+        echo "::error::a merge group falling back to force_all must emit loom=true"
+        path_case_failed=1
+    fi
+    rm -f "$out"
+    out=$(mktemp)
+    env -u PR_LABELS EVENT_NAME=pull_request BASE_SHA="$mq_orphan" \
+        HEAD_SHA="$mq_head" GITHUB_OUTPUT="$out" "$0" >/dev/null
+    if [[ "$(sed -n 's/^loom=//p' "$out")" != "true" ]]; then
+        echo "::error::a pull request falling back to force_all must emit loom=true"
+        path_case_failed=1
+    fi
+    rm -f "$out"
+    out=$(mktemp)
+    env -u PR_LABELS EVENT_NAME=push GITHUB_OUTPUT="$out" "$0" >/dev/null
+    if [[ "$(sed -n 's/^loom=//p' "$out")" != "false" ]]; then
+        echo "::error::a push to main must emit loom=false; the nightly tier in scheduled.yml covers it"
+        path_case_failed=1
+    fi
+    rm -f "$out"
     # The semver selection. `spate-test` is the row that fails if somebody
     # folds the two closures into one: the container table reaches four suites
     # from it through dev-dependencies, and no published API moves with them.
@@ -1046,6 +1118,10 @@ if len(set(keys)) != len(keys):
     env -u PR_LABELS EVENT_NAME=schedule GITHUB_OUTPUT="$out" "$0" >/dev/null
     if [[ "$(sed -n 's/^manifests=//p' "$out")" != "true" ]]; then
         echo "::error::a force_all event must emit manifests=true"
+        path_case_failed=1
+    fi
+    if [[ "$(sed -n 's/^loom=//p' "$out")" != "false" ]]; then
+        echo "::error::a schedule event must emit loom=false; the nightly tier in scheduled.yml covers it"
         path_case_failed=1
     fi
     rm -f "$out"
@@ -1140,6 +1216,7 @@ rust=false
 site=false
 fuzz=false
 bench=false
+loom=false
 bench_pkgs=""
 suites=""
 semver_pkgs=""
@@ -1156,6 +1233,16 @@ if [[ "$force_all" == "1" ]]; then
     bench_pkgs=$(all_bench_pkgs)
     suites="$CONTAINER_PKGS"
     semver_pkgs="$SEMVER_PKGS"
+    # A merge group runs the models before the merge lands, and a pull
+    # request whose diff could not be resolved gets the same fail-open
+    # treatment as every other flag on this branch: nothing here says the
+    # change leaves loom's primitives alone. A push to `main` follows a
+    # merge that already ran the models, and re-running there would model
+    # nothing new; `scheduled.yml`'s nightly tier is the backstop for that
+    # path, and for schedule and dispatch, instead.
+    if [[ "$mode" == "merge_group" || "$mode" == "pull_request" ]]; then
+        loom=true
+    fi
 else
     # Fill the discovery cache in the parent shell; see discover_bench_pkgs.
     discover_bench_pkgs
@@ -1296,6 +1383,29 @@ else
             ;;
         esac
 
+        # Which files model a synchronization primitive loom checks. The
+        # self-test greps `crates/spate-core/src/` for `cfg(loom)`,
+        # `cfg(not(loom))`, `cfg(all(test, loom))` or a `loom::` import and
+        # fails if a site exists outside this list. A file that reaches
+        # loom's swapped types through `checkpoint::sync` without naming
+        # loom itself carries none of these. Every current consumer of
+        # that shim lives under `checkpoint/*`, so the wildcard covers it;
+        # the self-test does not verify a consumer outside it.
+        case "$file" in
+        crates/spate-core/src/backpressure.rs | crates/spate-core/src/record.rs | \
+            crates/spate-core/src/lib.rs | crates/spate-core/src/checkpoint/*)
+            loom=true
+            ;;
+        # The loom job's own apparatus: the Makefile target that runs the
+        # models, the job that runs it, and this selector, which decides
+        # whether it runs at all. No `.github/actions/*` entry: a broken
+        # cache there slows a rebuild loom already forces, it does not
+        # change whether the models pass.
+        scripts/ci-changes.sh | .github/workflows/ci.yml | Makefile)
+            loom=true
+            ;;
+        esac
+
         # The fuzz job's own apparatus: the workflow that runs it, the composite
         # action that gives it a nightly toolchain, the pin that names which
         # nightly, the make targets it calls and the version they install, and
@@ -1358,7 +1468,6 @@ if [[ "$suites" != "$before_labels" ]]; then
     echo "note: 'ci: docker' label present; container suites forced on."
 fi
 
-loom=false
 if ci_label_wants_loom "${PR_LABELS:-}"; then
     echo "note: 'ci: loom' label present; loom models forced on."
     loom=true

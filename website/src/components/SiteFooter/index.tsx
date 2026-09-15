@@ -17,7 +17,7 @@ function Facts(): React.JSX.Element {
   const facts: Array<[string, string]> = [
     [proof.version ?? '0.x', 'latest release'],
     ['Apache-2.0', 'license, no CLA'],
-    ['1.94', 'MSRV, edition 2024'],
+    ['1.96', 'MSRV, edition 2024'],
     ...(typeof invariants === 'number' ? [[String(invariants), 'numbered invariants'] as [string, string]] : []),
     ...(typeof proof.downloads === 'number'
       ? [[proof.downloads.toLocaleString('en-US'), 'crates.io downloads'] as [string, string]]

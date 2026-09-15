@@ -849,6 +849,8 @@ if len(set(keys)) != len(keys):
         website/docusaurus.config.ts
     check_flags false true false "the submodule list rebuilds the site and needs no Rust build" \
         .gitmodules
+    check_flags false true false "the Node pin rebuilds the site and needs no Rust build" \
+        .node-version
     check_flags true false false "a bench source builds Rust and does not rebuild the site" \
         bench/src/lib.rs
     # The fuzz crate is outside the workspace, so the stable tier compiles none
@@ -1210,8 +1212,9 @@ else
             continue
             ;;
         # --- documentation and site sources: no Rust build needed ------------
-        # `.gitmodules` pins the benchmark data the site renders.
-        docs/* | website/* | .gitmodules)
+        # `.gitmodules` pins the benchmark data the site renders. `.node-version`
+        # pins the toolchain the site build runs on.
+        docs/* | website/* | .gitmodules | .node-version)
             site=true
             continue
             ;;

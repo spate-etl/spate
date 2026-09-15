@@ -14,7 +14,7 @@ include versions.mk
         deny attribution \
         supply-chain zizmor shellcheck self-test check-perf-report \
         check-gungraun-benches check-collected-region \
-        check-transclusions check-supported-versions \
+        check-transclusions check-supported-versions check-version-pins \
         check-brand \
         check-adr adr-new \
         check-changelog changelog-new \
@@ -169,6 +169,7 @@ self-test: ## The CI classifiers still match the crate graph
 	./scripts/semver-checks.sh --self-test
 	./scripts/container-image.sh --self-test
 	./scripts/supported-versions.sh --self-test
+	./scripts/version-pins.sh --self-test
 
 check-perf-report: ## The perf report's flag file stays parseable by perf-label.yml
 	./scripts/gungraun-report.sh --self-test
@@ -189,6 +190,9 @@ check-docs-meta: ## Every rendered docs page carries a description of the length
 
 check-supported-versions: ## Every supported-versions table matches the servers CI pins
 	./scripts/supported-versions.sh --check
+
+check-version-pins: ## Node is pinned exactly, everywhere, and engines.node stays a floor under it
+	./scripts/version-pins.sh --check
 
 check-site-meta: ## Every built page carries a description (run after the site build)
 	./scripts/site-meta.sh --check
@@ -221,7 +225,7 @@ release-dry-run: ## The whole release locally, nothing pushed or uploaded: make 
 #
 #     UPDATE_EXAMPLES_INDEX=1 cargo test -p spate --test examples_index --locked
 
-ci-lint: zizmor shellcheck self-test check-perf-report check-gungraun-benches check-collected-region check-adr check-brand check-changelog check-transclusions check-docs-meta check-supported-versions check-release-version ## Every repository-metadata check
+ci-lint: zizmor shellcheck self-test check-perf-report check-gungraun-benches check-collected-region check-adr check-brand check-changelog check-transclusions check-docs-meta check-supported-versions check-version-pins check-release-version ## Every repository-metadata check
 
 ##@ Fuzz
 

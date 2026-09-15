@@ -18,6 +18,8 @@
 #   BASE_SHA      github.event.pull_request.base.sha  (pull_request only)
 #   HEAD_SHA      github.event.pull_request.head.sha  (pull_request only)
 #   EVENT_BEFORE  github.event.before  (push only; the `manifests` output)
+#   MERGE_BASE_SHA  github.event.merge_group.base_sha  (merge_group only)
+#   MERGE_HEAD_SHA  github.event.merge_group.head_sha  (merge_group only)
 #   PR_AUTHOR     github.event.pull_request.user.login  (NOT github.actor,
 #                 which changes on a re-run)
 #
@@ -985,6 +987,38 @@ if len(set(keys)) != len(keys):
     check_manifests_env true "the zero SHA fails closed" "0000000000000000000000000000000000000000"
     check_manifests_env true "an unreachable before fails closed" "4242424242424242424242424242424242424242"
     check_manifests_env true "a missing before fails closed" ""
+
+    # The merge_group branch computes its own diff too, from the two SHAs the
+    # `changes` job passes, so these drive the arm through that environment.
+    check_manifests_mq() { # want, desc, base, head
+        local want="$1" desc="$2" base="$3" head="$4"
+        local out got
+        out=$(mktemp)
+        env -u PR_LABELS EVENT_NAME=merge_group MERGE_BASE_SHA="$base" \
+            MERGE_HEAD_SHA="$head" GITHUB_OUTPUT="$out" "$0" >/dev/null
+        got=$(sed -n 's/^manifests=//p' "$out")
+        rm -f "$out"
+        if [[ "$got" != "$want" ]]; then
+            echo "::error::$desc: expected manifests=$want, got manifests=$got (base='$base' head='$head')"
+            path_case_failed=1
+        fi
+    }
+    mq_head=$(git rev-parse HEAD)
+    check_manifests_mq false "an empty merge-group diff selects nothing" "$mq_head" "$mq_head"
+    check_manifests_mq true "the zero SHA fails closed" \
+        "0000000000000000000000000000000000000000" "$mq_head"
+    check_manifests_mq true "an unreachable base fails closed" \
+        "4242424242424242424242424242424242424242" "$mq_head"
+    check_manifests_mq true "a missing base fails closed" "" "$mq_head"
+    check_manifests_mq true "a missing head fails closed" "$mq_head" ""
+    # A base sharing no history with the head: `git merge-base` reports nothing
+    # and the arm runs everything, where a two-dot diff would have reported one
+    # unrelated tree against the other as the group's changes.
+    # The identity is supplied here because a CI runner configures none, and
+    # `git commit-tree` refuses to write an object without one.
+    mq_orphan=$(git -c user.name=self-test -c user.email=self-test@invalid \
+        commit-tree "$(git rev-parse 'HEAD^{tree}')" -m "ci-changes self-test")
+    check_manifests_mq true "a base sharing no history fails closed" "$mq_orphan" "$mq_head"
     # The semver selection. `spate-test` is the row that fails if somebody
     # folds the two closures into one: the container table reaches four suites
     # from it through dev-dependencies, and no published API moves with them.
@@ -1074,9 +1108,27 @@ pull_request)
         force_all=1
     fi
     ;;
+merge_group)
+    # The queue branch holds this entry on top of the ones ahead of it, so the
+    # diff from the merge base is what the group adds to `main`.
+    #
+    # Through `git merge-base` because nothing documents `merge_group.base_sha`
+    # as an ancestor of `head_sha`: a two-dot diff between two unrelated commits
+    # reports one tree against the other and can call a file changed that this
+    # group never touched, or miss one it did.
+    if ! merge_base=$(git merge-base "${MERGE_BASE_SHA:-}" "${MERGE_HEAD_SHA:-}" 2>/dev/null) ||
+        [[ -z "$merge_base" ]]; then
+        echo "note: no merge base for ${MERGE_BASE_SHA:-?}..${MERGE_HEAD_SHA:-?}; running everything."
+        force_all=1
+    elif ! git diff --no-ext-diff --no-textconv --name-only -z --no-renames \
+        "$merge_base" "${MERGE_HEAD_SHA}" >"$changed_file" 2>/dev/null; then
+        echo "note: could not diff ${merge_base}..${MERGE_HEAD_SHA}; running everything."
+        force_all=1
+    fi
+    ;;
 *)
-    # push, merge_group, schedule, workflow_dispatch: no pull-request diff to
-    # reason about, and a push to main is the last line of defence.
+    # push, schedule, workflow_dispatch: no diff to reason about, and a push to
+    # main is the last line of defence.
     force_all=1
     ;;
 esac

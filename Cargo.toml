@@ -18,7 +18,7 @@ members = [
 [workspace.package]
 version = "0.2.0"
 edition = "2024"
-rust-version = "1.94"
+rust-version = "1.96"
 license = "Apache-2.0"
 authors = ["Marcus Kainth <marcus@kainth.dev>"]
 repository = "https://github.com/spate-etl/spate"

@@ -83,21 +83,25 @@ impl InflightBudget {
 
     /// Record `bytes` entering the in-flight window (saturating).
     pub fn add(&self, bytes: usize) {
-        // `fetch_update` never returns `Err` with an always-`Some` closure.
-        let _ = self
-            .bytes
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
-                Some(v.saturating_add(bytes))
-            });
+        self.update(|v| v.saturating_add(bytes));
     }
 
     /// Record `bytes` leaving the in-flight window (saturating at zero).
     pub fn sub(&self, bytes: usize) {
+        self.update(|v| v.saturating_sub(bytes));
+    }
+
+    #[cfg(not(loom))]
+    fn update(&self, f: impl FnMut(usize) -> usize) {
+        self.bytes.update(Ordering::Relaxed, Ordering::Relaxed, f);
+    }
+
+    // loom 0.7 has no `update`.
+    #[cfg(loom)]
+    fn update(&self, mut f: impl FnMut(usize) -> usize) {
         let _ = self
             .bytes
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
-                Some(v.saturating_sub(bytes))
-            });
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| Some(f(v)));
     }
 
     /// Current in-flight bytes (possibly slightly stale under contention).

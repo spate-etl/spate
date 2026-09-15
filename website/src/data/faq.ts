@@ -6,7 +6,7 @@ export const FAQ: Array<{q: string; a: string}> = [
   },
   {
     q: 'Which Rust version does it need?',
-    a: 'The minimum supported Rust version is 1.94 with edition 2024. The newest 0.x minor is the supported line, and breaking changes ship in a minor bump.',
+    a: 'The minimum supported Rust version is 1.96 with edition 2024. The newest 0.x minor is the supported line, and breaking changes ship in a minor bump.',
   },
   {
     q: 'Which connectors ship?',

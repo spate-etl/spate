@@ -419,7 +419,6 @@ impl KafkaSink {
     /// metadata fetch, so unknown topics fail fast). This is the probe
     /// [`SinkBundle::into_parts`] attaches; manual assemblies hand it to
     /// `SinkRuntime.probe` directly.
-    #[must_use]
     pub fn probe_fn(&self) -> SinkProbeFn {
         endpoint_probe(self.writer.clone(), Arc::clone(&self.probe_endpoints))
     }

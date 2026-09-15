@@ -72,6 +72,10 @@ jobs:
           # For the `manifests` output on push, where no pull-request diff
           # exists. Empty or unresolvable fails closed to `manifests=true`.
           EVENT_BEFORE: ${{ github.event.before }}
+          # The queue branch: this entry on top of the ones ahead of it. Absent
+          # outside a merge group, where the arm reading them never runs.
+          MERGE_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          MERGE_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
         run: ./scripts/ci-changes.sh
 
   # Tier 1: cheap, unconditional, gates the expensive tier. No job-level `if:`

@@ -60,8 +60,8 @@ is documented as exempt from Spate's stability promises.
 
 ## Toolchain requirements
 
-- **MSRV: Rust 1.96** — checked in CI, on a rolling N-2 policy.
-- **Edition 2024.**
+- **MSRV: Rust <Msrv />** — checked in CI, on a rolling N-2 policy.
+- **Edition <Edition />.**
 - The `kafka` feature builds `rdkafka`, which compiles librdkafka from
   vendored sources. A working C toolchain on the build host is all it
   needs (the standard `rust` Docker images qualify), and the first build

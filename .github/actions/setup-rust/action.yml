@@ -9,7 +9,9 @@ description: >
 
 inputs:
   toolchain:
-    description: Rust toolchain to install (stable, nightly, or a version like "1.94").
+    description: >
+      Rust toolchain to install: a channel, an explicit version, or "msrv" to
+      install the floor `rust-version` declares in the workspace Cargo.toml.
     required: false
     default: stable
   toolchain-file:
@@ -67,13 +69,28 @@ runs:
         TOOLCHAIN_FILE: ${{ inputs.toolchain-file }}
       run: |
         set -euo pipefail
+        origin="the toolchain input"
         if [[ -n "$TOOLCHAIN_FILE" ]]; then
+          origin=$TOOLCHAIN_FILE
           TOOLCHAIN=$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)"[[:space:]]*$/\1/p' "$TOOLCHAIN_FILE")
-          if [[ -z "$TOOLCHAIN" ]]; then
-            echo "::error::$TOOLCHAIN_FILE declares no channel"
-            exit 1
-          fi
+        elif [[ "$TOOLCHAIN" == msrv ]]; then
+          origin=Cargo.toml
+          TOOLCHAIN=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)
         fi
+        # The resolved toolchain is one rustup channel spec. A sed that matched
+        # twice makes a multi-line value, which reaches `$GITHUB_OUTPUT` as a
+        # line carrying no `=`; the runner rejects that as `Invalid format`
+        # without naming the file behind it.
+        case "$TOOLCHAIN" in
+        '')
+          echo "::error::$origin declares no toolchain"
+          exit 1
+          ;;
+        *[!A-Za-z0-9._+-]*)
+          echo "::error::$origin declares an unusable toolchain: $TOOLCHAIN"
+          exit 1
+          ;;
+        esac
         echo "toolchain=$TOOLCHAIN" >>"$GITHUB_OUTPUT"
       shell: bash
 

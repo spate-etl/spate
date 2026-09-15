@@ -5,8 +5,9 @@ import clsx from 'clsx';
 import React, {useState} from 'react';
 
 import {CONNECTORS} from '../../data/connectors';
-import {FAQ} from '../../data/faq';
+import {faq} from '../../data/faq';
 import {githubUrl} from '../../repoUrl';
+import {useToolchain} from '../../toolchain';
 import Taste from '../../pages/_home/taste.mdx';
 import {useReveal} from '../motion/useReveal';
 import HeroBenchmark from './HeroBenchmark';
@@ -358,10 +359,11 @@ export function Deploy(): React.JSX.Element {
 }
 
 export function Faq(): React.JSX.Element {
+  const {msrv, edition} = useToolchain();
   return (
     <SplitSection id="faq" title="A streaming engineer asks these first.">
       <div className="home-faq">
-        {FAQ.map((item, i) => (
+        {faq(msrv, edition).map((item, i) => (
           <details key={item.q} open={i === 0}>
             <summary>{item.q}</summary>
             <p>{item.a}</p>

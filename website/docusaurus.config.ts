@@ -10,6 +10,7 @@ import benchData from './src/plugins/benchData';
 import socialProof from './src/plugins/socialProof';
 import {BENCHMARK_REPO, BENCHMARKS_BASE, NAV_ITEMS} from './src/data/nav';
 import {countInvariants} from './src/data/invariants';
+import {readToolchain} from './src/data/manifest';
 import prismTheme from './src/prismTheme';
 // The site is deployed as a Cloudflare Worker at https://spate.kainth.dev/.
 // organizationName/projectName drive the GitHub source links (githubUrl,
@@ -82,7 +83,7 @@ const config: Config = {
   url: 'https://spate.kainth.dev',
   baseUrl: '/',
   // Facts a page states that the repository, not the page, owns.
-  customFields: {invariants: countInvariants()},
+  customFields: {invariants: countInvariants(), ...readToolchain()},
   organizationName,
   projectName,
   trailingSlash: false,

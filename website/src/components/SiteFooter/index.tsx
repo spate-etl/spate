@@ -6,6 +6,7 @@ import ThemedImage from '@theme/ThemedImage';
 import React from 'react';
 
 import {FOOTER_COLUMNS} from '../../data/nav';
+import {useToolchain} from '../../toolchain';
 
 type Proof = {downloads?: number; version?: string; asOf?: string};
 
@@ -14,10 +15,11 @@ function Facts(): React.JSX.Element {
   const proof = (usePluginData('social-proof') as Proof | undefined) ?? {};
   const {siteConfig} = useDocusaurusContext();
   const invariants = siteConfig.customFields?.invariants;
+  const {msrv, edition} = useToolchain();
   const facts: Array<[string, string]> = [
     [proof.version ?? '0.x', 'latest release'],
     ['Apache-2.0', 'license, no CLA'],
-    ['1.96', 'MSRV, edition 2024'],
+    [msrv, `MSRV, edition ${edition}`],
     ...(typeof invariants === 'number' ? [[String(invariants), 'numbered invariants'] as [string, string]] : []),
     ...(typeof proof.downloads === 'number'
       ? [[proof.downloads.toLocaleString('en-US'), 'crates.io downloads'] as [string, string]]

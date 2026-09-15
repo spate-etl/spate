@@ -20,8 +20,10 @@ and never goes in an issue; see [Security and legal](#security-and-legal).
 
 ## Building and testing
 
-The default suites need a Rust toolchain at **1.96** or newer and nothing else.
-That version is the MSRV, and CI checks it.
+The default suites need a recent stable Rust toolchain and nothing else.
+`rust-version` in `Cargo.toml` declares the MSRV, and everything that needs the
+number reads it from there. CI holds the crates to that floor. Moving it edits
+that one line, plus a changelog fragment like any other crate-scoped `build`.
 
 ```sh
 make gates   # everything a pull request must pass

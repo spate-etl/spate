@@ -869,7 +869,7 @@ jobs:
       - run: make loom
 
   msrv:
-    name: Check (MSRV 1.96)
+    name: Check (MSRV)
     runs-on: ubuntu-latest
     needs: [changes, lint, workflows]
     if: needs.changes.outputs.rust == 'true'
@@ -880,7 +880,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-rust
         with:
-          toolchain: "1.96"
+          toolchain: msrv
           shared-key: msrv
       # `--locked` is what makes this ask about the graph we ship: free to
       # resolve, it would pass on an older graph than the committed lockfile.

@@ -14,14 +14,16 @@ import {
   WhyFast,
   SUBLINE,
 } from '../components/home/sections';
-import {FAQ} from '../data/faq';
+import {faq} from '../data/faq';
 import {githubUrl} from '../repoUrl';
+import {useToolchain} from '../toolchain';
 
 const TITLE = 'Spate: at-least-once streaming ETL framework for Rust';
 
 export default function Home(): React.JSX.Element {
   const {siteConfig} = useDocusaurusContext();
   const proof = (usePluginData('social-proof') as {version?: string} | undefined) ?? {};
+  const {msrv, edition} = useToolchain();
   const ld = [
     {
       '@context': 'https://schema.org',
@@ -38,7 +40,7 @@ export default function Home(): React.JSX.Element {
     {
       '@context': 'https://schema.org',
       '@type': 'FAQPage',
-      mainEntity: FAQ.map((f) => ({
+      mainEntity: faq(msrv, edition).map((f) => ({
         '@type': 'Question',
         name: f.q,
         acceptedAnswer: {'@type': 'Answer', text: f.a},

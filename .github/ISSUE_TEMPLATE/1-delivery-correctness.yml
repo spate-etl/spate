@@ -60,7 +60,7 @@ body:
     attributes:
       label: Rust version and platform
       description: >-
-        `rustc --version` and your OS/architecture. The MSRV is 1.94.
+        `rustc --version` and your OS/architecture. The MSRV is 1.96.
       placeholder: "rustc 1.97.0, macOS aarch64"
     validations:
       required: true

@@ -20,7 +20,7 @@ and never goes in an issue; see [Security and legal](#security-and-legal).
 
 ## Building and testing
 
-The default suites need a Rust toolchain at **1.94** or newer and nothing else.
+The default suites need a Rust toolchain at **1.96** or newer and nothing else.
 That version is the MSRV, and CI checks it.
 
 ```sh

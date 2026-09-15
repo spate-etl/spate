@@ -779,7 +779,7 @@ mod tests {
             self.ranges.lock().unwrap().push(range_kind(&options.range));
             if self
                 .fail_gets
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
                 .is_ok()
             {
                 return Err(Self::generic("injected get failure"));
@@ -787,7 +787,7 @@ mod tests {
             let result = self.inner.get_opts(location, options).await?;
             if self
                 .cut_streams
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
                 .is_ok()
             {
                 let cut_after = self.cut_after;

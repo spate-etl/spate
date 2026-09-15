@@ -13,6 +13,9 @@
     "clear": "docusaurus clear",
     "typecheck": "tsc",
     "test": "node --test \"src/**/*.test.js\" \"src/**/*.test.ts\"",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui",
+    "test:e2e:report": "playwright show-report",
     "write-translations": "docusaurus write-translations",
     "write-heading-ids": "docusaurus write-heading-ids"
   },
@@ -32,9 +35,11 @@
     "react-dom": "^19.2.8"
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.13.0",
     "@docusaurus/module-type-aliases": "^3.10.1",
     "@docusaurus/tsconfig": "^3.10.1",
     "@docusaurus/types": "^3.10.1",
+    "@playwright/test": "^1.63.0",
     "smol-toml": "^1.8.0",
     "typescript": "~5.9.3"
   },

@@ -847,6 +847,11 @@ if len(set(keys)) != len(keys):
         docs/METRICS.md
     check_flags false true false "the site tree rebuilds the site and needs no Rust build" \
         website/docusaurus.config.ts
+    # `website/*` takes this today, same as the case above. It guards against
+    # an arm for the test tree landing ahead of it, since the e2e suite runs
+    # against `website/build`.
+    check_flags false true false "an e2e Playwright spec rebuilds the site and needs no Rust build" \
+        website/tests/e2e/specs/a11y.spec.ts
     check_flags false true false "the submodule list rebuilds the site and needs no Rust build" \
         .gitmodules
     check_flags true false false "a bench source builds Rust and does not rebuild the site" \

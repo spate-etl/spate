@@ -32,6 +32,9 @@ website/node_modules
 website/build
 website/.docusaurus
 website/.cache-loader
+website/test-results
+website/playwright-report
+website/blob-report
 # Benchmark pages rendered from the submodule by website/scripts/sync-benchmark-docs.mjs
 website/.benchmarks
 website/.wrangler

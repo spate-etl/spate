@@ -106,11 +106,10 @@ The rules that break most often:
 
 - **Framework pages are vendor-neutral prose.** Everything under
   `docs/user-guide/` outside `04-connectors/` states its rules in framework
-  vocabulary. A connector name may appear only as a link label, a `## Related`
-  entry, or inside a `:::note Connector specifics` block, never carrying the
-  explanation. Fenced code and YAML are exempt; the prose around them is not.
-  `docs/adr/` sits outside the rule, and should not grow connector *usage*
-  guidance either.
+  vocabulary. `docs/STYLE.md`'s rule lists where a connector or vendor name may
+  appear; nowhere else may it carry the explanation. Fenced code and YAML are
+  exempt; the prose around them is not. `docs/adr/` sits outside the rule, and
+  should not grow connector *usage* guidance either.
 - **Docs read as the present, never as a changelog.** No "now", "recently", "as
   of". If something changed, the page describes what is and the commit says what
   moved. The one exception is `docs/adr/`; see below.

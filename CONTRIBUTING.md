@@ -97,10 +97,10 @@ change to what readers see. [`docs/STYLE.md`](docs/STYLE.md) is normative, and
 
 The rule to know before writing a line: **framework pages are vendor-neutral
 prose.** Everything under `docs/user-guide/` outside `04-connectors/` states its
-rules in framework vocabulary. A connector name belongs in a link label, a
-`## Related` entry, or a `:::note Connector specifics` block, never in the
-explanation. Fenced code and YAML are exempt: a configuration example has to name
-a real tag. Review enforces this boundary, not a lint.
+rules in framework vocabulary. `docs/STYLE.md`'s rule lists where a connector
+name belongs; nowhere else may it carry the explanation. Fenced code and YAML
+are exempt: a configuration example has to name a real tag. Review enforces
+this boundary, not a lint.
 
 ## Security and legal
 

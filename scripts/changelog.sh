@@ -163,7 +163,7 @@ fix(ci,docs): lowercase the Pages project name|exempt
 # --- the automation's own subjects, verbatim from its config ---
 chore(workspace): bump the cargo-compatible group|exempt
 chore(ci): bump mikepenz/action-junit-report|exempt
-chore(docs): bump typescript in /website|exempt
+chore(website): bump typescript in /website|exempt
 chore(examples): bump a dependency|exempt
 chore: release v0.2.0|exempt
 # --- the breaking marker decides on its own, before either axis ---

@@ -115,7 +115,7 @@ updates:
         patterns: ["*"]
         update-types: ["minor", "patch"]
 
-  # -------------------------------------------- npm (documentation site) ----
+  # -------------------------------------------- gitsubmodule (benchmark) ----
   # The benchmark data the site renders under /benchmarks. A bump reaches the
   # deployed site at the next nightly docs build or a manual `tier: docs`
   # dispatch; nothing deploys on push to main.
@@ -126,10 +126,11 @@ updates:
       day: wednesday
     labels: ["dependencies", "area: website"]
     commit-message:
-      prefix: "chore(docs)"
+      prefix: "chore(website)"
     cooldown:
       default-days: 3
 
+  # ------------------------------------------------------- npm (website) ----
   - package-ecosystem: npm
     directory: "/website"
     schedule:
@@ -138,7 +139,7 @@ updates:
     open-pull-requests-limit: 3
     labels: ["dependencies", "area: website"]
     commit-message:
-      prefix: "chore(docs)"
+      prefix: "chore(website)"
     cooldown:
       default-days: 7
       # 0.x packages here too, so semver-minor-days reaches them as above.

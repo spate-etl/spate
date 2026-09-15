@@ -38,8 +38,10 @@ fmt: ## Format the workspace
 fmt-check: ## Check formatting without writing
 	cargo fmt --all --check
 
+CLIPPY_FLAGS ?= -D warnings
+
 clippy: ## Lint, warnings denied
-	cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+	cargo clippy --workspace --all-targets --all-features --locked -- $(CLIPPY_FLAGS)
 
 lint: fmt-check clippy ## Formatting and clippy together
 

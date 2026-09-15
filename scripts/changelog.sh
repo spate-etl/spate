@@ -39,9 +39,10 @@ repo_url=https://github.com/spate-etl/spate
 # change is not a seventh type; it is a `**Breaking:**` marker on one of these.
 TYPES="added changed deprecated removed fixed security"
 
-# The scopes that do not reach a crate. Typed out rather than derived from the
-# `area:` labels in .github/labels.yml: that list also carries `supply-chain`,
-# and a `fix(supply-chain):` closing an advisory is a release note.
+# The scopes that do not reach a crate, typed out. Deriving them from the
+# `area:` labels in .github/labels.yml would over-name by one: that namespace
+# carries `supply-chain`, which names no scope, and exempting one nobody writes
+# fails open the day somebody does.
 #
 # `bench` covers the unpublished `spate-bench` harness and the `benches/`
 # targets inside published crates: neither reaches a published crate's surface.

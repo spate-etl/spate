@@ -617,6 +617,8 @@ jobs:
     needs: plan
     if: needs.plan.outputs.weekly == 'true'
     # Uncached, so both steps build from cold, librdkafka and OpenSSL included.
+    # A clippy failure adds a third full build when the reporting step reruns
+    # it without `-D warnings`.
     timeout-minutes: 60
     # Every other Rust job takes whatever `stable` resolves to on the day, so a
     # toolchain regression reaches `main` and every open pull request in the
@@ -638,28 +640,37 @@ jobs:
           # with the stable trees and would evict them from the 10 GB budget.
 
       # A new clippy lint is the most common way a release reds this
-      # repository, and `make clippy` denies warnings. A compile break stops
-      # the run here, where `make test` would report the same error again.
+      # repository, and `make clippy` denies warnings. continue-on-error on
+      # both steps keeps a clippy failure from skipping `make test`, so the
+      # run always reports both; the step below turns a failing outcome back
+      # into a failing job.
       - id: clippy
         run: make clippy
+        continue-on-error: true
       - id: test
         run: make test
+        continue-on-error: true
 
-      # Gated on the named steps, not `failure()`: a checkout or toolchain
-      # failure would file an issue asserting beta breaks the tree.
+      # Gated on `outcome`: continue-on-error reports a failing step's
+      # `conclusion` as `success` and keeps the real result in `outcome`.
+      # always() is required for the condition to run at all once a step has
+      # failed for real; a step that never ran carries neither outcome, so a
+      # checkout or toolchain failure still can't file an issue claiming beta
+      # breaks the tree.
       #
       # Neither title's words are a subset of the other's. The search below is
       # an unquoted AND over the title's terms, so a title contained in another
       # would comment on the wrong issue.
       - name: Report the failure as an issue
         if: >-
-          failure() &&
-          (steps.clippy.conclusion == 'failure' ||
-           steps.test.conclusion == 'failure')
+          always() &&
+          (steps.clippy.outcome == 'failure' ||
+           steps.test.outcome == 'failure')
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          CLIPPY_FAILED: ${{ steps.clippy.conclusion == 'failure' }}
+          CLIPPY_FAILED: ${{ steps.clippy.outcome == 'failure' }}
+          TEST_OUTCOME: ${{ steps.test.outcome }}
         run: |
           set -euo pipefail
           # shellcheck disable=SC2016
@@ -667,10 +678,21 @@ jobs:
             title='Clippy fails on the beta toolchain'
             body_head='`make clippy` failed on beta. Once beta becomes stable this'
             body_head2='blocks every pull request, because the lint job denies warnings.'
+            # continue-on-error keeps `make test` running after a clippy
+            # failure, but a manual cancel or the job's own timeout can still
+            # leave its outcome at `cancelled` or `skipped`.
+            if [ "$TEST_OUTCOME" = "failure" ]; then
+              test_line='`make test` also failed on the same run.'
+            elif [ "$TEST_OUTCOME" = "success" ]; then
+              test_line='`make test` passed on the same run.'
+            else
+              test_line="\`make test\` outcome on the same run: \`${TEST_OUTCOME}\`."
+            fi
           else
             title='Tests fail on the beta toolchain'
             body_head='`make test` failed on beta while `make clippy` passed.'
             body_head2='Clippy stops at the check build, so this is codegen, linking or behavior.'
+            test_line=''
           fi
           existing=$(gh issue list --state open --search "$title in:title" \
             --json number --jq '.[0].number // empty')
@@ -678,18 +700,62 @@ jobs:
             gh issue comment "$existing" --body "Still failing: ${RUN_URL}"
             exit 0
           fi
+          body_args=("$body_head" "$body_head2")
+          if [ -n "$test_line" ]; then
+            body_args+=("$test_line")
+          fi
+          body_args+=('' "Run: ${RUN_URL}")
+          if [ "$CLIPPY_FAILED" = "true" ]; then
+            # -D warnings stops the check build at the first crate that hits a
+            # denied lint; rerunning without it lets every crate build and
+            # surfaces the full list. A nonzero exit here means the build
+            # itself failed before clippy could list anything.
+            clippy_status=0
+            clippy_log=$(make clippy CLIPPY_FLAGS= 2>&1) || clippy_status=$?
+            # Bounded so a lint firing workspace-wide can't grow the body past
+            # GitHub's 65536-character limit and fail the step with no issue
+            # filed.
+            clippy_log_lines=$(printf '%s\n' "$clippy_log" | wc -l | tr -d ' ')
+            max_lines=200
+            if [ "$clippy_log_lines" -gt "$max_lines" ]; then
+              # A here-string: a pipe writer still filling the pipe when
+              # `head` exits early gets SIGPIPE. pipefail turns that into a
+              # failed step with no issue filed.
+              clippy_log_shown=$(head -n "$max_lines" <<<"$clippy_log")
+              clippy_log_note="Truncated to the first ${max_lines} of ${clippy_log_lines} lines; the run log has the rest."
+            else
+              clippy_log_shown="$clippy_log"
+              clippy_log_note=''
+            fi
+            if [ "$clippy_status" -eq 0 ]; then
+              # shellcheck disable=SC2016
+              lint_intro='Every lint `make clippy CLIPPY_FLAGS=` finds on beta:'
+            else
+              lint_intro="\`make clippy CLIPPY_FLAGS=\` still exits ${clippy_status}. The build fails before clippy reaches any lint."
+            fi
+            body_args+=('' "$lint_intro" '' '```' "$clippy_log_shown" '```')
+            if [ -n "$clippy_log_note" ]; then
+              body_args+=('' "$clippy_log_note")
+            fi
+          fi
+          body_args+=(
+            ''
+            'Beta reaches stable within six weeks, at which point this'
+            'blocks every open pull request at once. The run log names the'
+            'release it was found on.'
+          )
           # shellcheck disable=SC2016
-          gh issue create --title "$title" --body "$(
-            printf '%s\n' \
-              "$body_head" \
-              "$body_head2" \
-              '' \
-              "Run: ${RUN_URL}" \
-              '' \
-              'Beta reaches stable within six weeks, at which point this' \
-              'blocks every open pull request at once. The run log names the' \
-              'release it was found on.'
-          )"
+          gh issue create --title "$title" --body "$(printf '%s\n' "${body_args[@]}")"
+
+      # continue-on-error keeps a failing clippy or test step from failing the
+      # job by itself. This step exits 1 when either outcome was `failure`, so
+      # the weekly run still shows up red.
+      - name: Fail the job on either outcome
+        if: >-
+          always() &&
+          (steps.clippy.outcome == 'failure' ||
+           steps.test.outcome == 'failure')
+        run: exit 1
 
   features-powerset:
     name: Feature powerset (exhaustive)

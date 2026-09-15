@@ -5,11 +5,13 @@ name: CI
 on:
   push:
     branches: [main]
-  # `labeled` lets `ci: docker`, `ci: loom` and `ci: bench` take effect on the
-  # pull request carrying them. `edited` re-runs the changelog gate: it reads the
-  # pull request *title*, and a retitle after a green run would land unchecked.
+  # `edited` re-runs the changelog gate: it reads the pull request *title*, and
+  # a retitle after a green run would land unchecked. The opt-in `ci: docker`,
+  # `ci: loom` and `ci: bench` labels take effect on the branch's next push.
+  # `ci.yml` classifies each run from the event that triggered it, so a manual
+  # re-run of an already-started run carries the labels that run started with.
   pull_request:
-    types: [opened, synchronize, reopened, labeled, edited]
+    types: [opened, synchronize, reopened, edited]
   merge_group:
 
 env:
@@ -1080,9 +1082,12 @@ jobs:
     name: CI gate
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    # Without `always()` this job is itself skipped when a dependency fails, and
-    # a skipped check reports as *success* to branch protection.
-    if: always()
+    # `!cancelled()` still runs this job when a dependency fails outright: a
+    # skipped check reports as *success* to branch protection, and a genuine
+    # failure must report through this gate. It skips only when the run itself
+    # was cancelled, so a run superseded by a newer one for the same commit
+    # leaves no lingering `failure` for branch protection to keep blocking on.
+    if: ${{ !cancelled() }}
     needs: [changes, lint, workflows, deny, changelog, semver, semver-baseline, publish-dry-run, minimal-versions, test, doctests, docsrs, features, msrv, containers, clickhouse-versions, site, loom, alloc-assertions, fuzz, perf-warm, perf-counters, perf-report]
     steps:
       - name: Evaluate dependency results
@@ -1090,8 +1095,9 @@ jobs:
           RESULTS: ${{ toJSON(needs) }}
         run: |
           echo "$RESULTS"
-          # `skipped` is accepted; `cancelled` is not, since cancel-in-progress
-          # produces `cancelled` rather than `failure`.
+          # `skipped` is accepted; `cancelled` is not, since a dependency that
+          # exceeds its own `timeout-minutes` completes with conclusion
+          # `cancelled`, and every job in `needs:` carries one.
           bad=$(echo "$RESULTS" | jq -r '
             to_entries
             | map(select(.value.result == "failure" or .value.result == "cancelled"))

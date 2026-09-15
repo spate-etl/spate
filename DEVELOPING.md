@@ -108,9 +108,12 @@ a `spate-core` change checks every published crate.
 
 For a change whose reach those paths do not show, such as a refactor moving code
 between crates or a dependency swap, a maintainer can label the pull request
-`ci: docker`, `ci: loom` or `ci: bench`. They only ever add work; none can
-switch a suite off, and none reaches the semver gate, which follows the crate
-graph alone. `make self-test` checks each classifier against that graph.
+`ci: docker`, `ci: loom` or `ci: bench`. The label takes effect on the branch's
+next push: `ci.yml` classifies each run from the event that triggered it, so a
+re-run of an already-started run carries the labels that run started with. They
+only ever add work; none can switch a suite off, and none reaches the semver
+gate, which follows the crate graph alone. `make self-test` checks each
+classifier against that graph.
 
 ## Testing conventions
 

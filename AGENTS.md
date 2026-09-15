@@ -126,10 +126,10 @@ reverse. `docs/adr/_template.md` states both rules in full and is normative;
 ## Commits and pull requests
 
 Conventional Commits. Scope = crate touched (`spate-core`, `spate-kafka`, …),
-comma-separated for several; use `workspace`, `ci`, `docs`, `examples`,
-`bench` for non-crate areas. Dependabot raises bumps as `chore` scoped by
-area, so prefer `fix` or `feat` for your own commits; `chore` should read as "a
-bot bumped a version".
+comma-separated for several; [`CONTRIBUTING.md`](CONTRIBUTING.md) names the
+areas that are not crates. Dependabot raises bumps as `chore` scoped by area,
+so prefer `fix` or `feat` for your own commits; `chore` should read as "a bot
+bumped a version".
 
 Messages must make sense to outsiders: no plan or phase references, no issue
 shorthand that only resolves in this session. **No AI attribution in git**: no

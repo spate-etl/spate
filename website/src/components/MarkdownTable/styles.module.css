@@ -1,0 +1,27 @@
+/*
+ * Infima styles the bare `table` element as `display: block; overflow: auto`,
+ * which makes the table its own scroll container with no way to focus it.
+ * `.wrapper` takes the overflow instead and `.table` reverts the element to a
+ * normal table box; a class selector outranks Infima's bare-element one on
+ * specificity regardless of source order, which is what this site relies on
+ * with `useCssCascadeLayers` off.
+ */
+
+.wrapper {
+  overflow-x: auto;
+  margin-bottom: var(--ifm-spacing-vertical);
+}
+
+.wrapper:focus-visible {
+  outline: 2px solid var(--spate-accent);
+  outline-offset: -2px;
+}
+
+.table {
+  display: table;
+  overflow: visible;
+  /* Infima's bottom margin moves to .wrapper: a margin on this element would
+   * sit inside the scroll box instead of below it, since margins do not
+   * collapse out of an overflow container. */
+  margin-bottom: 0;
+}

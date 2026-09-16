@@ -200,9 +200,6 @@ latest_github_release() { # owner/repo
     if [[ -n "${GH_TOKEN:-}" ]]; then
         hdr=(-H "Authorization: Bearer $GH_TOKEN")
     fi
-    # ${hdr[@]+"${hdr[@]}"}: on bash before 4.4, "${hdr[@]}" on an empty array
-    # is an unbound-variable error under `set -u` (scripts/changelog.sh:27-29
-    # has the account); darwin's /bin/bash is 3.2.
     body=$(http_get "https://api.github.com/repos/$repo/releases/latest" ${hdr[@]+"${hdr[@]}"}) || return 1
     tag=$(printf '%s' "$body" | jq -r '.tag_name // empty')
     if [[ -z "$tag" ]]; then

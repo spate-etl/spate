@@ -105,11 +105,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # No Rust toolchain in this job, so it cannot go through setup-rust's own
+      # resolve step; this resolves the same versions.mk pins directly.
+      - id: resolve-tools
+        run: |
+          set -euo pipefail
+          tools=$(./scripts/tool-versions.sh --resolve zizmor,shellcheck)
+          echo "tools=$tools" >>"$GITHUB_OUTPUT"
       - uses: taiki-e/install-action@d438492cf8a250514fa2d34b30bc3c0dc37c65ff # v2.87.8
         with:
           # Version-pinned as well as SHA-pinned: a zizmor release can relax the
           # default audit policy this job rests on.
-          tool: zizmor@1.28.0,shellcheck@0.11.0
+          tool: ${{ steps.resolve-tools.outputs.tools }}
       # check-brand runs plain Node with no npm dependencies, so no cache or
       # install step is needed.
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -158,7 +165,7 @@ jobs:
       # an unverified release tarball into /usr/bin.
       - uses: ./.github/actions/setup-rust
         with:
-          tools: cargo-deny@0.20.2
+          tools: cargo-deny
 
       - run: make deny
 
@@ -229,7 +236,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-rust
         with:
-          tools: cargo-semver-checks@0.50.0
+          tools: cargo-semver-checks
           # Reads the lint cache for the tree's side. The baselines come from
           # the cache below instead, which rust-cache would not hold: it prunes
           # target/ to what it recognizes.
@@ -282,7 +289,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-rust
         with:
-          tools: cargo-semver-checks@0.50.0
+          tools: cargo-semver-checks
           shared-key: dev-allfeatures
           cache-save: never
 
@@ -412,7 +419,7 @@ jobs:
       - uses: ./.github/actions/setup-rust
         with:
           components: llvm-tools-preview
-          tools: nextest@0.9.140,cargo-llvm-cov@0.8.7
+          tools: nextest,cargo-llvm-cov
           # Its own key: llvm-cov builds into `target/llvm-cov-target`, not the
           # `target/debug` that lint, features and doctests share.
           shared-key: coverage
@@ -518,7 +525,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-rust
         with:
-          tools: cargo-hack@0.6.45
+          tools: cargo-hack
           shared-key: dev-allfeatures
       - run: make check-features
 
@@ -911,7 +918,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-rust
         with:
-          tools: nextest@0.9.140
+          tools: nextest
           # Separate key: the `#[ignore]`d suites link binaries `test` does not.
           shared-key: docker
       # By digest, and re-tagged locally, so the suite runs the pinned bytes.
@@ -977,7 +984,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-rust
         with:
-          tools: nextest@0.9.140
+          tools: nextest
           shared-key: docker
           # A consumer of the entry `containers` owns. These legs build one
           # crate and would otherwise win the race to write a cache holding the

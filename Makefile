@@ -170,6 +170,7 @@ self-test: ## The CI classifiers still match the crate graph
 	./scripts/container-image.sh --self-test
 	./scripts/supported-versions.sh --self-test
 	./scripts/version-pins.sh --self-test
+	./scripts/tool-versions.sh --self-test
 
 check-perf-report: ## The perf report's flag file stays parseable by perf-label.yml
 	./scripts/gungraun-report.sh --self-test
@@ -191,7 +192,7 @@ check-docs-meta: ## Every rendered docs page carries a description of the length
 check-supported-versions: ## Every supported-versions table matches the servers CI pins
 	./scripts/supported-versions.sh --check
 
-check-version-pins: ## Node is pinned exactly, everywhere, and engines.node stays a floor under it
+check-version-pins: ## Node and every cargo tool are pinned once, and engines.node stays a floor under Node
 	./scripts/version-pins.sh --check
 
 check-site-meta: ## Every built page carries a description (run after the site build)

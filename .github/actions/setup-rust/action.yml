@@ -26,8 +26,8 @@ inputs:
     default: ""
   tools:
     description: >
-      Comma-separated tools for taiki-e/install-action, e.g. "nextest,cargo-hack".
-      Pass a version where the tool's *behavior* is what a gate rests on.
+      Comma-separated bare tool names for taiki-e/install-action, e.g.
+      "nextest,cargo-hack". Each must have a version entry in versions.mk.
     required: false
     default: ""
   shared-key:
@@ -109,10 +109,22 @@ runs:
         echo "$rustc" >>"$GITHUB_STEP_SUMMARY"
       shell: bash
 
+    # The tools input goes through `env:`, never interpolated into the `run:`
+    # block, for the same reason the toolchain resolve step above does.
+    - id: resolve-tools
+      if: inputs.tools != ''
+      env:
+        TOOLS: ${{ inputs.tools }}
+      run: |
+        set -euo pipefail
+        tools=$(./scripts/tool-versions.sh --resolve "$TOOLS")
+        echo "tools=$tools" >>"$GITHUB_OUTPUT"
+      shell: bash
+
     - if: inputs.tools != ''
       uses: taiki-e/install-action@d438492cf8a250514fa2d34b30bc3c0dc37c65ff # v2.87.8
       with:
-        tool: ${{ inputs.tools }}
+        tool: ${{ steps.resolve-tools.outputs.tools }}
 
     # `save-if` restricted to main holds one warm baseline against the 10 GB
     # per-repo cache ceiling. Left at its default, every job on every pull

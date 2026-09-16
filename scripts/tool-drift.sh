@@ -30,7 +30,9 @@
 #       --sha SHA --run-url URL --table FILE             # the filed issue's body
 #   ./scripts/tool-drift.sh --self-test                  # the parsers and comparator, offline
 #
-# Runs on bash 3.2 and later: no associative arrays, no mapfile.
+# Runs on bash 3.2 and later: no associative arrays, no mapfile, and every
+# array expansion guarded, because `"${arr[@]}"` on an empty array is an
+# unbound-variable error under `set -u` there.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -198,7 +200,10 @@ latest_github_release() { # owner/repo
     if [[ -n "${GH_TOKEN:-}" ]]; then
         hdr=(-H "Authorization: Bearer $GH_TOKEN")
     fi
-    body=$(http_get "https://api.github.com/repos/$repo/releases/latest" "${hdr[@]}") || return 1
+    # ${hdr[@]+"${hdr[@]}"}: on bash before 4.4, "${hdr[@]}" on an empty array
+    # is an unbound-variable error under `set -u` (scripts/changelog.sh:27-29
+    # has the account); darwin's /bin/bash is 3.2.
+    body=$(http_get "https://api.github.com/repos/$repo/releases/latest" ${hdr[@]+"${hdr[@]}"}) || return 1
     tag=$(printf '%s' "$body" | jq -r '.tag_name // empty')
     if [[ -z "$tag" ]]; then
         fail "$repo: releases/latest carried no tag_name"
@@ -207,8 +212,9 @@ latest_github_release() { # owner/repo
     printf '%s\n' "${tag#v}"
 }
 
-# The highest patch Node ships within a pinned major. Never crosses a major:
-# that move is an LTS-calendar decision, not a version to chase.
+# The highest release Node ships within a pinned major, minor included. Never
+# crosses a major: that move is an LTS-calendar decision, not a version to
+# chase.
 latest_node_patch_in_major() { # major
     local major="$1" body
     body=$(http_get "https://nodejs.org/dist/index.json") || return 1

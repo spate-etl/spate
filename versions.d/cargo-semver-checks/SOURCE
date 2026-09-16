@@ -1,0 +1,2 @@
+# The crate scripts/tool-drift.sh queries for this tool's upstream releases.
+crate:cargo-semver-checks

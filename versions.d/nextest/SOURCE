@@ -1,0 +1,2 @@
+# install-action installs this under "nextest"; the published crate is cargo-nextest.
+crate:cargo-nextest

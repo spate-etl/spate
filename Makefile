@@ -14,7 +14,7 @@ include versions.mk
         deny attribution \
         supply-chain zizmor shellcheck self-test check-perf-report \
         check-gungraun-benches check-collected-region \
-        check-transclusions check-supported-versions check-version-pins \
+        check-transclusions check-supported-versions check-version-pins tool-drift \
         check-brand \
         check-adr adr-new \
         check-changelog changelog-new \
@@ -171,6 +171,7 @@ self-test: ## The CI classifiers still match the crate graph
 	./scripts/supported-versions.sh --self-test
 	./scripts/version-pins.sh --self-test
 	./scripts/tool-versions.sh --self-test
+	./scripts/tool-drift.sh --self-test
 
 check-perf-report: ## The perf report's flag file stays parseable by perf-label.yml
 	./scripts/gungraun-report.sh --self-test
@@ -194,6 +195,9 @@ check-supported-versions: ## Every supported-versions table matches the servers 
 
 check-version-pins: ## Node and every cargo tool are pinned once, and engines.node stays a floor under Node
 	./scripts/version-pins.sh --check
+
+tool-drift: ## Compare every pinned tool version against upstream (hits the network; not a gate)
+	./scripts/tool-drift.sh --check
 
 check-site-meta: ## Every built page carries a description (run after the site build)
 	./scripts/site-meta.sh --check

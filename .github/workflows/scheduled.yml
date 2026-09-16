@@ -960,10 +960,75 @@ jobs:
             exit 1
           fi
 
+  tool-drift:
+    name: Pinned tool version drift
+    runs-on: ubuntu-latest
+    needs: plan
+    if: needs.plan.outputs.weekly == 'true'
+    # Weekly, not nightly: the signal's cadence is a tool release, and a daily
+    # run would repeat "still drifted" seven times over for one upstream bump.
+    permissions:
+      contents: read
+      issues: write
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # An unreachable index or API fails this step and files nothing: that is
+      # not the same finding as a pin sitting behind upstream. The next step
+      # gates on `outputs.drifted`, never on `failure()`, so it cannot read a
+      # query failure as "nothing moved" either.
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ./scripts/tool-drift.sh --check --table-out "$RUNNER_TEMP/tool-drift-table.md"
+
+      - name: File or update the drift issue
+        if: steps.check.outputs.drifted == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          title='[bug] Pinned tool versions have drifted from upstream'
+          # The search's own match is fuzzy and the title's "[bug]" confuses
+          # its tokenizer, so the hit is confirmed client-side against an
+          # exact title before anything is posted to it.
+          existing=$(gh issue list --state open --search "$title in:title" --json number,title |
+            jq -r --arg t "$title" 'map(select(.title == $t)) | first.number // empty')
+          body_file="$RUNNER_TEMP/tool-drift-issue-body.md"
+          ./scripts/tool-drift.sh --render-issue-body --sha "$SHA" --run-url "$RUN_URL" \
+            --table "$RUNNER_TEMP/tool-drift-table.md" >"$body_file"
+          if [ -n "$existing" ]; then
+            # The whole current table, not a diff: a tool that drifted since
+            # the issue was filed belongs in the same comment as the one that
+            # drifted first, or the issue reads as stale the moment a second
+            # pin moves.
+            {
+              echo "Still drifted, at ${RUN_URL}:"
+              echo
+              cat "$RUNNER_TEMP/tool-drift-table.md"
+            } >"$RUNNER_TEMP/tool-drift-comment.md"
+            gh issue comment "$existing" --body-file "$RUNNER_TEMP/tool-drift-comment.md"
+            exit 0
+          fi
+          # `--label` needs triage permission on the token or it is silently
+          # dropped (cli/cli#13589); confirm on the first real run.
+          gh issue create --title "$title" --body-file "$body_file" \
+            --type Bug --label 'area: ci'
+
   # ===========================================================================
   # Catch-all failure reporting. `attribution`, `advisories`, `fuzz`,
-  # `minimal-versions`, `publish-dry-run` and `beta` file their own issues and
-  # are absent from `needs` below so they are not reported twice.
+  # `minimal-versions`, `publish-dry-run` and `beta` file their own issues on
+  # their own failure and are absent from `needs` below so they are not
+  # reported twice. `tool-drift` only reports a positive finding this way, not
+  # its own failure, so it stays in `needs` and a query failure still reaches
+  # this job.
   # ===========================================================================
   report:
     name: Report scheduled failures
@@ -977,6 +1042,7 @@ jobs:
       - examples-containers
       - coverage-containers
       - bench
+      - tool-drift
     # Skipped dependencies, meaning the whole other tier, are not failures.
     if: always() && contains(needs.*.result, 'failure')
     timeout-minutes: 10

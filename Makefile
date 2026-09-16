@@ -144,8 +144,9 @@ bench-compare: ## Re-render two legs: make bench-compare BASE=dir HEAD=dir FORMA
 
 ##@ Supply chain
 
-deny: ## Licenses, advisories, bans, sources
+deny: ## Licenses, advisories, bans, sources; the fuzz lockfile for the last three
 	cargo deny --all-features --locked check all
+	cargo deny --manifest-path fuzz/Cargo.toml --all-features --locked check advisories bans sources
 
 attribution: ## Regenerate THIRD-PARTY.md
 	./scripts/attribution.sh

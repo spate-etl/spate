@@ -156,11 +156,13 @@ jobs:
           tools: cargo-deny@0.20.2
       - id: deny
         run: cargo deny --all-features --locked check advisories
+      - id: deny-fuzz
+        run: cargo deny --manifest-path fuzz/Cargo.toml --all-features --locked check advisories
 
-      # Gated on the deny step, not `failure()`: a checkout failure would file
+      # Gated on the deny steps, not `failure()`: a checkout failure would file
       # an issue asserting an advisory was found.
       - name: Report the failure as an issue
-        if: failure() && steps.deny.conclusion == 'failure'
+        if: failure() && (steps.deny.conclusion == 'failure' || steps.deny-fuzz.conclusion == 'failure')
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

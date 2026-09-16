@@ -4,6 +4,7 @@ import useBrokenLinks from '@docusaurus/useBrokenLinks';
 import {useAnchorTargetClassName} from '@docusaurus/theme-common';
 import MDXComponents from '@theme-original/MDXComponents';
 
+import MarkdownTable from '../components/MarkdownTable';
 import {useToolchain} from '../toolchain';
 
 /**
@@ -26,4 +27,4 @@ function Edition(): React.JSX.Element {
   return <>{useToolchain().edition}</>;
 }
 
-export default {...MDXComponents, Anchor, Msrv, Edition};
+export default {...MDXComponents, Anchor, Msrv, Edition, table: MarkdownTable};

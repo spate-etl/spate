@@ -1449,9 +1449,9 @@ mod tests {
     }
 
     /// A map visitor that returns without reading an entry still validates the
-    /// block header, so a malformed or over-budget count fails the datum
-    /// rather than passing unexamined. `skip_datum` already charges a skipped
-    /// map's count; this keeps the consuming path agreeing with it.
+    /// block header, so a malformed or over-budget count fails the datum.
+    /// `skip_datum` already charges a skipped map's count; this keeps the
+    /// consuming path agreeing with it.
     #[test]
     fn non_consuming_map_visitor_still_validates_the_header() {
         use serde::de::MapAccess;

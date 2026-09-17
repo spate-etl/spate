@@ -7,4 +7,5 @@ that claim before failing: on a short payload the reservation is held to the
 bytes present, and above that serde caps the entry *count*, which for a 32-byte
 key/value pair works out near 2 MiB once the table rounds its bucket count up to
 a power of two. A custom visitor that returns without reading an entry now
-validates the block header. Arrays are unchanged.
+validates the block header, so a datum whose first map header is malformed
+or over budget errors where it used to decode. Arrays are unchanged.

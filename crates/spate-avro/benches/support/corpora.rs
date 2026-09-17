@@ -39,20 +39,21 @@
 //! worth knowing which cases are not. A `HashMap`'s seed is drawn per
 //! process, so where one is *built during the decode* the probe sequence,
 //! though not the hash itself, differs between the merge-base leg and the head
-//! leg with no code change at all. Two places do that: `apache-avro`'s `resolve_record`
-//! builds one per record whenever a reader schema is applied, and the
-//! logical-type target holds a `HashMap` field.
+//! leg with no code change at all. Three places do that: `apache-avro`'s
+//! `resolve_record` builds one per record whenever a reader schema is applied,
+//! its two-pass `Value` path resolves the writer schema's names into one per
+//! datum, and the logical-type and map-heavy targets hold `HashMap` fields.
 //!
-//! Running the same binary twice moves exactly those four cases (the three
-//! resolving readers and `logical_types`) and nothing else: the writer-only
-//! reader, the recursive datum, the Confluent cases and every pre-existing
-//! case come back bit-identical. That controlled comparison bounds the seed's
-//! own contribution at roughly a thousandth of a percent. Across two *builds*
-//! the same four are still the only cases that move, by up to a twentieth of
-//! a percent. The difference is ordinary codegen jitter, which every case is
-//! exposed to and which these four cannot be separated from.
+//! Running the same binary twice moves six cases and nothing else: the three
+//! resolving readers, `logical_types`, `map_heavy` and `decode_value batch50`,
+//! each by under five thousandths of a percent. The writer-only reader, the
+//! recursive datum, the Confluent cases and every other case come back
+//! bit-identical. Across two *builds* of the same source the same six are
+//! still the only cases that move, by under a hundredth of a percent. The
+//! difference is ordinary codegen jitter, which every case is exposed to and
+//! which these six cannot be separated from.
 //!
-//! So the caveat is narrow: on those four, do not read a near-zero delta as
+//! So the caveat is narrow: on those six, do not read a near-zero delta as
 //! exactly zero. It is not a reason to change the fixtures. Removing the
 //! nondeterminism would mean giving up either the reader schema or a
 //! realistic map target, which is the whole of what those cases measure.
@@ -452,6 +453,31 @@ pub(crate) struct Shapes {
 pub(crate) fn shape_tags(i: usize) -> Vec<(String, i64)> {
     (0..=i % 4)
         .map(|j| (format!("k{}", (i + j) % 23), ((i * 31 + j) % 5_000) as i64))
+        .collect()
+}
+
+pub(crate) const MAP_HEAVY: &str = r#"{"type":"record","name":"MapHeavy","fields":[
+  {"name":"tags","type":{"type":"map","values":"long"}}]}"#;
+
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct MapHeavy {
+    pub(crate) tags: HashMap<String, i64>,
+}
+
+/// Entries per map, below serde's cautious reservation cap for `(String, i64)`.
+pub(crate) const MAP_ENTRIES: usize = 1_024;
+
+/// [`BATCH`] bare datums with one positive-count block of [`MAP_ENTRIES`] distinct keys.
+pub(crate) fn map_heavy_datums() -> Vec<Vec<u8>> {
+    (0..BATCH)
+        .map(|i| {
+            let entries: Vec<_> = (0..MAP_ENTRIES)
+                .map(|j| (format!("k{j}"), ((i * 31 + j) % 5_000) as i64))
+                .collect();
+            let mut datum = Vec::new();
+            encode_map_of_long(&mut datum, &entries);
+            datum
+        })
         .collect()
 }
 

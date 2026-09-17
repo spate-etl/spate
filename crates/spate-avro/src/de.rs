@@ -813,6 +813,35 @@ struct BlockMapAccess<'a, 'de> {
     done: bool,
 }
 
+impl<'a, 'de> BlockMapAccess<'a, 'de> {
+    /// Reads the first block header, so [`size_hint`](de::MapAccess::size_hint)
+    /// carries that block's count before the visitor builds its table. A table
+    /// grows by rehashing every entry, so one reservation pays for the header
+    /// read. [`BlockSeqAccess`] leaves its header to the first element on
+    /// purpose: a `Vec` grows through `realloc`, which an allocator that
+    /// extends in place serves for almost nothing.
+    fn new(
+        cur: &'a mut Cursor<'de>,
+        value: &'a Schema,
+        names: &'a Names,
+        enclosing: Option<&'a str>,
+        depth: u16,
+    ) -> Result<Self, DatumError> {
+        let mut done = false;
+        let mut remaining = 0;
+        BlockSeqAccess::refill(cur, &mut done, &mut remaining)?;
+        Ok(BlockMapAccess {
+            cur,
+            value,
+            names,
+            enclosing,
+            depth,
+            remaining,
+            done,
+        })
+    }
+}
+
 impl<'de> de::MapAccess<'de> for BlockMapAccess<'_, 'de> {
     type Error = DatumError;
 
@@ -1016,15 +1045,13 @@ impl<'de> de::Deserializer<'de> for DatumDeserializer<'_, 'de> {
             }
             Schema::Map(m) => {
                 let depth = self.deeper()?;
-                visitor.visit_map(BlockMapAccess {
-                    cur: self.cur,
-                    value: m.types.as_ref(),
-                    names: self.names,
+                visitor.visit_map(BlockMapAccess::new(
+                    self.cur,
+                    m.types.as_ref(),
+                    self.names,
                     enclosing,
                     depth,
-                    remaining: 0,
-                    done: false,
-                })
+                )?)
             }
             Schema::Union(u) => {
                 let (_, branch) = Self::union_branch(self.cur, u)?;
@@ -1250,15 +1277,13 @@ impl<'de> de::Deserializer<'de> for DatumDeserializer<'_, 'de> {
         match schema {
             Schema::Map(m) => {
                 let depth = self.deeper()?;
-                visitor.visit_map(BlockMapAccess {
-                    cur: self.cur,
-                    value: m.types.as_ref(),
-                    names: self.names,
+                visitor.visit_map(BlockMapAccess::new(
+                    self.cur,
+                    m.types.as_ref(),
+                    self.names,
                     enclosing,
                     depth,
-                    remaining: 0,
-                    done: false,
-                })
+                )?)
             }
             Schema::Record(rec) => {
                 let depth = self.deeper()?;
@@ -1421,6 +1446,46 @@ mod tests {
         // Tests only.
         let names: &'static Names = Box::leak(Box::new(names));
         decode_datum(sch, names, datum)
+    }
+
+    /// A map visitor that returns without reading an entry still validates the
+    /// block header, so a malformed or over-budget count fails the datum.
+    /// `skip_datum` already charges a skipped map's count; this keeps the
+    /// consuming path agreeing with it.
+    #[test]
+    fn non_consuming_map_visitor_still_validates_the_header() {
+        use serde::de::MapAccess;
+        #[derive(Debug)]
+        struct Ignores;
+        impl<'de> Deserialize<'de> for Ignores {
+            fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+                struct V;
+                impl<'de> de::Visitor<'de> for V {
+                    type Value = Ignores;
+                    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                        f.write_str("a map this visitor never reads")
+                    }
+                    fn visit_map<A: MapAccess<'de>>(self, _: A) -> Result<Ignores, A::Error> {
+                        Ok(Ignores)
+                    }
+                }
+                d.deserialize_map(V)
+            }
+        }
+        const MAP: &str = r#"{"type":"map","values":"long"}"#;
+
+        let mut whole = zig(1);
+        whole.extend(zig(1));
+        whole.push(b'k');
+        whole.extend(zig(7));
+        whole.extend(zig(0));
+        assert!(decode::<Ignores>(&schema(MAP), &whole).is_ok());
+
+        let err = decode::<Ignores>(&schema(MAP), &[]).unwrap_err();
+        assert!(err.0.contains("truncated"), "{err}");
+
+        let err = decode::<Ignores>(&schema(MAP), &zig(1_000_000)).unwrap_err();
+        assert!(err.0.contains("item budget"), "{err}");
     }
 
     const LONG_ARRAY: &str = r#"{"type":"array","items":"long"}"#;

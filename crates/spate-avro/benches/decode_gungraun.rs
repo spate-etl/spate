@@ -57,15 +57,17 @@
 //!   rather than an absolute anybody has to interpret alone. There is no
 //!   alias case: the resolution the two-pass path delegates to matches
 //!   fields by name and never consults a reader field's aliases, which
-//!   `tests/bench_fixtures.rs` pins. The three resolving readers are also the
-//!   cases whose counts are not bit-reproducible across processes; see
+//!   `tests/bench_fixtures.rs` pins. The three resolving readers are among
+//!   the cases whose counts are not bit-reproducible across processes; see
 //!   `corpora`'s note on what a deterministic corpus does not pin.
 //! - **`shapes`** — decode shapes with bespoke handling in the single-pass
 //!   path and none of which any other case reaches: a map, an enum, a fixed,
 //!   both decimal backings, uuid, date and the two timestamp precisions; then
-//!   a recursive named reference, which is the only shape that makes the walk
-//!   resolve a `Schema::Ref` and the only one that drives the depth guard
-//!   past a couple of levels.
+//!   a single-block map of 1,024 entries, which prices the table reservation
+//!   the logical-type map is too small to show; then a recursive named
+//!   reference, which is the only shape that makes the walk resolve a
+//!   `Schema::Ref` and the only one that drives the depth guard past a
+//!   couple of levels.
 //! - **`errors`** — the malformed-datum fixture through the two paths the
 //!   `decode` group does not drive it through, plus a stale single-object
 //!   fingerprint. Under Skip or Fail this is the steady-state cost of a
@@ -99,8 +101,8 @@ mod registry_stub;
 use decode_rig::{
     BatchRig, Rig, batch_datum_rig, batch_value_rig, confluent_cached_rig, confluent_poisoned_rig,
     confluent_unknown_rig, decode_batch, decode_once, decode_once_err, evolution_rig,
-    flat_datum_rig, flat_serde_rig, flat_value_malformed_rig, flat_value_rig, recursive_rig,
-    shapes_rig, stale_fingerprint_rig, truncated_datum_rig, truncated_serde_rig,
+    flat_datum_rig, flat_serde_rig, flat_value_malformed_rig, flat_value_rig, map_heavy_rig,
+    recursive_rig, shapes_rig, stale_fingerprint_rig, truncated_datum_rig, truncated_serde_rig,
 };
 
 // Each case returns its rig rather than dropping it: a value moved into the
@@ -180,6 +182,15 @@ fn decode_shapes(
 }
 
 #[library_benchmark]
+#[bench::map_heavy(map_heavy_rig())]
+fn decode_map_heavy(
+    mut rig: BatchRig<AvroDatumDeserializer<Owned<corpora::MapHeavy>>>,
+) -> BatchRig<AvroDatumDeserializer<Owned<corpora::MapHeavy>>> {
+    decode_batch(&mut rig);
+    rig
+}
+
+#[library_benchmark]
 #[bench::recursive_refs(recursive_rig())]
 fn decode_recursive(
     mut rig: BatchRig<AvroDatumDeserializer<Owned<corpora::LongList>>>,
@@ -229,7 +240,10 @@ library_benchmark_group!(name = confluent; benchmarks = decode_confluent);
 
 library_benchmark_group!(name = evolution; benchmarks = decode_resolved);
 
-library_benchmark_group!(name = shapes; benchmarks = decode_shapes, decode_recursive);
+library_benchmark_group!(
+    name = shapes;
+    benchmarks = decode_shapes, decode_map_heavy, decode_recursive
+);
 
 library_benchmark_group!(
     name = errors;

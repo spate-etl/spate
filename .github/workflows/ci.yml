@@ -136,6 +136,8 @@ jobs:
 
       - run: make check-transclusions
 
+      - run: make check-docs-meta
+
       - run: make check-supported-versions
 
       - run: make check-release-version

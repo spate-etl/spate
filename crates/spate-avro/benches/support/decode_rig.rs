@@ -597,6 +597,14 @@ pub(crate) fn shapes_rig() -> BatchRig<AvroDatumDeserializer<Owned<corpora::Shap
     })
 }
 
+pub(crate) fn map_heavy_rig() -> BatchRig<AvroDatumDeserializer<Owned<corpora::MapHeavy>>> {
+    let settings = raw_settings(corpora::MAP_HEAVY, None);
+    batch_rig(&settings, corpora::map_heavy_datums(), true, |b| {
+        b.build_serde_datum::<corpora::MapHeavy>()
+            .expect("datum builder")
+    })
+}
+
 pub(crate) fn recursive_rig() -> BatchRig<AvroDatumDeserializer<Owned<corpora::LongList>>> {
     let settings = raw_settings(corpora::LONG_LIST, None);
     batch_rig(&settings, corpora::long_list_datums(), true, |b| {

@@ -30,7 +30,9 @@
 //! [`Buffers`]: https://docs.rs/simd-json
 
 use serde::de::{self, DeserializeOwned, Deserializer, MapAccess, SeqAccess, Visitor};
-use std::collections::HashSet;
+use std::borrow::Cow;
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::fmt;
 
 /// Identifier of the compiled decode backend, surfaced for benchmark and
@@ -162,10 +164,23 @@ impl<'de> Visitor<'de> for DupVisitor {
     where
         A: MapAccess<'de>,
     {
-        let mut seen: HashSet<String> = HashSet::new();
-        while let Some(key) = map.next_key::<String>()? {
-            if !seen.insert(key.clone()) {
-                return Err(de::Error::custom(format!("duplicate object key `{key}`")));
+        // `Cow` borrows the key straight out of the input when it contains no
+        // escapes, so the happy path stores only references and allocates
+        // nothing; an escaped key copies once, into the `Cow` itself.
+        let mut seen: HashMap<Cow<'de, str>, ()> = HashMap::new();
+        while let Some(key) = map.next_key::<Cow<'de, str>>()? {
+            match seen.entry(key) {
+                Entry::Vacant(slot) => {
+                    slot.insert(());
+                }
+                Entry::Occupied(occupied) => {
+                    // The stored key is still borrowed from the input, so
+                    // naming the offender costs no copy either.
+                    return Err(de::Error::custom(format!(
+                        "duplicate object key `{}`",
+                        occupied.key()
+                    )));
+                }
             }
             // Recurse so nested objects are guarded too.
             map.next_value::<DupGuard>()?;
@@ -208,5 +223,41 @@ impl<'de> Visitor<'de> for DupVisitor {
         D: Deserializer<'de>,
     {
         deserializer.deserialize_any(DupVisitor)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check_no_duplicate_keys;
+
+    fn duplicate_key_in(bytes: &[u8]) -> String {
+        let err = check_no_duplicate_keys(bytes).unwrap_err();
+        assert!(err.is_data, "a duplicate key must classify as a data error");
+        err.to_string()
+    }
+
+    #[test]
+    fn clean_document_passes_the_guard() {
+        // Nested objects, arrays, and scalars with unique keys: the guard must
+        // accept this without touching the heap for key storage.
+        assert!(
+            check_no_duplicate_keys(br#"{"a":1,"b":[true,null,{"c":"d"}],"e":{"f":2.5,"g":-3}}"#)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn duplicate_key_error_names_the_key() {
+        let msg = duplicate_key_in(br#"{"k":1,"k":2}"#);
+        assert!(msg.contains("duplicate object key `k`"), "{msg}");
+    }
+
+    #[test]
+    fn escaped_keys_still_compare_decoded() {
+        // Both keys decode to `ab`, but neither is borrowable from the input:
+        // the guard must copy the escaped one rather than misclassify the
+        // document as malformed.
+        let msg = duplicate_key_in(br#"{"a\u0062":1,"ab":2}"#);
+        assert!(msg.contains("duplicate object key `ab`"), "{msg}");
     }
 }

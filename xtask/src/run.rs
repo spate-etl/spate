@@ -132,16 +132,40 @@ fn program_path(root: &Path, program: &str) -> std::path::PathBuf {
         .map_or_else(|| std::path::PathBuf::from(program), |rel| root.join(rel))
 }
 
-/// Runs one step and returns its stdout, with stderr inherited.
+/// Whether a bare program name resolves to an executable file on `PATH`.
+pub(crate) fn on_path(program: &str) -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|dir| executable(&dir.join(program)))
+}
+
+#[cfg(unix)]
+fn executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn executable(path: &Path) -> bool {
+    path.is_file()
+}
+
+/// Runs one step and returns its stdout. Its stderr is inherited, so a failing
+/// child's own diagnostic reaches the terminal alongside the exit status.
 pub(crate) fn capture(root: &Path, step: &Step<'_>) -> Result<String, Error> {
     let dir = step
         .dir
         .map_or_else(|| root.to_path_buf(), |d| root.join(d));
+    // `output()` would pipe stderr as well, and nothing here reads it.
     let out = Command::new(program_path(root, step.program))
         .args(step.args.iter().map(OsStr::new))
         .envs(step.env.iter().map(|(k, v)| (*k, v.as_str())))
         .current_dir(&dir)
-        .output()
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| Error::msg(format!("{}: {e}", step.program)))?
+        .wait_with_output()
         .map_err(|e| Error::msg(format!("{}: {e}", step.program)))?;
     if !out.status.success() {
         return Err(Error {

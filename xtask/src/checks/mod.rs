@@ -1,4 +1,5 @@
-//! The repository checks and tools, ported from `scripts/`.
+//! The gates this binary runs in process: labels, docs.rs rustdoc, and
+//! supported versions.
 
 pub(crate) mod docsrs;
 pub(crate) mod supported_versions;

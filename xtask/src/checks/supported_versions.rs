@@ -19,21 +19,29 @@ use crate::run::{self, Error, Outcome, Step};
 
 const HEADING: &str = "## Supported";
 
-/// Resolves a lane to its `name:tag`, so a test can supply the pins without a
-/// tree of Dockerfiles.
+/// Resolves a `(service, lane)` pair to the `name:tag` it pins.
 type Resolve<'a> = &'a dyn Fn(&str, &str) -> Result<String, Error>;
 
-pub(crate) fn check(root: &Path) -> Outcome {
-    let ci_root = root.join("ci");
-    let resolve = |service: &str, lane: &str| {
-        run::capture(
-            root,
-            &Step::new("./scripts/container-image.sh", [service, lane]),
-        )
-        .map(|s| s.trim().to_owned())
-    };
+/// The invocation that reads one lane's pinned reference.
+fn image_step(service: &str, lane: &str) -> Step<'static> {
+    Step::new("./scripts/container-image.sh", [service, lane])
+}
 
+pub(crate) fn check(root: &Path, explain: bool) -> Outcome {
+    let ci_root = root.join("ci");
     let pairs = pairs(&ci_root)?;
+    if explain {
+        for (service, _) in &pairs {
+            for lane in lanes(&ci_root, service)? {
+                println!("{}", image_step(service, &lane).display());
+            }
+        }
+        return Ok(());
+    }
+
+    let resolve = |service: &str, lane: &str| {
+        run::capture(root, &image_step(service, lane)).map(|s| s.trim().to_owned())
+    };
     let mut failures = 0;
     for (service, page) in &pairs {
         if let Err(e) = check_page(root, &ci_root, service, page, &resolve) {
@@ -71,6 +79,11 @@ fn pairs(ci_root: &Path) -> Result<Vec<(String, String)>, Error> {
     Ok(out)
 }
 
+/// Every lane a service pins, in directory order.
+fn lanes(ci_root: &Path, service: &str) -> Result<Vec<String>, Error> {
+    services(&ci_root.join(service))
+}
+
 /// Every service with pinned images, in directory order.
 fn services(ci_root: &Path) -> Result<Vec<String>, Error> {
     let mut out = Vec::new();
@@ -99,12 +112,12 @@ fn check_page(
             "ci/{service}/DOCS names {page}, which does not exist"
         )));
     };
-    let pinned = pinned_lines(ci_root, service, resolve)?;
+    let pinned = pinned_lines(&lanes(ci_root, service)?, service, resolve)?;
     verify(service, page, &text, &pinned)
 }
 
 /// The rule itself: the section exists, and every line the table names is
-/// pinned. A lane that appears in no row is allowed, which is the subset rule.
+/// pinned. A lane that appears in no row is allowed.
 fn verify(service: &str, page: &str, text: &str, pinned: &BTreeSet<String>) -> Result<(), Error> {
     if !text.lines().any(|l| l.starts_with(HEADING)) {
         return Err(Error::msg(format!(
@@ -114,7 +127,7 @@ fn verify(service: &str, page: &str, text: &str, pinned: &BTreeSet<String>) -> R
     let bad: Vec<_> = claimed_lines(text).difference(pinned).cloned().collect();
     if !bad.is_empty() {
         return Err(Error::msg(format!(
-            "{page}: claims {}, which ci/{service} no longer pins (pinned: {}).\n  \
+            "{page}: claims {}, which ci/{service} no longer pins (pinned: {})\n  \
              Update the table, or the lane under ci/{service}/.",
             bad.join(" "),
             pinned.iter().cloned().collect::<Vec<_>>().join(" ")
@@ -123,22 +136,23 @@ fn verify(service: &str, page: &str, text: &str, pinned: &BTreeSet<String>) -> R
     Ok(())
 }
 
-/// Every release line a service pins, as `<major>.<minor>`, across its lanes.
+/// Every release line a service pins, as `<major>.<minor>`, across the lanes
+/// given. Two lanes on the same line collapse to one entry.
 fn pinned_lines(
-    ci_root: &Path,
+    lanes: &[String],
     service: &str,
     resolve: Resolve<'_>,
 ) -> Result<BTreeSet<String>, Error> {
     let mut out = BTreeSet::new();
-    for lane in services(&ci_root.join(service))? {
-        let reference = resolve(service, &lane)?;
+    for lane in lanes {
+        let reference = resolve(service, lane)?;
         let tag = reference.rsplit(':').next().unwrap_or_default();
         out.insert(major_minor(tag));
     }
     Ok(out)
 }
 
-/// The first two dot-separated fields, which is what `cut -d. -f1-2` gave.
+/// The first two dot-separated fields of a tag.
 fn major_minor(tag: &str) -> String {
     tag.split('.').take(2).collect::<Vec<_>>().join(".")
 }
@@ -151,21 +165,28 @@ fn claimed_lines(page: &str) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     let mut inside = false;
     for line in page.lines() {
-        if line.starts_with("## ") || line.starts_with(HEADING) {
+        // A heading is tested as an opening only when no section is open, so a
+        // second support heading closes the section and starts nothing.
+        if inside && line.starts_with("## ") {
+            inside = false;
+            continue;
+        }
+        if !inside {
             inside = line.starts_with(HEADING);
             continue;
         }
-        if let (true, Some(line)) = (inside, row_line(line)) {
-            out.insert(line);
+        if let Some(claim) = row_line(line) {
+            out.insert(claim);
         }
     }
     out
 }
 
-/// The `<major>.<minor>` opening a table row's first cell, where the row has a
-/// closing pipe and the number is not part of a longer digit run.
+/// The `<major>.<minor>` opening a table row's first cell, where a pipe follows
+/// the number and the number is not part of a longer digit run. Only spaces
+/// separate the opening pipe from the number.
 fn row_line(line: &str) -> Option<String> {
-    let rest = line.strip_prefix('|')?.trim_start();
+    let rest = line.strip_prefix('|')?.trim_start_matches(' ');
     let mut chars = rest.char_indices();
     let mut end = 0;
     let mut dot = false;
@@ -186,8 +207,6 @@ fn row_line(line: &str) -> Option<String> {
     if major.is_empty() || minor.is_empty() {
         return None;
     }
-    // A later cell has to exist, which is what the trailing pipe in the
-    // original expression required.
     if !rest[end..].contains('|') {
         return None;
     }
@@ -242,9 +261,18 @@ mod tests {
         assert_eq!(row_line("| Newest stable release | Guaranteed |"), None);
     }
 
-    /// The lanes as `ci/<service>/<lane>/Dockerfile` would pin them.
+    /// The pinned set for lanes tagged as given, resolved the way
+    /// `container-image.sh` resolves one: `name:tag`, digest already stripped.
     fn pinned(lanes: &[(&str, &str)]) -> BTreeSet<String> {
-        lanes.iter().map(|(_, tag)| major_minor(tag)).collect()
+        let names: Vec<String> = lanes.iter().map(|(l, _)| (*l).to_owned()).collect();
+        let resolve = |_service: &str, lane: &str| {
+            lanes
+                .iter()
+                .find(|(l, _)| *l == lane)
+                .map(|(_, tag)| format!("vendor/db:{tag}"))
+                .ok_or_else(|| Error::msg(format!("no such lane: {lane}")))
+        };
+        pinned_lines(&names, "db", &resolve).unwrap()
     }
 
     const BASE: &[(&str, &str)] = &[
@@ -279,12 +307,10 @@ mod tests {
     #[test]
     fn an_lts_line_move_is_caught() {
         let e = verify("db", "page.mdx", PAGE, &pinned(LTS_MOVED)).unwrap_err();
-        assert!(
-            e.message.starts_with(
-                "page.mdx: claims 9.4, which ci/db no longer pins (pinned: 9.1 9.5 9.6)"
-            ),
-            "{}",
-            e.message
+        assert_eq!(
+            e.message,
+            "page.mdx: claims 9.4, which ci/db no longer pins (pinned: 9.1 9.5 9.6)\n  \
+             Update the table, or the lane under ci/db/."
         );
     }
 
@@ -302,5 +328,69 @@ mod tests {
     fn a_renamed_section_claims_nothing() {
         let renamed = PAGE.replace("## Supported server versions", "## Versions");
         assert!(claimed_lines(&renamed).is_empty());
+    }
+
+    /// The second heading ends the section it sits under and starts nothing, so
+    /// the table below it is outside.
+    #[test]
+    fn a_second_support_heading_closes_the_section() {
+        let page = "## Supported server versions\n## Supported, continued\n\n| 9.9 | x |\n";
+        assert!(claimed_lines(page).is_empty());
+    }
+
+    #[test]
+    fn only_a_space_separates_the_opening_pipe_from_the_number() {
+        assert_eq!(row_line("|   9.4 | x |").as_deref(), Some("9.4"));
+        assert_eq!(row_line("|\t9.4 | x |"), None);
+        assert_eq!(row_line("|\u{a0}9.4 | x |"), None);
+    }
+
+    /// A directory under the system temporary directory, removed on drop.
+    struct Scratch(std::path::PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let dir =
+                std::env::temp_dir().join(format!("spate-xtask-{}-{name}", std::process::id()));
+            drop(std::fs::remove_dir_all(&dir));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+
+        fn service(&self, name: &str) -> &Self {
+            std::fs::create_dir_all(self.0.join(name)).unwrap();
+            self
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            drop(std::fs::remove_dir_all(&self.0));
+        }
+    }
+
+    #[test]
+    fn docs_pairs_skip_comments_and_blank_lines() {
+        let scratch = Scratch::new("pairs");
+        scratch.service("db");
+        std::fs::write(
+            scratch.0.join("db/DOCS"),
+            "# a comment\n\n  docs/page.mdx  \ndocs/other.mdx # inline\n",
+        )
+        .unwrap();
+        assert_eq!(
+            pairs(&scratch.0).unwrap(),
+            vec![
+                ("db".to_owned(), "docs/page.mdx".to_owned()),
+                ("db".to_owned(), "docs/other.mdx".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_service_without_docs_is_skipped() {
+        let scratch = Scratch::new("no-docs");
+        scratch.service("db");
+        assert!(pairs(&scratch.0).unwrap().is_empty());
     }
 }

@@ -109,7 +109,7 @@ fn one_check(root: &Path, explain: bool, check: TidyCheck) -> Outcome {
             script(root, explain, "gungraun-collected-region.sh", "--self-test")
         }
         TidyCheck::Transclusions => script(root, explain, "transclude.sh", "--check"),
-        TidyCheck::SupportedVersions => crate::checks::supported_versions::check(root),
+        TidyCheck::SupportedVersions => crate::checks::supported_versions::check(root, explain),
         TidyCheck::ReleaseVersion => script(root, explain, "release-version.sh", "--check"),
     }
 }

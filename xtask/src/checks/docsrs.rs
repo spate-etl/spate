@@ -32,27 +32,26 @@ pub(crate) struct Plan {
 
 pub(crate) fn run(root: &Path, explain: bool, nightly: &str) -> Outcome {
     let toolchain = format!("+{nightly}");
-    if !explain
-        && run::quiet(
-            root,
-            false,
-            &Step::new("cargo", [&toolchain]).arg("--version"),
-        )
-        .is_err()
-    {
+    let probe = Step::new("cargo", [&toolchain]).arg("--version");
+    let metadata_step = Step::new(
+        "cargo",
+        ["metadata", "--no-deps", "--format-version", "1", "--locked"],
+    );
+    if explain {
+        println!("{}", probe.display());
+        println!("{}", metadata_step.display());
+        println!("(one `cargo doc` per publishable crate that metadata names)");
+        return Ok(());
+    }
+    if run::quiet(root, false, &probe).is_err() {
         return Err(Error::msg(format!(
             "needs the {nightly} toolchain (rustup toolchain install {nightly})"
         )));
     }
 
-    let metadata = run::capture(
-        root,
-        &Step::new(
-            "cargo",
-            ["metadata", "--no-deps", "--format-version", "1", "--locked"],
-        ),
-    )?;
+    let metadata = run::capture(root, &metadata_step)?;
     let plans = plans(&metadata)?;
+    let inherited = std::env::var("RUSTFLAGS").unwrap_or_default();
 
     let mut built = 0;
     let mut failed = 0;
@@ -74,26 +73,8 @@ pub(crate) fn run(root: &Path, explain: bool, nightly: &str) -> Outcome {
         };
         println!("docsrs: {} {shown}", plan.name);
 
-        // `broken_intra_doc_links` denied on top of the crate's own args: a
-        // dangling link renders as dead text on the published page and the
-        // docs.rs build reports it nowhere. Denied by name rather than through
-        // `-D warnings`, which would make every merge wait on the next rustdoc
-        // lint arriving with a toolchain bump.
-        let mut rustdocflags = plan.rustdoc_args.join(" ");
-        if !rustdocflags.is_empty() {
-            rustdocflags.push(' ');
-        }
-        rustdocflags.push_str("-D rustdoc::broken_intra_doc_links");
-
-        let inherited = std::env::var("RUSTFLAGS").unwrap_or_default();
-        let rustflags = format!("{inherited} {}", plan.rustc_args.join(" "));
-
-        let step = Step::new("cargo", [&toolchain])
-            .args(["doc", "-p", &plan.name, "--no-deps", "--locked"])
-            .args(&plan.flags)
-            .env("RUSTDOCFLAGS", rustdocflags)
-            .env("RUSTFLAGS", rustflags);
-        if run::run(root, explain, &step).is_err() {
+        let step = doc_step(&toolchain, plan, &inherited);
+        if run::run(root, false, &step).is_err() {
             println!(
                 "::error::rustdoc failed for {} as docs.rs would build it",
                 plan.name
@@ -112,6 +93,31 @@ pub(crate) fn run(root: &Path, explain: bool, nightly: &str) -> Outcome {
     }
     println!("docsrs: {built} crate(s) documented as docs.rs builds them.");
     Ok(())
+}
+
+/// The `cargo doc` invocation for one plan, with `RUSTFLAGS` already in the
+/// environment carried through ahead of the crate's own `rustc-args`.
+///
+/// `broken_intra_doc_links` is denied on top of the crate's own rustdoc args: a
+/// dangling link renders as dead text on the published page and the docs.rs
+/// build reports it nowhere. Denied by name rather than through `-D warnings`,
+/// which would make every merge wait on the next rustdoc lint arriving with a
+/// toolchain bump.
+fn doc_step(toolchain: &str, plan: &Plan, inherited_rustflags: &str) -> Step<'static> {
+    let mut rustdocflags = plan.rustdoc_args.join(" ");
+    if !rustdocflags.is_empty() {
+        rustdocflags.push(' ');
+    }
+    rustdocflags.push_str("-D rustdoc::broken_intra_doc_links");
+
+    Step::new("cargo", [toolchain])
+        .args(["doc", "-p", &plan.name, "--no-deps", "--locked"])
+        .args(&plan.flags)
+        .env("RUSTDOCFLAGS", rustdocflags)
+        .env(
+            "RUSTFLAGS",
+            format!("{inherited_rustflags} {}", plan.rustc_args.join(" ")),
+        )
 }
 
 #[derive(Deserialize)]
@@ -201,13 +207,17 @@ mod tests {
         assert!(p[0].unsupported.is_empty());
     }
 
+    /// Only an empty `publish` list is excluded. A crate restricted to a named
+    /// registry is still uploaded, so docs.rs may still build it.
     #[test]
     fn publish_false_is_left_out() {
         let json = meta(
-            r#"{"name":"a","publish":[],"metadata":null},{"name":"b","publish":null,"metadata":null}"#,
+            r#"{"name":"a","publish":[],"metadata":null},
+               {"name":"b","publish":null,"metadata":null},
+               {"name":"c","publish":["some-registry"],"metadata":null}"#,
         );
         let names: Vec<_> = plans(&json).unwrap().into_iter().map(|p| p.name).collect();
-        assert_eq!(names, ["b"]);
+        assert_eq!(names, ["b", "c"]);
     }
 
     #[test]
@@ -247,5 +257,57 @@ mod tests {
         let json =
             meta(r#"{"name":"a","publish":null,"metadata":{"docs":{"rs":{"features":[]}}}}"#);
         assert_eq!(plans(&json).unwrap()[0].flags, Vec::<String>::new());
+    }
+
+    fn plan(rustdoc_args: &[&str], rustc_args: &[&str]) -> Plan {
+        Plan {
+            name: "a".to_owned(),
+            flags: vec!["--all-features".to_owned()],
+            rustdoc_args: rustdoc_args.iter().map(|s| (*s).to_owned()).collect(),
+            rustc_args: rustc_args.iter().map(|s| (*s).to_owned()).collect(),
+            unsupported: Vec::new(),
+        }
+    }
+
+    /// The deny is appended to whatever the crate's own `rustdoc-args` set.
+    #[test]
+    fn the_build_denies_broken_intra_doc_links() {
+        let step = doc_step("+nightly", &plan(&["--cfg", "docsrs"], &[]), "");
+        assert_eq!(
+            step.display(),
+            concat!(
+                r#"RUSTDOCFLAGS="--cfg docsrs -D rustdoc::broken_intra_doc_links" "#,
+                r#"RUSTFLAGS=" " "#,
+                "cargo +nightly doc -p a --no-deps --locked --all-features"
+            )
+        );
+    }
+
+    #[test]
+    fn a_crate_with_no_rustdoc_args_still_denies_it() {
+        let step = doc_step("+nightly", &plan(&[], &[]), "");
+        assert!(
+            step.display()
+                .starts_with(r#"RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links" "#),
+            "{}",
+            step.display()
+        );
+    }
+
+    /// `RUSTFLAGS` already in the environment reaches the build, ahead of the
+    /// crate's own `rustc-args`.
+    #[test]
+    fn the_environment_s_rustflags_are_carried_through() {
+        let step = doc_step(
+            "+nightly",
+            &plan(&[], &["--cfg", "other"]),
+            "-C debuginfo=0",
+        );
+        assert!(
+            step.display()
+                .contains(r#"RUSTFLAGS="-C debuginfo=0 --cfg other" "#),
+            "{}",
+            step.display()
+        );
     }
 }

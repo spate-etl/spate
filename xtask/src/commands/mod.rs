@@ -481,7 +481,7 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: Command) -> Outcome {
             run::run(root, explain, &s)
         }
         Command::SyncLabels { dry_run, repo } => {
-            // `DRY_RUN` is how the workflow selects it on a fork's pull request.
+            // `DRY_RUN=true` is how the workflow selects it on a pull request.
             let dry_run = dry_run || std::env::var("DRY_RUN").as_deref() == Ok("true");
             crate::checks::sync_labels::sync(root, explain, dry_run, repo.as_deref())
         }

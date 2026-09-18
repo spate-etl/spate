@@ -5,6 +5,7 @@ use std::path::Path;
 use std::process::Command;
 
 /// A command that did not succeed.
+#[derive(Debug)]
 pub(crate) struct Error {
     pub(crate) message: String,
     /// The child's exit status, where one was produced, so it can be
@@ -129,6 +130,27 @@ fn program_path(root: &Path, program: &str) -> std::path::PathBuf {
     program
         .strip_prefix("./")
         .map_or_else(|| std::path::PathBuf::from(program), |rel| root.join(rel))
+}
+
+/// Runs one step and returns its stdout, with stderr inherited.
+pub(crate) fn capture(root: &Path, step: &Step<'_>) -> Result<String, Error> {
+    let dir = step
+        .dir
+        .map_or_else(|| root.to_path_buf(), |d| root.join(d));
+    let out = Command::new(program_path(root, step.program))
+        .args(step.args.iter().map(OsStr::new))
+        .envs(step.env.iter().map(|(k, v)| (*k, v.as_str())))
+        .current_dir(&dir)
+        .output()
+        .map_err(|e| Error::msg(format!("{}: {e}", step.program)))?;
+    if !out.status.success() {
+        return Err(Error {
+            message: format!("`{}` exited {}", step.display(), describe(&out.status)),
+            code: out.status.code(),
+        });
+    }
+    String::from_utf8(out.stdout)
+        .map_err(|e| Error::msg(format!("{}: stdout is not UTF-8: {e}", step.program)))
 }
 
 /// Runs one step with its stdout discarded and its stderr inherited.

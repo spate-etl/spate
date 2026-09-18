@@ -37,6 +37,12 @@ pub(crate) struct Toolchain {
     nightly: String,
 }
 
+impl Toolchain {
+    pub(crate) fn nightly(&self) -> &str {
+        &self.nightly
+    }
+}
+
 pub(crate) fn dispatch(root: &Path, explain: bool, cmd: Fuzz) -> Outcome {
     match cmd {
         Fuzz::Install => run::run(

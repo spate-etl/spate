@@ -493,9 +493,10 @@ jobs:
           # Its own entry: a nightly rustdoc build shares no artefact with the
           # stable dev-profile trees the other jobs cache.
           shared-key: docsrs
-      - run: cargo xtask docsrs
-        env:
+      # `+nightly` would name the floating channel and resolve past the pin.
+      - env:
           NIGHTLY: ${{ steps.rust.outputs.toolchain }}
+        run: cargo xtask docsrs --nightly "$NIGHTLY"
 
   features:
     name: Feature matrix (each feature)

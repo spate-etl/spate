@@ -49,7 +49,10 @@ pub(crate) enum Command {
     Doc,
 
     /// Rustdoc as docs.rs builds it: per crate, on nightly
-    Docsrs,
+    Docsrs {
+        #[command(flatten)]
+        toolchain: fuzz::Toolchain,
+    },
 
     /// Container-backed suites (needs Docker; lanes per ci/README.md)
     IntegrationTest,
@@ -302,11 +305,9 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: Command) -> Outcome {
             )
             .env("RUSTDOCFLAGS", "-D warnings"),
         ),
-        Command::Docsrs => run::run(
-            root,
-            explain,
-            &Step::new("./scripts/docsrs.sh", [] as [&str; 0]),
-        ),
+        Command::Docsrs { toolchain } => {
+            crate::checks::docsrs::run(root, explain, toolchain.nightly())
+        }
         Command::IntegrationTest => run::steps(
             root,
             explain,

@@ -101,11 +101,15 @@ fn index_path(name: &str) -> String {
 /// The index lists one JSON object per published version in publish order, so
 /// the newest live version is the last entry that is not yanked. A crate whose
 /// every version is yanked has no baseline, and neither does one whose newest
-/// live entry names an empty version.
+/// live entry names an empty version. An entry of any other JSON shape is a
+/// parse failure, so a body the gate cannot read never reports a pass.
 fn baseline_version(body: &str) -> Result<Option<String>, String> {
     let mut latest = None;
     for entry in serde_json::Deserializer::from_str(body).into_iter::<Value>() {
         let entry = entry.map_err(|e| e.to_string())?;
+        if !entry.is_object() {
+            return Err("an entry is not a JSON object".to_owned());
+        }
         if yanked(&entry) {
             continue;
         }

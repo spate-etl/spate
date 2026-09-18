@@ -125,6 +125,7 @@ if [ -f "$SPATE_LOG.n" ]; then n=$(cat "$SPATE_LOG.n"); fi
 n=$((n + 1))
 echo "$n" >"$SPATE_LOG.n"
 printf 'findings %s\n' "$n"
+if [ -n "${SPATE_CARGO_NOISE:-}" ]; then printf 'noise %s\n' "$n" >&2; fi
 set -- $SPATE_CARGO_CODES
 eval "code=\${$n:-0}"
 exit "$code"
@@ -172,7 +173,8 @@ fn xtask(shim: &Shim, args: &[&str], env: &[(&str, &str)]) -> Output {
         .env_remove("GITHUB_OUTPUT")
         .env_remove("PR_TITLE")
         .env_remove("BASE_SHA")
-        .env_remove("SPATE_CARGO_CODES");
+        .env_remove("SPATE_CARGO_CODES")
+        .env_remove("SPATE_CARGO_NOISE");
     for (k, v) in env {
         command.env(k, v);
     }
@@ -374,6 +376,28 @@ fn an_index_answer_that_is_neither_200_nor_404_fails() {
     }
 }
 
+/// A 200 whose body parses as JSON but lists something other than objects is a
+/// parse failure, so the gate never reaches a comparison it cannot baseline.
+#[test]
+fn an_index_body_that_is_not_a_list_of_objects_fails() {
+    for (n, body) in [r#""hello""#, "42", "[]"].into_iter().enumerate() {
+        let shim = Shim::new(&format!("shape-{n}"));
+        shim.fixture("curl.spate-core.body", body);
+        let out = xtask(
+            &shim,
+            &["--against-registry", "--packages", "spate-core"],
+            &[],
+        );
+        assert_eq!(out.status.code(), Some(1), "{body}");
+        assert_eq!(
+            stderr(&out),
+            "xtask: the index entry for spate-core does not parse: an entry is not a JSON object\n",
+            "{body}"
+        );
+        assert!(shim.calls("cargo").is_empty(), "{body}");
+    }
+}
+
 /// A transport failure fails the run, since nothing was learned about the
 /// published surface.
 #[test]
@@ -465,8 +489,9 @@ fn a_broken_batch_is_attributed_crate_by_crate() {
     );
 }
 
-/// The attribution run discards its output, since the batch already reported
-/// the findings.
+/// The attribution run discards both of its streams, since the batch already
+/// reported the findings. Only the batch's `findings` and `noise` lines reach
+/// the job log.
 #[test]
 fn an_attribution_run_reports_only_its_verdict() {
     let shim = Shim::new("attribute-quiet");
@@ -476,6 +501,7 @@ fn an_attribution_run_reports_only_its_verdict() {
         &["--against-registry", "--packages", "spate-core"],
         &[
             ("SPATE_CARGO_CODES", "100 100"),
+            ("SPATE_CARGO_NOISE", "1"),
             ("PR_TITLE", "feat!: an announced break"),
         ],
     );
@@ -486,6 +512,7 @@ fn an_attribution_run_reports_only_its_verdict() {
         "{}",
         stdout(&out)
     );
+    assert_eq!(stderr(&out), "noise 1\n");
 }
 
 /// A batch that reports no verdict is the tool failing to complete, so the run

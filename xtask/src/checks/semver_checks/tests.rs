@@ -45,6 +45,8 @@ fn the_marker_is_a_type_an_optional_scope_and_a_bang() {
         "",
         "!: no type",
         "feat(unterminated!: a scope with no close",
+        "feat(!: a scope opened and never closed",
+        "féat!: a non-ascii letter in the type",
         "feat(a)b!: a scope followed by more type",
         " feat!: a leading space",
         "feat1!: a digit in the type",
@@ -190,6 +192,15 @@ fn the_last_live_entry_decides_even_when_it_names_nothing() {
 fn a_body_that_does_not_parse_is_an_error() {
     assert!(baseline_version(r#"{"vers":"1.0.0""#).is_err());
     assert!(baseline_version("not json").is_err());
+}
+
+/// An index body that parses as JSON but lists something other than objects is
+/// a parse failure, so a reply the gate cannot read fails closed.
+#[test]
+fn an_entry_that_is_not_an_object_is_an_error() {
+    for body in [r#""hello""#, "42", "true", "[]", "null"] {
+        assert!(baseline_version(body).is_err(), "{body}");
+    }
 }
 
 // ── The curl reply ─────────────────────────────────────────────────────

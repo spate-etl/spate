@@ -58,7 +58,7 @@ from the version input, in one commit on `release/vX.Y.Z`:
 | `Cargo.lock` | `cargo update --workspace`, inside the bump |
 | The install snippets at `X.Y` | the same bump; `--check` holds the set closed |
 | `CHANGELOG.md`, fragments consumed | `scripts/changelog.sh --build` |
-| `THIRD-PARTY.md` | `scripts/attribution.sh`, as a drift backstop |
+| `THIRD-PARTY.md` | `cargo xtask attribution`, as a drift backstop |
 
 The pull request it opens is titled `chore: release vX.Y.Z`, labeled
 `release`, and set to auto-merge. Re-dispatching the same version refreshes

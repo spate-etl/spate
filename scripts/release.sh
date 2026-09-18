@@ -254,7 +254,7 @@ assemble() {
     ./scripts/changelog.sh --build "$version"
     # The inventory holds no first-party rows, so this is a no-op unless a
     # dependency changed underneath the release.
-    ./scripts/attribution.sh
+    cargo xtask attribution
     endgroup
 
     group "The release commit"

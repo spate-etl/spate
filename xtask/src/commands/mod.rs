@@ -351,11 +351,7 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: Command) -> Outcome {
             ),
         ),
         Command::Attribution { html } => {
-            let mut s = Step::new("./scripts/attribution.sh", [] as [&str; 0]);
-            if let Some(out) = html {
-                s = s.args(["--html", &out]);
-            }
-            run::run(root, explain, &s)
+            crate::checks::attribution::generate(root, explain, html.as_deref())
         }
         Command::Tidy { check, list } => lint::tidy(root, explain, check, list),
         Command::Adr { cmd } => match cmd {

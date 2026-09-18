@@ -503,8 +503,8 @@ jobs:
           tools: cargo-about
           shared-key: docs
 
-      # The script filters the first-party crates and generates
-      # THIRD-PARTY.md the same way, so the page and the inventory agree.
+      # The same command generates THIRD-PARTY.md, filtering the first-party
+      # crates the same way, so the page and the inventory agree.
       - name: Build third-party license texts
         run: |
           rm -rf website/static/licenses

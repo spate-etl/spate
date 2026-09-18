@@ -6,6 +6,7 @@
 // A command-line tool writes to stdout and stderr.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
+mod checks;
 mod ci;
 mod commands;
 mod run;

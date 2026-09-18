@@ -480,14 +480,9 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: Command) -> Outcome {
             run::run(root, explain, &s)
         }
         Command::SyncLabels { dry_run, repo } => {
-            let mut s = Step::new("./scripts/sync-labels.sh", [] as [&str; 0]);
-            if dry_run {
-                s = s.arg("--dry-run");
-            }
-            if let Some(r) = &repo {
-                s = s.args(["--repo", r]);
-            }
-            run::run(root, explain, &s)
+            // `DRY_RUN` is how the workflow selects it on a fork's pull request.
+            let dry_run = dry_run || std::env::var("DRY_RUN").as_deref() == Ok("true");
+            crate::checks::sync_labels::sync(root, explain, dry_run, repo.as_deref())
         }
     }
 }

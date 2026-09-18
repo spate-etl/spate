@@ -131,6 +131,32 @@ fn program_path(root: &Path, program: &str) -> std::path::PathBuf {
         .map_or_else(|| std::path::PathBuf::from(program), |rel| root.join(rel))
 }
 
+/// Runs one step with its stdout discarded and its stderr inherited.
+pub(crate) fn quiet(root: &Path, explain: bool, step: &Step<'_>) -> Outcome {
+    let line = step.display();
+    if explain {
+        println!("{line}");
+        return Ok(());
+    }
+    let dir = step
+        .dir
+        .map_or_else(|| root.to_path_buf(), |d| root.join(d));
+    let status = Command::new(program_path(root, step.program))
+        .args(step.args.iter().map(OsStr::new))
+        .envs(step.env.iter().map(|(k, v)| (*k, v.as_str())))
+        .current_dir(&dir)
+        .stdout(std::process::Stdio::null())
+        .status()
+        .map_err(|e| Error::msg(format!("{}: {e}", step.program)))?;
+    if status.success() {
+        return Ok(());
+    }
+    Err(Error {
+        message: format!("`{line}` exited {}", describe(&status)),
+        code: status.code(),
+    })
+}
+
 fn describe(status: &std::process::ExitStatus) -> String {
     status
         .code()

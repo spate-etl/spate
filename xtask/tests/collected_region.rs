@@ -238,8 +238,7 @@ fn the_healthy_profile_is_accepted_and_its_baseline_ignored() {
 }
 
 /// A case split across threads is one measurement, judged once on the sum of
-/// its parts, and a part that produced no records is refused rather than
-/// skipped.
+/// its parts, and a part that produced no records is refused.
 #[test]
 fn a_threaded_case_is_judged_once_and_a_lost_part_is_refused() {
     let tree = Tree::new("threaded");
@@ -425,6 +424,28 @@ fn every_case_is_judged_and_one_refusal_fails_the_run() {
             passed(&name, "40.00", 10_000),
             tree.at("b/callgrind.x.out")
         )
+    );
+}
+
+/// A `DIR` ending in `/` names its case by the relative path, and the profile
+/// path the failure prints carries no doubled separator.
+#[test]
+fn a_trailing_separator_on_the_tree_does_not_reach_the_paths() {
+    let tree = Tree::new("slash");
+    tree.profile("b/callgrind.x.out", &share(100, 10_000));
+    held(
+        &[&format!("{}/", tree.root())],
+        1,
+        &format!(
+            "::error::b: the collected region is 1.00% application code (100 of 10000 Ir);\n\
+             \x20 the rest is the C runtime, so this case is measuring the allocator rather than the code it names.\n\
+             \x20 Profile: {}\n\
+             \x20 The usual cause is the measured work being written inline in the #[library_benchmark]\n\
+             \x20 function, where the optimizer may reshape it out of the collected region. Move it into a\n\
+             \x20 named #[inline(never)] function the benchmark calls. See DEVELOPING.md.\n",
+            tree.at("b/callgrind.x.out")
+        ),
+        "",
     );
 }
 

@@ -86,7 +86,7 @@ fn check_dir(root: &Path, dir: &str, shard: &str) -> Outcome {
 
     let mut failed = false;
     let mut checked = 0u64;
-    for rel in case_dirs(&base)? {
+    for (rel, path) in case_dirs(&base)? {
         // `spate-s3/descriptor_gungraun/descriptor/decode.full_splits`,
         // relative to the tree the caller named. A profile sitting directly in
         // that tree has no relative path to strip to, so it is named for its
@@ -94,9 +94,9 @@ fn check_dir(root: &Path, dir: &str, shard: &str) -> Outcome {
         let (case_dir, case_id) = if rel.is_empty() {
             (dir.to_owned(), basename(dir).to_owned())
         } else {
-            (format!("{dir}/{rel}"), rel.clone())
+            (format!("{dir}/{rel}"), rel)
         };
-        let parts = case_parts(&base.join(&rel), &case_dir);
+        let parts = case_parts(&path, &case_dir);
         if parts.is_empty() {
             continue;
         }
@@ -206,23 +206,23 @@ fn is_profile(name: &str) -> bool {
         && !name.contains('@')
 }
 
-/// Every directory under `base` holding at least one profile, as a path
-/// relative to `base` and in the bytewise order the cases are judged. The empty
-/// string names `base`.
+/// Every directory under `base` holding at least one profile, mapping the
+/// displayed path relative to `base` to the path on disk, in the bytewise order
+/// the cases are judged. The empty string names `base`.
 ///
 /// A threaded case's parts are only a measurement together, so the unit is the
 /// directory and each is judged once.
-fn case_dirs(base: &Path) -> Result<BTreeSet<String>, Error> {
-    let mut out = BTreeSet::new();
+fn case_dirs(base: &Path) -> Result<BTreeMap<String, PathBuf>, Error> {
+    let mut out = BTreeMap::new();
     walk(base, "", &mut out)?;
     Ok(out)
 }
 
 /// Descends `dir`, recording it when it holds a profile.
 ///
-/// Symlinked directories are recorded and never descended into, so a loop
+/// A symlink to a directory is neither recorded nor descended into, so a loop
 /// cannot hold the walk.
-fn walk(dir: &Path, rel: &str, out: &mut BTreeSet<String>) -> Result<(), Error> {
+fn walk(dir: &Path, rel: &str, out: &mut BTreeMap<String, PathBuf>) -> Result<(), Error> {
     let read = std::fs::read_dir(dir).map_err(|e| Error::msg(format!("{}: {e}", dir.display())))?;
     let mut holds = false;
     let mut subdirs = Vec::new();
@@ -242,7 +242,7 @@ fn walk(dir: &Path, rel: &str, out: &mut BTreeSet<String>) -> Result<(), Error> 
         }
     }
     if holds {
-        out.insert(rel.to_owned());
+        out.insert(rel.to_owned(), dir.to_path_buf());
     }
     for (path, child) in subdirs {
         walk(&path, &child, out)?;
@@ -620,7 +620,6 @@ fn numeric(field: &str) -> f64 {
     field[start..i].parse().unwrap_or(0.0)
 }
 
-/// Whether the line opens with any of `prefixes`.
 fn starts_with_any(line: &str, prefixes: &[&str]) -> bool {
     prefixes.iter().any(|p| line.starts_with(p))
 }

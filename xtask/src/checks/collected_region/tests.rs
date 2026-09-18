@@ -579,8 +579,8 @@ fn the_target_tree_falls_back_to_the_default_cargo_directory() {
     assert_eq!(target_tree(Some("/build")), "/build/gungraun");
 }
 
-/// One directory per case, deduplicated and sorted bytewise, with the tree
-/// itself named by the empty path.
+/// One directory per case, deduplicated and sorted bytewise, each against the
+/// path it is read by, with the tree itself named by the empty path.
 #[test]
 fn every_directory_holding_a_profile_is_one_case() {
     let scratch = Scratch::new("spate-xtask-region-discovery").unwrap();
@@ -598,7 +598,11 @@ fn every_directory_holding_a_profile_is_one_case() {
     }
     assert_eq!(
         case_dirs(base).unwrap().into_iter().collect::<Vec<_>>(),
-        ["", "a-later", "b/one"]
+        [
+            (String::new(), base.to_path_buf()),
+            ("a-later".to_owned(), base.join("a-later")),
+            ("b/one".to_owned(), base.join("b/one")),
+        ]
     );
     let parts = case_parts(&base.join("b/one"), "T/b/one");
     assert_eq!(
@@ -620,13 +624,34 @@ fn a_directory_named_like_a_profile_is_a_part() {
     std::fs::create_dir_all(&nested).unwrap();
     std::fs::write(nested.join("callgrind.y.out"), "").unwrap();
     assert_eq!(
-        case_dirs(base).unwrap().into_iter().collect::<Vec<_>>(),
+        case_dirs(base).unwrap().into_keys().collect::<Vec<_>>(),
         ["c", "c/callgrind.x.out"]
     );
     let parts = case_parts(&nested, "T/c/callgrind.x.out");
     assert_eq!(
         parts.iter().map(|(d, _)| d.as_str()).collect::<Vec<_>>(),
         ["T/c/callgrind.x.out", "T/c/callgrind.x.out/callgrind.y.out"]
+    );
+}
+
+/// A case whose directory name is not UTF-8 is judged, where losing it would
+/// leave the rest of the run green.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_case_named_in_invalid_utf8_is_judged() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    let scratch = Scratch::new("spate-xtask-region-non-utf8").unwrap();
+    let base = scratch.join("t");
+    let lossy = base.join(OsStr::from_bytes(b"case\xff"));
+    std::fs::create_dir_all(&lossy).unwrap();
+    std::fs::write(lossy.join("callgrind.x.out"), share(100, 10_000)).unwrap();
+    let healthy = base.join("plain");
+    std::fs::create_dir_all(&healthy).unwrap();
+    std::fs::write(healthy.join("callgrind.y.out"), share(9000, 10_000)).unwrap();
+    assert_eq!(
+        check_dir(scratch.dir(), "t", "").map_err(|e| e.code),
+        Err(Some(1))
     );
 }
 
@@ -746,7 +771,7 @@ fn a_tree_with_no_measurement_fails_closed() {
     );
 }
 
-/// An object path carrying a parenthesis is a name, not a reference.
+/// An object path carrying a parenthesis is read as a name.
 #[test]
 fn an_object_path_with_a_parenthesis_is_not_a_reference() {
     let text = "cmd: /bin/app (deleted)\npositions: line\nevents: Ir\nsummary: 5\n\n\

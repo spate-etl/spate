@@ -235,7 +235,6 @@ pub(crate) fn classify(
                     ".github/workflows/ci.yml",
                     ".github/actions/*",
                     "xtask/*",
-                    "scripts/semver-checks.sh",
                 ],
             ) {
                 out.semver_pkgs

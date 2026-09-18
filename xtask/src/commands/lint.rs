@@ -92,13 +92,10 @@ fn one_check(root: &Path, explain: bool, check: TidyCheck) -> Outcome {
                 &Step::new("shellcheck", [] as [&str; 0]).args(scripts),
             )
         }
-        TidyCheck::SelfTest => run::steps(
+        TidyCheck::SelfTest => run::run(
             root,
             explain,
-            &[
-                Step::new("cargo", ["test", "-p", "spate-xtask", "--locked"]),
-                Step::new("./scripts/semver-checks.sh", ["--self-test"]),
-            ],
+            &Step::new("cargo", ["test", "-p", "spate-xtask", "--locked"]),
         ),
         TidyCheck::Changelog => script(root, explain, "changelog.sh", "--check"),
         TidyCheck::Adr => crate::checks::adr::check(root, explain),

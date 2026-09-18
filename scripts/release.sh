@@ -80,7 +80,7 @@ workspace_version() {
     printf '%s\n' "$v"
 }
 
-# A crate's path in the sparse index. Matches scripts/semver-checks.sh.
+# A crate's path in the sparse index. Matches xtask/src/checks/semver_checks.rs.
 index_path() {
     local crate=$1
     case "${#crate}" in

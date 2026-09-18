@@ -413,17 +413,18 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: Command) -> Outcome {
             packages,
             cache_key,
         } => {
-            let mut s = Step::new("./scripts/semver-checks.sh", [] as [&str; 0]);
-            if against_registry {
-                s = s.arg("--against-registry");
-            }
-            if let Some(p) = &packages {
-                s = s.args(["--packages", p]);
-            }
+            use crate::checks::semver_checks;
+
             if cache_key {
-                s = s.arg("--cache-key");
+                semver_checks::print_cache_key(root, explain)
+            } else if against_registry {
+                semver_checks::registry(root, explain, packages.as_deref())
+            } else {
+                Err(Error::msg(
+                    "usage: cargo xtask semver-checks --against-registry [--packages \"a b\"] \
+                     | --cache-key",
+                ))
             }
-            run::run(root, explain, &s)
         }
         Command::ReleaseVersion {
             bump,

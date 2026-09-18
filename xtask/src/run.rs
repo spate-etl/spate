@@ -205,6 +205,73 @@ pub(crate) fn succeeded(root: &Path, step: &Step<'_>) -> Result<bool, Error> {
     Ok(status.success())
 }
 
+/// What a child's streams do while it runs.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Streams {
+    /// Both inherited.
+    Inherit,
+    /// Both discarded.
+    Discard,
+    /// stdout collected, stderr discarded.
+    Collect,
+}
+
+/// A child that ran to completion, whatever status it reported.
+pub(crate) struct Completed {
+    /// The status a shell would report: the exit code, or 128 plus the signal
+    /// that killed the child.
+    pub(crate) code: i32,
+    /// Empty unless [`Streams::Collect`] gathered it.
+    pub(crate) stdout: String,
+}
+
+/// Runs one step and answers how it finished, leaving a non-zero status for the
+/// caller to classify.
+pub(crate) fn complete(root: &Path, step: &Step<'_>, streams: Streams) -> Result<Completed, Error> {
+    let dir = step
+        .dir
+        .map_or_else(|| root.to_path_buf(), |d| root.join(d));
+    let mut command = Command::new(program_path(root, step.program));
+    command
+        .args(step.args.iter().map(OsStr::new))
+        .envs(step.env.iter().map(|(k, v)| (*k, v.as_str())))
+        .current_dir(&dir);
+    match streams {
+        Streams::Inherit => {}
+        Streams::Discard => {
+            command
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+        }
+        Streams::Collect => {
+            command
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null());
+        }
+    }
+    let out = command
+        .spawn()
+        .map_err(|e| Error::msg(format!("{}: {e}", step.program)))?
+        .wait_with_output()
+        .map_err(|e| Error::msg(format!("{}: {e}", step.program)))?;
+    Ok(Completed {
+        code: shell_code(&out.status),
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+    })
+}
+
+/// The status `$?` carries for a finished child.
+fn shell_code(status: &std::process::ExitStatus) -> i32 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = status.signal() {
+            return 128 + signal;
+        }
+    }
+    status.code().unwrap_or(1)
+}
+
 /// Runs one step with its stdout discarded and its stderr inherited.
 pub(crate) fn quiet(root: &Path, explain: bool, step: &Step<'_>) -> Outcome {
     let line = step.display();
@@ -289,5 +356,33 @@ mod tests {
         let step = Step::new("sh", ["-c", r#"test "$SPATE_STEP_ENV" = reached"#])
             .env("SPATE_STEP_ENV", "reached");
         assert!(succeeded(&root, &step).unwrap());
+    }
+
+    /// A non-zero exit reaches the caller as data, and `Collect` carries the
+    /// child's stdout with it.
+    #[cfg(unix)]
+    #[test]
+    fn a_completed_child_reports_its_own_code() {
+        let root = crate::repo_root().unwrap();
+        let step = Step::new("sh", ["-c", "printf 'out'; exit 100"]);
+        let done = complete(&root, &step, Streams::Collect).unwrap();
+        assert_eq!(done.code, 100);
+        assert_eq!(done.stdout, "out");
+        let done = complete(&root, &step, Streams::Discard).unwrap();
+        assert_eq!(done.code, 100);
+        assert_eq!(done.stdout, "");
+    }
+
+    /// A child killed by a signal reports the status a shell would, so nothing
+    /// reads it as a clean exit.
+    #[cfg(unix)]
+    #[test]
+    fn a_signalled_child_reports_128_plus_the_signal() {
+        let root = crate::repo_root().unwrap();
+        let step = Step::new("sh", ["-c", "kill -TERM $$"]);
+        assert_eq!(
+            complete(&root, &step, Streams::Discard).unwrap().code,
+            128 + 15
+        );
     }
 }

@@ -244,7 +244,7 @@ jobs:
       - env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_TITLE: ${{ github.event.pull_request.title }}
-          # Crate names this workflow computed, not event data. The script
+          # Crate names this workflow computed, not event data. The gate
           # rejects anything that is not a directory under crates/.
           SEMVER_PKGS: ${{ needs.changes.outputs.semver-pkgs }}
         run: cargo xtask semver-checks --against-registry --packages "$SEMVER_PKGS"

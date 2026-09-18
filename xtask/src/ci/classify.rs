@@ -215,7 +215,6 @@ pub(crate) fn classify(
                     ".github/actions/*",
                     "scripts/*",
                     "xtask/*",
-                    "Makefile",
                 ],
             ) {
                 out.container_pkgs
@@ -279,7 +278,6 @@ pub(crate) fn classify(
                     ".github/workflows/ci.yml",
                     ".github/actions/*",
                     ".github/toolchains/*",
-                    "Makefile",
                 ],
             ) {
                 out.fuzz = true;

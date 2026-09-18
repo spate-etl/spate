@@ -39,8 +39,9 @@ saying which non-crate area the change belongs to, not by leaving the scope off
 — `feat: …` requires a fragment, because some of the largest changes this
 project has ever shipped were written exactly that way.
 
-`make check-changelog` is the gate, and it runs as part of `make ci-lint` and in
-CI. There is no label and no checkbox to switch it off: the exemption is derived
+`cargo xtask tidy changelog` is the gate. `cargo xtask ci` runs it, and in CI
+it has a job of its own, because it reads the pull request's title and body.
+There is no label and no checkbox to switch it off: the exemption is derived
 from the type and scope you write, so the way out is to write a subject that is
 true.
 
@@ -66,7 +67,7 @@ subject, **the title is the one that has to be right.**
 ## Writing one
 
 ```sh
-make changelog-new TYPE=fixed SLUG=retry-ladder
+cargo xtask changelog new fixed retry-ladder
 ```
 
 That writes `changelog.d/retry-ladder.fixed.md` for you to edit. The name is

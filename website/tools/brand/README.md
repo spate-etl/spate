@@ -30,7 +30,7 @@ The palette is the `TOKENS` and `RAMP` tables in `brandgen.py`, written to
 and mapped onto Infima by [`src/css/custom.css`](../../src/css/custom.css). The
 mark's colours and the UI accent differ on the light ground: the mark is a
 graphic and reads at 3:1, while the accent carries link text and clears 4.5:1.
-`make check-brand` holds every pair to those floors.
+`cargo xtask tidy brand` holds every pair to those floors.
 
 ## Typeface
 

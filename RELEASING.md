@@ -92,7 +92,7 @@ are live, so the install snippets are true the moment the site serves them.
 ## Rehearse it first
 
 ```sh
-make release-dry-run VERSION=0.3.0
+cargo xtask release dry-run --version 0.3.0
 ```
 
 This runs the same `assemble` and the credential-free half of the publish in
@@ -196,7 +196,7 @@ includes a new crate:
    `spate-test`: dev-dependency edges with versions are part of the publish
    order, and that one closes a cycle no order can satisfy (cargo issue
    4242). The publish dry-run gate catches this.
-5. Run `make xtask-test`, which pins the container map to
+5. Run `cargo xtask tidy self-test`, which pins the container map to
    the crate graph.
 6. If it carries an install snippet anywhere, add the file to
    `SNIPPET_FILES` in `scripts/release-version.sh`; `--check` fails until the

@@ -14,7 +14,7 @@ ClickHouse.
 `SPATE_CLICKHOUSE_LANE` selects one:
 
 ```sh
-make test-docker SPATE_CLICKHOUSE_LANE=lts-previous
+SPATE_CLICKHOUSE_LANE=lts-previous cargo xtask integration-test
 ```
 
 ## Why these three

@@ -10,7 +10,7 @@ description: "REPLACE-ME"
 -->
 
 <!--
-  The ADR template. Copy it with `make adr-new SLUG=short-description`, which
+  The ADR template. Copy it with `cargo xtask adr new short-description`, which
   allocates the next number and fills in the date.
 
   This file is the documentation: the rules are stated inline, next to the
@@ -58,7 +58,7 @@ description: "REPLACE-ME"
   A withdrawn ADR keeps its number.
 
   Every `REPLACE-ME` below must be gone before the record lands.
-  `make ci-lint` fails while one remains.
+  `cargo xtask tidy` fails while one remains.
 -->
 
 # ADR-NNNN — REPLACE-ME short title naming both the problem and the solution
@@ -160,7 +160,7 @@ REPLACE-ME
 
   Examples of the shape wanted:
     INV-3, and `crates/spate-core/src/checkpoint/` is loom-tested.
-    `make check-adr`, run by `make ci-lint`.
+    `cargo xtask tidy adr`, run by `cargo xtask tidy`.
     Structural — `ShardWorker::dispatch` is not `async`, so the await cannot
     be added without changing the signature.
     Nothing yet.

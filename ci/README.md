@@ -13,7 +13,7 @@ digest that tag resolves to. Nothing builds them. They exist so one file names
 the server, readable by Dependabot, by `scripts/container-image.sh`, and by the
 test harness.
 
-Services and lanes are discovered from this tree. The Makefile, the CI
+Services and lanes are discovered from this tree. The task runner, the CI
 classifier and the test harness name no lane and no service beyond the one they
 are testing, so adding either is a change inside `ci/`.
 
@@ -48,17 +48,17 @@ is derived from the directory, so declaring it is the directory.
 ./scripts/container-image.sh --extra-lanes <service>     # lanes needing their own CI job
 ```
 
-`make test-docker` runs `--pull-all`, which walks this tree. Select a lane
+`cargo xtask integration-test` runs `--pull-all`, which walks this tree. Select a lane
 through the environment:
 
 ```sh
-SPATE_CLICKHOUSE_LANE=stable make test-docker
+SPATE_CLICKHOUSE_LANE=stable cargo xtask integration-test
 ```
 
 `--pull` fetches by digest and re-tags locally, which is what makes a run use the
 pinned bytes. testcontainers builds its image reference as `name:tag` and has no
 digest form, and it creates the container before it pulls, so the local tag is
-what it finds. `make test-docker` and CI both run it first.
+what it finds. `cargo xtask integration-test` and CI both run it first.
 
 A bare `cargo nextest run --profile docker` skips that step, and testcontainers
 then pulls the tag unverified. An exact patch tag is not re-pushed, so the bytes
@@ -106,7 +106,7 @@ The bump usually cannot be fixed inside its own pull request, so:
    `--extra-lanes` for its matrix; `ci.yml` gains a job consuming it.
 6. The Dependabot entries.
 
-Steps 1 to 3 are this tree, and `make test-docker` picks the service up from
+Steps 1 to 3 are this tree, and `cargo xtask integration-test` picks the service up from
 them with no edit. Steps 5 and 6 name the service once each, because the
 service-to-suite mapping and the bump policy are the two things that cannot be
 derived. `DEVELOPING.md` names no service at all.

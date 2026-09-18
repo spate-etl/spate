@@ -51,7 +51,7 @@ harness = false
 name = "framing_gungraun"
 harness = false
 
-# The wall-clock A/B tier, driven by `make bench-ab`.
+# The wall-clock A/B tier, driven by `cargo xtask bench ab`.
 [[bench]]
 name = "decode_wall"
 harness = false

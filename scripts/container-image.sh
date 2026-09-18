@@ -23,7 +23,7 @@
 #
 # `--pull-all` takes each service's lane from `SPATE_<SERVICE>_LANE`, falling
 # back to the lane named in `ci/<service>/PRIMARY`. It discovers services from
-# the tree, so adding one needs no edit here or in the Makefile.
+# the tree, so adding one needs no edit here or in the task runner.
 #
 # Runs on `bash` 3.2 and later: no associative arrays, no `mapfile`.
 set -euo pipefail

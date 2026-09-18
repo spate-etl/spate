@@ -3,9 +3,9 @@
 # Discovers the workspace's gungraun bench targets, and runs them. This is the
 # single reader of the filesystem, and every consumer asks it:
 #
-#   Makefile: bench-gungraun        --run
-#   Makefile: bench-gungraun-check  --check
-#   ci.yml, both legs               --run
+#   cargo xtask bench counted           --run
+#   cargo xtask bench gungraun          whichever flag it is given
+#   ci.yml, both legs                   --run, --check
 #
 # Discovery is by naming convention: `crates/<pkg>/benches/<name>_gungraun.rs`.
 #

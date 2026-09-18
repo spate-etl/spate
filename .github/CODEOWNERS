@@ -21,6 +21,8 @@
 # runs at all, and Dependabot is what edits those files.
 /.github/               @MarcusKainth
 /scripts/               @MarcusKainth
+/xtask/                 @MarcusKainth
+/.cargo/                @MarcusKainth
 /ci/                    @MarcusKainth
 
 # Supply-chain surface: the license/advisory/bans policy, the resolved graph

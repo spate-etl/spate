@@ -19,7 +19,7 @@
 //! siblings in `checkpoint_gungraun.rs` and `backpressure_gungraun.rs` and
 //! pinned by `tests/bench_fixtures.rs`.
 //!
-//! Run: `make bench-ab REF=main FILTER=ack_` (or `FILTER=poll_`)
+//! Run: `cargo xtask bench ab --ref main --filter ack_` (or `--filter poll_`)
 //!
 //! # Reading these numbers
 //!

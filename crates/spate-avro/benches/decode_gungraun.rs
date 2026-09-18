@@ -75,8 +75,8 @@
 //!   inside the single-pass walk's bounds checks, inside the two-pass
 //!   `Value` build, and before either, at the framing.
 //!
-//! Run it with `make bench-gungraun`; the runner must match the `gungraun`
-//! version in `Cargo.toml`.
+//! Run it with `cargo xtask bench counted`; the runner must match the
+//! `gungraun` version in `Cargo.toml`.
 
 // `library_benchmark` and `library_benchmark_group` expand to public modules,
 // functions and constants of their own, none of which carry documentation, so

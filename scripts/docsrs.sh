@@ -4,10 +4,10 @@
 # at a time, on nightly, with that crate's own `[package.metadata.docs.rs]`
 # table applied.
 #
-# `make doc` builds the workspace together on stable, which unifies features
-# across members and never sets `docsrs`. Neither shape reaches what docs.rs
-# does, so nothing else in the repository compiles the `docsrs` cfg or the
-# nightly rustdoc features gated on it.
+# `cargo xtask doc` builds the workspace together on stable, which unifies
+# features across members and never sets `docsrs`. Neither shape reaches what
+# docs.rs does, so nothing else in the repository compiles the `docsrs` cfg or
+# the nightly rustdoc features gated on it.
 #
 # Six of the table's keys are applied: `all-features`, `no-default-features`,
 # `features`, `cargo-args`, `rustdoc-args` and `rustc-args`. `default-target`
@@ -79,7 +79,7 @@ while IFS=$'\x1f' read -r name flags docargs rustcargs unsupported; do
   # reports it nowhere. Denied by name rather than through `-D warnings`, which
   # would make every merge wait on the next rustdoc lint. Such a lint arrives
   # with a toolchain bump, at a moment unrelated to the change under review.
-  # `make doc` holds the whole warning surface, on stable.
+  # `cargo xtask doc` holds the whole warning surface, on stable.
   # Unquoted on purpose; each field is a space-separated argument list.
   # shellcheck disable=SC2086
   if ! RUSTFLAGS="${RUSTFLAGS:-} $rustcargs" \

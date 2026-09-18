@@ -60,7 +60,7 @@ harness = false
 name = "backpressure_gungraun"
 harness = false
 
-# The wall-clock A/B tier, driven by `make bench-ab`.
+# The wall-clock A/B tier, driven by `cargo xtask bench ab`.
 [[bench]]
 name = "chain_wall"
 harness = false

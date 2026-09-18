@@ -3,54 +3,55 @@
 Maintainer and returning-contributor reference: the build, test and benchmark
 mechanics.
 
-## Targets
+## Commands
 
-`make help` lists every target, grouped. `make gates` is the pull request bar and
-covers formatting, clippy, the type check, the test suite, doctests, rustdoc,
-the feature matrix, licenses and advisories, and `make ci-lint`, the
-repository-metadata checks that read files and need no toolchain.
+`cargo xtask --help` lists the commands, each with its own `--help`, and
+`cargo xtask tidy --list` names the checks. `cargo xtask ci` is the pull request
+bar and covers formatting, clippy, the type check, the test suite, doctests,
+rustdoc, the feature matrix, licenses and advisories, and `cargo xtask tidy`,
+the repository consistency checks.
 
 Verify a gate by its **exit code**. Piped `grep` and `tail` chains report the
 status of the last command in the pipeline and have masked failures here. No
-target contains a pipe.
+command contains a pipe.
 
-CI calls the same targets for lint, type check, doctests, the feature matrix,
-licenses and every `ci-lint` member. Other jobs spell out invocations of their
+CI runs the same commands for lint, type check, doctests, the feature matrix,
+licenses and every `tidy` member. Other jobs spell out invocations of their
 own for a coverage run, a container image, Node or a pinned tool, so a green
-`make gates` locally does not mean CI has nothing left to say.
+`cargo xtask ci` locally does not mean CI has nothing left to say.
 
-These sit outside `gates`, by cost or by dependency:
+These sit outside `ci`, by cost or by dependency:
 
-| Target | Why it is outside |
+| Command | Why it is outside |
 | --- | --- |
-| `make test-docker` | Needs Docker and pulls real images |
-| `make loom` | Exhaustive interleaving; minutes, not seconds |
-| `make docs` | Needs Node; runs nightly and on documentation changes |
-| `make bench-check` | Builds the whole tree again in the release profile |
-| `make bench-gungraun` | Needs Linux and valgrind |
-| `make bench-gungraun-check` | Proves only that the benches build, not what they count |
-| `make bench-ab`, `make bench-arms`, `make bench-list`, `make bench-compare` | Wall clock; never a gate |
-| `make attribution` | `THIRD-PARTY.md` is checked nightly and regenerated at release |
-| `make fuzz-build`, `make fuzz` | Needs a nightly toolchain; the nightly tier fuzzes |
+| `cargo xtask integration-test` | Needs Docker and pulls real images |
+| `cargo xtask loom` | Exhaustive interleaving; minutes, not seconds |
+| `cargo xtask docs` | Needs Node; runs nightly and on documentation changes |
+| `cargo xtask bench check` | Builds the whole tree again in the release profile |
+| `cargo xtask bench counted` | Needs Linux and valgrind |
+| `cargo xtask bench gungraun --check` | Proves only that the benches build, not what they count |
+| `cargo xtask bench ab`, `cargo xtask bench arms`, `cargo xtask bench list`, `cargo xtask bench compare` | Wall clock; never a gate |
+| `cargo xtask attribution` | `THIRD-PARTY.md` is checked nightly and regenerated at release |
+| `cargo xtask fuzz build`, `cargo xtask fuzz run` | Needs a nightly toolchain; the nightly tier fuzzes |
 
 Three commands omit `--locked`, which everything else passes because CI does.
 `cargo hack --no-dev-deps` rewrites each `Cargo.toml` as it runs and a locked
 build refuses; `cargo fmt` resolves nothing, reading only `.rs` files; and
 `cargo fuzz` accepts no `--locked` passthrough.
 
-`make docs` sets `CI=true`. The client-redirects plugin only registers under it,
-so a plain `npm run build` skips redirect validation, and a redirect pointing at
-a page you deleted is a hard failure.
+`cargo xtask docs` sets `CI=true`. The client-redirects plugin only registers
+under it, so a plain `npm run build` skips redirect validation, and a redirect
+pointing at a page you deleted is a hard failure.
 
 ## The test suite
 
 Tests run under [cargo-nextest](https://nexte.st), one process per test
 concurrently, where `cargo test` runs one binary at a time. Plain
 `cargo test --workspace` still works and is many times slower. nextest does not
-run doctests; `make doctest` does.
+run doctests; `cargo xtask doctest` does.
 
-`make doc` builds the API reference with `RUSTDOCFLAGS="-D warnings"`, so a
-broken intra-doc link fails the build instead of rendering as dead text on
+`cargo xtask doc` builds the API reference with `RUSTDOCFLAGS="-D warnings"`, so
+a broken intra-doc link fails the build instead of rendering as dead text on
 docs.rs. It does not reach bench support modules, which `cargo doc` never
 builds.
 
@@ -67,7 +68,7 @@ The profiles in `.config/nextest.toml`:
   indistinguishable from a hang. One retry, JUnit report.
 
 Container-backed tests use testcontainers and are `#[ignore]`d, so a normal run
-skips them. `make test-docker` is what selects them.
+skips them. `cargo xtask integration-test` is what selects them.
 
 A suite that boots a real server runs it at a pinned version, one lane per
 release line the vendor still supports, selected by a `SPATE_<SERVICE>_LANE`
@@ -112,7 +113,7 @@ between crates or a dependency swap, a maintainer can label the pull request
 next push: `ci.yml` classifies each run from the event that triggered it, so a
 re-run of an already-started run carries the labels that run started with. They
 only ever add work; none can switch a suite off, and none reaches the semver
-gate, which follows the crate graph alone. `make self-test` checks each
+gate, which follows the crate graph alone. `cargo xtask tidy self-test` checks each
 classifier against that graph.
 
 ## Testing conventions
@@ -137,7 +138,7 @@ default, so an undeclared file is collected regardless, carrying no
 `required-features`, and every build compiles it — including the ones its
 imports do not exist under. `crates/spate/tests/manifest.rs` holds each test
 target to its stanza, and `cargo check --workspace --all-targets` in
-`make check-features` is what builds them on the default feature set;
+`cargo xtask hack` is what builds them on the default feature set;
 `cargo hack --no-dev-deps` strips dev-dependencies and reaches no test target
 at all.
 
@@ -154,9 +155,9 @@ off-by-default `testing` feature, in a `fuzz_seams` module. `fuzz/Cargo.toml`
 enables the feature on the crates whose targets need it.
 
 ```sh
-make fuzz-install
-make fuzz-build
-make fuzz TARGET=avro_wire_confluent SECS=60
+cargo xtask fuzz install
+cargo xtask fuzz build
+cargo xtask fuzz run avro_wire_confluent --secs 60
 ```
 
 `cargo +nightly fuzz list` prints the set. libFuzzer's instrumentation is
@@ -183,21 +184,21 @@ single component. A claim no tier here can measure is stated as unmeasured.
 
 ### The counted tier
 
-`make bench-gungraun` counts instructions under valgrind rather than measuring
+`cargo xtask bench counted` counts instructions under valgrind rather than measuring
 wall time, so its numbers are comparable across machines. It needs Linux,
 valgrind, and a `gungraun-runner` at the version `Cargo.lock` pins for
 `gungraun`; a mismatch is a hard error. On macOS the most you can check is that
-the benches build, with `make bench-gungraun-check`.
+the benches build, with `cargo xtask bench gungraun --check`.
 
 Adding one means naming the file `benches/<something>_gungraun.rs` and declaring
 it in the crate's `Cargo.toml` as a `[[bench]]` with `harness = false`.
 Nothing else registers it. `scripts/gungraun-benches.sh` discovers it by that
-name, and the Makefile target, both CI legs and `xtask/` all read
-from that one place, so there is no list to add yourself to. Running that script
+name, and the bench commands, both CI legs and the CI selector all read from
+that one place, so there is no list to add yourself to. Running that script
 bare prints what would run. Without the `harness = false` stanza, cargo
 auto-discovers the file under the default libtest harness, so the bench compiles
 cleanly and fails at run time complaining about arguments.
-`make check-gungraun-benches` catches it.
+`cargo xtask tidy gungraun-benches` catches it.
 
 **Put the measured work in a named `#[inline(never)]` function and have the
 benchmark function call it.** Getting this wrong produces a number rather than an
@@ -217,9 +218,9 @@ rather than from the source: a case must attribute at least 10% of its collected
 instructions to the binary under measurement, and must collect at least 1,000 of
 them, since a region can also be lost by leaving almost nothing rather than by
 leaving the allocator. Observed cases bottom out at 33.35% on the runner
-architecture and 28.67% on arm64. `make bench-gungraun`
+architecture and 28.67% on arm64. `cargo xtask bench counted`
 runs it after the benches, and CI runs it per shard as a *gate*: the counts are
-advisory, a bench measuring the allocator is not. `make check-collected-region`
+advisory, a bench measuring the allocator is not. `cargo xtask tidy collected-region`
 checks the guard itself against captured profiles of both shapes, and needs no
 valgrind.
 
@@ -227,7 +228,7 @@ Measuring a crate under more than one compiled feature arm *is* a second edit:
 CI runs one job per (package, arm), and the arm table is `feature_arms_for` in
 `xtask/src/ci/classify.rs`. Add an arm when a feature swaps an implementation
 the benches execute, not for every feature key; each arm is another pair of
-builds and valgrind runs. `make self-test` holds every arm to a feature its
+builds and valgrind runs. `cargo xtask tidy self-test` holds every arm to a feature its
 package declares.
 
 ### The wall-clock tier
@@ -238,13 +239,13 @@ wall-clock number answers "did this change move it" for a specific change on a
 machine you control.
 
 ```sh
-make bench-list                 # every case, with its flags
-make bench-ab REF=main REPS=20  # this tree against a reference
-make bench-ab REF=main PACKAGE=spate-avro       # only one crate's targets
-make bench-arms HEAD_FEATURES=spate-json/simd   # two feature arms of this tree
+cargo xtask bench list                 # every case, with its flags
+cargo xtask bench ab --ref main --replicates 20  # this tree against a reference
+cargo xtask bench ab --ref main --package spate-avro       # only one crate's targets
+cargo xtask bench arms --head-features spate-json/simd   # two feature arms of this tree
 ```
 
-`PACKAGE=` narrows the build as well as the report. Use it while writing or
+`--package` narrows the build as well as the report. Use it while writing or
 debugging one crate's cases, and leave it off for the run a change is accepted
 on.
 
@@ -260,10 +261,10 @@ pass away. Anything that drifts over a run otherwise lands entirely on whichever
 arm goes last, and the first repetition hands one arm the cold-start cost, which
 has been large enough here to decide which arm looked faster. Report an interval
 and the repetition count beside the value, so a reader can tell a difference from
-a spread. `make bench-ab` and `make bench-arms` do all of that.
+a spread. `cargo xtask bench ab` and `cargo xtask bench arms` do all of that.
 
-Which of the two you want depends on what the arms are. `bench-ab` varies the
-tree; `bench-arms` varies the Cargo features and holds the tree still, building
+Which of the two you want depends on what the arms are. `bench ab` varies the
+tree; `bench arms` varies the Cargo features and holds the tree still, building
 each arm into its own directory. **Two `bench run`s and a `bench compare` are
 not a substitute for either**: a lone leg calibrates its own iteration count, so
 two of them pin two different counts for the same case, and every case that
@@ -272,4 +273,4 @@ happens to is dropped. Nothing interleaves them either.
 ### Criterion
 
 `crates/spate-clickhouse/benches/encode.rs` is a criterion target, outside both
-conventions above. `make bench-check` compiles it and the weekly job runs it.
+conventions above. `cargo xtask bench check` compiles it and the weekly job runs it.

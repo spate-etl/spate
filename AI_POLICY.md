@@ -40,7 +40,7 @@ faster than a large change that does several things.
 In practice:
 
 - Tie it to a need, ideally an open issue.
-- Run `make gates` and check it by exit code.
+- Run `cargo xtask ci` and check it by exit code.
 - A diff past roughly 400 lines is worth splitting, or at least flagging.
 - Skip the drive-by cleanup. A formatting sweep bundled with a fix makes the fix
   harder to review and harder to revert.

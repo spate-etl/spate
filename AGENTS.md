@@ -6,7 +6,7 @@ crates under `crates/`, plus the unpublished wall-clock benchmark harness in
 
 [`CONTRIBUTING.md`](CONTRIBUTING.md) is the contributor-facing entry point.
 [`DEVELOPING.md`](DEVELOPING.md) carries the build, test and benchmark mechanics
-in full: read it for a target, a profile or a bench convention.
+in full: read it for a command, a profile or a bench convention.
 [`AI_POLICY.md`](AI_POLICY.md) covers what any contribution has to withstand. The
 part that most often applies here is that a delivery-correctness change is judged
 on a failing test, not on reasoning that reads well.
@@ -27,26 +27,27 @@ restating the property: "this touches INV-5" is the reviewable form, and
 After each edit, run the narrow check; `--workspace` is for the final gate:
 
 ```sh
-make clippy
+cargo xtask clippy
 cargo nextest run -p spate-s3 --all-features --locked   # the crate you touched
 ```
 
-`make help` lists every target; `make gates` is what a pull request must pass.
-CI calls the same targets for lint, type check, doctests, the feature matrix,
-licenses and every `ci-lint` member. Other jobs spell out invocations of their
-own, so green gates locally is necessary and not sufficient.
+`cargo xtask --help` lists the commands, each with its own `--help`;
+`cargo xtask ci` is what a pull request must pass.
+CI runs the same commands for lint, type check, doctests, the feature matrix,
+licenses and every `tidy` member. Other jobs spell out invocations of their
+own, so a green `cargo xtask ci` locally is necessary and not sufficient.
 
 Traps here:
 
 - **Verify by explicit exit code**, everywhere: gates, checklists, all of it.
   Piped `grep`/`tail` chains report the exit status of the last command in the
-  pipeline and have masked failures in this repo. The Makefile contains no pipes.
+  pipeline and have masked failures in this repo. No command in `xtask` pipes.
 - **Pass `--locked` on any ad-hoc cargo call**, as CI does. Without it a command
   can resolve a different graph and hide a failure CI will then find. The one
   exception is `cargo hack --no-dev-deps`, which rewrites each `Cargo.toml` as
   it runs and fails outright with the flag.
 - **`actionlint` runs locally only.** After touching a workflow, run
-  `actionlint .github/workflows/*.yml` and `make zizmor` yourself; CI will not
+  `actionlint .github/workflows/*.yml` and `cargo xtask tidy zizmor` yourself; CI will not
   catch a bad edit before you push.
 
 ## Testing
@@ -55,7 +56,7 @@ proptest for tracker and codec invariants, loom for the sync primitives, rdkafka
 MockCluster and clickhouse mocks in default CI, testcontainers behind the Docker
 job. Framework users test with `spate-test` mocks; keep those first-class.
 
-- `make test` does not run doctests; `make doctest` does.
+- `cargo xtask test` does not run doctests; `cargo xtask doctest` does.
 - `cargo test` runs a binary's tests in one process, so fixtures must carry
   per-test `pipeline`/`component` labels. A local recorder does not isolate the
   process-wide gauge claim in INV-10.
@@ -116,11 +117,11 @@ The rules that break most often:
 
 Decision records live in `docs/adr/`, one file per decision, and are the only
 place under `docs/` that reads as history. Scaffold one with
-`make adr-new SLUG=…`. An **accepted record is immutable**: a changed decision is
+`cargo xtask adr new …`. An **accepted record is immutable**: a changed decision is
 a *new* record superseding the old one, never an edit to it. A decision gets a
 record only if it affects structure, a key quality attribute, or is hard to
 reverse. `docs/adr/_template.md` states both rules in full and is normative;
-`make check-adr` holds the mechanical half.
+`cargo xtask tidy adr` holds the mechanical half.
 
 ## Commits and pull requests
 
@@ -167,12 +168,12 @@ closed unfixed). Check the issue afterwards.
 
 ## Done means
 
-- `make gates` green.
+- `cargo xtask ci` green.
 - Normative docs changed in the *same commit* as the behavior they describe.
 - A **changelog fragment** under `changelog.d/` whenever the change reaches a
   crate and somebody upgrading would care: `feat`, `fix`, `perf`, `revert` and
   `build`, plus **anything carrying `!` whatever its scope**.
-  `make changelog-new TYPE=fixed SLUG=…` scaffolds one, and
+  `cargo xtask changelog new fixed …` scaffolds one, and
   `changelog.d/README.md` has the conventions. Naming no scope is *not* an
   exemption; only naming one of the non-crate areas is. For a fix to a bug that
   was never released, put a `Changelog: none` trailer on the commit it excuses,

@@ -30,7 +30,7 @@
 //! | `lib_` | `apache-avro` over the same bytes |
 //!
 //! ```sh
-//! make bench-ab REF=main FILTER=raw_
+//! cargo xtask bench ab --ref main --filter raw_
 //! ```
 //!
 //! ## What each corpus is sized for

@@ -22,11 +22,11 @@ lives in the template, which is also this section's documentation:
 `docs/adr/_template.md`. Add one with:
 
 ```sh
-make adr-new SLUG=short-description
+cargo xtask adr new short-description
 ```
 
 That allocates the next number, fills in today's date, and copies the template
-with its rules attached. `make ci-lint` checks the mechanical half — unique
+with its rules attached. `cargo xtask tidy` checks the mechanical half — unique
 numbers, permitted status values, no unfilled placeholders, and that every
 record appears in the table below.
 

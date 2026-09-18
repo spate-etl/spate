@@ -567,7 +567,7 @@ cmd_check() {
         mode=require
         ;;
     "")
-        # A laptop. Orient against the obvious upstream so `make gates` answers
+        # A laptop. Orient against the obvious upstream so `cargo xtask ci` answers
         # the question before you push, and fall back to structure-only.
         for ref in origin/main upstream/main main; do
             if candidate=$(git rev-parse --verify --quiet "$ref^{commit}" 2>/dev/null) &&
@@ -586,10 +586,10 @@ cmd_check() {
         ;;
     esac
 
-    # Structure-only must never be the answer on a pull request. A workflow
-    # edit collapsing the four steps into `- run: make ci-lint` would call this
-    # with no `EVENT_NAME`, in a shallow checkout, where it takes the laptop arm
-    # and reports success having evaluated nothing.
+    # Structure-only must never be the answer on a pull request. A job running
+    # `cargo xtask tidy changelog` without passing the fields through `env:`
+    # would call this with no `EVENT_NAME`, in a shallow checkout, where it
+    # takes the laptop arm and reports success having evaluated nothing.
     if [ "$mode" = structure ] && [ -n "${GITHUB_ACTIONS:-}" ] &&
         [ "${GITHUB_EVENT_NAME:-}" = pull_request ]; then
         fail "running on a pull request inside GitHub Actions with no EVENT_NAME, so this
@@ -717,7 +717,7 @@ $(cat "$empty_file")
         echo
         echo "  Add one with:"
         echo
-        echo "      make changelog-new TYPE=fixed SLUG=short-description"
+        echo "      cargo xtask changelog new fixed short-description"
         echo
         echo "  and write what the change means for somebody upgrading, not what moved."
         echo "  $fragments/README.md has the format and the conventions."

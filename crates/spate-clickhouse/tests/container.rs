@@ -62,8 +62,8 @@ const SERVER_CREDENTIALS: &str = "user: default\npassword: container-secret\n";
 ///
 /// The digest beside the tag is dropped: testcontainers builds its reference as
 /// `name:tag` and has no digest form. `scripts/container-image.sh --pull` is
-/// what makes the tag resolve to the pinned bytes, and CI and `make test-docker`
-/// run it first.
+/// what makes the tag resolve to the pinned bytes, and CI and `cargo xtask
+/// integration-test` run it first.
 ///
 /// Panics on a lane with no manifest, so a typo in the CI matrix fails the job.
 fn lane_image() -> (String, String) {

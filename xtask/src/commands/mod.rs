@@ -462,7 +462,7 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: Command) -> Outcome {
 fn container_image(root: &Path, explain: bool, args: &ImageArgs) -> Outcome {
     use crate::checks::container_image as image;
 
-    let spare = args.service.is_some() || args.lane.is_some();
+    let spare = args.service.is_some();
     if args.pull_all {
         if spare {
             return Err(Error::msg("usage: cargo xtask container-image --pull-all"));
@@ -486,8 +486,7 @@ fn container_image(root: &Path, explain: bool, args: &ImageArgs) -> Outcome {
     image::run(root, explain, mode, svc, args.lane.as_deref())
 }
 
-/// The mode a pair of flags selects. clap holds them apart, so at most one is
-/// set.
+/// The mode a pair of flags selects.
 fn image_mode(r#ref: bool, pull: bool) -> crate::checks::container_image::Mode {
     use crate::checks::container_image::Mode;
     if pull {
@@ -689,7 +688,7 @@ mod tests {
     }
 
     /// Each mode takes a fixed number of positional arguments, and a spare one
-    /// is a usage error rather than a silently ignored word.
+    /// is a usage error.
     #[test]
     fn a_spare_positional_argument_is_a_usage_error() {
         let root = crate::repo_root().unwrap();

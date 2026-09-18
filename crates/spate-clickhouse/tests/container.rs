@@ -71,7 +71,7 @@ fn lane_image() -> (String, String) {
 ///
 /// `cargo test` runs this binary's tests in one process, where `set_var` beside
 /// another thread's `getenv` is undefined behaviour, so the lane is named on
-/// the command line rather than exported.
+/// the command line.
 fn image_for_lane(lane: &str) -> (String, String) {
     split_reference(&resolve(&["clickhouse", lane]))
 }

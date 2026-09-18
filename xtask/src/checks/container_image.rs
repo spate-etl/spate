@@ -10,6 +10,7 @@
 //! its image reference as `name:tag` and has no digest form, so a run reaches
 //! the pinned bytes through the local tag.
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use crate::run::{self, Error, Outcome, Step};
@@ -111,8 +112,8 @@ pub(crate) fn tagged_for(root: &Path, service: &str, lane: &str) -> Result<Strin
 /// lane: those resolving to a different image. The primary lane resolves to its
 /// own reference, so it drops out here too.
 ///
-/// A lane that does not resolve is reported and kept, so a broken pin reaches a
-/// job rather than disappearing from the matrix.
+/// A lane that does not resolve is reported and kept, so a broken pin still
+/// reaches a job.
 pub(crate) fn extra_lanes(root: &Path, service: &str) -> Result<Vec<String>, Error> {
     let primary = primary_lane(root, service)?;
     let primary_ref = reference_for(root, service, &primary)?;
@@ -134,9 +135,7 @@ pub(crate) fn extra_lanes(root: &Path, service: &str) -> Result<Vec<String>, Err
 fn pull_lane(root: &Path, explain: bool, service: &str, lane: &str) -> Result<String, Error> {
     let reference = reference_for(root, service, lane)?;
     let local = tagged(&reference).to_owned();
-    let by_digest = by_digest(&reference);
-    let pull = Step::new("docker", ["pull", "--quiet", &by_digest]);
-    let retag = Step::new("docker", ["tag", &by_digest, &local]);
+    let (pull, retag) = pull_plan(&reference);
     if explain {
         println!("{}", pull.display());
         println!("{}", retag.display());
@@ -147,6 +146,17 @@ fn pull_lane(root: &Path, explain: bool, service: &str, lane: &str) -> Result<St
     eprint!("{}", run::capture(root, &pull)?);
     run::quiet(root, false, &retag)?;
     Ok(local)
+}
+
+/// The two steps a pull takes: fetching the digest, then pointing the local tag
+/// at those bytes.
+fn pull_plan(reference: &str) -> (Step<'static>, Step<'static>) {
+    let local = tagged(reference);
+    let by_digest = by_digest(reference);
+    (
+        Step::new("docker", ["pull", "--quiet", &by_digest]),
+        Step::new("docker", ["tag", &by_digest, local]),
+    )
 }
 
 /// The `name:tag@sha256:...` a lane pins, from its Dockerfile's first `FROM`.
@@ -207,11 +217,24 @@ fn by_digest(reference: &str) -> String {
 
 /// The lane selected for a service: `SPATE_<SERVICE>_LANE`, else its primary.
 fn selected_lane(root: &Path, service: &str) -> Result<String, Error> {
-    match std::env::var(lane_var(service))
-        .ok()
-        .as_deref()
-        .and_then(from_env)
-    {
+    selected_lane_from(
+        std::env::var_os(lane_var(service)).as_deref(),
+        root,
+        service,
+    )
+}
+
+/// [`selected_lane`] over a given value of the variable.
+///
+/// A value that is not UTF-8 names no lane, and is rejected.
+fn selected_lane_from(value: Option<&OsStr>, root: &Path, service: &str) -> Result<String, Error> {
+    let Some(value) = value else {
+        return primary_lane(root, service);
+    };
+    let Some(value) = value.to_str() else {
+        return Err(Error::msg(format!("{} is not UTF-8", lane_var(service))));
+    };
+    match from_env(value) {
         Some(lane) => Ok(lane.to_owned()),
         None => primary_lane(root, service),
     }
@@ -321,7 +344,7 @@ mod tests {
     }
 
     /// Only a space ends the reference, so a tab inside one is part of it and
-    /// the lane is reported as unpinned rather than silently truncated.
+    /// the lane is reported as unpinned.
     #[test]
     fn a_tab_inside_the_reference_is_part_of_it() {
         assert_eq!(from_line("FROM a\tb c\n"), Some("a\tb"));
@@ -375,6 +398,20 @@ mod tests {
         assert_eq!(tagged("vendor/db@sha256:aa"), "vendor/db");
     }
 
+    // ── The pull plan ──────────────────────────────────────────────────
+
+    /// The fetch names the digest and the re-tag points the local tag at it, so
+    /// a caller reaching the image by tag gets the pinned bytes.
+    #[test]
+    fn the_pull_plan_fetches_the_digest_and_retags_it_locally() {
+        let (pull, retag) = pull_plan("vendor/db:9.4@sha256:aa");
+        assert_eq!(pull.display(), "docker pull --quiet vendor/db@sha256:aa");
+        assert_eq!(
+            retag.display(),
+            "docker tag vendor/db@sha256:aa vendor/db:9.4"
+        );
+    }
+
     // ── Lane selection ─────────────────────────────────────────────────
 
     #[test]
@@ -420,8 +457,8 @@ mod tests {
                 "old",
                 &format!("FROM vendor/db:9.1.7.3@sha256:{digest}\n"),
             );
-            // Byte-identical to the primary lane, which is where a `stable`
-            // lane sits whenever the newest release is also the newest LTS.
+            // Byte-identical to the primary lane. A `stable` lane sits here
+            // whenever the newest release is also the newest LTS.
             me.lane(
                 "db",
                 "tracking",
@@ -501,6 +538,40 @@ mod tests {
     fn an_unset_variable_falls_back_to_the_primary_lane() {
         let s = Scratch::new("selected");
         assert_eq!(selected_lane(s.root(), "db").unwrap(), "vendor-main");
+    }
+
+    /// A value naming a lane wins over `PRIMARY`, whether or not the tree holds
+    /// that lane, and a value naming none falls back.
+    #[test]
+    fn the_variable_names_the_lane_and_an_empty_value_names_none() {
+        let s = Scratch::new("selected-from");
+        let selected =
+            |value: &str| selected_lane_from(Some(OsStr::new(value)), s.root(), "db").unwrap();
+        assert_eq!(selected("old"), "old");
+        assert_eq!(selected("old\n\n"), "old");
+        assert_eq!(selected("ghost"), "ghost");
+        assert_eq!(selected(""), "vendor-main");
+        assert_eq!(selected("\n"), "vendor-main");
+        assert_eq!(
+            selected_lane_from(None, s.root(), "db").unwrap(),
+            "vendor-main"
+        );
+    }
+
+    /// A value that is not UTF-8 fails, so a mis-set variable cannot resolve to
+    /// the primary lane's image.
+    #[cfg(unix)]
+    #[test]
+    fn a_variable_that_is_not_utf8_is_rejected() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let s = Scratch::new("selected-bytes");
+        assert_eq!(
+            selected_lane_from(Some(OsStr::from_bytes(b"lt\xffs")), s.root(), "db")
+                .unwrap_err()
+                .message,
+            "SPATE_DB_LANE is not UTF-8"
+        );
     }
 
     #[test]

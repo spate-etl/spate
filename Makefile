@@ -3,8 +3,6 @@
 # exit status and masks a failure. `--locked` wherever a dependency graph is
 # resolved.
 
-include versions.mk
-
 .DEFAULT_GOAL := help
 
 .PHONY: help fmt fmt-check clippy lint check test doctest doc docsrs test-docker \
@@ -20,7 +18,7 @@ include versions.mk
         check-changelog changelog-new \
         check-release-version release-dry-run \
         fuzz fuzz-build fuzz-install \
-        ci-lint docs docs-serve gates
+        ci-lint ci-lint-metadata docs docs-serve gates
 
 ##@ Help
 
@@ -87,7 +85,7 @@ loom: ## Loom concurrency models (slow)
 check-features: ## Every feature alone, the feature-off combinations, and every target on the default set
 	# `cargo hack --no-dev-deps` rewrites each Cargo.toml as it runs, which a
 	# locked build refuses. Do not add `--locked`; it fails.
-	cargo hack check --workspace --each-feature --no-dev-deps --exclude-features full
+	cargo hack check --workspace --each-feature --no-dev-deps --exclude-features full --exclude spate-xtask
 	# Stripping dev-dependencies drops test and bench targets, so the run above
 	# reaches no test target in any crate. These two build them, on the axes it
 	# covers for the library: features off, then the default set.
@@ -165,7 +163,7 @@ shellcheck: ## Lint the shell scripts
 	shellcheck scripts/*.sh
 
 self-test: ## The CI classifiers still match the crate graph
-	./scripts/ci-changes.sh --self-test
+	cargo test -p spate-xtask --locked
 	./scripts/semver-checks.sh --self-test
 	./scripts/container-image.sh --self-test
 	./scripts/supported-versions.sh --self-test
@@ -221,7 +219,14 @@ release-dry-run: ## The whole release locally, nothing pushed or uploaded: make 
 #
 #     UPDATE_EXAMPLES_INDEX=1 cargo test -p spate --test examples_index --locked
 
-ci-lint: zizmor shellcheck self-test check-perf-report check-gungraun-benches check-collected-region check-adr check-brand check-changelog check-transclusions check-docs-meta check-supported-versions check-release-version ## Every repository-metadata check
+# The members needing neither a toolchain nor the pull request's own fields.
+# One CI step runs this whole list; the rest of `ci-lint` runs where its
+# prerequisites are.
+ci-lint-metadata: check-adr check-perf-report check-gungraun-benches \
+        check-collected-region check-transclusions check-docs-meta \
+        check-supported-versions check-release-version check-brand
+
+ci-lint: zizmor shellcheck self-test check-changelog ci-lint-metadata ## Every repository-metadata check
 
 ##@ Fuzz
 
@@ -231,7 +236,7 @@ ci-lint: zizmor shellcheck self-test check-perf-report check-gungraun-benches ch
 NIGHTLY ?= nightly
 
 fuzz-install: ## Install cargo-fuzz at the pinned version
-	cargo install cargo-fuzz --locked --version $(CARGO_FUZZ_VERSION)
+	cargo install cargo-fuzz --locked
 
 fuzz-build: ## Build every fuzz target
 	cargo +$(NIGHTLY) fuzz build

@@ -36,7 +36,7 @@ jobs:
   changes:
     name: Detect changes
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 12
     outputs:
       rust: ${{ steps.classify.outputs.rust }}
       site: ${{ steps.classify.outputs.site }}
@@ -60,6 +60,9 @@ jobs:
           # Both diff endpoints must be present as objects.
           fetch-depth: 0
           persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          shared-key: xtask
       - id: classify
         # Event fields go through `env:`, never interpolated into a `run:` block:
         # interpolation splices attacker-controlled text into generated shell.
@@ -78,7 +81,7 @@ jobs:
           # outside a merge group, where the arm reading them never runs.
           MERGE_BASE_SHA: ${{ github.event.merge_group.base_sha }}
           MERGE_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
-        run: ./scripts/ci-changes.sh
+        run: cargo run -q -p spate-xtask --locked -- ci-changes
 
   # Tier 1: cheap, unconditional, gates the expensive tier. No job-level `if:`
   # here: a skipped job skips everything that `needs:` it. The step carries it.
@@ -109,14 +112,16 @@ jobs:
           persist-credentials: false
       - uses: taiki-e/install-action@c3ec0de9ae7f1019cea21aa96aa0a895b9552063 # v2.87.9
         with:
-          # Version-pinned as well as SHA-pinned: a zizmor release can relax the
-          # default audit policy this job rests on.
-          tool: zizmor@1.28.0,shellcheck@0.11.0
+          # zizmor alone carries a version: a release can relax the default
+          # audit policy this job rests on, and the action's own bump would
+          # move it with nothing in the title to say so. Bumped by hand, after
+          # reading the release notes for audit changes.
+          tool: zizmor@1.28.0,shellcheck
       # check-brand runs plain Node with no npm dependencies, so no cache or
       # install step is needed.
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 24
+          node-version-file: .node-version
       # Without GH_TOKEN zizmor skips the API audits and reports "No findings",
       # exit 0, against a known-vulnerable action.
       - run: make zizmor
@@ -124,25 +129,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
       - run: make shellcheck
 
-      # `make ci-lint` aggregates these locally; CI runs them one by one, so a
-      # new check goes in both places.
-      - run: make check-adr
-
-      - run: make check-perf-report
-
-      - run: make check-gungraun-benches
-
-      - run: make check-collected-region
-
-      - run: make check-transclusions
-
-      - run: make check-docs-meta
-
-      - run: make check-supported-versions
-
-      - run: make check-release-version
-
-      - run: make check-brand
+      # The members needing no toolchain and no pull request fields. The other
+      # three run where their prerequisites are: `self-test` needs cargo,
+      # `check-changelog` needs the pull request's own fields, and `zizmor`
+      # needs the token above.
+      - run: make ci-lint-metadata
 
   deny:
     name: Licenses and advisories
@@ -158,7 +149,7 @@ jobs:
       # an unverified release tarball into /usr/bin.
       - uses: ./.github/actions/setup-rust
         with:
-          tools: cargo-deny@0.20.2
+          tools: cargo-deny
 
       - run: make deny
 
@@ -204,7 +195,7 @@ jobs:
   # fragment for that second break is what goes missing. This is the trade the
   # published baseline carries and it is taken deliberately.
   #
-  # The set comes from ci-changes.sh's reverse-dependency closure over the
+  # The set comes from the CI selector's reverse-dependency closure over the
   # changed crates, which is why a change confined to one connector no longer
   # rebuilds every crate's rustdoc.
   semver:
@@ -229,7 +220,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-rust
         with:
-          tools: cargo-semver-checks@0.50.0
+          tools: cargo-semver-checks
           # Reads the lint cache for the tree's side. The baselines come from
           # the cache below instead, which rust-cache would not hold: it prunes
           # target/ to what it recognizes.
@@ -282,7 +273,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-rust
         with:
-          tools: cargo-semver-checks@0.50.0
+          tools: cargo-semver-checks
           shared-key: dev-allfeatures
           cache-save: never
 
@@ -382,7 +373,7 @@ jobs:
       - name: Resolve every direct dependency to its declared floor
         run: cargo generate-lockfile -Z direct-minimal-versions
       # `--all-targets` holds dev-dependency floors to the same standard.
-      - run: cargo check --workspace --all-targets --all-features --locked
+      - run: cargo check --workspace --all-targets --all-features --locked --exclude spate-xtask
 
   test:
     name: Test and coverage
@@ -412,7 +403,7 @@ jobs:
       - uses: ./.github/actions/setup-rust
         with:
           components: llvm-tools-preview
-          tools: nextest@0.9.140,cargo-llvm-cov@0.8.7
+          tools: nextest,cargo-llvm-cov
           # Its own key: llvm-cov builds into `target/llvm-cov-target`, not the
           # `target/debug` that lint, features and doctests share.
           shared-key: coverage
@@ -518,7 +509,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-rust
         with:
-          tools: cargo-hack@0.6.45
+          tools: cargo-hack
           shared-key: dev-allfeatures
       - run: make check-features
 
@@ -911,7 +902,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-rust
         with:
-          tools: nextest@0.9.140
+          tools: nextest
           # Separate key: the `#[ignore]`d suites link binaries `test` does not.
           shared-key: docker
       # By digest, and re-tagged locally, so the suite runs the pinned bytes.
@@ -977,7 +968,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-rust
         with:
-          tools: nextest@0.9.140
+          tools: nextest
           shared-key: docker
           # A consumer of the entry `containers` owns. These legs build one
           # crate and would otherwise win the race to write a cache holding the
@@ -1026,7 +1017,7 @@ jobs:
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 24
+          node-version-file: .node-version
           cache: npm
           # Required: the lockfile is not at the repo root, and without it
           # setup-node silently never caches.

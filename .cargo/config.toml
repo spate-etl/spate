@@ -1,0 +1,6 @@
+# `cargo xtask <command>` runs the repository automation in xtask/.
+#
+# No `--locked`: a manifest edit without a matching lockfile would otherwise
+# fail the runner before any check ran. Workflows pass it explicitly.
+[alias]
+xtask = "run --quiet --package spate-xtask --"

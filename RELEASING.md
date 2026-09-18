@@ -196,7 +196,7 @@ includes a new crate:
    `spate-test`: dev-dependency edges with versions are part of the publish
    order, and that one closes a cycle no order can satisfy (cargo issue
    4242). The publish dry-run gate catches this.
-5. Run `./scripts/ci-changes.sh --self-test`, which pins the container map to
+5. Run `make xtask-test`, which pins the container map to
    the crate graph.
 6. If it carries an install snippet anywhere, add the file to
    `SNIPPET_FILES` in `scripts/release-version.sh`; `--check` fails until the
@@ -217,7 +217,7 @@ rather than on each release:
   `GITHUB_TOKEN` trigger no workflows: a release pull request opened with one
   would never run `CI gate` and could never merge. The App's slug is
   `spate-release`: its pull requests author as `spate-release[bot]`, the
-  identity the container-suite deferral in `scripts/ci-changes.sh` and the
+  identity the container-suite deferral in `xtask/` and the
   release commits key on, so renaming the App silently un-defers those
   suites.
 - **The `crates-io` environment's deployment branch policy, restricted to

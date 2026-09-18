@@ -90,11 +90,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # Version-pinned: a release reordering the generator's output reads here
-      # as spurious drift.
       - uses: ./.github/actions/setup-rust
         with:
-          tools: cargo-about@0.9.1
+          tools: cargo-about
       - id: regen
         run: make attribution
       - id: drift
@@ -128,12 +126,16 @@ jobs:
               'request and is green. Regenerate and commit:' \
               '' \
               '```sh' \
-              'cargo install cargo-about --locked --features cli --version 0.9.1' \
+              'cargo install cargo-about --locked --features cli' \
               './scripts/attribution.sh' \
               '```' \
               '' \
+              'The run log above names the cargo-about version this job used.' \
+              'A different one can reorder the output and re-trip this check, so' \
+              'match it if the regenerated file disagrees.' \
+              '' \
               'The release flow regenerates it too, so this can also just wait' \
-              'for the next release rather than being fixed on its own.'
+              'for the next release.'
           )"
 
   advisories:
@@ -153,7 +155,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-rust
         with:
-          tools: cargo-deny@0.20.2
+          tools: cargo-deny
       - id: deny
         run: cargo deny --all-features --locked check advisories
 
@@ -492,13 +494,13 @@ jobs:
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 24
+          node-version-file: .node-version
           cache: npm
           cache-dependency-path: website/package-lock.json
 
       - uses: ./.github/actions/setup-rust
         with:
-          tools: cargo-about@0.9.1
+          tools: cargo-about
           shared-key: docs
 
       # The script filters the first-party crates and generates
@@ -633,7 +635,7 @@ jobs:
         with:
           toolchain: beta
           components: clippy
-          tools: nextest@0.9.140
+          tools: nextest
           # No shared key. An entry keyed on beta's compiler shares nothing
           # with the stable trees and would evict them from the 10 GB budget.
 
@@ -749,7 +751,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-rust
         with:
-          tools: cargo-hack@0.6.45
+          tools: cargo-hack
           shared-key: dev-allfeatures
       - run: cargo hack check --workspace --feature-powerset --no-dev-deps
 
@@ -789,7 +791,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-rust
         with:
-          tools: nextest@0.9.140
+          tools: nextest
           # Same key as ci.yml's container job: both build the plain dev-profile
           # test binaries for the `#[ignore]`d suites.
           shared-key: docker
@@ -838,7 +840,7 @@ jobs:
       - uses: ./.github/actions/setup-rust
         with:
           components: llvm-tools-preview
-          tools: nextest@0.9.140,cargo-llvm-cov@0.8.7
+          tools: nextest,cargo-llvm-cov
           # Not `docker`: this builds instrumented into `target/llvm-cov-target`,
           # where ci.yml's container job builds plain.
           shared-key: coverage-docker

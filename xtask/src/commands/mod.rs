@@ -501,7 +501,11 @@ fn ci(root: &Path, explain: bool) -> Outcome {
     dispatch(root, explain, Command::Doc)?;
     dispatch(root, explain, Command::Hack)?;
     dispatch(root, explain, Command::Deny)?;
-    lint::tidy(root, explain, None, false)
+    lint::tidy(root, explain, None, false)?;
+    // Outside the default set because CI splits it into a job that carries the
+    // pull request's fields. On a laptop it orients against the upstream, so
+    // the gate answers before a push.
+    lint::tidy(root, explain, Some(TidyCheck::Changelog), false)
 }
 
 fn lint_group(root: &Path, explain: bool) -> Outcome {
@@ -569,30 +573,78 @@ mod tests {
     use super::TidyCheck;
     use crate::Cli;
 
+    /// Whether what precedes an occurrence puts it where a shell would run it.
+    ///
+    /// A whitelist, because prose names commands too and every way of quoting
+    /// prose also appears around a real invocation.
+    fn in_command_position(before: &str) -> bool {
+        let b = before.trim_end();
+        if b.is_empty() {
+            return true;
+        }
+        // A YAML scalar may quote the whole command.
+        if let Some(rest) = b.strip_suffix(['"', '\'']) {
+            return rest.trim_end().ends_with("run:");
+        }
+        [
+            "run:", "&&", "||", ";", "|", "(", "elif", "if", "then", "else",
+        ]
+        .iter()
+        .any(|p| b.ends_with(p))
+    }
+
     /// The tokens a workflow line passes to this binary, where it invokes it.
     ///
     /// A shell expansion cannot be resolved here, so its token is dropped and
     /// the line is marked as carrying one.
-    fn invocation(line: &str) -> Option<(Vec<String>, bool)> {
-        let rest = if let Some((_, r)) = line.split_once("cargo xtask ") {
-            r
-        } else if line.contains("spate-xtask") {
-            line.split_once(" -- ")?.1
-        } else {
-            return None;
-        };
+    fn invocations(line: &str) -> Vec<(Vec<String>, bool)> {
+        // A comment naming a command is prose, and prose does not parse as
+        // argv. Both YAML and shell comments open with `#`.
+        if line.trim_start().starts_with('#') {
+            return Vec::new();
+        }
+        let mut rests: Vec<&str> = Vec::new();
+        let mut cursor = line;
+        // A line may chain more than one invocation.
+        while let Some((before, r)) = cursor.split_once("cargo xtask ") {
+            if in_command_position(before) {
+                rests.push(r);
+            }
+            cursor = r;
+        }
+        if rests.is_empty() {
+            if !line.contains("spate-xtask") {
+                return Vec::new();
+            }
+            match line.split_once(" -- ") {
+                Some((_, r)) => rests.push(r),
+                None => return Vec::new(),
+            }
+        }
+        rests.into_iter().map(tokenise).collect()
+    }
+
+    /// The argv a single invocation passes, and whether a shell expansion was
+    /// dropped from it.
+    fn tokenise(rest: &str) -> (Vec<String>, bool) {
         let mut expanded = false;
         let mut out = Vec::new();
         for tok in rest.split_whitespace() {
+            // Shell syntax ends the argv. A line continuation ends what can be
+            // read from this line, and the command parses without its tail.
+            if tok.starts_with(['|', ';', '&', '<', '>']) || tok.contains('>') {
+                break;
+            }
             if tok.contains("${") || tok.contains("$(") {
                 expanded = true;
                 continue;
             }
+            let tok = tok.strip_suffix(')').unwrap_or(tok);
             // `split_whitespace` yields no empty token, so an empty result
             // came from a quoted empty string and is a value.
             out.push(tok.trim_matches(['"', '\'']).to_owned());
         }
-        Some((out, expanded))
+        (out, expanded)
     }
 
     /// Every invocation in `.github/workflows/` parses against this binary's
@@ -607,24 +659,22 @@ mod tests {
             if path.extension().is_none_or(|e| e != "yml") {
                 continue;
             }
-            let text = std::fs::read_to_string(&path).unwrap();
+            let text = std::fs::read_to_string(&path).unwrap().replace("\\\n", " ");
             for line in text.lines() {
-                let Some((tokens, expanded)) = invocation(line) else {
-                    continue;
-                };
-                checked += 1;
-                let argv = std::iter::once("cargo xtask".to_owned()).chain(tokens);
-                if let Err(e) = Cli::try_parse_from(argv) {
-                    // A dropped expansion can take a required value with it.
-                    if expanded && e.kind() == clap::error::ErrorKind::MissingRequiredArgument {
-                        continue;
+                for (tokens, expanded) in invocations(line) {
+                    checked += 1;
+                    let argv = std::iter::once("cargo xtask".to_owned()).chain(tokens);
+                    if let Err(e) = Cli::try_parse_from(argv) {
+                        use clap::error::ErrorKind;
+                        // `--help` and `--version` are reported as errors, and a
+                        // dropped expansion can take a required value with it.
+                        if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion)
+                            || (expanded && e.kind() == ErrorKind::MissingRequiredArgument)
+                        {
+                            continue;
+                        }
+                        panic!("{}: {e}\n  in: {}", path.display(), line.trim());
                     }
-                    panic!(
-                        "{}: {}\n  in: {}",
-                        path.display(),
-                        e.kind().as_str().unwrap_or("parse error"),
-                        line.trim()
-                    );
                 }
             }
         }
@@ -636,7 +686,8 @@ mod tests {
         let listed = super::lint::ALL;
         for check in TidyCheck::value_variants() {
             let count = listed.iter().filter(|c| *c == check).count();
-            let expected = usize::from(*check != TidyCheck::SiteMeta);
+            let outside = matches!(check, TidyCheck::SiteMeta | TidyCheck::Changelog);
+            let expected = usize::from(!outside);
             assert_eq!(
                 count,
                 expected,

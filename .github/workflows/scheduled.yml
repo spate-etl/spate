@@ -94,7 +94,7 @@ jobs:
         with:
           tools: cargo-about
       - id: regen
-        run: make attribution
+        run: cargo xtask attribution
       - id: drift
         run: git diff --exit-code THIRD-PARTY.md
 
@@ -117,7 +117,7 @@ jobs:
           # shellcheck disable=SC2016
           gh issue create --title "$title" --body "$(
             printf '%s\n' \
-              '`make attribution` failed, or the committed inventory no longer matches `Cargo.lock`.' \
+              '`cargo xtask attribution` failed, or the committed inventory no longer matches `Cargo.lock`.' \
               '' \
               "Run: ${RUN_URL}" \
               '' \
@@ -127,7 +127,7 @@ jobs:
               '' \
               '```sh' \
               'cargo install cargo-about --locked --features cli' \
-              './scripts/attribution.sh' \
+              'cargo xtask attribution' \
               '```' \
               '' \
               'The run log above names the cargo-about version this job used.' \
@@ -216,7 +216,7 @@ jobs:
           toolchain-file: .github/toolchains/nightly/rust-toolchain.toml
           shared-key: fuzz
 
-      - run: make fuzz-install
+      - run: cargo xtask fuzz install
 
       # BEFORE the run: a restore afterwards extracts a tar over `fuzz/corpus`
       # and overwrites the inputs libFuzzer just found. The prefix restore-key
@@ -242,7 +242,7 @@ jobs:
             exit 1
           fi
           echo "building $targets target(s)"
-          make fuzz-build
+          cargo xtask fuzz build --nightly "$NIGHTLY"
 
       - name: Fuzz every target
         id: run
@@ -413,7 +413,7 @@ jobs:
         run: |
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml)
           next="${version%.*}.$(( ${version##*.} + 1 ))"
-          ./scripts/release-version.sh --bump "$next"
+          cargo xtask release-version --bump "$next"
           git config user.name 'spate-release[bot]'
           git config user.email 'spate-release[bot]@users.noreply.github.com'
           git commit --all --quiet --message "chore: simulate the release bump to $next"
@@ -422,7 +422,7 @@ jobs:
       # or license with a warning and exit 0, while the upload rejects it
       # (cargo issue 14249).
       - id: metadata
-        run: ./scripts/release-version.sh --check-publish-metadata
+        run: cargo xtask release-version --check-publish-metadata
 
       - id: dry-run
         run: cargo publish --workspace --locked --dry-run
@@ -509,7 +509,7 @@ jobs:
         run: |
           rm -rf website/static/licenses
           mkdir -p website/static/licenses
-          ./scripts/attribution.sh --html website/static/licenses/index.html
+          cargo xtask attribution --html website/static/licenses/index.html
 
       - name: Install dependencies
         working-directory: website
@@ -537,7 +537,7 @@ jobs:
       # The homepage, the brand page and the benchmark pages rendered from the
       # submodule have no source under docs/ for ci-lint to check.
       - name: Every built page carries a description
-        run: ./scripts/site-meta.sh --check
+        run: cargo xtask tidy site-meta
 
       # The floor is what stops an empty build reaching the deploy. The upload's
       # `if-no-files-found` tests the whole `path:` list at once, and
@@ -641,10 +641,10 @@ jobs:
 
       # Both steps always run, so one report covers both.
       - id: clippy
-        run: make clippy
+        run: cargo xtask clippy
         continue-on-error: true
       - id: test
-        run: make test
+        run: cargo xtask test
         continue-on-error: true
 
       # continue-on-error reports a failed step's `conclusion` as `success`,
@@ -668,18 +668,18 @@ jobs:
           # shellcheck disable=SC2016
           if [ "$CLIPPY_FAILED" = "true" ]; then
             title='Clippy fails on the beta toolchain'
-            body_head='`make clippy` failed on beta. Once beta becomes stable this'
+            body_head='`cargo xtask clippy` failed on beta. Once beta becomes stable this'
             body_head2='blocks every pull request, because the lint job denies warnings.'
             if [ "$TEST_OUTCOME" = "failure" ]; then
-              test_line='`make test` also failed on the same run.'
+              test_line='`cargo xtask test` also failed on the same run.'
             elif [ "$TEST_OUTCOME" = "success" ]; then
-              test_line='`make test` passed on the same run.'
+              test_line='`cargo xtask test` passed on the same run.'
             else
-              test_line="\`make test\` outcome on the same run: \`${TEST_OUTCOME}\`."
+              test_line="\`cargo xtask test\` outcome on the same run: \`${TEST_OUTCOME}\`."
             fi
           else
             title='Tests fail on the beta toolchain'
-            body_head='`make test` failed on beta while `make clippy` passed.'
+            body_head='`cargo xtask test` failed on beta while `cargo xtask clippy` passed.'
             body_head2='Clippy stops at the check build, so this is codegen, linking or behavior.'
             test_line=''
           fi
@@ -697,7 +697,7 @@ jobs:
           if [ "$CLIPPY_FAILED" = "true" ]; then
             # A nonzero status means the build failed before clippy listed anything.
             clippy_status=0
-            clippy_log=$(make clippy CLIPPY_FLAGS= 2>&1) || clippy_status=$?
+            clippy_log=$(cargo xtask clippy --no-deny-warnings 2>&1) || clippy_status=$?
             # An issue body over 65536 characters is rejected.
             clippy_log_lines=$(printf '%s\n' "$clippy_log" | wc -l | tr -d ' ')
             max_lines=200
@@ -712,9 +712,9 @@ jobs:
             fi
             if [ "$clippy_status" -eq 0 ]; then
               # shellcheck disable=SC2016
-              lint_intro='Every lint `make clippy CLIPPY_FLAGS=` finds on beta:'
+              lint_intro='Every lint `cargo xtask clippy --no-deny-warnings` finds on beta:'
             else
-              lint_intro="\`make clippy CLIPPY_FLAGS=\` still exits ${clippy_status}. The build fails before clippy reaches any lint."
+              lint_intro="\`cargo xtask clippy --no-deny-warnings\` still exits ${clippy_status}. The build fails before clippy reaches any lint."
             fi
             body_args+=('' "$lint_intro" '' '```' "$clippy_log_shown" '```')
             if [ -n "$clippy_log_note" ]; then
@@ -772,7 +772,7 @@ jobs:
       # Doc tests compiled under `--cfg loom` construct loom-typed primitives
       # outside a model and abort, so the models run `--lib` only on the built-in
       # harness. Do not move this onto nextest.
-      - run: make loom
+      - run: cargo xtask loom
 
   examples-containers:
     name: Example container tier
@@ -901,7 +901,7 @@ jobs:
           key: criterion-baseline-${{ github.run_id }}
           restore-keys: criterion-baseline-
 
-      - run: make bench-check
+      - run: cargo xtask bench check
       # The target is named because a bare `-p X -- --save-baseline` reaches the
       # lib's libtest harness too, which rejects it. Given one baseline critcmp
       # prints a column of 1.00 ratios and exits 0, and a bench never run leaves

@@ -1,6 +1,7 @@
 # `cargo xtask <command>` runs the repository automation in xtask/.
 #
-# No `--locked`: a manifest edit without a matching lockfile would otherwise
-# fail the runner before any check ran. Workflows pass it explicitly.
+# `--locked` resolves no dependency graph that is not committed. A manifest
+# edit without a matching lockfile therefore fails here, before any check runs,
+# and `cargo check` is what reports it.
 [alias]
-xtask = "run --quiet --package spate-xtask --"
+xtask = "run --quiet --package spate-xtask --locked --"

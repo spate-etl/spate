@@ -4,9 +4,9 @@ name: Release
 # workflow_dispatch carrying the version, builds the single release commit and
 # opens an auto-merging pull request; `publish` runs on the push that merge
 # produces and does everything that touches the registry. The sequence lives
-# in scripts/release.sh and `make release-dry-run` runs it locally; this file
-# adds the credentials and the OIDC exchange. RELEASING.md is the account of
-# the whole process.
+# in scripts/release.sh and `cargo xtask release dry-run` runs it locally; this
+# file adds the credentials and the OIDC exchange. RELEASING.md is the account
+# of the whole process.
 #
 # The crates.io trusted publisher is bound to this repository, this filename
 # and the `crates-io` environment name. Renaming any of the three breaks the
@@ -78,7 +78,7 @@ jobs:
         env:
           VERSION: ${{ inputs.version }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-        run: ./scripts/release.sh assemble --version "$VERSION"
+        run: cargo xtask release assemble --version "$VERSION"
 
   publish:
     name: Publish
@@ -130,7 +130,7 @@ jobs:
         id: prepare
         env:
           EXPECTED_SHA: ${{ github.sha }}
-        run: ./scripts/release.sh prepare
+        run: cargo xtask release prepare
 
       # Covers target/package/*.crate exactly as `prepare` packaged them;
       # `finish` requires the registry's cksum to equal these files' sha256.
@@ -152,7 +152,7 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
           EXCLUDES: ${{ steps.prepare.outputs.excludes }}
           PENDING: ${{ steps.prepare.outputs.pending }}
-        run: ./scripts/release.sh upload
+        run: cargo xtask release upload
 
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         id: app-token
@@ -169,4 +169,4 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           DISPATCH_TOKEN: ${{ github.token }}
           BUNDLE_PATH: ${{ steps.attest.outputs.bundle-path }}
-        run: ./scripts/release.sh finish
+        run: cargo xtask release finish

@@ -38,12 +38,11 @@ pub(crate) enum TidyCheck {
     SiteMeta,
 }
 
-/// The order `ci-lint` runs them in, cheapest and most likely to fail first.
+/// The order `tidy` runs them in, cheapest and most likely to fail first.
 pub(super) const ALL: &[TidyCheck] = &[
     TidyCheck::Zizmor,
     TidyCheck::Shellcheck,
     TidyCheck::SelfTest,
-    TidyCheck::Changelog,
     TidyCheck::Adr,
     TidyCheck::PerfReport,
     TidyCheck::GungraunBenches,
@@ -57,8 +56,11 @@ pub(super) const ALL: &[TidyCheck] = &[
 
 /// Runs one named check, or every member of `ALL`.
 ///
-/// `SiteMeta` is outside `ALL` because it reads `website/build/`, which exists
-/// only after a site build.
+/// Two checks sit outside `ALL`, each because it reads state the caller has to
+/// provide. `SiteMeta` reads `website/build/`, which exists only after a site
+/// build. `Changelog` reads the pull request's title, body and endpoints, and
+/// enforces against `origin/main` when they are absent, so a caller without
+/// them would demand a fragment while unable to see the exemptions.
 pub(crate) fn tidy(root: &Path, explain: bool, check: Option<TidyCheck>, list: bool) -> Outcome {
     if list {
         for one in TidyCheck::value_variants() {

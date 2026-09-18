@@ -205,7 +205,8 @@ fn verdict(ran: usize, failed: bool) -> Option<i32> {
     None
 }
 
-/// What an empty selection reports on stderr.
+/// The diagnostic a selection matching nothing carries, naming the filter
+/// where one was given.
 fn no_match(filter: &[String]) -> String {
     if filter.is_empty() {
         return "gungraun-benches: no bench target was discovered".to_owned();
@@ -508,9 +509,6 @@ mod tests {
         assert_eq!(verdict(0, true), Some(1));
     }
 
-    /// An empty selection and a failure must not look alike: a merge base with
-    /// no bench legitimately measures nothing, a failure means discard the
-    /// measurement.
     #[test]
     fn an_empty_selection_is_two() {
         assert_eq!(verdict(0, false), Some(2));

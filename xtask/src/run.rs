@@ -16,9 +16,6 @@ pub(crate) struct Error {
 impl Error {
     pub(crate) fn msg(message: impl Into<String>) -> Self {
         let message = message.into();
-        // The top level prints nothing for an empty message, so an error built
-        // with one exits non-zero in silence. `Error::status` covers the case
-        // where that is intended.
         debug_assert!(!message.is_empty(), "an error carries a diagnostic");
         Self {
             message,
@@ -275,6 +272,13 @@ mod tests {
     fn an_embedded_single_quote_survives_the_round_trip() {
         let step = Step::new("sh", ["-c"]).arg("echo 'hi'");
         assert_eq!(step.display(), r#"sh -c 'echo '\''hi'\'''"#);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic = "an error carries a diagnostic"]
+    fn an_empty_message_is_rejected() {
+        drop(Error::msg(""));
     }
 
     /// A step's own environment reaches the child `succeeded` spawns.

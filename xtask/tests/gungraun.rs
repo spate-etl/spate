@@ -167,8 +167,8 @@ fn a_run_that_succeeds_exits_zero_and_names_every_target() {
     }
 }
 
-/// A failing bench is exit 1, every remaining target still runs, and each
-/// failure is named.
+/// A failing bench is exit 1 and every remaining target still runs. stderr
+/// carries the trace and the failure for each target, and nothing besides.
 #[test]
 fn a_failing_bench_exits_one_and_the_rest_still_run() {
     let shim = Shim::new("run-fail", 3);
@@ -177,15 +177,17 @@ fn a_failing_bench_exits_one_and_the_rest_still_run() {
 
     let calls = shim.calls();
     assert!(!calls.is_empty(), "{calls:?}");
-    let reported = stderr(&out);
-    for call in &calls {
-        let bench = call.last().unwrap();
-        assert!(
-            reported.contains(&format!("gungraun-benches: {PKG} --bench {bench} failed\n")),
-            "{reported}"
-        );
-    }
-    assert!(!reported.contains("failed to build"), "{reported}");
+    let expected: String = calls
+        .iter()
+        .map(|call| {
+            let bench = call.last().unwrap();
+            format!(
+                "+ cargo bench -p {PKG} --locked --bench {bench}\n\
+                 gungraun-benches: {PKG} --bench {bench} failed\n"
+            )
+        })
+        .collect();
+    assert_eq!(stderr(&out), expected);
 }
 
 /// An empty selection is exit 2, invokes no cargo, and reports one line naming
@@ -222,14 +224,36 @@ fn an_empty_selection_is_two_even_when_cargo_would_fail() {
 }
 
 /// A cargo that cannot be spawned reaches the failed-bench arm at exit 1.
+/// stderr carries three lines per target, and nothing besides.
 #[test]
 fn a_cargo_that_is_not_on_path_exits_one() {
     let shim = Shim::new("no-cargo", 0);
+    let targets = listing(&shim)
+        .iter()
+        .filter(|l| l.starts_with(&format!("{PKG} ")))
+        .count();
     let out = xtask_without_cargo(&shim, &["--run", PKG]);
     assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+
     let reported = stderr(&out);
-    assert!(reported.contains("gungraun-benches: cargo: "), "{reported}");
-    assert!(reported.contains("--bench"), "{reported}");
+    let lines: Vec<&str> = reported.lines().collect();
+    assert_eq!(lines.len(), targets * 3, "{lines:?}");
+    for group in lines.chunks(3) {
+        assert!(
+            group[0].starts_with(&format!("+ cargo bench -p {PKG} ")),
+            "{group:?}"
+        );
+        // The spawn error ends in the platform's own wording for ENOENT.
+        assert!(
+            group[1].starts_with("gungraun-benches: cargo: "),
+            "{group:?}"
+        );
+        assert!(
+            group[2].starts_with(&format!("gungraun-benches: {PKG} --bench ")),
+            "{group:?}"
+        );
+        assert!(group[2].ends_with(" failed"), "{group:?}");
+    }
 }
 
 /// A filter selects the crates it names, and drops a name no crate carries.
@@ -304,12 +328,19 @@ fn a_check_builds_without_running() {
     let shim = Shim::new("check-fail", 3);
     let out = xtask(&shim, &["--check", PKG]);
     assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
-    assert!(
-        stderr(&out).contains(&format!("gungraun-benches: {PKG} --bench")),
-        "{}",
-        stderr(&out)
-    );
-    assert!(stderr(&out).contains("failed to build"), "{}", stderr(&out));
+    let calls = shim.calls();
+    assert!(!calls.is_empty(), "{calls:?}");
+    let expected: String = calls
+        .iter()
+        .map(|call| {
+            let bench = call.last().unwrap();
+            format!(
+                "+ cargo bench --no-run -p {PKG} --locked --bench {bench}\n\
+                 gungraun-benches: {PKG} --bench {bench} failed to build\n"
+            )
+        })
+        .collect();
+    assert_eq!(stderr(&out), expected);
 }
 
 /// The child is handed a closed stdin, so it cannot swallow what the runner is
@@ -496,7 +527,12 @@ fn the_tidy_check_runs_the_gate() {
 #[test]
 fn a_malformed_command_line_runs_nothing() {
     let shim = Shim::new("usage", 0);
-    for args in [vec!["--bogus"], vec![PKG], vec!["--features"]] {
+    for args in [
+        vec!["--bogus"],
+        vec![PKG],
+        vec!["--features"],
+        vec!["--features", "simd", "--features", "other"],
+    ] {
         let out = xtask(&shim, &args);
         assert_eq!(out.status.code(), Some(2), "{args:?}: {}", stderr(&out));
         assert_eq!(stdout(&out), "", "{args:?}");

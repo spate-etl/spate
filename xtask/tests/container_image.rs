@@ -115,8 +115,8 @@ fn primary_tag(shim: &Shim) -> String {
     stdout(&out).trim().to_owned()
 }
 
-/// A pull fetches the digest, re-tags it locally, and leaves stdout carrying
-/// the local tag alone, which is what a caller parses.
+/// A pull fetches the digest and re-tags it locally. stdout holds the local
+/// tag alone, and docker's own line lands on stderr.
 #[test]
 fn a_pull_reaches_the_digest_and_prints_the_local_tag_alone() {
     let shim = Shim::new("pull");
@@ -125,7 +125,7 @@ fn a_pull_reaches_the_digest_and_prints_the_local_tag_alone() {
     let out = xtask(&shim, None, &["--pull", SERVICE]);
     assert!(out.status.success(), "{}", stderr(&out));
     assert_eq!(stdout(&out), format!("{tagged}\n"));
-    assert!(stderr(&out).contains(PULLED), "{}", stderr(&out));
+    assert_eq!(stderr(&out), format!("{PULLED}\n"));
 
     let calls = shim.calls();
     assert_eq!(calls.len(), 2, "{calls:?}");
@@ -182,11 +182,13 @@ fn pull_all_names_each_service_and_pulls_its_selected_lane() {
     let out = xtask(&shim, None, &["--pull-all"]);
     assert!(out.status.success(), "{}", stderr(&out));
     assert_eq!(stdout(&out), "");
-    assert!(
-        stderr(&out).contains(&format!("{SERVICE}: ")),
-        "{}",
-        stderr(&out)
-    );
+    let reported = stderr(&out);
+    let lines: Vec<&str> = reported.lines().collect();
+    // The lane a service selects is the tree's to choose, so its line is held
+    // to the service it names.
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert!(lines[0].starts_with(&format!("{SERVICE}: ")), "{lines:?}");
+    assert_eq!(lines[1], PULLED, "{lines:?}");
 
     let calls = shim.calls();
     assert_eq!(calls.len(), 2, "{calls:?}");

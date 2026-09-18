@@ -36,7 +36,7 @@ die() {
 }
 
 # Where the lane directories live. `SPATE_CI_ROOT` is a test hook: `--self-test`
-# and scripts/supported-versions.sh point the parsers at a scratch tree with it.
+# points the parser at a scratch tree with it.
 ci_root="${SPATE_CI_ROOT:-ci}"
 
 # Every service with pinned images, one per line, discovered from the tree.

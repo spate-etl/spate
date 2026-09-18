@@ -99,7 +99,6 @@ fn one_check(root: &Path, explain: bool, check: TidyCheck) -> Outcome {
                 Step::new("cargo", ["test", "-p", "spate-xtask", "--locked"]),
                 Step::new("./scripts/semver-checks.sh", ["--self-test"]),
                 Step::new("./scripts/container-image.sh", ["--self-test"]),
-                Step::new("./scripts/supported-versions.sh", ["--self-test"]),
             ],
         ),
         TidyCheck::Changelog => script(root, explain, "changelog.sh", "--check"),
@@ -110,7 +109,7 @@ fn one_check(root: &Path, explain: bool, check: TidyCheck) -> Outcome {
             script(root, explain, "gungraun-collected-region.sh", "--self-test")
         }
         TidyCheck::Transclusions => script(root, explain, "transclude.sh", "--check"),
-        TidyCheck::SupportedVersions => script(root, explain, "supported-versions.sh", "--check"),
+        TidyCheck::SupportedVersions => crate::checks::supported_versions::check(root),
         TidyCheck::ReleaseVersion => script(root, explain, "release-version.sh", "--check"),
     }
 }

@@ -148,6 +148,13 @@ fn a_run_that_crossed_no_threshold_writes_false() {
     ]);
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     assert_eq!(stderr(&out), "");
+    assert_eq!(
+        stdout(&out)
+            .lines()
+            .filter(|l| l.starts_with("| spate-json |"))
+            .collect::<Vec<_>>(),
+        ["| spate-json | decode::decode_value flat_record | 100000 | 99000 | +1% |"]
+    );
     assert_eq!(scratch.flag_body().as_deref(), Some("false\n"));
 }
 
@@ -169,6 +176,7 @@ fn the_baseline_label_names_the_old_column() {
         let refs: Vec<&str> = args.iter().map(String::as_str).collect();
         let out = report(&refs);
         assert_eq!(out.status.code(), Some(0), "{label:?}: {}", stderr(&out));
+        assert_eq!(stderr(&out), "", "{label:?}");
         assert_eq!(
             stdout(&out)
                 .lines()
@@ -220,6 +228,31 @@ fn an_unusable_summaries_file_reports_the_usage_line() {
         assert_eq!(stdout(&out), "", "{args:?}");
         assert_eq!(scratch.flag_body(), None, "{args:?}");
     }
+}
+
+/// A summaries file the process cannot open reports the usage line, so a
+/// permission problem does not read as a summary that cannot be parsed.
+#[cfg(unix)]
+#[test]
+fn an_unopenable_summaries_file_reports_the_usage_line() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let scratch = Scratch::new("unopenable");
+    let summaries = scratch.summaries(HOT);
+    std::fs::set_permissions(&summaries, std::fs::Permissions::from_mode(0o000)).unwrap();
+    // Root opens a file whatever its mode, so there is nothing to hold there.
+    if std::fs::File::open(&summaries).is_ok() {
+        return;
+    }
+    let out = report(&[
+        "--regressions-out",
+        &path(&scratch.flag()),
+        &path(&summaries),
+    ]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert_eq!(stderr(&out), USAGE);
+    assert_eq!(stdout(&out), "");
+    assert_eq!(scratch.flag_body(), None);
 }
 
 /// A flag file with no name is rejected before anything is read.
@@ -313,7 +346,6 @@ fn a_report_that_cannot_be_rendered_writes_no_flag() {
 /// step swallows still shows up.
 #[test]
 fn a_failure_on_a_runner_carries_the_annotation_prefix() {
-    let scratch = Scratch::new("annotation");
     let out = Command::new(env!("CARGO_BIN_EXE_spate-xtask"))
         .args(["bench", "report"])
         .env("GITHUB_ACTIONS", "true")
@@ -321,7 +353,7 @@ fn a_failure_on_a_runner_carries_the_annotation_prefix() {
         .unwrap();
     assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
     assert_eq!(stderr(&out), format!("::error::{USAGE}"));
-    drop(scratch);
+    assert_eq!(stdout(&out), "");
 }
 
 /// `--explain` names what it would read and write, and touches neither. It
@@ -402,12 +434,14 @@ fn the_flag_file_matches_an_arm_the_label_workflow_acts_on() {
             &path(&summaries),
         ]);
         assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
-        // `tr -d '[:space:]'`, as the workflow spells it.
+        assert_eq!(stderr(&out), "", "{want}");
+        // `tr -d '[:space:]'`: space, tab, newline, vertical tab, form feed
+        // and carriage return.
         let stripped: String = scratch
             .flag_body()
             .unwrap()
             .chars()
-            .filter(|c| !c.is_whitespace())
+            .filter(|c| !matches!(c, ' ' | '\t' | '\n' | '\u{b}' | '\u{c}' | '\r'))
             .collect();
         assert_eq!(stripped, want);
         assert!(arms.contains(&stripped.as_str()), "{stripped}");

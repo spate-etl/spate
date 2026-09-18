@@ -17,10 +17,11 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::Deserialize;
 
+use crate::checks::scratch::{Scratch, nonce};
 use crate::run::{self, Error, Outcome, Step};
 
 const MD_TEMPLATE: &str = "about/md.hbs";
@@ -50,9 +51,10 @@ pub(crate) fn generate(root: &Path, explain: bool, html: Option<&str>) -> Outcom
 
     let first_party = first_party(&run::capture(root, &metadata_step())?)?;
 
-    let raw = Scratch::new(tag)?;
-    run::run(root, false, &about_step(template, &raw.file))?;
-    let generated = read(&raw.file)?;
+    let scratch = Scratch::new("attribution")?;
+    let file = scratch.join(&format!("attribution.{tag}"));
+    run::run(root, false, &about_step(template, &file))?;
+    let generated = read(&file)?;
 
     let (text, report) = if html.is_some() {
         (filter_page(&generated, &first_party, out)?, String::new())
@@ -476,50 +478,6 @@ fn position(lines: &[&str], exact: &str) -> Option<usize> {
 // ---------------------------------------------------------------------------
 // Files.
 // ---------------------------------------------------------------------------
-
-/// A directory under the system temporary directory, holding the generator's
-/// output and removed with its contents on drop.
-struct Scratch {
-    dir: PathBuf,
-    file: PathBuf,
-}
-
-impl Scratch {
-    /// Creates the directory exclusively, and on unix reachable only by its
-    /// owner, so no other user can put anything at the path the generator
-    /// writes to.
-    fn new(tag: &str) -> Result<Self, Error> {
-        let dir =
-            std::env::temp_dir().join(format!("attribution.{}.{}", std::process::id(), nonce()));
-        private_dir(&dir).map_err(|e| Error::msg(format!("{}: {e}", dir.display())))?;
-        let file = dir.join(format!("attribution.{tag}"));
-        Ok(Self { dir, file })
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        drop(fs::remove_dir_all(&self.dir));
-    }
-}
-
-#[cfg(unix)]
-fn private_dir(path: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::DirBuilderExt;
-    fs::DirBuilder::new().mode(0o700).create(path)
-}
-
-#[cfg(not(unix))]
-fn private_dir(path: &Path) -> std::io::Result<()> {
-    fs::DirBuilder::new().create(path)
-}
-
-/// Distinguishes scratch names made under the same process id.
-fn nonce() -> u128 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos())
-}
 
 /// The input split on `\n` alone, so a `\r` a license text carries survives
 /// into the artifact.
@@ -1131,11 +1089,11 @@ Prose.
     fn the_scratch_directory_is_private_and_the_artifact_is_readable() {
         use std::os::unix::fs::PermissionsExt;
         let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
-        let scratch = Scratch::new("md").unwrap();
-        let out = scratch.dir.join("artifact.md");
+        let scratch = Scratch::new("attribution").unwrap();
+        let out = scratch.join("artifact.md");
         install(&out, "body\n").unwrap();
         assert_eq!(fs::read_to_string(&out).unwrap(), "body\n");
-        assert_eq!(mode(&scratch.dir), 0o700);
+        assert_eq!(mode(scratch.dir()), 0o700);
         assert_eq!(mode(&out), 0o644);
     }
 

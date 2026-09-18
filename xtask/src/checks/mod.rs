@@ -9,5 +9,6 @@ pub(crate) mod container_image;
 pub(crate) mod docsrs;
 pub(crate) mod gungraun;
 pub(crate) mod perf_report;
+pub(crate) mod scratch;
 pub(crate) mod supported_versions;
 pub(crate) mod sync_labels;

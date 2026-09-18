@@ -285,23 +285,22 @@ fn the_instruction_threshold_is_read_before_rounding() {
 }
 
 /// The heap-block threshold is an absolute move of more than one block, in
-/// either direction, taken from the two sides.
+/// either direction, taken from the two sides. A block count with no old side
+/// moved from nothing and never flags.
 #[test]
 fn the_heap_block_threshold_is_an_absolute_move_of_more_than_one() {
-    for (new, old, flagged) in [
-        (40, 40, false),
-        (41, 40, false),
-        (42, 40, true),
-        (38, 40, true),
+    for (metric, flagged) in [
+        (both("40", "40", "0.0"), false),
+        (both("41", "40", "0.0"), false),
+        (both("42", "40", "0.0"), true),
+        (both("38", "40", "0.0"), true),
+        (left(42), false),
     ] {
-        let text = dhat_summary(&format!(
-            r#""TotalBlocks":{}"#,
-            both(&new.to_string(), &old.to_string(), "0.0")
-        ));
+        let text = dhat_summary(&format!(r#""TotalBlocks":{metric}"#));
         assert_eq!(
             regressions(&parse(&text).unwrap()).unwrap(),
             flagged,
-            "{new} vs {old}"
+            "{metric}"
         );
     }
 }
@@ -326,6 +325,34 @@ fn a_metric_with_no_comparison_never_flags() {
     for shard in [None, Some(r#"{"package":"p","baseline":""}"#)] {
         let text = ir(r#"{"metrics":{"Left":{"Int":211000}}}"#, shard);
         assert!(!regressions(&parse(&text).unwrap()).unwrap(), "{shard:?}");
+    }
+}
+
+/// `duplicates` sorts what it is given, so a key repeated at any two positions
+/// comes back once, and the answer is sorted.
+#[test]
+fn a_repeated_key_is_found_wherever_it_sits() {
+    let keys = ["b", "a", "c", "a", "b"].map(str::to_owned);
+    assert_eq!(duplicates(keys.into_iter()), ["a", "b"]);
+}
+
+/// The self-test's line count holds a report to exactly `want` matches, so a
+/// fixture rendering a row twice fails as loudly as one rendering it not at
+/// all.
+#[test]
+fn the_self_test_line_count_is_an_equality() {
+    let report = "| a |\n| a |\n| b |";
+    for (want, needle) in [(2, "| a |"), (1, "| b |"), (0, "| c |")] {
+        count_is(report, want, needle, "d").expect("the count matches");
+    }
+    for want in [1, 3] {
+        let e = count_is(report, want, "| a |", "d").expect_err("the count is wrong");
+        assert_eq!(
+            e.message,
+            format!(
+                "perf-report --self-test: d: expected {want} line(s) matching '| a |', found 2"
+            )
+        );
     }
 }
 

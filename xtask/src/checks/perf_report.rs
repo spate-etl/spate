@@ -42,6 +42,7 @@ use serde::de::{MapAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use serde_json::value::RawValue;
 
+use crate::checks::scratch::Scratch;
 use crate::run::{Error, Outcome};
 
 /// The summary schema the field paths below walk. Bumping the gungraun
@@ -80,7 +81,8 @@ const HEAP_METRICS: [&str; 2] = ["TotalBlocks", "AtTGmaxBytes"];
 ///
 /// `args` is the summaries path followed by the baseline label any row that
 /// names no baseline of its own takes. An absent or empty label is `baseline`,
-/// and anything past those two arguments is ignored.
+/// and anything past those two arguments is ignored. A relative summaries or
+/// flag path resolves against the current directory.
 pub(crate) fn report(explain: bool, regressions_out: Option<&str>, args: &[String]) -> Outcome {
     let summaries = args.first().map_or("", String::as_str);
     if explain {
@@ -125,7 +127,8 @@ fn produce(summaries: &Path, base: &str, flag: Option<&Path>) -> Result<String, 
     Ok(markdown)
 }
 
-/// Whether the path names a file this report can read and that holds anything.
+/// Whether the path opens for reading and holds any bytes; a directory passes
+/// both tests.
 fn readable(path: &Path) -> bool {
     std::fs::File::open(path).is_ok() && std::fs::metadata(path).is_ok_and(|m| m.len() > 0)
 }
@@ -303,12 +306,12 @@ fn value(raw: &RawValue) -> Option<String> {
         float: Option<Box<RawValue>>,
     }
 
-    let text = raw.get().trim();
+    let text = raw.get();
     if !text.starts_with('{') {
         return (text != "null").then(|| text.to_owned());
     }
     let boxed: Boxed = serde_json::from_str(text).ok()?;
-    boxed.int.or(boxed.float).map(|v| v.get().trim().to_owned())
+    boxed.int.or(boxed.float).map(|v| v.get().to_owned())
 }
 
 /// The new side: the first of `Both`, else `Left`.
@@ -444,7 +447,7 @@ impl Row<'_> {
 }
 
 /// A valgrind tool, named as the summary names it and as the fold labels it.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy)]
 enum Tool {
     Callgrind,
     Dhat,
@@ -680,8 +683,7 @@ fn render(summaries: &[Summary], base: &str) -> Result<String, String> {
     Ok(out.join("\n"))
 }
 
-/// The PR column, which names an absent value where the baseline column would
-/// dash it.
+/// A metric side, with an absent one rendered as `null`.
 fn cell(side: Option<String>) -> String {
     side.unwrap_or_else(|| "null".to_owned())
 }
@@ -780,8 +782,8 @@ const SPLIT_RUSTC: &str = concat!(
     "\n",
 );
 
-/// Two jobs that stamped themselves identically, which is an aggregation bug
-/// the report has to name.
+/// Two jobs that stamped themselves identically, an aggregation bug the report
+/// has to name.
 const COLLIDE: &str = concat!(
     r#"{"version":"6","spate_shard":{"package":"spate-json","features":"simd","baseline":"main @ 0123456789ab"},"package_dir":"/w/crates/spate-json","module_path":"decode_gungraun::decode::decode_value","id":"flat_record","profiles":[{"tool":"Callgrind","summaries":{"total":{"summary":{"Callgrind":{"Ir":{"metrics":{"Both":[{"Int":61000},{"Int":60000}]},"diffs":{"diff_pct":"1.67"}}}}}}}]}"#,
     "\n",
@@ -800,10 +802,8 @@ pub(crate) fn self_test(explain: bool) -> Outcome {
         println!("(renders the fixtures this check carries)");
         return Ok(());
     }
-    let dir = std::env::temp_dir().join(format!("spate-xtask-perf-report-{}", std::process::id()));
-    let outcome = run_self_test(&dir);
-    drop(std::fs::remove_dir_all(&dir));
-    outcome?;
+    let scratch = Scratch::new("spate-xtask-perf-report")?;
+    run_self_test(scratch.dir())?;
     println!(
         "perf-report: self-test ok: the flag file is the bare boolean perf-label.yml parses, \
          markers track the thresholds, and merged jobs keep their shard identity"
@@ -811,22 +811,26 @@ pub(crate) fn self_test(explain: bool) -> Outcome {
     Ok(())
 }
 
+/// The diagnostic every self-test failure carries.
+fn fail(what: &str) -> Error {
+    Error::msg(format!("perf-report --self-test: {what}"))
+}
+
+/// Asserts that exactly `want` lines of the report carry `needle`.
+///
+/// A merged report's failure mode is a row appearing twice; presence alone
+/// cannot see that, so this is a count and an equality.
+fn count_is(report: &str, want: usize, needle: &str, desc: &str) -> Outcome {
+    let got = report.lines().filter(|l| l.contains(needle)).count();
+    if got == want {
+        return Ok(());
+    }
+    Err(fail(&format!(
+        "{desc}: expected {want} line(s) matching '{needle}', found {got}"
+    )))
+}
+
 fn run_self_test(dir: &Path) -> Outcome {
-    std::fs::create_dir_all(dir).map_err(|e| Error::msg(format!("{}: {e}", dir.display())))?;
-    let fail = |what: &str| Error::msg(format!("perf-report --self-test: {what}"));
-
-    // Asserts exactly `want` lines carry `needle`, by count: a merged report's
-    // failure mode is a row appearing twice, which presence alone cannot see.
-    let count_is = |report: &str, want: usize, needle: &str, desc: &str| -> Outcome {
-        let got = report.lines().filter(|l| l.contains(needle)).count();
-        if got == want {
-            return Ok(());
-        }
-        Err(fail(&format!(
-            "{desc}: expected {want} line(s) matching '{needle}', found {got}"
-        )))
-    };
-
     let render_fixture = |name: &str, body: &str| -> Result<(String, String), Error> {
         let summaries = dir.join(format!("{name}.jsonl"));
         let flag = dir.join("flag");

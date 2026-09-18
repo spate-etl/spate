@@ -22,7 +22,7 @@
 #
 # PR_TITLE and PR_BODY are free text somebody else typed: matched against, never
 # evaluated. A `pull_request` run executes the pull request's own copy of this
-# script. See the note in xtask/src/classify.rs.
+# script.
 #
 # Runs on `bash` 3.2 and later: no associative arrays, no `mapfile`, no
 # `${var,,}`, and every array expansion guarded, because `"${arr[@]}"` on an

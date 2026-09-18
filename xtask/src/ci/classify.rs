@@ -6,8 +6,8 @@
 
 use std::collections::BTreeSet;
 
-use crate::graph::Graph;
-use crate::outputs::{Lane, Outputs, Shard};
+use super::graph::Graph;
+use super::outputs::{Lane, Outputs, Shard};
 
 /// The webhook event a run was started from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -557,7 +557,7 @@ mod tests {
 
     #[test]
     fn the_apparatus_selects_every_bench() {
-        let out = run(&["xtask/src/classify.rs"]);
+        let out = run(&["xtask/src/ci/classify.rs"]);
         assert!(
             out.bench,
             "the change rewriting bench selection must run them"

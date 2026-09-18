@@ -3,7 +3,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use crate::classify::{Context, Event};
+use super::classify::{Context, Event};
 
 /// The changed paths a run should classify.
 pub(crate) trait Diff {
@@ -146,7 +146,7 @@ pub(crate) fn resolve(event: Event, diff: &dyn Diff) -> (Event, Vec<String>, boo
 /// the packaging and floors gates select on their own diff.
 pub(crate) fn manifest_reach(diff: &dyn Diff) -> Option<bool> {
     diff.push_paths()
-        .map(|paths| paths.iter().any(|p| crate::classify::is_manifest(p)))
+        .map(|paths| paths.iter().any(|p| super::classify::is_manifest(p)))
 }
 
 #[cfg(test)]

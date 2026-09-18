@@ -41,7 +41,7 @@ exists to detect.
 
 | License | Crates |
 |---|---|
-| `MIT` | 303 |
+| `MIT` | 304 |
 | `Unicode-3.0` | 19 |
 | `Apache-2.0` | 13 |
 | `ISC` | 6 |
@@ -125,6 +125,7 @@ above from what is left. The elected license ids are unaffected either way.
 | `cityhash-rs` | 1.0.1 | `MIT` |
 | `clap` | 4.6.6 | `MIT` |
 | `clap_builder` | 4.6.6 | `MIT` |
+| `clap_derive` | 4.6.4 | `MIT` |
 | `clap_lex` | 1.1.0 | `MIT` |
 | `clickhouse` | 0.15.2 | `MIT` |
 | `clickhouse-macros` | 0.3.0 | `MIT` |

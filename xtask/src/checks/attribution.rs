@@ -16,6 +16,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -49,9 +50,9 @@ pub(crate) fn generate(root: &Path, explain: bool, html: Option<&str>) -> Outcom
 
     let first_party = first_party(&run::capture(root, &metadata_step())?)?;
 
-    let raw = Scratch::new(tag);
-    run::run(root, false, &about_step(template, &raw.0))?;
-    let generated = read(&raw.0)?;
+    let raw = Scratch::new(tag)?;
+    run::run(root, false, &about_step(template, &raw.file))?;
+    let generated = read(&raw.file)?;
 
     let (text, report) = if html.is_some() {
         (filter_page(&generated, &first_party, out)?, String::new())
@@ -269,9 +270,9 @@ fn crate_of(line: &str) -> &str {
     rest.split('"').next().unwrap_or(rest)
 }
 
-/// The last chip's own text, `name version`, which is the distinct-count key.
-/// The inventory keeps one row per (crate, version), so two linked versions of
-/// one crate count twice there and must count twice here.
+/// The last chip's own text, `name version`. The inventory keeps one row per
+/// (crate, version), so two linked versions of one crate count twice there and
+/// must count twice here.
 fn chip_of(line: &str) -> &str {
     let rest = after_last(line, CHIP);
     let body = rest.find("\">").map_or(rest, |i| &rest[i + "\">".len()..]);
@@ -461,11 +462,9 @@ fn summary<'a>(rows: &[&'a str]) -> Vec<(&'a str, usize)> {
 /// The one-based backtick-separated field, empty when the line has no such
 /// field.
 ///
-/// Rows look like ``| `crate` | version | `LICENSE` |``. The backtick
-/// delimiter leaves field 2 as the bare crate name, so names sort as names;
-/// splitting on the pipe would carry the trailing backtick of `spate` and sort
-/// it after `spate-test`. Field 3 carries the version and field 4 the license
-/// id.
+/// Rows look like ``| `crate` | version | `LICENSE` |``: field 2 is the bare
+/// crate name, field 3 the version and field 4 the license id. The backtick
+/// delimiter keeps the name bare, so `spate` sorts before `spate-test`.
 fn field(line: &str, n: usize) -> &str {
     line.split('`').nth(n - 1).unwrap_or_default()
 }
@@ -478,19 +477,48 @@ fn position(lines: &[&str], exact: &str) -> Option<usize> {
 // Files.
 // ---------------------------------------------------------------------------
 
-/// A file under the system temporary directory, removed on drop.
-struct Scratch(PathBuf);
+/// A directory under the system temporary directory, holding the generator's
+/// output and removed with its contents on drop.
+struct Scratch {
+    dir: PathBuf,
+    file: PathBuf,
+}
 
 impl Scratch {
-    fn new(tag: &str) -> Self {
-        Self(std::env::temp_dir().join(format!("attribution.{}.{tag}", std::process::id())))
+    /// Creates the directory exclusively, and on unix reachable only by its
+    /// owner, so no other user can put anything at the path the generator
+    /// writes to.
+    fn new(tag: &str) -> Result<Self, Error> {
+        let dir =
+            std::env::temp_dir().join(format!("attribution.{}.{}", std::process::id(), nonce()));
+        private_dir(&dir).map_err(|e| Error::msg(format!("{}: {e}", dir.display())))?;
+        let file = dir.join(format!("attribution.{tag}"));
+        Ok(Self { dir, file })
     }
 }
 
 impl Drop for Scratch {
     fn drop(&mut self) {
-        drop(fs::remove_file(&self.0));
+        drop(fs::remove_dir_all(&self.dir));
     }
+}
+
+#[cfg(unix)]
+fn private_dir(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    fs::DirBuilder::new().mode(0o700).create(path)
+}
+
+#[cfg(not(unix))]
+fn private_dir(path: &Path) -> std::io::Result<()> {
+    fs::DirBuilder::new().create(path)
+}
+
+/// Distinguishes scratch names made under the same process id.
+fn nonce() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos())
 }
 
 /// The input split on `\n` alone, so a `\r` a license text carries survives
@@ -513,12 +541,19 @@ fn read(path: &Path) -> Result<String, Error> {
 /// filesystem and a failure mid-write leaves no truncated artifact behind.
 fn install(out: &Path, text: &str) -> Result<(), Error> {
     let dir = out.parent().unwrap_or(Path::new("."));
-    let staged = dir.join(format!(".attribution.{}", std::process::id()));
+    let staged = dir.join(format!(".attribution.{}.{}", std::process::id(), nonce()));
     let write = || -> std::io::Result<()> {
-        fs::write(&staged, text)?;
-        // Both artifacts are committed and served, so the staging file's
-        // owner-only default does not carry over.
-        readable(&staged)?;
+        // An exclusive create, so an existing file or symlink at the name is
+        // not followed.
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staged)?;
+        file.write_all(text.as_bytes())?;
+        // Both artifacts are committed and served, so the mode is set here and
+        // a restrictive umask cannot leave them unreadable.
+        readable(&file)?;
+        drop(file);
         fs::rename(&staged, out)
     };
     write().map_err(|e| {
@@ -528,13 +563,13 @@ fn install(out: &Path, text: &str) -> Result<(), Error> {
 }
 
 #[cfg(unix)]
-fn readable(path: &Path) -> std::io::Result<()> {
+fn readable(file: &fs::File) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o644))
+    file.set_permissions(fs::Permissions::from_mode(0o644))
 }
 
 #[cfg(not(unix))]
-fn readable(_path: &Path) -> std::io::Result<()> {
+fn readable(_file: &fs::File) -> std::io::Result<()> {
     Ok(())
 }
 
@@ -665,13 +700,80 @@ Prose.
         assert_eq!(summary(&rows), vec![("MIT", 2), ("ISC", 1), ("Zlib", 1)]);
     }
 
-    /// Backtick fields sort names as names; the pipe would sort `spate` after
-    /// `spate-test` on the closing backtick.
+    /// Rows whose order the comparator alone decides, each pair listed the
+    /// wrong way round. One license id throughout, a name and a name it
+    /// prefixes, two versions of one crate, and two rows tying on every key.
+    const MD_ORDER: &str = "\
+# Third-party licenses
+
+| License | Crates |
+|---|---|
+| `MIT` | 7 |
+
+## Crates
+
+| Crate | Version | License |
+|---|---|---|
+| `rand_core` | 0.6.4 | `MIT` |
+| `rand` | 0.9.2 | `MIT` |
+| `rand` | 0.8.5 | `MIT` |
+| `anyhow` | 1.0.0 | `MIT` |
+| `anyhow` | 1.0.0 | `MIT` (see NOTICE) |
+| `spate` | 0.1.0 | `MIT` |
+| `spate-core` | 0.1.0 | `MIT` |
+";
+
+    /// The crate rows of the rebuilt `MD_ORDER` inventory, in order.
+    fn ordered() -> Vec<String> {
+        rebuild(MD_ORDER, &names(&["spate", "spate-core"]))
+            .unwrap()
+            .text
+            .lines()
+            .skip_while(|l| *l != "|---|---|---|")
+            .skip(1)
+            .map(str::to_owned)
+            .collect()
+    }
+
+    fn precedes(a: &str, b: &str) -> bool {
+        let rows = ordered();
+        let at = |row: &str| {
+            rows.iter()
+                .position(|r| r == row)
+                .unwrap_or_else(|| panic!("row absent from the rebuilt table: {row}"))
+        };
+        at(a) < at(b)
+    }
+
+    /// Backtick fields sort names as names; the pipe would sort `rand_core`
+    /// before `rand` on the closing backtick.
     #[test]
     fn a_crate_name_sorts_without_its_delimiters() {
         assert_eq!(field("| `spate-test` | 1.0 | `MIT` |", 2), "spate-test");
         assert_eq!(field("| `spate-test` | 1.0 | `MIT` |", 3), " | 1.0 | ");
         assert_eq!(field("| `spate-test` | 1.0 | `MIT` |", 4), "MIT");
+        assert!(precedes(
+            "| `rand` | 0.9.2 | `MIT` |",
+            "| `rand_core` | 0.6.4 | `MIT` |"
+        ));
+    }
+
+    #[test]
+    fn two_versions_of_one_crate_sort_by_version() {
+        assert!(precedes(
+            "| `rand` | 0.8.5 | `MIT` |",
+            "| `rand` | 0.9.2 | `MIT` |"
+        ));
+    }
+
+    /// Two distinct rows tying on every key order by the whole line, so the
+    /// table does not inherit the order the generator emitted them in.
+    #[test]
+    fn rows_tying_on_every_key_sort_by_the_whole_line() {
+        assert!(precedes(
+            "| `anyhow` | 1.0.0 | `MIT` (see NOTICE) |",
+            "| `anyhow` | 1.0.0 | `MIT` |"
+        ));
     }
 
     fn refuse(text: &str) -> String {
@@ -757,6 +859,25 @@ Prose.
         );
     }
 
+    /// The row filter reads the crate cell alone, so a first-party name in any
+    /// other cell reaches the rebuilt table and the last check over it refuses.
+    #[test]
+    fn a_first_party_name_surviving_in_another_cell_is_refused() {
+        let text = MD
+            .replace(
+                "| `Apache-2.0` | 2 |",
+                "| `Apache-2.0` | 1 |\n| `spate` | 1 |",
+            )
+            .replace(
+                "| `anyhow` | 1.0.0 | `Apache-2.0` |",
+                "| `anyhow` | 1.0.0 | `spate` |",
+            );
+        assert_eq!(
+            refuse(&text),
+            "first-party crate 'spate' survived into the table"
+        );
+    }
+
     #[test]
     fn a_table_of_nothing_but_first_party_rows_is_refused() {
         let text = MD.replace("| `serde` | 1.0.0 | `MIT` |", "| `spate` | 1.0.0 | `MIT` |");
@@ -839,6 +960,72 @@ Prose.
         assert!(page(&text).unwrap().contains("— 1 crate</li>"));
     }
 
+    /// Two versions of one crate under MIT, and one of them under Zlib as
+    /// well.
+    const PAGE_TWICE: &str = "\
+<ul>
+  <li data-license-id=\"MIT\">MIT <code>(MIT)</code> — 4 crates</li>
+  <li data-license-id=\"Zlib\">Zlib <code>(Zlib)</code> — 2 crates</li>
+</ul>
+<!-- BEGIN-LICENSE MIT -->
+<h2>
+  <code data-crate=\"serde\">serde 1.0.0</code>
+  <code data-crate=\"serde\">serde 2.0.0</code>
+  <code data-crate=\"spate\">spate 0.1.0</code>
+</h2>
+<pre>MIT text</pre>
+<!-- END-LICENSE -->
+<!-- BEGIN-LICENSE Zlib -->
+<h2>
+  <code data-crate=\"serde\">serde 1.0.0</code>
+  <code data-crate=\"spate-core\">spate-core 0.1.0</code>
+</h2>
+<pre>Zlib text</pre>
+<!-- END-LICENSE -->
+";
+
+    /// The `PAGE_TWICE` table-of-contents row for `id`, or `<dropped>`.
+    fn toc_row(id: &str) -> String {
+        let page = page(PAGE_TWICE).unwrap();
+        let marker = format!("data-license-id=\"{id}\"");
+        page.lines()
+            .find(|l| l.contains(&marker))
+            .unwrap_or("<dropped>")
+            .to_owned()
+    }
+
+    /// The count key is the chip, so two linked versions of one crate are two
+    /// crates under that id.
+    #[test]
+    fn two_versions_of_one_crate_count_twice() {
+        assert_eq!(
+            toc_row("MIT"),
+            "  <li data-license-id=\"MIT\">MIT <code>(MIT)</code> — 2 crates</li>"
+        );
+    }
+
+    /// The count key carries the license id, so a crate under two ids counts
+    /// under each.
+    #[test]
+    fn a_crate_under_two_ids_counts_under_both() {
+        assert_eq!(
+            toc_row("Zlib"),
+            "  <li data-license-id=\"Zlib\">Zlib <code>(Zlib)</code> — 1 crate</li>"
+        );
+    }
+
+    /// The drop branch reads chips inside a section only, so a first-party chip
+    /// outside every section reaches the page and the last check over it
+    /// refuses.
+    #[test]
+    fn a_first_party_chip_surviving_outside_a_section_is_refused() {
+        let text = format!("{PAGE}<code data-crate=\"spate\">spate 0.1.0</code>\n");
+        assert_eq!(
+            page(&text).unwrap_err().message,
+            "first-party crate 'spate' survived into out.html"
+        );
+    }
+
     #[test]
     fn a_first_party_crate_the_page_never_names_is_refused() {
         let e = filter_page(PAGE, &names(&["spate", "spate-kafka"]), "out.html").unwrap_err();
@@ -904,12 +1091,11 @@ Prose.
         );
     }
 
+    /// A chip after the last section is outside every sentinel pair, so it
+    /// counts toward no id and keeps no section from being dropped.
     #[test]
     fn a_chip_outside_a_section_keeps_nothing_alive() {
-        let text = PAGE.replace(
-            "<!-- BEGIN-LICENSE Zlib -->",
-            "<code data-crate=\"anyhow\">anyhow 1.0.0</code>\n<!-- BEGIN-LICENSE Zlib -->",
-        );
+        let text = format!("{PAGE}<code data-crate=\"anyhow\">anyhow 1.0.0</code>\n");
         let out = page(&text).unwrap();
         assert!(!out.contains("Zlib text"));
         assert!(out.contains("data-crate=\"anyhow\""));
@@ -936,6 +1122,21 @@ Prose.
         assert!(records("").is_empty());
         let text = PAGE.replace("<pre>MIT text</pre>", "<pre>MIT\r\ntext\r</pre>");
         assert!(page(&text).unwrap().contains("<pre>MIT\r\ntext\r</pre>"));
+    }
+
+    /// The generator's directory is the owner's alone and the artifact is
+    /// world-readable, whatever the umask.
+    #[cfg(unix)]
+    #[test]
+    fn the_scratch_directory_is_private_and_the_artifact_is_readable() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let scratch = Scratch::new("md").unwrap();
+        let out = scratch.dir.join("artifact.md");
+        install(&out, "body\n").unwrap();
+        assert_eq!(fs::read_to_string(&out).unwrap(), "body\n");
+        assert_eq!(mode(&scratch.dir), 0o700);
+        assert_eq!(mode(&out), 0o644);
     }
 
     #[test]

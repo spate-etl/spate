@@ -216,7 +216,6 @@ pub(crate) fn classify(
                     "scripts/*",
                     "xtask/*",
                     "Makefile",
-                    "versions.mk",
                 ],
             ) {
                 out.container_pkgs
@@ -281,7 +280,6 @@ pub(crate) fn classify(
                     ".github/actions/*",
                     ".github/toolchains/*",
                     "Makefile",
-                    "versions.mk",
                 ],
             ) {
                 out.fuzz = true;

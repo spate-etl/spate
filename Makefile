@@ -3,8 +3,6 @@
 # exit status and masks a failure. `--locked` wherever a dependency graph is
 # resolved.
 
-include versions.mk
-
 .DEFAULT_GOAL := help
 
 .PHONY: help fmt fmt-check clippy lint check test doctest doc docsrs test-docker \
@@ -238,7 +236,7 @@ ci-lint: zizmor shellcheck self-test check-changelog ci-lint-metadata ## Every r
 NIGHTLY ?= nightly
 
 fuzz-install: ## Install cargo-fuzz at the pinned version
-	cargo install cargo-fuzz --locked --version $(CARGO_FUZZ_VERSION)
+	cargo install cargo-fuzz --locked
 
 fuzz-build: ## Build every fuzz target
 	cargo +$(NIGHTLY) fuzz build

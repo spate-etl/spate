@@ -21,7 +21,7 @@ include versions.mk
         check-changelog changelog-new \
         check-release-version release-dry-run \
         fuzz fuzz-build fuzz-install \
-        ci-lint docs docs-serve gates
+        ci-lint ci-lint-metadata docs docs-serve gates
 
 ##@ Help
 
@@ -224,7 +224,14 @@ release-dry-run: ## The whole release locally, nothing pushed or uploaded: make 
 #
 #     UPDATE_EXAMPLES_INDEX=1 cargo test -p spate --test examples_index --locked
 
-ci-lint: zizmor shellcheck self-test check-perf-report check-gungraun-benches check-collected-region check-adr check-brand check-changelog check-transclusions check-docs-meta check-supported-versions check-release-version ## Every repository-metadata check
+# The members needing neither a toolchain nor the pull request's own fields.
+# One CI step runs this whole list; the rest of `ci-lint` runs where its
+# prerequisites are.
+ci-lint-metadata: check-adr check-perf-report check-gungraun-benches \
+        check-collected-region check-transclusions check-docs-meta \
+        check-supported-versions check-release-version check-brand
+
+ci-lint: zizmor shellcheck self-test check-changelog ci-lint-metadata ## Every repository-metadata check
 
 ##@ Fuzz
 

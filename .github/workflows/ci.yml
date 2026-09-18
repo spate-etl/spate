@@ -130,25 +130,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
       - run: make shellcheck
 
-      # `make ci-lint` aggregates these locally; CI runs them one by one, so a
-      # new check goes in both places.
-      - run: make check-adr
-
-      - run: make check-perf-report
-
-      - run: make check-gungraun-benches
-
-      - run: make check-collected-region
-
-      - run: make check-transclusions
-
-      - run: make check-docs-meta
-
-      - run: make check-supported-versions
-
-      - run: make check-release-version
-
-      - run: make check-brand
+      # The members needing no toolchain and no pull request fields. The other
+      # three run where their prerequisites are: `self-test` needs cargo,
+      # `check-changelog` needs the pull request's own fields, and `zizmor`
+      # needs the token above.
+      - run: make ci-lint-metadata
 
   deny:
     name: Licenses and advisories

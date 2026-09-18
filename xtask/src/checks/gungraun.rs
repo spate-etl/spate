@@ -7,7 +7,7 @@
 //! [`run`] answers 0 when at least one bench ran and all succeeded, 1 when any
 //! failed, and 2 when the selection matched nothing. CI's merge-base leg
 //! branches on those three to decide whether it has a baseline, so the
-//! trichotomy is a contract. An empty selection is silent.
+//! trichotomy is a contract.
 //!
 //! [`check`] holds every discovered target to a `[[bench]]` stanza naming it
 //! with `harness = false`. Without one, cargo auto-discovers the file under the
@@ -88,7 +88,12 @@ pub(crate) fn run(
     }
     match verdict(ran, failed) {
         None => Ok(()),
-        Some(code) => Err(Error::status(code)),
+        Some(code) => {
+            if code == 2 {
+                eprintln!("{}", no_match(filter));
+            }
+            Err(Error::status(code))
+        }
     }
 }
 
@@ -134,8 +139,7 @@ pub(crate) fn owners(root: &Path) -> BTreeSet<String> {
 
 /// Every bench target under `crates/`, sorted bytewise by its `pkg bench` line.
 ///
-/// A tree with no `crates/` yields nothing, and a caller reads that as an empty
-/// selection.
+/// A tree with no `crates/` yields nothing.
 fn discover(root: &Path) -> Vec<Target> {
     let mut out = Vec::new();
     for pkg in entries(&root.join("crates")) {
@@ -152,8 +156,8 @@ fn discover(root: &Path) -> Vec<Target> {
     out
 }
 
-/// The names in a directory, excluding the dotfiles a glob would not match. An
-/// unreadable directory yields nothing.
+/// The names in a directory, excluding dotfiles. An unreadable directory yields
+/// nothing.
 fn entries(dir: &Path) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
@@ -199,6 +203,17 @@ fn verdict(ran: usize, failed: bool) -> Option<i32> {
         return Some(2);
     }
     None
+}
+
+/// What an empty selection reports on stderr.
+fn no_match(filter: &[String]) -> String {
+    if filter.is_empty() {
+        return "gungraun-benches: no bench target was discovered".to_owned();
+    }
+    format!(
+        "gungraun-benches: no bench target belongs to {}",
+        filter.join(" ")
+    )
 }
 
 /// The crates as a JSON array, in the order given.
@@ -312,7 +327,7 @@ mod tests {
 
     // --- discovery ---------------------------------------------------------
 
-    /// The repository's own tree, which the CI selector and both legs read.
+    /// Discovery over the repository's own tree.
     #[test]
     fn the_tree_yields_one_target_per_bench_source() {
         let root = crate::repo_root().unwrap();
@@ -353,7 +368,7 @@ mod tests {
         assert!(discover(Path::new("/nonexistent-spate-root")).is_empty());
     }
 
-    /// The name in front of the suffix may be empty, as it may under the glob.
+    /// The name in front of the suffix may be empty.
     #[test]
     fn the_suffix_alone_is_a_bench_source() {
         let scratch = Scratch::new("suffix-only");
@@ -499,6 +514,22 @@ mod tests {
     #[test]
     fn an_empty_selection_is_two() {
         assert_eq!(verdict(0, false), Some(2));
+    }
+
+    #[test]
+    fn an_empty_selection_names_the_filter_it_was_given() {
+        assert_eq!(
+            no_match(&names(&["spate-a", "spate-b"])),
+            "gungraun-benches: no bench target belongs to spate-a spate-b"
+        );
+    }
+
+    #[test]
+    fn an_empty_selection_under_no_filter_reports_discovery() {
+        assert_eq!(
+            no_match(&[]),
+            "gungraun-benches: no bench target was discovered"
+        );
     }
 
     // --- the JSON array ----------------------------------------------------

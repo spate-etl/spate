@@ -15,8 +15,13 @@ pub(crate) struct Error {
 
 impl Error {
     pub(crate) fn msg(message: impl Into<String>) -> Self {
+        let message = message.into();
+        // The top level prints nothing for an empty message, so an error built
+        // with one exits non-zero in silence. `Error::status` covers the case
+        // where that is intended.
+        debug_assert!(!message.is_empty(), "an error carries a diagnostic");
         Self {
-            message: message.into(),
+            message,
             code: None,
         }
     }
@@ -270,5 +275,15 @@ mod tests {
     fn an_embedded_single_quote_survives_the_round_trip() {
         let step = Step::new("sh", ["-c"]).arg("echo 'hi'");
         assert_eq!(step.display(), r#"sh -c 'echo '\''hi'\'''"#);
+    }
+
+    /// A step's own environment reaches the child `succeeded` spawns.
+    #[cfg(unix)]
+    #[test]
+    fn a_step_environment_reaches_the_child_succeeded_spawns() {
+        let root = crate::repo_root().unwrap();
+        let step = Step::new("sh", ["-c", r#"test "$SPATE_STEP_ENV" = reached"#])
+            .env("SPATE_STEP_ENV", "reached");
+        assert!(succeeded(&root, &step).unwrap());
     }
 }

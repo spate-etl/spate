@@ -188,10 +188,10 @@ fn a_failing_bench_exits_one_and_the_rest_still_run() {
     assert!(!reported.contains("failed to build"), "{reported}");
 }
 
-/// An empty selection is exit 2, invokes no cargo and says nothing, which is
-/// what CI's merge-base probe reads as "this copy understands the flag".
+/// An empty selection is exit 2, invokes no cargo, and reports one line naming
+/// the filter that matched nothing.
 #[test]
-fn an_empty_selection_exits_two_silently() {
+fn an_empty_selection_exits_two_and_names_the_filter() {
     let shim = Shim::new("empty-selection", 0);
     for args in [
         vec!["--run", GHOST],
@@ -201,7 +201,11 @@ fn an_empty_selection_exits_two_silently() {
     ] {
         let out = xtask(&shim, &args);
         assert_eq!(out.status.code(), Some(2), "{args:?}: {}", stderr(&out));
-        assert_eq!(stderr(&out), "", "{args:?}");
+        assert_eq!(
+            stderr(&out),
+            format!("gungraun-benches: no bench target belongs to {GHOST}\n"),
+            "{args:?}"
+        );
         assert_eq!(stdout(&out), "", "{args:?}");
     }
     assert!(shim.calls().is_empty(), "{:?}", shim.calls());
@@ -217,7 +221,7 @@ fn an_empty_selection_is_two_even_when_cargo_would_fail() {
     assert!(shim.calls().is_empty(), "{:?}", shim.calls());
 }
 
-/// A cargo that cannot be spawned is a failed bench, not an empty selection.
+/// A cargo that cannot be spawned reaches the failed-bench arm at exit 1.
 #[test]
 fn a_cargo_that_is_not_on_path_exits_one() {
     let shim = Shim::new("no-cargo", 0);
@@ -228,8 +232,7 @@ fn a_cargo_that_is_not_on_path_exits_one() {
     assert!(reported.contains("--bench"), "{reported}");
 }
 
-/// A filter selects the crates it names. A name matching nothing is ignored
-/// rather than emptying the selection.
+/// A filter selects the crates it names, and drops a name no crate carries.
 #[test]
 fn a_filter_selects_the_crates_it_names() {
     let shim = Shim::new("filter", 0);
@@ -372,6 +375,7 @@ fn pkgs_json_prints_the_owning_crates_and_runs_nothing() {
         vec!["--pkgs-json"],
         vec!["--features", "simd", "--pkgs-json"],
         vec!["--pkgs-json", "--run", PKG],
+        vec!["--pkgs-json", "--check", PKG],
     ] {
         let out = xtask(&shim, &args);
         assert_eq!(out.status.code(), Some(0), "{args:?}: {}", stderr(&out));
@@ -408,6 +412,23 @@ fn explain_prints_the_plan_and_runs_nothing() {
         lines.iter().all(|l| l.starts_with("cargo bench -p ")),
         "{lines:?}"
     );
+    assert!(shim.calls().is_empty(), "{:?}", shim.calls());
+}
+
+/// The listing and the package array both name what they would read under
+/// `--explain`, and read nothing.
+#[test]
+fn explain_names_what_the_listing_and_the_package_array_read() {
+    let shim = Shim::new("explain-reads", 0);
+    for args in [vec!["--explain"], vec!["--pkgs-json", "--explain"]] {
+        let out = xtask(&shim, &args);
+        assert_eq!(out.status.code(), Some(0), "{args:?}: {}", stderr(&out));
+        assert_eq!(
+            stdout(&out),
+            "(reads crates/*/benches/*_gungraun.rs)\n",
+            "{args:?}"
+        );
+    }
     assert!(shim.calls().is_empty(), "{:?}", shim.calls());
 }
 

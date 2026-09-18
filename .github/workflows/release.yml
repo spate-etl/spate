@@ -70,7 +70,7 @@ jobs:
       # publish job, which owns the key.
       - uses: ./.github/actions/setup-rust
         with:
-          tools: cargo-about@0.9.1
+          tools: cargo-about
           shared-key: release
           cache-save: never
 
@@ -123,7 +123,7 @@ jobs:
       # minted after it either way.
       - uses: ./.github/actions/setup-rust
         with:
-          tools: cargo-cyclonedx@0.5.9
+          tools: cargo-cyclonedx
           shared-key: release
 
       - name: Prepare

@@ -94,7 +94,7 @@ jobs:
       # as spurious drift.
       - uses: ./.github/actions/setup-rust
         with:
-          tools: cargo-about@0.9.1
+          tools: cargo-about
       - id: regen
         run: make attribution
       - id: drift
@@ -128,7 +128,7 @@ jobs:
               'request and is green. Regenerate and commit:' \
               '' \
               '```sh' \
-              'cargo install cargo-about --locked --features cli --version 0.9.1' \
+              'cargo install cargo-about --locked --features cli' \
               './scripts/attribution.sh' \
               '```' \
               '' \
@@ -153,7 +153,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-rust
         with:
-          tools: cargo-deny@0.20.2
+          tools: cargo-deny
       - id: deny
         run: cargo deny --all-features --locked check advisories
 
@@ -498,7 +498,7 @@ jobs:
 
       - uses: ./.github/actions/setup-rust
         with:
-          tools: cargo-about@0.9.1
+          tools: cargo-about
           shared-key: docs
 
       # The script filters the first-party crates and generates
@@ -633,7 +633,7 @@ jobs:
         with:
           toolchain: beta
           components: clippy
-          tools: nextest@0.9.140
+          tools: nextest
           # No shared key. An entry keyed on beta's compiler shares nothing
           # with the stable trees and would evict them from the 10 GB budget.
 
@@ -749,7 +749,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-rust
         with:
-          tools: cargo-hack@0.6.45
+          tools: cargo-hack
           shared-key: dev-allfeatures
       - run: cargo hack check --workspace --feature-powerset --no-dev-deps
 
@@ -789,7 +789,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-rust
         with:
-          tools: nextest@0.9.140
+          tools: nextest
           # Same key as ci.yml's container job: both build the plain dev-profile
           # test binaries for the `#[ignore]`d suites.
           shared-key: docker
@@ -838,7 +838,7 @@ jobs:
       - uses: ./.github/actions/setup-rust
         with:
           components: llvm-tools-preview
-          tools: nextest@0.9.140,cargo-llvm-cov@0.8.7
+          tools: nextest,cargo-llvm-cov
           # Not `docker`: this builds instrumented into `target/llvm-cov-target`,
           # where ci.yml's container job builds plain.
           shared-key: coverage-docker

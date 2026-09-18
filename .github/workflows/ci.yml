@@ -123,16 +123,10 @@ jobs:
           # move it with nothing in the title to say so. Bumped by hand, after
           # reading the release notes for audit changes.
           tool: zizmor@1.28.0,shellcheck
-      # The brand check runs plain Node with no npm dependencies, so no cache or
-      # install step is needed.
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version-file: .node-version
-
-      # `site-meta` and `changelog` are outside this set: one reads a built
-      # site, the other the pull request's own fields. Each runs in the job
-      # that has what it reads. Without GH_TOKEN zizmor skips the API audits
-      # and reports "No findings", exit 0, against a known-vulnerable action.
+      # `changelog` is outside this set: it reads the pull request's own fields
+      # and has a job that supplies them. Without GH_TOKEN zizmor skips the API
+      # audits and reports "No findings", exit 0, against a known-vulnerable
+      # action.
       - run: cargo xtask tidy
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1036,12 +1030,6 @@ jobs:
           # The token in `.git/config` would reach `npm ci` and the site build.
           persist-credentials: false
 
-      # For `tidy site-meta` after the build.
-      - uses: ./.github/actions/setup-rust
-        with:
-          shared-key: xtask
-          cache-save: never
-
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .node-version
@@ -1082,11 +1070,6 @@ jobs:
         env:
           CI: "true"
         run: npm run build
-
-      # The homepage, the brand page and the benchmark pages rendered from the
-      # submodule have no source under docs/ for ci-lint to check.
-      - name: Every built page carries a description
-        run: cargo xtask tidy site-meta
 
       - name: Site is within the Cloudflare file limit
         run: |

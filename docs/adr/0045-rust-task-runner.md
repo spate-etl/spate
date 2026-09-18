@@ -27,7 +27,7 @@ passes: `semver-checks.sh --against-registry --packages …`,
 `gungraun-report.sh --regressions-out …`. Reproducing one of those locally
 means reading the workflow and retyping the invocation, and nothing detects it
 when the two fall out of step. A few of the twenty-four do have a target,
-`site-meta.sh --check` among them, which is the shape the rest could have had.
+`site-meta.sh --check` among them.
 
 Two vocabularies therefore describe the same work, and a third already exists
 in Rust. `xtask/` decides which CI jobs a change needs, and two of its

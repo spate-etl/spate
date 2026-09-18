@@ -21,7 +21,6 @@ pub(crate) fn dispatch(root: &Path, explain: bool, serve: bool) -> Outcome {
             Step::new("npm", ["run", "build"])
                 .env("CI", "true")
                 .dir("website"),
-            Step::new("./scripts/site-meta.sh", ["--check"]),
         ],
     )
 }

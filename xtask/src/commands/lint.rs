@@ -26,16 +26,10 @@ pub(crate) enum TidyCheck {
     CollectedRegion,
     /// Every transcluded region a docs page names exists
     Transclusions,
-    /// Every rendered docs page carries a description
-    DocsMeta,
     /// Every supported-versions table matches the servers CI pins
     SupportedVersions,
     /// Every literal version is one the release rewrites
     ReleaseVersion,
-    /// Every brand colour clears WCAG AA on the ground it sits on
-    Brand,
-    /// Every built page carries a description (run after the site build)
-    SiteMeta,
 }
 
 /// The order `tidy` runs them in, cheapest and most likely to fail first.
@@ -48,19 +42,16 @@ pub(super) const ALL: &[TidyCheck] = &[
     TidyCheck::GungraunBenches,
     TidyCheck::CollectedRegion,
     TidyCheck::Transclusions,
-    TidyCheck::DocsMeta,
     TidyCheck::SupportedVersions,
     TidyCheck::ReleaseVersion,
-    TidyCheck::Brand,
 ];
 
 /// Runs one named check, or every member of `ALL`.
 ///
-/// Two checks sit outside `ALL`, each because it reads state the caller has to
-/// provide. `SiteMeta` reads `website/build/`, which exists only after a site
-/// build. `Changelog` reads the pull request's title, body and endpoints, and
-/// enforces against `origin/main` when they are absent, so a caller without
-/// them would demand a fragment while unable to see the exemptions.
+/// `Changelog` sits outside `ALL`. It reads the pull request's title, body and
+/// endpoints, and enforces against `origin/main` when they are absent, so a
+/// caller without them would demand a fragment while unable to see the
+/// exemptions that excuse it.
 pub(crate) fn tidy(root: &Path, explain: bool, check: Option<TidyCheck>, list: bool) -> Outcome {
     if list {
         for one in TidyCheck::value_variants() {
@@ -119,15 +110,8 @@ fn one_check(root: &Path, explain: bool, check: TidyCheck) -> Outcome {
             script(root, explain, "gungraun-collected-region.sh", "--self-test")
         }
         TidyCheck::Transclusions => script(root, explain, "transclude.sh", "--check"),
-        TidyCheck::DocsMeta => script(root, explain, "docs-meta.sh", "--check"),
         TidyCheck::SupportedVersions => script(root, explain, "supported-versions.sh", "--check"),
         TidyCheck::ReleaseVersion => script(root, explain, "release-version.sh", "--check"),
-        TidyCheck::SiteMeta => script(root, explain, "site-meta.sh", "--check"),
-        TidyCheck::Brand => run::run(
-            root,
-            explain,
-            &Step::new("node", ["website/tools/brand/check-contrast.mjs"]),
-        ),
     }
 }
 

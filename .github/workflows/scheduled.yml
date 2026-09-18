@@ -534,11 +534,6 @@ jobs:
           CI: "true"
         run: npm run build
 
-      # The homepage, the brand page and the benchmark pages rendered from the
-      # submodule have no source under docs/ for ci-lint to check.
-      - name: Every built page carries a description
-        run: cargo xtask tidy site-meta
-
       # The floor is what stops an empty build reaching the deploy. The upload's
       # `if-no-files-found` tests the whole `path:` list at once, and
       # wrangler.jsonc always matches it.

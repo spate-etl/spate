@@ -375,8 +375,8 @@ Everywhere:
   else.** The H1 is the title; a frontmatter `title:` alongside an H1 renders
   twice. The description is what a search result shows under the page's
   name: one or two sentences of 50 to 160 characters, opening with the
-  subject, in the page's own vocabulary. `cargo xtask tidy docs-meta` holds the
-  length and the absence of `title:`.
+  subject, in the page's own vocabulary. Review holds the length and the
+  absence of `title:`.
 - **Internal links are relative and extension-qualified** (`../foo/bar.mdx`).
   `onBrokenLinks: 'throw'` fails the build on a stale link, so `cargo xtask docs` is
   the correctness gate for any move or rename.

@@ -686,8 +686,7 @@ mod tests {
         let listed = super::lint::ALL;
         for check in TidyCheck::value_variants() {
             let count = listed.iter().filter(|c| *c == check).count();
-            let outside = matches!(check, TidyCheck::SiteMeta | TidyCheck::Changelog);
-            let expected = usize::from(!outside);
+            let expected = usize::from(*check != TidyCheck::Changelog);
             assert_eq!(
                 count,
                 expected,

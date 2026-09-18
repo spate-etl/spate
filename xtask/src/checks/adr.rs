@@ -20,8 +20,8 @@ const STATUSES: [&str; 3] = ["accepted", "superseded", "deprecated"];
 /// The marker the template leaves behind.
 const PLACEHOLDER: &str = "REPLACE-ME";
 
-/// One record on disk: the path the diagnostics name, the number its filename
-/// claims, and its text.
+/// One record on disk: the path the diagnostics name, the filename the index
+/// is matched on, the number that filename claims, and its text.
 struct Record {
     path: String,
     name: String,
@@ -80,6 +80,9 @@ pub(crate) fn check(root: &Path, explain: bool) -> Outcome {
     Ok(())
 }
 
+/// Scaffolds the next record from the template. Under `--explain` the answer
+/// is the path this would write, so a slug the filename rules reject and a path
+/// already taken are refused under the flag as they are without it.
 pub(crate) fn new(root: &Path, explain: bool, slug: &str) -> Outcome {
     if slug.is_empty() {
         return Err(Error::msg(
@@ -211,6 +214,8 @@ fn paths(root: &Path) -> Result<Vec<String>, Error> {
     Ok(out)
 }
 
+/// Every record in number order, with its text. One record that will not read
+/// fails the whole set, so no record's problems are reported.
 fn records(root: &Path) -> Result<Vec<Record>, Error> {
     let mut out = Vec::new();
     for path in paths(root)? {
@@ -281,6 +286,8 @@ fn status(text: &str) -> &str {
     else {
         return "";
     };
+    // Every blank that counts as horizontal space, so a tab or a stray carriage
+    // return ahead of the word does not read as a missing status.
     let rest = rest.trim_start_matches([' ', '\t', '\u{b}', '\u{c}', '\r']);
     let end = rest
         .bytes()
@@ -319,7 +326,14 @@ fn read(root: &Path, path: &str) -> Result<String, Error> {
 
 /// Today's date in UTC, as `YYYY-MM-DD`.
 fn today() -> String {
-    let days = std::time::SystemTime::now()
+    date_of(std::time::SystemTime::now())
+}
+
+/// The UTC civil date of a wall-clock instant, as `YYYY-MM-DD`. An instant
+/// before the epoch, or one past the day count a `u32` holds, reads as
+/// `1970-01-01`.
+fn date_of(at: std::time::SystemTime) -> String {
+    let days = at
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() / 86_400);
     civil_date(i64::from(u32::try_from(days).unwrap_or(0)))
@@ -431,6 +445,20 @@ It leaves ADR-0000 deprecated.
         assert_eq!(status("prose\n"), "");
     }
 
+    /// Each blank the parser skips ahead of the status word, alone and in a
+    /// run.
+    #[test]
+    fn a_blank_of_any_kind_before_the_status_word_is_skipped() {
+        for blank in [" ", "\t", "\u{b}", "\u{c}", "\r"] {
+            assert_eq!(
+                status(&format!("- **Status:**{blank}accepted\n")),
+                "accepted",
+                "{blank:?}"
+            );
+        }
+        assert_eq!(status("- **Status:** \t\u{b}\u{c}\raccepted\n"), "accepted");
+    }
+
     #[test]
     fn the_placeholder_check_separates_an_unfilled_record_from_a_mention_of_the_marker() {
         assert!(has_placeholder("Chosen option: \"REPLACE-ME\", because\n"));
@@ -526,8 +554,8 @@ It leaves ADR-0000 deprecated.
         assert_eq!(next_number(&["docs/adr/9999-a.md".to_owned()]), "10000");
     }
 
-    /// A withdrawn record keeps its number, so allocation follows the last
-    /// name in sort order rather than the count.
+    /// A withdrawn record keeps its number, so allocation reads the last name
+    /// in sort order.
     #[test]
     fn a_gap_below_the_highest_number_is_not_reused() {
         let paths = [
@@ -609,6 +637,20 @@ description: \"REPLACE-ME\"
         assert_eq!(civil_date(11_016), "2000-02-29");
         assert_eq!(civil_date(19_723), "2024-01-01");
         assert_eq!(civil_date(20_714), "2026-09-18");
+    }
+
+    /// The day boundary, and both fallbacks.
+    #[test]
+    fn a_wall_clock_instant_reads_as_its_utc_date() {
+        use std::time::{Duration, UNIX_EPOCH};
+
+        let at = |secs: u64| date_of(UNIX_EPOCH + Duration::from_secs(secs));
+        assert_eq!(at(0), "1970-01-01");
+        assert_eq!(at(86_399), "1970-01-01");
+        assert_eq!(at(86_400), "1970-01-02");
+        assert_eq!(at(20_714 * 86_400 + 43_200), "2026-09-18");
+        assert_eq!(date_of(UNIX_EPOCH - Duration::from_secs(1)), "1970-01-01");
+        assert_eq!(at((u64::from(u32::MAX) + 1) * 86_400), "1970-01-01");
     }
 
     /// A repository root under the system temporary directory, removed on
@@ -793,5 +835,30 @@ description: \"REPLACE-ME\"
         let scratch = Scratch::section("explain");
         new(&scratch.0, true, "a-thing").unwrap();
         assert!(!scratch.0.join(format!("{DIR}/0001-a-thing.md")).exists());
+    }
+
+    /// The explained answer is the path the scaffold would write, so a slug
+    /// with no such path and a path already taken are refused under the flag.
+    #[test]
+    fn explaining_a_scaffold_refuses_what_the_scaffold_refuses() {
+        let scratch = Scratch::section("explain-refused");
+        assert!(failure(new(&scratch.0, true, "A-Thing")).starts_with("'A-Thing' should be"));
+
+        scratch.record("9999-a", "accepted");
+        scratch.write(&format!("{DIR}/10000-b.md"), "held");
+        assert_eq!(
+            failure(new(&scratch.0, true, "b")),
+            "docs/adr/10000-b.md already exists"
+        );
+    }
+
+    /// The gate reads nothing under the flag, so a section it would refuse
+    /// still succeeds.
+    #[test]
+    fn explaining_the_gate_reads_nothing() {
+        let scratch = Scratch::new("explain-gate");
+        std::fs::remove_dir(scratch.0.join(DIR)).unwrap();
+        assert!(check(&scratch.0, false).is_err());
+        assert!(check(&scratch.0, true).is_ok());
     }
 }

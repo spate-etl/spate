@@ -777,7 +777,7 @@ jobs:
 
       # A gungraun summary carries the package only as a directory path and the
       # feature arm not at all, so shard identity is stamped here for
-      # `scripts/gungraun-report.sh`. Empty `baseline` renders as *no baseline*.
+      # `cargo xtask bench report`. Empty `baseline` renders as *no baseline*.
       #
       # The compiler is stamped alongside it. Codegen moves a count, and both
       # legs of this job run under one toolchain.

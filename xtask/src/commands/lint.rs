@@ -102,7 +102,7 @@ fn one_check(root: &Path, explain: bool, check: TidyCheck) -> Outcome {
         ),
         TidyCheck::Changelog => script(root, explain, "changelog.sh", "--check"),
         TidyCheck::Adr => crate::checks::adr::check(root, explain),
-        TidyCheck::PerfReport => script(root, explain, "gungraun-report.sh", "--self-test"),
+        TidyCheck::PerfReport => crate::checks::perf_report::self_test(explain),
         TidyCheck::GungraunBenches => crate::checks::gungraun::check(root, explain),
         TidyCheck::CollectedRegion => {
             script(root, explain, "gungraun-collected-region.sh", "--self-test")

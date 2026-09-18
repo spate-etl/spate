@@ -259,7 +259,6 @@ pub(crate) fn classify(
                 path,
                 &[
                     "xtask/*",
-                    "scripts/gungraun-report.sh",
                     "scripts/gungraun-collected-region.sh",
                     ".github/workflows/ci.yml",
                     ".github/actions/*",

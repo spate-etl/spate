@@ -4,7 +4,7 @@ use std::path::Path;
 
 use clap::Subcommand;
 
-use crate::checks::gungraun;
+use crate::checks::{gungraun, perf_report};
 use crate::run::{self, Outcome, Step};
 
 /// Cases carry their own flags, so the driver's `--package` repeats instead of
@@ -162,13 +162,7 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: Bench) -> Outcome {
         Bench::Report {
             regressions_out,
             args,
-        } => {
-            let mut s = Step::new("./scripts/gungraun-report.sh", [] as [&str; 0]);
-            if let Some(f) = &regressions_out {
-                s = s.args(["--regressions-out", f]);
-            }
-            run::run(root, explain, &s.args(&args))
-        }
+        } => perf_report::report(explain, regressions_out.as_deref(), &args),
         Bench::List { select } => {
             let s = driver(["list", "--cases"]).args(select.flags());
             run::run(root, explain, &s)

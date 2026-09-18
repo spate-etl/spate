@@ -227,7 +227,8 @@ Measuring a crate under more than one compiled feature arm *is* a second edit:
 CI runs one job per (package, arm), and the arm table is `feature_arms_for` in
 `xtask/src/classify.rs`. Add an arm when a feature swaps an implementation the
 benches execute, not for every feature key; each arm is another pair of builds
-and valgrind runs. `make self-test` checks the table against `cargo metadata`.
+and valgrind runs. `make self-test` holds every arm to a feature its package
+declares.
 
 ### The wall-clock tier
 

@@ -14,8 +14,6 @@ pub(crate) struct Outputs {
     pub(crate) loom: bool,
     pub(crate) bench: bool,
     pub(crate) manifests: bool,
-    /// Whether the change reaches this crate, so its tests run.
-    pub(crate) xtask: bool,
     pub(crate) container_pkgs: BTreeSet<String>,
     pub(crate) semver_pkgs: BTreeSet<String>,
     pub(crate) bench_shards: Vec<Shard>,
@@ -68,7 +66,6 @@ impl fmt::Display for Outputs {
         writeln!(f, "loom={}", self.loom)?;
         writeln!(f, "bench={}", self.bench)?;
         writeln!(f, "manifests={}", self.manifests)?;
-        writeln!(f, "xtask={}", self.xtask)?;
         // One line each. `$GITHUB_OUTPUT` is a key=value file, so a multi-line
         // value needs heredoc delimiters that the value can itself contain.
         writeln!(f, "bench-shards={}", compact_json(&self.bench_shards))?;
@@ -81,7 +78,7 @@ impl fmt::Display for Outputs {
 }
 
 /// Serialises to one line. Package and lane names come from directory names a
-/// branch chooses, so they are escaped rather than concatenated.
+/// branch chooses, so every value is escaped.
 fn compact_json<T: Serialize>(value: &T) -> String {
     serde_json::to_string(value).expect("matrix entries are plain strings")
 }

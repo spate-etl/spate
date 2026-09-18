@@ -90,8 +90,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # Version-pinned: a release reordering the generator's output reads here
-      # as spurious drift.
       - uses: ./.github/actions/setup-rust
         with:
           tools: cargo-about
@@ -132,8 +130,12 @@ jobs:
               './scripts/attribution.sh' \
               '```' \
               '' \
+              'The run log above names the cargo-about version this job used.' \
+              'A different one can reorder the output and re-trip this check, so' \
+              'match it if the regenerated file disagrees.' \
+              '' \
               'The release flow regenerates it too, so this can also just wait' \
-              'for the next release rather than being fixed on its own.'
+              'for the next release.'
           )"
 
   advisories:

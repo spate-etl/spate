@@ -39,6 +39,10 @@ fn feature_arms_for(pkg: &str) -> Vec<(&'static str, &'static str)> {
 
 /// True when `path` matches a bash `case` glob, where `*` spans `/` as well.
 fn glob(path: &str, pattern: &str) -> bool {
+    debug_assert!(
+        pattern.matches('*').count() <= 1,
+        "one `*` per pattern: a second is treated as a literal and silently never matches"
+    );
     match pattern.split_once('*') {
         None => path == pattern,
         Some((head, tail)) => {
@@ -165,7 +169,6 @@ pub(crate) fn classify(
         out.fuzz = true;
         out.bench = true;
         out.manifests = true;
-        out.xtask = true;
         bench_pkgs = graph.all_bench_pkgs().clone();
         out.container_pkgs = graph.all_container_pkgs().clone();
         out.semver_pkgs = graph.all_semver_pkgs().clone();
@@ -173,7 +176,6 @@ pub(crate) fn classify(
         for path in paths {
             let path = path.as_str();
             out.manifests |= is_manifest(path);
-            out.xtask |= glob(path, "xtask/*");
             match kind_of(path) {
                 Kind::Skip => continue,
                 Kind::SiteOnly => {
@@ -207,6 +209,7 @@ pub(crate) fn classify(
                     "Cargo.toml",
                     "deny.toml",
                     "rust-toolchain.toml",
+                    ".cargo/*",
                     ".config/*",
                     ".github/workflows/*",
                     ".github/actions/*",
@@ -304,8 +307,8 @@ pub(crate) fn classify(
                 })
         })
         .collect();
-    // An empty `include:` is a workflow error rather than a skipped job, so the
-    // boolean and the array have to agree.
+    // An empty `include:` fails the workflow, so the boolean and the array
+    // have to agree.
     if out.bench_shards.is_empty() {
         out.bench = false;
     }
@@ -509,6 +512,41 @@ mod tests {
                 .map(|s| s.package.as_str())
                 .collect::<Vec<_>>(),
             ["spate-kafka"]
+        );
+    }
+
+    #[test]
+    fn every_arm_names_a_feature_its_package_declares() {
+        let g = graph();
+        for pkg in g.all_bench_pkgs() {
+            let declared = g.features_of(pkg).expect("a workspace member");
+            let arms = feature_arms_for(pkg);
+            for (label, feats) in &arms {
+                for feat in feats.split(',').filter(|f| !f.is_empty()) {
+                    assert!(
+                        declared.contains(feat),
+                        "{pkg}'s `{label}` arm names `{feat}`, which it does not declare"
+                    );
+                }
+            }
+            assert_eq!(
+                arms.iter().filter(|(_, f)| f.is_empty()).count(),
+                1,
+                "{pkg} needs exactly one arm building its default features"
+            );
+            let labels: BTreeSet<&str> = arms.iter().map(|(l, _)| *l).collect();
+            assert_eq!(labels.len(), arms.len(), "{pkg} has a duplicate arm label");
+        }
+    }
+
+    #[test]
+    fn at_least_one_crate_is_measured_under_two_arms() {
+        let g = graph();
+        assert!(
+            g.all_bench_pkgs()
+                .iter()
+                .any(|p| feature_arms_for(p).len() > 1),
+            "the second dimension of the counter matrix has no member left"
         );
     }
 

@@ -8,7 +8,6 @@ include versions.mk
 .DEFAULT_GOAL := help
 
 .PHONY: help fmt fmt-check clippy lint check test doctest doc docsrs test-docker \
-        xtask-test \
         test-examples \
         check-features check-examples bench-check bench-gungraun \
         bench-gungraun-check bench-list bench-ab bench-arms bench-compare loom \
@@ -50,9 +49,6 @@ check: ## Type-check the workspace
 	cargo check --workspace --all-features --locked
 
 ##@ Test
-
-xtask-test: ## The CI selector's own tests
-	cargo test -p spate-xtask --locked
 
 test: ## Unit and integration tests, no containers
 	cargo nextest run --workspace --all-features --locked
@@ -169,6 +165,7 @@ shellcheck: ## Lint the shell scripts
 	shellcheck scripts/*.sh
 
 self-test: ## The CI classifiers still match the crate graph
+	cargo test -p spate-xtask --locked
 	./scripts/semver-checks.sh --self-test
 	./scripts/container-image.sh --self-test
 	./scripts/supported-versions.sh --self-test

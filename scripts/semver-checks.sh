@@ -8,7 +8,7 @@
 #   ./scripts/semver-checks.sh --self-test           # the classifiers, alone
 #
 # `--packages` restricts the comparison to a named set, which ci.yml fills from
-# The CI selector's reverse-dependency closure over the crates a pull request
+# the CI selector's reverse-dependency closure over the crates a pull request
 # touches. An empty set is an error rather than every crate: a workflow
 # expression that resolves to nothing must fail the gate, not silently widen it.
 #

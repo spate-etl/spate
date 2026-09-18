@@ -28,6 +28,11 @@ struct MetaPackage {
     #[serde(default)]
     publish: Option<Vec<String>>,
     dependencies: Vec<MetaDependency>,
+    // Read by the test holding the bench arm table to the features each
+    // package declares.
+    #[cfg_attr(not(test), allow(dead_code))]
+    #[serde(default)]
+    features: BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -52,6 +57,10 @@ pub(crate) struct Graph {
     fuzz_pkgs: BTreeSet<String>,
     /// Crates owning at least one gungraun bench.
     bench_pkgs: BTreeSet<String>,
+    /// Each workspace member's declared features, for holding the bench
+    /// arm table to them.
+    #[cfg(test)]
+    features: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl Graph {
@@ -85,7 +94,9 @@ impl Graph {
                         .or_default()
                         .insert(pkg.name.clone());
                 }
-                if dep.kind.is_none() {
+                // Build-dependencies included: generated code reaches a
+                // public signature the same way a normal dependency does.
+                if dep.kind.as_deref().is_none_or(|k| k == "build") {
                     semver_rdeps
                         .entry(dep.name.clone())
                         .or_default()
@@ -112,6 +123,13 @@ impl Graph {
             semver_pkgs,
             fuzz_pkgs: fuzz_dependencies(root, &members)?,
             bench_pkgs: gungraun_bench_owners(root)?,
+            #[cfg(test)]
+            features: meta
+                .packages
+                .iter()
+                .filter(|p| members.contains(p.name.as_str()))
+                .map(|p| (p.name.clone(), p.features.keys().cloned().collect()))
+                .collect(),
         })
     }
 }
@@ -167,29 +185,25 @@ fn fuzz_dependencies(root: &Path, members: &BTreeSet<&str>) -> Result<BTreeSet<S
         .collect())
 }
 
-/// Crates owning a `benches/*_gungraun.rs` target.
+/// Crates owning a gungraun bench, as `scripts/gungraun-benches.sh` discovers
+/// them. That script is the single reader of the bench tree and holds each
+/// target to its `harness = false` stanza, so asking it keeps one declaration.
 fn gungraun_bench_owners(root: &Path) -> Result<BTreeSet<String>, String> {
-    let crates = root.join("crates");
-    let mut owners = BTreeSet::new();
-    for entry in std::fs::read_dir(&crates).map_err(|e| format!("{}: {e}", crates.display()))? {
-        let entry = entry.map_err(|e| format!("{}: {e}", crates.display()))?;
-        let benches = entry.path().join("benches");
-        let Ok(dir) = std::fs::read_dir(&benches) else {
-            continue;
-        };
-        for bench in dir {
-            let bench = bench.map_err(|e| format!("{}: {e}", benches.display()))?;
-            if bench
-                .file_name()
-                .to_string_lossy()
-                .ends_with("_gungraun.rs")
-            {
-                owners.insert(entry.file_name().to_string_lossy().into_owned());
-                break;
-            }
-        }
+    let out = Command::new("./scripts/gungraun-benches.sh")
+        .current_dir(root)
+        .output()
+        .map_err(|e| format!("gungraun-benches.sh: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "gungraun-benches.sh exited {}; the bench selection would be empty",
+            out.status
+        ));
     }
-    Ok(owners)
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| l.split_whitespace().next())
+        .map(str::to_string)
+        .collect())
 }
 
 /// Whether any `.rs` file under a directory contains a needle.
@@ -200,10 +214,12 @@ fn tree_contains(dir: &Path, needle: &str) -> Result<bool, String> {
             if tree_contains(&path, needle)? {
                 return Ok(true);
             }
-        } else if path.extension().is_some_and(|e| e == "rs")
-            && std::fs::read_to_string(&path).is_ok_and(|t| t.contains(needle))
-        {
-            return Ok(true);
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            let text =
+                std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            if text.contains(needle) {
+                return Ok(true);
+            }
         }
     }
     Ok(false)
@@ -214,8 +230,8 @@ impl Graph {
     /// transitive dependents over dev edges too, intersected with the crates
     /// that own container tests.
     ///
-    /// This answers "can it break", not "does it exercise": a change confined
-    /// to one connector still boots the others through the facade.
+    /// The question is reachability: a change confined to one connector still
+    /// boots the others through the facade.
     pub(crate) fn container_suites_for(&self, crate_name: &str) -> BTreeSet<String> {
         closure(&self.container_rdeps, crate_name)
             .intersection(&self.container_pkgs)
@@ -253,6 +269,12 @@ impl Graph {
 
     pub(crate) fn all_semver_pkgs(&self) -> &BTreeSet<String> {
         &self.semver_pkgs
+    }
+
+    /// The features a package declares.
+    #[cfg(test)]
+    pub(crate) fn features_of(&self, pkg: &str) -> Option<&BTreeSet<String>> {
+        self.features.get(pkg)
     }
 
     pub(crate) fn all_bench_pkgs(&self) -> &BTreeSet<String> {

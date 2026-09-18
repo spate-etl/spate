@@ -105,9 +105,9 @@ impl<'a> GitDiff<'a> {
 impl Diff for GitDiff<'_> {
     fn changed_paths(&self) -> Option<Vec<String>> {
         match self.event {
-            // Against the merge base rather than the base branch tip: `base.sha`
-            // is the tip, so a two-dot diff also reports what main gained since
-            // this branch last moved.
+            // Against the merge base. `base.sha` is the base branch tip, so a
+            // two-dot diff also reports what main gained since this branch
+            // last moved.
             Event::PullRequest => {
                 let (base, head) = (env("BASE_SHA"), env("HEAD_SHA"));
                 let merge_base = self.merge_base(&base, &head)?;

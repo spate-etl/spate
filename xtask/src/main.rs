@@ -1,33 +1,7 @@
-//! # Repository automation
+//! Repository automation for this workspace.
 //!
-//! Decides which CI jobs a change needs, and writes the answers to
-//! `$GITHUB_OUTPUT`. The selection is defined once here and runs the same way
-//! locally and in CI.
-//!
-//! ## Example
-//!
-//! ```sh
-//! cargo xtask ci-changes
-//! ```
-//!
-//! ## Mechanism
-//!
-//! `cargo xtask` is an alias that builds this binary and forwards the remaining
-//! arguments to it. Workflows name `--manifest-path xtask/Cargo.toml` instead,
-//! so a step reads as what it runs.
-//!
-//! Filtering is per job. A workflow skipped by `on: paths:` never reports its
-//! checks, and a required check that never reports blocks a pull request
-//! forever, where a skipped *job* reports success.
-//!
-//! ## Discovery
-//!
-//! `cargo xtask help`, and `cargo xtask <command> help` for one command's
-//! arguments.
-//!
-//! ## Reference
-//!
-//! The [`cargo-xtask` convention](https://github.com/matklad/cargo-xtask).
+//! `cargo xtask` is an alias for this binary, declared in `.cargo/config.toml`.
+//! `cargo xtask help` lists the commands.
 
 // A command-line tool writes to stdout and stderr.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
@@ -83,8 +57,8 @@ fn ci_changes(args: &[String]) -> Result<(), String> {
     let lanes = extra_clickhouse_lanes(&root)?;
     let (ev, ctx) = event::from_environment();
 
-    // An argument rather than an environment variable: an exported variable
-    // could turn a real classification into a synthetic one.
+    // An argument, so no exported variable can turn a real classification
+    // into a synthetic one.
     let (ev, diff): (classify::Event, Box<dyn Diff>) = match args.first().map(String::as_str) {
         Some("--classify-paths") => {
             let file = args.get(1).ok_or("--classify-paths needs a file")?;

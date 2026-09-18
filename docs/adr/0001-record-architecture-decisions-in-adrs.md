@@ -89,7 +89,7 @@ change rather than by decision: they answer "what did this commit do" and not
 
 ### Confirmation
 
-`scripts/adr.sh --check`, run by `cargo xtask tidy` and therefore by CI. It
+`cargo xtask tidy adr`, run by `cargo xtask tidy` and therefore by CI. It
 holds the mechanical half: numbers unique and never reused, status values from
 the permitted set, no unfilled `REPLACE-ME` placeholder, and every record
 present in the index. The judgment half, whether a decision warranted a record

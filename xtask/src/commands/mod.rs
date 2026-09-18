@@ -355,11 +355,7 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: Command) -> Outcome {
         }
         Command::Tidy { check, list } => lint::tidy(root, explain, check, list),
         Command::Adr { cmd } => match cmd {
-            AdrCommand::New { slug } => run::run(
-                root,
-                explain,
-                &Step::new("./scripts/adr.sh", ["--new", &slug]),
-            ),
+            AdrCommand::New { slug } => crate::checks::adr::new(root, explain, &slug),
         },
         Command::Changelog { cmd } => {
             let s = match &cmd {

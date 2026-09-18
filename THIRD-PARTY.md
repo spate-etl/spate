@@ -295,7 +295,7 @@ above from what is left. The elected license ids are unaffected either way.
 | `regex-syntax` | 0.8.11 | `MIT` |
 | `reqwest` | 0.13.4 | `MIT` |
 | `rlimit` | 0.11.0 | `MIT` |
-| `rust_decimal` | 1.42.1 | `MIT` |
+| `rust_decimal` | 1.43.0 | `MIT` |
 | `rustc-hash` | 2.1.3 | `MIT` |
 | `rustc_version` | 0.4.1 | `MIT` |
 | `rustix` | 1.1.4 | `MIT` |

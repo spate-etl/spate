@@ -256,12 +256,7 @@ pub(crate) fn classify(
             // the one that never runs them.
             if any_glob(
                 path,
-                &[
-                    "xtask/*",
-                    "scripts/gungraun-collected-region.sh",
-                    ".github/workflows/ci.yml",
-                    ".github/actions/*",
-                ],
+                &["xtask/*", ".github/workflows/ci.yml", ".github/actions/*"],
             ) {
                 out.bench = true;
                 bench_pkgs.extend(graph.all_bench_pkgs().iter().cloned());

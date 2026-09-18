@@ -4,7 +4,7 @@ use std::path::Path;
 
 use clap::Subcommand;
 
-use crate::checks::{gungraun, perf_report};
+use crate::checks::{collected_region, gungraun, perf_report};
 use crate::run::{self, Outcome, Step};
 
 /// Cases carry their own flags, so the driver's `--package` repeats instead of
@@ -125,11 +125,7 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: Bench) -> Outcome {
         ),
         Bench::Counted => {
             gungraun::run(root, explain, gungraun::Mode::Run, &[], "")?;
-            run::run(
-                root,
-                explain,
-                &Step::new("./scripts/gungraun-collected-region.sh", [] as [&str; 0]),
-            )
+            collected_region::check(root, explain, None, None)
         }
         Bench::Gungraun {
             run: pkgs,
@@ -150,14 +146,7 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: Bench) -> Outcome {
             }
         }
         Bench::Region { shard, dir } => {
-            let mut s = Step::new("./scripts/gungraun-collected-region.sh", [] as [&str; 0]);
-            if let Some(l) = &shard {
-                s = s.args(["--shard", l]);
-            }
-            if let Some(d) = &dir {
-                s = s.arg(d);
-            }
-            run::run(root, explain, &s)
+            collected_region::check(root, explain, shard.as_deref(), dir.as_deref())
         }
         Bench::Report {
             regressions_out,

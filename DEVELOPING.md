@@ -213,15 +213,15 @@ Here that was glibc tearing down the corpus the fixture built: one bench reporte
 corpus held 400 documents or 6,400. Moving the loop behind a named callee took it
 to 30,086,540.
 
-`scripts/gungraun-collected-region.sh` enforces it from the callgrind profile
+`cargo xtask bench region` enforces it from the callgrind profile
 rather than from the source: a case must attribute at least 10% of its collected
 instructions to the binary under measurement, and must collect at least 1,000 of
 them, since a region can also be lost by leaving almost nothing rather than by
 leaving the allocator. Observed cases bottom out at 33.35% on the runner
 architecture and 28.67% on arm64. `cargo xtask bench counted`
 runs it after the benches, and CI runs it per shard as a *gate*: the counts are
-advisory, a bench measuring the allocator is not. `cargo xtask tidy collected-region`
-checks the guard itself against captured profiles of both shapes, and needs no
+advisory, a bench measuring the allocator is not. `cargo xtask tidy self-test`
+holds the guard itself to captured profiles of both shapes, and needs no
 valgrind.
 
 Measuring a crate under more than one compiled feature arm *is* a second edit:

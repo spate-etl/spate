@@ -473,6 +473,7 @@ fn the_counted_tier_runs_the_benches_then_the_region_guard() {
     let out = Command::new(env!("CARGO_BIN_EXE_spate-xtask"))
         .args(["bench", "counted", "--explain"])
         .env_remove("GITHUB_ACTIONS")
+        .env_remove("CARGO_TARGET_DIR")
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
@@ -485,11 +486,27 @@ fn the_counted_tier_runs_the_benches_then_the_region_guard() {
             .all(|l| l.starts_with("cargo bench -p ")),
         "{lines:?}"
     );
-    assert_eq!(lines[expected], "./scripts/gungraun-collected-region.sh");
+    assert_eq!(lines[expected], "(reads target/gungraun)");
 
     let shim = Shim::new("counted-fail", 3);
-    let out = Command::new(env!("CARGO_BIN_EXE_spate-xtask"))
-        .args(["bench", "counted"])
+    let counted = shimmed(&shim, &["bench", "counted"]);
+    assert_eq!(counted.status.code(), Some(1), "{}", stderr(&counted));
+    assert_eq!(shim.calls().len(), expected, "{:?}", shim.calls());
+
+    // The same benches with no guard behind them. A failing bench stops the
+    // tier, so both streams carry what the benches alone wrote and nothing
+    // more.
+    let alone = Shim::new("counted-fail-alone", 3);
+    let benches = shimmed(&alone, &["bench", "gungraun", "--run"]);
+    assert_eq!(stdout(&counted), stdout(&benches));
+    assert_eq!(stderr(&counted), stderr(&benches));
+}
+
+/// One run of the task runner with the shim ahead of anything else on `PATH`,
+/// driven by a whole command line.
+fn shimmed(shim: &Shim, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_spate-xtask"))
+        .args(args)
         .env("PATH", {
             let mut dirs = vec![shim.0.clone()];
             dirs.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
@@ -498,11 +515,7 @@ fn the_counted_tier_runs_the_benches_then_the_region_guard() {
         .env("SPATE_CARGO_LOG", shim.log())
         .env_remove("GITHUB_ACTIONS")
         .output()
-        .unwrap();
-    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
-    assert_eq!(shim.calls().len(), expected, "{:?}", shim.calls());
-    let reported = stderr(&out);
-    assert!(!reported.contains("collected-region"), "{reported}");
+        .unwrap()
 }
 
 /// `tidy` reaches the gate, which reports every target it held to its stanza.

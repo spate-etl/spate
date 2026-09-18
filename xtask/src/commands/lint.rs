@@ -22,8 +22,6 @@ pub(crate) enum TidyCheck {
     PerfReport,
     /// Every instruction-count bench declares a harness-free target
     GungraunBenches,
-    /// The degenerate-region guard still recognizes both shapes
-    CollectedRegion,
     /// Every transcluded region a docs page names exists
     Transclusions,
     /// Every supported-versions table matches the servers CI pins
@@ -40,7 +38,6 @@ pub(super) const ALL: &[TidyCheck] = &[
     TidyCheck::Adr,
     TidyCheck::PerfReport,
     TidyCheck::GungraunBenches,
-    TidyCheck::CollectedRegion,
     TidyCheck::Transclusions,
     TidyCheck::SupportedVersions,
     TidyCheck::ReleaseVersion,
@@ -101,9 +98,6 @@ fn one_check(root: &Path, explain: bool, check: TidyCheck) -> Outcome {
         TidyCheck::Adr => crate::checks::adr::check(root, explain),
         TidyCheck::PerfReport => crate::checks::perf_report::self_test(explain),
         TidyCheck::GungraunBenches => crate::checks::gungraun::check(root, explain),
-        TidyCheck::CollectedRegion => {
-            script(root, explain, "gungraun-collected-region.sh", "--self-test")
-        }
         TidyCheck::Transclusions => script(root, explain, "transclude.sh", "--check"),
         TidyCheck::SupportedVersions => crate::checks::supported_versions::check(root, explain),
         TidyCheck::ReleaseVersion => script(root, explain, "release-version.sh", "--check"),

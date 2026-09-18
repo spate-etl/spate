@@ -15,33 +15,25 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use crate::run::{self, Error, Outcome, Step};
+use crate::run::{Error, Outcome};
 
 const HEADING: &str = "## Supported";
 
 /// Resolves a `(service, lane)` pair to the `name:tag` it pins.
 type Resolve<'a> = &'a dyn Fn(&str, &str) -> Result<String, Error>;
 
-/// The invocation that reads one lane's pinned reference.
-fn image_step(service: &str, lane: &str) -> Step<'static> {
-    Step::new("./scripts/container-image.sh", [service, lane])
-}
-
 pub(crate) fn check(root: &Path, explain: bool) -> Outcome {
     let ci_root = root.join("ci");
     let pairs = pairs(&ci_root)?;
     if explain {
-        for (service, _) in &pairs {
-            for lane in lanes(&ci_root, service)? {
-                println!("{}", image_step(service, &lane).display());
-            }
+        for (service, page) in &pairs {
+            println!("(reads ci/{service}/*/Dockerfile against {page})");
         }
         return Ok(());
     }
 
-    let resolve = |service: &str, lane: &str| {
-        run::capture(root, &image_step(service, lane)).map(|s| s.trim().to_owned())
-    };
+    let resolve =
+        |service: &str, lane: &str| crate::checks::container_image::tagged_for(root, service, lane);
     let mut failures = 0;
     for (service, page) in &pairs {
         if let Err(e) = check_page(root, &ci_root, service, page, &resolve) {
@@ -262,7 +254,7 @@ mod tests {
     }
 
     /// The pinned set for lanes tagged as given, resolved the way
-    /// `container-image.sh` resolves one: `name:tag`, digest already stripped.
+    /// the pinned-image resolver does: `name:tag`, digest already stripped.
     fn pinned(lanes: &[(&str, &str)]) -> BTreeSet<String> {
         let names: Vec<String> = lanes.iter().map(|(l, _)| (*l).to_owned()).collect();
         let resolve = |_service: &str, lane: &str| {

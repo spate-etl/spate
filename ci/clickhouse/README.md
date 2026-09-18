@@ -1,7 +1,7 @@
 # ClickHouse
 
 [`../README.md`](../README.md) has the convention these lanes follow: the
-directory layout, `scripts/container-image.sh`, what CI runs, how bumps arrive,
+directory layout, `cargo xtask container-image`, what CI runs, how bumps arrive,
 and what to do when a lane goes red. This file covers what is specific to
 ClickHouse.
 

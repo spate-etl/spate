@@ -69,16 +69,5 @@ pub(crate) fn changes(args: &[String]) -> Result<(), String> {
 /// live in the repository's `ci/clickhouse/`, so adding or repointing one
 /// needs no edit here.
 fn extra_clickhouse_lanes(root: &Path) -> Result<Vec<String>, String> {
-    let out = std::process::Command::new("./scripts/container-image.sh")
-        .args(["--extra-lanes", "clickhouse"])
-        .current_dir(root)
-        .output()
-        .map_err(|e| format!("container-image.sh: {e}"))?;
-    if !out.status.success() {
-        return Err(format!("container-image.sh exited {}", out.status));
-    }
-    Ok(String::from_utf8_lossy(&out.stdout)
-        .split_whitespace()
-        .map(str::to_string)
-        .collect())
+    crate::checks::container_image::extra_lanes(root, "clickhouse").map_err(|e| e.message)
 }

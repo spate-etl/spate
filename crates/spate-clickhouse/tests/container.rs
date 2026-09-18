@@ -57,60 +57,51 @@ const SERVER_PASSWORD: &str = "container-secret";
 const SERVER_CREDENTIALS: &str = "user: default\npassword: container-secret\n";
 
 /// The image pinned by the lane in `SPATE_CLICKHOUSE_LANE`, as `name` and
-/// `tag`, read from `ci/clickhouse/<lane>/Dockerfile`. Falls back to the lane
-/// named in `ci/clickhouse/PRIMARY`.
+/// `tag`, falling back to the lane named in `ci/clickhouse/PRIMARY`.
 ///
-/// The digest beside the tag is dropped: testcontainers builds its reference as
-/// `name:tag` and has no digest form. `scripts/container-image.sh --pull` is
-/// what makes the tag resolve to the pinned bytes, and CI and `cargo xtask
+/// The digest beside the tag is dropped, because testcontainers builds its
+/// reference as `name:tag` and has no digest form. `cargo xtask container-image
+/// --pull` re-tags the pinned bytes under that tag, and CI and `cargo xtask
 /// integration-test` run it first.
-///
-/// Panics on a lane with no manifest, so a typo in the CI matrix fails the job.
 fn lane_image() -> (String, String) {
-    let lane = std::env::var("SPATE_CLICKHOUSE_LANE").unwrap_or_else(|_| primary_lane());
-    image_for_lane(&lane)
-}
-
-/// The lane `ci/clickhouse/PRIMARY` names, which is the one CI runs for the
-/// whole container tier.
-fn primary_lane() -> String {
-    let path = ci_dir().join("PRIMARY");
-    let text =
-        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-    let lane = text.lines().next().unwrap_or_default().trim().to_owned();
-    assert!(!lane.is_empty(), "{} is empty", path.display());
-    lane
-}
-
-/// The directory holding this service's lanes.
-fn ci_dir() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join("ci/clickhouse")
+    split_reference(&resolve(&["clickhouse"]))
 }
 
 /// [`lane_image`] for a named lane, so a test can cover every one of them.
 ///
 /// `cargo test` runs this binary's tests in one process, where `set_var` beside
-/// another thread's `getenv` is undefined behaviour.
+/// another thread's `getenv` is undefined behaviour, so the lane is named on
+/// the command line rather than exported.
 fn image_for_lane(lane: &str) -> (String, String) {
-    let manifest = ci_dir().join(lane).join("Dockerfile");
-    let text = std::fs::read_to_string(&manifest)
-        .unwrap_or_else(|e| panic!("read {}: {e}", manifest.display()));
-    parse_from_line(&text).unwrap_or_else(|| panic!("{} has no FROM line", manifest.display()))
+    split_reference(&resolve(&["clickhouse", lane]))
 }
 
-/// Splits the `name:tag` of a Dockerfile's first `FROM` into its two halves,
-/// discarding any `@sha256:` digest.
-fn parse_from_line(dockerfile: &str) -> Option<(String, String)> {
-    let reference = dockerfile
-        .lines()
-        .find_map(|line| line.strip_prefix("FROM "))?
-        .split_whitespace()
-        .next()?;
-    let tagged = reference.split_once('@').map_or(reference, |(t, _)| t);
-    let (name, tag) = tagged.rsplit_once(':')?;
-    Some((name.to_owned(), tag.to_owned()))
+/// One `cargo xtask container-image` run, so the pin has a single parser and
+/// cannot drift between this crate and `spate`'s examples tier.
+///
+/// Panics on a lane with no manifest, so a typo in the CI matrix fails the job.
+fn resolve(args: &[&str]) -> String {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let out = std::process::Command::new("cargo")
+        .args(["xtask", "container-image"])
+        .args(args)
+        .current_dir(&root)
+        .output()
+        .unwrap_or_else(|e| panic!("run cargo xtask container-image {args:?}: {e}"));
+    assert!(
+        out.status.success(),
+        "cargo xtask container-image {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_owned()
+}
+
+/// Splits a `name:tag` into the two halves testcontainers takes separately.
+fn split_reference(reference: &str) -> (String, String) {
+    let (name, tag) = reference
+        .rsplit_once(':')
+        .unwrap_or_else(|| panic!("no tag in {reference}"));
+    (name.to_owned(), tag.to_owned())
 }
 
 /// Hand readiness to the caller: `.start()` returns once the container is
@@ -396,47 +387,15 @@ async fn single_shard_cluster(admin: &clickhouse::Client) -> String {
         .expect("the stock image ships at least one single-shard cluster")
 }
 
-/// Every shipped lane resolves to a ClickHouse image, and its manifest pins a
-/// digest beside the tag.
+/// Every shipped lane names a ClickHouse server image, and the tagged half the
+/// fixtures pass to testcontainers carries a non-empty tag.
 #[test]
-fn every_lane_resolves_to_a_digest_pinned_clickhouse_image() {
+fn every_lane_resolves_to_a_clickhouse_server_image() {
     for lane in ["lts", "lts-previous", "stable"] {
         let (name, tag) = image_for_lane(lane);
         assert_eq!(name, "clickhouse/clickhouse-server", "lane {lane}");
         assert!(!tag.is_empty(), "lane {lane} has an empty tag");
-
-        let manifest = ci_dir().join(lane).join("Dockerfile");
-        let text = std::fs::read_to_string(&manifest).expect("read manifest");
-        let digest = text
-            .lines()
-            .find_map(|l| l.strip_prefix("FROM "))
-            .and_then(|l| l.split_whitespace().next())
-            .and_then(|r| r.split_once("@sha256:"))
-            .map(|(_, d)| d.to_owned())
-            .unwrap_or_else(|| panic!("lane {lane} is not pinned by digest"));
-        assert_eq!(digest.len(), 64, "lane {lane} digest: {digest}");
-        assert!(
-            digest.bytes().all(|b| b.is_ascii_hexdigit()),
-            "lane {lane} digest is not hex: {digest}"
-        );
     }
-}
-
-/// The `FROM` parse takes the first line only, and drops the digest.
-#[test]
-fn the_from_parse_splits_name_from_tag_and_drops_the_digest() {
-    let parsed = parse_from_line(
-        "# a comment\n\nFROM clickhouse/clickhouse-server:26.8.2.7@sha256:abc AS build\n\
-         FROM ignored/second:1\n",
-    );
-    assert_eq!(
-        parsed,
-        Some((
-            "clickhouse/clickhouse-server".to_owned(),
-            "26.8.2.7".to_owned()
-        ))
-    );
-    assert_eq!(parse_from_line("# no FROM here\n"), None);
 }
 
 // The tests are split by concern into the modules below; the shared fixtures

@@ -10,7 +10,7 @@ use std::path::Path;
 
 use clap::Subcommand;
 
-use crate::run::{self, Outcome, Step};
+use crate::run::{self, Error, Outcome, Step};
 
 pub(crate) use lint::TidyCheck;
 
@@ -149,21 +149,7 @@ pub(crate) enum Command {
     },
 
     /// The digest-pinned container image for a lane
-    ContainerImage {
-        #[arg(long, group = "mode")]
-        r#ref: bool,
-        #[arg(long, group = "mode")]
-        pull: bool,
-        #[arg(long, group = "mode")]
-        pull_all: bool,
-        #[arg(long, value_name = "SERVICE", group = "mode")]
-        extra_lanes: Option<String>,
-        /// The service the mode applies to, and optionally the lane
-        #[arg(value_name = "SERVICE")]
-        service: Option<String>,
-        #[arg(value_name = "LANE")]
-        lane: Option<String>,
-    },
+    ContainerImage(ImageArgs),
 
     /// Apply .github/labels.yml to the repository
     SyncLabels {
@@ -172,6 +158,24 @@ pub(crate) enum Command {
         #[arg(long, value_name = "OWNER/NAME")]
         repo: Option<String>,
     },
+}
+
+/// Which lane to resolve, and what to do with it.
+#[derive(clap::Args)]
+pub(crate) struct ImageArgs {
+    #[arg(long, group = "mode")]
+    r#ref: bool,
+    #[arg(long, group = "mode")]
+    pull: bool,
+    #[arg(long, group = "mode")]
+    pull_all: bool,
+    #[arg(long, value_name = "SERVICE", group = "mode")]
+    extra_lanes: Option<String>,
+    /// The service the mode applies to, and optionally the lane
+    #[arg(value_name = "SERVICE")]
+    service: Option<String>,
+    #[arg(value_name = "LANE")]
+    lane: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -308,12 +312,12 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: Command) -> Outcome {
         Command::Docsrs { toolchain } => {
             crate::checks::docsrs::run(root, explain, toolchain.nightly())
         }
-        Command::IntegrationTest => run::steps(
-            root,
-            explain,
-            &[
-                Step::new("./scripts/container-image.sh", ["--pull-all"]),
-                Step::new(
+        Command::IntegrationTest => {
+            crate::checks::container_image::pull_all(root, explain)?;
+            run::run(
+                root,
+                explain,
+                &Step::new(
                     "cargo",
                     [
                         "nextest",
@@ -327,8 +331,8 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: Command) -> Outcome {
                         "ignored-only",
                     ],
                 ),
-            ],
-        ),
+            )
+        }
         // `--lib` matters: the models are unit tests inside the crate, and a
         // `--test` run builds integration targets the cfg leaves empty.
         Command::Loom => run::run(
@@ -396,7 +400,6 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: Command) -> Outcome {
         }
         Command::CiChanges { classify_paths } => {
             if explain {
-                println!("./scripts/container-image.sh --extra-lanes clickhouse");
                 println!("(classifies the current event in process)");
                 return Ok(());
             }
@@ -443,40 +446,56 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: Command) -> Outcome {
             }
             run::run(root, explain, &s)
         }
-        Command::ContainerImage {
-            r#ref,
-            pull,
-            pull_all,
-            extra_lanes,
-            service,
-            lane,
-        } => {
-            let mut s = Step::new("./scripts/container-image.sh", [] as [&str; 0]);
-            if r#ref {
-                s = s.arg("--ref");
-            }
-            if pull {
-                s = s.arg("--pull");
-            }
-            if pull_all {
-                s = s.arg("--pull-all");
-            }
-            if let Some(svc) = &extra_lanes {
-                s = s.args(["--extra-lanes", svc]);
-            }
-            if let Some(svc) = &service {
-                s = s.arg(svc);
-            }
-            if let Some(l) = &lane {
-                s = s.arg(l);
-            }
-            run::run(root, explain, &s)
-        }
+        Command::ContainerImage(args) => container_image(root, explain, &args),
         Command::SyncLabels { dry_run, repo } => {
             // `DRY_RUN=true` is how the workflow selects it on a pull request.
             let dry_run = dry_run || std::env::var("DRY_RUN").as_deref() == Ok("true");
             crate::checks::sync_labels::sync(root, explain, dry_run, repo.as_deref())
         }
+    }
+}
+
+/// Resolves or pulls a pinned container image.
+///
+/// Each mode takes a fixed number of positional arguments, and clap holds the
+/// modes apart, so only their arity is checked here.
+fn container_image(root: &Path, explain: bool, args: &ImageArgs) -> Outcome {
+    use crate::checks::container_image as image;
+
+    let spare = args.service.is_some() || args.lane.is_some();
+    if args.pull_all {
+        if spare {
+            return Err(Error::msg("usage: cargo xtask container-image --pull-all"));
+        }
+        return image::pull_all(root, explain);
+    }
+    if let Some(svc) = &args.extra_lanes {
+        if spare {
+            return Err(Error::msg(
+                "usage: cargo xtask container-image --extra-lanes <service>",
+            ));
+        }
+        return image::print_extra_lanes(root, explain, svc);
+    }
+    let Some(svc) = &args.service else {
+        return Err(Error::msg(
+            "usage: cargo xtask container-image [--ref|--pull] <service> [lane]",
+        ));
+    };
+    let mode = image_mode(args.r#ref, args.pull);
+    image::run(root, explain, mode, svc, args.lane.as_deref())
+}
+
+/// The mode a pair of flags selects. clap holds them apart, so at most one is
+/// set.
+fn image_mode(r#ref: bool, pull: bool) -> crate::checks::container_image::Mode {
+    use crate::checks::container_image::Mode;
+    if pull {
+        Mode::Pull
+    } else if r#ref {
+        Mode::Reference
+    } else {
+        Mode::Tagged
     }
 }
 
@@ -667,6 +686,50 @@ mod tests {
             }
         }
         assert!(checked > 0, "no workflow invokes this binary");
+    }
+
+    /// Each mode takes a fixed number of positional arguments, and a spare one
+    /// is a usage error rather than a silently ignored word.
+    #[test]
+    fn a_spare_positional_argument_is_a_usage_error() {
+        let root = crate::repo_root().unwrap();
+        let call = |pull_all, extra: Option<&str>, service: Option<&str>, lane: Option<&str>| {
+            let args = super::ImageArgs {
+                r#ref: false,
+                pull: false,
+                pull_all,
+                extra_lanes: extra.map(str::to_owned),
+                service: service.map(str::to_owned),
+                lane: lane.map(str::to_owned),
+            };
+            super::container_image(&root, true, &args)
+                .unwrap_err()
+                .message
+        };
+        assert_eq!(
+            call(true, None, Some("clickhouse"), None),
+            "usage: cargo xtask container-image --pull-all"
+        );
+        assert_eq!(
+            call(false, Some("clickhouse"), Some("lts"), None),
+            "usage: cargo xtask container-image --extra-lanes <service>"
+        );
+        assert_eq!(
+            call(false, None, None, Some("lts")),
+            "usage: cargo xtask container-image [--ref|--pull] <service> [lane]"
+        );
+        assert_eq!(
+            call(false, None, None, None),
+            "usage: cargo xtask container-image [--ref|--pull] <service> [lane]"
+        );
+    }
+
+    #[test]
+    fn each_image_flag_selects_its_own_mode() {
+        use crate::checks::container_image::Mode;
+        assert_eq!(super::image_mode(false, false), Mode::Tagged);
+        assert_eq!(super::image_mode(true, false), Mode::Reference);
+        assert_eq!(super::image_mode(false, true), Mode::Pull);
     }
 
     #[test]

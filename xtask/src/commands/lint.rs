@@ -98,7 +98,6 @@ fn one_check(root: &Path, explain: bool, check: TidyCheck) -> Outcome {
             &[
                 Step::new("cargo", ["test", "-p", "spate-xtask", "--locked"]),
                 Step::new("./scripts/semver-checks.sh", ["--self-test"]),
-                Step::new("./scripts/container-image.sh", ["--self-test"]),
             ],
         ),
         TidyCheck::Changelog => script(root, explain, "changelog.sh", "--check"),

@@ -72,7 +72,7 @@ to.
 The `containers` job runs the whole container tier on each service's primary
 lane. Any other lane resolving to a different image gets a job of its own, one
 runner each. A lane resolving to the primary lane's image is dropped, and
-`scripts/ci-changes.sh` logs which and why, so a service whose `stable` and `lts`
+`cargo xtask ci-changes` logs which and why, so a service whose `stable` and `lts`
 point at one release costs no extra job until they diverge.
 
 ## Bumps
@@ -102,7 +102,7 @@ The bump usually cannot be fixed inside its own pull request, so:
 2. A `ci/<service>/README.md` naming those lines and the reasoning.
 3. A row in the table above.
 4. The suite's harness reads its manifest through the same helper.
-5. `scripts/ci-changes.sh` maps `ci/<service>/*` to that suite and calls
+5. `cargo xtask ci-changes` maps `ci/<service>/*` to that suite and calls
    `--extra-lanes` for its matrix; `ci.yml` gains a job consuming it.
 6. The Dependabot entries.
 

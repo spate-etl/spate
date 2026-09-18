@@ -13,6 +13,7 @@ members = [
     "crates/spate-datagen",
     "crates/spate-s3",
     "crates/spate-test",
+    "xtask",
 ]
 
 [workspace.package]

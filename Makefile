@@ -8,6 +8,7 @@ include versions.mk
 .DEFAULT_GOAL := help
 
 .PHONY: help fmt fmt-check clippy lint check test doctest doc docsrs test-docker \
+        xtask-test \
         test-examples \
         check-features check-examples bench-check bench-gungraun \
         bench-gungraun-check bench-list bench-ab bench-arms bench-compare loom \
@@ -50,6 +51,9 @@ check: ## Type-check the workspace
 
 ##@ Test
 
+xtask-test: ## The CI selector's own tests
+	cargo test -p spate-xtask --locked
+
 test: ## Unit and integration tests, no containers
 	cargo nextest run --workspace --all-features --locked
 
@@ -87,7 +91,7 @@ loom: ## Loom concurrency models (slow)
 check-features: ## Every feature alone, the feature-off combinations, and every target on the default set
 	# `cargo hack --no-dev-deps` rewrites each Cargo.toml as it runs, which a
 	# locked build refuses. Do not add `--locked`; it fails.
-	cargo hack check --workspace --each-feature --no-dev-deps --exclude-features full
+	cargo hack check --workspace --each-feature --no-dev-deps --exclude-features full --exclude spate-xtask
 	# Stripping dev-dependencies drops test and bench targets, so the run above
 	# reaches no test target in any crate. These two build them, on the axes it
 	# covers for the library: features off, then the default set.
@@ -165,7 +169,6 @@ shellcheck: ## Lint the shell scripts
 	shellcheck scripts/*.sh
 
 self-test: ## The CI classifiers still match the crate graph
-	./scripts/ci-changes.sh --self-test
 	./scripts/semver-checks.sh --self-test
 	./scripts/container-image.sh --self-test
 	./scripts/supported-versions.sh --self-test

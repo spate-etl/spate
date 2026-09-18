@@ -163,7 +163,7 @@ make fuzz TARGET=avro_wire_confluent SECS=60
 nightly-only, which is why every target carries `+nightly`.
 
 A pull request touching `fuzz/`, `ci.yml`, `.github/actions/` or
-`scripts/ci-changes.sh` builds every target and runs none of them. The nightly
+`xtask/` builds every target and runs none of them. The nightly
 tier in `scheduled.yml` fuzzes each for five minutes, set by `MAX_TOTAL_TIME`,
 and carries `fuzz/corpus` between nights in a cache entry. A crash uploads the
 input as the `fuzz-artifacts` artifact and opens an issue titled
@@ -192,7 +192,7 @@ the benches build, with `make bench-gungraun-check`.
 Adding one means naming the file `benches/<something>_gungraun.rs` and declaring
 it in the crate's `Cargo.toml` as a `[[bench]]` with `harness = false`.
 Nothing else registers it. `scripts/gungraun-benches.sh` discovers it by that
-name, and the Makefile target, both CI legs and `scripts/ci-changes.sh` all read
+name, and the Makefile target, both CI legs and `xtask/` all read
 from that one place, so there is no list to add yourself to. Running that script
 bare prints what would run. Without the `harness = false` stanza, cargo
 auto-discovers the file under the default libtest harness, so the bench compiles
@@ -225,7 +225,7 @@ valgrind.
 
 Measuring a crate under more than one compiled feature arm *is* a second edit:
 CI runs one job per (package, arm), and the arm table is `feature_arms_for` in
-`scripts/ci-changes.sh`. Add an arm when a feature swaps an implementation the
+`xtask/src/classify.rs`. Add an arm when a feature swaps an implementation the
 benches execute, not for every feature key; each arm is another pair of builds
 and valgrind runs. `make self-test` checks the table against `cargo metadata`.
 

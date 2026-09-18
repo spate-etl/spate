@@ -36,7 +36,7 @@ jobs:
   changes:
     name: Detect changes
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 12
     outputs:
       rust: ${{ steps.classify.outputs.rust }}
       site: ${{ steps.classify.outputs.site }}
@@ -54,12 +54,16 @@ jobs:
       # beyond the `lts` one `containers` runs. Empty when the two lanes
       # resolve to the same image, which they do until `stable` moves ahead.
       clickhouse-lanes: ${{ steps.classify.outputs.clickhouse-lanes }}
+      xtask: ${{ steps.classify.outputs.xtask }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Both diff endpoints must be present as objects.
           fetch-depth: 0
           persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          shared-key: xtask
       - id: classify
         # Event fields go through `env:`, never interpolated into a `run:` block:
         # interpolation splices attacker-controlled text into generated shell.
@@ -78,7 +82,7 @@ jobs:
           # outside a merge group, where the arm reading them never runs.
           MERGE_BASE_SHA: ${{ github.event.merge_group.base_sha }}
           MERGE_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
-        run: ./scripts/ci-changes.sh
+        run: cargo run -q -p spate-xtask --locked -- ci-changes
 
   # Tier 1: cheap, unconditional, gates the expensive tier. No job-level `if:`
   # here: a skipped job skips everything that `needs:` it. The step carries it.
@@ -204,7 +208,7 @@ jobs:
   # fragment for that second break is what goes missing. This is the trade the
   # published baseline carries and it is taken deliberately.
   #
-  # The set comes from ci-changes.sh's reverse-dependency closure over the
+  # The set comes from the CI selector's reverse-dependency closure over the
   # changed crates, which is why a change confined to one connector no longer
   # rebuilds every crate's rustdoc.
   semver:
@@ -382,7 +386,7 @@ jobs:
       - name: Resolve every direct dependency to its declared floor
         run: cargo generate-lockfile -Z direct-minimal-versions
       # `--all-targets` holds dev-dependency floors to the same standard.
-      - run: cargo check --workspace --all-targets --all-features --locked
+      - run: cargo check --workspace --all-targets --all-features --locked --exclude spate-xtask
 
   test:
     name: Test and coverage
@@ -876,6 +880,24 @@ jobs:
           shared-key: loom
       - run: make loom
 
+  xtask-test:
+    name: Test the CI selector
+    runs-on: ubuntu-latest
+    needs: [changes, lint, workflows]
+    # Outside a pull request the tests run whatever the paths say: the selector
+    # classifies itself, and an ignore-list arm that stopped matching would
+    # otherwise skip the only job that would object.
+    if: needs.changes.outputs.xtask == 'true' || github.event_name != 'pull_request'
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          shared-key: xtask
+      - run: make xtask-test
+
   msrv:
     name: Check (MSRV)
     runs-on: ubuntu-latest
@@ -1133,7 +1155,7 @@ jobs:
     # was cancelled, so a run superseded by a newer one for the same commit
     # leaves no lingering `failure` for branch protection to keep blocking on.
     if: ${{ !cancelled() }}
-    needs: [changes, lint, workflows, deny, changelog, semver, semver-baseline, publish-dry-run, minimal-versions, test, doctests, docsrs, features, msrv, containers, clickhouse-versions, site, loom, alloc-assertions, fuzz, perf-warm, perf-counters, perf-report]
+    needs: [changes, lint, workflows, deny, changelog, semver, semver-baseline, publish-dry-run, minimal-versions, test, doctests, docsrs, features, msrv, xtask-test, containers, clickhouse-versions, site, loom, alloc-assertions, fuzz, perf-warm, perf-counters, perf-report]
     steps:
       - name: Evaluate dependency results
         env:

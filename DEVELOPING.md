@@ -192,9 +192,9 @@ the benches build, with `cargo xtask bench gungraun --check`.
 
 Adding one means naming the file `benches/<something>_gungraun.rs` and declaring
 it in the crate's `Cargo.toml` as a `[[bench]]` with `harness = false`.
-Nothing else registers it. `scripts/gungraun-benches.sh` discovers it by that
+Nothing else registers it. `cargo xtask bench gungraun` discovers it by that
 name, and the bench commands, both CI legs and the CI selector all read from
-that one place, so there is no list to add yourself to. Running that script
+that one place, so there is no list to add yourself to. Running that command
 bare prints what would run. Without the `harness = false` stanza, cargo
 auto-discovers the file under the default libtest harness, so the bench compiles
 cleanly and fails at run time complaining about arguments.

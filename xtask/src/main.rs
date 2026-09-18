@@ -47,7 +47,9 @@ fn main() -> ExitCode {
     match commands::dispatch(&root, cli.explain, cli.command) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("{}xtask: {}", annotation(), e.message);
+            if !e.message.is_empty() {
+                eprintln!("{}xtask: {}", annotation(), e.message);
+            }
             let code = e.code.unwrap_or(1);
             ExitCode::from(u8::try_from(code).unwrap_or(1))
         }

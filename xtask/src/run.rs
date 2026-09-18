@@ -20,6 +20,15 @@ impl Error {
             code: None,
         }
     }
+
+    /// An exit status a caller has already accounted for on stderr, reported
+    /// with no further diagnostic.
+    pub(crate) fn status(code: i32) -> Self {
+        Self {
+            message: String::new(),
+            code: Some(code),
+        }
+    }
 }
 
 impl From<String> for Error {
@@ -175,6 +184,23 @@ pub(crate) fn capture(root: &Path, step: &Step<'_>) -> Result<String, Error> {
     }
     String::from_utf8(out.stdout)
         .map_err(|e| Error::msg(format!("{}: stdout is not UTF-8: {e}", step.program)))
+}
+
+/// Runs one step with its stdio inherited and its stdin closed, reporting
+/// whether it succeeded. A child reading stdin would otherwise consume what the
+/// caller's own loop is reading.
+pub(crate) fn succeeded(root: &Path, step: &Step<'_>) -> Result<bool, Error> {
+    let dir = step
+        .dir
+        .map_or_else(|| root.to_path_buf(), |d| root.join(d));
+    let status = Command::new(program_path(root, step.program))
+        .args(step.args.iter().map(OsStr::new))
+        .envs(step.env.iter().map(|(k, v)| (*k, v.as_str())))
+        .current_dir(&dir)
+        .stdin(std::process::Stdio::null())
+        .status()
+        .map_err(|e| Error::msg(format!("{}: {e}", step.program)))?;
+    Ok(status.success())
 }
 
 /// Runs one step with its stdout discarded and its stderr inherited.

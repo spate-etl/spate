@@ -686,9 +686,9 @@ jobs:
       - name: Put gungraun-runner on PATH
         run: echo "$HOME/.gungraun/bin" >>"$GITHUB_PATH"
 
-      # This leg runs the merge base's copy of `scripts/gungraun-benches.sh`, the
-      # head leg the head's. A non-default arm probes first: a base predating the
-      # feature axis measures the default arm and the delta is arm mismatch.
+      # This leg runs the merge base's own copy of the bench runner, the head leg
+      # the head's. A non-default arm probes first: a base predating the feature
+      # axis measures the default arm and the delta is arm mismatch.
       - name: Measure the merge base
         id: base
         if: github.event_name == 'pull_request'
@@ -705,19 +705,17 @@ jobs:
           # A restored cargo cache's counter output would become the comparison.
           rm -rf target/gungraun
           measured=false
-          # The merge base may predate the runner or postdate the script, so
-          # whichever it carries is used. Preferring the script keeps a merge
-          # base that has both on the path it was verified against.
+          # A merge base predating the command has no runner to measure with.
+          # `--help` answers 0 where the command exists, which separates it from
+          # the usage exit the argument probe below reads.
           runner=()
-          if [[ -x scripts/gungraun-benches.sh ]]; then
-            runner=(./scripts/gungraun-benches.sh)
-          elif cargo xtask bench gungraun --help >/dev/null 2>&1; then
+          if cargo xtask bench gungraun --help >/dev/null 2>&1; then
             runner=(cargo xtask bench gungraun)
           fi
           if [[ "${#runner[@]}" -eq 0 ]]; then
-            # Names the cause: a dropped `+x` would disable every baseline while
-            # CI stayed green.
-            echo "no baseline: the merge base carries neither an executable scripts/gungraun-benches.sh nor a bench gungraun command"
+            # Names the cause: a rename would disable every baseline while CI
+            # stayed green.
+            echo "no baseline: the merge base carries no bench gungraun command"
           else
             args=()
             probe=2

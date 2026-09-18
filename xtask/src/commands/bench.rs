@@ -4,6 +4,7 @@ use std::path::Path;
 
 use clap::Subcommand;
 
+use crate::checks::gungraun;
 use crate::run::{self, Outcome, Step};
 
 /// Cases carry their own flags, so the driver's `--package` repeats instead of
@@ -122,34 +123,31 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: Bench) -> Outcome {
                 ],
             ),
         ),
-        Bench::Counted => run::steps(
-            root,
-            explain,
-            &[
-                Step::new("./scripts/gungraun-benches.sh", ["--run"]),
-                Step::new("./scripts/gungraun-collected-region.sh", [] as [&str; 0]),
-            ],
-        ),
+        Bench::Counted => {
+            gungraun::run(root, explain, gungraun::Mode::Run, &[], "")?;
+            run::run(
+                root,
+                explain,
+                &Step::new("./scripts/gungraun-collected-region.sh", [] as [&str; 0]),
+            )
+        }
         Bench::Gungraun {
             run: pkgs,
             check,
             features,
             pkgs_json,
         } => {
-            let mut s = Step::new("./scripts/gungraun-benches.sh", [] as [&str; 0]);
-            if let Some(f) = &features {
-                s = s.args(["--features", f]);
-            }
+            let features = features.unwrap_or_default();
             if pkgs_json {
-                s = s.arg("--pkgs-json");
+                return gungraun::print_pkgs_json(root, explain);
             }
             if let Some(pkgs) = &check {
-                s = s.arg("--check").args(pkgs);
+                return gungraun::run(root, explain, gungraun::Mode::Check, pkgs, &features);
             }
-            if let Some(pkgs) = &pkgs {
-                s = s.arg("--run").args(pkgs);
+            match &pkgs {
+                Some(pkgs) => gungraun::run(root, explain, gungraun::Mode::Run, pkgs, &features),
+                None => gungraun::print_listing(root, explain),
             }
-            run::run(root, explain, &s)
         }
         Bench::Region { shard, dir } => {
             let mut s = Step::new("./scripts/gungraun-collected-region.sh", [] as [&str; 0]);

@@ -47,8 +47,10 @@ Traps here:
   exception is `cargo hack --no-dev-deps`, which rewrites each `Cargo.toml` as
   it runs and fails outright with the flag.
 - **`actionlint` runs locally only.** After touching a workflow, run
-  `actionlint .github/workflows/*.yml` and `cargo xtask tidy zizmor` yourself; CI will not
-  catch a bad edit before you push.
+  `actionlint .github/workflows/*.yml`; that is the only time it runs at all.
+- **A local `zizmor` run is offline.** CI runs it through `cargo xtask tidy`
+  with `GH_TOKEN` set; without a token `cargo xtask tidy zizmor` skips the API
+  audits and can report no findings where the `workflows` job fails.
 
 ## Testing
 

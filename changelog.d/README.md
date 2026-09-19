@@ -123,7 +123,7 @@ indentation are applied when the file is assembled.
 
 ## What happens at release
 
-`./scripts/changelog.sh --build <version>` groups the fragments by type under a
+`cargo xtask changelog build <version>` groups the fragments by type under a
 new `## [<version>] — <date>` heading, appends each entry's pull request link,
 adds a `### Contributors` section from the commit range, rewrites the link
 references, and deletes the fragments it consumed.

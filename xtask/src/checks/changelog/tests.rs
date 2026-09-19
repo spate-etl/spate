@@ -860,3 +860,1002 @@ fn a_fragment_on_disk_has_to_say_something() {
         "changelog.d/absent.fixed.md"
     ));
 }
+
+// ---------------------------------------------------------------------------
+// The release assembly.
+// ---------------------------------------------------------------------------
+
+/// A changelog with an empty Unreleased section, one prior release and the link
+/// foot the rewrite reads.
+const SKELETON: &str = "\
+# Changelog
+
+## [Unreleased]
+
+## [0.2.0] — 2026-08-22
+
+### Fixed
+
+- An older thing. ([#7])
+
+[#7]: https://github.com/spate-etl/spate/pull/7
+
+[Unreleased]: https://github.com/spate-etl/spate/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/spate-etl/spate/releases/tag/v0.2.0
+";
+
+/// A lookup that answers nothing, so an entry with no reference of its own
+/// takes the commit link.
+fn unanswered(_: &std::path::Path, _: &str) -> Result<Option<String>, Error> {
+    Ok(None)
+}
+
+/// The message of a refusal, where success is a failure of the test.
+#[track_caller]
+fn refused<T>(outcome: Result<T, Error>) -> String {
+    match outcome {
+        Ok(_) => panic!("this was expected to be refused"),
+        Err(e) => e.message,
+    }
+}
+
+/// A record ends at a newline, and a final newline closes the last record
+/// rather than opening an empty one.
+#[test]
+fn a_final_newline_closes_the_last_record() {
+    assert_eq!(records(""), Vec::<&str>::new());
+    assert_eq!(records("\n"), vec![""]);
+    assert_eq!(records("a\n"), vec!["a"]);
+    assert_eq!(records("a"), vec!["a"]);
+    assert_eq!(records("a\n\n"), vec!["a", ""]);
+    assert_eq!(records("a\nb"), vec!["a", "b"]);
+}
+
+/// The fence marker is either kind, indented by no more than three spaces, and
+/// a line that merely carries one is not a fence.
+#[test]
+fn a_fence_is_either_marker_under_four_spaces_of_indent() {
+    for line in ["```", "~~~", "   ```", "  ~~~rust", "```markdown"] {
+        assert!(is_fence(line), "{line}");
+    }
+    for line in ["    ```", "     ~~~", "a ```", "``", "~~", "- ```"] {
+        assert!(!is_fence(line), "{line}");
+    }
+}
+
+/// Only opening blank lines are dropped, and a line carrying a space carries
+/// something.
+#[test]
+fn the_opening_blank_lines_are_dropped() {
+    assert_eq!(opening_blanks_dropped("\n\na\nb\n\n"), "a\nb");
+    assert_eq!(opening_blanks_dropped("\n \na\n"), " \na");
+    assert_eq!(opening_blanks_dropped("\n\n"), "");
+    assert_eq!(opening_blanks_dropped(""), "");
+}
+
+/// The section runs from its heading to the next one, and the heading has to be
+/// followed by something, so a bare `## [x]` is not one.
+#[test]
+fn the_section_runs_to_the_next_heading() {
+    let text = "## [Unreleased]\n\n## [0.3.0] — d\n\n### Added\n\n- A thing.\n\n## [0.2.0] — d\n\n- Older.\n";
+    assert_eq!(
+        scan(text, "## [0.3.0] "),
+        Ok("\n### Added\n\n- A thing.\n\n".to_owned())
+    );
+    assert_eq!(scan(text, "## [0.9.0] "), Err(Scan::Missing));
+    assert_eq!(
+        scan("## [0.3.0]\n\n- A thing.\n", "## [0.3.0] "),
+        Err(Scan::Missing)
+    );
+}
+
+/// The link foot ends the last section, so it never leaks into the notes.
+#[test]
+fn the_link_foot_ends_the_last_section() {
+    let body = section_notes(SKELETON, "0.2.0", "CHANGELOG.md").unwrap();
+    assert_eq!(
+        body,
+        "### Fixed\n\n- An older thing. ([#7])\n\n[#7]: https://github.com/spate-etl/spate/pull/7\n"
+    );
+}
+
+/// A boundary quoted inside a fence is content, for either fence marker.
+#[test]
+fn a_boundary_inside_a_fence_is_content() {
+    let text = "\
+## [0.3.0] — d
+
+### Changed
+
+- **The heading writer** — emits this shape:
+
+  ```markdown
+## [Unreleased]
+[Unreleased]: quoted-inside-a-fence
+  ```
+
+  and keeps going.
+
+## [0.2.0] — d
+";
+    assert_eq!(
+        scan(text, "## [0.3.0] ").unwrap(),
+        "\n### Changed\n\n- **The heading writer** — emits this shape:\n\n  ```markdown\n## [Unreleased]\n[Unreleased]: quoted-inside-a-fence\n  ```\n\n  and keeps going.\n\n"
+    );
+    let tilde =
+        "## [1.1.0] — d\n\n~~~text\n## [Unreleased]\n~~~\n\n- A thing.\n\n[Unreleased]: x\n";
+    assert_eq!(
+        scan(tilde, "## [1.1.0] ").unwrap(),
+        "\n~~~text\n## [Unreleased]\n~~~\n\n- A thing.\n\n"
+    );
+}
+
+/// A second heading for one version is the part-finished assembly, and is
+/// refused rather than spliced.
+#[test]
+fn two_headings_for_one_version_are_refused() {
+    let text = "## [0.5.0] — a\n\n- One body.\n\n## [0.5.0] — b\n\n- Another body.\n";
+    assert_eq!(scan(text, "## [0.5.0] "), Err(Scan::Duplicate));
+    assert_eq!(
+        refused(section_notes(text, "0.5.0", "CHANGELOG.md")),
+        "two '## [0.5.0]' headings in CHANGELOG.md. A part-finished assembly has to be\n  \
+         undone before its section can be read."
+    );
+}
+
+/// A version the file does not carry is a refusal naming what writes the
+/// section, and an empty section is a refusal of its own.
+#[test]
+fn a_missing_and_an_empty_section_are_distinct_refusals() {
+    assert_eq!(
+        refused(section_notes(SKELETON, "9.9.9", "CHANGELOG.md")),
+        "no '## [9.9.9]' section in CHANGELOG.md. The notes read what the assembly wrote,\n  \
+         so the release is assembled first."
+    );
+    assert_eq!(
+        refused(section_notes(
+            "## [0.7.0] — d\n\n\n## [0.6.0] — d\n\n- A thing.\n",
+            "0.7.0",
+            "CHANGELOG.md"
+        )),
+        "the '## [0.7.0]' section in CHANGELOG.md is empty"
+    );
+    assert_eq!(
+        refused(section_notes(
+            "## [Unreleased]\n\n## [0.9.0]\n\n- A thing.\n\n[Unreleased]: x\n",
+            "0.9.0",
+            "CHANGELOG.md"
+        )),
+        "no '## [0.9.0]' section in CHANGELOG.md. The notes read what the assembly wrote,\n  \
+         so the release is assembled first."
+    );
+}
+
+/// Every reference the slice uses has to be defined inside it, or the release
+/// body renders the literal text. The first one missing is the one named.
+#[test]
+fn a_reference_with_no_definition_in_the_slice_is_refused() {
+    assert_eq!(
+        refused(section_notes(
+            "## [0.6.0] — d\n\n- A thing. ([#9]) and ([#10])\n",
+            "0.6.0",
+            "CHANGELOG.md"
+        )),
+        "the '## [0.6.0]' section uses [#10] with no definition in the section"
+    );
+    let defined = "## [0.6.0] — d\n\n- A thing. ([#9])\n\n[#9]: https://example.invalid/9\n";
+    assert!(section_notes(defined, "0.6.0", "CHANGELOG.md").is_ok());
+}
+
+/// The slice keeps its own blank lines and drops the opening ones.
+#[test]
+fn the_slice_drops_its_opening_blank_lines() {
+    let text = "## [1.0.0] — d\n\n\n\n### Added\n\n- A thing.\n\n## [0.9.0] — d\n";
+    assert_eq!(
+        section_notes(text, "1.0.0", "CHANGELOG.md").unwrap(),
+        "### Added\n\n- A thing.\n"
+    );
+}
+
+/// A fragment's prose loses the whitespace at the end of every line and the
+/// blank lines at either end.
+#[test]
+fn a_fragment_body_loses_its_edges() {
+    assert_eq!(
+        entry_body("\n\n  a thing   \n\nand more\t\n\n\n"),
+        "  a thing\n\nand more"
+    );
+    assert_eq!(entry_body("one line, no newline"), "one line, no newline");
+    assert_eq!(entry_body("   \n\t\n"), "");
+}
+
+/// The bullet goes on the first line and two spaces of continuation on every
+/// line carrying anything. Blank lines stay blank.
+#[test]
+fn an_entry_is_indented_as_one_list_item() {
+    assert_eq!(bullet("a\n\nb"), "- a\n\n  b\n");
+    assert_eq!(bullet("a"), "- a\n");
+}
+
+/// The six render under the heading Keep a Changelog spells.
+#[test]
+fn a_type_renders_in_sentence_case() {
+    let headings: Vec<String> = TYPES.iter().map(|kind| sentence_case(kind)).collect();
+    assert_eq!(
+        headings,
+        [
+            "Added",
+            "Changed",
+            "Deprecated",
+            "Removed",
+            "Fixed",
+            "Security"
+        ]
+    );
+    assert_eq!(sentence_case(""), "");
+}
+
+/// A definition points at the pull request of that number.
+#[test]
+fn a_definition_points_at_the_pull_request() {
+    assert_eq!(
+        link_line("31"),
+        "[#31]: https://github.com/spate-etl/spate/pull/31"
+    );
+}
+
+/// The definitions come out once each, ordered by the number rather than by the
+/// text, and two spellings of one number stay two definitions.
+#[test]
+fn the_definitions_are_deduplicated_then_ordered_by_number() {
+    let links = vec![
+        link_line("100"),
+        link_line("9"),
+        link_line("10"),
+        link_line("9"),
+        link_line("031"),
+        link_line("31"),
+    ];
+    assert_eq!(
+        sorted_links(links),
+        vec![
+            link_line("9"),
+            link_line("10"),
+            link_line("031"),
+            link_line("31"),
+            link_line("100"),
+        ]
+    );
+}
+
+/// The key is the number after the first `#`, and text carrying none sorts as
+/// zero.
+#[test]
+fn the_key_is_the_number_after_the_first_hash() {
+    assert_eq!(numeric_key("[#31]: https://example.invalid/pull/31"), 31);
+    assert_eq!(numeric_key("[#031]: x"), 31);
+    assert_eq!(numeric_key("[#]: x"), 0);
+    assert_eq!(numeric_key("no hash here"), 0);
+}
+
+/// Every `[#N]` in the prose is read, in order, and a malformed one is not.
+#[test]
+fn every_reference_in_the_prose_is_read() {
+    assert_eq!(
+        issue_references("cites [#12] then [#3] then [#12] again"),
+        vec!["12", "3", "12"]
+    );
+    assert_eq!(issue_references("[#]"), Vec::<&str>::new());
+    assert_eq!(issue_references("[##12]"), Vec::<&str>::new());
+    assert_eq!(issue_references("[#12a]"), Vec::<&str>::new());
+    assert_eq!(issue_references("[#12"), Vec::<&str>::new());
+    assert_eq!(issue_references("[#1][#2]"), vec!["1", "2"]);
+}
+
+/// An entry's own reference is the last thing in it. A citation anywhere else
+/// belongs to another pull request and does not stand in for the derived one.
+#[test]
+fn only_a_trailing_reference_stands_in_for_the_derived_one() {
+    assert!(ends_with_reference("A thing. ([#31])"));
+    assert!(ends_with_reference("A thing.\n([#31])  "));
+    assert!(!ends_with_reference("A thing citing ([#12]) and going on."));
+    assert!(!ends_with_reference("A thing. ([#31]) and more"));
+    assert!(!ends_with_reference("A thing. ([#])"));
+    assert!(!ends_with_reference("A thing.\n([#31])\nand more"));
+}
+
+/// The number GitHub appends to a squash subject, over the table the three
+/// shapes come from. All of them are real history.
+#[test]
+fn the_subject_parser_agrees_with_the_table() {
+    const TABLE: &[(&str, Option<&str>)] = &[
+        // A squash subject, which GitHub numbers.
+        (
+            "fix(spate-core): enforce max_pending_batches at the poll boundary (#200)",
+            Some("200"),
+        ),
+        (
+            "feat(spate-avro,bench): decode datums into typed records (#31)",
+            Some("31"),
+        ),
+        // A rebase merge appends nothing.
+        (
+            "fix(spate-kafka): count logical coordinator links toward broker_up",
+            None,
+        ),
+        (
+            "refactor(examples)!: name the JSON example for what it teaches",
+            None,
+        ),
+        ("chore: release v0.2.0", None),
+        // A citation mid-subject is not the merge's own number.
+        (
+            "docs(workspace): supersede (#12) with a record of its own",
+            None,
+        ),
+        (
+            "fix(spate-s3): restore what (#42) changed, and pin the ETag",
+            None,
+        ),
+        // The last one wins when the subject ends in two.
+        ("fix(spate-core): revert (#41) (#57)", Some("57")),
+        // Neither shape is a number.
+        ("fix: a thing (#)", None),
+        ("fix: a thing (##12)", None),
+    ];
+    for (subject, want) in TABLE {
+        assert_eq!(pr_from_subject(subject), *want, "{subject}");
+    }
+}
+
+/// The digit run at the end is maximal, and text ending in none has none.
+#[test]
+fn the_trailing_digit_run_is_maximal() {
+    assert_eq!(trailing_digits("abc123"), 3);
+    assert_eq!(trailing_digits("123"), 3);
+    assert_eq!(trailing_digits("abc"), 0);
+    assert_eq!(trailing_digits(""), 0);
+}
+
+/// An answer is used only where the call succeeded and it is a number. A commit
+/// the API does not know takes the commit link; any other failure aborts.
+#[test]
+fn the_lookup_answer_decides_between_a_number_and_a_refusal() {
+    let sha = "0123456789abcdef0123456789abcdef01234567";
+    assert_eq!(
+        classify(true, "57\n", "", sha).unwrap(),
+        Some("57".to_owned())
+    );
+    assert_eq!(classify(true, "", "", sha).unwrap(), None);
+    assert_eq!(
+        classify(false, "{\"status\": \"422\"}", "", sha).unwrap(),
+        None
+    );
+    assert_eq!(
+        classify(false, "{\"status\":\"422\"}", "", sha).unwrap(),
+        None
+    );
+    assert_eq!(
+        classify(false, "No commit found for SHA", "", sha).unwrap(),
+        None
+    );
+    assert_eq!(
+        refused(classify(true, "gh: not a number\n", "", sha)),
+        "the pull-request lookup for 0123456789ab answered with something that is\n  \
+         not a number: gh: not a number"
+    );
+    assert_eq!(
+        refused(classify(
+            false,
+            "{\"status\": \"401\"}",
+            "bad credentials\n",
+            sha
+        )),
+        "the pull-request lookup for 0123456789ab failed rather than answering:\n  \
+         {\"status\": \"401\"} bad credentials\n  \
+         Fix the token or the network and assemble again; falling back to a\n  \
+         commit link here would look identical to a commit that has no pull request."
+    );
+}
+
+/// The lookup asks for the merged pull requests of one commit in this
+/// repository.
+#[test]
+fn the_lookup_asks_for_one_commit_s_pull_requests() {
+    assert_eq!(
+        pulls_query("abc123"),
+        [
+            "api".to_owned(),
+            "repos/spate-etl/spate/commits/abc123/pulls".to_owned(),
+            "--jq".to_owned(),
+            "map(select(.merged_at)) | first | .number // empty".to_owned(),
+        ]
+    );
+}
+
+/// The count comes off a shortlog line, and a line carrying none is left whole.
+#[test]
+fn the_count_comes_off_a_shortlog_line() {
+    assert_eq!(shortlog_name("    12\tMarcus Kainth"), "Marcus Kainth");
+    assert_eq!(shortlog_name("1\tt"), "t");
+    assert_eq!(shortlog_name("  no count here"), "  no count here");
+    assert_eq!(shortlog_name(""), "");
+}
+
+/// The Unreleased section holds nothing until the next heading, where a line of
+/// whitespace is nothing and a fence is not modelled.
+#[test]
+fn the_unreleased_section_has_to_be_empty() {
+    assert!(unreleased_is_empty(SKELETON));
+    assert!(unreleased_is_empty(
+        "## [Unreleased]\n\n   \n\n## [0.2.0] — d\n- A thing.\n"
+    ));
+    assert!(unreleased_is_empty(
+        "# Changelog\n\n- Not under the heading.\n"
+    ));
+    assert!(!unreleased_is_empty(
+        "## [Unreleased]\n\n- Written by hand.\n\n## [0.2.0] — d\n"
+    ));
+    assert!(!unreleased_is_empty(
+        "## [Unreleased]\n\n- Written by hand.\n"
+    ));
+}
+
+/// The new section goes below the Unreleased heading and the two link
+/// references at the foot are rewritten, every one of them.
+#[test]
+fn the_section_and_the_links_are_written_together() {
+    let written = insert(SKELETON, "0.3.0", "2026-09-19", "### Fixed\n\n- A thing.\n").unwrap();
+    assert_eq!(
+        written,
+        "\
+# Changelog
+
+## [Unreleased]
+
+## [0.3.0] — 2026-09-19
+
+### Fixed
+
+- A thing.
+
+## [0.2.0] — 2026-08-22
+
+### Fixed
+
+- An older thing. ([#7])
+
+[#7]: https://github.com/spate-etl/spate/pull/7
+
+[Unreleased]: https://github.com/spate-etl/spate/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/spate-etl/spate/releases/tag/v0.3.0
+[0.2.0]: https://github.com/spate-etl/spate/releases/tag/v0.2.0
+"
+    );
+}
+
+/// The heading and the link reference are separate failures, so a changelog
+/// missing one says which.
+#[test]
+fn the_heading_and_the_link_reference_fail_apart() {
+    assert_eq!(
+        refused(insert(
+            "# Changelog\n\n[Unreleased]: x\n",
+            "0.3.0",
+            "d",
+            "b\n"
+        )),
+        "the Unreleased heading vanished mid-write"
+    );
+    assert_eq!(
+        refused(insert(
+            "# Changelog\n\n## [Unreleased]\n",
+            "0.3.0",
+            "d",
+            "b\n"
+        )),
+        "no [Unreleased]: link reference to rewrite"
+    );
+}
+
+/// What a finished assembly reports.
+#[test]
+fn the_summary_names_the_section_it_wrote() {
+    assert_eq!(
+        summary("0.3.0", "2026-09-19"),
+        "changelog: wrote ## [0.3.0] — 2026-09-19 into CHANGELOG.md and consumed the fragments.\n  \
+         Read what it wrote before committing: the assembly is mechanical, the release note is not.\n"
+    );
+}
+
+/// A throwaway repository holding a changelog and its fragments.
+struct Release(Repo);
+
+impl Release {
+    fn new(name: &str) -> Self {
+        let release = Self(Repo::new(name));
+        release.0.write(CHANGELOG, SKELETON);
+        release
+    }
+
+    fn path(&self) -> &std::path::Path {
+        self.0.path()
+    }
+
+    /// Writes a fragment and stages it, so the tracked check passes.
+    fn fragment(&self, name: &str, body: &str) {
+        self.0.write(&format!("{FRAGMENTS}/{name}"), body);
+        self.0.git(&["add", "-f", &format!("{FRAGMENTS}/{name}")]);
+    }
+
+    fn changelog(&self) -> String {
+        std::fs::read_to_string(self.path().join(CHANGELOG)).unwrap()
+    }
+
+    /// The fragment directory's contents, sorted.
+    fn listing(&self) -> Vec<String> {
+        let mut out: Vec<String> = std::fs::read_dir(self.path().join(FRAGMENTS))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        out.sort();
+        out
+    }
+}
+
+/// Only a name one level down carrying one of the six is a fragment, and one
+/// opening with a dot is not.
+#[test]
+fn the_fragment_listing_is_one_level_of_the_six() {
+    let release = Release::new("the_fragment_listing_is_one_level_of_the_six");
+    release.fragment("b.fixed.md", "B.\n");
+    release.fragment("a.added.md", "A.\n");
+    release.fragment("c.unknown.md", "C.\n");
+    release.fragment("notes.txt", "N.\n");
+    release.fragment(".hidden.fixed.md", "H.\n");
+    release.0.write("changelog.d/nested/d.fixed.md", "D.\n");
+
+    assert_eq!(
+        fragment_names(release.path()),
+        vec!["changelog.d/a.added.md", "changelog.d/b.fixed.md"]
+    );
+    assert_eq!(
+        fragments_of(release.path(), "fixed"),
+        vec!["changelog.d/b.fixed.md"]
+    );
+    assert_eq!(
+        fragments_of(release.path(), "security"),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        fragment_names(release.path().join("nowhere").as_path()),
+        Vec::<String>::new()
+    );
+}
+
+/// A staged file is tracked; one sitting in the worktree is not.
+#[test]
+fn a_staged_fragment_is_tracked() {
+    let release = Release::new("a_staged_fragment_is_tracked");
+    release.fragment("a.fixed.md", "A.\n");
+    release.0.write("changelog.d/b.added.md", "B.\n");
+    assert!(tracked(release.path(), "changelog.d/a.fixed.md"));
+    assert!(!tracked(release.path(), "changelog.d/b.added.md"));
+}
+
+/// The newest version tag bounds the range, read by version rather than by
+/// text, and a tag that is not one is left out.
+#[test]
+fn the_newest_version_tag_bounds_the_range() {
+    let release = Release::new("the_newest_version_tag_bounds_the_range");
+    assert_eq!(previous_tag(release.path()), None);
+    release.0.git(&["tag", "v0.2.0"]);
+    release.0.git(&["tag", "v0.10.0"]);
+    release.0.git(&["tag", "nightly"]);
+    assert_eq!(previous_tag(release.path()), Some("v0.10.0".to_owned()));
+}
+
+/// The contributors over a range are the authors, most commits first, with the
+/// bots left out.
+#[test]
+fn the_contributors_are_the_authors_of_the_range() {
+    let release = Release::new("the_contributors_are_the_authors_of_the_range");
+    let base = release.0.git(&["rev-parse", "HEAD"]);
+    for message in ["chore: one", "chore: two"] {
+        release.0.git(&[
+            "-c",
+            "user.name=Zoe",
+            "-c",
+            "user.email=zoe@t",
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "-m",
+            message,
+        ]);
+    }
+    release.0.git(&[
+        "-c",
+        "user.name=dependabot[bot]",
+        "-c",
+        "user.email=bot@t",
+        "commit",
+        "--quiet",
+        "--allow-empty",
+        "-m",
+        "chore: three",
+    ]);
+    release.0.git(&[
+        "-c",
+        "user.name=Ada",
+        "-c",
+        "user.email=ada@t",
+        "commit",
+        "--quiet",
+        "--allow-empty",
+        "-m",
+        "chore: four",
+    ]);
+    assert_eq!(
+        contributors(release.path(), &format!("{base}..HEAD")),
+        vec!["Zoe".to_owned(), "Ada".to_owned()]
+    );
+    assert_eq!(
+        contributors(release.path(), "nothing..HEAD"),
+        Vec::<String>::new()
+    );
+}
+
+/// The date the heading carries is today's, in UTC, as the heading spells it.
+#[test]
+fn the_date_is_a_calendar_day() {
+    let root = crate::repo_root().unwrap();
+    let today = today(&root).unwrap();
+    assert_eq!(today.len(), 10, "{today}");
+    let parts: Vec<&str> = today.split('-').collect();
+    assert_eq!(parts.len(), 3, "{today}");
+    assert!(
+        parts.iter().all(|p| p.bytes().all(|b| b.is_ascii_digit()))
+            && [4, 2, 2] == [parts[0].len(), parts[1].len(), parts[2].len()],
+        "{today}"
+    );
+}
+
+/// The subject of the commit that added the fragment answers first, the lookup
+/// answers next, and the commit itself answers last. A fragment with no history
+/// has no reference at all.
+#[test]
+fn the_reference_takes_the_first_of_the_three_sources() {
+    let release = Release::new("the_reference_takes_the_first_of_the_three_sources");
+    release.0.write("changelog.d/a.fixed.md", "A.\n");
+    assert_eq!(
+        fragment_reference(release.path(), "changelog.d/a.fixed.md", &unanswered).unwrap(),
+        None
+    );
+
+    let numbered = release.0.commit("fix(spate-core): a thing (#77)");
+    assert_eq!(
+        fragment_reference(release.path(), "changelog.d/a.fixed.md", &unanswered).unwrap(),
+        Some(Reference::Pull("77".to_owned()))
+    );
+
+    release.0.write("changelog.d/b.added.md", "B.\n");
+    let plain = release.0.commit("feat(spate-core): a thing with no number");
+    assert_ne!(plain, numbered);
+    assert_eq!(
+        fragment_reference(release.path(), "changelog.d/b.added.md", &unanswered).unwrap(),
+        Some(Reference::Commit(plain.clone()))
+    );
+
+    let asked = std::cell::RefCell::new(String::new());
+    let answering = |_: &std::path::Path, sha: &str| {
+        asked.borrow_mut().push_str(sha);
+        Ok(Some("99".to_owned()))
+    };
+    assert_eq!(
+        fragment_reference(release.path(), "changelog.d/b.added.md", &answering).unwrap(),
+        Some(Reference::Pull("99".to_owned()))
+    );
+    assert_eq!(*asked.borrow(), plain);
+}
+
+/// The block groups the entries by type in the order the six are declared, one
+/// blank line between groups, with the contributors and the definitions under
+/// them.
+#[test]
+fn the_block_renders_the_six_in_order() {
+    let release = Release::new("the_block_renders_the_six_in_order");
+    release.fragment("z.security.md", "A security thing.\n");
+    release.fragment("a.added.md", "An added thing citing ([#12]) in passing.\n");
+    release.fragment("b.added.md", "Another added thing. ([#3])\n");
+    release.fragment("c.fixed.md", "A fixed thing.\n");
+
+    let block = assemble(release.path(), "nothing..HEAD", None, &unanswered).unwrap();
+    assert_eq!(
+        block,
+        "\
+### Added
+
+- An added thing citing ([#12]) in passing.
+- Another added thing. ([#3])
+
+### Fixed
+
+- A fixed thing.
+
+### Security
+
+- A security thing.
+
+[#3]: https://github.com/spate-etl/spate/pull/3
+[#12]: https://github.com/spate-etl/spate/pull/12
+"
+    );
+}
+
+/// A tree with nothing to release is a refusal naming the tag the range starts
+/// at.
+#[test]
+fn a_tree_with_no_fragments_has_nothing_to_release() {
+    let release = Release::new("a_tree_with_no_fragments_has_nothing_to_release");
+    assert_eq!(
+        refused(assemble(
+            release.path(),
+            "nothing..HEAD",
+            Some("v0.2.0"),
+            &unanswered
+        )),
+        "no fragments in changelog.d/, so nothing to release.\n  \
+         Every user-visible change since v0.2.0 should have left one; if the release\n  \
+         genuinely contains none, write the section by hand and say why in the commit."
+    );
+}
+
+/// An entry with no reference of its own takes the derived one on a line of its
+/// own, because a fragment may end in a fenced code block.
+#[test]
+fn a_derived_reference_goes_on_its_own_line() {
+    let release = Release::new("a_derived_reference_goes_on_its_own_line");
+    release.0.write(
+        "changelog.d/a.added.md",
+        "A thing that ends in a fence:\n\n```rust\nlet x = 1;\n```\n",
+    );
+    release.0.commit("feat(spate-core): a fenced thing (#12)");
+    let block = assemble(release.path(), "nothing..HEAD", None, &unanswered).unwrap();
+    assert_eq!(
+        block,
+        "\
+### Added
+
+- A thing that ends in a fence:
+
+  ```rust
+  let x = 1;
+  ```
+  ([#12])
+
+[#12]: https://github.com/spate-etl/spate/pull/12
+"
+    );
+}
+
+/// An entry ending in a reference of its own keeps that one, and the reference
+/// the commit would have derived is neither appended nor defined.
+#[test]
+fn a_trailing_reference_stands_in_for_the_derived_one() {
+    let release = Release::new("a_trailing_reference_stands_in_for_the_derived_one");
+    release.0.write(
+        "changelog.d/a.fixed.md",
+        "A thing that landed elsewhere. ([#31])\n",
+    );
+    release.0.commit("fix(spate-core): a thing (#77)");
+    assert_eq!(
+        assemble(release.path(), "nothing..HEAD", None, &unanswered).unwrap(),
+        "\
+### Fixed
+
+- A thing that landed elsewhere. ([#31])
+
+[#31]: https://github.com/spate-etl/spate/pull/31
+"
+    );
+}
+
+/// A commit with no pull request links to itself, by its short sha, and gets no
+/// definition in the list.
+#[test]
+fn a_commit_with_no_pull_request_links_to_itself() {
+    let release = Release::new("a_commit_with_no_pull_request_links_to_itself");
+    release.0.write("changelog.d/a.fixed.md", "A thing.\n");
+    let sha = release.0.commit("fix(spate-core): a thing with no number");
+    let block = assemble(release.path(), "nothing..HEAD", None, &unanswered).unwrap();
+    assert_eq!(
+        block,
+        format!(
+            "### Fixed\n\n- A thing.\n  ([`{}`](https://github.com/spate-etl/spate/commit/{sha}))\n",
+            &sha[..7]
+        )
+    );
+}
+
+/// The assembly writes the section, consumes the fragments and takes them out
+/// of the index.
+#[test]
+fn the_assembly_consumes_what_it_wrote_into_the_changelog() {
+    let release = Release::new("the_assembly_consumes_what_it_wrote_into_the_changelog");
+    release.fragment("a.fixed.md", "A thing.\n");
+    release.fragment("b.added.md", "Another thing. ([#31])\n");
+    let today = today(release.path()).unwrap();
+    build(release.path(), false, "0.3.0").unwrap();
+
+    let section = "\
+### Added
+
+- Another thing. ([#31])
+
+### Fixed
+
+- A thing.
+
+### Contributors
+
+- t
+
+[#31]: https://github.com/spate-etl/spate/pull/31
+";
+    assert_eq!(
+        release.changelog(),
+        format!(
+            "\
+# Changelog
+
+## [Unreleased]
+
+## [0.3.0] — {today}
+
+{section}
+## [0.2.0] — 2026-08-22
+
+### Fixed
+
+- An older thing. ([#7])
+
+[#7]: https://github.com/spate-etl/spate/pull/7
+
+[Unreleased]: https://github.com/spate-etl/spate/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/spate-etl/spate/releases/tag/v0.3.0
+[0.2.0]: https://github.com/spate-etl/spate/releases/tag/v0.2.0
+"
+        )
+    );
+    assert_eq!(release.listing(), vec!["README.md".to_owned()]);
+    assert_eq!(
+        release.0.git(&["ls-files", FRAGMENTS]),
+        "changelog.d/README.md"
+    );
+    assert_eq!(
+        section_notes(&release.changelog(), "0.3.0", CHANGELOG).unwrap(),
+        section
+    );
+}
+
+/// The refusals an assembly reads off the changelog, each one leaving the tree
+/// as it was.
+#[test]
+fn the_assembly_refuses_a_changelog_it_cannot_write_into() {
+    let release = Release::new("the_assembly_refuses_a_changelog_it_cannot_write_into");
+    release.fragment("a.fixed.md", "A thing.\n");
+
+    release
+        .0
+        .write(CHANGELOG, "# Changelog\n\n## [0.2.0] — d\n");
+    assert_eq!(
+        refused(build(release.path(), false, "0.3.0")),
+        "no '## [Unreleased]' heading in CHANGELOG.md. The new release is inserted below\n  \
+         it, so a release that removed it has to put it back, empty, before the next one."
+    );
+
+    release.0.write(CHANGELOG, SKELETON);
+    assert_eq!(
+        refused(build(release.path(), false, "0.2.0")),
+        "CHANGELOG.md already has a '## [0.2.0]' section. Pick the next version,\n  \
+         or if the previous attempt failed part-way, undo it before running this again."
+    );
+
+    release.0.write(
+        CHANGELOG,
+        &SKELETON.replace("## [Unreleased]\n", "## [Unreleased]\n\n- By hand.\n"),
+    );
+    assert_eq!(
+        refused(build(release.path(), false, "0.3.0")),
+        "the '## [Unreleased]' section in CHANGELOG.md is not empty.\n\n  \
+         The assembly reads changelog.d/, and anything written under that heading by\n  \
+         hand would be swept into '## [0.3.0]' below the link definitions rather than\n  \
+         read as part of it. Move it into a fragment, one file per entry, typed by its\n  \
+         Keep a Changelog section, and run this again."
+    );
+
+    release
+        .0
+        .write(CHANGELOG, "# Changelog\n\n## [Unreleased]\n");
+    assert_eq!(
+        refused(build(release.path(), false, "0.3.0")),
+        "no [Unreleased]: link reference to rewrite"
+    );
+    assert_eq!(release.changelog(), "# Changelog\n\n## [Unreleased]\n");
+
+    std::fs::remove_file(release.path().join(CHANGELOG)).unwrap();
+    assert_eq!(
+        refused(build(release.path(), false, "0.3.0")),
+        "CHANGELOG.md not found"
+    );
+    assert_eq!(
+        release.listing(),
+        vec!["README.md".to_owned(), "a.fixed.md".to_owned()]
+    );
+}
+
+/// A fragment saying nothing, and one that never reached git, are both refused
+/// with the changelog left as it was.
+#[test]
+fn the_assembly_refuses_a_fragment_it_cannot_release() {
+    let release = Release::new("the_assembly_refuses_a_fragment_it_cannot_release");
+    release.fragment("a.fixed.md", "   \n\t\n");
+    assert_eq!(
+        refused(build(release.path(), false, "0.3.0")),
+        "changelog.d/a.fixed.md is empty. A fragment is the release note: write it, or delete the file."
+    );
+
+    release.fragment("a.fixed.md", "A thing.\n");
+    release
+        .0
+        .write("changelog.d/b.added.md", "Not committed.\n");
+    assert_eq!(
+        refused(build(release.path(), false, "0.3.0")),
+        "changelog.d/b.added.md is not tracked. Commit it before assembling a release:\n  \
+         a fragment that never reached git is not part of what is being released."
+    );
+    assert_eq!(release.changelog(), SKELETON);
+    assert_eq!(
+        release.listing(),
+        vec![
+            "README.md".to_owned(),
+            "a.fixed.md".to_owned(),
+            "b.added.md".to_owned()
+        ]
+    );
+}
+
+/// A version nobody named is a usage error, and `--explain` writes nothing.
+#[test]
+fn a_missing_version_is_a_usage_error() {
+    let release = Release::new("a_missing_version_is_a_usage_error");
+    release.fragment("a.fixed.md", "A thing.\n");
+    assert_eq!(
+        refused(build(release.path(), false, "")),
+        "usage: cargo xtask changelog build <version>"
+    );
+    assert_eq!(
+        refused(notes(release.path(), false, "")),
+        "usage: cargo xtask changelog notes <version>"
+    );
+    build(release.path(), true, "0.3.0").unwrap();
+    notes(release.path(), true, "0.3.0").unwrap();
+    assert_eq!(release.changelog(), SKELETON);
+    assert_eq!(
+        release.listing(),
+        vec!["README.md".to_owned(), "a.fixed.md".to_owned()]
+    );
+}
+
+/// The notes read the changelog, so a tree without one says so.
+#[test]
+fn the_notes_read_a_changelog_that_is_there() {
+    let release = Release::new("the_notes_read_a_changelog_that_is_there");
+    notes(release.path(), false, "0.2.0").unwrap();
+    std::fs::remove_file(release.path().join(CHANGELOG)).unwrap();
+    assert_eq!(
+        refused(notes(release.path(), false, "0.2.0")),
+        "CHANGELOG.md not found"
+    );
+}

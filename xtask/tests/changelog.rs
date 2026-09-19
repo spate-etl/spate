@@ -1,6 +1,6 @@
-//! The process-level contract of `cargo xtask tidy changelog` and `cargo xtask
-//! changelog new`: the exit status each outcome reports, which stream carries
-//! what, and the bytes of every diagnostic.
+//! The process-level contract of `cargo xtask tidy changelog`, `cargo xtask
+//! changelog new` and the two release commands: the exit status each outcome
+//! reports, which stream carries what, and the bytes of every diagnostic.
 
 use std::path::Path;
 use std::process::{Command, Output};
@@ -449,4 +449,70 @@ fn explain_refuses_what_a_write_would_refuse() {
         "xtask: 'Nope' should be lowercase letters, digits and hyphens, starting and ending\n  \
          with one of the first two. It becomes a filename.\n",
     );
+}
+
+/// This repository's own changelog, which the release notes are read out of.
+fn changelog() -> String {
+    std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("CHANGELOG.md"),
+    )
+    .unwrap()
+}
+
+/// The notes are the section's own bytes and nothing else, so what a release
+/// body carries is what the changelog says.
+#[test]
+fn the_notes_are_a_verbatim_slice_of_the_changelog() {
+    let got = xtask(&["changelog", "notes", "0.2.0"], &[]);
+    let stdout = String::from_utf8(got.stdout).unwrap();
+    assert_eq!(String::from_utf8_lossy(&got.stderr), "", "stderr");
+    assert_eq!(got.status.code(), Some(0));
+    assert!(changelog().contains(&stdout), "{stdout}");
+    assert!(!stdout.starts_with('\n'), "{stdout}");
+    assert!(
+        stdout.ends_with('\n') && !stdout.ends_with("\n\n"),
+        "{stdout}"
+    );
+    assert!(
+        !stdout.split('\n').any(|line| line.starts_with("## ")),
+        "{stdout}"
+    );
+}
+
+/// A version the changelog does not carry is a refusal on stderr with nothing
+/// on stdout, so a release body is never assembled out of a diagnostic.
+#[test]
+fn notes_for_a_version_that_is_not_there_writes_nothing_to_stdout() {
+    held(
+        &["changelog", "notes", "9.9.9"],
+        &[],
+        1,
+        "",
+        "xtask: no '## [9.9.9]' section in CHANGELOG.md. The notes read what the assembly wrote,\n  \
+         so the release is assembled first.\n",
+    );
+}
+
+/// `--explain` answers with what each release command would do, and leaves the
+/// changelog and the fragments alone.
+#[test]
+fn explain_names_what_the_release_commands_would_do() {
+    let before = changelog();
+    held(
+        &["--explain", "changelog", "build", "0.3.0"],
+        &[],
+        0,
+        "(writes ## [0.3.0] into CHANGELOG.md and consumes changelog.d/)\n",
+        "",
+    );
+    held(
+        &["--explain", "changelog", "notes", "0.3.0"],
+        &[],
+        0,
+        "(prints the ## [0.3.0] section of CHANGELOG.md)\n",
+        "",
+    );
+    assert_eq!(changelog(), before);
 }

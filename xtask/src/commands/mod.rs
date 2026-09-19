@@ -365,16 +365,12 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: Command) -> Outcome {
             ChangelogCommand::New { kind, slug } => {
                 crate::checks::changelog::new(root, explain, kind, slug)
             }
-            ChangelogCommand::Build { version } => run::run(
-                root,
-                explain,
-                &Step::new("./scripts/changelog.sh", ["--build", version]),
-            ),
-            ChangelogCommand::Notes { version } => run::run(
-                root,
-                explain,
-                &Step::new("./scripts/changelog.sh", ["--notes", version]),
-            ),
+            ChangelogCommand::Build { version } => {
+                crate::checks::changelog::build(root, explain, version)
+            }
+            ChangelogCommand::Notes { version } => {
+                crate::checks::changelog::notes(root, explain, version)
+            }
         },
         Command::Fuzz { cmd } => fuzz::dispatch(root, explain, cmd),
         Command::Docs { serve } => docs::dispatch(root, explain, serve),

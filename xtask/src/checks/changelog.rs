@@ -1,9 +1,11 @@
-//! The changelog-fragment gate and the scaffolder that writes a fragment.
+//! The changelog fragments: the gate, the scaffolder that writes one, the
+//! release assembly that consumes them, and one version's notes.
 //!
 //! A change somebody upgrading would care about carries a file under
 //! `changelog.d/`, and `changelog.d/README.md` states the format and the
 //! policy. The gate classifies the pull request's title and the branch's own
-//! subjects, and demands a fragment for any of them that reaches a crate.
+//! subjects, and demands a fragment for any of them that reaches a crate. The
+//! assembly runs once, at release, and rewrites `CHANGELOG.md` in place.
 //!
 //! The classifier is an ignore list on both axes: an unrecognized type and an
 //! unrecognized scope each require a fragment. Stated the other way round
@@ -698,6 +700,717 @@ fn has_prose(bytes: &[u8]) -> bool {
     String::from_utf8_lossy(bytes)
         .chars()
         .any(|c| !c.is_whitespace())
+}
+
+// ---------------------------------------------------------------------------
+// The release assembly.
+// ---------------------------------------------------------------------------
+
+/// The file a release is assembled into.
+const CHANGELOG: &str = "CHANGELOG.md";
+
+/// The repository every derived link points at.
+const REPO_URL: &str = "https://github.com/spate-etl/spate";
+
+/// Assembles the fragments into a new section of the changelog, in place, and
+/// consumes them.
+///
+/// Everything that can fail happens before anything is written back, so a
+/// refusal leaves the tree as it was.
+pub(crate) fn build(root: &Path, explain: bool, version: &str) -> Outcome {
+    if version.is_empty() {
+        return Err(Error::msg("usage: cargo xtask changelog build <version>"));
+    }
+    if explain {
+        println!("(writes ## [{version}] into {CHANGELOG} and consumes {FRAGMENTS}/)");
+        return Ok(());
+    }
+
+    let path = root.join(CHANGELOG);
+    if !path.is_file() {
+        return Err(Error::msg(format!("{CHANGELOG} not found")));
+    }
+    let text =
+        std::fs::read_to_string(&path).map_err(|e| Error::msg(format!("{CHANGELOG}: {e}")))?;
+
+    if !records(&text).contains(&"## [Unreleased]") {
+        return Err(Error::msg(format!(
+            "no '## [Unreleased]' heading in {CHANGELOG}. The new release is inserted below\n  \
+             it, so a release that removed it has to put it back, empty, before the next one."
+        )));
+    }
+    if text.contains(&format!("## [{version}]")) {
+        return Err(Error::msg(format!(
+            "{CHANGELOG} already has a '## [{version}]' section. Pick the next version,\n  \
+             or if the previous attempt failed part-way, undo it before running this again."
+        )));
+    }
+    if !unreleased_is_empty(&text) {
+        return Err(Error::msg(format!(
+            "the '## [Unreleased]' section in {CHANGELOG} is not empty.\n\n  \
+             The assembly reads {FRAGMENTS}/, and anything written under that heading by\n  \
+             hand would be swept into '## [{version}]' below the link definitions rather than\n  \
+             read as part of it. Move it into a fragment, one file per entry, typed by its\n  \
+             Keep a Changelog section, and run this again."
+        )));
+    }
+
+    for file in fragment_names(root) {
+        if !fragment_has_prose(root, &file) {
+            return Err(Error::msg(format!(
+                "{file} is empty. A fragment is the release note: write it, or delete the file."
+            )));
+        }
+    }
+
+    let today = today(root)?;
+    let previous = previous_tag(root);
+    let range = previous
+        .as_ref()
+        .map_or_else(|| "HEAD".to_owned(), |tag| format!("{tag}..HEAD"));
+    let block = assemble(root, &range, previous.as_deref(), &api_pull)?;
+    let written = insert(&text, version, &today, &block)?;
+
+    for kind in TYPES {
+        for file in fragments_of(root, kind) {
+            if !tracked(root, &file) {
+                return Err(Error::msg(format!(
+                    "{file} is not tracked. Commit it before assembling a release:\n  \
+                     a fragment that never reached git is not part of what is being released."
+                )));
+            }
+        }
+    }
+
+    std::fs::write(&path, &written).map_err(|e| Error::msg(format!("{CHANGELOG}: {e}")))?;
+
+    for kind in TYPES {
+        for file in fragments_of(root, kind) {
+            run::run(
+                root,
+                false,
+                &Step::new("git", ["rm", "--quiet", "--force", &file]),
+            )?;
+        }
+    }
+
+    print!("{}", summary(version, &today));
+    Ok(())
+}
+
+/// What a finished assembly reports.
+fn summary(version: &str, today: &str) -> String {
+    format!(
+        "{TOOL}: wrote ## [{version}] — {today} into {CHANGELOG} and consumed the fragments.\n  Read what it wrote before committing: the assembly is mechanical, the release note is not.\n"
+    )
+}
+
+/// Prints one version's section on stdout, for the release body. The heading is
+/// dropped because the release title already carries the version.
+pub(crate) fn notes(root: &Path, explain: bool, version: &str) -> Outcome {
+    if version.is_empty() {
+        return Err(Error::msg("usage: cargo xtask changelog notes <version>"));
+    }
+    if explain {
+        println!("(prints the ## [{version}] section of {CHANGELOG})");
+        return Ok(());
+    }
+    let path = root.join(CHANGELOG);
+    if !path.is_file() {
+        return Err(Error::msg(format!("{CHANGELOG} not found")));
+    }
+    let text =
+        std::fs::read_to_string(&path).map_err(|e| Error::msg(format!("{CHANGELOG}: {e}")))?;
+    print!("{}", section_notes(&text, version, CHANGELOG)?);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// One version's section.
+// ---------------------------------------------------------------------------
+
+/// What the scan found instead of one section.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Scan {
+    Missing,
+    Duplicate,
+}
+
+/// The body of one release's section: everything between its heading and the
+/// next one, the heading itself excluded.
+///
+/// The slice is self-contained because the assembly writes each section's
+/// `[#N]` definitions inside it; the definitions at the foot of the file belong
+/// to the headings, and the slice drops those. Every reference the slice uses
+/// must be defined inside it, or the release body renders the literal text.
+fn section_notes(text: &str, version: &str, file: &str) -> Result<String, Error> {
+    let raw = scan(text, &format!("## [{version}] ")).map_err(|what| match what {
+        Scan::Missing => Error::msg(format!(
+            "no '## [{version}]' section in {file}. The notes read what the assembly wrote,\n  \
+             so the release is assembled first."
+        )),
+        Scan::Duplicate => Error::msg(format!(
+            "two '## [{version}]' headings in {file}. A part-finished assembly has to be\n  \
+             undone before its section can be read."
+        )),
+    })?;
+
+    let body = opening_blanks_dropped(&raw);
+    if body.is_empty() {
+        return Err(Error::msg(format!(
+            "the '## [{version}]' section in {file} is empty"
+        )));
+    }
+
+    let mut used = issue_references(body);
+    used.sort_unstable();
+    used.dedup();
+    for number in used {
+        let definition = format!("[#{number}]: ");
+        if !body.split('\n').any(|line| line.starts_with(&definition)) {
+            return Err(Error::msg(format!(
+                "the '## [{version}]' section uses [#{number}] with no definition in the section"
+            )));
+        }
+    }
+    Ok(format!("{body}\n"))
+}
+
+/// The lines between the heading and the boundary that ends the section.
+///
+/// The last section is followed by the link foot, so the `[Unreleased]: ` line
+/// terminates a section too. Fenced code is opaque, and a hand-edited section
+/// may quote a heading-shaped or foot-shaped line inside one. Both fence kinds
+/// toggle one state, so a fence of one kind holding the other kind's marker at
+/// column zero is not modelled. A second heading for the same version is the
+/// part-finished assembly, and the scan refuses it.
+fn scan(text: &str, heading: &str) -> Result<String, Scan> {
+    let mut out = String::new();
+    let (mut fence, mut found, mut in_section) = (false, false, false);
+    for line in records(text) {
+        if is_fence(line) {
+            if in_section {
+                out.push_str(line);
+                out.push('\n');
+            }
+            fence = !fence;
+            continue;
+        }
+        if fence {
+            if in_section {
+                out.push_str(line);
+                out.push('\n');
+            }
+            continue;
+        }
+        if line.starts_with(heading) {
+            if found {
+                return Err(Scan::Duplicate);
+            }
+            found = true;
+            in_section = true;
+            continue;
+        }
+        if in_section && (line.starts_with("## ") || line.starts_with("[Unreleased]: ")) {
+            in_section = false;
+            continue;
+        }
+        if in_section {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    if found { Ok(out) } else { Err(Scan::Missing) }
+}
+
+/// A fenced-code delimiter: up to three spaces of indent, then either marker.
+fn is_fence(line: &str) -> bool {
+    let rest = line.trim_start_matches(' ');
+    line.len() - rest.len() <= 3 && (rest.starts_with("```") || rest.starts_with("~~~"))
+}
+
+/// The slice with its opening blank lines and its trailing newlines dropped. A
+/// line carrying a space carries something.
+fn opening_blanks_dropped(raw: &str) -> &str {
+    let mut body = raw.trim_end_matches('\n');
+    while let Some(rest) = body.strip_prefix('\n') {
+        body = rest;
+    }
+    body
+}
+
+// ---------------------------------------------------------------------------
+// The block one release renders.
+// ---------------------------------------------------------------------------
+
+/// Where an entry carrying no reference of its own points.
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum Reference {
+    Pull(String),
+    Commit(String),
+}
+
+/// How a commit's merged pull request is looked up.
+type Lookup<'a> = &'a dyn Fn(&Path, &str) -> Result<Option<String>, Error>;
+
+/// The entries grouped by type in the order the six are declared, the
+/// contributors over the range, and the link definitions the entries use.
+fn assemble(
+    root: &Path,
+    range: &str,
+    previous: Option<&str>,
+    lookup: Lookup<'_>,
+) -> Result<String, Error> {
+    let mut block = String::new();
+    let mut links: Vec<String> = Vec::new();
+
+    for kind in TYPES {
+        let mut open = false;
+        for file in fragments_of(root, kind) {
+            if !open {
+                // The leading blank separates this group from the last one. A
+                // blank line between list items makes it a *loose* list, and
+                // every bullet then renders in its own paragraph.
+                if !block.is_empty() {
+                    block.push('\n');
+                }
+                block.push_str(&format!("### {}\n\n", sentence_case(kind)));
+                open = true;
+            }
+
+            let text = std::fs::read_to_string(root.join(&file))
+                .map_err(|e| Error::msg(format!("{file}: {e}")))?;
+            let mut body = entry_body(&text);
+
+            // Every `[#N]` in the prose gets a definition regardless, or it
+            // renders as literal text. Only a trailing one skips deriving.
+            for number in issue_references(&body) {
+                links.push(link_line(number));
+            }
+
+            if !ends_with_reference(&body) {
+                // Each form goes on its own line. A fragment may end in a
+                // fenced code block, and CommonMark allows only whitespace after
+                // a closing fence, so appending leaves it unclosed and swallows
+                // every section below.
+                match fragment_reference(root, &file, lookup)? {
+                    Some(Reference::Pull(number)) => {
+                        links.push(link_line(&number));
+                        body = format!("{body}\n([#{number}])");
+                    }
+                    // An inline link. The definition list holds `[#N]` alone and
+                    // sorts on that number.
+                    Some(Reference::Commit(sha)) => {
+                        let short = sha.get(..7).unwrap_or(&sha);
+                        body = format!("{body}\n([`{short}`]({REPO_URL}/commit/{sha}))");
+                    }
+                    None => {}
+                }
+            }
+
+            block.push_str(&bullet(&body));
+        }
+    }
+
+    if block.is_empty() {
+        return Err(Error::msg(format!(
+            "no fragments in {FRAGMENTS}/, so nothing to release.\n  \
+             Every user-visible change since {} should have left one; if the release\n  \
+             genuinely contains none, write the section by hand and say why in the commit.",
+            previous.unwrap_or_default()
+        )));
+    }
+
+    // Contributors over the whole range, not only the ones who left a fragment.
+    let people = contributors(root, range);
+    if !people.is_empty() {
+        block.push_str("\n### Contributors\n\n");
+        for name in people {
+            block.push_str(&format!("- {name}\n"));
+        }
+    }
+
+    if !links.is_empty() {
+        block.push('\n');
+        for line in sorted_links(links) {
+            block.push_str(&line);
+            block.push('\n');
+        }
+    }
+
+    // The insertion line already supplies the separator.
+    Ok(format!("{}\n", block.trim_end_matches('\n')))
+}
+
+/// The changelog with the new section written below the Unreleased heading and
+/// the two link references at the foot rewritten.
+fn insert(text: &str, version: &str, today: &str, block: &str) -> Result<String, Error> {
+    let mut out = String::new();
+    let (mut inserted, mut rewritten) = (false, false);
+    for line in records(text) {
+        if line == "## [Unreleased]" {
+            out.push_str(&format!("{line}\n\n## [{version}] — {today}\n\n{block}"));
+            inserted = true;
+            continue;
+        }
+        if line.starts_with("[Unreleased]: ") {
+            out.push_str(&format!(
+                "[Unreleased]: {REPO_URL}/compare/v{version}...HEAD\n\
+                 [{version}]: {REPO_URL}/releases/tag/v{version}\n"
+            ));
+            rewritten = true;
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    if !inserted {
+        return Err(Error::msg("the Unreleased heading vanished mid-write"));
+    }
+    if !rewritten {
+        return Err(Error::msg("no [Unreleased]: link reference to rewrite"));
+    }
+    Ok(out)
+}
+
+/// Whether the Unreleased section holds anything.
+///
+/// Anything under it would fall through the insertion into the new release, out
+/// of section order and dated into a version it was not part of, leaving its own
+/// heading empty.
+fn unreleased_is_empty(text: &str) -> bool {
+    let mut seen = false;
+    for line in records(text) {
+        if line == "## [Unreleased]" {
+            seen = true;
+            continue;
+        }
+        if !seen {
+            continue;
+        }
+        if line.starts_with("## ") {
+            break;
+        }
+        if line.chars().any(|c| !is_space(c)) {
+            return false;
+        }
+    }
+    true
+}
+
+/// One fragment's prose: trailing whitespace off every line, and no blank line
+/// at either end.
+fn entry_body(text: &str) -> String {
+    let stripped: Vec<&str> = text
+        .split('\n')
+        .map(|line| line.trim_end_matches(is_space))
+        .collect();
+    let mut lines = stripped.as_slice();
+    while lines.last().is_some_and(|line| line.is_empty()) {
+        lines = &lines[..lines.len() - 1];
+    }
+    while lines.first().is_some_and(|line| line.is_empty()) {
+        lines = &lines[1..];
+    }
+    lines.join("\n")
+}
+
+/// The entry as a list item. Blank lines stay blank, since indenting them
+/// leaves trailing whitespace and makes the section a *loose* list.
+fn bullet(body: &str) -> String {
+    let mut out = String::new();
+    for (position, line) in body.split('\n').enumerate() {
+        if position == 0 {
+            out.push_str("- ");
+        } else {
+            out.push('\n');
+            if !line.is_empty() {
+                out.push_str("  ");
+            }
+        }
+        out.push_str(line);
+    }
+    out.push('\n');
+    out
+}
+
+/// Sentence case for a heading, as Keep a Changelog spells them.
+fn sentence_case(word: &str) -> String {
+    let mut chars = word.chars();
+    chars.next().map_or_else(String::new, |first| {
+        format!("{}{}", first.to_ascii_uppercase(), chars.as_str())
+    })
+}
+
+/// The definition one `[#N]` needs.
+fn link_line(number: &str) -> String {
+    format!("[#{number}]: {REPO_URL}/pull/{number}")
+}
+
+/// The definitions, each one once, ordered by the number they define.
+///
+/// Whole lines are deduplicated before the numeric order is applied. Doing both
+/// at once compares only the numeric key, so `[#031]` and `[#31]` collapse to
+/// one and a definition is dropped.
+fn sorted_links(mut links: Vec<String>) -> Vec<String> {
+    links.sort();
+    links.dedup();
+    links.sort_by(|a, b| numeric_key(a).cmp(&numeric_key(b)).then_with(|| a.cmp(b)));
+    links
+}
+
+/// The number read from the field following the first `#`.
+fn numeric_key(line: &str) -> u64 {
+    let after = line.split_once('#').map_or("", |(_, rest)| rest);
+    after
+        .split(|c: char| !c.is_ascii_digit())
+        .next()
+        .unwrap_or_default()
+        .parse()
+        .unwrap_or(0)
+}
+
+/// Every `[#N]` the text carries, in the order they appear, as the digits alone.
+fn issue_references(text: &str) -> Vec<&str> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut at = 0;
+    while at + 2 < bytes.len() {
+        if bytes[at] != b'[' || bytes[at + 1] != b'#' {
+            at += 1;
+            continue;
+        }
+        let start = at + 2;
+        let mut end = start;
+        while bytes.get(end).is_some_and(u8::is_ascii_digit) {
+            end += 1;
+        }
+        if end > start && bytes.get(end) == Some(&b']') {
+            out.push(&text[start..end]);
+            at = end + 1;
+        } else {
+            at += 1;
+        }
+    }
+    out
+}
+
+/// Whether the entry ends in a `([#N])` of its own, which stands in for the
+/// derived reference.
+///
+/// Anchored to the end, so a mid-sentence citation of an earlier pull request
+/// is not read as this entry's reference.
+fn ends_with_reference(body: &str) -> bool {
+    let last = body.rsplit('\n').next().unwrap_or(body);
+    let Some(head) = last.trim_end_matches(is_space).strip_suffix("])") else {
+        return false;
+    };
+    let digits = trailing_digits(head);
+    digits > 0 && head[..head.len() - digits].ends_with("([#")
+}
+
+/// The pull request number GitHub appends to a squash subject. A `(#12)`
+/// written mid-subject cites another pull request and is not read, and a subject
+/// ending in two is read as the last of them.
+fn pr_from_subject(subject: &str) -> Option<&str> {
+    let head = subject.strip_suffix(')')?;
+    let digits = trailing_digits(head);
+    if digits == 0 {
+        return None;
+    }
+    let (before, number) = head.split_at(head.len() - digits);
+    before.ends_with("(#").then_some(number)
+}
+
+/// How many ASCII digits the text ends in.
+fn trailing_digits(text: &str) -> usize {
+    text.len() - text.trim_end_matches(|c: char| c.is_ascii_digit()).len()
+}
+
+// ---------------------------------------------------------------------------
+// What an entry with no reference of its own points at.
+// ---------------------------------------------------------------------------
+
+/// The pull request that merged the fragment, or the commit that added it.
+///
+/// Three sources in order. A squash subject ends in `(#N)`. A rebase merge
+/// appends nothing, so the adding commit goes to `lookup` next. A commit that
+/// reached the default branch outside a pull request links to itself. A fragment
+/// with no history, written but not yet committed, has no reference at all.
+fn fragment_reference(
+    root: &Path,
+    file: &str,
+    lookup: Lookup<'_>,
+) -> Result<Option<Reference>, Error> {
+    let Some(sha) = capture(root, &["log", "--diff-filter=A", "--format=%H", "--", file]) else {
+        return Ok(None);
+    };
+    let subject =
+        capture(root, &["log", "--diff-filter=A", "--format=%s", "--", file]).unwrap_or_default();
+    if let Some(number) = pr_from_subject(&subject) {
+        return Ok(Some(Reference::Pull(number.to_owned())));
+    }
+    Ok(Some(match lookup(root, &sha)? {
+        Some(number) => Reference::Pull(number),
+        None => Reference::Commit(sha),
+    }))
+}
+
+/// The merged pull request the API associates with a commit. Merged ones only,
+/// and the first of them, because a commit can also be associated with one that
+/// never landed.
+///
+/// Absent `gh` nothing is asked, and the commit link answers instead.
+fn api_pull(root: &Path, sha: &str) -> Result<Option<String>, Error> {
+    if !run::on_path("gh") {
+        return Ok(None);
+    }
+    // `run::complete` discards stderr, and the refusal below quotes it.
+    let out = std::process::Command::new("gh")
+        .args(pulls_query(sha))
+        .current_dir(root)
+        .output()
+        .map_err(|e| Error::msg(format!("gh: {e}")))?;
+    classify(
+        out.status.success(),
+        &String::from_utf8_lossy(&out.stdout),
+        &String::from_utf8_lossy(&out.stderr),
+        sha,
+    )
+}
+
+/// The `gh` arguments that ask which pull requests a commit belongs to.
+fn pulls_query(sha: &str) -> [String; 4] {
+    let slug = REPO_URL
+        .strip_prefix("https://github.com/")
+        .unwrap_or(REPO_URL);
+    [
+        "api".to_owned(),
+        format!("repos/{slug}/commits/{sha}/pulls"),
+        "--jq".to_owned(),
+        "map(select(.merged_at)) | first | .number // empty".to_owned(),
+    ]
+}
+
+/// What one lookup's answer means.
+///
+/// On an HTTP error `gh api` exits non-zero and prints the response body to
+/// stdout, so the answer is used only when the call succeeded and it is a
+/// number. A commit the API does not know (assembled locally, never pushed)
+/// takes the commit link; any other failure aborts, because a bad token would
+/// otherwise turn every derived reference into a commit link with nothing
+/// saying so.
+fn classify(ok: bool, stdout: &str, stderr: &str, sha: &str) -> Result<Option<String>, Error> {
+    let answer = stdout.trim_end_matches('\n');
+    let short = sha.get(..12).unwrap_or(sha);
+    if ok {
+        if answer.is_empty() {
+            return Ok(None);
+        }
+        if !answer.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(Error::msg(format!(
+                "the pull-request lookup for {short} answered with something that is\n  \
+                 not a number: {answer}"
+            )));
+        }
+        return Ok(Some(answer.to_owned()));
+    }
+    if answer.contains("No commit found")
+        || answer.contains("\"status\": \"422\"")
+        || answer.contains("\"status\":\"422\"")
+    {
+        return Ok(None);
+    }
+    Err(Error::msg(format!(
+        "the pull-request lookup for {short} failed rather than answering:\n  \
+         {answer} {}\n  \
+         Fix the token or the network and assemble again; falling back to a\n  \
+         commit link here would look identical to a commit that has no pull request.",
+        stderr.trim_end_matches('\n')
+    )))
+}
+
+// ---------------------------------------------------------------------------
+// What the release reads off the tree.
+// ---------------------------------------------------------------------------
+
+/// Every fragment under `changelog.d/`, sorted, as repository-relative paths. A
+/// name opening with a dot is not one.
+fn fragment_names(root: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(root.join(FRAGMENTS)) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = entries
+        .flatten()
+        .map(|entry| format!("{FRAGMENTS}/{}", entry.file_name().to_string_lossy()))
+        .filter(|path| {
+            !path.starts_with(&format!("{FRAGMENTS}/.")) && fragment_type(path).is_some()
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// The fragments of one type, sorted.
+fn fragments_of(root: &Path, kind: &str) -> Vec<String> {
+    fragment_names(root)
+        .into_iter()
+        .filter(|path| fragment_type(path) == Some(kind))
+        .collect()
+}
+
+/// Whether git has this path in the index.
+fn tracked(root: &Path, file: &str) -> bool {
+    let step = Step::new("git", ["ls-files", "--error-unmatch", file]);
+    matches!(
+        run::complete(root, &step, Streams::Discard),
+        Ok(Completed { code: 0, .. })
+    )
+}
+
+/// The newest version tag, the lower bound of the contributor range.
+fn previous_tag(root: &Path) -> Option<String> {
+    capture(root, &["tag", "--list", "v*", "--sort=-v:refname"])
+}
+
+/// The names on the commits in `range`, bots left out.
+fn contributors(root: &Path, range: &str) -> Vec<String> {
+    let step = Step::new("git", ["shortlog", "-sn", range]);
+    let listing = run::complete(root, &step, Streams::Collect)
+        .map(|done| done.stdout)
+        .unwrap_or_default();
+    listing
+        .split('\n')
+        .map(shortlog_name)
+        .filter(|name| !name.is_empty() && !name.ends_with("[bot]"))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The name on a `git shortlog -sn` line, where the count is dropped.
+fn shortlog_name(line: &str) -> &str {
+    let rest = line.trim_start_matches(is_space);
+    let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    if digits == 0 {
+        return line;
+    }
+    rest[digits..].trim_start_matches(is_space)
+}
+
+/// Today's date in UTC, as the section heading spells it.
+fn today(root: &Path) -> Result<String, Error> {
+    let out = run::capture(root, &Step::new("date", ["-u", "+%Y-%m-%d"]))?;
+    Ok(out.trim_end_matches('\n').to_owned())
+}
+
+/// The records a line-oriented scan reads. A final newline closes the last
+/// record.
+fn records(text: &str) -> Vec<&str> {
+    let mut out: Vec<&str> = text.split('\n').collect();
+    if out.last().is_some_and(|line| line.is_empty()) {
+        out.pop();
+    }
+    out
 }
 
 #[cfg(test)]

@@ -164,7 +164,7 @@ nightly-only, which is why every target carries `+nightly`.
 
 A pull request touching `fuzz/`, `ci.yml`, `.github/actions/`, the nightly pin
 or `xtask/` builds every target with instrumentation and runs none of them, and
-so does one touching any of the six crates the harness depends on.
+so does one touching a workspace crate the harness depends on directly.
 The nightly tier in `scheduled.yml` fuzzes each for five minutes, set by
 `MAX_TOTAL_TIME`, and carries `fuzz/corpus` between nights in a cache entry.
 A crash uploads the input as the `fuzz-artifacts` artifact and opens an issue

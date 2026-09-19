@@ -21,8 +21,7 @@ allow = [
 
 # libfuzzer-sys vendors LLVM's libFuzzer, so its expression is
 # `(MIT OR Apache-2.0) AND NCSA` and the NCSA term has to be satisfied on its
-# own. Scoped to the crate rather than added to `allow` above, which would
-# accept NCSA from anything.
+# own. The exception is scoped to this crate.
 [[licenses.exceptions]]
 crate = "libfuzzer-sys"
 allow = ["NCSA"]

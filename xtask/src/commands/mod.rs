@@ -106,6 +106,9 @@ pub(crate) enum Command {
         cmd: fuzz::Fuzz,
     },
 
+    /// Assert the built site is complete
+    SiteCheck,
+
     /// The documentation site
     Docs {
         /// Serve locally with hot reload instead of building
@@ -373,6 +376,7 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: Command) -> Outcome {
             }
         },
         Command::Fuzz { cmd } => fuzz::dispatch(root, explain, cmd),
+        Command::SiteCheck => crate::checks::site_check::check(root, explain),
         Command::Docs { serve } => docs::dispatch(root, explain, serve),
         Command::Release { cmd } => {
             let s = match &cmd {

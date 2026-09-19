@@ -1037,6 +1037,10 @@ jobs:
           # setup-node silently never caches.
           cache-dependency-path: website/package-lock.json
 
+      - uses: ./.github/actions/setup-rust
+        with:
+          shared-key: docs
+
       - name: Install dependencies
         working-directory: website
         run: npm ci
@@ -1070,14 +1074,8 @@ jobs:
           CI: "true"
         run: npm run build
 
-      - name: Site is within the Cloudflare file limit
-        run: |
-          count=$(find website/build -type f | wc -l)
-          echo "site files: $count"
-          if [ "$count" -gt 10000 ]; then
-            echo "::error::$count files; Workers static assets refuse a deployment over 20000."
-            exit 1
-          fi
+      - name: Site is complete
+        run: cargo xtask site-check
 
       # Its own step because it is also the cache key below. A browser build
       # from a different Playwright version is unusable, so the key names the

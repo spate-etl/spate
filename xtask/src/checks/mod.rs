@@ -2,7 +2,7 @@
 //! decision records, the changelog fragments, labels, docs.rs rustdoc, the
 //! instruction-count bench targets, their collected regions, the counted-tier
 //! report, the pinned container images, the semver comparison against the
-//! published release, and supported versions.
+//! published release, supported versions, and the built documentation site.
 
 pub(crate) mod adr;
 pub(crate) mod attribution;
@@ -14,5 +14,6 @@ pub(crate) mod gungraun;
 pub(crate) mod perf_report;
 pub(crate) mod scratch;
 pub(crate) mod semver_checks;
+pub(crate) mod site_check;
 pub(crate) mod supported_versions;
 pub(crate) mod sync_labels;

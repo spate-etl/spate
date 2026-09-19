@@ -534,23 +534,13 @@ jobs:
           CI: "true"
         run: npm run build
 
-      # The floor is what stops an empty build reaching the deploy. The upload's
-      # `if-no-files-found` tests the whole `path:` list at once, and
-      # wrangler.jsonc always matches it.
-      - name: Site is complete and within the Cloudflare file limit
-        run: |
-          count=$(find website/build -type f | wc -l)
-          echo "site files: $count"
-          if [ "$count" -lt 200 ]; then
-            echo "::error::$count files; the build produced nothing usable."
-            exit 1
-          fi
-          if [ "$count" -gt 10000 ]; then
-            echo "::error::$count files; Workers static assets refuse a deployment over 20000."
-            exit 1
-          fi
+      - name: Site is complete
+        run: cargo xtask site-check
 
       # The deploy job has no checkout, so the config ships in the artifact.
+      # `if-no-files-found` tests the whole `path:` list at once and
+      # wrangler.jsonc always matches it, so the step above is what stops an
+      # empty build reaching the deploy.
       - name: Upload site artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

@@ -139,10 +139,6 @@
   color: "fbca04"
   description: "Force the container suites to run on this pull request"
 
-- name: "ci: loom"
-  color: "fbca04"
-  description: "Force the loom models to run on this pull request"
-
 - name: "ci: bench"
   color: "fbca04"
   description: "Force the instruction-count benches to run on this pull request"

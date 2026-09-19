@@ -11,7 +11,6 @@ pub(crate) struct Outputs {
     pub(crate) rust: bool,
     pub(crate) site: bool,
     pub(crate) fuzz: bool,
-    pub(crate) loom: bool,
     pub(crate) bench: bool,
     pub(crate) manifests: bool,
     pub(crate) container_pkgs: BTreeSet<String>,
@@ -63,7 +62,6 @@ impl fmt::Display for Outputs {
                 .collect::<Vec<_>>()
                 .join(" ")
         )?;
-        writeln!(f, "loom={}", self.loom)?;
         writeln!(f, "bench={}", self.bench)?;
         writeln!(f, "manifests={}", self.manifests)?;
         // One line each. `$GITHUB_OUTPUT` is a key=value file, so a multi-line

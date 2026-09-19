@@ -346,9 +346,9 @@ fn apply_deferrals(
     }
 }
 
-/// `ci: docker`, `ci: loom` and `ci: bench` force a suite on for a change whose
-/// paths would not have selected it. They can only add: an override able to
-/// clear a selection would make the classifier fail open.
+/// `ci: docker` and `ci: bench` force a suite on for a change whose paths would
+/// not have selected it. They can only add: an override able to clear a
+/// selection would make the classifier fail open.
 ///
 /// Applied after the deferrals, so labelling a bot's pull request overrides one
 /// for that one bump.
@@ -362,9 +362,6 @@ fn apply_labels(
     if has("ci: docker") {
         out.container_pkgs
             .extend(graph.all_container_pkgs().iter().cloned());
-    }
-    if has("ci: loom") {
-        out.loom = true;
     }
     if has("ci: bench") {
         out.bench = true;

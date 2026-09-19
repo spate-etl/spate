@@ -29,7 +29,15 @@ fn env(name: &str) -> String {
 
 /// The event shape, and what the run knows about its pull request.
 pub(crate) fn from_environment() -> (Event, Context) {
-    let event = match env("EVENT_NAME").as_str() {
+    // `github.actor` changes on a re-run, so the author comes from the pull
+    // request itself.
+    from_values(&env("EVENT_NAME"), &env("PR_AUTHOR"), &env("PR_LABELS"))
+}
+
+/// The event shape and the context one set of runner values names. An unset
+/// variable arrives as an empty string.
+fn from_values(event_name: &str, author: &str, labels: &str) -> (Event, Context) {
+    let event = match event_name {
         "pull_request" => Event::PullRequest,
         "merge_group" => Event::MergeGroup,
         // push, schedule and workflow_dispatch: a push to main is the last line
@@ -37,10 +45,8 @@ pub(crate) fn from_environment() -> (Event, Context) {
         _ => Event::ForceAll,
     };
     let ctx = Context {
-        // `github.actor` changes on a re-run, so the author comes from the
-        // pull request itself.
-        author: env("PR_AUTHOR"),
-        labels: env("PR_LABELS")
+        author: author.to_string(),
+        labels: labels
             .split(',')
             .map(|l| l.trim().to_string())
             .filter(|l| !l.is_empty())
@@ -172,6 +178,49 @@ mod tests {
             changed: None,
             push: None,
         }
+    }
+
+    /// The two events carrying a diff are the two that select one.
+    #[test]
+    fn the_two_events_with_a_diff_select_themselves() {
+        assert_eq!(from_values("pull_request", "", "").0, Event::PullRequest);
+        assert_eq!(from_values("merge_group", "", "").0, Event::MergeGroup);
+    }
+
+    /// Every other event name runs everything, an unset `EVENT_NAME` and a
+    /// name this code has never heard of included.
+    #[test]
+    fn every_other_event_name_runs_everything() {
+        for name in ["push", "schedule", "workflow_dispatch", "", "pull-request"] {
+            assert_eq!(
+                from_values(name, "", "").0,
+                Event::ForceAll,
+                "EVENT_NAME='{name}'"
+            );
+        }
+    }
+
+    /// The author the deferrals key on is the one `PR_AUTHOR` carries.
+    #[test]
+    fn the_author_reaches_the_context() {
+        assert_eq!(
+            from_values("pull_request", "dependabot[bot]", "").1.author,
+            "dependabot[bot]"
+        );
+        assert_eq!(from_values("push", "", "").1.author, "");
+    }
+
+    /// `PR_LABELS` is one comma-separated line, and a label carries spaces.
+    #[test]
+    fn the_labels_split_on_commas_and_drop_the_empty_entries() {
+        let labels = |text| from_values("pull_request", "", text).1.labels;
+        assert_eq!(labels("ci: docker,ci: loom"), ["ci: docker", "ci: loom"]);
+        assert_eq!(
+            labels(" ci: docker , ci: loom "),
+            ["ci: docker", "ci: loom"]
+        );
+        assert_eq!(labels(",, ,ci: bench,"), ["ci: bench"]);
+        assert!(labels("").is_empty());
     }
 
     #[test]

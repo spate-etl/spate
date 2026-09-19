@@ -567,7 +567,7 @@ fn hack(root: &Path, explain: bool) -> Outcome {
             // Last, because `--no-dev-deps` restores each Cargo.toml only when
             // it is finished and a locked build reads what is on disk.
             //
-            // The only workspace-wide build with features off. spate-fuzz is
+            // The workspace-wide build on default features. spate-fuzz is
             // excluded because it requires `testing` on spate-s3 and
             // spate-coordination, which the resolver would unify into every
             // other crate in the same invocation.

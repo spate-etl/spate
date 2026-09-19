@@ -14,8 +14,8 @@ use serde::Deserialize;
 /// `#[ignore]`d test, so the edge reaches no container suite.
 const WALL_BENCH_HARNESS: &str = "spate-bench";
 
-/// The libFuzzer harness. Nothing depends on it, so it adds no reverse edge
-/// that reaches a container suite or a published API.
+/// The libFuzzer harness. It sits outside `crates/` and owns no `#[ignore]`d
+/// test, so both closures intersect it away and neither set gains a member.
 const FUZZ_HARNESS: &str = "spate-fuzz";
 
 #[derive(Deserialize)]

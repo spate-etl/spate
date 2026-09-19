@@ -1127,6 +1127,43 @@ Prose.
         )
     }
 
+    /// The page drops a crate no release carries, alongside the first-party
+    /// chips, and the surviving section counts only what is left.
+    #[test]
+    fn the_page_drops_a_crate_nothing_distributes() {
+        let page = "\
+<ul>
+  <li data-license-id=\"MIT\">MIT <code>(MIT)</code> — 3 crates</li>
+</ul>
+<!-- BEGIN-LICENSE MIT -->
+<h2>
+  <code data-crate=\"serde\">serde 1.0.0</code>
+  <code data-crate=\"clap\">clap 4.0.0</code>
+  <code data-crate=\"spate\">spate 0.1.0</code>
+  — MIT <code>(MIT)</code>
+</h2>
+<pre>MIT text</pre>
+<!-- END-LICENSE -->
+";
+        let carried: HashSet<String> = ["serde", "spate"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        let out = filter_page(page, &names(&["spate"]), &carried, "out.html").unwrap();
+        assert!(
+            !out.contains("data-crate=\"clap\""),
+            "a crate nothing distributes stayed on the page"
+        );
+        assert!(
+            out.contains("data-crate=\"serde\""),
+            "a distributed third-party crate was dropped"
+        );
+        assert!(
+            out.contains("— 1 crate<"),
+            "the TOC count still counts the dropped crates: {out}"
+        );
+    }
+
     /// The sentinels leave with the sections they marked, an emptied section
     /// takes its TOC row with it, and the surviving row carries the count of
     /// what is left.

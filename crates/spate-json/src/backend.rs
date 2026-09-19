@@ -164,8 +164,8 @@ impl<'de> Visitor<'de> for DupVisitor {
     {
         let mut seen: HashSet<String> = HashSet::new();
         while let Some(key) = map.next_key::<String>()? {
-            if !seen.insert(key.clone()) {
-                return Err(de::Error::custom(format!("duplicate object key `{key}`")));
+            if let Some(dup) = seen.replace(key) {
+                return Err(de::Error::custom(format!("duplicate object key `{dup}`")));
             }
             // Recurse so nested objects are guarded too.
             map.next_value::<DupGuard>()?;

@@ -13,52 +13,15 @@
 mod support;
 
 use spate_coordination::{SplitCoordinator, SplitProgress};
-use std::sync::{Arc, Mutex};
+use spate_test::LogCapture;
 use std::time::Instant;
 use support::{Held, PhasedPlanner, drive, runtime, store, worker};
-
-/// Everything the global subscriber has formatted, shared with the
-/// subscriber it is installed into.
-#[derive(Clone)]
-struct Capture(Arc<Mutex<Vec<u8>>>);
-
-impl Capture {
-    fn new() -> Capture {
-        Capture(Arc::new(Mutex::new(Vec::new())))
-    }
-
-    fn lines(&self) -> Vec<String> {
-        String::from_utf8_lossy(&self.0.lock().expect("capture"))
-            .lines()
-            .map(str::to_string)
-            .collect()
-    }
-}
-
-impl std::io::Write for Capture {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().expect("capture").extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Capture {
-    type Writer = Capture;
-
-    fn make_writer(&'a self) -> Capture {
-        self.clone()
-    }
-}
 
 /// How many rebalances the leader has announced. Separate from
 /// [`announced_moves`] so a wait can poll it without parsing: a line read
 /// mid-write would panic there, and inside a poll loop that reads as a
 /// timeout in the wrong place.
-fn announcements(capture: &Capture) -> usize {
+fn announcements(capture: &LogCapture) -> usize {
     capture
         .lines()
         .iter()
@@ -71,7 +34,7 @@ fn announcements(capture: &Capture) -> usize {
 /// `moved=0`: a formatter that stopped rendering fields this way produces
 /// that absence too, and such an assertion would pass having checked
 /// nothing.
-fn announced_moves(capture: &Capture) -> Vec<u64> {
+fn announced_moves(capture: &LogCapture) -> Vec<u64> {
     capture
         .lines()
         .iter()
@@ -87,7 +50,7 @@ fn announced_moves(capture: &Capture) -> Vec<u64> {
 }
 
 /// Wait for a line containing `needle`.
-fn wait_for_line(capture: &Capture, needle: &str) {
+fn wait_for_line(capture: &LogCapture, needle: &str) {
     wait_until(&format!("a line containing {needle:?}"), capture, |c| {
         c.lines().iter().any(|l| l.contains(needle))
     });
@@ -96,7 +59,7 @@ fn wait_for_line(capture: &Capture, needle: &str) {
 /// Wait for `what` to become true of the capture, so the assertions below
 /// run against a fleet that has finished reacting to the join rather than
 /// one still mid-flight.
-fn wait_until(what: &str, capture: &Capture, mut check: impl FnMut(&Capture) -> bool) {
+fn wait_until(what: &str, capture: &LogCapture, mut check: impl FnMut(&LogCapture) -> bool) {
     let deadline = Instant::now() + support::DEADLINE;
     while Instant::now() < deadline {
         if check(capture) {
@@ -112,7 +75,7 @@ fn wait_until(what: &str, capture: &Capture, mut check: impl FnMut(&Capture) -> 
 
 #[test]
 fn a_peer_joining_is_announced_and_nothing_reads_as_a_fault() {
-    let capture = Capture::new();
+    let capture = LogCapture::new();
     // `info` is the level a deployment runs at and the level the coordinated
     // examples set, so it is the level this asserts about.
     tracing_subscriber::fmt()

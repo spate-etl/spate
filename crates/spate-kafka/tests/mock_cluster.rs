@@ -184,19 +184,23 @@ fn pause_stops_delivery_and_resume_recovers_gapless() {
     source.pause(&[lanes[0].id()]).expect("pause");
     produce(&brokers, 5, 1, "b");
 
-    // While paused nothing is delivered (pause also purges prefetch).
-    let idle_until = Instant::now() + Duration::from_secs(2);
-    while Instant::now() < idle_until {
-        // poll_events keeps the client machinery served.
-        let _ = source.poll_events(Duration::from_millis(50));
-        assert!(
-            lanes[0]
-                .poll(64, Duration::from_millis(100))
-                .expect("poll")
-                .is_none(),
-            "paused lane must not deliver"
-        );
-    }
+    // While paused nothing is delivered (pause also purges prefetch). A
+    // failure here arrives with the window's warnings, among them the rewind
+    // that pauses, seeks and resumes a partition, clearing this pause.
+    spate_test::show_logs(tracing::Level::WARN, || {
+        let idle_until = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < idle_until {
+            // poll_events keeps the client machinery served.
+            let _ = source.poll_events(Duration::from_millis(50));
+            assert!(
+                lanes[0]
+                    .poll(64, Duration::from_millis(100))
+                    .expect("poll")
+                    .is_none(),
+                "paused lane must not deliver"
+            );
+        }
+    });
 
     source.resume(&[lanes[0].id()]).expect("resume");
     let rows = drain_lane(&mut lanes[0], 5);

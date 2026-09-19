@@ -377,7 +377,7 @@ above from what is left. The elected license ids are unaffected either way.
 | `unicode-ident` | 1.0.24 | `MIT` |
 | `url` | 2.5.8 | `MIT` |
 | `utf8_iter` | 1.0.4 | `MIT` |
-| `uuid` | 1.26.0 | `MIT` |
+| `uuid` | 1.26.1 | `MIT` |
 | `value-trait` | 0.12.2 | `MIT` |
 | `vcpkg` | 0.2.15 | `MIT` |
 | `version_check` | 0.9.5 | `MIT` |

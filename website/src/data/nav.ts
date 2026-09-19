@@ -47,7 +47,6 @@ export const FOOTER_COLUMNS: FooterColumn[] = [
       {label: 'docs.rs', href: 'https://docs.rs/spate'},
       {label: 'crates.io', href: 'https://crates.io/crates/spate'},
       {label: 'Changelog', href: `${githubUrl}/blob/main/CHANGELOG.md`},
-      {label: 'Licenses', to: 'pathname:///licenses/'},
       {label: 'Brand', to: '/brand'},
     ],
   },

@@ -245,9 +245,8 @@ Copyright 2026 Marcus Kainth.
 
 Licensed under the Apache License, Version 2.0; see [LICENSE](LICENSE).
 
-Dependency licenses are inventoried in [THIRD-PARTY.md](THIRD-PARTY.md); the full
-texts are published at
-[spate.kainth.dev/licenses](https://spate.kainth.dev/licenses/).
+Dependency licenses are inventoried in [THIRD-PARTY.md](THIRD-PARTY.md). Most
+crates ship their own notice in their published source.
 
 Contributions are accepted under the same terms, per Apache-2.0 §5. There is no
 CLA to sign.

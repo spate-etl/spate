@@ -481,8 +481,7 @@ jobs:
     needs: plan
     if: needs.plan.outputs.nightly == 'true' || needs.plan.outputs.docs == 'true'
     timeout-minutes: 30
-    # The full build, with every dependency's license text on top. This
-    # produces what ships.
+    # The artifact this uploads is what docs-deploy publishes.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -500,16 +499,7 @@ jobs:
 
       - uses: ./.github/actions/setup-rust
         with:
-          tools: cargo-about
           shared-key: docs
-
-      # The same command generates THIRD-PARTY.md, filtering the first-party
-      # crates the same way, so the page and the inventory agree.
-      - name: Build third-party license texts
-        run: |
-          rm -rf website/static/licenses
-          mkdir -p website/static/licenses
-          cargo xtask attribution --html website/static/licenses/index.html
 
       - name: Install dependencies
         working-directory: website

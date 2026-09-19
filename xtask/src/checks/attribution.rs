@@ -1,18 +1,16 @@
-//! Regenerates the dependency attribution artifacts: the committed
-//! `THIRD-PARTY.md` inventory and the site's license page.
+//! Regenerates `THIRD-PARTY.md`, the committed inventory of the dependency
+//! licenses a release carries.
 //!
-//! Both artifacts are third-party inventories. The workspace's own crates are
-//! first-party and Apache-2.0, and `about.toml`'s `private = { ignore }` only
-//! reaches unpublished members, so the publishable members `cargo metadata`
-//! names are filtered out here instead. Both artifacts generate through this
-//! module, so they agree.
+//! The workspace's own crates are first-party and Apache-2.0, and
+//! `about.toml`'s `private = { ignore }` only reaches unpublished members, so
+//! the publishable members `cargo metadata` names are filtered out here.
 //!
 //! `cargo about` emits one row per license *text*, in an order that follows
-//! directory-read order and so varies between machines. The Markdown rebuild
-//! makes the output a property of its content alone: the crate table is sorted
-//! by (license id, crate, version) with duplicate rows collapsed, and the
-//! summary counts are recomputed from those rows. The generator's own counts
-//! are row counts.
+//! directory-read order and so varies between machines. The rebuild makes the
+//! output a property of its content alone: the crate table is sorted by
+//! (license id, crate, version) with duplicate rows collapsed, and the summary
+//! counts are recomputed from those rows. The generator's own counts are row
+//! counts.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
@@ -25,27 +23,16 @@ use crate::checks::scratch::{Scratch, nonce};
 use crate::run::{self, Error, Outcome, Step};
 
 const MD_TEMPLATE: &str = "about/md.hbs";
-const HTML_TEMPLATE: &str = "about/html.hbs";
 const INVENTORY: &str = "THIRD-PARTY.md";
-
-/// The crate chip the page filter reads, one per line in the page template.
-const CHIP: &str = "<code data-crate=\"";
-const BEGIN: &str = "<!-- BEGIN-LICENSE ";
-const END: &str = "<!-- END-LICENSE -->";
-const TOC_ROW: &str = "<li data-license-id=\"";
 
 const SUMMARY_RULE: &str = "|---|---|";
 const CRATE_HEADER: &str = "| Crate | Version | License |";
 
-pub(crate) fn generate(root: &Path, explain: bool, html: Option<&str>) -> Outcome {
-    let (template, tag, out) = match html {
-        Some(path) => (HTML_TEMPLATE, "html", path),
-        None => (MD_TEMPLATE, "md", INVENTORY),
-    };
+pub(crate) fn generate(root: &Path, explain: bool) -> Outcome {
     if explain {
         println!("{}", metadata_step().display());
-        println!("{}", about_step(template, Path::new("TMPFILE")).display());
-        println!("(filters the first-party and undistributed rows into {out})");
+        println!("{}", about_step(Path::new("TMPFILE")).display());
+        println!("(filters the first-party and undistributed rows into {INVENTORY})");
         return Ok(());
     }
 
@@ -54,26 +41,16 @@ pub(crate) fn generate(root: &Path, explain: bool, html: Option<&str>) -> Outcom
     let distributed = distributed(&meta)?;
 
     let scratch = Scratch::new("attribution")?;
-    let file = scratch.join(&format!("attribution.{tag}"));
-    run::run(root, false, &about_step(template, &file))?;
-    let generated = read(&file)?;
+    let file = scratch.join("attribution.md");
+    run::run(root, false, &about_step(&file))?;
 
-    let (text, report) = if html.is_some() {
-        (
-            filter_page(&generated, &first_party, &distributed, out)?,
-            String::new(),
-        )
-    } else {
-        let inventory = rebuild(&generated, &first_party, &distributed)?;
-        let report = format!(
-            " ({} third-party crates, {} first-party row(s) filtered, {} undistributed row(s) filtered, {} duplicate notice row(s) collapsed)",
-            inventory.crates, inventory.first_party, inventory.undistributed, inventory.collapsed
-        );
-        (inventory.text, report)
-    };
-
-    install(&root.join(out), &text)?;
-    println!("attribution: wrote {out}{report}");
+    let inventory = rebuild(&read(&file)?, &first_party, &distributed)?;
+    install(&root.join(INVENTORY), &inventory.text)?;
+    println!(
+        "attribution: wrote {INVENTORY} ({} third-party crates, {} first-party row(s) filtered, \
+         {} undistributed row(s) filtered, {} duplicate notice row(s) collapsed)",
+        inventory.crates, inventory.first_party, inventory.undistributed, inventory.collapsed
+    );
     Ok(())
 }
 
@@ -97,7 +74,7 @@ fn metadata_step() -> Step<'static> {
 /// `--fail` is the gate: non-zero if any crate's license cannot be determined.
 /// `--frozen` would take the run offline, dropping the clarification lookups
 /// and silently degrading accuracy.
-fn about_step(template: &str, out: &Path) -> Step<'static> {
+fn about_step(out: &Path) -> Step<'static> {
     Step::new(
         "cargo",
         [
@@ -111,7 +88,7 @@ fn about_step(template: &str, out: &Path) -> Step<'static> {
         ],
     )
     .arg(out.to_string_lossy())
-    .arg(template)
+    .arg(MD_TEMPLATE)
 }
 
 #[derive(Deserialize)]
@@ -244,196 +221,6 @@ fn distributed(meta: &Metadata) -> Result<HashSet<String>, Error> {
         .into_iter()
         .filter_map(|id| name_of.get(id).map(|n| (*n).to_string()))
         .collect())
-}
-
-// ---------------------------------------------------------------------------
-// The /licenses/ page.
-// ---------------------------------------------------------------------------
-
-/// Drops the first-party chips, the sections they empty and the table-of-
-/// contents rows that reach zero, rewriting the surviving counts.
-///
-/// Two passes. The first counts the crates each section keeps; the second
-/// emits. Handlebars HTML-escapes the license text, so a text cannot fake a
-/// sentinel or a chip.
-fn filter_page(
-    generated: &str,
-    first_party: &[String],
-    distributed: &HashSet<String>,
-    out: &str,
-) -> Result<String, Error> {
-    // Both halves per crate, mirroring the Markdown path: every first-party
-    // package must appear in the generated page, or the filter has nothing to
-    // drop for it and has gone blind for that name.
-    for name in first_party {
-        if !generated.contains(&format!("data-crate=\"{name}\"")) {
-            return Err(Error::msg(format!(
-                "first-party crate '{name}' never appeared in the generated page"
-            )));
-        }
-    }
-
-    let names: HashSet<&str> = first_party.iter().map(String::as_str).collect();
-    let drop = |crate_name: &str| names.contains(crate_name) || !distributed.contains(crate_name);
-
-    // A crate shipping several notices sits in several sections, and the
-    // inventory counts it once, so each id counts distinct (crate, version)
-    // pairs here and the two agree. A chip outside a sentinel pair counts
-    // toward nothing.
-    let mut keep: HashMap<usize, usize> = HashMap::new();
-    let mut count: HashMap<&str, usize> = HashMap::new();
-    let mut seen: HashSet<(&str, &str)> = HashSet::new();
-    let mut block = 0usize;
-    let mut inside = false;
-    let mut id = "";
-    for line in records(generated) {
-        if let Some(rest) = line.strip_prefix(BEGIN) {
-            block += 1;
-            inside = true;
-            id = rest.strip_suffix(" -->").unwrap_or(rest);
-        } else if line == END {
-            inside = false;
-        } else if inside && line.contains(CHIP) && !drop(crate_of(line)) {
-            *keep.entry(block).or_default() += 1;
-            if seen.insert((id, chip_of(line))) {
-                *count.entry(id).or_default() += 1;
-            }
-        }
-    }
-
-    let mut page = String::with_capacity(generated.len());
-    let mut blockno = 0usize;
-    let mut inside = false;
-    let mut skip = false;
-    let mut dropped = 0usize;
-    let mut toc = 0usize;
-    for line in records(generated) {
-        if line.starts_with(BEGIN) {
-            inside = true;
-            blockno += 1;
-            skip = keep.get(&blockno).copied().unwrap_or(0) == 0;
-            continue;
-        }
-        if line == END {
-            inside = false;
-            skip = false;
-            continue;
-        }
-        if inside && skip {
-            continue;
-        }
-        if inside && line.contains(CHIP) && drop(crate_of(line)) {
-            dropped += 1;
-            continue;
-        }
-        if line.contains(TOC_ROW) {
-            let n = count
-                .get(id_of(line, "data-license-id="))
-                .copied()
-                .unwrap_or(0);
-            if n < 1 {
-                continue;
-            }
-            let row = rewrite_count(line, n).ok_or_else(|| {
-                Error::msg(format!(
-                    "a TOC row lost the count shape the rewrite expects: {line}"
-                ))
-            })?;
-            toc += 1;
-            page.push_str(&row);
-            page.push('\n');
-            continue;
-        }
-        page.push_str(line);
-        page.push('\n');
-    }
-
-    if inside {
-        return Err(Error::msg("unterminated BEGIN-LICENSE section"));
-    }
-    if blockno < 1 {
-        return Err(Error::msg(
-            "no BEGIN-LICENSE sections; the template lost its sentinels",
-        ));
-    }
-    if dropped < 1 {
-        return Err(Error::msg(
-            "no first-party crate chip was dropped; the filter has gone blind",
-        ));
-    }
-    // Every id that kept a crate keeps its TOC row, and no other row survives;
-    // a drift between the overview ids and the section ids would otherwise thin
-    // the TOC silently.
-    if toc != count.len() {
-        return Err(Error::msg(format!(
-            "{toc} TOC rows kept for {} license ids with crates",
-            count.len()
-        )));
-    }
-
-    // Nothing first-party may survive, name by name.
-    for name in first_party {
-        if page.contains(&format!("data-crate=\"{name}\"")) {
-            return Err(Error::msg(format!(
-                "first-party crate '{name}' survived into {out}"
-            )));
-        }
-    }
-    Ok(page)
-}
-
-/// The text after the last occurrence of `marker`, or the whole line when it
-/// holds none.
-fn after_last<'a>(line: &'a str, marker: &str) -> &'a str {
-    line.rfind(marker)
-        .map_or(line, |i| &line[i + marker.len()..])
-}
-
-/// The crate named by the last chip on the line.
-fn crate_of(line: &str) -> &str {
-    let rest = after_last(line, CHIP);
-    rest.split('"').next().unwrap_or(rest)
-}
-
-/// The last chip's own text, `name version`. The inventory keeps one row per
-/// (crate, version), so two linked versions of one crate count twice there and
-/// must count twice here.
-fn chip_of(line: &str) -> &str {
-    let rest = after_last(line, CHIP);
-    let body = rest.find("\">").map_or(rest, |i| &rest[i + "\">".len()..]);
-    body.split("</code>").next().unwrap_or(body)
-}
-
-/// The attribute value after the last occurrence of `marker`.
-fn id_of<'a>(line: &'a str, marker: &str) -> &'a str {
-    let rest = after_last(line, &format!("{marker}\""));
-    rest.split('"').next().unwrap_or(rest)
-}
-
-/// The row with its crate count replaced, or `None` when the row carries no
-/// count to replace. The leftmost digit run followed by ` crates</li>` is the
-/// one rewritten.
-fn rewrite_count(line: &str, n: usize) -> Option<String> {
-    const TAIL: &str = " crates</li>";
-    let noun = if n == 1 { "crate" } else { "crates" };
-    let bytes = line.as_bytes();
-    let mut from = 0;
-    while let Some(offset) = line[from..].find(TAIL) {
-        let at = from + offset;
-        let mut start = at;
-        while start > 0 && bytes[start - 1].is_ascii_digit() {
-            start -= 1;
-        }
-        if start < at {
-            return Some(format!(
-                "{}{n} {noun}</li>{}",
-                &line[..start],
-                &line[at + TAIL.len()..]
-            ));
-        }
-        from = at + 1;
-    }
-    None
 }
 
 // ---------------------------------------------------------------------------
@@ -615,8 +402,7 @@ fn position(lines: &[&str], exact: &str) -> Option<usize> {
 // Files.
 // ---------------------------------------------------------------------------
 
-/// The input split on `\n` alone, so a `\r` a license text carries survives
-/// into the artifact.
+/// The input split on `\n` alone, with one trailing newline dropped.
 fn records(text: &str) -> Vec<&str> {
     if text.is_empty() {
         return Vec::new();
@@ -644,8 +430,8 @@ fn install(out: &Path, text: &str) -> Result<(), Error> {
             .create_new(true)
             .open(&staged)?;
         file.write_all(text.as_bytes())?;
-        // Both artifacts are committed and served, so the mode is set here and
-        // a restrictive umask cannot leave them unreadable.
+        // The inventory is committed, so the mode is set here and a
+        // restrictive umask cannot leave it unreadable.
         readable(&file)?;
         drop(file);
         fs::rename(&staged, out)
@@ -674,16 +460,11 @@ mod tests {
     /// Every crate a fixture names, so the distribution filter drops nothing
     /// and the test isolates the behaviour it is about.
     fn carries_all(text: &str) -> HashSet<String> {
-        let mut out = HashSet::new();
-        for line in records(text) {
-            if line.starts_with("| ") {
-                out.insert(field(line, 2).to_string());
-            }
-            if line.contains(CHIP) {
-                out.insert(crate_of(line).to_string());
-            }
-        }
-        out
+        records(text)
+            .iter()
+            .filter(|l| l.starts_with("| "))
+            .map(|l| field(l, 2).to_string())
+            .collect()
     }
 
     fn names(list: &[&str]) -> Vec<String> {
@@ -695,7 +476,7 @@ mod tests {
     #[test]
     fn the_generator_is_asked_for_the_whole_feature_union_and_fails_loud() {
         assert_eq!(
-            about_step(MD_TEMPLATE, Path::new("/tmp/x")).display(),
+            about_step(Path::new("/tmp/x")).display(),
             "cargo about generate --workspace --all-features --locked --fail -o /tmp/x about/md.hbs"
         );
     }
@@ -1094,294 +875,14 @@ Prose.
         );
     }
 
-    // -- the /licenses/ page -----------------------------------------------
-
-    const PAGE: &str = "\
-<ul>
-  <li data-license-id=\"MIT\">MIT <code>(MIT)</code> — 3 crates</li>
-  <li data-license-id=\"Zlib\">Zlib <code>(Zlib)</code> — 1 crates</li>
-</ul>
-<!-- BEGIN-LICENSE MIT -->
-<h2>
-  <code data-crate=\"serde\">serde 1.0.0</code>
-  <code data-crate=\"spate\">spate 0.1.0</code>
-  — MIT <code>(MIT)</code>
-</h2>
-<pre>MIT text</pre>
-<!-- END-LICENSE -->
-<!-- BEGIN-LICENSE Zlib -->
-<h2>
-  <code data-crate=\"spate-core\">spate-core 0.1.0</code>
-  — Zlib <code>(Zlib)</code>
-</h2>
-<pre>Zlib text</pre>
-<!-- END-LICENSE -->
-";
-
-    fn page(text: &str) -> Result<String, Error> {
-        filter_page(
-            text,
-            &names(&["spate", "spate-core"]),
-            &carries_all(text),
-            "out.html",
-        )
-    }
-
-    /// The page drops a crate no release carries, alongside the first-party
-    /// chips, and the surviving section counts only what is left.
-    #[test]
-    fn the_page_drops_a_crate_nothing_distributes() {
-        let page = "\
-<ul>
-  <li data-license-id=\"MIT\">MIT <code>(MIT)</code> — 3 crates</li>
-</ul>
-<!-- BEGIN-LICENSE MIT -->
-<h2>
-  <code data-crate=\"serde\">serde 1.0.0</code>
-  <code data-crate=\"clap\">clap 4.0.0</code>
-  <code data-crate=\"spate\">spate 0.1.0</code>
-  — MIT <code>(MIT)</code>
-</h2>
-<pre>MIT text</pre>
-<!-- END-LICENSE -->
-";
-        let carried: HashSet<String> = ["serde", "spate"]
-            .iter()
-            .map(|s| (*s).to_string())
-            .collect();
-        let out = filter_page(page, &names(&["spate"]), &carried, "out.html").unwrap();
-        assert!(
-            !out.contains("data-crate=\"clap\""),
-            "a crate nothing distributes stayed on the page"
-        );
-        assert!(
-            out.contains("data-crate=\"serde\""),
-            "a distributed third-party crate was dropped"
-        );
-        assert!(
-            out.contains("— 1 crate<"),
-            "the TOC count still counts the dropped crates: {out}"
-        );
-    }
-
-    /// The sentinels leave with the sections they marked, an emptied section
-    /// takes its TOC row with it, and the surviving row carries the count of
-    /// what is left.
-    #[test]
-    fn an_emptied_section_and_its_toc_row_are_dropped() {
-        assert_eq!(
-            page(PAGE).unwrap(),
-            "\
-<ul>
-  <li data-license-id=\"MIT\">MIT <code>(MIT)</code> — 1 crate</li>
-</ul>
-<h2>
-  <code data-crate=\"serde\">serde 1.0.0</code>
-  — MIT <code>(MIT)</code>
-</h2>
-<pre>MIT text</pre>
-"
-        );
-    }
-
-    #[test]
-    fn a_section_keeping_two_crates_reads_as_plural() {
-        let text = PAGE.replace(
-            "  <code data-crate=\"spate\">spate 0.1.0</code>\n",
-            "  <code data-crate=\"anyhow\">anyhow 1.0.0</code>\n  \
-             <code data-crate=\"spate\">spate 0.1.0</code>\n",
-        );
-        assert!(page(&text).unwrap().contains("— 2 crates</li>"));
-    }
-
-    /// One crate's two notices under one id are two sections and one count, so
-    /// the page agrees with the inventory.
-    #[test]
-    fn a_crate_with_two_notices_counts_once() {
-        let text = PAGE.replace(
-            "<!-- BEGIN-LICENSE Zlib -->",
-            "<!-- BEGIN-LICENSE MIT -->\n<h2>\n  \
-             <code data-crate=\"serde\">serde 1.0.0</code>\n</h2>\n\
-             <pre>other MIT text</pre>\n<!-- END-LICENSE -->\n\
-             <!-- BEGIN-LICENSE Zlib -->",
-        );
-        assert!(page(&text).unwrap().contains("— 1 crate</li>"));
-    }
-
-    /// Two versions of one crate under MIT, and one of them under Zlib as
-    /// well.
-    const PAGE_TWICE: &str = "\
-<ul>
-  <li data-license-id=\"MIT\">MIT <code>(MIT)</code> — 4 crates</li>
-  <li data-license-id=\"Zlib\">Zlib <code>(Zlib)</code> — 2 crates</li>
-</ul>
-<!-- BEGIN-LICENSE MIT -->
-<h2>
-  <code data-crate=\"serde\">serde 1.0.0</code>
-  <code data-crate=\"serde\">serde 2.0.0</code>
-  <code data-crate=\"spate\">spate 0.1.0</code>
-</h2>
-<pre>MIT text</pre>
-<!-- END-LICENSE -->
-<!-- BEGIN-LICENSE Zlib -->
-<h2>
-  <code data-crate=\"serde\">serde 1.0.0</code>
-  <code data-crate=\"spate-core\">spate-core 0.1.0</code>
-</h2>
-<pre>Zlib text</pre>
-<!-- END-LICENSE -->
-";
-
-    /// The `PAGE_TWICE` table-of-contents row for `id`, or `<dropped>`.
-    fn toc_row(id: &str) -> String {
-        let page = page(PAGE_TWICE).unwrap();
-        let marker = format!("data-license-id=\"{id}\"");
-        page.lines()
-            .find(|l| l.contains(&marker))
-            .unwrap_or("<dropped>")
-            .to_owned()
-    }
-
-    /// The count key is the chip, so two linked versions of one crate are two
-    /// crates under that id.
-    #[test]
-    fn two_versions_of_one_crate_count_twice() {
-        assert_eq!(
-            toc_row("MIT"),
-            "  <li data-license-id=\"MIT\">MIT <code>(MIT)</code> — 2 crates</li>"
-        );
-    }
-
-    /// The count key carries the license id, so a crate under two ids counts
-    /// under each.
-    #[test]
-    fn a_crate_under_two_ids_counts_under_both() {
-        assert_eq!(
-            toc_row("Zlib"),
-            "  <li data-license-id=\"Zlib\">Zlib <code>(Zlib)</code> — 1 crate</li>"
-        );
-    }
-
-    /// The drop branch reads chips inside a section only, so a first-party chip
-    /// outside every section reaches the page and the last check over it
-    /// refuses.
-    #[test]
-    fn a_first_party_chip_surviving_outside_a_section_is_refused() {
-        let text = format!("{PAGE}<code data-crate=\"spate\">spate 0.1.0</code>\n");
-        assert_eq!(
-            page(&text).unwrap_err().message,
-            "first-party crate 'spate' survived into out.html"
-        );
-    }
-
-    #[test]
-    fn a_first_party_crate_the_page_never_names_is_refused() {
-        let e = filter_page(
-            PAGE,
-            &names(&["spate", "spate-kafka"]),
-            &carries_all(PAGE),
-            "out.html",
-        )
-        .unwrap_err();
-        assert_eq!(
-            e.message,
-            "first-party crate 'spate-kafka' never appeared in the generated page"
-        );
-    }
-
-    #[test]
-    fn a_page_with_nothing_to_drop_is_refused() {
-        let text = PAGE.replace("data-crate=\"spate\"", "data-crate=\"serde\"");
-        let e = filter_page(
-            &text,
-            &names(&["spate-core"]),
-            &carries_all(&text),
-            "out.html",
-        )
-        .unwrap_err();
-        assert_eq!(
-            e.message,
-            "no first-party crate chip was dropped; the filter has gone blind"
-        );
-    }
-
-    #[test]
-    fn a_page_without_sentinels_is_refused() {
-        let text = PAGE
-            .replace("<!-- BEGIN-LICENSE MIT -->\n", "")
-            .replace("<!-- BEGIN-LICENSE Zlib -->\n", "")
-            .replace("<!-- END-LICENSE -->\n", "");
-        assert_eq!(
-            page(&text).unwrap_err().message,
-            "no BEGIN-LICENSE sections; the template lost its sentinels"
-        );
-    }
-
-    #[test]
-    fn an_unterminated_section_is_refused() {
-        let text = PAGE.replace("<pre>Zlib text</pre>\n<!-- END-LICENSE -->\n", "");
-        assert_eq!(
-            page(&text).unwrap_err().message,
-            "unterminated BEGIN-LICENSE section"
-        );
-    }
-
-    #[test]
-    fn a_toc_row_without_a_count_is_refused() {
-        let text = PAGE.replace("— 3 crates</li>", "</li>");
-        assert_eq!(
-            page(&text).unwrap_err().message,
-            concat!(
-                "a TOC row lost the count shape the rewrite expects: ",
-                "  <li data-license-id=\"MIT\">MIT <code>(MIT)</code> </li>"
-            )
-        );
-    }
-
-    /// An id with crates and no TOC row would thin the overview silently.
-    #[test]
-    fn a_missing_toc_row_is_refused() {
-        let text = PAGE.replace(
-            "  <li data-license-id=\"MIT\">MIT <code>(MIT)</code> — 3 crates</li>\n",
-            "",
-        );
-        assert_eq!(
-            page(&text).unwrap_err().message,
-            "0 TOC rows kept for 1 license ids with crates"
-        );
-    }
-
-    /// A chip after the last section is outside every sentinel pair, so it
-    /// counts toward no id and keeps no section from being dropped.
-    #[test]
-    fn a_chip_outside_a_section_keeps_nothing_alive() {
-        let text = format!("{PAGE}<code data-crate=\"anyhow\">anyhow 1.0.0</code>\n");
-        let out = page(&text).unwrap();
-        assert!(!out.contains("Zlib text"));
-        assert!(out.contains("data-crate=\"anyhow\""));
-    }
-
-    #[test]
-    fn a_chip_yields_its_crate_and_its_version() {
-        let line = "  <code data-crate=\"serde\">serde 1.0.0</code>";
-        assert_eq!(crate_of(line), "serde");
-        assert_eq!(chip_of(line), "serde 1.0.0");
-        assert_eq!(
-            id_of("<li data-license-id=\"MIT\">x</li>", "data-license-id="),
-            "MIT"
-        );
-    }
-
-    /// A `\r` a license text carries is part of the line and reaches the page
-    /// unchanged.
+    /// `records` splits on `\n` alone, so a `\r` stays on its line. One
+    /// trailing newline is dropped, and empty input yields no records.
     #[test]
     fn a_carriage_return_is_not_a_line_terminator() {
         assert_eq!(records("a\r\nb\n"), ["a\r", "b"]);
         assert_eq!(records("a\n\n"), ["a", ""]);
         assert_eq!(records("a"), ["a"]);
         assert!(records("").is_empty());
-        let text = PAGE.replace("<pre>MIT text</pre>", "<pre>MIT\r\ntext\r</pre>");
-        assert!(page(&text).unwrap().contains("<pre>MIT\r\ntext\r</pre>"));
     }
 
     /// The generator's directory is the owner's alone and the artifact is
@@ -1397,14 +898,5 @@ Prose.
         assert_eq!(fs::read_to_string(&out).unwrap(), "body\n");
         assert_eq!(mode(scratch.dir()), 0o700);
         assert_eq!(mode(&out), 0o644);
-    }
-
-    #[test]
-    fn only_the_first_count_in_a_row_is_rewritten() {
-        assert_eq!(
-            rewrite_count("<li>12 crates</li> 3 crates</li>", 7).as_deref(),
-            Some("<li>7 crates</li> 3 crates</li>")
-        );
-        assert_eq!(rewrite_count("<li>crates</li>", 2), None);
     }
 }

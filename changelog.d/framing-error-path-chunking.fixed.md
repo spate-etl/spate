@@ -1,11 +1,14 @@
-**Object framing stays chunking-independent when it fails** (`spate-s3`,
-`spate-core`) — a record the framer completed before a chunk failed to decode
-is queued for the source rather than dropped with the error, and the same drain
-runs when the end-of-object validation fails, which is where a compressed codec
-hands over an object's last records. What a lane delivers is unchanged, since a
-failing object is quarantined and everything undelivered is discarded. This
-restores the framer's own property, that the record sequence it emits is a
-function of the object's byte stream, which is what a resume by record index
-replays against. `RecordFramer` states the obligation an implementer carries
-for that, bounding a record against the bytes accumulated so far so the framer
-fails at the same position however the stream was split.
+**Consistent record framing after a decode error** (`spate-s3`, `spate-core`)
+
+The object framer now preserves completed records when decoding a chunk or
+validating the end of an object fails. Previously, an error could discard
+records completed during that call, making the framer's output depend on how
+the object was split into chunks. Preserving these records keeps record
+indexes consistent when the same byte stream is read again. Source delivery
+is unchanged: the source quarantines a failed object and discards its
+undelivered records.
+
+Custom `RecordFramer` implementations must check size limits against the
+record accumulated so far and make completed records available before
+returning an error. This keeps both the failure position and the completed
+record sequence independent of chunk boundaries.

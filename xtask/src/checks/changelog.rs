@@ -48,12 +48,21 @@ const INTERNAL_TYPES: &[&str] = &["docs", "test", "chore", "style", "ci", "refac
 
 /// What a new fragment carries until its author writes the entry.
 const TEMPLATE: &str = "\
-**A short bold lead-in** (`spate-crate`) — what this means for somebody
-upgrading, in one to five sentences. Present tense, impersonal. Say what it
-means, not what moved; the commit message already says what moved.
+**A short descriptive title** (`spate-crate`)
+
+Start with what happens now, in present tense. Follow with what happened
+previously, in past tense, then explain the practical consequence or required
+action. For a new feature, include previous limitations only when useful.
+
+Use short sentences and familiar words. Keep exact setting, type and metric
+names readers need to find. Avoid idioms, implementation jargon and vague
+claims. Include qualifications when they prevent a likely misunderstanding.
+Usually write three to five sentences; add paragraphs for migration details.
+Check current behavior against source and tests, and previous behavior against
+history. Say \"in previous versions\" only for behavior verified in a release.
 
 Delete this template text and write the entry. If the change is breaking, open
-with `**Breaking:**`.
+with `**Breaking:**`. See changelog.d/README.md for the guide and an example.
 ";
 
 /// What the failure prints under the offending subjects.

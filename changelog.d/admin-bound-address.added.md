@@ -1,6 +1,7 @@
-**The start reports the admin server's address** (`spate-core`) — a pipeline
-whose `admin.listen` names a port of `0` asks the kernel to pick one, and
-nothing said which port it picked, so `/metrics`, `/healthz` and `/readyz` were
-served at an address no one could learn. The bound address is logged at `INFO`
-under the message `admin server listening`. A deployment running at `INFO` sees
-one new line per start.
+**Admin server address** (`spate-core`)
+
+The pipeline now logs the admin server's bound address at `INFO` with the
+message `admin server listening`. Previously, startup did not report this
+address, so configuring `admin.listen` with port `0` left the automatically
+assigned port out of the logs. You can use the logged address to reach
+`/metrics`, `/healthz`, and `/readyz`.

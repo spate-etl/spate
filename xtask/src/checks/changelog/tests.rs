@@ -328,13 +328,15 @@ fn a_fragment_filename_carries_its_type() {
     assert_eq!(fragment_type("changelog.d/sub/x.fixed.md"), None);
 }
 
-/// A fragment has to say something.
+/// A fragment has to say something, where a blank outside ASCII says nothing
+/// and a byte that is not UTF-8 says something.
 #[test]
 fn an_empty_fragment_is_not_prose() {
     assert!(!has_prose(b""));
     assert!(!has_prose(b"   \n\n\t\n"));
     assert!(has_prose(b"A real note.\n"));
-    assert!(has_prose("\u{a0}".as_bytes()));
+    assert!(!has_prose("\u{a0}\u{2003}\n".as_bytes()));
+    assert!(has_prose(b"\xff"));
 }
 
 /// The trailer is read in any casing, with whatever spacing, and a sentence
@@ -444,18 +446,24 @@ fn the_title_is_a_subject_of_its_own() {
     assert!(subjects(&root, "HEAD..HEAD", "").is_empty());
 }
 
-/// A commit's subject and its short sha come back as one subject, and the
-/// excuse is read from that commit's own message.
+/// A commit's subject and its short sha come back as one subject, split at the
+/// tab between them, so a subject carrying spaces survives whole.
 #[test]
 fn a_commit_subject_names_the_commit_it_came_from() {
-    let root = crate::repo_root().unwrap();
-    let got = subjects(&root, "HEAD~1..HEAD", "");
-    assert_eq!(got.len(), 1, "{got:?}");
-    let Source::Commit(sha) = &got[0].source else {
-        panic!("{got:?}");
-    };
-    assert_eq!(got[0].origin, format!("commit {sha}"));
-    assert!(!sha.is_empty());
+    let repo = Repo::new("a_commit_subject_names_the_commit_it_came_from");
+    let base = repo.git(&["rev-parse", "HEAD"]);
+    let text = "fix(spate-kafka): stop dropping offsets on revoke";
+    let head = repo.commit(text);
+    let short = repo.git(&["log", "-1", "--format=%h", &head]);
+
+    assert_eq!(
+        subjects(repo.path(), &format!("{base}..{head}"), ""),
+        vec![Subject {
+            text: text.to_owned(),
+            origin: format!("commit {short}"),
+            source: Source::Commit(short),
+        }]
+    );
 }
 
 /// A range git cannot resolve yields no subjects, and the gate carries on.
@@ -541,8 +549,9 @@ fn the_laptop_arm_reads_the_first_upstream_that_is_behind_head() {
     assert_eq!(laptop_base(repo.path()), Some(first));
 }
 
-/// A trailer on a commit excuses that commit's subject alone, and a subject
-/// with nothing excusing it is reported with where it came from.
+/// A trailer on a commit excuses that commit's subject alone. A subject with
+/// nothing excusing it is reported with where it came from, and the pull
+/// request title is reported even where a commit carries the same text.
 #[test]
 fn a_trailer_excuses_one_subject_and_leaves_the_rest() {
     let repo = Repo::new("a_trailer_excuses_one_subject_and_leaves_the_rest");
@@ -560,43 +569,21 @@ fn a_trailer_excuses_one_subject_and_leaves_the_rest() {
             source: Source::Commit(repo.commit("fix(spate-kafka): a real one")),
         },
         Subject {
-            text: "docs(ci): a page".to_owned(),
+            text: "feat(spate-core): never released".to_owned(),
             origin: "pull request title".to_owned(),
             source: Source::Body,
         },
     ];
 
-    let (offending, excused) = offenders(repo.path(), &scratch, &subjects, "");
+    let (offending, excused) = offenders(repo.path(), &scratch, &subjects);
     assert_eq!(excused, 1);
     assert_eq!(
         offending,
-        vec![offender_line(
-            "fix(spate-kafka): a real one",
-            "commit def5678"
-        )]
+        vec![
+            offender_line("fix(spate-kafka): a real one", "commit def5678"),
+            offender_line("feat(spate-core): never released", "pull request title"),
+        ]
     );
-}
-
-/// The pull request body's trailer excuses nothing on a commit, because the
-/// body is read for the whole pull request before this.
-#[test]
-fn the_body_excuses_no_single_commit() {
-    let repo = Repo::new("the_body_excuses_no_single_commit");
-    let scratch = scratch("the_body_excuses_no_single_commit");
-    let subjects = vec![Subject {
-        text: "feat(spate-core): a thing".to_owned(),
-        origin: "commit abc1234".to_owned(),
-        source: Source::Commit(repo.commit("feat(spate-core): a thing")),
-    }];
-
-    let (offending, excused) = offenders(
-        repo.path(),
-        &scratch,
-        &subjects,
-        "why\n\nSigned-off-by: A <a@a>\nChangelog: none",
-    );
-    assert_eq!(excused, 0);
-    assert_eq!(offending.len(), 1);
 }
 
 /// A fragment written but not yet committed counts only for a run with no head
@@ -706,12 +693,54 @@ fn the_gate_refuses_a_tree_missing_the_fragment_directory() {
     );
     std::fs::create_dir(scratch.join("changelog.d")).unwrap();
     let refused = check(scratch.dir(), false).unwrap_err();
-    assert!(
-        refused
-            .message
-            .starts_with("changelog.d/README.md not found."),
-        "{}",
-        refused.message
+    assert_eq!(
+        refused.message,
+        "changelog.d/README.md not found. It states the format and, less obviously,\n  \
+         is what keeps the directory in git once a release has consumed every fragment."
+    );
+}
+
+/// The fields a pull request run reads, over one range.
+fn pull_request(base: &str, head: &str, title: &str) -> Fields {
+    Fields {
+        event: "pull_request".to_owned(),
+        base_sha: base.to_owned(),
+        head_sha: head.to_owned(),
+        title: title.to_owned(),
+        body: String::new(),
+    }
+}
+
+/// A pull request is judged on the fragments its own head carries, so one
+/// sitting in the worktree satisfies nothing.
+#[test]
+fn the_gate_counts_the_fragments_of_the_head_it_was_given() {
+    let repo = Repo::new("the_gate_counts_the_fragments_of_the_head_it_was_given");
+    let base = repo.git(&["rev-parse", "HEAD"]);
+    let head = repo.commit("feat(spate-core): a windowed operator");
+    repo.write("changelog.d/untracked.fixed.md", "A real note.\n");
+
+    let refused = gate(repo.path(), &pull_request(&base, &head, ""), false, "").unwrap_err();
+    assert_eq!(refused.code, Some(1));
+    assert_eq!(refused.message, "");
+}
+
+/// A fragment added with nothing in it is refused by name, so an empty file
+/// cannot stand in for the release note.
+#[test]
+fn the_gate_names_an_added_fragment_that_is_empty() {
+    let repo = Repo::new("the_gate_names_an_added_fragment_that_is_empty");
+    let base = repo.git(&["rev-parse", "HEAD"]);
+    repo.write("changelog.d/silent.fixed.md", "   \n\n");
+    let head = repo.commit("feat(spate-core): a windowed operator");
+
+    let refused = gate(repo.path(), &pull_request(&base, &head, ""), false, "").unwrap_err();
+    assert_eq!(
+        refused.message,
+        "these fragment(s) were added but are empty:\n\n    \
+         changelog.d/silent.fixed.md\n  \
+         A fragment is the release note. Write what the change means for somebody\n  \
+         upgrading. changelog.d/README.md has the conventions."
     );
 }
 
@@ -791,24 +820,9 @@ fn a_commit_trailer_excuses_its_own_subject() {
     let excused = repo.commit("feat(spate-core): a thing\n\nChangelog: none\n");
     let plain = repo.commit("feat(spate-core): another\n\nChangelog: none of this applies\n");
 
-    assert!(has_changelog_none(
-        repo.path(),
-        &scratch,
-        &Source::Commit(excused),
-        ""
-    ));
-    assert!(!has_changelog_none(
-        repo.path(),
-        &scratch,
-        &Source::Commit(plain),
-        ""
-    ));
-    assert!(!has_changelog_none(
-        repo.path(),
-        &scratch,
-        &Source::Commit("0000000".to_owned()),
-        ""
-    ));
+    assert!(commit_says_none(repo.path(), &scratch, &excused));
+    assert!(!commit_says_none(repo.path(), &scratch, &plain));
+    assert!(!commit_says_none(repo.path(), &scratch, "0000000"));
 }
 
 /// The pull request body's trailer is read from the body's last block, so a
@@ -817,7 +831,7 @@ fn a_commit_trailer_excuses_its_own_subject() {
 fn the_body_trailer_is_read_from_the_last_block() {
     let repo = Repo::new("the_body_trailer_is_read_from_the_last_block");
     let scratch = scratch("the_body_trailer_is_read_from_the_last_block");
-    let read = |body: &str| has_changelog_none(repo.path(), &scratch, &Source::Body, body);
+    let read = |body: &str| body_says_none(repo.path(), &scratch, body);
 
     assert!(read("why this exists\n\nChangelog: none"));
     assert!(read(

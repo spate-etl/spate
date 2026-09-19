@@ -148,7 +148,16 @@ pub(crate) fn check(root: &Path, explain: bool) -> Outcome {
         println!("(classifies this branch's subjects and reads {FRAGMENTS}/)");
         return Ok(());
     }
+    gate(
+        root,
+        &Fields::from_env(),
+        std::env::var_os("GITHUB_ACTIONS").is_some(),
+        &var("GITHUB_EVENT_NAME"),
+    )
+}
 
+/// The gate's verdict over one set of fields and one runner state.
+fn gate(root: &Path, fields: &Fields, in_actions: bool, github_event: &str) -> Outcome {
     if !root.join(FRAGMENTS).is_dir() {
         return Err(Error::msg(format!(
             "{FRAGMENTS}/ not found. It holds the changelog fragments"
@@ -161,14 +170,9 @@ pub(crate) fn check(root: &Path, explain: bool) -> Outcome {
         )));
     }
 
-    let fields = Fields::from_env();
-    let mode = select(root, &fields)?;
+    let mode = select(root, fields)?;
 
-    if evaluated_nothing(
-        &mode,
-        std::env::var_os("GITHUB_ACTIONS").is_some(),
-        &var("GITHUB_EVENT_NAME"),
-    ) {
+    if evaluated_nothing(&mode, in_actions, github_event) {
         return Err(Error::msg(
             "running on a pull request inside GitHub Actions with no EVENT_NAME, so this\n  \
              would have checked nothing and passed.\n\n  \
@@ -191,7 +195,7 @@ pub(crate) fn check(root: &Path, explain: bool) -> Outcome {
     let subjects = subjects(root, &range, &fields.title);
     let scratch = Scratch::new("spate-xtask-changelog")?;
 
-    if has_changelog_none(root, &scratch, &Source::Body, &fields.body) {
+    if body_says_none(root, &scratch, &fields.body) {
         println!("{TOOL}: the pull request body carries a 'Changelog: none' trailer, which");
         println!(
             "  is what the squash commit will carry. Taken at its word for this pull request."
@@ -199,7 +203,7 @@ pub(crate) fn check(root: &Path, explain: bool) -> Outcome {
         return Ok(());
     }
 
-    let (offenders, excused) = offenders(root, &scratch, &subjects, &fields.body);
+    let (offenders, excused) = offenders(root, &scratch, &subjects);
 
     if offenders.is_empty() && excused > 0 {
         println!("{TOOL}: {excused} subject(s) would require a changelog fragment, and each");
@@ -501,22 +505,17 @@ fn subjects(root: &Path, range: &str, title: &str) -> Vec<Subject> {
 /// The subjects requiring a fragment with nothing excusing them, and how many
 /// a trailer excused.
 ///
-/// A trailer on a commit excuses that commit's subject alone; the body's own
-/// trailer is read before this, for the whole pull request.
-fn offenders(
-    root: &Path,
-    scratch: &Scratch,
-    subjects: &[Subject],
-    body: &str,
-) -> (Vec<String>, usize) {
+/// A trailer on a commit excuses that commit's subject alone, so the pull
+/// request title is never excused here.
+fn offenders(root: &Path, scratch: &Scratch, subjects: &[Subject]) -> (Vec<String>, usize) {
     let mut offenders = Vec::new();
     let mut excused = 0;
     for subject in subjects {
         if !needs_entry(&subject.text) {
             continue;
         }
-        if subject.source != Source::Body
-            && has_changelog_none(root, scratch, &subject.source, body)
+        if let Source::Commit(sha) = &subject.source
+            && commit_says_none(root, scratch, sha)
         {
             excused += 1;
             continue;
@@ -536,29 +535,33 @@ fn offender_line(subject: &str, origin: &str) -> String {
 // The `Changelog: none` trailer.
 // ---------------------------------------------------------------------------
 
-/// Whether the message this subject came from carries `Changelog: none`.
+/// Whether the pull request body carries `Changelog: none`, which is the
+/// trailer the squash commit will carry.
+fn body_says_none(root: &Path, scratch: &Scratch, body: &str) -> bool {
+    if body.is_empty() {
+        return false;
+    }
+    says_none(root, scratch, &format!("{body}\n"))
+}
+
+/// Whether this commit's own message carries `Changelog: none`.
+fn commit_says_none(root: &Path, scratch: &Scratch, sha: &str) -> bool {
+    let step = Step::new("git", ["log", "-1", "--format=%B", sha]);
+    let message = match run::complete(root, &step, Streams::Collect) {
+        Ok(Completed { code: 0, stdout }) => stdout,
+        _ => String::new(),
+    };
+    says_none(root, scratch, &message)
+}
+
+/// Whether one message carries `Changelog: none`.
 ///
 /// `git interpret-trailers --parse` decides. A body line like `Tests: the two
 /// fault-injection knobs ...` starts a sentence, and a substring search would
 /// read it as a trailer. One message at a time, because interpret-trailers takes
 /// the trailers from the last block of its whole input.
-fn has_changelog_none(root: &Path, scratch: &Scratch, source: &Source, body: &str) -> bool {
-    let message = match source {
-        Source::Body => {
-            if body.is_empty() {
-                return false;
-            }
-            format!("{body}\n")
-        }
-        Source::Commit(sha) => {
-            let step = Step::new("git", ["log", "-1", "--format=%B", sha]);
-            match run::complete(root, &step, Streams::Collect) {
-                Ok(Completed { code: 0, stdout }) => stdout,
-                _ => String::new(),
-            }
-        }
-    };
-    trailer_says_none(&parse_trailers(root, scratch, &message))
+fn says_none(root: &Path, scratch: &Scratch, message: &str) -> bool {
+    trailer_says_none(&parse_trailers(root, scratch, message))
 }
 
 /// What `git interpret-trailers --parse` makes of a message, empty where it
@@ -689,8 +692,12 @@ fn fragment_has_prose(root: &Path, file: &str) -> bool {
     std::fs::read(root.join(file)).is_ok_and(|bytes| has_prose(&bytes))
 }
 
+/// A blank outside ASCII is whitespace here, so a fragment holding nothing else
+/// is empty for the gate and for the release step that reads it again.
 fn has_prose(bytes: &[u8]) -> bool {
-    bytes.iter().any(|b| !is_space(char::from(*b)))
+    String::from_utf8_lossy(bytes)
+        .chars()
+        .any(|c| !c.is_whitespace())
 }
 
 #[cfg(test)]

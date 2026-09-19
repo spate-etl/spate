@@ -2,11 +2,12 @@
 //! changelog new`: the exit status each outcome reports, which stream carries
 //! what, and the bytes of every diagnostic.
 
+use std::path::Path;
 use std::process::{Command, Output};
 
-/// The environment variables the gate reads, cleared so nothing on the host
-/// reaches the child.
-const READS: [&str; 7] = [
+/// The variables the gate reads, and the two its `git` invocations read,
+/// cleared so nothing on the host reaches the child.
+const READS: [&str; 9] = [
     "EVENT_NAME",
     "BASE_SHA",
     "HEAD_SHA",
@@ -14,7 +15,43 @@ const READS: [&str; 7] = [
     "PR_BODY",
     "GITHUB_ACTIONS",
     "GITHUB_EVENT_NAME",
+    "GIT_DIR",
+    "GIT_WORK_TREE",
 ];
+
+/// What the refusal prints under the offending subjects.
+const GUIDANCE: &str = "
+  Add one with:
+
+      cargo xtask changelog new fixed short-description
+
+  and write what the change means for somebody upgrading, not what moved.
+  changelog.d/README.md has the format and the conventions.
+
+  If it is not user-visible, say so in the subject. There is no label and
+  no opt-out checkbox for this, and .github/labels.yml says why. The exemption
+  is derived from the type and scope you write:
+
+      feat(spate-core): ...  ->  refactor(spate-core): ...  nothing user-facing moved
+      fix(spate-core): ...   ->  test(spate-core): ...      it only touched tests
+      feat(spate-core): ...  ->  feat(docs): ...            it only touched docs
+
+  For a fix to a bug that was never released, put a 'Changelog: none'
+  trailer on the commit.
+
+  The pull request title is what lands on main, since this repository squashes
+  with the title as the subject, so the title is the one that has to be right.
+";
+
+/// The whole refusal naming one offending subject and where it came from.
+fn refusal(subject: &str, origin: &str) -> String {
+    format!(
+        "changelog: these subject(s) say this change is visible to somebody\n  \
+         upgrading, and no fragment was added under changelog.d/:\n\n    \
+         {subject}{} ({origin})\n{GUIDANCE}",
+        " ".repeat(70usize.saturating_sub(subject.len()))
+    )
+}
 
 fn xtask(args: &[&str], env: &[(&str, &str)]) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_spate-xtask"));
@@ -168,26 +205,7 @@ fn a_title_requiring_a_fragment_fails_with_the_guidance() {
         &pull_request(&sha, title, ""),
         1,
         "",
-        &format!(
-            "changelog: these subject(s) say this change is visible to somebody\n  \
-             upgrading, and no fragment was added under changelog.d/:\n\n    \
-             {title}{} (pull request title)\n\n  \
-             Add one with:\n\n      \
-             cargo xtask changelog new fixed short-description\n\n  \
-             and write what the change means for somebody upgrading, not what moved.\n  \
-             changelog.d/README.md has the format and the conventions.\n\n  \
-             If it is not user-visible, say so in the subject. There is no label and\n  \
-             no opt-out checkbox for this, and .github/labels.yml says why. The exemption\n  \
-             is derived from the type and scope you write:\n\n      \
-             feat(spate-core): ...  ->  refactor(spate-core): ...  nothing user-facing moved\n      \
-             fix(spate-core): ...   ->  test(spate-core): ...      it only touched tests\n      \
-             feat(spate-core): ...  ->  feat(docs): ...            it only touched docs\n\n  \
-             For a fix to a bug that was never released, put a 'Changelog: none'\n  \
-             trailer on the commit.\n\n  \
-             The pull request title is what lands on main, since this repository squashes\n  \
-             with the title as the subject, so the title is the one that has to be right.\n",
-            " ".repeat(70 - title.len())
-        ),
+        &refusal(title, "pull request title"),
     );
 }
 
@@ -219,6 +237,157 @@ fn a_body_trailer_excuses_the_pull_request() {
         0,
         "changelog: the pull request body carries a 'Changelog: none' trailer, which\n  \
          is what the squash commit will carry. Taken at its word for this pull request.\n",
+        "",
+    );
+}
+
+/// A repository of this run's own, removed with its contents. `GIT_DIR` and
+/// `GIT_WORK_TREE` point the gate's `git` invocations at it, so the range it
+/// reads is the one built here and no test depends on this repository's
+/// history.
+struct Repo {
+    git_dir: String,
+    work_tree: String,
+}
+
+impl Repo {
+    fn new(name: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!(
+            "spate-xtask-changelog-{name}.{}",
+            std::process::id()
+        ));
+        drop(std::fs::remove_dir_all(&dir));
+        std::fs::create_dir_all(&dir).unwrap();
+        let repo = Self {
+            git_dir: dir.join(".git").to_string_lossy().into_owned(),
+            work_tree: dir.to_string_lossy().into_owned(),
+        };
+        repo.git(&["init", "--quiet", "-b", "main", "."]);
+        repo.write("changelog.d/README.md", "the conventions\n");
+        repo.commit("chore: the first commit");
+        repo
+    }
+
+    fn path(&self) -> &Path {
+        Path::new(&self.work_tree)
+    }
+
+    fn git(&self, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .current_dir(self.path())
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim_end().to_owned()
+    }
+
+    fn write(&self, rel: &str, body: &str) {
+        let path = self.path().join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+    }
+
+    /// Commits everything in the tree, answering the new commit's sha and the
+    /// short form `git log` prints for it.
+    fn commit(&self, message: &str) -> (String, String) {
+        self.git(&["add", "-A"]);
+        self.git(&["commit", "--quiet", "--allow-empty", "-m", message]);
+        (
+            self.git(&["rev-parse", "HEAD"]),
+            self.git(&["log", "-1", "--format=%h"]),
+        )
+    }
+}
+
+impl Drop for Repo {
+    fn drop(&mut self) {
+        drop(std::fs::remove_dir_all(self.path()));
+    }
+}
+
+/// The environment a pull request run reads, over a range in `repo`.
+fn over<'a>(
+    repo: &'a Repo,
+    base: &'a str,
+    head: &'a str,
+    title: &'a str,
+) -> Vec<(&'a str, &'a str)> {
+    vec![
+        ("EVENT_NAME", "pull_request"),
+        ("BASE_SHA", base),
+        ("HEAD_SHA", head),
+        ("PR_TITLE", title),
+        ("PR_BODY", ""),
+        ("GIT_DIR", &repo.git_dir),
+        ("GIT_WORK_TREE", &repo.work_tree),
+    ]
+}
+
+/// The branch's own commits are classified, so a commit requiring a fragment is
+/// refused under a title that requires none.
+#[test]
+fn a_commit_requiring_a_fragment_is_refused_under_an_exempt_title() {
+    let repo = Repo::new("a_commit_requiring_a_fragment_is_refused_under_an_exempt_title");
+    let (base, _) = repo.commit("chore: a base");
+    let subject = "fix(spate-kafka): stop dropping offsets on revoke";
+    let (head, short) = repo.commit(subject);
+
+    held(
+        &["tidy", "changelog"],
+        &over(&repo, &base, &head, "chore: tidy up"),
+        1,
+        "",
+        &refusal(subject, &format!("commit {short}")),
+    );
+}
+
+/// A commit carrying a `Changelog: none` trailer is taken at its word, and the
+/// run says how many subjects that excused.
+#[test]
+fn a_commit_trailer_excuses_the_commit_it_is_on() {
+    let repo = Repo::new("a_commit_trailer_excuses_the_commit_it_is_on");
+    let (base, _) = repo.commit("chore: a base");
+    let (head, _) = repo.commit("feat(spate-core): never released\n\nChangelog: none\n");
+
+    held(
+        &["tidy", "changelog"],
+        &over(&repo, &base, &head, "chore: tidy up"),
+        0,
+        "changelog: 1 subject(s) would require a changelog fragment, and each\n  \
+         carries a 'Changelog: none' trailer saying it is not user-visible.\n",
+        "",
+    );
+}
+
+/// A fragment added in the range satisfies the subjects requiring one, and the
+/// run says how many of each it counted.
+#[test]
+fn an_added_fragment_satisfies_the_subjects_requiring_one() {
+    let repo = Repo::new("an_added_fragment_satisfies_the_subjects_requiring_one");
+    let (base, _) = repo.commit("chore: a base");
+    repo.write("changelog.d/a-windowed-operator.added.md", "A real note.\n");
+    let (head, _) = repo.commit("feat(spate-core): a windowed operator");
+
+    held(
+        &["tidy", "changelog"],
+        &over(&repo, &base, &head, "chore: tidy up"),
+        0,
+        "changelog: 1 subject(s) require a changelog fragment, 1 added.\n",
         "",
     );
 }
@@ -256,7 +425,7 @@ fn explain_names_the_path_it_would_write() {
         "",
     );
     assert!(
-        !std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        !Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../changelog.d/a-thing.fixed.md")
             .exists()
     );

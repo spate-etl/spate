@@ -1,5 +1,6 @@
-**`spate_sink_drain_overrun_total` is listed in the name taxonomy**
-(`spate-core`) — the constant was declared, documented and incremented in
-production, but missing from `metrics::names::COUNTERS`. Anything enumerating
-the taxonomy through those lists, rather than through the constants, could not
-see it.
+**Complete counter name list** (`spate-core`)
+
+`metrics::names::COUNTERS` now includes `spate_sink_drain_overrun_total`.
+Previously, the counter was recorded and documented but missing from this
+list. Code that enumerates counter names through `COUNTERS` can now discover
+it.

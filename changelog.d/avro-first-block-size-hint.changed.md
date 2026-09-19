@@ -1,11 +1,16 @@
-**Avro map decoding reserves its table from the first block header**
-(`spate-avro`) — `AvroDatumDeserializer` reads a map's first block count before
-serde builds the table, so a decoded `HashMap` starts at that block's size and
-stops rehashing its way up. A map spanning several blocks still rehashes at each
-later boundary. Malformed input claiming a large first block reserves against
-that claim before failing: on a short payload the reservation is held to the
-bytes present, and above that serde caps the entry *count*, which for a 32-byte
-key/value pair works out near 2 MiB once the table rounds its bucket count up to
-a power of two. A custom visitor that returns without reading an entry now
-validates the block header, so a datum whose first map header is malformed
-or over budget errors where it used to decode. Arrays are unchanged.
+**Avro map allocation** (`spate-avro`)
+
+`AvroDatumDeserializer` now uses the first block's entry count to reserve space
+when decoding a map into a `HashMap`. Previously, the map started with no
+reserved space and grew as entries arrived. This reduces allocation and
+rehashing while decoding the first block; later blocks may still require the
+table to grow.
+
+Malformed input can cause a reservation before decoding fails. The size hint
+is limited by the bytes remaining in the payload, and serde also caps the
+number of entries it reserves. For `HashMap<String, i64>`, a sufficiently large
+malformed payload can cause an allocation of about 2 MiB.
+
+A custom visitor that reads no entries now rejects a malformed first block
+header or a count above the decoding budget. Previously, that visitor could
+accept the datum without checking the header. Array decoding is unchanged.

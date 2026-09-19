@@ -1,14 +1,14 @@
-**Breaking:** **`metrics.per_partition_detail` reaches the checkpointer**
-(`spate-core`) — `spate_checkpoint_pending_batches` carried the flag's
-`partition` label in the documentation and in the handle, but nothing wrote it,
-so the labeled series never appeared in a scrape whatever the flag was set to.
-The controller publishes one labeled series per partition it tracks, on every
-commit cycle, and zeroes a partition's series when that partition leaves the
-assignment.
+**Breaking:** **Pending batches per partition** (`spate-core`)
 
-A deployment already running with `per_partition_detail: true` gains series it
-never had. The unlabeled series still carries the max across partitions, so
-select it with `{partition=""}`; a `sum` over the bare name now adds that max to
-the per-partition counts, and a dashboard panel or recording rule built on the
-bare family needs rechecking. The default (off) publishes the aggregate alone,
-as before.
+With `metrics.per_partition_detail: true`,
+`spate_checkpoint_pending_batches` now publishes a pending-batch count for
+each tracked partition. Previously, the setting produced no partition-labeled
+series for this metric. Counts update during regular commit cycles, and a
+partition's series is set to zero after it leaves the assignment. During
+reassignment, this detail can trail the aggregate by up to one commit interval.
+
+The series without a `partition` label still reports the maximum across
+partitions. Select it with `{partition=""}` when you need that aggregate:
+summing the bare metric name now includes both the maximum and the individual
+counts. Review dashboards and recording rules that use this metric. With the
+setting disabled, only the aggregate is published.

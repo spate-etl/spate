@@ -1,23 +1,24 @@
-**Breaking: the ClickHouse sink always fetches the schema, and RowBinary
-carries it on the wire** (`spate-clickhouse`) — `sink: { clickhouse: ... }` no
-longer takes `validate_schema`; the table's columns are read from every replica
-whenever a sink is built, and `format: rowbinary` sends
-`INSERT … FORMAT RowBinaryWithNamesAndTypes` with a header naming each column
-and its type. The server checks that header on every insert, so a table
-`ALTER`ed under a running pipeline is rejected rather than silently storing
-rescaled values — the case a same-width change (a `Decimal` scale, a
-`DateTime64` precision) used to slip through. `ClickHouseSinkBuilder::with_row`
-is now async and returns the runnable sink, replacing
-`ClickHouseSink::validate_schema`; pass `sink.schema()` to
-`ClickHouseEncoder::with_schema`, which is now its only constructor, and call
-`sink.native_schema()` synchronously. `input_format_with_names_use_header` and
-`input_format_with_types_use_header` join the settings the sink manages, so a
-`settings:` map naming either is rejected at load. `NativeSchema::from_columns`
-now checks a row against the types it declares, not only their names.
+**Breaking:** **ClickHouse schema checks on every sink** (`spate-clickhouse`)
 
-The type check running on every sink is what a pipeline previously on
-`validate_schema: off` or `names` will notice: a field whose width matches its
-column by coincidence is now rejected at the first record. A raw `u64` epoch
-against a `DateTime64` column is the likely one — that column is `Int64`-backed,
-so it takes an `i64`, or the `DateTime64Millis` wrapper, which pins the scale
-as well.
+The ClickHouse sink now fetches the table schema from every replica when it is
+built, and `format: rowbinary` sends column names and types using
+`RowBinaryWithNamesAndTypes`. Previously, `validate_schema` could disable type
+checks, and RowBinary inserts carried no type information. The server now
+checks the header on every insert, so changing a column's decimal scale or
+`DateTime64` precision while a pipeline is running causes an error instead of
+silently interpreting values with the new scale.
+
+Remove `validate_schema` from the sink configuration. Await
+`ClickHouseSinkBuilder::with_row` to fetch the schema and obtain the sink;
+this replaces `ClickHouseSink::validate_schema`. Construct the encoder with
+`ClickHouseEncoder::with_schema` and pass `sink.schema()` to it. Call
+`sink.native_schema()` without awaiting it. Remove
+`input_format_with_names_use_header` and `input_format_with_types_use_header`
+from custom `settings`; the sink manages them and rejects overrides.
+
+Row type checks now also apply to pipelines previously configured with
+`validate_schema: off` or `names`, and `NativeSchema::from_columns` validates
+declared types as well as names. A field with the same byte width as its
+column can therefore fail on the first record if its type is incompatible.
+For example, use an `i64` for a raw `DateTime64` value or a matching wrapper
+such as `DateTime64Millis`; a `u64` is rejected.

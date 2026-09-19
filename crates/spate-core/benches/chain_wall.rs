@@ -41,6 +41,9 @@
 //! - **The state is a `RefCell`** because the harness hands a case's routine
 //!   `&S` while `Rig::drive` takes `&mut self`. One borrow flag per iteration
 //!   against a region of tens of microseconds, paid identically by both legs.
+//! - **`chain_stable_key_hash` is marked erratic**, so it is measured and
+//!   reported but never reaches the significant-changes table (see
+//!   [`CHAIN_STABLE_KEY_HASH_ERRATIC`]). Read its row; do not gate on it.
 //!
 //! # What the measured region carries that production does not
 //!
@@ -86,6 +89,22 @@ const BORROWED_ROWS: u64 = BATCH as u64 * 3;
 /// Sixteen rather than one, so the modulo has something to divide and the
 /// result spreads; the keyed corpus hits all sixteen residues.
 const ROUTE_SHARDS: usize = 16;
+
+/// Why `chain_stable_key_hash` is reported but never flagged.
+///
+/// Established from one A/A run's six per-replicate wall times (#229): base
+/// `976.0 963.2 991.3 1029.1 1042.3 965.3`, head `941.1 1122.9 1032.7 1071.0
+/// 1135.4 976.9`. The head leg's six replicates split into two clusters. The
+/// fastest replicate in the run and the two slowest are both on the head leg.
+/// A real regression cannot produce that pattern. The case reached the
+/// significant-changes table at +5.23% (regressed) and, on a consecutive run
+/// of the same commit the same day, −5.90% (improved).
+///
+/// This records an observation on one machine, not a diagnosis. Re-test on
+/// dedicated hardware before the marking is lifted.
+const CHAIN_STABLE_KEY_HASH_ERRATIC: &str = "one run's per-replicate wall times show a second mode, \
+     with the head leg holding both the fastest replicate and the two slowest; flags in both \
+     directions across consecutive runs of the same commit";
 
 /// The default chunk target: above everything one batch encodes, so a chunk
 /// seals only at `flush`.
@@ -221,6 +240,7 @@ fn suite() -> Suite {
         // The keys are what this case ingests, so here they *are* the corpus,
         // unlike the chain cases above, where they sit beside the payload.
         .bytes(BATCH as u64 * 8)
+        .erratic(CHAIN_STABLE_KEY_HASH_ERRATIC)
         .done()
         .case(
             "chain_route_key_hash",

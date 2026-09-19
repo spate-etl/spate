@@ -55,7 +55,7 @@ ignore:
   - "crates/spate-test/**" # the mock/test-harness crate shipped for users
   - "examples/**"
   - "bench/**" # the wall-clock harness: unpublished, run by hand
-  - "fuzz/**" # the libFuzzer harness: its own crate, outside the workspace
+  - "fuzz/**" # the libFuzzer harness: unpublished, and fuzzed on nightly
   # The entry points those targets reach the private decoders through. They
   # are exercised by the nightly fuzz tier, which needs a sanitizer build on
   # nightly and cannot run under `cargo llvm-cov`, so coverage reads them as

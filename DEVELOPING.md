@@ -146,8 +146,8 @@ at all.
 `fuzz/` is a [cargo-fuzz](https://rust-fuzz.github.io/book/cargo-fuzz.html)
 crate with one libFuzzer target per boundary where the pipeline turns bytes
 into records or records into bytes. Each target asserts a property rather
-than only the absence of a panic. The crate sits outside the workspace, so no
-`--workspace` target compiles it.
+than only the absence of a panic. It is a workspace member, so `--workspace`
+compiles it and the root lockfile pins what it builds against.
 
 A decoder its crate keeps private is reached through that crate's
 off-by-default `testing` feature, in a `fuzz_seams` module. `fuzz/Cargo.toml`
@@ -162,12 +162,13 @@ cargo xtask fuzz run avro_wire_confluent --secs 60
 `cargo +nightly fuzz list` prints the set. libFuzzer's instrumentation is
 nightly-only, which is why every target carries `+nightly`.
 
-A pull request touching `fuzz/`, `ci.yml`, `.github/actions/` or
-`xtask/` builds every target and runs none of them. The nightly
-tier in `scheduled.yml` fuzzes each for five minutes, set by `MAX_TOTAL_TIME`,
-and carries `fuzz/corpus` between nights in a cache entry. A crash uploads the
-input as the `fuzz-artifacts` artifact and opens an issue titled
-`A fuzz target found a crashing input`.
+A pull request touching `fuzz/`, `ci.yml`, `.github/actions/`, the nightly pin
+or `xtask/` builds every target with instrumentation and runs none of them, and
+so does one touching a workspace crate the harness depends on directly.
+The nightly tier in `scheduled.yml` fuzzes each for five minutes, set by
+`MAX_TOTAL_TIME`, and carries `fuzz/corpus` between nights in a cache entry.
+A crash uploads the input as the `fuzz-artifacts` artifact and opens an issue
+titled `A fuzz target found a crashing input`.
 
 ## Benchmarks
 

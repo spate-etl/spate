@@ -24,10 +24,13 @@ When reading it:
   They are published at <https://spate.kainth.dev/licenses/>, generated
   from the same lockfile by the same tool.
 
-Dev-dependencies are excluded: they are never distributed and so require no
-attribution. Build-dependencies are included, since a build script can
-contribute generated code to the shipped artifact, as can a proc-macro, so
-compile-time-only crates are listed.
+Only what a release carries is listed: the crates reachable from a publishable
+crate over normal and build edges. Dev-dependencies are excluded, and so is
+anything reached only through an unpublished workspace member, such as the
+benchmark harness, the task runner and the fuzz targets. Build-dependencies of
+a published crate are included, since a build script can contribute generated
+code to the shipped artifact, as can a proc-macro, so compile-time-only crates
+are listed.
 
 Spate's **own** crates (`spate`, `spate-core`, …) are not listed. They are
 first-party, Apache-2.0, covered by [LICENSE](LICENSE), and
@@ -41,7 +44,7 @@ exists to detect.
 
 | License | Crates |
 |---|---|
-| `MIT` | 304 |
+| `MIT` | 299 |
 | `Unicode-3.0` | 19 |
 | `Apache-2.0` | 13 |
 | `ISC` | 6 |
@@ -96,7 +99,6 @@ above from what is left. The elected license ids are unaffected either way.
 | `aho-corasick` | 1.1.4 | `MIT` |
 | `aliasable` | 0.1.3 | `MIT` |
 | `allocator-api2` | 0.2.21 | `MIT` |
-| `anstyle` | 1.0.14 | `MIT` |
 | `arrayvec` | 0.7.8 | `MIT` |
 | `async-trait` | 0.1.92 | `MIT` |
 | `atomic-waker` | 1.1.2 | `MIT` |
@@ -123,10 +125,6 @@ above from what is left. The elected license ids are unaffected either way.
 | `chacha20` | 0.10.2 | `MIT` |
 | `chrono` | 0.4.45 | `MIT` |
 | `cityhash-rs` | 1.0.1 | `MIT` |
-| `clap` | 4.6.6 | `MIT` |
-| `clap_builder` | 4.6.6 | `MIT` |
-| `clap_derive` | 4.6.4 | `MIT` |
-| `clap_lex` | 1.1.0 | `MIT` |
 | `clickhouse` | 0.15.2 | `MIT` |
 | `clickhouse-macros` | 0.3.0 | `MIT` |
 | `clickhouse-types` | 0.1.3 | `MIT` |

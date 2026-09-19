@@ -96,6 +96,8 @@ url = "2.5"
 futures-util = { version = "0.3.31", default-features = false }
 base64 = "0.22.1"
 flate2 = "1.1"
+# clickhouse requires ^0.13, so 0.14 adds a second copy of the crate. Tracked
+# in #562.
 zstd = "0.13"
 schema_registry_converter = { version = "5.0", default-features = false }
 

@@ -40,6 +40,17 @@ updates:
         update-types:
           - "version-update:semver-minor"
           - "version-update:semver-major"
+      # clickhouse requires zstd ^0.13 and spate-clickhouse enables its `zstd`
+      # feature, so zstd 0.14 adds a second copy of the crate and a second
+      # zstd-safe, leaving 0.13.3 in the graph. Nothing on spate-s3's
+      # decompression path changed at 0.14, so the bump buys two duplicates and
+      # two THIRD-PARTY.md rows.
+      #
+      # Delete this when clickhouse moves to ^0.14. Tracked in #562.
+      - dependency-name: "zstd"
+        update-types:
+          - "version-update:semver-minor"
+          - "version-update:semver-major"
 
     # Under Cargo's default `increase-if-necessary`, a manifest edit in a bump
     # signals a dependency moved outside its declared requirement.

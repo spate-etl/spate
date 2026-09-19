@@ -45,11 +45,13 @@ pub(crate) fn generate(root: &Path, explain: bool, html: Option<&str>) -> Outcom
     if explain {
         println!("{}", metadata_step().display());
         println!("{}", about_step(template, Path::new("TMPFILE")).display());
-        println!("(filters the first-party rows into {out})");
+        println!("(filters the first-party and undistributed rows into {out})");
         return Ok(());
     }
 
-    let first_party = first_party(&run::capture(root, &metadata_step())?)?;
+    let meta = Metadata::parse(&run::capture(root, &metadata_step())?)?;
+    let first_party = first_party(&meta)?;
+    let distributed = distributed(&meta)?;
 
     let scratch = Scratch::new("attribution")?;
     let file = scratch.join(&format!("attribution.{tag}"));
@@ -57,12 +59,15 @@ pub(crate) fn generate(root: &Path, explain: bool, html: Option<&str>) -> Outcom
     let generated = read(&file)?;
 
     let (text, report) = if html.is_some() {
-        (filter_page(&generated, &first_party, out)?, String::new())
+        (
+            filter_page(&generated, &first_party, &distributed, out)?,
+            String::new(),
+        )
     } else {
-        let inventory = rebuild(&generated, &first_party)?;
+        let inventory = rebuild(&generated, &first_party, &distributed)?;
         let report = format!(
-            " ({} third-party crates, {} first-party row(s) filtered, {} duplicate notice row(s) collapsed)",
-            inventory.crates, inventory.first_party, inventory.collapsed
+            " ({} third-party crates, {} first-party row(s) filtered, {} undistributed row(s) filtered, {} duplicate notice row(s) collapsed)",
+            inventory.crates, inventory.first_party, inventory.undistributed, inventory.collapsed
         );
         (inventory.text, report)
     };
@@ -74,8 +79,19 @@ pub(crate) fn generate(root: &Path, explain: bool, html: Option<&str>) -> Outcom
 
 /// Reads the whole workspace metadata, so a member anywhere in the tree is
 /// covered and a stray directory under `crates/` cannot be mistaken for one.
+/// The resolve graph comes with it, under the same feature union the generator
+/// is asked for, so both filters read one answer.
 fn metadata_step() -> Step<'static> {
-    Step::new("cargo", ["metadata", "--no-deps", "--format-version", "1"])
+    Step::new(
+        "cargo",
+        [
+            "metadata",
+            "--format-version",
+            "1",
+            "--all-features",
+            "--locked",
+        ],
+    )
 }
 
 /// `--fail` is the gate: non-zero if any crate's license cannot be determined.
@@ -101,24 +117,69 @@ fn about_step(template: &str, out: &Path) -> Step<'static> {
 #[derive(Deserialize)]
 struct Metadata {
     packages: Vec<Package>,
+    #[serde(default)]
+    workspace_members: Vec<String>,
+    #[serde(default)]
+    resolve: Option<Resolve>,
 }
 
 #[derive(Deserialize)]
 struct Package {
+    #[serde(default)]
+    id: String,
     name: String,
     publish: Option<Vec<String>>,
 }
 
+#[derive(Deserialize)]
+struct Resolve {
+    nodes: Vec<Node>,
+}
+
+#[derive(Deserialize)]
+struct Node {
+    id: String,
+    deps: Vec<NodeDep>,
+}
+
+#[derive(Deserialize)]
+struct NodeDep {
+    pkg: String,
+    #[serde(default)]
+    dep_kinds: Vec<DepKind>,
+}
+
+#[derive(Deserialize)]
+struct DepKind {
+    /// `None` for a normal dependency, `"dev"` or `"build"` otherwise.
+    kind: Option<String>,
+}
+
+impl Metadata {
+    fn parse(metadata: &str) -> Result<Self, Error> {
+        serde_json::from_str(metadata).map_err(|e| Error::msg(format!("cargo metadata: {e}")))
+    }
+
+    /// Whether a package is a member of this workspace. A metadata run that
+    /// carries dependencies lists every registry crate here too, and a
+    /// registry crate's `publish` is null.
+    fn is_member(&self, pkg: &Package) -> bool {
+        self.workspace_members.is_empty() || self.workspace_members.contains(&pkg.id)
+    }
+}
+
+fn publishable(pkg: &Package) -> bool {
+    pkg.publish.as_ref().is_none_or(|allow| !allow.is_empty())
+}
+
 /// The publishable workspace members, in the order the metadata lists them.
 /// `publish: []` marks a member that is never uploaded.
-fn first_party(metadata: &str) -> Result<Vec<String>, Error> {
-    let parsed: Metadata =
-        serde_json::from_str(metadata).map_err(|e| Error::msg(format!("cargo metadata: {e}")))?;
-    let names: Vec<String> = parsed
+fn first_party(meta: &Metadata) -> Result<Vec<String>, Error> {
+    let names: Vec<String> = meta
         .packages
-        .into_iter()
-        .filter(|p| p.publish.as_ref().is_none_or(|allow| !allow.is_empty()))
-        .map(|p| p.name)
+        .iter()
+        .filter(|p| meta.is_member(p) && publishable(p))
+        .map(|p| p.name.clone())
         .collect();
     if names.is_empty() {
         return Err(Error::msg(
@@ -127,6 +188,62 @@ fn first_party(metadata: &str) -> Result<Vec<String>, Error> {
         ));
     }
     Ok(names)
+}
+
+/// Every crate a published release carries: reachable from a publishable
+/// member over normal and build edges. Dev edges are left out, matching
+/// `about.toml`'s `ignore-dev-dependencies`.
+///
+/// Anything outside it is build-time tooling for this repository, which no
+/// release distributes and so nothing has to attribute.
+fn distributed(meta: &Metadata) -> Result<HashSet<String>, Error> {
+    let Some(resolve) = &meta.resolve else {
+        return Err(Error::msg(
+            "cargo metadata carried no resolve graph, so the distribution\n  \
+             filter is blind",
+        ));
+    };
+    let nodes: HashMap<&str, &Node> = resolve.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
+    let name_of: HashMap<&str, &str> = meta
+        .packages
+        .iter()
+        .map(|p| (p.id.as_str(), p.name.as_str()))
+        .collect();
+
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut queue: Vec<&str> = meta
+        .packages
+        .iter()
+        .filter(|p| meta.is_member(p) && publishable(p))
+        .map(|p| p.id.as_str())
+        .collect();
+    let roots = queue.len();
+    while let Some(id) = queue.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        let Some(node) = nodes.get(id) else { continue };
+        for dep in &node.deps {
+            let carried = dep
+                .dep_kinds
+                .iter()
+                .any(|k| k.kind.as_deref().is_none_or(|k| k == "build"));
+            if carried {
+                queue.push(dep.pkg.as_str());
+            }
+        }
+    }
+
+    if seen.len() <= roots {
+        return Err(Error::msg(
+            "the resolve graph reaches nothing beyond the publishable members,\n  \
+             so the distribution filter would drop every third-party row",
+        ));
+    }
+    Ok(seen
+        .into_iter()
+        .filter_map(|id| name_of.get(id).map(|n| (*n).to_string()))
+        .collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -139,7 +256,12 @@ fn first_party(metadata: &str) -> Result<Vec<String>, Error> {
 /// Two passes. The first counts the crates each section keeps; the second
 /// emits. Handlebars HTML-escapes the license text, so a text cannot fake a
 /// sentinel or a chip.
-fn filter_page(generated: &str, first_party: &[String], out: &str) -> Result<String, Error> {
+fn filter_page(
+    generated: &str,
+    first_party: &[String],
+    distributed: &HashSet<String>,
+    out: &str,
+) -> Result<String, Error> {
     // Both halves per crate, mirroring the Markdown path: every first-party
     // package must appear in the generated page, or the filter has nothing to
     // drop for it and has gone blind for that name.
@@ -152,6 +274,7 @@ fn filter_page(generated: &str, first_party: &[String], out: &str) -> Result<Str
     }
 
     let names: HashSet<&str> = first_party.iter().map(String::as_str).collect();
+    let drop = |crate_name: &str| names.contains(crate_name) || !distributed.contains(crate_name);
 
     // A crate shipping several notices sits in several sections, and the
     // inventory counts it once, so each id counts distinct (crate, version)
@@ -170,7 +293,7 @@ fn filter_page(generated: &str, first_party: &[String], out: &str) -> Result<Str
             id = rest.strip_suffix(" -->").unwrap_or(rest);
         } else if line == END {
             inside = false;
-        } else if inside && line.contains(CHIP) && !names.contains(crate_of(line)) {
+        } else if inside && line.contains(CHIP) && !drop(crate_of(line)) {
             *keep.entry(block).or_default() += 1;
             if seen.insert((id, chip_of(line))) {
                 *count.entry(id).or_default() += 1;
@@ -199,7 +322,7 @@ fn filter_page(generated: &str, first_party: &[String], out: &str) -> Result<Str
         if inside && skip {
             continue;
         }
-        if inside && line.contains(CHIP) && names.contains(crate_of(line)) {
+        if inside && line.contains(CHIP) && drop(crate_of(line)) {
             dropped += 1;
             continue;
         }
@@ -322,12 +445,17 @@ struct Inventory {
     text: String,
     crates: usize,
     first_party: usize,
+    undistributed: usize,
     collapsed: usize,
 }
 
 /// Rebuilds the generated Markdown with the crate table filtered, sorted and
 /// collapsed, and the summary counts recomputed from what is left.
-fn rebuild(generated: &str, first_party: &[String]) -> Result<Inventory, Error> {
+fn rebuild(
+    generated: &str,
+    first_party: &[String],
+    distributed: &HashSet<String>,
+) -> Result<Inventory, Error> {
     let lines = records(generated);
 
     // The summary rule is two columns and the crate rule is three, so matching
@@ -379,17 +507,24 @@ fn rebuild(generated: &str, first_party: &[String]) -> Result<Inventory, Error> 
         ));
     }
 
-    // Drop the first-party rows before anything is counted, so every check
-    // below judges the filtered table.
+    // Drop the first-party rows, and the rows for crates no release carries,
+    // before anything is counted, so every check below judges the filtered
+    // table.
     let names: HashSet<&str> = first_party.iter().map(String::as_str).collect();
-    let rows_third: Vec<&str> = rows_raw
+    let rows_carried: Vec<&str> = rows_raw
+        .iter()
+        .copied()
+        .filter(|r| distributed.contains(field(r, 2)))
+        .collect();
+    let undistributed = rows_raw.len() - rows_carried.len();
+    let rows_third: Vec<&str> = rows_carried
         .iter()
         .copied()
         .filter(|r| !names.contains(field(r, 2)))
         .collect();
     if rows_third.is_empty() {
         return Err(Error::msg(
-            "every row was filtered as first-party; the crate table is gone",
+            "every row was filtered; the crate table is gone",
         ));
     }
 
@@ -443,7 +578,8 @@ fn rebuild(generated: &str, first_party: &[String]) -> Result<Inventory, Error> 
 
     Ok(Inventory {
         crates: rows.len(),
-        first_party: rows_raw.len() - rows_third.len(),
+        first_party: rows_carried.len() - rows_third.len(),
+        undistributed,
         collapsed: rows_third.len() - rows.len(),
         text,
     })
@@ -535,6 +671,21 @@ fn readable(_file: &fs::File) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
+    /// Every crate a fixture names, so the distribution filter drops nothing
+    /// and the test isolates the behaviour it is about.
+    fn carries_all(text: &str) -> HashSet<String> {
+        let mut out = HashSet::new();
+        for line in records(text) {
+            if line.starts_with("| ") {
+                out.insert(field(line, 2).to_string());
+            }
+            if line.contains(CHIP) {
+                out.insert(crate_of(line).to_string());
+            }
+        }
+        out
+    }
+
     fn names(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| (*s).to_owned()).collect()
     }
@@ -550,11 +701,95 @@ mod tests {
     }
 
     #[test]
-    fn the_first_party_set_comes_from_the_workspace_metadata() {
+    fn the_filters_read_one_metadata_run_over_the_same_feature_union() {
         assert_eq!(
             metadata_step().display(),
-            "cargo metadata --no-deps --format-version 1"
+            "cargo metadata --format-version 1 --all-features --locked"
         );
+    }
+
+    /// A metadata run carrying dependencies lists every registry crate, and a
+    /// registry crate's `publish` is null, so membership decides first.
+    #[test]
+    fn a_registry_crate_is_not_first_party() {
+        let json = r#"{"packages":[
+            {"id":"m","name":"mine","publish":null},
+            {"id":"r","name":"serde","publish":null}],
+            "workspace_members":["m"]}"#;
+        assert_eq!(
+            first_party(&Metadata::parse(json).unwrap()).unwrap(),
+            names(&["mine"])
+        );
+    }
+
+    /// Normal and build edges from a publishable member are carried; a dev
+    /// edge is not, and neither is anything only an unpublished member needs.
+    #[test]
+    fn the_distribution_set_is_what_a_release_carries() {
+        let json = r#"{"packages":[
+            {"id":"pub","name":"spate","publish":null},
+            {"id":"priv","name":"spate-xtask","publish":[]},
+            {"id":"dep","name":"serde","publish":null},
+            {"id":"bd","name":"cc","publish":null},
+            {"id":"dev","name":"proptest","publish":null},
+            {"id":"tool","name":"clap","publish":null}],
+            "workspace_members":["pub","priv"],
+            "resolve":{"nodes":[
+              {"id":"pub","deps":[
+                {"pkg":"dep","dep_kinds":[{"kind":null}]},
+                {"pkg":"bd","dep_kinds":[{"kind":"build"}]},
+                {"pkg":"dev","dep_kinds":[{"kind":"dev"}]}]},
+              {"id":"priv","deps":[{"pkg":"tool","dep_kinds":[{"kind":null}]}]},
+              {"id":"dep","deps":[]},{"id":"bd","deps":[]},
+              {"id":"dev","deps":[]},{"id":"tool","deps":[]}]}}"#;
+        let got = distributed(&Metadata::parse(json).unwrap()).unwrap();
+        let mut got: Vec<&str> = got.iter().map(String::as_str).collect();
+        got.sort_unstable();
+        assert_eq!(got, ["cc", "serde", "spate"]);
+    }
+
+    #[test]
+    fn metadata_without_a_resolve_graph_is_refused() {
+        let json = r#"{"packages":[{"id":"a","name":"a","publish":null}],
+            "workspace_members":["a"]}"#;
+        assert!(
+            distributed(&Metadata::parse(json).unwrap())
+                .unwrap_err()
+                .message
+                .starts_with("cargo metadata carried no resolve graph")
+        );
+    }
+
+    /// A resolve graph reaching nothing would filter every third-party row
+    /// away, which reads as a clean run rather than a broken one.
+    #[test]
+    fn a_distribution_set_of_members_alone_is_refused() {
+        let json = r#"{"packages":[{"id":"a","name":"a","publish":null}],
+            "workspace_members":["a"],
+            "resolve":{"nodes":[{"id":"a","deps":[]}]}}"#;
+        assert!(
+            distributed(&Metadata::parse(json).unwrap())
+                .unwrap_err()
+                .message
+                .starts_with("the resolve graph reaches nothing beyond")
+        );
+    }
+
+    /// A crate no publishable member reaches is build-time tooling for this
+    /// repository, and no release carries it.
+    #[test]
+    fn an_undistributed_row_is_dropped_and_counted() {
+        // `anyhow` holds two rows in the fixture, one per license text.
+        let carried: HashSet<String> = ["serde", "spate", "spate-core"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        let out = rebuild(MD, &names(&["spate", "spate-core"]), &carried).unwrap();
+        assert!(
+            !out.text.contains("| `anyhow` |"),
+            "a crate nothing distributes stayed in the inventory"
+        );
+        assert_eq!(out.undistributed, 2);
     }
 
     #[test]
@@ -563,14 +798,17 @@ mod tests {
             {"name":"a","publish":null},
             {"name":"b","publish":[]},
             {"name":"c","publish":["registry"]}]}"#;
-        assert_eq!(first_party(json).unwrap(), names(&["a", "c"]));
+        assert_eq!(
+            first_party(&Metadata::parse(json).unwrap()).unwrap(),
+            names(&["a", "c"])
+        );
     }
 
     #[test]
     fn a_workspace_with_nothing_publishable_is_refused() {
         let json = r#"{"packages":[{"name":"a","publish":[]}]}"#;
         assert!(
-            first_party(json)
+            first_party(&Metadata::parse(json).unwrap())
                 .unwrap_err()
                 .message
                 .starts_with("the workspace metadata names no publishable packages")
@@ -604,7 +842,7 @@ Prose.
 ";
 
     fn inventory(text: &str) -> Inventory {
-        rebuild(text, &names(&["spate", "spate-core"])).unwrap()
+        rebuild(text, &names(&["spate", "spate-core"]), &carries_all(text)).unwrap()
     }
 
     #[test]
@@ -683,14 +921,18 @@ Prose.
 
     /// The crate rows of the rebuilt `MD_ORDER` inventory, in order.
     fn ordered() -> Vec<String> {
-        rebuild(MD_ORDER, &names(&["spate", "spate-core"]))
-            .unwrap()
-            .text
-            .lines()
-            .skip_while(|l| *l != "|---|---|---|")
-            .skip(1)
-            .map(str::to_owned)
-            .collect()
+        rebuild(
+            MD_ORDER,
+            &names(&["spate", "spate-core"]),
+            &carries_all(MD_ORDER),
+        )
+        .unwrap()
+        .text
+        .lines()
+        .skip_while(|l| *l != "|---|---|---|")
+        .skip(1)
+        .map(str::to_owned)
+        .collect()
     }
 
     fn precedes(a: &str, b: &str) -> bool {
@@ -735,7 +977,7 @@ Prose.
     }
 
     fn refuse(text: &str) -> String {
-        rebuild(text, &names(&["spate", "spate-core"]))
+        rebuild(text, &names(&["spate", "spate-core"]), &carries_all(text))
             .unwrap_err()
             .message
     }
@@ -809,9 +1051,13 @@ Prose.
     #[test]
     fn a_first_party_crate_the_filter_misses_is_refused() {
         assert_eq!(
-            rebuild(MD, &names(&["spate", "spate-core", "spate-kafka"]))
-                .unwrap_err()
-                .message,
+            rebuild(
+                MD,
+                &names(&["spate", "spate-core", "spate-kafka"]),
+                &carries_all(MD)
+            )
+            .unwrap_err()
+            .message,
             "first-party crate 'spate-kafka' never appeared in the generated table: does its\n  \
              package name still match its directory under crates/?"
         );
@@ -841,8 +1087,10 @@ Prose.
         let text = MD.replace("| `serde` | 1.0.0 | `MIT` |", "| `spate` | 1.0.0 | `MIT` |");
         let names = names(&["spate", "spate-core", "anyhow", "serde"]);
         assert_eq!(
-            rebuild(&text, &names).unwrap_err().message,
-            "every row was filtered as first-party; the crate table is gone"
+            rebuild(&text, &names, &carries_all(&text))
+                .unwrap_err()
+                .message,
+            "every row was filtered; the crate table is gone"
         );
     }
 
@@ -871,7 +1119,12 @@ Prose.
 ";
 
     fn page(text: &str) -> Result<String, Error> {
-        filter_page(text, &names(&["spate", "spate-core"]), "out.html")
+        filter_page(
+            text,
+            &names(&["spate", "spate-core"]),
+            &carries_all(text),
+            "out.html",
+        )
     }
 
     /// The sentinels leave with the sections they marked, an emptied section
@@ -986,7 +1239,13 @@ Prose.
 
     #[test]
     fn a_first_party_crate_the_page_never_names_is_refused() {
-        let e = filter_page(PAGE, &names(&["spate", "spate-kafka"]), "out.html").unwrap_err();
+        let e = filter_page(
+            PAGE,
+            &names(&["spate", "spate-kafka"]),
+            &carries_all(PAGE),
+            "out.html",
+        )
+        .unwrap_err();
         assert_eq!(
             e.message,
             "first-party crate 'spate-kafka' never appeared in the generated page"
@@ -996,7 +1255,13 @@ Prose.
     #[test]
     fn a_page_with_nothing_to_drop_is_refused() {
         let text = PAGE.replace("data-crate=\"spate\"", "data-crate=\"serde\"");
-        let e = filter_page(&text, &names(&["spate-core"]), "out.html").unwrap_err();
+        let e = filter_page(
+            &text,
+            &names(&["spate-core"]),
+            &carries_all(&text),
+            "out.html",
+        )
+        .unwrap_err();
         assert_eq!(
             e.message,
             "no first-party crate chip was dropped; the filter has gone blind"

@@ -43,6 +43,16 @@ private = { ignore = true }
 
 workarounds = ["ring", "rustls"]
 
+# The NCSA half of libfuzzer-sys's `(MIT OR Apache-2.0) AND NCSA`. Scoped to
+# the crate, so `accepted` above stays the list every other crate is judged
+# against.
+#
+# `--fail` judges every crate the workspace resolves, and the fuzz harness is a
+# member, so the expression has to be satisfiable here even though no row for
+# it survives: `cargo xtask attribution` drops what no release carries.
+[libfuzzer-sys]
+accepted = ["NCSA"]
+
 # Per-crate clarifications, naming which file a license text is read from. Both
 # crates below ship several files scanning as the same license id at equal
 # confidence, and the scan's tie-break is readdir order, so an unclarified crate

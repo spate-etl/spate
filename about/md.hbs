@@ -24,10 +24,13 @@ When reading it:
   They are published at <https://spate.kainth.dev/licenses/>, generated
   from the same lockfile by the same tool.
 
-Dev-dependencies are excluded: they are never distributed and so require no
-attribution. Build-dependencies are included, since a build script can
-contribute generated code to the shipped artifact, as can a proc-macro, so
-compile-time-only crates are listed.
+Only what a release carries is listed: the crates reachable from a publishable
+crate over normal and build edges. Dev-dependencies are excluded, and so is
+anything reached only through an unpublished workspace member, such as the
+benchmark harness, the task runner and the fuzz targets. Build-dependencies of
+a published crate are included, since a build script can contribute generated
+code to the shipped artifact, as can a proc-macro, so compile-time-only crates
+are listed.
 
 Spate's **own** crates (`spate`, `spate-core`, …) are not listed. They are
 first-party, Apache-2.0, covered by [LICENSE](LICENSE), and

@@ -524,6 +524,11 @@ jobs:
           key: docusaurus-${{ runner.os }}-${{ hashFiles('website/package-lock.json') }}
           restore-keys: docusaurus-${{ runner.os }}-
 
+      # SWC strips types without checking them, so the build alone does not.
+      - name: Typecheck the site
+        working-directory: website
+        run: npm run typecheck
+
       - name: Test the site
         working-directory: website
         run: npm test

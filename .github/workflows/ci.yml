@@ -115,7 +115,7 @@ jobs:
           # would race the owner the first time it is missing.
           shared-key: xtask
           cache-save: never
-      - uses: taiki-e/install-action@c3ec0de9ae7f1019cea21aa96aa0a895b9552063 # v2.87.9
+      - uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2.87.12
         with:
           # zizmor alone carries a version: a release can relax the default
           # audit policy this job rests on, and the action's own bump would

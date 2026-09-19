@@ -94,7 +94,7 @@ fn one_check(root: &Path, explain: bool, check: TidyCheck) -> Outcome {
             explain,
             &Step::new("cargo", ["test", "-p", "spate-xtask", "--locked"]),
         ),
-        TidyCheck::Changelog => script(root, explain, "changelog.sh", "--check"),
+        TidyCheck::Changelog => crate::checks::changelog::check(root, explain),
         TidyCheck::Adr => crate::checks::adr::check(root, explain),
         TidyCheck::PerfReport => crate::checks::perf_report::self_test(explain),
         TidyCheck::GungraunBenches => crate::checks::gungraun::check(root, explain),

@@ -1,11 +1,12 @@
 //! The gates this binary runs in process: the attribution artifacts, the
-//! decision records, labels, docs.rs rustdoc, the instruction-count bench
-//! targets, their collected regions, the counted-tier report, the pinned
-//! container images, the semver comparison against the published release, and
-//! supported versions.
+//! decision records, the changelog fragments, labels, docs.rs rustdoc, the
+//! instruction-count bench targets, their collected regions, the counted-tier
+//! report, the pinned container images, the semver comparison against the
+//! published release, and supported versions.
 
 pub(crate) mod adr;
 pub(crate) mod attribution;
+pub(crate) mod changelog;
 pub(crate) mod collected_region;
 pub(crate) mod container_image;
 pub(crate) mod docsrs;

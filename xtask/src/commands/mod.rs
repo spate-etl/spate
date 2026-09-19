@@ -361,20 +361,21 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: Command) -> Outcome {
         Command::Adr { cmd } => match cmd {
             AdrCommand::New { slug } => crate::checks::adr::new(root, explain, &slug),
         },
-        Command::Changelog { cmd } => {
-            let s = match &cmd {
-                ChangelogCommand::New { kind, slug } => {
-                    Step::new("./scripts/changelog.sh", ["--new", kind, slug])
-                }
-                ChangelogCommand::Build { version } => {
-                    Step::new("./scripts/changelog.sh", ["--build", version])
-                }
-                ChangelogCommand::Notes { version } => {
-                    Step::new("./scripts/changelog.sh", ["--notes", version])
-                }
-            };
-            run::run(root, explain, &s)
-        }
+        Command::Changelog { cmd } => match &cmd {
+            ChangelogCommand::New { kind, slug } => {
+                crate::checks::changelog::new(root, explain, kind, slug)
+            }
+            ChangelogCommand::Build { version } => run::run(
+                root,
+                explain,
+                &Step::new("./scripts/changelog.sh", ["--build", version]),
+            ),
+            ChangelogCommand::Notes { version } => run::run(
+                root,
+                explain,
+                &Step::new("./scripts/changelog.sh", ["--notes", version]),
+            ),
+        },
         Command::Fuzz { cmd } => fuzz::dispatch(root, explain, cmd),
         Command::Docs { serve } => docs::dispatch(root, explain, serve),
         Command::Release { cmd } => {

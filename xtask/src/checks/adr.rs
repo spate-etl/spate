@@ -263,7 +263,7 @@ fn record_number(path: &str) -> Option<&str> {
 
 /// Lowercase letters, digits and hyphens, starting and ending with one of the
 /// first two.
-fn is_slug(s: &str) -> bool {
+pub(super) fn is_slug(s: &str) -> bool {
     let ok = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit();
     let bytes = s.as_bytes();
     match (bytes.first(), bytes.last()) {

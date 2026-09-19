@@ -148,20 +148,18 @@ const FATAL_EXCEPTION_CODES: &[u32] = &[
 
 /// Map a client error onto the framework's retryable/fatal taxonomy.
 ///
-/// - transport (`Network`, `TimedOut`, compression) → `Retryable`;
+/// - transport (`Network`, `TimedOut`) and uncategorized client errors
+///   (`Other`) → `Retryable`;
 /// - server exceptions (`BadResponse`) → fatal only for the schema/parse/
 ///   auth codes above, `Retryable` otherwise (e.g. `TOO_MANY_PARTS`,
 ///   memory pressure, shutdown races);
-/// - client-side encoding/params problems → `Fatal` (retrying identical
-///   bytes cannot help).
+/// - client-side params and both codec directions (`InvalidParams`,
+///   `SchemaMismatch`, `Unsupported`, `Compression`, `Decompression`) →
+///   `Fatal`.
 fn classify(err: clickhouse::error::Error) -> SinkError {
     use clickhouse::error::Error as ChError;
     let class = match &err {
-        ChError::Network(_)
-        | ChError::TimedOut
-        | ChError::Compression(_)
-        | ChError::Decompression(_)
-        | ChError::Other(_) => ErrorClass::Retryable,
+        ChError::Network(_) | ChError::TimedOut | ChError::Other(_) => ErrorClass::Retryable,
         ChError::BadResponse(reason) => {
             if exception_code(reason).is_some_and(|c| FATAL_EXCEPTION_CODES.contains(&c)) {
                 ErrorClass::Fatal
@@ -169,9 +167,11 @@ fn classify(err: clickhouse::error::Error) -> SinkError {
                 ErrorClass::Retryable
             }
         }
-        ChError::InvalidParams(_) | ChError::SchemaMismatch(_) | ChError::Unsupported(_) => {
-            ErrorClass::Fatal
-        }
+        ChError::InvalidParams(_)
+        | ChError::SchemaMismatch(_)
+        | ChError::Unsupported(_)
+        | ChError::Compression(_)
+        | ChError::Decompression(_) => ErrorClass::Fatal,
         // Anything unanticipated: retry, which is idempotent under dedup
         // tokens and visible through breaker metrics if persistent.
         _ => ErrorClass::Retryable,
@@ -253,6 +253,34 @@ mod tests {
         let schema = classify(clickhouse::error::Error::SchemaMismatch("boom".into()));
         assert!(matches!(
             schema,
+            SinkError::Client {
+                class: ErrorClass::Fatal,
+                ..
+            }
+        ));
+    }
+
+    /// Both codec directions classify `Fatal`.
+    ///
+    /// Regression for #566.
+    #[test]
+    fn codec_errors_classify_fatal() {
+        let compression = classify(clickhouse::error::Error::Compression(
+            "zstd: out of memory".into(),
+        ));
+        assert!(matches!(
+            compression,
+            SinkError::Client {
+                class: ErrorClass::Fatal,
+                ..
+            }
+        ));
+
+        let decompression = classify(clickhouse::error::Error::Decompression(
+            "incorrect magic number".into(),
+        ));
+        assert!(matches!(
+            decompression,
             SinkError::Client {
                 class: ErrorClass::Fatal,
                 ..

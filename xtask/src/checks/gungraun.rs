@@ -4,7 +4,7 @@
 //! Discovery is by naming convention, `crates/<pkg>/benches/<name>_gungraun.rs`,
 //! sorted bytewise so every consumer sees one order on every machine.
 //!
-//! [`run`] answers 0 when at least one bench ran and all succeeded, 1 when any
+//! [`run()`] answers 0 when at least one bench ran and all succeeded, 1 when any
 //! failed, and 2 when the selection matched nothing. CI's merge-base leg
 //! branches on those three to decide whether it has a baseline, so the
 //! trichotomy is a contract.

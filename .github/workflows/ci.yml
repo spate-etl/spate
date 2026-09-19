@@ -374,7 +374,7 @@ jobs:
       - name: Resolve every direct dependency to its declared floor
         run: cargo generate-lockfile -Z direct-minimal-versions
       # `--all-targets` holds dev-dependency floors to the same standard.
-      - run: cargo check --workspace --all-targets --all-features --locked --exclude spate-xtask
+      - run: cargo check --workspace --all-targets --all-features --locked
 
   test:
     name: Test and coverage

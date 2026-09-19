@@ -71,3 +71,21 @@ pub(crate) fn changes(args: &[String]) -> Result<(), String> {
 fn extra_clickhouse_lanes(root: &Path) -> Result<Vec<String>, String> {
     crate::checks::container_image::extra_lanes(root, "clickhouse").map_err(|e| e.message)
 }
+
+#[cfg(test)]
+mod tests {
+    /// Each argument arm refuses what it does not define. The command line
+    /// parser answers both shapes first, so neither refusal is reachable
+    /// through the binary.
+    #[test]
+    fn an_argument_the_classifier_does_not_define_is_refused() {
+        assert_eq!(
+            super::changes(&["--classify-paths".to_owned()]),
+            Err("--classify-paths needs a file".to_owned())
+        );
+        assert_eq!(
+            super::changes(&["--paths".to_owned(), "list".to_owned()]),
+            Err("unknown option '--paths'".to_owned())
+        );
+    }
+}

@@ -754,9 +754,10 @@ jobs:
     name: Loom models (spate-core)
     runs-on: ubuntu-latest
     needs: plan
-    # On the nightly tier: INV-3 gets the narrower regression window.
+    # INV-3 against a moving compiler: `setup-rust` installs the stable
+    # channel, so this runs the models on whatever stable shipped that day.
     if: needs.plan.outputs.nightly == 'true'
-    timeout-minutes: 60
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

@@ -214,10 +214,10 @@ mod tests {
     #[test]
     fn the_labels_split_on_commas_and_drop_the_empty_entries() {
         let labels = |text| from_values("pull_request", "", text).1.labels;
-        assert_eq!(labels("ci: docker,ci: loom"), ["ci: docker", "ci: loom"]);
+        assert_eq!(labels("ci: docker,ci: bench"), ["ci: docker", "ci: bench"]);
         assert_eq!(
-            labels(" ci: docker , ci: loom "),
-            ["ci: docker", "ci: loom"]
+            labels(" ci: docker , ci: bench "),
+            ["ci: docker", "ci: bench"]
         );
         assert_eq!(labels(",, ,ci: bench,"), ["ci: bench"]);
         assert!(labels("").is_empty());

@@ -7,9 +7,9 @@ mechanics.
 
 `cargo xtask --help` lists the commands, each with its own `--help`, and
 `cargo xtask tidy --list` names the checks. `cargo xtask ci` is the pull request
-bar and covers formatting, clippy, the type check, the test suite, doctests,
-rustdoc, the feature matrix, licenses and advisories, and `cargo xtask tidy`,
-the repository consistency checks.
+bar and covers formatting, clippy, the type check, the loom models, the test
+suite, doctests, rustdoc, the feature matrix, licenses and advisories, and
+`cargo xtask tidy`, the repository consistency checks.
 
 Verify a gate by its **exit code**. Piped `grep` and `tail` chains report the
 status of the last command in the pipeline and have masked failures here. No
@@ -25,7 +25,6 @@ These sit outside `ci`, by cost or by dependency:
 | Command | Why it is outside |
 | --- | --- |
 | `cargo xtask integration-test` | Needs Docker and pulls real images |
-| `cargo xtask loom` | Exhaustive interleaving; minutes, not seconds |
 | `cargo xtask docs` | Needs Node; runs nightly and on documentation changes |
 | `cargo xtask bench check` | Builds the whole tree again in the release profile |
 | `cargo xtask bench counted` | Needs Linux and valgrind |
@@ -109,11 +108,11 @@ a `spate-core` change checks every published crate.
 
 For a change whose reach those paths do not show, such as a refactor moving code
 between crates or a dependency swap, a maintainer can label the pull request
-`ci: docker`, `ci: loom` or `ci: bench`. The label takes effect on the branch's
-next push: `ci.yml` classifies each run from the event that triggered it, so a
-re-run of an already-started run carries the labels that run started with. They
-only ever add work; none can switch a suite off, and none reaches the semver
-gate, which follows the crate graph alone. `cargo xtask tidy self-test` checks each
+`ci: docker` or `ci: bench`. The label takes effect on the branch's next push:
+`ci.yml` classifies each run from the event that triggered it, so a re-run of an
+already-started run carries the labels that run started with. They only ever add
+work; none can switch a suite off, and none reaches the semver gate, which
+follows the crate graph alone. `cargo xtask tidy self-test` checks each
 classifier against that graph.
 
 ## Testing conventions

@@ -57,7 +57,7 @@ pub(crate) enum Command {
     /// Container-backed suites (needs Docker; lanes per ci/README.md)
     IntegrationTest,
 
-    /// Loom concurrency models (slow)
+    /// Loom concurrency models for the checkpoint and backpressure primitives
     Loom,
 
     /// Every feature alone, the feature-off combinations, and every target
@@ -500,6 +500,8 @@ fn image_mode(r#ref: bool, pull: bool) -> crate::checks::container_image::Mode {
 fn ci(root: &Path, explain: bool) -> Outcome {
     lint_group(root, explain)?;
     dispatch(root, explain, Command::Check)?;
+    // Nothing else in this chain compiles the `--cfg loom` arm.
+    dispatch(root, explain, Command::Loom)?;
     dispatch(root, explain, Command::Test)?;
     dispatch(root, explain, Command::Doctest)?;
     dispatch(root, explain, Command::Doc)?;

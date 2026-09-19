@@ -6,10 +6,10 @@ on:
   push:
     branches: [main]
   # `edited` re-runs the changelog gate: it reads the pull request *title*, and
-  # a retitle after a green run would land unchecked. The opt-in `ci: docker`,
-  # `ci: loom` and `ci: bench` labels take effect on the branch's next push.
-  # `ci.yml` classifies each run from the event that triggered it, so a manual
-  # re-run of an already-started run carries the labels that run started with.
+  # a retitle after a green run would land unchecked. The opt-in `ci: docker`
+  # and `ci: bench` labels take effect on the branch's next push. `ci.yml`
+  # classifies each run from the event that triggered it, so a manual re-run of
+  # an already-started run carries the labels that run started with.
   pull_request:
     types: [opened, synchronize, reopened, edited]
   merge_group:
@@ -45,7 +45,6 @@ jobs:
       container-args: ${{ steps.classify.outputs.container-args }}
       semver: ${{ steps.classify.outputs.semver }}
       semver-pkgs: ${{ steps.classify.outputs.semver-pkgs }}
-      loom: ${{ steps.classify.outputs.loom }}
       bench: ${{ steps.classify.outputs.bench }}
       manifests: ${{ steps.classify.outputs.manifests }}
       # A JSON array of `{package, arm, cargo_features}` objects, one per shard.
@@ -864,12 +863,13 @@ jobs:
           path: perf-regressions/has_regressions
 
   loom:
-    name: Loom models (opt-in)
+    name: Loom models (spate-core)
     runs-on: ubuntu-latest
     needs: [changes, lint, workflows]
-    # Opt-in via the `ci: loom` label for a change under INV-3.
-    if: needs.changes.outputs.loom == 'true'
-    timeout-minutes: 60
+    # INV-3. The models are the only thing that checks it, and `--cfg loom` is
+    # the only build that compiles their side of the cfg pairs.
+    if: needs.changes.outputs.rust == 'true'
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

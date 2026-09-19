@@ -118,12 +118,13 @@ fn run_with(shim: &Shim, path: std::ffi::OsString, args: &[&str]) -> Output {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(SENTINEL.as_bytes())
-        .unwrap();
+    // A case that exits before the write lands closes the read end first. What
+    // the sentinel is for is asserted on the shim's `stdin` side-channel, which
+    // records what each child was handed; the write reaching the pipe proves
+    // nothing on its own.
+    if let Err(e) = child.stdin.take().unwrap().write_all(SENTINEL.as_bytes()) {
+        assert_eq!(e.kind(), std::io::ErrorKind::BrokenPipe, "{e}");
+    }
     child.wait_with_output().unwrap()
 }
 

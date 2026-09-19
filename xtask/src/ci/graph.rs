@@ -14,6 +14,10 @@ use serde::Deserialize;
 /// `#[ignore]`d test, so the edge reaches no container suite.
 const WALL_BENCH_HARNESS: &str = "spate-bench";
 
+/// The libFuzzer harness. Nothing depends on it, so it adds no reverse edge
+/// that reaches a container suite or a published API.
+const FUZZ_HARNESS: &str = "spate-fuzz";
+
 #[derive(Deserialize)]
 struct Metadata {
     packages: Vec<MetaPackage>,
@@ -53,7 +57,7 @@ pub(crate) struct Graph {
     container_pkgs: BTreeSet<String>,
     /// Publishable crates under `crates/`.
     semver_pkgs: BTreeSet<String>,
-    /// Crates the out-of-workspace fuzz harness depends on.
+    /// Workspace crates the fuzz harness depends on.
     fuzz_pkgs: BTreeSet<String>,
     /// Crates owning at least one gungraun bench.
     bench_pkgs: BTreeSet<String>,
@@ -64,8 +68,8 @@ pub(crate) struct Graph {
 }
 
 impl Graph {
-    /// Reads `cargo metadata` and the two files no manifest graph reaches:
-    /// `fuzz/Cargo.toml` and the bench targets on disk.
+    /// Reads `cargo metadata` and the bench targets on disk, which no manifest
+    /// graph reaches.
     pub(crate) fn load(root: &Path) -> Result<Self, String> {
         let meta = cargo_metadata(root)?;
         let members: BTreeSet<&str> = meta
@@ -121,7 +125,7 @@ impl Graph {
             semver_rdeps,
             container_pkgs: container_test_owners(root, &members)?,
             semver_pkgs,
-            fuzz_pkgs: fuzz_dependencies(root, &members)?,
+            fuzz_pkgs: fuzz_dependencies(&meta, &members),
             bench_pkgs: crate::checks::gungraun::owners(root),
             #[cfg(test)]
             features: meta
@@ -169,20 +173,16 @@ fn container_test_owners(
     Ok(owners)
 }
 
-/// The workspace crates `fuzz/Cargo.toml` names. That crate is its own
-/// workspace root, so no `--workspace` target compiles it.
-fn fuzz_dependencies(root: &Path, members: &BTreeSet<&str>) -> Result<BTreeSet<String>, String> {
-    let manifest = root.join("fuzz").join("Cargo.toml");
-    let text =
-        std::fs::read_to_string(&manifest).map_err(|e| format!("{}: {e}", manifest.display()))?;
-    Ok(members
+/// The workspace crates the fuzz harness depends on. Empty when the harness is
+/// absent, which `a_fuzz_dependency_builds_the_harness` is the guard against.
+fn fuzz_dependencies(meta: &Metadata, members: &BTreeSet<&str>) -> BTreeSet<String> {
+    meta.packages
         .iter()
-        .filter(|m| {
-            text.lines()
-                .any(|l| l.split_once('=').is_some_and(|(k, _)| k.trim() == **m))
-        })
-        .map(|m| (*m).to_string())
-        .collect())
+        .filter(|p| p.name == FUZZ_HARNESS)
+        .flat_map(|p| &p.dependencies)
+        .filter(|d| members.contains(d.name.as_str()))
+        .map(|d| d.name.clone())
+        .collect()
 }
 
 /// Whether any `.rs` file under a directory contains a needle.

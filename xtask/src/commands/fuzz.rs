@@ -71,8 +71,8 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: Fuzz) -> Outcome {
                 }
             }
             // libFuzzer writes new finds to the first corpus path and reads the
-            // rest. The first sits under the ignored `target/`, so a local run
-            // leaves the committed seeds alone.
+            // rest. The first matches `.gitignore`'s `**/target`, so a local
+            // run leaves the committed seeds alone.
             run::run(
                 root,
                 explain,

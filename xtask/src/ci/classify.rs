@@ -68,8 +68,6 @@ enum Kind {
     SiteOnly,
     /// Code, and it rebuilds the site too.
     CodeAndSite,
-    /// The fuzz harness alone.
-    FuzzOnly,
     /// Code.
     Code,
 }
@@ -109,10 +107,9 @@ fn kind_of(path: &str) -> Kind {
     if glob(path, ".github/*") {
         return Kind::Skip;
     }
-    // Its crate sits outside the workspace, so no `--workspace` target compiles
-    // it. Ahead of the `*.md` arm, which would otherwise take fuzz/README.md.
+    // Ahead of the `*.md` arm, which would otherwise take fuzz/README.md.
     if glob(path, "fuzz/*") {
-        return Kind::FuzzOnly;
+        return Kind::Code;
     }
     // `.gitmodules` pins the benchmark data the site renders. `.node-version`
     // pins the Node the site build runs on.
@@ -139,6 +136,7 @@ pub(crate) fn is_manifest(path: &str) -> bool {
             "Cargo.lock",
             "crates/*/Cargo.toml",
             "bench/Cargo.toml",
+            "fuzz/Cargo.toml",
             "xtask/Cargo.toml",
             "scripts/release-version.sh",
             "xtask/*",
@@ -180,10 +178,6 @@ pub(crate) fn classify(
                 Kind::Skip => continue,
                 Kind::SiteOnly => {
                     out.site = true;
-                    continue;
-                }
-                Kind::FuzzOnly => {
-                    out.fuzz = true;
                     continue;
                 }
                 Kind::CodeAndSite => out.site = true,
@@ -262,10 +256,12 @@ pub(crate) fn classify(
                 bench_pkgs.extend(graph.all_bench_pkgs().iter().cloned());
             }
 
-            // The fuzz job's apparatus, and the crates its harness depends on.
+            // The harness itself, the fuzz job's apparatus, and the crates the
+            // harness depends on.
             if any_glob(
                 path,
                 &[
+                    "fuzz/*",
                     "xtask/*",
                     ".github/workflows/ci.yml",
                     ".github/actions/*",
@@ -550,6 +546,29 @@ mod tests {
             "the change rewriting bench selection must run them"
         );
         assert_eq!(out.bench_shards.len(), graph().all_bench_pkgs().len() + 1);
+    }
+
+    /// A fuzz target is a workspace member's source, so it builds the harness
+    /// and everything `--workspace` reaches, and moves no manifest.
+    #[test]
+    fn a_fuzz_target_builds_the_harness_and_the_workspace() {
+        let out = run(&["fuzz/fuzz_targets/s3_split_id.rs"]);
+        assert!(out.fuzz, "the harness has to build");
+        assert!(out.rust, "`--workspace` compiles it");
+        assert!(!out.manifests, "a target moves no dependency graph");
+        assert!(out.container_pkgs.is_empty());
+        assert!(out.semver_pkgs.is_empty());
+        assert!(out.bench_shards.is_empty());
+    }
+
+    /// The harness resolves from the root lockfile, so its manifest reaches the
+    /// gates that read declared floors.
+    #[test]
+    fn the_fuzz_manifest_is_a_manifest() {
+        let out = run(&["fuzz/Cargo.toml"]);
+        assert!(out.manifests);
+        assert!(out.fuzz);
+        assert!(out.rust);
     }
 
     #[test]

@@ -531,10 +531,10 @@ jobs:
           shared-key: release
       - run: cargo test -p spate-core --release --test chain_alloc --locked
 
-  # The fuzz crate sits outside the workspace, so no other job compiles it. This
-  # one builds every target and runs none of them; the nightly tier in
-  # scheduled.yml is what fuzzes, and is also the backstop for a crate change
-  # that breaks the harness without touching `fuzz/`.
+  # The only job that builds the targets with libFuzzer's instrumentation, which
+  # needs nightly. It runs none of them; the nightly tier in scheduled.yml is
+  # what fuzzes, and is also the backstop for a crate change that breaks the
+  # harness without touching `fuzz/`.
   fuzz:
     name: Fuzz targets build
     runs-on: ubuntu-latest

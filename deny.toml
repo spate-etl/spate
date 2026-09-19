@@ -19,6 +19,14 @@ allow = [
     "CDLA-Permissive-2.0", # webpki-roots (Mozilla CCADB root store data)
 ]
 
+# libfuzzer-sys vendors LLVM's libFuzzer, so its expression is
+# `(MIT OR Apache-2.0) AND NCSA` and the NCSA term has to be satisfied on its
+# own. Scoped to the crate rather than added to `allow` above, which would
+# accept NCSA from anything.
+[[licenses.exceptions]]
+crate = "libfuzzer-sys"
+allow = ["NCSA"]
+
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"

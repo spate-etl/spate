@@ -545,6 +545,8 @@ fn hack(root: &Path, explain: bool) -> Outcome {
                     "full",
                     "--exclude",
                     "spate-xtask",
+                    "--exclude",
+                    "spate-fuzz",
                 ],
             ),
             // Stripping dev-dependencies drops test and bench targets, so the
@@ -564,9 +566,21 @@ fn hack(root: &Path, explain: bool) -> Outcome {
             ),
             // Last, because `--no-dev-deps` restores each Cargo.toml only when
             // it is finished and a locked build reads what is on disk.
+            //
+            // The only workspace-wide build with features off. spate-fuzz is
+            // excluded because it requires `testing` on spate-s3 and
+            // spate-coordination, which the resolver would unify into every
+            // other crate in the same invocation.
             Step::new(
                 "cargo",
-                ["check", "--workspace", "--all-targets", "--locked"],
+                [
+                    "check",
+                    "--workspace",
+                    "--all-targets",
+                    "--locked",
+                    "--exclude",
+                    "spate-fuzz",
+                ],
             ),
         ],
     )

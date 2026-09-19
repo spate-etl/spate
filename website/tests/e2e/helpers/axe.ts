@@ -67,6 +67,11 @@ async function sameElement(page: Page, a: ElementHandle, b: ElementHandle): Prom
  * assertion fails: a selector that stops resolving to the offending element
  * (the defect was fixed, or the page changed under it) is a signal, not
  * something to pass silently.
+ *
+ * An entry matches only what axe reports as a violation. webkit files some
+ * results under `incomplete` where chromium and firefox file them under
+ * `violations`, `color-contrast` among them, so an entry written from a
+ * chromium run can match nothing on webkit and fail the run there.
  */
 export async function expectNoAxeViolations(
   page: Page,

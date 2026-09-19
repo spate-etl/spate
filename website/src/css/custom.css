@@ -42,6 +42,7 @@
   --ifm-table-border-color: var(--spate-border);
   --ifm-table-stripe-background: var(--spate-surface-2);
   --ifm-navbar-background-color: var(--spate-bg);
+  --ifm-navbar-search-input-placeholder-color: var(--spate-muted);
   --ifm-footer-background-color: var(--spate-surface-2);
   --ifm-footer-color: var(--spate-muted);
   --ifm-footer-link-color: var(--spate-muted);
@@ -66,6 +67,13 @@
   --ifm-color-emphasis-600: #9aa1a9;
   --ifm-color-emphasis-700: #b6bcc4;
   --ifm-color-emphasis-800: #d3d7dc;
+  /* The pill takes --ifm-color-emphasis-200. This block loses to Infima's
+   * `html[data-theme='dark']` on specificity (#568), so that token keeps
+   * Infima's #444950 and the value declared above never applies. --spate-muted
+   * is 3.48:1 on #444950, and emphasis-500 holds the hint and the placeholder
+   * at 5.11:1. Fixing #568 puts the pill on #2b303a, where --spate-muted from
+   * :root reaches 5.07:1 and this line can go. */
+  --ifm-navbar-search-input-placeholder-color: var(--ifm-color-emphasis-500);
   --docusaurus-highlighted-code-line-bg: rgba(255, 140, 74, 0.18);
 }
 

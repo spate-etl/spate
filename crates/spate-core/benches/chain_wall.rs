@@ -19,7 +19,7 @@
 //! The rigs live in `benches/support/chain_rig.rs`, shared with the counted
 //! tier and pinned by `tests/bench_fixtures.rs`.
 //!
-//! Run: `make bench-ab REF=main FILTER=chain_`
+//! Run: `cargo xtask bench ab --ref main --filter chain_`
 //!
 //! # Reading these numbers
 //!

@@ -66,7 +66,7 @@ def ensure_font():
 #
 # The mark's colours and the UI's accent differ on the light ground on
 # purpose: the mark is a graphic and reads at 3:1, while the accent carries
-# link text and has to clear 4.5:1 on paper. `make check-brand` holds both.
+# link text and has to clear 4.5:1 on paper.
 
 DARK_BASE = "#16181d"
 DARK_NODE = "#ff8c4a"

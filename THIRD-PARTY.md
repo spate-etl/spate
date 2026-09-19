@@ -3,7 +3,7 @@
 **Generated file. Do not edit.** Regenerate with:
 
 ```sh
-./scripts/attribution.sh
+cargo xtask attribution
 ```
 
 CI regenerates this and fails on any diff, so it cannot drift from `Cargo.lock`.
@@ -31,7 +31,7 @@ compile-time-only crates are listed.
 
 Spate's **own** crates (`spate`, `spate-core`, …) are not listed. They are
 first-party, Apache-2.0, covered by [LICENSE](LICENSE), and
-`scripts/attribution.sh` filters them out of what `cargo-about` emits, which
+`cargo xtask attribution` filters them out of what `cargo-about` emits, which
 includes every publishable workspace member. With them gone, this file changes
 only when a real dependency changes, which is what the nightly drift check
 exists to detect.
@@ -41,7 +41,7 @@ exists to detect.
 
 | License | Crates |
 |---|---|
-| `MIT` | 303 |
+| `MIT` | 304 |
 | `Unicode-3.0` | 19 |
 | `Apache-2.0` | 13 |
 | `ISC` | 6 |
@@ -60,7 +60,7 @@ This table is post-processed. `cargo-about` emits one row per license *text*,
 grouping crates by which text they share, and a crate that ships several files
 scanning as the same license has its text chosen by the order those files are
 read off disk. Group membership, and so each row's position, then varies from
-machine to machine. `scripts/attribution.sh` sorts the rows, collapses the
+machine to machine. `cargo xtask attribution` sorts the rows, collapses the
 duplicates a crate with several notices produces, and recomputes the counts
 above from what is left. The elected license ids are unaffected either way.
 
@@ -125,6 +125,7 @@ above from what is left. The elected license ids are unaffected either way.
 | `cityhash-rs` | 1.0.1 | `MIT` |
 | `clap` | 4.6.6 | `MIT` |
 | `clap_builder` | 4.6.6 | `MIT` |
+| `clap_derive` | 4.6.4 | `MIT` |
 | `clap_lex` | 1.1.0 | `MIT` |
 | `clickhouse` | 0.15.2 | `MIT` |
 | `clickhouse-macros` | 0.3.0 | `MIT` |

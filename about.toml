@@ -1,9 +1,9 @@
 # cargo-about: generates the dependency attribution artifacts.
 #
-#   ./scripts/attribution.sh                              # THIRD-PARTY.md
-#   ./scripts/attribution.sh --html <output-file>         # docs site
+#   cargo xtask attribution                               # THIRD-PARTY.md
+#   cargo xtask attribution --html <output-file>          # docs site
 #
-# Both artifacts go through the script: it canonicalises the row order
+# Both artifacts go through that command: it canonicalises the row order
 # cargo-about leaves machine-dependent, and it filters the first-party crates,
 # which `private = { ignore }` below cannot reach because they are published.
 
@@ -57,8 +57,8 @@ workarounds = ["ring", "rustls"]
 #   checked against it, and nothing warns if the two drift. Re-check on a
 #   version bump.
 # - Listing several files for one license id publishes all of their texts. The
-#   site reproduces each, and `attribution.sh` collapses the duplicate rows that
-#   would otherwise appear in THIRD-PARTY.md.
+#   site reproduces each, and `cargo xtask attribution` collapses the duplicate
+#   rows that would otherwise appear in THIRD-PARTY.md.
 #
 # Nothing re-checks the tie when a dependency is added; see #88.
 

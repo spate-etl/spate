@@ -46,8 +46,8 @@ does.
 
 <!-- Tick what you ran. Nothing else belongs under this heading. -->
 
-- [ ] `make gates`
-- [ ] `make docs`, if this touches docs
+- [ ] `cargo xtask ci`
+- [ ] `cargo xtask docs`, if this touches docs
 - [ ] Conventional Commits, scoped to the crate touched, no AI attribution
       trailers
 - [ ] A fragment under `changelog.d/`, if this reaches a crate somebody

@@ -6,8 +6,8 @@
 
 use std::collections::BTreeSet;
 
-use crate::graph::Graph;
-use crate::outputs::{Lane, Outputs, Shard};
+use super::graph::Graph;
+use super::outputs::{Lane, Outputs, Shard};
 
 /// The webhook event a run was started from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -215,7 +215,6 @@ pub(crate) fn classify(
                     ".github/actions/*",
                     "scripts/*",
                     "xtask/*",
-                    "Makefile",
                 ],
             ) {
                 out.container_pkgs
@@ -236,7 +235,6 @@ pub(crate) fn classify(
                     ".github/workflows/ci.yml",
                     ".github/actions/*",
                     "xtask/*",
-                    "scripts/semver-checks.sh",
                 ],
             ) {
                 out.semver_pkgs
@@ -258,14 +256,7 @@ pub(crate) fn classify(
             // the one that never runs them.
             if any_glob(
                 path,
-                &[
-                    "xtask/*",
-                    "scripts/gungraun-benches.sh",
-                    "scripts/gungraun-report.sh",
-                    "scripts/gungraun-collected-region.sh",
-                    ".github/workflows/ci.yml",
-                    ".github/actions/*",
-                ],
+                &["xtask/*", ".github/workflows/ci.yml", ".github/actions/*"],
             ) {
                 out.bench = true;
                 bench_pkgs.extend(graph.all_bench_pkgs().iter().cloned());
@@ -279,7 +270,6 @@ pub(crate) fn classify(
                     ".github/workflows/ci.yml",
                     ".github/actions/*",
                     ".github/toolchains/*",
-                    "Makefile",
                 ],
             ) {
                 out.fuzz = true;
@@ -557,7 +547,7 @@ mod tests {
 
     #[test]
     fn the_apparatus_selects_every_bench() {
-        let out = run(&["xtask/src/classify.rs"]);
+        let out = run(&["xtask/src/ci/classify.rs"]);
         assert!(
             out.bench,
             "the change rewriting bench selection must run them"

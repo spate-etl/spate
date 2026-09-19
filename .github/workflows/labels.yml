@@ -35,10 +35,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          shared-key: xtask
+          cache-save: never
 
       # No pruning: deleting a label destroys the record of what was filed under
       # it, stock labels included. Retiring one is a manual step.
       - env:
           GH_TOKEN: ${{ github.token }}
           DRY_RUN: ${{ github.event_name == 'pull_request' }}
-        run: ./scripts/sync-labels.sh
+        run: cargo xtask sync-labels

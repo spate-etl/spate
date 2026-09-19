@@ -63,7 +63,7 @@
 //! move with the C library rather than with the code the case names. Virtual
 //! time advances explicitly, once per iteration, inside the measured loop.
 //!
-//! Run with `make bench-gungraun`.
+//! Run with `cargo xtask bench counted`.
 
 // `library_benchmark` and `library_benchmark_group` expand to public modules,
 // functions and constants of their own, none of which carry documentation, so

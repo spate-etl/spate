@@ -9,7 +9,7 @@ Run from the repository root for the available commands, their arguments and
 examples:
 
 ```sh
-cargo xtask help
+cargo xtask --help
 ```
 
 ## CI selection

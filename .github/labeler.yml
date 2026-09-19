@@ -74,7 +74,8 @@
       - any-glob-to-any-file:
           - .github/**
           - scripts/**
-          - Makefile
+          - xtask/**
+          - .cargo/config.toml
           - codecov.yml
           - .config/nextest.toml
 

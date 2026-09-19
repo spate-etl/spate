@@ -41,11 +41,11 @@
 //!
 //! Every case declares [`BACKEND_ID`] as `decode_wall.rs` does, so the two arms
 //! of this crate are told apart here too; see that target's backend-axis
-//! section. Comparing them is `make bench-arms HEAD_FEATURES=spate-json/simd
-//! FILTER=frame_`, though the framer does not decode and the two arms should
-//! measure the same.
+//! section. Comparing them is `cargo xtask bench arms --head-features
+//! spate-json/simd --filter frame_`, though the framer does not decode and the
+//! two arms should measure the same.
 //!
-//! Run it with `make bench-ab REF=main FILTER=frame_`.
+//! Run it with `cargo xtask bench ab --ref main --filter frame_`.
 //!
 //! [`BACKEND_ID`]: spate_json::BACKEND_ID
 //!

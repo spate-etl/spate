@@ -122,7 +122,7 @@ impl Graph {
             container_pkgs: container_test_owners(root, &members)?,
             semver_pkgs,
             fuzz_pkgs: fuzz_dependencies(root, &members)?,
-            bench_pkgs: gungraun_bench_owners(root)?,
+            bench_pkgs: crate::checks::gungraun::owners(root),
             #[cfg(test)]
             features: meta
                 .packages
@@ -182,27 +182,6 @@ fn fuzz_dependencies(root: &Path, members: &BTreeSet<&str>) -> Result<BTreeSet<S
                 .any(|l| l.split_once('=').is_some_and(|(k, _)| k.trim() == **m))
         })
         .map(|m| (*m).to_string())
-        .collect())
-}
-
-/// Crates owning a gungraun bench, as `scripts/gungraun-benches.sh` discovers
-/// them. That script is the single reader of the bench tree and holds each
-/// target to its `harness = false` stanza, so asking it keeps one declaration.
-fn gungraun_bench_owners(root: &Path) -> Result<BTreeSet<String>, String> {
-    let out = Command::new("./scripts/gungraun-benches.sh")
-        .current_dir(root)
-        .output()
-        .map_err(|e| format!("gungraun-benches.sh: {e}"))?;
-    if !out.status.success() {
-        return Err(format!(
-            "gungraun-benches.sh exited {}; the bench selection would be empty",
-            out.status
-        ));
-    }
-    Ok(String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter_map(|l| l.split_whitespace().next())
-        .map(str::to_string)
         .collect())
 }
 

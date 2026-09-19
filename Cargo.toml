@@ -115,7 +115,7 @@ trybuild = "1"
 loom = "0.7"
 criterion = "0.8"
 # A normal (not dev) dependency, so cargo-about lists it in THIRD-PARTY.md.
-clap = { version = "4.6", default-features = false, features = [
+clap = { version = "4.5", default-features = false, features = [
     "std",
     "help",
     "usage",

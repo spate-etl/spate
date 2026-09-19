@@ -1,7 +1,8 @@
 name: Performance label
 
 # Syncs the `affects-performance` label from the flag artifact ci.yml's report
-# step writes. `make check-perf-report` holds the write side of that contract.
+# step writes. `cargo xtask tidy perf-report` holds the write side of that
+# contract.
 #
 # `workflow_run` because the halves cannot share a job: the benches run the pull
 # request's code under a read-only token, and labelling is a write. This half

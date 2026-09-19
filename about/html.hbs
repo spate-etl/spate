@@ -79,7 +79,7 @@
 </p>
 
 {{! One sentinel pair per section and one chip line per crate: the anchors
-    scripts/attribution.sh needs to drop first-party chips and any section
+    `cargo xtask attribution` needs to drop first-party chips and any section
     they empty. `text` is HTML-escaped, so a license text cannot fake either. }}
 {{#each licenses}}
 <!-- BEGIN-LICENSE {{id}} -->

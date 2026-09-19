@@ -12,7 +12,7 @@
 //! instruction-count sibling in `benches/split_gungraun.rs` and pinned by
 //! `tests/bench_fixtures.rs`.
 //!
-//! Run: `make bench-ab REF=main FILTER=split_`
+//! Run: `cargo xtask bench ab --ref main --filter split_`
 //!
 //! # Reading these numbers
 //!

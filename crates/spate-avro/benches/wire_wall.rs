@@ -16,7 +16,7 @@
 //! one schema id against eight.
 //!
 //! ```sh
-//! make bench-ab REF=main FILTER=wire_
+//! cargo xtask bench ab --ref main --filter wire_
 //! ```
 
 use spate_bench::{Corpus, Suite, bench_main};

@@ -47,7 +47,7 @@
 //! a proportional one. A change to the code moves all three cases together in
 //! proportion to the batches they carry, not one case drifting on its own.
 //!
-//! Run with `make bench-gungraun`.
+//! Run with `cargo xtask bench counted`.
 
 // `library_benchmark` and `library_benchmark_group` expand to public modules,
 // functions and constants of their own, none of which carry documentation, so

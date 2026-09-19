@@ -80,7 +80,7 @@ workspace_version() {
     printf '%s\n' "$v"
 }
 
-# A crate's path in the sparse index. Matches scripts/semver-checks.sh.
+# A crate's path in the sparse index. Matches xtask/src/checks/semver_checks.rs.
 index_path() {
     local crate=$1
     case "${#crate}" in
@@ -251,10 +251,10 @@ assemble() {
 
     group "Generate every artefact"
     ./scripts/release-version.sh --bump "$version"
-    ./scripts/changelog.sh --build "$version"
+    cargo xtask changelog build "$version"
     # The inventory holds no first-party rows, so this is a no-op unless a
     # dependency changed underneath the release.
-    ./scripts/attribution.sh
+    cargo xtask attribution
     endgroup
 
     group "The release commit"
@@ -329,7 +329,7 @@ prepare() {
         fail "the subject says $version but Cargo.toml says $(workspace_version); the tree is not the release"
     # The slice the release body needs has to exist before anything uploads;
     # `finish` extracts it after the crates are permanent.
-    ./scripts/changelog.sh --notes "$version" >/dev/null
+    cargo xtask changelog notes "$version" >/dev/null
     echo "release.sh: releasing v$version from $(git rev-parse --short HEAD)"
     endgroup
 
@@ -581,7 +581,7 @@ SMOKE
         echo "the v$version release already exists."
     else
         notes=$(mktemp)
-        ./scripts/changelog.sh --notes "$version" >"$notes"
+        cargo xtask changelog notes "$version" >"$notes"
         if ! gh release create "v$version" --verify-tag --title "v$version" --notes-file "$notes"; then
             # The tag pushed moments ago can lag replication on the API side.
             sleep 10

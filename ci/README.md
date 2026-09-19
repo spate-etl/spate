@@ -10,10 +10,10 @@ ci/<service>/<lane>/Dockerfile    the pin for that lane
 
 Each `Dockerfile` holds a single `FROM` carrying an exact patch tag and the
 digest that tag resolves to. Nothing builds them. They exist so one file names
-the server, readable by Dependabot, by `scripts/container-image.sh`, and by the
-test harness.
+the server, readable by Dependabot, by the task runner, and by the test
+harness.
 
-Services and lanes are discovered from this tree. The Makefile, the CI
+Services and lanes are discovered from this tree. The task runner, the CI
 classifier and the test harness name no lane and no service beyond the one they
 are testing, so adding either is a change inside `ci/`.
 
@@ -38,27 +38,27 @@ to the lane in `ci/<service>/PRIMARY`. Lanes are per-service, so a shared
 variable would impose one vendor's release vocabulary on every other. The name
 is derived from the directory, so declaring it is the directory.
 
-**Resolving and pulling** goes through `scripts/container-image.sh`:
+**Resolving and pulling** goes through `cargo xtask container-image`:
 
 ```sh
-./scripts/container-image.sh <service> <lane>            # print name:tag
-./scripts/container-image.sh --ref <service> <lane>      # print name:tag@digest
-./scripts/container-image.sh --pull <service> <lane>     # pull, re-tag, print name:tag
-./scripts/container-image.sh --pull-all                  # every service's selected lane
-./scripts/container-image.sh --extra-lanes <service>     # lanes needing their own CI job
+cargo xtask container-image <service> <lane>           # print name:tag
+cargo xtask container-image --ref <service> <lane>     # print name:tag@digest
+cargo xtask container-image --pull <service> <lane>    # pull, re-tag, print name:tag
+cargo xtask container-image --pull-all                 # every service's selected lane
+cargo xtask container-image --extra-lanes <service>    # lanes needing their own CI job
 ```
 
-`make test-docker` runs `--pull-all`, which walks this tree. Select a lane
+`cargo xtask integration-test` runs `--pull-all`, which walks this tree. Select a lane
 through the environment:
 
 ```sh
-SPATE_CLICKHOUSE_LANE=stable make test-docker
+SPATE_CLICKHOUSE_LANE=stable cargo xtask integration-test
 ```
 
 `--pull` fetches by digest and re-tags locally, which is what makes a run use the
 pinned bytes. testcontainers builds its image reference as `name:tag` and has no
 digest form, and it creates the container before it pulls, so the local tag is
-what it finds. `make test-docker` and CI both run it first.
+what it finds. `cargo xtask integration-test` and CI both run it first.
 
 A bare `cargo nextest run --profile docker` skips that step, and testcontainers
 then pulls the tag unverified. An exact patch tag is not re-pushed, so the bytes
@@ -102,11 +102,11 @@ The bump usually cannot be fixed inside its own pull request, so:
 2. A `ci/<service>/README.md` naming those lines and the reasoning.
 3. A row in the table above.
 4. The suite's harness reads its manifest through the same helper.
-5. `cargo xtask ci-changes` maps `ci/<service>/*` to that suite and calls
-   `--extra-lanes` for its matrix; `ci.yml` gains a job consuming it.
+5. `cargo xtask ci-changes` maps `ci/<service>/*` to that suite and reads its
+   extra lanes for the matrix; `ci.yml` gains a job consuming it.
 6. The Dependabot entries.
 
-Steps 1 to 3 are this tree, and `make test-docker` picks the service up from
+Steps 1 to 3 are this tree, and `cargo xtask integration-test` picks the service up from
 them with no edit. Steps 5 and 6 name the service once each, because the
 service-to-suite mapping and the bump policy are the two things that cannot be
 derived. `DEVELOPING.md` names no service at all.

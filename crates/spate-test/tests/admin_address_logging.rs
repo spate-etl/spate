@@ -12,10 +12,9 @@ use spate_core::config::PipelineConfig;
 use spate_core::ops::chain_owned;
 use spate_core::pipeline::{Pipeline, RuntimeOptions};
 use spate_core::sink::KeyHashRouter;
-use spate_test::{BytesPassthrough, TestEncoder, capture_sink, memory_source};
+use spate_test::{BytesPassthrough, LogCapture, TestEncoder, capture_sink, memory_source};
 use std::io::{Read, Write};
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const DEADLINE: Duration = Duration::from_secs(10);
@@ -31,50 +30,13 @@ source: { memory: {} }
 sink: { capture: {} }
 "#;
 
-/// Everything the global subscriber has formatted, shared with the subscriber
-/// it is installed into.
-#[derive(Clone)]
-struct Capture(Arc<Mutex<Vec<u8>>>);
-
-impl Capture {
-    fn new() -> Capture {
-        Capture(Arc::new(Mutex::new(Vec::new())))
-    }
-
-    fn lines(&self) -> Vec<String> {
-        String::from_utf8_lossy(&self.0.lock().expect("capture"))
-            .lines()
-            .map(str::to_string)
-            .collect()
-    }
-}
-
-impl std::io::Write for Capture {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().expect("capture").extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Capture {
-    type Writer = Capture;
-
-    fn make_writer(&'a self) -> Capture {
-        self.clone()
-    }
-}
-
 /// The `addr` field of the line announcing the bound admin address, once one
 /// has been written.
 ///
 /// Reading the field rather than testing the line for the absence of `:0`: a
 /// formatter that stopped rendering fields this way produces that absence too,
 /// and such an assertion would pass having checked nothing.
-fn logged_addr(capture: &Capture) -> Option<SocketAddr> {
+fn logged_addr(capture: &LogCapture) -> Option<SocketAddr> {
     capture
         .lines()
         .iter()
@@ -92,7 +54,7 @@ fn logged_addr(capture: &Capture) -> Option<SocketAddr> {
 /// pipeline that has finished starting rather than one still mid-flight. The
 /// whole capture goes into the panic, since the reason for a timeout is
 /// whatever the pipeline logged instead.
-fn wait_until<T>(what: &str, capture: &Capture, mut check: impl FnMut() -> Option<T>) -> T {
+fn wait_until<T>(what: &str, capture: &LogCapture, mut check: impl FnMut() -> Option<T>) -> T {
     let deadline = Instant::now() + DEADLINE;
     while Instant::now() < deadline {
         if let Some(value) = check() {
@@ -131,7 +93,7 @@ fn get(addr: SocketAddr, path: &str) -> std::io::Result<(u16, String)> {
 
 #[test]
 fn the_bound_admin_address_is_logged_and_serves() {
-    let capture = Capture::new();
+    let capture = LogCapture::new();
     // `info` is the level a deployment runs at, and the level
     // `spate_core::telemetry` assigns to a startup milestone.
     tracing_subscriber::fmt()

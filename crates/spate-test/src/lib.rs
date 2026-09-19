@@ -70,6 +70,7 @@
 
 mod coordination;
 mod deser;
+mod logs;
 mod run;
 mod sink;
 mod source;
@@ -79,6 +80,7 @@ pub mod strategies;
 
 pub use coordination::{CoordinatorScript, ScriptedCoordinator, scripted_coordinator};
 pub use deser::{EmitCollector, TestDeserializer};
+pub use logs::{LogCapture, capture_logs, show_logs};
 pub use run::{PipelineRun, wait_until};
 pub use sink::{
     CaptureSink, CaptureWriter, CapturedWrite, ReplicaTag, ScriptedResult, SinkScript, TestEncoder,

@@ -17,12 +17,13 @@ crossbeam-channel = { workspace = true }
 spate-core = { workspace = true }
 proptest = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["time"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["fmt"] }
 
 [dev-dependencies]
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "test-util", "time"] }
-tracing-subscriber = { workspace = true, features = ["fmt"] }
 
 [features]
 default = []

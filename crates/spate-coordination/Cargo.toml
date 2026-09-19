@@ -42,6 +42,7 @@ uuid = { workspace = true, features = ["v4"] }
 spate-coordination = { path = ".", features = ["testing"] }
 gungraun = { workspace = true }
 proptest = { workspace = true }
+spate-test = { workspace = true }
 serde_yaml = { workspace = true }
 testcontainers = { workspace = true, features = ["blocking"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

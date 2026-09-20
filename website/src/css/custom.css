@@ -38,7 +38,7 @@
   --ifm-link-color: var(--spate-accent);
   --ifm-link-hover-color: var(--spate-ink);
   --ifm-toc-border-color: var(--spate-border);
-  --ifm-hr-color: var(--spate-border);
+  --ifm-hr-background-color: var(--spate-border);
   --ifm-table-border-color: var(--spate-border);
   --ifm-table-stripe-background: var(--spate-surface-2);
   --ifm-navbar-background-color: var(--spate-bg);

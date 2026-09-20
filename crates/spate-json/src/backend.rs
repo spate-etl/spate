@@ -210,3 +210,33 @@ impl<'de> Visitor<'de> for DupVisitor {
         deserializer.deserialize_any(DupVisitor)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::check_no_duplicate_keys;
+
+    #[test]
+    fn duplicate_key_names_the_key() {
+        let err = check_no_duplicate_keys(br#"{"id":1,"id":2}"#).unwrap_err();
+        assert!(err.is_data, "{err}");
+        assert!(
+            err.to_string().starts_with("duplicate object key `id`"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn escaped_spelling_is_the_same_key() {
+        let err = check_no_duplicate_keys(br#"{"\u0061":1,"a":2}"#).unwrap_err();
+        assert!(err.is_data, "{err}");
+        assert!(
+            err.to_string().starts_with("duplicate object key `a`"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn same_key_in_sibling_scopes_is_clean() {
+        check_no_duplicate_keys(br#"{"a":{"a":1},"b":[{"a":1},{"a":2}]}"#).unwrap();
+    }
+}

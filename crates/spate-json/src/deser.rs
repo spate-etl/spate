@@ -490,24 +490,6 @@ mod tests {
         }
     }
 
-    /// The duplicate-key error names the repeated key, not just the fact that
-    /// one exists.
-    #[test]
-    fn duplicate_key_error_names_the_repeated_key() {
-        let mut d = builder(JsonFraming::Single, OnError::Fail, true).build_value();
-        let mut out = Collected(Vec::new());
-        let err = d
-            .deserialize(&raw(br#"{"id":1,"id":2}"#), &test_ack(), &mut out)
-            .unwrap_err();
-        match err {
-            DeserError::Malformed { reason } => assert!(
-                reason.starts_with("duplicate_key: duplicate object key `id`"),
-                "the error must name the repeated key, got `{reason}`"
-            ),
-            other => panic!("expected Malformed, got {other}"),
-        }
-    }
-
     #[test]
     fn nested_duplicate_keys_are_rejected() {
         let mut d = builder(JsonFraming::Single, OnError::Fail, true).build_value();

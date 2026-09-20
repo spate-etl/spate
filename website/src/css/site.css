@@ -126,6 +126,22 @@ html.docs-wrapper .main-wrapper > div {
   text-decoration: none;
 }
 
+/* Infima gives `.navbar__search-input` `border: none`, which leaves the pill's
+ * fill against the navbar as its whole boundary, under the 3:1 that WCAG 2.2
+ * SC 1.4.11 asks of a control in both modes. */
+.navbar__search-input {
+  border: 1px solid var(--spate-muted);
+}
+
+/* The hint's border and inset shadow are the whole boundary between it and the
+ * pill it sits on. The descendant selector is required: the plugin's own rule
+ * is (0,1,0) and loads after this sheet, so a bare attribute selector loses the
+ * tie on source order. The class carries a build hash, hence the substring. */
+.navbar__search [class*='searchHint_'] {
+  border-color: var(--spate-muted);
+  box-shadow: inset 0 -1px 0 var(--spate-muted);
+}
+
 /* The theme's own mobile sidebar carries the links under 997px. */
 @media (max-width: 996px) {
   .site-nav__links,

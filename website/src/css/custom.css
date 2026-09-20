@@ -60,20 +60,16 @@
   --ifm-scrollbar-thumb-background-color: var(--spate-border);
 }
 
-[data-theme='dark'] {
+/* The `html` prefix matches the specificity of Infima's own
+ * `html[data-theme='dark']` emphasis block, so source order decides these six
+ * tokens. Without it they resolve to Infima's grey scale. */
+html[data-theme='dark'] {
   --ifm-color-emphasis-100: #22262f;
   --ifm-color-emphasis-200: #2b303a;
   --ifm-color-emphasis-300: #363c48;
   --ifm-color-emphasis-600: #9aa1a9;
   --ifm-color-emphasis-700: #b6bcc4;
   --ifm-color-emphasis-800: #d3d7dc;
-  /* The pill takes --ifm-color-emphasis-200. This block loses to Infima's
-   * `html[data-theme='dark']` on specificity (#568), so that token keeps
-   * Infima's #444950 and the value declared above never applies. --spate-muted
-   * is 3.48:1 on #444950, and emphasis-500 holds the hint and the placeholder
-   * at 5.11:1. Fixing #568 puts the pill on #2b303a, where --spate-muted from
-   * :root reaches 5.07:1 and this line can go. */
-  --ifm-navbar-search-input-placeholder-color: var(--ifm-color-emphasis-500);
   --docusaurus-highlighted-code-line-bg: rgba(255, 140, 74, 0.18);
 }
 

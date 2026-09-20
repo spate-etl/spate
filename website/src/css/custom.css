@@ -56,9 +56,6 @@
   --ifm-pre-background: var(--spate-code-bg);
   --ifm-pre-color: var(--spate-code-ink);
   --docusaurus-highlighted-code-line-bg: rgba(255, 140, 74, 0.14);
-  /* These two stay out of the dark block below. `--spate-border` on a
-   * `--spate-surface-2` track reads 1.19:1 in light, where this mapping
-   * applies, and 1.14:1 in dark, where it would. */
   --ifm-scrollbar-track-background-color: var(--spate-surface-2);
   --ifm-scrollbar-thumb-background-color: var(--spate-border);
 }

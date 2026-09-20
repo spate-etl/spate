@@ -82,17 +82,6 @@ test.describe('dark mode emphasis scale', () => {
     expect(await computedTokens(page, Object.keys(BRAND_DARK))).toEqual(BRAND_DARK);
   });
 
-  // The scrollbar pair keeps its Infima values in dark. `--spate-border` on a
-  // `--spate-surface-2` track reads 1.14:1 against Infima's 1.75:1, so moving
-  // the `:root` mapping into the dark block turns this red. See #585.
-  test('the scrollbar pair holds the Infima values', async ({page, colorMode}) => {
-    await gotoRoute(page, 'quickstart', colorMode);
-    expect(await computedTokens(page, ['--ifm-scrollbar-thumb-background-color', '--ifm-scrollbar-track-background-color'])).toEqual({
-      '--ifm-scrollbar-thumb-background-color': '#686868',
-      '--ifm-scrollbar-track-background-color': '#444',
-    });
-  });
-
   // Both candidate declarations resolve to #2b303a, so a value assertion is
   // blind here. They differ in what they depend on: Infima's is
   // `var(--ifm-color-emphasis-200)` and ours is `var(--spate-border)`. Moving

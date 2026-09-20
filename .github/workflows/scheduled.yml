@@ -108,8 +108,8 @@ jobs:
         run: |
           set -euo pipefail
           title='THIRD-PARTY.md is out of date'
-          existing=$(gh issue list --state open --search "$title in:title" \
-            --json number --jq '.[0].number // empty')
+          matches=$(gh issue list --state open --search "$title in:title" --json number,title)
+          existing=$(jq -r --arg t "$title" 'map(select(.title == $t)) | .[0].number // empty' <<<"$matches")
           if [ -n "$existing" ]; then
             gh issue comment "$existing" --body "Still drifted: ${RUN_URL}"
             exit 0
@@ -169,8 +169,8 @@ jobs:
         run: |
           set -euo pipefail
           title='Nightly advisory scan is failing'
-          existing=$(gh issue list --state open --search "$title in:title" \
-            --json number --jq '.[0].number // empty')
+          matches=$(gh issue list --state open --search "$title in:title" --json number,title)
+          existing=$(jq -r --arg t "$title" 'map(select(.title == $t)) | .[0].number // empty' <<<"$matches")
           if [ -n "$existing" ]; then
             gh issue comment "$existing" --body "Still failing: ${RUN_URL}"
             exit 0
@@ -306,8 +306,8 @@ jobs:
         run: |
           set -euo pipefail
           title='A fuzz target found a crashing input'
-          existing=$(gh issue list --state open --search "$title in:title" \
-            --json number --jq '.[0].number // empty')
+          matches=$(gh issue list --state open --search "$title in:title" --json number,title)
+          existing=$(jq -r --arg t "$title" 'map(select(.title == $t)) | .[0].number // empty' <<<"$matches")
           if [ -n "$existing" ]; then
             gh issue comment "$existing" --body "Still failing: ${RUN_URL}"
             exit 0
@@ -370,8 +370,8 @@ jobs:
         run: |
           set -euo pipefail
           title='Declared version floors no longer build'
-          existing=$(gh issue list --state open --search "$title in:title" \
-            --json number --jq '.[0].number // empty')
+          matches=$(gh issue list --state open --search "$title in:title" --json number,title)
+          existing=$(jq -r --arg t "$title" 'map(select(.title == $t)) | .[0].number // empty' <<<"$matches")
           if [ -n "$existing" ]; then
             gh issue comment "$existing" --body "Still failing: ${RUN_URL}"
             exit 0
@@ -456,8 +456,8 @@ jobs:
             body_head='`cargo publish --workspace --locked --dry-run` or the upload-metadata'
             body_head2='check failed on the nightly run, at a simulated next-patch version.'
           fi
-          existing=$(gh issue list --state open --search "$title in:title" \
-            --json number --jq '.[0].number // empty')
+          matches=$(gh issue list --state open --search "$title in:title" --json number,title)
+          existing=$(jq -r --arg t "$title" 'map(select(.title == $t)) | .[0].number // empty' <<<"$matches")
           if [ -n "$existing" ]; then
             gh issue comment "$existing" --body "Still failing: ${RUN_URL}"
             exit 0
@@ -629,10 +629,6 @@ jobs:
 
       # continue-on-error reports a failed step's `conclusion` as `success`,
       # so the real result is in `outcome`.
-      #
-      # Neither title's words are a subset of the other's. The search below is
-      # an unquoted AND over the title's terms, so a title contained in another
-      # would comment on the wrong issue.
       - name: Report the failure as an issue
         if: >-
           always() &&
@@ -663,8 +659,8 @@ jobs:
             body_head2='Clippy stops at the check build, so this is codegen, linking or behavior.'
             test_line=''
           fi
-          existing=$(gh issue list --state open --search "$title in:title" \
-            --json number --jq '.[0].number // empty')
+          matches=$(gh issue list --state open --search "$title in:title" --json number,title)
+          existing=$(jq -r --arg t "$title" 'map(select(.title == $t)) | .[0].number // empty' <<<"$matches")
           if [ -n "$existing" ]; then
             gh issue comment "$existing" --body "Still failing: ${RUN_URL}"
             exit 0
@@ -960,8 +956,8 @@ jobs:
             'The scheduled tier detects the world changing underneath a static' \
             'tree, so a failure here is usually not caused by the last commit.' \
             'Check the run before assuming a regression.')
-          existing=$(gh issue list --state open --search "$title in:title" \
-            --json number --jq '.[0].number // empty')
+          matches=$(gh issue list --state open --search "$title in:title" --json number,title)
+          existing=$(jq -r --arg t "$title" 'map(select(.title == $t)) | .[0].number // empty' <<<"$matches")
           if [ -n "$existing" ]; then
             gh issue comment "$existing" --body "$body"
           else

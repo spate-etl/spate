@@ -35,6 +35,12 @@ function ratio(a: string, b: string): number {
   return (light + 0.05) / (dark + 0.05);
 }
 
+/** Composites a colour over a ground at `alpha`, the way an element's own opacity paints. */
+function composite(colour: string, ground: string, alpha: number): string {
+  const [front, back] = [channels(colour), channels(ground)];
+  return `rgb(${front.map((channel, i) => channel * alpha + back[i] * (1 - alpha)).join(', ')})`;
+}
+
 function token(page: Page, name: string): Promise<string> {
   return page.evaluate((n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim(), name);
 }
@@ -70,6 +76,33 @@ const codeBlock = (page: Page) => page.locator('.theme-code-block').first();
 const codeButton = (page: Page) => codeBlock(page).locator('[class*="buttonGroup_"] button').first();
 
 /**
+ * Asserts the ring a pointer user sees on a revealed code-block button clears
+ * the floor.
+ *
+ * The buttons rest at `opacity: 0` and the theme reveals them part-way while
+ * the block is hovered, so the border as painted is its colour composited over
+ * the code ground at the element's own opacity. A read of `border-top-color`
+ * alone is blind to that.
+ */
+async function expectRevealedRing(page: Page): Promise<void> {
+  await codeBlock(page).hover();
+  await expect
+    .poll(async () => {
+      const painted = await codeButton(page).evaluate((el) => {
+        const style = getComputedStyle(el);
+        const block = el.closest('.theme-code-block')!;
+        return {
+          border: style.borderTopColor,
+          ground: getComputedStyle(block).backgroundColor,
+          alpha: Number(style.opacity),
+        };
+      });
+      return ratio(composite(painted.border, painted.ground, painted.alpha), painted.ground);
+    })
+    .toBeGreaterThanOrEqual(FLOOR);
+}
+
+/**
  * Pins the navbar search pill, the search hint's `<kbd>` and the code-block
  * copy and wrap buttons to the 3:1 WCAG 2.2 SC 1.4.11 asks of a control
  * boundary, in both colour modes.
@@ -100,6 +133,11 @@ test.describe('control boundaries in light mode', () => {
     await gotoRoute(page, 'quickstart', colorMode);
     await expectBoundary(codeButton(page), () => background(codeBlock(page)));
   });
+
+  test('the code-block buttons keep their ring while the block is hovered', async ({page, colorMode}) => {
+    await gotoRoute(page, 'quickstart', colorMode);
+    await expectRevealedRing(page);
+  });
 });
 
 test.describe('control boundaries in dark mode', () => {
@@ -118,5 +156,10 @@ test.describe('control boundaries in dark mode', () => {
   test('the code-block buttons are bounded against the code ground', async ({page, colorMode}) => {
     await gotoRoute(page, 'quickstart', colorMode);
     await expectBoundary(codeButton(page), () => background(codeBlock(page)));
+  });
+
+  test('the code-block buttons keep their ring while the block is hovered', async ({page, colorMode}) => {
+    await gotoRoute(page, 'quickstart', colorMode);
+    await expectRevealedRing(page);
   });
 });

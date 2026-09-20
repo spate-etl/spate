@@ -38,7 +38,7 @@
   --ifm-link-color: var(--spate-accent);
   --ifm-link-hover-color: var(--spate-ink);
   --ifm-toc-border-color: var(--spate-border);
-  --ifm-hr-color: var(--spate-border);
+  --ifm-hr-background-color: var(--spate-border);
   --ifm-table-border-color: var(--spate-border);
   --ifm-table-stripe-background: var(--spate-surface-2);
   --ifm-navbar-background-color: var(--spate-bg);
@@ -61,8 +61,9 @@
 }
 
 /* The `html` prefix matches the specificity of Infima's own
- * `html[data-theme='dark']` emphasis block, so source order decides these six
- * tokens. Without it they resolve to Infima's grey scale. */
+ * `html[data-theme='dark']` block, so source order decides these tokens.
+ * Without it they resolve to Infima's palette. The six lines below the
+ * emphasis scale repeat their `:root` mappings unchanged. */
 html[data-theme='dark'] {
   --ifm-color-emphasis-100: #22262f;
   --ifm-color-emphasis-200: #2b303a;
@@ -70,6 +71,14 @@ html[data-theme='dark'] {
   --ifm-color-emphasis-600: #9aa1a9;
   --ifm-color-emphasis-700: #b6bcc4;
   --ifm-color-emphasis-800: #d3d7dc;
+
+  --ifm-background-color: var(--spate-bg);
+  --ifm-background-surface-color: var(--spate-surface);
+  --ifm-code-background: var(--spate-surface-2);
+  --ifm-color-content-secondary: var(--spate-muted);
+  --ifm-table-stripe-background: var(--spate-surface-2);
+  --ifm-toc-border-color: var(--spate-border);
+
   --docusaurus-highlighted-code-line-bg: rgba(255, 140, 74, 0.18);
 }
 

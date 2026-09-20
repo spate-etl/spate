@@ -27,7 +27,9 @@ Reusable page logic belongs under `helpers/`, not inline in a spec:
 - `helpers/navigate.ts` — `gotoRoute()`, the only sanctioned way to land on a
   page. It checks the response status and the applied colour mode before a
   test proceeds, so a redirect or a storage-key change fails loudly instead
-  of quietly testing the wrong page.
+  of quietly testing the wrong page. It then polls until no element computes
+  the other colour mode's ink, so a spec reading a colour gets the settled
+  value.
 - `helpers/axe.ts` — `expectNoAxeViolations()` for an accessibility
   assertion, scoped to the WCAG tags the CI gate blocks on.
 

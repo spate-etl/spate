@@ -1,6 +1,6 @@
 //! The control plane: a single consumer whose partitions fan out to lanes.
 //!
-//! # Rebalance choreography (spike-verified, deferred completion)
+//! # Rebalance choreography (deferred completion)
 //!
 //! librdkafka runs rebalance callbacks inside `poll()` on the thread that
 //! calls it, which here is the runtime controller calling
@@ -43,11 +43,14 @@
 //! classified like every other consumer error; librdkafka rejoins on its
 //! own and a fresh assignment follows.
 //!
-//! Revoked lanes' queues go silent immediately (fetching stops); dropping
-//! a `PartitionQueue` before `unassign` would restore forwarding to the
-//! main queue, which is why any message that ever appears on the main
-//! queue is defensively rewound with `seek` rather than dropped; its
-//! offset would otherwise be committed past without processing.
+//! Revoked lanes' queues go silent immediately (fetching stops), and a
+//! partition split with `split_partition_queue` stays split. The split
+//! sets `RD_KAFKA_Q_F_FWD_APP` on the partition's fetch queue, librdkafka
+//! refuses to re-forward a queue carrying that flag, and nothing clears
+//! it, so neither dropping the `PartitionQueue` nor a later unassign
+//! restores main-queue forwarding. The rewind in
+//! [`Source::poll_events`] stands against a librdkafka that stops holding
+//! the contract.
 
 use crate::config::KafkaSourceConfig;
 use crate::context::{Intent, SourceContext};

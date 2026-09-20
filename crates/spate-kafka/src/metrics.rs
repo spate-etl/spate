@@ -553,7 +553,6 @@ fn ms_to_secs(v: i64) -> f64 {
 mod tests {
     use super::*;
     use rdkafka::statistics::{Broker, ConsumerGroup, Topic, Window};
-    use std::sync::{Arc, Mutex};
 
     /// Run `f` against a local Prometheus recorder and return the rendered
     /// exposition. Handles must be resolved inside `f`.
@@ -579,45 +578,10 @@ mod tests {
         partitions.iter().copied().map(PartitionId).collect()
     }
 
-    /// Everything the subscriber installed for one test has formatted.
-    #[derive(Clone)]
-    struct Capture(Arc<Mutex<Vec<u8>>>);
-
-    impl std::io::Write for Capture {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().expect("capture").extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Capture {
-        type Writer = Capture;
-
-        fn make_writer(&'a self) -> Capture {
-            self.clone()
-        }
-    }
-
     /// Run `f` under a subscriber at `info`, the level a deployment runs at,
-    /// and return the lines it formatted. The subscriber is thread-local
-    /// (`with_default`) rather than the process-wide `init()`, because
-    /// `cargo test` shares one process across a binary.
+    /// and return the lines it formatted.
     fn capture_logs(f: impl FnOnce()) -> Vec<String> {
-        let capture = Capture(Arc::new(Mutex::new(Vec::new())));
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(capture.clone())
-            .with_max_level(tracing::Level::INFO)
-            .without_time()
-            .finish();
-        tracing::subscriber::with_default(subscriber, f);
-        String::from_utf8_lossy(&capture.0.lock().expect("capture"))
-            .lines()
-            .map(str::to_string)
-            .collect()
+        spate_test::capture_logs(tracing::Level::INFO, f)
     }
 
     /// Lines carrying `needle`, so an assertion counts what was reported

@@ -24,8 +24,8 @@ import type { SidebarsConfig } from '@docusaurus/plugin-content-docs';
  * sorted last because it carries no number prefix.
  *
  * Reading the directory keeps the property autogeneration was wanted for: a new
- * record appears without anyone editing this file. `make check-adr` separately
- * holds the records to their index.
+ * record appears without anyone editing this file. `cargo xtask tidy adr`
+ * separately holds the records to their index.
  *
  * The `NNNN-` prefix is stripped from the id because Docusaurus's default
  * number-prefix parser strips it from the route — `0001-foo.md` is served at

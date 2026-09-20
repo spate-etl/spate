@@ -6,10 +6,10 @@ on:
   push:
     branches: [main]
   # `edited` re-runs the changelog gate: it reads the pull request *title*, and
-  # a retitle after a green run would land unchecked. The opt-in `ci: docker`,
-  # `ci: loom` and `ci: bench` labels take effect on the branch's next push.
-  # `ci.yml` classifies each run from the event that triggered it, so a manual
-  # re-run of an already-started run carries the labels that run started with.
+  # a retitle after a green run would land unchecked. The opt-in `ci: docker`
+  # and `ci: bench` labels take effect on the branch's next push. `ci.yml`
+  # classifies each run from the event that triggered it, so a manual re-run of
+  # an already-started run carries the labels that run started with.
   pull_request:
     types: [opened, synchronize, reopened, edited]
   merge_group:
@@ -36,7 +36,7 @@ jobs:
   changes:
     name: Detect changes
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 12
     outputs:
       rust: ${{ steps.classify.outputs.rust }}
       site: ${{ steps.classify.outputs.site }}
@@ -45,7 +45,6 @@ jobs:
       container-args: ${{ steps.classify.outputs.container-args }}
       semver: ${{ steps.classify.outputs.semver }}
       semver-pkgs: ${{ steps.classify.outputs.semver-pkgs }}
-      loom: ${{ steps.classify.outputs.loom }}
       bench: ${{ steps.classify.outputs.bench }}
       manifests: ${{ steps.classify.outputs.manifests }}
       # A JSON array of `{package, arm, cargo_features}` objects, one per shard.
@@ -60,6 +59,9 @@ jobs:
           # Both diff endpoints must be present as objects.
           fetch-depth: 0
           persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          shared-key: xtask
       - id: classify
         # Event fields go through `env:`, never interpolated into a `run:` block:
         # interpolation splices attacker-controlled text into generated shell.
@@ -78,7 +80,7 @@ jobs:
           # outside a merge group, where the arm reading them never runs.
           MERGE_BASE_SHA: ${{ github.event.merge_group.base_sha }}
           MERGE_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
-        run: ./scripts/ci-changes.sh
+        run: cargo run -q -p spate-xtask --locked -- ci-changes
 
   # Tier 1: cheap, unconditional, gates the expensive tier. No job-level `if:`
   # here: a skipped job skips everything that `needs:` it. The step carries it.
@@ -95,52 +97,38 @@ jobs:
         with:
           components: rustfmt, clippy
           shared-key: dev-allfeatures
-      - run: make fmt-check
+      - run: cargo xtask fmt --check
       - if: needs.changes.outputs.rust == 'true'
-        run: make clippy
+        run: cargo xtask clippy
 
   workflows:
-    name: Workflow lint (zizmor)
+    name: Repository checks
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: taiki-e/install-action@c3ec0de9ae7f1019cea21aa96aa0a895b9552063 # v2.87.9
+      - uses: ./.github/actions/setup-rust
         with:
-          # Version-pinned as well as SHA-pinned: a zizmor release can relax the
-          # default audit policy this job rests on.
-          tool: zizmor@1.28.0,shellcheck@0.11.0
-      # check-brand runs plain Node with no npm dependencies, so no cache or
-      # install step is needed.
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+          # The entry the `changes` job owns. A consumer that also wrote it
+          # would race the owner the first time it is missing.
+          shared-key: xtask
+          cache-save: never
+      - uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2.87.12
         with:
-          node-version: 24
-      # Without GH_TOKEN zizmor skips the API audits and reports "No findings",
-      # exit 0, against a known-vulnerable action.
-      - run: make zizmor
+          # zizmor alone carries a version: a release can relax the default
+          # audit policy this job rests on, and the action's own bump would
+          # move it with nothing in the title to say so. Bumped by hand, after
+          # reading the release notes for audit changes.
+          tool: zizmor@1.28.0,shellcheck
+      # `changelog` is outside this set: it reads the pull request's own fields
+      # and has a job that supplies them. Without GH_TOKEN zizmor skips the API
+      # audits and reports "No findings", exit 0, against a known-vulnerable
+      # action.
+      - run: cargo xtask tidy
         env:
           GH_TOKEN: ${{ github.token }}
-      - run: make shellcheck
-
-      # `make ci-lint` aggregates these locally; CI runs them one by one, so a
-      # new check goes in both places.
-      - run: make check-adr
-
-      - run: make check-perf-report
-
-      - run: make check-gungraun-benches
-
-      - run: make check-collected-region
-
-      - run: make check-transclusions
-
-      - run: make check-supported-versions
-
-      - run: make check-release-version
-
-      - run: make check-brand
 
   deny:
     name: Licenses and advisories
@@ -156,11 +144,11 @@ jobs:
       # an unverified release tarball into /usr/bin.
       - uses: ./.github/actions/setup-rust
         with:
-          tools: cargo-deny@0.20.2
+          tools: cargo-deny
 
-      - run: make deny
+      - run: cargo xtask deny
 
-      - run: make self-test
+      - run: cargo xtask tidy self-test
 
   changelog:
     name: Changelog entry
@@ -174,13 +162,18 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - uses: ./.github/actions/setup-rust
+        with:
+          shared-key: xtask
+          cache-save: never
+
       - env:
           EVENT_NAME: ${{ github.event_name }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
-        run: make check-changelog
+        run: cargo xtask tidy changelog
 
   # Tier 2: gated on tier 1, scoped to what changed.
 
@@ -202,7 +195,7 @@ jobs:
   # fragment for that second break is what goes missing. This is the trade the
   # published baseline carries and it is taken deliberately.
   #
-  # The set comes from ci-changes.sh's reverse-dependency closure over the
+  # The set comes from the CI selector's reverse-dependency closure over the
   # changed crates, which is why a change confined to one connector no longer
   # rebuilds every crate's rustdoc.
   semver:
@@ -227,7 +220,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-rust
         with:
-          tools: cargo-semver-checks@0.50.0
+          tools: cargo-semver-checks
           # Reads the lint cache for the tree's side. The baselines come from
           # the cache below instead, which rust-cache would not hold: it prunes
           # target/ to what it recognizes.
@@ -235,7 +228,7 @@ jobs:
           cache-save: never
 
       - id: baseline-key
-        run: ./scripts/semver-checks.sh --cache-key
+        run: cargo xtask semver-checks --cache-key
 
       # Restore-only; the baseline-cache job below produces this entry. The
       # tool writes the parsed rustdoc for each published baseline under
@@ -250,10 +243,10 @@ jobs:
       - env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_TITLE: ${{ github.event.pull_request.title }}
-          # Crate names this workflow computed, not event data. The script
+          # Crate names this workflow computed, not event data. The gate
           # rejects anything that is not a directory under crates/.
           SEMVER_PKGS: ${{ needs.changes.outputs.semver-pkgs }}
-        run: ./scripts/semver-checks.sh --against-registry --packages "$SEMVER_PKGS"
+        run: cargo xtask semver-checks --against-registry --packages "$SEMVER_PKGS"
 
   # Fills the baseline cache the pull-request gate restores. The key names the
   # published release, so this runs once a release cycle and is a no-op on
@@ -280,12 +273,12 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-rust
         with:
-          tools: cargo-semver-checks@0.50.0
+          tools: cargo-semver-checks
           shared-key: dev-allfeatures
           cache-save: never
 
       - id: baseline-key
-        run: ./scripts/semver-checks.sh --cache-key
+        run: cargo xtask semver-checks --cache-key
 
       - id: restore
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -304,7 +297,7 @@ jobs:
       - if: steps.restore.outputs.cache-hit != 'true'
         id: fill
         run: |
-          ./scripts/semver-checks.sh --against-registry || true
+          cargo xtask semver-checks --against-registry || true
           if [ -n "$(ls -A target/semver-checks/cache 2>/dev/null)" ]; then
             echo "filled=true" >>"$GITHUB_OUTPUT"
           else
@@ -347,7 +340,7 @@ jobs:
         run: |
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml)
           next="${version%.*}.$(( ${version##*.} + 1 ))"
-          ./scripts/release-version.sh --bump "$next"
+          cargo xtask release-version --bump "$next"
           # The dry run refuses a dirty worktree.
           git config user.name 'spate-release[bot]'
           git config user.email 'spate-release[bot]@users.noreply.github.com'
@@ -357,7 +350,7 @@ jobs:
       # or license with a warning and exit 0, while the upload rejects it
       # (cargo issue 14249).
       - name: Prove the upload metadata is present
-        run: ./scripts/release-version.sh --check-publish-metadata
+        run: cargo xtask release-version --check-publish-metadata
 
       - name: Prove every crate packages
         run: cargo publish --workspace --locked --dry-run
@@ -410,7 +403,7 @@ jobs:
       - uses: ./.github/actions/setup-rust
         with:
           components: llvm-tools-preview
-          tools: nextest@0.9.140,cargo-llvm-cov@0.8.7
+          tools: nextest,cargo-llvm-cov
           # Its own key: llvm-cov builds into `target/llvm-cov-target`, not the
           # `target/debug` that lint, features and doctests share.
           shared-key: coverage
@@ -474,8 +467,8 @@ jobs:
       - uses: ./.github/actions/setup-rust
         with:
           shared-key: dev-allfeatures
-      - run: make doctest
-      - run: make doc
+      - run: cargo xtask doctest
+      - run: cargo xtask doc
 
   docsrs:
     name: Rustdoc as docs.rs builds it
@@ -484,10 +477,10 @@ jobs:
     if: needs.changes.outputs.rust == 'true'
     timeout-minutes: 30
     # docs.rs builds each crate alone, on nightly, applying that crate's own
-    # `[package.metadata.docs.rs]`. `make doc` builds the workspace together on
-    # stable, which unifies features across members and leaves `docsrs` unset,
-    # so the `rustdoc-args` and the nightly rustdoc features gated on that cfg
-    # reach no other job.
+    # `[package.metadata.docs.rs]`. `cargo xtask doc` builds the workspace
+    # together on stable, which unifies features across members and leaves
+    # `docsrs` unset, so the `rustdoc-args` and the nightly rustdoc features
+    # gated on that cfg reach no other job.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -499,9 +492,10 @@ jobs:
           # Its own entry: a nightly rustdoc build shares no artefact with the
           # stable dev-profile trees the other jobs cache.
           shared-key: docsrs
-      - run: make docsrs
-        env:
+      # `+nightly` would name the floating channel and resolve past the pin.
+      - env:
           NIGHTLY: ${{ steps.rust.outputs.toolchain }}
+        run: cargo xtask docsrs --nightly "$NIGHTLY"
 
   features:
     name: Feature matrix (each feature)
@@ -516,9 +510,9 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-rust
         with:
-          tools: cargo-hack@0.6.45
+          tools: cargo-hack
           shared-key: dev-allfeatures
-      - run: make check-features
+      - run: cargo xtask hack
 
   alloc-assertions:
     name: Allocation assertions (spate-core)
@@ -537,10 +531,10 @@ jobs:
           shared-key: release
       - run: cargo test -p spate-core --release --test chain_alloc --locked
 
-  # The fuzz crate sits outside the workspace, so no other job compiles it. This
-  # one builds every target and runs none of them; the nightly tier in
-  # scheduled.yml is what fuzzes, and is also the backstop for a crate change
-  # that breaks the harness without touching `fuzz/`.
+  # Builds every target with libFuzzer's instrumentation, which needs nightly.
+  # It runs none of them; the nightly tier in scheduled.yml is
+  # what fuzzes, and is also the backstop for a crate change that breaks the
+  # harness without touching `fuzz/`.
   fuzz:
     name: Fuzz targets build
     runs-on: ubuntu-latest
@@ -562,7 +556,7 @@ jobs:
 
       # install-action carries no manifest for cargo-fuzz and falls back to
       # cargo-binstall, which resolves a release binary nothing here checksums.
-      - run: make fuzz-install
+      - run: cargo xtask fuzz install
 
       - name: Build every fuzz target
         # `+nightly` would name the floating channel and resolve past the pin.
@@ -577,7 +571,7 @@ jobs:
             exit 1
           fi
           echo "building $targets target(s)"
-          make fuzz-build
+          cargo xtask fuzz build --nightly "$NIGHTLY"
 
   # The instruction-count tier: one shard per (package, feature arm). gungraun's
   # summary path carries no feature component, so two feature builds of one bench
@@ -615,7 +609,7 @@ jobs:
           built=0
           while IFS=$'\t' read -r package cargo_features; do
             [[ -n "$package" ]] || continue
-            ./scripts/gungraun-benches.sh --features "$cargo_features" --check "$package"
+            cargo xtask bench gungraun --features "$cargo_features" --check "$package"
             built=$((built + 1))
           done <arms.tsv
           if [[ "$built" -ne "$arms" ]]; then
@@ -691,9 +685,9 @@ jobs:
       - name: Put gungraun-runner on PATH
         run: echo "$HOME/.gungraun/bin" >>"$GITHUB_PATH"
 
-      # This leg runs the merge base's copy of `scripts/gungraun-benches.sh`, the
-      # head leg the head's. A non-default arm probes first: a base predating the
-      # feature axis measures the default arm and the delta is arm mismatch.
+      # This leg runs the merge base's own copy of the bench runner, the head leg
+      # the head's. A non-default arm probes first: a base predating the feature
+      # axis measures the default arm and the delta is arm mismatch.
       - name: Measure the merge base
         id: base
         if: github.event_name == 'pull_request'
@@ -710,27 +704,34 @@ jobs:
           # A restored cargo cache's counter output would become the comparison.
           rm -rf target/gungraun
           measured=false
-          if [[ ! -x scripts/gungraun-benches.sh ]]; then
-            # Names the cause: a dropped `+x` would disable every baseline while
-            # CI stayed green.
-            echo "no baseline: scripts/gungraun-benches.sh is absent or not executable at the merge base"
+          # A merge base predating the command has no runner to measure with.
+          # `--help` answers 0 where the command exists, which separates it from
+          # the usage exit the argument probe below reads.
+          runner=()
+          if cargo xtask bench gungraun --help >/dev/null 2>&1; then
+            runner=(cargo xtask bench gungraun)
+          fi
+          if [[ "${#runner[@]}" -eq 0 ]]; then
+            # Names the cause: a rename would disable every baseline while CI
+            # stayed green.
+            echo "no baseline: the merge base carries no bench gungraun command"
           else
             args=()
             probe=2
             if [[ -n "$CARGO_FEATURES" ]]; then
               args=(--features "$CARGO_FEATURES")
               set +e
-              ./scripts/gungraun-benches.sh "${args[@]}" \
+              "${runner[@]}" "${args[@]}" \
                 --run __no_such_package__ >/dev/null 2>&1
               probe=$?
               set -e
             fi
             if [[ "$probe" -ne 2 ]]; then
-              echo "no baseline: the merge base's scripts/gungraun-benches.sh does not take --features (probe exit $probe)."
+              echo "no baseline: the merge base's ${runner[*]} does not take --features (probe exit $probe)."
               echo "It would build the default arm while this shard builds '$ARM', and two arms are not comparable."
             else
               set +e
-              GUNGRAUN_SAVE_BASELINE=base ./scripts/gungraun-benches.sh \
+              GUNGRAUN_SAVE_BASELINE=base "${runner[@]}" \
                 ${args[@]+"${args[@]}"} --run "$PACKAGE"
               rc=$?
               set -e
@@ -762,7 +763,7 @@ jobs:
             # Otherwise a restored cache or aborted base leg becomes the baseline.
             rm -rf target/gungraun
           fi
-          ./scripts/gungraun-benches.sh --features "$CARGO_FEATURES" --run "$PACKAGE"
+          cargo xtask bench gungraun --features "$CARGO_FEATURES" --run "$PACKAGE"
 
       # A gate, not a measurement: a bench whose collected region measured the
       # allocator reports a plausible number through every other signal, and that
@@ -771,11 +772,11 @@ jobs:
         env:
           PACKAGE: ${{ matrix.package }}
           ARM: ${{ matrix.arm }}
-        run: ./scripts/gungraun-collected-region.sh --shard "$PACKAGE ($ARM)"
+        run: cargo xtask bench region --shard "$PACKAGE ($ARM)"
 
       # A gungraun summary carries the package only as a directory path and the
       # feature arm not at all, so shard identity is stamped here for
-      # `scripts/gungraun-report.sh`. Empty `baseline` renders as *no baseline*.
+      # `cargo xtask bench report`. Empty `baseline` renders as *no baseline*.
       #
       # The compiler is stamped alongside it. Codegen moves a count, and both
       # legs of this job run under one toolchain.
@@ -826,6 +827,11 @@ jobs:
         with:
           persist-credentials: false
 
+      - uses: ./.github/actions/setup-rust
+        with:
+          shared-key: xtask
+          cache-save: never
+
       # Own directory per shard, so identically named files do not collide.
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -842,7 +848,7 @@ jobs:
           mkdir -p shards
           find shards -name '*.jsonl' -exec cat {} + >gungraun-summaries.jsonl
           mkdir -p perf-regressions
-          ./scripts/gungraun-report.sh \
+          cargo xtask bench report \
             --regressions-out perf-regressions/has_regressions \
             gungraun-summaries.jsonl "baseline" >>"$GITHUB_STEP_SUMMARY"
 
@@ -857,12 +863,13 @@ jobs:
           path: perf-regressions/has_regressions
 
   loom:
-    name: Loom models (opt-in)
+    name: Loom models (spate-core)
     runs-on: ubuntu-latest
     needs: [changes, lint, workflows]
-    # Opt-in via the `ci: loom` label for a change under INV-3.
-    if: needs.changes.outputs.loom == 'true'
-    timeout-minutes: 60
+    # INV-3. The models are the only thing that checks it, and `--cfg loom` is
+    # the only build that compiles their side of the cfg pairs.
+    if: needs.changes.outputs.rust == 'true'
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -872,7 +879,7 @@ jobs:
           # `--cfg loom` rebuilds the world against loom-typed primitives. Same
           # key as the scheduled job, so whichever runs first warms the other.
           shared-key: loom
-      - run: make loom
+      - run: cargo xtask loom
 
   msrv:
     name: Check (MSRV)
@@ -890,7 +897,7 @@ jobs:
           shared-key: msrv
       # `--locked` is what makes this ask about the graph we ship: free to
       # resolve, it would pass on an older graph than the committed lockfile.
-      - run: make check
+      - run: cargo xtask check
 
   containers:
     name: Container suites
@@ -909,7 +916,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-rust
         with:
-          tools: nextest@0.9.140
+          tools: nextest
           # Separate key: the `#[ignore]`d suites link binaries `test` does not.
           shared-key: docker
       # By digest, and re-tagged locally, so the suite runs the pinned bytes.
@@ -917,7 +924,7 @@ jobs:
       # is what it finds.
       - name: Pull the pinned ClickHouse image
         if: contains(needs.changes.outputs.container-args, 'spate-clickhouse')
-        run: ./scripts/container-image.sh --pull clickhouse
+        run: cargo xtask container-image --pull clickhouse
       # Serial: 2 cores and ~7 GB across SeaweedFS, NATS, Kafka and ClickHouse
       # OOMs in parallel.
       - name: Container suites
@@ -975,14 +982,14 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-rust
         with:
-          tools: nextest@0.9.140
+          tools: nextest
           shared-key: docker
           # A consumer of the entry `containers` owns. These legs build one
           # crate and would otherwise win the race to write a cache holding the
           # whole container tier.
           cache-save: never
       - name: Pull the pinned ClickHouse image
-        run: ./scripts/container-image.sh --pull clickhouse "$SPATE_CLICKHOUSE_LANE"
+        run: cargo xtask container-image --pull clickhouse "$SPATE_CLICKHOUSE_LANE"
       - name: ClickHouse suite
         run: |
           cargo nextest run --profile docker -p spate-clickhouse --all-features \
@@ -1024,11 +1031,15 @@ jobs:
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 24
+          node-version-file: .node-version
           cache: npm
           # Required: the lockfile is not at the repo root, and without it
           # setup-node silently never caches.
           cache-dependency-path: website/package-lock.json
+
+      - uses: ./.github/actions/setup-rust
+        with:
+          shared-key: docs
 
       - name: Install dependencies
         working-directory: website
@@ -1063,19 +1074,8 @@ jobs:
           CI: "true"
         run: npm run build
 
-      # The homepage, the brand page and the benchmark pages rendered from the
-      # submodule have no source under docs/ for ci-lint to check.
-      - name: Every built page carries a description
-        run: ./scripts/site-meta.sh --check
-
-      - name: Site is within the Cloudflare file limit
-        run: |
-          count=$(find website/build -type f | wc -l)
-          echo "site files: $count"
-          if [ "$count" -gt 10000 ]; then
-            echo "::error::$count files; Workers static assets refuse a deployment over 20000."
-            exit 1
-          fi
+      - name: Site is complete
+        run: cargo xtask site-check
 
       # Its own step because it is also the cache key below. A browser build
       # from a different Playwright version is unusable, so the key names the

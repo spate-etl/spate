@@ -39,8 +39,9 @@ saying which non-crate area the change belongs to, not by leaving the scope off
 — `feat: …` requires a fragment, because some of the largest changes this
 project has ever shipped were written exactly that way.
 
-`make check-changelog` is the gate, and it runs as part of `make ci-lint` and in
-CI. There is no label and no checkbox to switch it off: the exemption is derived
+`cargo xtask tidy changelog` is the gate. `cargo xtask ci` runs it, and in CI
+it has a job of its own, because it reads the pull request's title and body.
+There is no label and no checkbox to switch it off: the exemption is derived
 from the type and scope you write, so the way out is to write a subject that is
 true.
 
@@ -66,7 +67,7 @@ subject, **the title is the one that has to be right.**
 ## Writing one
 
 ```sh
-make changelog-new TYPE=fixed SLUG=retry-ladder
+cargo xtask changelog new fixed retry-ladder
 ```
 
 That writes `changelog.d/retry-ladder.fixed.md` for you to edit. The name is
@@ -92,18 +93,38 @@ it in words.
 
 ## The conventions
 
-**Say what it means, not what moved.** The commit message already says what
-moved. A release note answers "what does this change for me", which is a
-different sentence.
+A fragment tells somebody upgrading what to expect and whether they need to
+take action. Write for a reader who knows the framework but has not read the
+implementation, including readers whose first language is not English.
 
-- **Present tense, impersonal.** "The wait selects on a breaker wake", not "we
-  changed the wait" or "the wait will now select".
-- **Open with a bold lead-in naming the crate**, matching the entries already in
-  `CHANGELOG.md`: `` **Typed Avro datum decoding** (`spate-avro`) — … ``
-- **One to five sentences.** Long enough to say why it matters, short enough to
-  scan. If it needs a migration, say so and link the page that has it.
-- **Name the settings, types and metrics a reader will search for.** Somebody
-  arrives at this file because a gauge moved or a config key stopped working.
+- **Start the body with what happens now.** Use present tense for current
+  behavior, then past tense for what happened previously. A title describing
+  current behavior does not replace that first sentence. For a new feature,
+  explain a previous limitation or workaround only when it helps the reader.
+- **State the consequence or required action.** Say whether records could
+  replay, the process could report success incorrectly, or a dashboard query
+  needs updating. For a migration, include the required steps and link to
+  further instructions when available.
+- **Use short sentences and familiar words.** Give each sentence one main
+  point. Avoid idioms, dense clauses and implementation jargon such as
+  "latched a fatal"; "recorded a fatal error" describes the behavior. Replace
+  vague claims such as "improved error handling" with the actual outcome.
+- **Keep exact settings, types and metric names** when a reader needs to search
+  for them or change their code or configuration. Explain implementation
+  details only when they help the reader understand the consequence.
+- **Include useful qualifications.** Mention an unaffected behavior when
+  readers might reasonably assume it changed. Keep constraints that affect
+  how someone uses the feature.
+- **Check both sides of the comparison.** Verify current behavior against
+  source and tests, and previous behavior against history. Use "in previous
+  versions" only after checking that the behavior existed in a released
+  version. Describe the condition under which a failure occurred, without
+  implying that every use was affected.
+- **Open with a short bold title and the crate name**, then put the body in a
+  separate paragraph. Keep the voice impersonal: "The pipeline now logs…"
+  describes the behavior directly.
+- **Usually write three to five sentences.** A simple change can take fewer;
+  a breaking change may need additional paragraphs for migration details.
 - No pull request number and no author. The number is derived at release time
   from the commit that added the fragment — its squash subject if that carries
   one, and the GitHub API for the commit if it does not. A commit that reached
@@ -120,9 +141,21 @@ own link definition, and leaves the entry's own reference alone.
 A fragment is prose, not a list item: write paragraphs, and the bullet and its
 indentation are applied when the file is assembled.
 
+For example:
+
+```markdown
+**Admin server address** (`spate-core`)
+
+The pipeline now logs the admin server's bound address at `INFO` with the
+message `admin server listening`. Previously, startup did not report this
+address, so configuring `admin.listen` with port `0` left the automatically
+assigned port out of the logs. You can use the logged address to reach
+`/metrics`, `/healthz`, and `/readyz`.
+```
+
 ## What happens at release
 
-`./scripts/changelog.sh --build <version>` groups the fragments by type under a
+`cargo xtask changelog build <version>` groups the fragments by type under a
 new `## [<version>] — <date>` heading, appends each entry's pull request link,
 adds a `### Contributors` section from the commit range, rewrites the link
 references, and deletes the fragments it consumed.

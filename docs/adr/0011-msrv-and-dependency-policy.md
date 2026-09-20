@@ -66,7 +66,7 @@ wrapping it would create a second vocabulary for the same concepts.
 
 ### Confirmation
 
-`make check-features` and the feature matrix in CI compile the crates without
+`cargo xtask hack` and the feature matrix in CI compile the crates without
 default features, which is what catches a dependency type leaking into a
 signature through a feature-gated path. The rule itself is INV-6.
 

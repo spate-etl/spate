@@ -20,6 +20,8 @@
 //!   line, so almost every record is assembled across several pushes through
 //!   the partial-line buffer. The other end of that axis, and what a
 //!   small-read source or a chunked transfer encoding puts the framer in.
+//!   Marked erratic (see [`FRAME_LF_SPLIT_CHUNKS_ERRATIC`]); read its row, do
+//!   not gate on it.
 //! - `frame_crlf_fetch_chunks` — the baseline stream terminated `\r\n`. The
 //!   framer strips exactly one trailing `\r`, so the delta is that strip plus
 //!   one more byte to scan per line. Both of those are inside the declared
@@ -41,11 +43,11 @@
 //!
 //! Every case declares [`BACKEND_ID`] as `decode_wall.rs` does, so the two arms
 //! of this crate are told apart here too; see that target's backend-axis
-//! section. Comparing them is `make bench-arms HEAD_FEATURES=spate-json/simd
-//! FILTER=frame_`, though the framer does not decode and the two arms should
-//! measure the same.
+//! section. Comparing them is `cargo xtask bench arms --head-features
+//! spate-json/simd --filter frame_`, though the framer does not decode and the
+//! two arms should measure the same.
 //!
-//! Run it with `make bench-ab REF=main FILTER=frame_`.
+//! Run it with `cargo xtask bench ab --ref main --filter frame_`.
 //!
 //! [`BACKEND_ID`]: spate_json::BACKEND_ID
 //!
@@ -104,8 +106,8 @@ fn wide() -> Rig {
 /// splitting, stopped stripping a `\r`, or started counting blank lines would
 /// otherwise report a large improvement rather than a failure. The returned
 /// pair is also what `black_box` holds, so the loop cannot be optimized away.
-fn case(suite: Suite, id: &str, build: fn() -> Rig) -> Suite {
-    suite
+fn case(suite: Suite, id: &str, build: fn() -> Rig, erratic: Option<&str>) -> Suite {
+    let case = suite
         .case(
             id,
             move |corpus, _seed| {
@@ -138,22 +140,54 @@ fn case(suite: Suite, id: &str, build: fn() -> Rig) -> Suite {
             },
         )
         .items_of(|rig: &Rig| rig.expect_records as u64)
-        .bytes_of(input_bytes)
-        .done()
+        .bytes_of(input_bytes);
+    match erratic {
+        Some(why) => case.erratic(why).done(),
+        None => case.done(),
+    }
 }
+
+/// Why `frame_lf_split_chunks` is reported but never flagged.
+///
+/// At six replicates, the count `make bench-ab REF=HEAD REPS=6` uses, one A/A
+/// run measured −6.61% wall and CPU time, CI [−11.62%, −2.65%], interval
+/// half-width 4.49% against the 5% floor (#243). At twenty replicates the same
+/// case on the same machine measured +2.67%, half-width 2.92%, and did not
+/// reach the table. The case's spread is wider than its neighbours', and
+/// resolving with more replicates is ordinary for that. Six is the replicate
+/// count `bench/README.md` names for the A/A acceptance run, and that is why
+/// the six-replicate flag is the one recorded here; the marking itself holds
+/// at every count once applied, since `.erratic()` keeps a case off the
+/// significant-changes table regardless of how many replicates a later run
+/// uses.
+///
+/// This records an observation on one machine, not a diagnosis. Re-test on
+/// dedicated hardware before the marking is lifted.
+const FRAME_LF_SPLIT_CHUNKS_ERRATIC: &str = "clears the 5% floor at six replicates, the count the \
+     documented acceptance run uses, with an interval half-width of 4.49%; at twenty replicates on \
+     the same machine it does not clear it";
 
 fn suite() -> Suite {
     let suite = spate_bench::suite("spate-json");
-    let suite = case(suite, "frame_lf_fetch_chunks", || {
-        standard(Eol::Lf, 0, lines::FETCH_CHUNK_BYTES)
-    });
-    let suite = case(suite, "frame_lf_split_chunks", || {
-        standard(Eol::Lf, 0, lines::SPLIT_CHUNK_BYTES)
-    });
-    let suite = case(suite, "frame_crlf_fetch_chunks", || {
-        standard(Eol::Crlf, 0, lines::FETCH_CHUNK_BYTES)
-    });
-    case(suite, "frame_lf_wide_lines", wide)
+    let suite = case(
+        suite,
+        "frame_lf_fetch_chunks",
+        || standard(Eol::Lf, 0, lines::FETCH_CHUNK_BYTES),
+        None,
+    );
+    let suite = case(
+        suite,
+        "frame_lf_split_chunks",
+        || standard(Eol::Lf, 0, lines::SPLIT_CHUNK_BYTES),
+        Some(FRAME_LF_SPLIT_CHUNKS_ERRATIC),
+    );
+    let suite = case(
+        suite,
+        "frame_crlf_fetch_chunks",
+        || standard(Eol::Crlf, 0, lines::FETCH_CHUNK_BYTES),
+        None,
+    );
+    case(suite, "frame_lf_wide_lines", wide, None)
 }
 
 bench_main!(suite);

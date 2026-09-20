@@ -12,7 +12,7 @@
 //! instruction-count sibling in `benches/split_gungraun.rs` and pinned by
 //! `tests/bench_fixtures.rs`.
 //!
-//! Run: `make bench-ab REF=main FILTER=split_`
+//! Run: `cargo xtask bench ab --ref main --filter split_`
 //!
 //! # Reading these numbers
 //!
@@ -25,13 +25,13 @@
 //!   reaches no branch and produces no row. That is the axis, not a
 //!   regression. The case prices a route closure that falls through against
 //!   one that always matches.
-//! - **Both four-branch cases are marked erratic**, so they are measured and
-//!   reported but never reach the significant-changes table (see
-//!   [`FOUR_BRANCH_ERRATIC`]). They place occasional replicates well above
-//!   their own mode on the reference machine, enough to flag a change that
-//!   never happened, and nothing in the measured region accounts for it. Read
-//!   their rows; do not gate on them. `split_two_branches` is the case here
-//!   that gates.
+//! - **All three cases are marked erratic**, so they are measured and reported
+//!   but never reach the significant-changes table (see
+//!   [`FOUR_BRANCH_ERRATIC`] and [`TWO_BRANCH_ERRATIC`]). The four-branch
+//!   cases place occasional replicates well above their own mode on the
+//!   reference machine, and nothing in the measured region accounts for it.
+//!   `split_two_branches` flips direction across separate A/A runs. Read
+//!   every row here; none of them gates.
 //! - **The counts come from the rig, not from a literal.** `.items_of()` reads
 //!   `Rig::expect_rows`. That is a second statement of the tag distribution
 //!   rather than a derivation from it, since `Tags::routed` is arithmetic
@@ -92,6 +92,22 @@ fn absorb(corpus: &mut spate_bench::Corpus, rig: &Rig) {
 const FOUR_BRANCH_ERRATIC: &str = "occasional replicates land about 25% above the case's mode on \
      the reference machine; the two-branch and chain cases do not";
 
+/// Why `split_two_branches` is reported but never flagged.
+///
+/// Established across four interleaved A/A runs on this machine, `main` and a
+/// feature branch taken in turn so drift over the window could not favour one
+/// side (#229). The case reached the significant-changes table three times,
+/// each time as an improvement: −16.35%, −11.21%, and −17.43% (CI [−24.15%,
+/// −10.42%]). A separate run of the same case the same day measured +6.98% in
+/// the other direction, short of the floor, so the sign is not stable run to
+/// run. The other cases in the same interleaved runs held within about 1%.
+///
+/// This records an observation on one machine, not a diagnosis. Re-test on
+/// dedicated hardware before the marking is lifted.
+const TWO_BRANCH_ERRATIC: &str = "flags as an improvement in separate A/A runs on the reference \
+     machine, and its sign is not stable run to run; sibling split and chain cases hold within about \
+     1% in the same runs";
+
 /// Rows a case's batch produces, as the rig itself computes it.
 fn rows(rig: &RefCell<Rig>) -> u64 {
     rig.borrow().expect_rows as u64
@@ -147,7 +163,12 @@ fn suite() -> Suite {
     // four-branch one is read against. Both carry the same records and the same
     // bytes; the four-branch case has twice the branches for the downcast to
     // discriminate between, and twice the buffers, encoders and `AckSet`s.
-    let suite = split_case(suite, "split_two_branches", two_branch_rig, None);
+    let suite = split_case(
+        suite,
+        "split_two_branches",
+        two_branch_rig,
+        Some(TWO_BRANCH_ERRATIC),
+    );
     let suite = split_case(
         suite,
         "split_four_branches",

@@ -1,0 +1,15 @@
+[package]
+name = "spate-xtask"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+clap = { workspace = true, features = ["derive"] }
+serde = { workspace = true }
+serde_json = { workspace = true, features = ["raw_value"] }
+
+[lints]
+workspace = true

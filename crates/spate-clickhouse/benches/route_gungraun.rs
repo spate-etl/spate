@@ -33,7 +33,7 @@
 //! costs time on every pull request.
 //!
 //! Needs valgrind and a same-version `gungraun-runner`, neither of which
-//! exists on every developer machine: run it with `make bench-gungraun`.
+//! exists on every developer machine: run it with `cargo xtask bench counted`.
 
 // `library_benchmark` and `library_benchmark_group` expand to public modules,
 // functions and constants of their own, none of which carry documentation, so

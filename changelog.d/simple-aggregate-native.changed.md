@@ -1,8 +1,11 @@
-**Breaking: `SimpleAggregateFunction` columns build under `format: native`**
-(`spate-clickhouse`) — the type parser resolves `SimpleAggregateFunction(f,
-T)` to `T`, the type it stores, instead of treating it as unrecognized. Native
-now writes these columns for any `T` it already writes on its own. Under
-`format: rowbinary`, the first-record check now validates the row field
-against `T` instead of skipping it, so a field that disagrees with `T` is
-rejected on the first record; a `T` of `Nullable(U)` against an `Option`
-field, previously rejected unconditionally under this check, is now accepted.
+**Breaking:** **SimpleAggregateFunction column support** (`spate-clickhouse`)
+
+With `format: native`, the sink now supports `SimpleAggregateFunction(f, T)`
+columns whenever the Native encoder supports the stored type `T`. Previously,
+these columns were rejected as an unknown type when the encoder was built.
+You can now insert their values using the same row field types as for `T`.
+
+With `format: rowbinary`, the first-record check now validates the row field
+against `T`; previously, that type check was skipped. Incompatible fields
+therefore fail on the first record. A column storing `Nullable(U)` now accepts
+a compatible `Option` field, which the previous check rejected.

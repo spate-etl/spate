@@ -6,7 +6,6 @@ import type {ColorMode} from '../fixtures';
 import {expectNoAxeViolations, formatViolations} from '../helpers/axe';
 import {gotoRoute} from '../helpers/navigate';
 import {VIEWPORTS} from '../helpers/routes';
-import type {KnownViolation} from '../helpers/axe';
 
 const MODES: ColorMode[] = ['light', 'dark'];
 
@@ -25,24 +24,14 @@ for (const colorMode of MODES) {
   test.describe(`color mode: ${colorMode}`, () => {
     test.use({colorMode, viewport: VIEWPORTS.desktop});
 
-    // #513: the docs search hint's `<kbd>` fails color-contrast in light
-    // mode only. The widget is in the global navbar, so every route carries
-    // it. The class suffix is a css-loader ident hash, so this matches the
-    // authored prefix. It takes both kbd children of the shortcut hint (the
-    // modifier key and "K"), and `page.$` resolves to the first, the only one
-    // that ever violates. color-contrast still checks the rest of the page.
-    // Dark mode uses different tokens and clears the floor.
-    const searchHintKnown: KnownViolation[] =
-      colorMode === 'light' ? [{ruleId: 'color-contrast', selector: '[class^="searchHint_"]'}] : [];
-
     test('home page has no WCAG violations', async ({page}, testInfo) => {
       await gotoRoute(page, 'home', colorMode);
-      await expectNoAxeViolations(page, testInfo, {knownViolations: searchHintKnown});
+      await expectNoAxeViolations(page, testInfo);
     });
 
     test('quickstart page has no WCAG violations', async ({page}, testInfo) => {
       await gotoRoute(page, 'quickstart', colorMode);
-      await expectNoAxeViolations(page, testInfo, {knownViolations: searchHintKnown});
+      await expectNoAxeViolations(page, testInfo);
     });
 
     // The Kafka source page carries the Metrics table #396 is about: at this
@@ -55,9 +44,7 @@ for (const colorMode of MODES) {
     test('kafka source page has no WCAG violations', async ({page}, testInfo) => {
       await gotoRoute(page, 'kafkaSource', colorMode);
       await waitForMetricsTableMeasured(page);
-      await expectNoAxeViolations(page, testInfo, {
-        knownViolations: searchHintKnown, // #513, light mode only, see above
-      });
+      await expectNoAxeViolations(page, testInfo);
     });
 
     // Regression for #396: the Metrics table's scroll frame is keyboard

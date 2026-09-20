@@ -1,9 +1,8 @@
-# cargo-about: generates the dependency attribution artifacts.
+# cargo-about: generates the dependency attribution inventory.
 #
-#   ./scripts/attribution.sh                              # THIRD-PARTY.md
-#   ./scripts/attribution.sh --html <output-file>         # docs site
+#   cargo xtask attribution                               # THIRD-PARTY.md
 #
-# Both artifacts go through the script: it canonicalises the row order
+# The inventory goes through that command: it canonicalises the row order
 # cargo-about leaves machine-dependent, and it filters the first-party crates,
 # which `private = { ignore }` below cannot reach because they are published.
 
@@ -43,6 +42,16 @@ private = { ignore = true }
 
 workarounds = ["ring", "rustls"]
 
+# The NCSA half of libfuzzer-sys's `(MIT OR Apache-2.0) AND NCSA`. Scoped to
+# the crate, so `accepted` above stays the list every other crate is judged
+# against.
+#
+# `--fail` judges every crate the workspace resolves, and the fuzz harness is a
+# member, so the expression has to be satisfiable here even though no row for
+# it survives: `cargo xtask attribution` drops what no release carries.
+[libfuzzer-sys]
+accepted = ["NCSA"]
+
 # Per-crate clarifications, naming which file a license text is read from. Both
 # crates below ship several files scanning as the same license id at equal
 # confidence, and the scan's tie-break is readdir order, so an unclarified crate
@@ -56,15 +65,15 @@ workarounds = ["ring", "rustls"]
 # - `license` here *replaces* the crate's declared expression rather than being
 #   checked against it, and nothing warns if the two drift. Re-check on a
 #   version bump.
-# - Listing several files for one license id publishes all of their texts. The
-#   site reproduces each, and `attribution.sh` collapses the duplicate rows that
-#   would otherwise appear in THIRD-PARTY.md.
+# - Listing several files for one license id yields one row per text, and
+#   `cargo xtask attribution` collapses the duplicates that would otherwise
+#   appear in THIRD-PARTY.md.
 #
 # Nothing re-checks the tie when a dependency is added; see #88.
 
 # bnum vendors modified code from num-bigint and rand and ships their notices
 # under `licenses/` alongside its own (see its COPYRIGHT). All three are listed
-# so all three are reproduced.
+# so the clarification covers every notice the crate ships.
 [bnum.clarify]
 license = "MIT OR Apache-2.0"
 
@@ -89,8 +98,8 @@ checksum = "eb1cfebd2a5760e95f672ba77e5e43f047ada1641173a70990a822c6f0c4b873"
 license = "Apache-2.0"
 
 # `LICENSE` and `LICENSE-MIT.md` are the same notice, differing by one blank
-# line and both carrying all four copyright holders, so naming either publishes
-# the same text.
+# line and both carrying all four copyright holders, so naming either resolves
+# to the same notice.
 [miniz_oxide.clarify]
 license = "MIT OR Zlib OR Apache-2.0"
 

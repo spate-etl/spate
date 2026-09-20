@@ -57,8 +57,8 @@ from the version input, in one commit on `release/vX.Y.Z`:
 | `[workspace.package] version` and the `=` pins | `scripts/release-version.sh --bump` |
 | `Cargo.lock` | `cargo update --workspace`, inside the bump |
 | The install snippets at `X.Y` | the same bump; `--check` holds the set closed |
-| `CHANGELOG.md`, fragments consumed | `scripts/changelog.sh --build` |
-| `THIRD-PARTY.md` | `scripts/attribution.sh`, as a drift backstop |
+| `CHANGELOG.md`, fragments consumed | `cargo xtask changelog build` |
+| `THIRD-PARTY.md` | `cargo xtask attribution`, as a drift backstop |
 
 The pull request it opens is titled `chore: release vX.Y.Z`, labeled
 `release`, and set to auto-merge. Re-dispatching the same version refreshes
@@ -92,7 +92,7 @@ are live, so the install snippets are true the moment the site serves them.
 ## Rehearse it first
 
 ```sh
-make release-dry-run VERSION=0.3.0
+cargo xtask release dry-run --version 0.3.0
 ```
 
 This runs the same `assemble` and the credential-free half of the publish in
@@ -196,7 +196,7 @@ includes a new crate:
    `spate-test`: dev-dependency edges with versions are part of the publish
    order, and that one closes a cycle no order can satisfy (cargo issue
    4242). The publish dry-run gate catches this.
-5. Run `./scripts/ci-changes.sh --self-test`, which pins the container map to
+5. Run `cargo xtask tidy self-test`, which pins the container map to
    the crate graph.
 6. If it carries an install snippet anywhere, add the file to
    `SNIPPET_FILES` in `scripts/release-version.sh`; `--check` fails until the
@@ -217,7 +217,7 @@ rather than on each release:
   `GITHUB_TOKEN` trigger no workflows: a release pull request opened with one
   would never run `CI gate` and could never merge. The App's slug is
   `spate-release`: its pull requests author as `spate-release[bot]`, the
-  identity the container-suite deferral in `scripts/ci-changes.sh` and the
+  identity the container-suite deferral in `xtask/` and the
   release commits key on, so renaming the App silently un-defers those
   suites.
 - **The `crates-io` environment's deployment branch policy, restricted to

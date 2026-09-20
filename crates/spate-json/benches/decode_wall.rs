@@ -32,12 +32,12 @@
 //! which is what `arms` is:
 //!
 //! ```sh
-//! make bench-arms HEAD_FEATURES=spate-json/simd FILTER=decode_
+//! cargo xtask bench arms --head-features spate-json/simd --filter decode_
 //! ```
 //!
 //! It builds each arm into its own directory, calibrates one iteration count on
 //! the base arm and pins it for both, and interleaves them, the same discipline
-//! `bench-ab` applies to two commits, which a comparison needs whatever the two
+//! `bench ab` applies to two commits, which a comparison needs whatever the two
 //! legs differ in. No waiver is involved: on this axis the feature set is the
 //! subject rather than a guard, the corpus digests match because the two arms
 //! decode the same payloads, and the declared backends differ because that is
@@ -102,7 +102,7 @@
 //! `--target-ms`, which is the harness's knob for it and moves every case
 //! together.
 //!
-//! Run it with `make bench-ab REF=main FILTER=decode_`.
+//! Run it with `cargo xtask bench ab --ref main --filter decode_`.
 //!
 //! [`BACKEND_ID`]: spate_json::BACKEND_ID
 

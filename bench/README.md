@@ -11,23 +11,23 @@ CI job runs it; the instruction-count tier is what gates a pull request, because
 counting is comparable across shared machines and timing is not.
 
 ```sh
-make bench-list                              # every case, with its flags
-make bench-ab REF=main REPS=20               # compare this tree against a ref
-make bench-ab REF=main FILTER=decode         # only cases whose id contains this
-make bench-ab REF=main PACKAGE=spate-avro    # only that crate's targets
-make bench-arms HEAD_FEATURES=spate-json/simd   # compare two feature arms
-make bench-compare BASE=dir HEAD=dir FORMAT=markdown
+cargo xtask bench list                              # every case, with its flags
+cargo xtask bench ab --ref main --replicates 20               # compare this tree against a ref
+cargo xtask bench ab --ref main --filter decode         # only cases whose id contains this
+cargo xtask bench ab --ref main --package spate-avro    # only that crate's targets
+cargo xtask bench arms --head-features spate-json/simd   # compare two feature arms
+cargo xtask bench compare <base-dir> <head-dir> --format markdown
 ```
 
-`PACKAGE=` narrows the *build*, by exact crate name and repeatable as a
-space-separated list; `FILTER=` narrows the case list within whatever was built.
+`--package` narrows the *build*, by exact crate name and repeatable;
+`--filter` narrows the case list within whatever was built.
 Narrowing never narrows the resolved features the two legs are guarded on, so a
 narrowed run can be refused over a feature neither leg built; `--allow features`
 waives that, and the report's header says it was waived.
 
-`bench-ab` builds the reference in a detached worktree, builds this tree, and
+`bench ab` builds the reference in a detached worktree, builds this tree, and
 interleaves the two — expect two full bench-profile builds before the first
-measurement. `bench-arms` is the same comparison over the other axis: one tree,
+measurement. `bench arms` is the same comparison over the other axis: one tree,
 two feature sets, each arm in its own build directory. Both legs are written
 under `$TMPDIR/spate-bench`, or `SPATE_BENCH_CACHE` when that is set, never
 inside the repository.
@@ -38,7 +38,7 @@ two of them pin two counts for the same case, and the comparator drops every
 case that happens to — leaving an empty table and a non-zero exit. Nor does
 anything interleave them.
 
-Targets live at `crates/<pkg>/benches/<name>_wall.rs`, and `make bench-list` is
+Targets live at `crates/<pkg>/benches/<name>_wall.rs`, and `cargo xtask bench list` is
 what says which exist — the case list comes from the compiled target rather than
 from a manifest, which is what stops the list and the run ever disagreeing.
 
@@ -55,8 +55,8 @@ cargo doc -p spate-bench --all-features --no-deps --open
 Each bench target's own `//!` header is the account of what *that* target
 measures and the traps particular to it. `benches/selftest_wall.rs` carries every
 shape the case builder supports, and is what the A/A acceptance run drives:
-`make bench-ab REF=HEAD REPS=6 PACKAGE=spate-bench` compares it against itself
+`cargo xtask bench ab --ref HEAD --replicates 6 --package spate-bench` compares it against itself
 and must flag nothing. Both narrowings are part of the claim. Without
-`PACKAGE=`, the run covers every `_wall` target in the workspace at a count
+`--package`, the run covers every `_wall` target in the workspace at a count
 chosen for these four cases. A run too short for a case declines a verdict on
 it and names the count that case needs.

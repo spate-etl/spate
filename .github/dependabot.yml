@@ -40,6 +40,17 @@ updates:
         update-types:
           - "version-update:semver-minor"
           - "version-update:semver-major"
+      # clickhouse requires zstd ^0.13 and spate-clickhouse enables its `zstd`
+      # feature, so zstd 0.14 adds a second copy of the crate and a second
+      # zstd-safe, leaving 0.13.3 in the graph. Nothing on spate-s3's
+      # decompression path changed at 0.14, so the bump buys two duplicates and
+      # two THIRD-PARTY.md rows.
+      #
+      # Delete this when clickhouse moves to ^0.14. Tracked in #562.
+      - dependency-name: "zstd"
+        update-types:
+          - "version-update:semver-minor"
+          - "version-update:semver-major"
 
     # Under Cargo's default `increase-if-necessary`, a manifest edit in a bump
     # signals a dependency moved outside its declared requirement.
@@ -53,26 +64,6 @@ updates:
       proc-macro-trio:
         patterns: ["syn", "quote", "proc-macro2"]
         update-types: ["minor", "patch"]
-
-  # ----------------------------------------------- Cargo (fuzz harness) ----
-  - package-ecosystem: cargo
-    # `fuzz/` is its own workspace root and sits outside the root member list,
-    # so the `/` entry above never reaches its lockfile. Left out, the harness
-    # fuzzes the workspace's current sources against pinned third-party crates
-    # that drift further behind every week.
-    directory: "/fuzz"
-    schedule:
-      interval: weekly
-      day: monday
-    open-pull-requests-limit: 2
-    labels: ["dependencies", "area: workspace"]
-    commit-message:
-      prefix: "chore(workspace)"
-    cooldown:
-      default-days: 7
-      semver-minor-days: 14
-      semver-major-days: 14
-    # No group: nothing here releases in the lockstep that would justify one.
 
   # --------------------------------------------------- Rust (the nightly) ----
   # The dated nightly every job needing one installs. Nothing else moves it:

@@ -375,16 +375,16 @@ Everywhere:
   else.** The H1 is the title; a frontmatter `title:` alongside an H1 renders
   twice. The description is what a search result shows under the page's
   name: one or two sentences of 50 to 160 characters, opening with the
-  subject, in the page's own vocabulary. `make check-docs-meta` holds the
-  length and the absence of `title:`.
+  subject, in the page's own vocabulary. Review holds the length and the
+  absence of `title:`.
 - **Internal links are relative and extension-qualified** (`../foo/bar.mdx`).
-  `onBrokenLinks: 'throw'` fails the build on a stale link, so `make docs` is
+  `onBrokenLinks: 'throw'` fails the build on a stale link, so `cargo xtask docs` is
   the correctness gate for any move or rename.
 - **A link to a file in this repository uses the `repo:` scheme** — a
   repository-relative path, which the build resolves against the checkout and
   turns into a URL on the hosting service. A path that does not exist fails the
   build, the same tier as a stale internal link; a directory resolves to the
-  tree view rather than the file view. `make check-transclusions` holds the same
+  tree view rather than the file view. `cargo xtask tidy transclusions` holds the same
   rule without a site build. Two constraints follow from how it is resolved.
   The scheme addresses a file, never lines within one, so render the lines as a
   fence (§ 10). The offline check also reads text rather than a syntax tree, so
@@ -394,7 +394,7 @@ Everywhere:
   `{ from, to }` entry to the `clientRedirects` plugin in
   `website/docusaurus.config.ts` for every moved page to keep old links alive.
   That plugin only registers under `CI=true`, so test redirects that way.
-- **Run the gate before pushing:** `make docs`, checking the **exit code
+- **Run the gate before pushing:** `cargo xtask docs`, checking the **exit code
   explicitly**, because piped `grep`/`tail` chains have masked failures here.
   `onBrokenLinks`, `onBrokenAnchors` and `onBrokenMarkdownLinks` are all
   `'throw'`, so a stale link *or* a stale `#anchor` fails the build outright
@@ -434,7 +434,7 @@ rewriting; changing what the record claims was decided is.
 Everything else follows the rest of this file: sentence case, relative
 extension-qualified links, and an em-dash gloss on every `## Related` entry.
 
-`make check-adr` holds the mechanical half. It checks that numbers are unique
+`cargo xtask tidy adr` holds the mechanical half. It checks that numbers are unique
 and never reused, that statuses come from the permitted set, that no
 placeholder is left unfilled, and that every record is present in
 `docs/adr/README.mdx`. Whether a decision warranted a record at all is
@@ -490,7 +490,7 @@ from what renders, so they cost the reader nothing:
 A file that does not exist, a region with no matching pair of markers, and a
 fence carrying both `file=` and hand-written content each fail the build
 outright, the same tier as a stale link (§ 8), and for the same reason. An
-unchecked pointer rots. `make check-transclusions` holds the same rule without
+unchecked pointer rots. `cargo xtask tidy transclusions` holds the same rule without
 a site build.
 
 Prefer a source under `crates/spate/examples/`, because a reader can run it.
@@ -530,7 +530,7 @@ An exemption is a claim review checks, not a default.
 
 A page may also render a fence from a file under `examples/`, the tree a reader
 deploys from. Nothing compiles those files, so the clippy argument above does
-not reach them. `make check-transclusions` still fails when the region moves.
+not reach them. `cargo xtask tidy transclusions` still fails when the region moves.
 Dependency automation edits these files and reads no documentation page, so a
 copy of the lines it maintains falls behind at the next bump (§ 5).
 `examples/docker/Dockerfile` is the worked case, with image pins that move on a

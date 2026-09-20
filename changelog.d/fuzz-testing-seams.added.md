@@ -1,7 +1,8 @@
-**Fuzz seams for the private decoders** (`spate-s3`, `spate-coordination`) — the
-off-by-default `testing` feature carries a `fuzz_seams` module in each crate,
-exporting the composite offset codec, the object framer with its gzip and zstd
-decompression, and the coordination store's record and key parsers as
-functions. The workspace's `fuzz/` harness drives them from three libFuzzer
-targets. The feature stays outside the semver surface and the `spate` facade
-never enables it, so a crate that does not ask for it sees no change.
+**Decoder access for fuzz testing** (`spate-s3`, `spate-coordination`)
+
+The optional `testing` feature now exposes a `fuzz_seams` module for testing
+private decoders. These functions cover the composite offset codec, object
+framing with gzip and zstd decompression, and coordination record and key
+parsing. The `fuzz/` harness uses them to test malformed input. The feature is
+disabled by default, is not enabled by the `spate` facade, and has no semantic
+versioning compatibility guarantee.

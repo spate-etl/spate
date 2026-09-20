@@ -184,19 +184,23 @@ fn pause_stops_delivery_and_resume_recovers_gapless() {
     source.pause(&[lanes[0].id()]).expect("pause");
     produce(&brokers, 5, 1, "b");
 
-    // While paused nothing is delivered (pause also purges prefetch).
-    let idle_until = Instant::now() + Duration::from_secs(2);
-    while Instant::now() < idle_until {
-        // poll_events keeps the client machinery served.
-        let _ = source.poll_events(Duration::from_millis(50));
-        assert!(
-            lanes[0]
-                .poll(64, Duration::from_millis(100))
-                .expect("poll")
-                .is_none(),
-            "paused lane must not deliver"
-        );
-    }
+    // While paused nothing is delivered (pause also purges prefetch). A
+    // failure here arrives with the window's warnings, among them the rewind
+    // that pauses, seeks and resumes a partition, clearing this pause.
+    spate_test::show_logs(tracing::Level::WARN, || {
+        let idle_until = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < idle_until {
+            // poll_events keeps the client machinery served.
+            let _ = source.poll_events(Duration::from_millis(50));
+            assert!(
+                lanes[0]
+                    .poll(64, Duration::from_millis(100))
+                    .expect("poll")
+                    .is_none(),
+                "paused lane must not deliver"
+            );
+        }
+    });
 
     source.resume(&[lanes[0].id()]).expect("resume");
     let rows = drain_lane(&mut lanes[0], 5);
@@ -853,5 +857,121 @@ fn a_backlogged_consumer_publishes_its_lag() {
             .filter(|l| l.starts_with("spate_source_lag_records{"))
             .any(|l| !l.contains("partition=")),
         "every lag series must carry a partition label:\n{rendered}"
+    );
+}
+
+/// A directly assigned consumer (no group coordination), positioned at the
+/// beginning of every partition.
+fn assigned_consumer(brokers: &str, group: &str, partitions: i32) -> std::sync::Arc<BaseConsumer> {
+    let consumer: BaseConsumer = ClientConfig::new()
+        .set("bootstrap.servers", brokers)
+        .set("group.id", group)
+        .create()
+        .expect("consumer");
+    let mut tpl = rdkafka::TopicPartitionList::new();
+    for p in 0..partitions {
+        tpl.add_partition_offset(TOPIC, p, rdkafka::Offset::Beginning)
+            .expect("tpl entry");
+    }
+    consumer.assign(&tpl).expect("assign");
+    std::sync::Arc::new(consumer)
+}
+
+/// Count the messages the consumer's main queue hands back over `window`.
+fn drain_main_queue(consumer: &BaseConsumer, window: Duration) -> usize {
+    let deadline = Instant::now() + window;
+    let mut delivered = 0usize;
+    while Instant::now() < deadline {
+        if let Some(result) = consumer.poll(Duration::from_millis(100)) {
+            result.expect("main queue message");
+            delivered += 1;
+        }
+    }
+    delivered
+}
+
+/// An assigned partition with no split queue delivers on the consumer's main
+/// queue. Without it, a zero from a main-queue drain is not evidence about
+/// routing.
+#[test]
+fn the_main_queue_delivers_a_partition_that_was_never_split() {
+    let cluster = MockCluster::new(1).expect("mock cluster");
+    cluster.create_topic(TOPIC, 1, 1).expect("create topic");
+    let brokers = cluster.bootstrap_servers();
+    produce(&brokers, 20, 1, "p");
+
+    let consumer = assigned_consumer(&brokers, "plain", 1);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut delivered = false;
+    while !delivered && Instant::now() < deadline {
+        if let Some(result) = consumer.poll(Duration::from_millis(100)) {
+            result.expect("main queue message");
+            delivered = true;
+        }
+    }
+    assert!(delivered, "an unsplit partition delivered nothing");
+}
+
+/// How long a main-queue drain runs before it reports an absence. A first
+/// main-queue delivery lands about 0.5s after the assign on MockCluster, an
+/// order of magnitude inside this.
+const WINDOW: Duration = Duration::from_secs(6);
+
+/// A partition whose queue has been split stays off the main queue. The
+/// `RD_KAFKA_Q_F_FWD_APP` mark survives dropping the `PartitionQueue`, an
+/// unassign and a re-assign, so the main queue delivers nothing for it.
+#[test]
+fn a_split_partition_never_returns_to_the_main_queue() {
+    let cluster = MockCluster::new(1).expect("mock cluster");
+    cluster.create_topic(TOPIC, 1, 1).expect("create topic");
+    let brokers = cluster.bootstrap_servers();
+    produce(&brokers, 20, 1, "w");
+
+    let consumer = assigned_consumer(&brokers, "fwdapp", 1);
+    let queue = consumer
+        .split_partition_queue(TOPIC, 0)
+        .expect("split partition queue");
+
+    // A partition that never fetched also reports zero on the main queue, so
+    // the split queue has to deliver before the drain below means anything.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut split_delivered = false;
+    while !split_delivered && Instant::now() < deadline {
+        let _ = consumer.poll(Duration::from_millis(100));
+        if let Some(result) = queue.poll(Duration::from_millis(100)) {
+            result.expect("split queue message");
+            split_delivered = true;
+        }
+    }
+    assert!(split_delivered, "the split queue delivered nothing");
+
+    drop(queue);
+    consumer.unassign().expect("unassign");
+    let mut tpl = rdkafka::TopicPartitionList::new();
+    tpl.add_partition_offset(TOPIC, 0, rdkafka::Offset::Beginning)
+        .expect("tpl entry");
+    consumer.assign(&tpl).expect("re-assign");
+
+    let main_queue = drain_main_queue(&consumer, WINDOW);
+
+    // The re-assign positions the partition at the beginning, so a fetch that
+    // restarted hands back offset 0; residue from the first fetch starts at 1
+    // or higher.
+    let requeued = consumer
+        .split_partition_queue(TOPIC, 0)
+        .expect("re-split partition queue");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut resplit_offset = None;
+    while resplit_offset.is_none() && Instant::now() < deadline {
+        let _ = consumer.poll(Duration::from_millis(100));
+        if let Some(result) = requeued.poll(Duration::from_millis(100)) {
+            let msg = result.expect("re-split queue message");
+            resplit_offset = Some(rdkafka::Message::offset(&msg));
+        }
+    }
+    assert_eq!(
+        (main_queue, resplit_offset),
+        (0, Some(0)),
+        "main queue delivered {main_queue}, re-split queue delivered {resplit_offset:?}"
     );
 }

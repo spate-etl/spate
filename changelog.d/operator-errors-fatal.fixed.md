@@ -1,29 +1,23 @@
-**Breaking:** **An operator stage that stops the pipeline names itself**
-(`spate-core`) — `spate_operator_errors_total` registered an `error_type` of
-`retryable`, `record_level` and `fatal`, and only `record_level` had a writer,
-so the other two rendered `0` for the life of the process whatever happened. A
-`try_map` under `ErrorPolicy::Fail`, a split whose `unmatched` policy is `Fail`,
-and a sink encoder that fails under `Fail` or with an error classed
-`ErrorClass::Fatal` each count one `error_type="fatal"` under their own
-`component` label, so the exposition names the stage the pipeline stopped in.
-An encoder error the Skip policy drops still counts `record_level`, as before.
+**Breaking:** **Fatal operator errors and failed flushes** (`spate-core`)
 
-A stage counts one fatal however often it is re-entered afterwards. Every
-pipeline thread's instance of a stage shares one series, so the value is the
-number of threads that tripped.
+`spate_operator_errors_total{error_type="fatal"}` now counts fatal errors
+under the `component` label of the stage that stops the pipeline. Previously,
+the `fatal` and `retryable` series always reported zero; only `record_level`
+was updated. The fatal count covers `try_map` failures under
+`ErrorPolicy::Fail`, unmatched split records under `Fail`, and encoder errors
+under `Fail` or classified as `ErrorClass::Fatal`. Each stage instance counts
+at most one fatal error, so a stage's shared series counts how many pipeline
+threads encountered one.
 
-`error_type="retryable"` no longer registers on this family. An operator stage
-carries no error class to retry on, and `spate_sink_errors_total` still carries
-all three classes. A query selecting
-`spate_operator_errors_total{error_type="retryable"}` now matches no series, and
-a `sum` over the bare family name grows by the fatal counts.
-`OperatorMetrics::errors` is replaced by `record_errors` and `fatal_error`.
+The metric no longer registers `error_type="retryable"`; queries selecting
+it now return no series. Sums over `spate_operator_errors_total` now include
+fatal errors, so review affected dashboards and recording rules.
+`spate_sink_errors_total` still reports all three error classes, and skipped
+encoder errors still count as `record_level` on the operator metric. Replace
+calls to `OperatorMetrics::errors` with `record_errors` or `fatal_error`, as
+appropriate.
 
-Fixing the same family exposed a second defect and closes it. An encoder that
-failed to finalize a block latched a fatal that the flush latching it never
-returned, and the controller stopped reading driver events before the drain
-began, so the pipeline reported `Completed` and exited `0` while a batch had
-been abandoned. The data always replayed, since the unsent rows'
-acknowledgments fail on teardown, but the exit code said the run had succeeded.
-The flush returns the fatal and the controller takes what the drain reported,
-so the run fails.
+A failure in `RowEncoder::finish_chunk` now causes the run to fail, including
+during shutdown. Previously, the pipeline could report `Completed` and exit
+with code `0` despite leaving a batch unsent. Unsent records remain eligible
+for replay; the reported run status now reflects the failure.

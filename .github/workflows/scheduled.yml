@@ -90,13 +90,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # Version-pinned: a release reordering the generator's output reads here
-      # as spurious drift.
       - uses: ./.github/actions/setup-rust
         with:
-          tools: cargo-about@0.9.1
+          tools: cargo-about
       - id: regen
-        run: make attribution
+        run: cargo xtask attribution
       - id: drift
         run: git diff --exit-code THIRD-PARTY.md
 
@@ -110,8 +108,8 @@ jobs:
         run: |
           set -euo pipefail
           title='THIRD-PARTY.md is out of date'
-          existing=$(gh issue list --state open --search "$title in:title" \
-            --json number --jq '.[0].number // empty')
+          matches=$(gh issue list --state open --search "$title in:title" --json number,title)
+          existing=$(jq -r --arg t "$title" 'map(select(.title == $t)) | .[0].number // empty' <<<"$matches")
           if [ -n "$existing" ]; then
             gh issue comment "$existing" --body "Still drifted: ${RUN_URL}"
             exit 0
@@ -119,7 +117,7 @@ jobs:
           # shellcheck disable=SC2016
           gh issue create --title "$title" --body "$(
             printf '%s\n' \
-              '`make attribution` failed, or the committed inventory no longer matches `Cargo.lock`.' \
+              '`cargo xtask attribution` failed, or the committed inventory no longer matches `Cargo.lock`.' \
               '' \
               "Run: ${RUN_URL}" \
               '' \
@@ -128,12 +126,16 @@ jobs:
               'request and is green. Regenerate and commit:' \
               '' \
               '```sh' \
-              'cargo install cargo-about --locked --features cli --version 0.9.1' \
-              './scripts/attribution.sh' \
+              'cargo install cargo-about --locked --features cli' \
+              'cargo xtask attribution' \
               '```' \
               '' \
+              'The run log above names the cargo-about version this job used.' \
+              'A different one can reorder the output and re-trip this check, so' \
+              'match it if the regenerated file disagrees.' \
+              '' \
               'The release flow regenerates it too, so this can also just wait' \
-              'for the next release rather than being fixed on its own.'
+              'for the next release.'
           )"
 
   advisories:
@@ -153,7 +155,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-rust
         with:
-          tools: cargo-deny@0.20.2
+          tools: cargo-deny
       - id: deny
         run: cargo deny --all-features --locked check advisories
 
@@ -167,8 +169,8 @@ jobs:
         run: |
           set -euo pipefail
           title='Nightly advisory scan is failing'
-          existing=$(gh issue list --state open --search "$title in:title" \
-            --json number --jq '.[0].number // empty')
+          matches=$(gh issue list --state open --search "$title in:title" --json number,title)
+          existing=$(jq -r --arg t "$title" 'map(select(.title == $t)) | .[0].number // empty' <<<"$matches")
           if [ -n "$existing" ]; then
             gh issue comment "$existing" --body "Still failing: ${RUN_URL}"
             exit 0
@@ -214,7 +216,7 @@ jobs:
           toolchain-file: .github/toolchains/nightly/rust-toolchain.toml
           shared-key: fuzz
 
-      - run: make fuzz-install
+      - run: cargo xtask fuzz install
 
       # BEFORE the run: a restore afterwards extracts a tar over `fuzz/corpus`
       # and overwrites the inputs libFuzzer just found. The prefix restore-key
@@ -240,7 +242,7 @@ jobs:
             exit 1
           fi
           echo "building $targets target(s)"
-          make fuzz-build
+          cargo xtask fuzz build --nightly "$NIGHTLY"
 
       - name: Fuzz every target
         id: run
@@ -304,8 +306,8 @@ jobs:
         run: |
           set -euo pipefail
           title='A fuzz target found a crashing input'
-          existing=$(gh issue list --state open --search "$title in:title" \
-            --json number --jq '.[0].number // empty')
+          matches=$(gh issue list --state open --search "$title in:title" --json number,title)
+          existing=$(jq -r --arg t "$title" 'map(select(.title == $t)) | .[0].number // empty' <<<"$matches")
           if [ -n "$existing" ]; then
             gh issue comment "$existing" --body "Still failing: ${RUN_URL}"
             exit 0
@@ -368,8 +370,8 @@ jobs:
         run: |
           set -euo pipefail
           title='Declared version floors no longer build'
-          existing=$(gh issue list --state open --search "$title in:title" \
-            --json number --jq '.[0].number // empty')
+          matches=$(gh issue list --state open --search "$title in:title" --json number,title)
+          existing=$(jq -r --arg t "$title" 'map(select(.title == $t)) | .[0].number // empty' <<<"$matches")
           if [ -n "$existing" ]; then
             gh issue comment "$existing" --body "Still failing: ${RUN_URL}"
             exit 0
@@ -411,7 +413,7 @@ jobs:
         run: |
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml)
           next="${version%.*}.$(( ${version##*.} + 1 ))"
-          ./scripts/release-version.sh --bump "$next"
+          cargo xtask release-version --bump "$next"
           git config user.name 'spate-release[bot]'
           git config user.email 'spate-release[bot]@users.noreply.github.com'
           git commit --all --quiet --message "chore: simulate the release bump to $next"
@@ -420,7 +422,7 @@ jobs:
       # or license with a warning and exit 0, while the upload rejects it
       # (cargo issue 14249).
       - id: metadata
-        run: ./scripts/release-version.sh --check-publish-metadata
+        run: cargo xtask release-version --check-publish-metadata
 
       - id: dry-run
         run: cargo publish --workspace --locked --dry-run
@@ -454,8 +456,8 @@ jobs:
             body_head='`cargo publish --workspace --locked --dry-run` or the upload-metadata'
             body_head2='check failed on the nightly run, at a simulated next-patch version.'
           fi
-          existing=$(gh issue list --state open --search "$title in:title" \
-            --json number --jq '.[0].number // empty')
+          matches=$(gh issue list --state open --search "$title in:title" --json number,title)
+          existing=$(jq -r --arg t "$title" 'map(select(.title == $t)) | .[0].number // empty' <<<"$matches")
           if [ -n "$existing" ]; then
             gh issue comment "$existing" --body "Still failing: ${RUN_URL}"
             exit 0
@@ -479,8 +481,7 @@ jobs:
     needs: plan
     if: needs.plan.outputs.nightly == 'true' || needs.plan.outputs.docs == 'true'
     timeout-minutes: 30
-    # The full build, with every dependency's license text on top. This
-    # produces what ships.
+    # The artifact this uploads is what docs-deploy publishes.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -492,22 +493,13 @@ jobs:
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 24
+          node-version-file: .node-version
           cache: npm
           cache-dependency-path: website/package-lock.json
 
       - uses: ./.github/actions/setup-rust
         with:
-          tools: cargo-about@0.9.1
           shared-key: docs
-
-      # The script filters the first-party crates and generates
-      # THIRD-PARTY.md the same way, so the page and the inventory agree.
-      - name: Build third-party license texts
-        run: |
-          rm -rf website/static/licenses
-          mkdir -p website/static/licenses
-          ./scripts/attribution.sh --html website/static/licenses/index.html
 
       - name: Install dependencies
         working-directory: website
@@ -522,6 +514,11 @@ jobs:
           key: docusaurus-${{ runner.os }}-${{ hashFiles('website/package-lock.json') }}
           restore-keys: docusaurus-${{ runner.os }}-
 
+      # SWC strips types without checking them, so the build alone does not.
+      - name: Typecheck the site
+        working-directory: website
+        run: npm run typecheck
+
       - name: Test the site
         working-directory: website
         run: npm test
@@ -532,28 +529,13 @@ jobs:
           CI: "true"
         run: npm run build
 
-      # The homepage, the brand page and the benchmark pages rendered from the
-      # submodule have no source under docs/ for ci-lint to check.
-      - name: Every built page carries a description
-        run: ./scripts/site-meta.sh --check
-
-      # The floor is what stops an empty build reaching the deploy. The upload's
-      # `if-no-files-found` tests the whole `path:` list at once, and
-      # wrangler.jsonc always matches it.
-      - name: Site is complete and within the Cloudflare file limit
-        run: |
-          count=$(find website/build -type f | wc -l)
-          echo "site files: $count"
-          if [ "$count" -lt 200 ]; then
-            echo "::error::$count files; the build produced nothing usable."
-            exit 1
-          fi
-          if [ "$count" -gt 10000 ]; then
-            echo "::error::$count files; Workers static assets refuse a deployment over 20000."
-            exit 1
-          fi
+      - name: Site is complete
+        run: cargo xtask site-check
 
       # The deploy job has no checkout, so the config ships in the artifact.
+      # `if-no-files-found` tests the whole `path:` list at once and
+      # wrangler.jsonc always matches it, so the step above is what stops an
+      # empty build reaching the deploy.
       - name: Upload site artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -633,63 +615,103 @@ jobs:
         with:
           toolchain: beta
           components: clippy
-          tools: nextest@0.9.140
+          tools: nextest
           # No shared key. An entry keyed on beta's compiler shares nothing
           # with the stable trees and would evict them from the 10 GB budget.
 
-      # A new clippy lint is the most common way a release reds this
-      # repository, and `make clippy` denies warnings. A compile break stops
-      # the run here, where `make test` would report the same error again.
+      # Both steps always run, so one report covers both.
       - id: clippy
-        run: make clippy
+        run: cargo xtask clippy
+        continue-on-error: true
       - id: test
-        run: make test
+        run: cargo xtask test
+        continue-on-error: true
 
-      # Gated on the named steps, not `failure()`: a checkout or toolchain
-      # failure would file an issue asserting beta breaks the tree.
-      #
-      # Neither title's words are a subset of the other's. The search below is
-      # an unquoted AND over the title's terms, so a title contained in another
-      # would comment on the wrong issue.
+      # continue-on-error reports a failed step's `conclusion` as `success`,
+      # so the real result is in `outcome`.
       - name: Report the failure as an issue
         if: >-
-          failure() &&
-          (steps.clippy.conclusion == 'failure' ||
-           steps.test.conclusion == 'failure')
+          always() &&
+          (steps.clippy.outcome == 'failure' ||
+           steps.test.outcome == 'failure')
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          CLIPPY_FAILED: ${{ steps.clippy.conclusion == 'failure' }}
+          CLIPPY_FAILED: ${{ steps.clippy.outcome == 'failure' }}
+          TEST_OUTCOME: ${{ steps.test.outcome }}
         run: |
           set -euo pipefail
           # shellcheck disable=SC2016
           if [ "$CLIPPY_FAILED" = "true" ]; then
             title='Clippy fails on the beta toolchain'
-            body_head='`make clippy` failed on beta. Once beta becomes stable this'
+            body_head='`cargo xtask clippy` failed on beta. Once beta becomes stable this'
             body_head2='blocks every pull request, because the lint job denies warnings.'
+            if [ "$TEST_OUTCOME" = "failure" ]; then
+              test_line='`cargo xtask test` also failed on the same run.'
+            elif [ "$TEST_OUTCOME" = "success" ]; then
+              test_line='`cargo xtask test` passed on the same run.'
+            else
+              test_line="\`cargo xtask test\` outcome on the same run: \`${TEST_OUTCOME}\`."
+            fi
           else
             title='Tests fail on the beta toolchain'
-            body_head='`make test` failed on beta while `make clippy` passed.'
+            body_head='`cargo xtask test` failed on beta while `cargo xtask clippy` passed.'
             body_head2='Clippy stops at the check build, so this is codegen, linking or behavior.'
+            test_line=''
           fi
-          existing=$(gh issue list --state open --search "$title in:title" \
-            --json number --jq '.[0].number // empty')
+          matches=$(gh issue list --state open --search "$title in:title" --json number,title)
+          existing=$(jq -r --arg t "$title" 'map(select(.title == $t)) | .[0].number // empty' <<<"$matches")
           if [ -n "$existing" ]; then
             gh issue comment "$existing" --body "Still failing: ${RUN_URL}"
             exit 0
           fi
+          body_args=("$body_head" "$body_head2")
+          if [ -n "$test_line" ]; then
+            body_args+=("$test_line")
+          fi
+          body_args+=('' "Run: ${RUN_URL}")
+          if [ "$CLIPPY_FAILED" = "true" ]; then
+            # A nonzero status means the build failed before clippy listed anything.
+            clippy_status=0
+            clippy_log=$(cargo xtask clippy --no-deny-warnings 2>&1) || clippy_status=$?
+            # An issue body over 65536 characters is rejected.
+            clippy_log_lines=$(printf '%s\n' "$clippy_log" | wc -l | tr -d ' ')
+            max_lines=200
+            if [ "$clippy_log_lines" -gt "$max_lines" ]; then
+              # A here-string. Through a pipe, `head` exiting early SIGPIPEs
+              # the writer and pipefail fails the step with no issue filed.
+              clippy_log_shown=$(head -n "$max_lines" <<<"$clippy_log")
+              clippy_log_note="Truncated to the first ${max_lines} of ${clippy_log_lines} lines; the run log has the rest."
+            else
+              clippy_log_shown="$clippy_log"
+              clippy_log_note=''
+            fi
+            if [ "$clippy_status" -eq 0 ]; then
+              # shellcheck disable=SC2016
+              lint_intro='Every lint `cargo xtask clippy --no-deny-warnings` finds on beta:'
+            else
+              lint_intro="\`cargo xtask clippy --no-deny-warnings\` still exits ${clippy_status}. The build fails before clippy reaches any lint."
+            fi
+            body_args+=('' "$lint_intro" '' '```' "$clippy_log_shown" '```')
+            if [ -n "$clippy_log_note" ]; then
+              body_args+=('' "$clippy_log_note")
+            fi
+          fi
+          body_args+=(
+            ''
+            'Beta reaches stable within six weeks, at which point this'
+            'blocks every open pull request at once. The run log names the'
+            'release it was found on.'
+          )
           # shellcheck disable=SC2016
-          gh issue create --title "$title" --body "$(
-            printf '%s\n' \
-              "$body_head" \
-              "$body_head2" \
-              '' \
-              "Run: ${RUN_URL}" \
-              '' \
-              'Beta reaches stable within six weeks, at which point this' \
-              'blocks every open pull request at once. The run log names the' \
-              'release it was found on.'
-          )"
+          gh issue create --title "$title" --body "$(printf '%s\n' "${body_args[@]}")"
+
+      - name: Fail the job on either outcome
+        if: >-
+          always() &&
+          (steps.clippy.outcome == 'failure' ||
+           steps.test.outcome == 'failure')
+        run: exit 1
 
   features-powerset:
     name: Feature powerset (exhaustive)
@@ -705,7 +727,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-rust
         with:
-          tools: cargo-hack@0.6.45
+          tools: cargo-hack
           shared-key: dev-allfeatures
       - run: cargo hack check --workspace --feature-powerset --no-dev-deps
 
@@ -713,9 +735,10 @@ jobs:
     name: Loom models (spate-core)
     runs-on: ubuntu-latest
     needs: plan
-    # On the nightly tier: INV-3 gets the narrower regression window.
+    # INV-3 against a moving compiler: `setup-rust` installs the stable
+    # channel, so this runs the models on whatever stable shipped that day.
     if: needs.plan.outputs.nightly == 'true'
-    timeout-minutes: 60
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -726,7 +749,7 @@ jobs:
       # Doc tests compiled under `--cfg loom` construct loom-typed primitives
       # outside a model and abort, so the models run `--lib` only on the built-in
       # harness. Do not move this onto nextest.
-      - run: make loom
+      - run: cargo xtask loom
 
   examples-containers:
     name: Example container tier
@@ -745,7 +768,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-rust
         with:
-          tools: nextest@0.9.140
+          tools: nextest
           # Same key as ci.yml's container job: both build the plain dev-profile
           # test binaries for the `#[ignore]`d suites.
           shared-key: docker
@@ -794,7 +817,7 @@ jobs:
       - uses: ./.github/actions/setup-rust
         with:
           components: llvm-tools-preview
-          tools: nextest@0.9.140,cargo-llvm-cov@0.8.7
+          tools: nextest,cargo-llvm-cov
           # Not `docker`: this builds instrumented into `target/llvm-cov-target`,
           # where ci.yml's container job builds plain.
           shared-key: coverage-docker
@@ -855,7 +878,7 @@ jobs:
           key: criterion-baseline-${{ github.run_id }}
           restore-keys: criterion-baseline-
 
-      - run: make bench-check
+      - run: cargo xtask bench check
       # The target is named because a bare `-p X -- --save-baseline` reaches the
       # lib's libtest harness too, which rejects it. Given one baseline critcmp
       # prints a column of 1.00 ratios and exits 0, and a bench never run leaves
@@ -933,8 +956,8 @@ jobs:
             'The scheduled tier detects the world changing underneath a static' \
             'tree, so a failure here is usually not caused by the last commit.' \
             'Check the run before assuming a regression.')
-          existing=$(gh issue list --state open --search "$title in:title" \
-            --json number --jq '.[0].number // empty')
+          matches=$(gh issue list --state open --search "$title in:title" --json number,title)
+          existing=$(jq -r --arg t "$title" 'map(select(.title == $t)) | .[0].number // empty' <<<"$matches")
           if [ -n "$existing" ]; then
             gh issue comment "$existing" --body "$body"
           else

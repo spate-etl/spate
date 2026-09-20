@@ -27,7 +27,8 @@ inputs:
   tools:
     description: >
       Comma-separated tools for taiki-e/install-action, e.g. "nextest,cargo-hack".
-      Pass a version where the tool's *behavior* is what a gate rests on.
+      The action's SHA pin fixes the version each one installs. Name a version
+      only where a release can change what a gate accepts.
     required: false
     default: ""
   shared-key:
@@ -94,7 +95,7 @@ runs:
         echo "toolchain=$TOOLCHAIN" >>"$GITHUB_OUTPUT"
       shell: bash
 
-    - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+    - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
       with:
         toolchain: ${{ steps.resolve.outputs.toolchain }}
         components: ${{ inputs.components }}
@@ -110,7 +111,7 @@ runs:
       shell: bash
 
     - if: inputs.tools != ''
-      uses: taiki-e/install-action@c3ec0de9ae7f1019cea21aa96aa0a895b9552063 # v2.87.9
+      uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2.87.12
       with:
         tool: ${{ inputs.tools }}
 

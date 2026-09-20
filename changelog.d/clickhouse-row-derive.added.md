@@ -1,8 +1,8 @@
-**`#[derive(ClickHouseRow)]`** (`spate-clickhouse-derive`) — a new proc-macro
-crate implements `spate_clickhouse::ClickHouseRow` for a row struct, generating
-the insert column list from the field declaration order. It honors
-`#[serde(rename = "...")]` for a column name no Rust identifier can spell, such
-as a flattened `Nested` table's dotted `outer.inner`, and rejects a duplicate
-name, a malformed name, `#[serde(flatten)]`, a container-level
-`#[serde(rename_all = "...")]`, and `#[serde(skip_serializing_if = "...")]` at
-compile time.
+**ClickHouse row derive** (`spate-clickhouse-derive`)
+
+`#[derive(ClickHouseRow)]` now implements `spate_clickhouse::ClickHouseRow` for
+a row struct and generates its insert column list in field declaration order.
+It supports `#[serde(rename = "...")]` for names such as `outer.inner` in a
+flattened `Nested` table. Duplicate or malformed column names are compile
+errors. The derive also rejects `#[serde(flatten)]`, container-level
+`#[serde(rename_all = "...")]`, and `#[serde(skip_serializing_if = "...")]`.

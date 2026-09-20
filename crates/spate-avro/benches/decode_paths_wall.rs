@@ -30,7 +30,7 @@
 //! | `lib_` | `apache-avro` over the same bytes |
 //!
 //! ```sh
-//! make bench-ab REF=main FILTER=raw_
+//! cargo xtask bench ab --ref main --filter raw_
 //! ```
 //!
 //! ## What each corpus is sized for
@@ -137,9 +137,9 @@ use decode_rig::{
     BatchRig, FlattenRig, TypedFlattenSink, ValueFlattenSink, confluent_cached_rig,
     confluent_mixed_rig, confluent_poisoned_rig, confluent_unknown_rig, decode_and_flatten,
     decode_batch, evolution_rig, flat_corpus_datum_rig, flat_corpus_serde_rig,
-    flat_corpus_value_rig, order_batch_borrowed_rig, order_batch_datum_rig, order_batch_serde_rig,
-    order_batch_value_rig, recursive_rig, shapes_rig, single_object_rig, stale_fingerprint_rig,
-    truncated_datum_rig, truncated_serde_rig, truncated_value_rig,
+    flat_corpus_value_rig, map_heavy_rig, order_batch_borrowed_rig, order_batch_datum_rig,
+    order_batch_serde_rig, order_batch_value_rig, recursive_rig, shapes_rig, single_object_rig,
+    stale_fingerprint_rig, truncated_datum_rig, truncated_serde_rig, truncated_value_rig,
 };
 
 /// Records in the per-record corpora, the extent those cases declare.
@@ -343,6 +343,12 @@ fn shapes_cases(suite: Suite) -> Suite {
         "shapes_logical_types",
         RECORDS,
         shapes_rig,
+    );
+    let s = batch_case::<Owned<corpora::MapHeavy>, AvroDatumDeserializer<Owned<corpora::MapHeavy>>>(
+        s,
+        "shapes_map_heavy",
+        RECORDS,
+        map_heavy_rig,
     );
     batch_case::<Owned<corpora::LongList>, AvroDatumDeserializer<Owned<corpora::LongList>>>(
         s,

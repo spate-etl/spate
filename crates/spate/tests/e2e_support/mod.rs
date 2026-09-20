@@ -516,20 +516,18 @@ impl RunningPipeline {
 /// The ClickHouse image the selected lane pins, pulled by digest and re-tagged,
 /// as `name` and `tag`.
 ///
-/// Shells out to `scripts/container-image.sh`, so the pin has one parser and
-/// cannot drift between this crate and `spate-clickhouse`.
+/// Shells out to the task runner, so the pin has one parser and cannot drift
+/// between this crate and `spate-clickhouse`.
 fn pinned_clickhouse() -> (String, String) {
-    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join("scripts/container-image.sh");
-    let out = Command::new(&script)
-        .args(["--pull", "clickhouse"])
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let out = Command::new("cargo")
+        .args(["xtask", "container-image", "--pull", "clickhouse"])
+        .current_dir(&root)
         .output()
-        .unwrap_or_else(|e| panic!("run {}: {e}", script.display()));
+        .unwrap_or_else(|e| panic!("run cargo xtask container-image: {e}"));
     assert!(
         out.status.success(),
-        "{} --pull clickhouse failed: {}",
-        script.display(),
+        "cargo xtask container-image --pull clickhouse failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
     let reference = String::from_utf8_lossy(&out.stdout).trim().to_owned();

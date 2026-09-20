@@ -642,7 +642,7 @@ fn finish(outcome: &ab::AbOutcome, args: &ArgMatches) -> Result<(), Failure> {
     let _ = writeln!(
         std::io::stderr(),
         "\nspate-bench: legs kept at\n  {}\n  {}\n\
-         Re-render with: make bench-compare BASE={} HEAD={} FORMAT=markdown",
+         Re-render with: cargo xtask bench compare {} {} --format markdown",
         outcome.base_dir.display(),
         outcome.head_dir.display(),
         outcome.base_dir.display(),
@@ -701,8 +701,8 @@ fn feature_args(args: &ArgMatches) -> Vec<String> {
 ///
 /// `arms` takes two sets at once, so the flag names are a parameter rather than
 /// fixed. An empty or blank list is dropped rather than forwarded: cargo rejects
-/// `--features ''`, and `make bench-arms HEAD_FEATURES=…` with no
-/// `BASE_FEATURES` produces exactly that.
+/// `--features ''`, and `cargo xtask bench arms --head-features …` with no
+/// `--base-features` produces exactly that.
 fn named_feature_args(args: &ArgMatches, all: &str, list: &str) -> Vec<String> {
     let mut out = Vec::new();
     if args.get_flag(all) {
@@ -777,7 +777,7 @@ mod tests {
             .clone()
     }
 
-    /// `make bench-arms HEAD_FEATURES=…` passes `--base-features ""`
+    /// `cargo xtask bench arms --head-features …` passes `--base-features ""`
     /// unconditionally, so the blank path is on the common route rather than an
     /// edge. Forwarded, it becomes `--features ''`, which cargo rejects.
     #[test]

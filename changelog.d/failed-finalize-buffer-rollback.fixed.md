@@ -1,15 +1,14 @@
-**A failed finalize leaves only the encoded rows in the chunk buffer**
-(`spate-core`) — a `RowEncoder::finish_chunk` that wrote into the chunk buffer
-before returning an error left those bytes there, ahead of the next block, and
-because the stop a finalize error triggers is asynchronous, a shard sealed again
-before it landed shipped a frame carrying the failed attempt's bytes in front of
-a complete one. The terminal stage rolls the buffer back to its length before
-the call, matching what the record path already does on a failed `encode`, so a
-frame that ships holds one complete block. The encoders in this repository are
-unaffected: the ClickHouse Native encoder refuses a poisoned block before
-writing anything, and row formats leave `finish_chunk` defaulted.
-`RowEncoder::finish_chunk` states the obligation an implementer carries, that a
-later seal finalizes the same chunk and may find rows in it the failed call
-never saw. The stage discards what the failed call wrote and not the row count,
-so an encoder that had already moved its rows into the buffer when it failed
-re-encodes them rather than relying on their being kept.
+**Chunk buffer recovery after an encoder error** (`spate-core`)
+
+When `RowEncoder::finish_chunk` returns an error, the pipeline now removes any
+bytes that call appended to the chunk buffer. Previously, those bytes remained
+in the buffer and could be sent before a complete block if another attempt
+succeeded before shutdown. Removing them prevents a failed attempt's partial
+output from corrupting a later frame.
+
+Custom encoders must retain enough state to finalize the same chunk again,
+including any rows added before the next attempt. The pipeline keeps the row
+count but discards the failed call's output, so an encoder that moved rows into
+the buffer must encode them again. The bundled encoders are unaffected: the
+ClickHouse Native encoder rejects a failed block before writing bytes, and row
+formats use the default `finish_chunk` implementation.

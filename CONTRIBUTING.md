@@ -26,15 +26,15 @@ number reads it from there. CI holds the crates to that floor. Moving it edits
 that one line, plus a changelog fragment like any other crate-scoped `build`.
 
 ```sh
-make gates   # everything a pull request must pass
-make help    # every target, grouped
+cargo xtask ci       # everything a pull request must pass
+cargo xtask --help   # the commands, each with its own --help
 ```
 
-`make gates` covers formatting, clippy, the type check, the test suite, doctests,
-the feature matrix, licenses and advisories, and the repository's own consistency
-checks. CI calls those same targets, so a target that passes here is what runs
-there. It is necessary and not sufficient: other jobs spell out invocations of
-their own.
+`cargo xtask ci` covers formatting, clippy, the type check, the test suite,
+doctests, the feature matrix, licenses and advisories, and the repository's own
+consistency checks. CI runs the same commands, so one that passes here is what
+runs there. It is necessary and not sufficient: other jobs spell out
+invocations of their own.
 
 Containers, benchmarks, nextest profiles, fuzzing and the opt-in suites are in
 [`DEVELOPING.md`](DEVELOPING.md).
@@ -72,9 +72,9 @@ A change that reaches a crate and that somebody upgrading would care about also
 needs a **changelog fragment**: a `feat`, `fix`, `perf`, `revert` or `build`, and
 anything carrying `!` whatever its scope. Scoping to one of the areas that is not
 a crate is the exemption; leaving the scope off is not.
-`make changelog-new TYPE=fixed SLUG=…` scaffolds one,
+`cargo xtask changelog new fixed …` scaffolds one,
 [`changelog.d/README.md`](changelog.d/README.md) has the conventions, and
-`make check-changelog` is the gate, so a miss fails CI.
+`cargo xtask tidy changelog` is the gate, so a miss fails CI.
 
 [`.github/pull_request_template.md`](.github/pull_request_template.md) is the
 body structure. Tick its boxes by exit code, not by memory.
@@ -93,7 +93,7 @@ restating the property: "this touches INV-5" is the reviewable form.
 
 `docs/` is the published site, rendered in place, so a documentation change is a
 change to what readers see. [`docs/STYLE.md`](docs/STYLE.md) is normative, and
-`make docs` is the gate that catches a link you broke by moving a page.
+`cargo xtask docs` is the gate that catches a link you broke by moving a page.
 
 The rule to know before writing a line: **framework pages are vendor-neutral
 prose.** Everything under `docs/user-guide/` outside `04-connectors/` states its

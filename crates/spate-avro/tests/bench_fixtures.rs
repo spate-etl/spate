@@ -205,6 +205,11 @@ fn the_corpora_are_pinned_across_revisions() {
             0x8f3e_6856_dd5e_c3b2,
         ),
         (
+            "map_heavy_datums",
+            corpora::digest(&corpora::map_heavy_datums()),
+            0x6449_d318_7635_dc71,
+        ),
+        (
             "long_list_datums",
             corpora::digest(&corpora::long_list_datums()),
             0x77ba_abca_3240_c9a5,
@@ -506,6 +511,31 @@ fn the_hand_framed_map_decodes_to_its_entries() {
     let sizes: std::collections::HashSet<usize> =
         (0..8).map(|i| corpora::shape_tags(i).len()).collect();
     assert!(sizes.len() > 1, "every map has the same entry count");
+}
+
+/// The map-heavy corpus decodes in full and carries [`corpora::MAP_ENTRIES`]
+/// distinct entries in one block.
+#[test]
+fn the_map_heavy_corpus_decodes_one_block_of_distinct_entries() {
+    let datums = corpora::map_heavy_datums();
+    assert_eq!(datums.len(), corpora::BATCH);
+    for i in [0, 1, 17, corpora::BATCH - 1] {
+        assert_eq!(&datums[i][..2], &[0x80, 0x10]); // Positive count of 1,024.
+        assert_eq!(datums[i].last(), Some(&0));
+        let decoded: corpora::MapHeavy = decode_one_datum(corpora::MAP_HEAVY, &datums[i]);
+        assert_eq!(decoded.tags.len(), corpora::MAP_ENTRIES);
+        for j in 0..corpora::MAP_ENTRIES {
+            assert_eq!(
+                decoded.tags[&format!("k{j}")],
+                ((i * 31 + j) % 5_000) as i64
+            );
+        }
+    }
+    let rt = runtime();
+    let deser = builder(&raw_settings(corpora::MAP_HEAVY, None), &rt)
+        .build_serde_datum::<corpora::MapHeavy>()
+        .unwrap();
+    assert_eq!(outcomes(deser, &datums), (corpora::BATCH, 0));
 }
 
 #[test]

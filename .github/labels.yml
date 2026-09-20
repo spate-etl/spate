@@ -130,7 +130,7 @@
 
 # --------------------------------------------------------------------- ci ----
 #
-# Triggers, not descriptions. `scripts/ci-changes.sh` selects the expensive
+# Triggers, not descriptions. `cargo xtask ci-changes` selects the expensive
 # suites from the changed paths and fails closed; these labels turn a suite
 # **on** for a pull request whose paths would not have selected it. Each adds
 # work; none switches a suite off.
@@ -138,10 +138,6 @@
 - name: "ci: docker"
   color: "fbca04"
   description: "Force the container suites to run on this pull request"
-
-- name: "ci: loom"
-  color: "fbca04"
-  description: "Force the loom models to run on this pull request"
 
 - name: "ci: bench"
   color: "fbca04"

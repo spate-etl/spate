@@ -3,7 +3,7 @@
 **Generated file. Do not edit.** Regenerate with:
 
 ```sh
-./scripts/attribution.sh
+cargo xtask attribution
 ```
 
 CI regenerates this and fails on any diff, so it cannot drift from `Cargo.lock`.
@@ -21,17 +21,20 @@ When reading it:
   features such as `kafka-tls`, `coordination-nats` and `json-simd`. Attributing
   more than you distribute is safe, so this file is the superset.
 - **Full license texts are not reproduced here**, to keep the file diffable.
-  They are published at <https://spate.kainth.dev/licenses/>, generated
-  from the same lockfile by the same tool.
+  Most crates ship their own notice in their published source, at the version
+  listed below.
 
-Dev-dependencies are excluded: they are never distributed and so require no
-attribution. Build-dependencies are included, since a build script can
-contribute generated code to the shipped artifact, as can a proc-macro, so
-compile-time-only crates are listed.
+Only what a release carries is listed: the crates reachable from a publishable
+crate over normal and build edges. Dev-dependencies are excluded, and so is
+anything reached only through an unpublished workspace member, such as the
+benchmark harness, the task runner and the fuzz targets. Build-dependencies of
+a published crate are included, since a build script can contribute generated
+code to the shipped artifact, as can a proc-macro, so compile-time-only crates
+are listed.
 
 Spate's **own** crates (`spate`, `spate-core`, …) are not listed. They are
 first-party, Apache-2.0, covered by [LICENSE](LICENSE), and
-`scripts/attribution.sh` filters them out of what `cargo-about` emits, which
+`cargo xtask attribution` filters them out of what `cargo-about` emits, which
 includes every publishable workspace member. With them gone, this file changes
 only when a real dependency changes, which is what the nightly drift check
 exists to detect.
@@ -47,15 +50,13 @@ exists to detect.
 ## Crates
 
 One row per crate, grouped by the license elected for it and sorted by name
-within each group. `cargo-about` records each crate's own license text
-separately, since the copyright lines differ, so the full texts live on the site
-rather than here.
+within each group.
 
 This table is post-processed. `cargo-about` emits one row per license *text*,
 grouping crates by which text they share, and a crate that ships several files
 scanning as the same license has its text chosen by the order those files are
 read off disk. Group membership, and so each row's position, then varies from
-machine to machine. `scripts/attribution.sh` sorts the rows, collapses the
+machine to machine. `cargo xtask attribution` sorts the rows, collapses the
 duplicates a crate with several notices produces, and recomputes the counts
 above from what is left. The elected license ids are unaffected either way.
 

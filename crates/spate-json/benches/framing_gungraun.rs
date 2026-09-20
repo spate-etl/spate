@@ -48,7 +48,7 @@
 //! the product of two effects each already fixed.
 //!
 //! Needs valgrind and a same-version `gungraun-runner`, neither of which
-//! exists on every developer machine: run it with `make bench-gungraun`.
+//! exists on every developer machine: run it with `cargo xtask bench counted`.
 //!
 //! [`RecordFramer`]: spate_core::framing::RecordFramer
 

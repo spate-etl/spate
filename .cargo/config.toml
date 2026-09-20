@@ -1,0 +1,7 @@
+# `cargo xtask <command>` runs the repository automation in xtask/.
+#
+# `--locked` resolves no dependency graph that is not committed. A manifest
+# edit without a matching lockfile therefore fails here, before any check runs,
+# and `cargo check` is what reports it.
+[alias]
+xtask = "run --quiet --package spate-xtask --locked --"

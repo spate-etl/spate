@@ -1,6 +1,7 @@
 import type {Page} from '@playwright/test';
 
 import {expect, test} from '../fixtures';
+import type {ColorMode} from '../fixtures';
 import {gotoRoute} from '../helpers/navigate';
 
 const BRAND_SCALE = {
@@ -134,3 +135,27 @@ test.describe('light mode emphasis scale', () => {
     expect(await computedTokens(page, Object.keys(BRAND_LIGHT))).toEqual(BRAND_LIGHT);
   });
 });
+
+/** The `<hr>` as Infima paints it, from `--ifm-hr-background-color` over `border: 0`. */
+const RULE_COLOUR: Record<ColorMode, string> = {
+  light: 'rgb(226, 222, 215)',
+  dark: 'rgb(43, 48, 58)',
+};
+
+/**
+ * Pins the site's one `<hr>` to the brand border in both colour modes. A
+ * mapping declared on any name Infima does not read paints nothing, and the
+ * rule keeps whatever `--ifm-color-emphasis-500` holds.
+ *
+ * Regression for #584.
+ */
+for (const colorMode of Object.keys(RULE_COLOUR) as ColorMode[]) {
+  test.describe(`horizontal rule: ${colorMode}`, () => {
+    test.use({colorMode});
+
+    test('paints the brand border', async ({page}) => {
+      await gotoRoute(page, 'clickdoomPost', colorMode);
+      await expect(page.locator('.markdown hr').first()).toHaveCSS('background-color', RULE_COLOUR[colorMode]);
+    });
+  });
+}

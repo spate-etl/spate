@@ -56,8 +56,6 @@
   --ifm-pre-background: var(--spate-code-bg);
   --ifm-pre-color: var(--spate-code-ink);
   --docusaurus-highlighted-code-line-bg: rgba(255, 140, 74, 0.14);
-  --ifm-scrollbar-track-background-color: var(--spate-surface-2);
-  --ifm-scrollbar-thumb-background-color: var(--spate-border);
 }
 
 /* The `html` prefix matches the specificity of Infima's own

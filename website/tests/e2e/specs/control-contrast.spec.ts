@@ -114,11 +114,11 @@ test.use({viewport: VIEWPORTS.desktop});
 test.describe('control boundaries in light mode', () => {
   test.use({colorMode: 'light'});
 
-  // The ground is the `--spate-bg` token read off `<html>`. `<html>`'s own
-  // computed background is Infima's `#1b1b1d` in dark, whose
-  // `html[data-theme='dark']` rule outranks the `:root` mapping. The navbar
-  // paints the token at 72% over the page ground, which moves the dark figure
-  // by under 0.1.
+  // The ground is the `--spate-bg` token read off `<html>`. The navbar fills
+  // with that token at 72% over the page ground, and `--ifm-background-color`
+  // resolves to the same token in both colour modes, so the composite equals
+  // the token. The navbar's own computed fill is a `color(srgb ... / 0.72)`
+  // string, which `channels()` does not parse.
   test('the search pill is bounded against the navbar', async ({page, colorMode}) => {
     await gotoRoute(page, 'quickstart', colorMode);
     await expectBoundary(pill(page), () => token(page, '--spate-bg'));

@@ -73,11 +73,7 @@ pub(crate) enum Command {
     Deny,
 
     /// Regenerate THIRD-PARTY.md
-    Attribution {
-        /// Render the licence page to this file instead
-        #[arg(long, value_name = "FILE")]
-        html: Option<String>,
-    },
+    Attribution,
 
     /// Repository consistency checks; name one to run it alone
     Tidy {
@@ -357,9 +353,7 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: Command) -> Outcome {
                 ["deny", "--all-features", "--locked", "check", "all"],
             ),
         ),
-        Command::Attribution { html } => {
-            crate::checks::attribution::generate(root, explain, html.as_deref())
-        }
+        Command::Attribution => crate::checks::attribution::generate(root, explain),
         Command::Tidy { check, list } => lint::tidy(root, explain, check, list),
         Command::Adr { cmd } => match cmd {
             AdrCommand::New { slug } => crate::checks::adr::new(root, explain, &slug),

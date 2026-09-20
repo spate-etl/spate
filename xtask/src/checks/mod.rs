@@ -1,4 +1,4 @@
-//! The gates this binary runs in process: the attribution artifacts, the
+//! The gates this binary runs in process: the attribution inventory, the
 //! decision records, the changelog fragments, labels, docs.rs rustdoc, the
 //! instruction-count bench targets, their collected regions, the counted-tier
 //! report, the pinned container images, the semver comparison against the

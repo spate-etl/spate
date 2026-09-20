@@ -21,8 +21,8 @@ When reading it:
   features such as `kafka-tls`, `coordination-nats` and `json-simd`. Attributing
   more than you distribute is safe, so this file is the superset.
 - **Full license texts are not reproduced here**, to keep the file diffable.
-  They are published at <https://spate.kainth.dev/licenses/>, generated
-  from the same lockfile by the same tool.
+  Most crates ship their own notice in their published source, at the version
+  listed below.
 
 Only what a release carries is listed: the crates reachable from a publishable
 crate over normal and build edges. Dev-dependencies are excluded, and so is
@@ -55,9 +55,7 @@ exists to detect.
 ## Crates
 
 One row per crate, grouped by the license elected for it and sorted by name
-within each group. `cargo-about` records each crate's own license text
-separately, since the copyright lines differ, so the full texts live on the site
-rather than here.
+within each group.
 
 This table is post-processed. `cargo-about` emits one row per license *text*,
 grouping crates by which text they share, and a crate that ships several files

@@ -97,9 +97,11 @@ test.describe('dark mode emphasis scale', () => {
   // blind here. They differ in what they depend on: Infima's is
   // `var(--ifm-color-emphasis-200)` and ours is `var(--spate-border)`. Moving
   // emphasis-200 to a sentinel therefore moves the computed value only while
-  // Infima's declaration is the one that won. An Infima release that rewrites
-  // its declaration to a literal retires this check, and it passes silently
-  // from then on.
+  // Infima's declaration is the one that won. The probe does not generalise.
+  // The other five tokens are told apart by value, and asking which
+  // declaration won for an arbitrary token means resolving the cascade across
+  // the whole bundle. An Infima release that rewrites its declaration to a
+  // literal retires this check, and it passes silently from then on.
   test('the site declaration decides the toc border', async ({page, colorMode}) => {
     await gotoRoute(page, 'quickstart', colorMode);
     const moved = await page.evaluate(() => {

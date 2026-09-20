@@ -354,3 +354,16 @@ table th {
 .theme-code-block [class*='codeBlockTitle'] + div pre {
   padding-top: 0.6rem;
 }
+
+/* The copy and wrap buttons fill with the code ground behind them, so their
+ * border is the whole control. Dark only; light reads 13.64:1 already. */
+html[data-theme='dark'] .theme-code-block [class*='buttonGroup_'] button {
+  border-color: var(--spate-muted);
+}
+
+/* The theme reveals the buttons at 0.4 while the block is hovered, where the
+ * border composites to 2.15:1 against the code ground. Full opacity holds it
+ * at 7.12:1. */
+html[data-theme='dark'] .theme-code-block:hover [class*='buttonGroup_'] button {
+  opacity: 1;
+}

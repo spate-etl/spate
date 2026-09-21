@@ -30,6 +30,7 @@
 //! [`Buffers`]: https://docs.rs/simd-json
 
 use serde::de::{self, DeserializeOwned, Deserializer, MapAccess, SeqAccess, Visitor};
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::fmt;
 
@@ -151,6 +152,39 @@ impl<'de> serde::Deserialize<'de> for DupGuard {
 
 struct DupVisitor;
 
+/// An object key, borrowed from the input when it carries no escapes and copied
+/// when it does.
+struct Key<'de>(Cow<'de, str>);
+
+impl<'de> serde::Deserialize<'de> for Key<'de> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_str(KeyVisitor)
+    }
+}
+
+struct KeyVisitor;
+
+impl<'de> Visitor<'de> for KeyVisitor {
+    type Value = Key<'de>;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("an object key")
+    }
+
+    fn visit_borrowed_str<E: de::Error>(self, v: &'de str) -> Result<Self::Value, E> {
+        Ok(Key(Cow::Borrowed(v)))
+    }
+
+    /// The deserializer unescapes into a scratch buffer it clears before the
+    /// next key, so an escaped key has to be copied out.
+    fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+        Ok(Key(Cow::Owned(v.to_owned())))
+    }
+}
+
 impl<'de> Visitor<'de> for DupVisitor {
     type Value = DupGuard;
 
@@ -162,8 +196,8 @@ impl<'de> Visitor<'de> for DupVisitor {
     where
         A: MapAccess<'de>,
     {
-        let mut seen: HashSet<String> = HashSet::new();
-        while let Some(key) = map.next_key::<String>()? {
+        let mut seen: HashSet<Cow<'de, str>> = HashSet::new();
+        while let Some(Key(key)) = map.next_key::<Key<'de>>()? {
             if let Some(dup) = seen.replace(key) {
                 return Err(de::Error::custom(format!("duplicate object key `{dup}`")));
             }
@@ -228,6 +262,19 @@ mod tests {
     #[test]
     fn escaped_spelling_is_the_same_key() {
         let err = check_no_duplicate_keys(br#"{"\u0061":1,"a":2}"#).unwrap_err();
+        assert!(err.is_data, "{err}");
+        assert!(
+            err.to_string().starts_with("duplicate object key `a`"),
+            "{err}"
+        );
+    }
+
+    /// The set holds the plain spelling and the escaped one probes it, the
+    /// reverse of `escaped_spelling_is_the_same_key`. The message names the key
+    /// the set already held.
+    #[test]
+    fn plain_spelling_matches_an_escaped_duplicate() {
+        let err = check_no_duplicate_keys(br#"{"a":1,"\u0061":2}"#).unwrap_err();
         assert!(err.is_data, "{err}");
         assert!(
             err.to_string().starts_with("duplicate object key `a`"),

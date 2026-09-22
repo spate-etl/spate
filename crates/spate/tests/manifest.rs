@@ -1,4 +1,5 @@
-//! Holds the examples and the integration tests to their declarations.
+//! Holds the examples, the integration tests and the rustdoc feature table to
+//! what the manifest declares.
 //!
 //! `autoexamples` and `autotests` are both left at their default, so a file
 //! nothing declares is collected anyway, carrying no `required-features`. What
@@ -31,6 +32,8 @@
 //!    directions?
 //! 4. Does a test including the shared end-to-end harness declare `full`, and
 //!    does one declaring `full` include it?
+//! 5. Does every declared feature have a row in the rustdoc feature table, and
+//!    does every row name a feature that exists?
 //!
 //! Question 1 has no counterpart for tests. Counting `[[test]]` stanzas against
 //! test targets would demand a stanza for the two that need no features, which
@@ -118,6 +121,43 @@ fn tests(pkg: &Package) -> Vec<&Target> {
 
 /// The attribute a scenario includes the shared harness with.
 const HARNESS: &str = r#"#[path = "e2e_support/mod.rs"]"#;
+
+/// The header row of the rustdoc feature table, and the prefix its lines carry.
+const FEATURE_TABLE: &str = "| Feature | Enables |";
+const DOC: &str = "//!";
+
+/// The feature names backticked in the first cell of each feature-table row,
+/// and any first cell carrying text outside the backticks. Both are empty when
+/// the header row is absent.
+///
+/// A first cell is a list of feature names and separators. Prose there, such
+/// as a cross-reference to a feature whose row sits elsewhere, would otherwise
+/// read as that feature's own row.
+fn table_features(src: &str) -> (BTreeSet<String>, Vec<String>) {
+    let mut lines = src
+        .lines()
+        .map(|l| l.trim_start().trim_start_matches(DOC).trim())
+        .skip_while(|l| *l != FEATURE_TABLE)
+        .skip(2);
+    let (mut names, mut malformed) = (BTreeSet::new(), Vec::new());
+    for row in lines.by_ref().take_while(|l| l.starts_with('|')) {
+        let cell = row.trim_matches('|').split('|').next().unwrap_or_default();
+        // Backticked runs sit at the odd indices of a split on the delimiter,
+        // so one row can carry several names. The even indices hold the
+        // separators.
+        let parts = cell.split('`');
+        if parts
+            .clone()
+            .step_by(2)
+            .any(|gap| gap.chars().any(|c| c != ',' && !c.is_whitespace()))
+        {
+            malformed.push(cell.trim().to_owned());
+            continue;
+        }
+        names.extend(parts.skip(1).step_by(2).map(str::to_owned));
+    }
+    (names, malformed)
+}
 
 /// Guards every assertion below: a filter that matched nothing would make
 /// them all pass while testing nothing.
@@ -296,5 +336,46 @@ fn the_harness_and_full_agree() {
          `full` alone. A test needing `full` without the harness is a case this \
          rule does not cover, and the rule is what changes.",
         bad.join("\n  ")
+    );
+}
+
+/// Every declared feature has a row in the rustdoc feature table, and every
+/// row names a feature that exists.
+///
+/// docs.rs renders that table and nothing reads it back, so a feature added
+/// without a row is documented nowhere and every gate stays green.
+#[test]
+fn every_feature_has_a_table_row() {
+    let pkg = spate_package();
+    let declared: BTreeSet<String> = pkg
+        .features
+        .keys()
+        // `default` is empty and enables nothing, so it has no row.
+        .filter(|f| *f != "default")
+        .cloned()
+        .collect();
+    let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lib.rs"))
+        .expect("read the spate crate root");
+    let (documented, malformed) = table_features(&src);
+
+    assert!(
+        malformed.is_empty(),
+        "a feature-table row's first cell carries text outside the backticks:\n  {}\n\n\
+         A cell lists the row's own feature names, separated by commas. Prose there \
+         reads the same as a name documented elsewhere, so the shape is refused.",
+        malformed.join("\n  ")
+    );
+    assert!(
+        !documented.is_empty(),
+        "no rows under `{FEATURE_TABLE}` in src/lib.rs; the header has moved, and \
+         the comparison below would pass on an empty manifest"
+    );
+    let undocumented: Vec<&String> = declared.difference(&documented).collect();
+    let stale: Vec<&String> = documented.difference(&declared).collect();
+    assert!(
+        undocumented.is_empty() && stale.is_empty(),
+        "the rustdoc feature table and the manifest disagree:\n  \
+         declared with no row: {undocumented:?}\n  \
+         row naming no feature: {stale:?}"
     );
 }

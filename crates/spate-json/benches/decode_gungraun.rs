@@ -66,10 +66,7 @@
 //! - `deep_nested` — documents nested to the decoder's practical depth.
 //! - `numeric_array` — almost nothing but number conversion.
 //! - `large_string` — one field three orders of magnitude larger than its
-//!   neighbors. This is the case the `simd` backend's mandatory copy of the
-//!   payload into its scratch buffer is large enough to show in; the crate's
-//!   claim that the copy is negligible rests on flat records, which is not
-//!   where a copy would ever have been visible.
+//!   neighbors.
 //!
 //! ## The duplicate-key guard
 //!

@@ -247,7 +247,51 @@ impl<'de> Visitor<'de> for DupVisitor {
 
 #[cfg(test)]
 mod tests {
-    use super::check_no_duplicate_keys;
+    use super::{Key, check_no_duplicate_keys};
+    use serde::Deserialize;
+    use serde::de::{IgnoredAny, MapAccess, Visitor};
+    use std::borrow::Cow;
+    use std::fmt;
+
+    struct ObjectKeys<'de>(Vec<Cow<'de, str>>);
+
+    impl<'de> Deserialize<'de> for ObjectKeys<'de> {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            deserializer.deserialize_map(ObjectKeysVisitor)
+        }
+    }
+
+    struct ObjectKeysVisitor;
+
+    impl<'de> Visitor<'de> for ObjectKeysVisitor {
+        type Value = ObjectKeys<'de>;
+
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("a JSON object")
+        }
+
+        fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+        where
+            A: MapAccess<'de>,
+        {
+            let mut keys = Vec::new();
+            while let Some(Key(key)) = map.next_key::<Key<'de>>()? {
+                map.next_value::<IgnoredAny>()?;
+                keys.push(key);
+            }
+            Ok(ObjectKeys(keys))
+        }
+    }
+
+    #[test]
+    fn an_unescaped_key_borrows_from_the_payload() {
+        let ObjectKeys(keys) = serde_json::from_slice(br#"{"abc":1,"\u0061bc":2}"#).unwrap();
+        assert!(matches!(keys[0], Cow::Borrowed("abc")));
+        assert!(matches!(keys[1], Cow::Owned(_)));
+    }
 
     #[test]
     fn duplicate_key_names_the_key() {

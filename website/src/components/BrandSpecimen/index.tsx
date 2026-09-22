@@ -6,7 +6,7 @@ type SpecimenProps = {
   alt: string;
   ground: 'light' | 'dark';
   caption: string;
-  /** Image height in CSS pixels. */
+  /** Largest image height in CSS pixels; a narrow frame scales the image down with its ratio kept. */
   height?: number;
 };
 
@@ -17,7 +17,7 @@ type SpecimenProps = {
 export function Specimen({src, alt, ground, caption, height = 96}: SpecimenProps): React.JSX.Element {
   return (
     <figure data-theme={ground} className="brand-specimen">
-      <img src={useBaseUrl(src)} alt={alt} style={{height}} />
+      <img src={useBaseUrl(src)} alt={alt} style={{maxHeight: height}} />
       <figcaption>{caption}</figcaption>
     </figure>
   );

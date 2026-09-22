@@ -20,19 +20,23 @@ for (const colorMode of MODES) {
         els.map((el) => {
           const img = el as HTMLImageElement;
           const box = img.getBoundingClientRect();
+          const frame = img.closest('figure')!;
+          const pad = getComputedStyle(frame);
           return {
             src: img.getAttribute('src'),
             width: box.width,
+            frameWidth: frame.clientWidth - parseFloat(pad.paddingLeft) - parseFloat(pad.paddingRight),
             skew: box.width / box.height / (img.naturalWidth / img.naturalHeight),
           };
         }),
       );
 
       // A hard assertion, not a skip: the ratio check only means something
-      // if the social card's 400px display width is capped here.
+      // if the frame caps the social card's width here, which it does exactly
+      // when the card fills the frame's content box.
       const card = specimens.find((s) => s.src?.endsWith('social-spate.png'));
       expect(card, 'the social card specimen').toBeDefined();
-      expect(card!.width).toBeLessThan(400);
+      expect(Math.abs(card!.width - card!.frameWidth), 'the social card fills its frame').toBeLessThan(1);
 
       for (const s of specimens) {
         expect(Math.abs(s.skew - 1), `${s.src} rendered off its natural ratio`).toBeLessThan(0.02);

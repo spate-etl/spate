@@ -14,9 +14,9 @@
   --spate-accent: #c04409;
   --spate-accent-ink: #ffffff;
   --spate-accent-soft: rgba(192, 68, 9, 0.08);
-  --spate-mark-node: #d1500b;
-  --spate-mark-edge: #e65a0f;
-  --spate-mark-core: #f16413;
+  --spate-diagram-node: #d1500b;
+  --spate-diagram-edge: #e65a0f;
+  --spate-diagram-core: #f16413;
   --spate-code-bg: #17181c;
   --spate-code-ink: #e8e9ec;
   --spate-danger: #b8382c;
@@ -42,9 +42,9 @@
   --spate-accent: #ff8c4a;
   --spate-accent-ink: #16181d;
   --spate-accent-soft: rgba(255, 140, 74, 0.10);
-  --spate-mark-node: #ff8c4a;
-  --spate-mark-edge: #ff8c4a;
-  --spate-mark-core: #ffc9a8;
+  --spate-diagram-node: #ff8c4a;
+  --spate-diagram-edge: #ff8c4a;
+  --spate-diagram-core: #ffc9a8;
   --spate-code-bg: #111318;
   --spate-code-ink: #e8e9ec;
   --spate-danger: #ff8a7a;

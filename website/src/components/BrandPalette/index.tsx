@@ -11,8 +11,8 @@ const TOKENS: Array<{name: string; role: string}> = [
   {name: 'dim', role: 'Graphic fill'},
   {name: 'grid', role: 'Background texture'},
   {name: 'accent', role: 'Links and controls'},
-  {name: 'mark-node', role: 'Mark: sources and sink'},
-  {name: 'mark-core', role: 'Mark: core'},
+  {name: 'diagram-node', role: 'Diagram: nodes'},
+  {name: 'diagram-core', role: 'Diagram: core'},
   {name: 'danger', role: 'Loses data'},
   {name: 'warning', role: 'Costs time'},
 ];

@@ -70,8 +70,8 @@ def ensure_fonts():
 # website/src/css/brand.css, which the site's stylesheet maps onto Infima, so
 # an asset and the page it sits on cannot disagree.
 #
-# The mark's colours and the UI's accent differ on the light ground on
-# purpose: the mark is a graphic and reads at 3:1, while the accent carries
+# The diagram colours and the UI's accent differ on the light ground on
+# purpose: a diagram is a graphic and reads at 3:1, while the accent carries
 # link text and has to clear 4.5:1 on paper.
 
 DARK_BASE = "#16181d"
@@ -99,9 +99,9 @@ TOKENS = {
         "accent": LIGHT_ACCENT,
         "accent-ink": "#ffffff",
         "accent-soft": "rgba(192, 68, 9, 0.08)",
-        "mark-node": LIGHT_NODE,
-        "mark-edge": LIGHT_EDGE,
-        "mark-core": LIGHT_CORE,
+        "diagram-node": LIGHT_NODE,
+        "diagram-edge": LIGHT_EDGE,
+        "diagram-core": LIGHT_CORE,
         "code-bg": "#17181c",
         "code-ink": "#e8e9ec",
         "danger": "#b8382c",
@@ -119,9 +119,9 @@ TOKENS = {
         "accent": DARK_NODE,
         "accent-ink": DARK_BASE,
         "accent-soft": "rgba(255, 140, 74, 0.10)",
-        "mark-node": DARK_NODE,
-        "mark-edge": DARK_NODE,
-        "mark-core": DARK_CORE,
+        "diagram-node": DARK_NODE,
+        "diagram-edge": DARK_NODE,
+        "diagram-core": DARK_CORE,
         "code-bg": "#111318",
         "code-ink": "#e8e9ec",
         "danger": "#ff8a7a",

@@ -44,7 +44,10 @@ builder) with no connectors. Enable what you need:
 | `coordination-nats` | The same over NATS JetStream KV (implies `coordination`). See [NATS JetStream](../04-connectors/coordination/nats/README.mdx). |
 | `datagen` | `spate::datagen` — synthetic storefront source needing no infrastructure. Keeps no durable progress, so it is outside `full`. See [Datagen connector](../04-connectors/sources/datagen/README.mdx). |
 | `datagen-avro` | Avro payloads from that generator instead of JSON (implies `datagen`). |
-| `full` | `avro` + `json` + `kafka` + `clickhouse` + `coordination-nats` + `s3`. Not `datagen`. |
+| `full` | `avro` + `json` + `kafka` + `clickhouse` + `coordination-nats` + `s3`. |
+
+This is not the whole set. [docs.rs](https://docs.rs/spate) lists every
+feature the crate declares, each with what it pulls in.
 
 The quickstart needs no features at all; the flagship Kafka → Avro →
 ClickHouse pipeline needs `full` (or `kafka`, `avro` and `clickhouse`

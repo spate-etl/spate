@@ -4,7 +4,7 @@
 //! Selecting it:
 //!
 //! ```sh
-//! cargo test -p spate --features full --locked \
+//! cargo test -p spate --features kafka,clickhouse,avro --locked \
 //!   --test e2e_happy -- --ignored
 //! ```
 

@@ -23,10 +23,10 @@ with `with_row`, which generates the insert column list from
 
 That is from
 [`kafka_avro_to_clickhouse.rs`](repo:crates/spate/examples/kafka_avro_to_clickhouse.rs),
-a complete program that builds under the `full` facade feature. The single
-`sink:` section is addressed as `"default"`; a named sink resolves under its
-own name. The fetch that `with_row` performs is what the encoder and the
-insert header are both built from; see
+a complete program that builds under the `kafka`, `clickhouse` and `avro`
+features. The single `sink:` section is addressed as `"default"`; a named sink
+resolves under its own name. The fetch that `with_row` performs is what the
+encoder and the insert header are both built from; see
 [Schema validation](./schema-validation.mdx).
 
 To write to **several tables** from one pipeline (one per record kind), see

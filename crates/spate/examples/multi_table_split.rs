@@ -45,7 +45,7 @@
 //! ```
 //!
 //! ```sh
-//! cargo run --release -p spate --features full \
+//! cargo run --release -p spate --features kafka,clickhouse,avro \
 //!   --example multi_table_split
 //! ```
 //!

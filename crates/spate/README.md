@@ -9,7 +9,7 @@ Prometheus metrics.
 
 ```toml
 [dependencies]
-spate = { version = "0.2", features = ["full"] }
+spate = { version = "0.2", features = ["kafka", "clickhouse", "avro"] }
 ```
 
 This crate re-exports the engine and every connector behind a feature flag, so
@@ -28,7 +28,6 @@ tree, and never resolves `rdkafka` into its lockfile.
 | `coordination-nats` | The same over NATS JetStream KV |
 | `datagen` | Synthetic storefront source, no infrastructure ([`spate-datagen`](https://crates.io/crates/spate-datagen)) — keeps no durable progress |
 | `datagen-avro` | Avro payloads from that generator instead of JSON (implies `datagen`) |
-| `full` | Every connector above except `datagen`, which a production build should not enable |
 
 `examples/README.md` indexes every example by what it shows, in five tiers,
 with what each one needs in order to run. Start with

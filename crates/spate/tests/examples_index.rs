@@ -90,7 +90,7 @@ that tier depends on reading order — pick the one matching your task.
 
 ```sh
 cargo run -p spate --example memory_pipeline
-cargo run --release -p spate --features full --example kafka_avro_to_clickhouse
+cargo run --release -p spate --features kafka,clickhouse,avro --example kafka_avro_to_clickhouse
 ```
 
 An example whose **Features** column is not `—` needs those features on the
@@ -109,7 +109,7 @@ Configuration comes from `SPATE_CONFIG` where an example loads YAML from disk:
 
 ```sh
 SPATE_CONFIG=/etc/spate/pipeline.yaml cargo run --release -p spate \
-  --features full --example kafka_avro_to_clickhouse
+  --features kafka,clickhouse,avro --example kafka_avro_to_clickhouse
 ```
 
 ## The storefront stream

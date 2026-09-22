@@ -35,10 +35,8 @@ Connectors are grouped by role:
 | [NATS JetStream](coordination/nats/README.mdx) | Coordination store | `spate-coordination` | `coordination-nats` | — (assembly wiring, not YAML) |
 | [Memory / Capture](memory.mdx) | Test source + sink | `spate-test` | — (separate dev-dependency) | `source: { memory: {} }` / `sink: { capture: {} }` (informational) |
 
-`features = ["full"]` on the `spate` facade enables all production
-connectors. The connectors outside it are the ones no deployment should
-reach for: Datagen, which keeps no durable progress and needs its own
-`datagen` feature, and Memory / Capture, which ships as a separate
+Datagen and Memory / Capture are not for production deployments. Datagen
+keeps no durable progress, and Memory / Capture ships as a separate
 dev-dependency. Memory / Capture is dual-role, being neither a production
 source nor a sink, so it lives at the connectors root rather than under
 `sources/` or `sinks/`; Datagen fills the source role only and sits with the
@@ -67,8 +65,7 @@ other sources.
   is strictly more duplication than a real source produces. Its one durability
   claim is the bounded case. A run with `count` set reaches `Completed` only
   after every record was acknowledged and the final watermark committed, so a
-  clean exit is an end-to-end assertion. A demo and test source, and
-  deliberately outside the `full` feature.
+  clean exit is an end-to-end assertion. A demo and test source.
 - **Kafka (sink)** — a batch acknowledges only after **every** message's
   delivery report confirms, under forced `acks=all` + idempotence; a failed
   or timed-out report stalls the watermark and the batch replays.

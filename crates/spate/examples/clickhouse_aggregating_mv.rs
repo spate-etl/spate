@@ -44,7 +44,7 @@
 //! ```
 //!
 //! ```sh
-//! cargo run -p spate --example clickhouse_aggregating_mv --features full
+//! cargo run -p spate --example clickhouse_aggregating_mv --features clickhouse
 //! ```
 //!
 //! Read the finalized values back with the `-Merge` combinators. The stored

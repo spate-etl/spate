@@ -11,7 +11,7 @@
 FROM rust:1.98.1-bookworm@sha256:9a73a5088750b4c95158ab26629c854c3d6fc4b173cb7bc8079ad252d8ed7bfa AS builder
 WORKDIR /build
 COPY . .
-RUN cargo build --release -p spate --example kafka_avro_to_clickhouse --features full \
+RUN cargo build --release -p spate --example kafka_avro_to_clickhouse --features kafka,clickhouse,avro \
     && cp target/release/examples/kafka_avro_to_clickhouse /build/pipeline
 
 # Distroless: glibc + libgcc only, no shell, runs as nonroot (65532).

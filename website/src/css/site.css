@@ -367,6 +367,41 @@ html.docs-wrapper .main-wrapper > div {
   }
 }
 
+/* Carriers ---------------------------------------------------------------- */
+
+/* A documentation ordinal: above its heading at 76 × 70 in a narrow column,
+ * beside it in a wide one. The 640px threshold is the brand page's, and the
+ * two change together. */
+article:has(.carrier) {
+  container-type: inline-size;
+}
+
+/* ThemedImage sets the shown image's display, so it stays inline. */
+.carrier img {
+  width: 100%;
+  height: auto;
+  vertical-align: top;
+}
+
+.page-carrier {
+  width: 76px;
+  margin-bottom: 24px;
+}
+
+@container (min-width: 640px) {
+  .page-carrier {
+    float: right;
+    width: 181px;
+    margin: 0 0 1.5rem 1.5rem;
+  }
+
+  /* Only the title and running text wrap beside the carrier; a code block or
+   * table beside a float is narrowed and clips its content. */
+  .page-carrier + .markdown > :not(header, p) {
+    clear: right;
+  }
+}
+
 /* Motion ------------------------------------------------------------------ */
 
 @media (prefers-reduced-motion: no-preference) {

@@ -60,6 +60,9 @@ render "$brand/apple-touch-icon.svg" 180  "$img/apple-touch-icon.png"
 oxipng --quiet --opt 4 --strip safe "${rendered[@]}"
 echo "optimized ${#rendered[@]} PNGs"
 
+# The starter deck places resvg renders of the wordmark and the carriers.
+"$venv/bin/python" "$here/slides.py"
+
 # favicon.ico at the site root, which browsers request without being told.
 # One PNG entry per size, all from the dark-ground touch icon source.
 ico_sizes=(16 32 48 64 128 256)

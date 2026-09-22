@@ -4,7 +4,8 @@ The Spate wordmark and icon, and the images uploaded to GitHub by hand.
 
 Everything in `website/static/img/brand/`, plus `logo.svg`, `logo-dark.svg`,
 `favicon.svg` and `apple-touch-icon.png` in `website/static/img/`,
-`website/static/favicon.ico`, and the colour tokens in
+`website/static/favicon.ico`, the slide deck in `website/static/brand/`, and
+the colour tokens in
 `website/src/css/brand.css`, is **generated**. Change
 [`brandgen.py`](brandgen.py) and re-run, rather than editing an asset:
 
@@ -79,6 +80,12 @@ kind, so there is nothing to script:
 The avatar and the touch icon are full-bleed squares on the dark ground with no
 corner radius of their own: the platform rounds them, and a baked-in radius
 double-rounds the corners.
+
+`brand/spate-slides.pptx` is the starter deck [`slides.py`](slides.py) writes:
+title, section, content, code and closing slides on both grounds. Its text
+boxes name IBM Plex Sans and Overpass Mono, Regular and Medium, as the static
+cuts from IBM's `IBM/plex` release and from Google Fonts install them. Reruns
+write the same bytes.
 
 `wordmark.png` and `wordmark-dark.png` are for READMEs and anywhere else that
 takes no SVG. Pair them behind a `<picture>` element so each theme gets the

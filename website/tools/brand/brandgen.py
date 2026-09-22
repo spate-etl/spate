@@ -434,6 +434,47 @@ def gen_not_found():
         write(name, svg(f"0 0 {w} {h}", pieces([above], [below], Transform(), *colors), (w, h), "404"))
 
 
+def gen_misuse(art):
+    """The brand page's misuse gallery: the wordmark done wrong, each on a
+    transparent 300×140 canvas. The page carries the captions."""
+    w, h, ink_w = 300, 140, 220
+    ink, accent = two_tone("light")
+
+    def placed(art_, rotate=0.0):
+        fx0, fy0, fx1, fy1 = finished_ink(art_)
+        k = ink_w / (fx1 - fx0)
+        t = Transform(k, 0, 0, k, (w - ink_w) / 2 - fx0 * k, (h - (fy1 - fy0) * k) / 2 - fy0 * k)
+        if rotate:
+            t = Transform().translate(w / 2, h / 2).rotate(rotate).translate(-w / 2, -h / 2).transform(t)
+        return t
+
+    t = placed(art)
+    uncut = waterline.shape("spate", waterline.P["weight"], waterline.P["track"])
+    whole = [g for g, _ in uncut]
+    swell = " ".join(f"{x:.2f},{y:.2f}" for x, y in (t.transformPoint(pt) for pt in art["swell"]))
+    fx0, fy0, fx1, fy1 = finished_ink(art)
+    fh = (fy1 - fy0) * t[0]
+    mono = waterline.carrier("spate", ((w - ink_w) / 2, (h - fh) / 2, ink_w, fh))
+
+    cases = {
+        "recolored": word_paths(art, t, "#2457c5", "#2f9e44"),
+        "stroke": [
+            f'<path fill="{ink}" d="{waterline.svg_d(whole, t)}"/>',
+            f'<polyline fill="none" stroke="{accent}" stroke-width="{waterline.P["gap"] * t[0]:.2f}" '
+            f'stroke-linecap="round" points="{swell}"/>',
+        ],
+        "moved": word_paths(waterline.artwork({**waterline.P, "cut": 0.25}), t, ink, accent),
+        "outlined": [
+            line.replace('fill="', 'fill="none" stroke-width="1.5" stroke="')
+            for line in word_paths(art, t, ink, accent)
+        ],
+        "typeface": pieces([mono[0]], [mono[1]], Transform(), ink, accent),
+        "rotated": word_paths(art, placed(art, -0.2), ink, accent),
+    }
+    for name, body in cases.items():
+        write(f"misuse-{name}.svg", svg(f"0 0 {w} {h}", body, (w, h), f"Misuse: {name}"))
+
+
 if __name__ == "__main__":
     ensure_fonts()
     gen_tokens()
@@ -441,6 +482,7 @@ if __name__ == "__main__":
     gen_marks(art, waterline.crop(art))
     gen_social_card(art)
     gen_not_found()
+    gen_misuse(art)
     banner(
         art,
         "benchmark",

@@ -8,7 +8,7 @@ export default function BrandPage(): React.JSX.Element {
   return (
     <SiteLayout
       title="Brand"
-      description="The Spate mark, wordmark lockups, color tokens and typefaces, with the files to download and the rules for using them.">
+      description="The Spate wordmark and icon, color tokens, typefaces and slide deck, with the files to download and the rules for using them.">
       <div className="site-container site-prose">
         <h1>Brand</h1>
         <MDXContent>

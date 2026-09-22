@@ -1,65 +1,118 @@
 import BrandPalette from '@site/src/components/BrandPalette';
+import {Specimen, Specimens} from '@site/src/components/BrandSpecimen';
 
-The mark is a confluence: three sources feed one core and leave through one sink,
-the shape of a pipeline whose partitions fan into a single monomorphized loop.
-Every asset on this page is generated from one source in the repository, so a
-file here is never hand-edited.
+The Spate mark is the word `spate` in IBM Plex Sans, cut once by a swell. The letters above the water are ink and the letters below it take the accent. The icon is the wordmark's first letter, framed from the same artwork. Every file on this page comes from the [brand generator in the repository](https://github.com/spate-etl/spate/tree/main/website/tools/brand), and none is edited by hand.
 
-## The mark
+## Wordmark and icon
 
-<div style={{display: 'flex', gap: '1rem', flexWrap: 'wrap', alignItems: 'stretch'}}>
-  <figure data-theme="light" style={{margin: 0, padding: '2rem', border: '1px solid var(--spate-border)', borderRadius: 8, background: 'var(--spate-bg)', flex: '1 1 200px', textAlign: 'center'}}>
-    <img src="/img/logo.svg" alt="The Spate mark on a light ground" width="96" height="96" />
-    <figcaption style={{color: 'var(--spate-muted)', fontSize: '0.85rem', marginTop: '0.75rem'}}>Light ground</figcaption>
-  </figure>
-  <figure data-theme="dark" style={{margin: 0, padding: '2rem', border: '1px solid var(--spate-border)', borderRadius: 8, background: 'var(--spate-bg)', flex: '1 1 200px', textAlign: 'center'}}>
-    <img src="/img/logo-dark.svg" alt="The Spate mark on a dark ground" width="96" height="96" />
-    <figcaption style={{color: 'var(--spate-muted)', fontSize: '0.85rem', marginTop: '0.75rem'}}>Dark ground</figcaption>
-  </figure>
-</div>
+The wordmark is the logo. Use it wherever the name has to be read. Use the icon where the space is square or too small for the wordmark.
 
-Download: [mark, light](/img/logo.svg) · [mark, dark](/img/logo-dark.svg) ·
-[favicon](/img/favicon.svg) · [avatar, 512 px](/img/brand/avatar.png)
+<Specimens>
+  <Specimen src="/img/brand/wordmark.svg" alt="The Spate wordmark on a light ground" ground="light" caption="Wordmark, light ground" height={56} />
+  <Specimen src="/img/brand/wordmark-dark.svg" alt="The Spate wordmark on a dark ground" ground="dark" caption="Wordmark, dark ground" height={56} />
+</Specimens>
 
-## The lockup
+<Specimens>
+  <Specimen src="/img/logo.svg" alt="The Spate icon on a light ground" ground="light" caption="Icon, light ground" />
+  <Specimen src="/img/logo-dark.svg" alt="The Spate icon on a dark ground" ground="dark" caption="Icon, dark ground" />
+</Specimens>
 
-The wordmark is IBM Plex Sans SemiBold, tracked to −0.022 em, with the mark's
-ink centered on the x-height. Use the lockup where the name has to be read; use
-the mark alone where the name is already beside it.
+Downloads:
 
-<div style={{display: 'flex', flexDirection: 'column', gap: '1rem'}}>
-  <div data-theme="light" style={{padding: '2.5rem', border: '1px solid var(--spate-border)', borderRadius: 8, background: 'var(--spate-bg)'}}>
-    <img src="/img/brand/wordmark.svg" alt="Spate wordmark on a light ground" style={{height: 56}} />
-  </div>
-  <div data-theme="dark" style={{padding: '2.5rem', border: '1px solid var(--spate-border)', borderRadius: 8, background: 'var(--spate-bg)'}}>
-    <img src="/img/brand/wordmark-dark.svg" alt="Spate wordmark on a dark ground" style={{height: 56}} />
-  </div>
-</div>
+- [Wordmark for light grounds, SVG](/img/brand/wordmark.svg) · [Wordmark for light grounds, PNG](/img/brand/wordmark.png)
+- [Wordmark for dark grounds, SVG](/img/brand/wordmark-dark.svg) · [Wordmark for dark grounds, PNG](/img/brand/wordmark-dark.png)
+- [Icon for light grounds, SVG](/img/logo.svg) · [Icon for dark grounds, SVG](/img/logo-dark.svg)
+- [Favicon, SVG](/img/favicon.svg) · [Avatar, 512 px PNG](/img/brand/avatar.png) · [Social card, 1280 × 640 PNG](/img/brand/social-spate.png)
 
-Download: [wordmark, light](/img/brand/wordmark.svg) ([PNG](/img/brand/wordmark.png)) ·
-[wordmark, dark](/img/brand/wordmark-dark.svg) ([PNG](/img/brand/wordmark-dark.png)) ·
-[social card](/img/brand/social-spate.png)
+## Grayscale
+
+Where color cannot be reproduced, both portions take ink and the channel stays cut.
+
+<Specimens>
+  <Specimen src="/img/brand/wordmark-mono.svg" alt="The grayscale Spate wordmark on a light ground" ground="light" caption="Grayscale wordmark, light ground" height={56} />
+  <Specimen src="/img/brand/wordmark-mono-dark.svg" alt="The grayscale Spate wordmark on a dark ground" ground="dark" caption="Grayscale wordmark, dark ground" height={56} />
+</Specimens>
+
+Downloads:
+
+- [Grayscale wordmark for light grounds, SVG](/img/brand/wordmark-mono.svg) · [Grayscale wordmark for dark grounds, SVG](/img/brand/wordmark-mono-dark.svg)
+- [Grayscale icon for light grounds, SVG](/img/brand/logo-mono.svg) · [Grayscale icon for dark grounds, SVG](/img/brand/logo-mono-dark.svg)
+
+## The water
+
+- Ink fills the letters above the water and the accent fills them below, on both grounds.
+- The water is a channel of the ground cut through the letters. It is never drawn as a line or filled with a color.
+- The water sits at one height. A height that changed with a page or a status would read as a measurement.
+- The mark takes no gradient, no fade on the part below the water, no ripples or droplets, and no animation.
+
+## Carriers
+
+A carrier is a large numeral cut by the same water: Overpass Mono SemiBold, ink above and the accent below, with the water at 0.72 of the numeral's ink height on every surface. The numeral names something the surface counts, such as the four stages of a pipeline, a section's place in a sequence, or a status code. It never states a result, a throughput or a rank, so the benchmark's social card carries none.
+
+- The social card carries `04`, for the four stages: Extract, Transform, Load and Observe.
+- The 404 page carries `404`.
+- In the slide deck, the title slide carries `04` and a section slide carries its section's ordinal.
+
+<Specimens>
+  <Specimen src="/img/brand/social-spate.png" alt="The Spate social card: the title One pipeline. Four stages. beside a 04 carrier" ground="dark" caption="The social card" height={200} />
+</Specimens>
+
+On documentation pages, a carrier can mark the page header or a major section:
+
+- A section carrier marks a major H2 transition on a long page. It never appears at an H3 or H4, between code blocks, inside a table or above every paragraph. A page whose header carries a carrier takes none at its first section.
+- The numeral is an ordinal: the page's or the section's place in its sequence.
+- In a content column narrower than 900 px, the carrier moves above the heading at 76 × 70 px, with 24 px between the carrier and the heading.
+- The carrier is decorative and hidden from assistive technology with `aria-hidden="true"`. The heading beside it is live text, and no text enters the water.
 
 ## Color
 
-One accent, two grounds. The mark's colors and the accent that carries link
-text differ on the light ground, because a graphic reads at 3:1 and text has to
-clear 4.5:1. Every pair below was measured against its floor by a checker this
-repository no longer carries.
-
 <BrandPalette />
+
+The ratios below are computed from the token values with the WCAG 2.2 relative-luminance formula. Text has to clear 4.5:1 and a graphic 3:1. Ink and the accent never touch in the mark, because the channel of ground runs between them.
+
+| Pair | Light ground | Dark ground | Floor |
+| --- | --- | --- | --- |
+| Ink on ground | 17.01 | 16.27 | 4.5 |
+| Muted text on ground | 5.71 | 6.80 | 4.5 |
+| Accent on ground: links and the mark below the water | 4.94 | 7.70 | 4.5 |
+| Button text on accent | 5.16 | 7.70 | 4.5 |
+| Diagram node on ground | 4.14 | 7.70 | 3 |
+| Diagram core on ground | 3.06 | 11.98 | 3 |
 
 ## Type
 
-IBM Plex Sans for text, Overpass Mono for code and figures, both under the SIL
-Open Font License. Headings are SemiBold with tight tracking; body text is
-Regular at 16 px on a 1.6 line height.
+IBM Plex Sans sets text and Overpass Mono sets code, figures and carriers, both under the SIL Open Font License 1.1. Headings are SemiBold with tight tracking; body text is Regular at 16 px on a 1.6 line height. The wordmark is Plex Sans SemiBold at −0.022 em, baked to outlines, so it never depends on an installed font.
 
-## Rules
+## Clear space and minimum size
 
-- Keep clear space around the mark of at least the core square's width.
-- Do not recolor the mark. On a colored ground, use the lockup for the
-  ground's tone or the avatar, which carries its own ground.
-- Do not rotate, outline, add effects, or set the wordmark in another face.
-- The smallest the mark renders legibly is 16 px; below that, use the favicon.
-- Spate is written with a capital S in prose and in lowercase in the wordmark.
+- Clear space on every side of the wordmark and the icon equals the depth of the water: the height of the part of the `s` below it. Measured from the generated artwork, that is 0.19 of the wordmark's ink height and 7.2 units on the icon's 32-unit canvas.
+- The wordmark's ink is at least 96 px wide. Below that, use the icon.
+- The icon is at least 16 px.
+
+## Misuse
+
+<Specimens>
+  <Specimen src="/img/brand/misuse-recolored.svg" alt="The wordmark in blue above the water and green below it" ground="light" caption="Recolored. The mark takes ink and the accent only." height={84} />
+  <Specimen src="/img/brand/misuse-stroke.svg" alt="The uncut wordmark with a wavy orange line drawn across it" ground="light" caption="Water drawn as a line. The water is a gap in the letters." height={84} />
+  <Specimen src="/img/brand/misuse-moved.svg" alt="The wordmark with the water high across the letters" ground="light" caption="Water moved. It sits at one height." height={84} />
+  <Specimen src="/img/brand/misuse-outlined.svg" alt="The wordmark drawn as outlines" ground="light" caption="Outlined. The letters are solid." height={84} />
+  <Specimen src="/img/brand/misuse-typeface.svg" alt="The word spate set in a monospaced face and cut by water" ground="light" caption="Another typeface. The wordmark is IBM Plex Sans." height={84} />
+  <Specimen src="/img/brand/misuse-rotated.svg" alt="The wordmark tilted" ground="light" caption="Rotated. The wordmark sits level." height={84} />
+</Specimens>
+
+A shadow, a glow, a gradient or any other effect is a misuse too.
+
+## Slides
+
+The [Spate starter deck](/brand/spate-slides.pptx) is a PowerPoint file with title, section, content, code and closing slides on both grounds. Its text is set in IBM Plex Sans and Overpass Mono, Regular and Medium. Install both before editing it:
+
+- IBM Plex Sans: the static TTF files in `ibm-plex-sans.zip` from [IBM Plex releases on GitHub](https://github.com/IBM/plex/releases).
+- Overpass Mono: the static files from [Overpass Mono on Google Fonts](https://fonts.google.com/specimen/Overpass+Mono).
+
+## Using the name and the mark
+
+The name Spate and the mark identify this project. Use them to refer to it: in articles, talks, documentation, comparisons and criticism, and to say that your software works with Spate. Do not use them in a way that suggests the project sponsors, endorses or is affiliated with you or your product. Do not use the mark in your own product's name or logo, and do not alter it. A fork takes its own name and mark. The Apache-2.0 license covers the code and grants no rights to the name or the mark ([section 6 of the Apache-2.0 license](https://github.com/spate-etl/spate/blob/main/LICENSE)).
+
+## Naming
+
+Spate is written with a capital S in prose and in lowercase in the wordmark.

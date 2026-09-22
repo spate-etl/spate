@@ -29,6 +29,11 @@ for (const colorMode of MODES) {
       await expectNoAxeViolations(page, testInfo);
     });
 
+    test('brand page has no WCAG violations', async ({page}, testInfo) => {
+      await gotoRoute(page, 'brand', colorMode);
+      await expectNoAxeViolations(page, testInfo);
+    });
+
     test('quickstart page has no WCAG violations', async ({page}, testInfo) => {
       await gotoRoute(page, 'quickstart', colorMode);
       await expectNoAxeViolations(page, testInfo);

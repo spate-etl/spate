@@ -26,12 +26,16 @@ async function inkFor(page: Page, mode: ColorMode): Promise<string> {
 
 /**
  * Counts elements whose computed `color` is `hex`, reading every element so
- * the read forces the resolution it measures.
+ * the read forces the resolution it measures. An element inside a subtree that
+ * pins its own `data-theme`, such as a swatch on the brand page, takes that
+ * theme's ink by design and is not counted.
  */
 function countColor(page: Page, hex: string): Promise<number> {
   return page.evaluate((h) => {
     const rgb = `rgb(${[1, 3, 5].map((i) => Number.parseInt(h.slice(i, i + 2), 16)).join(', ')})`;
-    return Array.from(document.querySelectorAll('*')).filter((el) => getComputedStyle(el).color === rgb).length;
+    return Array.from(document.querySelectorAll('*')).filter(
+      (el) => getComputedStyle(el).color === rgb && el.closest('body [data-theme]') === null,
+    ).length;
   }, hex);
 }
 

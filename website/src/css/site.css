@@ -274,6 +274,40 @@ html.docs-wrapper .main-wrapper > div {
   }
 }
 
+/* Brand page -------------------------------------------------------------- */
+
+.brand-specimens {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.brand-specimen {
+  display: flex;
+  flex: 1 1 14rem;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 0;
+  padding: 2rem 1.5rem 1.25rem;
+  border: 1px solid var(--spate-border);
+  border-radius: 8px;
+  background: var(--spate-bg);
+}
+
+.brand-specimen img {
+  display: block;
+  max-width: 100%;
+  width: auto;
+}
+
+.brand-specimen figcaption {
+  font-size: 0.85rem;
+  text-align: center;
+  color: var(--spate-muted);
+}
+
 /* Not found --------------------------------------------------------------- */
 
 /* The 404 page: the carrier art on the left, the status and the ways back on

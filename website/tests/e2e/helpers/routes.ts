@@ -16,6 +16,9 @@ export const ROUTES = {
 
 export type RouteName = keyof typeof ROUTES;
 
+/** A path the build has no page for, which the server answers with the 404 page. */
+export const MISSING_ROUTE = '/no-page-at-this-address';
+
 /** The viewport #396 measured the defect at: a 1505px window over an 823px docs column. */
 export const VIEWPORTS = {
   desktop: {width: 1505, height: 900},

@@ -264,11 +264,11 @@ def word_paths(art, t, top, bottom):
     return pieces(aboves, belows, t, top, bottom)
 
 
-def svg(view_box, body, size=None):
+def svg(view_box, body, size=None, label="Spate"):
     dims = f' width="{size[0]:.0f}" height="{size[1]:.0f}"' if size else ""
     return (
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="{view_box}"{dims} '
-        'role="img" aria-label="Spate">\n'
+        f'role="img" aria-label="{label}">\n'
         + "".join(f"  {line}\n" for line in body)
         + "</svg>"
     )
@@ -426,12 +426,21 @@ def gen_social_card(art):
     write("social-spate.svg", svg(f"0 0 {BANNER_W} {BANNER_H}", body, (BANNER_W, BANNER_H)))
 
 
+def gen_not_found():
+    """The 404 page's `404` carrier on a transparent ground, in the study's 697×345 box."""
+    w, h = 697, 345
+    above, below = waterline.carrier("404", (0, 0, w, h))
+    for name, colors in (("not-found.svg", two_tone("light")), ("not-found-dark.svg", two_tone("dark"))):
+        write(name, svg(f"0 0 {w} {h}", pieces([above], [below], Transform(), *colors), (w, h), "404"))
+
+
 if __name__ == "__main__":
     ensure_fonts()
     gen_tokens()
     art = waterline.artwork(waterline.P)
     gen_marks(art, waterline.crop(art))
     gen_social_card(art)
+    gen_not_found()
     banner(
         art,
         "benchmark",

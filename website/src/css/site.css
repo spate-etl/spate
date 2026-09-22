@@ -274,6 +274,64 @@ html.docs-wrapper .main-wrapper > div {
   }
 }
 
+/* Not found --------------------------------------------------------------- */
+
+/* The 404 page: the carrier art on the left, the status and the ways back on
+ * the right, stacked below 900px. */
+.not-found {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: center;
+  gap: clamp(2rem, 6vw, 6rem);
+  padding-block: clamp(3rem, 10vh, 7rem);
+}
+
+.not-found__art img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.not-found__eyebrow {
+  margin: 0 0 1rem;
+  font-family: var(--ifm-font-family-monospace);
+  font-size: 0.85rem;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--spate-accent);
+}
+
+.not-found__title {
+  margin: 0 0 1rem;
+  font-size: clamp(2.25rem, 4.4vw, 4rem);
+  font-weight: 500;
+  letter-spacing: -0.035em;
+  line-height: 1.1;
+}
+
+.not-found__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 1rem 1.75rem;
+  margin-top: 2rem;
+}
+
+.not-found__home {
+  color: var(--spate-ink);
+  font-weight: 500;
+}
+
+@media (max-width: 900px) {
+  .not-found {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .not-found__art {
+    max-width: 28rem;
+  }
+}
+
 /* Motion ------------------------------------------------------------------ */
 
 @media (prefers-reduced-motion: no-preference) {

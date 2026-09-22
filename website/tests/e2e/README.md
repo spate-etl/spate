@@ -29,7 +29,9 @@ Reusable page logic belongs under `helpers/`, not inline in a spec:
   test proceeds, so a redirect or a storage-key change fails loudly instead
   of quietly testing the wrong page. It then polls until no element computes
   the other colour mode's ink, so a spec reading a colour gets the settled
-  value.
+  value. A spec that expects another status, such as the 404 page's, calls
+  `page.goto()`, asserts the status itself, then calls `settleColorMode()`
+  for the same wait.
 - `helpers/axe.ts` — `expectNoAxeViolations()` for an accessibility
   assertion, scoped to the WCAG tags the CI gate blocks on.
 

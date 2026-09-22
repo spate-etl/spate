@@ -64,6 +64,7 @@ The site picks these up from the config. Nothing to do by hand:
 | `img/brand/*-mono.svg`, `img/brand/*-mono-dark.svg` | Grayscale output, with both portions in ink |
 | `img/favicon.svg`, `favicon.ico`, `img/apple-touch-icon.png` | Browser tab, search-result thumbnails and the iOS home screen, via `favicon` and `headTags` |
 | `img/brand/social-spate.png` | Open Graph card, via `themeConfig.image` |
+| `img/brand/not-found.svg`, `img/brand/not-found-dark.svg` | The 404 page's `404` carrier, via `src/theme/NotFound/Content` |
 | `src/css/brand.css` | Every colour on the site, through `custom.css` |
 
 These three are uploaded by hand. GitHub exposes no REST endpoint for either

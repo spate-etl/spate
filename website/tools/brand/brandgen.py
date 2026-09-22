@@ -434,6 +434,20 @@ def gen_not_found():
         write(name, svg(f"0 0 {w} {h}", pieces([above], [below], Transform(), *colors), (w, h), "404"))
 
 
+def gen_carriers():
+    """The documentation ordinals `01` to `09` on a transparent ground, in the study's 181×166 header box.
+
+    The site shows each at 181×166, 125×113 and 76×70; the channel's thickness
+    clamp engages at none of them, so one file scales to all three."""
+    w, h = 181, 166
+    for n in range(1, 10):
+        value = f"{n:02d}"
+        above, below = waterline.carrier(value, (0, 0, w, h))
+        for suffix, colors in (("", two_tone("light")), ("-dark", two_tone("dark"))):
+            body = pieces([above], [below], Transform(), *colors)
+            write(f"carrier-{value}{suffix}.svg", svg(f"0 0 {w} {h}", body, (w, h), value))
+
+
 def gen_misuse(art):
     """The brand page's misuse gallery: the wordmark done wrong, each on a
     transparent 300×140 canvas. The page carries the captions."""
@@ -482,6 +496,7 @@ if __name__ == "__main__":
     gen_marks(art, waterline.crop(art))
     gen_social_card(art)
     gen_not_found()
+    gen_carriers()
     gen_misuse(art)
     banner(
         art,

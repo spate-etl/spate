@@ -3,11 +3,10 @@
 
 Text is shaped with HarfBuzz and baked to outlines, so the emitted SVGs carry no
 font dependency. All layout is driven by measured ink bounds rather than the
-nominal canvas, so the mark, the rule and the tagline share one optical left
-edge and the lockup never clips an ascender or descender.
+nominal canvas, so the wordmark, the rule and the tagline share one optical left
+edge. The mark itself comes from `waterline.py`.
 """
 import hashlib
-import io
 import pathlib
 import sys
 import urllib.request
@@ -17,15 +16,13 @@ from fontTools.misc.transform import Transform
 from fontTools.pens.boundsPen import BoundsPen
 from fontTools.pens.svgPathPen import SVGPathPen
 from fontTools.pens.transformPen import TransformPen
-from fontTools.ttLib import TTFont
-from fontTools.varLib import instancer
+
+import waterline
+from waterline import SRC_FONT, UPEM, instance
 
 HERE = pathlib.Path(__file__).parent
 STATIC = (HERE / ".." / ".." / "static" / "img").resolve()
 OUT = STATIC / "brand"
-
-SRC_FONT = HERE / ".cache" / "IBMPlexSans.ttf"
-UPEM = 1000
 
 # The wordmark is set in IBM Plex Sans (SIL Open Font License 1.1). The font is
 # fetched on demand rather than vendored: the glyphs ship as baked outlines, so
@@ -131,61 +128,9 @@ RAMP = {
     "dark": ["#e15200", "#ff6b18", "#ff7629", DARK_NODE, "#ffa26b", "#ffad7c", DARK_CORE],
 }
 
-WORD_WEIGHT, WORD_TRACK = 600, -0.022
 SUB_WEIGHT, SUB_TRACK = 400, -0.012
 
-# ---------------------------------------------------------------- the mark
-
-# The confluence mark: 3 sources, 1 core, 1 sink, on a 32-unit canvas.
-# The ink occupies only part of that canvas; every layout below aligns to INK,
-# not to the canvas.
-#   left   6 - 2.4 = 3.6      right  26 + 2.9 = 28.9
-#   top    7.5 - 2.4 = 5.1    bottom 24.5 + 2.4 = 26.9
-MARK_INK = (3.6, 5.1, 28.9, 26.9)
-MARK_INK_W = MARK_INK[2] - MARK_INK[0]   # 25.3
-MARK_INK_H = MARK_INK[3] - MARK_INK[1]   # 21.8
-
-
-def mark(node, edge, core, scale=1.0, dx=0.0, dy=0.0):
-    return f"""<g transform="translate({dx:.3f} {dy:.3f}) scale({scale:.6f})">
-    <g stroke="{edge}" stroke-width="2.2" stroke-linecap="round" fill="none">
-      <path d="M7.7 9.3 L13.6 15.6"/>
-      <path d="M8.4 16 L13.6 16"/>
-      <path d="M7.7 22.7 L13.6 16.4"/>
-      <path d="M19.6 16 L23.0 16"/>
-    </g>
-    <circle cx="6" cy="7.5" r="2.4" fill="{node}"/>
-    <circle cx="6" cy="16" r="2.4" fill="{node}"/>
-    <circle cx="6" cy="24.5" r="2.4" fill="{node}"/>
-    <rect x="12.6" y="12.6" width="6.8" height="6.8" rx="1.6" fill="{core}"/>
-    <circle cx="26" cy="16" r="2.9" fill="{node}"/>
-  </g>"""
-
-
-def mark_by_ink(node, edge, core, ink_h, left, mid_y):
-    """Place the mark so its INK is `ink_h` tall, its left ink edge at `left`,
-    and its vertical ink center at `mid_y`."""
-    s = ink_h / MARK_INK_H
-    dx = left - MARK_INK[0] * s
-    dy = mid_y - (MARK_INK[1] + MARK_INK_H / 2) * s
-    return mark(node, edge, core, s, dx, dy), MARK_INK_W * s
-
-
 # ---------------------------------------------------------------- type
-
-_instances = {}
-
-
-def instance(weight):
-    if weight not in _instances:
-        f = instancer.instantiateVariableFont(
-            TTFont(SRC_FONT), {"wght": weight, "wdth": 100}, inplace=False
-        )
-        buf = io.BytesIO()
-        f.save(buf)
-        _instances[weight] = (f, buf.getvalue())
-    return _instances[weight]
-
 
 def shape(text, weight, tracking=0.0):
     """Shape `text` at upem scale, baseline at y=0, y-down.
@@ -251,54 +196,6 @@ class Run:
         return self.at(x - self.ink_left, baseline, fill)
 
 
-def metric(char, size, weight):
-    """Height of `char` above the baseline, in the same units as `size`."""
-    _, _, ink = shape(char, weight)
-    return -ink[1] * size / UPEM
-
-
-# ---------------------------------------------------------------- lockup
-
-def lockup(size, node, edge, core, word_fill, sub_fill, sub=None):
-    """Mark + 'spate' (+ optional lighter second word), laid out on ink.
-
-    Origin is (0, 0) at the top-left of the composed ink box.
-    Returns (svg_body, width, height).
-    """
-    cap = metric("S", size, WORD_WEIGHT)
-    xh = metric("x", size, WORD_WEIGHT)
-
-    word = Run("spate", size, WORD_WEIGHT, WORD_TRACK)
-    runs = [(word, word_fill, WORD_WEIGHT)]
-    if sub:
-        runs.append((Run(sub, size, SUB_WEIGHT, SUB_TRACK), sub_fill, SUB_WEIGHT))
-
-    mark_h = cap * 1.15
-    gap = cap * 0.34
-    word_gap = size * 0.24
-
-    # Vertical: the mark's ink center sits on the x-height band center, which is
-    # where a lowercase wordmark carries its visual mass.
-    baseline = 0.0
-    mark_mid = baseline - xh / 2
-
-    # Compose left to right in a temporary frame, then normalize to (0, 0).
-    body, mark_w = mark_by_ink(node, edge, core, mark_h, 0.0, mark_mid)
-    parts = [body]
-    x = mark_w + gap
-    for i, (run, fill, _) in enumerate(runs):
-        if i:
-            x += word_gap
-        parts.append(run.at_ink_left(x, baseline, fill))
-        x += run.ink_w
-
-    top = min(mark_mid - mark_h / 2, min(r.ink[1] for r, _, _ in runs))
-    bottom = max(mark_mid + mark_h / 2, max(r.ink[3] for r, _, _ in runs))
-
-    shifted = f'<g transform="translate(0 {-top:.2f})">\n' + "\n".join(parts) + "\n</g>"
-    return shifted, x, bottom - top
-
-
 def write(name, body, dest=None):
     dest = OUT if dest is None else dest
     dest.mkdir(parents=True, exist_ok=True)
@@ -306,33 +203,123 @@ def write(name, body, dest=None):
     print(f"  {(dest / name).relative_to(STATIC.parent.parent)}")
 
 
-# ---------------------------------------------------------------- assets
+# ---------------------------------------------------------------- the mark
+#
+# One artwork. The wordmark is every glyph's pieces; the icon is the `s` alone,
+# framed by `waterline.crop()`. Ink fills the pieces above the water and the
+# accent fills those below; the grayscale version fills both with ink.
 
-def gen_marks():
-    # The navbar logo ships in two grounds; docusaurus.config.ts picks between
-    # them with `logo.srcDark`.
-    for name, (n, e, c) in {
-        "logo.svg": (LIGHT_NODE, LIGHT_EDGE, LIGHT_CORE),
-        "logo-dark.svg": (DARK_NODE, DARK_NODE, DARK_CORE),
-    }.items():
-        write(
-            name,
-            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" '
-            f'fill="none" role="img" aria-label="Spate">\n{mark(n, e, c)}\n</svg>',
-            STATIC,
-        )
+WORDMARK_K = 0.1  # wordmark SVG units per upem
+WORDMARK_PAD = 0.12 * UPEM
 
-    write(
-        "favicon.svg",
-        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" '
+
+def two_tone(ground):
+    return TOKENS[ground]["ink"], TOKENS[ground]["accent"]
+
+
+def grayscale(ground):
+    return TOKENS[ground]["ink"], TOKENS[ground]["ink"]
+
+
+def pieces(aboves, belows, t, top, bottom, attr="fill"):
+    """`<path>` elements for the pieces above and below the water, mapped by `t`.
+
+    Equal `top` and `bottom` values give one path holding every piece."""
+    if top == bottom or not belows:
+        return [f'<path {attr}="{top}" d="{waterline.svg_d(aboves + belows, t)}"/>']
+    return [
+        f'<path {attr}="{top}" d="{waterline.svg_d(aboves, t)}"/>',
+        f'<path {attr}="{bottom}" d="{waterline.svg_d(belows, t)}"/>',
+    ]
+
+
+def icon_paths(art, c, top, bottom, attr="fill"):
+    """The icon's paths on the 32-unit canvas, under the crop `c`."""
+    k, dx, dy = c
+    above, below = art["pieces"][0]
+    return pieces([above], [below], Transform(k, 0, 0, k, dx, dy), top, bottom, attr)
+
+
+def finished_ink(art):
+    """Ink bounds of the cut and blunted word, in upem."""
+    bs = [piece.bounds for pair in art["pieces"] for piece in pair if piece.bounds]
+    return (min(b[0] for b in bs), min(b[1] for b in bs),
+            max(b[2] for b in bs), max(b[3] for b in bs))
+
+
+def word_paths(art, t, top, bottom):
+    aboves = [a for a, _ in art["pieces"] if a.bounds]
+    belows = [b for _, b in art["pieces"] if b.bounds]
+    return pieces(aboves, belows, t, top, bottom)
+
+
+def svg(view_box, body, size=None):
+    dims = f' width="{size[0]:.0f}" height="{size[1]:.0f}"' if size else ""
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="{view_box}"{dims} '
         'role="img" aria-label="Spate">\n'
-        f'  <rect width="32" height="32" rx="7" fill="{DARK_BASE}"/>\n'
-        f"{mark(DARK_NODE, DARK_NODE, DARK_CORE)}\n</svg>",
-        STATIC,
+        + "".join(f"  {line}\n" for line in body)
+        + "</svg>"
     )
 
-    gen_square_icon(512, "avatar.svg")
 
+def gen_marks(art, c):
+    # The icon and the wordmark ship in two grounds; docusaurus.config.ts picks
+    # between them with `logo.srcDark`.
+    for name, dest, colors in (
+        ("logo.svg", STATIC, two_tone("light")),
+        ("logo-dark.svg", STATIC, two_tone("dark")),
+        ("logo-mono.svg", OUT, grayscale("light")),
+        ("logo-mono-dark.svg", OUT, grayscale("dark")),
+    ):
+        write(name, svg("0 0 32 32", icon_paths(art, c, *colors)), dest)
+
+    # The paths keep the master's frame, the uncut word's ink plus WORDMARK_PAD
+    # on every side; the viewBox crops that frame to the finished ink.
+    x0, y0, _, _ = art["ink"]
+    k = WORDMARK_K
+    t = Transform(k, 0, 0, k, -(x0 - WORDMARK_PAD) * k, -(y0 - WORDMARK_PAD) * k)
+    fx0, fy0, fx1, fy1 = finished_ink(art)
+    vx, vy = (fx0 - x0 + WORDMARK_PAD) * k, (fy0 - y0 + WORDMARK_PAD) * k
+    w, h = (fx1 - fx0) * k, (fy1 - fy0) * k
+    for name, colors in (
+        ("wordmark.svg", two_tone("light")),
+        ("wordmark-dark.svg", two_tone("dark")),
+        ("wordmark-mono.svg", grayscale("light")),
+        ("wordmark-mono-dark.svg", grayscale("dark")),
+    ):
+        write(name, svg(f"{vx:.2f} {vy:.2f} {w:.2f} {h:.2f}", word_paths(art, t, *colors), (w, h)))
+
+    light, dark = two_tone("light"), two_tone("dark")
+    style = (
+        f"<style>.above{{fill:{light[0]}}}.below{{fill:{light[1]}}}"
+        "@media (prefers-color-scheme:dark){"
+        f".above{{fill:{dark[0]}}}.below{{fill:{dark[1]}}}}}</style>"
+    )
+    write("favicon.svg", svg("0 0 32 32", [style, *icon_paths(art, c, "above", "below", "class")]), STATIC)
+
+    gen_square_icon(art, c, 180, "apple-touch-icon.svg")
+    gen_square_icon(art, c, 512, "avatar.svg")
+
+
+def gen_square_icon(art, c, size, name):
+    # Full-bleed square, no corner radius: the platform applies its own mask
+    # (GitHub for the avatar, iOS for the touch icon).
+    body = "".join(icon_paths(art, c, *two_tone("dark")))
+    write(
+        name,
+        svg(
+            f"0 0 {size} {size}",
+            [
+                f'<rect width="{size}" height="{size}" fill="{DARK_BASE}"/>',
+                f'<g transform="scale({size / 32:g})">{body}</g>',
+            ],
+            (size, size),
+        ),
+    )
+
+
+# ---------------------------------------------------------------- assets
 
 def gen_tokens():
     """Write the palette as CSS custom properties the site maps onto Infima."""
@@ -356,83 +343,57 @@ def gen_tokens():
     write("brand.css", "\n".join(lines), STATIC.parent.parent / "src" / "css")
 
 
-def gen_square_icon(size, name):
-    # Full-bleed square, no corner radius: the platform applies its own mask
-    # (GitHub for the avatar, iOS for the touch icon). Ink fills 62% of the
-    # width, which keeps it clear of that mask.
-    ink_w = size * 0.62
-    body, _ = mark_by_ink(
-        DARK_NODE, DARK_NODE, DARK_CORE,
-        ink_w * MARK_INK_H / MARK_INK_W, (size - ink_w) / 2, size / 2,
-    )
-    write(
-        name,
-        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {size} {size}" '
-        f'width="{size}" height="{size}" role="img" aria-label="Spate">\n'
-        f'  <rect width="{size}" height="{size}" fill="{DARK_BASE}"/>\n{body}\n</svg>',
-    )
-
-
-def gen_touch_icon():
-    gen_square_icon(180, "apple-touch-icon.svg")
-
-
-def gen_lockups():
-    for name, (n, e, c, wf, sf) in {
-        "lockup-light.svg": (LIGHT_NODE, LIGHT_EDGE, LIGHT_CORE, "#16181d", "#676d74"),
-        "lockup-dark.svg": (DARK_NODE, DARK_NODE, DARK_CORE, "#f4f5f6", "#9aa1a9"),
-    }.items():
-        body, w, h = lockup(120, n, e, c, wf, sf)
-        pad = 10
-        write(
-            name,
-            '<svg xmlns="http://www.w3.org/2000/svg" '
-            f'viewBox="{-pad} {-pad} {w + 2 * pad:.2f} {h + 2 * pad:.2f}" '
-            f'width="{w + 2 * pad:.0f}" height="{h + 2 * pad:.0f}" '
-            f'role="img" aria-label="Spate">\n{body}\n</svg>',
-        )
-
-
 BANNER_W, BANNER_H = 1280, 640
 
 
-def banner(sub, tagline, filename):
-    margin = 128
-    body, lw, lh = lockup(
-        108, DARK_NODE, DARK_NODE, DARK_CORE, BANNER_TEXT, BANNER_MUTED, sub=sub
-    )
+def banner(art, sub, tagline, filename):
+    margin, size = 128, 108
+    s = size / UPEM
+    x0, y0, x1, y1 = finished_ink(art)
+    runs = [Run(sub, size, SUB_WEIGHT, SUB_TRACK)] if sub else []
+    top = min([y0 * s] + [r.ink[1] for r in runs])
+    bottom = max([y1 * s] + [r.ink[3] for r in runs])
 
     rule_h, rule_gap, tag_size, tag_gap = 3, 46, 32, 42
     tag = Run(tagline, tag_size, 400)
     tag_h = tag.ink[3] - tag.ink[1]
 
-    block_h = lh + rule_gap + rule_h + tag_gap + tag_h
-    top = (BANNER_H - block_h) / 2
+    block_h = (bottom - top) + rule_gap + rule_h + tag_gap + tag_h
+    block_top = (BANNER_H - block_h) / 2
+    baseline = block_top - top
 
-    rule_y = top + lh + rule_gap
+    ink, accent = two_tone("dark")
+    word = word_paths(art, Transform(s, 0, 0, s, margin - x0 * s, baseline), ink, accent)
+    word += [r.at_ink_left(margin + (x1 - x0) * s + size * 0.24, baseline, BANNER_MUTED) for r in runs]
+
+    rule_y = block_top + (bottom - top) + rule_gap
     tag_baseline = rule_y + rule_h + tag_gap - tag.ink[1]
 
     write(
         filename,
-        '<svg xmlns="http://www.w3.org/2000/svg" '
-        f'viewBox="0 0 {BANNER_W} {BANNER_H}" width="{BANNER_W}" '
-        f'height="{BANNER_H}" role="img" aria-label="Spate">\n'
-        f'  <rect width="{BANNER_W}" height="{BANNER_H}" fill="{DARK_BASE}"/>\n'
-        f'  <g transform="translate({margin} {top:.2f})">\n{body}\n  </g>\n'
-        f'  <rect x="{margin}" y="{rule_y:.2f}" width="64" height="{rule_h}" '
-        f'rx="1.5" fill="{DARK_NODE}"/>\n'
-        f"  {tag.at_ink_left(margin, tag_baseline, BANNER_MUTED)}\n"
-        "</svg>",
+        svg(
+            f"0 0 {BANNER_W} {BANNER_H}",
+            [
+                f'<rect width="{BANNER_W}" height="{BANNER_H}" fill="{DARK_BASE}"/>',
+                *word,
+                f'<rect x="{margin}" y="{rule_y:.2f}" width="64" height="{rule_h}" '
+                f'rx="1.5" fill="{DARK_NODE}"/>',
+                tag.at_ink_left(margin, tag_baseline, BANNER_MUTED),
+            ],
+            (BANNER_W, BANNER_H),
+        ),
     )
 
 
-def gen_banners():
+def gen_banners(art):
     banner(
+        art,
         None,
         "At-least-once streaming ETL for Rust.",
         "social-spate.svg",
     )
     banner(
+        art,
         "benchmark",
         "Streaming ETL systems on one fixed pipeline: Kafka → Avro → ClickHouse.",
         "social-benchmark.svg",
@@ -442,8 +403,7 @@ def gen_banners():
 if __name__ == "__main__":
     ensure_font()
     gen_tokens()
-    gen_marks()
-    gen_touch_icon()
-    gen_lockups()
-    gen_banners()
+    art = waterline.artwork(waterline.P)
+    gen_marks(art, waterline.crop(art))
+    gen_banners(art)
     print("done")

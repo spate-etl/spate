@@ -2,12 +2,12 @@
 
 <picture>
   <source media="(prefers-color-scheme: dark)"
-          srcset="https://raw.githubusercontent.com/spate-etl/spate/main/website/static/img/brand/lockup-dark.png">
+          srcset="https://raw.githubusercontent.com/spate-etl/spate/main/website/static/img/brand/wordmark-dark.png">
   <source media="(prefers-color-scheme: light)"
-          srcset="https://raw.githubusercontent.com/spate-etl/spate/main/website/static/img/brand/lockup-light.png">
+          srcset="https://raw.githubusercontent.com/spate-etl/spate/main/website/static/img/brand/wordmark.png">
   <img alt="spate"
-       src="https://raw.githubusercontent.com/spate-etl/spate/main/website/static/img/brand/lockup-light.png"
-       width="380">
+       src="https://raw.githubusercontent.com/spate-etl/spate/main/website/static/img/brand/wordmark.png"
+       width="300">
 </picture>
 
 **At-least-once streaming ETL for Rust.**

@@ -40,16 +40,16 @@ function Facts(): React.JSX.Element {
   );
 }
 
-/** The site's footer: the brand lockup and tagline beside the columns from `FOOTER_COLUMNS`, above the project figures. */
+/** The site's footer: the wordmark and tagline beside the columns from `FOOTER_COLUMNS`, above the project figures. */
 export default function SiteFooter(): React.JSX.Element {
-  const light = useBaseUrl('/img/brand/lockup-light.svg');
-  const dark = useBaseUrl('/img/brand/lockup-dark.svg');
+  const light = useBaseUrl('/img/brand/wordmark.svg');
+  const dark = useBaseUrl('/img/brand/wordmark-dark.svg');
   return (
     <footer className="site-footer">
       <div className="site-container site-footer__grid">
         <div className="site-footer__brand">
-          <Link to="/" className="site-footer__lockup">
-            <ThemedImage sources={{light, dark}} alt="Spate" height={30} />
+          <Link to="/" className="site-footer__wordmark">
+            <ThemedImage sources={{light, dark}} alt="Spate" height={35} />
           </Link>
           <p className="site-footer__tagline">
             /speɪt/ · a river in sudden flood. At-least-once streaming ETL for Rust.

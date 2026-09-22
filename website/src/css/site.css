@@ -35,7 +35,7 @@ html.docs-wrapper .main-wrapper > div {
 
 /* One navbar on every page: the theme's, with src/theme/Navbar/Content
  * inside it. Translucent over the top of a page, a rule beneath it once
- * scrolled. Its inner width is the site frame, so the lockup sits in the
+ * scrolled. Its inner width is the site frame, so the wordmark sits in the
  * same place on the homepage and on a docs page at any viewport. */
 .navbar {
   height: 4rem;
@@ -76,7 +76,7 @@ html.docs-wrapper .main-wrapper > div {
 }
 
 .navbar__logo {
-  height: 28px;
+  height: 35px;
 }
 
 .navbar__brand {
@@ -173,9 +173,9 @@ html.docs-wrapper .main-wrapper > div {
   gap: 0.9rem;
 }
 
-.site-footer__lockup img {
+.site-footer__wordmark img {
   display: block;
-  height: 30px;
+  height: 35px;
 }
 
 .site-footer__tagline {

@@ -4,8 +4,7 @@
 //! `rdkafka` property passthrough (`security.protocol`, `ssl.*`, `sasl.*`).
 //! There is no typed security section, which keeps `rdkafka` types out of
 //! the public API. Those properties only do anything when librdkafka was compiled
-//! with SSL/SASL support, which is the crate's off-by-default `tls` feature
-//! (see the securing-connections guide).
+//! with SSL/SASL support, which is the crate's off-by-default `tls` feature.
 //!
 //! Without the feature, librdkafka rejects a security request only when the
 //! client is created: the sink eagerly in `build()`, the source in `open()`.

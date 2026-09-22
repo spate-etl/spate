@@ -7,7 +7,10 @@
 */}
 
 The bundled librdkafka is built **without TLS/SASL by default**, so connecting
-to a secured cluster needs the opt-in **`kafka-tls`** feature. Once enabled,
+to a secured cluster needs the opt-in **`kafka-tls`** feature. The feature
+builds OpenSSL from vendored sources, which adds to the
+[toolchain requirements](../01-getting-started/01-installation.mdx#toolchain-requirements).
+Once enabled,
 every security property is set through the connector's raw `rdkafka:`
 passthrough; these keys are **not** on the denylist, and the configuration is
 identical for the Kafka source and the Kafka sink. Setting any security
@@ -62,8 +65,20 @@ rdkafka:
   ssl.ca.location: /etc/kafka/ca.pem     # for the TLS side of sasl_ssl
 ```
 
+Set `sasl.mechanism`: it defaults to `GSSAPI` (Kerberos), which the feature does
+not compile in. A client configured with `GSSAPI` fails at startup with
+`No provider for SASL mechanism GSSAPI`.
+
+`OAUTHBEARER` has no production token source: the OIDC method is not compiled
+in, and the connector registers no token-refresh callback. With the default
+method, a client never connects to a broker and raises no authentication error.
+The source fails once `startup_timeout` passes; the sink retries as it would
+through a broker outage. librdkafka's unsecured token handler
+(`enable.sasl.oauthbearer.unsecure.jwt`) does connect, and is for development
+and testing only.
+
 Keep secrets out of the file with
 [environment interpolation](../03-guides/configuring-pipelines.mdx#environment-interpolation);
-`${VAR}` is substituted before parsing. For the build rationale (why the
-feature is opt-in, and the Kerberos/GSSAPI scope) see the generic
-[Securing connections](../03-guides/securing-connections.mdx) guide.
+`${VAR}` is substituted before parsing. See
+[Securing connections](../03-guides/securing-connections.mdx) for the generic
+model.

@@ -76,7 +76,7 @@ const config: Config = {
   // the rest and the search-result thumbnails. All three come out of
   // website/tools/brand/generate.sh.
   headTags: [
-    { tagName: 'link', attributes: { rel: 'icon', href: '/favicon.ico', sizes: '32x32' } },
+    { tagName: 'link', attributes: { rel: 'icon', href: '/favicon.ico', sizes: '16x16 32x32 48x48 64x64 128x128 256x256' } },
     { tagName: 'link', attributes: { rel: 'apple-touch-icon', href: '/img/apple-touch-icon.png' } },
   ],
 
@@ -268,8 +268,8 @@ const config: Config = {
     navbar: {
       logo: {
         alt: 'Spate',
-        src: 'img/brand/lockup-light.svg',
-        srcDark: 'img/brand/lockup-dark.svg',
+        src: 'img/brand/wordmark.svg',
+        srcDark: 'img/brand/wordmark-dark.svg',
       },
       items: [
         ...NAV_ITEMS.map((item) => ({to: item.to, label: item.label, position: 'left' as const})),

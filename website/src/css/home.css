@@ -471,7 +471,7 @@
 }
 
 .pipeline__edges {
-  stroke: var(--spate-mark-edge);
+  stroke: var(--spate-diagram-edge);
   fill: none;
 }
 
@@ -489,23 +489,23 @@
 
 .pipeline__nodes circle,
 .pipeline__nodes rect {
-  fill: var(--spate-mark-node);
+  fill: var(--spate-diagram-node);
 }
 
 /* A replica set, drawn as overlapping discs the ground-coloured stroke separates. */
 .pipeline__stack circle {
-  fill: var(--spate-mark-node);
+  fill: var(--spate-diagram-node);
   stroke: var(--spate-bg);
   stroke-width: 2;
 }
 
 .pipeline__core rect {
-  fill: var(--spate-mark-core);
+  fill: var(--spate-diagram-core);
 }
 
 .pipeline__core rect.behind {
   fill: var(--spate-bg);
-  stroke: var(--spate-mark-core);
+  stroke: var(--spate-diagram-core);
   stroke-width: 1.5;
 }
 
@@ -528,13 +528,13 @@
 }
 
 .pipeline__queue rect.fill {
-  fill: var(--spate-mark-core);
+  fill: var(--spate-diagram-core);
   stroke: none;
 }
 
 .pipeline__records circle,
 .pipeline__still circle {
-  fill: var(--spate-mark-core);
+  fill: var(--spate-diagram-core);
 }
 
 /* Ordered after the record fill so a still-frame acknowledgement keeps the signal colour. */
@@ -741,11 +741,11 @@
 }
 
 .incident__node {
-  fill: var(--spate-mark-node);
+  fill: var(--spate-diagram-node);
 }
 
 .incident__rec {
-  fill: var(--spate-mark-core);
+  fill: var(--spate-diagram-core);
 }
 
 /* A record leaving the path under an error policy. */
@@ -755,7 +755,7 @@
 }
 
 .incident__path {
-  stroke: var(--spate-mark-edge);
+  stroke: var(--spate-diagram-edge);
   stroke-width: 1.25;
   fill: none;
   opacity: 0.7;
@@ -857,7 +857,7 @@
   width: 10px;
   height: 10px;
   border-radius: 50%;
-  background: var(--spate-mark-node);
+  background: var(--spate-diagram-node);
 }
 
 .home-stage__name {
@@ -875,7 +875,7 @@
   right: -0.9rem;
   width: 0.9rem;
   height: 1px;
-  background: var(--spate-mark-edge);
+  background: var(--spate-diagram-edge);
   opacity: 0.7;
 }
 

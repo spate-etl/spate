@@ -26,22 +26,35 @@ async function inkFor(page: Page, mode: ColorMode): Promise<string> {
 
 /**
  * Counts elements whose computed `color` is `hex`, reading every element so
- * the read forces the resolution it measures.
+ * the read forces the resolution it measures. An element inside a subtree that
+ * pins its own `data-theme`, such as a swatch on the brand page, takes that
+ * theme's ink by design and is not counted.
  */
 function countColor(page: Page, hex: string): Promise<number> {
   return page.evaluate((h) => {
     const rgb = `rgb(${[1, 3, 5].map((i) => Number.parseInt(h.slice(i, i + 2), 16)).join(', ')})`;
-    return Array.from(document.querySelectorAll('*')).filter((el) => getComputedStyle(el).color === rgb).length;
+    return Array.from(document.querySelectorAll('*')).filter(
+      (el) => getComputedStyle(el).color === rgb && el.closest('body [data-theme]') === null,
+    ).length;
   }, hex);
 }
 
 /**
  * Navigates to a named route and waits until the page is a reliable target
  * for an accessibility sweep. Checks the response was not silently
- * redirected to Docusaurus's (fully accessible) 404 page, that the requested
- * colour mode actually landed on `<html>` rather than whatever the storage
- * key defaulted to, that web fonts have finished loading, and that no element
- * computes the other colour mode's ink.
+ * redirected to Docusaurus's (fully accessible) 404 page, then waits on
+ * `settleColorMode`.
+ */
+export async function gotoRoute(page: Page, route: RouteName, colorMode: ColorMode): Promise<void> {
+  const response = await page.goto(ROUTES[route]);
+  expect(response?.status(), `GET ${ROUTES[route]}`).toBe(200);
+  await settleColorMode(page, colorMode);
+}
+
+/**
+ * Waits until the requested colour mode actually landed on `<html>` rather
+ * than whatever the storage key defaulted to, web fonts have finished
+ * loading, and no element computes the other colour mode's ink.
  *
  * Chromium can serve a `color` resolved before `data-theme` reached `<html>`
  * and repairs one DOM level per lifecycle update, so reading every element is
@@ -52,10 +65,7 @@ function countColor(page: Page, hex: string): Promise<number> {
  * so a green run with this poll removed means nothing until the rate has been
  * swept.
  */
-export async function gotoRoute(page: Page, route: RouteName, colorMode: ColorMode): Promise<void> {
-  const response = await page.goto(ROUTES[route]);
-  expect(response?.status(), `GET ${ROUTES[route]}`).toBe(200);
-
+export async function settleColorMode(page: Page, colorMode: ColorMode): Promise<void> {
   await expect(page.locator('html')).toHaveAttribute('data-theme', colorMode);
   await page.evaluate(() => document.fonts.ready);
 

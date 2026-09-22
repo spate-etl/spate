@@ -35,7 +35,7 @@ html.docs-wrapper .main-wrapper > div {
 
 /* One navbar on every page: the theme's, with src/theme/Navbar/Content
  * inside it. Translucent over the top of a page, a rule beneath it once
- * scrolled. Its inner width is the site frame, so the lockup sits in the
+ * scrolled. Its inner width is the site frame, so the wordmark sits in the
  * same place on the homepage and on a docs page at any viewport. */
 .navbar {
   height: 4rem;
@@ -76,7 +76,7 @@ html.docs-wrapper .main-wrapper > div {
 }
 
 .navbar__logo {
-  height: 28px;
+  height: 35px;
 }
 
 .navbar__brand {
@@ -173,9 +173,9 @@ html.docs-wrapper .main-wrapper > div {
   gap: 0.9rem;
 }
 
-.site-footer__lockup img {
+.site-footer__wordmark img {
   display: block;
-  height: 30px;
+  height: 35px;
 }
 
 .site-footer__tagline {
@@ -271,6 +271,99 @@ html.docs-wrapper .main-wrapper > div {
 @media (max-width: 560px) {
   .site-footer__facts-row {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+/* Brand page -------------------------------------------------------------- */
+
+.brand-specimens {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.brand-specimen {
+  display: flex;
+  flex: 1 1 14rem;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 0;
+  padding: 2rem 1.5rem 1.25rem;
+  border: 1px solid var(--spate-border);
+  border-radius: 8px;
+  background: var(--spate-bg);
+}
+
+.brand-specimen img {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: 100%;
+}
+
+.brand-specimen figcaption {
+  font-size: 0.85rem;
+  text-align: center;
+  color: var(--spate-muted);
+}
+
+/* Not found --------------------------------------------------------------- */
+
+/* The 404 page: the carrier art on the left, the status and the ways back on
+ * the right, stacked below 900px. */
+.not-found {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: center;
+  gap: clamp(2rem, 6vw, 6rem);
+  padding-block: clamp(3rem, 10vh, 7rem);
+}
+
+.not-found__art img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.not-found__eyebrow {
+  margin: 0 0 1rem;
+  font-family: var(--ifm-font-family-monospace);
+  font-size: 0.85rem;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--spate-accent);
+}
+
+.not-found__title {
+  margin: 0 0 1rem;
+  font-size: clamp(2.25rem, 4.4vw, 4rem);
+  font-weight: 500;
+  letter-spacing: -0.035em;
+  line-height: 1.1;
+}
+
+.not-found__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 1rem 1.75rem;
+  margin-top: 2rem;
+}
+
+.not-found__home {
+  color: var(--spate-ink);
+  font-weight: 500;
+}
+
+@media (max-width: 900px) {
+  .not-found {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .not-found__art {
+    max-width: 28rem;
   }
 }
 

@@ -18,7 +18,7 @@ const GitHubIcon = () => (
 
 /**
  * The one navbar, on the docs pages and the marketing pages alike: the
- * lockup, the primary links from src/data/nav.ts, search, the GitHub link
+ * wordmark, the primary links from src/data/nav.ts, search, the GitHub link
  * and the colour-mode toggle. The theme's layout around it keeps the
  * mobile sidebar, which is where the docs tree lives on a phone.
  *

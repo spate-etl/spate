@@ -24,7 +24,7 @@ if [[ ! -x "$venv/bin/python" ]]; then
     echo "creating venv at $venv"
     python3 -m venv "$venv"
 fi
-"$venv/bin/pip" install --quiet --disable-pip-version-check fonttools brotli uharfbuzz
+"$venv/bin/pip" install --quiet --disable-pip-version-check -r "$here/requirements.txt"
 "$venv/bin/python" "$here/brandgen.py"
 
 # --- raster ----------------------------------------------------------------
@@ -53,24 +53,37 @@ echo "rendering:"
 render "$brand/avatar.svg"           512  "$brand/avatar.png"
 render "$brand/social-spate.svg"     1280 "$brand/social-spate.png"
 render "$brand/social-benchmark.svg" 1280 "$brand/social-benchmark.png"
-render "$brand/lockup-light.svg"     880  "$brand/lockup-light.png"
-render "$brand/lockup-dark.svg"      880  "$brand/lockup-dark.png"
+render "$brand/wordmark.svg"         880  "$brand/wordmark.png"
+render "$brand/wordmark-dark.svg"    880  "$brand/wordmark-dark.png"
 render "$brand/apple-touch-icon.svg" 180  "$img/apple-touch-icon.png"
 
 oxipng --quiet --opt 4 --strip safe "${rendered[@]}"
 echo "optimized ${#rendered[@]} PNGs"
 
+# The starter deck places resvg renders of the wordmark and the carriers.
+"$venv/bin/python" "$here/slides.py"
+
 # favicon.ico at the site root, which browsers request without being told.
-# One 32px PNG inside an ICO container; every current browser reads it.
-favicon_png="$(mktemp -t favicon)"
-resvg --width 32 "$img/favicon.svg" "$favicon_png"
-oxipng --quiet --opt 4 --strip safe "$favicon_png"
-"$venv/bin/python" - "$favicon_png" "$img/../favicon.ico" <<'PY'
+# One PNG entry per size, all from the dark-ground touch icon source.
+ico_sizes=(16 32 48 64 128 256)
+ico_dir="$(mktemp -d "${TMPDIR:-/tmp}/favicon.XXXXXX")"
+ico_pngs=()
+for size in "${ico_sizes[@]}"; do
+    resvg --width "$size" "$brand/apple-touch-icon.svg" "$ico_dir/$size.png"
+    ico_pngs+=("$ico_dir/$size.png")
+done
+oxipng --quiet --opt 4 --strip safe "${ico_pngs[@]}"
+"$venv/bin/python" - "$img/../favicon.ico" "${ico_pngs[@]}" <<'PY'
 import struct, sys
-png = open(sys.argv[1], "rb").read()
-header = struct.pack("<HHH", 0, 1, 1)
-entry = struct.pack("<BBBBHHII", 32, 32, 0, 0, 1, 32, len(png), 6 + 16)
-open(sys.argv[2], "wb").write(header + entry + png)
+out, *srcs = sys.argv[1:]
+pngs = [open(src, "rb").read() for src in srcs]
+entries, offset = b"", 6 + 16 * len(pngs)
+for png in pngs:
+    w, h = struct.unpack(">II", png[16:24])
+    # A dimension of 256 is stored as 0.
+    entries += struct.pack("<BBBBHHII", w % 256, h % 256, 0, 0, 1, 32, len(png), offset)
+    offset += len(png)
+open(out, "wb").write(struct.pack("<HHH", 0, 1, len(pngs)) + entries + b"".join(pngs))
 PY
-rm -f "$favicon_png"
+rm -rf "$ico_dir"
 echo "  static/favicon.ico"

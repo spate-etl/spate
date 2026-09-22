@@ -47,7 +47,6 @@ export const FOOTER_COLUMNS: FooterColumn[] = [
       {label: 'docs.rs', href: 'https://docs.rs/spate'},
       {label: 'crates.io', href: 'https://crates.io/crates/spate'},
       {label: 'Changelog', href: `${githubUrl}/blob/main/CHANGELOG.md`},
-      {label: 'Brand', to: '/brand'},
     ],
   },
   {
@@ -57,6 +56,7 @@ export const FOOTER_COLUMNS: FooterColumn[] = [
       {label: 'Issues', href: `${githubUrl}/issues`},
       {label: 'Security policy', href: `${githubUrl}/blob/main/SECURITY.md`},
       {label: 'Code of conduct', href: `${githubUrl}/blob/main/CODE_OF_CONDUCT.md`},
+      {label: 'Brand', to: '/brand'},
       {label: 'Blog', to: '/blog/'},
       {label: 'RSS', to: 'pathname:///blog/rss.xml'},
     ],

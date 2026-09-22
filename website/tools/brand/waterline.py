@@ -6,7 +6,10 @@ the swell, is knocked out of every glyph. `artwork()` returns the pieces above
 and below the channel for each glyph; the icon is glyph 0 framed by `crop()`.
 Coordinates are upem, y down, baseline at 0.
 
-`brandgen.py` fetches and verifies the font before anything here reads it.
+`carrier()` cuts an Overpass Mono numeral with the simpler channel the
+application surfaces use: two cubics at a fixed height, with no blunting.
+
+`brandgen.py` fetches and verifies the fonts before anything here reads them.
 """
 import io
 import math
@@ -26,6 +29,7 @@ from fontTools.varLib import instancer
 
 HERE = pathlib.Path(__file__).parent
 SRC_FONT = HERE / ".cache" / "IBMPlexSans.ttf"
+MONO_FONT = HERE / ".cache" / "OverpassMono.ttf"
 UPEM = 1000
 ICON_S = 0.76 * 32  # the s's ink height on the 32-unit icon canvas; its ink is centred on (16, 16)
 
@@ -48,24 +52,27 @@ P = dict(
 _instances = {}
 
 
-def instance(weight):
-    if weight not in _instances:
-        f = instancer.instantiateVariableFont(
-            TTFont(SRC_FONT), {"wght": weight, "wdth": 100}, inplace=False
-        )
+def instance(weight, src=SRC_FONT):
+    if (src, weight) not in _instances:
+        f = TTFont(src)
+        axes = {"wght": weight}
+        if any(a.axisTag == "wdth" for a in f["fvar"].axes):
+            axes["wdth"] = 100
+        f = instancer.instantiateVariableFont(f, axes, inplace=False)
         buf = io.BytesIO()
         f.save(buf)
-        _instances[weight] = (f, buf.getvalue())
-    return _instances[weight]
+        _instances[src, weight] = (f, buf.getvalue())
+    return _instances[src, weight]
 
 
-def shape(text, weight, tracking=0.0):
-    """Shape `text` at upem scale, baseline y=0, y-down.
+def shape(text, weight, tracking=0.0, src=SRC_FONT):
+    """Shape `text` in the font's own units, baseline y=0, y-down.
 
     Returns a list of (pathops.Path, ink bounds) per glyph, in run order."""
-    font, raw = instance(weight)
+    font, raw = instance(weight, src)
+    upem = font["head"].unitsPerEm
     hbfont = hb.Font(hb.Face(raw))
-    hbfont.scale = (UPEM, UPEM)
+    hbfont.scale = (upem, upem)
     buf = hb.Buffer()
     buf.add_str(text)
     buf.guess_segment_properties()
@@ -87,7 +94,7 @@ def shape(text, weight, tracking=0.0):
         out.append((path, bpen.bounds))
         cursor += pos.x_advance
         if i != len(infos) - 1:
-            cursor += tracking * UPEM
+            cursor += tracking * upem
     return out
 
 
@@ -384,6 +391,76 @@ def crop(art):
     dx = 16 - (fx0 + fx1) / 2 * k
     dy = 16 - (fy0 + fy1) / 2 * k
     return k, dx, dy
+
+
+# ---------------------------------------------------------------- carriers
+
+CARRIER = dict(
+    weight=600,     # Overpass Mono wght
+    track=-0.055,   # em, between glyphs
+    level=0.72,     # channel centre, fraction down the fitted ink height
+    amp=0.045,      # cubic control offset, fraction of the ink height; the curve reaches 0.75 of it
+    gap=0.042,      # vertical channel thickness, fraction of the ink height ...
+    gap_min=2.0,    # ... clamped to this range, in output units
+    gap_max=20.0,
+    n=64,           # samples per cubic
+)
+
+
+def channel_centre(x, y, w, a, n):
+    """The channel's centre line across `w` at height `y`: two cubics, sampled `n` times each."""
+    segments = (
+        ((x, y), (x + .18 * w, y - a), (x + .33 * w, y - a), (x + .50 * w, y)),
+        ((x + .50 * w, y), (x + .66 * w, y + a), (x + .82 * w, y + a), (x + w, y)),
+    )
+    pts = [segments[0][0]]
+    for p0, p1, p2, p3 in segments:
+        for i in range(1, n + 1):
+            t = i / n
+            u = 1 - t
+            pts.append(tuple(u ** 3 * a0 + 3 * u * u * t * a1 + 3 * u * t * t * a2 + t ** 3 * a3
+                             for a0, a1, a2, a3 in zip(p0, p1, p2, p3)))
+    return pts
+
+
+def vertical_half_plane(pts, dy, above, far=1e5):
+    """Region on one side of the polyline shifted down by `dy`, extended flat past both ends."""
+    shifted = [(x, y + dy) for x, y in pts]
+    edge = -far if above else far
+    (xa, ya), (xb, yb) = shifted[0], shifted[-1]
+    path = pathops.Path()
+    pen = path.getPen()
+    pen.moveTo((xa - far, edge))
+    pen.lineTo((xa - far, ya))
+    for pt in shifted:
+        pen.lineTo(pt)
+    pen.lineTo((xb + far, yb))
+    pen.lineTo((xb + far, edge))
+    pen.closePath()
+    return path
+
+
+def carrier(value, box, p=CARRIER):
+    """`value` in Overpass Mono, fitted into `box` (x, y, w, h) by its ink and cut by the channel.
+
+    Returns the (above, below) pieces in the box's coordinates. The channel is
+    measured from the fitted ink, so the font's metrics never move the water."""
+    word = pathops.Path()
+    for glyph, _ in shape(value, p["weight"], p["track"], MONO_FONT):
+        word.addPath(glyph)
+    word.simplify()
+    x0, y0, x1, y1 = word.bounds
+    bx, by, bw, bh = box
+    k = min(bw / (x1 - x0), bh / (y1 - y0))
+    w, h = (x1 - x0) * k, (y1 - y0) * k
+    x, y = bx + (bw - w) / 2, by + (bh - h) / 2
+    placed = pathops.Path()
+    word.draw(TransformPen(placed.getPen(), Transform(k, 0, 0, k, x - x0 * k, y - y0 * k)))
+    gap = min(max(p["gap"] * h, p["gap_min"]), p["gap_max"])
+    centre = channel_centre(x, y + p["level"] * h, w, p["amp"] * h, p["n"])
+    above = pathops.op(placed, vertical_half_plane(centre, -gap / 2, True), pathops.PathOp.INTERSECTION)
+    below = pathops.op(placed, vertical_half_plane(centre, +gap / 2, False), pathops.PathOp.INTERSECTION)
+    return above, below
 
 
 # ---------------------------------------------------------------- output

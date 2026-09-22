@@ -40,15 +40,18 @@ routes it visits and no graphic pair anywhere.
 ## Typeface
 
 The wordmark is IBM Plex Sans, SemiBold at −0.022 em for `spate` and Regular at
-−0.012 em for a second word. Glyphs are shaped with HarfBuzz and baked to
+−0.012 em for a second word. The large numerals, or carriers, on the social card
+are Overpass Mono SemiBold at −0.055 em, cut by a channel of two cubics at 0.72
+of their ink height, with no blunting. Glyphs are shaped with HarfBuzz and baked to
 outlines, so no asset carries a font dependency and the repository never
 redistributes font software. The site sets its text in the same family and its
 code in Overpass Mono, served from the `@fontsource/ibm-plex-sans` and
 `@fontsource-variable/overpass-mono` packages (SIL Open Font License 1.1) at
 build time; those files are a dependency, not part of the repository.
 
-`brandgen.py` pins the upstream file by SHA-256. A digest mismatch stops the
-run, since the wordmark would otherwise be re-cut from a different source.
+`brandgen.py` fetches both upstream files from `google/fonts` and pins each by
+SHA-256. A digest mismatch stops the run, since the artwork would otherwise be
+re-cut from a different source.
 
 ## What goes where
 

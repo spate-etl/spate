@@ -18,42 +18,51 @@ from fontTools.pens.svgPathPen import SVGPathPen
 from fontTools.pens.transformPen import TransformPen
 
 import waterline
-from waterline import SRC_FONT, UPEM, instance
+from waterline import MONO_FONT, SRC_FONT, UPEM, instance
 
 HERE = pathlib.Path(__file__).parent
 STATIC = (HERE / ".." / ".." / "static" / "img").resolve()
 OUT = STATIC / "brand"
 
-# The wordmark is set in IBM Plex Sans (SIL Open Font License 1.1). The font is
-# fetched on demand rather than vendored: the glyphs ship as baked outlines, so
-# the repository never redistributes font software and the license surface is
-# unchanged. Pinned by digest. A mismatch means the upstream file moved, and
-# the wordmark is re-cut deliberately.
-FONT_URL = (
-    "https://github.com/google/fonts/raw/main/ofl/ibmplexsans/"
-    "IBMPlexSans%5Bwdth,wght%5D.ttf"
-)
-FONT_SHA256 = "3b031aa4216174205bd8471f88a49b91f093169e9e87bd5262242bc5967fe2e3"
+# The wordmark is set in IBM Plex Sans and the carriers in Overpass Mono (both
+# SIL Open Font License 1.1). The fonts are fetched on demand rather than
+# vendored: the glyphs ship as baked outlines, so the repository never
+# redistributes font software and the license surface is unchanged. Pinned by
+# digest. A mismatch means the upstream file moved, and the artwork is re-cut
+# deliberately.
+FONTS = {
+    SRC_FONT: (
+        "https://github.com/google/fonts/raw/main/ofl/ibmplexsans/"
+        "IBMPlexSans%5Bwdth,wght%5D.ttf",
+        "3b031aa4216174205bd8471f88a49b91f093169e9e87bd5262242bc5967fe2e3",
+    ),
+    MONO_FONT: (
+        "https://github.com/google/fonts/raw/main/ofl/overpassmono/"
+        "OverpassMono%5Bwght%5D.ttf",
+        "49f230e10251608f0ae1a2ce46be768d7b9ddcbe5cdca2e9f6b762fcbce1ae4f",
+    ),
+}
 
 
-def ensure_font():
-    if SRC_FONT.exists():
-        digest = hashlib.sha256(SRC_FONT.read_bytes()).hexdigest()
-        if digest == FONT_SHA256:
-            return
-        print(f"cached font digest mismatch, refetching ({digest[:12]}…)")
+def ensure_fonts():
+    for path, (url, sha256) in FONTS.items():
+        if path.exists():
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            if digest == sha256:
+                continue
+            print(f"cached font digest mismatch, refetching ({digest[:12]}…)")
 
-    print(f"fetching {FONT_URL}")
-    SRC_FONT.parent.mkdir(parents=True, exist_ok=True)
-    with urllib.request.urlopen(FONT_URL) as r:  # noqa: S310 - pinned https URL
-        blob = r.read()
+        print(f"fetching {url}")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with urllib.request.urlopen(url) as r:  # noqa: S310 - pinned https URL
+            blob = r.read()
 
-    digest = hashlib.sha256(blob).hexdigest()
-    if digest != FONT_SHA256:
-        sys.exit(
-            f"font digest mismatch\n  expected {FONT_SHA256}\n  got      {digest}"
-        )
-    SRC_FONT.write_bytes(blob)
+        digest = hashlib.sha256(blob).hexdigest()
+        if digest != sha256:
+            sys.exit(
+                f"font digest mismatch for {path.name}\n  expected {sha256}\n  got      {digest}"
+            )
+        path.write_bytes(blob)
 
 # ---------------------------------------------------------------- palette
 #
@@ -132,15 +141,17 @@ SUB_WEIGHT, SUB_TRACK = 400, -0.012
 
 # ---------------------------------------------------------------- type
 
-def shape(text, weight, tracking=0.0):
-    """Shape `text` at upem scale, baseline at y=0, y-down.
+def shape(text, weight, tracking=0.0, src=SRC_FONT):
+    """Shape `text` in the font's own units, baseline at y=0, y-down.
 
-    Returns (path_d, advance, ink_bounds). `ink_bounds` is (x0, y0, x1, y1) with
-    y0 above the baseline (negative). `tracking` is in em, between glyphs only.
+    Returns (path_d, advance, ink_bounds, upem). `ink_bounds` is (x0, y0, x1, y1)
+    with y0 above the baseline (negative). `tracking` is in em, between glyphs
+    only.
     """
-    font, raw = instance(weight)
+    font, raw = instance(weight, src)
+    upem = font["head"].unitsPerEm
     hbfont = hb.Font(hb.Face(raw))
-    hbfont.scale = (UPEM, UPEM)
+    hbfont.scale = (upem, upem)
 
     buf = hb.Buffer()
     buf.add_str(text)
@@ -160,17 +171,17 @@ def shape(text, weight, tracking=0.0):
         glyphset[name].draw(TransformPen(bpen, t))
         cursor += pos.x_advance
         if i != len(infos) - 1:
-            cursor += tracking * UPEM
+            cursor += tracking * upem
 
-    return spen.getCommands(), cursor, bpen.bounds
+    return spen.getCommands(), cursor, bpen.bounds, upem
 
 
 class Run:
     """A shaped run of text, measured, ready to place at a baseline origin."""
 
-    def __init__(self, text, size, weight, tracking=0.0):
-        d, adv, ink = shape(text, weight, tracking)
-        k = size / UPEM
+    def __init__(self, text, size, weight, tracking=0.0, src=SRC_FONT):
+        d, adv, ink, upem = shape(text, weight, tracking, src)
+        k = size / upem
         self.d = d
         self.k = k
         self.advance = adv * k
@@ -385,25 +396,46 @@ def banner(art, sub, tagline, filename):
     )
 
 
-def gen_banners(art):
-    banner(
-        art,
-        None,
-        "At-least-once streaming ETL for Rust.",
-        "social-spate.svg",
+def gen_social_card(art):
+    """The site's Open Graph card on the dark ground, carrying the `04` of the
+    four stages. The layout is drawn for 1200×630; at 1280×640, items anchored
+    to the right move by the extra width and the bottom row by the extra height."""
+    c = TOKENS["dark"]
+    dx, dy = BANNER_W - 1200, BANNER_H - 630
+    margin = 64
+    fx0, fy0, fx1, _ = finished_ink(art)
+    s = 142 / (fx1 - fx0)
+    body = [f'<rect width="{BANNER_W}" height="{BANNER_H}" fill="{c["bg"]}"/>']
+    body += word_paths(art, Transform(s, 0, 0, s, margin - fx0 * s, 48 - fy0 * s), c["ink"], c["accent"])
+    body += [
+        Run("RUST / STREAMING ETL", 17, 500, src=MONO_FONT).at(64, 182, c["accent"]),
+        Run("One pipeline.", 74, 500, -0.035).at(60, 273, c["ink"]),
+        Run("Four stages.", 74, 500, -0.035).at(60, 351, c["ink"]),
+        Run("At-least-once delivery.", 29, 400).at(64, 421, c["muted"]),
+    ]
+    above, below = waterline.carrier("04", (744 + dx, 158, 392, 303))
+    body += pieces([above], [below], Transform(), c["ink"], c["accent"])
+    body.append(
+        f'<rect x="{margin}" y="{510 + dy}" width="{BANNER_W - 2 * margin}" height="1" fill="{c["border"]}"/>'
     )
+    col = 232
+    for i, stage in enumerate(["Extract", "Transform", "Load", "Observe"]):
+        body.append(Run(f"0{i + 1}", 13, 500, src=MONO_FONT).at(64 + i * col, 562 + dy, c["accent"]))
+        body.append(Run(stage, 20, 400).at(94 + i * col, 562 + dy, c["ink"]))
+    body.append(Run("spate.kainth.dev", 14, 400, src=MONO_FONT).at(939 + dx, 606 + dy, c["muted"]))
+    write("social-spate.svg", svg(f"0 0 {BANNER_W} {BANNER_H}", body, (BANNER_W, BANNER_H)))
+
+
+if __name__ == "__main__":
+    ensure_fonts()
+    gen_tokens()
+    art = waterline.artwork(waterline.P)
+    gen_marks(art, waterline.crop(art))
+    gen_social_card(art)
     banner(
         art,
         "benchmark",
         "Streaming ETL systems on one fixed pipeline: Kafka → Avro → ClickHouse.",
         "social-benchmark.svg",
     )
-
-
-if __name__ == "__main__":
-    ensure_font()
-    gen_tokens()
-    art = waterline.artwork(waterline.P)
-    gen_marks(art, waterline.crop(art))
-    gen_banners(art)
     print("done")

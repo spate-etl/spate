@@ -24,7 +24,7 @@ if [[ ! -x "$venv/bin/python" ]]; then
     echo "creating venv at $venv"
     python3 -m venv "$venv"
 fi
-"$venv/bin/pip" install --quiet --disable-pip-version-check fonttools brotli uharfbuzz
+"$venv/bin/pip" install --quiet --disable-pip-version-check -r "$here/requirements.txt"
 "$venv/bin/python" "$here/brandgen.py"
 
 # --- raster ----------------------------------------------------------------

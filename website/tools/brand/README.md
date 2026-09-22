@@ -12,7 +12,8 @@ Everything in `website/static/img/brand/`, plus `logo.svg`, `logo-dark.svg`,
 ./website/tools/brand/generate.sh
 ```
 
-The script creates its own virtualenv, fetches the typeface, writes the SVG
+The script creates its own virtualenv, installs the versions pinned in
+[`requirements.txt`](requirements.txt), fetches the typeface, writes the SVG
 sources, then rasterises the PNGs. It needs `python3`, plus `resvg` and `oxipng`
 for the raster step (`brew install resvg oxipng`). Without those it writes the
 SVGs, names what it could not refresh, and exits non-zero.

@@ -177,9 +177,7 @@ And the framework itself:
 | [`spate-test`](https://crates.io/crates/spate-test) | In-memory sources and sinks with scripting handles; test your pipelines without infrastructure. |
 
 Each connector feature turns on one crate. Finer knobs are separate features,
-listed with what they pull in on [docs.rs](https://docs.rs/spate): a SIMD JSON
-backend, TLS and SASL for Kafka, `chrono`/`time`/`uuid`/`rust_decimal` column
-types for ClickHouse, a NATS JetStream store for coordination. Writing your
+listed with what they pull in on [docs.rs](https://docs.rs/spate). Writing your
 own connector is a supported path, not a fork: see
 [`custom_source_sink`](crates/spate/examples/custom_source_sink.rs).
 

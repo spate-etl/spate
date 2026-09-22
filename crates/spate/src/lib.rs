@@ -10,6 +10,7 @@
 //! | Feature | Enables |
 //! |---|---|
 //! | `kafka` | [`kafka`] — Kafka source built on `rdkafka` (single consumer, partition-queue lanes) |
+//! | `kafka-tls` | TLS, mTLS and SASL for [`kafka`]; librdkafka is built with a vendored OpenSSL, and GSSAPI/Kerberos is not compiled in. Not part of `full`, and without it a security property in the `rdkafka` passthrough fails config validation |
 //! | `s3` | [`s3`] — coordinated bounded object-storage (S3) backfill source: the fleet's leader plans the prefix into splits, workers lease them through an injected coordinator (solo in-process by default; progress is ephemeral without a durable store), and the job self-terminates once the plan is final and every split completes (`refresh_listing` keeps it open) |
 //! | `clickhouse` | [`clickhouse`] — ClickHouse sink (RowBinary, dedup tokens, replica rotation) |
 //! | `clickhouse-uuid` | `uuid::Uuid` fields for `UUID` columns (`clickhouse::serde::uuid`) |
@@ -19,6 +20,7 @@
 //! | `avro` | [`avro`] — Avro deserialization (Confluent wire format, schema registry) |
 //! | `json` | [`json`] — JSON deserialization (single-document, NDJSON, top-level array) |
 //! | `json-float-roundtrip`, `json-arbitrary-precision`, `json-raw-value` | Opt-in `serde_json` fidelity knobs for [`json`]. Not part of `full` — `arbitrary-precision` is crate-wide |
+//! | `json-simd` | SIMD decode backend for [`json`] (`simd-json` replacing `serde_json`). Not part of `full`; the fidelity knobs above do not apply under it |
 //! | `coordination` | [`coordination`] backend — multi-instance leader-assigned work distribution for broker-less sources: the protocol, `StoreCoordinator`, and the in-memory store (zero-infrastructure embedding). The seam types and the `CoordinationDriver` live in `spate::coordination` without any feature |
 //! | `coordination-nats` | The production NATS JetStream KV store (server >= 2.11) on top of [`coordination`]; pulls the async-nats dependency tree |
 //! | `datagen` | [`datagen`] — synthetic storefront-event source (orders, payments, refunds) for a pipeline that needs no broker, bucket or coordination store. A demo and test source: it keeps no durable progress, and is not part of `full` |

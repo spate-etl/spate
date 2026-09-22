@@ -29,6 +29,8 @@ cargo run -p spate --example custom_metrics
 cargo run -p spate --example instrumented_operator
 ```
 
+<SectionCarrier heading="what-you-get-for-free" />
+
 ## What you get for free
 
 Every stage is pre-instrumented by the engine, not by the connector. A source's
@@ -39,6 +41,8 @@ writes; the checkpointer owns commit and watermark metrics. A hand-rolled
 into a pipeline. So the question is never "how do I emit
 `spate_sink_records_total`", since the framework does, but "what does my
 connector know that the framework can't measure from the outside?"
+
+<SectionCarrier heading="feeding-a-framework-handle" />
 
 ## Feeding a framework handle
 
@@ -111,6 +115,8 @@ by the sink worker and circuit breaker from the results your `ShardWriter`
 returns. You report them by returning the right outcome, not by touching a
 metrics handle. See [Custom sinks](custom-sink.mdx).
 
+<SectionCarrier heading="labeling-your-component" />
+
 ## Labeling your component
 
 Every framework series carries three standard labels (`pipeline`, `component`,
@@ -129,6 +135,8 @@ assembly. The ones you set as a connector author are on the sink builder:
 [Custom sinks](custom-sink.mdx) is the reference for both, and this page doesn't
 repeat the plumbing. Pick a stable, low-cardinality
 `component_type` and give replicas human-meaningful names.
+
+<SectionCarrier heading="owning-a-metric-family" />
 
 ## Owning a metric family
 
@@ -200,6 +208,8 @@ each series by name, label set and value. That is the assertion worth copying,
 and the one [Testing](#testing) below is about. It renders through the handle
 rather than scraping an endpoint, so it needs no admin server.
 
+<SectionCarrier heading="dropping-to-the-raw-facade" />
+
 ## Dropping to the raw facade
 
 If you need a metric **outside** the governed `spate_` namespace, mirroring a
@@ -217,6 +227,8 @@ typed into the macro.
 [Monitoring § The hot-path discipline](../05-deployment/monitoring.mdx#the-hot-path-discipline)
 states those rules in full. Prefer the `Meter` above unless you
 want to live outside the `spate_` taxonomy.
+
+<SectionCarrier heading="contracts" />
 
 ## Contracts
 
@@ -263,6 +275,8 @@ first or your handles record into the void. See
 [Monitoring](../05-deployment/monitoring.mdx).
 :::
 
+<SectionCarrier heading="testing" />
+
 ## Testing
 
 Assert your instrumentation the way the framework tests its own: build a
@@ -281,6 +295,8 @@ one process, so two tests building the same handle with the same labels have the
 second one become a shadow, whose counters still sum but whose gauges publish
 nothing, so the assertion fails somewhere unrelated to the change that broke
 it. Distinct labels per test avoid the collision entirely.
+
+<SectionCarrier heading="from-a-built-in-source-or-sink" />
 
 ## From a built-in source or sink
 

@@ -388,6 +388,17 @@ article:has(.carrier) {
   margin-bottom: 24px;
 }
 
+.section-carrier {
+  width: 76px;
+  margin-top: 2.5rem;
+}
+
+/* A link to the heading scrolls its carrier into view with it. */
+.markdown > .section-carrier + h2 {
+  margin-top: 24px;
+  scroll-margin-top: calc(var(--ifm-navbar-height) + 0.5rem + 76px * 166 / 181 + 24px);
+}
+
 @container (min-width: 640px) {
   .page-carrier {
     float: right;
@@ -399,6 +410,27 @@ article:has(.carrier) {
    * table beside a float is narrowed and clips its content. */
   .page-carrier + .markdown > :not(header, p) {
     clear: right;
+  }
+
+  /* The heading is pulled up beside the carrier and centred on it. A float
+   * would sit below the heading by whatever margin the preceding element
+   * carries. */
+  .markdown {
+    --section-carrier-height: calc(125px * 166 / 181);
+  }
+
+  .section-carrier {
+    width: 125px;
+  }
+
+  /* Block-level `align-content`: a grid or flex heading would split its
+   * inline code and hash link into separate items. */
+  .markdown > .section-carrier + h2 {
+    align-content: center;
+    min-height: var(--section-carrier-height);
+    margin-top: calc(-1 * var(--section-carrier-height));
+    padding-left: 170px;
+    scroll-margin-top: calc(var(--ifm-navbar-height) + 0.5rem);
   }
 }
 

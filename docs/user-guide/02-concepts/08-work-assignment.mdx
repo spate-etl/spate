@@ -64,6 +64,8 @@ the next, which assumes the member count does not change in between; a
 worker that joins between the two leaves work stranded in a skew that never
 self-corrects. Having no rounds means there is nothing to fall between.
 
+<SectionCarrier heading="contract" />
+
 ## Contract
 
 **A worker may assume:**
@@ -99,6 +101,8 @@ linearizability only at the per-split commit; centralizing the *assignment*
 does not weaken that argument, because the assignment carries no
 correctness.
 
+<SectionCarrier heading="invariants" />
+
 ## Invariants
 
 Each is enforced by a property test in
@@ -126,6 +130,8 @@ page.
 The improving-move pass is bounded by `MAX_IMPROVING_MOVES` as a termination
 backstop. If that bound ever binds, the assignment stops being locally
 optimal, and invariant 4's test is what says so.
+
+<SectionCarrier heading="balance-objective" />
 
 ## Balance objective
 
@@ -167,6 +173,8 @@ is the condition under which the move reduces the sum of squared loads.
 Every accepted move strictly improves that potential, so the pass converges
 and cannot oscillate.
 
+<SectionCarrier heading="rebalance-delay" />
+
 ## Rebalance delay
 
 When an instance's presence key expires, its splits are **withheld** rather
@@ -187,6 +195,8 @@ A delay knob whose zero flows through the general path as another
 value is how "reassign at once" silently becomes "withhold indefinitely".
 Enforced by
 `a_zero_rebalance_delay_reassigns_immediately`.
+
+<SectionCarrier heading="revocation" />
 
 ## Revocation
 
@@ -257,6 +267,8 @@ minutes. The only floor is `op_timeout`: a deadline below one store
 round-trip would force every revocation before its final commit could
 land.
 
+<SectionCarrier heading="failure-behavior" />
+
 ## Failure behavior
 
 | Failure | Consequence |
@@ -267,6 +279,8 @@ land.
 | Assignment write lost | The worker keeps its previous assignment. The leader republishes on its next step. |
 | Source refuses to drain | Forced revocation as soon as the decline lands, or after `drain_deadline` if it never does; bounded replay. If the revocation was cancelled first, the refusal costs nothing — the split was staying anyway. |
 | Drain wedges after its revocation was cancelled | Released after `drain_deadline` with no commit landing, then re-claimed by the same worker with a fresh lane; bounded replay. Without this the split would be owned and unread. |
+
+<SectionCarrier heading="what-this-is-not" />
 
 ## What this is not
 
@@ -279,6 +293,8 @@ land.
   cannot take a split from a peer.
   [ADR-0038](../../adr/0038-leader-computed-sticky-assignment.md) records
   why, superseding [ADR-0023](../../adr/0023-dynamic-work-stealing-coordination.md).
+
+<SectionCarrier heading="where-this-lives-in-the-code" />
 
 ## Where this lives in the code
 

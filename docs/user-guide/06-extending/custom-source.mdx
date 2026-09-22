@@ -31,6 +31,8 @@ cargo run -p spate --example custom_source_sink
 
 The coordination section at the end draws on a second example, named there.
 
+<SectionCarrier heading="the-data-plane-sourcelane-and-payloadbatch" />
+
 ## The data plane: `SourceLane` and `PayloadBatch`
 
 A lane polls up to `max_records` payloads, waiting at most `timeout`:
@@ -65,6 +67,8 @@ all sharing the batch lifetime:
 `RawPayload.key` feeds the sink's shard routing hash. Populate it if your
 source has message keys.
 
+<SectionCarrier heading="the-control-plane-source" />
+
 ## The control plane: `Source`
 
 The control plane owns whatever the lanes are built from, and the `Source` impl
@@ -97,6 +101,8 @@ them wherever your source resumes from instead.
   and restart fetching for specific lanes. Sources that can't pause rely on
   bounded-queue pushback alone, but a pausable source keeps memory flat
   under sink pressure.
+
+<SectionCarrier heading="framing-turning-bytes-into-records" />
 
 ## Framing: turning bytes into records
 
@@ -152,6 +158,8 @@ model. Columnar, footer-indexed formats (Parquet/ORC/Arrow) have no
 per-record byte boundary and belong to a future record-batch reader source,
 not a framer.
 
+<SectionCarrier heading="epochs-and-rebalances" />
+
 ## Epochs and rebalances
 
 Assignment changes are where at-least-once is won or lost:
@@ -194,6 +202,8 @@ revocation, where the runtime guarantees the pipeline threads are draining
 toward it.
 :::
 
+<SectionCarrier heading="testing" />
+
 ## Testing
 
 Drive your source without a full pipeline: construct a `Checkpointer`, call
@@ -206,6 +216,8 @@ exactly this with the memory source, and
 `pipeline.sink(...)?.chains(...).run(source)`. The source stays a terminal
 generic, so no registration is needed
 ([Assembling a pipeline](../03-guides/assembling-a-pipeline.mdx)).
+
+<SectionCarrier heading="coordination-aware-sources" />
 
 ## Coordination-aware sources
 

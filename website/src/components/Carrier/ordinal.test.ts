@@ -7,7 +7,7 @@ import path from 'node:path';
 import {test} from 'node:test';
 import {fileURLToPath} from 'node:url';
 
-import {numeral, pageOrdinal} from './ordinal.ts';
+import {numeral, pageOrdinal, sectionOrdinal} from './ordinal.ts';
 
 const WEBSITE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 
@@ -17,6 +17,27 @@ test('a page ordinal comes from a user-guide number prefix', () => {
   assert.equal(pageOrdinal({id: 'user-guide/guides/graceful-shutdown'}), null);
   assert.equal(pageOrdinal({id: 'adr/at-least-once-delivery', sidebarPosition: 2}), null);
   assert.equal(pageOrdinal({id: 'workload'}), null);
+});
+
+const TOC = [
+  {id: 'the-model', level: 2},
+  {id: 'splits', level: 3},
+  {id: 'contract', level: 2},
+  {id: 'revocation', level: 2},
+];
+
+/** A section's place counts the page's H2s only, so it matches its table-of-contents position. */
+test('a section ordinal is the place among H2s', () => {
+  assert.equal(sectionOrdinal(TOC, 'the-model', false), 1);
+  assert.equal(sectionOrdinal(TOC, 'revocation', false), 3);
+  assert.equal(sectionOrdinal(TOC, 'contract', true), 2);
+});
+
+/** A stale id, an H3, or a first section under a header carrier fails the build instead of rendering. */
+test('a section carrier the rules do not allow throws', () => {
+  assert.throws(() => sectionOrdinal(TOC, 'renamed', false), /no H2 with id "renamed"/);
+  assert.throws(() => sectionOrdinal(TOC, 'splits', false), /no H2 with id "splits"/);
+  assert.throws(() => sectionOrdinal(TOC, 'the-model', true), /first section/);
 });
 
 /** A numeral names an image, so one short of two digits would miss it. */

@@ -28,6 +28,8 @@ The rest of this page is about the coordinated case: what a fleet does, what it
 costs, and how it fails. The store itself is a connector with its own page,
 where requirements, provisioning, and outage behavior live.
 
+<SectionCarrier heading="deploying-the-fleet" />
+
 ## Deploying the fleet
 
 The coordinator is assembly wiring; there is no `coordination:` YAML on the
@@ -47,6 +49,8 @@ Deployment carries a narrow set of guarantees:
   finds a record it cannot read as this build's schema exits fatally. The
   remedy is a fresh job name, which leaves the committed per-split progress
   behind and re-runs a bounded job from the beginning.
+
+<SectionCarrier heading="kubernetes" />
 
 ## Kubernetes
 
@@ -170,6 +174,8 @@ Stickiness keeps this rare. Replayed duplicates among live workers come
 only from forced revocations; crash takeover (lease expiry) remains the
 irreducible at-least-once replay.
 
+<SectionCarrier heading="tuning" />
+
 ## Tuning
 
 | Knob | Default | Description |
@@ -189,6 +195,8 @@ useful quanta of work. For most sources that is the planner's design rather
 than a knob; a source whose input sizes vary widely may expose a target, in
 which case its own page documents it.
 
+<SectionCarrier heading="failure-modes" />
+
 ## Failure modes
 
 | Failure | What happens |
@@ -202,6 +210,8 @@ which case its own page documents it.
 | Scale-up | The leader folds the new replicas into the next assignment and moves splits toward weight balance. Each move is a cooperative revocation — the losing worker drains and commits before releasing, so it replays nothing; a drain that is declined or outruns `drain_deadline` is forced instead, at a cost of up to one commit interval of duplicates. See [rebalance cost](#what-a-rebalance-costs). |
 | Config divergence | A worker whose planner fingerprint differs is rejected at startup with both fingerprints in the message. |
 | Duplicate `instance_id` | Two live twins would ping-pong reclaims forever; the protocol detects the foreign process on the shared id and stops with a fatal, actionable error. |
+
+<SectionCarrier heading="observability" />
 
 ## Observability
 

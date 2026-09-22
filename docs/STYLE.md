@@ -377,6 +377,13 @@ Everywhere:
   name: one or two sentences of 50 to 160 characters, opening with the
   subject, in the page's own vocabulary. Review holds the length and the
   absence of `title:`.
+- **Ordinals come from the page's structure.** A user-guide page with an `NN-`
+  filename prefix shows that number beside its title. A long page marks a major
+  H2 with `<SectionCarrier heading="<id>" />` on its own line directly above
+  the heading, and shows the H2's place among the page's H2s. The build fails
+  when the id names no H2, or names the first H2 on a page that already shows
+  a title ordinal. The carrier rules on the site's brand page decide where one
+  belongs.
 - **Internal links are relative and extension-qualified** (`../foo/bar.mdx`).
   `onBrokenLinks: 'throw'` fails the build on a stale link, so `cargo xtask docs` is
   the correctness gate for any move or rename.

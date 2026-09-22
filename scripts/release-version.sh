@@ -494,14 +494,12 @@ FIXTURE
     # same fence, and a trailing comment that has to survive byte-for-byte.
     cat >"$scratch/snippet.in" <<'FIXTURE'
 spate = { version = "0.2", features = ["kafka", "clickhouse", "avro"] }
-spate = { version = "0.2", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 spate-test = "0.2"
 spate = { version = "0.2", features = ["kafka-tls"] }   # implies "kafka"
 FIXTURE
     cat >"$scratch/snippet.want" <<'FIXTURE'
 spate = { version = "0.3", features = ["kafka", "clickhouse", "avro"] }
-spate = { version = "0.3", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 spate-test = "0.3"
 spate = { version = "0.3", features = ["kafka-tls"] }   # implies "kafka"
@@ -541,7 +539,6 @@ FIXTURE
     done <<'TABLE'
 # --- the real snippets ---
 spate = { version = "0.2", features = ["kafka", "clickhouse", "avro"] }|rewritable
-spate = { version = "0.2", features = ["full"] }|rewritable
 spate-test = "0.2"|rewritable
 spate = { version = "0.2", features = ["kafka-tls"] }   # implies "kafka"|rewritable
 spate-object-store = "0.2"|rewritable

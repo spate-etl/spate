@@ -19,8 +19,8 @@ type; the rows that follow are positional, so the row struct's field order is
 the wire contract. `OrderRow` below is the row; the two types above it are what
 the chain decodes and totals into it. All three come from
 [`kafka_avro_to_clickhouse.rs`](repo:crates/spate/examples/kafka_avro_to_clickhouse.rs),
-a complete program that builds under the `full` facade feature, as does the
-wiring further down:
+a complete program that builds under the `kafka`, `clickhouse` and `avro`
+features, as does the wiring further down:
 
 ```rust file=crates/spate/examples/kafka_avro_to_clickhouse.rs region=record
 ```

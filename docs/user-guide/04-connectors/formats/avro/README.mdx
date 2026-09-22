@@ -18,10 +18,10 @@ I/O runtime handle (the registry fetcher lives there):
 
 That is from
 [`kafka_avro_to_clickhouse.rs`](repo:crates/spate/examples/kafka_avro_to_clickhouse.rs),
-a complete program that builds under the `full` facade feature. The
-`deserializer:` section is optional in the framework's config, so the factory
-takes the unwrapped section, and a pipeline whose source emits ready-made
-records configures none.
+a complete program that builds under the `kafka`, `clickhouse` and `avro`
+features. The `deserializer:` section is optional in the framework's config,
+so the factory takes the unwrapped section, and a pipeline whose source emits
+ready-made records configures none.
 
 ## Configuration
 

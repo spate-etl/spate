@@ -89,7 +89,8 @@ cargo nextest run --profile docker -p spate --all-features --locked \
 ```
 
 `--all-features` turns on `spate-kafka/tls`, which compiles OpenSSL from source.
-Drop it when you are not touching the TLS surface.
+When you are not touching the TLS surface, replace it with the features the
+`e2e_examples` stanza in `crates/spate/Cargo.toml` requires.
 
 **On macOS every freshly linked binary stalls for tens of seconds at 0% CPU on
 its first exec** while Gatekeeper scans it. Across this workspace that alone

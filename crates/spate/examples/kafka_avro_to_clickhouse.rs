@@ -44,7 +44,7 @@
 //! ```
 //!
 //! ```sh
-//! cargo run --release -p spate --example kafka_avro_to_clickhouse --features full
+//! cargo run --release -p spate --example kafka_avro_to_clickhouse --features kafka,clickhouse,avro
 //! ```
 //!
 //! SIGTERM drains gracefully: lanes stop, chains flush, sink batches

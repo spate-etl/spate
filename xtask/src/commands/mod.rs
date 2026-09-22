@@ -539,8 +539,6 @@ fn hack(root: &Path, explain: bool) -> Outcome {
                     "--workspace",
                     "--each-feature",
                     "--no-dev-deps",
-                    "--exclude-features",
-                    "full",
                     "--exclude",
                     "spate-xtask",
                     "--exclude",

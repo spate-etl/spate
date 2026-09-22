@@ -10,10 +10,9 @@ assembled, run and measured with no broker, bucket or coordination store behind
 it. **It keeps no durable progress**, since every run regenerates its stream
 from the beginning, which makes it reproducible and not resumable. It is a demo
 and test source, and a pipeline that depends on it for delivery is depending on
-something that replays in full after any restart. It is not part of the `full`
-feature; the reasoning is in
-[ADR-0042](../../../../adr/0042-first-party-load-generator-source.md), which
-also records why it ships one named dataset rather than a schema language.
+something that replays in full after any restart.
+[ADR-0042](../../../../adr/0042-first-party-load-generator-source.md) records
+why it ships one named dataset rather than a schema language.
 
 Construct it from the pipeline's opaque section:
 

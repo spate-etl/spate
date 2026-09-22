@@ -417,7 +417,7 @@ fn topic_count(brokers: &str, topic: &str) -> usize {
 
 // ── Kafka + schema registry + ClickHouse ───────────────────────────────────
 
-/// The three `full`-feature examples that read Kafka and write ClickHouse.
+/// The three examples that read Kafka and write ClickHouse.
 /// One container set drives all three; they use disjoint topics and tables.
 #[test]
 #[ignore = "requires Docker"]

@@ -60,7 +60,7 @@ single-sink wiring, N times. The whole program is
 [`multi_table_split.rs`](repo:crates/spate/examples/multi_table_split.rs); it
 needs a Kafka topic of Avro storefront-event messages and both target tables,
 and runs with
-`cargo run --release -p spate --features full --example multi_table_split`:
+`cargo run --release -p spate --features kafka,clickhouse,avro --example multi_table_split`:
 
 ```rust file=crates/spate/examples/multi_table_split.rs region=assembly
 ```

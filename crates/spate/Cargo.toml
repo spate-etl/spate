@@ -47,31 +47,31 @@ tracing = { workspace = true }
 # `cargo test -p spate --all-features -- --ignored --test-threads=1`
 [[test]]
 name = "e2e_happy"
-required-features = ["full"]
+required-features = ["kafka", "clickhouse", "avro"]
 
 [[test]]
 name = "e2e_sink_outage"
-required-features = ["full"]
+required-features = ["kafka", "clickhouse", "avro"]
 
 [[test]]
 name = "e2e_rebalance"
-required-features = ["full"]
+required-features = ["kafka", "clickhouse", "avro"]
 
 [[test]]
 name = "e2e_drain_restart"
-required-features = ["full"]
+required-features = ["kafka", "clickhouse", "avro"]
 
 [[test]]
 name = "e2e_drain_outage"
-required-features = ["full"]
+required-features = ["kafka", "clickhouse", "avro"]
 
 [[test]]
 name = "e2e_poison"
-required-features = ["full"]
+required-features = ["kafka", "clickhouse", "avro"]
 
 [[test]]
 name = "e2e_examples"
-required-features = ["full"]
+required-features = ["kafka", "clickhouse", "avro", "s3", "json", "coordination-nats"]
 
 [[example]]
 name = "memory_pipeline"
@@ -116,15 +116,15 @@ test = true
 
 [[example]]
 name = "kafka_avro_to_clickhouse"
-required-features = ["full"]
+required-features = ["kafka", "clickhouse", "avro"]
 
 [[example]]
 name = "kafka_avro_flatmap_clickhouse"
-required-features = ["full"]
+required-features = ["kafka", "clickhouse", "avro"]
 
 [[example]]
 name = "multi_table_split"
-required-features = ["full"]
+required-features = ["kafka", "clickhouse", "avro"]
 
 [[example]]
 name = "kafka_to_kafka_split"
@@ -178,7 +178,6 @@ clickhouse-uuid = ["clickhouse", "spate-clickhouse/uuid"]
 clickhouse-chrono = ["clickhouse", "spate-clickhouse/chrono"]
 clickhouse-time = ["clickhouse", "spate-clickhouse/time"]
 clickhouse-rust-decimal = ["clickhouse", "spate-clickhouse/rust_decimal"]
-full = ["avro", "json", "kafka", "clickhouse", "coordination-nats", "s3"]
 
 [package.metadata.docs.rs]
 all-features = true

@@ -79,7 +79,7 @@
 //! ```
 //!
 //! ```sh
-//! cargo run --release -p spate --features full \
+//! cargo run --release -p spate --features kafka,clickhouse,avro \
 //!   --example kafka_avro_flatmap_clickhouse
 //! ```
 //!

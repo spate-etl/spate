@@ -61,8 +61,8 @@ with flatten/untagged/RawValue), and `raw-value`.
 Decoding uses `serde_json` (stable 1.x) by default. The opt-in `simd` Cargo
 feature (`json-simd` on the `spate` facade) swaps the byte-slice → value step to
 `simd-json` with no change to this crate's API, and `BACKEND_ID` reports which
-is compiled. It is off by default and excluded from the facade's `full` feature.
-`simd-json` is a different parser, so decoding is not byte-for-byte identical on
-every input, and the `serde_json` knobs above do not apply under it; the JSON
-connector guide's Backends section gives the differences. `from_reader` is never
-used — decoding always operates on the in-memory payload slice.
+is compiled. It is off by default. `simd-json` is a different parser, so
+decoding is not byte-for-byte identical on every input, and the `serde_json`
+knobs above do not apply under it; the JSON connector guide's Backends section
+gives the differences. `from_reader` is never used — decoding always operates on
+the in-memory payload slice.

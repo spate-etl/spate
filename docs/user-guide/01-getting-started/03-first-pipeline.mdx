@@ -15,11 +15,11 @@ Every Rust block below is rendered from that source, so what you read is
 what compiles.
 
 You need Kafka, a Confluent-compatible schema registry, and ClickHouse, plus
-the `full` feature (see [Installation](01-installation.mdx)). From the
-repository:
+the `kafka`, `clickhouse` and `avro` features (see
+[Installation](01-installation.mdx)). From the repository:
 
 ```sh
-cargo run --release -p spate --example kafka_avro_to_clickhouse --features full
+cargo run --release -p spate --example kafka_avro_to_clickhouse --features kafka,clickhouse,avro
 ```
 
 ## 1. Create the target table
@@ -221,7 +221,7 @@ The full mapping is in the `spate::pipeline::Pipeline` module docs and in
 export KAFKA_BROKERS=localhost:9092
 export SCHEMA_REGISTRY_URL=http://localhost:8081
 export CLICKHOUSE_URL=http://localhost:8123
-cargo run --release -p spate --example kafka_avro_to_clickhouse --features full
+cargo run --release -p spate --example kafka_avro_to_clickhouse --features kafka,clickhouse,avro
 ```
 
 Probes and metrics are on the admin listener from the YAML:

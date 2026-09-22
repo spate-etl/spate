@@ -30,8 +30,8 @@
 //!    exists?
 //! 3. Do an example's runner block and its `test = true` agree, in both
 //!    directions?
-//! 4. Does a test including the shared end-to-end harness declare `full`, and
-//!    does one declaring `full` include it?
+//! 4. Does every test target require exactly the features that its source,
+//!    the shared end-to-end harness and the examples it runs reach?
 //! 5. Does every declared feature have a row in the rustdoc feature table, and
 //!    does every row name a feature that exists?
 //!
@@ -273,22 +273,87 @@ fn the_tests_are_discovered() {
     );
 }
 
-/// A scenario that includes the shared harness declares `full`, and one that
-/// declares `full` includes it.
+/// The declared features a source reaches through `spate::<module>` paths,
+/// counting each member of a `spate::{…}` group.
 ///
-/// `tests/e2e_support/mod.rs` imports `spate::avro`, `spate::clickhouse` and
-/// `spate::kafka`, so a target reaching it compiles under `full` and nothing
-/// less. Deriving the requirement from the include rather than from the file
-/// name keeps a rename from defeating it.
+/// A path through an alias (`use spate as s`) is not seen. Panics on
+/// `spate::coordination`, which also resolves without its feature.
+fn connector_features(src: &str, declared: &BTreeSet<&str>) -> BTreeSet<String> {
+    fn ident(s: &str) -> &str {
+        let s = s.trim_start();
+        let end = s
+            .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .unwrap_or(s.len());
+        &s[..end]
+    }
+
+    let mut found = BTreeSet::new();
+    for (at, needle) in src.match_indices("spate::") {
+        if src[..at]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_')
+        {
+            continue;
+        }
+        let rest = &src[at + needle.len()..];
+        let mut names = Vec::new();
+        match rest.strip_prefix('{') {
+            Some(group) => {
+                let (mut depth, mut item) = (0, 0);
+                for (i, c) in group.char_indices() {
+                    match c {
+                        '{' => depth += 1,
+                        '}' if depth == 0 => {
+                            names.push(ident(&group[item..i]));
+                            break;
+                        }
+                        '}' => depth -= 1,
+                        ',' if depth == 0 => {
+                            names.push(ident(&group[item..i]));
+                            item = i + 1;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            None => names.push(ident(rest)),
+        }
+        for name in names {
+            assert_ne!(
+                name, "coordination",
+                "`spate::coordination` resolves with or without the `coordination` \
+                 feature, so whether a target needs it is decided by hand"
+            );
+            if declared.contains(name) {
+                found.insert(name.to_owned());
+            }
+        }
+    }
+    found
+}
+
+/// Every test target requires exactly the features it reaches: the connector
+/// modules its source names and, for a scenario including the shared harness,
+/// the harness's modules plus the `required-features` of each example it names
+/// as a quoted literal.
+///
+/// Requiring less fails to compile under the declared set; requiring more
+/// builds connectors the test never touches.
 #[test]
-fn the_harness_and_full_agree() {
+fn test_targets_require_what_they_reach() {
     let pkg = spate_package();
+    let declared: BTreeSet<&str> = pkg.features.keys().map(String::as_str).collect();
+    let harness_src = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/e2e_support/mod.rs"
+    ))
+    .expect("read the end-to-end harness");
+    let harness = connector_features(&harness_src, &declared);
 
     // This file names the attribute it searches for, so it matches itself.
     // `file!()` tracks the path through a rename where a written-out constant
-    // would go stale; the counts below are what refuse a silent miss, since a
-    // needle that stops matching would otherwise disarm the rule rather than
-    // fail it.
+    // would go stale.
     let mut skipped = 0;
     let mut includes = 0;
     let mut bad = Vec::new();
@@ -300,22 +365,22 @@ fn the_harness_and_full_agree() {
         }
         let src = std::fs::read_to_string(&target.src_path)
             .unwrap_or_else(|e| panic!("read {}: {e}", target.src_path.display()));
-        let uses_harness = src.contains(HARNESS);
-        let requires_full = target.required_features.iter().any(|f| f == "full");
-        if uses_harness {
+        let mut needs = connector_features(&src, &declared);
+        if src.contains(HARNESS) {
             includes += 1;
+            needs.extend(harness.iter().cloned());
+            for example in examples(&pkg) {
+                if src.contains(&format!("\"{}\"", example.name)) {
+                    needs.extend(example.required_features.iter().cloned());
+                }
+            }
         }
-
-        match (uses_harness, requires_full) {
-            (true, false) => bad.push(format!(
-                "{}: includes the harness, but its stanza does not require `full`",
+        let requires: BTreeSet<String> = target.required_features.iter().cloned().collect();
+        if requires != needs {
+            bad.push(format!(
+                "{}: requires {requires:?}, reaches {needs:?}",
                 target.name
-            )),
-            (false, true) => bad.push(format!(
-                "{}: requires `full`, but includes nothing that needs it",
-                target.name
-            )),
-            _ => {}
+            ));
         }
     }
 
@@ -325,16 +390,13 @@ fn the_harness_and_full_agree() {
          at 0 it fails on its own source, above 1 it is excluding a scenario"
     );
     assert!(
-        includes >= 6,
-        "only {includes} test target(s) include the harness; the attribute this \
-         file searches for has changed shape, so the check below is vacuous"
+        !harness.is_empty() && includes >= 6,
+        "the harness reaches {harness:?} and {includes} test target(s) include it; \
+         a needle has stopped matching, so the check below is vacuous"
     );
     assert!(
         bad.is_empty(),
-        "a scenario and its stanza disagree:\n  {}\n\n\
-         An undeclared file is built under every feature set and compiles under \
-         `full` alone. A test needing `full` without the harness is a case this \
-         rule does not cover, and the rule is what changes.",
+        "a test target's stanza disagrees with what its source reaches:\n  {}",
         bad.join("\n  ")
     );
 }

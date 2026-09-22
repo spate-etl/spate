@@ -127,9 +127,8 @@ framings, where one large document is parsed in a pass; the margin narrows on
 NDJSON, where per-parse overhead across many small lines dominates. How much
 faster is both payload- and architecture-sensitive, and aarch64 is the only
 side measured for throughput; an x86-64 host with AVX2 is unknown territory
-here. It is **off by default** and excluded from the facade's `full`
-feature: it is a per-deployment choice worth benchmarking against real
-hardware and payloads.
+here. It is **off by default**: it is a per-deployment choice worth
+benchmarking against real hardware and payloads.
 
 simd-json parses a mutable buffer in place, so the
 framework copies each borrowed payload into a reused thread-local buffer

@@ -397,15 +397,20 @@ mod tests {
     /// A TLS/SASL passthrough is accepted only when the `tls` feature compiled
     /// the transport into librdkafka. With the feature: the security keys
     /// survive into the client and creation succeeds, because client creation
-    /// validates the build's capability (SSL present, and the SCRAM SASL
-    /// provider present) without any network I/O. Without it: rejected at load
-    /// with an actionable message. Default `cargo test -p spate-kafka` exercises
-    /// the reject arm; `--features tls` / `--all-features` the accept arm.
+    /// validates the build's capability (SSL present, and the PLAIN and SCRAM
+    /// SASL providers present) without any network I/O. Without it: rejected at
+    /// load with an actionable message. Default `cargo test -p spate-kafka`
+    /// exercises the reject arm; `--features tls` / `--all-features` the accept
+    /// arm.
     #[test]
     fn tls_config_matches_build_capability() {
         for sec in [
             "    security.protocol: ssl\n",
+            "    security.protocol: sasl_ssl\n    sasl.mechanism: PLAIN\n    \
+             sasl.username: svc\n    sasl.password: secret\n",
             "    security.protocol: sasl_ssl\n    sasl.mechanism: SCRAM-SHA-256\n    \
+             sasl.username: svc\n    sasl.password: secret\n",
+            "    security.protocol: sasl_ssl\n    sasl.mechanism: SCRAM-SHA-512\n    \
              sasl.username: svc\n    sasl.password: secret\n",
         ] {
             let body = format!("{}  rdkafka:\n{sec}", minimal());
@@ -425,6 +430,38 @@ mod tests {
                 let err = parsed.expect_err("non-tls build rejects a security config");
                 assert!(err.to_string().contains("kafka-tls"), "actionable: {err}");
             }
+        }
+    }
+
+    /// The `tls` build compiles in neither GSSAPI nor the OAUTHBEARER OIDC
+    /// method, so consumer creation fails for each, and for an omitted
+    /// mechanism, which defaults to GSSAPI.
+    #[cfg(feature = "tls")]
+    #[test]
+    fn tls_build_rejects_gssapi_and_oidc() {
+        for (sasl, expected) in [
+            ("    sasl.mechanism: GSSAPI\n", "GSSAPI"),
+            ("", "GSSAPI"),
+            (
+                "    sasl.mechanism: OAUTHBEARER\n    sasl.oauthbearer.method: oidc\n    \
+                 sasl.oauthbearer.client.id: svc\n    sasl.oauthbearer.client.secret: secret\n    \
+                 sasl.oauthbearer.token.endpoint.url: https://idp.invalid/token\n",
+                "not supported in this build",
+            ),
+        ] {
+            let body = format!(
+                "{}  rdkafka:\n    security.protocol: sasl_ssl\n{sasl}",
+                minimal()
+            );
+            let cfg = KafkaSourceConfig::from_component_config(&section(&body))
+                .expect("config load does not check the mechanism");
+            let Err(err) = cfg
+                .client_config()
+                .create::<rdkafka::consumer::BaseConsumer>()
+            else {
+                panic!("consumer creation succeeded with {sasl:?}");
+            };
+            assert!(err.to_string().contains(expected), "{err}");
         }
     }
 

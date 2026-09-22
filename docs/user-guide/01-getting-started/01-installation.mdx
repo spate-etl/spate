@@ -68,6 +68,9 @@ is documented as exempt from Spate's stability promises.
   needs (the standard `rust` Docker images qualify), and the first build
   takes a few minutes. The [Docker guide](../05-deployment/docker.mdx)
   shows the flagship build image.
+- The `kafka-tls` feature also compiles OpenSSL from vendored sources, which
+  needs Perl 5 with its core modules on the build host. The standard `rust`
+  Docker images include it.
 
 ## Verifying the install
 

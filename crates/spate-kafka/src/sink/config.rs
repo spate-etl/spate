@@ -604,7 +604,11 @@ mod tests {
     fn tls_config_matches_build_capability() {
         for sec in [
             "    security.protocol: ssl\n",
+            "    security.protocol: sasl_ssl\n    sasl.mechanism: PLAIN\n    \
+             sasl.username: svc\n    sasl.password: secret\n",
             "    security.protocol: sasl_ssl\n    sasl.mechanism: SCRAM-SHA-256\n    \
+             sasl.username: svc\n    sasl.password: secret\n",
+            "    security.protocol: sasl_ssl\n    sasl.mechanism: SCRAM-SHA-512\n    \
              sasl.username: svc\n    sasl.password: secret\n",
         ] {
             let body = format!("{}  rdkafka:\n{sec}", minimal());
@@ -626,6 +630,36 @@ mod tests {
                     .to_string();
                 assert!(msg.contains("kafka-tls"), "actionable: {msg}");
             }
+        }
+    }
+
+    /// Sink counterpart to the source's test: producer creation fails for
+    /// GSSAPI, an omitted mechanism, and the OAUTHBEARER OIDC method.
+    #[cfg(feature = "tls")]
+    #[test]
+    fn tls_build_rejects_gssapi_and_oidc() {
+        for (sasl, expected) in [
+            ("    sasl.mechanism: GSSAPI\n", "GSSAPI"),
+            ("", "GSSAPI"),
+            (
+                "    sasl.mechanism: OAUTHBEARER\n    sasl.oauthbearer.method: oidc\n    \
+                 sasl.oauthbearer.client.id: svc\n    sasl.oauthbearer.client.secret: secret\n    \
+                 sasl.oauthbearer.token.endpoint.url: https://idp.invalid/token\n",
+                "not supported in this build",
+            ),
+        ] {
+            let body = format!(
+                "{}  rdkafka:\n    security.protocol: sasl_ssl\n{sasl}",
+                minimal()
+            );
+            let cfg = parse(&body).expect("config load does not check the mechanism");
+            let Err(err) = cfg
+                .client_config()
+                .create::<rdkafka::producer::BaseProducer>()
+            else {
+                panic!("producer creation succeeded with {sasl:?}");
+            };
+            assert!(err.to_string().contains(expected), "{err}");
         }
     }
 

@@ -19,8 +19,8 @@
 //! it, including under feature sets its imports do not exist in, and there it
 //! fails to compile and takes the package's test run with it.
 //!
-//! `--all-features` is what keeps both survivable, and is why every gate here
-//! passes it.
+//! `--all-features` meets every `required-features` entry that names a real
+//! feature, so once question 2 holds, a run under it builds every test target.
 //!
 //! The questions, none of which builds anything, since `cargo metadata` reads
 //! manifests and resolves nothing:

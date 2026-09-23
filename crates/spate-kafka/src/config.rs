@@ -438,8 +438,11 @@ mod tests {
                     .expect("SSL/SASL compiled in: consumer creation succeeds");
                 drop(consumer);
             } else {
-                let err = parsed.expect_err("non-tls build rejects a security config");
-                assert!(err.to_string().contains("kafka-tls"), "actionable: {err}");
+                let msg = parsed
+                    .expect_err("non-tls build rejects a security config")
+                    .to_string();
+                assert!(msg.contains("kafka-tls"), "actionable: {msg}");
+                assert!(msg.contains("source.kafka.rdkafka"), "scoped: {msg}");
             }
         }
     }

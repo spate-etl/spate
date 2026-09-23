@@ -59,8 +59,8 @@ The profiles in `.config/nextest.toml`:
 - **`default`** — `fail-fast = false`, and a 30-second slow warning that
   terminates after four periods, so a hard kill at 120s. The container suites are
   excluded here and nothing left should take that long.
-- **`ci`** — what runs on a pull request. 60 seconds, terminating after four,
-  plus one retry and a JUnit report, so a retried test surfaces as a flaky
+- **`ci`** — what the test and coverage job runs. 60 seconds, terminating after
+  four, plus one retry and a JUnit report, so a retried test surfaces as a flaky
   annotation rather than a green run.
 - **`docker`** — warns at 120 seconds and **never terminates**: a cold image pull
   can exceed any figure worth setting, and a SIGKILL reports as a timeout
@@ -141,6 +141,11 @@ target to its stanza, and `cargo check --workspace --all-targets` in
 `cargo xtask hack` is what builds them on the default feature set;
 `cargo hack --no-dev-deps` strips dev-dependencies and reaches no test target
 at all.
+
+A test that branches on `cfg!(feature = …)` runs its feature-on arm under
+`cargo xtask test`, which passes `--all-features`, and its feature-off arm under
+`cargo xtask hack`, which runs the suite on default features. The feature-off
+arm of a default feature, or of one a dev-dependency enables, runs in neither.
 
 ## Fuzzing
 

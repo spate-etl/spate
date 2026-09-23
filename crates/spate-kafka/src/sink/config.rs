@@ -640,7 +640,29 @@ mod tests {
                     .expect_err("non-tls build rejects a security config")
                     .to_string();
                 assert!(msg.contains("kafka-tls"), "actionable: {msg}");
+                assert!(msg.contains("sink.kafka.rdkafka"), "scoped: {msg}");
             }
+        }
+    }
+
+    /// `build()` runs the TLS guard on a config made with `new()`: without the
+    /// `tls` feature it rejects a security passthrough, and with it the
+    /// producer is created.
+    #[test]
+    fn build_enforces_tls_guard_on_programmatic_sink() {
+        let mut config = KafkaSinkConfig::new("localhost:9092", "orders");
+        config
+            .rdkafka
+            .insert("security.protocol".into(), "ssl".into());
+        let result = build(config);
+        if cfg!(feature = "tls") {
+            result.expect("tls build: build succeeds");
+        } else {
+            let msg = result
+                .expect_err("non-tls build: build rejects the security config")
+                .to_string();
+            assert!(msg.contains("kafka-tls"), "actionable: {msg}");
+            assert!(msg.contains("sink.kafka.rdkafka"), "scoped: {msg}");
         }
     }
 

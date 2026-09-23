@@ -60,7 +60,8 @@ pub(crate) enum Command {
     /// Loom concurrency models for the checkpoint and backpressure primitives
     Loom,
 
-    /// Every feature alone, the feature-off combinations, and every target
+    /// Every feature alone, the feature-off combinations, every target, and
+    /// the tests on default features
     Hack,
 
     /// Benchmarks, counted and wall-clock
@@ -523,7 +524,7 @@ fn lint_group(root: &Path, explain: bool) -> Outcome {
     )
 }
 
-/// The feature matrix.
+/// The feature matrix, and the test suite on default features.
 fn hack(root: &Path, explain: bool) -> Outcome {
     run::steps(
         root,
@@ -531,6 +532,8 @@ fn hack(root: &Path, explain: bool) -> Outcome {
         &[
             // `cargo hack --no-dev-deps` rewrites each Cargo.toml as it runs,
             // which a locked build refuses. Do not add `--locked`; it fails.
+            // It restores each Cargo.toml only when it is finished, so every
+            // locked step goes after it.
             Step::new(
                 "cargo",
                 [
@@ -560,9 +563,6 @@ fn hack(root: &Path, explain: bool) -> Outcome {
                     "--locked",
                 ],
             ),
-            // Last, because `--no-dev-deps` restores each Cargo.toml only when
-            // it is finished and a locked build reads what is on disk.
-            //
             // The workspace-wide build on default features. spate-fuzz is
             // excluded because it requires `testing` on spate-s3 and
             // spate-coordination, which the resolver would unify into every
@@ -576,6 +576,22 @@ fn hack(root: &Path, explain: bool) -> Outcome {
                     "--locked",
                     "--exclude",
                     "spate-fuzz",
+                ],
+            ),
+            // The test suite on default features, which runs the feature-off
+            // arm of tests that `--all-features` skips. spate-fuzz has no
+            // tests and spate-xtask no features.
+            Step::new(
+                "cargo",
+                [
+                    "nextest",
+                    "run",
+                    "--workspace",
+                    "--locked",
+                    "--exclude",
+                    "spate-fuzz",
+                    "--exclude",
+                    "spate-xtask",
                 ],
             ),
         ],

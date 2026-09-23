@@ -28,10 +28,9 @@ newest stables, so a release between LTS lines is a version people run, and it
 surfaces a behaviour change first. It carries no Dependabot `ignore`, so it
 follows every release.
 
-The suite has already found version-gated behaviour. `Time` and `Time64` need
-`enable_time_time64_type=1` on 25.8 and create without it from 26.3, and under
-`RowBinaryWithNamesAndTypes` that setting governs the type name in the insert
-header as well as the DDL.
+ClickHouse supports `Time` and `Time64` from 25.6. Where required, set
+`enable_time_time64_type=1` when creating those columns.
+`RowBinaryWithNamesAndTypes` inserts need no such setting.
 
 ## Scope of the claim
 

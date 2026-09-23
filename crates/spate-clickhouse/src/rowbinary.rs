@@ -28,7 +28,7 @@
 //! | `Date` / `Date32` | [`DateDays`](crate::DateDays) / [`Date32Days`](crate::Date32Days), or [⚠](crate::serde) `chrono::NaiveDate` / `time::Date` via [`crate::serde`] (feature-gated) |
 //! | `DateTime` | [`DateTimeSeconds`], or [⚠](crate::serde) `chrono::DateTime<Utc>` / `time::OffsetDateTime` via [`crate::serde`] |
 //! | `DateTime64(0/3/6/9)` | [`DateTime64Secs`](crate::DateTime64Secs) / [`DateTime64Millis`] / [`DateTime64Micros`](crate::DateTime64Micros) / [`DateTime64Nanos`](crate::DateTime64Nanos), or [⚠](crate::serde) the `datetime64::*` serde modules |
-//! | `Time` / `Time64(p)` | [`TimeSeconds`](crate::TimeSeconds) / [`Time64Secs`](crate::Time64Secs)-family, or [⚠](crate::serde) the `time`/`time64::*` serde modules (server ≥ 25.6, `enable_time_time64_type=1`) |
+//! | `Time` / `Time64(p)` | [`TimeSeconds`](crate::TimeSeconds) / [`Time64Secs`](crate::Time64Secs)-family, or [⚠](crate::serde) the `time`/`time64::*` serde modules (server ≥ 25.6; where required, set `enable_time_time64_type=1` for `CREATE TABLE`; inserts need no such setting) |
 //! | `UUID` | [⚠](crate::serde) `uuid::Uuid` with `#[serde(with = "spate_clickhouse::serde::uuid")]` (feature `uuid`) |
 //! | `IPv4` | [⚠](crate::serde) `std::net::Ipv4Addr` with `#[serde(with = "spate_clickhouse::serde::ipv4")]` |
 //! | `IPv6` | `std::net::Ipv6Addr` bare (its default impl — 16 network-order bytes — is correct) |

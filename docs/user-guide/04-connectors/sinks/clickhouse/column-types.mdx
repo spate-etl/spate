@@ -46,8 +46,8 @@ is in the `rowbinary` module of the
 | `Date32` | yes | yes | |
 | `DateTime` | yes | yes | |
 | `DateTime64(P)` | yes | yes | Native emits the raw `Int64` without rescaling; see the scale warning on [Native format](./native-format.mdx) |
-| `Time` | yes | no | Needs ClickHouse 25.6 or later with `enable_time_time64_type=1` under `settings:` |
-| `Time64(P)` | yes | no | Needs ClickHouse 25.6 or later with `enable_time_time64_type=1` under `settings:` |
+| `Time` | yes | no | Needs ClickHouse 25.6 or later. Where required, set `enable_time_time64_type=1` for `CREATE TABLE`; inserts need no such setting |
+| `Time64(P)` | yes | no | Needs ClickHouse 25.6 or later. Where required, set `enable_time_time64_type=1` for `CREATE TABLE`; inserts need no such setting |
 | `Decimal(P, S)`, `P` of 38 or below | yes | yes | `Decimal32(S)`, `Decimal64(S)` and `Decimal128(S)` are the sugar for `P` of 9, 18 and 38. The first-record check holds the wrapper's declared scale against `S` |
 | `Decimal(P, S)`, `P` above 38 | manual | no | The row carries an `Int256` holding the value already scaled by `10^S`. The width is checked against the column's precision band; the scaling is the row's to get right, since the field carries no scale to check |
 | `Decimal256(S)` | manual | no | Parses as a `Decimal` of precision 76, so the row above applies |
@@ -70,7 +70,7 @@ is in the `rowbinary` module of the
 | `MultiLineString` | yes | yes | |
 | `MultiPolygon` | yes | yes | |
 | `Nested(…)` | yes | yes | Generated as the flattened `outer.inner` names the server reports under `flatten_nested = 1`, each an `Array(T)` the row takes as a `Vec<T>`. A Rust field cannot carry the dot, so `#[serde(rename = "outer.inner")]` on that field is what `#[derive(ClickHouseRow)]` names the column, and what the first-record check compares. Under `flatten_nested = 0` the column stays one unflattened value that nothing in the crate covers |
-| `JSON` | yes | no | A `String` of JSON text, with `input_format_binary_read_json_as_string: "1"` under `settings:` |
+| `JSON` | yes | no | A `String` of JSON text. Creating the table may need `allow_experimental_json_type=1`; inserts need `input_format_binary_read_json_as_string: "1"` under the sink's `settings:` |
 | `Variant(…)` | manual | no | The discriminant byte follows the Rust enum's declaration order and the server orders member types by name, so the row declares its variants in the server's order; `Nullable(Variant)` has no representation |
 | `Dynamic` | no | no | |
 | `SimpleAggregateFunction(f, T)` | yes | yes | The column stores the plain `T`, so the row declares the field `T` takes; Native accepts any inner it accepts on its own |

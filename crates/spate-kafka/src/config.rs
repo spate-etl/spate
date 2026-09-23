@@ -465,6 +465,24 @@ mod tests {
         }
     }
 
+    /// The `tls` build supports every `builtin.features` flag the guard
+    /// rejects without it.
+    #[cfg(feature = "tls")]
+    #[test]
+    fn tls_build_supports_guarded_builtin_features() {
+        let body = format!(
+            "{}  rdkafka:\n    builtin.features: ssl,sasl_scram,sasl_oauthbearer\n",
+            minimal()
+        );
+        let cfg = KafkaSourceConfig::from_component_config(&section(&body))
+            .expect("tls build accepts the flags at load");
+        let consumer: rdkafka::consumer::BaseConsumer = cfg
+            .client_config()
+            .create()
+            .expect("OpenSSL compiled in: consumer creation succeeds");
+        drop(consumer);
+    }
+
     #[test]
     fn unknown_fields_are_rejected() {
         let body = format!("{}  topics: [a, b]\n", minimal());

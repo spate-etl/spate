@@ -32,11 +32,14 @@ fn check(rdkafka: &BTreeMap<String, String>, scope: &str, tls: bool) -> Result<(
         return Ok(());
     }
 
-    // `enable.ssl.*` and `enable.sasl.*` configure TLS and SASL from outside
-    // the `ssl.` / `sasl.` prefixes.
+    // `builtin.features`, `enable.ssl.*` and `enable.sasl.*` need OpenSSL from
+    // outside the `ssl.` / `sasl.` prefixes.
     let wants_security = rdkafka
         .get("security.protocol")
         .is_some_and(|v| !v.eq_ignore_ascii_case("plaintext"))
+        || rdkafka
+            .get("builtin.features")
+            .is_some_and(|v| names_openssl_feature(v))
         || rdkafka.keys().any(|k| {
             ["ssl.", "sasl.", "enable.ssl.", "enable.sasl."]
                 .iter()
@@ -51,6 +54,19 @@ fn check(rdkafka: &BTreeMap<String, String>, scope: &str, tls: bool) -> Result<(
         )));
     }
     Ok(())
+}
+
+/// Whether a `builtin.features` list names a flag librdkafka supports only with OpenSSL.
+fn names_openssl_feature(features: &str) -> bool {
+    features.split(',').any(|flag| {
+        // librdkafka trims only leading whitespace, and rejects an unsupported
+        // flag under `-` as well as `+`.
+        let flag = flag.trim_ascii_start();
+        let flag = flag.strip_prefix(['+', '-']).unwrap_or(flag);
+        ["ssl", "sasl_scram", "sasl_oauthbearer"]
+            .iter()
+            .any(|f| flag.eq_ignore_ascii_case(f))
+    })
 }
 
 #[cfg(test)]
@@ -74,6 +90,11 @@ mod tests {
             map(&[("enable.idempotence", "true")]),
             map(&[("enable.auto.commit", "false")]),
             map(&[("linger.ms", "20")]),
+            // Flags librdkafka builds without OpenSSL, or that `kafka-tls` does not add.
+            map(&[("builtin.features", "sasl,sasl_plain,gzip,lz4")]),
+            map(&[("builtin.features", "sasl_gssapi,oidc,http")]),
+            // librdkafka keeps trailing whitespace, so `ssl ` is not the `ssl` flag.
+            map(&[("builtin.features", "ssl ,gzip")]),
         ];
         for cfg in plain {
             assert!(check(&cfg, "sink.kafka", false).is_ok(), "{cfg:?}");
@@ -81,7 +102,7 @@ mod tests {
     }
 
     /// Every TLS/SASL request is rejected with the actionable message without the
-    /// feature, and accepted with it. Regression for #610.
+    /// feature, and accepted with it. Regression for #610 and #615.
     #[test]
     fn security_request_tracks_the_feature() {
         let secured = [
@@ -96,6 +117,12 @@ mod tests {
             // Gated on OpenSSL but outside the `ssl.` / `sasl.` prefixes.
             map(&[("enable.ssl.certificate.verification", "false")]),
             map(&[("enable.sasl.oauthbearer.unsecure.jwt", "true")]),
+            map(&[("builtin.features", "ssl")]),
+            map(&[("builtin.features", "sasl_scram")]),
+            map(&[("builtin.features", "sasl_oauthbearer")]),
+            map(&[("builtin.features", "gzip, SSL")]),
+            map(&[("builtin.features", "+sasl_scram")]),
+            map(&[("builtin.features", "-ssl")]),
         ];
         for cfg in secured {
             let err = check(&cfg, "source.kafka", false).expect_err("tls off must reject");

@@ -24,21 +24,23 @@ pub(crate) fn check_tls_feature(
     rdkafka: &BTreeMap<String, String>,
     scope: &str,
 ) -> Result<(), ConfigError> {
-    // The feature compiles the SSL/SASL transport into librdkafka.
-    if cfg!(feature = "tls") {
+    check(rdkafka, scope, cfg!(feature = "tls"))
+}
+
+fn check(rdkafka: &BTreeMap<String, String>, scope: &str, tls: bool) -> Result<(), ConfigError> {
+    if tls {
         return Ok(());
     }
 
-    // `security.protocol` defaults to `plaintext`; anything else (ssl,
-    // sasl_ssl, sasl_plaintext) needs the transport, as does any explicit
-    // `ssl.*` / `sasl.*` property, or the TLS-gated `enable.ssl.*` family
-    // (e.g. `enable.ssl.certificate.verification`), which sits outside the
-    // `ssl.` prefix, even without `security.protocol` set.
+    // `enable.ssl.*` and `enable.sasl.*` configure TLS and SASL from outside
+    // the `ssl.` / `sasl.` prefixes.
     let wants_security = rdkafka
         .get("security.protocol")
         .is_some_and(|v| !v.eq_ignore_ascii_case("plaintext"))
         || rdkafka.keys().any(|k| {
-            k.starts_with("ssl.") || k.starts_with("sasl.") || k.starts_with("enable.ssl.")
+            ["ssl.", "sasl.", "enable.ssl.", "enable.sasl."]
+                .iter()
+                .any(|p| k.starts_with(p))
         });
 
     if wants_security {
@@ -64,19 +66,24 @@ mod tests {
 
     #[test]
     fn plaintext_is_always_allowed() {
-        // No security request: accepted regardless of the `tls` feature.
-        assert!(check_tls_feature(&map(&[]), "source.kafka").is_ok());
-        assert!(
-            check_tls_feature(&map(&[("security.protocol", "plaintext")]), "sink.kafka").is_ok()
-        );
-        // A benign, non-security passthrough is not mistaken for one.
-        assert!(check_tls_feature(&map(&[("linger.ms", "20")]), "sink.kafka").is_ok());
+        let plain = [
+            map(&[]),
+            map(&[("security.protocol", "plaintext")]),
+            map(&[("security.protocol", "PLAINTEXT")]),
+            // Non-security keys that share the `enable.` prefix.
+            map(&[("enable.idempotence", "true")]),
+            map(&[("enable.auto.commit", "false")]),
+            map(&[("linger.ms", "20")]),
+        ];
+        for cfg in plain {
+            assert!(check(&cfg, "sink.kafka", false).is_ok(), "{cfg:?}");
+        }
     }
 
+    /// Every TLS/SASL request is rejected with the actionable message without the
+    /// feature, and accepted with it. Regression for #610.
     #[test]
     fn security_request_tracks_the_feature() {
-        // These configs all request the secured transport; whether they are
-        // accepted depends on whether the `tls` feature compiled it in.
         let secured = [
             map(&[("security.protocol", "ssl")]),
             map(&[
@@ -86,17 +93,14 @@ mod tests {
             // `ssl.*` / `sasl.*` alone (no `security.protocol`) still counts.
             map(&[("ssl.ca.location", "/etc/kafka/ca.pem")]),
             map(&[("sasl.username", "svc")]),
-            // TLS-gated but outside the `ssl.` prefix.
+            // Gated on OpenSSL but outside the `ssl.` / `sasl.` prefixes.
             map(&[("enable.ssl.certificate.verification", "false")]),
+            map(&[("enable.sasl.oauthbearer.unsecure.jwt", "true")]),
         ];
         for cfg in secured {
-            let result = check_tls_feature(&cfg, "source.kafka");
-            if cfg!(feature = "tls") {
-                assert!(result.is_ok(), "tls on: {cfg:?} should be accepted");
-            } else {
-                let err = result.expect_err("tls off: security config must be rejected");
-                assert!(err.to_string().contains("kafka-tls"), "actionable: {err}");
-            }
+            let err = check(&cfg, "source.kafka", false).expect_err("tls off must reject");
+            assert!(err.to_string().contains("kafka-tls"), "{cfg:?}: {err}");
+            assert!(check(&cfg, "source.kafka", true).is_ok(), "tls on: {cfg:?}");
         }
     }
 }

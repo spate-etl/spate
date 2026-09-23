@@ -69,6 +69,7 @@ sink:
 | `database` | string | `none` | Default database for unqualified tables. |
 | `user` | string | `none` | Username (interpolate secrets via `${VAR}`). |
 | `password` | string | `none` | Password (interpolate secrets via `${VAR}`). |
+| `tls.root_ca` | path | `none` | PEM bundle of root CAs trusted in addition to the system trust store. Requires an `https://` URL. See [Security](#security-tls). |
 | `settings` | string map | `{}` | Extra per-insert ClickHouse settings, applied verbatim — see [below](#the-settings-passthrough-and-the-denylist). |
 | `batch` / `inflight` / `retry` / `breaker` | sections | `none` | Shared sink-pool tuning (batching, in-flight limit, retry backoff, circuit breaker). Unset means the framework's defaults apply; keys and defaults are in the [configuration reference](../../../07-reference/configuration.mdx#sink-pool), and the breaker is described under [Replica rotation](#replica-rotation-and-the-circuit-breaker) below. |
 | `timeouts.send` | duration | `30s` | ClickHouse-only. Per-send timeout (one frame reaching the socket); configures the HTTP client, not the shared pool. |
@@ -109,7 +110,23 @@ sink:
       - replicas: ["https://ch-1.internal:8443", "https://ch-2.internal:8443"]
     user: spate
     password: "${CLICKHOUSE_PASSWORD}"
+    tls:
+      root_ca: /etc/spate/clickhouse-ca.pem   # only for a private CA
 ```
+
+The sink verifies an `https://` replica against the system trust store, which
+on macOS includes the Keychain. When `SSL_CERT_FILE` or `SSL_CERT_DIR` is set,
+the certificates they name replace the system store. If the store yields no
+certificates, as on a container image without a CA package, the sink logs a
+warning and uses the Mozilla root bundle compiled into the binary. When the
+store has certificates, the Mozilla bundle is not added, so the store or
+`tls.root_ca` must hold the CA of every replica.
+
+For a private CA, set `tls.root_ca` to a PEM file. Its certificates are trusted
+in addition to the store. A relative path resolves against the working
+directory, and a file that cannot be read or holds no certificate fails the sink
+at startup. A config with no `https://` URL reads no trust store and rejects
+`tls.root_ca`.
 
 Client-certificate (**mTLS**) authentication is not supported. For the
 framework-wide view of transport security across connectors, see

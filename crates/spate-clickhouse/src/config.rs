@@ -11,6 +11,8 @@ use crate::distributed::{self, DistributedCheckError};
 use crate::router::{DistributedRouter, KeyExtractor};
 use crate::schema::{self, RowSchema, SchemaError};
 use crate::writer::{ClickHouseEndpoint, ClickHouseWriter};
+use rustls::ClientConfig;
+use rustls_native_certs::CertificateResult;
 use serde::{Deserialize, Deserializer, de};
 use spate_core::config::{ComponentConfig, ConfigError};
 use spate_core::deser::RecFamily;
@@ -19,6 +21,7 @@ use spate_core::sink::{
     SinkProbeFn, endpoint_probe,
 };
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -65,6 +68,9 @@ pub struct ClickHouseSinkConfig {
     /// Password (interpolate secrets upstream via `${VAR}`).
     #[serde(default)]
     pub password: Option<String>,
+    /// Trust settings for `https://` replicas (see [`TlsSection`]).
+    #[serde(default)]
+    pub tls: TlsSection,
     /// Extra per-insert ClickHouse settings (beyond the deduplication
     /// settings this sink always sets).
     #[serde(default)]
@@ -223,6 +229,7 @@ impl ClickHouseSinkConfig {
             database: None,
             user: None,
             password: None,
+            tls: TlsSection::default(),
             settings: BTreeMap::new(),
             batch: BatchConfig::default(),
             inflight: InflightConfig::default(),
@@ -333,6 +340,28 @@ impl DistributedCheckSection {
             endpoint: None,
         }
     }
+}
+
+/// Trust settings for `https://` replicas. The URL scheme decides whether a
+/// connection uses TLS.
+///
+/// ```yaml
+/// sink:
+///   clickhouse:
+///     tls:
+///       root_ca: /etc/spate/clickhouse-ca.pem
+/// ```
+///
+/// Construct with [`TlsSection::default`] and set the fields. The struct is
+/// `#[non_exhaustive]` so new knobs can be added without breaking callers.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct TlsSection {
+    /// PEM bundle of root CAs trusted in addition to the system trust store.
+    /// Requires at least one `https://` URL.
+    #[serde(default)]
+    pub root_ca: Option<PathBuf>,
 }
 
 /// Client-side timeouts for one insert.
@@ -565,13 +594,25 @@ pub fn from_component_config(
 }
 
 /// Build from an already-deserialized config (programmatic use).
+///
+/// Reads the system trust store and `tls.root_ca` when any replica or
+/// `distributed_check.endpoint` is `https://`.
 pub fn build(cfg: ClickHouseSinkConfig) -> Result<ClickHouseSinkBuilder, ConfigError> {
+    build_with(cfg, rustls_native_certs::load_native_certs)
+}
+
+fn build_with(
+    cfg: ClickHouseSinkConfig,
+    system_roots: impl FnOnce() -> CertificateResult,
+) -> Result<ClickHouseSinkBuilder, ConfigError> {
     validate(&cfg)?;
+    let roots = crate::http::root_store(&cfg.tls, uses_https(&cfg), system_roots)?;
+    let tls = crate::http::client_config(roots);
 
     // Two independent client sets: inserts and readiness probes must not
     // share connection pools (see `ClickHouseSink::probe_endpoints`).
-    let endpoints = make_endpoints(&cfg);
-    let probe_endpoints = Arc::new(make_endpoints(&cfg));
+    let endpoints = make_endpoints(&cfg, &tls);
+    let probe_endpoints = Arc::new(make_endpoints(&cfg, &tls));
 
     let shard_weights: Arc<[u32]> = cfg.shards.iter().map(|s| s.weight).collect();
     let distributed = cfg.distributed_check.as_ref().map(|section| {
@@ -579,7 +620,7 @@ pub fn build(cfg: ClickHouseSinkConfig) -> Result<ClickHouseSinkBuilder, ConfigE
             .endpoint
             .clone()
             .unwrap_or_else(|| cfg.shards[0].replicas[0].clone());
-        let endpoint = ClickHouseEndpoint::new(client_for(&url, &cfg), url);
+        let endpoint = ClickHouseEndpoint::new(client_for(&url, &cfg, &tls), url);
         let expected_expr = match (&section.sharding_key, &section.sharding_expr) {
             (Some(key), None) => format!("xxHash64({key})"),
             (None, Some(expr)) => distributed::normalize(expr),
@@ -619,8 +660,8 @@ pub fn build(cfg: ClickHouseSinkConfig) -> Result<ClickHouseSinkBuilder, ConfigE
 
 /// One configured client for `url`. Private: the `clickhouse` crate's 0.x
 /// `Client` type must never surface in this crate's public API.
-fn client_for(url: &str, cfg: &ClickHouseSinkConfig) -> clickhouse::Client {
-    let mut client = clickhouse::Client::default().with_url(url);
+fn client_for(url: &str, cfg: &ClickHouseSinkConfig, tls: &ClientConfig) -> clickhouse::Client {
+    let mut client = crate::http::client(tls).with_url(url);
     if let Some(db) = &cfg.database {
         client = client.with_database(db);
     }
@@ -634,14 +675,14 @@ fn client_for(url: &str, cfg: &ClickHouseSinkConfig) -> clickhouse::Client {
 }
 
 /// One connected client per replica, `[shard][replica]`.
-fn make_endpoints(cfg: &ClickHouseSinkConfig) -> Vec<Vec<ClickHouseEndpoint>> {
+fn make_endpoints(cfg: &ClickHouseSinkConfig, tls: &ClientConfig) -> Vec<Vec<ClickHouseEndpoint>> {
     cfg.shards
         .iter()
         .map(|shard| {
             shard
                 .replicas
                 .iter()
-                .map(|url| ClickHouseEndpoint::new(client_for(url, cfg), url.clone()))
+                .map(|url| ClickHouseEndpoint::new(client_for(url, cfg, tls), url.clone()))
                 .collect()
         })
         .collect()
@@ -775,7 +816,22 @@ fn validate(cfg: &ClickHouseSinkConfig) -> Result<(), ConfigError> {
             ));
         }
     }
+    if cfg.tls.root_ca.is_some() && !uses_https(cfg) {
+        return fail(
+            "tls.root_ca is set, but no replica or distributed_check.endpoint is https://".into(),
+        );
+    }
     Ok(())
+}
+
+/// Whether any replica or the `distributed_check` endpoint is `https://`.
+fn uses_https(cfg: &ClickHouseSinkConfig) -> bool {
+    let check = cfg.distributed_check.as_ref();
+    cfg.shards
+        .iter()
+        .flat_map(|shard| &shard.replicas)
+        .chain(check.and_then(|c| c.endpoint.as_ref()))
+        .any(|url| url.starts_with("https://"))
 }
 
 /// Strict identifier: `[A-Za-z_][A-Za-z0-9_]*`. Validated before being
@@ -1185,6 +1241,84 @@ settings: { insert_quorum: "auto" }
             ClickHouseSinkConfig::new("t", vec![ShardConfig::new(vec!["http://a:8123".into()])]);
         cfg.distributed_check = Some(DistributedCheckSection::new("prod", "db.t_dist", "id"));
         let _ = build(cfg).expect("a config built entirely from `new` passes validation");
+    }
+
+    /// An `https://` replica signed by the CA that `SSL_CERT_FILE` names is
+    /// trusted through `build`. Regression for #619.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn build_trusts_a_ca_from_the_system_trust_store() {
+        const NAME: &str = "config::tests::build_trusts_a_ca_from_the_system_trust_store";
+        const URL: &str = "SPATE_TEST_CLICKHOUSE_TLS_URL";
+        if let Ok(url) = std::env::var(URL) {
+            let builder = build(ClickHouseSinkConfig::new(
+                "t",
+                vec![ShardConfig::new(vec![url])],
+            ))
+            .unwrap();
+            builder.endpoints[0][0]
+                .client()
+                .query("SELECT 1")
+                .execute()
+                .await
+                .expect("the CA in SSL_CERT_FILE is trusted");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let ca = crate::test_tls::TestCa::new("system");
+        let url = ca.serve().await;
+        let ca_file = ca.write(dir.path());
+        let out = tokio::task::spawn_blocking(move || {
+            std::process::Command::new(std::env::current_exe().expect("test binary"))
+                .args(["--exact", NAME])
+                .env_remove("SSL_CERT_DIR")
+                .env("SSL_CERT_FILE", ca_file)
+                .env(URL, url)
+                .output()
+                .expect("spawn the test binary")
+        })
+        .await
+        .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        // A filter that matches nothing also exits 0.
+        assert!(
+            out.status.success() && stdout.contains("1 passed"),
+            "{stdout}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// The trust store is read when a replica or the `distributed_check`
+    /// endpoint is `https://`, and only then.
+    #[test]
+    fn the_trust_store_is_read_only_for_https() {
+        let http = ClickHouseSinkConfig::new("t", vec![ShardConfig::new(vec!["http://a".into()])]);
+        let _ = build_with(http.clone(), || panic!("the trust store was read")).unwrap();
+
+        let mut front = http;
+        let mut check = DistributedCheckSection::new("prod", "db.t_dist", "id");
+        check.endpoint = Some("https://front:8443".into());
+        front.distributed_check = Some(check);
+        let https =
+            ClickHouseSinkConfig::new("t", vec![ShardConfig::new(vec!["https://a".into()])]);
+        for cfg in [front, https] {
+            let mut read = false;
+            let _ = build_with(cfg, || {
+                read = true;
+                CertificateResult::default()
+            })
+            .unwrap();
+            assert!(read);
+        }
+    }
+
+    #[test]
+    fn tls_root_ca_parses_and_requires_an_https_url() {
+        let yaml = "table: t\nshards: [{replicas: [\"https://a\"]}]\ntls: {root_ca: /etc/ca.pem}\n";
+        let cfg: ClickHouseSinkConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cfg.tls.root_ca, Some(PathBuf::from("/etc/ca.pem")));
+
+        let err = from_component_config(&component(&yaml.replace("https", "http"))).unwrap_err();
+        assert!(err.to_string().contains("tls.root_ca"), "{err}");
     }
 
     #[test]

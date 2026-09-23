@@ -815,13 +815,10 @@ mod tests {
         }
     }
 
-    /// `open()` runs the TLS/SASL guard before creating the consumer, so a
-    /// source built programmatically via `new()`, bypassing
-    /// `from_component_config`'s config-load validation, still fails fast with
-    /// the actionable message instead of a late librdkafka error. Without the
-    /// `tls` feature the guard rejects a security passthrough before any client
-    /// (or broker contact); with it the guard is a no-op and the lazily
-    /// connecting consumer is created without touching a broker.
+    /// `open()` runs the TLS guard on a source made with `new()`, which skips
+    /// `from_component_config`: without the `tls` feature it rejects a security
+    /// passthrough before creating a client, and with it the consumer is
+    /// created.
     #[test]
     fn open_enforces_tls_guard_on_programmatic_source() {
         use spate_core::checkpoint::Checkpointer;
@@ -835,8 +832,11 @@ mod tests {
         if cfg!(feature = "tls") {
             result.expect("tls build: open succeeds");
         } else {
-            let err = result.expect_err("non-tls build: open rejects the security config");
-            assert!(err.to_string().contains("kafka-tls"), "actionable: {err}");
+            let msg = result
+                .expect_err("non-tls build: open rejects the security config")
+                .to_string();
+            assert!(msg.contains("kafka-tls"), "actionable: {msg}");
+            assert!(msg.contains("source.kafka.rdkafka"), "scoped: {msg}");
         }
     }
 

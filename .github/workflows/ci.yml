@@ -498,7 +498,7 @@ jobs:
         run: cargo xtask docsrs --nightly "$NIGHTLY"
 
   features:
-    name: Feature matrix (each feature)
+    name: Feature matrix and default-feature tests
     runs-on: ubuntu-latest
     needs: [changes, lint, workflows]
     if: needs.changes.outputs.rust == 'true'
@@ -510,7 +510,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-rust
         with:
-          tools: cargo-hack
+          tools: cargo-hack,nextest
           shared-key: dev-allfeatures
       - run: cargo xtask hack
 

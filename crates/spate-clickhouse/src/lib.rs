@@ -132,12 +132,15 @@ extern crate self as spate_clickhouse;
 pub mod config;
 mod distributed;
 mod encoder;
+mod http;
 pub mod native;
 pub mod router;
 mod row;
 pub mod rowbinary;
 mod schema;
 pub mod serde;
+#[cfg(test)]
+mod test_tls;
 #[cfg(feature = "testing")]
 #[doc(hidden)]
 pub mod testing;
@@ -145,7 +148,7 @@ mod types;
 mod writer;
 
 pub use config::{
-    ClickHouseSink, ClickHouseSinkConfig, Compression, DistributedCheckSection, Format,
+    ClickHouseSink, ClickHouseSinkConfig, Compression, DistributedCheckSection, Format, TlsSection,
     from_component_config,
 };
 pub use distributed::DistributedCheckError;

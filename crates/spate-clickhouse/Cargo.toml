@@ -14,7 +14,12 @@ categories.workspace = true
 [dependencies]
 bytes = { workspace = true }
 bytesize = { workspace = true }
-clickhouse = { workspace = true, features = ["lz4", "zstd", "rustls-tls"] }
+clickhouse = { workspace = true, features = ["lz4", "zstd"] }
+hyper-rustls = { workspace = true }
+hyper-util = { workspace = true, features = ["client-legacy", "http1", "tokio"] }
+rustls = { workspace = true }
+rustls-native-certs = { workspace = true }
+webpki-roots = { workspace = true }
 spate-core = { workspace = true }
 spate-clickhouse-derive = { workspace = true }
 foldhash = { workspace = true }
@@ -49,15 +54,20 @@ testing = []
 spate-clickhouse = { path = ".", features = ["testing"] }
 gungraun = { workspace = true }
 criterion = { workspace = true }
-clickhouse = { workspace = true, features = ["lz4", "zstd", "rustls-tls", "test-util"] }
+clickhouse = { workspace = true, features = ["lz4", "zstd", "test-util"] }
 crossbeam-channel = { workspace = true }
 spate-test = { workspace = true }
 proptest = { workspace = true }
 serde_repr = { workspace = true }
-hyper = { workspace = true }
+hyper = { workspace = true, features = ["http1", "server"] }
+hyper-util = { workspace = true, features = ["tokio"] }
+base64 = { workspace = true }
+rcgen = { workspace = true }
+tempfile = { workspace = true }
+tokio-rustls = { workspace = true, features = ["aws_lc_rs"] }
 serde_yaml = { workspace = true }
 testcontainers-modules = { workspace = true, features = ["clickhouse"] }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
 
 [[bench]]
 name = "encode"

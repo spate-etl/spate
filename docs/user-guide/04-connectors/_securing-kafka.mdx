@@ -34,6 +34,14 @@ rdkafka:
   ssl.ca.location: /etc/kafka/ca.pem   # omit to use the system trust store
 ```
 
+Without `ssl.ca.location` or `ssl.ca.pem`, the connector sets
+`ssl.ca.location: probe`. On Linux and BSD, librdkafka then loads the first
+standard CA bundle it finds, such as `/etc/ssl/certs/ca-certificates.crt`. If
+`SSL_CERT_FILE` or `SSL_CERT_DIR` is set there, the connector leaves the key
+unset and OpenSSL reads those variables instead. On macOS, librdkafka applies
+`probe` itself and does not read the Keychain. On Windows, it reads the system
+certificate store.
+
 ### mTLS (client-certificate authentication)
 
 Add the client certificate and its private key; the broker authenticates the

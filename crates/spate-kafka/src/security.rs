@@ -1,4 +1,5 @@
-//! Shared load-time guard for the opt-in TLS/SASL transport.
+//! TLS/SASL handling shared by the source and sink: the load-time guard for
+//! the opt-in transport, and the CA default applied to the client config.
 //!
 //! TLS/mTLS and SASL are configured entirely through each connector's raw
 //! `rdkafka` property passthrough (`security.protocol`, `ssl.*`, `sasl.*`).
@@ -69,6 +70,40 @@ fn names_openssl_feature(features: &str) -> bool {
     })
 }
 
+/// Set `ssl.ca.location` to `probe` when the passthrough names no CA and
+/// `openssl_env` is false, so the client trusts the system store on every
+/// platform. A no-op without the `tls` feature.
+pub(crate) fn apply_ca_default(
+    cc: &mut rdkafka::ClientConfig,
+    rdkafka: &BTreeMap<String, String>,
+    openssl_env: bool,
+) {
+    if let Some(location) = ca_location_default(rdkafka, cfg!(feature = "tls"), openssl_env) {
+        cc.set("ssl.ca.location", location);
+    }
+}
+
+/// Whether `SSL_CERT_FILE` or `SSL_CERT_DIR` is set and non-empty.
+///
+/// `probe` stops at the first system bundle it loads and never reads these,
+/// so the default stands aside for them.
+pub(crate) fn openssl_env_overrides() -> bool {
+    ["SSL_CERT_FILE", "SSL_CERT_DIR"]
+        .iter()
+        .any(|var| std::env::var_os(var).is_some_and(|v| !v.is_empty()))
+}
+
+fn ca_location_default(
+    rdkafka: &BTreeMap<String, String>,
+    tls: bool,
+    openssl_env: bool,
+) -> Option<&'static str> {
+    let names_ca = ["ssl.ca.location", "ssl.ca.pem"]
+        .iter()
+        .any(|k| rdkafka.contains_key(*k));
+    (tls && !names_ca && !openssl_env).then_some("probe")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128,6 +163,59 @@ mod tests {
             let err = check(&cfg, "source.kafka", false).expect_err("tls off must reject");
             assert!(err.to_string().contains("kafka-tls"), "{cfg:?}: {err}");
             assert!(check(&cfg, "source.kafka", true).is_ok(), "tls on: {cfg:?}");
+        }
+    }
+
+    /// `probe` applies only in a `tls` build whose passthrough names no CA and
+    /// whose environment has no OpenSSL override. Regression for #609.
+    #[test]
+    fn ca_default_yields_to_a_named_ca_and_the_openssl_env() {
+        let none = map(&[]);
+        assert_eq!(ca_location_default(&none, true, false), Some("probe"));
+        assert_eq!(ca_location_default(&none, false, false), None);
+        assert_eq!(ca_location_default(&none, true, true), None);
+
+        for named in [
+            map(&[("ssl.ca.location", "/etc/kafka/ca.pem")]),
+            map(&[("ssl.ca.pem", "-----BEGIN CERTIFICATE-----")]),
+        ] {
+            assert_eq!(ca_location_default(&named, true, false), None, "{named:?}");
+        }
+    }
+
+    /// `openssl_env_overrides` reads both variables and treats an empty value
+    /// as unset. Each case runs in a child test process with a controlled
+    /// environment, because cargo sets both variables on Linux.
+    #[test]
+    fn openssl_env_overrides_reads_both_vars_and_ignores_empty() {
+        const NAME: &str =
+            "security::tests::openssl_env_overrides_reads_both_vars_and_ignores_empty";
+        const EXPECT: &str = "SPATE_TEST_OPENSSL_ENV_EXPECT";
+        if let Some(expected) = std::env::var_os(EXPECT) {
+            assert_eq!(openssl_env_overrides(), expected == "1");
+            return;
+        }
+        for (vars, expected) in [
+            (&[][..], "0"),
+            (&[("SSL_CERT_FILE", ""), ("SSL_CERT_DIR", "")][..], "0"),
+            (&[("SSL_CERT_FILE", "/etc/kafka/ca.pem")][..], "1"),
+            (&[("SSL_CERT_DIR", "/etc/kafka/certs")][..], "1"),
+        ] {
+            let out = std::process::Command::new(std::env::current_exe().expect("test binary"))
+                .args(["--exact", NAME])
+                .env_remove("SSL_CERT_FILE")
+                .env_remove("SSL_CERT_DIR")
+                .envs(vars.iter().copied())
+                .env(EXPECT, expected)
+                .output()
+                .expect("spawn the test binary");
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            // A filter that matches nothing also exits 0.
+            assert!(
+                out.status.success() && stdout.contains("1 passed"),
+                "{vars:?}: {stdout}{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
         }
     }
 }

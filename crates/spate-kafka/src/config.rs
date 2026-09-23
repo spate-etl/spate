@@ -128,7 +128,10 @@ pub struct KafkaSourceConfig {
     #[serde(with = "humantime_serde", default = "default_statistics_interval")]
     pub statistics_interval: Duration,
     /// Raw librdkafka properties, applied verbatim after validation.
-    /// Framework-owned properties (see crate docs) are rejected.
+    /// Framework-owned properties (see crate docs) are rejected. With the
+    /// `tls` feature, a map naming neither `ssl.ca.location` nor `ssl.ca.pem`
+    /// gets `ssl.ca.location: probe` unless `SSL_CERT_FILE` or `SSL_CERT_DIR`
+    /// is set.
     ///
     /// The framework sets no prefetch cap of its own, so
     /// `queued.min.messages` (default 100000) and
@@ -219,11 +222,19 @@ impl KafkaSourceConfig {
 
     /// Build the effective librdkafka client configuration.
     pub(crate) fn client_config(&self) -> rdkafka::ClientConfig {
+        self.client_config_with(crate::security::openssl_env_overrides())
+    }
+
+    /// Takes the OpenSSL env check as an argument: on Linux, cargo exports
+    /// `SSL_CERT_FILE` and `SSL_CERT_DIR` to every process it runs, so a test
+    /// reading them always sees them set.
+    fn client_config_with(&self, openssl_env: bool) -> rdkafka::ClientConfig {
         let mut cc = rdkafka::ClientConfig::new();
         // User passthrough first: framework-owned settings below always win.
         for (k, v) in &self.rdkafka {
             cc.set(k, v);
         }
+        crate::security::apply_ca_default(&mut cc, &self.rdkafka, openssl_env);
         // Prefetch depth is deliberately left at librdkafka's own defaults
         // (`queued.min.messages` 100000, `queued.max.messages.kbytes` 65536)
         // so behavior is predictable and reasoning transfers from librdkafka's
@@ -481,6 +492,60 @@ mod tests {
             .create()
             .expect("OpenSSL compiled in: consumer creation succeeds");
         drop(consumer);
+    }
+
+    /// A `tls` build gets `probe` when the passthrough names no CA and no
+    /// OpenSSL env override is set, and keeps a CA it names.
+    #[cfg(feature = "tls")]
+    #[test]
+    fn tls_build_defaults_the_ca_to_the_system_store() {
+        let cfg = KafkaSourceConfig::from_component_config(&section(&minimal())).unwrap();
+        assert_eq!(
+            cfg.client_config_with(false).get("ssl.ca.location"),
+            Some("probe")
+        );
+        assert_eq!(cfg.client_config_with(true).get("ssl.ca.location"), None);
+
+        let body = format!(
+            "{}  rdkafka:\n    ssl.ca.location: /etc/kafka/ca.pem\n",
+            minimal()
+        );
+        let cfg = KafkaSourceConfig::from_component_config(&section(&body)).unwrap();
+        assert_eq!(
+            cfg.client_config_with(false).get("ssl.ca.location"),
+            Some("/etc/kafka/ca.pem")
+        );
+    }
+
+    /// A `tls` consumer on Linux loads a standard CA bundle when the
+    /// passthrough names no CA and no OpenSSL env override is set.
+    /// Regression for #609.
+    #[cfg(all(feature = "tls", target_os = "linux"))]
+    #[test]
+    fn tls_consumer_loads_a_system_ca_bundle() {
+        use rdkafka::config::FromClientConfigAndContext;
+        use rdkafka::consumer::BaseConsumer;
+
+        let body = format!(
+            "{}  rdkafka:\n    security.protocol: ssl\n    debug: security\n",
+            minimal()
+        );
+        let cfg = KafkaSourceConfig::from_component_config(&section(&body)).unwrap();
+        for openssl_env in [false, true] {
+            let logs = spate_test::capture_logs(tracing::Level::DEBUG, || {
+                let consumer = BaseConsumer::from_config_and_context(
+                    &cfg.client_config_with(openssl_env),
+                    crate::context::SourceContext::default(),
+                )
+                .expect("consumer");
+                // librdkafka queues creation-time logs until the first poll.
+                let _ = consumer.poll(Duration::ZERO);
+            });
+            let loaded = logs
+                .iter()
+                .any(|l| l.contains("Setting default CA certificate location"));
+            assert_eq!(loaded, !openssl_env, "{logs:#?}");
+        }
     }
 
     #[test]

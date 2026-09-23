@@ -223,7 +223,10 @@ pub struct KafkaSinkConfig {
     /// Raw librdkafka producer properties, applied verbatim after
     /// validation. Sink-owned properties (see [`KafkaSinkConfig`] docs and
     /// the connector guide) are rejected; batching knobs like `linger.ms`
-    /// and `batch.num.messages` may be tuned here.
+    /// and `batch.num.messages` may be tuned here. With the `tls` feature, a
+    /// map naming neither `ssl.ca.location` nor `ssl.ca.pem` gets
+    /// `ssl.ca.location: probe` unless `SSL_CERT_FILE` or `SSL_CERT_DIR` is
+    /// set.
     #[serde(default)]
     pub rdkafka: BTreeMap<String, String>,
 }
@@ -327,22 +330,30 @@ impl KafkaSinkConfig {
 
     /// Build the effective librdkafka producer configuration.
     pub(crate) fn client_config(&self) -> rdkafka::ClientConfig {
-        self.client_config_impl(true)
+        self.client_config_impl(true, crate::security::openssl_env_overrides())
     }
 
     /// The probe producer's configuration: identical, minus statistics —
     /// only the main producer's context translates statistics, so a second
     /// emitting client would be pure overhead.
     fn probe_client_config(&self) -> rdkafka::ClientConfig {
-        self.client_config_impl(false)
+        self.client_config_impl(false, crate::security::openssl_env_overrides())
     }
 
-    fn client_config_impl(&self, with_statistics: bool) -> rdkafka::ClientConfig {
+    /// Takes the OpenSSL env check as an argument: on Linux, cargo exports
+    /// `SSL_CERT_FILE` and `SSL_CERT_DIR` to every process it runs, so a test
+    /// reading them always sees them set.
+    fn client_config_impl(
+        &self,
+        with_statistics: bool,
+        openssl_env: bool,
+    ) -> rdkafka::ClientConfig {
         let mut cc = rdkafka::ClientConfig::new();
         // User passthrough first: sink-owned settings below always win.
         for (k, v) in &self.rdkafka {
             cc.set(k, v);
         }
+        crate::security::apply_ca_default(&mut cc, &self.rdkafka, openssl_env);
         if let Some(compression) = self.compression {
             cc.set("compression.codec", compression.codec());
         }
@@ -661,6 +672,33 @@ mod tests {
             };
             assert!(err.to_string().contains(expected), "{err}");
         }
+    }
+
+    /// Both producers of a `tls` build get `probe` when the passthrough names
+    /// no CA and no OpenSSL env override is set, and keep a CA it names.
+    #[cfg(feature = "tls")]
+    #[test]
+    fn tls_build_defaults_the_ca_to_the_system_store() {
+        let cfg = parse(&minimal()).unwrap();
+        for with_statistics in [true, false] {
+            let ca = |env| {
+                cfg.client_config_impl(with_statistics, env)
+                    .get("ssl.ca.location")
+                    .map(str::to_owned)
+            };
+            assert_eq!(ca(false).as_deref(), Some("probe"));
+            assert_eq!(ca(true), None);
+        }
+
+        let body = format!(
+            "{}  rdkafka:\n    ssl.ca.location: /etc/kafka/ca.pem\n",
+            minimal()
+        );
+        let cfg = parse(&body).unwrap();
+        assert_eq!(
+            cfg.client_config_impl(true, false).get("ssl.ca.location"),
+            Some("/etc/kafka/ca.pem")
+        );
     }
 
     #[test]

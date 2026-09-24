@@ -54,7 +54,8 @@ Authentication and TLS failures are a **fatal error class**, not a retryable
 one: a wrong password, an untrusted CA, or a rejected client certificate fails
 the pipeline fast with an actionable message rather than silently stalling or
 looping. A security misconfiguration therefore surfaces at startup, or at the
-first connection, instead of degrading into a stuck pipeline. See
+first connection, instead of degrading into a stuck pipeline. A component that
+connects on demand fails at the first record that needs the connection. See
 [Delivery guarantees](../02-concepts/02-delivery-guarantees.mdx) for how fatal
 error classes propagate, and [Error handling](../02-concepts/04-error-handling.mdx)
 for the Skip/Fail taxonomy they sit outside of.

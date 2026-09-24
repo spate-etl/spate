@@ -3981,6 +3981,8 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-rustls",
+ "tower-layer",
+ "tower-service",
  "tracing",
  "webpki-roots 1.0.8",
  "yaml_serde",

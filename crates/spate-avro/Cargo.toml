@@ -21,6 +21,8 @@ reqwest = { workspace = true, features = ["rustls"] }
 rustls = { workspace = true }
 rustls-native-certs = { workspace = true }
 webpki-roots = { workspace = true }
+tower-layer = { workspace = true }
+tower-service = { workspace = true }
 humantime-serde = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }

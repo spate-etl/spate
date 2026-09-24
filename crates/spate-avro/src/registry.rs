@@ -9,7 +9,7 @@
 //! `schema_registry_converter` is used strictly as the registry HTTP
 //! client; its decoders never appear on the hot path.
 //!
-//! # Transient vs permanent failures
+//! # Transient, permanent and rejected
 //!
 //! Only a *permanent* verdict about an id is negatively cached: the registry
 //! answering `404` (unknown id/subject/version), a schema that uses
@@ -21,6 +21,10 @@
 //! records for the whole negative-cache TTL. Per-id backoff, held here in
 //! the fetcher, keeps those replays from hot-looping the registry.
 //!
+//! A registry that answers `401`/`403`, or whose certificate fails
+//! verification, is *rejected*: the reason is recorded once in the handle's
+//! [`Rejection`], and every later cache miss is fatal.
+//!
 //! # Concurrency
 //!
 //! Fetches run concurrently (up to [`MAX_CONCURRENT_FETCHES`]) so one slow
@@ -30,13 +34,17 @@
 
 use crate::cache::{CompiledSchema, Lookup, SchemaCache};
 use crate::config::AvroConfigError;
-use rustls::{ClientConfig, RootCertStore};
+use rustls::{CertificateError, ClientConfig, RootCertStore};
 use rustls_native_certs::CertificateResult;
 use schema_registry_converter::async_impl::schema_registry::{self, SrSettings, SrSettingsBuilder};
 use schema_registry_converter::error::SRCError;
 use schema_registry_converter::schema_registry_common::{SchemaType, SubjectNameStrategy};
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::error::Error;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Arc, OnceLock};
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
@@ -50,11 +58,15 @@ const FETCH_BACKOFF_MAX: Duration = Duration::from_secs(5);
 /// load and open-socket count modest.
 const MAX_CONCURRENT_FETCHES: usize = 4;
 
+/// Why the registry rejected this client, set at most once.
+pub(crate) type Rejection = Arc<OnceLock<String>>;
+
 /// Cloneable handle held by deserializers: request a fetch, read the cache.
 #[derive(Clone, Debug)]
 pub(crate) struct RegistryHandle {
     tx: mpsc::UnboundedSender<u32>,
     pub(crate) cache: Arc<SchemaCache>,
+    pub(crate) rejection: Rejection,
 }
 
 impl RegistryHandle {
@@ -73,22 +85,46 @@ pub(crate) struct RegistryConfig {
     pub basic_auth: Option<(String, Option<String>)>,
 }
 
+impl RegistryConfig {
+    /// The URL without userinfo, query or fragment, for error messages.
+    pub(crate) fn display_url(&self) -> String {
+        match reqwest::Url::parse(&self.url) {
+            Ok(mut url) => {
+                let _ = url.set_username("");
+                let _ = url.set_password(None);
+                url.set_query(None);
+                url.set_fragment(None);
+                url.to_string()
+            }
+            Err(_) => "(unparseable URL)".to_owned(),
+        }
+    }
+}
+
 /// The registry client, verifying an `https://` registry against the system
-/// trust store.
-pub(crate) fn sr_settings(cfg: &RegistryConfig) -> Result<SrSettings, AvroConfigError> {
-    sr_settings_with(cfg, rustls_native_certs::load_native_certs)
+/// trust store. A certificate the client rejects is recorded in `rejection`.
+pub(crate) fn sr_settings(
+    cfg: &RegistryConfig,
+    rejection: &Rejection,
+) -> Result<SrSettings, AvroConfigError> {
+    sr_settings_with(cfg, rejection, rustls_native_certs::load_native_certs)
 }
 
 fn sr_settings_with(
     cfg: &RegistryConfig,
+    rejection: &Rejection,
     system: impl FnOnce() -> CertificateResult,
 ) -> Result<SrSettings, AvroConfigError> {
     let mut builder: SrSettingsBuilder = SrSettings::new_builder(cfg.url.clone());
     if let Some((user, pass)) = &cfg.basic_auth {
         builder.set_basic_authorization(user, pass.as_deref());
     }
+    let layer = RecordRejection {
+        registry: cfg.display_url().into(),
+        rejection: Arc::clone(rejection),
+    };
     builder
-        .build_with(client_builder(system))
+        .build_with(client_builder(system).connector_layer(layer))
         .map_err(|e| AvroConfigError::Registry {
             detail: match e.cause {
                 Some(cause) => format!("{}: {cause}", e.error),
@@ -127,6 +163,86 @@ fn root_store(system: impl FnOnce() -> CertificateResult) -> RootCertStore {
     roots
 }
 
+/// A connector layer that records a certificate rejection in its
+/// [`Rejection`] and passes every result through unchanged.
+///
+/// `schema_registry_converter` renders a request error with `Display`, which
+/// drops the source chain, so the rejection is read here instead.
+#[derive(Clone)]
+struct RecordRejection {
+    registry: Arc<str>,
+    rejection: Rejection,
+}
+
+impl<S> tower_layer::Layer<S> for RecordRejection {
+    type Service = RecordRejectionService<S>;
+
+    fn layer(&self, inner: S) -> Self::Service {
+        RecordRejectionService {
+            inner,
+            layer: self.clone(),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct RecordRejectionService<S> {
+    inner: S,
+    layer: RecordRejection,
+}
+
+type BoxError = Box<dyn Error + Send + Sync>;
+
+impl<S, Req> tower_service::Service<Req> for RecordRejectionService<S>
+where
+    S: tower_service::Service<Req, Error = BoxError>,
+    S::Future: Send + 'static,
+{
+    type Response = S::Response;
+    type Error = BoxError;
+    type Future = Pin<Box<dyn Future<Output = Result<S::Response, BoxError>> + Send>>;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), BoxError>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, req: Req) -> Self::Future {
+        let connecting = self.inner.call(req);
+        let layer = self.layer.clone();
+        Box::pin(async move {
+            connecting.await.inspect_err(|e| {
+                if let Some(cert) = certificate_error(e.as_ref()) {
+                    let _ = layer.rejection.set(format!(
+                        "schema registry {} presented a certificate the client rejects: {cert}",
+                        layer.registry
+                    ));
+                }
+            })
+        })
+    }
+}
+
+/// The certificate rejection in `err`'s source chain, if the TLS handshake
+/// failed to verify the server.
+fn certificate_error<'a>(err: &'a (dyn Error + 'static)) -> Option<&'a CertificateError> {
+    let mut pending = vec![err];
+    while let Some(e) = pending.pop() {
+        if let Some(rustls::Error::InvalidCertificate(cert)) = e.downcast_ref() {
+            return Some(cert);
+        }
+        // `io::Error::source` skips the error it wraps, so reach it through
+        // `get_ref`.
+        if let Some(inner) = e
+            .downcast_ref::<std::io::Error>()
+            .and_then(|io| io.get_ref())
+        {
+            pending.push(inner);
+        }
+        pending.extend(e.source());
+    }
+    None
+}
+
 fn client_config(roots: RootCertStore) -> ClientConfig {
     // rustls has no process-wide default provider when a build enables both
     // `ring` and `aws-lc-rs`.
@@ -156,12 +272,15 @@ struct Backoff {
 /// Spawn the fetcher task on `handle` and return the requester side.
 pub(crate) fn spawn_fetcher(
     settings: Arc<SrSettings>,
+    registry: Arc<str>,
+    rejection: Rejection,
     negative_cache_ttl: Duration,
     runtime: &tokio::runtime::Handle,
 ) -> RegistryHandle {
     let cache = Arc::new(SchemaCache::new(negative_cache_ttl));
     let (tx, mut rx) = mpsc::unbounded_channel::<u32>();
     let task_cache = Arc::clone(&cache);
+    let task_rejection = Arc::clone(&rejection);
     runtime.spawn(async move {
         // Ids with a fetch currently running: dedup across the concurrency.
         let mut in_flight: HashSet<u32> = HashSet::new();
@@ -223,22 +342,34 @@ pub(crate) fn spawn_fetcher(
                     in_flight.insert(id);
                     let cache = Arc::clone(&task_cache);
                     let settings = Arc::clone(&settings);
+                    let registry = Arc::clone(&registry);
+                    let rejection = Arc::clone(&task_rejection);
                     tasks.spawn(async move {
-                        let outcome = fetch_one(id, &settings, &cache).await;
+                        let outcome = fetch_one(id, &settings, &cache, &registry, &rejection).await;
                         (id, outcome)
                     });
                 }
             }
         }
     });
-    RegistryHandle { tx, cache }
+    RegistryHandle {
+        tx,
+        cache,
+        rejection,
+    }
 }
 
 /// Fetch, parse, and publish schema `id`, or classify the failure. A single
 /// HTTP attempt: transient failures are retried by the deserializer replaying
 /// the payload (bounded by this id's backoff), not by blocking here, which
 /// also stops one slow id from monopolizing a fetch slot for minutes.
-async fn fetch_one(id: u32, settings: &SrSettings, cache: &SchemaCache) -> FetchOutcome {
+async fn fetch_one(
+    id: u32,
+    settings: &SrSettings,
+    cache: &SchemaCache,
+    registry: &str,
+    rejection: &Rejection,
+) -> FetchOutcome {
     match schema_registry::get_schema_by_id_and_type(id, settings, SchemaType::Avro).await {
         Ok(registered) => {
             if !registered.references.is_empty() {
@@ -271,6 +402,17 @@ async fn fetch_one(id: u32, settings: &SrSettings, cache: &SchemaCache) -> Fetch
             cache.insert_failed(id, format!("registry fetch for schema {id} failed: {e}"));
             FetchOutcome::Resolved
         }
+        Err(e) if is_auth_rejection(&e) => {
+            let reason = format!(
+                "schema registry {registry} rejected the fetch of schema {id}: {}",
+                e.error
+            );
+            tracing::error!(schema_id = id, %reason, "registry rejected the client");
+            let _ = rejection.set(reason);
+            // Leave the id absent: a negative entry would reach the
+            // ErrorPolicy, and Skip would drop the payload.
+            FetchOutcome::Transient
+        }
         Err(e) => {
             // Transient outage. Leave the id absent: poisoning it here would
             // drop (and ack) decodable records for the whole negative TTL. The
@@ -294,11 +436,27 @@ fn is_permanent(e: &SRCError) -> bool {
     e.error.contains("status 404")
 }
 
+/// Whether the registry refused the client's credentials or access (`401`,
+/// `403`). Matched on the message for the reason [`is_permanent`] gives.
+fn is_auth_rejection(e: &SRCError) -> bool {
+    e.error.contains("status 401") || e.error.contains("status 403")
+}
+
 /// Fetch the latest version of every configured subject into the cache
-/// (startup pre-warm). Failures are logged, not fatal: the id will be
-/// fetched on demand when it first appears in a payload.
-pub(crate) async fn prewarm(settings: &SrSettings, subjects: &[String], cache: &SchemaCache) {
+/// (startup pre-warm). A `401` is recorded in `rejection` and ends the
+/// pre-warm; any other failure is logged, and the id is fetched on demand
+/// when it first appears in a payload.
+pub(crate) async fn prewarm(
+    settings: &SrSettings,
+    subjects: &[String],
+    cache: &SchemaCache,
+    registry: &str,
+    rejection: &Rejection,
+) {
     for subject in subjects {
+        if rejection.get().is_some() {
+            return;
+        }
         let strategy = SubjectNameStrategy::RecordNameStrategy(subject.clone());
         match schema_registry::get_schema_by_subject(settings, &strategy).await {
             Ok(registered) if registered.references.is_empty() => {
@@ -318,6 +476,14 @@ pub(crate) async fn prewarm(settings: &SrSettings, subjects: &[String], cache: &
             }
             Ok(_) => {
                 tracing::warn!(subject, "pre-warm skipped: schema references unsupported");
+            }
+            Err(e) if e.error.contains("status 401") => {
+                let reason = format!(
+                    "schema registry {registry} rejected the pre-warm of subject {subject}: {}",
+                    e.error
+                );
+                tracing::error!(subject, %reason, "registry rejected the client");
+                let _ = rejection.set(reason);
             }
             Err(e) => tracing::warn!(subject, error = %e, "pre-warm fetch failed"),
         }
@@ -430,7 +596,8 @@ mod tests {
                 url: url.to_owned(),
                 basic_auth: None,
             };
-            let settings = sr_settings_with(&cfg, || loaded(vec![der])).unwrap();
+            let settings =
+                sr_settings_with(&cfg, &Rejection::default(), || loaded(vec![der])).unwrap();
             schema_registry::get_schema_by_id_and_type(1, &settings, SchemaType::Avro)
                 .await
                 .map(|registered| registered.schema)

@@ -25,7 +25,7 @@
 //! | Ephemeral | `leader`            | [`LeaderVal`]           — leadership lease |
 //! | Ephemeral | `worker.{instance}` | [`WorkerVal`]           — membership presence |
 //! | Ephemeral | `split.{id}`        | [`LeaseVal`]            — split lease |
-//! | Either    | `_probe.{instance}.{nonce}` | opaque          — the startup store probe, written to both keyspaces and deleted by the run that wrote it; a run that dies mid-probe leaves its durable key |
+//! | Either    | `_probe.{instance}.{run}` | opaque            — the startup store probe, written to both keyspaces and deleted by the run that wrote it; a run that dies mid-probe leaves its durable key |
 
 use crate::error::fatal;
 use base64::Engine as _;
@@ -106,14 +106,14 @@ pub(crate) fn parse_worker_key(key: &str) -> Option<&str> {
     key.strip_prefix(WORKER_PREFIX)
 }
 
-/// `_probe.{instance}.{nonce}` startup probe key, unique to one run so that
-/// processes sharing an instance id never touch each other's probe.
-pub(crate) fn probe_key(instance: &str, nonce: &str) -> String {
-    format!("{PROBE_PREFIX}{instance}.{nonce}")
+/// `_probe.{instance}.{run}` startup probe key, where `run` is the start's
+/// nonce, so processes sharing an instance id never touch each other's probe.
+pub(crate) fn probe_key(instance: &str, run: &str) -> String {
+    format!("{PROBE_PREFIX}{instance}.{run}")
 }
 
-/// The instance encoded in a `_probe.{instance}.{nonce}` key, if it is one.
-/// Also reads the `_probe.{instance}` form without a nonce.
+/// The instance encoded in a `_probe.{instance}.{run}` key, if it is one.
+/// Also reads the `_probe.{instance}` form without a run.
 pub(crate) fn parse_probe_key(key: &str) -> Option<&str> {
     let rest = key.strip_prefix(PROBE_PREFIX)?;
     Some(rest.split_once('.').map_or(rest, |(instance, _)| instance))

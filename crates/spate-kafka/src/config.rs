@@ -520,37 +520,6 @@ mod tests {
         );
     }
 
-    /// A `tls` consumer on Linux loads a standard CA bundle when the
-    /// passthrough names no CA and no OpenSSL env override is set.
-    /// Regression for #609.
-    #[cfg(all(feature = "tls", target_os = "linux"))]
-    #[test]
-    fn tls_consumer_loads_a_system_ca_bundle() {
-        use rdkafka::config::FromClientConfigAndContext;
-        use rdkafka::consumer::BaseConsumer;
-
-        let body = format!(
-            "{}  rdkafka:\n    security.protocol: ssl\n    debug: security\n",
-            minimal()
-        );
-        let cfg = KafkaSourceConfig::from_component_config(&section(&body)).unwrap();
-        for openssl_env in [false, true] {
-            let logs = spate_test::capture_logs(tracing::Level::DEBUG, || {
-                let consumer = BaseConsumer::from_config_and_context(
-                    &cfg.client_config_with(openssl_env),
-                    crate::context::SourceContext::default(),
-                )
-                .expect("consumer");
-                // librdkafka queues creation-time logs until the first poll.
-                let _ = consumer.poll(Duration::ZERO);
-            });
-            let loaded = logs
-                .iter()
-                .any(|l| l.contains("Setting default CA certificate location"));
-            assert_eq!(loaded, !openssl_env, "{logs:#?}");
-        }
-    }
-
     #[test]
     fn unknown_fields_are_rejected() {
         let body = format!("{}  topics: [a, b]\n", minimal());

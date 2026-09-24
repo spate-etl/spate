@@ -1,5 +1,7 @@
 //! Integration tests against rdkafka's in-process MockCluster (no Docker).
 
+mod support;
+
 use rdkafka::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::mocking::MockCluster;
@@ -7,10 +9,11 @@ use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
 use spate_core::checkpoint::Checkpointer;
 use spate_core::error::{ErrorClass, SourceError};
 use spate_core::record::PartitionId;
-use spate_core::source::{PayloadBatch, Source, SourceCtx, SourceEvent, SourceLane};
+use spate_core::source::{Source, SourceCtx, SourceEvent, SourceLane};
 use spate_kafka::{KafkaSource, KafkaSourceConfig};
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
+use support::{drain_lane, serve_events};
 
 const TOPIC: &str = "orders";
 
@@ -76,56 +79,6 @@ fn await_assignment(source: &mut KafkaSource) -> Vec<<KafkaSource as Source>::La
     }
 }
 
-/// Serve the source's control plane once. Panics on any event but `Idle` and
-/// on a non-retryable error; retryable errors are appended to `errors`.
-fn serve_events(source: &mut KafkaSource, errors: &mut Vec<String>) {
-    match source.poll_events(Duration::from_millis(50)) {
-        Ok(SourceEvent::Idle) => {}
-        Ok(other) => panic!("unexpected source event: {other:?}"),
-        Err(
-            e @ SourceError::Client {
-                class: ErrorClass::Retryable,
-                ..
-            },
-        ) => errors.push(e.to_string()),
-        Err(e) => panic!("poll_events: {e}"),
-    }
-}
-
-/// Poll a lane until `want` payloads arrive, serving the source between
-/// polls; returns (payload, key, offset).
-fn drain_lane(
-    source: &mut KafkaSource,
-    lane: &mut <KafkaSource as Source>::Lane,
-    want: usize,
-) -> Vec<(Vec<u8>, Vec<u8>, i64)> {
-    let mut got = Vec::new();
-    let mut errors = Vec::new();
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while got.len() < want {
-        assert!(
-            Instant::now() < deadline,
-            "lane delivered {}/{want} before deadline; retryable errors: {errors:?}",
-            got.len()
-        );
-        serve_events(source, &mut errors);
-        let Some(mut batch) = lane
-            .poll(64, Duration::from_millis(500))
-            .expect("lane poll")
-        else {
-            continue;
-        };
-        while let Some(raw) = batch.next_payload() {
-            got.push((
-                raw.bytes.to_vec(),
-                raw.key.unwrap_or(&[]).to_vec(),
-                raw.offset,
-            ));
-        }
-    }
-    got
-}
-
 #[test]
 fn full_lifecycle_polls_acks_and_commits() {
     let cluster = MockCluster::new(1).expect("mock cluster");
@@ -143,7 +96,7 @@ fn full_lifecycle_polls_acks_and_commits() {
     cp.begin_epoch(&partitions, 1);
 
     for lane in &mut lanes {
-        let rows = drain_lane(&mut source, lane, 10);
+        let rows = drain_lane(&mut source, lane, 10, Duration::from_secs(30));
         // Offsets are contiguous from zero within a partition.
         let offsets: Vec<i64> = rows.iter().map(|(_, _, o)| *o).collect();
         assert_eq!(offsets, (0..10).collect::<Vec<_>>());
@@ -229,7 +182,7 @@ fn pause_stops_delivery_and_resume_recovers_gapless() {
         }
 
         source.resume(&[lanes[0].id()]).expect("resume");
-        let rows = drain_lane(&mut source, &mut lanes[0], 5);
+        let rows = drain_lane(&mut source, &mut lanes[0], 5, Duration::from_secs(30));
         let offsets: Vec<i64> = rows.iter().map(|(_, _, o)| *o).collect();
         assert_eq!(offsets, (0..5).collect::<Vec<_>>(), "gap-free redelivery");
     });
@@ -500,7 +453,7 @@ fn empty_assignment_completes_rebalance_protocol() {
     );
 
     // Sanity: the recovered member can consume the partition.
-    let rows = drain_lane(&mut src, &mut lanes[0], 5);
+    let rows = drain_lane(&mut src, &mut lanes[0], 5, Duration::from_secs(30));
     assert_eq!(rows.len(), 5, "recovered member drains the partition");
 }
 
@@ -813,7 +766,7 @@ fn a_backlogged_consumer_publishes_its_lag() {
         // `(hi_offset or ls_offset) - committed_offset`, so it stays `-1`,
         // unknown and correctly unpublished, until a commit lands.
         for lane in &mut lanes {
-            let rows = drain_lane(&mut source, lane, CONSUMED);
+            let rows = drain_lane(&mut source, lane, CONSUMED, Duration::from_secs(30));
             assert!(rows.len() >= CONSUMED, "drained {} rows", rows.len());
         }
         cp.drain();

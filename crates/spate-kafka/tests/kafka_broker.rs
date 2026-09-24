@@ -5,14 +5,17 @@
 //! cargo test -p spate-kafka --test kafka_broker -- --ignored
 //! ```
 
+mod support;
+
 use rdkafka::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
 use spate_core::checkpoint::Checkpointer;
-use spate_core::source::{PayloadBatch, Source, SourceCtx, SourceEvent, SourceLane};
+use spate_core::source::{Source, SourceCtx, SourceEvent, SourceLane};
 use spate_kafka::{KafkaSource, KafkaSourceConfig};
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
+use support::drain_lane;
 use testcontainers::runners::SyncRunner;
 use testcontainers_modules::kafka::apache::{KAFKA_PORT, Kafka};
 
@@ -75,21 +78,11 @@ fn real_broker_full_lifecycle() {
     assert_eq!(lanes.len(), 1);
     cp.begin_epoch(&[lanes[0].partition()], 1);
 
-    // Drain all 100 records.
-    let mut got = 0usize;
-    let deadline = Instant::now() + Duration::from_secs(60);
-    while got < 100 {
-        assert!(Instant::now() < deadline, "drained {got}/100");
-        if let Some(mut batch) = lanes[0]
-            .poll(64, Duration::from_millis(500))
-            .expect("lane poll")
-        {
-            while let Some(raw) = batch.next_payload() {
-                assert!(raw.bytes.starts_with(b"real-"));
-                got += 1;
-            }
-        }
-    }
+    let rows = drain_lane(&mut source, &mut lanes[0], 100, Duration::from_secs(60));
+    assert!(
+        rows.iter()
+            .all(|(payload, _, _)| payload.starts_with(b"real-"))
+    );
     drop(lanes);
 
     // Ack → watermark → store → sync commit.
@@ -168,16 +161,7 @@ fn real_broker_revocation_commit_persists_revoked_offsets() {
     };
     assert_eq!(lanes.len(), 1);
     cp.begin_epoch(&[lanes[0].partition()], 1);
-    let mut drained = 0usize;
-    let deadline = Instant::now() + Duration::from_secs(60);
-    while drained < 50 {
-        assert!(Instant::now() < deadline, "drained {drained}/50");
-        if let Some(mut batch) = lanes[0].poll(64, Duration::from_millis(500)).expect("poll") {
-            while batch.next_payload().is_some() {
-                drained += 1;
-            }
-        }
-    }
+    drain_lane(&mut source, &mut lanes[0], 50, Duration::from_secs(60));
     drop(lanes);
     cp.drain();
     let watermarks = cp.take_watermarks();
@@ -343,18 +327,8 @@ fn real_broker_backlog_reports_summable_lag() {
         // Consume a small prefix so a commit lands: `consumer_lag` is measured
         // against the committed offset and stays unknown (`-1`) until then.
         for lane in &mut lanes {
-            let mut seen = 0usize;
-            while seen < CONSUME_PER_LANE {
-                assert!(Instant::now() < deadline, "lane starved");
-                if let Some(mut batch) = lane
-                    .poll(64, Duration::from_millis(500))
-                    .expect("lane poll")
-                {
-                    while batch.next_payload().is_some() {
-                        seen += 1;
-                    }
-                }
-            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            drain_lane(&mut source, lane, CONSUME_PER_LANE, left);
         }
         cp.drain();
         let watermarks = cp.take_watermarks();

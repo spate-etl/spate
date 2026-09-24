@@ -7,7 +7,7 @@ description: "The JSON deserializer decodes single, NDJSON, and array framings i
 The JSON deserializer (`spate-json`, feature `json` on the `spate` facade) decodes
 JSON payloads carried by a source into records, either serde types or
 dynamically-typed values. The framings map onto the framework's "one payload →
-0..N records" contract, and `serde_json` (stable 1.x) does the parsing.
+0..N records" contract, and `serde_json` (stable 1.x) parses by default.
 
 Construct it from the pipeline's opaque section with
 `JsonDeserializerBuilder::from_component`, or from settings built in code with
@@ -138,17 +138,23 @@ repository no longer carries). The
 always runs on `serde_json`, so duplicate-key handling is identical either
 way.
 
-`simd` is **not** byte-for-byte identical to `serde_json` on numbers, because it
-is a different parser. `simd-json` **rejects integer literals outside the
-`i64`/`u64` range** (which `serde_json` accepts, coercing to `f64`), so a document
-`serde_json` decodes may instead be dropped as `malformed` under `simd`, or fail
-the whole payload under `on_error: fail`; it also normalizes `-0` to `0`.
-And because parsing is done by `simd-json` rather than `serde_json`, the
+The backends differ on some valid numbers. `simd-json` **rejects integer literals
+outside the `i64`/`u64` range** (which `serde_json` accepts, coercing to `f64`)
+and normalizes `-0` to `0`. Both backends reject a NUL byte after a number and
+underscore separators in numbers as malformed JSON.
+
+The parsers also enforce different nesting limits: `serde_json` has a recursion
+limit of 128, while `simd-json` limits nested arrays and objects to 1024. With
+`reject_duplicate_keys` enabled, the `serde_json` guard runs first and applies
+its recursion limit under either backend. Inputs beyond the applicable limit
+produce a `malformed` decode error. Under `on_error: skip`, the affected record
+or payload is dropped; under `on_error: fail`, decoding fails.
+
+Because parsing is done by `simd-json` rather than `serde_json`, the
 `serde_json`-specific knobs `json-float-roundtrip`, `json-arbitrary-precision`,
 and `json-raw-value` do **not** apply under `simd` (arbitrary precision is
-silently lost; `RawValue` capture is unsupported). For payloads of ordinary-range
-numbers the backends agree, but benchmark **and** validate against real data
-before switching.
+silently lost; `RawValue` capture is unsupported). Benchmark **and** validate
+against real data before switching.
 
 ## Metrics
 

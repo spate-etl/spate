@@ -15,15 +15,14 @@
 //! off-by-default fidelity pass, not the hot path, keeping the duplicate-key
 //! error classification identical across backends.
 //!
-//! Decode itself is **not** byte-for-byte identical across the two backends,
-//! because `simd-json` is a different parser. It rejects integer literals outside the
-//! `i64`/`u64` range that `serde_json` accepts (coercing to `f64`), so under
-//! `simd` such a document surfaces as a `malformed` decode error where
-//! `serde_json` would succeed; it normalizes `-0` to `0`; and, being a distinct
-//! parser, it does not honor serde_json's `arbitrary_precision` / `raw_value` /
-//! `float_roundtrip` cargo features. This is inherent to swapping parsers
-//! rather than a bug to reconcile here; see the JSON connector guide's
-//! Backends section.
+//! `simd-json` rejects integer literals outside the `i64`/`u64` range that
+//! `serde_json` accepts as `f64` and normalizes `-0` to `0`. Both backends reject
+//! NUL bytes after numbers and underscore separators in numbers. `serde_json`
+//! has a recursion limit of 128; `simd-json` limits nesting to 1024. With
+//! `reject_duplicate_keys`, the `serde_json` guard applies its limit first.
+//! `simd-json` does not honor serde_json's `arbitrary_precision` / `raw_value` /
+//! `float_roundtrip` cargo features. See the JSON connector guide's Backends
+//! section.
 //!
 //! [`Buffers`]: https://docs.rs/simd-json
 

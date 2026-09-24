@@ -57,11 +57,14 @@
 //! API, and [`BACKEND_ID`] reports which is compiled. `simd` is a decode speedup over
 //! serde_json on the single-document and array paths (the Kafka-message
 //! default), by a margin that depends on the payload and the host
-//! architecture. It is off by default. `simd` is *not* byte-for-byte
-//! identical to serde_json on every input: it rejects integer literals outside
-//! the `i64`/`u64` range that serde_json accepts as `f64`, and does not honor
-//! serde_json's `arbitrary_precision` / `raw_value` / `float_roundtrip`
-//! features; see the JSON connector guide's Backends section. `from_reader` is
+//! architecture. It is off by default. `simd` rejects integer literals outside
+//! the `i64`/`u64` range that serde_json accepts as `f64` and normalizes `-0`
+//! to `0`. Both backends reject NUL bytes after numbers and underscore separators
+//! in numbers. `serde_json` has a recursion limit of 128; `simd-json` limits
+//! nesting to 1024. With `reject_duplicate_keys`, the `serde_json` guard applies
+//! its limit before decoding. `simd` does not honor serde_json's
+//! `arbitrary_precision` / `raw_value` / `float_roundtrip` features; see the
+//! JSON connector guide's Backends section. `from_reader` is
 //! never used on the hot path, and decoding always operates on the in-memory
 //! payload slice.
 

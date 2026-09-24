@@ -263,7 +263,7 @@ impl CoordinationStore for InterleavingStore {
 
 /// Two live processes sharing an instance id stop on the duplicate
 /// instance id, even when one probes while the other is mid-probe.
-/// Regression for #642.
+/// Regression for #656.
 #[test]
 fn twins_probing_together_reach_the_shared_instance_id_fatal() {
     // The held update must complete inside one `op_timeout`, which has to

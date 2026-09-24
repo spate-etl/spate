@@ -76,19 +76,39 @@ fn await_assignment(source: &mut KafkaSource) -> Vec<<KafkaSource as Source>::La
     }
 }
 
-/// Poll a lane until `want` payloads arrive; returns (payload, key, offset).
+/// Serve the source's control plane once. Panics on any event but `Idle` and
+/// on a non-retryable error; retryable errors are appended to `errors`.
+fn serve_events(source: &mut KafkaSource, errors: &mut Vec<String>) {
+    match source.poll_events(Duration::from_millis(50)) {
+        Ok(SourceEvent::Idle) => {}
+        Ok(other) => panic!("unexpected source event: {other:?}"),
+        Err(
+            e @ SourceError::Client {
+                class: ErrorClass::Retryable,
+                ..
+            },
+        ) => errors.push(e.to_string()),
+        Err(e) => panic!("poll_events: {e}"),
+    }
+}
+
+/// Poll a lane until `want` payloads arrive, serving the source between
+/// polls; returns (payload, key, offset).
 fn drain_lane(
+    source: &mut KafkaSource,
     lane: &mut <KafkaSource as Source>::Lane,
     want: usize,
 ) -> Vec<(Vec<u8>, Vec<u8>, i64)> {
     let mut got = Vec::new();
+    let mut errors = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(30);
     while got.len() < want {
         assert!(
             Instant::now() < deadline,
-            "lane delivered {}/{want} before deadline",
+            "lane delivered {}/{want} before deadline; retryable errors: {errors:?}",
             got.len()
         );
+        serve_events(source, &mut errors);
         let Some(mut batch) = lane
             .poll(64, Duration::from_millis(500))
             .expect("lane poll")
@@ -123,7 +143,7 @@ fn full_lifecycle_polls_acks_and_commits() {
     cp.begin_epoch(&partitions, 1);
 
     for lane in &mut lanes {
-        let rows = drain_lane(lane, 10);
+        let rows = drain_lane(&mut source, lane, 10);
         // Offsets are contiguous from zero within a partition.
         let offsets: Vec<i64> = rows.iter().map(|(_, _, o)| *o).collect();
         assert_eq!(offsets, (0..10).collect::<Vec<_>>());
@@ -174,9 +194,15 @@ fn pause_stops_delivery_and_resume_recovers_gapless() {
     cluster.create_topic(TOPIC, 1, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
 
+    let mut cfg = config(&brokers, "pause");
+    // Statistics feed the warning for a held partition that stops fetching.
+    cfg.statistics_interval = Duration::from_millis(250);
     let mut cp = Checkpointer::new();
-    let mut source = KafkaSource::new(config(&brokers, "pause"));
-    source.open(SourceCtx::new(cp.handle())).expect("open");
+    let mut source = KafkaSource::new(cfg);
+    let meter = spate_core::metrics::Meter::with_namespace("kafka", "pause", "source", "kafka");
+    source
+        .open(SourceCtx::new(cp.handle()).with_meter(Some(meter)))
+        .expect("open");
     let mut lanes = await_assignment(&mut source);
     assert_eq!(lanes.len(), 1);
     cp.begin_epoch(&[lanes[0].partition()], 1);
@@ -184,28 +210,29 @@ fn pause_stops_delivery_and_resume_recovers_gapless() {
     source.pause(&[lanes[0].id()]).expect("pause");
     produce(&brokers, 5, 1, "b");
 
-    // While paused nothing is delivered (pause also purges prefetch). A
-    // failure here arrives with the window's warnings, among them the rewind
-    // that pauses, seeks and resumes a partition, clearing this pause.
+    // A failure from here on carries the source's warnings: a main-queue
+    // rewind, librdkafka's errors, and a held partition that is not fetching,
+    // with its fetch state.
     spate_test::show_logs(tracing::Level::WARN, || {
+        let mut errors = Vec::new();
+        // While paused nothing is delivered (pause also purges prefetch).
         let idle_until = Instant::now() + Duration::from_secs(2);
         while Instant::now() < idle_until {
-            // poll_events keeps the client machinery served.
-            let _ = source.poll_events(Duration::from_millis(50));
+            serve_events(&mut source, &mut errors);
             assert!(
                 lanes[0]
                     .poll(64, Duration::from_millis(100))
                     .expect("poll")
                     .is_none(),
-                "paused lane must not deliver"
+                "paused lane must not deliver; retryable errors: {errors:?}"
             );
         }
-    });
 
-    source.resume(&[lanes[0].id()]).expect("resume");
-    let rows = drain_lane(&mut lanes[0], 5);
-    let offsets: Vec<i64> = rows.iter().map(|(_, _, o)| *o).collect();
-    assert_eq!(offsets, (0..5).collect::<Vec<_>>(), "gap-free redelivery");
+        source.resume(&[lanes[0].id()]).expect("resume");
+        let rows = drain_lane(&mut source, &mut lanes[0], 5);
+        let offsets: Vec<i64> = rows.iter().map(|(_, _, o)| *o).collect();
+        assert_eq!(offsets, (0..5).collect::<Vec<_>>(), "gap-free redelivery");
+    });
 }
 
 #[test]
@@ -473,7 +500,7 @@ fn empty_assignment_completes_rebalance_protocol() {
     );
 
     // Sanity: the recovered member can consume the partition.
-    let rows = drain_lane(&mut lanes[0], 5);
+    let rows = drain_lane(&mut src, &mut lanes[0], 5);
     assert_eq!(rows.len(), 5, "recovered member drains the partition");
 }
 
@@ -786,7 +813,7 @@ fn a_backlogged_consumer_publishes_its_lag() {
         // `(hi_offset or ls_offset) - committed_offset`, so it stays `-1`,
         // unknown and correctly unpublished, until a commit lands.
         for lane in &mut lanes {
-            let rows = drain_lane(lane, CONSUMED);
+            let rows = drain_lane(&mut source, lane, CONSUMED);
             assert!(rows.len() >= CONSUMED, "drained {} rows", rows.len());
         }
         cp.drain();

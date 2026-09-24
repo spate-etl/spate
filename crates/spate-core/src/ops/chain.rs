@@ -598,6 +598,7 @@ where
         ack: &AckRef,
         ok: &mut u64,
         errors: &mut u64,
+        fatal: &mut u64,
     ) -> Step {
         let mut flow = Flow::Continue;
         let mut emitted = 0u64;
@@ -618,6 +619,13 @@ where
                     "NotReady after emitting records would duplicate them on replay"
                 );
                 return Step::NotReady;
+            }
+            Err(DeserError::Fatal { reason }) => {
+                *fatal += 1;
+                return Step::Fatal(self.ops.take_fatal().unwrap_or(FatalError {
+                    component: "deserializer".to_string(),
+                    reason,
+                }));
             }
             Err(e) => {
                 *errors += 1;
@@ -704,13 +712,15 @@ where
         let mut ok: u64 = 0;
         let mut errors: u64 = 0;
         let mut not_ready: u64 = 0;
+        // Fatal payloads count as errors but were not dropped by a policy.
+        let mut fatal: u64 = 0;
         let mut outcome: Option<PushOutcome> = None;
 
         // Replay a stashed not-ready payload before pulling new ones. Its
         // index is `cursor`; the batch iterator is already past it.
         if let Some(p) = self.pending.take() {
             let raw = p.as_raw();
-            match self.deser_step(&raw, batch.ack(), &mut ok, &mut errors) {
+            match self.deser_step(&raw, batch.ack(), &mut ok, &mut errors, &mut fatal) {
                 Step::Continue => self.cursor += 1,
                 Step::Backpressure => {
                     self.cursor += 1;
@@ -735,7 +745,7 @@ where
             let Some(raw) = batch.next_payload() else {
                 break;
             };
-            match self.deser_step(&raw, batch.ack(), &mut ok, &mut errors) {
+            match self.deser_step(&raw, batch.ack(), &mut ok, &mut errors, &mut fatal) {
                 Step::Continue => self.cursor += 1,
                 Step::Backpressure => {
                     self.cursor += 1;
@@ -758,7 +768,7 @@ where
 
         let elapsed = started.elapsed();
         if let Some(m) = &self.deser_metrics {
-            m.batch(ok, errors, elapsed);
+            m.batch(ok, errors + fatal, elapsed);
             if errors > 0 && matches!(self.deser_policy, ErrorPolicy::Skip) {
                 m.dropped(errors);
             }

@@ -78,6 +78,18 @@ pub enum DeserError {
         /// What is being waited for.
         reason: String,
     },
+    /// The deserializer can decode no further payload, for example because
+    /// its schema registry rejected the credentials. The chain stops the
+    /// pipeline whatever the stage's [`ErrorPolicy`], and counts the payload
+    /// as an error but not as dropped.
+    ///
+    /// Contract: as with `NotReady`, return this before emitting any record
+    /// for the payload.
+    #[error("deserializer failed: {reason}")]
+    Fatal {
+        /// Human-readable cause.
+        reason: String,
+    },
 }
 
 /// A source failed to poll, commit, or manage its assignment.

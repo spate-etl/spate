@@ -89,6 +89,18 @@ split descriptor cannot grow into an unwritable record.
 client identity fails at startup rather than connecting without mutual TLS.
 Setting the `tls` field at all requires TLS on every server in `servers`.
 
+The store verifies servers against the system trust store, which on macOS
+includes the Keychain. When `SSL_CERT_FILE` or `SSL_CERT_DIR` is set, the
+certificates they name replace the system store. If the store yields no
+certificates, the store logs a warning and uses the Mozilla root bundle compiled
+into the binary. The certificates in `root_ca` are trusted in addition to these
+roots. A relative path resolves against the working directory.
+
+The first connection fails with a fatal error when a `root_ca`, `client_cert` or
+`client_key` file cannot be read or holds no PEM item, or when the certificate
+and key do not match. It also fails when TLS is certain, because `tls` is set or
+a server URL is `tls://` or `wss://`, and the trust store cannot be read.
+
 Auth failure is fatal at startup, not retried. See
 [Securing connections](../../../03-guides/securing-connections.mdx) for the
 generic model.

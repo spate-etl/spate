@@ -15,7 +15,7 @@ categories.workspace = true
 default = ["nats"]
 # The NATS JetStream KV store backend. Off leaves the store trait, the
 # protocol, and the in-memory store (tests, single-process embedding).
-nats = ["dep:async-nats"]
+nats = ["dep:async-nats", "dep:rustls-native-certs", "dep:webpki-roots"]
 # Test-only injection seam: `clock::TestClock` for the `tests/` binaries,
 # `bench_seams` for the instruction-count benches, and `fuzz_seams` for the
 # fuzz harness. Off by default, not enabled by the `spate` facade, and outside
@@ -23,7 +23,7 @@ nats = ["dep:async-nats"]
 testing = []
 
 [dependencies]
-async-nats = { workspace = true, optional = true }
+async-nats = { workspace = true, optional = true, features = ["ring"] }
 base64 = { workspace = true }
 spate-core = { workspace = true }
 foldhash = { workspace = true }
@@ -31,21 +31,28 @@ foldhash = { workspace = true }
 # without it BoxStream and StreamExt::boxed vanish.
 futures-util = { workspace = true, features = ["alloc"] }
 humantime-serde = { workspace = true }
+rustls-native-certs = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
 tracing = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
+webpki-roots = { workspace = true, optional = true }
 
 [dev-dependencies]
 spate-coordination = { path = ".", features = ["testing"] }
 gungraun = { workspace = true }
 proptest = { workspace = true }
+rcgen = { workspace = true }
 spate-test = { workspace = true }
 serde_yaml = { workspace = true }
 testcontainers = { workspace = true, features = ["blocking"] }
+tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+# `aws_lc_rs` beside async-nats's `ring` puts both rustls providers in the
+# test build, as a facade build with other TLS connectors has.
+tokio-rustls = { workspace = true, features = ["aws_lc_rs"] }
 tracing-subscriber = { workspace = true, features = ["fmt"] }
 
 [[bench]]

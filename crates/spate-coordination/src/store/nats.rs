@@ -19,6 +19,9 @@
 //! retry budget and startup-time misconfiguration is Fatal with an
 //! actionable message. No `async-nats` type appears in any public
 //! signature (0.x policy: single pinned minor, internal only).
+//!
+//! TLS connections use rustls with the `ring` provider, whatever other rustls
+//! features the build enables.
 
 use super::{
     CasOutcome, CoordinationStore, Entry, Keyspace, Revision, StoreError, WatchEvent, WatchStream,
@@ -30,6 +33,10 @@ use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+
+#[cfg(test)]
+mod test_tls;
+mod tls;
 
 /// The NATS server floor: per-message TTLs and limit markers shipped in
 /// 2.11, and marker precision is one second, so leases below 2s are
@@ -101,7 +108,7 @@ pub enum NatsCredentials {
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct NatsTls {
-    /// Extra root CA bundle (PEM), for private CAs.
+    /// PEM bundle of root CAs trusted in addition to the system trust store.
     pub root_ca: Option<PathBuf>,
     /// Client certificate (PEM), for mutual TLS.
     pub client_cert: Option<PathBuf>,
@@ -276,19 +283,37 @@ async fn connect(config: &NatsConfig, lease_ttl: Duration) -> Result<Buckets, St
                 .map_err(|e| StoreError::Fatal(format!("reading NATS credentials file: {e}")))?;
         }
     }
-    if let Some(tls) = &config.tls {
+    if config.tls.is_some() {
         options = options.require_tls(true);
-        if let Some(root_ca) = &tls.root_ca {
-            options = options.add_root_certificates(root_ca.clone());
-        }
-        if let (Some(cert), Some(key)) = (&tls.client_cert, &tls.client_key) {
-            options = options.add_client_certificate(cert.clone(), key.clone());
-        }
     }
+    let tls_certain = config.tls.is_some()
+        || config
+            .servers
+            .iter()
+            .any(|s| s.starts_with("tls://") || s.starts_with("wss://"));
+    let section = config.tls.clone();
+    let (tls_config, fallback) = tokio::task::spawn_blocking(move || {
+        tls::client_config(
+            section.as_ref(),
+            tls_certain,
+            rustls_native_certs::load_native_certs,
+        )
+    })
+    .await
+    .map_err(|e| StoreError::Fatal(format!("building the NATS TLS config: {e}")))??;
+    if fallback && tls_certain {
+        warn_mozilla_fallback();
+    }
+    // Passed without `tls` too: a server that requires TLS upgrades a
+    // `nats://` connection through it.
+    options = options.tls_client_config(tls_config);
     let client = options
         .connect(config.servers.join(","))
         .await
         .map_err(|e| StoreError::Retryable(format!("connecting to NATS: {e}")))?;
+    if fallback && !tls_certain && client.server_info().tls_required {
+        warn_mozilla_fallback();
+    }
 
     let info = client.server_info();
     if !server_at_least(&info.version, MIN_SERVER) {
@@ -327,6 +352,13 @@ async fn connect(config: &NatsConfig, lease_ttl: Duration) -> Result<Buckets, St
     )
     .await?;
     Ok(Buckets { state, lease })
+}
+
+fn warn_mozilla_fallback() {
+    tracing::warn!(
+        "the system trust store has no certificates; verifying NATS servers against \
+         the Mozilla root bundle"
+    );
 }
 
 /// Parse `major.minor[.patch][-pre]` leniently and compare.

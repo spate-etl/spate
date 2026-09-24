@@ -91,7 +91,7 @@ use std::fmt;
 /// occurrence.
 pub(crate) type Names = HashMap<String, HashMap<String, Schema>>;
 
-/// Recursion bound for the schema/data walk. apache-avro 0.21 has no
+/// Recursion bound for the schema/data walk. apache-avro has no
 /// decode-side depth guard at all; 128 comfortably covers real schemas
 /// while keeping a recursive-schema depth bomb from overflowing the stack.
 const MAX_DEPTH: u16 = 128;

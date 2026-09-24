@@ -361,9 +361,8 @@ mod tests {
         run_in_child("an_unknown_ca_is_rejected", system.write(dir.path()), env).await;
     }
 
-    /// With an unreadable system trust store, a `tls://` server, and a
-    /// `nats://` server under a `tls` section, fail the connect with a fatal
-    /// error.
+    /// An unreadable system trust store fails the connect with a fatal error
+    /// for a `tls://` server, and for a `nats://` server under a `tls` section.
     #[tokio::test(flavor = "multi_thread")]
     async fn an_unreadable_trust_store_is_fatal_when_tls_is_certain() {
         if child_connects().await {

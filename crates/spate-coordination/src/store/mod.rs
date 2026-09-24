@@ -11,6 +11,7 @@
 //!
 //! # Contract notes for implementors
 //!
+//! - Operations on one handle must be safe to run concurrently.
 //! - [`Revision`]s are store-assigned and **strictly increase per key**
 //!   across its write history (bucket-wide sequences satisfy this).
 //! - `update` on an [`Ephemeral`](Keyspace::Ephemeral) key re-arms its

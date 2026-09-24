@@ -2,10 +2,9 @@
 //!
 //! [`S3Planner`] runs on whichever instance holds job leadership (the
 //! coordination backend calls it off the async loop, so blocking on the
-//! listing is safe). Every plan run re-lists the prefix in full and packs
-//! it with [`pack`](crate::split::pack); deterministic split ids make the
-//! re-submission of already-planned work a store-side create-if-absent
-//! no-op, so replanning a growing prefix costs one LIST and nothing else.
+//! listing is safe). Every plan run re-lists the prefix in full, packs it
+//! with [`pack`](crate::split::pack) and returns every split; deterministic
+//! split ids make re-submitting already-planned work idempotent.
 //! Workers never list; they read member objects straight from the split
 //! descriptors the planner wrote.
 

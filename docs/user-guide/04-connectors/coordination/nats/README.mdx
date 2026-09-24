@@ -110,7 +110,8 @@ generic model.
 One job means two KV buckets, split by durability:
 
 - **`spate_coordination_{job}_state`** — durable, no age limit. Split records
-  and the plan record survive the death of whoever wrote them.
+  and the plan record survive the death of whoever wrote them. A deleted key
+  leaves a marker that the server removes one lease TTL later.
 - **`spate_coordination_{job}_lease`** — ephemeral, with a bucket-level
   `max_age` equal to the lease TTL.
 
@@ -118,8 +119,7 @@ The lease bucket is where the server version floor comes from. NATS KV cannot
 re-arm a per-key TTL on update, but `max_age` applies per *message*, so every
 compare-and-swap rewrite restarts that key's clock, which **is** the heartbeat.
 An untouched key expires on its own, and the expiry surfaces to watchers as a
-limit marker (a graceful delete surfaces differently, which is what lets a
-worker distinguish "released" from "died").
+limit marker.
 
 ## Requirements
 
@@ -128,6 +128,10 @@ worker distinguish "released" from "died").
   startup and fails actionably against anything older.
 - **One job name per coordinated job.** A fingerprint check rejects
   misconfigured workers before they can touch anything.
+- **Permission to update the state bucket's stream** when an earlier version
+  created it. A worker enables per-message TTLs on that stream at startup. If
+  its credentials lack `$JS.API.STREAM.UPDATE`, it logs a warning and deleted
+  keys keep their markers.
 
 Development and CI need nothing more than a single container:
 

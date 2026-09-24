@@ -62,6 +62,9 @@ job. Framework users test with `spate-test` mocks; keep those first-class.
 - `cargo test` runs a binary's tests in one process, so fixtures must carry
   per-test `pipeline`/`component` labels. A local recorder does not isolate the
   process-wide gauge claim in INV-10.
+- A test waits for a condition, polled with `spate_test::wait_until` or awaited
+  as a signal, under a deadline; a fixed sleep belongs only where elapsed time
+  is the property under test, on paused tokio time where the code allows it.
 
 ## Comments
 

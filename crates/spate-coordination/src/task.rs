@@ -479,7 +479,7 @@ impl<S: CoordinationStore> Task<S> {
     /// one.
     async fn probe(&mut self) -> Result<(), CoordinationError> {
         for ks in [Keyspace::Durable, Keyspace::Ephemeral] {
-            let key = records::probe_key(&self.instance);
+            let key = records::probe_key(&self.instance, &self.nonce);
             let ctx = "store probe";
             let rev = match self
                 .store
@@ -489,14 +489,14 @@ impl<S: CoordinationStore> Task<S> {
             {
                 CasOutcome::Won(rev) => rev,
                 CasOutcome::Lost => {
-                    // Leftover from a crashed run: clear and re-probe.
+                    // Left by an earlier attempt that failed mid-probe.
                     let _ = self
                         .store
                         .delete(ks, &key, None)
                         .await
                         .map_err(|e| store_error(ctx, &e))?;
                     return Err(crate::error::retryable(
-                        "probe key existed (crashed predecessor?); cleared, retrying",
+                        "probe key left by an earlier attempt; cleared, retrying",
                     ));
                 }
             };

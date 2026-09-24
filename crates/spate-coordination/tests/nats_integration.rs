@@ -13,7 +13,9 @@
 
 mod support;
 
+use futures_util::StreamExt as _;
 use spate_coordination::store::nats::{NatsConfig, NatsStore};
+use spate_coordination::store::{CasOutcome, CoordinationStore, Keyspace, WatchEvent};
 use spate_coordination::{
     CoordinationConfig, CoordinationErrorKind, NatsCoordinator, SplitCoordinator, SplitProgress,
     StoreCoordinator,
@@ -217,4 +219,45 @@ fn servers_below_the_floor_are_rejected_actionably() {
     assert_eq!(error.kind, CoordinationErrorKind::Fatal, "{error}");
     assert!(error.to_string().contains("2.11"), "{error}");
     assert!(error.to_string().contains("upgrade"), "{error}");
+}
+
+/// `NatsStore::delete` returns the outcomes the trait documents, and a
+/// guarded delete of an expired lease wins. Regression for #654.
+#[test]
+#[ignore = "needs Docker; run explicitly"]
+fn delete_outcomes_match_the_trait() {
+    let (_nats, port) = start_nats(TAG);
+    let rt = runtime();
+    let store = NatsStore::new(nats_config(port, "delete"), LEASE).expect("nats store");
+    rt.block_on(async {
+        support::delete_contract(&store).await;
+
+        let mut watch = store.watch(Keyspace::Ephemeral, "lease").await.unwrap();
+        let rev = store
+            .create(Keyspace::Ephemeral, "lease", b"v".to_vec())
+            .await
+            .unwrap()
+            .won()
+            .unwrap();
+        let expired = async {
+            while let Some(event) = watch.next().await {
+                if let WatchEvent::Delete { key, .. } = event.unwrap()
+                    && key == "lease"
+                {
+                    return;
+                }
+            }
+            panic!("watch ended before the lease expired");
+        };
+        tokio::time::timeout(LEASE * 4, expired)
+            .await
+            .expect("lease expires within four TTLs");
+        assert!(matches!(
+            store
+                .delete(Keyspace::Ephemeral, "lease", Some(rev))
+                .await
+                .unwrap(),
+            CasOutcome::Won(_)
+        ));
+    });
 }

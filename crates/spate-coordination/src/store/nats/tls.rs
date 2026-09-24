@@ -120,6 +120,7 @@ mod tests {
     const CLIENT_KEY: &str = "SPATE_TEST_NATS_TLS_CLIENT_KEY";
     const WITH_TLS: &str = "SPATE_TEST_NATS_TLS_SECTION";
     const EXPECT_REJECT: &str = "SPATE_TEST_NATS_TLS_EXPECT_REJECT";
+    const EXPECT_FATAL: &str = "SPATE_TEST_NATS_TLS_EXPECT_FATAL";
 
     fn loaded(certs: Vec<CertificateDer<'static>>) -> CertificateResult {
         let mut result = CertificateResult::default();
@@ -241,8 +242,8 @@ mod tests {
     }
 
     /// Connects with the config the environment describes and asserts the
-    /// TLS handshake completed, or that the server certificate was rejected.
-    /// Returns false outside a child process.
+    /// outcome it names: a completed handshake by default. Returns false
+    /// outside a child process.
     async fn child_connects() -> bool {
         let Ok(url) = std::env::var(URL) else {
             return false;
@@ -259,12 +260,12 @@ mod tests {
         let err = store.get(Keyspace::Durable, "k").await.unwrap_err();
         if std::env::var_os(EXPECT_REJECT).is_some() {
             assert!(err.to_string().contains("UnknownIssuer"), "{err}");
-        } else {
-            // The stub reports 2.10.0, so this error follows a completed
-            // handshake.
-            let message = fatal_message(err);
-            assert!(message.contains("too old"), "{message}");
+            return true;
         }
+        // The stub reports 2.10.0, so "too old" follows a completed handshake.
+        let want = std::env::var(EXPECT_FATAL).unwrap_or_else(|_| "too old".into());
+        let message = fatal_message(err);
+        assert!(message.contains(&want), "{message}");
         true
     }
 
@@ -358,6 +359,24 @@ mod tests {
             (EXPECT_REJECT, "1".into()),
         ];
         run_in_child("an_unknown_ca_is_rejected", system.write(dir.path()), env).await;
+    }
+
+    /// A `tls://` server with an unreadable system trust store fails the
+    /// connect with a fatal error.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unreadable_trust_store_is_fatal_when_tls_is_certain() {
+        if child_connects().await {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let port = TestCa::new("system").serve_nats(None).await;
+        let env = vec![(URL, tls_url(port)), (EXPECT_FATAL, "SSL_CERT_FILE".into())];
+        run_in_child(
+            "an_unreadable_trust_store_is_fatal_when_tls_is_certain",
+            dir.path().join("missing.pem"),
+            env,
+        )
+        .await;
     }
 
     /// With both rustls providers compiled in and no `tls` section, a

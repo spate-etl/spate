@@ -92,12 +92,12 @@ object_store = "0.14"
 # The `server_2_11` default feature gates the limit-marker KV config the lease
 # buckets depend on.
 async-nats = "0.50"
+rustls-native-certs = "0.8.4"
+webpki-roots = "1.0.8"
 # spate-clickhouse's HTTPS connector, handed to `clickhouse` in place of its
 # default client.
 hyper-rustls = { version = "0.27.9", default-features = false, features = ["http1", "tls12"] }
 rustls = { version = "0.23.45", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
-rustls-native-certs = "0.8.4"
-webpki-roots = "1.0.8"
 url = "2.5"
 futures-util = { version = "0.3.31", default-features = false }
 base64 = "0.22.1"

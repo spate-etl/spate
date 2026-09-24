@@ -21,8 +21,11 @@ A store is **assembly wiring, not YAML**
 build one and hand it to a `StoreCoordinator`, which you inject into the
 source. Nothing about the store appears in the pipeline config file.
 
-Writing your own is one trait, `CoordinationStore`; the primitives are
-get/put/delete/list/watch with compare-and-swap. The correctness properties the
-framework needs from it (fencing on revision, TTL expiry that surfaces to
-watchers) are specified in
-[Work assignment](../../02-concepts/08-work-assignment.mdx).
+Custom stores implement
+[`CoordinationStore`](https://docs.rs/spate-coordination/latest/spate_coordination/store/trait.CoordinationStore.html).
+Its store operations are `create` (if absent), `update` (revision CAS), `get`,
+`delete` (optionally revision-guarded), `watch`, and `list`. The
+[store module contract](https://docs.rs/spate-coordination/latest/spate_coordination/store/index.html)
+specifies revision ordering, TTL expiry, watch delivery, and reconciliation.
+At startup, `StoreCoordinator` probes create-if-absent, revision CAS on update,
+and revision-guarded delete in both keyspaces.

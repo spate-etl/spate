@@ -16,13 +16,13 @@
 //! handle types are re-exported here so a connector can store them without a
 //! direct `metrics` dependency.
 //!
-//! # One pipeline per process
+//! # The global recorder
 //!
-//! The exporter installs a **process-global** recorder (the `metrics`
-//! facade has one global recorder), matching the framework's
-//! one-pipeline-per-process deployment model. [`install`] therefore
-//! succeeds at most once per process; a second call returns
-//! [`MetricsError::AlreadyInstalled`].
+//! The `metrics` facade has one global recorder per process. The first
+//! [`install`] with [`Exporter::Prometheus`] sets it, and every later
+//! Prometheus install returns the same handle. [`Exporter::None`] sets no
+//! recorder. [`MetricsError::AlreadyInstalled`] means a recorder set outside
+//! [`install`] is already in place.
 //!
 //! # Series ownership
 //!
@@ -158,8 +158,7 @@ pub struct MetricsSettings {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum MetricsError {
-    /// A global recorder is already installed in this process (one pipeline
-    /// per process).
+    /// A recorder set outside [`install`] is already the global recorder.
     #[error("a metrics recorder is already installed in this process")]
     AlreadyInstalled,
     /// The exporter rejected its configuration.
@@ -287,13 +286,12 @@ fn configured_builder() -> Result<PrometheusBuilder, BuildError> {
         )
 }
 
-/// The handle from this process's successful [`install`]. Installation is
-/// once-per-process (the recorder is global); later `install` calls reuse
-/// this handle instead of failing.
+/// The handle from this process's first Prometheus [`install`]; later
+/// Prometheus calls return it.
 static INSTALLED: std::sync::OnceLock<MetricsHandle> = std::sync::OnceLock::new();
 
-/// The settings of the first successful [`install`], kept so later calls
-/// with different settings can warn that theirs are ignored.
+/// The settings of the first Prometheus [`install`]; a later Prometheus call
+/// with different settings warns that its own are ignored.
 static INSTALLED_SETTINGS: std::sync::OnceLock<MetricsSettings> = std::sync::OnceLock::new();
 
 /// Install the configured exporter as this process's global recorder and
@@ -302,10 +300,11 @@ static INSTALLED_SETTINGS: std::sync::OnceLock<MetricsSettings> = std::sync::Onc
 /// **Call this before constructing any metric handle structs**
 /// ([`SinkShardMetrics`] and friends).
 /// Handles bind to the recorder present at construction, and handles built
-/// earlier record into the void. Idempotent; a second call returns the
-/// first call's handle (with a warning when the requested settings differ).
-/// [`MetricsError::AlreadyInstalled`] is only returned when a *foreign*
-/// global recorder (not installed through this function) already exists.
+/// earlier record into the void. A later [`Exporter::Prometheus`] call
+/// returns the handle from the first one, with a warning when the requested
+/// settings differ. [`Exporter::None`] installs nothing and returns a no-op
+/// handle. [`MetricsError::AlreadyInstalled`] means a recorder set outside
+/// this function is already the global recorder.
 ///
 /// For [`Exporter::Prometheus`] this also registers the `process_*`
 /// collector (CPU, memory, fds). No HTTP listener is spawned here; the

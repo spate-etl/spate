@@ -17,6 +17,10 @@ ouroboros = { workspace = true }
 bytes = { workspace = true }
 spate-core = { workspace = true }
 schema_registry_converter = { workspace = true, features = ["futures", "rustls_tls"] }
+reqwest = { workspace = true, features = ["rustls"] }
+rustls = { workspace = true }
+rustls-native-certs = { workspace = true }
+webpki-roots = { workspace = true }
 humantime-serde = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
@@ -29,6 +33,8 @@ all-features = true
 [dev-dependencies]
 gungraun = { workspace = true }
 proptest = { workspace = true }
+rcgen = { workspace = true }
+tokio-rustls = { workspace = true, features = ["aws_lc_rs"] }
 spate-bench = { workspace = true }
 spate-test = { workspace = true }
 http-body-util = { workspace = true }

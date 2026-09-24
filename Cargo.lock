@@ -3967,6 +3967,10 @@ dependencies = [
  "hyper-util",
  "ouroboros",
  "proptest",
+ "rcgen",
+ "reqwest",
+ "rustls",
+ "rustls-native-certs",
  "schema_registry_converter",
  "serde",
  "serde_json",
@@ -3976,7 +3980,9 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "tokio-rustls",
  "tracing",
+ "webpki-roots 1.0.8",
  "yaml_serde",
 ]
 

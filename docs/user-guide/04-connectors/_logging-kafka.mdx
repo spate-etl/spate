@@ -1,0 +1,14 @@
+## Logging
+
+Kafka clients forward librdkafka lines to `tracing` under the `librdkafka`
+target at their mapped severity. The subscriber's filter controls which lines
+appear. Debug categories are off by default. To see debug lines, enable a
+category through the `rdkafka` map and allow the target in `RUST_LOG`:
+
+```yaml
+rdkafka:
+  debug: broker,topic
+```
+
+`RUST_LOG=info,librdkafka=debug` retains other info logs and shows the
+selected librdkafka debug categories.

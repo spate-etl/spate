@@ -5,6 +5,7 @@ description: "The Kafka sink writes to one topic per instance through a single p
 # Kafka sink
 
 import SecuringKafka from '../../_securing-kafka.mdx';
+import LoggingKafka from '../../_logging-kafka.mdx';
 
 The Kafka sink (`spate-kafka`, feature `kafka` on the `spate` facade) is the
 producer half of the Kafka connector: pipelines terminate in a Kafka topic,
@@ -99,6 +100,8 @@ anything runs.
 ## Security (TLS, mTLS, SASL)
 
 <SecuringKafka />
+
+<LoggingKafka />
 
 ## How a batch becomes durable
 

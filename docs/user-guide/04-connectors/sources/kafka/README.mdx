@@ -5,6 +5,7 @@ description: "The Kafka source: one consumer per process, its partitions split i
 # Kafka source
 
 import SecuringKafka from '../../_securing-kafka.mdx';
+import LoggingKafka from '../../_logging-kafka.mdx';
 
 The Kafka source (`spate-kafka`, feature `kafka` on the `spate` facade) is
 built on `rdkafka` with a **single consumer per process**: one
@@ -85,6 +86,8 @@ framework values apply in unspecified order.
 ## Security (TLS, mTLS, SASL)
 
 <SecuringKafka />
+
+<LoggingKafka />
 
 ## How offsets are committed
 

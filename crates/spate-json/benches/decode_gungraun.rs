@@ -65,7 +65,7 @@
 //! - `wide_flat` — a flat object far wider than any struct.
 //! - `deep_nested` — documents nested to the decoder's practical depth.
 //! - `numeric_array` — almost nothing but number conversion.
-//! - `large_string` — one field three orders of magnitude larger than its
+//! - `large_string` — one field roughly five orders of magnitude larger than its
 //!   neighbors.
 //!
 //! ## The duplicate-key guard

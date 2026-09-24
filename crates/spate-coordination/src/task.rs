@@ -473,12 +473,13 @@ impl<S: CoordinationStore> Task<S> {
         )))
     }
 
-    /// Verify the store's conditional semantics before trusting fencing
-    /// to them: create wins, duplicate create loses, stale update loses,
-    /// guarded delete works. All four are checked in both keyspaces.
+    /// Verify the store's conditional semantics in both keyspaces before
+    /// trusting fencing to them: create wins, a duplicate create loses, and
+    /// an update or delete wins at the current revision and loses at a stale
+    /// one.
     async fn probe(&mut self) -> Result<(), CoordinationError> {
         for ks in [Keyspace::Durable, Keyspace::Ephemeral] {
-            let key = records::probe_key(&self.instance);
+            let key = records::probe_key(&self.instance, &self.nonce);
             let ctx = "store probe";
             let rev = match self
                 .store
@@ -488,14 +489,14 @@ impl<S: CoordinationStore> Task<S> {
             {
                 CasOutcome::Won(rev) => rev,
                 CasOutcome::Lost => {
-                    // Leftover from a crashed run: clear and re-probe.
+                    // Left by an earlier attempt that failed mid-probe.
                     let _ = self
                         .store
                         .delete(ks, &key, None)
                         .await
                         .map_err(|e| store_error(ctx, &e))?;
                     return Err(crate::error::retryable(
-                        "probe key existed (crashed predecessor?); cleared, retrying",
+                        "probe key left by an earlier attempt; cleared, retrying",
                     ));
                 }
             };
@@ -538,11 +539,48 @@ impl<S: CoordinationStore> Task<S> {
                      coordination",
                 ));
             }
-            let _ = self
+            if self
                 .store
-                .delete(ks, &key, Some(rev2))
+                .delete(ks, &key, Some(rev))
                 .await
-                .map_err(|e| store_error(ctx, &e))?;
+                .map_err(|e| store_error(ctx, &e))?
+                != CasOutcome::Lost
+            {
+                return Err(fatal(
+                    "store accepted a stale-revision delete: guarded delete is not \
+                     enforced; this store cannot host coordination",
+                ));
+            }
+            // The rejected delete must have left the key at `rev2`. Checked
+            // with a CAS because a store may serve a `get` from a lagging
+            // replica.
+            let rev3 = match self
+                .store
+                .update(ks, &key, b"probe".to_vec(), rev2)
+                .await
+                .map_err(|e| store_error(ctx, &e))?
+            {
+                CasOutcome::Won(rev3) => rev3,
+                CasOutcome::Lost => {
+                    return Err(fatal(
+                        "store removed a key on a stale-revision delete it reported as \
+                         lost: guarded delete is not enforced; this store cannot host \
+                         coordination",
+                    ));
+                }
+            };
+            if self
+                .store
+                .delete(ks, &key, Some(rev3))
+                .await
+                .map_err(|e| store_error(ctx, &e))?
+                == CasOutcome::Lost
+            {
+                return Err(fatal(
+                    "store rejected a matched-revision delete: guarded delete is broken; \
+                     this store cannot host coordination",
+                ));
+            }
         }
         Ok(())
     }

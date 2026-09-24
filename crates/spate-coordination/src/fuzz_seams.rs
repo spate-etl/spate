@@ -168,15 +168,15 @@ pub fn split_keys(id: &str) -> Option<[String; 2]> {
     Some([records::split_key(&id), records::spec_key(&id)])
 }
 
-/// The `worker.{instance}`, `_probe.{instance}` and `assign.{instance}` keys
-/// an instance is written under, in that order. `None` when `instance` is not
-/// a valid instance id.
+/// The `worker.{instance}`, `_probe.{instance}.{run}` and `assign.{instance}`
+/// keys an instance is written under, in that order, with a fixed run. `None`
+/// when `instance` is not a valid instance id.
 #[must_use]
 pub fn instance_keys(instance: &str) -> Option<[String; 3]> {
     records::validate_instance_id(instance).ok()?;
     Some([
         records::worker_key(instance),
-        records::probe_key(instance),
+        records::probe_key(instance, "0123456789abcdef0123456789abcdef"),
         records::assign_key(instance),
     ])
 }

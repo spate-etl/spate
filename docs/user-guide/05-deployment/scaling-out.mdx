@@ -248,9 +248,9 @@ dips. The worker itself still reports the fleet it found. A graceful
 shutdown behaves differently, deleting the presence key, so the departure
 and the return are both announced.
 
-Some of what a fleet change warns about is not a fault. A worker whose
-predecessor died between writing its startup probe key and clearing it finds
-the key on the next start, reports it, clears it and carries on; replicas
+Some of what a fleet change warns about is not a fault. A startup probe
+interrupted by a transient store error finds its own probe key on the retry,
+reports it, clears it and carries on; replicas
 racing to create the plan record warn once each for the losers, back off and
 re-read; a restart can find its own presence key expiring underneath it and
 retry that. Each resolves inside the startup retry budget, and each is fatal

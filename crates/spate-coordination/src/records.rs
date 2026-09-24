@@ -25,7 +25,7 @@
 //! | Ephemeral | `leader`            | [`LeaderVal`]           — leadership lease |
 //! | Ephemeral | `worker.{instance}` | [`WorkerVal`]           — membership presence |
 //! | Ephemeral | `split.{id}`        | [`LeaseVal`]            — split lease |
-//! | Either    | `_probe.{instance}` | opaque                  — the startup store probe, written to both keyspaces and deleted by the instance that wrote it |
+//! | Either    | `_probe.{instance}.{run}` | opaque            — the startup store probe, written to both keyspaces and deleted by the run that wrote it; a run that dies mid-probe leaves its durable key |
 
 use crate::error::fatal;
 use base64::Engine as _;
@@ -106,14 +106,17 @@ pub(crate) fn parse_worker_key(key: &str) -> Option<&str> {
     key.strip_prefix(WORKER_PREFIX)
 }
 
-/// `_probe.{instance}` startup probe key.
-pub(crate) fn probe_key(instance: &str) -> String {
-    format!("{PROBE_PREFIX}{instance}")
+/// `_probe.{instance}.{run}` startup probe key, where `run` is the start's
+/// nonce, so processes sharing an instance id never touch each other's probe.
+pub(crate) fn probe_key(instance: &str, run: &str) -> String {
+    format!("{PROBE_PREFIX}{instance}.{run}")
 }
 
-/// The instance encoded in a `_probe.{instance}` key, if it is one.
+/// The instance encoded in a `_probe.{instance}.{run}` key, if it is one.
+/// Also reads the `_probe.{instance}` form without a run.
 pub(crate) fn parse_probe_key(key: &str) -> Option<&str> {
-    key.strip_prefix(PROBE_PREFIX)
+    let rest = key.strip_prefix(PROBE_PREFIX)?;
+    Some(rest.split_once('.').map_or(rest, |(instance, _)| instance))
 }
 
 /// `assign.{instance}` assignment key.
@@ -679,14 +682,15 @@ mod tests {
 
         // The probe key shares a keyspace with all of them, and a watcher
         // classifies a delete by prefix alone.
-        assert_eq!(probe_key("worker-a"), "_probe.worker-a");
+        assert_eq!(probe_key("worker-a", "n1"), "_probe.worker-a.n1");
+        assert_eq!(parse_probe_key("_probe.worker-a.n1"), Some("worker-a"));
         assert_eq!(parse_probe_key("_probe.worker-a"), Some("worker-a"));
         for key in ["assign.worker-a", "worker.worker-a", "split.abc", "plan"] {
             assert_eq!(parse_probe_key(key), None, "{key}");
         }
-        assert_eq!(parse_assign_key("_probe.worker-a"), None);
-        assert_eq!(parse_split_key("_probe.worker-a"), None);
-        assert_eq!(parse_worker_key("_probe.worker-a"), None);
+        assert_eq!(parse_assign_key("_probe.worker-a.n1"), None);
+        assert_eq!(parse_split_key("_probe.worker-a.n1"), None);
+        assert_eq!(parse_worker_key("_probe.worker-a.n1"), None);
     }
 
     #[test]

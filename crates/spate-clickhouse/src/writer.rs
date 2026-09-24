@@ -148,7 +148,9 @@ const FATAL_EXCEPTION_CODES: &[u32] = &[
 
 /// Map a client error onto the framework's retryable/fatal taxonomy.
 ///
-/// - transport (`Network`, `TimedOut`) and uncategorized client errors
+/// - a server certificate the TLS handshake rejects → `Fatal`, whatever the
+///   variant carrying it;
+/// - other transport (`Network`, `TimedOut`) and uncategorized client errors
 ///   (`Other`) → `Retryable`;
 /// - server exceptions (`BadResponse`) → fatal only for the schema/parse/
 ///   auth codes above, `Retryable` otherwise (e.g. `TOO_MANY_PARTS`,
@@ -159,6 +161,7 @@ const FATAL_EXCEPTION_CODES: &[u32] = &[
 fn classify(err: clickhouse::error::Error) -> SinkError {
     use clickhouse::error::Error as ChError;
     let class = match &err {
+        _ if crate::http::certificate_error(&err).is_some() => ErrorClass::Fatal,
         ChError::Network(_) | ChError::TimedOut | ChError::Other(_) => ErrorClass::Retryable,
         ChError::BadResponse(reason) => {
             if exception_code(reason).is_some_and(|c| FATAL_EXCEPTION_CODES.contains(&c)) {
@@ -178,7 +181,7 @@ fn classify(err: clickhouse::error::Error) -> SinkError {
     };
     SinkError::Client {
         class,
-        reason: err.to_string(),
+        reason: crate::http::error_reason(&err),
     }
 }
 
@@ -200,6 +203,9 @@ fn exception_code(reason: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_tls::{TestCa, endpoint_trusting};
+    use tokio::io::AsyncWriteExt as _;
+    use tokio::net::TcpListener;
 
     #[test]
     fn exception_codes_are_extracted() {
@@ -286,5 +292,65 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// A replica whose certificate does not verify fails both a header-led
+    /// insert and a probe `Fatal`, with the rejection and its remedy in the
+    /// reason.
+    ///
+    /// Regression for #627.
+    #[tokio::test]
+    async fn an_unverified_certificate_classifies_fatal_with_its_cause() {
+        let (server, other) = (TestCa::new("server"), TestCa::new("other"));
+        let url = server.serve().await;
+        let endpoint = endpoint_trusting(&other, &url);
+        let writer = ClickHouseWriter::new(
+            "INSERT INTO t FORMAT RowBinaryWithNamesAndTypes".into(),
+            Some(Bytes::from_static(b"header")),
+            Vec::new(),
+            None,
+            None,
+        );
+        let batch = SealedBatch {
+            frames: vec![Bytes::from_static(b"rows")],
+            rows: 1,
+            bytes: 4,
+            dedup_token: "t".into(),
+        };
+        let write = writer.write_batch(&endpoint, &batch).await.unwrap_err();
+        let probe = writer.probe(&endpoint).await.unwrap_err();
+        for err in [write, probe] {
+            let SinkError::Client { class, reason } = &err else {
+                panic!("{err:?}");
+            };
+            assert_eq!(*class, ErrorClass::Fatal, "{reason}");
+            assert!(reason.contains("UnknownIssuer"), "{reason}");
+            assert!(reason.contains("`tls.root_ca`"), "{reason}");
+        }
+    }
+
+    /// A rustls error that is not a certificate rejection, behind the same
+    /// `io::Error` wrappers, stays `Retryable`.
+    #[tokio::test]
+    async fn a_tls_protocol_failure_stays_retryable() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("https://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            while let Ok((mut tcp, _)) = listener.accept().await {
+                let _ = tcp.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n").await;
+            }
+        });
+        let ca = TestCa::new("any");
+        let err = endpoint_trusting(&ca, &url)
+            .client()
+            .query("SELECT 1")
+            .execute()
+            .await
+            .unwrap_err();
+        assert!(format!("{err:?}").contains("InvalidMessage"), "{err:?}");
+        let SinkError::Client { class, reason } = classify(err) else {
+            unreachable!()
+        };
+        assert_eq!(class, ErrorClass::Retryable, "{reason}");
     }
 }

@@ -128,6 +128,13 @@ directory, and a file that cannot be read or holds no certificate fails the sink
 at startup. A config with no `https://` URL reads no trust store and rejects
 `tls.root_ca`.
 
+A replica certificate that fails verification is a
+[fatal error](../../../02-concepts/04-error-handling.mdx#fatal-errors-panics-and-stalled-watermarks),
+and its message carries the rustls reason, such as `UnknownIssuer`. Startup
+fails with that message. Mid-run, the `sink write failed` warning carries it,
+the batch is not retried on another replica, and the pipeline fails once
+`checkpoint.stalled_fail_after` elapses.
+
 Client-certificate (**mTLS**) authentication is not supported. For the
 framework-wide view of transport security across connectors, see
 [Securing connections](../../../03-guides/securing-connections.mdx).
@@ -201,11 +208,12 @@ land again. Design target tables to tolerate duplicates;
 
 Each shard has one worker that seals batches and dispatches up to
 `inflight.max_per_shard` concurrent writes, rotating round-robin across
-that shard's **healthy** replicas. A failed write retries the *same sealed
-batch* (same token) on the next healthy replica with capped exponential
-backoff. Per-replica circuit breakers quarantine a replica after
-`failure_threshold` consecutive failures for `open_for`, then admit trial
-writes again. The first probe to succeed closes the breaker, and
+that shard's **healthy** replicas. A write that fails with a retryable error
+retries the *same sealed batch* (same token) on the next healthy replica with
+capped exponential backoff. A fatal error, such as a certificate that does not
+verify or a rejected password, abandons the batch instead. Per-replica circuit
+breakers quarantine a replica after `failure_threshold` consecutive failures
+for `open_for`, then admit trial writes again. The first probe to succeed closes the breaker, and
 `half_open_probes` caps how many probes run concurrently in one half-open
 episode rather than how many must succeed. ClickHouse wants few big inserts,
 so per-shard workers (rather than per-replica) keep batches full-sized while
@@ -219,8 +227,8 @@ shard's other replicas and to heal a replica that was down when it returns.
 This is the client-side equivalent of `internal_replication=true`, where the
 sink never *fans out* a block to several replicas as a delivery strategy (that is
 the `internal_replication=false` footgun, where replicas drift).
-Cross-replica **retries** are the one deliberate exception. A failed write
-re-sends the same sealed batch to the next healthy replica, and the deduplication token
+Cross-replica **retries** are the one deliberate exception. A write that fails
+with a retryable error re-sends the same sealed batch to the next healthy replica, and the deduplication token
 makes an ambiguous double-landing a server-side no-op rather than a
 duplicate.
 

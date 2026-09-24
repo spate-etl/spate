@@ -1,6 +1,7 @@
 //! A private CA for TLS tests, and a local HTTPS server presenting a
 //! certificate it signed.
 
+use crate::writer::ClickHouseEndpoint;
 use base64::Engine as _;
 use hyper::Response;
 use hyper::server::conn::http1;
@@ -8,7 +9,7 @@ use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
-use rustls::{CertificateError, ServerConfig};
+use rustls::{CertificateError, RootCertStore, ServerConfig};
 use std::convert::Infallible;
 use std::error::Error;
 use std::path::{Path, PathBuf};
@@ -96,24 +97,18 @@ impl TestCa {
     }
 }
 
+/// An endpoint for `url` whose client trusts `ca` and nothing else.
+pub(crate) fn endpoint_trusting(ca: &TestCa, url: &str) -> ClickHouseEndpoint {
+    let mut roots = RootCertStore::empty();
+    roots.add(ca.der()).unwrap();
+    let client = crate::http::client(&crate::http::client_config(roots)).with_url(url);
+    ClickHouseEndpoint::new(client, url.to_owned())
+}
+
 /// Whether `err`'s source chain holds rustls's unknown-issuer rejection.
 pub(crate) fn is_unknown_issuer(err: &(dyn Error + 'static)) -> bool {
-    let mut pending = vec![err];
-    while let Some(e) = pending.pop() {
-        if let Some(rustls::Error::InvalidCertificate(CertificateError::UnknownIssuer)) =
-            e.downcast_ref()
-        {
-            return true;
-        }
-        // `io::Error::source` skips the error it wraps, so reach it through
-        // `get_ref`.
-        if let Some(inner) = e
-            .downcast_ref::<std::io::Error>()
-            .and_then(|io| io.get_ref())
-        {
-            pending.push(inner);
-        }
-        pending.extend(e.source());
-    }
-    false
+    matches!(
+        crate::http::certificate_error(err),
+        Some(CertificateError::UnknownIssuer)
+    )
 }

@@ -1,5 +1,5 @@
-//! The HTTP(S) client behind each replica endpoint, and the roots it verifies
-//! `https://` replicas against.
+//! The HTTP(S) client behind each replica endpoint, the roots it verifies
+//! `https://` replicas against, and the certificate rejections it reports.
 
 use crate::config::TlsSection;
 use hyper_util::client::legacy::Client as HyperClient;
@@ -7,9 +7,10 @@ use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
 use rustls::pki_types::CertificateDer;
 use rustls::pki_types::pem::PemObject;
-use rustls::{ClientConfig, RootCertStore};
+use rustls::{CertificateError, ClientConfig, RootCertStore};
 use rustls_native_certs::CertificateResult;
 use spate_core::config::ConfigError;
+use std::error::Error;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -97,6 +98,43 @@ pub(crate) fn client(tls: &ClientConfig) -> clickhouse::Client {
             .pool_idle_timeout(POOL_IDLE_TIMEOUT)
             .build(connector),
     )
+}
+
+/// The certificate rejection in `err`'s source chain, if the TLS handshake
+/// failed to verify the server.
+pub(crate) fn certificate_error<'a>(
+    err: &'a (dyn Error + 'static),
+) -> Option<&'a CertificateError> {
+    let mut pending = vec![err];
+    while let Some(e) = pending.pop() {
+        if let Some(rustls::Error::InvalidCertificate(cert)) = e.downcast_ref() {
+            return Some(cert);
+        }
+        // `io::Error::source` skips the error it wraps, so reach it through
+        // `get_ref`.
+        if let Some(inner) = e
+            .downcast_ref::<std::io::Error>()
+            .and_then(|io| io.get_ref())
+        {
+            pending.push(inner);
+        }
+        pending.extend(e.source());
+    }
+    None
+}
+
+/// `err`'s message, with the certificate rejection behind it appended.
+pub(crate) fn error_reason(err: &clickhouse::error::Error) -> String {
+    let Some(cert) = certificate_error(err) else {
+        return err.to_string();
+    };
+    let hint = match cert {
+        CertificateError::UnknownIssuer => {
+            "; add the issuing CA to the system trust store or `tls.root_ca`"
+        }
+        _ => "",
+    };
+    format!("{err}: invalid peer certificate: {cert}{hint}")
 }
 
 #[cfg(test)]

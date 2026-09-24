@@ -181,7 +181,7 @@ async fn fetch_columns(
         .map_err(|e| SchemaError::Fetch {
             table: check.display_table(),
             url: endpoint.url().to_string(),
-            reason: e.to_string(),
+            reason: crate::http::error_reason(&e),
         })
 }
 
@@ -546,5 +546,27 @@ mod tests {
         ] {
             assert_eq!(aggregate_function_remedy("c", ty), None, "{ty}");
         }
+    }
+
+    /// A schema fetch from a replica whose certificate does not verify names
+    /// the rejection.
+    ///
+    /// Regression for #627.
+    #[tokio::test]
+    async fn an_unverified_certificate_names_its_cause_at_startup() {
+        use crate::test_tls::{TestCa, endpoint_trusting};
+        let (server, other) = (TestCa::new("server"), TestCa::new("other"));
+        let url = server.serve().await;
+        let check = SchemaCheck {
+            wire: Wire::RowBinary,
+            database: None,
+            table: "t".into(),
+            columns: &["id"],
+        };
+        let err = validate(&check, &[vec![endpoint_trusting(&other, &url)]])
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SchemaError::Fetch { .. }), "{err:?}");
+        assert!(err.to_string().contains("UnknownIssuer"), "{err}");
     }
 }

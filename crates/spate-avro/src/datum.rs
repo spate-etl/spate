@@ -55,7 +55,7 @@ use std::marker::PhantomData;
 /// (the `Value` decode plus `from_value`) for every well-formed payload both
 /// accept; the differential suite in `tests/datum_parity.rs` pins this.
 /// The deliberate differences are strictness on truncated payloads (this
-/// path errors where apache-avro 0.21 silently yields `Null`), a per-datum
+/// path errors where apache-avro silently yields `Null`), a per-datum
 /// budget of `max(payload length, 65 536)` claimed collection items (a
 /// hostile block count over zero-width items errors instead of walking),
 /// skipped-field contents (structurally validated only, not UTF-8-checked,

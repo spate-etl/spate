@@ -96,7 +96,7 @@ impl InflightBudget {
         self.bytes.update(Ordering::Relaxed, Ordering::Relaxed, f);
     }
 
-    // loom 0.7 has no `update`.
+    // loom has no `update`.
     #[cfg(loom)]
     fn update(&self, mut f: impl FnMut(usize) -> usize) {
         let _ = self

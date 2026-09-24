@@ -68,15 +68,14 @@ impl KafkaLane {
 
 /// Erase a borrowed message's phantom lifetime so the lane can own it.
 ///
-/// SAFETY: `BorrowedMessage<'a>` is `{ ptr: NativePtr<RDKafkaMessage>,
-/// _event: Arc<NativeEvent>, _owner: PhantomData<&'a u8> }` (rdkafka
-/// 0.39.0). The `'a` parameter is phantom only: it affects no layout and
+/// SAFETY: `BorrowedMessage<'a>` is
+/// `{ ptr: NativePtr<RDKafkaMessage>, _event: Arc<NativeEvent>,
+/// _owner: PhantomData<&'a u8> }`. The `'a` parameter affects no layout and
 /// no drop behavior, so transmuting the lifetime is sound. Validity of
-/// the message memory is self-contained: the message holds an `Arc` of its
-/// owning native event, and destruction happens in the `BorrowedMessage`
-/// drop. The lane additionally keeps the consumer alive through its
-/// `queue` (which holds a consumer `Arc`), with `held` declared to drop
-/// first.
+/// the message memory is self-contained: its `Arc` keeps the native event
+/// alive through the message's drop. The lane keeps the consumer alive
+/// through `queue` (which holds a consumer `Arc`), with `held` declared
+/// to drop first.
 unsafe fn erase_lifetime(msg: BorrowedMessage<'_>) -> BorrowedMessage<'static> {
     // SAFETY: lifetime-only transmute; see function docs.
     unsafe { std::mem::transmute::<BorrowedMessage<'_>, BorrowedMessage<'static>>(msg) }

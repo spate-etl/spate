@@ -111,7 +111,7 @@ impl DistributedCheck {
             .map_err(|e| DistributedCheckError::Fetch {
                 what: "cluster topology",
                 url: self.endpoint.url().to_string(),
-                reason: e.to_string(),
+                reason: crate::http::error_reason(&e),
             })?;
         if replicas.is_empty() {
             return Err(self.mismatch(format!(
@@ -220,7 +220,7 @@ impl DistributedCheck {
             DistributedCheckError::Fetch {
                 what: "table engine",
                 url: self.endpoint.url().to_string(),
-                reason: e.to_string(),
+                reason: crate::http::error_reason(&e),
             }
         })?;
         let Some(row) = engines.first() else {
@@ -536,5 +536,29 @@ mod tests {
         );
         assert_eq!(host_of("http://[]:8123"), None, "empty brackets");
         assert_eq!(host_of("http://[::1"), None, "unclosed bracket");
+    }
+
+    /// The guard's fetch from an endpoint whose certificate does not verify
+    /// names the rejection.
+    #[tokio::test]
+    async fn an_unverified_certificate_names_its_cause() {
+        use crate::test_tls::{TestCa, endpoint_trusting};
+        let (server, other) = (TestCa::new("server"), TestCa::new("other"));
+        let url = server.serve().await;
+        let check = DistributedCheck {
+            endpoint: endpoint_trusting(&other, &url),
+            cluster: "prod".into(),
+            database: None,
+            table: "t_dist".into(),
+            expected_expr: "xxHash64(id)".into(),
+            weights: Arc::from([1]),
+            replica_hosts: vec![vec!["127.0.0.1".into()]],
+        };
+        let err = check.verify().await.unwrap_err();
+        assert!(
+            matches!(err, DistributedCheckError::Fetch { .. }),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("UnknownIssuer"), "{err}");
     }
 }

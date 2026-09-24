@@ -22,7 +22,7 @@
 use crate::cache::CompiledSchema;
 use crate::datum::AvroDatumDeserializer;
 use crate::deser::{AvroSerdeDeserializer, AvroValueDeserializer, DecoderCore, SchemaSourceMode};
-use crate::registry::{RegistryConfig, spawn_fetcher};
+use crate::registry::{RegistryConfig, spawn_fetcher, sr_settings};
 use apache_avro::Schema;
 use apache_avro::rabin::Rabin;
 use serde::Deserialize;
@@ -165,6 +165,12 @@ pub enum AvroConfigError {
         /// What went wrong.
         detail: String,
     },
+    /// The schema registry HTTP client could not be built.
+    #[error("avro schema registry client: {detail}")]
+    Registry {
+        /// What went wrong.
+        detail: String,
+    },
 }
 
 /// Builder produced from the opaque config section; hands out either the
@@ -188,6 +194,15 @@ impl AvroDeserializerBuilder {
     }
 
     /// Build from already-parsed settings.
+    ///
+    /// In `confluent` mode on Linux and other non-Apple Unix, this reads the
+    /// system trust store.
+    ///
+    /// # Errors
+    ///
+    /// [`AvroConfigError::SchemaLoad`] for a schema that cannot be loaded,
+    /// [`AvroConfigError::Invalid`] for settings the mode rejects, and
+    /// [`AvroConfigError::Registry`] for a registry client that cannot be built.
     pub fn from_settings(
         settings: &AvroSettings,
         runtime: &tokio::runtime::Handle,
@@ -210,20 +225,20 @@ impl AvroDeserializerBuilder {
                             .into(),
                     });
                 }
-                let registry_cfg = RegistryConfig {
+                let client = Arc::new(sr_settings(&RegistryConfig {
                     url: registry.url.clone(),
                     basic_auth: registry
                         .username
                         .as_ref()
                         .map(|u| (u.clone(), registry.password.clone())),
-                    negative_cache_ttl: settings.negative_cache_ttl,
-                };
-                let handle = spawn_fetcher(registry_cfg.clone(), runtime);
+                })?);
+                let handle =
+                    spawn_fetcher(Arc::clone(&client), settings.negative_cache_ttl, runtime);
                 if !settings.prewarm_subjects.is_empty() {
                     let subjects = settings.prewarm_subjects.clone();
                     let cache = Arc::clone(&handle.cache);
                     runtime.spawn(async move {
-                        crate::registry::prewarm(&registry_cfg, &subjects, &cache).await;
+                        crate::registry::prewarm(&client, &subjects, &cache).await;
                     });
                 }
                 SchemaSourceMode::Confluent {

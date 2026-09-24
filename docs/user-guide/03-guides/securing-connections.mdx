@@ -19,7 +19,7 @@ concrete mechanism.
 | Kafka sink | TLS, mTLS, SASL | opt-in `kafka-tls` feature | [Kafka sink → Security](../04-connectors/sinks/kafka/README.mdx#security-tls-mtls-sasl) |
 | ClickHouse sink | TLS, user/password | none | [ClickHouse → Security](../04-connectors/sinks/clickhouse/README.mdx#security-tls) |
 | S3 source | Ambient cloud credentials, or static keys | none | [S3 source → Security](../04-connectors/sources/s3/README.mdx#security-credentials-and-region) |
-| Avro format | Registry basic auth | none | [Avro → Security](../04-connectors/formats/avro/README.mdx#security-registry-credentials) |
+| Avro format | TLS, registry basic auth | none | [Avro → Security](../04-connectors/formats/avro/README.mdx#security-tls-and-registry-credentials) |
 | NATS JetStream store | TLS, mTLS, token, creds file | opt-in `coordination-nats` feature | [NATS → Security](../04-connectors/coordination/nats/README.mdx#security-authentication-and-tls) |
 
 Connectors that share a client share a matrix; the Kafka source and sink

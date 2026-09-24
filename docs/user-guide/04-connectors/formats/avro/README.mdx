@@ -58,7 +58,20 @@ Mode requirements are validated at construction with explicit messages:
 `confluent` without a `registry`, `raw` without a `schema`, `prewarm_subjects`
 outside `confluent`, and so on all fail fast at startup.
 
-## Security (registry credentials)
+## Security (TLS and registry credentials)
+
+An `https://` registry is verified against the system trust store. On macOS
+and Windows the operating system verifies the certificate. On Linux and other
+Unix systems the client reads the system store, and when `SSL_CERT_FILE` or
+`SSL_CERT_DIR` is set, the certificates they name replace it. If the store
+yields no certificates, as on a container image without a CA package, the
+client logs a warning and uses the Mozilla root bundle compiled into the
+binary.
+
+A registry whose certificate fails verification is handled like an unreachable
+one: the fetch logs `registry fetch failed transiently` and the batch waits for
+the schema, as described in
+[Schema fetching never blocks a pipeline thread](#schema-fetching-never-blocks-a-pipeline-thread).
 
 `registry.username` and `registry.password` carry basic auth to the schema
 registry. Interpolate them from the environment (`${SR_USER}` / `${SR_PASSWORD}`)

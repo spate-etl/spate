@@ -168,10 +168,14 @@ impl EmitRecord<'_, AvroValue> for Collected {
 }
 
 fn settings(addr: std::net::SocketAddr, ttl: Duration) -> AvroSettings {
+    settings_at(format!("http://{addr}"), ttl)
+}
+
+fn settings_at(url: String, ttl: Duration) -> AvroSettings {
     AvroSettings {
         mode: AvroMode::Confluent,
         registry: Some(RegistrySection {
-            url: format!("http://{addr}"),
+            url,
             username: None,
             password: None,
         }),
@@ -486,6 +490,73 @@ async fn prewarm_loads_subjects_at_startup() {
     .unwrap()
     .unwrap();
     assert_eq!(rows.len(), 1);
+}
+
+/// The registry URL a re-executed child test builds against.
+const CHILD_REGISTRY_URL: &str = "SPATE_TEST_AVRO_REGISTRY_URL";
+
+/// Runs the test `name` in a child test binary with `SSL_CERT_DIR` unset and
+/// `env` applied, and asserts that it passed.
+async fn run_in_child(name: &'static str, env: Vec<(&'static str, String)>) {
+    let out = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args(["--exact", name])
+            .env_remove("SSL_CERT_DIR")
+            .envs(env)
+            .output()
+            .expect("spawn the test binary")
+    })
+    .await
+    .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // A filter that matches nothing also exits 0.
+    assert!(
+        out.status.success() && stdout.contains("1 passed"),
+        "{stdout}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// With an empty system trust store, an `http://` registry builds and
+/// decodes, and an `https://` registry builds. Regression for #624.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_empty_trust_store_does_not_fail_the_build() {
+    const NAME: &str = "an_empty_trust_store_does_not_fail_the_build";
+    let runtime = tokio::runtime::Handle::current();
+    if let Ok(url) = std::env::var(CHILD_REGISTRY_URL) {
+        let https = settings_at("https://registry.invalid".into(), Duration::from_secs(30));
+        AvroDeserializerBuilder::from_settings(&https, &runtime).expect("https registry builds");
+        let builder = AvroDeserializerBuilder::from_settings(
+            &settings_at(url, Duration::from_secs(30)),
+            &runtime,
+        )
+        .expect("http registry builds");
+        let mut deser = builder.build_value().expect("apache builder");
+        let payload = confluent_payload(42, 7);
+        let rows = tokio::task::spawn_blocking(move || {
+            let mut out = Collected(Vec::new());
+            drive_until_ready(&mut deser, &payload, &mut out).map(|()| out.0)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        return;
+    }
+    let stub = StubRegistry::default();
+    stub.script("/schemas/ids/42", 200, &schema_body(SCHEMA_V1), 0);
+    let addr = stub.serve().await;
+    let dir = tempfile::tempdir().unwrap();
+    let empty = dir.path().join("empty.pem");
+    std::fs::write(&empty, "").unwrap();
+    run_in_child(
+        NAME,
+        vec![
+            ("SSL_CERT_FILE", empty.display().to_string()),
+            (CHILD_REGISTRY_URL, format!("http://{addr}")),
+        ],
+    )
+    .await;
 }
 
 /// A schema the parser refuses — here a record named `"my-record"`, which

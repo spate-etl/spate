@@ -29,6 +29,9 @@
 //! backoff are preserved across the concurrency.
 
 use crate::cache::{CompiledSchema, Lookup, SchemaCache};
+use crate::config::AvroConfigError;
+use rustls::{ClientConfig, RootCertStore};
+use rustls_native_certs::CertificateResult;
 use schema_registry_converter::async_impl::schema_registry::{self, SrSettings, SrSettingsBuilder};
 use schema_registry_converter::error::SRCError;
 use schema_registry_converter::schema_registry_common::{SchemaType, SubjectNameStrategy};
@@ -68,15 +71,70 @@ impl RegistryHandle {
 pub(crate) struct RegistryConfig {
     pub url: String,
     pub basic_auth: Option<(String, Option<String>)>,
-    pub negative_cache_ttl: Duration,
 }
 
-fn sr_settings(cfg: &RegistryConfig) -> SrSettings {
+/// The registry client, verifying an `https://` registry against the system
+/// trust store.
+pub(crate) fn sr_settings(cfg: &RegistryConfig) -> Result<SrSettings, AvroConfigError> {
+    sr_settings_with(cfg, rustls_native_certs::load_native_certs)
+}
+
+fn sr_settings_with(
+    cfg: &RegistryConfig,
+    system: impl FnOnce() -> CertificateResult,
+) -> Result<SrSettings, AvroConfigError> {
     let mut builder: SrSettingsBuilder = SrSettings::new_builder(cfg.url.clone());
     if let Some((user, pass)) = &cfg.basic_auth {
         builder.set_basic_authorization(user, pass.as_deref());
     }
-    builder.build().expect("registry settings")
+    builder
+        .build_with(client_builder(system))
+        .map_err(|e| AvroConfigError::Registry {
+            detail: match e.cause {
+                Some(cause) => format!("{}: {cause}", e.error),
+                None => e.error,
+            },
+        })
+}
+
+/// The HTTP client builder. On macOS, Windows and Android it keeps reqwest's
+/// platform verifier; elsewhere TLS is verified against [`root_store`].
+fn client_builder(system: impl FnOnce() -> CertificateResult) -> reqwest::ClientBuilder {
+    let builder = reqwest::Client::builder();
+    if cfg!(any(target_vendor = "apple", windows, target_os = "android")) {
+        return builder;
+    }
+    // An `http://` registry needs these roots too: a redirect to `https://`
+    // or an `https://` proxy connects over TLS.
+    builder.tls_backend_preconfigured(client_config(root_store(system)))
+}
+
+/// The certificates `system` yields, or the Mozilla bundle when it yields none.
+fn root_store(system: impl FnOnce() -> CertificateResult) -> RootCertStore {
+    let loaded = system();
+    if !loaded.errors.is_empty() {
+        tracing::warn!(errors = ?loaded.errors, "deserializer.avro: errors reading the system trust store");
+    }
+    let mut roots = RootCertStore::empty();
+    let (added, _unparsable) = roots.add_parsable_certificates(loaded.certs);
+    if added == 0 {
+        tracing::warn!(
+            "deserializer.avro: the system trust store has no certificates; \
+             verifying the registry against the Mozilla root bundle"
+        );
+        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    }
+    roots
+}
+
+fn client_config(roots: RootCertStore) -> ClientConfig {
+    // rustls has no process-wide default provider when a build enables both
+    // `ring` and `aws-lc-rs`.
+    ClientConfig::builder_with_provider(Arc::new(rustls::crypto::aws_lc_rs::default_provider()))
+        .with_safe_default_protocol_versions()
+        .expect("aws-lc-rs supports rustls's default protocol versions")
+        .with_root_certificates(roots)
+        .with_no_client_auth()
 }
 
 /// What a single fetch resolved to, used to drive per-id backoff.
@@ -97,13 +155,13 @@ struct Backoff {
 
 /// Spawn the fetcher task on `handle` and return the requester side.
 pub(crate) fn spawn_fetcher(
-    cfg: RegistryConfig,
+    settings: Arc<SrSettings>,
+    negative_cache_ttl: Duration,
     runtime: &tokio::runtime::Handle,
 ) -> RegistryHandle {
-    let cache = Arc::new(SchemaCache::new(cfg.negative_cache_ttl));
+    let cache = Arc::new(SchemaCache::new(negative_cache_ttl));
     let (tx, mut rx) = mpsc::unbounded_channel::<u32>();
     let task_cache = Arc::clone(&cache);
-    let settings = Arc::new(sr_settings(&cfg));
     runtime.spawn(async move {
         // Ids with a fetch currently running: dedup across the concurrency.
         let mut in_flight: HashSet<u32> = HashSet::new();
@@ -239,11 +297,10 @@ fn is_permanent(e: &SRCError) -> bool {
 /// Fetch the latest version of every configured subject into the cache
 /// (startup pre-warm). Failures are logged, not fatal: the id will be
 /// fetched on demand when it first appears in a payload.
-pub(crate) async fn prewarm(cfg: &RegistryConfig, subjects: &[String], cache: &SchemaCache) {
-    let settings = sr_settings(cfg);
+pub(crate) async fn prewarm(settings: &SrSettings, subjects: &[String], cache: &SchemaCache) {
     for subject in subjects {
         let strategy = SubjectNameStrategy::RecordNameStrategy(subject.clone());
-        match schema_registry::get_schema_by_subject(&settings, &strategy).await {
+        match schema_registry::get_schema_by_subject(settings, &strategy).await {
             Ok(registered) if registered.references.is_empty() => {
                 // Per-backend compile with the parse-panic guard inside (see
                 // `fetch_one`), so one poison schema cannot kill this detached
@@ -263,6 +320,164 @@ pub(crate) async fn prewarm(cfg: &RegistryConfig, subjects: &[String], cache: &S
                 tracing::warn!(subject, "pre-warm skipped: schema references unsupported");
             }
             Err(e) => tracing::warn!(subject, error = %e, "pre-warm fetch failed"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rustls::pki_types::CertificateDer;
+
+    fn loaded(certs: Vec<CertificateDer<'static>>) -> CertificateResult {
+        let mut result = CertificateResult::default();
+        result.certs = certs;
+        result
+    }
+
+    /// An empty system store falls back to the Mozilla bundle, and a
+    /// non-empty one keeps it out.
+    #[test]
+    fn an_empty_system_store_falls_back_to_the_mozilla_roots() {
+        let roots = root_store(CertificateResult::default);
+        assert_eq!(roots.len(), webpki_roots::TLS_SERVER_ROOTS.len());
+        let cert = rcgen::generate_simple_self_signed(vec!["sr".to_owned()]).unwrap();
+        assert_eq!(
+            root_store(|| loaded(vec![cert.cert.der().clone()])).len(),
+            1
+        );
+    }
+
+    #[cfg(not(any(target_vendor = "apple", windows, target_os = "android")))]
+    mod tls {
+        use super::*;
+        use http_body_util::Full;
+        use hyper::body::Bytes;
+        use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair};
+        use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+
+        const SCHEMA: &str =
+            r#"{"type":"record","name":"E","fields":[{"name":"id","type":"long"}]}"#;
+
+        struct TestCa {
+            der: CertificateDer<'static>,
+            issuer: Issuer<'static, KeyPair>,
+        }
+
+        impl TestCa {
+            fn new(name: &str) -> TestCa {
+                let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+                params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+                params.distinguished_name.push(DnType::CommonName, name);
+                let key = KeyPair::generate().unwrap();
+                let der = params.self_signed(&key).unwrap().der().clone();
+                TestCa {
+                    der,
+                    issuer: Issuer::new(params, key),
+                }
+            }
+
+            /// Serves `SCHEMA` as every registry response on `127.0.0.1`,
+            /// over a certificate this CA signed, and returns the `https://`
+            /// URL.
+            async fn serve(&self) -> String {
+                let key = KeyPair::generate().unwrap();
+                let leaf = CertificateParams::new(vec!["127.0.0.1".to_owned()])
+                    .unwrap()
+                    .signed_by(&key, &self.issuer)
+                    .unwrap();
+                let config = rustls::ServerConfig::builder_with_provider(Arc::new(
+                    rustls::crypto::aws_lc_rs::default_provider(),
+                ))
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_no_client_auth()
+                .with_single_cert(
+                    vec![leaf.der().clone()],
+                    PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der())),
+                )
+                .unwrap();
+                let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let port = listener.local_addr().unwrap().port();
+                let body = serde_json::json!({ "schema": SCHEMA }).to_string();
+                tokio::spawn(async move {
+                    while let Ok((tcp, _)) = listener.accept().await {
+                        let (acceptor, body) = (acceptor.clone(), body.clone());
+                        tokio::spawn(async move {
+                            let Ok(tls) = acceptor.accept(tcp).await else {
+                                return;
+                            };
+                            let respond = hyper::service::service_fn(move |_| {
+                                let body = Full::new(Bytes::from(body.clone()));
+                                async move {
+                                    Ok::<_, std::convert::Infallible>(hyper::Response::new(body))
+                                }
+                            });
+                            let _ = hyper::server::conn::http1::Builder::new()
+                                .serve_connection(hyper_util::rt::TokioIo::new(tls), respond)
+                                .await;
+                        });
+                    }
+                });
+                format!("https://127.0.0.1:{port}")
+            }
+        }
+
+        async fn fetch(url: &str, root: &TestCa) -> Result<String, SRCError> {
+            let der = root.der.clone();
+            let cfg = RegistryConfig {
+                url: url.to_owned(),
+                basic_auth: None,
+            };
+            let settings = sr_settings_with(&cfg, || loaded(vec![der])).unwrap();
+            schema_registry::get_schema_by_id_and_type(1, &settings, SchemaType::Avro)
+                .await
+                .map(|registered| registered.schema)
+        }
+
+        /// An `http://` registry that redirects to `https://` is verified
+        /// against the system roots.
+        #[tokio::test]
+        async fn an_http_registry_redirected_to_https_is_trusted() {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let registry = TestCa::new("registry");
+            let target = registry.serve().await;
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            tokio::spawn(async move {
+                while let Ok((mut tcp, _)) = listener.accept().await {
+                    let mut request = [0u8; 4096];
+                    let n = tcp.read(&mut request).await.unwrap_or(0);
+                    let request = String::from_utf8_lossy(&request[..n]);
+                    let path = request.split_whitespace().nth(1).unwrap_or("/");
+                    let response = format!(
+                        "HTTP/1.1 307 Temporary Redirect\r\nLocation: {target}{path}\r\n\
+                         Content-Length: 0\r\nConnection: close\r\n\r\n"
+                    );
+                    let _ = tcp.write_all(response.as_bytes()).await;
+                }
+            });
+            let url = format!("http://127.0.0.1:{port}");
+            let schema = fetch(&url, &registry)
+                .await
+                .expect("the redirect target is trusted");
+            assert_eq!(schema, SCHEMA);
+        }
+
+        /// An `https://` registry is trusted when its CA is among the system
+        /// roots, and rejected when it is not.
+        #[tokio::test]
+        async fn an_https_registry_is_verified_against_the_system_roots() {
+            let (registry, other) = (TestCa::new("registry"), TestCa::new("other"));
+            let url = registry.serve().await;
+            let schema = fetch(&url, &registry)
+                .await
+                .expect("the registry's CA is trusted");
+            assert_eq!(schema, SCHEMA);
+            fetch(&url, &other)
+                .await
+                .expect_err("an unknown CA is rejected");
         }
     }
 }

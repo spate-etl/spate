@@ -448,6 +448,26 @@ fn await_state_bucket(
     });
 }
 
+/// Waits until the job's lease bucket holds no live key.
+fn await_leases_expired(port: u16, job: &str) {
+    runtime().block_on(async {
+        let js = jetstream(port).await;
+        let deadline = Instant::now() + LEASE * 5;
+        loop {
+            let kv = js
+                .get_key_value(format!("spate_coordination_{job}_lease"))
+                .await
+                .expect("lease bucket");
+            let live = kv.keys().await.expect("keys").count().await;
+            if live == 0 {
+                return;
+            }
+            assert!(Instant::now() < deadline, "{live} leases never expired");
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    });
+}
+
 /// Keys deleted from the state bucket leave no marker once a lease has
 /// passed, across restarts with a random instance id. Regression for #657.
 #[test]
@@ -456,23 +476,24 @@ fn durable_markers_expire_across_restarts() {
     let (_nats, port) = start_nats(TAG);
     for i in 0..4 {
         start_claim_release(nats_config(port, "markers"), None, &format!("start {i}"));
-        // Lets the leader see the departed instance and delete its record.
-        std::thread::sleep(LEASE + Duration::from_millis(500));
+        // The next leader deletes the record of an instance whose lease is gone.
+        await_leases_expired(port, "markers");
     }
     await_state_bucket(port, "markers", "_probe.>", |messages, live, probes| {
         probes == 0 && messages == live as u64
     });
 }
 
-/// A state bucket created without per-message TTLs gains them on the
-/// next start and keeps the rest of its stream config.
+/// A store connecting to a state bucket created without per-message TTLs
+/// enables them, keeps the rest of the stream config, and its own later
+/// deletes leave markers that expire.
 #[test]
 #[ignore = "needs Docker; run explicitly"]
 fn an_existing_state_bucket_gains_message_ttls() {
     let (_nats, port) = start_nats(TAG);
     let rt = runtime();
-    let js = rt.block_on(jetstream(port));
-    rt.block_on(async {
+    let gone = rt.block_on(async {
+        let js = jetstream(port).await;
         js.create_key_value(async_nats::jetstream::kv::Config {
             bucket: state_bucket_name("upgrade"),
             description: "operator note".into(),
@@ -482,29 +503,61 @@ fn an_existing_state_bucket_gains_message_ttls() {
         })
         .await
         .expect("old-style state bucket");
-    });
-    start_claim_release(nats_config(port, "upgrade"), Some("gen-1"), "first start");
-    let config = rt.block_on(async {
+
+        let store = NatsStore::new(nats_config(port, "upgrade"), LEASE).expect("store");
+        store.get(Keyspace::Durable, "none").await.expect("connect");
         let deadline = Instant::now() + LEASE * 5;
-        loop {
+        let config = loop {
             let mut stream = js
                 .get_stream(format!("KV_{}", state_bucket_name("upgrade")))
                 .await
                 .expect("stream");
             let config = stream.info().await.expect("info").config.clone();
             if config.allow_message_ttl {
-                return config;
+                break config;
             }
             assert!(Instant::now() < deadline, "message TTLs never enabled");
             tokio::time::sleep(Duration::from_millis(200)).await;
+        };
+        assert_eq!(config.description.as_deref(), Some("operator note"));
+        assert_eq!(config.max_bytes, 1 << 30);
+        assert_eq!(config.subject_delete_marker_ttl, Some(LEASE));
+
+        // The patch reply sets the flag after the config change is visible,
+        // so delete fresh keys until a marker carries a TTL.
+        let stream = js
+            .get_stream(format!("KV_{}", state_bucket_name("upgrade")))
+            .await
+            .expect("stream");
+        let mut attempt = 0;
+        loop {
+            let key = format!("gone-{attempt}");
+            attempt += 1;
+            let created = store
+                .create(Keyspace::Durable, &key, b"v".to_vec())
+                .await
+                .expect("create");
+            assert!(matches!(created, CasOutcome::Won(_)), "{created:?}");
+            let deleted = store
+                .delete(Keyspace::Durable, &key, None)
+                .await
+                .expect("delete");
+            assert!(matches!(deleted, CasOutcome::Won(_)), "{deleted:?}");
+            let marker = stream
+                .get_last_raw_message_by_subject(&format!(
+                    "$KV.{}.{key}",
+                    state_bucket_name("upgrade")
+                ))
+                .await
+                .expect("marker");
+            if marker.headers.get("Nats-TTL").is_some() {
+                break key;
+            }
+            assert!(Instant::now() < deadline, "no delete carried a TTL");
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     });
-    assert_eq!(config.description.as_deref(), Some("operator note"));
-    assert_eq!(config.max_bytes, 1 << 30);
-    assert_eq!(config.subject_delete_marker_ttl, Some(LEASE));
-
-    start_claim_release(nats_config(port, "upgrade"), Some("gen-2"), "second start");
-    await_state_bucket(port, "upgrade", "_probe.gen-2", |_, _, probes| probes == 0);
+    await_state_bucket(port, "upgrade", &gone, |_, _, subjects| subjects == 0);
 }
 
 /// A worker whose credentials may not update the state bucket's stream

@@ -209,7 +209,7 @@ pub(crate) fn numeric_array() -> Vec<u8> {
 /// A small record whose one `text` field holds `TEXT_BYTES` of escaped text.
 ///
 /// The other fields are there so the document is a record rather than a bare
-/// string: what the case isolates is one field being three orders of magnitude
+/// string: what the case isolates is one field being roughly five orders of magnitude
 /// larger than its neighbors, which is what a log line, a stack trace or an
 /// embedded document looks like on the wire.
 pub(crate) fn large_string() -> Vec<u8> {

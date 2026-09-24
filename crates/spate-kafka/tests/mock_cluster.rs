@@ -79,6 +79,32 @@ fn await_assignment(source: &mut KafkaSource) -> Vec<<KafkaSource as Source>::La
     }
 }
 
+/// Group state changes after startup reach the tracing subscriber.
+/// Regression for #651.
+#[test]
+fn consumer_debug_logs_continue_through_group_join() {
+    let cluster = MockCluster::new(1).expect("mock cluster");
+    cluster.create_topic(TOPIC, 1, 1).expect("create topic");
+    let mut cfg = config(&cluster.bootstrap_servers(), "log-level-source");
+    cfg.rdkafka.insert("debug".into(), "cgrp".into());
+
+    let lines = spate_test::capture_logs(tracing::Level::DEBUG, || {
+        let cp = Checkpointer::new();
+        let mut source = KafkaSource::new(cfg);
+        source.open(SourceCtx::new(cp.handle())).expect("open");
+        let _lanes = await_assignment(&mut source);
+    });
+
+    let states: Vec<_> = lines
+        .iter()
+        .filter(|line| line.contains("librdkafka") && line.contains("fac=\"CGRPSTATE\""))
+        .collect();
+    assert!(
+        states.iter().any(|line| line.contains("-> up")),
+        "no post-startup group state debug line: {states:#?}"
+    );
+}
+
 #[test]
 fn full_lifecycle_polls_acks_and_commits() {
     let cluster = MockCluster::new(1).expect("mock cluster");

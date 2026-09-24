@@ -349,6 +349,8 @@ impl KafkaSinkConfig {
         openssl_env: bool,
     ) -> rdkafka::ClientConfig {
         let mut cc = rdkafka::ClientConfig::new();
+        // rdkafka reads the log facade by default; tracing filters these events.
+        cc.set_log_level(rdkafka::config::RDKafkaLogLevel::Debug);
         // User passthrough first: sink-owned settings below always win.
         for (k, v) in &self.rdkafka {
             cc.set(k, v);

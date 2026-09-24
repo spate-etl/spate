@@ -259,6 +259,11 @@ impl NatsStore {
             .await
     }
 
+    /// How long a listing or watch snapshot waits for its next message.
+    fn stall_bound(&self) -> Duration {
+        self.inner.lease_ttl / 4
+    }
+
     fn bucket<'a>(&self, buckets: &'a Buckets, ks: Keyspace) -> &'a kv::Store {
         match ks {
             Keyspace::Durable => &buckets.state,
@@ -427,6 +432,20 @@ async fn live_on_leader(bucket: &kv::Store, key: &str) -> Result<bool, StoreErro
     }
 }
 
+/// The next item of a listing or watch snapshot, or Retryable when none
+/// arrives within `bound`. Such a stream ends only on a delivered message
+/// that reports nothing pending, so messages that expire before delivery
+/// leave it waiting forever.
+async fn next_within<S: futures_util::Stream + Unpin>(
+    stream: &mut S,
+    bound: Duration,
+    what: &str,
+) -> Result<Option<S::Item>, StoreError> {
+    tokio::time::timeout(bound, stream.next())
+        .await
+        .map_err(|_| StoreError::Retryable(format!("{what} stalled for {bound:?}")))
+}
+
 /// Map a KV entry to the store contract: non-Put operations are markers,
 /// i.e. deletions.
 fn to_event(entry: kv::Entry) -> WatchEvent {
@@ -540,7 +559,9 @@ impl CoordinationStore for NatsStore {
                 .keys()
                 .await
                 .map_err(|e| StoreError::Retryable(format!("listing keys: {e}")))?;
-            keys.next().await.is_none()
+            next_within(&mut keys, self.stall_bound(), "listing keys")
+                .await?
+                .is_none()
         };
         let watcher = store
             .watch_with_history(&filter)
@@ -553,10 +574,19 @@ impl CoordinationStore for NatsStore {
             Vec::new()
         });
         let caught_up = empty;
+        let stall = self.stall_bound();
         let tail = futures_util::stream::unfold(
             (watcher, caught_up),
-            |(mut watcher, mut caught_up)| async move {
-                match watcher.next().await {
+            move |(mut watcher, mut caught_up)| async move {
+                let next = if caught_up {
+                    watcher.next().await
+                } else {
+                    match next_within(&mut watcher, stall, "watch snapshot").await {
+                        Ok(next) => next,
+                        Err(e) => return Some((vec![Err(e)], (watcher, caught_up))),
+                    }
+                };
+                match next {
                     Some(Ok(entry)) => {
                         let mark_done = !caught_up && entry.seen_current;
                         caught_up |= entry.seen_current;
@@ -592,8 +622,9 @@ impl CoordinationStore for NatsStore {
             .keys()
             .await
             .map_err(|e| StoreError::Retryable(format!("listing keys: {e}")))?;
+        let stall = self.stall_bound();
         let mut out = Vec::new();
-        while let Some(key) = keys.next().await {
+        while let Some(key) = next_within(&mut keys, stall, "listing keys").await? {
             let key = key.map_err(|e| StoreError::Retryable(format!("listing keys: {e}")))?;
             if !key.starts_with(prefix) {
                 continue;

@@ -5,13 +5,17 @@
 #![allow(dead_code, unreachable_pub)]
 
 use spate_coordination::store::memory::MemoryStore;
+use spate_coordination::store::{
+    CasOutcome, CoordinationStore, Entry, Keyspace, Revision, StoreError, WatchStream,
+};
 use spate_coordination::{
     Clock, CoordinationConfig, CoordinationError, CoordinationEvent, MemoryCoordinator,
     PlanContext, PlanFinality, PlannedSplit, SplitCoordinator, SplitId, SplitPlan, SplitPlanner,
     SplitProgress, SplitSpec, StoreCoordinator,
 };
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Test lease: short enough for fast takeover tests, far above the
@@ -512,4 +516,136 @@ pub const QUIET_ROUNDS: usize = 4;
 pub fn crash<C: SplitCoordinator + 'static>(runtime: tokio::runtime::Runtime, coordinator: C) {
     runtime.shutdown_background();
     std::mem::forget(coordinator);
+}
+
+/// Seeding traffic a [`CountingStore`] observed.
+#[derive(Default)]
+pub struct SeedStats {
+    /// Durable `spec.` and `split.` creates issued, won or lost.
+    pub creates: AtomicU64,
+    /// Durable updates of the plan record, won or lost.
+    pub plan_updates: AtomicU64,
+    in_flight: AtomicU64,
+    /// Most seeding creates outstanding at once.
+    pub max_in_flight: AtomicU64,
+    /// Set when a `split.{id}` create was issued while `spec.{id}` was absent.
+    pub progress_before_spec: AtomicBool,
+}
+
+/// A [`MemoryStore`] that records seeding traffic, optionally delays each
+/// seeding create, and can fail one durable create by key.
+#[derive(Clone)]
+pub struct CountingStore {
+    pub inner: MemoryStore,
+    pub stats: Arc<SeedStats>,
+    create_delay: Duration,
+    fail_once: Arc<Mutex<Option<String>>>,
+}
+
+impl CountingStore {
+    pub fn new(inner: MemoryStore) -> CountingStore {
+        CountingStore {
+            inner,
+            stats: Arc::default(),
+            create_delay: Duration::ZERO,
+            fail_once: Arc::default(),
+        }
+    }
+
+    /// Hold every seeding create pending for `delay` before it reaches the store.
+    pub fn with_create_delay(mut self, delay: Duration) -> CountingStore {
+        self.create_delay = delay;
+        self
+    }
+
+    /// Fail the next durable create of `key` at once with a retryable error,
+    /// writing nothing.
+    pub fn fail_create_once(&self, key: &str) {
+        *self.fail_once.lock().expect("fault") = Some(key.to_string());
+    }
+
+    pub fn worker(&self, io: &tokio::runtime::Handle, instance_id: &str) -> StoreCoordinator<Self> {
+        StoreCoordinator::new(self.clone(), config(Some(instance_id)), io.clone(), None)
+            .expect("coordinator")
+    }
+}
+
+impl CoordinationStore for CountingStore {
+    fn lease_ttl(&self) -> Duration {
+        self.inner.lease_ttl()
+    }
+
+    async fn create(
+        &self,
+        ks: Keyspace,
+        key: &str,
+        value: Vec<u8>,
+    ) -> Result<CasOutcome, StoreError> {
+        let seeding =
+            ks == Keyspace::Durable && (key.starts_with("spec.") || key.starts_with("split."));
+        if !seeding {
+            return self.inner.create(ks, key, value).await;
+        }
+        let stats = &self.stats;
+        stats.creates.fetch_add(1, Ordering::SeqCst);
+        let injected = {
+            let mut fault = self.fail_once.lock().expect("fault");
+            fault.take_if(|k| k == key).is_some()
+        };
+        if injected {
+            return Err(StoreError::Retryable(format!(
+                "injected: create {key} dropped"
+            )));
+        }
+        let now = stats.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+        stats.max_in_flight.fetch_max(now, Ordering::SeqCst);
+        if !self.create_delay.is_zero() {
+            tokio::time::sleep(self.create_delay).await;
+        }
+        let result = async {
+            if let Some(id) = key.strip_prefix("split.")
+                && self.inner.get(ks, &format!("spec.{id}")).await?.is_none()
+            {
+                stats.progress_before_spec.store(true, Ordering::SeqCst);
+            }
+            self.inner.create(ks, key, value).await
+        }
+        .await;
+        stats.in_flight.fetch_sub(1, Ordering::SeqCst);
+        result
+    }
+
+    async fn update(
+        &self,
+        ks: Keyspace,
+        key: &str,
+        value: Vec<u8>,
+        expected: Revision,
+    ) -> Result<CasOutcome, StoreError> {
+        if ks == Keyspace::Durable && key == "plan" {
+            self.stats.plan_updates.fetch_add(1, Ordering::SeqCst);
+        }
+        self.inner.update(ks, key, value, expected).await
+    }
+
+    async fn get(&self, ks: Keyspace, key: &str) -> Result<Option<Entry>, StoreError> {
+        self.inner.get(ks, key).await
+    }
+
+    async fn delete(
+        &self,
+        ks: Keyspace,
+        key: &str,
+        expected: Option<Revision>,
+    ) -> Result<CasOutcome, StoreError> {
+        self.inner.delete(ks, key, expected).await
+    }
+
+    async fn watch(&self, ks: Keyspace, prefix: &str) -> Result<WatchStream, StoreError> {
+        self.inner.watch(ks, prefix).await
+    }
+
+    async fn list(&self, ks: Keyspace, prefix: &str) -> Result<Vec<Entry>, StoreError> {
+        self.inner.list(ks, prefix).await
+    }
 }

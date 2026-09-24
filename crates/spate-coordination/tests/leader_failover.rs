@@ -5,8 +5,12 @@ mod support;
 
 use spate_coordination::store::{CoordinationStore as _, Keyspace};
 use spate_coordination::{PlanFinality, SplitCoordinator, SplitProgress};
+use std::sync::atomic::Ordering::SeqCst;
 use std::time::Instant;
-use support::{Held, LEASE, PhasedPlanner, crash, drive, runtime, split_id, splits, store, worker};
+use support::{
+    CountingStore, Held, LEASE, PhasedPlanner, crash, drive, runtime, split_id, splits, store,
+    worker,
+};
 
 #[test]
 fn leader_death_hands_planning_over_and_replans_idempotently() {
@@ -38,10 +42,12 @@ fn leader_death_hands_planning_over_and_replans_idempotently() {
     );
 
     // The leader dies. B must take leadership after the lease, re-run
-    // the planner (create-if-absent: the same ids are a no-op), seal the
-    // plan on the next phase, take the work over, and finish the job.
+    // the planner (the same ids are already in its view, so it writes
+    // none of them), seal the plan on the next phase, take the work over,
+    // and finish the job.
     crash(rt_a, a);
-    let mut b = worker(&store, rt.handle(), Some("worker-b"));
+    let counted = CountingStore::new(store.clone());
+    let mut b = counted.worker(rt.handle(), "worker-b");
     b.start(planner()).unwrap();
     let mut held_b = Held::default();
     drive(
@@ -64,6 +70,11 @@ fn leader_death_hands_planning_over_and_replans_idempotently() {
         .block_on(store.list(Keyspace::Durable, "split."))
         .unwrap();
     assert_eq!(records.len(), 2, "replanning must not duplicate splits");
+    assert_eq!(
+        counted.stats.creates.load(SeqCst),
+        0,
+        "B must not re-seed splits its watch already delivered"
+    );
     let plan = rt
         .block_on(store.get(Keyspace::Durable, "plan"))
         .unwrap()

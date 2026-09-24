@@ -17,13 +17,19 @@
 
 use crate::error::store_error;
 use crate::records::{self, LeaderVal, PlanFinalityRepr, SplitProgressRecord, SplitSpecRecord};
-use crate::store::{CasOutcome, CoordinationStore, Keyspace, Revision};
+use crate::store::{CasOutcome, CoordinationStore, Keyspace, Revision, StoreError};
 use crate::task::Task;
+use futures_util::StreamExt as _;
+use futures_util::stream::FuturesUnordered;
 use spate_core::coordination::{
-    CoordinationError, CoordinationErrorKind, PlanContext, PlanFinality, SplitPlan, SplitPlanner,
+    CoordinationError, CoordinationErrorKind, PlanContext, PlanFinality, SplitId, SplitPlan,
+    SplitPlanner,
 };
 use spate_core::metrics::ReplanOutcome;
 use tokio::time::Instant;
+
+/// Most splits a plan run seeds concurrently.
+const SEED_CONCURRENCY: usize = 64;
 
 /// What the blocking-pool planner call returns: the planner handed back,
 /// plus its enumeration result.
@@ -175,9 +181,9 @@ impl<S: CoordinationStore> Task<S> {
         }))
     }
 
-    /// Land a planner run: seed splits with create-if-absent (idempotent
-    /// by deterministic ids), recount, then CAS the plan record, the
-    /// write that makes the run count.
+    /// Land a planner run: seed the splits this leader has not observed
+    /// with create-if-absent, recount, then CAS the plan record, the write
+    /// that makes the run count.
     pub(crate) async fn finish_plan(
         &mut self,
         joined: Result<PlannerOutput, tokio::task::JoinError>,
@@ -202,56 +208,40 @@ impl<S: CoordinationStore> Task<S> {
             Err(e) => return Err(e),
         };
 
-        // Seed the splits, spec before progress: a progress record in the
-        // store implies its spec exists. First-writer-wins per id.
-        let mut created = 0u64;
-        for planned in &split_plan.splits {
-            let spec_record = SplitSpecRecord::planned(&planned.spec, self.fp, run.generation);
-            match self
-                .store
-                .create(
-                    Keyspace::Durable,
-                    &records::spec_key(&planned.spec.id),
-                    spec_record.encode(),
-                )
-                .await
-            {
-                Ok(_) => {} // Won or Lost: the spec exists either way
-                Err(e) => {
-                    tracing::warn!(split = %planned.spec.id, error = %e,
-                        "spec seeding failed; next replan tick retries");
-                    self.metrics(|m| m.replan(ReplanOutcome::Error, run.started.elapsed()));
-                    return Ok(());
-                }
-            }
-            let progress =
-                SplitProgressRecord::planned(&planned.spec.id, self.fp, planned.seed.as_ref());
-            match self
-                .store
-                .create(
-                    Keyspace::Durable,
-                    &records::split_key(&planned.spec.id),
-                    progress.encode(),
-                )
-                .await
-            {
-                Ok(CasOutcome::Won(rev)) => {
-                    created += 1;
-                    // Fold our own writes into the view; the watch echoes
-                    // arrive at revisions we already know.
-                    self.attach_spec(planned.spec.id.as_str(), spec_record);
-                    self.upsert_progress(planned.spec.id.as_str(), progress, rev)?;
-                }
-                Ok(CasOutcome::Lost) => {} // already planned: idempotent no-op
-                Err(e) => {
-                    tracing::warn!(split = %planned.spec.id, error = %e,
-                        "split seeding failed; next replan tick retries");
-                    self.metrics(|m| m.replan(ReplanOutcome::Error, run.started.elapsed()));
-                    return Ok(());
-                }
-            }
+        // Skipping splits whose progress and spec are both in the view
+        // relies on split records never being deleted.
+        let jobs = split_plan
+            .splits
+            .iter()
+            .filter(|planned| {
+                self.splits
+                    .get(planned.spec.id.as_str())
+                    .is_none_or(|state| state.spec.is_none())
+            })
+            .map(|planned| SeedJob {
+                id: planned.spec.id.clone(),
+                spec: SplitSpecRecord::planned(&planned.spec, self.fp, run.generation),
+                progress: SplitProgressRecord::planned(
+                    &planned.spec.id,
+                    self.fp,
+                    planned.seed.as_ref(),
+                ),
+            });
+        let (won, failed) = seed_all(&self.store, jobs).await;
+        let created = won.len() as u64;
+        for (job, rev) in won {
+            // Fold our own writes into the view; the watch echoes
+            // arrive at revisions we already know.
+            self.attach_spec(job.id.as_str(), job.spec);
+            self.upsert_progress(job.id.as_str(), job.progress, rev)?;
         }
         self.metrics(|m| m.planned(created));
+        if let Some((split, record, e)) = failed {
+            tracing::warn!(%split, record, error = %e,
+                "split seeding failed; next replan tick retries");
+            self.metrics(|m| m.replan(ReplanOutcome::Error, run.started.elapsed()));
+            return Ok(());
+        }
 
         // `planned` is recounted from an authoritative listing, never
         // accumulated: only creates that WON are countable locally, so a
@@ -326,4 +316,77 @@ impl<S: CoordinationStore> Task<S> {
             }
         }
     }
+}
+
+/// One split to seed, owned so its write future borrows only the store.
+struct SeedJob {
+    id: SplitId,
+    spec: SplitSpecRecord,
+    progress: SplitProgressRecord,
+}
+
+/// Seed `jobs` with up to [`SEED_CONCURRENCY`] in flight, returning the
+/// progress creates that won and the first failure. After a failure no new
+/// job starts, and the ones in flight finish so their wins are returned.
+async fn seed_all<S: CoordinationStore>(
+    store: &S,
+    mut jobs: impl Iterator<Item = SeedJob>,
+) -> (
+    Vec<(SeedJob, Revision)>,
+    Option<(SplitId, &'static str, StoreError)>,
+) {
+    let mut in_flight = FuturesUnordered::new();
+    let mut won = Vec::new();
+    let mut failed = None;
+    loop {
+        while failed.is_none() && in_flight.len() < SEED_CONCURRENCY {
+            let Some(job) = jobs.next() else { break };
+            in_flight.push(seed(store, job));
+        }
+        let Some((job, outcome)) = in_flight.next().await else {
+            return (won, failed);
+        };
+        match outcome {
+            Ok(Some(rev)) => won.push((job, rev)),
+            Ok(None) => {}
+            Err((record, e)) => {
+                failed.get_or_insert((job.id, record, e));
+            }
+        }
+    }
+}
+
+/// Create the spec, then the progress record, so a progress record in the
+/// store implies its spec exists. `Some` carries the revision of a
+/// progress create that won; `None` means the split was already planned.
+/// An error names the record whose create failed.
+async fn seed<S: CoordinationStore>(
+    store: &S,
+    job: SeedJob,
+) -> (
+    SeedJob,
+    Result<Option<Revision>, (&'static str, StoreError)>,
+) {
+    let outcome = async {
+        // Won or Lost, the spec now exists.
+        let _ = store
+            .create(
+                Keyspace::Durable,
+                &records::spec_key(&job.id),
+                job.spec.encode(),
+            )
+            .await
+            .map_err(|e| ("spec", e))?;
+        let progress = store
+            .create(
+                Keyspace::Durable,
+                &records::split_key(&job.id),
+                job.progress.encode(),
+            )
+            .await
+            .map_err(|e| ("progress", e))?;
+        Ok(progress.won())
+    }
+    .await;
+    (job, outcome)
 }

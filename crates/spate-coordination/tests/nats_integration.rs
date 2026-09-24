@@ -262,9 +262,30 @@ fn delete_outcomes_match_the_trait() {
     });
 }
 
+/// Waits until the lease bucket holds no message, keys and their expiry
+/// markers alike.
+async fn await_lease_bucket_empty(mut stream: async_nats::jetstream::stream::Stream) {
+    let deadline = Instant::now() + LEASE * 5;
+    loop {
+        let messages = stream.info().await.expect("stream info").state.messages;
+        if messages == 0 {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{messages} messages never expired"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 /// Fills the job's lease bucket with more keys than a listing buffers
 /// before flow control pauses delivery, all written within one lease.
-async fn fill_lease_bucket(store: &NatsStore, port: u16, job: &str) {
+async fn fill_lease_bucket(
+    store: &NatsStore,
+    port: u16,
+    job: &str,
+) -> async_nats::jetstream::stream::Stream {
     // Provisions both buckets.
     store
         .get(Keyspace::Ephemeral, "none")
@@ -273,7 +294,8 @@ async fn fill_lease_bucket(store: &NatsStore, port: u16, job: &str) {
     let client = async_nats::connect(format!("nats://127.0.0.1:{port}"))
         .await
         .expect("connect");
-    let kv = async_nats::jetstream::new(client)
+    let js = async_nats::jetstream::new(client);
+    let kv = js
         .get_key_value(format!("spate_coordination_{job}_lease"))
         .await
         .expect("lease bucket");
@@ -287,6 +309,9 @@ async fn fill_lease_bucket(store: &NatsStore, port: u16, job: &str) {
         }
     }
     futures_util::future::try_join_all(acks).await.expect("put");
+    js.get_stream(format!("KV_spate_coordination_{job}_lease"))
+        .await
+        .expect("lease stream")
 }
 
 /// A listing whose undelivered messages expire ends, as a result or as
@@ -319,14 +344,14 @@ fn a_watch_snapshot_whose_undelivered_tail_expires_ends() {
     let rt = runtime();
     rt.block_on(async {
         let store = NatsStore::new(nats_config(port, "stall-watch"), LEASE).expect("store");
-        fill_lease_bucket(&store, port, "stall-watch").await;
+        let lease = fill_lease_bucket(&store, port, "stall-watch").await;
         let mut watch = store.watch(Keyspace::Ephemeral, "").await.expect("watch");
         watch
             .next()
             .await
             .expect("first event")
             .expect("first event");
-        tokio::time::sleep(LEASE * 2).await;
+        await_lease_bucket_empty(lease).await;
         let ended = tokio::time::timeout(Duration::from_secs(60), async {
             loop {
                 match watch.next().await {

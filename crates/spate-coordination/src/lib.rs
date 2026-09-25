@@ -31,10 +31,11 @@ pub mod store;
 
 // The `testing` feature also carries `bench_seams`, which reaches the pure,
 // synchronous decisions an instruction-count bench cannot get to through an
-// async surface, and `fuzz_seams`, which reaches the record and key parsers
-// for the fuzz harness. Both modules are `#[doc(hidden)]`, so a link to
-// either dangles on docs.rs (where the feature is off) and renders as literal
-// text in the published API reference (where it is on).
+// async surface, `fuzz_seams`, which reaches the record and key parsers for
+// the fuzz harness, and `loop_probe`, which reports the coordinator task's
+// loop state. These modules are `#[doc(hidden)]`, so a link to any of them
+// dangles on docs.rs (where the feature is off) and renders as literal text
+// in the published API reference (where it is on).
 #[cfg(feature = "testing")]
 #[doc(hidden)]
 pub mod bench_seams;
@@ -51,6 +52,9 @@ mod error;
 #[doc(hidden)]
 pub mod fuzz_seams;
 mod leader;
+#[cfg(feature = "testing")]
+#[doc(hidden)]
+pub mod loop_probe;
 mod protocol;
 mod records;
 mod task;

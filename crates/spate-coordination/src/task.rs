@@ -258,6 +258,8 @@ pub(crate) struct Task<S: CoordinationStore> {
     /// computed over. A publish whose member set matches it did not follow
     /// a fleet change, so whatever it rewrote came from splits completing.
     announced_members: BTreeSet<String>,
+    #[cfg(feature = "testing")]
+    probe: Arc<crate::loop_probe::LoopProbe>,
 }
 
 impl<S: CoordinationStore> Task<S> {
@@ -319,8 +321,33 @@ impl<S: CoordinationStore> Task<S> {
             departed: BTreeMap::new(),
             reported_members: None,
             announced_members: BTreeSet::new(),
+            #[cfg(feature = "testing")]
+            probe: Arc::default(),
         }
     }
+
+    /// Report this task's loop through `probe`.
+    #[cfg(feature = "testing")]
+    pub(crate) fn with_probe(mut self, probe: Arc<crate::loop_probe::LoopProbe>) -> Task<S> {
+        self.probe = probe;
+        self
+    }
+
+    #[cfg(feature = "testing")]
+    fn probe_applied(&self, ks: Keyspace, revision: Revision) {
+        self.probe.applied(ks, revision);
+    }
+
+    #[cfg(not(feature = "testing"))]
+    fn probe_applied(&self, _: Keyspace, _: Revision) {}
+
+    #[cfg(feature = "testing")]
+    fn probe_loop_top(&self, next_timer: Instant, planning: bool) {
+        self.probe.at_loop_top(next_timer, planning);
+    }
+
+    #[cfg(not(feature = "testing"))]
+    fn probe_loop_top(&self, _: Instant, _: bool) {}
 
     /// Run to completion (fatal error or handle drop).
     pub(crate) async fn run(mut self) {
@@ -355,6 +382,7 @@ impl<S: CoordinationStore> Task<S> {
             if planning.is_none() {
                 planning = self.maybe_start_plan()?;
             }
+            self.probe_loop_top(heartbeat.min(reconcile).min(replan), planning.is_some());
             tokio::select! {
                 command = self.commands.recv() => {
                     let Some(command) = command else {
@@ -370,7 +398,14 @@ impl<S: CoordinationStore> Task<S> {
                 }
                 event = lease_watch.next() => {
                     match event {
-                        Some(Ok(event)) => self.apply_lease_event(event)?,
+                        Some(Ok(event)) => {
+                            if let WatchEvent::Put(Entry { revision, .. })
+                            | WatchEvent::Delete { revision, .. } = &event
+                            {
+                                self.probe_applied(Keyspace::Ephemeral, *revision);
+                            }
+                            self.apply_lease_event(event)?;
+                        }
                         Some(Err(e)) => {
                             tracing::warn!(error = %e, "lease watch broke; re-watching");
                             lease_watch = Box::pin(self.rewatch(Keyspace::Ephemeral)).await?;
@@ -381,7 +416,14 @@ impl<S: CoordinationStore> Task<S> {
                 }
                 event = state_watch.next() => {
                     match event {
-                        Some(Ok(event)) => self.apply_state_event(event)?,
+                        Some(Ok(event)) => {
+                            if let WatchEvent::Put(Entry { revision, .. })
+                            | WatchEvent::Delete { revision, .. } = &event
+                            {
+                                self.probe_applied(Keyspace::Durable, *revision);
+                            }
+                            self.apply_state_event(event)?;
+                        }
                         Some(Err(e)) => {
                             tracing::warn!(error = %e, "state watch broke; re-watching");
                             state_watch = Box::pin(self.rewatch(Keyspace::Durable)).await?;
@@ -708,7 +750,10 @@ impl<S: CoordinationStore> Task<S> {
         loop {
             match stream.next().await {
                 Some(Ok(WatchEvent::SnapshotDone)) => break,
-                Some(Ok(WatchEvent::Put(entry))) => snapshot.push(entry),
+                Some(Ok(WatchEvent::Put(entry))) => {
+                    self.probe_applied(ks, entry.revision);
+                    snapshot.push(entry);
+                }
                 Some(Ok(WatchEvent::Delete { .. })) => {}
                 Some(Err(e)) => return Err(store_error("watch snapshot", &e)),
                 None => {

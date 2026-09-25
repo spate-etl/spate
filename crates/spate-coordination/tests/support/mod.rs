@@ -4,6 +4,7 @@
 // Each test binary compiles this module independently and uses a subset.
 #![allow(dead_code, unreachable_pub)]
 
+use spate_coordination::loop_probe::LoopProbe;
 use spate_coordination::store::memory::MemoryStore;
 use spate_coordination::store::{
     CasOutcome, CoordinationStore, Entry, Keyspace, Revision, StoreError, WatchStream,
@@ -95,19 +96,22 @@ pub fn worker(
         .expect("coordinator")
 }
 
-/// A worker with a non-default drain deadline. A long deadline makes the
-/// forced revocation effectively never fire inside a test window (every
-/// move must complete cooperatively); a very short one forces it, which is
-/// how the replaying path is exercised on purpose.
-pub fn worker_drain_deadline(
+/// A worker with a non-default drain deadline, on an injected clock. A long
+/// deadline makes the forced revocation effectively never fire inside a
+/// test window (every move must complete cooperatively); a very short one
+/// forces it, which is how the replaying path is exercised on purpose.
+/// Build the store with [`store_with_clock`] and the same clock.
+pub fn worker_drain_deadline_clock(
     store: &MemoryStore,
     io: &tokio::runtime::Handle,
     instance_id: Option<&str>,
     drain_deadline: Duration,
+    clock: Arc<dyn Clock>,
 ) -> MemoryCoordinator {
     let mut config = config(instance_id);
     config.drain_deadline = drain_deadline;
-    StoreCoordinator::new(store.clone(), config, io.clone(), None).expect("coordinator")
+    StoreCoordinator::with_clock(store.clone(), config, io.clone(), None, clock)
+        .expect("coordinator")
 }
 
 /// A worker with a non-default rebalance delay. Tests that assert a
@@ -310,6 +314,101 @@ pub fn drive_clocked(
                 .poll()
                 .unwrap_or_else(|e| panic!("poll failed while {what}: {e}")),
         );
+    }
+}
+
+/// The live workers of a frozen-clock test, for waiting until they have
+/// finished reacting to a clock step.
+pub struct Fleet {
+    store: MemoryStore,
+    io: tokio::runtime::Handle,
+    probes: Vec<(String, Arc<LoopProbe>)>,
+}
+
+/// The key [`Fleet::settle`] writes in each keyspace. The coordinator
+/// ignores keys it does not recognize.
+const SETTLE_KEY: &str = "_settle";
+
+impl Fleet {
+    pub fn new(store: &MemoryStore, io: &tokio::runtime::Handle) -> Fleet {
+        Fleet {
+            store: store.clone(),
+            io: io.clone(),
+            probes: Vec::new(),
+        }
+    }
+
+    pub fn join<S: CoordinationStore + Clone>(&mut self, worker: &StoreCoordinator<S>) {
+        self.probes
+            .push((worker.instance_id().to_string(), worker.loop_probe()));
+    }
+
+    /// Stop waiting on `instance`, whose task is gone.
+    pub fn forget(&mut self, instance: &str) {
+        self.probes.retain(|(id, _)| id != instance);
+    }
+
+    /// Advance `clock` by `by`, then [`settle`](Fleet::settle).
+    pub fn step(&self, clock: &TestClock, by: Duration) {
+        clock.advance(by);
+        self.settle(clock);
+    }
+
+    /// Return once every worker has handled every store write and every
+    /// timer due at the clock's current time, and none is planning.
+    ///
+    /// Writes [`SETTLE_KEY`] in both keyspaces and waits for each worker to
+    /// apply it at an idle loop top; a second write one revision later
+    /// proves nothing else wrote in between. The workers see the marker as
+    /// a watch event and run their `step` on it.
+    pub fn settle(&self, clock: &TestClock) {
+        // Expiry due at this instant happens now, not on the sweeper's
+        // real-time cadence.
+        self.io
+            .block_on(self.store.list(Keyspace::Ephemeral, ""))
+            .expect("list the ephemeral keyspace");
+        let deadline = Instant::now() + DEADLINE;
+        let mut marks = self.mark();
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            spate_test::wait_until(remaining, "the fleet settles", || {
+                self.probes.iter().all(|(_, probe)| {
+                    probe.state().is_some_and(|s| {
+                        s.durable >= marks.0
+                            && s.ephemeral >= marks.1
+                            && s.next_timer > clock.now()
+                            && !s.planning
+                    })
+                })
+            });
+            let next = self.mark();
+            if next.0.0 == marks.0.0 + 1 && next.1.0 == marks.1.0 + 1 {
+                return;
+            }
+            marks = next;
+        }
+    }
+
+    /// Write [`SETTLE_KEY`] in the durable and the ephemeral keyspace.
+    fn mark(&self) -> (Revision, Revision) {
+        let write = |ks| {
+            self.io.block_on(async {
+                let outcome = match self.store.get(ks, SETTLE_KEY).await.expect("get") {
+                    Some(entry) => {
+                        self.store
+                            .update(ks, SETTLE_KEY, Vec::new(), entry.revision)
+                            .await
+                    }
+                    None => self.store.create(ks, SETTLE_KEY, Vec::new()).await,
+                }
+                .expect("write the settle marker");
+                match outcome {
+                    CasOutcome::Won(revision) => revision,
+                    CasOutcome::Lost => panic!("only the fleet writes {SETTLE_KEY}"),
+                }
+            })
+        };
+        (write(Keyspace::Durable), write(Keyspace::Ephemeral))
     }
 }
 

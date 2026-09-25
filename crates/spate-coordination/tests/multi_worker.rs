@@ -12,7 +12,7 @@ use spate_coordination::{CoordinationErrorKind, SplitCoordinator, SplitProgress}
 use std::time::Instant;
 use support::{
     Held, LEASE, PhasedPlanner, crash, drive, drive_pair, runtime, split_id, store, worker,
-    worker_drain_deadline, worker_max_in_flight,
+    worker_max_in_flight,
 };
 
 #[test]
@@ -644,6 +644,9 @@ fn reassignment_delay(delay: std::time::Duration) -> std::time::Duration {
     );
     a.start(planner()).unwrap();
     b.start(planner()).unwrap();
+    let mut fleet = support::Fleet::new(&store, rt.handle());
+    fleet.join(&a);
+    fleet.join(&b);
     let (mut held_a, mut held_b) = (Held::default(), Held::default());
     // Step the clock while both claim: the leader's first assignment can
     // hinge on a reconcile tick, which is clock-driven, so a frozen clock
@@ -656,8 +659,7 @@ fn reassignment_delay(delay: std::time::Duration) -> std::time::Duration {
             Instant::now() < claim_deadline,
             "both workers never held a split"
         );
-        clock.advance(step);
-        std::thread::sleep(support::POLL_INTERVAL);
+        fleet.step(&clock, step);
         held_a.fold(a.poll().unwrap());
         held_b.fold(b.poll().unwrap());
     }
@@ -669,14 +671,14 @@ fn reassignment_delay(delay: std::time::Duration) -> std::time::Duration {
     // too. `advanced` is the clock time from the crash to the
     // takeover: B's lease expiry plus, for a non-zero delay, the whole grace
     // window on top.
+    fleet.forget("worker-b");
     crash(rt_b, b);
     let cap = LEASE * 10;
     let mut advanced = std::time::Duration::ZERO;
     while held_a.splits.len() < 2 {
         assert!(advanced < cap, "the survivor never picked up the split");
-        clock.advance(step);
+        fleet.step(&clock, step);
         advanced += step;
-        std::thread::sleep(support::POLL_INTERVAL);
         held_a.fold(a.poll().unwrap());
         support::commit_held(&mut a, &held_a);
     }
@@ -689,36 +691,60 @@ fn reassignment_delay(delay: std::time::Duration) -> std::time::Duration {
 #[test]
 fn a_drain_that_never_completes_is_forced_out() {
     let rt = runtime();
-    let store = store();
+    let clock = support::TestClock::frozen();
+    let store = support::store_with_clock(clock.clone());
     let ids = ["s0", "s1", "s2", "s3"];
     let planner = || Box::new(PhasedPlanner::one_final("forced:v1", &ids));
+    let step = LEASE / 12;
 
     // A short deadline so the force fires inside the test window.
-    let mut a = worker_drain_deadline(&store, rt.handle(), Some("worker-a"), LEASE / 4);
+    let mut a = support::worker_drain_deadline_clock(
+        &store,
+        rt.handle(),
+        Some("worker-a"),
+        LEASE / 4,
+        clock.clone(),
+    );
     a.start(planner()).unwrap();
+    let mut fleet = support::Fleet::new(&store, rt.handle());
+    fleet.join(&a);
     let mut held_a = Held::default();
-    drive(&mut a, &mut held_a, "worker-a takes the whole plan", |h| {
-        h.splits.len() == ids.len()
-    });
-    support::commit_held(&mut a, &held_a);
-
-    let mut b = worker_drain_deadline(&store, rt.handle(), Some("worker-b"), LEASE / 4);
-    b.start(planner()).unwrap();
-    let mut held_b = Held::default();
-    let started = Instant::now();
-
-    // A never consents: `Held::fold` records the request and does nothing,
-    // which is exactly a declining source.
     let deadline = Instant::now() + support::DEADLINE;
-    while held_b.splits.is_empty() {
+    while held_a.splits.len() < ids.len() {
         assert!(
             Instant::now() < deadline,
+            "worker-a never took the whole plan"
+        );
+        fleet.step(&clock, step);
+        held_a.fold(a.poll().unwrap());
+    }
+    support::commit_held(&mut a, &held_a);
+
+    let mut b = support::worker_drain_deadline_clock(
+        &store,
+        rt.handle(),
+        Some("worker-b"),
+        LEASE / 4,
+        clock.clone(),
+    );
+    b.start(planner()).unwrap();
+    fleet.join(&b);
+    let mut held_b = Held::default();
+
+    // A never consents: `Held::fold` records the request and does nothing,
+    // which is exactly a declining source. `advanced` is the clock time from
+    // B's start to its first split.
+    let mut advanced = std::time::Duration::ZERO;
+    while held_b.splits.is_empty() {
+        assert!(
+            advanced < LEASE * 10,
             "a declining source blocked the rebalance forever"
         );
+        fleet.step(&clock, step);
+        advanced += step;
         held_a.fold(a.poll().unwrap());
         held_b.fold(b.poll().unwrap());
         support::commit_held(&mut a, &held_a);
-        std::thread::sleep(support::POLL_INTERVAL);
     }
     assert!(
         !held_a.revoke_requests.is_empty(),
@@ -733,10 +759,9 @@ fn a_drain_that_never_completes_is_forced_out() {
     // forcing path deleted. `drain_deadline` is a quarter of the lease, so
     // nothing but a forced revocation can have moved a split this soon.
     assert!(
-        started.elapsed() < LEASE,
-        "a split moved only after a full lease ({:?}) — that is an expiry takeover, \
-         not a forced revocation",
-        started.elapsed()
+        advanced < LEASE,
+        "a split moved only after a full lease ({advanced:?}) — that is an expiry \
+         takeover, not a forced revocation"
     );
     // And what B holds must be something A was asked for.
     let moved: Vec<&String> = held_b.splits.keys().collect();
@@ -779,6 +804,9 @@ fn a_withdrawn_assignment_record_does_not_release_anything() {
     let mut b = support::worker_with_clock(&store, rt.handle(), Some("worker-b"), clock.clone());
     b.start(planner()).unwrap();
     let mut held_b = Held::default();
+    let mut fleet = support::Fleet::new(&store, rt.handle());
+    fleet.join(&a);
+    fleet.join(&b);
     // Four splits, two workers, equal weights, a lane budget neither
     // reaches: the balancer's fixpoint is two each, and reaching it is what
     // makes "nothing changed" below mean anything. The helper settles to
@@ -814,7 +842,7 @@ fn a_withdrawn_assignment_record_does_not_release_anything() {
     // reconcile tick reads the clock too, so the leader's republish still
     // happens inside this window without being paid for in wall time.
     clock.advance_stepped(LEASE, LEASE / 12, || {
-        std::thread::sleep(support::POLL_INTERVAL);
+        fleet.settle(&clock);
         for event in a.poll().expect("poll a") {
             held_a.fold(vec![event]);
         }
@@ -837,6 +865,13 @@ fn a_withdrawn_assignment_record_does_not_release_anything() {
     assert_eq!(
         before, after,
         "worker-b's working set changed while it had no assignment record"
+    );
+    let republished = rt
+        .block_on(store.get(Keyspace::Durable, "assign.worker-b"))
+        .expect("get");
+    assert!(
+        republished.is_some(),
+        "the leader never republished, so the window proved nothing"
     );
 }
 
@@ -890,14 +925,16 @@ fn a_reassigned_split_cancels_its_own_revocation() {
     let mut b = support::worker_with_clock(&store, rt_b.handle(), Some("worker-b"), clock.clone());
     b.start(planner()).unwrap();
     let mut held_b = Held::default();
+    let mut fleet = support::Fleet::new(&store, rt.handle());
+    fleet.join(&a);
+    fleet.join(&b);
     let deadline = Instant::now() + support::DEADLINE;
     while held_a.revoke_requests.is_empty() {
         assert!(
             Instant::now() < deadline,
             "the leader never revoked anything from worker-a"
         );
-        clock.advance(LEASE / 12);
-        std::thread::sleep(support::POLL_INTERVAL);
+        fleet.step(&clock, LEASE / 12);
         held_a.fold(a.poll().expect("poll a"));
         held_b.fold(b.poll().expect("poll b"));
         support::commit_held(&mut a, &held_a);
@@ -914,6 +951,7 @@ fn a_reassigned_split_cancels_its_own_revocation() {
     // B dies mid-drain and its presence key goes with it. Deleting the key
     // rather than waiting out its TTL keeps the leader's change of mind
     // inside the drain deadline, the case under test.
+    fleet.forget("worker-b");
     crash(rt_b, b);
     rt.block_on(async {
         let outcome = store
@@ -930,7 +968,7 @@ fn a_reassigned_split_cancels_its_own_revocation() {
     // config sets. The leader (A itself) re-decides that every split stays
     // put, and the pending revocations must end.
     clock.advance_stepped(LEASE, LEASE / 12, || {
-        std::thread::sleep(support::POLL_INTERVAL);
+        fleet.settle(&clock);
         for event in a.poll().expect("poll a") {
             if let spate_coordination::CoordinationEvent::Lost { split } = &event {
                 assert!(
@@ -995,19 +1033,22 @@ fn a_stalled_cancelled_drain_is_still_released() {
     let mut b = support::worker_with_clock(&store, rt_b.handle(), Some("worker-b"), clock.clone());
     b.start(planner()).unwrap();
     let mut held_b = Held::default();
+    let mut fleet = support::Fleet::new(&store, rt.handle());
+    fleet.join(&a);
+    fleet.join(&b);
     let deadline = Instant::now() + support::DEADLINE;
     while held_a.revoke_requests.is_empty() {
         assert!(
             Instant::now() < deadline,
             "the leader never revoked anything from worker-a"
         );
-        clock.advance(LEASE / 12);
-        std::thread::sleep(support::POLL_INTERVAL);
+        fleet.step(&clock, LEASE / 12);
         held_a.fold(a.poll().expect("poll a"));
         held_b.fold(b.poll().expect("poll b"));
         support::commit_held(&mut a, &held_a);
     }
     let asked = held_a.revoke_requests.clone();
+    fleet.forget("worker-b");
     crash(rt_b, b);
     rt.block_on(async {
         let outcome = store
@@ -1024,7 +1065,7 @@ fn a_stalled_cancelled_drain_is_still_released() {
     // lease is twice the drain deadline: a revocation that had not been
     // cancelled would have fired inside this window.
     clock.advance_stepped(LEASE, LEASE / 12, || {
-        std::thread::sleep(support::POLL_INTERVAL);
+        fleet.settle(&clock);
         for event in a.poll().expect("poll a") {
             if let spate_coordination::CoordinationEvent::Lost { split } = &event {
                 assert!(
@@ -1058,8 +1099,7 @@ fn a_stalled_cancelled_drain_is_still_released() {
             "the stalled drain was never released: {asked:?} stayed owned with nothing \
              reading them"
         );
-        clock.advance(LEASE / 12);
-        std::thread::sleep(support::POLL_INTERVAL);
+        fleet.step(&clock, LEASE / 12);
         for event in a.poll().expect("poll a") {
             if let spate_coordination::CoordinationEvent::Lost { split } = &event
                 && asked.contains(&split.as_str().to_string())

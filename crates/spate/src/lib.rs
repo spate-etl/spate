@@ -100,9 +100,10 @@
 //! let join = std::thread::spawn(move || runtime.run());
 //! handle.assign_lanes(&[(spate::source::LaneId(0), PartitionId(0))]);
 //! let last = handle.push(PartitionId(0), None, b"hello");
-//! while handle.last_committed(PartitionId(0)) != Some(last + 1) {
-//!     std::thread::sleep(std::time::Duration::from_millis(5));
-//! }
+//! assert!(
+//!     handle.wait_committed(PartitionId(0), last + 1, std::time::Duration::from_secs(10)),
+//!     "the offset never committed"
+//! );
 //! shutdown.trigger();
 //! let report = join.join().expect("join")?;
 //! assert_eq!(report.exit_code(), 0);

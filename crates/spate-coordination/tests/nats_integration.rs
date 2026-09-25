@@ -422,49 +422,61 @@ fn start_claim_release(nats: NatsConfig, instance_id: Option<&str>, what: &str) 
     w.release(&[split_id("m0")]).expect("release");
 }
 
-/// Waits until `done` holds for the state bucket, or panics with its
-/// last reading.
+/// Waits until `done` holds for the state bucket, printing each new
+/// reading to stderr.
+#[allow(clippy::print_stderr)]
 fn await_state_bucket(
     port: u16,
     job: &str,
     filter: &str,
     done: impl Fn(u64, usize, usize) -> bool,
 ) {
-    runtime().block_on(async {
-        let js = jetstream(port).await;
-        let deadline = Instant::now() + LEASE * 5;
-        loop {
-            let (messages, live, subjects) = state_bucket(&js, job, filter).await;
-            if done(messages, live, subjects) {
-                return;
-            }
-            assert!(
-                Instant::now() < deadline,
+    let rt = runtime();
+    // The poll's timer and the client's drop both need a runtime context.
+    let _context = rt.enter();
+    let js = rt.block_on(jetstream(port));
+    let mut last = None;
+    spate_test::wait_until(LEASE * 5, "the state bucket condition", || {
+        let Ok(reading) = rt.block_on(tokio::time::timeout(LEASE, state_bucket(&js, job, filter)))
+        else {
+            return false;
+        };
+        let (messages, live, subjects) = reading;
+        if last != Some(reading) {
+            eprintln!(
                 "state bucket: {messages} messages, {live} live keys, {subjects} subjects \
                  matching {filter}"
             );
-            tokio::time::sleep(Duration::from_millis(200)).await;
+            last = Some(reading);
         }
+        done(messages, live, subjects)
     });
 }
 
 /// Waits until the job's lease bucket holds no live key.
+#[allow(clippy::print_stderr)]
 fn await_leases_expired(port: u16, job: &str) {
-    runtime().block_on(async {
-        let js = jetstream(port).await;
-        let deadline = Instant::now() + LEASE * 5;
-        loop {
+    let rt = runtime();
+    // The poll's timer and the client's drop both need a runtime context.
+    let _context = rt.enter();
+    let js = rt.block_on(jetstream(port));
+    let mut last = None;
+    spate_test::wait_until(LEASE * 5, "the lease bucket holds no live key", || {
+        let read = async {
             let kv = js
                 .get_key_value(format!("spate_coordination_{job}_lease"))
                 .await
                 .expect("lease bucket");
-            let live = kv.keys().await.expect("keys").count().await;
-            if live == 0 {
-                return;
-            }
-            assert!(Instant::now() < deadline, "{live} leases never expired");
-            tokio::time::sleep(Duration::from_millis(200)).await;
+            kv.keys().await.expect("keys").count().await
+        };
+        let Ok(live) = rt.block_on(tokio::time::timeout(LEASE, read)) else {
+            return false;
+        };
+        if last != Some(live) {
+            eprintln!("lease bucket holds {live} live keys");
+            last = Some(live);
         }
+        live == 0
     });
 }
 
@@ -492,7 +504,10 @@ fn durable_markers_expire_across_restarts() {
 fn an_existing_state_bucket_gains_message_ttls() {
     let (_nats, port) = start_nats(TAG);
     let rt = runtime();
-    let gone = rt.block_on(async {
+    // The polls' timers and the clients' drops need a runtime context.
+    let _context = rt.enter();
+    let stream_name = format!("KV_{}", state_bucket_name("upgrade"));
+    let (js, store) = rt.block_on(async {
         let js = jetstream(port).await;
         js.create_key_value(async_nats::jetstream::kv::Config {
             bucket: state_bucket_name("upgrade"),
@@ -506,33 +521,35 @@ fn an_existing_state_bucket_gains_message_ttls() {
 
         let store = NatsStore::new(nats_config(port, "upgrade"), LEASE).expect("store");
         store.get(Keyspace::Durable, "none").await.expect("connect");
-        let deadline = Instant::now() + LEASE * 5;
-        let config = loop {
-            let mut stream = js
-                .get_stream(format!("KV_{}", state_bucket_name("upgrade")))
-                .await
-                .expect("stream");
-            let config = stream.info().await.expect("info").config.clone();
-            if config.allow_message_ttl {
-                break config;
-            }
-            assert!(Instant::now() < deadline, "message TTLs never enabled");
-            tokio::time::sleep(Duration::from_millis(200)).await;
+        (js, store)
+    });
+    let mut config = None;
+    spate_test::wait_until(LEASE * 5, "message TTLs are enabled", || {
+        let read = async {
+            let mut stream = js.get_stream(&stream_name).await.expect("stream");
+            stream.info().await.expect("info").config.clone()
         };
-        assert_eq!(config.description.as_deref(), Some("operator note"));
-        assert_eq!(config.max_bytes, 1 << 30);
-        assert_eq!(config.subject_delete_marker_ttl, Some(LEASE));
+        if let Ok(read) = rt.block_on(tokio::time::timeout(LEASE, read))
+            && read.allow_message_ttl
+        {
+            config = Some(read);
+        }
+        config.is_some()
+    });
+    let config = config.expect("stream config");
+    assert_eq!(config.description.as_deref(), Some("operator note"));
+    assert_eq!(config.max_bytes, 1 << 30);
+    assert_eq!(config.subject_delete_marker_ttl, Some(LEASE));
 
-        // The patch reply sets the flag after the config change is visible,
-        // so delete fresh keys until a marker carries a TTL.
-        let stream = js
-            .get_stream(format!("KV_{}", state_bucket_name("upgrade")))
-            .await
-            .expect("stream");
-        let mut attempt = 0;
-        loop {
-            let key = format!("gone-{attempt}");
-            attempt += 1;
+    // The patch reply sets the flag after the config change is visible,
+    // so delete fresh keys until a marker carries a TTL.
+    let stream = rt.block_on(js.get_stream(&stream_name)).expect("stream");
+    let mut attempt = 0;
+    let mut gone = None;
+    spate_test::wait_until(LEASE * 5, "a delete marker carries a TTL", || {
+        let key = format!("gone-{attempt}");
+        attempt += 1;
+        let marked = rt.block_on(tokio::time::timeout(LEASE, async {
             let created = store
                 .create(Keyspace::Durable, &key, b"v".to_vec())
                 .await
@@ -550,13 +567,14 @@ fn an_existing_state_bucket_gains_message_ttls() {
                 ))
                 .await
                 .expect("marker");
-            if marker.headers.get("Nats-TTL").is_some() {
-                break key;
-            }
-            assert!(Instant::now() < deadline, "no delete carried a TTL");
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            marker.headers.get("Nats-TTL").is_some()
+        }));
+        if matches!(marked, Ok(true)) {
+            gone = Some(key);
         }
+        gone.is_some()
     });
+    let gone = gone.expect("a marked key");
     await_state_bucket(port, "upgrade", &gone, |_, _, subjects| subjects == 0);
 }
 

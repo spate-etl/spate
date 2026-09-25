@@ -49,6 +49,8 @@ pub struct StoreCoordinator<S: CoordinationStore + Clone> {
     /// Set by the driver before `start`; handed to the task so every
     /// queued event also wakes the driver's park.
     waker: Option<ControlWaker>,
+    #[cfg(feature = "testing")]
+    probe: Arc<crate::loop_probe::LoopProbe>,
 }
 
 struct Running {
@@ -141,7 +143,17 @@ impl<S: CoordinationStore + Clone> StoreCoordinator<S> {
             running: None,
             failed: None,
             waker: None,
+            #[cfg(feature = "testing")]
+            probe: Arc::default(),
         })
+    }
+
+    /// What this worker's control loop last reported.
+    #[cfg(feature = "testing")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn loop_probe(&self) -> Arc<crate::loop_probe::LoopProbe> {
+        Arc::clone(&self.probe)
     }
 
     /// This worker's (stable or generated) instance id.
@@ -349,6 +361,8 @@ impl<S: CoordinationStore + Clone> SplitCoordinator for StoreCoordinator<S> {
             event_tx,
             self.waker.clone(),
         );
+        #[cfg(feature = "testing")]
+        let task = task.with_probe(Arc::clone(&self.probe));
         let join = self.io.spawn(task.run());
         self.running = Some(Running {
             commands: command_tx,

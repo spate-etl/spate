@@ -12,10 +12,13 @@
 
 mod support;
 
+use spate_coordination::store::memory::MemoryStore;
+use spate_coordination::store::{CoordinationStore as _, Keyspace};
 use spate_coordination::{SplitCoordinator, SplitProgress};
 use spate_test::LogCapture;
 use std::time::Instant;
 use support::{Held, PhasedPlanner, drive, runtime, store, worker};
+use tokio::runtime::Runtime;
 
 /// How many rebalances the leader has announced. Separate from
 /// [`announced_moves`] so a wait can poll it without parsing: a line read
@@ -47,6 +50,20 @@ fn announced_moves(capture: &LogCapture) -> Vec<u64> {
                 .expect("moved is a count")
         })
         .collect()
+}
+
+/// The splits `instance`'s durable assignment record names; empty while there
+/// is no record.
+fn assigned(rt: &Runtime, store: &MemoryStore, instance: &str) -> Vec<String> {
+    let Some(entry) = rt
+        .block_on(store.get(Keyspace::Durable, &format!("assign.{instance}")))
+        .expect("read the assignment record")
+    else {
+        return Vec::new();
+    };
+    let record: serde_json::Value =
+        serde_json::from_slice(&entry.value).expect("assignment record is JSON");
+    serde_json::from_value(record["splits"].clone()).expect("assignment names its splits")
 }
 
 /// Wait for a line containing `needle`.
@@ -111,14 +128,19 @@ fn a_peer_joining_is_announced_and_nothing_reads_as_a_fault() {
         // worker's own view; the suite drops it by hand, as its siblings do.
         held_a.splits.remove(id);
     }
-    // Long enough for several reconcile ticks, so the leader has observed
-    // both completions and republished its own shrunken assignment. Silence
-    // over a window in which nothing was published would prove nothing.
-    let settle_until = Instant::now() + support::LEASE;
-    while Instant::now() < settle_until {
-        held_a.fold(a.poll().unwrap());
-        std::thread::sleep(support::POLL_INTERVAL);
-    }
+    // Silence over a window in which nothing was published would prove
+    // nothing, so wait for the leader's republish of its shrunken assignment.
+    spate_test::wait_until(
+        support::DEADLINE,
+        "worker-a's assignment shrinks to s2, s3",
+        || {
+            held_a.fold(a.poll().unwrap());
+            assigned(&rt, &store, "worker-a") == ["s2", "s3"]
+        },
+    );
+    // The task serves a command only after the turn that wrote the record,
+    // and with it the decision whether to announce it, has finished.
+    support::commit_held(&mut a, &held_a);
     assert_eq!(held_a.splits.len(), 2, "two splits are left to hold");
     assert_eq!(
         announcements(&capture),

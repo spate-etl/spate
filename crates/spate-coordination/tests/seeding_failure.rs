@@ -9,10 +9,11 @@ use spate_core::coordination::SplitCoordinator;
 use spate_core::metrics::{
     ComponentLabels, CoordinationMetrics, Exporter, MetricsSettings, install,
 };
+use spate_test::wait_until;
 use std::sync::Arc;
 use std::sync::atomic::Ordering::SeqCst;
 use std::time::Duration;
-use support::{CountingStore, PhasedPlanner, TestClock, runtime, store_with_clock, wait_until};
+use support::{CountingStore, PhasedPlanner, TestClock, runtime, store_with_clock};
 
 /// After the first failed create no new split starts, the splits already
 /// in flight finish, and their wins reach `splits_planned_total`. The clock

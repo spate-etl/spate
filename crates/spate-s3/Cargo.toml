@@ -45,7 +45,7 @@ proptest = { workspace = true }
 serde_yaml = { workspace = true }
 tempfile = { workspace = true }
 testcontainers = { workspace = true, features = ["blocking"] }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 
 [[bench]]
 name = "split_gungraun"

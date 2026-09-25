@@ -6,6 +6,7 @@ use crate::backpressure::InflightBudget;
 use crate::checkpoint::{AckMsg, AckRef, AckStatus};
 use crate::error::ErrorClass;
 use crate::metrics::{ComponentLabels, E2eBasis, SinkShardMetrics};
+use crate::pipeline::fakes::wait_for;
 use bytes::Bytes;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1018,7 +1019,11 @@ async fn an_unabortable_write_does_not_hold_the_worker_past_its_grace() {
     let (ack, ack_rx) = AckRef::test_pair();
     f.queues.try_send(0, chunk(1, 8, &ack)).unwrap();
     f.budget.add(8);
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // Blocking is safe here: the test body runs on its own thread, apart from
+    // the runtime's workers.
+    wait_for("the write starts", Duration::from_secs(5), || {
+        !f.writer.calls().is_empty()
+    });
     drop(ack);
     drop(f.queues);
 
@@ -1158,8 +1163,8 @@ fn random_streams_conserve_rows_and_resolve_every_ack() {
 }
 
 /// Teardown without drain (a Failed exit dropping the I/O runtime) must not
-/// resolve un-written data as delivered. Pending batches and queued chunks
-/// hold their acknowledgments in fail-on-drop sets.
+/// resolve un-written data as delivered: a batch in flight, a sealed batch
+/// waiting for a permit, and a chunk still in the shard queue all fail.
 #[test]
 fn runtime_teardown_without_drain_fails_unwritten_acks() {
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -1169,26 +1174,44 @@ fn runtime_teardown_without_drain_fails_unwritten_acks() {
         .expect("runtime");
 
     let (in_flight_ack, in_flight_rx) = AckRef::test_pair();
+    let (waiting_ack, waiting_rx) = AckRef::test_pair();
     let (queued_ack, queued_rx) = AckRef::test_pair();
 
     let fx = rt.block_on(async {
-        let fx = fixture(1, 1, small_batches(), 8);
-        // First chunk seals immediately (max_rows = 1) and its write hangs
-        // forever, so the batch stays pending in the worker's ledger.
+        let mut cfg = small_batches();
+        cfg.inflight.max_per_shard = 1;
+        let fx = fixture(1, 1, cfg, 8);
+        // Every chunk seals on its own (max_rows = 1) and every write hangs, so
+        // the first batch holds the shard's only permit.
         fx.writer.set_default(Outcome::Hang);
         fx.queues
             .try_send(0, chunk(1, 8, &in_flight_ack))
             .expect("send in-flight");
-        // Give the worker a moment to seal and dispatch.
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        // Second chunk sits in the shard queue, never picked up (the
-        // worker is awaiting the semaphore/inflight join).
+        wait_for("the first batch is written", Duration::from_secs(5), || {
+            fx.writer.calls().len() == 1
+        });
+        // Sealed with no permit free, it waits in the worker and gates intake.
+        fx.queues
+            .try_send(0, chunk(1, 8, &waiting_ack))
+            .expect("send waiting");
+        wait_for(
+            "the worker takes the second chunk",
+            Duration::from_secs(5),
+            || fx.queues.all_below(0.0),
+        );
+        // Intake is gated, so this one stays in the shard queue.
         fx.queues
             .try_send(0, chunk(1, 8, &queued_ack))
             .expect("send queued");
+        assert_eq!(
+            fx.writer.calls().len(),
+            1,
+            "only the first batch is written"
+        );
         fx
     });
     drop(in_flight_ack);
+    drop(waiting_ack);
     drop(queued_ack);
 
     // Tear the runtime down without draining the pool. Worker futures and the
@@ -1198,7 +1221,7 @@ fn runtime_teardown_without_drain_fails_unwritten_acks() {
 
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     let mut statuses = Vec::new();
-    for rx in [in_flight_rx, queued_rx] {
+    for rx in [in_flight_rx, waiting_rx, queued_rx] {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         let msg: AckMsg = rx
             .recv_timeout(remaining)
@@ -1207,7 +1230,7 @@ fn runtime_teardown_without_drain_fails_unwritten_acks() {
     }
     assert_eq!(
         statuses,
-        vec![AckStatus::Failed, AckStatus::Failed],
+        vec![AckStatus::Failed; 3],
         "unwritten data must fail, never deliver, at teardown"
     );
 }

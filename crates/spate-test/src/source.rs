@@ -50,6 +50,9 @@ struct Shared {
     flush_commits_calls: usize,
     open: bool,
     events: VecDeque<ScriptEvent>,
+    /// Lane polls parked on `data_cv`.
+    #[cfg(test)]
+    parked_polls: usize,
 }
 
 #[derive(Debug, Default)]
@@ -446,12 +449,20 @@ impl SourceLane for MemoryLane {
                 if now >= deadline {
                     return Ok(None);
                 }
+                #[cfg(test)]
+                {
+                    st.parked_polls += 1;
+                }
                 let (guard, _) = self
                     .shared
                     .data_cv
                     .wait_timeout(st, deadline - now)
                     .expect("spate-test source state poisoned");
                 st = guard;
+                #[cfg(test)]
+                {
+                    st.parked_polls -= 1;
+                }
             };
         }
         let last_offset = self.buf.last().expect("non-empty batch").offset;
@@ -489,5 +500,44 @@ impl<'a> PayloadBatch<'a> for MemoryBatch<'a> {
 
     fn ack(&self) -> &spate_core::checkpoint::AckRef {
         &self.ack
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use spate_core::checkpoint::Checkpointer;
+
+    #[test]
+    fn poll_blocks_until_a_push_from_another_thread() {
+        let mut cp = Checkpointer::new();
+        let (mut source, handle) = memory_source();
+        source.open(SourceCtx::new(cp.handle())).unwrap();
+        cp.begin_epoch(&[PartitionId(0)], 1);
+        handle.assign_lanes(&[(LaneId(0), PartitionId(0))]);
+        let SourceEvent::LanesAssigned(mut lanes) =
+            source.poll_events(Duration::from_millis(100)).unwrap()
+        else {
+            panic!("expected an assignment");
+        };
+        let pusher = handle.clone();
+        let t = std::thread::spawn(move || {
+            // Pushed only once the poll is parked, so it must wake on the notify.
+            crate::wait_until(Duration::from_secs(5), "the poll parks", || {
+                pusher.shared.lock().parked_polls == 1
+            });
+            pusher.push(PartitionId(0), None, b"late");
+        });
+        let timeout = Duration::from_secs(30);
+        let started = Instant::now();
+        let batch = lanes[0].poll(16, timeout).unwrap();
+        let woken = started.elapsed();
+        assert!(batch.is_some(), "poll returns the pushed payload");
+        assert!(
+            woken < timeout / 2,
+            "the push must wake the poll, but it waited {woken:?} of {timeout:?}"
+        );
+        drop(batch);
+        t.join().unwrap();
     }
 }

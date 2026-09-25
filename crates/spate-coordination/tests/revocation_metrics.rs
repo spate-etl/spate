@@ -230,7 +230,7 @@ fn a_real_revocation_moves_every_metric_seam() {
     // arrive, so once it is present the rest have landed too.
     let name = "spate_coordination_assignment_latency_seconds";
     let mut text = handle.render();
-    support::wait_until(
+    spate_test::wait_until(
         Duration::from_secs(5),
         "B's assignment latency reaches the exporter",
         || {

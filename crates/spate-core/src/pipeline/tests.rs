@@ -320,8 +320,12 @@ fn shutdown_during_permanently_blocked_batch_exits_promptly_and_fails_the_batch(
         batches_seen: 0,
     });
     assign_one_lane(&h, std::slice::from_ref(&(0..10)));
-    // Let the driver enter the blocked-retry loop.
-    std::thread::sleep(Duration::from_millis(100));
+    // A block pauses the lane, so the driver is inside its retry loop.
+    wait_for(
+        "the blocked batch pauses the lane",
+        Duration::from_secs(5),
+        || !h.shared.lock().unwrap().pauses.is_empty(),
+    );
     let begun = std::time::Instant::now();
     h.shutdown.trigger();
     let report = h.join.join().unwrap().unwrap();
@@ -850,7 +854,6 @@ fn caller_owned_io_runtime_is_used_and_shut_down_by_run() {
     .with_io_runtime(io);
     let shutdown = runtime.shutdown_handle();
     let join = std::thread::spawn(move || runtime.run());
-    std::thread::sleep(Duration::from_millis(50));
     shutdown.trigger();
     let report = join.join().unwrap().unwrap();
 

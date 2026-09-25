@@ -1062,7 +1062,7 @@ mod tests {
         assert!(saw_poison, "a failed precondition must poison the split");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn pause_halts_fetching_and_resume_continues() {
         let store: Arc<dyn ObjectStore> = Arc::new(seeded(&[("p/a", b"abcdefgh")]).await);
         let slice = listed(&store).await;
@@ -1083,7 +1083,8 @@ mod tests {
             retries: None,
         };
         tokio::spawn(run_fetcher(params));
-        // Paused before the first send: nothing arrives.
+        // Paused before the first send: nothing arrives. On paused time the
+        // sleep returns only once the fetcher is parked.
         tokio::time::sleep(Duration::from_millis(80)).await;
         assert!(
             rx.try_recv().is_err(),
@@ -1155,7 +1156,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_backpressured_lane_buffers_one_window_and_fetches_no_further() {
         // 16-byte object, 8-byte windows → two windows. With a capacity-1
         // channel that nothing drains, the fetcher must read the FIRST window
@@ -1183,6 +1184,7 @@ mod tests {
             retries: None,
         };
         let task = tokio::spawn(run_fetcher(params));
+        // On paused time the sleep returns only once the fetcher is parked.
         tokio::time::sleep(Duration::from_millis(80)).await;
         assert_eq!(
             flaky.recorded_ranges(),
@@ -1305,7 +1307,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_paused_fetcher_notices_the_stop_and_closes_cleanly() {
         // A back-pressured fetcher parked in the pause wait must give up its
         // split promptly when a revocation sets `stop`, closing the channel at
@@ -1330,7 +1332,8 @@ mod tests {
             retries: None,
         };
         let task = tokio::spawn(run_fetcher(params));
-        // Parked on the pause: nothing arrives.
+        // Parked on the pause: nothing arrives. On paused time the sleep
+        // returns only once the fetcher is parked.
         tokio::time::sleep(Duration::from_millis(80)).await;
         assert!(rx.try_recv().is_err(), "a paused fetcher delivers nothing");
         // Stop while paused: the fetcher must exit without ever unpausing. A
@@ -1351,7 +1354,7 @@ mod tests {
         assert!(msgs.is_empty(), "no object was ever started: {msgs:?}");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_stop_finishes_the_open_object_then_cuts_at_the_boundary() {
         // A stop observed mid-object must never close the channel there (that
         // trips the lane's mid-object Fatal path): the fetcher finishes the
@@ -1386,7 +1389,10 @@ mod tests {
         assert!(matches!(m1, ChunkMsg::Chunk(_)), "mid the first object");
         pause.store(true, Ordering::Relaxed);
         stop.store(true, Ordering::Relaxed);
+        // On paused time the sleep returns only once the fetcher is parked,
+        // here mid-object with the next chunk buffered.
         tokio::time::sleep(Duration::from_millis(40)).await;
+        assert_eq!(rx.len(), 1, "parked mid-object behind one buffered chunk");
         pause.store(false, Ordering::Relaxed); // let it drain to the boundary
         let mut msgs = vec![m0, m1];
         while let Some(m) = rx.recv().await {

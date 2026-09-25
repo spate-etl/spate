@@ -183,21 +183,6 @@ fn pause_is_honored_and_resume_wakes() {
 }
 
 #[test]
-fn poll_blocks_until_a_push_from_another_thread() {
-    let (mut source, handle, _cp) = opened_source();
-    let mut lanes = assigned_lanes(&mut source, &handle, &[(L0, P0)]);
-    let pusher = handle.clone();
-    let t = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(30));
-        pusher.push(P0, None, b"late");
-    });
-    let batch = lanes[0].poll(16, Duration::from_secs(5)).unwrap();
-    assert!(batch.is_some(), "poll woke on push");
-    drop(batch);
-    t.join().unwrap();
-}
-
-#[test]
 fn revoke_probe_tracks_arrivals() {
     let (mut source, handle, _cp) = opened_source();
     let _lanes = assigned_lanes(&mut source, &handle, &[(L0, P0), (L1, P1)]);

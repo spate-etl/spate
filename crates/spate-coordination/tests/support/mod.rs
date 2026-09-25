@@ -313,23 +313,6 @@ pub fn drive_clocked(
     }
 }
 
-/// Poll `check` until it returns true or `timeout` elapses; panics with
-/// `what` on timeout. Mirrors `spate_test::wait_until`, which this crate
-/// cannot reach (`spate-test` is not a dev-dependency here). Use it instead
-/// of sleeping a guessed interval: a sleep long enough for a loaded CI
-/// scheduler is dead time on every other run, and one that is not is a
-/// flake.
-pub fn wait_until(timeout: Duration, what: &str, mut check: impl FnMut() -> bool) {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if check() {
-            return;
-        }
-        std::thread::sleep(POLL_INTERVAL);
-    }
-    panic!("timed out after {timeout:?} waiting for: {what}");
-}
-
 /// The watermark [`commit_held`] writes: what a running data plane has
 /// durably committed before a rebalance starts.
 pub const BASE_WATERMARK: i64 = 1;

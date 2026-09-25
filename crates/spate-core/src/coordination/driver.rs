@@ -1033,6 +1033,7 @@ mod tests {
     use super::*;
     use crate::checkpoint::AckRef;
     use crate::coordination::{PlanContext, PlanFinality, SplitPlan};
+    use crate::pipeline::fakes::wait_for;
     use crate::record::RawPayload;
     use crate::source::PayloadBatch;
     use std::cell::RefCell;
@@ -1062,6 +1063,8 @@ mod tests {
         declined: Vec<SplitId>,
         started: bool,
         waker: Option<ControlWaker>,
+        /// `poll` calls so far, counted after each drain.
+        polls: usize,
     }
 
     #[derive(Clone, Default)]
@@ -1115,6 +1118,10 @@ mod tests {
         fn fails(&self) -> Vec<(SplitId, String)> {
             self.0.lock().unwrap().fails.clone()
         }
+
+        fn polls(&self) -> usize {
+            self.0.lock().unwrap().polls
+        }
     }
 
     struct ScriptedCoordinator(Script);
@@ -1130,14 +1137,9 @@ mod tests {
         }
 
         fn poll(&mut self) -> Result<Vec<CoordinationEvent>, CoordinationError> {
-            Ok(self
-                .0
-                .0
-                .lock()
-                .unwrap()
-                .batches
-                .pop_front()
-                .unwrap_or_default())
+            let mut s = self.0.0.lock().unwrap();
+            s.polls += 1;
+            Ok(s.batches.pop_front().unwrap_or_default())
         }
 
         fn commit(
@@ -1425,21 +1427,30 @@ mod tests {
             "expected a real park, returned after {idle:?}"
         );
 
-        // A signal landing mid-park ends it. The event itself surfaces on
-        // the following call (the drain runs at the top of `poll_events`),
-        // so this asserts the wakeup, not the delivery.
+        // A signal pushed after this call has drained the backend reaches it
+        // only through the wake. The event itself surfaces on the following
+        // call, so this asserts the wakeup, not the delivery.
         let signaller = script.clone();
+        let drained = script.polls();
         let handle = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(20));
+            wait_for(
+                "the driver drains the backend",
+                Duration::from_secs(5),
+                || signaller.polls() > drained,
+            );
             signaller.push(vec![CoordinationEvent::AllComplete]);
         });
+        let long_park = Duration::from_secs(30);
         let t1 = Instant::now();
-        let _ = d.poll_events(&mut s, park).unwrap();
+        assert!(matches!(
+            d.poll_events(&mut s, long_park).unwrap(),
+            SourceEvent::Idle
+        ));
         let woken = t1.elapsed();
         handle.join().unwrap();
         assert!(
-            woken < park / 2,
-            "a signal must cut the park short, but it ran {woken:?} of {park:?}"
+            woken < long_park / 2,
+            "a signal must cut the park short, but it ran {woken:?} of {long_park:?}"
         );
         assert!(matches!(
             d.poll_events(&mut s, Duration::ZERO).unwrap(),

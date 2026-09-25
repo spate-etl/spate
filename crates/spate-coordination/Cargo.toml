@@ -49,7 +49,7 @@ spate-test = { workspace = true }
 serde_yaml = { workspace = true }
 testcontainers = { workspace = true, features = ["blocking"] }
 tempfile = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 # `aws_lc_rs` beside async-nats's `ring` puts both rustls providers in the
 # test build, as a facade build with other TLS connectors has.
 tokio-rustls = { workspace = true, features = ["aws_lc_rs"] }

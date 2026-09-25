@@ -454,7 +454,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn ephemeral_writes_rearm_the_ttl_and_silence_expires() {
         let s = store();
         let mut rev = s

@@ -27,6 +27,7 @@ use super::{
     CasOutcome, CoordinationStore, Entry, Keyspace, Revision, StoreError, WatchEvent, WatchStream,
 };
 use async_nats::jetstream::kv;
+use async_nats::jetstream::stream::LastRawMessageErrorKind;
 use futures_util::StreamExt as _;
 use serde::Deserialize;
 use std::fmt;
@@ -401,6 +402,31 @@ async fn ensure_bucket(
     }
 }
 
+/// Whether `key` holds a value, read through the stream leader.
+///
+/// `kv::Store::entry` uses direct get, which any replica may answer, so a
+/// lagging follower can miss a write the leader has acknowledged.
+async fn live_on_leader(bucket: &kv::Store, key: &str) -> Result<bool, StoreError> {
+    let subject = format!("{}{}", bucket.prefix, key);
+    match bucket
+        .stream
+        .get_last_raw_message_by_subject(&subject)
+        .await
+    {
+        // Every marker carries one of these headers.
+        Ok(message) => Ok(message
+            .headers
+            .get(async_nats::header::NATS_MARKER_REASON)
+            .is_none()
+            && message
+                .headers
+                .get("KV-Operation")
+                .is_none_or(|op| op.as_str() == "PUT")),
+        Err(e) if e.kind() == LastRawMessageErrorKind::NoMessageFound => Ok(false),
+        Err(e) => Err(StoreError::Retryable(format!("read {key}: {e}"))),
+    }
+}
+
 /// Map a KV entry to the store contract: non-Put operations are markers,
 /// i.e. deletions.
 fn to_event(entry: kv::Entry) -> WatchEvent {
@@ -476,15 +502,22 @@ impl CoordinationStore for NatsStore {
         expected: Option<Revision>,
     ) -> Result<CasOutcome, StoreError> {
         let buckets = self.buckets().await?;
-        let result = self
-            .bucket(buckets, ks)
+        let bucket = self.bucket(buckets, ks);
+        let result = bucket
             .delete_expect_revision(key, expected.map(|r| r.0))
             .await;
         match result {
-            // NATS does not report the marker's revision; callers only
-            // branch on the outcome.
+            // NATS does not report the marker's revision.
             Ok(()) => Ok(CasOutcome::Won(Revision(0))),
-            Err(e) if e.kind() == kv::UpdateErrorKind::WrongLastRevision => Ok(CasOutcome::Lost),
+            // JetStream checks `expected` against the subject's last
+            // message, which for an absent key is nothing or a marker.
+            Err(e) if e.kind() == kv::UpdateErrorKind::WrongLastRevision => {
+                if live_on_leader(bucket, key).await? {
+                    Ok(CasOutcome::Lost)
+                } else {
+                    Ok(CasOutcome::Won(Revision(0)))
+                }
+            }
             Err(e) => Err(StoreError::Retryable(format!("delete {key}: {e}"))),
         }
     }

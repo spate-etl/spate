@@ -166,7 +166,8 @@ pub trait CoordinationStore: Send + Sync + 'static {
     ) -> impl Future<Output = Result<Option<Entry>, StoreError>> + Send;
 
     /// Delete `key`; with `expected`, only if still at that revision.
-    /// Deleting an absent key wins vacuously.
+    /// Deleting an absent key (never written, deleted or expired) wins,
+    /// guarded or not; the revision in `Won` is unspecified.
     fn delete(
         &self,
         ks: Keyspace,

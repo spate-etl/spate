@@ -8,9 +8,9 @@ use std::future::Future;
 use std::time::{Duration, Instant};
 
 /// Wraps any [`CoordinationStore`] with the configured `op_timeout` on
-/// every single-round-trip primitive (a hung store surfaces as a
-/// Retryable failure the protocol already tolerates, instead of wedging
-/// the task loop) and records each primitive's round-trip latency.
+/// every primitive but `list` (a hung store surfaces as a Retryable
+/// failure the protocol already tolerates, instead of wedging the task
+/// loop) and records each primitive's latency.
 ///
 /// `list` is metered but **not** deadline-bounded: its duration grows
 /// with the number of live keys (the NATS backend point-reads each one),

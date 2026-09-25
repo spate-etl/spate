@@ -13,7 +13,7 @@ use spate_coordination::{
     Clock, CoordinationEvent, SplitCoordinator, SplitProgress, StoreCoordinator,
 };
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use support::{DEADLINE, Held, PhasedPlanner, config, runtime, split_id};
@@ -28,6 +28,8 @@ struct FaultStore {
     /// Once: the next ephemeral split-lease update WRITES but returns an
     /// error, the maybe-landed renewal.
     lease_maybe_land: Arc<AtomicBool>,
+    /// Split-lease updates that won since the maybe-landed renewal.
+    renewals_after_fault: Arc<AtomicU64>,
     /// While armed: the next durable split-record write that clears the
     /// owner (a graceful release, or a revocation's final hand-back) is
     /// dropped (Retryable, nothing written), disarming afterward.
@@ -47,6 +49,7 @@ impl FaultStore {
             inner,
             plan_update_script: Arc::new(Mutex::new(VecDeque::new())),
             lease_maybe_land: Arc::new(AtomicBool::new(false)),
+            renewals_after_fault: Arc::new(AtomicU64::new(0)),
             drop_owner_clear: Arc::new(AtomicBool::new(false)),
             drop_assignment_publish: Arc::new(AtomicBool::new(false)),
         }
@@ -116,11 +119,19 @@ impl CoordinationStore for FaultStore {
             // The write LANDS but the caller sees a failure, the
             // maybe-landed renewal a flaky round-trip produces.
             let _ = self.inner.update(ks, key, value, expected).await?;
+            self.renewals_after_fault.store(0, Ordering::Release);
             return Err(StoreError::Retryable(
                 "injected: renewal reply lost after the write landed".into(),
             ));
         }
-        self.inner.update(ks, key, value, expected).await
+        let outcome = self.inner.update(ks, key, value, expected).await?;
+        if ks == Keyspace::Ephemeral
+            && key.starts_with("split.")
+            && matches!(outcome, CasOutcome::Won(_))
+        {
+            self.renewals_after_fault.fetch_add(1, Ordering::AcqRel);
+        }
+        Ok(outcome)
     }
 
     async fn get(&self, ks: Keyspace, key: &str) -> Result<Option<Entry>, StoreError> {
@@ -200,8 +211,10 @@ fn maybe_landed_renewal_is_adopted_not_fenced() {
     // fire (the "advance to settle" pattern; see
     // `spate_coordination::clock`).
     let clock = support::TestClock::frozen();
-    let store = FaultStore::new(MemoryStore::with_clock(support::LEASE, clock.clone()));
+    let inner = MemoryStore::with_clock(support::LEASE, clock.clone());
+    let store = FaultStore::new(inner.clone());
     let lease_maybe_land = store.lease_maybe_land.clone();
+    let renewals_after_fault = store.renewals_after_fault.clone();
 
     let planner = Box::new(PhasedPlanner::one_final("renewal-fault:v1", &["r0"]));
     let mut worker = StoreCoordinator::with_clock(
@@ -213,6 +226,8 @@ fn maybe_landed_renewal_is_adopted_not_fenced() {
     )
     .expect("coordinator");
     worker.start(planner).unwrap();
+    let mut fleet = support::Fleet::new(&inner, rt.handle());
+    fleet.join(&worker);
 
     let mut held = Held::default();
     support::drive(&mut worker, &mut held, "claiming the split", |h| {
@@ -225,7 +240,7 @@ fn maybe_landed_renewal_is_adopted_not_fenced() {
     let held = std::cell::RefCell::new(held);
     let worker = std::cell::RefCell::new(worker);
     let pump = || {
-        std::thread::sleep(support::POLL_INTERVAL);
+        fleet.settle(&clock);
         for event in worker.borrow_mut().poll().expect("poll") {
             assert!(
                 !matches!(
@@ -241,10 +256,10 @@ fn maybe_landed_renewal_is_adopted_not_fenced() {
     // Arm the fault: the next lease renewal writes but reports an error, and
     // the one after loses its CAS against that landed write and must ADOPT it
     // (not fence). Step a renew-interval per iteration until the fault has
-    // fired (the flag clears), then a couple more so the adopting renewal
-    // runs under the no-loss assertion. A step of a quarter renew-interval
-    // keeps `last_ok_write` within a lease throughout, so a genuine self-fence
-    // never masquerades as the loss we are refuting.
+    // fired (the flag clears), then until a renewal wins against the adopted
+    // revision, all under the no-loss assertion. A step of a quarter
+    // renew-interval keeps `last_ok_write` within a lease throughout, so a
+    // genuine self-fence never masquerades as the loss we are refuting.
     lease_maybe_land.store(true, Ordering::Release);
     let renew = support::LEASE / 3;
     let deadline = Instant::now() + DEADLINE;
@@ -252,7 +267,8 @@ fn maybe_landed_renewal_is_adopted_not_fenced() {
         assert!(Instant::now() < deadline, "the fault never fired");
         clock.advance_stepped(renew, renew / 4, pump);
     }
-    for _ in 0..3 {
+    while renewals_after_fault.load(Ordering::Acquire) == 0 {
+        assert!(Instant::now() < deadline, "no renewal won after the fault");
         clock.advance_stepped(renew, renew / 4, pump);
     }
 

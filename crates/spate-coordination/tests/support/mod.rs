@@ -96,19 +96,22 @@ pub fn worker(
         .expect("coordinator")
 }
 
-/// A worker with a non-default drain deadline. A long deadline makes the
-/// forced revocation effectively never fire inside a test window (every
-/// move must complete cooperatively); a very short one forces it, which is
-/// how the replaying path is exercised on purpose.
-pub fn worker_drain_deadline(
+/// A worker with a non-default drain deadline, on an injected clock. A long
+/// deadline makes the forced revocation effectively never fire inside a
+/// test window (every move must complete cooperatively); a very short one
+/// forces it, which is how the replaying path is exercised on purpose.
+/// Build the store with [`store_with_clock`] and the same clock.
+pub fn worker_drain_deadline_clock(
     store: &MemoryStore,
     io: &tokio::runtime::Handle,
     instance_id: Option<&str>,
     drain_deadline: Duration,
+    clock: Arc<dyn Clock>,
 ) -> MemoryCoordinator {
     let mut config = config(instance_id);
     config.drain_deadline = drain_deadline;
-    StoreCoordinator::new(store.clone(), config, io.clone(), None).expect("coordinator")
+    StoreCoordinator::with_clock(store.clone(), config, io.clone(), None, clock)
+        .expect("coordinator")
 }
 
 /// A worker with a non-default rebalance delay. Tests that assert a

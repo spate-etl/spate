@@ -109,6 +109,9 @@ schema_registry_converter = { version = "5.0", default-features = false }
 # schema_registry_converter's HTTP client. spate-avro builds it, so the major
 # must match that crate's; internal only (INV-6).
 reqwest = { version = "0.13.4", default-features = false }
+# The connector layer spate-avro adds to reqwest; the majors reqwest uses.
+tower-layer = "0.3.3"
+tower-service = "0.3.3"
 
 async-trait = "0.1.53"
 serde_repr = "0.1.16"

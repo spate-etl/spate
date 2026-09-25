@@ -5,7 +5,8 @@
 //! [`DecoderCore::resolve`]. Schema resolution never blocks a pipeline
 //! thread: on a registry cache miss the core triggers an asynchronous fetch
 //! and returns [`DeserError::NotReady`], which the chain converts into a
-//! retriable `Blocked` (see `spate-core`'s deserializer contract).
+//! retriable `Blocked` (see `spate-core`'s deserializer contract). Once the
+//! registry has rejected the client, a miss returns [`DeserError::Fatal`].
 //!
 //! Empty payloads (Kafka tombstones) decode to **zero records** in every
 //! mode.
@@ -180,6 +181,11 @@ impl DecoderCore {
                 match registry.cache.lookup(memo, id) {
                     Lookup::Ready(schema) => (schema, datum),
                     Lookup::Missing => {
+                        if let Some(reason) = registry.rejection.get() {
+                            return Err(DeserError::Fatal {
+                                reason: reason.clone(),
+                            });
+                        }
                         registry.request(id);
                         return Err(DeserError::NotReady {
                             reason: format!("schema {id} is being fetched from the registry"),

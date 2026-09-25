@@ -2531,3 +2531,135 @@ fn abandon_batch_resets_mid_batch_state_for_the_next_batch() {
     drop(batch2);
     assert_eq!(ack2_rx.try_recv().unwrap().status, AckStatus::Delivered);
 }
+
+// ---- fatal deserializer -----------------------------------------------------
+
+/// Wraps LogDeser; payloads ending in `|fatal` report NotReady
+/// `not_ready_first` times, then `DeserError::Fatal`.
+struct FatalDeser {
+    not_ready_first: u32,
+}
+
+impl Deserializer<LogF> for FatalDeser {
+    fn deserialize<'buf>(
+        &mut self,
+        raw: &RawPayload<'buf>,
+        ack: &AckRef,
+        out: &mut dyn EmitRecord<'buf, LogEvent<'buf>>,
+    ) -> Result<(), DeserError> {
+        if raw.bytes.ends_with(b"|fatal") {
+            if self.not_ready_first > 0 {
+                self.not_ready_first -= 1;
+                return Err(DeserError::NotReady {
+                    reason: "schema fetch in flight".into(),
+                });
+            }
+            return Err(DeserError::Fatal {
+                reason: "registry rejected the credentials".into(),
+            });
+        }
+        LogDeser.deserialize(raw, ack, out)
+    }
+}
+
+/// The value of the one series in `rendered` named `name` whose labels
+/// contain `label`, or 0 when none renders.
+fn series_value(rendered: &str, name: &str, label: &str) -> u64 {
+    rendered
+        .lines()
+        .find(|l| l.starts_with(&format!("{name}{{")) && l.contains(label))
+        .and_then(|l| l.rsplit(' ').next())
+        .map_or(0, |v| v.parse().unwrap())
+}
+
+/// A fatal deserializer error stops the chain under the Skip policy, fails
+/// the batch, and counts the payload as an error but not as a skip drop.
+#[test]
+fn a_fatal_deser_error_stops_the_chain_under_skip() {
+    let mut ack_status = None;
+    let rendered = render(|| {
+        let (queues, _rxs) = shard_queues(1, 64);
+        let mut c = chain(FatalDeser { not_ready_first: 0 })
+            .with_metrics("fataltest", "main")
+            .flat_map::<SubF, _>(split_body)
+            .sink(
+                SubEncoder,
+                ToZero,
+                ChunkConfig::default(),
+                queues,
+                Arc::new(InflightBudget::new()),
+            )
+            .build();
+
+        let bufs = payloads(&["a:one", "b:two|fatal", "c:three"]);
+        let (mut batch, ack_rx) = TestBatch::new(&bufs);
+        let PushOutcome::Fatal(f) = c.push_batch(&mut batch, 0) else {
+            panic!("expected Fatal whatever the Skip policy");
+        };
+        assert_eq!(f.component, "deserializer");
+        assert!(f.reason.contains("rejected the credentials"), "{f}");
+        drop(batch);
+        drop(c);
+        ack_status = Some(ack_rx.try_recv().expect("batch resolved").status);
+    });
+    assert_eq!(ack_status, Some(AckStatus::Failed));
+    let name = crate::metrics::names::DESER_RECORDS_TOTAL;
+    assert_eq!(
+        series_value(&rendered, name, r#"outcome="error""#),
+        1,
+        "{rendered}"
+    );
+    assert_eq!(
+        series_value(
+            &rendered,
+            crate::metrics::names::DESER_RECORDS_DROPPED_TOTAL,
+            r#"reason="skip_policy""#
+        ),
+        0,
+        "{rendered}"
+    );
+}
+
+/// A payload that reports NotReady and then Fatal on replay fails the batch
+/// and clears the stash, so the next batch starts cleanly at index 0.
+#[test]
+fn a_fatal_on_replay_fails_the_batch_and_clears_the_stash() {
+    let mut statuses = Vec::new();
+    let rendered = render(|| {
+        let (queues, _rxs) = shard_queues(1, 64);
+        let mut c = chain(FatalDeser { not_ready_first: 1 })
+            .with_metrics("fataltest", "main")
+            .flat_map::<SubF, _>(split_body)
+            .sink(
+                SubEncoder,
+                ToZero,
+                ChunkConfig::default(),
+                queues,
+                Arc::new(InflightBudget::new()),
+            )
+            .build();
+
+        let b1 = payloads(&["a:one", "b:two|fatal"]);
+        let (mut batch1, ack1_rx) = TestBatch::new(&b1);
+        let PushOutcome::Blocked { resume_at, reason } = c.push_batch(&mut batch1, 0) else {
+            panic!("expected Blocked NotReady");
+        };
+        assert_eq!((resume_at, reason), (1, BlockReason::NotReady));
+        assert!(matches!(
+            c.push_batch(&mut batch1, 1),
+            PushOutcome::Fatal(_)
+        ));
+        drop(batch1);
+
+        let b2 = payloads(&["c:three"]);
+        let (mut batch2, ack2_rx) = TestBatch::new(&b2);
+        assert!(matches!(c.push_batch(&mut batch2, 0), PushOutcome::Done));
+        drop(batch2);
+        drop(c);
+        statuses.push(ack1_rx.try_recv().expect("batch 1 resolved").status);
+        statuses.push(ack2_rx.try_recv().expect("batch 2 resolved").status);
+    });
+    assert_eq!(statuses[0], AckStatus::Failed);
+    let name = crate::metrics::names::DESER_NOT_READY_TOTAL;
+    assert_eq!(series_value(&rendered, name, "fataltest"), 1, "{rendered}");
+}

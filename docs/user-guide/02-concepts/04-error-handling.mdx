@@ -14,7 +14,7 @@ metrics. There are no dead-letter queues and no silent drops.
 |---|---|---|
 | **Retryable** | Transient sink I/O: a timeout, a connection reset, one replica down | Handled by the sink layer: the same sealed batch retries on the next healthy replica with capped exponential backoff and circuit breakers. Not your problem unless it persists — watch `spate_sink_retries_total` and `spate_sink_replica_healthy`, with `spate_sink_replica_errors_total` to pin the failing endpoint and `spate_sink_shard_healthy` for the whole-shard escalation. The retry counter only moves on an *attempt*, so pair it with `spate_sink_retry_backoff_seconds` — the gauge that says whether the shard is asleep between attempts on an available replica right now, and for how long. |
 | **Record-level** | A payload that won't deserialize, a `try_map` closure returning `Err` | Subject to the per-stage policy: **Skip** or **Fail** (below). |
-| **Fatal** | Invariant violations, unusable configuration, a sink write that exhausts every option | The pipeline transitions to Failed and the process exits non-zero. Kubernetes restarts it; delivery resumes from the last committed watermark. |
+| **Fatal** | Invariant violations, unusable configuration, a sink write that exhausts every option, a deserializer that can decode nothing further (a schema source that rejects its credentials, say) | The pipeline transitions to Failed and the process exits non-zero. Kubernetes restarts it; delivery resumes from the last committed watermark. |
 
 ## Record-level policy: Skip or Fail — nothing else
 
@@ -27,6 +27,10 @@ metrics. There are no dead-letter queues and no silent drops.
   `spate_operator_errors_total{error_type="fatal"}` under its own `component`
   label, so the exposition names it. A deserializer counts
   `spate_deser_records_total{outcome="error"}` either way.
+
+A deserializer can also report that it can decode no further payload at all.
+That error is fatal under either policy. The payload counts as an error and
+never as a drop.
 
 Defaults follow the likely blast radius: **deserializers default to Skip**
 (one poison record shouldn't take the pipeline down),

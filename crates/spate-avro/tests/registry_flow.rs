@@ -594,6 +594,157 @@ async fn a_refused_schema_poisons_the_id_rather_than_stalling() {
 }
 
 // ---------------------------------------------------------------------------
+// Registry rejections that stop the pipeline
+// ---------------------------------------------------------------------------
+
+/// Drives `payload` through a fresh value deserializer until the result is
+/// not `NotReady`, and returns the `DeserError::Fatal` reason.
+async fn fatal_reason(deser: spate_avro::AvroValueDeserializer, payload: Vec<u8>) -> String {
+    let mut deser = deser;
+    let result = tokio::task::spawn_blocking(move || {
+        let mut out = Collected(Vec::new());
+        drive_until_ready(&mut deser, &payload, &mut out)
+    })
+    .await
+    .unwrap();
+    match result {
+        Err(DeserError::Fatal { reason }) => reason,
+        other => panic!("expected DeserError::Fatal, got {other:?}"),
+    }
+}
+
+/// A `401` or `403` on a schema fetch is fatal, and the reason names the
+/// registry without its credentials.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_auth_rejection_is_fatal() {
+    for status in [401, 403] {
+        let stub = StubRegistry::default();
+        stub.script(
+            "/schemas/ids/1",
+            status,
+            r#"{"error_code":401,"message":"Unauthorized"}"#,
+            0,
+        );
+        let addr = stub.serve().await;
+        let mut cfg = settings_at(
+            format!("http://urluser:urlsecret@{addr}"),
+            Duration::from_secs(30),
+        );
+        let registry = cfg.registry.as_mut().unwrap();
+        registry.username = Some("svc".into());
+        registry.password = Some("hunter2".into());
+        let builder =
+            AvroDeserializerBuilder::from_settings(&cfg, &tokio::runtime::Handle::current())
+                .unwrap();
+        let reason = fatal_reason(builder.build_value().unwrap(), confluent_payload(1, 1)).await;
+        assert!(reason.contains(&format!("{status}")), "{reason}");
+        assert!(reason.contains(&addr.to_string()), "{reason}");
+        for secret in ["urlsecret", "hunter2"] {
+            assert!(!reason.contains(secret), "{reason}");
+        }
+    }
+}
+
+/// A `401` on the pre-warm makes the first cache miss fatal, even while the
+/// by-id fetch only ever sees a transient `503`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_prewarm_auth_rejection_is_fatal_at_the_first_miss() {
+    let stub = StubRegistry::default();
+    stub.script("/subjects/events-value/versions/latest", 401, "{}", 0);
+    stub.script("/schemas/ids/42", 503, "{}", 0);
+    let addr = stub.serve().await;
+    let mut cfg = settings(addr, Duration::from_secs(30));
+    cfg.prewarm_subjects = vec!["events-value".into()];
+    let builder =
+        AvroDeserializerBuilder::from_settings(&cfg, &tokio::runtime::Handle::current()).unwrap();
+    let reason = fatal_reason(builder.build_value().unwrap(), confluent_payload(42, 1)).await;
+    assert!(reason.contains("401"), "{reason}");
+}
+
+/// Once a rejection is recorded, a schema already cached keeps decoding.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cached_schema_decodes_after_a_rejection() {
+    let stub = StubRegistry::default();
+    stub.script("/schemas/ids/1", 200, &schema_body(SCHEMA_V1), 0);
+    stub.script("/schemas/ids/2", 401, "{}", 0);
+    let addr = stub.serve().await;
+    let builder = AvroDeserializerBuilder::from_settings(
+        &settings(addr, Duration::from_secs(30)),
+        &tokio::runtime::Handle::current(),
+    )
+    .unwrap();
+    let mut deser = builder.build_value().unwrap();
+    let (cached, rejected) = (confluent_payload(1, 7), confluent_payload(2, 8));
+    let (first, second, again) = tokio::task::spawn_blocking(move || {
+        let mut out = Collected(Vec::new());
+        let first = drive_until_ready(&mut deser, &cached, &mut out);
+        let second = drive_until_ready(&mut deser, &rejected, &mut out);
+        let again = drive_until_ready(&mut deser, &cached, &mut out);
+        (first.map(|()| out.0.len()), second, again)
+    })
+    .await
+    .unwrap();
+    first.unwrap();
+    assert!(
+        matches!(second, Err(DeserError::Fatal { .. })),
+        "{second:?}"
+    );
+    again.expect("a cached schema still decodes");
+}
+
+/// Serves `https://127.0.0.1:<port>` with a certificate from a CA no trust
+/// store holds, and returns the URL.
+async fn serve_untrusted_https() -> String {
+    use rcgen::{BasicConstraints, CertificateParams, IsCa, Issuer, KeyPair};
+    use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+    let mut ca = CertificateParams::new(Vec::<String>::new()).unwrap();
+    ca.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    let ca_key = KeyPair::generate().unwrap();
+    let issuer = Issuer::new(ca, ca_key);
+    let key = KeyPair::generate().unwrap();
+    let leaf = CertificateParams::new(vec!["127.0.0.1".to_owned()])
+        .unwrap()
+        .signed_by(&key, &issuer)
+        .unwrap();
+    let config = rustls::ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_no_client_auth()
+    .with_single_cert(
+        vec![leaf.der().clone()],
+        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der())),
+    )
+    .unwrap();
+    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        while let Ok((tcp, _)) = listener.accept().await {
+            let acceptor = acceptor.clone();
+            tokio::spawn(async move {
+                let _ = acceptor.accept(tcp).await;
+            });
+        }
+    });
+    format!("https://127.0.0.1:{port}")
+}
+
+/// A registry certificate the client does not trust is fatal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_untrusted_registry_certificate_is_fatal() {
+    let url = serve_untrusted_https().await;
+    let builder = AvroDeserializerBuilder::from_settings(
+        &settings_at(url, Duration::from_secs(30)),
+        &tokio::runtime::Handle::current(),
+    )
+    .unwrap();
+    let reason = fatal_reason(builder.build_value().unwrap(), confluent_payload(1, 1)).await;
+    assert!(reason.contains("certificate"), "{reason}");
+}
+
+// ---------------------------------------------------------------------------
 // The single-pass datum path against the registry
 // ---------------------------------------------------------------------------
 

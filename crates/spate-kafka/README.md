@@ -12,11 +12,11 @@ section). No `rdkafka` types appear in public signatures.
 
 ## Sharp edges worth knowing
 
-- **`auto.offset.reset` defaults to `latest`** (librdkafka's default,
-  passed through as user policy): a consumer group starting *after* data
-  was produced reads nothing until new data arrives. Set it to `earliest`
-  in the `rdkafka:` passthrough when backfilling or testing against
-  pre-produced topics.
+- **`auto.offset.reset` defaults to `latest`** (librdkafka's default; the
+  source applies it to a partition with no committed offset): a consumer
+  group starting *after* data was produced reads nothing until new data
+  arrives. Set it to `earliest` in the `rdkafka:` passthrough when
+  backfilling or testing against pre-produced topics.
 - The `rdkafka:` passthrough validates a denylist: properties the
   framework owns for correctness — `enable.auto.offset.store`,
   `enable.auto.commit`, `enable.partition.eof`, and the typed fields'

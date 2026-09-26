@@ -17,7 +17,8 @@
 //! 2. `assign(tpl)` — accept the partitions. With concrete offsets the
 //!    fetchers start before `assign` returns. A fetcher librdkafka starts
 //!    later can lose its start to a concurrent `pause`/`resume`, which
-//!    leaves the partition unfetched until the next rebalance;
+//!    leaves the partition unfetched until the next rebalance
+//!    ([librdkafka#5591](https://github.com/confluentinc/librdkafka/issues/5591));
 //! 3. `pause(tpl)` — a fetch that completed before it is discarded as
 //!    outdated and refetched, so no message leaks onto the main queue;
 //! 4. `split_partition_queue` per partition (must be redone after *every*

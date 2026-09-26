@@ -10,5 +10,6 @@ throughout.
 
 `spate_source_lag_records` appears for a partition as soon as the group has
 committed an offset for it, without waiting for this member's first commit.
-With `auto.offset.reset: error`, a partition with no committed offset still
-takes the old path.
+Two cases still take the old path: a partition whose committed offset could
+not be read, which the source logs as a warning, and a partition with no
+committed offset under `auto.offset.reset: error`.

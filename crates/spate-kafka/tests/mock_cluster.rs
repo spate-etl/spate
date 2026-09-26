@@ -768,39 +768,43 @@ fn statistics_populate_kafka_source_metrics() {
                     .with_partition_detail(true),
             )
             .expect("open");
-        let _lanes = await_assignment(&mut source);
+        // A failure carries the source's warnings: a partition that is not
+        // fetching, with its fetch state, and any main-queue rewind.
+        spate_test::show_logs(tracing::Level::WARN, || {
+            let _lanes = await_assignment(&mut source);
 
-        // Poll past at least one statistics interval; stop as soon as the
-        // families appear. The not-fetching series is waited on by value
-        // rather than by presence, because the first snapshot after an
-        // assignment legitimately catches a partition at `offset-query`.
-        let needles = [
-            "spate_kafka_group_assignment_size".to_owned(),
-            "spate_kafka_rx_responses_total".to_owned(),
-            "spate_kafka_broker_up".to_owned(),
-            not_fetching(0),
-            not_fetching(1),
-        ];
-        let deadline = Instant::now() + Duration::from_secs(30);
-        loop {
-            source
-                .poll_events(Duration::from_millis(100))
-                .expect("poll_events");
-            let rendered = handle.render();
-            let missing: Vec<&str> = needles
-                .iter()
-                .filter(|n| !rendered.contains(n.as_str()))
-                .map(String::as_str)
-                .collect();
-            if missing.is_empty() {
-                break;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "statistics series did not appear within deadline, \
+            // Poll past at least one statistics interval; stop as soon as the
+            // families appear. The not-fetching series is waited on by value
+            // rather than by presence, because the first snapshot after an
+            // assignment legitimately catches a partition at `offset-query`.
+            let needles = [
+                "spate_kafka_group_assignment_size".to_owned(),
+                "spate_kafka_rx_responses_total".to_owned(),
+                "spate_kafka_broker_up".to_owned(),
+                not_fetching(0),
+                not_fetching(1),
+            ];
+            let deadline = Instant::now() + Duration::from_secs(30);
+            loop {
+                source
+                    .poll_events(Duration::from_millis(100))
+                    .expect("poll_events");
+                let rendered = handle.render();
+                let missing: Vec<&str> = needles
+                    .iter()
+                    .filter(|n| !rendered.contains(n.as_str()))
+                    .map(String::as_str)
+                    .collect();
+                if missing.is_empty() {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "statistics series did not appear within deadline, \
                  missing {missing:?}:\n{rendered}"
-            );
-        }
+                );
+            }
+        });
     });
 
     let rendered = handle.render();

@@ -3,8 +3,9 @@
 
 mod support;
 
+use spate_coordination::StoreCoordinator;
 use spate_coordination::store::{CoordinationStore as _, Keyspace};
-use spate_coordination::{Clock, StoreCoordinator};
+use spate_core::clock::tokio::Clock;
 use spate_core::coordination::SplitCoordinator;
 use spate_core::metrics::{
     ComponentLabels, CoordinationMetrics, Exporter, MetricsSettings, install,

@@ -11,6 +11,10 @@ homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[features]
+# Test-only. Off by default and outside the semver surface.
+testing = []
+
 [dependencies]
 bytes = { workspace = true }
 bytesize = { workspace = true }

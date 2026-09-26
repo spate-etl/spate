@@ -26,9 +26,9 @@ trait, so a backend is a few hundred lines rather than a fork.
 - **Draining is cooperative and takes as long as the work in flight.** A split
   moving between workers waits for the losing worker to finish and commit, so
   time-to-balance is dominated by the drain rather than by the protocol.
-- The `testing` feature exposes a controllable clock. It is off by default and
-  the facade must never enable it — a test clock in production stops the
-  control loop dead.
+- The `testing` feature enables `spate-core`'s controllable clocks. It is off by
+  default and the facade must never enable it — a test clock in production
+  stops the control loop dead.
 
 The algorithm is normative and documented under
 [Work assignment](https://spate.kainth.dev/docs/user-guide/concepts/work-assignment),

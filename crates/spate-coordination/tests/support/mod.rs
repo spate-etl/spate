@@ -10,10 +10,11 @@ use spate_coordination::store::{
     CasOutcome, CoordinationStore, Entry, Keyspace, Revision, StoreError, WatchStream,
 };
 use spate_coordination::{
-    Clock, CoordinationConfig, CoordinationError, CoordinationEvent, MemoryCoordinator,
-    PlanContext, PlanFinality, PlannedSplit, SplitCoordinator, SplitId, SplitPlan, SplitPlanner,
-    SplitProgress, SplitSpec, StoreCoordinator,
+    CoordinationConfig, CoordinationError, CoordinationEvent, MemoryCoordinator, PlanContext,
+    PlanFinality, PlannedSplit, SplitCoordinator, SplitId, SplitPlan, SplitPlanner, SplitProgress,
+    SplitSpec, StoreCoordinator,
 };
+use spate_core::clock::tokio::Clock;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -63,12 +64,23 @@ pub fn store() -> MemoryStore {
     MemoryStore::new(LEASE)
 }
 
-/// The deterministic clock lives in the crate, behind its `testing`
-/// feature. These are external test binaries, so a `#[cfg(test)]` item
-/// would be invisible to them. Re-exported here so the suites read
-/// unchanged. Share one instance between the store and the coordinator so
-/// expiry, the self-fence, and the control-loop cadence stay coherent.
-pub use spate_coordination::clock::TestClock;
+/// The frozen clock for the suites. Share one instance between the store
+/// and the coordinator so expiry, the self-fence, and the control-loop
+/// cadence stay coherent.
+///
+/// What is safe to advance by depends on whether the worker under test can
+/// still renew:
+///
+/// - **Advance to expire.** Jumping past a whole lease is deterministic only
+///   when the target cannot renew anyway (a crashed runtime, a kill-switch
+///   store, an injected fault). Nothing is racing the jump.
+/// - **Advance to settle.** For "hold steady and assert nothing changes"
+///   windows the worker is alive and must win its renewals, so step in
+///   increments no larger than `renew_interval` and let the task run between
+///   them, as `TestClock::advance_stepped`, [`drive_clocked`] and
+///   [`Fleet::step`] do. A single large jump makes a lease expiry and the
+///   renewal that prevents it come due at the same instant, which races.
+pub use spate_core::clock::tokio::TestClock;
 
 /// A store whose ephemeral expiry runs on `clock` rather than wall time.
 pub fn store_with_clock(clock: Arc<dyn Clock>) -> MemoryStore {
@@ -294,8 +306,8 @@ pub fn drive(
 /// the clock, so a never-advanced frozen clock stalls them all).
 ///
 /// The step is small enough that a live worker renews inside it, the
-/// "advance to settle" pattern from [`spate_coordination::clock`], so a
-/// self-fence does not fire because the test moved time in one jump.
+/// "advance to settle" pattern from [`TestClock`], so a self-fence does not
+/// fire because the test moved time in one jump.
 pub fn drive_clocked(
     coordinator: &mut impl SplitCoordinator,
     clock: &TestClock,

@@ -20,7 +20,8 @@
 
 #![allow(dead_code, reason = "each target uses a different subset")]
 
-use spate_core::backpressure::{BackpressureParams, Clock, InflightBudget, WatermarkController};
+use spate_core::backpressure::{BackpressureParams, InflightBudget, WatermarkController};
+use spate_core::clock::Clock;
 use std::cell::Cell;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -78,8 +79,8 @@ const PHASE: usize = 16;
 const REJECT_EVERY: usize = 64;
 
 /// Injected clock. The controller reads time through a
-/// [`Clock`](spate_core::backpressure::Clock) so it can be driven without
-/// sleeping, and the bench takes that seam rather than the monotonic default.
+/// [`Clock`](spate_core::clock::Clock) so it can be driven without sleeping,
+/// and the bench takes that seam rather than the `SystemClock` default.
 /// `Instant::now` is a libc read costing more than the state machine it would
 /// be timing, and counting it would put the case under the C library instead
 /// of under this crate. Virtual time advances explicitly, once per iteration,

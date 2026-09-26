@@ -8,13 +8,13 @@
 //! `std::sync::mpsc` receives, so a wedged runtime cannot deadlock the
 //! controller.
 
-use crate::clock::{Clock, SystemClock};
 use crate::config::CoordinationConfig;
 use crate::error::fatal;
 use crate::records::{self, LeaseVal, SplitProgressRecord};
 use crate::store::metered::Metered;
 use crate::store::{CoordinationStore, Keyspace};
 use crate::task::{Command, Task, TaskEvent};
+use spate_core::clock::tokio::{Clock, SystemClock};
 use spate_core::coordination::ControlWaker;
 use spate_core::coordination::{
     CoordinationError, CoordinationErrorKind, CoordinationEvent, SplitCoordinator, SplitId,
@@ -93,7 +93,7 @@ impl<S: CoordinationStore + Clone> StoreCoordinator<S> {
     /// Like [`new`](StoreCoordinator::new) but drives the starvation
     /// self-fence from an injected [`Clock`]. A frozen clock makes fencing
     /// deterministic under CI scheduler jitter. Pass the same clock to the
-    /// store so its lease expiry stays coherent. See [`crate::clock`].
+    /// store so its lease expiry stays coherent.
     ///
     /// # Errors
     ///
@@ -183,6 +183,7 @@ impl<S: CoordinationStore + Clone> StoreCoordinator<S> {
             return Err(fatal("coordinator used before start"));
         };
         let commands = running.commands.clone();
+        // Real time: the budget bounds store I/O behind the task.
         let deadline_at = Instant::now() + self.config.op_timeout * 3;
         let (reply_tx, reply_rx) = std_mpsc::sync_channel(1);
         // Enqueue with the same deadline as the reply: a full queue means

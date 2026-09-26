@@ -10,7 +10,8 @@ use std::time::{Duration, Instant};
 /// Wraps any [`CoordinationStore`] with the configured `op_timeout` on
 /// every primitive but `list` (a hung store surfaces as a Retryable
 /// failure the protocol already tolerates, instead of wedging the task
-/// loop) and records each primitive's latency.
+/// loop) and records each primitive's latency. The timeout runs on real
+/// time because it bounds store I/O.
 ///
 /// `list` is metered but **not** deadline-bounded: its duration grows
 /// with the number of live keys (the NATS backend point-reads each one),

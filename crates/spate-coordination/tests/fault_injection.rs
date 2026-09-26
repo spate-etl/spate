@@ -9,9 +9,8 @@ use spate_coordination::store::memory::MemoryStore;
 use spate_coordination::store::{
     CasOutcome, CoordinationStore, Entry, Keyspace, Revision, StoreError, WatchStream,
 };
-use spate_coordination::{
-    Clock, CoordinationEvent, SplitCoordinator, SplitProgress, StoreCoordinator,
-};
+use spate_coordination::{CoordinationEvent, SplitCoordinator, SplitProgress, StoreCoordinator};
+use spate_core::clock::tokio::Clock;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -208,8 +207,7 @@ fn maybe_landed_renewal_is_adopted_not_fenced() {
     // renewal, never from a CI scheduler stall. We drive the renewals
     // ourselves by stepping the clock, one fraction of a renew-interval at a
     // time so a live worker always gets to renew before the self-fence would
-    // fire (the "advance to settle" pattern; see
-    // `spate_coordination::clock`).
+    // fire (the "advance to settle" pattern; see `support::TestClock`).
     let clock = support::TestClock::frozen();
     let inner = MemoryStore::with_clock(support::LEASE, clock.clone());
     let store = FaultStore::new(inner.clone());

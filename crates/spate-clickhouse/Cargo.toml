@@ -45,9 +45,8 @@ time = ["dep:time"]
 ## Checked conversions between `rust_decimal::Decimal` and the pre-scaled
 ## `Decimal32/64/128` wrappers.
 rust_decimal = ["dep:rust_decimal"]
-## Development-only seams: `testing::system_columns` for a `clickhouse` mock
-## that must answer the sink's schema fetch, and `ClickHouseEncoder::unchecked`
-## for the encode benches. Off by default and not enabled by the `spate` facade.
+## Test-only. Off by default, not enabled by the `spate` facade, and outside
+## the semver surface.
 testing = []
 
 [dev-dependencies]

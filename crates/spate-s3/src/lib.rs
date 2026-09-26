@@ -71,13 +71,7 @@
 //! dependency policy that keeps rdkafka out of `spate-kafka`'s). The one
 //! seam that would break it, `S3Source::with_store`, is gated behind the
 //! off-by-default `testing` feature so tests can inject wrapped or
-//! fault-injecting stores without that type reaching a real consumer. The
-//! same feature carries `bench_seams`, which reaches the pure, synchronous
-//! parts an instruction-count bench cannot get to through an async surface,
-//! and `fuzz_seams`, which reaches the offset codec and the object framer for
-//! the fuzz harness. Both modules are `#[doc(hidden)]`, so a link to either
-//! dangles on docs.rs (where the feature is off) and renders as literal text
-//! in the published API reference (where it is on).
+//! fault-injecting stores without that type reaching a real consumer.
 
 #[cfg(feature = "testing")]
 #[doc(hidden)]

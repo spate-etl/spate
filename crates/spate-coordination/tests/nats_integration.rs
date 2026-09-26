@@ -14,7 +14,7 @@
 mod support;
 
 use futures_util::StreamExt as _;
-use spate_coordination::store::nats::{NatsConfig, NatsStore};
+use spate_coordination::store::nats::{NatsConfig, NatsCredentials, NatsStore, Secret};
 use spate_coordination::store::{CasOutcome, CoordinationStore, Keyspace, StoreError, WatchEvent};
 use spate_coordination::{
     CoordinationConfig, CoordinationErrorKind, NatsCoordinator, SplitCoordinator, SplitProgress,
@@ -52,11 +52,19 @@ fn nats_config(port: u16, job: &str) -> NatsConfig {
 }
 
 fn worker(port: u16, job: &str, io: &tokio::runtime::Handle, instance_id: &str) -> NatsCoordinator {
-    let store = NatsStore::new(nats_config(port, job), LEASE).expect("nats store");
+    worker_with(nats_config(port, job), io, Some(instance_id))
+}
+
+fn worker_with(
+    nats: NatsConfig,
+    io: &tokio::runtime::Handle,
+    instance_id: Option<&str>,
+) -> NatsCoordinator {
+    let store = NatsStore::new(nats, LEASE).expect("nats store");
     let mut cfg = CoordinationConfig::default();
     cfg.lease_duration = LEASE;
     cfg.op_timeout = Duration::from_secs(1);
-    cfg.instance_id = Some(instance_id.to_string());
+    cfg.instance_id = instance_id.map(str::to_string);
     cfg.replan_interval = LEASE;
     cfg.reconcile_interval = Duration::from_secs(1);
     // A dead worker's splits flow back on lease expiry alone; the grace
@@ -367,4 +375,268 @@ fn a_watch_snapshot_whose_undelivered_tail_expires_ends() {
             assert!(matches!(e, StoreError::Retryable(_)), "{e}");
         }
     });
+}
+
+fn state_bucket_name(job: &str) -> String {
+    format!("spate_coordination_{job}_state")
+}
+
+async fn jetstream(port: u16) -> async_nats::jetstream::Context {
+    let client = async_nats::connect(format!("nats://127.0.0.1:{port}"))
+        .await
+        .expect("connect");
+    async_nats::jetstream::new(client)
+}
+
+/// The state bucket's message count, live keys, and subjects matching
+/// `filter` under the bucket.
+async fn state_bucket(
+    js: &async_nats::jetstream::Context,
+    job: &str,
+    filter: &str,
+) -> (u64, usize, usize) {
+    let bucket = state_bucket_name(job);
+    let kv = js.get_key_value(&bucket).await.expect("state bucket");
+    let messages = kv.status().await.expect("status").info.state.messages;
+    let live = kv.keys().await.expect("keys").count().await;
+    let subjects = js
+        .get_stream(format!("KV_{bucket}"))
+        .await
+        .expect("stream")
+        .info_with_subjects(format!("$KV.{bucket}.{filter}"))
+        .await
+        .expect("subjects")
+        .count()
+        .await;
+    (messages, live, subjects)
+}
+
+/// Starts a worker, claims the job's one split and releases it.
+fn start_claim_release(nats: NatsConfig, instance_id: Option<&str>, what: &str) {
+    let rt = runtime();
+    let mut w = worker_with(nats, rt.handle(), instance_id);
+    w.start(Box::new(PhasedPlanner::one_final("markers:v1", &["m0"])))
+        .expect("start");
+    let mut held = Held::default();
+    drive(&mut w, &mut held, what, |h| h.splits.len() == 1);
+    w.release(&[split_id("m0")]).expect("release");
+}
+
+/// Waits until `done` holds for the state bucket, printing each new
+/// reading to stderr.
+#[allow(clippy::print_stderr)]
+fn await_state_bucket(
+    port: u16,
+    job: &str,
+    filter: &str,
+    done: impl Fn(u64, usize, usize) -> bool,
+) {
+    let rt = runtime();
+    // The poll's timer and the client's drop both need a runtime context.
+    let _context = rt.enter();
+    let js = rt.block_on(jetstream(port));
+    let mut last = None;
+    spate_test::wait_until(LEASE * 5, "the state bucket condition", || {
+        let Ok(reading) = rt.block_on(tokio::time::timeout(LEASE, state_bucket(&js, job, filter)))
+        else {
+            return false;
+        };
+        let (messages, live, subjects) = reading;
+        if last != Some(reading) {
+            eprintln!(
+                "state bucket: {messages} messages, {live} live keys, {subjects} subjects \
+                 matching {filter}"
+            );
+            last = Some(reading);
+        }
+        done(messages, live, subjects)
+    });
+}
+
+/// Waits until the job's lease bucket holds no live key.
+#[allow(clippy::print_stderr)]
+fn await_leases_expired(port: u16, job: &str) {
+    let rt = runtime();
+    // The poll's timer and the client's drop both need a runtime context.
+    let _context = rt.enter();
+    let js = rt.block_on(jetstream(port));
+    let mut last = None;
+    spate_test::wait_until(LEASE * 5, "the lease bucket holds no live key", || {
+        let read = async {
+            let kv = js
+                .get_key_value(format!("spate_coordination_{job}_lease"))
+                .await
+                .expect("lease bucket");
+            kv.keys().await.expect("keys").count().await
+        };
+        let Ok(live) = rt.block_on(tokio::time::timeout(LEASE, read)) else {
+            return false;
+        };
+        if last != Some(live) {
+            eprintln!("lease bucket holds {live} live keys");
+            last = Some(live);
+        }
+        live == 0
+    });
+}
+
+/// Keys deleted from the state bucket leave no marker once a lease has
+/// passed, across restarts with a random instance id. Regression for #657.
+#[test]
+#[ignore = "needs Docker; run explicitly"]
+fn durable_markers_expire_across_restarts() {
+    let (_nats, port) = start_nats(TAG);
+    for i in 0..4 {
+        start_claim_release(nats_config(port, "markers"), None, &format!("start {i}"));
+        // The next leader deletes the record of an instance whose lease is gone.
+        await_leases_expired(port, "markers");
+    }
+    await_state_bucket(port, "markers", "_probe.>", |messages, live, probes| {
+        probes == 0 && messages == live as u64
+    });
+}
+
+/// A store connecting to a state bucket created without per-message TTLs
+/// enables them, keeps the rest of the stream config, and its own later
+/// deletes leave markers that expire.
+#[test]
+#[ignore = "needs Docker; run explicitly"]
+fn an_existing_state_bucket_gains_message_ttls() {
+    let (_nats, port) = start_nats(TAG);
+    let rt = runtime();
+    // The polls' timers and the clients' drops need a runtime context.
+    let _context = rt.enter();
+    let stream_name = format!("KV_{}", state_bucket_name("upgrade"));
+    let (js, store) = rt.block_on(async {
+        let js = jetstream(port).await;
+        js.create_key_value(async_nats::jetstream::kv::Config {
+            bucket: state_bucket_name("upgrade"),
+            description: "operator note".into(),
+            history: 1,
+            max_bytes: 1 << 30,
+            ..Default::default()
+        })
+        .await
+        .expect("old-style state bucket");
+
+        let store = NatsStore::new(nats_config(port, "upgrade"), LEASE).expect("store");
+        store.get(Keyspace::Durable, "none").await.expect("connect");
+        (js, store)
+    });
+    let mut config = None;
+    spate_test::wait_until(LEASE * 5, "message TTLs are enabled", || {
+        let read = async {
+            let mut stream = js.get_stream(&stream_name).await.expect("stream");
+            stream.info().await.expect("info").config.clone()
+        };
+        if let Ok(read) = rt.block_on(tokio::time::timeout(LEASE, read))
+            && read.allow_message_ttl
+        {
+            config = Some(read);
+        }
+        config.is_some()
+    });
+    let config = config.expect("stream config");
+    assert_eq!(config.description.as_deref(), Some("operator note"));
+    assert_eq!(config.max_bytes, 1 << 30);
+    assert_eq!(config.subject_delete_marker_ttl, Some(LEASE));
+
+    // The patch reply sets the flag after the config change is visible,
+    // so delete fresh keys until a marker carries a TTL.
+    let stream = rt.block_on(js.get_stream(&stream_name)).expect("stream");
+    let mut attempt = 0;
+    let mut gone = None;
+    spate_test::wait_until(LEASE * 5, "a delete marker carries a TTL", || {
+        let key = format!("gone-{attempt}");
+        attempt += 1;
+        let marked = rt.block_on(tokio::time::timeout(LEASE, async {
+            let created = store
+                .create(Keyspace::Durable, &key, b"v".to_vec())
+                .await
+                .expect("create");
+            assert!(matches!(created, CasOutcome::Won(_)), "{created:?}");
+            let deleted = store
+                .delete(Keyspace::Durable, &key, None)
+                .await
+                .expect("delete");
+            assert!(matches!(deleted, CasOutcome::Won(_)), "{deleted:?}");
+            let marker = stream
+                .get_last_raw_message_by_subject(&format!(
+                    "$KV.{}.{key}",
+                    state_bucket_name("upgrade")
+                ))
+                .await
+                .expect("marker");
+            marker.headers.get("Nats-TTL").is_some()
+        }));
+        if matches!(marked, Ok(true)) {
+            gone = Some(key);
+        }
+        gone.is_some()
+    });
+    let gone = gone.expect("a marked key");
+    await_state_bucket(port, "upgrade", &gone, |_, _, subjects| subjects == 0);
+}
+
+/// A worker whose credentials may not update the state bucket's stream
+/// starts, and its deletes keep writing plain markers.
+#[test]
+#[ignore = "needs Docker; run explicitly"]
+fn a_state_bucket_that_cannot_be_updated_keeps_working() {
+    const CONF: &str = r#"
+jetstream: enabled
+authorization {
+  users: [
+    {
+      user: spate
+      password: spate
+      permissions: {
+        publish: { allow: [">"], deny: ["$JS.API.STREAM.UPDATE.>"] }
+        subscribe: ">"
+      }
+    }
+  ]
+}
+"#;
+    let nats = GenericImage::new(IMAGE, TAG)
+        .with_exposed_port(CLIENT_PORT.tcp())
+        .with_wait_for(WaitFor::message_on_stderr("Server is ready"))
+        .with_copy_to("/etc/nats/deny-update.conf", CONF.as_bytes().to_vec())
+        .with_cmd(["-c", "/etc/nats/deny-update.conf"])
+        .start()
+        .expect("start NATS");
+    let port = nats.get_host_port_ipv4(CLIENT_PORT).expect("mapped port");
+    let mut config = nats_config(port, "denied");
+    config.credentials = NatsCredentials::UserPassword {
+        username: "spate".into(),
+        password: Secret::new("spate"),
+    };
+    let rt = runtime();
+    let js = rt.block_on(async {
+        let client =
+            async_nats::ConnectOptions::with_user_and_password("spate".into(), "spate".into())
+                .connect(format!("nats://127.0.0.1:{port}"))
+                .await
+                .expect("connect");
+        async_nats::jetstream::new(client)
+    });
+    rt.block_on(async {
+        js.create_key_value(async_nats::jetstream::kv::Config {
+            bucket: state_bucket_name("denied"),
+            history: 1,
+            ..Default::default()
+        })
+        .await
+        .expect("old-style state bucket");
+    });
+    start_claim_release(config.clone(), Some("gen-1"), "first start");
+    start_claim_release(config, Some("gen-2"), "second start");
+    let allowed = rt.block_on(async {
+        let mut stream = js
+            .get_stream(format!("KV_{}", state_bucket_name("denied")))
+            .await
+            .expect("stream");
+        stream.info().await.expect("info").config.allow_message_ttl
+    });
+    assert!(!allowed, "the update was denied");
 }

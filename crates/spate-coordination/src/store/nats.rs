@@ -3,7 +3,9 @@
 //! Two KV buckets per job carry the two keyspaces:
 //!
 //! - `spate_coordination_{job}_state` — durable: no age limit; split
-//!   records and the plan record survive owner death.
+//!   records and the plan record survive owner death. A delete writes a
+//!   marker with a per-message TTL of `lease_ttl` once the bucket allows
+//!   message TTLs, which connecting enables on a bucket that lacks them.
 //! - `spate_coordination_{job}_lease` — ephemeral: bucket-level
 //!   `max_age = lease_ttl` with limit markers (server >= 2.11). NATS KV
 //!   cannot re-arm a per-key TTL on update, but `max_age` applies per
@@ -26,13 +28,14 @@
 use super::{
     CasOutcome, CoordinationStore, Entry, Keyspace, Revision, StoreError, WatchEvent, WatchStream,
 };
-use async_nats::jetstream::kv;
 use async_nats::jetstream::stream::LastRawMessageErrorKind;
+use async_nats::jetstream::{kv, stream};
 use futures_util::StreamExt as _;
 use serde::Deserialize;
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 #[cfg(test)]
@@ -204,6 +207,8 @@ impl NatsConfig {
 struct Buckets {
     state: kv::Store,
     lease: kv::Store,
+    /// Set once the state bucket accepts per-message TTLs.
+    state_marker_ttl: Arc<AtomicBool>,
 }
 
 struct Lazy {
@@ -331,7 +336,7 @@ async fn connect(config: &NatsConfig, lease_ttl: Duration) -> Result<Buckets, St
     }
 
     let jetstream = async_nats::jetstream::new(client);
-    let state = ensure_bucket(
+    let (state, adopted) = ensure_bucket(
         &jetstream,
         kv::Config {
             bucket: format!("spate_coordination_{}_state", config.job),
@@ -339,11 +344,22 @@ async fn connect(config: &NatsConfig, lease_ttl: Duration) -> Result<Buckets, St
             history: 1,
             max_value_size: MAX_VALUE_BYTES,
             num_replicas: config.replicas,
+            limit_markers: Some(lease_ttl),
             ..Default::default()
         },
     )
     .await?;
-    let lease = ensure_bucket(
+    let state_marker_ttl = Arc::new(AtomicBool::new(true));
+    if let Some(patched) = adopted.and_then(|c| with_message_ttls(c, lease_ttl)) {
+        state_marker_ttl.store(false, Ordering::Release);
+        // Off the startup path: a denied update only times out.
+        tokio::spawn(enable_message_ttls(
+            jetstream.clone(),
+            patched,
+            Arc::clone(&state_marker_ttl),
+        ));
+    }
+    let (lease, _) = ensure_bucket(
         &jetstream,
         kv::Config {
             bucket: format!("spate_coordination_{}_lease", config.job),
@@ -357,7 +373,47 @@ async fn connect(config: &NatsConfig, lease_ttl: Duration) -> Result<Buckets, St
         },
     )
     .await?;
-    Ok(Buckets { state, lease })
+    Ok(Buckets {
+        state,
+        lease,
+        state_marker_ttl,
+    })
+}
+
+/// `config` with per-message TTLs enabled, or `None` when it allows them
+/// already.
+fn with_message_ttls(mut config: stream::Config, marker_ttl: Duration) -> Option<stream::Config> {
+    if config.allow_message_ttl {
+        return None;
+    }
+    config.allow_message_ttl = true;
+    config.subject_delete_marker_ttl = Some(marker_ttl);
+    Some(config)
+}
+
+/// Apply `config` to an existing bucket's stream and set `enabled` once
+/// the server reports per-message TTLs allowed. A failure is logged and
+/// leaves `enabled` unset.
+async fn enable_message_ttls(
+    jetstream: async_nats::jetstream::Context,
+    config: stream::Config,
+    enabled: Arc<AtomicBool>,
+) {
+    match jetstream.update_stream(&config).await {
+        Ok(info) if info.config.allow_message_ttl => enabled.store(true, Ordering::Release),
+        Ok(_) => tracing::warn!(
+            stream = %config.name,
+            "the NATS server did not enable per-message TTLs on the coordination state \
+             bucket; deleted keys keep a marker"
+        ),
+        Err(error) => tracing::warn!(
+            stream = %config.name,
+            %error,
+            "could not enable per-message TTLs on the coordination state bucket, so \
+             deleted keys keep a marker; the workers' credentials need \
+             $JS.API.STREAM.UPDATE on its stream"
+        ),
+    }
 }
 
 fn warn_mozilla_fallback() {
@@ -377,11 +433,12 @@ fn server_at_least(version: &str, (want_major, want_minor): (u64, u64)) -> bool 
 }
 
 /// Create the bucket or adopt an existing one, verifying that the config
-/// that matters (max_age, which IS the lease TTL) matches.
+/// that matters (max_age, which IS the lease TTL) matches. Returns an
+/// adopted bucket's stream config.
 async fn ensure_bucket(
     jetstream: &async_nats::jetstream::Context,
     config: kv::Config,
-) -> Result<kv::Store, StoreError> {
+) -> Result<(kv::Store, Option<stream::Config>), StoreError> {
     let name = config.bucket.clone();
     let expected_age = config.max_age;
     match jetstream.get_key_value(&name).await {
@@ -398,11 +455,12 @@ async fn ensure_bucket(
                     status.max_age()
                 )));
             }
-            Ok(store)
+            Ok((store, Some(status.info.config)))
         }
         Err(_) => jetstream
             .create_key_value(config)
             .await
+            .map(|store| (store, None))
             .map_err(|e| StoreError::Retryable(format!("creating bucket {name}: {e}"))),
     }
 }
@@ -522,9 +580,24 @@ impl CoordinationStore for NatsStore {
     ) -> Result<CasOutcome, StoreError> {
         let buckets = self.buckets().await?;
         let bucket = self.bucket(buckets, ks);
-        let result = bucket
-            .delete_expect_revision(key, expected.map(|r| r.0))
-            .await;
+        let ttl = self.inner.lease_ttl;
+        // A purge carrying a TTL leaves a marker the server removes after
+        // it; a delete marker in the state bucket stays forever.
+        let marker_ttl =
+            ks == Keyspace::Durable && buckets.state_marker_ttl.load(Ordering::Acquire);
+        let result = match (marker_ttl, expected) {
+            (false, expected) => {
+                bucket
+                    .delete_expect_revision(key, expected.map(|r| r.0))
+                    .await
+            }
+            (true, Some(revision)) => {
+                bucket
+                    .purge_expect_revision_with_ttl(key, revision.0, ttl)
+                    .await
+            }
+            (true, None) => bucket.purge_with_ttl(key, ttl).await,
+        };
         match result {
             // NATS does not report the marker's revision.
             Ok(()) => Ok(CasOutcome::Won(Revision(0))),
@@ -693,6 +766,28 @@ mod tests {
         };
         let err = NatsStore::new(no_servers, Duration::from_secs(30)).unwrap_err();
         assert!(err.to_string().contains("servers"), "{err}");
+    }
+
+    #[test]
+    fn message_ttls_patch_only_the_ttl_fields() {
+        let existing = stream::Config {
+            name: "KV_spate_coordination_orders_state".into(),
+            description: Some("operator note".into()),
+            num_replicas: 3,
+            max_bytes: 1 << 30,
+            ..Default::default()
+        };
+        let patched =
+            with_message_ttls(existing.clone(), Duration::from_secs(30)).expect("TTLs are off");
+        assert_eq!(
+            patched,
+            stream::Config {
+                allow_message_ttl: true,
+                subject_delete_marker_ttl: Some(Duration::from_secs(30)),
+                ..existing
+            }
+        );
+        assert_eq!(with_message_ttls(patched, Duration::from_secs(30)), None);
     }
 
     #[test]

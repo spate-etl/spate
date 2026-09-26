@@ -46,9 +46,8 @@ Then the builder itself:
 ```
 
 `Pipeline::from_config` owns process initialization. It installs the
-metrics exporter *before any metric handle can exist* (so nothing records
-into the void) and builds the shared tokio I/O runtime the sink workers run
-on. Telemetry init is idempotent and first-call-wins. Call
+metrics exporter *before any metric handle can exist* and builds the shared
+tokio I/O runtime the sink workers run on. Telemetry init is idempotent and first-call-wins. Call
 `spate::telemetry::init` yourself first if you want pretty logs instead of
 the builder's JSON default. The why behind this ordering is in
 [Architecture](../02-concepts/01-architecture.mdx).

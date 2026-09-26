@@ -375,9 +375,10 @@ impl Pipeline {
     ///    yourself *first* (the binaries-init convention).
     /// 2. **Metrics exporter** — installed from the config's `metrics`
     ///    section before you can construct any handle, so every handle
-    ///    built while holding the `Pipeline` is live. When a foreign
-    ///    recorder already owns the process, the pipeline continues
-    ///    against it with a warning.
+    ///    built while holding the `Pipeline` binds to the process's
+    ///    recorder, which always exists under `exporter: prometheus`.
+    ///    When a foreign recorder already owns the process, the pipeline
+    ///    continues against it with a warning.
     /// 3. **The I/O runtime** — `pipeline.io_threads` workers, thread name
     ///    `spate-io`. Connectors that need a handle before `run` (schema
     ///    fetchers, async pre-flight validation) use

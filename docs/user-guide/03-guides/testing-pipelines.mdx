@@ -47,7 +47,8 @@ is process-wide:
   start fails. Where the test neither scrapes an endpoint nor answers a
   probe, `admin: { listen: none }` is the answer (no port at all), and
   `metrics: { exporter: none }` beside it leaves the process-global recorder
-  free too. Where the test does read an endpoint, `admin: { listen:
+  free too. Its series still go to a recorder another test in the binary
+  installed first. Where the test does read an endpoint, `admin: { listen:
   "127.0.0.1:0" }` lets the kernel pick a free port instead. The start logs
   the address it bound ([Monitoring](../05-deployment/monitoring.mdx)). A test
   driving the pipeline as a subprocess reads the port off that line. In

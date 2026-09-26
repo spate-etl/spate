@@ -372,7 +372,8 @@ pub enum MetricsExporter {
     /// Prometheus scrape endpoint on the admin server (default).
     #[default]
     Prometheus,
-    /// No exporter (metrics recorded to a no-op recorder).
+    /// Installs no recorder, so handles record into one the process already
+    /// has, or nowhere.
     None,
 }
 

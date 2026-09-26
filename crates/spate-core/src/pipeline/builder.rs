@@ -1,10 +1,10 @@
 //! The pipeline builder: the primary assembly path.
 //!
 //! [`Pipeline::from_config`] owns startup initialization (telemetry, the
-//! metrics exporter, and the shared I/O runtime), so holding a `Pipeline`
-//! *guarantees* a live recorder. Every metric handle built afterwards
-//! (framework or custom) is live, and connectors get an I/O handle before
-//! any thread spawns. The builder is a thin composition of the public
+//! metrics exporter, and the shared I/O runtime). Every metric handle built
+//! afterwards (framework or custom) binds to the process's recorder, which
+//! always exists under `exporter: prometheus`, and connectors get an I/O
+//! handle before any thread spawns. The builder is a thin composition of the public
 //! primitives it replaces; nothing here is required, and the desugaring
 //! below remains a fully supported assembly path.
 //!

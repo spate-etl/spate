@@ -42,7 +42,7 @@ The combinations, and what each is for:
 | an address | `prometheus` | Probes and a scrape endpoint. The deployment default. |
 | an address | `none` | Probes only. `/metrics` answers 404: there is no exposition to serve, and an empty 200 would read to a scraper as a healthy target delivering nothing. |
 | `none` | `prometheus` | Series recorded, nothing serving them. For a host process that renders the exposition itself, through `Pipeline::metrics`, and mounts it on a server it already runs. The start logs a warning, because this is equally what disabling the server and forgetting the exporter produces. |
-| `none` | `none` | No port and no recorder. What a test or a local demo wants ([Testing pipelines](../03-guides/testing-pipelines.mdx)). |
+| `none` | `none` | No port, and the pipeline installs no recorder. What a test or a local demo wants ([Testing pipelines](../03-guides/testing-pipelines.mdx)). |
 
 `/metrics` follows the exposition rather than the setting. Where another
 library installed a recorder before the pipeline did, the pipeline records
@@ -52,6 +52,9 @@ recorder was already installed, and the pipeline continued against the
 existing one with a detached render handle. The `admin.listen: none` warning
 from the table above stays silent; it fires only for a handle that exports an
 exposition of its own. The exposition is that other library's to publish.
+
+Under `exporter: none`, a pipeline's series go to a recorder already in the
+process, such as one another pipeline installed, and appear in its exposition.
 
 Two pipelines on one host collide unless they name different addresses, or one
 of them names `none`. Left alone, both take the same default. Failing to take

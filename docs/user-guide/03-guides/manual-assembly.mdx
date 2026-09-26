@@ -78,9 +78,9 @@ async context panics. The builder refuses that case up front with
 pipeline in a larger program. A second call that sets an exporter returns the
 first exporter and leaves it installed, so you can install early (right after
 loading configuration, before anything else runs) and the runtime's own install
-reuses what you created. `exporter: none` never claims the process slot,
-so a pipeline with metrics disabled leaves the recorder free for
-whatever else in the process wants it.
+reuses what you created. `exporter: none` never claims the process slot, so
+the recorder stays free for the rest of the process, and the pipeline's handles
+record into one installed before them.
 
 ### Connectors
 

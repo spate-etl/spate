@@ -21,7 +21,8 @@
 //! The `metrics` facade has one global recorder per process. The first
 //! [`install`] with [`Exporter::Prometheus`] sets it, and every later
 //! Prometheus install returns the same handle. [`Exporter::None`] sets no
-//! recorder. [`MetricsError::AlreadyInstalled`] means a recorder set outside
+//! recorder, so its handles record into one installed before them, or
+//! nowhere. [`MetricsError::AlreadyInstalled`] means a recorder set outside
 //! [`install`] is already in place.
 //!
 //! # Series ownership
@@ -126,7 +127,8 @@ pub enum Exporter {
     /// Prometheus scrape endpoint, served by the admin server.
     #[default]
     Prometheus,
-    /// No export; all handles become no-ops.
+    /// Installs no recorder, so handles record into one the process already
+    /// has, or nowhere.
     None,
 }
 
@@ -318,7 +320,7 @@ pub fn install(settings: &MetricsSettings) -> Result<MetricsHandle, MetricsError
     let _serialized = INSTALL.lock().unwrap_or_else(PoisonError::into_inner);
     // Exporter::None installs no global recorder, so it neither claims nor
     // consults the once-per-process slot. A later Prometheus install still
-    // works, and tests with metrics disabled stay isolated.
+    // works.
     if settings.exporter == Exporter::None {
         return Ok(MetricsHandle {
             inner: Inner::Noop,
@@ -972,10 +974,8 @@ mod tests {
         handle.upkeep_tick(); // must not panic
     }
 
-    /// The single test that installs the process-global recorder: install,
-    /// register, render, upkeep. Kept as ONE test because a global recorder
-    /// can only be installed once per test process; all other tests use
-    /// local recorders.
+    /// Pins install, register, render and upkeep through the process-global
+    /// recorder, and that `Exporter::None` leaves handles recording into it.
     #[test]
     fn install_prometheus_end_to_end() {
         let handle = install(&MetricsSettings::default()).expect("first install succeeds");
@@ -1026,6 +1026,15 @@ mod tests {
         })
         .expect("noop install");
         assert!(noop.render().is_empty());
+        let deser = DeserMetrics::new(&labels("install_e2e_none"));
+        deser.dropped(3);
+        let rendered = handle.render();
+        assert!(
+            rendered.contains(
+                r#"spate_deser_records_dropped_total{pipeline="orders",component="install_e2e_none",component_type="kafka",reason="skip_policy"} 3"#
+            ),
+            "a handle built under Exporter::None records into the installed recorder:\n{rendered}"
+        );
         assert!(
             install(&MetricsSettings::default())
                 .expect("prometheus still reusable")

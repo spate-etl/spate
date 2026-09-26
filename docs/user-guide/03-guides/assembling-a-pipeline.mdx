@@ -82,9 +82,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 The constructor does process init because **metric handles bind to the
 recorder present at the moment they are constructed**. A handle built before
 the exporter exists records into the void, with no error and missing
-series. Because the constructor installs the exporter, holding a `Pipeline`
-*guarantees* a live recorder: every handle built afterwards, framework or
-custom, is live. (Rationale: [ADR-0014](../../adr/0014-pipeline-builder-as-primary-assembly.md) and
+series. Because the constructor installs the exporter, every handle built
+afterwards, framework or custom, records into the process's recorder. Under
+`exporter: prometheus` that recorder always exists. (Rationale: [ADR-0014](../../adr/0014-pipeline-builder-as-primary-assembly.md) and
 § Metrics.)
 
 :::warning

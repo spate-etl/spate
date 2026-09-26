@@ -37,8 +37,8 @@ use spate::record::{RawPayload, Record};
 use spate::sink::{RecordRouter, RowEncoder, SealedBatch, ShardWriter};
 use spate::source::{LaneId, PayloadBatch, Source, SourceCtx, SourceEvent, SourceLane};
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
 
 /// Sink shards, and how many storefront customers the orders belong to.
 const SHARDS: usize = 2;
@@ -137,6 +137,34 @@ impl SourceLane for CounterLane {
 }
 // ANCHOR_END: lane
 
+/// The latest committed watermark per partition, signalled on every commit.
+#[derive(Default)]
+struct Commits {
+    by_partition: Mutex<BTreeMap<u32, i64>>,
+    changed: Condvar,
+}
+
+impl Commits {
+    fn record(&self, watermarks: &[(PartitionId, i64)]) {
+        let mut by_partition = self.by_partition.lock().expect("commits lock");
+        for (p, offset) in watermarks {
+            by_partition.insert(p.0, *offset);
+        }
+        self.changed.notify_all();
+    }
+
+    /// Block until `done` holds for the committed watermarks or `timeout`
+    /// lapses; returns whether it held.
+    fn wait_for(&self, timeout: Duration, done: impl Fn(&BTreeMap<u32, i64>) -> bool) -> bool {
+        let by_partition = self.by_partition.lock().expect("commits lock");
+        let (by_partition, _) = self
+            .changed
+            .wait_timeout_while(by_partition, timeout, |m| !done(m))
+            .expect("commits lock");
+        done(&by_partition)
+    }
+}
+
 /// The control plane. It hands out its lanes once, then idles. Commits are
 /// recorded where the demo and your tests can observe them; a real source
 /// stores them durably (Kafka: `store_offsets`).
@@ -146,7 +174,7 @@ struct CounterSource {
     partitions: u32,
     issuer: Option<AckIssuer>,
     handed_out: bool,
-    commits: Arc<Mutex<BTreeMap<u32, i64>>>,
+    commits: Arc<Commits>,
 }
 
 impl Source for CounterSource {
@@ -178,10 +206,7 @@ impl Source for CounterSource {
     }
 
     fn commit(&mut self, watermarks: &[(PartitionId, i64)]) -> Result<(), SourceError> {
-        let mut commits = self.commits.lock().expect("commits lock");
-        for (p, offset) in watermarks {
-            commits.insert(p.0, *offset);
-        }
+        self.commits.record(watermarks);
         Ok(())
     }
 }
@@ -346,7 +371,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let per_partition = 100;
     let partitions = 2;
-    let commits = Arc::new(Mutex::new(BTreeMap::new()));
+    let commits = Arc::new(Commits::default());
     let source = CounterSource {
         per_partition,
         partitions,
@@ -419,18 +444,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let shutdown = runtime.shutdown_handle();
     let join = std::thread::spawn(move || runtime.run());
 
-    // Wait for the checkpointer to commit both partitions to the end.
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        {
-            let commits = commits.lock().expect("commits lock");
-            if (0..partitions).all(|p| commits.get(&p) == Some(&per_partition)) {
-                break;
-            }
-        }
-        assert!(Instant::now() < deadline, "commits not observed in time");
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    assert!(
+        commits.wait_for(Duration::from_secs(10), |c| {
+            (0..partitions).all(|p| c.get(&p) == Some(&per_partition))
+        }),
+        "both partitions never committed to the end (committed: {:?})",
+        commits.by_partition.lock().expect("commits lock"),
+    );
     shutdown.trigger();
     let report = join.join().expect("pipeline thread")?;
     assert_eq!(report.exit_code(), 0, "the pipeline must drain clean");
@@ -492,7 +512,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     println!("\npipeline exit: {:?}", report.state);
-    println!("committed: {:?}", commits.lock().expect("commits lock"));
+    println!(
+        "committed: {:?}",
+        commits.by_partition.lock().expect("commits lock")
+    );
     println!("customer → shard: {shard_of_customer:?}");
     Ok(())
 }

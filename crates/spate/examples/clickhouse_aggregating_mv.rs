@@ -77,7 +77,7 @@ use spate::source::LaneId;
 use spate_test::{TestDeserializer, memory_source};
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// One placed order, already collapsed to a per-SKU quantity. `Serialize`
 /// writes it as RowBinary into the Null landing table, where field order is
@@ -182,11 +182,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Watermarks advance once the sink acknowledges durably. Wait for the
     // commit covering the last event, then drain gracefully.
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while handle.last_committed(p0) != Some(last + 1) {
-        assert!(Instant::now() < deadline, "commit not observed in time");
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    assert!(
+        handle.wait_committed(p0, last + 1, Duration::from_secs(10)),
+        "the offset never committed (last committed: {:?})",
+        handle.last_committed(p0),
+    );
     shutdown.trigger();
     let report = join.join().expect("pipeline thread")?;
 

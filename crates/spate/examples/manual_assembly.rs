@@ -35,7 +35,7 @@ use spate::prelude::*;
 use spate::sink::{SinkDrainFn, SinkPool, shard_queues};
 use spate::source::LaneId;
 use spate::telemetry;
-use spate_test::{TestDeserializer, TestEncoder, capture_sink, memory_source, wait_until};
+use spate_test::{TestDeserializer, TestEncoder, capture_sink, memory_source};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -254,11 +254,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         last = handle.push(orders, Some(b"eu-west"), payload);
     }
 
-    // The wait is bounded. Without a deadline a broken pipeline hangs the
-    // process instead of failing it.
-    wait_until(Duration::from_secs(10), "the last offset to commit", || {
-        handle.last_committed(orders) == Some(last + 1)
-    });
+    assert!(
+        handle.wait_committed(orders, last + 1, Duration::from_secs(10)),
+        "the last offset never committed (last committed: {:?})",
+        handle.last_committed(orders),
+    );
     shutdown.trigger();
     let report = join.join().expect("pipeline thread")?;
 

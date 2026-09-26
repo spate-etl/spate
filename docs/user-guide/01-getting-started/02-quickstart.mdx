@@ -96,10 +96,10 @@ committed watermark to cover the last offset:
 ```rust file=crates/spate/examples/memory_pipeline.rs region=drive
 ```
 
-The wait loop observes the at-least-once contract: the watermark advances
-only after the sink acknowledged the data durably. The filtered empty word
-counts as delivered too, since an intentional drop must not stall the
-commit. [Delivery guarantees](../02-concepts/02-delivery-guarantees.mdx)
+`wait_committed` observes the at-least-once contract: the watermark
+advances only after the sink acknowledged the data durably. The filtered
+empty word counts as delivered too, since an intentional drop must not
+stall the commit. [Delivery guarantees](../02-concepts/02-delivery-guarantees.mdx)
 explains the machinery.
 
 Finally, read back what the sink captured:

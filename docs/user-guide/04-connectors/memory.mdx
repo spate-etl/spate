@@ -55,6 +55,7 @@ its control plane and observes everything the runtime asks of it:
 | `revoke_lanes(&[LaneId])` | Queue a revocation; returns a `DrainBarrierProbe` to observe the drain choreography. |
 | `push(partition, key, payload)` | Queue one payload; returns its assigned offset. `push_many` / `push_at` for batches and explicit timestamps. |
 | `last_committed(partition)` | The most recent committed watermark — **one past the last offset**, and only advanced after the sink durably acknowledged (the at-least-once assertion). `committed()` returns the full history. |
+| `wait_committed(partition, offset, timeout)` | Block until the committed watermark reaches `offset` or the timeout lapses; returns whether it did. |
 | `paused_lanes()` | Which lanes backpressure has paused. |
 | `flush_commits_calls()`, `is_open()` | Lifecycle observation. |
 

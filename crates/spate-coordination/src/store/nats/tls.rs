@@ -119,7 +119,6 @@ mod tests {
     const CLIENT_CERT: &str = "SPATE_TEST_NATS_TLS_CLIENT_CERT";
     const CLIENT_KEY: &str = "SPATE_TEST_NATS_TLS_CLIENT_KEY";
     const WITH_TLS: &str = "SPATE_TEST_NATS_TLS_SECTION";
-    const EXPECT_REJECT: &str = "SPATE_TEST_NATS_TLS_EXPECT_REJECT";
     const EXPECT_FATAL: &str = "SPATE_TEST_NATS_TLS_EXPECT_FATAL";
 
     fn loaded(certs: Vec<CertificateDer<'static>>) -> CertificateResult {
@@ -258,10 +257,6 @@ mod tests {
         }
         let store = NatsStore::new(config, Duration::from_secs(30)).unwrap();
         let err = store.get(Keyspace::Durable, "k").await.unwrap_err();
-        if std::env::var_os(EXPECT_REJECT).is_some() {
-            assert!(err.to_string().contains("UnknownIssuer"), "{err}");
-            return true;
-        }
         // The stub reports 2.10.0, so "too old" follows a completed handshake.
         let want = std::env::var(EXPECT_FATAL).unwrap_or_else(|_| "too old".into());
         let message = fatal_message(err);
@@ -339,7 +334,7 @@ mod tests {
     }
 
     /// A server whose CA is in neither the system store nor `root_ca` fails
-    /// certificate verification.
+    /// certificate verification with a fatal error. Regression for #634.
     #[tokio::test(flavor = "multi_thread")]
     async fn an_unknown_ca_is_rejected() {
         if child_connects().await {
@@ -356,7 +351,7 @@ mod tests {
             (URL, tls_url(port)),
             (WITH_TLS, "1".into()),
             (ROOT_CA, private.write(dir.path()).into()),
-            (EXPECT_REJECT, "1".into()),
+            (EXPECT_FATAL, "UnknownIssuer".into()),
         ];
         run_in_child("an_unknown_ca_is_rejected", system.write(dir.path()), env).await;
     }
@@ -383,6 +378,27 @@ mod tests {
             )
             .await;
         }
+    }
+
+    /// An unreadable system trust store fails the connect with a fatal error
+    /// for a `nats://` server that asks for TLS. Regression for #634.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unreadable_trust_store_is_fatal_when_the_server_asks_for_tls() {
+        if child_connects().await {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let port = TestCa::new("system").serve_nats(None).await;
+        let env = vec![
+            (URL, format!("nats://127.0.0.1:{port}").into()),
+            (EXPECT_FATAL, "platform certs".into()),
+        ];
+        run_in_child(
+            "an_unreadable_trust_store_is_fatal_when_the_server_asks_for_tls",
+            dir.path().join("missing.pem"),
+            env,
+        )
+        .await;
     }
 
     /// With both rustls providers compiled in and no `tls` section, a
@@ -432,5 +448,39 @@ mod tests {
             env,
         )
         .await;
+    }
+
+    /// A server that rejects the client certificate, or its absence, fails the
+    /// connect with a fatal error. Regression for #634.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_rejected_client_certificate_is_fatal() {
+        if child_connects().await {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let (system, clients) = (TestCa::new("system"), TestCa::new("clients"));
+        let port = system.serve_nats(Some(&clients)).await;
+        let (cert, key) = TestCa::new("strangers").write_identity(dir.path());
+        for env in [
+            vec![
+                (URL, tls_url(port)),
+                (WITH_TLS, "1".into()),
+                (CLIENT_CERT, cert.into()),
+                (CLIENT_KEY, key.into()),
+                (EXPECT_FATAL, "UnknownCA".into()),
+            ],
+            vec![
+                (URL, tls_url(port)),
+                (WITH_TLS, "1".into()),
+                (EXPECT_FATAL, "CertificateRequired".into()),
+            ],
+        ] {
+            run_in_child(
+                "a_rejected_client_certificate_is_fatal",
+                system.write(dir.path()),
+                env,
+            )
+            .await;
+        }
     }
 }

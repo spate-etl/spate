@@ -36,8 +36,9 @@ POD_NAME=worker-b cargo run -p spate --features s3,json,coordination-nats --exam
 
 Construction is synchronous and lazy, so the connection and bucket provisioning
 happen on the first store operation, which is the coordinator's startup probe.
-Connect failures therefore ride the startup retry budget, and misconfiguration
-is fatal at startup with an actionable message rather than surfacing later.
+An unreachable server therefore rides the startup retry budget. Misconfiguration
+fails startup with a fatal error that names the cause, and so does a credential
+or certificate the connection rejects.
 
 ## Configuration
 
@@ -98,10 +99,9 @@ roots. A relative path resolves against the working directory.
 
 The first connection fails with a fatal error when a `root_ca`, `client_cert` or
 `client_key` file cannot be read or holds no PEM item, or when the certificate
-and key do not match. It also fails when TLS is certain, because `tls` is set or
-a server URL is `tls://` or `wss://`, and the trust store cannot be read.
-
-Auth failure is fatal at startup, not retried. See
+and key do not match. It also fails when the connection uses TLS and the trust
+store cannot be read. A credential the server rejects is fatal, and so is a
+certificate either side rejects. See
 [Securing connections](../../../03-guides/securing-connections.mdx) for the
 generic model.
 

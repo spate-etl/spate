@@ -640,3 +640,34 @@ authorization {
     });
     assert!(!allowed, "the update was denied");
 }
+
+/// A password the server rejects fails the first store operation with a
+/// fatal error. Regression for #634.
+#[test]
+#[ignore = "needs Docker; run explicitly"]
+fn a_rejected_password_is_fatal() {
+    const CONF: &str = r#"
+jetstream: enabled
+authorization { users: [ { user: spate, password: spate } ] }
+"#;
+    let nats = GenericImage::new(IMAGE, TAG)
+        .with_exposed_port(CLIENT_PORT.tcp())
+        .with_wait_for(WaitFor::message_on_stderr("Server is ready"))
+        .with_copy_to("/etc/nats/auth.conf", CONF.as_bytes().to_vec())
+        .with_cmd(["-c", "/etc/nats/auth.conf"])
+        .start()
+        .expect("start NATS");
+    let port = nats.get_host_port_ipv4(CLIENT_PORT).expect("mapped port");
+    let mut config = nats_config(port, "rejected");
+    config.credentials = NatsCredentials::UserPassword {
+        username: "spate".into(),
+        password: Secret::new("wrong"),
+    };
+    let store = NatsStore::new(config, LEASE).expect("valid config");
+    match runtime().block_on(store.get(Keyspace::Durable, "k")) {
+        Err(StoreError::Fatal(message)) => {
+            assert!(message.contains("authorization violation"), "{message}");
+        }
+        other => panic!("expected Fatal, got {other:?}"),
+    }
+}

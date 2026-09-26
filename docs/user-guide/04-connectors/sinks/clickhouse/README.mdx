@@ -130,10 +130,15 @@ at startup. A config with no `https://` URL reads no trust store and rejects
 
 A replica certificate that fails verification is a
 [fatal error](../../../02-concepts/04-error-handling.mdx#fatal-errors-panics-and-stalled-watermarks),
-and its message carries the rustls reason, such as `UnknownIssuer`. Startup
-fails with that message. Mid-run, the `sink write failed` warning carries it,
-the batch is not retried on another replica, and the pipeline fails once
-`checkpoint.stalled_fail_after` elapses.
+and its message carries the rustls reason, such as `UnknownIssuer`. A user the
+server does not know, a wrong password and a denied grant are fatal the same
+way, and the message carries the server's exception, such as `Code: 516`
+(`AUTHENTICATION_FAILED`). Startup fails with that message, as it does on any
+other TLS failure. Mid-run, the `sink write failed` warning carries it, the
+batch is not retried on another replica, and the pipeline fails once
+`checkpoint.stalled_fail_after` elapses. A TLS failure other than a certificate
+rejection, such as a protocol error or an alert from the server, is retryable
+mid-run.
 
 Client-certificate (**mTLS**) authentication is not supported. For the
 framework-wide view of transport security across connectors, see

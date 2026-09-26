@@ -15,7 +15,7 @@ mod support;
 
 use futures_util::StreamExt as _;
 use spate_coordination::store::nats::{NatsConfig, NatsStore};
-use spate_coordination::store::{CasOutcome, CoordinationStore, Keyspace, WatchEvent};
+use spate_coordination::store::{CasOutcome, CoordinationStore, Keyspace, StoreError, WatchEvent};
 use spate_coordination::{
     CoordinationConfig, CoordinationErrorKind, NatsCoordinator, SplitCoordinator, SplitProgress,
     StoreCoordinator,
@@ -259,5 +259,112 @@ fn delete_outcomes_match_the_trait() {
                 .unwrap(),
             CasOutcome::Won(_)
         ));
+    });
+}
+
+/// Fills the job's lease bucket with more keys than a listing buffers
+/// before flow control pauses delivery, all written within one lease.
+async fn fill_lease_bucket(
+    store: &NatsStore,
+    port: u16,
+    job: &str,
+) -> async_nats::jetstream::stream::Stream {
+    // Provisions both buckets.
+    store
+        .get(Keyspace::Ephemeral, "none")
+        .await
+        .expect("provision");
+    let client = async_nats::connect(format!("nats://127.0.0.1:{port}"))
+        .await
+        .expect("connect");
+    let js = async_nats::jetstream::new(client);
+    let kv = js
+        .get_key_value(format!("spate_coordination_{job}_lease"))
+        .await
+        .expect("lease bucket");
+    let mut acks = Vec::new();
+    for i in 0..40_000 {
+        acks.push(kv.put(format!("k{i}"), "v".into()));
+        if acks.len() == 1024 {
+            futures_util::future::try_join_all(acks.drain(..))
+                .await
+                .expect("put");
+        }
+    }
+    futures_util::future::try_join_all(acks).await.expect("put");
+    js.get_stream(format!("KV_spate_coordination_{job}_lease"))
+        .await
+        .expect("lease stream")
+}
+
+/// A listing whose undelivered messages expire ends, as a result or as
+/// Retryable. Regression for #661.
+#[test]
+#[ignore = "needs Docker; run explicitly"]
+fn a_listing_whose_undelivered_tail_expires_ends() {
+    let (_nats, port) = start_nats(TAG);
+    let rt = runtime();
+    rt.block_on(async {
+        let store = NatsStore::new(nats_config(port, "stall-list"), LEASE).expect("store");
+        fill_lease_bucket(&store, port, "stall-list").await;
+        // One point read per key keeps the listing busy past the lease.
+        let listed =
+            tokio::time::timeout(Duration::from_secs(60), store.list(Keyspace::Ephemeral, ""))
+                .await
+                .expect("listing never ended");
+        if let Err(e) = listed {
+            assert!(matches!(e, StoreError::Retryable(_)), "{e}");
+        }
+    });
+}
+
+/// A watch snapshot whose undelivered messages expire ends, with
+/// `SnapshotDone` or as Retryable. Regression for #661.
+#[test]
+#[ignore = "needs Docker; run explicitly"]
+#[allow(clippy::print_stderr)]
+fn a_watch_snapshot_whose_undelivered_tail_expires_ends() {
+    let (_nats, port) = start_nats(TAG);
+    let rt = runtime();
+    // The poll's timer and the watch's drop both need a runtime context.
+    let _context = rt.enter();
+    let store = NatsStore::new(nats_config(port, "stall-watch"), LEASE).expect("store");
+    let (mut lease, mut watch) = rt.block_on(async {
+        let lease = fill_lease_bucket(&store, port, "stall-watch").await;
+        let mut watch = store.watch(Keyspace::Ephemeral, "").await.expect("watch");
+        watch
+            .next()
+            .await
+            .expect("first event")
+            .expect("first event");
+        (lease, watch)
+    });
+    let mut last = None;
+    spate_test::wait_until(LEASE * 5, "the lease bucket holds no message", || {
+        let Ok(info) = rt.block_on(tokio::time::timeout(LEASE, lease.info())) else {
+            return false;
+        };
+        let messages = info.expect("stream info").state.messages;
+        if last != Some(messages) {
+            eprintln!("lease bucket holds {messages} messages");
+            last = Some(messages);
+        }
+        messages == 0
+    });
+    rt.block_on(async {
+        let ended = tokio::time::timeout(Duration::from_secs(60), async {
+            loop {
+                match watch.next().await {
+                    Some(Ok(WatchEvent::SnapshotDone)) | None => return Ok(()),
+                    Some(Ok(_)) => {}
+                    Some(Err(e)) => return Err(e),
+                }
+            }
+        })
+        .await
+        .expect("snapshot never ended");
+        if let Err(e) = ended {
+            assert!(matches!(e, StoreError::Retryable(_)), "{e}");
+        }
     });
 }

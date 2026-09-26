@@ -47,6 +47,7 @@
 //! }
 //! ```
 
+use crate::clock::{Clock, SystemClock};
 use std::time::{Duration, Instant};
 
 #[cfg(loom)]
@@ -108,24 +109,6 @@ impl InflightBudget {
     #[must_use]
     pub fn usage(&self) -> usize {
         self.bytes.load(Ordering::Relaxed)
-    }
-}
-
-/// Time source for the controller, injectable so hysteresis is testable
-/// without sleeping.
-pub trait Clock {
-    /// Current monotonic instant.
-    fn now(&self) -> Instant;
-}
-
-/// Default [`Clock`] over [`Instant::now`].
-#[derive(Clone, Copy, Debug, Default)]
-pub struct MonotonicClock;
-
-impl Clock for MonotonicClock {
-    #[inline]
-    fn now(&self) -> Instant {
-        Instant::now()
     }
 }
 
@@ -207,7 +190,7 @@ enum State {
 /// alternate (`Pause`, `Resume`, `Pause`, ...) and each full cycle takes at
 /// least [`BackpressureParams::min_pause`].
 #[derive(Debug)]
-pub struct WatermarkController<C: Clock = MonotonicClock> {
+pub struct WatermarkController<C: Clock = SystemClock> {
     params: BackpressureParams,
     state: State,
     /// A `try_send` rejection observed since the last `tick`.
@@ -215,16 +198,16 @@ pub struct WatermarkController<C: Clock = MonotonicClock> {
     clock: C,
 }
 
-impl WatermarkController<MonotonicClock> {
+impl WatermarkController<SystemClock> {
     /// Controller on the real monotonic clock.
     #[must_use]
     pub fn new(params: BackpressureParams) -> Self {
-        Self::with_clock(params, MonotonicClock)
+        Self::with_clock(params, SystemClock)
     }
 }
 
 impl<C: Clock> WatermarkController<C> {
-    /// Controller with an injected clock (tests).
+    /// Controller on an injected clock.
     #[must_use]
     pub fn with_clock(params: BackpressureParams, clock: C) -> Self {
         Self {
@@ -298,32 +281,7 @@ impl<C: Clock> WatermarkController<C> {
 #[cfg(all(test, not(loom)))]
 mod tests {
     use super::*;
-    use std::cell::Cell;
-
-    /// Manual clock: starts at an arbitrary instant, advanced explicitly.
-    struct TestClock {
-        base: Instant,
-        offset: Cell<Duration>,
-    }
-
-    impl TestClock {
-        fn new() -> Self {
-            Self {
-                base: Instant::now(),
-                offset: Cell::new(Duration::ZERO),
-            }
-        }
-
-        fn advance(&self, d: Duration) {
-            self.offset.set(self.offset.get() + d);
-        }
-    }
-
-    impl Clock for &TestClock {
-        fn now(&self) -> Instant {
-            self.base + self.offset.get()
-        }
-    }
+    use crate::clock::TestClock;
 
     const MIN_PAUSE: Duration = Duration::from_millis(500);
 
@@ -356,7 +314,7 @@ mod tests {
 
     #[test]
     fn rejection_pauses_on_next_tick() {
-        let clock = TestClock::new();
+        let clock = TestClock::frozen();
         let (mut ctl, budget) = setup(&clock);
         assert_eq!(ctl.tick(&budget, true), None);
         ctl.on_send_rejected();
@@ -366,7 +324,7 @@ mod tests {
 
     #[test]
     fn high_watermark_pauses_without_rejection() {
-        let clock = TestClock::new();
+        let clock = TestClock::frozen();
         let (mut ctl, budget) = setup(&clock);
         budget.add(800);
         assert_eq!(ctl.tick(&budget, true), Some(Transition::Pause));
@@ -374,7 +332,7 @@ mod tests {
 
     #[test]
     fn no_resume_before_min_pause() {
-        let clock = TestClock::new();
+        let clock = TestClock::frozen();
         let (mut ctl, budget) = setup(&clock);
         ctl.on_send_rejected();
         ctl.tick(&budget, true);
@@ -384,7 +342,7 @@ mod tests {
 
     #[test]
     fn no_resume_above_low_watermark() {
-        let clock = TestClock::new();
+        let clock = TestClock::frozen();
         let (mut ctl, budget) = setup(&clock);
         budget.add(900);
         ctl.tick(&budget, true);
@@ -397,7 +355,7 @@ mod tests {
 
     #[test]
     fn no_resume_while_queues_are_full() {
-        let clock = TestClock::new();
+        let clock = TestClock::frozen();
         let (mut ctl, budget) = setup(&clock);
         ctl.on_send_rejected();
         ctl.tick(&budget, true);
@@ -408,7 +366,7 @@ mod tests {
 
     #[test]
     fn rejection_while_paused_restarts_the_timer() {
-        let clock = TestClock::new();
+        let clock = TestClock::frozen();
         let (mut ctl, budget) = setup(&clock);
         ctl.on_send_rejected();
         ctl.tick(&budget, true);
@@ -425,7 +383,7 @@ mod tests {
         // Adversary: rejects the instant we resume, drains immediately
         // after we pause. Transitions must still alternate and the rate is
         // bounded by min_pause per full cycle.
-        let clock = TestClock::new();
+        let clock = TestClock::frozen();
         let (mut ctl, budget) = setup(&clock);
         let mut transitions = Vec::new();
         let step = Duration::from_millis(50);
@@ -504,7 +462,7 @@ mod tests {
             /// transitions strictly alternate starting with Pause.
             #[test]
             fn model_equivalence(ops in proptest::collection::vec(op_strategy(), 1..200)) {
-                let clock = TestClock::new();
+                let clock = TestClock::frozen();
                 let (mut ctl, budget) = setup(&clock);
                 let mut model: usize = 0;
                 let mut transitions = Vec::new();
@@ -532,7 +490,7 @@ mod tests {
             /// and stays quiet past min_pause, the controller resumes.
             #[test]
             fn eventually_resumes_after_drain(ops in proptest::collection::vec(op_strategy(), 1..200)) {
-                let clock = TestClock::new();
+                let clock = TestClock::frozen();
                 let (mut ctl, budget) = setup(&clock);
                 for op in ops {
                     match op {

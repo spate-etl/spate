@@ -56,7 +56,7 @@
 //! runs the workload under emulation.
 //!
 //! The controller reads time through its injected
-//! [`Clock`](spate_core::backpressure::Clock) rather than the monotonic
+//! [`Clock`](spate_core::clock::Clock) rather than the `SystemClock`
 //! default, which drives hysteresis without sleeping and keeps the case
 //! measuring this crate. A real `Instant::now` costs more per call than the
 //! state machine around it, and a count dominated by a libc time read would

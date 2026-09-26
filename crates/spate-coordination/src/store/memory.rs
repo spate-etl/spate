@@ -14,8 +14,8 @@
 use super::{
     CasOutcome, CoordinationStore, Entry, Keyspace, Revision, StoreError, WatchEvent, WatchStream,
 };
-use crate::clock::{Clock, SystemClock};
 use futures_util::StreamExt as _;
+use spate_core::clock::tokio::{Clock, SystemClock};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -24,7 +24,8 @@ use tokio::sync::broadcast;
 use tokio::time::Instant;
 
 /// How often the sweeper checks for expired ephemeral keys. Far below any
-/// realistic lease floor; tests with 300ms+ leases stay deterministic.
+/// realistic lease floor; tests with 300ms+ leases stay deterministic. The
+/// cadence is real time; expiry is judged against the store's clock.
 const SWEEP_INTERVAL: Duration = Duration::from_millis(20);
 
 /// Broadcast capacity for watch fan-out. Lagged watchers get a Retryable
@@ -100,7 +101,7 @@ impl MemoryStore {
 
     /// Like [`new`](MemoryStore::new) but drives ephemeral expiry from an
     /// injected [`Clock`]. A frozen clock makes lease expiry deterministic
-    /// under CI scheduler jitter; see [`crate::clock`].
+    /// under CI scheduler jitter.
     #[doc(hidden)]
     #[must_use]
     pub fn with_clock(lease_ttl: Duration, clock: Arc<dyn Clock>) -> MemoryStore {

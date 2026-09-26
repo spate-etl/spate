@@ -14,7 +14,6 @@
 //! (it was still the owner; progress is monotone) and is adopted by the
 //! claimant on its CAS retry, which reduces replay.
 
-use crate::clock::Clock;
 use crate::config::CoordinationConfig;
 use crate::error::{fatal, store_error};
 use crate::leader::PlanRun;
@@ -27,6 +26,7 @@ use crate::store::{
     CasOutcome, CoordinationStore, Entry, Keyspace, Revision, WatchEvent, WatchStream,
 };
 use futures_util::StreamExt as _;
+use spate_core::clock::tokio::Clock;
 use spate_core::coordination::ControlWaker;
 use spate_core::coordination::{
     CoordinationError, CoordinationErrorKind, CoordinationEvent, LeaseEpoch, SplitId, SplitPlanner,
@@ -152,7 +152,9 @@ pub(crate) struct Task<S: CoordinationStore> {
     /// cadence, the grace window, the drain deadline, and the renewal
     /// cadence gate. `SystemClock` in production; in tests an injected
     /// clock the test advances, so no transition fires on scheduler jitter.
-    /// Anything anchored to it must also be *read* through it.
+    /// Anything anchored to it must also be *read* through it. Commands are
+    /// served on a clock-independent arm, so a test can drive a coordinator
+    /// whose clock is not moving.
     pub(crate) clock: Arc<dyn Clock>,
     pub(crate) fingerprint: String,
     pub(crate) fp: u64,
@@ -492,7 +494,8 @@ impl<S: CoordinationStore> Task<S> {
 
     /// Startup-budgeted retry: capped exponential backoff, fatal after
     /// the configured attempts. Steady-state operations are NOT budgeted —
-    /// they retry on later ticks and escalate through lease expiry.
+    /// they retry on later ticks and escalate through lease expiry. The
+    /// backoff sleeps on real time because it paces store I/O.
     async fn budgeted<F>(&mut self, what: &str, op: F) -> Result<(), CoordinationError>
     where
         F: AsyncFn(&mut Self) -> Result<(), CoordinationError>,
@@ -716,7 +719,8 @@ impl<S: CoordinationStore> Task<S> {
     /// return the live tail. Unbudgeted; retries until the store answers.
     /// While it retries, queued commands are refused as Retryable so the
     /// controller's bounded waits fail fast instead of backing up behind
-    /// an unreachable store and wedging the control thread.
+    /// an unreachable store and wedging the control thread. The retry
+    /// sleeps on real time because it paces store I/O.
     async fn rewatch(&mut self, ks: Keyspace) -> Result<WatchStream, CoordinationError> {
         loop {
             match self.try_rewatch(ks).await {

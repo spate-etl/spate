@@ -380,6 +380,27 @@ mod tests {
         }
     }
 
+    /// An unreadable system trust store fails the connect with a fatal error
+    /// for a `nats://` server that asks for TLS. Regression for #634.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unreadable_trust_store_is_fatal_when_the_server_asks_for_tls() {
+        if child_connects().await {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let port = TestCa::new("system").serve_nats(None).await;
+        let env = vec![
+            (URL, format!("nats://127.0.0.1:{port}").into()),
+            (EXPECT_FATAL, "platform certs".into()),
+        ];
+        run_in_child(
+            "an_unreadable_trust_store_is_fatal_when_the_server_asks_for_tls",
+            dir.path().join("missing.pem"),
+            env,
+        )
+        .await;
+    }
+
     /// With both rustls providers compiled in and no `tls` section, a
     /// `tls://` server and a `nats://` server that requires TLS both complete
     /// the handshake. Regression for #625.

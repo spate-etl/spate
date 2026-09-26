@@ -112,7 +112,7 @@ See [Monitoring](../05-deployment/monitoring.mdx).
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `exporter` | `prometheus` \| `none` | `prometheus` | `prometheus` mounts `/metrics` on the admin server; `none` records to a no-op recorder, and `/metrics` answers 404. |
+| `exporter` | `prometheus` \| `none` | `prometheus` | `prometheus` mounts `/metrics` on the admin server; `none` installs no recorder, and `/metrics` answers 404. A pipeline's series go to a recorder already in the process, if there is one. |
 | `per_partition_detail` | bool | `false` | Emit per-partition gauge series (`partition` label). Off by default: cardinality grows with the assignment. Does **not** gate `spate_source_lag_records`, which is always per partition. |
 | `e2e_basis` | `ingest` \| `event` | `ingest` | Time basis for `spate_e2e_latency_seconds`. `ingest` is immune to producer clock skew; `event` measures true pipeline lag against record event time. |
 

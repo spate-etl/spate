@@ -107,7 +107,7 @@ are constructed programmatically and their factories read nothing:
 ```yaml
 pipeline: { name: memory-demo, threads: 1 }
 admin: { listen: none }            # no admin server; the port stays free
-metrics: { exporter: none }        # no global recorder; tests stay isolated
+metrics: { exporter: none }        # installs no recorder
 source: { memory: {} }
 sink: { capture: {} }
 ```

@@ -60,8 +60,7 @@ The profiles in `.config/nextest.toml`:
   terminates after four periods, so a hard kill at 120s. The container suites are
   excluded here and nothing left should take that long.
 - **`ci`** — what the test and coverage job runs. 60 seconds, terminating after
-  four, plus one retry and a JUnit report, so a retried test surfaces as a flaky
-  annotation rather than a green run.
+  four, with no retry and a JUnit report.
 - **`docker`** — warns at 120 seconds and **never terminates**: a cold image pull
   can exceed any figure worth setting, and a SIGKILL reports as a timeout
   indistinguishable from a hang. One retry, JUnit report.

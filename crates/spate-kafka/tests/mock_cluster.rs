@@ -214,6 +214,154 @@ fn pause_stops_delivery_and_resume_recovers_gapless() {
     });
 }
 
+/// The op version in a librdkafka `topic` debug line: the `N` in `(vN)`.
+fn op_version(line: &str) -> Option<u32> {
+    let start = line.rfind("(v")? + 2;
+    let len = line[start..].find(')')?;
+    line[start..start + len].parse().ok()
+}
+
+/// A partition's fetcher starts before the source hands out its lane, so a
+/// pause issued after the assignment is ordered after the fetch start.
+/// Regression for #638.
+#[test]
+fn the_fetcher_starts_before_the_lane_is_handed_out() {
+    let cluster = MockCluster::new(1).expect("mock cluster");
+    cluster.create_topic(TOPIC, 1, 1).expect("create topic");
+    let brokers = cluster.bootstrap_servers();
+    produce(&brokers, 5, 1, "c");
+    // Replies land after the request that asked for them has returned.
+    cluster
+        .broker_round_trip_time(1, Duration::from_millis(300))
+        .expect("round trip time");
+
+    let mut cfg = config(&brokers, "fetch-start");
+    cfg.rdkafka.insert("debug".into(), "topic".into());
+    let cp = Checkpointer::new();
+    let mut source = KafkaSource::new(cfg);
+
+    let lines = spate_test::capture_logs(tracing::Level::DEBUG, || {
+        source.open(SourceCtx::new(cp.handle())).expect("open");
+        let mut lanes = await_assignment(&mut source);
+        source.pause(&[lanes[0].id()]).expect("pause");
+        source.resume(&[lanes[0].id()]).expect("resume");
+        let rows = drain_lane(&mut source, &mut lanes[0], 5, Duration::from_secs(30));
+        let offsets: Vec<i64> = rows.iter().map(|(_, _, o)| *o).collect();
+        assert_eq!(offsets, (0..5).collect::<Vec<_>>());
+    });
+
+    let partition = format!("{TOPIC} [0]");
+    let version_of = |prefix: &str| {
+        lines
+            .iter()
+            .filter(|l| l.contains("librdkafka") && l.contains(&partition))
+            .find(|l| l.contains(prefix))
+            .and_then(|l| op_version(l))
+    };
+    let start = version_of("Start consuming").expect("no fetch start logged");
+    let pause = version_of("Pause ").expect("no pause logged");
+    assert!(
+        start < pause,
+        "fetch start v{start} was issued after the pause v{pause}"
+    );
+    let outdated: Vec<_> = lines.iter().filter(|l| l.contains("outdated op")).collect();
+    assert!(
+        outdated.is_empty(),
+        "ops dropped as outdated: {outdated:#?}"
+    );
+}
+
+/// Commit `offset` on partition 0 for `group`, as a previous member would.
+fn commit_as(brokers: &str, group: &str, offset: i64) {
+    let probe: BaseConsumer = ClientConfig::new()
+        .set("bootstrap.servers", brokers)
+        .set("group.id", group)
+        .create()
+        .expect("probe");
+    let mut tpl = rdkafka::TopicPartitionList::new();
+    tpl.add_partition_offset(TOPIC, 0, rdkafka::Offset::Offset(offset))
+        .expect("offset");
+    probe
+        .commit(&tpl, rdkafka::consumer::CommitMode::Sync)
+        .expect("commit");
+}
+
+/// A failed committed-offset lookup starts the partition from its committed
+/// offset, never from the reset policy.
+#[test]
+fn a_failed_offset_lookup_starts_from_the_committed_offset() {
+    let cluster = MockCluster::new(1).expect("mock cluster");
+    cluster.create_topic(TOPIC, 1, 1).expect("create topic");
+    let brokers = cluster.bootstrap_servers();
+    produce(&brokers, 6, 1, "d");
+    commit_as(&brokers, "lookup-error", 3);
+    // Fails the source's lookup; librdkafka's own query after it succeeds.
+    cluster.request_errors(
+        rdkafka::types::RDKafkaApiKey::OffsetFetch,
+        &[rdkafka::types::RDKafkaRespErr::RD_KAFKA_RESP_ERR_GROUP_AUTHORIZATION_FAILED],
+    );
+
+    let mut cfg = config(&brokers, "lookup-error");
+    cfg.rdkafka
+        .insert("auto.offset.reset".into(), "latest".into());
+    let cp = Checkpointer::new();
+    let mut source = KafkaSource::new(cfg);
+
+    let lines = spate_test::capture_logs(tracing::Level::WARN, || {
+        source.open(SourceCtx::new(cp.handle())).expect("open");
+        let mut lanes = await_assignment(&mut source);
+        let rows = drain_lane(&mut source, &mut lanes[0], 3, Duration::from_secs(30));
+        let offsets: Vec<i64> = rows.iter().map(|(_, _, o)| *o).collect();
+        assert_eq!(offsets, vec![3, 4, 5]);
+    });
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("committed offset lookup failed")),
+        "the injected error did not reach the lookup: {lines:#?}"
+    );
+}
+
+/// A member that starts from a committed offset publishes its lag before it
+/// commits anything itself.
+#[test]
+fn a_restarted_member_publishes_lag_before_committing() {
+    let cluster = MockCluster::new(1).expect("mock cluster");
+    cluster.create_topic(TOPIC, 1, 1).expect("create topic");
+    let brokers = cluster.bootstrap_servers();
+    produce(&brokers, 10, 1, "e");
+    commit_as(&brokers, "restart", 3);
+
+    let mut cfg = config(&brokers, "restart");
+    cfg.statistics_interval = Duration::from_millis(100);
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    metrics::with_local_recorder(&recorder, || {
+        let metrics = std::sync::Arc::new(spate_core::metrics::SourceMetrics::new(
+            &spate_core::metrics::ComponentLabels::new("restart", "source", "kafka"),
+        ));
+        let cp = Checkpointer::new();
+        let mut source = KafkaSource::new(cfg);
+        source
+            .open(SourceCtx::new(cp.handle()).with_stage_metrics(Some(metrics)))
+            .expect("open");
+        let _lanes = await_assignment(&mut source);
+        spate_test::wait_until(Duration::from_secs(30), "lag published", || {
+            source
+                .poll_events(Duration::from_millis(100))
+                .expect("poll_events");
+            lag_series_count(&handle.render()) == 1
+        });
+    });
+
+    let rendered = handle.render();
+    let needle = r#"spate_source_lag_records{pipeline="restart",component="source",component_type="kafka",partition="0"} 7"#;
+    assert!(
+        rendered.lines().any(|l| l == needle),
+        "lag must equal produced - committed:\n{rendered}"
+    );
+}
+
 #[test]
 fn second_member_triggers_revoke_then_fresh_assignment() {
     let cluster = MockCluster::new(1).expect("mock cluster");

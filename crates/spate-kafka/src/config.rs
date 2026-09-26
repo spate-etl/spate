@@ -220,6 +220,28 @@ impl KafkaSourceConfig {
         Ok(())
     }
 
+    /// Where a partition with no committed offset starts under
+    /// `auto.offset.reset`. `None` for `error`, which only librdkafka applies.
+    pub(crate) fn uncommitted_start(&self) -> Option<rdkafka::Offset> {
+        let policy = self
+            .rdkafka
+            .get("auto.offset.reset")
+            .map_or("latest", String::as_str);
+        match policy.to_ascii_lowercase().as_str() {
+            "smallest" | "earliest" | "beginning" => Some(rdkafka::Offset::Beginning),
+            "largest" | "latest" | "end" => Some(rdkafka::Offset::End),
+            _ => None,
+        }
+    }
+
+    /// Whether librdkafka measures lag to the last stable offset rather than
+    /// the high watermark (`isolation.level`, `read_committed` by default).
+    pub(crate) fn reads_committed(&self) -> bool {
+        self.rdkafka
+            .get("isolation.level")
+            .is_none_or(|level| level.eq_ignore_ascii_case("read_committed"))
+    }
+
     /// Build the effective librdkafka client configuration.
     pub(crate) fn client_config(&self) -> rdkafka::ClientConfig {
         self.client_config_with(crate::security::openssl_env_overrides())
@@ -285,6 +307,42 @@ mod tests {
 
     fn minimal() -> String {
         "  brokers: localhost:9092\n  topic: orders\n  group_id: spate\n".to_string()
+    }
+
+    fn with_rdkafka(pairs: &[(&str, &str)]) -> KafkaSourceConfig {
+        let mut cfg = KafkaSourceConfig::new("localhost:9092", "orders", "spate");
+        cfg.rdkafka = pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect();
+        cfg
+    }
+
+    /// Every spelling librdkafka accepts maps to the same start, and an unset
+    /// policy starts at the end, as librdkafka's default does.
+    #[test]
+    fn the_reset_policy_maps_to_a_start_offset() {
+        use rdkafka::Offset;
+        for (policy, start) in [
+            ("smallest", Some(Offset::Beginning)),
+            ("Earliest", Some(Offset::Beginning)),
+            ("beginning", Some(Offset::Beginning)),
+            ("largest", Some(Offset::End)),
+            ("LATEST", Some(Offset::End)),
+            ("end", Some(Offset::End)),
+            ("error", None),
+        ] {
+            let cfg = with_rdkafka(&[("auto.offset.reset", policy)]);
+            assert_eq!(cfg.uncommitted_start(), start, "{policy}");
+        }
+        assert_eq!(with_rdkafka(&[]).uncommitted_start(), Some(Offset::End));
+    }
+
+    #[test]
+    fn lag_reads_the_stable_offset_unless_uncommitted_reads_are_set() {
+        assert!(with_rdkafka(&[]).reads_committed());
+        assert!(with_rdkafka(&[("isolation.level", "read_committed")]).reads_committed());
+        assert!(!with_rdkafka(&[("isolation.level", "read_uncommitted")]).reads_committed());
     }
 
     #[test]

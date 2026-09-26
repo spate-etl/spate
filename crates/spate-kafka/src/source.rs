@@ -12,14 +12,19 @@
 //! choreography:
 //!
 //! **Assignment** (all inside one `poll_events` call):
-//! 1. `assign(tpl)` — accept the partitions;
-//! 2. `pause(tpl)` immediately — no fetch may complete before the split,
-//!    so no message can leak onto the main queue;
-//! 3. `split_partition_queue` per partition (must be redone after *every*
+//! 1. read the committed offsets and give every partition a concrete start
+//!    offset, applying `auto.offset.reset` where none is committed;
+//! 2. `assign(tpl)` — accept the partitions. With concrete offsets the
+//!    fetchers start before `assign` returns. A fetcher librdkafka starts
+//!    later can lose its start to a concurrent `pause`/`resume`, which
+//!    leaves the partition unfetched until the next rebalance;
+//! 3. `pause(tpl)` — a fetch that completed before it is discarded as
+//!    outdated and refetched, so no message leaks onto the main queue;
+//! 4. `split_partition_queue` per partition (must be redone after *every*
 //!    assign, since assign deactivates existing queues) and build lanes;
-//! 4. `resume(tpl)` — messages start flowing into the split queues, which
+//! 5. `resume(tpl)` — messages start flowing into the split queues, which
 //!    buffer until pipeline threads take the lanes over;
-//! 5. return [`SourceEvent::LanesAssigned`].
+//! 6. return [`SourceEvent::LanesAssigned`].
 //!
 //! **Revocation** (spans two `poll_events` calls):
 //! 1. surface [`SourceEvent::LanesRevoked`] with a [`DrainBarrier`] sized
@@ -57,6 +62,7 @@ use crate::context::{Intent, SourceContext};
 use crate::lane::KafkaLane;
 use crate::metrics::KafkaStatsMetrics;
 use rdkafka::consumer::{BaseConsumer, Consumer};
+use rdkafka::error::KafkaResult;
 use rdkafka::message::Message;
 use rdkafka::statistics::Statistics;
 use rdkafka::{Offset, TopicPartitionList};
@@ -68,6 +74,9 @@ use spate_core::source::{DrainBarrier, LaneId, Source, SourceCtx, SourceEvent};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+/// Bound on the committed-offset read made before each assignment.
+const COMMITTED_LOOKUP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Since when the member has been without an assignment, and what took the
 /// last one. `cause` is `None` before the first assignment, the window
@@ -117,6 +126,10 @@ pub struct KafkaSource {
     assignment_wait: Option<AssignmentWait>,
     /// Messages that leaked onto the main queue and were rewound.
     main_queue_rewinds: u64,
+    /// Committed offset per held partition, read before its assignment.
+    /// Stands in for librdkafka's committed position in the lag statistic,
+    /// which the lookup does not update.
+    committed_at_assign: HashMap<i32, i64>,
 }
 
 impl std::fmt::Debug for KafkaSource {
@@ -147,6 +160,7 @@ impl KafkaSource {
             pending_error: None,
             assignment_wait: None,
             main_queue_rewinds: 0,
+            committed_at_assign: HashMap::new(),
         }
     }
 
@@ -209,6 +223,8 @@ impl KafkaSource {
     /// assignment `publish_stats` reads while one is in flight.
     fn prune_partition_series(&mut self) {
         let owned = self.retained_partition_ids();
+        self.committed_at_assign
+            .retain(|p, _| u32::try_from(*p).is_ok_and(|p| owned.contains(&PartitionId(p))));
         if let Some(m) = &self.metrics {
             m.retain_partitions(&owned);
         }
@@ -237,20 +253,22 @@ impl KafkaSource {
             .collect()
     }
 
-    /// Accept an assignment: assign → pause → split → resume → lanes.
+    /// Accept an assignment: look up start offsets → assign → pause → split
+    /// → resume → lanes.
     fn accept_assignment(
         &mut self,
         tpl: &TopicPartitionList,
     ) -> Result<Vec<KafkaLane>, SourceError> {
         let consumer = Arc::clone(self.consumer()?);
+        let start = self.start_positions(&consumer, tpl);
         let issuer = self.issuer.as_ref().ok_or_else(|| SourceError::Client {
             class: ErrorClass::Fatal,
             reason: "assignment before open()".into(),
         })?;
 
-        consumer.assign(tpl).map_err(fatal("assign"))?;
-        // Pause before any fetch can complete: prevents pre-split messages
-        // from reaching the main queue (spike-verified choreography).
+        consumer.assign(&start).map_err(fatal("assign"))?;
+        // A fetch that completes before this pause is discarded as outdated
+        // and refetched, so no pre-split message reaches the main queue.
         consumer.pause(tpl).map_err(fatal("pause new assignment"))?;
 
         let mut lanes = Vec::new();
@@ -285,6 +303,50 @@ impl KafkaSource {
         Ok(lanes)
     }
 
+    /// `tpl` with a concrete start offset for each partition, so `assign`
+    /// starts the fetchers before it returns. A partition whose committed
+    /// offset could not be read, or whose reset policy is `error`, keeps
+    /// `Offset::Stored` and is started by librdkafka after the call.
+    fn start_positions(
+        &mut self,
+        consumer: &BaseConsumer<SourceContext>,
+        tpl: &TopicPartitionList,
+    ) -> TopicPartitionList {
+        self.committed_at_assign.clear();
+        let committed = match consumer.committed_offsets(tpl.clone(), COMMITTED_LOOKUP_TIMEOUT) {
+            Ok(committed) => committed,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    topic = %self.config.topic,
+                    "committed offset lookup failed; librdkafka resolves the start offsets"
+                );
+                return tpl.clone();
+            }
+        };
+        let uncommitted = self.config.uncommitted_start().unwrap_or(Offset::Stored);
+        for mut elem in committed.elements() {
+            if let Err(e) = elem.error() {
+                tracing::warn!(
+                    partition = elem.partition(),
+                    error = %e,
+                    "committed offset lookup failed; librdkafka resolves the start offset"
+                );
+            }
+            match start_offset(elem.error(), elem.offset(), uncommitted) {
+                Some(start) => {
+                    let _ = elem.set_offset(start);
+                }
+                None => {
+                    if let Offset::Offset(offset) = elem.offset() {
+                        self.committed_at_assign.insert(elem.partition(), offset);
+                    }
+                }
+            }
+        }
+        committed
+    }
+
     /// Record the loss of the member's last partitions, opening the window
     /// `assignment_timeout` governs, or naming the latest event when that
     /// window is already open. The instant is the first loss, so a run of
@@ -316,15 +378,59 @@ impl KafkaSource {
         let Some(consumer) = self.consumer.as_ref() else {
             return;
         };
-        let Some(stats) = consumer.context().stats.lock().expect("stats lock").take() else {
+        let Some(mut stats) = consumer.context().stats.lock().expect("stats lock").take() else {
             return;
         };
+        fill_unknown_lag(
+            &mut stats,
+            &self.config.topic,
+            &self.committed_at_assign,
+            self.config.reads_committed(),
+        );
         let owned = self.retained_partition_ids();
         if let Some(metrics) = self.metrics.as_ref() {
             publish_lag(&stats, &self.config.topic, &owned, metrics);
         }
         if let Some(stats_metrics) = self.stats_metrics.as_mut() {
             stats_metrics.update(&stats, &self.config.topic, &owned);
+        }
+    }
+}
+
+/// The start offset to assign for one partition of a committed-offset
+/// lookup, or `None` to keep the committed offset it returned. A partition
+/// whose lookup failed gets `Offset::Stored`, never the reset policy.
+fn start_offset(lookup: KafkaResult<()>, committed: Offset, uncommitted: Offset) -> Option<Offset> {
+    match (lookup, committed) {
+        (Ok(()), Offset::Offset(_)) => None,
+        (Ok(()), Offset::Invalid) => Some(uncommitted),
+        _ => Some(Offset::Stored),
+    }
+}
+
+/// Fill `consumer_lag` for a partition librdkafka reports as unknown, from
+/// the committed offset read before its assignment. librdkafka's own figure
+/// takes over once it has one, after this member's first commit.
+fn fill_unknown_lag(
+    stats: &mut Statistics,
+    topic: &str,
+    committed: &HashMap<i32, i64>,
+    reads_committed: bool,
+) {
+    let Some(topic) = stats.topics.get_mut(topic) else {
+        return;
+    };
+    for (pid, p) in &mut topic.partitions {
+        let end = if reads_committed {
+            p.ls_offset
+        } else {
+            p.hi_offset
+        };
+        if p.consumer_lag < 0
+            && let Some(&committed) = committed.get(pid)
+            && committed <= end
+        {
+            p.consumer_lag = end - committed;
         }
     }
 }
@@ -1534,6 +1640,93 @@ mod tests {
                 !rendered.contains(r#"partition="1"} 44"#),
                 "revoked partition must not resume updating:\n{rendered}"
             );
+        }
+    }
+
+    mod start_offsets {
+        use super::*;
+        use rdkafka::error::KafkaError;
+        use rdkafka::statistics::{Partition, Topic};
+
+        fn failed() -> KafkaResult<()> {
+            Err(KafkaError::OffsetFetch(
+                RDKafkaErrorCode::GroupAuthorizationFailed,
+            ))
+        }
+
+        /// A partition whose lookup failed is left to librdkafka, whatever
+        /// the reset policy, so it cannot start past its committed offset.
+        #[test]
+        fn a_failed_lookup_keeps_the_stored_offset() {
+            for committed in [Offset::Invalid, Offset::Offset(3)] {
+                assert_eq!(
+                    start_offset(failed(), committed, Offset::End),
+                    Some(Offset::Stored)
+                );
+            }
+        }
+
+        #[test]
+        fn an_uncommitted_partition_takes_the_reset_policy() {
+            assert_eq!(
+                start_offset(Ok(()), Offset::Invalid, Offset::Beginning),
+                Some(Offset::Beginning)
+            );
+        }
+
+        #[test]
+        fn a_committed_offset_is_kept() {
+            assert_eq!(start_offset(Ok(()), Offset::Offset(3), Offset::End), None);
+        }
+
+        /// One partition of `orders` with the given statistics offsets.
+        fn snapshot(consumer_lag: i64, hi_offset: i64, ls_offset: i64) -> Statistics {
+            let partition = Partition {
+                partition: 0,
+                consumer_lag,
+                hi_offset,
+                ls_offset,
+                ..Default::default()
+            };
+            Statistics {
+                topics: HashMap::from([(
+                    "orders".to_owned(),
+                    Topic {
+                        topic: "orders".to_owned(),
+                        partitions: HashMap::from([(0, partition)]),
+                        ..Default::default()
+                    },
+                )]),
+                ..Default::default()
+            }
+        }
+
+        fn filled(mut stats: Statistics, committed: &[(i32, i64)], reads_committed: bool) -> i64 {
+            fill_unknown_lag(
+                &mut stats,
+                "orders",
+                &committed.iter().copied().collect(),
+                reads_committed,
+            );
+            stats.topics["orders"].partitions[&0].consumer_lag
+        }
+
+        #[test]
+        fn unknown_lag_is_measured_from_the_committed_offset() {
+            assert_eq!(filled(snapshot(-1, 10, 8), &[(0, 3)], true), 5);
+            assert_eq!(filled(snapshot(-1, 10, 8), &[(0, 3)], false), 7);
+        }
+
+        #[test]
+        fn a_known_lag_is_left_alone() {
+            assert_eq!(filled(snapshot(2, 10, 10), &[(0, 3)], true), 2);
+        }
+
+        /// No committed offset, or no end offset yet, leaves the lag unknown.
+        #[test]
+        fn nothing_to_measure_from_stays_unknown() {
+            assert_eq!(filled(snapshot(-1, 10, 10), &[], true), -1);
+            assert_eq!(filled(snapshot(-1, -1, -1), &[(0, 3)], true), -1);
         }
     }
 }

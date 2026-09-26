@@ -38,8 +38,8 @@
 //!   unreadable past the retry budget hands its split back (surfaced in
 //!   `spate_s3_source_objects_failed_total{reason}`); at the attempt cap
 //!   the split is quarantined. A bounded job with quarantined splits ends
-//!   **failed**, never silently incomplete. Credentials/configuration
-//!   errors are still immediately fatal.
+//!   **failed**, never silently incomplete. A rejected object read and a
+//!   client-configuration error are immediately fatal.
 //! - **Records are framed, not decoded, here.** The source is
 //!   format-agnostic: it streams object bytes (after gzip/zstd decompression)
 //!   through a [`RecordFramer`](spate_core::framing::RecordFramer) *you supply*

@@ -118,8 +118,8 @@ poll loop). Report errors map onto the framework taxonomy:
   are re-produced, which duplicates records but never loses them.
 - **Fatal** (unknown topic, authorization failures, a message over the
   broker limit, the idempotent producer's fenced states): the batch is
-  abandoned, its partition watermark stalls, and the pipeline fails fast
-  (`checkpoint.stalled_fail_after`) instead of spinning.
+  abandoned, its partition watermark stalls, and the pipeline fails once
+  `checkpoint.stalled_fail_after` elapses.
 
 Oversized records never reach the writer. The encoder's
 `max_message_bytes` guard fails them record-level, where the sink stage's

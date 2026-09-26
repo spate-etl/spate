@@ -85,6 +85,22 @@ through a broker outage. librdkafka's unsecured token handler
 (`enable.sasl.oauthbearer.unsecure.jwt`) does connect, and is for development
 and testing only.
 
+### When authentication or TLS fails
+
+The source fails at once on a SASL authentication failure, and the exit report
+carries the reason. A TLS failure is retryable. `startup_timeout` bounds the
+wait for a first partition assignment, and `assignment_timeout` the wait after
+an assignment is lost. Either ends in a `no partition assignment` error that
+does not name TLS.
+
+In the sink, both failures show up as timed-out deliveries, which are
+retryable. Under the default
+[`retry` settings](../07-reference/configuration.mdx#sink-pool) the pipeline
+keeps running with nothing written, and `/readyz` reports not ready.
+
+For both roles, the broker's reason is in the log lines under the `librdkafka`
+target.
+
 Keep secrets out of the file with
 [environment interpolation](../03-guides/configuring-pipelines.mdx#environment-interpolation);
 `${VAR}` is substituted before parsing. See

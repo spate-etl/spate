@@ -176,8 +176,13 @@ from the environment):
       aws_container_authorization_token_file: "${AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE}"
 ```
 
-Credential, permission and client-configuration errors fail the pipeline
-immediately, because no peer would fare better. Non-S3 schemes (`file://`) do
+An object read the store rejects as unauthenticated or forbidden, and a
+client-configuration error, fail the pipeline immediately, because no peer
+would fare better. The store reports a rejected listing as a generic error, so
+the listing is retried on each replan tick, and the pipeline fails with the
+listing error after eight consecutive failures. A read whose credentials cannot be resolved
+or refreshed is retried like a transport error, and the split is then handed
+back and quarantined at the attempt cap. Non-S3 schemes (`file://`) do
 not read the AWS environment. See
 [Securing connections](../../../03-guides/securing-connections.mdx) for the
 generic model.

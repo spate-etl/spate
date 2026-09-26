@@ -236,7 +236,7 @@ Content that would be identical across pages lives once and is linked or
 embedded, never copy-pasted.
 
 - **Security** is hub-and-spoke: the generic model (secrets via `${VAR}`,
-  auth-failure-is-fatal, the connector matrix) lives in
+  what a security failure does at runtime, the connector matrix) lives in
   `03-guides/securing-connections.mdx`; connector specifics live on each
   connector page and link back. The hub holds pointers, not mechanisms.
 - **Identical prose shared by two pages** uses an MDX partial, a file named

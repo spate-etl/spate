@@ -434,7 +434,6 @@ jobs:
           fail_ci_if_error: true
           flags: unit
 
-      # Keeps a passing-on-retry flake visible as a check annotation.
       - name: Publish test report
         uses: mikepenz/action-junit-report@a9170d5795813c01ab4901ffb045b52bab4ab09d # v6.5.0
         if: always()
@@ -443,7 +442,6 @@ jobs:
           check_name: Test results
           detailed_summary: true
           include_passed: false
-          flaky_summary: true
           fail_on_failure: false
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()

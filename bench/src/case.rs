@@ -193,6 +193,21 @@ fn empty_loop_ns_per_iter(iters: u64) -> Option<f64> {
     }
 }
 
+/// Refuses a case whose per-iteration cost is within [`DEGENERATE_FACTOR`] of
+/// the empty loop's `floor`, boundary included.
+fn refuse_degenerate(case: &str, per_iter: f64, floor: f64) -> Result<(), String> {
+    if per_iter <= floor * DEGENERATE_FACTOR {
+        return Err(format!(
+            "case '{case}' took {per_iter:.3} ns per iteration against an empty loop's \
+             {floor:.3} ns, so it is measuring the loop rather than the routine. Either \
+             the routine was optimized away — return its result instead of discarding \
+             it, so black_box has something to hold on to — or one iteration is too \
+             little work to time, in which case fold more of it into each one."
+        ));
+    }
+    Ok(())
+}
+
 /// Starts a suite for `krate`.
 ///
 /// The name must be the package name cargo knows, because the driver intersects
@@ -500,6 +515,16 @@ impl Case {
     /// clock cannot resolve a loop of this length, or when the case turns out
     /// to be measuring that loop rather than its routine.
     pub(crate) fn measure(&self, opts: &RunOptions) -> Result<Outcome, String> {
+        self.measure_against(opts, empty_loop_ns_per_iter)
+    }
+
+    /// [`Case::measure`], judging the region against the empty-loop floor that
+    /// `floor` returns for the case's iteration count.
+    fn measure_against(
+        &self,
+        opts: &RunOptions,
+        floor: impl FnOnce(u64) -> Option<f64>,
+    ) -> Result<Outcome, String> {
         let mut corpus = Corpus::new();
         let prepared = (self.prepare)(opts.seed, &mut corpus);
         let iters = opts.iters.max(1);
@@ -530,23 +555,14 @@ impl Case {
         // The guard that catches a case measuring nothing. See
         // `empty_loop_ns_per_iter`.
         let per_iter = wall_ns as f64 / iters as f64;
-        let Some(floor) = empty_loop_ns_per_iter(iters) else {
+        let Some(floor) = floor(iters) else {
             return Err(format!(
                 "case '{}': the clock could not resolve a loop of {iters} iterations, so \
                  nothing measured over one is a measurement. Raise the iteration count.",
                 self.id
             ));
         };
-        if per_iter <= floor * DEGENERATE_FACTOR {
-            return Err(format!(
-                "case '{}' took {per_iter:.3} ns per iteration against an empty loop's \
-                 {floor:.3} ns, so it is measuring the loop rather than the routine. Either \
-                 the routine was optimized away — return its result instead of discarding \
-                 it, so black_box has something to hold on to — or one iteration is too \
-                 little work to time, in which case fold more of it into each one.",
-                self.id
-            ));
-        }
+        refuse_degenerate(&self.id, per_iter, floor)?;
 
         let mut metrics = BTreeMap::new();
         let mut notes = Vec::new();
@@ -859,6 +875,8 @@ impl Bencher {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
     use super::{MAX_ITERS, RunOptions, suite};
     use crate::record::{ALLOC_BYTES_PER_ITER, CPU_NS_PER_ITER, RECORDS_PER_S, WALL_NS_PER_ITER};
 
@@ -985,33 +1003,15 @@ mod tests {
         assert!(err.contains("2 measured regions"), "{err}");
     }
 
-    /// The failure that produces a plausible number rather than an error: a
-    /// routine returning `()` gives `black_box` nothing to hold, the call is
-    /// deleted, and the case reports the cost of an empty loop as if it were a
-    /// measurement.
-    /// A routine whose body the optimizer deleted is indistinguishable from one
-    /// that never had a body, so the guard is asserted against the latter,
-    /// which behaves the same way in every profile, where the deletion only
-    /// happens in an optimized build.
+    /// `measure_against` asks for the floor at the case's own iteration count,
+    /// refuses a region within twice it, measures one above it, and reports a
+    /// floor the clock could not resolve. Regression for #692.
     #[test]
-    fn a_routine_that_measures_nothing_is_refused() {
-        let opts = RunOptions {
-            seed: 1,
-            iters: 200_000,
-            warmup_ms: 0,
-        };
-
+    fn a_case_is_judged_against_the_floor_at_its_own_count() {
         let empty = suite("spate-bench")
             .case("empty", |_, _| (), |b, ()| b.iter(|| {}))
             .done();
-        let err = empty
-            .find("empty")
-            .expect("declared")
-            .measure(&opts)
-            .expect_err("a routine at the empty loop's cost must not report a number");
-        assert!(err.contains("measuring the loop"), "{err}");
-
-        // A routine that does something is measured.
+        let empty = empty.find("empty").expect("declared");
         let real = suite("spate-bench")
             .case(
                 "real",
@@ -1019,23 +1019,50 @@ mod tests {
                 |b, data| b.iter(|| data.iter().sum::<u64>()),
             )
             .done();
-        assert!(real.find("real").expect("declared").measure(&opts).is_ok());
+        let real = real.find("real").expect("declared");
 
         // The guard applies at every iteration count. There is no threshold
         // below which it stands aside, which matters because a pinned
         // `.iters(n)` is where an `iter_batched` case lives.
-        let few = RunOptions {
-            iters: 4096,
-            ..opts
-        };
-        assert!(
-            empty
-                .find("empty")
-                .expect("declared")
-                .measure(&few)
-                .is_err()
-        );
-        assert!(real.find("real").expect("declared").measure(&few).is_ok());
+        for iters in [200_000, 4096] {
+            let opts = RunOptions {
+                seed: 1,
+                iters,
+                warmup_ms: 0,
+            };
+
+            // One second per iteration: no region reaches twice that.
+            let asked = Cell::new(None);
+            let err = empty
+                .measure_against(&opts, |n| {
+                    asked.set(Some(n));
+                    Some(1e9)
+                })
+                .expect_err("a region within twice the floor is refused");
+            assert!(err.contains("measuring the loop"), "{err}");
+            assert_eq!(asked.get(), Some(iters));
+
+            // Any region the clock resolves is above twice this floor.
+            assert!(
+                real.measure_against(&opts, |_| Some(f64::MIN_POSITIVE))
+                    .is_ok()
+            );
+
+            let err = empty
+                .measure_against(&opts, |_| None)
+                .expect_err("no floor, no measurement");
+            assert!(err.contains("could not resolve"), "{err}");
+        }
+    }
+
+    /// A case is refused up to and including twice the floor, and measured above
+    /// it.
+    #[test]
+    fn the_degenerate_threshold_is_twice_the_floor_inclusive() {
+        let err = super::refuse_degenerate("c", 1.5, 1.5).expect_err("at the floor");
+        assert!(err.contains("measuring the loop"), "{err}");
+        assert!(super::refuse_degenerate("c", 3.0, 1.5).is_err());
+        assert!(super::refuse_degenerate("c", 3.001, 1.5).is_ok());
     }
 
     /// The floor is a measurement, so it has to say when it is not one. A pass

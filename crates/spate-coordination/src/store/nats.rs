@@ -17,10 +17,11 @@
 //!
 //! Construction is synchronous and lazy: the connection and bucket
 //! provisioning happen on the first store operation, the coordinator's
-//! startup probe, so connect failures ride the startup
-//! retry budget and startup-time misconfiguration is Fatal with an
-//! actionable message. No `async-nats` type appears in any public
-//! signature (0.x policy: single pinned minor, internal only).
+//! startup probe, so an unreachable server rides the startup retry budget.
+//! Misconfiguration, and a credential or certificate the connection
+//! rejects, are Fatal with an actionable message. No `async-nats` type
+//! appears in any public signature (0.x policy: single pinned minor,
+//! internal only).
 //!
 //! TLS connections use rustls with the `ring` provider, whatever other rustls
 //! features the build enables.
@@ -321,7 +322,7 @@ async fn connect(config: &NatsConfig, lease_ttl: Duration) -> Result<Buckets, St
     let client = options
         .connect(config.servers.join(","))
         .await
-        .map_err(|e| StoreError::Retryable(format!("connecting to NATS: {e}")))?;
+        .map_err(connect_error)?;
     if fallback && !tls_certain && client.server_info().tls_required {
         warn_mozilla_fallback();
     }
@@ -378,6 +379,63 @@ async fn connect(config: &NatsConfig, lease_ttl: Duration) -> Result<Buckets, St
         lease,
         state_marker_ttl,
     })
+}
+
+/// Fatal when the connection rejects a credential or a certificate on
+/// either side, Retryable otherwise.
+fn connect_error(e: async_nats::ConnectError) -> StoreError {
+    use async_nats::ConnectErrorKind;
+    use async_nats::rustls::{AlertDescription, Error as TlsError};
+    let rejected = match e.kind() {
+        ConnectErrorKind::AuthorizationViolation
+        | ConnectErrorKind::Authentication
+        | ConnectErrorKind::Tls => true,
+        _ => matches!(
+            find_source::<TlsError>(&e),
+            Some(
+                TlsError::InvalidCertificate(_)
+                    | TlsError::AlertReceived(
+                        AlertDescription::BadCertificate
+                            | AlertDescription::UnsupportedCertificate
+                            | AlertDescription::CertificateRevoked
+                            | AlertDescription::CertificateExpired
+                            | AlertDescription::CertificateUnknown
+                            | AlertDescription::UnknownCA
+                            | AlertDescription::AccessDenied
+                            | AlertDescription::CertificateRequired
+                            | AlertDescription::DecryptError
+                    )
+            )
+        ),
+    };
+    let message = format!("connecting to NATS: {e}");
+    if rejected {
+        StoreError::Fatal(message)
+    } else {
+        StoreError::Retryable(message)
+    }
+}
+
+/// The first `T` in `err`'s source chain, `err` included.
+fn find_source<'a, T: std::error::Error + 'static>(
+    err: &'a (dyn std::error::Error + 'static),
+) -> Option<&'a T> {
+    let mut pending = vec![err];
+    while let Some(e) = pending.pop() {
+        if let Some(found) = e.downcast_ref() {
+            return Some(found);
+        }
+        // `io::Error::source` skips the error it wraps, so reach it through
+        // `get_ref`.
+        if let Some(inner) = e
+            .downcast_ref::<std::io::Error>()
+            .and_then(|io| io.get_ref())
+        {
+            pending.push(inner);
+        }
+        pending.extend(e.source());
+    }
+    None
 }
 
 /// `config` with per-message TTLs enabled, or `None` when it allows them
@@ -788,6 +846,44 @@ mod tests {
             }
         );
         assert_eq!(with_message_ttls(patched, Duration::from_secs(30)), None);
+    }
+
+    /// A server that answers the CONNECT with an authorization violation fails
+    /// the connect with a fatal error. Regression for #634.
+    #[tokio::test]
+    async fn a_rejected_credential_is_fatal() {
+        use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((tcp, _)) = listener.accept().await {
+                let mut tcp = BufReader::new(tcp);
+                let info = format!(
+                    "INFO {{\"server_id\":\"test\",\"version\":\"2.11.0\",\"proto\":1,\
+                     \"host\":\"127.0.0.1\",\"port\":{port},\"max_payload\":1048576,\
+                     \"auth_required\":true}}\r\n"
+                );
+                tcp.get_mut().write_all(info.as_bytes()).await.unwrap();
+                let mut line = String::new();
+                tcp.read_line(&mut line).await.unwrap();
+                tcp.get_mut()
+                    .write_all(b"-ERR 'Authorization Violation'\r\n")
+                    .await
+                    .unwrap();
+            }
+        });
+        let mut config = NatsConfig::new(vec![format!("nats://127.0.0.1:{port}")], "auth_test");
+        config.credentials = NatsCredentials::UserPassword {
+            username: "spate".into(),
+            password: Secret::new("wrong"),
+        };
+        let store = NatsStore::new(config, Duration::from_secs(30)).unwrap();
+        match store.get(Keyspace::Durable, "k").await {
+            Err(StoreError::Fatal(message)) => {
+                assert!(message.contains("authorization violation"), "{message}");
+            }
+            other => panic!("expected Fatal, got {other:?}"),
+        }
     }
 
     #[test]

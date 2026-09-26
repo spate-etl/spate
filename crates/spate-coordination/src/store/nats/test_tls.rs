@@ -106,8 +106,14 @@ impl TestCa {
                     if tcp.write_all(info.as_bytes()).await.is_err() {
                         return;
                     }
-                    let Ok(tls) = acceptor.accept(tcp).await else {
-                        return;
+                    let tls = match acceptor.accept(tcp).into_fallible().await {
+                        Ok(tls) => tls,
+                        Err((_, mut tcp)) => {
+                            // Dropping a socket with unread bytes sends a reset,
+                            // which can reach the client before the alert does.
+                            let _ = tokio::io::copy(&mut tcp, &mut tokio::io::sink()).await;
+                            return;
+                        }
                     };
                     let mut tls = BufReader::new(tls);
                     let mut line = String::new();

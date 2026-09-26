@@ -98,6 +98,18 @@ them wherever your source resumes from instead.
   bounded-queue pushback alone, but a pausable source keeps memory flat
   under sink pressure.
 
+**Class a rejected credential or TLS handshake `Fatal`.** That covers a
+certificate your TLS stack fails to verify, a fatal TLS alert from the server,
+no protocol version or cipher suite in common, an authentication or
+authorization error from the server, and a 401 or 403 from the service. A
+failure to obtain credentials or reach the server stays `Retryable`, and so
+do a connection reset, closed or timed out during the handshake and a
+malformed TLS message. Under TLS 1.3 a server refuses a client certificate
+after the handshake completes, so look for its alert on the first read as
+well as on the connect call.
+[ADR-0047](../../adr/0047-a-rejected-credential-or-tls-handshake-is-fatal.md)
+states the rule.
+
 ## Framing: turning bytes into records
 
 A source emits `RawPayload`s; a deserializer decodes one payload into records.

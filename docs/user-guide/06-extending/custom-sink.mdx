@@ -107,7 +107,10 @@ the frames) happens when the worker calls it, not when the future is polled:
 - **Classify errors honestly.** Retryable errors get retried; a `Fatal`
   error abandons the batch (its acks fail, the partition watermark stalls,
   and `checkpoint.stalled_fail_after` eventually fails the pipeline so the
-  data replays after restart).
+  data replays after restart). A rejected credential or TLS handshake is
+  `Fatal`, and a failure to obtain credentials or reach the server is
+  `Retryable`
+  ([ADR-0047](../../adr/0047-a-rejected-credential-or-tls-handshake-is-fatal.md)).
 - One writer instance is shared by every shard worker (`Send + Sync`); the
   per-replica state lives in `Endpoint`.
 

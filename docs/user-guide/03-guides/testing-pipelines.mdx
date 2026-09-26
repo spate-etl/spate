@@ -118,13 +118,13 @@ record, which is the at-least-once contract. **Committed positions are one past 
 offset**, the "next position to read", the same convention the framework
 commits everywhere, which is why the target is `last + 1`.
 
-Bound the wait, whichever way you write it: an unbounded one turns a broken
-pipeline into a hung test rather than a failing one.
-`handle.wait_committed(partition, last + 1, timeout)` is the blocking
-equivalent of the poll loop, waking on each commit instead of sleeping, and
-returns whether the target was met. `handle.committed()` returns every
-watermark ever committed, in call order, when you need more than the
-latest.
+`handle.wait_committed(partition, last + 1, timeout)` blocks until the
+partition's committed watermark reaches the target or the timeout lapses,
+and returns whether it got there. Assert on the result so a pipeline that
+stops committing fails the test at the timeout, and print
+`handle.last_committed(partition)` in the message to show how far it got.
+`handle.committed()` returns every watermark ever committed, in call
+order, when you need more than the latest.
 
 ## Asserting the writes: `SinkScript` and `decode_rows`
 

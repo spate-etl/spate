@@ -36,7 +36,7 @@
 
 use spate::prelude::*;
 use spate::source::LaneId;
-use spate_test::{TestDeserializer, TestEncoder, capture_sink, memory_source, wait_until};
+use spate_test::{TestDeserializer, TestEncoder, capture_sink, memory_source};
 use std::time::Duration;
 
 /// `pipeline.name` is the `pipeline` label on every series the `Meter` mints,
@@ -196,11 +196,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .as_bytes(),
     );
 
-    // The wait is bounded. Without a deadline a broken pipeline hangs the
-    // process instead of failing it.
-    wait_until(Duration::from_secs(10), "the offset to commit", || {
-        handle.last_committed(p0) == Some(last + 1)
-    });
+    assert!(
+        handle.wait_committed(p0, last + 1, Duration::from_secs(10)),
+        "the offset never committed (last committed: {:?})",
+        handle.last_committed(p0),
+    );
     shutdown.trigger();
     let report = join.join().expect("pipeline thread")?;
 

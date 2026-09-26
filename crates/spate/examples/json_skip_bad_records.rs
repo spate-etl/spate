@@ -26,7 +26,7 @@ use spate::json::{JsonDeserializerBuilder, JsonFraming, JsonSettings, OnError};
 use spate::prelude::*;
 use spate::source::LaneId;
 use spate_test::{TestEncoder, capture_sink, memory_source};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 const CONFIG: &str = r#"
 pipeline: { name: json-ndjson-demo, threads: 1 }
@@ -107,11 +107,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     .as_bytes();
     let last = handle.push(p0, Some(b"demo"), payload);
 
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while handle.last_committed(p0) != Some(last + 1) {
-        assert!(Instant::now() < deadline, "commit not observed in time");
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    assert!(
+        handle.wait_committed(p0, last + 1, Duration::from_secs(10)),
+        "the offset never committed (last committed: {:?})",
+        handle.last_committed(p0),
+    );
     shutdown.trigger();
     let report = join.join().expect("pipeline thread")?;
 

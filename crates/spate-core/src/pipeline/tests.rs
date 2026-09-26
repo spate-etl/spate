@@ -168,9 +168,15 @@ fn happy_path_consumes_and_commits() {
     assert!(log.flush_commits >= 1, "shutdown must flush commits");
 }
 
+/// Revocation stops the lane's consumption and commits every consumed offset
+/// from the revocation drain. Regression for #664.
 #[test]
 fn revocation_drains_flushes_and_commits_in_order() {
-    let h = start(|shared, log| FakeChain {
+    let mut config = test_config(1);
+    // No commit tick fires during the test, so only the revocation drain can
+    // commit.
+    config.checkpoint.interval = Duration::from_secs(60);
+    let h = start_with_config(config, |shared, log| FakeChain {
         shared,
         log,
         mode: ChainMode::Ok,
@@ -180,6 +186,10 @@ fn revocation_drains_flushes_and_commits_in_order() {
     wait_for("first batch consumed", Duration::from_secs(5), || {
         h.chain.consumed.load(Ordering::Relaxed) >= 10
     });
+    assert!(
+        h.shared.lock().unwrap().committed.is_empty(),
+        "nothing may commit before the revocation drain"
+    );
     h.script
         .lock()
         .unwrap()
@@ -212,15 +222,8 @@ fn revocation_drains_flushes_and_commits_in_order() {
             commit_after.is_some(),
             "revocation must commit acknowledged offsets"
         );
-        // No flush/commit *ordering* assertion here. The controller also
-        // broadcasts FlushNow on every commit tick (20ms in tests), so the
-        // log interleaves periodic flushes and commits nondeterministically,
-        // and this chain resolves acks on consumption, so the equality below
-        // cannot see whether revocation flushed before committing. That
-        // ordering is pinned by `revocation_flushes_parked_acks_before_committing`,
-        // whose chain parks acks until a flush. This test keeps the
-        // ack-on-consume half: everything consumed was committed, and nothing
-        // consumed was lost.
+        // This chain acks on consume, so flush-before-commit ordering is
+        // pinned by `revocation_flushes_parked_acks_before_committing`.
         assert_eq!(
             log.committed.get(&PartitionId(0)),
             Some(&(consumed_at_revoke as i64))

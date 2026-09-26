@@ -19,7 +19,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-use crate::checks::scratch::{Scratch, nonce};
+use crate::checks::scratch::{Scratch, unique_name};
 use crate::run::{self, Error, Outcome, Step};
 
 const MD_TEMPLATE: &str = "about/md.hbs";
@@ -421,7 +421,7 @@ fn read(path: &Path) -> Result<String, Error> {
 /// filesystem and a failure mid-write leaves no truncated artifact behind.
 fn install(out: &Path, text: &str) -> Result<(), Error> {
     let dir = out.parent().unwrap_or(Path::new("."));
-    let staged = dir.join(format!(".attribution.{}.{}", std::process::id(), nonce()));
+    let staged = dir.join(unique_name(".attribution"));
     let write = || -> std::io::Result<()> {
         // An exclusive create, so an existing file or symlink at the name is
         // not followed.

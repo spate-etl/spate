@@ -21,9 +21,9 @@
 //! records for the whole negative-cache TTL. Per-id backoff, held here in
 //! the fetcher, keeps those replays from hot-looping the registry.
 //!
-//! A registry that answers `401`/`403`, or whose certificate fails
-//! verification, is *rejected*: the reason is recorded once in the handle's
-//! [`Rejection`], and every later cache miss is fatal.
+//! A registry that answers `401`/`403`, or that rejects the TLS handshake
+//! ([`tls_rejection`]), is *rejected*: the reason is recorded once in the
+//! handle's [`Rejection`], and every later cache miss is fatal.
 //!
 //! # Concurrency
 //!
@@ -34,7 +34,7 @@
 
 use crate::cache::{CompiledSchema, Lookup, SchemaCache};
 use crate::config::AvroConfigError;
-use rustls::{CertificateError, ClientConfig, RootCertStore};
+use rustls::{ClientConfig, RootCertStore};
 use rustls_native_certs::CertificateResult;
 use schema_registry_converter::async_impl::schema_registry::{self, SrSettings, SrSettingsBuilder};
 use schema_registry_converter::error::SRCError;
@@ -102,7 +102,7 @@ impl RegistryConfig {
 }
 
 /// The registry client, verifying an `https://` registry against the system
-/// trust store. A certificate the client rejects is recorded in `rejection`.
+/// trust store. A TLS rejection ([`tls_rejection`]) is recorded in `rejection`.
 pub(crate) fn sr_settings(
     cfg: &RegistryConfig,
     rejection: &Rejection,
@@ -163,7 +163,7 @@ fn root_store(system: impl FnOnce() -> CertificateResult) -> RootCertStore {
     roots
 }
 
-/// A connector layer that records a certificate rejection in its
+/// A connector layer that records a TLS rejection in its
 /// [`Rejection`] and passes every result through unchanged.
 ///
 /// `schema_registry_converter` renders a request error with `Display`, which
@@ -211,24 +211,36 @@ where
         let layer = self.layer.clone();
         Box::pin(async move {
             connecting.await.inspect_err(|e| {
-                if let Some(cert) = certificate_error(e.as_ref()) {
-                    let _ = layer.rejection.set(format!(
+                let reason = match tls_rejection(e.as_ref()) {
+                    Some(rustls::Error::InvalidCertificate(cert)) => format!(
                         "schema registry {} presented a certificate the client rejects: {cert}",
                         layer.registry
-                    ));
-                }
+                    ),
+                    Some(tls) => format!(
+                        "the TLS handshake with schema registry {} failed: {tls}",
+                        layer.registry
+                    ),
+                    None => return,
+                };
+                let _ = layer.rejection.set(reason);
             })
         })
     }
 }
 
-/// The certificate rejection in `err`'s source chain, if the TLS handshake
-/// failed to verify the server.
-fn certificate_error<'a>(err: &'a (dyn Error + 'static)) -> Option<&'a CertificateError> {
-    match spate_core::error::find_source::<rustls::Error>(err) {
-        Some(rustls::Error::InvalidCertificate(cert)) => Some(cert),
-        _ => None,
-    }
+/// The TLS rejection in `err`'s source chain: a server certificate that
+/// failed verification, an alert in
+/// [`TLS_REJECTION_ALERTS`](spate_core::error::TLS_REJECTION_ALERTS), or a
+/// server that shares no protocol version, cipher suite or other handshake
+/// parameter with the client (`PeerIncompatible`).
+fn tls_rejection<'a>(err: &'a (dyn Error + 'static)) -> Option<&'a rustls::Error> {
+    spate_core::error::find_source::<rustls::Error>(err).filter(|tls| match tls {
+        rustls::Error::InvalidCertificate(_) | rustls::Error::PeerIncompatible(_) => true,
+        rustls::Error::AlertReceived(alert) => {
+            spate_core::error::TLS_REJECTION_ALERTS.contains(&u8::from(*alert))
+        }
+        _ => false,
+    })
 }
 
 fn client_config(roots: RootCertStore) -> ClientConfig {
@@ -500,6 +512,52 @@ mod tests {
             root_store(|| loaded(vec![cert.cert.der().clone()])).len(),
             1
         );
+    }
+
+    /// A handshake alert that rejects the client is recorded with its name;
+    /// `decode_error`, which reports a malformed message, is not.
+    #[tokio::test]
+    async fn a_rejecting_tls_alert_is_recorded() {
+        use rustls::AlertDescription as A;
+        for (alert, recorded) in [
+            (A::HandshakeFailure, true),
+            (A::ProtocolVersion, true),
+            (A::DecodeError, false),
+        ] {
+            let addr = spate_test::tls_alert_server(b"", u8::from(alert));
+            let cfg = RegistryConfig {
+                url: format!("https://{addr}"),
+                basic_auth: None,
+            };
+            let rejection = Rejection::default();
+            let settings = sr_settings_with(&cfg, &rejection, CertificateResult::default).unwrap();
+            schema_registry::get_schema_by_id_and_type(1, &settings, SchemaType::Avro)
+                .await
+                .expect_err("the server answers every handshake with an alert");
+            match rejection.get() {
+                Some(reason) => {
+                    assert!(recorded, "{alert:?} recorded: {reason}");
+                    assert!(reason.contains(&format!("{alert:?}")), "{reason}");
+                }
+                None => assert!(!recorded, "{alert:?} not recorded"),
+            }
+        }
+    }
+
+    /// No cipher suite in common is a rejection; an alert outside the list
+    /// is not.
+    #[test]
+    fn tls_rejection_covers_an_incompatible_peer_and_only_listed_alerts() {
+        let wrapped =
+            |tls: rustls::Error| std::io::Error::new(std::io::ErrorKind::InvalidData, tls);
+        let incompatible = wrapped(rustls::Error::PeerIncompatible(
+            rustls::PeerIncompatible::NoCipherSuitesInCommon,
+        ));
+        assert!(tls_rejection(&incompatible).is_some());
+        let internal = wrapped(rustls::Error::AlertReceived(
+            rustls::AlertDescription::InternalError,
+        ));
+        assert!(tls_rejection(&internal).is_none());
     }
 
     #[cfg(not(any(target_vendor = "apple", windows, target_os = "android")))]

@@ -83,6 +83,10 @@ framework values apply in unspecified order.
 `cooperative` strategy is rejected, because the framework relies on eager
 (full) rebalances.
 
+Static membership is allowed through `group.instance.id`. A member fenced by
+another member with the same `group.instance.id` stops the pipeline, and the
+error names the id.
+
 ## Security (TLS, mTLS, SASL)
 
 <SecuringKafka />

@@ -665,12 +665,22 @@ impl Source for KafkaSource {
                 }
                 Err(e) => {
                     // Permanent broker-side failures (authorization revoked,
-                    // deleted topic, unsupported protocol) must fail fast
-                    // rather than retry forever behind a green health probe.
-                    return Err(SourceError::Client {
-                        class: crate::error::classify_poll_error(&e, self.saw_first_assignment),
-                        reason: format!("consumer poll: {e}"),
-                    });
+                    // deleted topic, unsupported protocol, a rejected TLS
+                    // handshake) must fail fast rather than retry forever
+                    // behind a green health probe.
+                    let text = e
+                        .rdkafka_error_code()
+                        .and_then(|code| consumer.context().take_error(code));
+                    let class = crate::error::classify_poll_error(
+                        &e,
+                        self.saw_first_assignment,
+                        text.as_deref(),
+                    );
+                    let reason = match text {
+                        Some(text) => format!("consumer poll: {e}: {text}"),
+                        None => format!("consumer poll: {e}"),
+                    };
+                    return Err(SourceError::Client { class, reason });
                 }
             }
         }
@@ -1096,6 +1106,59 @@ mod tests {
                     assert!(reason.contains("rebalance error"), "{reason}");
                 }
                 other => panic!("expected a fatal error, got {other:?}"),
+            }
+        }
+    }
+
+    #[cfg(feature = "tls")]
+    mod tls_rejection {
+        use super::*;
+
+        /// The first consumer error, other than `AllBrokersDown`, from a
+        /// source whose only broker answers the TLS handshake with `alert`.
+        fn first_handshake_error(alert: u8) -> (ErrorClass, String) {
+            let mut cfg = test_config();
+            cfg.brokers = spate_test::tls_alert_server(b"", alert).to_string();
+            cfg.rdkafka.insert("security.protocol".into(), "ssl".into());
+            let mut source = KafkaSource::new(cfg);
+            let cp = Checkpointer::new();
+            source.open(SourceCtx::new(cp.handle())).expect("open");
+            let mut seen = None;
+            spate_test::wait_until(
+                Duration::from_secs(20),
+                "a handshake error",
+                || match source.poll_events(Duration::from_millis(50)) {
+                    Err(SourceError::Client { class, reason })
+                        if !reason.contains("AllBrokersDown") =>
+                    {
+                        seen = Some((class, reason));
+                        true
+                    }
+                    _ => false,
+                },
+            );
+            seen.expect("wait_until returned")
+        }
+
+        /// A listed alert from the broker fails the source, and the error
+        /// carries librdkafka's text; `decode_error` (50) and
+        /// `internal_error` (80) stay `Retryable`.
+        #[test]
+        fn a_rejecting_tls_alert_is_fatal() {
+            for (alert, expected) in [
+                (40, ErrorClass::Fatal),
+                (48, ErrorClass::Fatal),
+                (70, ErrorClass::Fatal),
+                (116, ErrorClass::Fatal),
+                (50, ErrorClass::Retryable),
+                (80, ErrorClass::Retryable),
+            ] {
+                let (class, reason) = first_handshake_error(alert);
+                assert!(
+                    reason.contains(&format!("SSL alert number {alert} ")),
+                    "alert {alert}: {reason}"
+                );
+                assert_eq!(class, expected, "alert {alert}: {reason}");
             }
         }
     }

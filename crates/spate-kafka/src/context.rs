@@ -1,4 +1,5 @@
-//! Consumer context: rebalance interception and statistics capture.
+//! Consumer context: rebalance interception, statistics capture and the
+//! text of the latest consumer error.
 //!
 //! The framework needs rebalances to complete only after the pipeline has
 //! drained and committed, but librdkafka runs the rebalance callback inside
@@ -22,11 +23,13 @@
 use rdkafka::TopicPartitionList;
 use rdkafka::client::ClientContext;
 use rdkafka::consumer::{BaseConsumer, Consumer, ConsumerContext};
+use rdkafka::error::RDKafkaErrorCode;
 use rdkafka::statistics::Statistics;
 use rdkafka::types::RDKafkaRespErr;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::{self, ThreadId};
 
 /// A rebalance event recorded by the callback, consumed by `poll_events`.
 #[derive(Debug)]
@@ -69,6 +72,23 @@ pub(crate) struct SourceContext {
     /// will ever run to complete a deferred intent; deferring there
     /// deadlocks the drop forever.
     pub(crate) closing: AtomicBool,
+    /// The latest error callback's code and text, per polling thread.
+    /// librdkafka runs the callback on the thread whose poll then returns
+    /// the same event as an error.
+    last_error: Mutex<HashMap<ThreadId, (RDKafkaErrorCode, String)>>,
+}
+
+impl SourceContext {
+    /// The text of this thread's latest error callback, when its code is
+    /// `code`. The entry is removed either way.
+    pub(crate) fn take_error(&self, code: RDKafkaErrorCode) -> Option<String> {
+        let (seen, text) = self
+            .last_error
+            .lock()
+            .expect("error lock")
+            .remove(&thread::current().id())?;
+        (seen == code).then_some(text)
+    }
 }
 
 impl ClientContext for SourceContext {
@@ -91,6 +111,12 @@ impl ClientContext for SourceContext {
 
     fn error(&self, error: rdkafka::error::KafkaError, reason: &str) {
         tracing::warn!(target: "librdkafka", %error, "{reason}");
+        if let Some(code) = error.rdkafka_error_code() {
+            self.last_error
+                .lock()
+                .expect("error lock")
+                .insert(thread::current().id(), (code, reason.to_owned()));
+        }
     }
 }
 
@@ -221,5 +247,34 @@ mod tests {
             .map(Intent::kind)
             .collect();
         assert_eq!(kinds, vec!["assign"]);
+    }
+
+    /// A thread takes the text of its own latest error, once, and only
+    /// under the code it polled.
+    #[test]
+    fn take_error_pairs_by_thread_and_code() {
+        let ctx = SourceContext::default();
+        let error = |code| rdkafka::error::KafkaError::Global(code);
+        ctx.error(error(RDKafkaErrorCode::SSL), "handshake");
+        thread::scope(|s| {
+            s.spawn(|| {
+                assert_eq!(ctx.take_error(RDKafkaErrorCode::SSL), None);
+                ctx.error(error(RDKafkaErrorCode::AllBrokersDown), "down");
+            });
+        });
+
+        assert_eq!(
+            ctx.take_error(RDKafkaErrorCode::SSL).as_deref(),
+            Some("handshake")
+        );
+        assert_eq!(ctx.take_error(RDKafkaErrorCode::SSL), None, "taken once");
+
+        ctx.error(error(RDKafkaErrorCode::SSL), "handshake");
+        assert_eq!(ctx.take_error(RDKafkaErrorCode::AllBrokersDown), None);
+        assert_eq!(
+            ctx.take_error(RDKafkaErrorCode::SSL),
+            None,
+            "a mismatched take removes the entry"
+        );
     }
 }

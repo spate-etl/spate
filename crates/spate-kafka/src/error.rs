@@ -7,12 +7,12 @@
 //! a running consumer, a deleted or invalid topic, an unsupported protocol)
 //! is retried forever while the health probe stays green and the pipeline
 //! silently delivers nothing. This module maps clearly-permanent rdkafka
-//! error codes to [`ErrorClass::Fatal`] so the driver fails fast, while
-//! keeping transient codes (transport hiccups, leader elections,
-//! coordinator churn) retryable.
+//! error codes, and a TLS rejection named in librdkafka's error text, to
+//! [`ErrorClass::Fatal`] so the driver fails fast, while keeping transient
+//! codes (transport hiccups, leader elections, coordinator churn) retryable.
 
 use rdkafka::error::{KafkaError, RDKafkaErrorCode};
-use spate_core::error::ErrorClass;
+use spate_core::error::{ErrorClass, TLS_REJECTION_ALERTS};
 
 /// Classify a single librdkafka consumer/queue error code.
 ///
@@ -50,10 +50,41 @@ pub(crate) fn classify_consumer_error(code: RDKafkaErrorCode, after_startup: boo
     }
 }
 
+/// Whether an error callback's `code` and `text` report a TLS handshake the
+/// client or the broker rejected.
+///
+/// The code is `SSL` or `BrokerTransportFailure`, and the text carries
+/// OpenSSL's `certificate verify failed` or `SSL alert number N` with `N` in
+/// [`TLS_REJECTION_ALERTS`].
+pub(crate) fn tls_rejection(code: RDKafkaErrorCode, text: &str) -> bool {
+    const ALERT: &str = "SSL alert number ";
+    matches!(
+        code,
+        RDKafkaErrorCode::SSL | RDKafkaErrorCode::BrokerTransportFailure
+    ) && (text.contains("certificate verify failed")
+        || text.match_indices(ALERT).any(|(at, _)| {
+            let rest = &text[at + ALERT.len()..];
+            let digits = rest
+                .find(|c: char| !c.is_ascii_digit())
+                .map_or(rest, |end| &rest[..end]);
+            digits
+                .parse::<u8>()
+                .is_ok_and(|alert| TLS_REJECTION_ALERTS.contains(&alert))
+        }))
+}
+
 /// Classify a [`KafkaError`] returned by a consumer/queue poll, defaulting to
 /// [`ErrorClass::Retryable`] when the error carries no librdkafka code.
-pub(crate) fn classify_poll_error(err: &KafkaError, after_startup: bool) -> ErrorClass {
+///
+/// `text` is the error callback's text for the same event, when known; a
+/// [`tls_rejection`] in it is [`ErrorClass::Fatal`].
+pub(crate) fn classify_poll_error(
+    err: &KafkaError,
+    after_startup: bool,
+    text: Option<&str>,
+) -> ErrorClass {
     match err.rdkafka_error_code() {
+        Some(code) if text.is_some_and(|text| tls_rejection(code, text)) => ErrorClass::Fatal,
         Some(code) => classify_consumer_error(code, after_startup),
         None => ErrorClass::Retryable,
     }
@@ -130,6 +161,118 @@ mod tests {
         assert_eq!(
             classify_consumer_error(C::UnknownTopicOrPartition, true),
             ErrorClass::Fatal,
+        );
+    }
+
+    /// librdkafka's error text for a handshake the broker rejected with
+    /// alert 40, at the default log level.
+    const ALERT_40: &str = "ssl://127.0.0.1:54436/bootstrap: SSL handshake failed: \
+        error:0A000410:SSL routines::ssl/tls alert handshake failure: SSL alert number 40 \
+        (after 0ms in state SSL_HANDSHAKE)";
+
+    /// A rejection is matched in each form librdkafka reports it: a listed
+    /// alert during or after the handshake, and a broker certificate the
+    /// client failed to verify.
+    #[test]
+    fn tls_rejection_matches_a_rejected_handshake() {
+        for (code, text) in [
+            (C::SSL, ALERT_40),
+            (
+                C::SSL,
+                "ssl://127.0.0.1:54436/bootstrap: SSL handshake failed: error:0A000410:SSL \
+                 routines::ssl/tls alert handshake failure: SSL alert number 40 (after 0ms in \
+                 state SSL_HANDSHAKE, 1 identical error(s) suppressed)",
+            ),
+            // Alert 40 with no cipher suite in common, from a debug build of
+            // OpenSSL that prefixes the source location.
+            (
+                C::SSL,
+                "ssl://127.0.0.1:47104/bootstrap: SSL handshake failed: \
+                 ssl/record/rec_layer_s3.c:918:ssl3_read_bytes error:0A000410:SSL \
+                 routines::ssl/tls alert handshake failure: SSL alert number 40",
+            ),
+            (
+                C::SSL,
+                "ssl://127.0.0.1:54440/bootstrap: SSL handshake failed: error:0A00042E:SSL \
+                 routines::tlsv1 alert protocol version: SSL alert number 70 (after 0ms in \
+                 state SSL_HANDSHAKE)",
+            ),
+            (
+                C::SSL,
+                "ssl://127.0.0.1:47105/bootstrap: SSL handshake failed: \
+                 ssl/statem/statem_clnt.c:2126:tls_post_process_server_certificate \
+                 error:0A000086:SSL routines::certificate verify failed: broker certificate \
+                 could not be verified, verify that ssl.ca.location is correctly configured \
+                 or root CA certificates are installed (brew install openssl)",
+            ),
+            // TLS 1.3 refuses a missing client certificate after the
+            // handshake, on the first read.
+            (
+                C::BrokerTransportFailure,
+                "ssl://127.0.0.1:47101/bootstrap: Receive failed: \
+                 ssl/record/rec_layer_s3.c:918:ssl3_read_bytes error:0A00045C:SSL \
+                 routines::tlsv13 alert certificate required: SSL alert number 116",
+            ),
+        ] {
+            assert!(tls_rejection(code, text), "{code:?}: {text}");
+        }
+    }
+
+    /// A reset, a refused connection, a malformed record, an unlisted alert,
+    /// a number outside the alert range and a listed alert under an
+    /// unrelated code are not rejections.
+    #[test]
+    fn tls_rejection_leaves_other_failures_alone() {
+        for (code, text) in [
+            (
+                C::BrokerTransportFailure,
+                "127.0.0.1:1/bootstrap: Connect to ipv4#127.0.0.1:1 failed: Connection refused \
+                 (after 0ms in state CONNECT)",
+            ),
+            (
+                C::BrokerTransportFailure,
+                "ssl://127.0.0.1:9093/bootstrap: SSL handshake failed: Disconnected: \
+                 connection reset by peer (after 2ms in state SSL_HANDSHAKE)",
+            ),
+            (
+                C::SSL,
+                "ssl://127.0.0.1:9093/bootstrap: SSL handshake failed: error:0A00010B:SSL \
+                 routines::wrong version number (after 0ms in state SSL_HANDSHAKE)",
+            ),
+            (
+                C::SSL,
+                "ssl://127.0.0.1:54448/bootstrap: SSL handshake failed: error:0A00041A:SSL \
+                 routines::tlsv1 alert decode error: SSL alert number 50 (after 0ms in state \
+                 SSL_HANDSHAKE)",
+            ),
+            (
+                C::SSL,
+                "ssl://127.0.0.1:54452/bootstrap: SSL handshake failed: error:0A000438:SSL \
+                 routines::tlsv1 alert internal error: SSL alert number 80 (after 0ms in state \
+                 SSL_HANDSHAKE)",
+            ),
+            (C::SSL, "SSL handshake failed: SSL alert number 400"),
+            (C::SSL, "SSL handshake failed: SSL alert number 4"),
+            (C::SSL, "SSL handshake failed: SSL alert number "),
+            (C::AllBrokersDown, ALERT_40),
+            (C::MessageTimedOut, ALERT_40),
+        ] {
+            assert!(!tls_rejection(code, text), "{code:?}: {text}");
+        }
+    }
+
+    /// A poll error is fatal on a rejection in its callback text, and keeps
+    /// its code's class without one.
+    #[test]
+    fn a_poll_error_with_a_rejection_in_its_text_is_fatal() {
+        let err = KafkaError::MessageConsumption(C::SSL);
+        assert_eq!(
+            classify_poll_error(&err, false, Some(ALERT_40)),
+            ErrorClass::Fatal
+        );
+        assert_eq!(
+            classify_poll_error(&err, false, None),
+            ErrorClass::Retryable
         );
     }
 }

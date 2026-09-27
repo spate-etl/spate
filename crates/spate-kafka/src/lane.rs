@@ -105,7 +105,7 @@ impl SourceLane for KafkaLane {
             Some(Err(e)) => {
                 // Post-startup: a lane exists only once its partition is assigned.
                 return Err(SourceError::Client {
-                    class: crate::error::classify_poll_error(&e, true),
+                    class: crate::error::classify_poll_error(&e, true, None),
                     reason: format!("partition {} poll: {e}", self.partition.0),
                 });
             }

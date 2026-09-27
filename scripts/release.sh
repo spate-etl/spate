@@ -264,9 +264,9 @@ assemble() {
         -c user.email='spate-release[bot]@users.noreply.github.com' \
         commit --all --quiet --message "release: v$version" --message \
 "Every artefact is generated from the version input: the manifest rewrite,
-Cargo.lock, CHANGELOG.md assembled from changelog.d/, THIRD-PARTY.md and the
-install snippets. The squash merge of this pull request is what triggers the
-publish."
+Cargo.lock, CHANGELOG.md assembled from changelog.d/ and the moved dependency
+requirements, THIRD-PARTY.md and the install snippets. The squash merge of
+this pull request is what triggers the publish."
     git show --stat --format='%h %s' HEAD
     endgroup
 
@@ -303,7 +303,7 @@ publish."
     # the first dispatch.
     pr=$(gh pr list --state open --head "release/v$version" --json number --jq '.[0].number // empty')
     if [ -z "$pr" ]; then
-        body="Assembled by \`release.yml\` from the v$version dispatch. Every file in this diff is generated; the reviewed prose is the fragments it consumes, which landed with their changes. The squash merge triggers the publish. The controls are the version input and its derivation check, so a review here is reading the assembled changelog, not the mechanics."
+        body="Assembled by \`release.yml\` from the v$version dispatch. Every file in this diff is generated; the reviewed prose is the fragments it consumes, which landed with their changes, and the dependency requirement entry the build writes from \`Cargo.toml\`. The squash merge triggers the publish. The controls are the version input and its derivation check, so a review here is reading the assembled changelog, not the mechanics."
         out=$(gh pr create --title "release: v$version" --label release \
             --head "release/v$version" --body "$body" 2>&1) ||
             fail "gh pr create failed: $out"

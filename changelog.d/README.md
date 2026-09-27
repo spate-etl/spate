@@ -41,10 +41,10 @@ The line counts wherever it sits in the body. Before the pull request exists, a
 
 A change outside those paths can still deserve a fragment, and the gate does
 not ask for one. A lockfile bump that changes what a dependency does is one.
-A changed requirement under the root `[workspace.dependencies]` is another:
-the published manifest of every crate declaring that dependency carries it, so
-a raised floor reaches everybody who depends on one of those crates. Add the
-fragment yourself.
+Add the fragment yourself. A changed requirement under the root
+`[workspace.dependencies]` needs no fragment for the requirement itself,
+because the release lists it. Add one when the new version changes behavior
+somebody would notice.
 
 ## Writing one
 
@@ -144,7 +144,10 @@ assigned port out of the logs. You can use the logged address to reach
 `cargo xtask changelog build <version>` groups the fragments by type under a
 new `## [<version>] — <date>` heading, appends each entry's pull request link,
 adds a `### Contributors` section from the commit range, rewrites the link
-references, and deletes the fragments it consumed.
+references, and deletes the fragments it consumed. It also closes the
+`### Changed` group with one entry listing each root `[workspace.dependencies]`
+requirement that moved since the previous release tag, for the dependencies a
+crate under `crates/` inherits outside its dev-dependencies.
 [`RELEASING.md`](../RELEASING.md) has the whole procedure.
 
 The assembly is mechanical. The release note is not — read what it wrote before

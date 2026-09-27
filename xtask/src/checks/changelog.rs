@@ -1,6 +1,7 @@
 //! The changelog fragments: the gate, the scaffolder that writes one, the
-//! release assembly that consumes them, one version's notes, and whether the
-//! release being prepared announces a breaking change.
+//! release assembly that consumes them and adds the moved root dependency
+//! requirements, one version's notes, and whether the release being prepared
+//! announces a breaking change.
 //!
 //! A change somebody upgrading would care about carries a file under
 //! `changelog.d/`, and `changelog.d/README.md` states the format and the
@@ -9,6 +10,8 @@
 //! once, at release, and rewrites `CHANGELOG.md` in place.
 
 use std::path::Path;
+
+mod requirements;
 
 use crate::checks::adr::is_slug;
 use crate::checks::scratch::Scratch;
@@ -609,8 +612,8 @@ const CHANGELOG: &str = "CHANGELOG.md";
 /// The repository every derived link points at.
 const REPO_URL: &str = "https://github.com/spate-etl/spate";
 
-/// Assembles the fragments into a new section of the changelog, in place, and
-/// consumes them.
+/// Assembles the fragments and the moved root dependency requirements into a
+/// new section of the changelog, in place, and consumes the fragments.
 ///
 /// Everything that can fail happens before anything is written back, so a
 /// refusal leaves the tree as it was.
@@ -665,7 +668,14 @@ pub(crate) fn build(root: &Path, explain: bool, version: &str) -> Outcome {
     let range = previous
         .as_ref()
         .map_or_else(|| "HEAD".to_owned(), |tag| format!("{tag}..HEAD"));
-    let block = assemble(root, &range, previous.as_deref(), &api_pull)?;
+    let generated = requirements::entry(root, previous.as_deref())?;
+    let block = assemble(
+        root,
+        &range,
+        previous.as_deref(),
+        generated.as_deref(),
+        &api_pull,
+    )?;
     let written = insert(&text, version, &today, &block)?;
 
     for kind in TYPES {
@@ -852,10 +862,12 @@ type Lookup<'a> = &'a dyn Fn(&Path, &str) -> Result<Option<String>, Error>;
 
 /// The entries grouped by type in the order the six are declared, the
 /// contributors over the range, and the link definitions the entries use.
+/// `generated` closes the `changed` group and takes no reference.
 fn assemble(
     root: &Path,
     range: &str,
     previous: Option<&str>,
+    generated: Option<&str>,
     lookup: Lookup<'_>,
 ) -> Result<String, Error> {
     let mut block = String::new();
@@ -865,13 +877,7 @@ fn assemble(
         let mut open = false;
         for file in fragments_of(root, kind) {
             if !open {
-                // The leading blank separates this group from the last one. A
-                // blank line between list items makes it a *loose* list, and
-                // every bullet then renders in its own paragraph.
-                if !block.is_empty() {
-                    block.push('\n');
-                }
-                block.push_str(&format!("### {}\n\n", sentence_case(kind)));
+                open_group(&mut block, kind);
                 open = true;
             }
 
@@ -907,6 +913,14 @@ fn assemble(
 
             block.push_str(&bullet(&body));
         }
+        if *kind == "changed"
+            && let Some(body) = generated
+        {
+            if !open {
+                open_group(&mut block, kind);
+            }
+            block.push_str(&bullet(&entry_body(body)));
+        }
     }
 
     if block.is_empty() {
@@ -937,6 +951,17 @@ fn assemble(
 
     // The insertion line already supplies the separator.
     Ok(format!("{}\n", block.trim_end_matches('\n')))
+}
+
+/// Writes the heading that opens one type's group.
+fn open_group(block: &mut String, kind: &str) {
+    // The leading blank separates this group from the last one. A blank line
+    // between list items makes it a *loose* list, and every bullet then renders
+    // in its own paragraph.
+    if !block.is_empty() {
+        block.push('\n');
+    }
+    block.push_str(&format!("### {}\n\n", sentence_case(kind)));
 }
 
 /// The changelog with the new section written below the Unreleased heading and

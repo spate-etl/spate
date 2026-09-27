@@ -56,8 +56,9 @@ pub fn option<T>(value: &Option<T>) -> impl fmt::Debug + '_ {
 /// the host replaced by `<redacted>`.
 ///
 /// The scheme, host, port and path stay visible. Userinfo runs to the last
-/// `@` after `://`, so an `@` later in the URL redacts the host as well. A
-/// string without `://` renders as `<redacted>` in full.
+/// `@` after the scheme, so an `@` later in the URL redacts the host as well.
+/// A string without `://` is read the same way from its start, so
+/// `user:pass@host:4222` renders as `<redacted>@host:4222`.
 pub fn url(url: &str) -> impl fmt::Debug + fmt::Display + '_ {
     Url(url)
 }
@@ -66,10 +67,13 @@ struct Url<'a>(&'a str);
 
 impl fmt::Display for Url<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let Some((scheme, rest)) = self.0.split_once("://") else {
-            return f.write_str("<redacted>");
+        let rest = match self.0.split_once("://") {
+            Some((scheme, rest)) => {
+                write!(f, "{scheme}://")?;
+                rest
+            }
+            None => self.0,
         };
-        write!(f, "{scheme}://")?;
         let rest = match rest.rsplit_once('@') {
             Some((_, host)) => {
                 f.write_str("<redacted>@")?;
@@ -158,9 +162,14 @@ mod tests {
     }
 
     #[test]
-    fn url_without_a_scheme_is_fully_redacted() {
-        for raw in ["svc:hunter2@sr", "hunter2", ""] {
-            assert_eq!(url(raw).to_string(), "<redacted>", "{raw}");
+    fn url_without_a_scheme_redacts_the_same_parts() {
+        let cases = [
+            ("n1:4222", "n1:4222"),
+            ("svc:hunter2@n1:4222", "<redacted>@n1:4222"),
+            ("n1:4222?token=hunter2", "n1:4222?<redacted>"),
+        ];
+        for (raw, want) in cases {
+            assert_eq!(url(raw).to_string(), want, "{raw}");
         }
     }
 

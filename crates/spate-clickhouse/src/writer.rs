@@ -26,6 +26,12 @@ impl ClickHouseEndpoint {
         &self.url
     }
 
+    /// [`url`](Self::url) with its userinfo, query and fragment redacted, for
+    /// error text and metric labels.
+    pub(crate) fn display_url(&self) -> impl fmt::Display + '_ {
+        redact::url(&self.url)
+    }
+
     /// Crate-internal access for schema validation queries; the client
     /// type stays out of the public API.
     pub(crate) fn client(&self) -> &clickhouse::Client {
@@ -36,7 +42,7 @@ impl ClickHouseEndpoint {
 impl fmt::Debug for ClickHouseEndpoint {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ClickHouseEndpoint")
-            .field("url", &self.url)
+            .field("url", &redact::url(&self.url))
             .finish_non_exhaustive()
     }
 }

@@ -61,7 +61,7 @@ cfg.replicas = 3;
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `servers` | `Vec<String>` | `required` | Server URLs (`nats://host:4222`, `tls://…`, `ws://…`, `wss://…`). At least one. |
+| `servers` | `Vec<String>` | `required` | Server URLs (`nats://host:4222`, `tls://…`, `ws://…`, `wss://…`). At least one. Userinfo and any query render `<redacted>` in `Debug` output. |
 | `job` | `String` | `required` | Job identity, `[A-Za-z0-9_-]{1,64}`. Suffixes both bucket names. Every worker of one job uses the same value; two different jobs must never share one. |
 | `credentials` | `NatsCredentials` | `none` | Anonymous by default. See [Security](#security-authentication-and-tls). |
 | `tls` | `Option<NatsTls>` | `none` | TLS material. Its presence requires TLS on every server and rejects a `ws://` server. |

@@ -180,7 +180,7 @@ async fn fetch_columns(
         .await
         .map_err(|e| SchemaError::Fetch {
             table: check.display_table(),
-            url: endpoint.url().to_string(),
+            url: endpoint.display_url().to_string(),
             reason: crate::http::error_reason(&e),
         })
 }
@@ -243,11 +243,11 @@ pub(crate) async fn validate(
                     "sink.clickhouse: table {} not found (or not visible to this user) \
                      on replica {}",
                     check.display_table(),
-                    endpoint.url()
+                    endpoint.display_url()
                 )));
             }
             match &reference {
-                None => reference = Some((endpoint.url().to_string(), cols)),
+                None => reference = Some((endpoint.display_url().to_string(), cols)),
                 Some((ref_url, ref_cols)) => {
                     if *ref_cols != cols {
                         return Err(SchemaError::Mismatch(format!(
@@ -255,7 +255,7 @@ pub(crate) async fn validate(
                              {ref_url}: {}\n  {}: {}",
                             check.display_table(),
                             table_column_list(ref_cols),
-                            endpoint.url(),
+                            endpoint.display_url(),
                             table_column_list(&cols),
                         )));
                     }

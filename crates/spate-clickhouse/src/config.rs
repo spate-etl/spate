@@ -289,7 +289,7 @@ impl ClickHouseSinkConfig {
 /// Construct with [`ShardConfig::new`] and set the optional fields. The
 /// struct is `#[non_exhaustive]` so new knobs can be added without breaking
 /// callers.
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct ShardConfig {
@@ -300,6 +300,21 @@ pub struct ShardConfig {
     /// Consumed by [`ClickHouseSink::router`]; irrelevant otherwise.
     #[serde(default = "default_weight")]
     pub weight: u32,
+}
+
+// Hand-written: replica URLs can carry credentials. The destructure lists every
+// field so a new one cannot reach `Debug` unredacted.
+impl std::fmt::Debug for ShardConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let ShardConfig { replicas, weight } = self;
+        f.debug_struct("ShardConfig")
+            .field(
+                "replicas",
+                &replicas.iter().map(|r| redact::url(r)).collect::<Vec<_>>(),
+            )
+            .field("weight", weight)
+            .finish()
+    }
 }
 
 fn default_weight() -> u32 {
@@ -336,7 +351,7 @@ impl ShardConfig {
 /// Construct with [`DistributedCheckSection::new`] and set the optional
 /// fields. The struct is `#[non_exhaustive]` so new knobs can be added
 /// without breaking callers.
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct DistributedCheckSection {
@@ -359,6 +374,27 @@ pub struct DistributedCheckSection {
     /// list; defaults to the first replica of shard 0.
     #[serde(default)]
     pub endpoint: Option<String>,
+}
+
+// Hand-written: the endpoint URL can carry credentials. The destructure lists
+// every field so a new one cannot reach `Debug` unredacted.
+impl std::fmt::Debug for DistributedCheckSection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let DistributedCheckSection {
+            cluster,
+            table,
+            sharding_key,
+            sharding_expr,
+            endpoint,
+        } = self;
+        f.debug_struct("DistributedCheckSection")
+            .field("cluster", cluster)
+            .field("table", table)
+            .field("sharding_key", sharding_key)
+            .field("sharding_expr", sharding_expr)
+            .field("endpoint", &endpoint.as_deref().map(redact::url))
+            .finish()
+    }
 }
 
 impl DistributedCheckSection {
@@ -615,7 +651,7 @@ impl SinkBundle for ClickHouseSink {
         let replica_labels = self
             .endpoints
             .iter()
-            .map(|shard| shard.iter().map(|e| e.url().to_string()).collect())
+            .map(|shard| shard.iter().map(|e| e.display_url().to_string()).collect())
             .collect();
         SinkParts::new(self.writer, self.endpoints, self.pool)
             .with_component_type("clickhouse")
@@ -739,9 +775,12 @@ fn validate(cfg: &ClickHouseSinkConfig) -> Result<(), ConfigError> {
         if shard.replicas.is_empty() {
             return fail(format!("shard {i} has no replicas"));
         }
-        for url in &shard.replicas {
+        for (j, url) in shard.replicas.iter().enumerate() {
             if !(url.starts_with("http://") || url.starts_with("https://")) {
-                return fail(format!("replica `{url}` is not an http(s) URL"));
+                return fail(format!(
+                    "shard {i} replica {j} (`{}`) is not an http(s) URL",
+                    redact::url(url)
+                ));
             }
         }
         // Weights are ClickHouse interval widths: a zero-weight shard
@@ -853,7 +892,8 @@ fn validate(cfg: &ClickHouseSinkConfig) -> Result<(), ConfigError> {
             && !(url.starts_with("http://") || url.starts_with("https://"))
         {
             return fail(format!(
-                "distributed_check: endpoint `{url}` is not an http(s) URL"
+                "distributed_check: endpoint `{}` is not an http(s) URL",
+                redact::url(url)
             ));
         }
     }
@@ -971,6 +1011,34 @@ table: orders
 shards:
   - replicas: ["http://a:8123"]
 "#;
+
+    /// Replica and distributed-check endpoint URLs print without userinfo
+    /// or query, in `Debug` and in the scheme error.
+    #[test]
+    fn replica_url_credentials_never_reach_debug_or_config_errors() {
+        let builder = from_component_config(&component(
+            "table: orders\nshards: [{replicas: ['http://svc:hunter2@a:8123/?password=hunter2']}]\n\
+             distributed_check: {cluster: c, table: d, sharding_key: id, endpoint: 'http://svc:hunter2@a:8123'}\n",
+        ))
+        .unwrap();
+        let printed = format!("{builder:?}");
+        assert!(!printed.contains("hunter2"), "{printed}");
+        assert!(
+            printed.contains("http://<redacted>@a:8123/?<redacted>"),
+            "{printed}"
+        );
+
+        let err = from_component_config(&component(
+            "table: orders\nshards: [{replicas: ['svc:hunter2@a:8123']}]\n",
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(!err.contains("hunter2"), "{err}");
+        assert!(
+            err.contains("shard 0 replica 0 (`<redacted>@a:8123`)"),
+            "{err}"
+        );
+    }
 
     /// `Debug` on the builder hides the password and every `settings` value
     /// and keeps the user and setting names. Regression for #754.

@@ -168,9 +168,11 @@ services:
       # instance_id from the container hostname — unique per replica
 ```
 
-For production, run a 3-node cluster with JetStream, list every node in
-`servers`, and set `replicas: 3` on `NatsConfig` so the buckets survive losing
-a node.
+For production, run a 3-node cluster with JetStream and set `replicas: 3` on
+`NatsConfig` so the buckets survive losing a node. The client learns the other
+nodes from the first server it reaches, so one reachable entry in `servers` is
+enough. List more than one, or a DNS name that resolves to every node, so the
+first connection survives a node being down.
 
 ## What an outage does
 

@@ -685,8 +685,9 @@ impl Source for KafkaSource {
                 Err(e) => {
                     // Permanent broker-side failures (authorization revoked,
                     // deleted topic, unsupported protocol, a rejected TLS
-                    // handshake) must fail fast rather than retry forever
-                    // behind a green health probe.
+                    // handshake, a client librdkafka has failed) must fail
+                    // fast rather than retry forever behind a green health
+                    // probe.
                     let code = e.rdkafka_error_code();
                     let text = code.and_then(|code| consumer.context().take_error(code));
                     let class = crate::error::classify_poll_error(
@@ -694,10 +695,18 @@ impl Source for KafkaSource {
                         self.saw_first_assignment,
                         text.as_deref(),
                     );
-                    let reason = match text {
+                    let mut reason = match text {
                         Some(text) => format!("consumer poll: {e}: {text}"),
                         None => format!("consumer poll: {e}"),
                     };
+                    // librdkafka's fencing text does not name the instance.
+                    if let rdkafka::error::KafkaError::MessageConsumptionFatal(
+                        rdkafka::error::RDKafkaErrorCode::FencedInstanceId,
+                    ) = e
+                        && let Some(id) = self.config.rdkafka.get("group.instance.id")
+                    {
+                        reason.push_str(&format!(" (group.instance.id {id:?})"));
+                    }
                     // Every broker's failure is followed by `AllBrokersDown`,
                     // which would otherwise hide it from the deadline error.
                     if code != Some(rdkafka::error::RDKafkaErrorCode::AllBrokersDown) {
@@ -1133,6 +1142,56 @@ mod tests {
                 }
                 other => panic!("expected a fatal error, got {other:?}"),
             }
+        }
+    }
+
+    mod fatal_consumer_error {
+        use super::*;
+        use rdkafka::bindings::rd_kafka_resp_err_t as RespErr;
+
+        /// A static member librdkafka fences fails the source, and the error
+        /// carries librdkafka's text and the member's `group.instance.id`.
+        /// Regression for #727.
+        #[test]
+        fn a_fenced_static_member_is_fatal() {
+            let mut cfg = test_config();
+            cfg.rdkafka
+                .insert("group.instance.id".into(), "worker-a".into());
+            let mut source = opened_source_with(cfg, &[]);
+            let client = source.consumer.as_ref().expect("opened").client();
+            // SAFETY: the pointer is a live client owned by `source`, and the
+            // reason is a NUL-terminated literal.
+            let raised = unsafe {
+                rdkafka::bindings::rd_kafka_test_fatal_error(
+                    client.native_ptr(),
+                    RespErr::RD_KAFKA_RESP_ERR_FENCED_INSTANCE_ID,
+                    c"fenced by test".as_ptr(),
+                )
+            };
+            assert_eq!(raised, RespErr::RD_KAFKA_RESP_ERR_NO_ERROR);
+
+            let mut seen = None;
+            spate_test::wait_until(Duration::from_secs(20), "the fatal error", || match source
+                .poll_events(Duration::from_millis(50))
+            {
+                Err(SourceError::Client { class, reason })
+                    if reason.contains("Static consumer fenced") =>
+                {
+                    seen = Some((class, reason));
+                    true
+                }
+                _ => false,
+            });
+            let (class, reason) = seen.expect("wait_until returned");
+            assert_eq!(class, ErrorClass::Fatal, "{reason}");
+            assert!(
+                reason.contains("test_fatal_error: fenced by test"),
+                "{reason}"
+            );
+            assert!(
+                reason.contains(r#"group.instance.id "worker-a""#),
+                "{reason}"
+            );
         }
     }
 

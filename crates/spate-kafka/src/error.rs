@@ -76,13 +76,18 @@ pub(crate) fn tls_rejection(code: RDKafkaErrorCode, text: &str) -> bool {
 /// Classify a [`KafkaError`] returned by a consumer/queue poll, defaulting to
 /// [`ErrorClass::Retryable`] when the error carries no librdkafka code.
 ///
-/// `text` is the error callback's text for the same event, when known; a
-/// [`tls_rejection`] in it is [`ErrorClass::Fatal`].
+/// [`KafkaError::MessageConsumptionFatal`] is [`ErrorClass::Fatal`] whatever
+/// its code: librdkafka has failed the client. `text` is the error callback's
+/// text for the same event, when known; a [`tls_rejection`] in it is
+/// [`ErrorClass::Fatal`].
 pub(crate) fn classify_poll_error(
     err: &KafkaError,
     after_startup: bool,
     text: Option<&str>,
 ) -> ErrorClass {
+    if let KafkaError::MessageConsumptionFatal(_) = err {
+        return ErrorClass::Fatal;
+    }
     match err.rdkafka_error_code() {
         Some(code) if text.is_some_and(|text| tls_rejection(code, text)) => ErrorClass::Fatal,
         Some(code) => classify_consumer_error(code, after_startup),
@@ -259,6 +264,16 @@ mod tests {
         ] {
             assert!(!tls_rejection(code, text), "{code:?}: {text}");
         }
+    }
+
+    /// A poll error librdkafka marks fatal is fatal, whatever its code.
+    /// Regression for #727.
+    #[test]
+    fn a_fatal_poll_error_is_fatal() {
+        let err = KafkaError::MessageConsumptionFatal(C::FencedInstanceId);
+        assert_eq!(classify_poll_error(&err, true, None), ErrorClass::Fatal);
+        let err = KafkaError::MessageConsumption(C::FencedInstanceId);
+        assert_eq!(classify_poll_error(&err, true, None), ErrorClass::Retryable);
     }
 
     /// A poll error is fatal on a rejection in its callback text, and keeps

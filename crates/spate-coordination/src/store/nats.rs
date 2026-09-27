@@ -204,9 +204,13 @@ impl NatsConfig {
             ));
         }
         if self.tls.is_some()
-            && let Some(i) = self.servers.iter().position(|s| is_plain_websocket(s))
+            && let Some(i) = self.servers.iter().position(|s| {
+                s.parse::<async_nats::ServerAddr>()
+                    .is_ok_and(|addr| addr.scheme() == "ws")
+            })
         {
-            // Named by index: a server URL can carry credentials.
+            // Parsed as the client parses it, so every spelling it connects as
+            // `ws` is caught. Named by index: a server URL can carry credentials.
             return Err(StoreError::Fatal(format!(
                 "nats.servers[{i}] is a ws:// server, which never uses TLS; use wss://, \
                  or remove nats.tls"
@@ -214,19 +218,6 @@ impl NatsConfig {
         }
         Ok(())
     }
-}
-
-/// Whether `server` has the `ws` scheme once URL parsing has stripped
-/// surrounding whitespace and control characters and inner tabs and newlines.
-fn is_plain_websocket(server: &str) -> bool {
-    let cleaned: String = server
-        .trim_matches(|c: char| c <= ' ')
-        .chars()
-        .filter(|c| !matches!(c, '\t' | '\r' | '\n'))
-        .collect();
-    cleaned
-        .split_once("://")
-        .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("ws"))
 }
 
 struct Buckets {
@@ -789,6 +780,7 @@ mod tests {
             (&["ws://nats-1.internal:8080"][..], 0),
             (&["WS://nats-1.internal:8080"], 0),
             (&[" ws://nats-1.internal:8080\n"], 0),
+            (&["ws:nats-1.internal:8080/?next=nats://x"], 0),
             (
                 &["wss://nats-0.internal:443", "ws://nats-1.internal:8080"],
                 1,

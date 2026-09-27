@@ -50,7 +50,33 @@ impl Shim {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         me.fixture("git.tags", &format!("{TAG}\nv0.1.0\n"));
+        me.shows(
+            "Cargo.toml",
+            &format!("[workspace.package]\nversion = \"{TREE}\"\n"),
+        );
         me
+    }
+
+    /// Serves one file of `HEAD` to `git show HEAD:<path>`.
+    fn shows(&self, path: &str, body: &str) -> &Self {
+        self.fixture(
+            &format!("git.show.HEAD_{}", path.replace(['/', ':'], "_")),
+            body,
+        )
+    }
+
+    /// Serves `changelog.d/` at `HEAD` holding one fragment.
+    fn fragment(&self, name: &str, body: &str) -> &Self {
+        self.fixture("git.fragments", &format!("changelog.d/{name}\n"));
+        self.shows(&format!("changelog.d/{name}"), body)
+    }
+
+    /// Serves a fragment announcing a break.
+    fn announced(&self) -> &Self {
+        self.fragment(
+            "moved.changed.md",
+            "**Breaking:** **A method moves** (`spate-core`)\n",
+        )
     }
 
     /// Writes one fixture the shims read.
@@ -137,11 +163,19 @@ printf '\n' >>"$SPATE_LOG.git"
 case "$1" in
 tag) if [ -f "$SPATE_FIX/git.tags" ]; then cat "$SPATE_FIX/git.tags"; fi; exit 0 ;;
 ls-tree)
+  if [ "$3" = HEAD ]; then
+    if [ -f "$SPATE_FIX/git.fragments" ]; then cat "$SPATE_FIX/git.fragments"; fi
+    exit 0
+  fi
   if [ -f "$SPATE_FIX/git.lstree" ]; then cat "$SPATE_FIX/git.lstree"; fi
   if [ -f "$SPATE_FIX/git.lstree.ok" ]; then exit 0; fi
   printf 'fatal: not a tree object\n' >&2
   exit 128 ;;
-log) if [ -f "$SPATE_FIX/git.log" ]; then cat "$SPATE_FIX/git.log"; fi; exit 0 ;;
+show)
+  f="$SPATE_FIX/git.show.$(printf '%s' "$2" | tr '/:' '__')"
+  if [ -f "$f" ]; then cat "$f"; exit 0; fi
+  printf 'fatal: path does not exist\n' >&2
+  exit 128 ;;
 esac
 exit 0
 "#;
@@ -167,12 +201,9 @@ fn xtask(shim: &Shim, args: &[&str], env: &[(&str, &str)]) -> Output {
         .env("PATH", path)
         .env("SPATE_LOG", shim.0.join("argv"))
         .env("SPATE_FIX", shim.0.join("fix"))
-        // The annotation prefix would otherwise depend on the host, and the
-        // marker scan on whatever the caller's own event set.
+        // The annotation prefix would otherwise depend on the host.
         .env_remove("GITHUB_ACTIONS")
         .env_remove("GITHUB_OUTPUT")
-        .env_remove("PR_TITLE")
-        .env_remove("BASE_SHA")
         .env_remove("SPATE_CARGO_CODES")
         .env_remove("SPATE_CARGO_NOISE");
     for (k, v) in env {
@@ -463,15 +494,13 @@ fn the_children_carry_the_arguments_the_gate_depends_on() {
 #[test]
 fn a_broken_batch_is_attributed_crate_by_crate() {
     let shim = Shim::new("attribute");
+    shim.announced();
     shim.published("spate-core", &[("0.1.0", false)]);
     shim.published("spate-s3", &[("0.1.0", false)]);
     let out = xtask(
         &shim,
         &["--against-registry", "--packages", "spate-core spate-s3"],
-        &[
-            ("SPATE_CARGO_CODES", "100 0 100"),
-            ("PR_TITLE", "feat!: an announced break"),
-        ],
+        &[("SPATE_CARGO_CODES", "100 0 100")],
     );
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     let calls = shim.calls("cargo");
@@ -495,15 +524,12 @@ fn a_broken_batch_is_attributed_crate_by_crate() {
 #[test]
 fn an_attribution_run_reports_only_its_verdict() {
     let shim = Shim::new("attribute-quiet");
+    shim.announced();
     shim.published("spate-core", &[(TREE, false)]);
     let out = xtask(
         &shim,
         &["--against-registry", "--packages", "spate-core"],
-        &[
-            ("SPATE_CARGO_CODES", "100 100"),
-            ("SPATE_CARGO_NOISE", "1"),
-            ("PR_TITLE", "feat!: an announced break"),
-        ],
+        &[("SPATE_CARGO_CODES", "100 100"), ("SPATE_CARGO_NOISE", "1")],
     );
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     assert_eq!(
@@ -565,13 +591,14 @@ fn an_error_while_attributing_fails_the_run() {
 #[test]
 fn a_crate_the_tree_lost_is_breaking() {
     let shim = Shim::new("removed");
+    shim.announced();
     shim.published("spate-core", &[(TREE, false)]);
     shim.fixture("git.lstree", "spate-core\nspate-ghost\n");
     shim.fixture("git.lstree.ok", "");
     let out = xtask(
         &shim,
         &["--against-registry", "--packages", "spate-core"],
-        &[("PR_TITLE", "feat!: drop a crate")],
+        &[],
     );
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     assert!(
@@ -583,7 +610,9 @@ fn a_crate_the_tree_lost_is_breaking() {
     let ls = shim
         .calls("git")
         .into_iter()
-        .find(|c| c.first().is_some_and(|a| a == "ls-tree"))
+        .find(|c| {
+            c.first().is_some_and(|a| a == "ls-tree") && c.get(2).is_some_and(|a| a != "HEAD")
+        })
         .unwrap();
     assert_eq!(ls, ["ls-tree", "--name-only", &format!("{TAG}:crates")]);
 }
@@ -612,12 +641,13 @@ fn a_tag_naming_no_crate_tree_reports_no_removal() {
 #[test]
 fn a_partial_crate_listing_is_read() {
     let shim = Shim::new("partial-tree");
+    shim.announced();
     shim.published("spate-core", &[(TREE, false)]);
     shim.fixture("git.lstree", "spate-ghost\n");
     let out = xtask(
         &shim,
         &["--against-registry", "--packages", "spate-core"],
-        &[("PR_TITLE", "feat!: drop a crate")],
+        &[],
     );
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     assert!(
@@ -630,161 +660,107 @@ fn a_partial_crate_listing_is_read() {
     assert_eq!(stderr(&out), "");
 }
 
-// ── The marker excuse ──────────────────────────────────────────────────
+// ── The announcement ───────────────────────────────────────────────────
 
-/// The title alone announces this pull request's own break, and the log is not
-/// read once it does.
+/// A fragment at `HEAD` opening with `**Breaking:**` excuses a break, and is
+/// read through `git` at `HEAD`.
 #[test]
-fn the_title_marker_excuses_a_break() {
-    let shim = Shim::new("title-marker");
+fn a_breaking_fragment_excuses_a_break() {
+    let shim = Shim::new("fragment");
+    shim.announced();
     shim.published("spate-core", &[(TREE, false)]);
     let out = xtask(
         &shim,
         &["--against-registry", "--packages", "spate-core"],
-        &[
-            ("SPATE_CARGO_CODES", "100 100"),
-            ("PR_TITLE", "fix(spate-core)!: drop a method"),
-        ],
+        &[("SPATE_CARGO_CODES", "100 100")],
     );
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     assert!(
         stdout(&out).ends_with(
             "semver-checks: breaking against the registry: spate-core\n  \
-             The title carries the marker; the next release derives as a minor.\n"
+             A changelog fragment announces a break in this release; the next release derives as a minor.\n"
         ),
         "{}",
         stdout(&out)
     );
+    let git = shim.calls("git");
     assert!(
-        !shim
-            .calls("git")
-            .iter()
-            .any(|c| c.first().is_some_and(|a| a == "log")),
-        "the log was scanned although the title announced the break"
+        git.iter()
+            .any(|c| c == &["ls-tree", "--name-only", "HEAD", "changelog.d/"]),
+        "{git:?}"
+    );
+    assert!(
+        git.iter()
+            .any(|c| c == &["show", "HEAD:changelog.d/moved.changed.md"]),
+        "{git:?}"
     );
 }
 
-/// A marker anywhere in the log since the last tag excuses a break, and the
-/// scan ends at the base tip. Scanning to `HEAD` would read this branch's own
-/// subjects, which squash into body lines the release derivation reads as
-/// plain.
+/// A fragment that does not open with the marker announces nothing.
 #[test]
-fn a_marker_since_the_last_tag_excuses_a_break() {
-    let shim = Shim::new("log-marker");
-    shim.published("spate-core", &[(TREE, false)]);
-    shim.fixture(
-        "git.log",
-        "chore: a subject\n\nfeat(spate)!: an earlier break\n",
+fn a_plain_fragment_does_not_excuse_a_break() {
+    let shim = Shim::new("plain-fragment");
+    shim.fragment(
+        "moved.changed.md",
+        "**A method moves** (`spate-core`)\n\n**Breaking:** in prose.\n",
     );
+    shim.published("spate-core", &[(TREE, false)]);
     let out = xtask(
         &shim,
         &["--against-registry", "--packages", "spate-core"],
-        &[
-            ("SPATE_CARGO_CODES", "100 100"),
-            ("PR_TITLE", "fix(spate-core): drop a method"),
-            ("BASE_SHA", "0123456789ab"),
-        ],
+        &[("SPATE_CARGO_CODES", "100 100")],
     );
-    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
-    assert!(
-        stdout(&out).ends_with(&format!(
-            "  A marker since {TAG} already announces it; the next release derives as a minor.\n"
-        )),
-        "{}",
-        stdout(&out)
-    );
-    let log = shim
-        .calls("git")
-        .into_iter()
-        .find(|c| c.first().is_some_and(|a| a == "log"))
-        .unwrap();
-    assert_eq!(
-        log,
-        [
-            "log",
-            "--no-merges",
-            "--format=%B",
-            &format!("{TAG}..0123456789ab")
-        ]
-    );
+    assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
 }
 
-/// With no base tip the scan runs to `HEAD`, so a run off a pull request still
-/// reads a range.
+/// Between a release merge and its tag the fragments are consumed, and the
+/// section the release wrote announces the break.
 #[test]
-fn an_absent_base_tip_scans_to_head() {
-    for base in [None, Some("")] {
-        let shim = Shim::new("head-scan");
-        shim.published("spate-core", &[(TREE, false)]);
-        let mut env = vec![("SPATE_CARGO_CODES", "100 100")];
-        if let Some(base) = base {
-            env.push(("BASE_SHA", base));
-        }
-        let out = xtask(
-            &shim,
-            &["--against-registry", "--packages", "spate-core"],
-            &env,
-        );
-        assert_eq!(out.status.code(), Some(1), "{base:?}");
-        let log = shim
-            .calls("git")
-            .into_iter()
-            .find(|c| c.first().is_some_and(|a| a == "log"))
-            .unwrap();
-        assert_eq!(log[3], format!("{TAG}..HEAD"), "{base:?}");
-    }
+fn a_release_awaiting_its_tag_excuses_through_its_section() {
+    let shim = Shim::new("awaiting-tag");
+    shim.shows("Cargo.toml", "[workspace.package]\nversion = \"0.3.0\"\n");
+    shim.shows(
+        "CHANGELOG.md",
+        "# Changelog\n\n## [Unreleased]\n\n## [0.3.0] - 2026-09-30\n\n- **Breaking:** **A method moves**\n\n## [0.2.0] - 2026-08-23\n",
+    );
+    shim.published("spate-core", &[(TREE, false)]);
+    let out = xtask(
+        &shim,
+        &["--against-registry", "--packages", "spate-core"],
+        &[("SPATE_CARGO_CODES", "100 100")],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
 }
 
 /// A break nobody announced fails, and both lines reach stdout as workflow
 /// annotations.
 #[test]
-fn a_break_with_no_marker_anywhere_fails() {
-    let shim = Shim::new("no-marker");
+fn a_break_nothing_announces_fails() {
+    let shim = Shim::new("unannounced");
     shim.published("spate-core", &[(TREE, false)]);
-    shim.fixture("git.log", "chore: nothing announced\n");
     let out = xtask(
         &shim,
         &["--against-registry", "--packages", "spate-core"],
-        &[
-            ("SPATE_CARGO_CODES", "100 100"),
-            ("PR_TITLE", "fix(spate-core): drop a method"),
-        ],
+        &[("SPATE_CARGO_CODES", "100 100")],
     );
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(stderr(&out), "");
     assert!(
-        stdout(&out).ends_with(&format!(
-            "::error::Breaking against the registry with no marker since {TAG}: spate-core\n\
-             ::error::The release derivation reads the log for the marker, so this break would \
-             under-bump the next version. Land a commit carrying `!` in its subject and a \
-             changelog fragment opening with **Breaking:**.\n"
-        )),
+        stdout(&out).ends_with(
+            "::error::Breaking against the registry, and nothing in this release announces a break: spate-core\n\
+             ::error::The release derivation reads changelog.d/ for a fragment opening with \
+             **Breaking:**, so this break would under-bump the next version. Add one saying what \
+             breaks and what somebody upgrading has to change.\n"
+        ),
         "{}",
         stdout(&out)
     );
 }
 
-/// A title is matched against and never evaluated, so shell syntax inside one
-/// is text.
+/// With no release tag the version cannot be ahead of one, so only a fragment
+/// announces the break.
 #[test]
-fn a_title_is_matched_and_never_evaluated() {
-    let shim = Shim::new("title-text");
-    shim.published("spate-core", &[(TREE, false)]);
-    shim.fixture("git.log", "chore: nothing announced\n");
-    let canary = shim.0.join("canary");
-    let title = format!("$(touch {}) `id` feat!: x", canary.display());
-    let out = xtask(
-        &shim,
-        &["--against-registry", "--packages", "spate-core"],
-        &[("SPATE_CARGO_CODES", "100 100"), ("PR_TITLE", &title)],
-    );
-    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
-    assert!(!canary.exists(), "the title was evaluated");
-}
-
-/// A break with no release tag leaves nothing to scan, so the run fails.
-#[test]
-fn a_break_with_no_tag_to_scan_fails() {
+fn a_break_with_no_tag_needs_a_fragment() {
     let shim = Shim::new("no-tag-break");
     shim.fixture("git.tags", "");
     shim.published("spate-core", &[(TREE, false)]);
@@ -793,11 +769,18 @@ fn a_break_with_no_tag_to_scan_fails() {
         &["--against-registry", "--packages", "spate-core"],
         &[("SPATE_CARGO_CODES", "100 100")],
     );
-    assert_eq!(out.status.code(), Some(1));
-    assert_eq!(
-        stderr(&out),
-        "xtask: breaking changes found but no vX.Y.Z tag to scan for their markers\n"
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+
+    let shim = Shim::new("no-tag-announced");
+    shim.fixture("git.tags", "");
+    shim.announced();
+    shim.published("spate-core", &[(TREE, false)]);
+    let out = xtask(
+        &shim,
+        &["--against-registry", "--packages", "spate-core"],
+        &[("SPATE_CARGO_CODES", "100 100")],
     );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
 }
 
 // ── The selection ──────────────────────────────────────────────────────

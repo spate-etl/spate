@@ -5,8 +5,8 @@ name: CI
 on:
   push:
     branches: [main]
-  # `edited` re-runs the changelog gate: it reads the pull request *title*, and
-  # a retitle after a green run would land unchecked. The opt-in `ci: docker`
+  # `edited` re-runs the title and changelog gates: they read the pull request
+  # title and body, and a retitle after a green run would land unchecked. The opt-in `ci: docker`
   # and `ci: bench` labels take effect on the branch's next push. `ci.yml`
   # classifies each run from the event that triggered it, so a manual re-run of
   # an already-started run carries the labels that run started with.
@@ -167,11 +167,20 @@ jobs:
           shared-key: xtask
           cache-save: never
 
+      # The title is the squash subject on `main`. Each step reports on its
+      # own, so one failure does not hide the other.
       - env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: cargo xtask tidy title
+
+      - if: ${{ !cancelled() }}
+        env:
           EVENT_NAME: ${{ github.event_name }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
         run: cargo xtask tidy changelog
 
@@ -182,18 +191,13 @@ jobs:
   # moves only at a release, which is what tokio, hyper, diesel and rustls all
   # compare against.
   #
-  # A finding passes with a notice when the title carries the `!` marker. The
-  # squash subject is the title, and the marker there is what the release
-  # derivation reads, so `edited` in this workflow's triggers re-runs the gate
-  # on a retitle. A finding also passes when a commit since the last tag
-  # already carries a marker, because the break it names has already landed
-  # and is already announced.
-  #
-  # That second excuse is workspace-wide. After the first announced break of a
-  # release cycle, a later pull request breaking a different crate passes here
-  # without a marker of its own; the version still derives as a minor and the
-  # fragment for that second break is what goes missing. This is the trade the
-  # published baseline carries and it is taken deliberately.
+  # A finding passes with a notice when a changelog fragment opening with
+  # `**Breaking:**` is in the tree, which is what the release derivation reads.
+  # The excuse is workspace-wide. After the first announced break of a release
+  # cycle, a later pull request breaking a different crate passes here without
+  # a fragment of its own; the version still derives as a minor and the
+  # release note for that second break is what goes missing. This is the trade
+  # the published baseline carries and it is taken deliberately.
   #
   # The set comes from the CI selector's reverse-dependency closure over the
   # changed crates, which is why a change confined to one connector no longer
@@ -214,8 +218,7 @@ jobs:
           df -h /
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # The tags and every commit since the newest one: the marker scan
-          # reads that range, and the base tip ends it.
+          # The tags: the newest names the baseline and the crates it published.
           fetch-depth: 0
           persist-credentials: false
       - uses: ./.github/actions/setup-rust
@@ -241,8 +244,6 @@ jobs:
           key: ${{ steps.baseline-key.outputs.key }}
 
       - env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
           # Crate names this workflow computed, not event data. The gate
           # rejects anything that is not a directory under crates/.
           SEMVER_PKGS: ${{ needs.changes.outputs.semver-pkgs }}
@@ -326,7 +327,7 @@ jobs:
     if: >-
       github.event_name == 'push' &&
       needs.changes.outputs.manifests == 'true' &&
-      !startsWith(github.event.head_commit.message, 'chore: release v')
+      !startsWith(github.event.head_commit.message, 'release: v')
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -344,7 +345,7 @@ jobs:
           # The dry run refuses a dirty worktree.
           git config user.name 'spate-release[bot]'
           git config user.email 'spate-release[bot]@users.noreply.github.com'
-          git commit --all --quiet --message "chore: simulate the release bump to $next"
+          git commit --all --quiet --message "workspace: simulate the release bump to $next"
 
       # The dry run cannot see these: it packages a crate with no description
       # or license with a warning and exit 0, while the upload rejects it

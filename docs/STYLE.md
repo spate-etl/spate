@@ -282,7 +282,7 @@ Everywhere:
 - **Present-tense declarative.** "Unknown fields are rejected", not "will be".
 - **The page reads as the present, never as a changelog.** No "now", "recently",
   "as of", "has been changed to". If something moved, the page describes what
-  is and the commit message says what moved. (§ 9 suspends this for `docs/adr/`.)
+  is and the pull request says what moved. (§ 9 suspends this for `docs/adr/`.)
 - **Adding an item to a list is an insertion, never an edit to the sentence
   above it.** Prose must not restate what the structure beside it already
   carries. The count is the usual breach: "the framework owns four typed

@@ -13,7 +13,7 @@ updates:
     open-pull-requests-limit: 4
     labels: ["dependencies", "area: workspace"]
     commit-message:
-      prefix: "chore(workspace)"
+      prefix: "workspace"
 
     cooldown:
       default-days: 7
@@ -80,7 +80,7 @@ updates:
     open-pull-requests-limit: 1
     labels: ["dependencies", "area: ci"]
     commit-message:
-      prefix: "chore(ci)"
+      prefix: "ci"
 
   # ------------------------------------------------------- GitHub Actions ----
   - package-ecosystem: github-actions
@@ -96,7 +96,7 @@ updates:
     open-pull-requests-limit: 3
     labels: ["dependencies", "area: ci"]
     commit-message:
-      prefix: "chore(ci)"
+      prefix: "ci"
     # `default-days` only. The semver-*-days keys are unsupported for this
     # ecosystem and for docker.
     cooldown:
@@ -117,7 +117,7 @@ updates:
       day: wednesday
     labels: ["dependencies", "area: website"]
     commit-message:
-      prefix: "chore(website)"
+      prefix: "website"
     cooldown:
       default-days: 3
 
@@ -130,7 +130,7 @@ updates:
     open-pull-requests-limit: 3
     labels: ["dependencies", "area: website"]
     commit-message:
-      prefix: "chore(website)"
+      prefix: "website"
     cooldown:
       default-days: 7
       # 0.x packages here too, so semver-minor-days reaches them as above.
@@ -174,7 +174,7 @@ updates:
     open-pull-requests-limit: 3
     labels: ["dependencies", "area: examples"]
     commit-message:
-      prefix: "chore(examples)"
+      prefix: "examples"
     # `default-days` only, as for github-actions above.
     cooldown:
       default-days: 7
@@ -202,7 +202,7 @@ updates:
     open-pull-requests-limit: 2
     labels: ["dependencies", "area: ci"]
     commit-message:
-      prefix: "chore(ci)"
+      prefix: "ci"
     cooldown:
       default-days: 7
     # One pull request for both lanes: the same image under two policies.
@@ -228,6 +228,6 @@ updates:
     open-pull-requests-limit: 1
     labels: ["dependencies", "area: ci"]
     commit-message:
-      prefix: "chore(ci)"
+      prefix: "ci"
     cooldown:
       default-days: 7

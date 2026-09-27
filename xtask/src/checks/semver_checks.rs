@@ -5,25 +5,16 @@
 //! error, so a workflow expression that resolves to nothing fails the gate.
 //!
 //! The published release is the baseline a version number is a claim about, and
-//! it moves only at a release. A break is expected once an announced one has
-//! landed, so a finding passes when the pull request title carries the
-//! conventional marker, or when a commit since the last tag already carries
-//! one. That second excuse is workspace-wide: after the first announced break
-//! of a release cycle, a later pull request breaking a different crate passes
-//! with no marker of its own. The version still derives as a minor, and the
-//! fragment and release-note line for that second break are given up.
+//! it moves only at a release. A break is expected once one is announced, so a
+//! finding passes when the release being prepared announces a breaking change:
+//! a fragment opening with `**Breaking:**`. That excuse is workspace-wide:
+//! after the first announced break of a release cycle, a later pull request
+//! breaking a different crate passes with no fragment of its own. The version
+//! still derives as a minor, and the release note for that second break is
+//! given up.
 //!
 //! Pre-1.0 a breaking change ships in a minor bump, so the gate exists to force
-//! the announcement. A finding with no marker fails, and retitling re-runs it.
-//!
-//! Two variables shape the marker scan, both set on a pull request and absent
-//! elsewhere:
-//!
-//! - `BASE_SHA` ends the scan. Scanning to `HEAD` would read this branch's own
-//!   commit subjects, which squash into body lines the release derivation
-//!   classifies as plain.
-//! - `PR_TITLE` is free text somebody typed. It is matched against, and never
-//!   evaluated or passed to a shell.
+//! the announcement. A finding with nothing announcing a break fails.
 
 use std::ffi::OsStr;
 use std::path::Path;
@@ -55,31 +46,6 @@ fn classify_exit(code: i32) -> Verdict {
         100 => Verdict::Breaking,
         _ => Verdict::Error,
     }
-}
-
-/// Whether a subject carries the conventional breaking marker, the shape the
-/// release derivation reads the bump from.
-///
-/// Matches `^[a-zA-Z]+(\([^)]*\))?!:` against the whole string, so a newline
-/// inside a scope is part of it.
-fn subject_is_breaking(subject: &str) -> bool {
-    let after_type = subject.trim_start_matches(|c: char| c.is_ascii_alphabetic());
-    if after_type.len() == subject.len() {
-        return false;
-    }
-    let after_scope = match after_type.strip_prefix('(') {
-        // An unterminated scope leaves the optional group unmatched.
-        Some(inner) => inner
-            .find(')')
-            .map_or(after_type, |close| &inner[close + 1..]),
-        None => after_type,
-    };
-    after_scope.starts_with("!:")
-}
-
-/// Whether any line of a commit log carries the marker.
-fn log_has_marker(log: &str) -> bool {
-    log.split('\n').any(subject_is_breaking)
 }
 
 /// A crate's path in the sparse index. The scheme keys on name length, and the
@@ -147,7 +113,7 @@ fn split_reply(raw: &str) -> (&str, &str) {
 
 /// The workspace version, from the root manifest's own `version` key. Several
 /// matching lines join on newlines, as a capture of the same search would.
-fn workspace_version(manifest: &str) -> String {
+pub(crate) fn workspace_version(manifest: &str) -> String {
     manifest
         .split('\n')
         .filter_map(|line| line.strip_prefix("version = \"")?.strip_suffix('"'))
@@ -450,42 +416,24 @@ fn removed_since(root: &Path, tag: &str) -> Vec<String> {
         .collect()
 }
 
-/// Reports a break, passing it where a marker already announces it.
+/// Reports a break, passing it where the release being prepared announces one.
 fn verdict(root: &Path, breaking: &[String]) -> Outcome {
     let list: String = breaking.iter().map(|b| format!(" {b}")).collect();
-    let last = last_tag(root)?;
-    if last.is_empty() {
-        return Err(Error::msg(
-            "breaking changes found but no vX.Y.Z tag to scan for their markers",
-        ));
-    }
-
-    // This pull request's own announcement is its title and nothing else: the
-    // squash subject is the title, and a constituent subject inside a squash
-    // body is not a subject the release derivation reads.
-    if subject_is_breaking(&std::env::var("PR_TITLE").unwrap_or_default()) {
-        println!("{TOOL}: breaking against the registry:{list}");
-        println!("  The title carries the marker; the next release derives as a minor.");
-        return Ok(());
-    }
-
-    let base = std::env::var("BASE_SHA").unwrap_or_default();
-    let base = if base.is_empty() { "HEAD" } else { &base };
-    let step =
-        Step::new("git", ["log", "--no-merges", "--format=%B"]).arg(format!("{last}..{base}"));
-    if log_has_marker(&run::capture(root, &step)?) {
+    if crate::checks::changelog::breaking_announced(root)? {
         println!("{TOOL}: breaking against the registry:{list}");
         println!(
-            "  A marker since {last} already announces it; the next release derives as a minor."
+            "  A changelog fragment announces a break in this release; the next release derives as a minor."
         );
         return Ok(());
     }
 
-    println!("::error::Breaking against the registry with no marker since {last}:{list}");
     println!(
-        "::error::The release derivation reads the log for the marker, so this break would \
-         under-bump the next version. Land a commit carrying `!` in its subject and a changelog \
-         fragment opening with **Breaking:**."
+        "::error::Breaking against the registry, and nothing in this release announces a break:{list}"
+    );
+    println!(
+        "::error::The release derivation reads changelog.d/ for a fragment opening with \
+         **Breaking:**, so this break would under-bump the next version. Add one saying what \
+         breaks and what somebody upgrading has to change."
     );
     Err(Error::status(1))
 }

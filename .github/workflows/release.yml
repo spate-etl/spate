@@ -16,9 +16,10 @@ on:
     inputs:
       version:
         description: >-
-          The version to release, as X.Y.Z. Checked against the derivation
-          from history: any breaking marker since the last tag means a minor
-          bump, anything else a patch. The run fails when the two disagree.
+          The version to release, as X.Y.Z. Checked against the derivation:
+          a changelog fragment opening with **Breaking:**, or a raised
+          rust-version, means a minor bump, anything else a patch. The run
+          fails when the two disagree.
         required: true
         type: string
   push:
@@ -89,7 +90,7 @@ jobs:
     # environment writes a deployment record, one per push to main otherwise.
     if: >-
       github.event_name == 'push' &&
-      startsWith(github.event.head_commit.message, 'chore: release v') &&
+      startsWith(github.event.head_commit.message, 'release: v') &&
       vars.RELEASE_APP_ID != ''
     # A second run started mid-publish could tag a version the first is still
     # uploading; `cancel-in-progress` stays false so a publish finishes. The

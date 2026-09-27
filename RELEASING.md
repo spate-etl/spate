@@ -34,10 +34,9 @@ gh workflow run release.yml -f version=0.3.0
 ```
 
 The workflow derives the version independently and fails when the two
-disagree: any commit since the last tag whose subject carries the breaking
-`!`, or a `rust-version` move, means a minor bump; anything else means a
-patch. The `!` is the only marker the derivation reads, so a
-`BREAKING CHANGE` footer on its own derives a patch.
+disagree: a changelog fragment that opens with `**Breaking:**`, or a
+`rust-version` raise since the last tag, means a minor bump; anything else
+means a patch. Commit subjects play no part.
 `./scripts/release-version.sh --derive` prints the same answer locally.
 
 Everything after the input runs unattended. The release pull request
@@ -60,7 +59,7 @@ from the version input, in one commit on `release/vX.Y.Z`:
 | `CHANGELOG.md`, fragments consumed | `cargo xtask changelog build` |
 | `THIRD-PARTY.md` | `cargo xtask attribution`, as a drift backstop |
 
-The pull request it opens is titled `chore: release vX.Y.Z`, labeled
+The pull request it opens is titled `release: vX.Y.Z`, labeled
 `release`, and set to auto-merge. Re-dispatching the same version refreshes
 it, which is the path for a fragment that landed after the first dispatch; a
 dispatch at a different version supersedes and closes it.
@@ -230,8 +229,10 @@ rather than on each release:
   until the publisher configuration is updated to match.
 - **The `main` ruleset and merge settings**: pull requests only, no bypass
   actors, squash as the only merge method with the pull request title as the
-  subject, and auto-merge enabled. The publish trigger reads the squash
-  subject, so the merge-method setting is load-bearing.
+  subject and a blank body (`squash_merge_commit_message=BLANK`), and
+  auto-merge enabled. The publish trigger reads the squash subject, so the
+  merge-method setting is load-bearing. No other title can start with
+  `release: v`, because the title gate reserves it for `release: vX.Y.Z`.
 - **The `code-scanning` ruleset**, which requires CodeQL results on `main` and
   names the `spate-release` App as its only bypass actor. The rule blocks a
   merge while an analysis is pending, and the bypass is what lets the release

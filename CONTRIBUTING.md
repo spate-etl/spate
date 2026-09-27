@@ -23,7 +23,7 @@ and never goes in an issue; see [Security and legal](#security-and-legal).
 The default suites need a recent stable Rust toolchain and nothing else.
 `rust-version` in `Cargo.toml` declares the MSRV, and everything that needs the
 number reads it from there. CI holds the crates to that floor. Moving it edits
-that one line, plus a changelog fragment like any other crate-scoped `build`.
+that one line, plus a changelog fragment, which the changelog gate asks for.
 
 ```sh
 cargo xtask ci       # everything a pull request must pass
@@ -61,20 +61,43 @@ CI on a pull request from a fork waits for an explicit approval before it runs. 
 workflow runs as it exists in the pull request, so an unreviewed run is an
 unreviewed change to what CI proves. It costs you one round-trip.
 
-Commits follow [Conventional Commits](https://www.conventionalcommits.org),
-scoped to the crate touched: `fix(spate-kafka): …`, comma-separated for several,
-and `workspace`, `ci`, `docs`, `examples`, `bench` or `website` for the areas
-that are not crates. Breaking changes carry `!`. Messages should make sense to
-somebody who was not in the conversation: say what changed and why, not which
-iteration of a plan it belongs to.
+A subject names one area and says what the change does, in at most 72
+characters:
 
-A change that reaches a crate and that somebody upgrading would care about also
-needs a **changelog fragment**: a `feat`, `fix`, `perf`, `revert` or `build`, and
-anything carrying `!` whatever its scope. Scoping to one of the areas that is not
-a crate is the exemption; leaving the scope off is not.
-`cargo xtask changelog new fixed …` scaffolds one,
+```text
+kafka: start a partition's fetcher before its lane is handed out
+core: `Clock` moves into spate_core::clock
+```
+
+The area is a crate's directory name without the `spate-` prefix (`core`,
+`kafka`, `clickhouse-derive`, and `spate` for the facade crate), or one of
+`workspace`, `ci`, `docs`, `examples`, `bench` and `website`. Name the area
+whose behavior the change is about; the docs and tests that come with it do not
+add a second one, and a change across crates is `workspace`. The description
+starts lowercase unless it opens with a `code` reference, and has no trailing
+period. `release: vX.Y.Z` is reserved for the release pull request. GitHub's
+Revert button titles a pull request `Revert "…"`, which needs a retitle.
+
+The pull request title is the subject that lands. `main` is squash-merged with
+the title as the subject and an empty body, and the merge appends ` (#N)`, so a
+title gets 72 characters less that suffix. `cargo xtask tidy title` checks it
+in CI. Run `cargo xtask hooks install` once per clone, and a commit-msg hook
+applies the same rule to every commit.
+
+A commit body is optional: one line of why where the diff does not show it.
+Branch commits do not reach `main`, so what a reviewer or a later reader needs
+goes in the pull request body. Write it for somebody who was not in the
+conversation, with no reference to a plan or its iterations.
+
+A change to what a crate ships needs a **changelog fragment**. That is anything
+under a crate's `src/`, its `build.rs` or its `Cargo.toml`, and the workspace
+`rust-version`. `cargo xtask changelog new fixed …` scaffolds one,
 [`changelog.d/README.md`](changelog.d/README.md) has the conventions, and
-`cargo xtask tidy changelog` is the gate, so a miss fails CI.
+`cargo xtask tidy changelog` is the gate, so a miss fails CI. When nobody
+upgrading would notice the change, such as a refactor, a unit test or a fix to a
+bug that was never released, put a line reading `Changelog: none` in the pull
+request body. A breaking change is a fragment that opens with `**Breaking:**`,
+and the release derives its minor bump from it.
 
 [`.github/pull_request_template.md`](.github/pull_request_template.md) is the
 body structure. Tick its boxes by exit code, not by memory.

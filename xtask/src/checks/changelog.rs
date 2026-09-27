@@ -1,15 +1,12 @@
 //! The changelog fragments: the gate, the scaffolder that writes one, the
-//! release assembly that consumes them, and one version's notes.
+//! release assembly that consumes them, one version's notes, and whether the
+//! release being prepared announces a breaking change.
 //!
 //! A change somebody upgrading would care about carries a file under
 //! `changelog.d/`, and `changelog.d/README.md` states the format and the
-//! policy. The gate classifies the pull request's title and the branch's own
-//! subjects, and demands a fragment for any of them that reaches a crate. The
-//! assembly runs once, at release, and rewrites `CHANGELOG.md` in place.
-//!
-//! The classifier is an ignore list on both axes: an unrecognized type and an
-//! unrecognized scope each require a fragment. Stated the other way round
-//! ("required iff the scope names a crate") it fails open.
+//! policy. The gate demands a fragment when the branch changes what a crate
+//! ships, unless the pull request says `Changelog: none`. The assembly runs
+//! once, at release, and rewrites `CHANGELOG.md` in place.
 
 use std::path::Path;
 
@@ -34,17 +31,9 @@ const TYPES: &[&str] = &[
     "security",
 ];
 
-/// The scopes that do not reach a crate.
-///
-/// Typed out. The `area:` labels in `.github/labels.yml` also carry
-/// `supply-chain`, and a `fix(supply-chain):` closing an advisory is a release
-/// note. `bench` covers the unpublished bench harness and the `benches/`
-/// targets inside published crates.
-const EXEMPT_SCOPES: &[&str] = &["ci", "docs", "examples", "bench", "workspace", "website"];
-
-/// The types whose subjects say nothing user-visible moved. Every other type
-/// requires a fragment, `feat`, `fix`, `perf`, `revert` and `build` included.
-const INTERNAL_TYPES: &[&str] = &["docs", "test", "chore", "style", "ci", "refactor"];
+/// What a fragment opens with when its change breaks something. The release
+/// derives a minor bump from it.
+const BREAKING: &str = "**Breaking:**";
 
 /// What a new fragment carries until its author writes the entry.
 const TEMPLATE: &str = "\
@@ -65,7 +54,7 @@ Delete this template text and write the entry. If the change is breaking, open
 with `**Breaking:**`. See changelog.d/README.md for the guide and an example.
 ";
 
-/// What the failure prints under the offending subjects.
+/// What the failure prints under the shipped paths.
 const GUIDANCE: &str = "
   Add one with:
 
@@ -74,19 +63,17 @@ const GUIDANCE: &str = "
   and write what the change means for somebody upgrading, not what moved.
   changelog.d/README.md has the format and the conventions.
 
-  If it is not user-visible, say so in the subject. There is no label and
-  no opt-out checkbox for this, and .github/labels.yml says why. The exemption
-  is derived from the type and scope you write:
+  If nobody upgrading would notice, as with a refactor, a test, a doc comment
+  or a fix to a bug that was never released, put this line in the pull
+  request body:
 
-      feat(spate-core): ...  ->  refactor(spate-core): ...  nothing user-facing moved
-      fix(spate-core): ...   ->  test(spate-core): ...      it only touched tests
-      feat(spate-core): ...  ->  feat(docs): ...            it only touched docs
+      Changelog: none
 
-  For a fix to a bug that was never released, put a 'Changelog: none'
-  trailer on the commit.
+  A 'Changelog: none' trailer on a commit of the branch does the same before
+  the pull request exists.";
 
-  The pull request title is what lands on main, since this repository squashes
-  with the title as the subject, so the title is the one that has to be right.";
+/// How many shipped paths a refusal lists before summing up the rest.
+const LISTED: usize = 10;
 
 /// The fields a pull request run reads, all of them free text somebody else
 /// typed.
@@ -99,7 +86,6 @@ struct Fields {
     event: String,
     base_sha: String,
     head_sha: String,
-    title: String,
     body: String,
 }
 
@@ -109,30 +95,9 @@ impl Fields {
             event: var("EVENT_NAME"),
             base_sha: var("BASE_SHA"),
             head_sha: var("HEAD_SHA"),
-            title: var("PR_TITLE"),
             body: var("PR_BODY"),
         }
     }
-}
-
-/// Where a `Changelog: none` trailer is read from.
-///
-/// A trailer excuses the message it is written on. In the pull request body
-/// that is the whole pull request, because the body is what the squash commit
-/// carries; on a commit it is that commit's subject alone.
-#[derive(Clone, PartialEq, Eq, Debug)]
-enum Source {
-    Body,
-    Commit(String),
-}
-
-/// One subject to classify, the phrase naming where it came from, and the
-/// message its excuse would be written on.
-#[derive(Clone, PartialEq, Eq, Debug)]
-struct Subject {
-    text: String,
-    origin: String,
-    source: Source,
 }
 
 /// What the gate compares against.
@@ -140,23 +105,14 @@ struct Subject {
 enum Mode {
     /// The fragment requirement is not evaluated.
     Structure,
-    /// Every subject in `base..head`, where an absent head reads as `HEAD`.
+    /// The change `base..head`, where an absent head reads as the worktree.
     Require { base: String, head: Option<String> },
 }
 
-/// A subject broken into the three fields the classifier reads.
-#[derive(Clone, PartialEq, Eq, Debug)]
-struct Parsed<'a> {
-    kind: &'a str,
-    scopes: &'a str,
-    bang: bool,
-}
-
-/// The gate: classifies every subject this change carries and demands a
-/// fragment for each of them that reaches a crate.
+/// The gate: demands a fragment when the change touches what a crate ships.
 pub(crate) fn check(root: &Path, explain: bool) -> Outcome {
     if explain {
-        println!("(classifies this branch's subjects and reads {FRAGMENTS}/)");
+        println!("(reads the paths this branch changes and {FRAGMENTS}/)");
         return Ok(());
     }
     gate(
@@ -187,9 +143,9 @@ fn gate(root: &Path, fields: &Fields, in_actions: bool, github_event: &str) -> O
         return Err(Error::msg(
             "running on a pull request inside GitHub Actions with no EVENT_NAME, so this\n  \
              would have checked nothing and passed.\n\n  \
-             The job that runs this has to pass EVENT_NAME, BASE_SHA, HEAD_SHA, PR_TITLE and\n  \
-             PR_BODY through `env:`, and its checkout needs `fetch-depth: 0`. See the\n  \
-             `changelog` job in .github/workflows/ci.yml.",
+             The job that runs this has to pass EVENT_NAME, BASE_SHA, HEAD_SHA and PR_BODY\n  \
+             through `env:`, and its checkout needs `fetch-depth: 0`. See the `changelog`\n  \
+             job in .github/workflows/ci.yml.",
         ));
     }
 
@@ -203,26 +159,19 @@ fn gate(root: &Path, fields: &Fields, in_actions: bool, github_event: &str) -> O
     };
 
     let range = format!("{base}..{}", head.as_deref().unwrap_or("HEAD"));
-    let subjects = subjects(root, &range, &fields.title);
+    let shipped = shipped_changes(root, &base, head.as_deref());
+    if shipped.is_empty() {
+        println!("{TOOL}: nothing in {range} changes what a crate ships.");
+        return Ok(());
+    }
+
+    if body_says_none(&fields.body) {
+        println!("{TOOL}: the pull request body says 'Changelog: none'. Taken at its word.");
+        return Ok(());
+    }
     let scratch = Scratch::new("spate-xtask-changelog")?;
-
-    if body_says_none(root, &scratch, &fields.body) {
-        println!("{TOOL}: the pull request body carries a 'Changelog: none' trailer, which");
-        println!(
-            "  is what the squash commit will carry. Taken at its word for this pull request."
-        );
-        return Ok(());
-    }
-
-    let (offenders, excused) = offenders(root, &scratch, &subjects);
-
-    if offenders.is_empty() && excused > 0 {
-        println!("{TOOL}: {excused} subject(s) would require a changelog fragment, and each");
-        println!("  carries a 'Changelog: none' trailer saying it is not user-visible.");
-        return Ok(());
-    }
-    if offenders.is_empty() {
-        println!("{TOOL}: nothing in {range} requires a changelog fragment.");
+    if let Some(sha) = branch_says_none(root, &scratch, &range) {
+        println!("{TOOL}: commit {sha} carries a 'Changelog: none' trailer. Taken at its word.");
         return Ok(());
     }
 
@@ -238,17 +187,20 @@ fn gate(root: &Path, fields: &Fields, in_actions: bool, github_event: &str) -> O
     }
     if added > 0 {
         println!(
-            "{TOOL}: {} subject(s) require a changelog fragment, {added} added.",
-            offenders.len()
+            "{TOOL}: {} shipped file(s) changed, {added} fragment(s) added.",
+            shipped.len()
         );
         return Ok(());
     }
 
-    eprintln!("{TOOL}: these subject(s) say this change is visible to somebody");
-    eprintln!("  upgrading, and no fragment was added under {FRAGMENTS}/:");
+    eprintln!("{TOOL}: this change touches what a crate ships, and no fragment was");
+    eprintln!("  added under {FRAGMENTS}/:");
     eprintln!();
-    for line in &offenders {
-        eprintln!("{line}");
+    for path in shipped.iter().take(LISTED) {
+        eprintln!("    {path}");
+    }
+    if shipped.len() > LISTED {
+        eprintln!("    ... and {} more", shipped.len() - LISTED);
     }
     eprintln!("{GUIDANCE}");
     Err(Error::status(1))
@@ -297,85 +249,12 @@ pub(crate) fn new(root: &Path, explain: bool, kind: &str, slug: &str) -> Outcome
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// The classifier.
-// ---------------------------------------------------------------------------
-
-/// Whether this subject requires a changelog fragment.
-///
-/// Reads the subject line and nothing else. A subject the pattern does not
-/// match requires one.
-fn needs_entry(subject: &str) -> bool {
-    let Some(parsed) = parse_subject(subject) else {
-        return true;
-    };
-
-    // `!` decides on its own, before either axis.
-    if parsed.bang {
-        return true;
-    }
-
-    // Scope axis: can this reach something somebody depends on?
-    let reaches_crate = if parsed.scopes.is_empty() {
-        true
-    } else {
-        scope_list(parsed.scopes)
-            .into_iter()
-            .any(|scope| !in_list(EXEMPT_SCOPES, trim_space(scope)))
-    };
-    if !reaches_crate {
-        return false;
-    }
-
-    // Type axis: would somebody upgrading care?
-    !in_list(INTERNAL_TYPES, &parsed.kind.to_ascii_lowercase())
-}
-
-/// The type, the scope list and the breaking marker of `type(scope)!: text`.
-/// The scope and the marker are optional; the text is required.
-fn parse_subject(subject: &str) -> Option<Parsed<'_>> {
-    let kind_len = subject.bytes().take_while(u8::is_ascii_alphabetic).count();
-    if kind_len == 0 {
-        return None;
-    }
-    let (kind, mut rest) = subject.split_at(kind_len);
-
-    // A scope runs to the first `)`; with none, the whole group is absent and
-    // the `:` has to follow the type.
-    let mut scopes = "";
-    if let Some(open) = rest.strip_prefix('(')
-        && let Some(close) = open.find(')')
-    {
-        scopes = &open[..close];
-        rest = &open[close + 1..];
-    }
-
-    let bang = rest.starts_with('!');
-    if bang {
-        rest = &rest[1..];
-    }
-    rest = rest.strip_prefix(':')?;
-    rest = rest.trim_start_matches(is_space);
-    (!rest.is_empty()).then_some(Parsed { kind, scopes, bang })
-}
-
-/// The scopes of a comma-separated list, where a trailing comma closes the
-/// last one and an empty list has no scopes at all.
-fn scope_list(scopes: &str) -> Vec<&str> {
-    let mut out: Vec<&str> = scopes.split(',').collect();
-    if out.last().is_some_and(|last| last.is_empty()) {
-        out.pop();
-    }
-    out
-}
-
 /// Whether `item` appears in `list` as a space-delimited run.
 fn in_list(list: &[&str], item: &str) -> bool {
     format!(" {} ", list.join(" ")).contains(&format!(" {item} "))
 }
 
-/// Trims the ASCII whitespace a field may carry: `feat( spate-core ):` is legal
-/// conventional-commits.
+/// Trims the ASCII whitespace a field may carry.
 fn trim_space(s: &str) -> &str {
     s.trim_matches(is_space)
 }
@@ -472,87 +351,100 @@ fn var(name: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// The subjects.
+// What the change ships.
 // ---------------------------------------------------------------------------
 
-/// The union of the pull request title and the branch's own subjects, where the
-/// branch can only ever add the requirement.
+/// The changed paths that reach somebody depending on a crate, sorted.
 ///
-/// The title is authoritative, since this repository squashes with it as the
-/// commit subject, and title-only fails open: a pull request titled `chore:
-/// tidy up` carrying a `feat(spate-core)` commit would escape. Merges are left
-/// out, because `Merge branch 'main' into x` is unparseable and an unparseable
-/// subject is not exempt.
-fn subjects(root: &Path, range: &str, title: &str) -> Vec<Subject> {
-    let mut out: Vec<Subject> = title
-        .split('\n')
-        .filter(|line| !line.is_empty())
-        .map(|line| Subject {
-            text: line.to_owned(),
-            origin: "pull request title".to_owned(),
-            source: Source::Body,
-        })
-        .collect();
-
-    let step = Step::new("git", ["log", "--no-merges", "--format=%s%x09%h", range]);
-    let log = match run::complete(root, &step, Streams::Collect) {
+/// A crate's `src/`, `build.rs` and manifest, and the workspace manifest when
+/// its `rust-version` line moved. With no head the worktree is compared, so an
+/// uncommitted edit counts.
+fn shipped_changes(root: &Path, base: &str, head: Option<&str>) -> Vec<String> {
+    let mut step = Step::new("git", ["diff", "--no-ext-diff", "--name-only", base]);
+    if let Some(head) = head {
+        step = step.arg(head);
+    }
+    let listing = match run::complete(root, &step, Streams::Collect) {
         Ok(Completed { code: 0, stdout }) => stdout,
         _ => String::new(),
     };
-    for line in log.split('\n').filter(|line| !line.is_empty()) {
-        let (text, sha) = line.split_once('\t').unwrap_or((line, ""));
-        if text.is_empty() {
-            continue;
-        }
-        out.push(Subject {
-            text: text.to_owned(),
-            origin: format!("commit {sha}"),
-            source: Source::Commit(sha.to_owned()),
-        });
+    let mut out: Vec<String> = listing
+        .split('\n')
+        .filter(|path| ships(path))
+        .map(str::to_owned)
+        .collect();
+    if rust_version_moved(root, base, head) {
+        out.push("Cargo.toml (rust-version)".to_owned());
     }
+    out.sort();
     out
 }
 
-/// The subjects requiring a fragment with nothing excusing them, and how many
-/// a trailer excused.
+/// Whether a path is part of what a published crate ships.
 ///
-/// A trailer on a commit excuses that commit's subject alone, so the pull
-/// request title is never excused here.
-fn offenders(root: &Path, scratch: &Scratch, subjects: &[Subject]) -> (Vec<String>, usize) {
-    let mut offenders = Vec::new();
-    let mut excused = 0;
-    for subject in subjects {
-        if !needs_entry(&subject.text) {
-            continue;
-        }
-        if let Source::Commit(sha) = &subject.source
-            && commit_says_none(root, scratch, sha)
-        {
-            excused += 1;
-            continue;
-        }
-        offenders.push(offender_line(&subject.text, &subject.origin));
-    }
-    (offenders, excused)
-}
-
-/// One offending subject, padded so the origins line up.
-fn offender_line(subject: &str, origin: &str) -> String {
-    let pad = " ".repeat(70usize.saturating_sub(subject.len()));
-    format!("    {subject}{pad} ({origin})")
-}
-
-// ---------------------------------------------------------------------------
-// The `Changelog: none` trailer.
-// ---------------------------------------------------------------------------
-
-/// Whether the pull request body carries `Changelog: none`, which is the
-/// trailer the squash commit will carry.
-fn body_says_none(root: &Path, scratch: &Scratch, body: &str) -> bool {
-    if body.is_empty() {
+/// Every directory under `crates/` is a published crate. Unit tests live
+/// under `src/` and count; `tests/`, `benches/` and `examples/` do not ship.
+fn ships(path: &str) -> bool {
+    let Some((_, inner)) = path
+        .strip_prefix("crates/")
+        .and_then(|rest| rest.split_once('/'))
+    else {
         return false;
+    };
+    inner.starts_with("src/") || inner == "build.rs" || inner == "Cargo.toml"
+}
+
+/// Whether the workspace manifest's `rust-version` line changed.
+fn rust_version_moved(root: &Path, base: &str, head: Option<&str>) -> bool {
+    let mut step = Step::new("git", ["diff", "--no-ext-diff", "--unified=0", base]);
+    if let Some(head) = head {
+        step = step.arg(head);
     }
-    says_none(root, scratch, &format!("{body}\n"))
+    let diff = match run::complete(root, &step.args(["--", "Cargo.toml"]), Streams::Collect) {
+        Ok(Completed { code: 0, stdout }) => stdout,
+        _ => String::new(),
+    };
+    diff_moves_rust_version(&diff)
+}
+
+/// Whether a unified diff adds or removes a `rust-version` line.
+fn diff_moves_rust_version(diff: &str) -> bool {
+    diff.split('\n').any(|line| {
+        (line.starts_with('+') || line.starts_with('-'))
+            && !line.starts_with("+++")
+            && !line.starts_with("---")
+            && line[1..]
+                .trim_start_matches(is_space)
+                .starts_with("rust-version")
+    })
+}
+
+// ---------------------------------------------------------------------------
+// `Changelog: none`.
+// ---------------------------------------------------------------------------
+
+/// Whether the pull request body has a line reading `Changelog: none`, in any
+/// casing.
+///
+/// Matched per line and not as a git trailer: the body ends in the template's
+/// own sections, which would hide a trailer written above them.
+fn body_says_none(body: &str) -> bool {
+    body.split('\n').map(trim_space).any(says_none_line)
+}
+
+/// The first commit in `range` whose message carries a `Changelog: none`
+/// trailer.
+fn branch_says_none(root: &Path, scratch: &Scratch, range: &str) -> Option<String> {
+    let step = Step::new("git", ["log", "--no-merges", "--format=%h", range]);
+    let listing = match run::complete(root, &step, Streams::Collect) {
+        Ok(Completed { code: 0, stdout }) => stdout,
+        _ => String::new(),
+    };
+    listing
+        .split('\n')
+        .filter(|sha| !sha.is_empty())
+        .find(|sha| commit_says_none(root, scratch, sha))
+        .map(str::to_owned)
 }
 
 /// Whether this commit's own message carries `Changelog: none`.
@@ -562,21 +454,14 @@ fn commit_says_none(root: &Path, scratch: &Scratch, sha: &str) -> bool {
         Ok(Completed { code: 0, stdout }) => stdout,
         _ => String::new(),
     };
-    says_none(root, scratch, &message)
-}
-
-/// Whether one message carries `Changelog: none`.
-///
-/// `git interpret-trailers --parse` decides. A body line like `Tests: the two
-/// fault-injection knobs ...` starts a sentence, and a substring search would
-/// read it as a trailer. One message at a time, because interpret-trailers takes
-/// the trailers from the last block of its whole input.
-fn says_none(root: &Path, scratch: &Scratch, message: &str) -> bool {
-    trailer_says_none(&parse_trailers(root, scratch, message))
+    trailer_says_none(&parse_trailers(root, scratch, &message))
 }
 
 /// What `git interpret-trailers --parse` makes of a message, empty where it
 /// could not be asked.
+///
+/// A body line like `Tests: the two fault-injection knobs ...` starts a
+/// sentence, and a substring search would read it as a trailer.
 fn parse_trailers(root: &Path, scratch: &Scratch, message: &str) -> String {
     let path = scratch.join("message");
     if std::fs::write(&path, message).is_err() {
@@ -591,13 +476,16 @@ fn parse_trailers(root: &Path, scratch: &Scratch, message: &str) -> String {
 
 /// Whether a parsed trailer block carries `Changelog: none`, in any casing.
 fn trailer_says_none(parsed: &str) -> bool {
+    parsed.split('\n').any(says_none_line)
+}
+
+/// Whether one line is `Changelog:` followed by `none`, in any casing.
+fn says_none_line(line: &str) -> bool {
     const KEY: &[u8] = b"changelog:";
-    parsed.split('\n').any(|line| {
-        let bytes = line.as_bytes();
-        bytes.len() >= KEY.len()
-            && bytes[..KEY.len()].eq_ignore_ascii_case(KEY)
-            && trim_space(&line[KEY.len()..]).eq_ignore_ascii_case("none")
-    })
+    let bytes = line.as_bytes();
+    bytes.len() >= KEY.len()
+        && bytes[..KEY.len()].eq_ignore_ascii_case(KEY)
+        && trim_space(&line[KEY.len()..]).eq_ignore_ascii_case("none")
 }
 
 // ---------------------------------------------------------------------------
@@ -1377,9 +1265,10 @@ fn tracked(root: &Path, file: &str) -> bool {
     )
 }
 
-/// The newest version tag, the lower bound of the contributor range.
+/// The newest release tag. `v[0-9]*` keeps a non-release tag such as `vnext`
+/// from standing in for one, the same pattern `release-version.sh` reads.
 fn previous_tag(root: &Path) -> Option<String> {
-    capture(root, &["tag", "--list", "v*", "--sort=-v:refname"])
+    capture(root, &["tag", "--list", "v[0-9]*", "--sort=-v:refname"])
 }
 
 /// The names on the commits in `range`, bots left out.
@@ -1410,6 +1299,67 @@ fn shortlog_name(line: &str) -> &str {
 fn today(root: &Path) -> Result<String, Error> {
     let out = run::capture(root, &Step::new("date", ["-u", "+%Y-%m-%d"]))?;
     Ok(out.trim_end_matches('\n').to_owned())
+}
+
+/// Prints whether the release being prepared announces a breaking change.
+pub(crate) fn breaking(root: &Path, explain: bool) -> Outcome {
+    if explain {
+        println!("(reads {FRAGMENTS}/ and {CHANGELOG} at HEAD)");
+        return Ok(());
+    }
+    println!(
+        "{}",
+        if breaking_announced(root)? {
+            "breaking"
+        } else {
+            "none"
+        }
+    );
+    Ok(())
+}
+
+/// Whether the release being prepared announces a breaking change: a fragment
+/// at `HEAD` opening with `**Breaking:**`, or, while the workspace version is
+/// ahead of the newest tag, that marker inside the version's own section of
+/// `CHANGELOG.md`.
+///
+/// The second arm covers the window between a release merge, which consumes
+/// the fragments, and its tag. Reads `HEAD` through git, so an uncommitted
+/// fragment does not count.
+pub(crate) fn breaking_announced(root: &Path) -> Result<bool, Error> {
+    let listing = run::capture(
+        root,
+        &Step::new("git", ["ls-tree", "--name-only", "HEAD"]).arg(format!("{FRAGMENTS}/")),
+    )?;
+    for file in listing.split('\n').filter(|f| fragment_type(f).is_some()) {
+        let text = run::capture(
+            root,
+            &Step::new("git", ["show"]).arg(format!("HEAD:{file}")),
+        )?;
+        if opens_breaking(&text) {
+            return Ok(true);
+        }
+    }
+
+    let manifest = run::capture(root, &Step::new("git", ["show", "HEAD:Cargo.toml"]))?;
+    let version = crate::checks::semver_checks::workspace_version(&manifest);
+    let Some(tag) = previous_tag(root) else {
+        return Ok(false);
+    };
+    if version.is_empty() || tag == format!("v{version}") {
+        return Ok(false);
+    }
+    let changelog = run::capture(
+        root,
+        &Step::new("git", ["show"]).arg(format!("HEAD:{CHANGELOG}")),
+    )?;
+    Ok(scan(&changelog, &format!("## [{version}] "))
+        .is_ok_and(|section| section.contains(BREAKING)))
+}
+
+/// Whether a fragment's text opens with the breaking marker.
+fn opens_breaking(text: &str) -> bool {
+    text.trim_start().starts_with(BREAKING)
 }
 
 /// The records a line-oriented scan reads. A final newline closes the last

@@ -7,11 +7,10 @@ use std::process::{Command, Output};
 
 /// The variables the gate reads, and the two its `git` invocations read,
 /// cleared so nothing on the host reaches the child.
-const READS: [&str; 9] = [
+const READS: [&str; 8] = [
     "EVENT_NAME",
     "BASE_SHA",
     "HEAD_SHA",
-    "PR_TITLE",
     "PR_BODY",
     "GITHUB_ACTIONS",
     "GITHUB_EVENT_NAME",
@@ -19,7 +18,7 @@ const READS: [&str; 9] = [
     "GIT_WORK_TREE",
 ];
 
-/// What the refusal prints under the offending subjects.
+/// What the refusal prints under the shipped paths.
 const GUIDANCE: &str = "
   Add one with:
 
@@ -28,28 +27,22 @@ const GUIDANCE: &str = "
   and write what the change means for somebody upgrading, not what moved.
   changelog.d/README.md has the format and the conventions.
 
-  If it is not user-visible, say so in the subject. There is no label and
-  no opt-out checkbox for this, and .github/labels.yml says why. The exemption
-  is derived from the type and scope you write:
+  If nobody upgrading would notice, as with a refactor, a test, a doc comment
+  or a fix to a bug that was never released, put this line in the pull
+  request body:
 
-      feat(spate-core): ...  ->  refactor(spate-core): ...  nothing user-facing moved
-      fix(spate-core): ...   ->  test(spate-core): ...      it only touched tests
-      feat(spate-core): ...  ->  feat(docs): ...            it only touched docs
+      Changelog: none
 
-  For a fix to a bug that was never released, put a 'Changelog: none'
-  trailer on the commit.
-
-  The pull request title is what lands on main, since this repository squashes
-  with the title as the subject, so the title is the one that has to be right.
+  A 'Changelog: none' trailer on a commit of the branch does the same before
+  the pull request exists.
 ";
 
-/// The whole refusal naming one offending subject and where it came from.
-fn refusal(subject: &str, origin: &str) -> String {
+/// The whole refusal naming the shipped paths.
+fn refusal(paths: &[&str]) -> String {
+    let listed: String = paths.iter().map(|p| format!("    {p}\n")).collect();
     format!(
-        "changelog: these subject(s) say this change is visible to somebody\n  \
-         upgrading, and no fragment was added under changelog.d/:\n\n    \
-         {subject}{} ({origin})\n{GUIDANCE}",
-        " ".repeat(70usize.saturating_sub(subject.len()))
+        "changelog: this change touches what a crate ships, and no fragment was\n  \
+         added under changelog.d/:\n\n{listed}{GUIDANCE}"
     )
 }
 
@@ -105,9 +98,9 @@ fn a_pull_request_that_evaluated_nothing_is_refused() {
         "",
         "::error::xtask: running on a pull request inside GitHub Actions with no EVENT_NAME, so this\n  \
          would have checked nothing and passed.\n\n  \
-         The job that runs this has to pass EVENT_NAME, BASE_SHA, HEAD_SHA, PR_TITLE and\n  \
-         PR_BODY through `env:`, and its checkout needs `fetch-depth: 0`. See the\n  \
-         `changelog` job in .github/workflows/ci.yml.\n",
+         The job that runs this has to pass EVENT_NAME, BASE_SHA, HEAD_SHA and PR_BODY\n  \
+         through `env:`, and its checkout needs `fetch-depth: 0`. See the `changelog`\n  \
+         job in .github/workflows/ci.yml.\n",
     );
 }
 
@@ -172,7 +165,7 @@ fn a_pull_request_with_no_merge_base_is_refused() {
 }
 
 /// The sha of the tip, which a pull request run is pointed at both ends of so
-/// the range holds no commits and the title is the only subject.
+/// the range changes nothing.
 fn head() -> String {
     let out = Command::new("git")
         .args(["rev-parse", "HEAD"])
@@ -183,60 +176,19 @@ fn head() -> String {
     String::from_utf8(out.stdout).unwrap().trim_end().to_owned()
 }
 
-/// The environment a pull request run reads, pointed at one commit.
-fn pull_request<'a>(sha: &'a str, title: &'a str, body: &'a str) -> Vec<(&'a str, &'a str)> {
-    vec![
-        ("EVENT_NAME", "pull_request"),
-        ("BASE_SHA", sha),
-        ("HEAD_SHA", sha),
-        ("PR_TITLE", title),
-        ("PR_BODY", body),
-    ]
-}
-
-/// A title requiring a fragment with none added fails, and the failure names
-/// the subject, where it came from and how to satisfy it.
+/// A range that changes nothing passes, and says which range it read.
 #[test]
-fn a_title_requiring_a_fragment_fails_with_the_guidance() {
-    let sha = head();
-    let title = "feat(spate-core): a windowed operator";
-    held(
-        &["tidy", "changelog"],
-        &pull_request(&sha, title, ""),
-        1,
-        "",
-        &refusal(title, "pull request title"),
-    );
-}
-
-/// A title the classifier exempts passes, and says which range it read.
-#[test]
-fn an_exempt_title_passes() {
+fn a_range_shipping_nothing_passes() {
     let sha = head();
     held(
         &["tidy", "changelog"],
-        &pull_request(&sha, "docs(ci): a page", ""),
+        &[
+            ("EVENT_NAME", "pull_request"),
+            ("BASE_SHA", &sha),
+            ("HEAD_SHA", &sha),
+        ],
         0,
-        &format!("changelog: nothing in {sha}..{sha} requires a changelog fragment.\n"),
-        "",
-    );
-}
-
-/// A `Changelog: none` trailer in the body is taken at its word for the whole
-/// pull request, because the body is what the squash commit carries.
-#[test]
-fn a_body_trailer_excuses_the_pull_request() {
-    let sha = head();
-    held(
-        &["tidy", "changelog"],
-        &pull_request(
-            &sha,
-            "feat(spate-core): a windowed operator",
-            "never released\n\nChangelog: none",
-        ),
-        0,
-        "changelog: the pull request body carries a 'Changelog: none' trailer, which\n  \
-         is what the squash commit will carry. Taken at its word for this pull request.\n",
+        &format!("changelog: nothing in {sha}..{sha} changes what a crate ships.\n"),
         "",
     );
 }
@@ -264,7 +216,7 @@ impl Repo {
         };
         repo.git(&["init", "--quiet", "-b", "main", "."]);
         repo.write("changelog.d/README.md", "the conventions\n");
-        repo.commit("chore: the first commit");
+        repo.commit("workspace: the first commit");
         repo
     }
 
@@ -325,71 +277,120 @@ fn over<'a>(
     repo: &'a Repo,
     base: &'a str,
     head: &'a str,
-    title: &'a str,
+    body: &'a str,
 ) -> Vec<(&'a str, &'a str)> {
     vec![
         ("EVENT_NAME", "pull_request"),
         ("BASE_SHA", base),
         ("HEAD_SHA", head),
-        ("PR_TITLE", title),
-        ("PR_BODY", ""),
+        ("PR_BODY", body),
         ("GIT_DIR", &repo.git_dir),
         ("GIT_WORK_TREE", &repo.work_tree),
     ]
 }
 
-/// The branch's own commits are classified, so a commit requiring a fragment is
-/// refused under a title that requires none.
+/// A change to what a crate ships with no fragment fails, and the failure
+/// names the paths and how to satisfy it.
 #[test]
-fn a_commit_requiring_a_fragment_is_refused_under_an_exempt_title() {
-    let repo = Repo::new("a_commit_requiring_a_fragment_is_refused_under_an_exempt_title");
-    let (base, _) = repo.commit("chore: a base");
-    let subject = "fix(spate-kafka): stop dropping offsets on revoke";
-    let (head, short) = repo.commit(subject);
+fn a_shipped_change_with_no_fragment_fails_with_the_guidance() {
+    let repo = Repo::new("a_shipped_change_with_no_fragment_fails_with_the_guidance");
+    let (base, _) = repo.commit("workspace: a base");
+    repo.write("crates/spate-kafka/src/revoke.rs", "pub fn revoke() {}\n");
+    repo.write("crates/spate-kafka/tests/revoke.rs", "#[test] fn t() {}\n");
+    let (head, _) = repo.commit("kafka: stop dropping offsets on revoke");
 
     held(
         &["tidy", "changelog"],
-        &over(&repo, &base, &head, "chore: tidy up"),
+        &over(&repo, &base, &head, ""),
         1,
         "",
-        &refusal(subject, &format!("commit {short}")),
+        &refusal(&["crates/spate-kafka/src/revoke.rs"]),
     );
 }
 
-/// A commit carrying a `Changelog: none` trailer is taken at its word, and the
-/// run says how many subjects that excused.
+/// A line reading `Changelog: none` anywhere in the body is taken at its word,
+/// including above the template's own sections.
 #[test]
-fn a_commit_trailer_excuses_the_commit_it_is_on() {
-    let repo = Repo::new("a_commit_trailer_excuses_the_commit_it_is_on");
-    let (base, _) = repo.commit("chore: a base");
-    let (head, _) = repo.commit("feat(spate-core): never released\n\nChangelog: none\n");
+fn a_body_line_excuses_the_pull_request() {
+    let repo = Repo::new("a_body_line_excuses_the_pull_request");
+    let (base, _) = repo.commit("workspace: a base");
+    repo.write("crates/spate-core/src/window.rs", "pub struct Window;\n");
+    let (head, _) = repo.commit("core: move the window");
 
     held(
         &["tidy", "changelog"],
-        &over(&repo, &base, &head, "chore: tidy up"),
+        &over(
+            &repo,
+            &base,
+            &head,
+            "A refactor.\n\nChangelog: none\n\n## Checks\n\n- [x] ci\n",
+        ),
         0,
-        "changelog: 1 subject(s) would require a changelog fragment, and each\n  \
-         carries a 'Changelog: none' trailer saying it is not user-visible.\n",
+        "changelog: the pull request body says 'Changelog: none'. Taken at its word.\n",
         "",
     );
 }
 
-/// A fragment added in the range satisfies the subjects requiring one, and the
-/// run says how many of each it counted.
+/// A commit of the branch carrying a `Changelog: none` trailer excuses the
+/// change, and the run names the commit.
 #[test]
-fn an_added_fragment_satisfies_the_subjects_requiring_one() {
-    let repo = Repo::new("an_added_fragment_satisfies_the_subjects_requiring_one");
-    let (base, _) = repo.commit("chore: a base");
+fn a_commit_trailer_excuses_the_change() {
+    let repo = Repo::new("a_commit_trailer_excuses_the_change");
+    let (base, _) = repo.commit("workspace: a base");
+    repo.write("crates/spate-core/src/window.rs", "pub struct Window;\n");
+    let (head, short) = repo.commit("core: never released\n\nChangelog: none\n");
+
+    held(
+        &["tidy", "changelog"],
+        &over(&repo, &base, &head, ""),
+        0,
+        &format!(
+            "changelog: commit {short} carries a 'Changelog: none' trailer. Taken at its word.\n"
+        ),
+        "",
+    );
+}
+
+/// A fragment added in the range satisfies the requirement, and the run says
+/// how many of each it counted.
+#[test]
+fn an_added_fragment_satisfies_the_requirement() {
+    let repo = Repo::new("an_added_fragment_satisfies_the_requirement");
+    let (base, _) = repo.commit("workspace: a base");
     repo.write("changelog.d/a-windowed-operator.added.md", "A real note.\n");
-    let (head, _) = repo.commit("feat(spate-core): a windowed operator");
+    repo.write("crates/spate-core/src/window.rs", "pub struct Window;\n");
+    let (head, _) = repo.commit("core: a windowed operator");
 
     held(
         &["tidy", "changelog"],
-        &over(&repo, &base, &head, "chore: tidy up"),
+        &over(&repo, &base, &head, ""),
         0,
-        "changelog: 1 subject(s) require a changelog fragment, 1 added.\n",
+        "changelog: 1 shipped file(s) changed, 1 fragment(s) added.\n",
         "",
     );
+}
+
+/// `changelog breaking` answers `breaking` once a committed fragment opens with
+/// the marker, and `none` before.
+#[test]
+fn breaking_answers_from_the_committed_fragments() {
+    let repo = Repo::new("breaking_answers_from_the_committed_fragments");
+    repo.write("Cargo.toml", "[workspace.package]\nversion = \"0.2.0\"\n");
+    repo.write("CHANGELOG.md", "# Changelog\n");
+    repo.commit("workspace: a manifest");
+    repo.git(&["tag", "v0.2.0"]);
+    let env = [
+        ("GIT_DIR", repo.git_dir.as_str()),
+        ("GIT_WORK_TREE", repo.work_tree.as_str()),
+    ];
+    held(&["changelog", "breaking"], &env, 0, "none\n", "");
+
+    repo.write(
+        "changelog.d/moved.changed.md",
+        "**Breaking:** **A move** (`spate-core`)\n",
+    );
+    repo.commit("core: a move");
+    held(&["changelog", "breaking"], &env, 0, "breaking\n", "");
 }
 
 /// A type the Keep a Changelog six do not name is refused, and so is a slug
@@ -433,7 +434,7 @@ fn explain_names_the_path_it_would_write() {
         &["--explain", "tidy", "changelog"],
         &[],
         0,
-        "(classifies this branch's subjects and reads changelog.d/)\n",
+        "(reads the paths this branch changes and changelog.d/)\n",
         "",
     );
 }

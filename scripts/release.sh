@@ -95,7 +95,7 @@ index_path() {
 # appends ` (#N)`; a plain commit carries none.
 version_from_subject() {
     local subject=$1
-    if [[ "$subject" =~ ^chore:\ release\ v([0-9]+\.[0-9]+\.[0-9]+)(\ \(#[0-9]+\))?$ ]]; then
+    if [[ "$subject" =~ ^release:\ v([0-9]+\.[0-9]+\.[0-9]+)(\ \(#[0-9]+\))?$ ]]; then
         printf '%s\n' "${BASH_REMATCH[1]}"
         return 0
     fi
@@ -117,14 +117,16 @@ self_test() {
             failures=$((failures + 1))
         fi
     done <<'TABLE'
-chore: release v0.3.0|0.3.0
-chore: release v0.3.0 (#309)|0.3.0
-chore: release v10.20.30 (#1)|10.20.30
+release: v0.3.0|0.3.0
+release: v0.3.0 (#309)|0.3.0
+release: v10.20.30 (#1)|10.20.30
 # --- near misses stay misses: the publish must not fire on these ---
-chore: release v0.3|-
-chore: release v0.3.0 and a trailer|-
-chore(workspace): release v0.3.0|-
-fix: mention chore: release v0.3.0 in a doc|-
+release: v0.3|-
+release: v0.3.0 and a trailer|-
+release: verify the tag|-
+workspace: release v0.3.0|-
+chore: release v0.3.0|-
+docs: mention release: v0.3.0 in a page|-
 TABLE
 
     while IFS='|' read -r line want; do
@@ -260,7 +262,7 @@ assemble() {
     group "The release commit"
     git -c user.name='spate-release[bot]' \
         -c user.email='spate-release[bot]@users.noreply.github.com' \
-        commit --all --quiet --message "chore: release v$version" --message \
+        commit --all --quiet --message "release: v$version" --message \
 "Every artefact is generated from the version input: the manifest rewrite,
 Cargo.lock, CHANGELOG.md assembled from changelog.d/, THIRD-PARTY.md and the
 install snippets. The squash merge of this pull request is what triggers the
@@ -302,7 +304,7 @@ publish."
     pr=$(gh pr list --state open --head "release/v$version" --json number --jq '.[0].number // empty')
     if [ -z "$pr" ]; then
         body="Assembled by \`release.yml\` from the v$version dispatch. Every file in this diff is generated; the reviewed prose is the fragments it consumes, which landed with their changes. The squash merge triggers the publish. The controls are the version input and its derivation check, so a review here is reading the assembled changelog, not the mechanics."
-        out=$(gh pr create --title "chore: release v$version" --label release \
+        out=$(gh pr create --title "release: v$version" --label release \
             --head "release/v$version" --body "$body" 2>&1) ||
             fail "gh pr create failed: $out"
         pr=$(printf '%s\n' "$out" | grep -oE '[0-9]+$' | tail -n 1) || true
@@ -379,7 +381,7 @@ prepare() {
         [ "$sha" = "$EXPECTED_SHA" ] || fail "$crate $version was published from ${sha}, not from
   $EXPECTED_SHA. The release is split across trees; abandon $version. The squash
   subject is the publish trigger, so a hand-opened pull request titled
-  'chore: release v<next>' carrying the bump publishes the next patch from one
+  'release: v<next>' carrying the bump publishes the next patch from one
   commit."
         sleep 1 # the API's documented limit is one request per second
     done

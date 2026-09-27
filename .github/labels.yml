@@ -7,7 +7,7 @@
 #
 # The namespaces:
 #
-#   crate:     which crate. Reuses the commit scopes verbatim.
+#   crate:     which crate, by package name.
 #   area:      the non-crate surfaces.
 #   platform:  where it happens, when that is the point.
 #   ci:        opt a pull request into a suite its paths would not select.

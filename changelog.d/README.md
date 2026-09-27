@@ -18,51 +18,33 @@ present for the next change.
 
 ## When you need one
 
-**Whenever the change reaches a crate and somebody upgrading would care.** In
-practice that is a `feat`, `fix` or `perf` commit, or anything carrying `!`.
-
-You are exempt when the scope names one of the areas that is not a crate —
-`ci`, `docs`, `examples`, `bench`, `workspace`, `website` — or when the
-type says nobody upgrading is affected: `docs`, `test`, `chore`, `style`, `ci`,
-`refactor`.
-
-`revert` and `build` are **not** on that list. Reverting a released feature takes
-away something people are using, and a crate-scoped `build` is where an MSRV
-floor moves; both are things a reader upgrading has to be told.
-
-A `!` needs one whatever the scope and type say. It is you declaring a breaking
-change, and that is the one thing a release note cannot omit.
-
-Note which way round that is. **Naming no scope is not an exemption**, and
-neither is a scope this repository does not recognize. An exemption is earned by
-saying which non-crate area the change belongs to, not by leaving the scope off
-— `feat: …` requires a fragment, because some of the largest changes this
-project has ever shipped were written exactly that way.
+**Whenever the change touches what a crate ships**: anything under a crate's
+`src/`, its `build.rs` or its `Cargo.toml`, and the workspace `rust-version`.
+Unit tests live under `src/`, so they count. A crate's `tests/`, `benches/` and
+`examples/`, and everything outside `crates/`, do not.
 
 `cargo xtask tidy changelog` is the gate. `cargo xtask ci` runs it, and in CI
-it has a job of its own, because it reads the pull request's title and body.
-There is no label and no checkbox to switch it off: the exemption is derived
-from the type and scope you write, so the way out is to write a subject that is
-true.
+it has a job of its own, because it reads the pull request body. There is no
+label and no checkbox to switch it off.
 
-    feat(spate-core): …   ->  refactor(spate-core): …   nothing user-facing moved
-    fix(spate-core): …    ->  test(spate-core): …       it only touched tests
-    feat(spate-core): …   ->  feat(docs): …             it only touched docs
+When nobody upgrading would notice the change, such as a refactor, a test, a doc
+comment or a fix to a bug that was never released, say so with a line of its
+own in the pull request body:
 
-For the one case that leaves — **a fix to a bug that was never released** — put
-a `Changelog: none` trailer on the commit. There is nothing to tell anybody
-upgrading, because from outside this repository it never happened.
-
-```
-fix(spate-core): correct the probe deadline
-
-Broken by #31 and never released.
-
+```text
 Changelog: none
 ```
 
-Because the repository squashes with the pull request title as the commit
-subject, **the title is the one that has to be right.**
+The line counts wherever it sits in the body. Before the pull request exists, a
+`Changelog: none` trailer on a commit of the branch does the same for
+`cargo xtask ci`.
+
+A change outside those paths can still deserve a fragment, and the gate does
+not ask for one. A lockfile bump that changes what a dependency does is one.
+A changed requirement under the root `[workspace.dependencies]` is another:
+the published manifest of every crate declaring that dependency carries it, so
+a raised floor reaches everybody who depends on one of those crates. Add the
+fragment yourself.
 
 ## Writing one
 
@@ -90,6 +72,10 @@ There are six on purpose. A **breaking** change is not a seventh type — it is
 one of these six, opened with a `**Breaking:**` marker. Pre-1.0 a breaking
 change ships in a minor bump, which is easy to miss in a version number, so say
 it in words.
+
+The marker is also what the tooling reads. The release derives a minor bump
+when any fragment opens with it, and the semver gate lets an API break through
+only while one does. It has to be the first thing in the file.
 
 ## The conventions
 

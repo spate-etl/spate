@@ -42,7 +42,7 @@ The section sits beside `source:`. Its `store:` key is a single-key component
 selecting the backend, and every other key is `CoordinationConfig` tuning.
 `spate-core` holds it opaque, as it holds a source body. The runtime calls
 `Source::configure_coordination` with it before the source opens and before
-any thread starts. A coordinated source decodes it there with
+the pipeline threads start. A coordinated source decodes it there with
 `spate-coordination`'s `CoordinatorSpec`, which does no I/O, and builds the
 coordinator in `open` with the metrics scope the source receives there. The
 default hook rejects the section, so a pipeline whose source does not
@@ -79,11 +79,13 @@ used.
 
 ### Confirmation
 
-`PipelineRuntime::run` calls the hook before the admin server binds or any
-thread starts, and `crates/spate-core/src/pipeline/tests.rs` pins that an
+`PipelineRuntime::run` calls the hook before the admin server binds or the
+pipeline threads start, and `crates/spate-core/src/pipeline/tests.rs` pins that an
 uncoordinated source fails startup with a section set. `crates/spate-s3`'s
 `coordinated_pipeline` tests pin that the section builds the coordinator and
-that a section plus `with_coordinator` fails startup.
+that a section plus `with_coordinator` fails startup, and its
+`coordination_metrics` test that the section-built coordinator publishes the
+coordination families.
 
 ## More information
 

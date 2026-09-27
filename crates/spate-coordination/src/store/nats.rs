@@ -90,7 +90,7 @@ impl fmt::Display for Secret {
 ///
 /// Deserializes from `none`, or from a single-key map naming the mechanism:
 /// `{ user_password: { username, password } }`, `{ token: … }` or
-/// `{ creds_file: … }`.
+/// `{ creds_file: … }`. The YAML-tagged forms (`!token …`) parse too.
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
 pub enum NatsCredentials {
@@ -111,6 +111,7 @@ pub enum NatsCredentials {
 }
 
 const CREDENTIAL_KEYS: &[&str] = &["user_password", "token", "creds_file"];
+const CREDENTIAL_VARIANTS: &[&str] = &["none", "user_password", "token", "creds_file"];
 
 impl<'de> Deserialize<'de> for NatsCredentials {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
@@ -163,6 +164,27 @@ impl<'de> Deserialize<'de> for NatsCredentials {
                     return Err(A::Error::custom("credentials name exactly one mechanism"));
                 }
                 Ok(credentials)
+            }
+
+            fn visit_enum<A: serde::de::EnumAccess<'de>>(
+                self,
+                data: A,
+            ) -> Result<NatsCredentials, A::Error> {
+                use serde::de::{Error as _, VariantAccess as _};
+                let (tag, variant) = data.variant::<String>()?;
+                match tag.as_str() {
+                    "none" => {
+                        variant.unit_variant()?;
+                        Ok(NatsCredentials::None)
+                    }
+                    "user_password" => {
+                        let UserPassword { username, password } = variant.newtype_variant()?;
+                        Ok(NatsCredentials::UserPassword { username, password })
+                    }
+                    "token" => Ok(NatsCredentials::Token(variant.newtype_variant()?)),
+                    "creds_file" => Ok(NatsCredentials::CredsFile(variant.newtype_variant()?)),
+                    other => Err(A::Error::unknown_variant(other, CREDENTIAL_VARIANTS)),
+                }
             }
         }
 
@@ -854,6 +876,35 @@ impl CoordinationStore for NatsStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Both spellings parse from YAML text: the single-key map and the tagged
+    /// form the derived `Deserialize` accepted.
+    #[test]
+    fn credentials_parse_from_maps_and_tags() {
+        for (yaml, expect) in [
+            ("none", "None"),
+            ("!none", "None"),
+            ("{ token: t }", "Token"),
+            ("!token t", "Token"),
+            ("{ creds_file: /c }", "CredsFile"),
+            ("!creds_file /c", "CredsFile"),
+            (
+                "{ user_password: { username: u, password: p } }",
+                "UserPassword",
+            ),
+            (
+                "!user_password { username: u, password: p }",
+                "UserPassword",
+            ),
+        ] {
+            let parsed: NatsCredentials =
+                serde_yaml::from_str(yaml).unwrap_or_else(|e| panic!("{yaml}: {e}"));
+            assert!(
+                format!("{parsed:?}").starts_with(expect),
+                "{yaml}: {parsed:?}"
+            );
+        }
+    }
 
     #[test]
     fn secrets_never_debug_print() {

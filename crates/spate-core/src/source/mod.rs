@@ -248,8 +248,8 @@ pub trait Source: Send {
     }
 
     /// Accept the pipeline's `coordination:` section. The runtime calls this
-    /// once, before [`open`](Self::open) and before any thread starts, and only
-    /// when the section is present.
+    /// once, before [`open`](Self::open) and before the pipeline threads start,
+    /// and only when the section is present.
     ///
     /// A coordinated source validates the section here and builds its
     /// coordinator from it in `open`. The default rejects the section, so a

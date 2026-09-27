@@ -95,8 +95,8 @@ These conventions apply throughout:
 Cross-field validation runs at load as well. For example,
 `checkpoint.interval` has a 100ms floor, and the backpressure ratios must
 satisfy `0 < low_ratio < high_ratio <= 1`. The `coordination` keys are the
-exception: the source checks them when the pipeline starts, before any thread
-runs, and the errors carry the same dotted paths.
+exception: the source checks them when the pipeline starts, before the
+pipeline threads run, and the errors carry the same dotted paths.
 
 ## Environment interpolation
 

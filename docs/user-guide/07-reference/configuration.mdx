@@ -257,7 +257,8 @@ Optional. The coordinator of a [coordinated source](../02-concepts/07-source-coo
 the store its instances share, and the coordinator's tuning. Without the
 section a coordinated source runs solo over an in-process store, and set on a
 source that does not coordinate it fails startup. These keys are checked when
-the pipeline starts, before the source opens and before any thread runs.
+the pipeline starts, before the source opens and before the pipeline threads
+run.
 
 ```yaml
 coordination:

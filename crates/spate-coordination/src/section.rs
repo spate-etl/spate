@@ -166,7 +166,8 @@ mod tests {
         assert!(err.contains("servers"), "{err}");
     }
 
-    /// The `credentials` spellings the NATS page documents.
+    /// The `credentials` spellings the NATS page documents, plus the tagged
+    /// forms the derived `Deserialize` accepted.
     #[test]
     fn documented_credential_spellings_parse() {
         for credentials in [
@@ -174,6 +175,10 @@ mod tests {
             "{ user_password: { username: u, password: p } }",
             "{ token: t }",
             "{ creds_file: /etc/nats/worker.creds }",
+            "!none",
+            "!user_password { username: u, password: p }",
+            "!token t",
+            "!creds_file /etc/nats/worker.creds",
         ] {
             let body = format!(
                 "  store:\n    nats: {{ servers: [\"nats://n:4222\"], job: j, credentials: {credentials} }}\n"

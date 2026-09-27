@@ -9,6 +9,7 @@ In previous versions these settings were Rust code passed to
 `S3Source::with_coordinator`, which still works for a coordinator built in
 code. Setting both the section and `with_coordinator` fails startup, and so
 does a `coordination:` section on a source that does not coordinate. NATS
-`credentials` deserialize from `none` or a single-key map naming the mechanism
-(`user_password`, `token` or `creds_file`). Custom sources accept the section
-by overriding the new `Source::configure_coordination` method.
+`credentials` also deserialize from a single-key map naming the mechanism
+(`user_password`, `token` or `creds_file`); the tagged form (`!token …`) still
+parses. Custom sources accept the section by overriding the new
+`Source::configure_coordination` method.

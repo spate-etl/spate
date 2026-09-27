@@ -14,7 +14,7 @@ use crate::writer::{ClickHouseEndpoint, ClickHouseWriter};
 use rustls::ClientConfig;
 use rustls_native_certs::CertificateResult;
 use serde::{Deserialize, Deserializer, de};
-use spate_core::config::{ComponentConfig, ConfigError};
+use spate_core::config::{ComponentConfig, ConfigError, redact};
 use spate_core::deser::RecFamily;
 use spate_core::sink::{
     BatchConfig, BreakerConfig, InflightConfig, RetryConfig, SinkBundle, SinkParts, SinkPoolConfig,
@@ -49,7 +49,7 @@ use std::time::Duration;
 /// Construct with [`ClickHouseSinkConfig::new`] and set the optional
 /// fields. The struct is `#[non_exhaustive]` so new knobs can be added
 /// without breaking callers.
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct ClickHouseSinkConfig {
@@ -103,6 +103,47 @@ pub struct ClickHouseSinkConfig {
     /// Absent by default: no queries issued.
     #[serde(default)]
     pub distributed_check: Option<DistributedCheckSection>,
+}
+
+// Hand-written: `password` and the `settings` values are credentials. The
+// destructure lists every field so a new one cannot reach `Debug` unredacted.
+impl std::fmt::Debug for ClickHouseSinkConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let ClickHouseSinkConfig {
+            table,
+            shards,
+            database,
+            user,
+            password,
+            tls,
+            settings,
+            batch,
+            inflight,
+            retry,
+            breaker,
+            timeouts,
+            compression,
+            format,
+            distributed_check,
+        } = self;
+        f.debug_struct("ClickHouseSinkConfig")
+            .field("table", table)
+            .field("shards", shards)
+            .field("database", database)
+            .field("user", user)
+            .field("password", &redact::option(password))
+            .field("tls", tls)
+            .field("settings", &redact::map(settings.keys()))
+            .field("batch", batch)
+            .field("inflight", inflight)
+            .field("retry", retry)
+            .field("breaker", breaker)
+            .field("timeouts", timeouts)
+            .field("compression", compression)
+            .field("format", format)
+            .field("distributed_check", distributed_check)
+            .finish()
+    }
 }
 
 /// The `INSERT` wire format.
@@ -930,6 +971,28 @@ table: orders
 shards:
   - replicas: ["http://a:8123"]
 "#;
+
+    /// `Debug` on the builder hides the password and every `settings` value
+    /// and keeps the user and setting names. Regression for #754.
+    #[test]
+    fn debug_never_prints_password_or_settings_values() {
+        let yaml =
+            format!("{MINIMAL}user: svc\npassword: hunter2\nsettings: {{ password: hunter2 }}\n");
+        let builder = from_component_config(&component(&yaml)).unwrap();
+        let printed = format!("{builder:?}");
+        assert!(!printed.contains("hunter2"), "{printed}");
+        for visible in ["\"svc\"", "Some(<redacted>)", "\"password\": <redacted>"] {
+            assert!(printed.contains(visible), "{visible}: {printed}");
+        }
+        let writer = ClickHouseWriter::new(
+            "INSERT".into(),
+            None,
+            vec![("password".into(), "hunter2".into())],
+            None,
+            None,
+        );
+        assert!(!format!("{writer:?}").contains("hunter2"), "{writer:?}");
+    }
 
     #[test]
     fn minimal_config_builds_with_framework_defaults() {

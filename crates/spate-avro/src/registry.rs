@@ -42,6 +42,7 @@ use rustls_native_certs::CertificateResult;
 use schema_registry_converter::async_impl::schema_registry::{self, SrSettings, SrSettingsBuilder};
 use schema_registry_converter::error::SRCError;
 use schema_registry_converter::schema_registry_common::{SchemaType, SubjectNameStrategy};
+use spate_core::config::redact;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::future::Future;
@@ -83,11 +84,33 @@ impl RegistryHandle {
 }
 
 /// Registry connection settings.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) struct RegistryConfig {
     pub url: String,
     pub basic_auth: Option<(String, Option<String>)>,
     pub root_ca: Option<PathBuf>,
+}
+
+// Hand-written: the password and the URL userinfo are credentials. The
+// destructure lists every field so a new one cannot reach `Debug` unredacted.
+impl std::fmt::Debug for RegistryConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let RegistryConfig {
+            url,
+            basic_auth,
+            root_ca,
+        } = self;
+        f.debug_struct("RegistryConfig")
+            .field("url", &redact::url(url))
+            .field(
+                "basic_auth",
+                &basic_auth
+                    .as_ref()
+                    .map(|(user, password)| (user, redact::option(password))),
+            )
+            .field("root_ca", root_ca)
+            .finish()
+    }
 }
 
 impl RegistryConfig {

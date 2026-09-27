@@ -50,7 +50,7 @@ deserializer:
 |---|---|---|---|
 | `mode` | string | `confluent` | Payload framing: `confluent`, `raw`, or `single_object`. |
 | `registry.url` | string | `required` | Base URL of a Confluent-compatible schema registry. Required in `confluent` mode; rejected in the others. |
-| `registry.username` / `registry.password` | string | `none` | Basic auth (interpolate secrets via `${VAR}`). |
+| `registry.username` / `registry.password` | string | `none` | Basic auth (interpolate secrets via `${VAR}`). The password and any userinfo in `registry.url` render `<redacted>` in `Debug` output. |
 | `registry.tls.root_ca` | path | `none` | PEM bundle of root CAs trusted in addition to the system trust store. Requires an `https://` URL. |
 | `prewarm_subjects` | string list | `[]` | Subjects whose latest schemas are fetched at startup (`confluent` mode only). |
 | `negative_cache_ttl` | duration | `30s` | How long a schema id the registry could not serve stays negatively cached before a refetch is allowed. |

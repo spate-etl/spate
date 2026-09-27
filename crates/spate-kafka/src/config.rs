@@ -2,7 +2,7 @@
 //! librdkafka property passthrough.
 
 use serde::Deserialize;
-use spate_core::config::{ComponentConfig, ConfigError};
+use spate_core::config::{ComponentConfig, ConfigError, redact};
 use std::collections::BTreeMap;
 use std::time::Duration;
 
@@ -91,7 +91,7 @@ fn default_statistics_interval() -> Duration {
 /// Construct with [`KafkaSourceConfig::new`] and set the optional fields.
 /// The struct is `#[non_exhaustive]` so new knobs can be added without
 /// breaking callers.
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct KafkaSourceConfig {
@@ -153,6 +153,33 @@ pub struct KafkaSourceConfig {
     /// See the Kafka source tuning guide.
     #[serde(default)]
     pub rdkafka: BTreeMap<String, String>,
+}
+
+// Hand-written: the `rdkafka` map carries credentials. The destructure lists
+// every field so a new one cannot reach `Debug` unredacted.
+impl std::fmt::Debug for KafkaSourceConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let KafkaSourceConfig {
+            brokers,
+            topic,
+            group_id,
+            commit_interval,
+            startup_timeout,
+            assignment_timeout,
+            statistics_interval,
+            rdkafka,
+        } = self;
+        f.debug_struct("KafkaSourceConfig")
+            .field("brokers", brokers)
+            .field("topic", topic)
+            .field("group_id", group_id)
+            .field("commit_interval", commit_interval)
+            .field("startup_timeout", startup_timeout)
+            .field("assignment_timeout", assignment_timeout)
+            .field("statistics_interval", statistics_interval)
+            .field("rdkafka", &redact::map(rdkafka.keys()))
+            .finish()
+    }
 }
 
 impl KafkaSourceConfig {
@@ -322,6 +349,19 @@ mod tests {
 
     /// Every spelling librdkafka accepts maps to the same start, and an unset
     /// policy starts at the end, as librdkafka's default does.
+    /// `Debug` shows every `rdkafka` key and none of the values.
+    #[test]
+    fn debug_never_prints_rdkafka_values() {
+        let body = format!("{}  rdkafka:\n    sasl.password: hunter2\n", minimal());
+        let cfg: KafkaSourceConfig = section(&body).deserialize_into().unwrap();
+        let printed = format!("{cfg:?}");
+        assert!(!printed.contains("hunter2"), "{printed}");
+        assert!(
+            printed.contains("\"sasl.password\": <redacted>"),
+            "{printed}"
+        );
+    }
+
     #[test]
     fn the_reset_policy_maps_to_a_start_offset() {
         use rdkafka::Offset;

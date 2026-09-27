@@ -50,9 +50,25 @@ gives you nothing to leak.
 
 ## What a security failure does at runtime
 
-Each connector classifies an authentication or TLS failure as fatal or
-retryable, and its security section says which. The class and the stage that
-meets the failure decide what you see:
+Every connector applies one rule
+([ADR-0047](../../adr/0047-a-rejected-credential-or-tls-handshake-is-fatal.md)).
+A rejection is fatal:
+
+- a certificate the client's TLS stack fails to verify;
+- a fatal TLS alert from the server that names the certificate, the credential
+  or the negotiation;
+- no protocol version, cipher suite or other handshake parameter in common with
+  the server;
+- an authentication or authorization error from the server;
+- a `401` or `403` from the service.
+
+A failure to obtain credentials or reach the server is retryable, and so are a
+connection reset, closed or timed out during the handshake, a malformed TLS
+message, and any other alert. Some client libraries do not report every
+rejection, and a connector's security section lists the cases that stay
+retryable there.
+
+The class and the stage that meets the failure decide what you see:
 
 - **Fatal, at startup.** Startup fails, and the error carries the reason.
 - **Fatal, in a source or deserializer.** The pipeline stops, and the exit

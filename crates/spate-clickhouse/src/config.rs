@@ -291,7 +291,8 @@ impl ClickHouseSinkConfig {
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct ShardConfig {
-    /// HTTP(S) URLs of this shard's replicas.
+    /// HTTP(S) URLs of this shard's replicas. A URL with credentials is
+    /// rejected; set them in `user` and `password`.
     pub replicas: Vec<String>,
     /// Distributed-parity weight: must equal this shard's `<weight>` in
     /// the cluster's `remote_servers` entry (ClickHouse's default is 1).
@@ -369,7 +370,8 @@ pub struct DistributedCheckSection {
     pub sharding_expr: Option<String>,
     /// Endpoint to query for `system.clusters` / `system.tables`. The
     /// `Distributed` table may live on a front node outside the `shards:`
-    /// list; defaults to the first replica of shard 0.
+    /// list; defaults to the first replica of shard 0. Rejected like a replica
+    /// URL when it carries credentials.
     #[serde(default)]
     pub endpoint: Option<String>,
 }
@@ -780,6 +782,11 @@ fn validate(cfg: &ClickHouseSinkConfig) -> Result<(), ConfigError> {
                     redact::url(url)
                 ));
             }
+            if has_credentials(url) {
+                return fail(format!(
+                    "shard {i} replica {j} URL contains credentials; set them in user and password"
+                ));
+            }
         }
         // Weights are ClickHouse interval widths: a zero-weight shard
         // receives nothing under Distributed parity and breaks the
@@ -886,13 +893,20 @@ fn validate(cfg: &ClickHouseSinkConfig) -> Result<(), ConfigError> {
             }
             _ => {}
         }
-        if let Some(url) = &check.endpoint
-            && !(url.starts_with("http://") || url.starts_with("https://"))
-        {
-            return fail(format!(
-                "distributed_check: endpoint `{}` is not an http(s) URL",
-                redact::url(url)
-            ));
+        if let Some(url) = &check.endpoint {
+            if !(url.starts_with("http://") || url.starts_with("https://")) {
+                return fail(format!(
+                    "distributed_check: endpoint `{}` is not an http(s) URL",
+                    redact::url(url)
+                ));
+            }
+            if has_credentials(url) {
+                return fail(
+                    "distributed_check: endpoint URL contains credentials; \
+                     set them in user and password"
+                        .into(),
+                );
+            }
         }
     }
     if cfg.tls.root_ca.is_some() && !uses_https(cfg) {
@@ -901,6 +915,12 @@ fn validate(cfg: &ClickHouseSinkConfig) -> Result<(), ConfigError> {
         );
     }
     Ok(())
+}
+
+/// Whether `url` carries userinfo, as the `clickhouse` client's URL parser
+/// reads it.
+fn has_credentials(url: &str) -> bool {
+    url::Url::parse(url).is_ok_and(|u| !u.username().is_empty() || u.password().is_some())
 }
 
 /// Whether any replica or the `distributed_check` endpoint is `https://`.
@@ -1014,17 +1034,26 @@ shards:
     /// or query, in `Debug` and in the scheme error.
     #[test]
     fn replica_url_credentials_never_reach_debug_or_config_errors() {
-        let builder = from_component_config(&component(
+        let cfg: ClickHouseSinkConfig = component(
             "table: orders\nshards: [{replicas: ['http://svc:hunter2@a:8123/?password=hunter2']}]\n\
              distributed_check: {cluster: c, table: d, sharding_key: id, endpoint: 'http://svc:hunter2@a:8123'}\n",
-        ))
+        )
+        .deserialize_into()
         .unwrap();
-        let printed = format!("{builder:?}");
+        let printed = format!("{cfg:?}");
         assert!(!printed.contains("hunter2"), "{printed}");
         assert!(
             printed.contains("http://<redacted>@a:8123/?<redacted>"),
             "{printed}"
         );
+
+        let builder = from_component_config(&component(
+            "table: orders\nshards: [{replicas: ['http://a:8123/?password=hunter2']}]\n",
+        ))
+        .unwrap();
+        let printed = format!("{builder:?}");
+        assert!(!printed.contains("hunter2"), "{printed}");
+        assert!(printed.contains("http://a:8123/?<redacted>"), "{printed}");
 
         let err = from_component_config(&component(
             "table: orders\nshards: [{replicas: ['svc:hunter2@a:8123']}]\n",
@@ -1036,6 +1065,50 @@ shards:
             err.contains("shard 0 replica 0 (`<redacted>@a:8123`)"),
             "{err}"
         );
+    }
+
+    /// A replica or `distributed_check.endpoint` URL with userinfo fails at load
+    /// with an error that names `user` and `password` and omits the secret.
+    /// Regression for #765.
+    #[test]
+    fn url_credentials_are_rejected_at_load() {
+        let check = "distributed_check: {cluster: c, table: d, sharding_key: id, endpoint: ";
+        let cases = [
+            (
+                "shards: [{replicas: ['http://svc:hunter2@a:8123']}]\n".to_owned(),
+                "shard 0 replica 0 URL",
+            ),
+            (
+                "shards: [{replicas: ['http://a', 'https://svc@b']}]\n".to_owned(),
+                "shard 0 replica 1 URL",
+            ),
+            (
+                "shards: [{replicas: ['http:///svc:hunter2@a:8123']}]\n".to_owned(),
+                "shard 0 replica 0 URL",
+            ),
+            (
+                "shards: [{replicas: ['http://:hunter2@a:8123']}]\n".to_owned(),
+                "shard 0 replica 0 URL",
+            ),
+            (
+                format!("shards: [{{replicas: ['http://a']}}]\n{check}'http://svc:hunter2@b'}}\n"),
+                "distributed_check: endpoint URL",
+            ),
+        ];
+        for (yaml, needle) in cases {
+            let err = from_component_config(&component(&format!("table: orders\n{yaml}")))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(needle), "{needle}: {err}");
+            assert!(err.contains("user and password"), "{err}");
+            assert!(!err.contains("hunter2"), "{err}");
+        }
+
+        let builder = from_component_config(&component(
+            "table: orders\nshards: [{replicas: ['http://a:8123/?x=a@b']}]\n",
+        ))
+        .expect("an `@` after the host is not userinfo");
+        assert_eq!(builder.endpoints[0][0].url(), "http://a:8123/?x=a@b");
     }
 
     /// `Debug` on the builder hides the password and every `settings` value

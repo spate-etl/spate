@@ -102,6 +102,8 @@ No feature flag is needed for TLS. Point a replica at an `https://` URL and the
 connection is encrypted (rustls is always compiled in), with `user`/`password`
 authenticating over it. Keep the password out of the file with `${VAR}`
 [interpolation](../../../03-guides/configuring-pipelines.mdx#environment-interpolation).
+A replica or `distributed_check.endpoint` URL that carries credentials is
+rejected at load.
 
 ```yaml
 sink:

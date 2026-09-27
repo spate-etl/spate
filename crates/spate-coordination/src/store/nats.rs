@@ -104,7 +104,7 @@ pub enum NatsCredentials {
 }
 
 /// TLS material for the NATS connection. Presence of this section
-/// requires TLS on every server.
+/// requires TLS on every server, and rejects a `ws://` server.
 ///
 /// Construct with [`NatsTls::default`] and set fields. The struct is
 /// `#[non_exhaustive]` so new knobs can be added without breaking
@@ -132,7 +132,8 @@ pub struct NatsTls {
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct NatsConfig {
-    /// Server URLs (`nats://host:4222`, `tls://...`). At least one.
+    /// Server URLs (`nats://host:4222`, `tls://...`, `ws://...`, `wss://...`).
+    /// At least one.
     pub servers: Vec<String>,
     /// Job identity: the bucket-name suffix, `[A-Za-z0-9_-]{1,64}`.
     /// Every worker of one coordinated job uses the same value; two
@@ -141,7 +142,8 @@ pub struct NatsConfig {
     /// Authentication. Default anonymous.
     #[serde(default)]
     pub credentials: NatsCredentials,
-    /// TLS material. Default none (plain or server-driven TLS).
+    /// TLS material. Default none (plain or server-driven TLS; a `ws://`
+    /// server never upgrades).
     #[serde(default)]
     pub tls: Option<NatsTls>,
     /// Replication factor for both buckets (1, 3, or 5; 3+ needs a
@@ -201,8 +203,30 @@ impl NatsConfig {
                     .into(),
             ));
         }
+        if self.tls.is_some()
+            && let Some(i) = self.servers.iter().position(|s| is_plain_websocket(s))
+        {
+            // Named by index: a server URL can carry credentials.
+            return Err(StoreError::Fatal(format!(
+                "nats.servers[{i}] is a ws:// server, which never uses TLS; use wss://, \
+                 or remove nats.tls"
+            )));
+        }
         Ok(())
     }
+}
+
+/// Whether `server` has the `ws` scheme once URL parsing has stripped
+/// surrounding whitespace and control characters and inner tabs and newlines.
+fn is_plain_websocket(server: &str) -> bool {
+    let cleaned: String = server
+        .trim_matches(|c: char| c <= ' ')
+        .chars()
+        .filter(|c| !matches!(c, '\t' | '\r' | '\n'))
+        .collect();
+    cleaned
+        .split_once("://")
+        .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("ws"))
 }
 
 struct Buckets {
@@ -749,6 +773,37 @@ mod tests {
         assert!(!rendered.contains("hunter2"), "{rendered}");
         assert!(rendered.contains("<redacted>"), "{rendered}");
         assert!(rendered.contains("svc"), "usernames are not secret");
+    }
+
+    /// With `tls` set, a `ws://` server in any spelling async-nats accepts
+    /// fails validation without echoing the URL. Regression for #633.
+    #[test]
+    fn tls_rejects_a_plain_websocket_server() {
+        let with_tls = |servers: &[&str]| {
+            let mut config =
+                NatsConfig::new(servers.iter().map(|s| (*s).into()).collect(), "orders");
+            config.tls = Some(NatsTls::default());
+            NatsStore::new(config, Duration::from_secs(30))
+        };
+        for (servers, index) in [
+            (&["ws://nats-1.internal:8080"][..], 0),
+            (&["WS://nats-1.internal:8080"], 0),
+            (&[" ws://nats-1.internal:8080\n"], 0),
+            (
+                &["wss://nats-0.internal:443", "ws://nats-1.internal:8080"],
+                1,
+            ),
+        ] {
+            let err = with_tls(servers).unwrap_err().to_string();
+            assert!(err.contains(&format!("nats.servers[{index}]")), "{err}");
+            assert!(err.contains("wss://"), "{err}");
+            assert!(!err.contains("nats-1.internal"), "{err}");
+        }
+        with_tls(&["wss://nats-1.internal:443"]).unwrap();
+        with_tls(&["nats://nats-1.internal:4222"]).unwrap();
+        with_tls(&["nats-1.internal:4222"]).unwrap();
+        let plain = NatsConfig::new(vec!["ws://nats-1.internal:8080".into()], "orders");
+        NatsStore::new(plain, Duration::from_secs(30)).unwrap();
     }
 
     #[test]

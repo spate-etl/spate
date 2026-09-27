@@ -51,7 +51,8 @@ A rejection is identifiable when the client meets one of:
 - a fatal TLS alert from the server that names the certificate, the
   credential or the negotiation, such as `bad_certificate`, `unknown_ca`,
   `certificate_required` or `handshake_failure`;
-- no protocol version or cipher suite in common with the server;
+- no protocol version, cipher suite or other handshake parameter in common
+  with the server;
 - an authentication or authorization error code from the server;
 - an HTTP 401 or 403 from the service the connector talks to.
 

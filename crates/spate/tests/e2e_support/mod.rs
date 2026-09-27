@@ -38,6 +38,7 @@ use spate::pipeline::{
     ExitReport, Pipeline, RuntimeOptions, ShutdownHandle, SinkOptions, StartError,
 };
 use spate::sink::KeyHashRouter;
+use spate_test_support::container_image;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::SocketAddr;
@@ -101,7 +102,7 @@ impl Harness {
 
         // The same pinned server the ClickHouse suite runs, fetched by digest
         // and re-tagged so this starts the pinned bytes.
-        let (ch_image, ch_tag) = pinned_clickhouse();
+        let (ch_image, ch_tag) = container_image(&["--pull", "clickhouse"]);
         let ch = GenericImage::new(&ch_image, &ch_tag)
             .with_env_var("CLICKHOUSE_PASSWORD", CH_PASSWORD)
             .start()
@@ -512,30 +513,6 @@ impl RunningPipeline {
 }
 
 // ── Plumbing ───────────────────────────────────────────────────────────
-
-/// The ClickHouse image the selected lane pins, pulled by digest and re-tagged,
-/// as `name` and `tag`.
-///
-/// Shells out to the task runner, so the pin has one parser and cannot drift
-/// between this crate and `spate-clickhouse`.
-fn pinned_clickhouse() -> (String, String) {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let out = Command::new("cargo")
-        .args(["xtask", "container-image", "--pull", "clickhouse"])
-        .current_dir(&root)
-        .output()
-        .unwrap_or_else(|e| panic!("run cargo xtask container-image: {e}"));
-    assert!(
-        out.status.success(),
-        "cargo xtask container-image --pull clickhouse failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let reference = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-    let (name, tag) = reference
-        .rsplit_once(':')
-        .unwrap_or_else(|| panic!("no tag in {reference}"));
-    (name.to_owned(), tag.to_owned())
-}
 
 fn docker(args: &[&str]) {
     let out = Command::new("docker")

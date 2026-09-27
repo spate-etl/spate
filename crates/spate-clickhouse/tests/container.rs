@@ -9,6 +9,7 @@ use spate_clickhouse::serialize_row;
 use spate_clickhouse::{ClickHouseRow, ClickHouseRowFamily};
 use spate_core::deser::Owned;
 use spate_core::sink::SealedBatch;
+use spate_test_support::container_image;
 // The concern modules under tests/container/ reach the writer trait through
 // `use super::*`; re-export it so that stays a no-op for the root helpers.
 use serde::{Deserialize, Serialize};
@@ -59,12 +60,10 @@ const SERVER_CREDENTIALS: &str = "user: default\npassword: container-secret\n";
 /// The image pinned by the lane in `SPATE_CLICKHOUSE_LANE`, as `name` and
 /// `tag`, falling back to the lane named in `ci/clickhouse/PRIMARY`.
 ///
-/// The digest beside the tag is dropped, because testcontainers builds its
-/// reference as `name:tag` and has no digest form. `cargo xtask container-image
-/// --pull` re-tags the pinned bytes under that tag, and CI and `cargo xtask
-/// integration-test` run it first.
+/// CI and `cargo xtask integration-test` pull the pinned bytes by digest first.
+/// Panics on a lane with no manifest, so a typo in the CI matrix fails the job.
 fn lane_image() -> (String, String) {
-    split_reference(&resolve(&["clickhouse"]))
+    container_image(&["clickhouse"])
 }
 
 /// [`lane_image`] for a named lane, so a test can cover every one of them.
@@ -73,35 +72,7 @@ fn lane_image() -> (String, String) {
 /// another thread's `getenv` is undefined behaviour, so the lane is named on
 /// the command line.
 fn image_for_lane(lane: &str) -> (String, String) {
-    split_reference(&resolve(&["clickhouse", lane]))
-}
-
-/// One `cargo xtask container-image` run, so the pin has a single parser and
-/// cannot drift between this crate and `spate`'s examples tier.
-///
-/// Panics on a lane with no manifest, so a typo in the CI matrix fails the job.
-fn resolve(args: &[&str]) -> String {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let out = std::process::Command::new("cargo")
-        .args(["xtask", "container-image"])
-        .args(args)
-        .current_dir(&root)
-        .output()
-        .unwrap_or_else(|e| panic!("run cargo xtask container-image {args:?}: {e}"));
-    assert!(
-        out.status.success(),
-        "cargo xtask container-image {args:?} failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8_lossy(&out.stdout).trim().to_owned()
-}
-
-/// Splits a `name:tag` into the two halves testcontainers takes separately.
-fn split_reference(reference: &str) -> (String, String) {
-    let (name, tag) = reference
-        .rsplit_once(':')
-        .unwrap_or_else(|| panic!("no tag in {reference}"));
-    (name.to_owned(), tag.to_owned())
+    container_image(&["clickhouse", lane])
 }
 
 /// Hand readiness to the caller: `.start()` returns once the container is

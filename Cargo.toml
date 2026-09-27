@@ -13,6 +13,7 @@ members = [
     "crates/spate-datagen",
     "crates/spate-s3",
     "crates/spate-test",
+    "test-support",
     "fuzz",
     "xtask",
 ]
@@ -41,8 +42,9 @@ spate-datagen = { version = "=0.2.0", path = "crates/spate-datagen" }
 spate-s3 = { version = "=0.2.0", path = "crates/spate-s3" }
 spate-test = { version = "=0.2.0", path = "crates/spate-test" }
 # Versionless: cargo strips a versionless path dev-dependency at package time,
-# letting a published crate dev-depend on this unpublished harness.
+# letting a published crate dev-depend on these unpublished crates.
 spate-bench = { path = "bench" }
+spate-test-support = { path = "test-support" }
 
 tokio = { version = "1.52", default-features = false }
 hyper = "1.10"

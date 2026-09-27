@@ -108,6 +108,8 @@ malformed TLS message. Under TLS 1.3 a server refuses a client certificate
 after the handshake completes, so look for its alert on the first read as
 well as on the connect call. `spate::error::find_source` finds your TLS
 library's error behind the client's wrappers, including inside an `io::Error`.
+With a rustls client, `spate::tls_rejection!(rustls, &err)` applies the whole
+TLS part of the rule.
 [ADR-0047](../../adr/0047-a-rejected-credential-or-tls-handshake-is-fatal.md)
 states the rule.
 

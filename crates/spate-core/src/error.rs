@@ -169,9 +169,68 @@ pub fn find_source<'a, T: std::error::Error + 'static>(
     None
 }
 
+/// The TLS rejection in an error's source chain, as an
+/// `Option<&rustls::Error>`: a certificate the client failed to verify, an
+/// alert in [`TLS_REJECTION_ALERTS`](crate::error::TLS_REJECTION_ALERTS), or a
+/// peer that shares no protocol version, cipher suite or other handshake
+/// parameter with the client (`PeerIncompatible`).
+///
+/// The first argument is the path to the caller's `rustls` crate, such as
+/// `rustls` or `async_nats::rustls`, and the second an
+/// `&(dyn Error + 'static)`. It expands against the caller's rustls, so
+/// spate-core itself does not depend on rustls.
+///
+/// ```ignore
+/// let fatal = spate::tls_rejection!(rustls, &err).is_some();
+/// ```
+#[macro_export]
+macro_rules! tls_rejection {
+    ($($rustls:ident)::+, $err:expr) => {
+        $crate::error::find_source::<$($rustls)::+::Error>($err).filter(|tls| match tls {
+            $($rustls)::+::Error::InvalidCertificate(_)
+            | $($rustls)::+::Error::PeerIncompatible(_) => true,
+            $($rustls)::+::Error::AlertReceived(alert) => {
+                $crate::error::TLS_REJECTION_ALERTS.contains(&u8::from(*alert))
+            }
+            _ => false,
+        })
+    };
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A certificate failure, a listed alert and an incompatible peer are
+    /// rejections behind an `io::Error`; an unlisted alert and other TLS
+    /// errors are not.
+    #[test]
+    fn tls_rejection_matches_the_rejection_classes() {
+        use rustls::{AlertDescription as A, CertificateError, Error as Tls};
+        for (tls, rejected) in [
+            (
+                Tls::InvalidCertificate(CertificateError::UnknownIssuer),
+                true,
+            ),
+            (
+                Tls::PeerIncompatible(rustls::PeerIncompatible::NoCipherSuitesInCommon),
+                true,
+            ),
+            (Tls::AlertReceived(A::HandshakeFailure), true),
+            (Tls::AlertReceived(A::CertificateRequired), true),
+            (Tls::AlertReceived(A::DecodeError), false),
+            (Tls::AlertReceived(A::InternalError), false),
+            (Tls::General("reset".into()), false),
+        ] {
+            let name = format!("{tls:?}");
+            let err = std::io::Error::new(std::io::ErrorKind::InvalidData, tls);
+            assert_eq!(
+                crate::tls_rejection!(rustls, &err).is_some(),
+                rejected,
+                "{name}"
+            );
+        }
+    }
 
     #[test]
     fn defaults_match_documented_policy() {

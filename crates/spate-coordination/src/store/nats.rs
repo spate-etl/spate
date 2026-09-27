@@ -389,7 +389,7 @@ fn connect_error(e: async_nats::ConnectError) -> StoreError {
         ConnectErrorKind::AuthorizationViolation
         | ConnectErrorKind::Authentication
         | ConnectErrorKind::Tls => true,
-        _ => tls_rejection(&e).is_some(),
+        _ => spate_core::tls_rejection!(async_nats::rustls, &e).is_some(),
     };
     let message = format!("connecting to NATS: {e}");
     if rejected {
@@ -397,24 +397,6 @@ fn connect_error(e: async_nats::ConnectError) -> StoreError {
     } else {
         StoreError::Retryable(message)
     }
-}
-
-/// The TLS rejection in `err`'s source chain: a server certificate that
-/// failed verification, an alert in
-/// [`TLS_REJECTION_ALERTS`](spate_core::error::TLS_REJECTION_ALERTS), or a
-/// server that shares no protocol version, cipher suite or other handshake
-/// parameter with the client (`PeerIncompatible`).
-fn tls_rejection<'a>(
-    err: &'a (dyn std::error::Error + 'static),
-) -> Option<&'a async_nats::rustls::Error> {
-    use async_nats::rustls::Error as TlsError;
-    spate_core::error::find_source::<TlsError>(err).filter(|tls| match tls {
-        TlsError::InvalidCertificate(_) | TlsError::PeerIncompatible(_) => true,
-        TlsError::AlertReceived(alert) => {
-            spate_core::error::TLS_REJECTION_ALERTS.contains(&u8::from(*alert))
-        }
-        _ => false,
-    })
 }
 
 /// `config` with per-message TTLs enabled, or `None` when it allows them

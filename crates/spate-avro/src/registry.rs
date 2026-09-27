@@ -22,8 +22,9 @@
 //! the fetcher, keeps those replays from hot-looping the registry.
 //!
 //! A registry that answers `401`/`403`, or that rejects the TLS handshake
-//! ([`tls_rejection`]), is *rejected*: the reason is recorded once in the
-//! handle's [`Rejection`], and every later cache miss is fatal.
+//! ([`tls_rejection!`](spate_core::tls_rejection)), is *rejected*: the reason
+//! is recorded once in the handle's [`Rejection`], and every later cache miss
+//! is fatal.
 //!
 //! # Concurrency
 //!
@@ -102,7 +103,8 @@ impl RegistryConfig {
 }
 
 /// The registry client, verifying an `https://` registry against the system
-/// trust store. A TLS rejection ([`tls_rejection`]) is recorded in `rejection`.
+/// trust store. A TLS rejection ([`tls_rejection!`](spate_core::tls_rejection))
+/// is recorded in `rejection`.
 pub(crate) fn sr_settings(
     cfg: &RegistryConfig,
     rejection: &Rejection,
@@ -211,7 +213,7 @@ where
         let layer = self.layer.clone();
         Box::pin(async move {
             connecting.await.inspect_err(|e| {
-                let reason = match tls_rejection(e.as_ref()) {
+                let reason = match spate_core::tls_rejection!(rustls, e.as_ref()) {
                     Some(rustls::Error::InvalidCertificate(cert)) => format!(
                         "schema registry {} presented a certificate the client rejects: {cert}",
                         layer.registry
@@ -226,21 +228,6 @@ where
             })
         })
     }
-}
-
-/// The TLS rejection in `err`'s source chain: a server certificate that
-/// failed verification, an alert in
-/// [`TLS_REJECTION_ALERTS`](spate_core::error::TLS_REJECTION_ALERTS), or a
-/// server that shares no protocol version, cipher suite or other handshake
-/// parameter with the client (`PeerIncompatible`).
-fn tls_rejection<'a>(err: &'a (dyn Error + 'static)) -> Option<&'a rustls::Error> {
-    spate_core::error::find_source::<rustls::Error>(err).filter(|tls| match tls {
-        rustls::Error::InvalidCertificate(_) | rustls::Error::PeerIncompatible(_) => true,
-        rustls::Error::AlertReceived(alert) => {
-            spate_core::error::TLS_REJECTION_ALERTS.contains(&u8::from(*alert))
-        }
-        _ => false,
-    })
 }
 
 fn client_config(roots: RootCertStore) -> ClientConfig {
@@ -543,22 +530,6 @@ mod tests {
                 None => assert!(!recorded, "{alert:?} not recorded"),
             }
         }
-    }
-
-    /// No cipher suite in common is a rejection; an alert outside the list
-    /// is not.
-    #[test]
-    fn tls_rejection_covers_an_incompatible_peer_and_only_listed_alerts() {
-        let wrapped =
-            |tls: rustls::Error| std::io::Error::new(std::io::ErrorKind::InvalidData, tls);
-        let incompatible = wrapped(rustls::Error::PeerIncompatible(
-            rustls::PeerIncompatible::NoCipherSuitesInCommon,
-        ));
-        assert!(tls_rejection(&incompatible).is_some());
-        let internal = wrapped(rustls::Error::AlertReceived(
-            rustls::AlertDescription::InternalError,
-        ));
-        assert!(tls_rejection(&internal).is_none());
     }
 
     #[cfg(not(any(target_vendor = "apple", windows, target_os = "android")))]

@@ -38,6 +38,8 @@ tracing-subscriber = { workspace = true, features = ["fmt", "json", "env-filter"
 [dev-dependencies]
 gungraun = { workspace = true }
 proptest = { workspace = true }
+# Exercises `tls_rejection!`, which expands against the caller's rustls.
+rustls = { workspace = true }
 serde_json = { workspace = true }
 spate-bench = { workspace = true }
 tempfile = { workspace = true }

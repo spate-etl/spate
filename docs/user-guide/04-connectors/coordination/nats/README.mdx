@@ -36,10 +36,12 @@ POD_NAME=worker-b cargo run -p spate --features s3,json,coordination-nats --exam
 
 Construction is synchronous and lazy, so the connection and bucket provisioning
 happen on the first store operation, which is the coordinator's startup probe.
-An unreachable server therefore rides the startup retry budget. Misconfiguration
-fails startup with a fatal error that names the cause, and so does a credential,
-certificate or TLS handshake rejected on the first connection. A rejection met
-on a reconnect after startup is retried like an [outage](#what-an-outage-does).
+An unreachable server therefore rides the startup retry budget. Misconfiguration,
+such as a `servers` entry that is not a URL or joins several with commas, fails
+startup with a fatal error that names the cause, and so does a credential
+rejected on the first connection, or a certificate or TLS handshake rejected by
+the last server it tries. A rejection met on a reconnect after startup is
+retried like an [outage](#what-an-outage-does).
 
 ## Configuration
 
@@ -110,7 +112,9 @@ so is a server that shares no protocol version, cipher suite or other handshake
 parameter with the client. The message names the alert or the mismatch. Any
 other TLS failure, such as a malformed message, an `InternalError` alert or a
 connection closed during the handshake, is retryable. These rules hold for the
-first connection. After startup the client reconnects on its own without limit,
+first connection, which tries each server in `servers` once. A rejected
+credential stops it at once; after any other failure it moves on to the next
+server, and the last server's failure decides. After startup the client reconnects on its own without limit,
 and a rejection it meets there is retried like an
 [outage](#what-an-outage-does). See
 [Securing connections](../../../03-guides/securing-connections.mdx) for the
@@ -165,7 +169,10 @@ services:
 ```
 
 For production, run a 3-node cluster with JetStream and set `replicas: 3` on
-`NatsConfig` so the buckets survive losing a node.
+`NatsConfig` so the buckets survive losing a node. The client learns the other
+nodes from the first server it reaches, so one reachable entry in `servers` is
+enough. List more than one, or a DNS name that resolves to every node, so the
+first connection survives a node being down.
 
 ## What an outage does
 

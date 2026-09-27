@@ -468,10 +468,9 @@ mod tests {
         assert!(reason.contains("message.max.bytes"), "actionable: {reason}");
     }
 
-    /// A timed-out report is fatal while a rejection is in the window, from
-    /// the failed-reports exit and the missing-reports exit alike, and the
-    /// reason ends with the rejection's age and text. Without one it stays
-    /// retryable.
+    /// `report_error` makes a timed-out report fatal while a rejection is
+    /// recorded, with either exit's reason, and the reason ends with the
+    /// rejection's age and text. Without one it stays retryable.
     #[test]
     fn a_timed_out_report_after_a_rejection_is_fatal() {
         use crate::sink::context::tests::SASL_REFUSED;
@@ -588,7 +587,8 @@ mod tests {
 
         /// A batch written to a broker that answers the TLS handshake with a
         /// listed alert fails `Fatal`, and the error carries librdkafka's
-        /// text. A live 116 arrives under the `SSL` code.
+        /// text. A live 116 arrives under the `SSL` code. A probe on the same
+        /// producer then carries the rejection in its reason.
         #[tokio::test]
         async fn a_rejected_handshake_fails_the_batch() {
             for alert in [40, 48, 70, 116] {
@@ -612,6 +612,18 @@ mod tests {
                     "alert {alert}: {reason}"
                 );
                 assert_eq!(class, ErrorClass::Fatal, "alert {alert}: {reason}");
+
+                let err = sink
+                    .writer
+                    .probe(&sink.endpoints[0][0])
+                    .await
+                    .expect_err("no broker answers the probe");
+                let reason = err.to_string();
+                assert!(
+                    reason.contains("a broker rejected the connection")
+                        && reason.contains(&format!("SSL alert number {alert} ")),
+                    "alert {alert}: probe: {reason}"
+                );
             }
         }
     }

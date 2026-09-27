@@ -71,12 +71,13 @@ yields no certificates, as on a container image without a CA package, the
 client logs a warning and uses the Mozilla root bundle compiled into the
 binary.
 
-For a private CA, set `registry.tls.root_ca` to a PEM file. On macOS, Windows
-and Linux its certificates are trusted in addition to the system store, and on
-Linux also when `SSL_CERT_FILE` or `SSL_CERT_DIR` replace that store. A relative
-path resolves against the working directory. A file that cannot be read, holds
-no certificate or holds a malformed one fails the deserializer at startup, and
-so does `registry.tls.root_ca` with a registry URL that is not `https://`.
+For a private CA, set `registry.tls.root_ca` to a PEM file. Its certificates are
+trusted in addition to the system store, and on Linux and other Unix systems
+also when `SSL_CERT_FILE` or `SSL_CERT_DIR` replace that store. A relative path
+resolves against the working directory. A file that cannot be read, holds no
+certificate or holds a malformed one fails the deserializer at startup, and so
+does `registry.tls.root_ca` with a registry URL that is not `https://`. Android
+builds reject the setting.
 
 `registry.username` and `registry.password` carry basic auth to the schema
 registry. Interpolate them from the environment (`${SR_USER}` / `${SR_PASSWORD}`)

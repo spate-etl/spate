@@ -148,15 +148,15 @@ fn client_builder(
     root_ca: Option<&Path>,
 ) -> Result<reqwest::ClientBuilder, AvroConfigError> {
     let builder = reqwest::Client::builder();
-    let extra = match root_ca {
-        Some(path) => read_root_ca(path)?,
-        None => Vec::new(),
-    };
-    if cfg!(target_os = "android") && !extra.is_empty() {
+    if cfg!(target_os = "android") && root_ca.is_some() {
         return Err(AvroConfigError::Invalid {
             detail: "registry.tls.root_ca is not supported on Android".into(),
         });
     }
+    let extra = match root_ca {
+        Some(path) => read_root_ca(path)?,
+        None => Vec::new(),
+    };
     if cfg!(any(target_vendor = "apple", windows, target_os = "android")) {
         let certs = extra
             .iter()

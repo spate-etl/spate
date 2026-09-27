@@ -18,10 +18,10 @@
 //! Construction is synchronous and lazy: the connection and bucket
 //! provisioning happen on the first store operation, the coordinator's
 //! startup probe, so an unreachable server rides the startup retry budget.
-//! Misconfiguration, and a credential or certificate the connection
-//! rejects, are Fatal with an actionable message. No `async-nats` type
-//! appears in any public signature (0.x policy: single pinned minor,
-//! internal only).
+//! Misconfiguration, and a credential, certificate or TLS handshake
+//! rejected on the first connection, are Fatal with an actionable message.
+//! No `async-nats` type appears in any public signature (0.x policy: single
+//! pinned minor, internal only).
 //!
 //! TLS connections use rustls with the `ring` provider, whatever other rustls
 //! features the build enables.
@@ -381,32 +381,15 @@ async fn connect(config: &NatsConfig, lease_ttl: Duration) -> Result<Buckets, St
     })
 }
 
-/// Fatal when the connection rejects a credential or a certificate on
-/// either side, Retryable otherwise.
+/// Fatal when the connection rejects a credential, a certificate or the TLS
+/// handshake, Retryable otherwise.
 fn connect_error(e: async_nats::ConnectError) -> StoreError {
     use async_nats::ConnectErrorKind;
-    use async_nats::rustls::{AlertDescription, Error as TlsError};
     let rejected = match e.kind() {
         ConnectErrorKind::AuthorizationViolation
         | ConnectErrorKind::Authentication
         | ConnectErrorKind::Tls => true,
-        _ => matches!(
-            spate_core::error::find_source::<TlsError>(&e),
-            Some(
-                TlsError::InvalidCertificate(_)
-                    | TlsError::AlertReceived(
-                        AlertDescription::BadCertificate
-                            | AlertDescription::UnsupportedCertificate
-                            | AlertDescription::CertificateRevoked
-                            | AlertDescription::CertificateExpired
-                            | AlertDescription::CertificateUnknown
-                            | AlertDescription::UnknownCA
-                            | AlertDescription::AccessDenied
-                            | AlertDescription::CertificateRequired
-                            | AlertDescription::DecryptError
-                    )
-            )
-        ),
+        _ => tls_rejection(&e).is_some(),
     };
     let message = format!("connecting to NATS: {e}");
     if rejected {
@@ -414,6 +397,24 @@ fn connect_error(e: async_nats::ConnectError) -> StoreError {
     } else {
         StoreError::Retryable(message)
     }
+}
+
+/// The TLS rejection in `err`'s source chain: a server certificate that
+/// failed verification, an alert in
+/// [`TLS_REJECTION_ALERTS`](spate_core::error::TLS_REJECTION_ALERTS), or a
+/// server that shares no protocol version, cipher suite or other handshake
+/// parameter with the client (`PeerIncompatible`).
+fn tls_rejection<'a>(
+    err: &'a (dyn std::error::Error + 'static),
+) -> Option<&'a async_nats::rustls::Error> {
+    use async_nats::rustls::Error as TlsError;
+    spate_core::error::find_source::<TlsError>(err).filter(|tls| match tls {
+        TlsError::InvalidCertificate(_) | TlsError::PeerIncompatible(_) => true,
+        TlsError::AlertReceived(alert) => {
+            spate_core::error::TLS_REJECTION_ALERTS.contains(&u8::from(*alert))
+        }
+        _ => false,
+    })
 }
 
 /// `config` with per-message TTLs enabled, or `None` when it allows them
@@ -862,6 +863,31 @@ mod tests {
             }
             other => panic!("expected Fatal, got {other:?}"),
         }
+    }
+
+    /// A connect that fails with no handshake parameter in common is fatal;
+    /// one that fails on an alert outside `TLS_REJECTION_ALERTS` is not.
+    /// Regression for #718.
+    #[test]
+    fn connect_error_covers_an_incompatible_peer_and_only_listed_alerts() {
+        use async_nats::rustls;
+        let failed = |tls: rustls::Error| {
+            connect_error(async_nats::ConnectError::with_source(
+                async_nats::ConnectErrorKind::Io,
+                std::io::Error::new(std::io::ErrorKind::InvalidData, tls),
+            ))
+        };
+        let incompatible = failed(rustls::Error::PeerIncompatible(
+            rustls::PeerIncompatible::NoCipherSuitesInCommon,
+        ));
+        assert!(
+            matches!(&incompatible, StoreError::Fatal(m) if m.contains("NoCipherSuitesInCommon")),
+            "{incompatible:?}"
+        );
+        let internal = failed(rustls::Error::AlertReceived(
+            rustls::AlertDescription::InternalError,
+        ));
+        assert!(matches!(internal, StoreError::Retryable(_)), "{internal:?}");
     }
 
     #[test]

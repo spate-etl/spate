@@ -11,6 +11,12 @@ use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs
 use tokio_rustls::rustls::server::WebPkiClientVerifier;
 use tokio_rustls::rustls::{RootCertStore, ServerConfig};
 
+/// A NATS `INFO` from a 2.10.0 server that requires TLS. async-nats reads its
+/// `port` only for logging.
+pub(crate) const INFO_REQUIRING_TLS: &[u8] = b"INFO {\"server_id\":\"test\",\
+    \"version\":\"2.10.0\",\"proto\":1,\"host\":\"127.0.0.1\",\"port\":4222,\
+    \"max_payload\":1048576,\"tls_required\":true}\r\n";
+
 pub(crate) struct TestCa {
     name: String,
     der: CertificateDer<'static>,
@@ -94,16 +100,11 @@ impl TestCa {
         let acceptor = TlsAcceptor::from(Arc::new(config));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let info = format!(
-            "INFO {{\"server_id\":\"test\",\"version\":\"2.10.0\",\"proto\":1,\
-             \"host\":\"127.0.0.1\",\"port\":{port},\"max_payload\":1048576,\
-             \"tls_required\":true}}\r\n"
-        );
         tokio::spawn(async move {
             while let Ok((mut tcp, _)) = listener.accept().await {
-                let (acceptor, info) = (acceptor.clone(), info.clone());
+                let acceptor = acceptor.clone();
                 tokio::spawn(async move {
-                    if tcp.write_all(info.as_bytes()).await.is_err() {
+                    if tcp.write_all(INFO_REQUIRING_TLS).await.is_err() {
                         return;
                     }
                     let tls = match acceptor.accept(tcp).into_fallible().await {

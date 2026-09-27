@@ -37,8 +37,9 @@ POD_NAME=worker-b cargo run -p spate --features s3,json,coordination-nats --exam
 Construction is synchronous and lazy, so the connection and bucket provisioning
 happen on the first store operation, which is the coordinator's startup probe.
 An unreachable server therefore rides the startup retry budget. Misconfiguration
-fails startup with a fatal error that names the cause, and so does a credential
-or certificate the connection rejects.
+fails startup with a fatal error that names the cause, and so does a credential,
+certificate or TLS handshake rejected on the first connection. A rejection met
+on a reconnect after startup is retried like an [outage](#what-an-outage-does).
 
 ## Configuration
 
@@ -101,7 +102,15 @@ The first connection fails with a fatal error when a `root_ca`, `client_cert` or
 `client_key` file cannot be read or holds no PEM item, or when the certificate
 and key do not match. It also fails when the connection uses TLS and the trust
 store cannot be read. A credential the server rejects is fatal, and so is a
-certificate either side rejects. See
+certificate either side rejects. A TLS alert with which the server rejects the
+handshake, such as `HandshakeFailure` or `ProtocolVersion`, is fatal too, and
+so is a server that shares no protocol version, cipher suite or other handshake
+parameter with the client. The message names the alert or the mismatch. Any
+other TLS failure, such as a malformed message, an `InternalError` alert or a
+connection closed during the handshake, is retryable. These rules hold for the
+first connection. After startup the client reconnects on its own without limit,
+and a rejection it meets there is retried like an
+[outage](#what-an-outage-does). See
 [Securing connections](../../../03-guides/securing-connections.mdx) for the
 generic model.
 

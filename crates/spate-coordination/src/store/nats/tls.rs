@@ -107,9 +107,10 @@ fn fatal(field: &str, path: &Path, why: &str) -> StoreError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::nats::test_tls::TestCa;
+    use crate::store::nats::test_tls::{INFO_REQUIRING_TLS, TestCa};
     use crate::store::nats::{NatsConfig, NatsStore};
     use crate::store::{CoordinationStore, Keyspace};
+    use async_nats::rustls::AlertDescription;
     use std::ffi::OsString;
     use std::path::PathBuf;
     use std::time::Duration;
@@ -120,6 +121,7 @@ mod tests {
     const CLIENT_KEY: &str = "SPATE_TEST_NATS_TLS_CLIENT_KEY";
     const WITH_TLS: &str = "SPATE_TEST_NATS_TLS_SECTION";
     const EXPECT_FATAL: &str = "SPATE_TEST_NATS_TLS_EXPECT_FATAL";
+    const EXPECT_RETRYABLE: &str = "SPATE_TEST_NATS_TLS_EXPECT_RETRYABLE";
 
     fn loaded(certs: Vec<CertificateDer<'static>>) -> CertificateResult {
         let mut result = CertificateResult::default();
@@ -257,6 +259,13 @@ mod tests {
         }
         let store = NatsStore::new(config, Duration::from_secs(30)).unwrap();
         let err = store.get(Keyspace::Durable, "k").await.unwrap_err();
+        if let Ok(want) = std::env::var(EXPECT_RETRYABLE) {
+            match err {
+                StoreError::Retryable(message) => assert!(message.contains(&want), "{message}"),
+                StoreError::Fatal(message) => panic!("expected Retryable, got Fatal: {message}"),
+            }
+            return true;
+        }
         // The stub reports 2.10.0, so "too old" follows a completed handshake.
         let want = std::env::var(EXPECT_FATAL).unwrap_or_else(|_| "too old".into());
         let message = fatal_message(err);
@@ -482,5 +491,58 @@ mod tests {
             )
             .await;
         }
+    }
+
+    /// A server that rejects the handshake with `handshake_failure` or
+    /// `protocol_version` fails the connect with a fatal error naming the
+    /// alert. The child pins the trust store because a failure to load it is
+    /// `ConnectErrorKind::Tls`, which is fatal. Regression for #718.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_rejecting_tls_alert_is_fatal() {
+        if child_connects().await {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let system = TestCa::new("system");
+        for alert in [
+            AlertDescription::HandshakeFailure,
+            AlertDescription::ProtocolVersion,
+        ] {
+            let addr = spate_test::tls_alert_server(INFO_REQUIRING_TLS, u8::from(alert));
+            let env = vec![
+                (URL, tls_url(addr.port())),
+                (EXPECT_FATAL, format!("{alert:?}").into()),
+            ];
+            run_in_child(
+                "a_rejecting_tls_alert_is_fatal",
+                system.write(dir.path()),
+                env,
+            )
+            .await;
+        }
+    }
+
+    /// A server that answers the handshake with `decode_error` fails the
+    /// connect with a retryable error naming the alert. The child pins the
+    /// trust store because a failure to load it is `ConnectErrorKind::Tls`,
+    /// which is fatal.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unlisted_tls_alert_is_retryable() {
+        if child_connects().await {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let alert = AlertDescription::DecodeError;
+        let addr = spate_test::tls_alert_server(INFO_REQUIRING_TLS, u8::from(alert));
+        let env = vec![
+            (URL, tls_url(addr.port())),
+            (EXPECT_RETRYABLE, format!("{alert:?}").into()),
+        ];
+        run_in_child(
+            "an_unlisted_tls_alert_is_retryable",
+            TestCa::new("system").write(dir.path()),
+            env,
+        )
+        .await;
     }
 }

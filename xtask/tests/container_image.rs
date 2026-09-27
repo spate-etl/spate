@@ -172,28 +172,58 @@ fn a_lane_variable_that_is_not_utf8_fails() {
     assert_eq!(stdout(&out), "");
 }
 
+/// The services the tree declares, sorted as `--pull-all` walks them.
+fn services() -> Vec<String> {
+    let ci = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../ci");
+    let mut out: Vec<String> = std::fs::read_dir(ci)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|e| e.path().is_dir())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|name| !name.starts_with('.'))
+        .collect();
+    out.sort();
+    out
+}
+
 /// `--pull-all` names each service and the lane it took on stderr, and pulls
 /// that lane.
 #[test]
 fn pull_all_names_each_service_and_pulls_its_selected_lane() {
     let shim = Shim::new("pull-all");
-    let tagged = primary_tag(&shim);
+    let services = services();
+    let tagged: Vec<String> = services
+        .iter()
+        .map(|service| {
+            let out = xtask(&shim, None, &[service]);
+            assert!(out.status.success(), "{}", stderr(&out));
+            stdout(&out).trim().to_owned()
+        })
+        .collect();
 
     let out = xtask(&shim, None, &["--pull-all"]);
     assert!(out.status.success(), "{}", stderr(&out));
     assert_eq!(stdout(&out), "");
     let reported = stderr(&out);
     let lines: Vec<&str> = reported.lines().collect();
-    // The lane a service selects is the tree's to choose, so its line is held
-    // to the service it names.
-    assert_eq!(lines.len(), 2, "{lines:?}");
-    assert!(lines[0].starts_with(&format!("{SERVICE}: ")), "{lines:?}");
-    assert_eq!(lines[1], PULLED, "{lines:?}");
-
     let calls = shim.calls();
-    assert_eq!(calls.len(), 2, "{calls:?}");
-    assert_eq!(calls[0][0], "pull");
-    assert_eq!(calls[1], ["tag", &calls[0][2], &tagged]);
+    assert_eq!(lines.len(), 2 * services.len(), "{lines:?}");
+    assert_eq!(calls.len(), 2 * services.len(), "{calls:?}");
+    for (i, service) in services.iter().enumerate() {
+        // The lane a service selects is the tree's to choose, so its line is
+        // held to the service it names.
+        assert!(
+            lines[2 * i].starts_with(&format!("{service}: ")),
+            "{lines:?}"
+        );
+        assert_eq!(lines[2 * i + 1], PULLED, "{lines:?}");
+        assert_eq!(calls[2 * i][0], "pull");
+        assert_eq!(
+            calls[2 * i + 1],
+            ["tag", &calls[2 * i][2], &tagged[i]],
+            "{calls:?}"
+        );
+    }
 }
 
 /// `--explain` prints the plan and runs none of it.

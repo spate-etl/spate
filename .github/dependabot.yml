@@ -231,3 +231,22 @@ updates:
       prefix: "ci"
     cooldown:
       default-days: 7
+
+  # ------------------------------------- Docker (Kafka TLS client image) ----
+  # `ci/debian/trixie/Dockerfile` pins the image `spate-kafka`'s `tls_system_ca`
+  # runs its clients in. Held on Debian 13: a new release moves glibc, which
+  # bounds the hosts that can run the test, so that move is a maintainer edit.
+  - package-ecosystem: docker
+    directory: "/ci/debian/trixie"
+    schedule:
+      interval: monthly
+      day: friday
+    open-pull-requests-limit: 1
+    labels: ["dependencies", "area: ci"]
+    commit-message:
+      prefix: "ci"
+    cooldown:
+      default-days: 7
+    ignore:
+      - dependency-name: "debian"
+        update-types: ["version-update:semver-major"]

@@ -200,6 +200,11 @@ pub(crate) fn classify(
                 image_suites.extend(graph.container_suites_for("spate-clickhouse"));
                 out.container_pkgs.extend(image_suites.iter().cloned());
             }
+            // The client image `spate-kafka`'s TLS suite runs its clients in.
+            if glob(path, "ci/debian/*") {
+                image_suites.insert("spate-kafka".to_string());
+                out.container_pkgs.extend(image_suites.iter().cloned());
+            }
             // A dependency, lint or apparatus change moves the whole graph.
             if any_glob(
                 path,
@@ -469,7 +474,7 @@ mod tests {
     #[test]
     fn a_test_support_change_selects_its_dependent_suites() {
         let out = run(&["test-support/src/lib.rs"]);
-        assert_eq!(suites(&out), ["spate", "spate-clickhouse"]);
+        assert_eq!(suites(&out), ["spate", "spate-clickhouse", "spate-kafka"]);
         assert!(out.semver_pkgs.is_empty());
     }
 
@@ -627,6 +632,24 @@ mod tests {
         let image = vec!["ci/clickhouse/lts/Dockerfile".to_string()];
         let out = classify(&image, Event::PullRequest, &ctx, &graph(), &[]);
         assert_eq!(suites(&out), ["spate", "spate-clickhouse"]);
+    }
+
+    /// Only `spate-kafka`'s suite runs in the client image, so a bump boots
+    /// nothing else, on a Dependabot pull request too.
+    #[test]
+    fn a_client_image_bump_selects_the_kafka_suite_alone() {
+        assert_eq!(
+            suites(&run(&["ci/debian/trixie/Dockerfile"])),
+            ["spate-kafka"]
+        );
+
+        let ctx = Context {
+            author: "dependabot[bot]".into(),
+            labels: vec![],
+        };
+        let image = vec!["ci/debian/trixie/Dockerfile".to_string()];
+        let out = classify(&image, Event::PullRequest, &ctx, &graph(), &[]);
+        assert_eq!(suites(&out), ["spate-kafka"]);
     }
 
     #[test]

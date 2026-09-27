@@ -4180,17 +4180,20 @@ dependencies = [
 name = "spate-kafka"
 version = "0.2.0"
 dependencies = [
+ "base64 0.22.1",
  "bytes",
  "bytesize",
  "gungraun",
  "humantime-serde",
  "metrics",
  "metrics-exporter-prometheus",
+ "rcgen",
  "rdkafka",
  "serde",
  "serde_json",
  "spate-core",
  "spate-test",
+ "spate-test-support",
  "testcontainers",
  "testcontainers-modules",
  "tokio",

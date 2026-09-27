@@ -1,16 +1,17 @@
 # Pinned service images
 
-The container suites boot real servers. This tree records the version each one
-runs against, one directory per service and one per release line under it:
+The container suites boot real servers, and some run their clients in a pinned
+image too. This tree records the image each one runs, one directory per service
+and one per release line under it:
 
 ```
 ci/<service>/PRIMARY              the lane to use when nothing selects one
 ci/<service>/<lane>/Dockerfile    the pin for that lane
 ```
 
-Each `Dockerfile` holds a single `FROM` carrying an exact patch tag and the
+Each `Dockerfile` holds a single `FROM` carrying an exact release tag and the
 digest that tag resolves to. Nothing builds them. They exist so one file names
-the server, readable by Dependabot, by the task runner, and by the test
+the image, readable by Dependabot, by the task runner, and by the test
 harness.
 
 Services and lanes are discovered from this tree. The task runner, the CI
@@ -22,6 +23,7 @@ are testing, so adding either is a change inside `ci/`.
 | Service | Lanes | Suite |
 | --- | --- | --- |
 | [`clickhouse`](clickhouse/README.md) | `lts-previous`, `lts`, `stable` | `spate-clickhouse`, and `spate`'s examples tier |
+| [`debian`](debian/README.md) | `trixie` | `spate-kafka`'s `tls_system_ca`, as its client image |
 
 A service's own README carries what is specific to it: which release lines it
 has, its vendor's support window, and why those lanes.
@@ -61,11 +63,13 @@ digest form, and it creates the container before it pulls, so the local tag is
 what it finds. `cargo xtask integration-test` and CI both run it first.
 
 A bare `cargo nextest run --profile docker` skips that step, and testcontainers
-then pulls the tag unverified. An exact patch tag is not re-pushed, so the bytes
-are the same; the digest is simply not checked.
+then pulls the tag unverified. An exact release tag is not re-pushed, so the
+bytes are the same; the digest is simply not checked. A suite that reads its
+image with `--pull`, through `spate_test_support::container_image`, pulls by
+digest on every run.
 
-**Exact four-component tags**, so a bump diff names the patch version it moved
-to.
+**Exact tags**, the vendor's full release version, so a bump diff names the
+release it moved to: `YY.M.P.B` for ClickHouse, `MAJOR.POINT` for Debian.
 
 ## What CI runs
 

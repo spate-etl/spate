@@ -147,7 +147,7 @@ pub(crate) async fn failed_query(ca: &TestCa, url: &str) -> clickhouse::error::E
 /// Whether `err`'s source chain holds rustls's unknown-issuer rejection.
 pub(crate) fn is_unknown_issuer(err: &(dyn Error + 'static)) -> bool {
     matches!(
-        crate::http::tls_rejection(err),
+        spate_core::tls_rejection!(rustls, err),
         Some(rustls::Error::InvalidCertificate(
             CertificateError::UnknownIssuer
         ))

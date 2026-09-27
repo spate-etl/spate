@@ -148,7 +148,7 @@ const FATAL_EXCEPTION_CODES: &[u32] = &[
 
 /// Map a client error onto the framework's retryable/fatal taxonomy.
 ///
-/// - a TLS rejection ([`tls_rejection`](crate::http::tls_rejection)) →
+/// - a TLS rejection ([`tls_rejection!`](spate_core::tls_rejection)) →
 ///   `Fatal`, whatever the variant carrying it;
 /// - other transport (`Network`, `TimedOut`) and uncategorized client errors
 ///   (`Other`) → `Retryable`;
@@ -161,7 +161,7 @@ const FATAL_EXCEPTION_CODES: &[u32] = &[
 fn classify(err: clickhouse::error::Error) -> SinkError {
     use clickhouse::error::Error as ChError;
     let class = match &err {
-        _ if crate::http::tls_rejection(&err).is_some() => ErrorClass::Fatal,
+        _ if spate_core::tls_rejection!(rustls, &err).is_some() => ErrorClass::Fatal,
         ChError::Network(_) | ChError::TimedOut | ChError::Other(_) => ErrorClass::Retryable,
         ChError::BadResponse(reason) => {
             if exception_code(reason).is_some_and(|c| FATAL_EXCEPTION_CODES.contains(&c)) {

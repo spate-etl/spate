@@ -28,7 +28,7 @@ runtimes, leaked queue clones. Use it when you need it, not by default.
 
 | Builder step | Public primitives |
 |---|---|
-| `Pipeline::from_config(config)` | `telemetry::init` → `metrics::install(&metrics_settings(&config))` → `tokio::runtime::Builder` (`io_threads` workers) → `InflightBudget::new` |
+| `Pipeline::from_config(config)` | `telemetry::init` → `metrics::install(&metrics_settings(&config))` → `tokio::runtime::Builder` (`io_threads` workers) → `InflightBudget::new` → `SinkFailures::new` |
 | `.sink(bundle)` | `SinkBundle::into_parts` → `shard_queues` → `ComponentLabels` + `SinkShardMetrics::try_new` per shard → `SinkPool::spawn` → a boxed drain closure. It also resolves this sink's `ChunkConfig` from the YAML `chunk:` block — the one step with no manual equivalent, since the config layer is what carries `chunk:`, so by hand you pass a `ChunkConfig` yourself. |
 | `.chains(f)` | the chain factory handed to `PipelineRuntime::new`, with queue/budget/name plumbing pre-threaded per call |
 | `.into_runtime(source)` / `.run(source)` | `PipelineRuntime::new(config, source, factory, SinkRuntime, budget)` + `with_options` + `with_io_runtime` + `run` |
@@ -37,7 +37,7 @@ Module paths (all under the `spate` facade, which re-exports `spate_core` at
 the root): `spate::telemetry`, `spate::metrics`, `spate::pipeline`
 (`PipelineRuntime`, `SinkRuntime`, `metrics_settings`, `RuntimeOptions`,
 `SinkOptions`), `spate::sink` (`shard_queues`, `SinkPool`, `SinkBundle`,
-`SinkParts`), and `spate::backpressure` (`InflightBudget`).
+`SinkParts`, `SinkFailures`), and `spate::backpressure` (`InflightBudget`).
 
 ## The metric scopes the builder wires
 
@@ -134,6 +134,9 @@ impossibility; manually, they are yours again:
   logs, all of it before threads spawn.
 - **One I/O runtime** — build once, pass to `SinkPool::spawn` by handle and
   to the runtime by value.
+- **One `SinkFailures`** — pass a clone to every `SinkPool::spawn` and the
+  register itself to `SinkRuntime`. A pool given a different register
+  records its reasons where the runtime never reads them.
 - **Queue drop ordering** — the sink drains only when every `ShardQueues`
   clone is gone; audit every clone you make (see
   [Graceful shutdown](graceful-shutdown.mdx)).

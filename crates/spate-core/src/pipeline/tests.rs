@@ -34,6 +34,7 @@ fn test_sink() -> (SinkRuntime, Arc<AtomicBool>) {
             queues: vec![queues],
             drain,
             probe: None,
+            failures: SinkFailures::new(),
         },
         drained,
     )
@@ -47,6 +48,9 @@ struct Harness {
     script: Arc<Mutex<VecDeque<Script>>>,
     chain: Arc<ChainShared>,
     drained: Arc<AtomicBool>,
+    /// The register the runtime reads; a test records into it in place of a
+    /// sink worker.
+    sink_failures: SinkFailures,
     shutdown: super::runtime::ShutdownHandle,
     join: std::thread::JoinHandle<Result<ExitReport, super::runtime::StartError>>,
 }
@@ -72,6 +76,7 @@ fn start_with_options(
     let (source, shared, script) = FakeSource::new();
     let chain_shared = Arc::new(ChainShared::default());
     let (sink, drained) = test_sink();
+    let sink_failures = sink.failures.clone();
     let budget = Arc::new(crate::backpressure::InflightBudget::new());
     let budget_for_test = Arc::clone(&budget);
     let cs = Arc::clone(&chain_shared);
@@ -94,6 +99,7 @@ fn start_with_options(
         script,
         chain: chain_shared,
         drained,
+        sink_failures,
         shutdown,
         join,
     }
@@ -671,6 +677,7 @@ fn drained_with_unacknowledged_batches_fails_instead_of_completing() {
     });
     // Acks for both batches are held (never delivered, never failed) for the
     // life of the test, so the final commit cycle still sees them pending.
+    h.sink_failures.record("orders", "write timed out".into());
     h.script.lock().unwrap().push_back(Script::Drained);
     let report = h.join.join().unwrap().unwrap();
     let ExitState::Failed(failure) = report.state else {
@@ -678,7 +685,10 @@ fn drained_with_unacknowledged_batches_fails_instead_of_completing() {
     };
     assert_eq!(failure.component, "source");
     assert!(
-        failure.reason.contains("unacknowledged"),
+        failure.reason.contains("unacknowledged")
+            && failure
+                .reason
+                .contains("sink `orders` abandoned a batch: write timed out"),
         "{}",
         failure.reason
     );
@@ -833,6 +843,7 @@ fn caller_owned_io_runtime_is_used_and_shut_down_by_run() {
         queues: vec![queues],
         drain,
         probe: None,
+        failures: SinkFailures::new(),
     };
 
     let (source, _shared, _script) = FakeSource::new();

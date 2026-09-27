@@ -14,6 +14,7 @@ use crate::metrics::{
     CheckpointMetrics, InflightBudgetMetrics, Meter, PipelineMetrics, PipelineState, SourceMetrics,
 };
 use crate::record::PartitionId;
+use crate::sink::SinkFailures;
 use crate::source::{DrainBarrier, LaneId, Source, SourceCtx, SourceEvent, SourceLane};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
@@ -63,6 +64,9 @@ pub(crate) struct ControllerContext<S: Source> {
     /// this fails the pipeline (permanent sink failures otherwise leave it
     /// running forever, committing nothing for that partition).
     pub stalled_fail_after: Duration,
+    /// Why each sink last abandoned a batch, appended to a failure that a
+    /// failed batch caused.
+    pub sink_failures: SinkFailures,
     pub checkpoint_metrics: CheckpointMetrics,
     /// The pipeline's in-flight byte budget, shared with every driver and
     /// sink. Read once per loop pass to publish `budget_metrics`.
@@ -96,6 +100,7 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
         drain_timeout,
         event_poll_timeout,
         stalled_fail_after,
+        sink_failures,
         checkpoint_metrics,
         budget,
         budget_metrics,
@@ -190,10 +195,13 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
                 if age > stalled_fail_after {
                     state.failure.get_or_insert(FatalError {
                         component: "checkpoint".into(),
-                        reason: format!(
-                            "partition {} watermark stalled behind a failed batch for {age:?} \
-                             (limit {stalled_fail_after:?}); a sink leg is permanently failing",
-                            partition.0
+                        reason: with_sink_failures(
+                            format!(
+                                "partition {} watermark stalled behind a failed batch for \
+                                 {age:?} (limit {stalled_fail_after:?})",
+                                partition.0
+                            ),
+                            &sink_failures,
                         ),
                     });
                     break;
@@ -417,9 +425,13 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
         if pending > 0 {
             state.failure = Some(FatalError {
                 component: "source".into(),
-                reason: format!(
-                    "source drained but unacknowledged batches remain (max {pending} on one \
-                     partition); their data was not durably committed — rerun to complete"
+                reason: with_sink_failures(
+                    format!(
+                        "source drained but unacknowledged batches remain (max {pending} on \
+                         one partition); their data was not durably committed — rerun to \
+                         complete"
+                    ),
+                    &sink_failures,
                 ),
             });
         } else if !state.pending_commit.is_empty() || final_flush_failed {
@@ -472,6 +484,14 @@ struct State {
     /// Everything successfully committed (for the exit report).
     committed: BTreeMap<PartitionId, i64>,
     failure: Option<FatalError>,
+}
+
+/// `reason`, followed by each sink that abandoned a batch and why.
+fn with_sink_failures(reason: String, sink_failures: &SinkFailures) -> String {
+    match sink_failures.describe() {
+        Some(sinks) => format!("{reason}; {sinks}"),
+        None => reason,
+    }
 }
 
 fn is_fatal(e: &SourceError) -> bool {

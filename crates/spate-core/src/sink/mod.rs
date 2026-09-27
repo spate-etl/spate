@@ -25,6 +25,7 @@
 mod breaker;
 mod bundle;
 mod config;
+mod failures;
 mod pool;
 #[cfg(test)]
 mod pool_tests;
@@ -37,6 +38,7 @@ pub use config::{
     BatchConfig, BreakerConfig, BreakerConfigError, InflightConfig, RetryConfig, RetryConfigError,
     SinkPoolConfig,
 };
+pub use failures::SinkFailures;
 pub use pool::{DrainReport, SinkPool};
 pub use queue::{ChunkSendError, ShardQueues, shard_queues};
 

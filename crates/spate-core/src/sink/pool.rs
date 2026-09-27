@@ -2,7 +2,7 @@
 
 use super::config::SinkPoolConfig;
 use super::worker::{ShardWorker, WorkerReport};
-use super::{EncodedChunk, ShardWriter};
+use super::{EncodedChunk, ShardWriter, SinkFailures};
 use crate::backpressure::InflightBudget;
 use crate::error::SinkError;
 use crate::metrics::SinkShardMetrics;
@@ -59,7 +59,8 @@ impl<W: ShardWriter> SinkPool<W> {
     /// `shard_endpoints[s]` are shard `s`'s replica endpoints;
     /// `receivers[s]` its chunk queue; `metrics[s]` its pre-registered
     /// handles. All three must have equal length, with at least one replica
-    /// per shard.
+    /// per shard. A worker that abandons a batch records the reason in
+    /// `failures` under `sink_name`.
     ///
     /// # Panics
     ///
@@ -78,6 +79,8 @@ impl<W: ShardWriter> SinkPool<W> {
         budget: Arc<InflightBudget>,
         metrics: Vec<SinkShardMetrics>,
         pipeline_name: &str,
+        sink_name: &str,
+        failures: SinkFailures,
         runtime: &tokio::runtime::Handle,
     ) -> Self {
         assert_eq!(
@@ -122,6 +125,7 @@ impl<W: ShardWriter> SinkPool<W> {
             shard_endpoints.into_iter().map(Arc::new).collect();
 
         let nonce = run_nonce();
+        let sink: Arc<str> = Arc::from(sink_name);
         // Shared with the workers rather than moved into them; `drain` needs
         // the handles too, to report a shard that overruns its deadline.
         let metrics: Vec<Arc<SinkShardMetrics>> = metrics.into_iter().map(Arc::new).collect();
@@ -131,6 +135,8 @@ impl<W: ShardWriter> SinkPool<W> {
             .enumerate()
             .map(|(shard, (rx, shard_metrics))| {
                 let worker = ShardWorker {
+                    sink: Arc::clone(&sink),
+                    failures: failures.clone(),
                     shard: u32::try_from(shard).unwrap_or(u32::MAX),
                     writer: Arc::clone(&writer),
                     endpoints: Arc::clone(&endpoints[shard]),

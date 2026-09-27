@@ -37,7 +37,7 @@ pub use runtime::{PipelineRuntime, RuntimeOptions, ShutdownHandle, StartError, m
 
 use crate::error::FatalError;
 use crate::record::PartitionId;
-use crate::sink::ShardQueues;
+use crate::sink::{ShardQueues, SinkFailures};
 use crate::source::{DrainBarrier, LaneId};
 use std::time::Instant;
 
@@ -121,6 +121,10 @@ pub struct SinkRuntime {
     /// sinks-connected half of `/readyz`. Without a probe the flag is set
     /// unconditionally.
     pub probe: Option<SinkProbeFn>,
+    /// The register every sink pool records an abandoned batch's reason in
+    /// (the clone passed to each [`SinkPool::spawn`](crate::sink::SinkPool::spawn)).
+    /// A pipeline failure behind an abandoned batch names what it holds.
+    pub failures: SinkFailures,
 }
 
 impl std::fmt::Debug for SinkRuntime {

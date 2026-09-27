@@ -12,7 +12,7 @@
 use super::breaker::BreakerSet;
 use super::config::SinkPoolConfig;
 use super::retry::Backoff;
-use super::{EncodedChunk, SealedBatch, ShardWriter};
+use super::{EncodedChunk, SealedBatch, ShardWriter, SinkFailures};
 use crate::backpressure::InflightBudget;
 use crate::checkpoint::AckSet;
 use crate::error::{ErrorClass, SinkError};
@@ -120,7 +120,9 @@ struct Pending {
 /// Outcome reported by a write task. Tasks never touch acks.
 struct WriteDone {
     seq: u64,
-    written: bool,
+    /// `None` when the batch was written, else the error that ended its
+    /// attempts.
+    failure: Option<String>,
 }
 
 struct Accumulator {
@@ -165,6 +167,8 @@ impl Accumulator {
 }
 
 pub(crate) struct ShardWorker<W: ShardWriter> {
+    pub(crate) sink: Arc<str>,
+    pub(crate) failures: SinkFailures,
     pub(crate) shard: u32,
     pub(crate) writer: Arc<W>,
     pub(crate) endpoints: Arc<Vec<W::Endpoint>>,
@@ -424,7 +428,11 @@ impl<W: ShardWriter> ShardWorker<W> {
         waiting.clear();
         let stranded: Vec<u64> = ledger.pending.keys().copied().collect();
         for s in stranded {
-            self.abandon(s, ledger);
+            self.abandon(
+                s,
+                "the drain deadline passed before the write finished",
+                ledger,
+            );
         }
         ledger.ids.clear();
     }
@@ -435,12 +443,11 @@ impl<W: ShardWriter> ShardWorker<W> {
         ledger: &mut Ledger,
     ) {
         match joined {
-            Ok((id, WriteDone { seq, written })) => {
+            Ok((id, WriteDone { seq, failure })) => {
                 ledger.ids.remove(&id);
-                if written {
-                    self.settle(seq, ledger);
-                } else {
-                    self.abandon(seq, ledger);
+                match failure {
+                    None => self.settle(seq, ledger),
+                    Some(reason) => self.abandon(seq, &reason, ledger),
                 }
             }
             Err(join_err) => {
@@ -449,7 +456,9 @@ impl<W: ShardWriter> ShardWorker<W> {
                 let id = join_err.id();
                 tracing::error!(error = %join_err, "sink write task panicked");
                 match ledger.ids.remove(&id) {
-                    Some(seq) => self.abandon(seq, ledger),
+                    Some(seq) => {
+                        self.abandon(seq, &format!("the write task panicked: {join_err}"), ledger);
+                    }
                     None => tracing::error!(
                         "panicked sink task had no ledger entry; batch already resolved"
                     ),
@@ -473,15 +482,20 @@ impl<W: ShardWriter> ShardWorker<W> {
         p.acks.deliver();
     }
 
-    fn abandon(&self, seq: u64, ledger: &mut Ledger) {
+    fn abandon(&self, seq: u64, reason: &str, ledger: &mut Ledger) {
         let Some(p) = ledger.pending.remove(&seq) else {
             return;
         };
         tracing::error!(
+            sink = %self.sink,
             rows = p.rows,
             bytes = p.bytes,
+            reason,
             "abandoning sink batch; data will replay after restart"
         );
+        // Recorded before the acks fail, so a controller that sees the failed
+        // ack also finds the reason.
+        self.failures.record(&self.sink, reason.to_owned());
         drop(p.acks); // AckSet drop resolution: Failed
         self.metrics.abandoned(1);
         self.budget
@@ -641,7 +655,7 @@ impl<W: ShardWriter> ShardWorker<W> {
                         }
                         return WriteDone {
                             seq: this_seq,
-                            written: true,
+                            failure: None,
                         };
                     }
                     Err(err) => {
@@ -661,7 +675,7 @@ impl<W: ShardWriter> ShardWorker<W> {
                         {
                             return WriteDone {
                                 seq: this_seq,
-                                written: false,
+                                failure: Some(err.to_string()),
                             };
                         }
                         metrics.retries(1);

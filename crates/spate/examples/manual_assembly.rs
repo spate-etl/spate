@@ -32,7 +32,7 @@ use spate::backpressure::InflightBudget;
 use spate::metrics::{ComponentLabels, MetricsSettings, SinkShardMetrics, install};
 use spate::pipeline::{PipelineRuntime, SinkRuntime, metrics_settings};
 use spate::prelude::*;
-use spate::sink::{SinkDrainFn, SinkPool, shard_queues};
+use spate::sink::{SinkDrainFn, SinkFailures, SinkPool, shard_queues};
 use spate::source::LaneId;
 use spate::telemetry;
 use spate_test::{TestDeserializer, TestEncoder, capture_sink, memory_source};
@@ -167,6 +167,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // is one you name yourself with `Meter::with_namespace`. Everything else
     // in the taxonomy is identical.
 
+    // Where each sink records why it abandoned a batch. The runtime names
+    // these reasons when a failed batch fails the pipeline.
+    let failures = SinkFailures::new();
+
     // One worker per shard, spawned onto the runtime from step 2.
     let pool = SinkPool::spawn(
         Arc::new(parts.writer),
@@ -176,6 +180,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::clone(&budget),
         shard_metrics,
         &pipeline_name,
+        "default",
+        failures.clone(),
         io.handle(),
     );
 
@@ -190,6 +196,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         drain,
         // Drives the sinks half of `/readyz`; `None` reports connected.
         probe: parts.probe,
+        failures,
     };
     // ANCHOR_END: sink
 

@@ -57,12 +57,16 @@ use spate_core::error::DeserError;
 use spate_core::metrics::{ComponentLabels, E2eBasis, SinkShardMetrics};
 use spate_core::ops::{ChunkConfig, Emitter, PushOutcome, chain};
 use spate_core::record::{PartitionId, RawPayload, Record};
-use spate_core::sink::{DrainReport, SinkPool, shard_queues};
+use spate_core::sink::{DrainReport, SinkFailures, SinkPool, shard_queues};
 use spate_core::source::{LaneId, Source, SourceCtx, SourceEvent, SourceLane};
 use spate_test::memory_source;
 use std::sync::Arc;
 use std::time::Duration;
 use testcontainers_modules::testcontainers::{ContainerAsync, ImageExt};
+
+const PIPELINE: &str = "parity";
+/// The sink's name, which is also its metrics `component` label.
+const SINK: &str = "clickhouse";
 
 // ---- the user-side record types + their owned families ----------------------
 
@@ -483,7 +487,7 @@ async fn run_pipeline(sink: config::ClickHouseSink, payloads: &[String]) -> Drai
     // Per-shard metric handles. With no exporter installed they record into
     // the void, since these tests assert on ClickHouse contents, not
     // /metrics.
-    let labels = ComponentLabels::new("parity", "clickhouse", "clickhouse");
+    let labels = ComponentLabels::new(PIPELINE, SINK, "clickhouse");
     let metrics: Vec<SinkShardMetrics> = (0..num_shards)
         .map(|s| SinkShardMetrics::new(&labels, s as u32, &[format!("ch-{s}-0")], E2eBasis::Ingest))
         .collect();
@@ -495,7 +499,9 @@ async fn run_pipeline(sink: config::ClickHouseSink, payloads: &[String]) -> Drai
         pool_cfg,
         budget,
         metrics,
-        "parity",
+        PIPELINE,
+        SINK,
+        SinkFailures::new(),
         &tokio::runtime::Handle::current(),
     );
 

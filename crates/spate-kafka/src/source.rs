@@ -125,6 +125,10 @@ pub struct KafkaSource {
     /// assignment, and from every later loss of the last one. The deadline is
     /// measured from `since`; an accepted assignment, empty or not, clears it.
     assignment_wait: Option<AssignmentWait>,
+    /// The latest consumer poll error other than `AllBrokersDown`, and when
+    /// it arrived, for the deadline error to name. Cleared with
+    /// `assignment_wait` by an accepted assignment.
+    last_consumer_error: Option<(Instant, String)>,
     /// Messages that leaked onto the main queue and were rewound.
     main_queue_rewinds: u64,
     /// Committed offset per held partition, read before its assignment.
@@ -160,6 +164,7 @@ impl KafkaSource {
             pending_unassign: false,
             pending_error: None,
             assignment_wait: None,
+            last_consumer_error: None,
             main_queue_rewinds: 0,
             committed_at_assign: HashMap::new(),
         }
@@ -296,6 +301,7 @@ impl KafkaSource {
             .map_err(fatal("resume new assignment"))?;
         self.saw_first_assignment = true;
         self.assignment_wait = None;
+        self.last_consumer_error = None;
         tracing::info!(
             partitions = lanes.len(),
             topic = %self.config.topic,
@@ -491,6 +497,9 @@ fn publish_lag(stats: &Statistics, topic: &str, owned: &[PartitionId], metrics: 
 /// `assignment_timeout` bounds and whose error names the group and the
 /// event that took them.
 ///
+/// `last_error` is the latest consumer error and its age, which either
+/// message ends with.
+///
 /// Free function taking the elapsed time rather than a method reading the
 /// clock, so a unit test pins the boundaries and the messages directly. The
 /// same reason `publish_lag` is one.
@@ -498,6 +507,7 @@ fn assignment_deadline_error(
     config: &KafkaSourceConfig,
     waited: Duration,
     cause: Option<&str>,
+    last_error: Option<(Duration, &str)>,
 ) -> Option<SourceError> {
     let deadline = match cause {
         None => config.startup_timeout,
@@ -506,7 +516,7 @@ fn assignment_deadline_error(
     if deadline.is_zero() || waited <= deadline {
         return None;
     }
-    let reason = match cause {
+    let mut reason = match cause {
         None => format!(
             "no partition assignment within {waited:?} \
              (topic {:?}, brokers {:?})",
@@ -518,6 +528,11 @@ fn assignment_deadline_error(
             config.group_id, config.topic
         ),
     };
+    if let Some((age, error)) = last_error {
+        reason.push_str(&format!(
+            "; last consumer error {age:?} before the deadline: {error}"
+        ));
+    }
     Some(SourceError::Client {
         class: ErrorClass::Fatal,
         reason,
@@ -605,8 +620,14 @@ impl Source for KafkaSource {
         // Checked last, this deadline would never fire and a misconfigured
         // pipeline would retry forever instead of failing fast.
         if let Some(wait) = &self.assignment_wait
-            && let Some(e) =
-                assignment_deadline_error(&self.config, wait.since.elapsed(), wait.cause.as_deref())
+            && let Some(e) = assignment_deadline_error(
+                &self.config,
+                wait.since.elapsed(),
+                wait.cause.as_deref(),
+                self.last_consumer_error
+                    .as_ref()
+                    .map(|(at, error)| (at.elapsed(), error.as_str())),
+            )
         {
             return Err(e);
         }
@@ -680,6 +701,13 @@ impl Source for KafkaSource {
                         Some(text) => format!("consumer poll: {e}: {text}"),
                         None => format!("consumer poll: {e}"),
                     };
+                    // Every broker's failure is followed by `AllBrokersDown`,
+                    // which would otherwise hide it from the deadline error.
+                    if e.rdkafka_error_code()
+                        != Some(rdkafka::error::RDKafkaErrorCode::AllBrokersDown)
+                    {
+                        self.last_consumer_error = Some((Instant::now(), reason.clone()));
+                    }
                     return Err(SourceError::Client { class, reason });
                 }
             }
@@ -727,6 +755,7 @@ impl Source for KafkaSource {
                         consumer.assign(&tpl).map_err(fatal("assign empty"))?;
                         self.saw_first_assignment = true;
                         self.assignment_wait = None;
+                        self.last_consumer_error = None;
                         self.prune_partition_series();
                         return Ok(SourceEvent::Idle);
                     }
@@ -1051,7 +1080,9 @@ mod tests {
             assert!(Instant::now() < deadline, "no outcome within deadline");
             match source.poll_events(Duration::from_millis(50)) {
                 Ok(SourceEvent::Idle) => continue,
-                Err(e) if e.to_string().contains("consumer poll") => continue,
+                Err(SourceError::Client { reason, .. }) if reason.starts_with("consumer poll") => {
+                    continue;
+                }
                 other => return other,
             }
         }
@@ -1195,7 +1226,8 @@ mod tests {
         }
 
         /// Past the deadline the member reports a fatal error, naming the
-        /// group, the last rebalance event and how long it has held nothing.
+        /// group, the last rebalance event, how long it has held nothing and
+        /// the last consumer error.
         #[test]
         fn an_expired_deadline_is_fatal_and_names_the_group() {
             let mut cfg = test_config();
@@ -1205,6 +1237,7 @@ mod tests {
                 &cfg,
                 Duration::from_secs(301),
                 Some("rebalance error: Broker: Not coordinator"),
+                Some((Duration::from_secs(12), "consumer poll: SSL")),
             )
             .expect("the deadline has passed");
 
@@ -1223,6 +1256,12 @@ mod tests {
                         reason.contains(r#"group "test""#),
                         "names the group: {reason}"
                     );
+                    assert!(
+                        reason.ends_with(
+                            "; last consumer error 12s before the deadline: consumer poll: SSL"
+                        ),
+                        "names the last consumer error: {reason}"
+                    );
                 }
                 other => panic!("expected a client error, got {other:?}"),
             }
@@ -1237,12 +1276,22 @@ mod tests {
             cfg.assignment_timeout = Duration::from_secs(300);
 
             assert!(
-                assignment_deadline_error(&cfg, Duration::from_secs(299), Some("a revocation"))
-                    .is_none()
+                assignment_deadline_error(
+                    &cfg,
+                    Duration::from_secs(299),
+                    Some("a revocation"),
+                    None
+                )
+                .is_none()
             );
             assert!(
-                assignment_deadline_error(&cfg, Duration::from_secs(300), Some("a revocation"))
-                    .is_none(),
+                assignment_deadline_error(
+                    &cfg,
+                    Duration::from_secs(300),
+                    Some("a revocation"),
+                    None
+                )
+                .is_none(),
                 "the deadline is exclusive"
             );
         }
@@ -1256,16 +1305,17 @@ mod tests {
             cfg.startup_timeout = Duration::ZERO;
             let a_day = Duration::from_secs(86_400);
 
-            assert!(assignment_deadline_error(&cfg, a_day, Some("a revocation")).is_none());
+            assert!(assignment_deadline_error(&cfg, a_day, Some("a revocation"), None).is_none());
             assert!(
-                assignment_deadline_error(&cfg, a_day, None).is_none(),
+                assignment_deadline_error(&cfg, a_day, None, None).is_none(),
                 "a member still waiting for its first assignment"
             );
         }
 
         /// Before the first assignment `startup_timeout` is the deadline,
         /// and its error names the topic and the brokers, which is what a
-        /// pipeline that never joins usually has wrong. The much longer
+        /// pipeline that never joins usually has wrong, and the last consumer
+        /// error. The much longer
         /// `assignment_timeout` does not govern that window.
         #[test]
         fn the_startup_window_has_its_own_deadline_and_message() {
@@ -1274,11 +1324,16 @@ mod tests {
             cfg.assignment_timeout = Duration::from_secs(300);
 
             assert!(
-                assignment_deadline_error(&cfg, Duration::from_secs(30), None).is_none(),
+                assignment_deadline_error(&cfg, Duration::from_secs(30), None, None).is_none(),
                 "the deadline is exclusive"
             );
-            let error = assignment_deadline_error(&cfg, Duration::from_secs(31), None)
-                .expect("the startup deadline has passed");
+            let error = assignment_deadline_error(
+                &cfg,
+                Duration::from_secs(31),
+                None,
+                Some((Duration::from_secs(2), "consumer poll: SSL")),
+            )
+            .expect("the startup deadline has passed");
 
             match error {
                 SourceError::Client { class, reason } => {
@@ -1294,6 +1349,12 @@ mod tests {
                     assert!(
                         reason.contains(r#"brokers "localhost:9092""#),
                         "names the brokers: {reason}"
+                    );
+                    assert!(
+                        reason.ends_with(
+                            "; last consumer error 2s before the deadline: consumer poll: SSL"
+                        ),
+                        "names the last consumer error: {reason}"
                     );
                 }
                 other => panic!("expected a client error, got {other:?}"),
@@ -1343,6 +1404,69 @@ mod tests {
             }
         }
 
+        /// Drive `poll_events` until the consumer has reported a broker
+        /// transport failure and its latest error is `AllBrokersDown`.
+        fn poll_until_brokers_down(source: &mut KafkaSource) {
+            let (mut transport, mut down) = (false, false);
+            spate_test::wait_until(
+                Duration::from_secs(20),
+                "a transport failure, then AllBrokersDown",
+                || {
+                    if let Err(e) = source.poll_events(Duration::from_millis(50)) {
+                        let e = e.to_string();
+                        transport |= e.contains("BrokerTransportFailure");
+                        down = e.contains("AllBrokersDown");
+                    }
+                    transport && down
+                },
+            );
+        }
+
+        /// The deadline error names the last consumer error with librdkafka's
+        /// text, and `AllBrokersDown` is never that error.
+        fn assert_names_the_transport_failure(source: &mut KafkaSource, window: &str) {
+            match source.poll_events(Duration::from_millis(50)) {
+                Err(SourceError::Client { class, reason }) => {
+                    assert_eq!(class, ErrorClass::Fatal, "{reason}");
+                    assert!(reason.contains(window), "{reason}");
+                    assert!(reason.contains("last consumer error"), "{reason}");
+                    assert!(reason.contains("BrokerTransportFailure"), "{reason}");
+                    assert!(reason.contains("Connection refused"), "{reason}");
+                    assert!(!reason.contains("AllBrokersDown"), "{reason}");
+                }
+                other => panic!("expected the deadline error, got {other:?}"),
+            }
+        }
+
+        /// A member that never joins because its brokers refuse the
+        /// connection fails at `startup_timeout` with the refusal in the
+        /// error. Regression for #711.
+        #[test]
+        fn the_startup_deadline_names_the_last_consumer_error() {
+            let mut cfg = test_config();
+            cfg.brokers = "127.0.0.1:1".into();
+            let mut source = KafkaSource::new(cfg);
+            let cp = Checkpointer::new();
+            source.open(SourceCtx::new(cp.handle())).expect("open");
+
+            poll_until_brokers_down(&mut source);
+            source.config.startup_timeout = Duration::from_nanos(1);
+            assert_names_the_transport_failure(&mut source, "no partition assignment within");
+        }
+
+        /// A member that lost its partitions and cannot reach a broker fails
+        /// at `assignment_timeout` with the refusal in the error.
+        /// Regression for #711.
+        #[test]
+        fn the_assignment_deadline_names_the_last_consumer_error() {
+            let mut source = opened_source(&[]);
+            source.note_assignment_loss("a revocation".to_owned());
+
+            poll_until_brokers_down(&mut source);
+            source.config.assignment_timeout = Duration::from_nanos(1);
+            assert_names_the_transport_failure(&mut source, "no partition assignment for");
+        }
+
         /// The revocation that releases a member's last partitions arms the
         /// deadline, once `unassign` completes it on the following call.
         /// This is the path every eager rebalance takes.
@@ -1362,10 +1486,10 @@ mod tests {
             assert_eq!(poll_until_armed(&mut source), "a revocation");
         }
 
-        /// An assignment clears the deadline even when it is empty. A group
-        /// with more members than partitions hands some member nothing, and
-        /// that member keeps running: it is in the group, and the next
-        /// rebalance can give it partitions.
+        /// An assignment clears the deadline and the recorded consumer error
+        /// even when it is empty. A group with more members than partitions
+        /// hands some member nothing, and that member keeps running: it is in
+        /// the group, and the next rebalance can give it partitions.
         #[test]
         fn an_accepted_empty_assignment_clears_the_deadline() {
             let mut source = opened_source(&[]);
@@ -1383,8 +1507,10 @@ mod tests {
                 "the error arms the deadline and names itself: {cause}"
             );
 
+            source.last_consumer_error = Some((Instant::now(), "consumer poll: SSL".to_owned()));
             push_intent(&source, Intent::Assign(TopicPartitionList::new()));
             poll_until_cleared(&mut source);
+            assert!(source.last_consumer_error.is_none());
         }
     }
 

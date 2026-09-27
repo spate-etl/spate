@@ -203,7 +203,7 @@ fn exception_code(reason: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_tls::{TestCa, endpoint_trusting};
+    use crate::test_tls::{TestCa, endpoint_trusting, failed_query};
     use tokio::io::AsyncWriteExt as _;
     use tokio::net::TcpListener;
 
@@ -340,13 +340,7 @@ mod tests {
                 let _ = tcp.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n").await;
             }
         });
-        let ca = TestCa::new("any");
-        let err = endpoint_trusting(&ca, &url)
-            .client()
-            .query("SELECT 1")
-            .execute()
-            .await
-            .unwrap_err();
+        let err = failed_query(&TestCa::new("any"), &url).await;
         assert!(format!("{err:?}").contains("InvalidMessage"), "{err:?}");
         let SinkError::Client { class, reason } = classify(err) else {
             unreachable!()
@@ -359,26 +353,23 @@ mod tests {
     /// `Retryable`.
     #[tokio::test]
     async fn a_rejecting_tls_alert_classifies_fatal() {
+        use rustls::AlertDescription as A;
         let ca = TestCa::new("any");
-        for (alert, name, expected) in [
-            (40, "HandshakeFailure", ErrorClass::Fatal),
-            (70, "ProtocolVersion", ErrorClass::Fatal),
-            (50, "DecodeError", ErrorClass::Retryable),
+        for (alert, expected) in [
+            (A::HandshakeFailure, ErrorClass::Fatal),
+            (A::ProtocolVersion, ErrorClass::Fatal),
+            (A::DecodeError, ErrorClass::Retryable),
         ] {
-            let addr = spate_test::tls_alert_server(b"", alert);
-            let err = endpoint_trusting(&ca, &format!("https://{addr}"))
-                .client()
-                .query("SELECT 1")
-                .execute()
-                .await
-                .unwrap_err();
-            assert!(format!("{err:?}").contains(name), "{err:?}");
+            let name = format!("{alert:?}");
+            let addr = spate_test::tls_alert_server(b"", u8::from(alert));
+            let err = failed_query(&ca, &format!("https://{addr}")).await;
+            assert!(format!("{err:?}").contains(&name), "{err:?}");
             let SinkError::Client { class, reason } = classify(err) else {
                 unreachable!()
             };
             assert_eq!(class, expected, "{reason}");
             if expected == ErrorClass::Fatal {
-                assert!(reason.contains(name), "{reason}");
+                assert!(reason.contains(&name), "{reason}");
             }
         }
     }
@@ -391,12 +382,7 @@ mod tests {
         let url = server
             .serve_requiring_client_cert(&TestCa::new("clients"))
             .await;
-        let err = endpoint_trusting(&server, &url)
-            .client()
-            .query("SELECT 1")
-            .execute()
-            .await
-            .unwrap_err();
+        let err = failed_query(&server, &url).await;
         let SinkError::Client { class, reason } = classify(err) else {
             unreachable!()
         };

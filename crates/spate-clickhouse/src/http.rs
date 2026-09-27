@@ -102,8 +102,9 @@ pub(crate) fn client(tls: &ClientConfig) -> clickhouse::Client {
 
 /// The TLS rejection in `err`'s source chain: a server certificate that
 /// failed verification, an alert in
-/// [`TLS_REJECTION_ALERTS`](spate_core::error::TLS_REJECTION_ALERTS), or no
-/// protocol version or cipher suite in common.
+/// [`TLS_REJECTION_ALERTS`](spate_core::error::TLS_REJECTION_ALERTS), or a
+/// server that shares no protocol version, cipher suite or other handshake
+/// parameter with the client (`PeerIncompatible`).
 pub(crate) fn tls_rejection<'a>(err: &'a (dyn Error + 'static)) -> Option<&'a rustls::Error> {
     spate_core::error::find_source::<rustls::Error>(err).filter(|tls| match tls {
         rustls::Error::InvalidCertificate(_) | rustls::Error::PeerIncompatible(_) => true,

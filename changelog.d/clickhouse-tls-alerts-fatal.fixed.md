@@ -3,7 +3,8 @@
 The ClickHouse sink fails a write as fatal when the server rejects the TLS
 handshake with an alert such as `handshake_failure`, `protocol_version` or,
 under TLS 1.3, `certificate_required`, and when client and server share no
-protocol version or cipher suite. The error names the alert. In previous
+protocol version, cipher suite or other handshake parameter. The error names
+the alert or the mismatch. In previous
 versions these were retryable, and the sink retried them without limit under
 the default retry settings. Other alerts, such as `internal_error`, stay
 retryable.

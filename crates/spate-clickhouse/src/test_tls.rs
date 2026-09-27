@@ -129,6 +129,21 @@ pub(crate) fn endpoint_trusting(ca: &TestCa, url: &str) -> ClickHouseEndpoint {
     ClickHouseEndpoint::new(client, url.to_owned())
 }
 
+/// The error a `SELECT 1` to `url` fails with, from a client that trusts
+/// `ca` and nothing else.
+///
+/// # Panics
+///
+/// Panics when the query succeeds.
+pub(crate) async fn failed_query(ca: &TestCa, url: &str) -> clickhouse::error::Error {
+    endpoint_trusting(ca, url)
+        .client()
+        .query("SELECT 1")
+        .execute()
+        .await
+        .unwrap_err()
+}
+
 /// Whether `err`'s source chain holds rustls's unknown-issuer rejection.
 pub(crate) fn is_unknown_issuer(err: &(dyn Error + 'static)) -> bool {
     matches!(

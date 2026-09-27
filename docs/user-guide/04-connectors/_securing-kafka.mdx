@@ -109,13 +109,21 @@ malformed message or an `internal error` alert (80), is retryable.
 `no partition assignment` error that also names the last consumer error, such
 as a refused connection, and how long ago it arrived.
 
-In the sink, both failures show up as timed-out deliveries, which are
-retryable. Under the default
-[`retry` settings](../07-reference/configuration.mdx#sink-pool) the pipeline
-keeps running with nothing written, and `/readyz` reports not ready.
+The sink sees both failures as timed-out deliveries. A timed-out delivery is
+fatal when it follows a rejection by a broker the sink connects to, a SASL
+authentication failure or a rejected handshake as listed above, by at most
+`delivery_timeout` + 35s + `reconnect.backoff.max.ms` (10s by default). This
+holds for a delivery bound for any broker. The batch fails once
+`delivery_timeout` passes, and the pipeline fails once
+`checkpoint.stalled_fail_after` elapses. The `sink write failed` warning ends
+with how long ago the rejection arrived and librdkafka's text, such as
+`a broker rejected the connection 33.5300315s ago: … Invalid username or password`.
+The `sink probe failed` warning carries the same text, and `/readyz` reports
+not ready.
 
-For the sink, the broker's reason is only in the log lines under the
-`librdkafka` target.
+Any other timed-out delivery is retryable. Under the default
+[`retry` settings](../07-reference/configuration.mdx#sink-pool) the pipeline
+then keeps running with nothing written, and `/readyz` reports not ready.
 
 Keep secrets out of the file with
 [environment interpolation](../03-guides/configuring-pipelines.mdx#environment-interpolation);

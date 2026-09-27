@@ -32,7 +32,7 @@ use crate::sink::context::SinkContext;
 use crate::sink::encoder::{
     DEFAULT_MAX_MESSAGE_BYTES, KafkaBytesEncoder, KafkaEncoder, KafkaJsonEncoder, MessageEncoder,
 };
-use crate::sink::writer::{KafkaEndpoint, KafkaWriter};
+use crate::sink::writer::{DELIVERY_GRACE, KafkaEndpoint, KafkaWriter};
 use bytesize::ByteSize;
 use rdkafka::producer::ThreadedProducer;
 use serde::Deserialize;
@@ -118,6 +118,12 @@ const DENYLIST: &[(&str, &str)] = &[
     ),
 ];
 
+/// librdkafka's default `reconnect.backoff.max.ms`.
+const DEFAULT_RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(10);
+
+/// How long librdkafka suppresses an error identical to the last one.
+const REPEATED_ERROR_INTERVAL: Duration = Duration::from_secs(30);
+
 fn default_shards() -> usize {
     1
 }
@@ -191,7 +197,10 @@ pub struct KafkaSinkConfig {
     #[serde(default = "default_shards")]
     pub shards: usize,
     /// librdkafka `delivery.timeout.ms`, and the bound on how long a batch
-    /// write awaits its delivery reports before failing retryably.
+    /// write awaits its delivery reports before failing. The failure is
+    /// retryable unless a broker rejected the connection with a SASL or TLS
+    /// failure at most `delivery_timeout` + 35s + `reconnect.backoff.max.ms`
+    /// earlier.
     #[serde(with = "humantime_serde", default = "default_delivery_timeout")]
     pub delivery_timeout: Duration,
     /// Per-message size limit (key + payload + headers), enforced at encode
@@ -326,6 +335,23 @@ impl KafkaSinkConfig {
             }
         }
         Ok(())
+    }
+
+    /// How long a rejection by a broker makes a timed-out delivery fatal:
+    /// `delivery_timeout`, the write's grace, 30s, and the passthrough's
+    /// `reconnect.backoff.max.ms` (librdkafka's 10s when unset or not a
+    /// number).
+    ///
+    /// librdkafka repeats an identical error once 30s have passed since the
+    /// last, on the next failed attempt, and retries a broker within
+    /// `reconnect.backoff.max.ms`.
+    pub(crate) fn rejection_window(&self) -> Duration {
+        let reconnect_backoff_max = self
+            .rdkafka
+            .get("reconnect.backoff.max.ms")
+            .and_then(|ms| ms.trim().parse().ok())
+            .map_or(DEFAULT_RECONNECT_BACKOFF_MAX, Duration::from_millis);
+        self.delivery_timeout + DELIVERY_GRACE + REPEATED_ERROR_INTERVAL + reconnect_backoff_max
     }
 
     /// Build the effective librdkafka producer configuration.
@@ -493,10 +519,12 @@ pub fn build(cfg: KafkaSinkConfig) -> Result<KafkaSink, ConfigError> {
         })?;
     let probe_endpoints = Arc::new(vec![vec![KafkaEndpoint::new(probe_producer, label)]]);
 
+    let rejection_window = cfg.rejection_window();
     let pool = SinkPoolConfig::new(cfg.batch, cfg.inflight, cfg.retry, cfg.breaker);
 
     Ok(KafkaSink {
         writer: KafkaWriter::new(
+            rejection_window,
             cfg.topic,
             cfg.delivery_timeout,
             stats_slot,
@@ -527,6 +555,28 @@ mod tests {
         let cfg: KafkaSinkConfig = section(body).deserialize_into()?;
         cfg.validate()?;
         Ok(cfg)
+    }
+
+    /// The rejection window is `delivery_timeout` + 5s + 30s +
+    /// `reconnect.backoff.max.ms`, with librdkafka's 10s default when the
+    /// property is unset or not a number.
+    #[test]
+    fn rejection_window_follows_the_reconnect_backoff() {
+        let window = |backoff: Option<&str>| {
+            let mut cfg = KafkaSinkConfig::new("localhost:9092", "orders");
+            if let Some(ms) = backoff {
+                cfg.rdkafka
+                    .insert("reconnect.backoff.max.ms".into(), ms.into());
+            }
+            cfg.rejection_window()
+        };
+        assert_eq!(window(None), Duration::from_secs(75));
+        assert_eq!(window(Some("2000")), Duration::from_secs(67));
+        assert_eq!(window(Some("2s")), Duration::from_secs(75));
+
+        let mut short = KafkaSinkConfig::new("localhost:9092", "orders");
+        short.delivery_timeout = Duration::from_secs(1);
+        assert_eq!(short.rejection_window(), Duration::from_secs(46));
     }
 
     #[test]

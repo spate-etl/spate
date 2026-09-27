@@ -110,6 +110,8 @@ pub(crate) struct SinkContext {
     stats: Arc<Mutex<Option<KafkaSinkStatsMetrics>>>,
     /// When the latest SASL or TLS rejection arrived, and its text.
     rejection: Mutex<Option<(Instant, String)>>,
+    /// The last error callback, until the identical call that repeats it.
+    unpaired_error: Mutex<Option<(Option<RDKafkaErrorCode>, String)>>,
 }
 
 impl SinkContext {
@@ -118,6 +120,7 @@ impl SinkContext {
         SinkContext {
             stats,
             rejection: Mutex::new(None),
+            unpaired_error: Mutex::new(None),
         }
     }
 
@@ -155,6 +158,23 @@ impl SinkContext {
         let age = now.saturating_duration_since(*at);
         (age <= window).then(|| (age, text.clone()))
     }
+
+    /// Whether this error callback repeats the previous one, which it then
+    /// consumes. rdkafka's producer poll hands each error event to the
+    /// context twice in a row on the poll thread;
+    /// `rdkafka_delivers_each_producer_error_twice` pins that.
+    fn repeats_previous(&self, code: Option<RDKafkaErrorCode>, reason: &str) -> bool {
+        let mut unpaired = self.unpaired_error.lock().expect("unpaired error lock");
+        if unpaired
+            .as_ref()
+            .is_some_and(|(c, r)| *c == code && r == reason)
+        {
+            *unpaired = None;
+            return true;
+        }
+        *unpaired = Some((code, reason.to_owned()));
+        false
+    }
 }
 
 impl ClientContext for SinkContext {
@@ -179,6 +199,9 @@ impl ClientContext for SinkContext {
     }
 
     fn error(&self, error: rdkafka::error::KafkaError, reason: &str) {
+        if self.repeats_previous(error.rdkafka_error_code(), reason) {
+            return;
+        }
         tracing::warn!(target: "librdkafka", %error, "{reason}");
         if let Some(code) = error.rdkafka_error_code() {
             self.note_error(code, reason, Instant::now());
@@ -355,5 +378,74 @@ pub(crate) mod tests {
                 "{code:?}: {text}"
             );
         }
+    }
+
+    /// Each error event logs one warning when it arrives as the identical pair
+    /// of callbacks rdkafka makes, and a SASL failure is still recorded.
+    /// Regression for #747.
+    #[test]
+    fn an_error_event_is_logged_once() {
+        use RDKafkaErrorCode as C;
+        use rdkafka::error::KafkaError;
+        const DOWN: &str = "1/1 brokers are down";
+        let ctx = SinkContext::detached();
+        let calls = [(C::AllBrokersDown, DOWN); 4]
+            .into_iter()
+            .chain([(C::Authentication, SASL_REFUSED); 2]);
+        let lines = spate_test::capture_logs(tracing::Level::WARN, || {
+            for (code, text) in calls {
+                ctx.error(KafkaError::Global(code), text);
+            }
+        });
+        let count = |text: &str| lines.iter().filter(|line| line.contains(text)).count();
+        assert_eq!(count(DOWN), 2, "two events, one line each: {lines:#?}");
+        assert_eq!(count(SASL_REFUSED), 1, "one event, one line: {lines:#?}");
+        assert!(
+            ctx.rejection_within(Instant::now(), Duration::MAX)
+                .is_some()
+        );
+    }
+
+    /// Records every error callback a producer receives.
+    #[derive(Default)]
+    struct ErrorCalls(Mutex<Vec<(Option<RDKafkaErrorCode>, String)>>);
+
+    impl ClientContext for ErrorCalls {
+        fn error(&self, error: rdkafka::error::KafkaError, reason: &str) {
+            self.0
+                .lock()
+                .expect("calls lock")
+                .push((error.rdkafka_error_code(), reason.to_owned()));
+        }
+    }
+
+    impl ProducerContext for ErrorCalls {
+        type DeliveryOpaque = ();
+
+        fn delivery(&self, _: &DeliveryResult<'_>, _: ()) {}
+    }
+
+    /// rdkafka's producer hands each error event to its context twice in a
+    /// row, which `SinkContext::repeats_previous` depends on.
+    #[test]
+    fn rdkafka_delivers_each_producer_error_twice() {
+        use rdkafka::ClientConfig;
+        use rdkafka::producer::{Producer, ThreadedProducer};
+        let producer: ThreadedProducer<ErrorCalls> = ClientConfig::new()
+            .set("bootstrap.servers", "127.0.0.1:1")
+            .create_with_context(ErrorCalls::default())
+            .expect("producer");
+        let context = Arc::clone(producer.context());
+        spate_test::wait_until(Duration::from_secs(10), "two error callbacks", || {
+            context.0.lock().expect("calls lock").len() >= 2
+        });
+        // Dropping the producer joins its poll thread, so every pair is complete.
+        drop(producer);
+        let calls = context.0.lock().expect("calls lock");
+        assert!(
+            calls.len() % 2 == 0 && calls.chunks(2).all(|pair| pair[0] == pair[1]),
+            "rdkafka no longer repeats error callbacks: delete \
+             `SinkContext::repeats_previous` and this test. Calls: {calls:#?}"
+        );
     }
 }

@@ -38,9 +38,10 @@ Construction is synchronous and lazy, so the connection and bucket provisioning
 happen on the first store operation, which is the coordinator's startup probe.
 An unreachable server therefore rides the startup retry budget. Misconfiguration,
 such as a `servers` entry that is not a URL or joins several with commas, fails
-startup with a fatal error that names the cause, and so does a credential,
-certificate or TLS handshake rejected on the first connection. A rejection met
-on a reconnect after startup is retried like an [outage](#what-an-outage-does).
+startup with a fatal error that names the cause, and so does a credential
+rejected on the first connection, or a certificate or TLS handshake rejected by
+the last server it tries. A rejection met on a reconnect after startup is
+retried like an [outage](#what-an-outage-does).
 
 ## Configuration
 

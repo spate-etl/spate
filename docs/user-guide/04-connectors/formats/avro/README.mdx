@@ -74,16 +74,22 @@ rather than committing them.
 
 A registry that answers `401` or `403`, or whose certificate fails
 verification, stops the pipeline whatever the deserializer's `ErrorPolicy`.
-The error names the registry URL, without credentials, and the status or the
-certificate error. An expired or untrusted intermediate certificate counts as
-a failed verification. The deserializer learns of the rejection from a fetch,
-so the pipeline stops at the first payload whose schema is not cached. Schemas
-already cached keep decoding until then, and a pipeline that receives no
-payload keeps running. A `401` on a `prewarm_subjects` fetch counts too; a `403`
+An expired or untrusted intermediate certificate counts as a failed
+verification. A TLS alert with which the registry rejects the handshake, such
+as `HandshakeFailure` or `ProtocolVersion`, stops the pipeline too, and so does
+a registry that shares no protocol version, cipher suite or other handshake
+parameter with the client. The error names the registry URL, without
+credentials, and the status, the certificate error, the alert or the mismatch.
+The deserializer learns of the rejection from a fetch, so the pipeline stops at
+the first payload whose schema is not cached. Schemas already cached keep
+decoding until then, and a pipeline that receives no payload keeps running. A `401` on a `prewarm_subjects` fetch counts too; a `403`
 there is logged, and the subject's schema is fetched on demand. Any other TLS
-or transport failure is transient: the batch is held and replayed while it
+or transport failure, such as an `InternalError` alert or a connection closed
+during the handshake, is transient: the batch is held and replayed while it
 lasts, logging `registry fetch failed transiently` and counting
-`spate_deser_not_ready_total`. See
+`spate_deser_not_ready_total`. The registry client presents no client
+certificate. A TLS 1.3 registry that requires one refuses the connection after
+the handshake, and that refusal is transient as well. See
 [Securing connections](../../../03-guides/securing-connections.mdx) for the
 generic model.
 

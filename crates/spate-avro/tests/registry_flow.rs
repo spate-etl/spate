@@ -744,6 +744,23 @@ async fn an_untrusted_registry_certificate_is_fatal() {
     assert!(reason.contains("certificate"), "{reason}");
 }
 
+/// A TLS alert with which the registry rejects the handshake is fatal, and
+/// the reason names the alert.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_rejecting_tls_alert_is_fatal() {
+    use rustls::AlertDescription as A;
+    for alert in [A::HandshakeFailure, A::ProtocolVersion] {
+        let addr = spate_test::tls_alert_server(b"", u8::from(alert));
+        let builder = AvroDeserializerBuilder::from_settings(
+            &settings_at(format!("https://{addr}"), Duration::from_secs(30)),
+            &tokio::runtime::Handle::current(),
+        )
+        .unwrap();
+        let reason = fatal_reason(builder.build_value().unwrap(), confluent_payload(1, 1)).await;
+        assert!(reason.contains(&format!("{alert:?}")), "{reason}");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The single-pass datum path against the registry
 // ---------------------------------------------------------------------------

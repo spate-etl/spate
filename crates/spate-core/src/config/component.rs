@@ -2,9 +2,11 @@
 
 use super::ConfigError;
 use super::chunk::ChunkSection;
+use super::redact;
 use crate::ops::ChunkConfig;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use std::fmt;
 
 /// An opaque component section: `{ <type_tag>: { ...connector config... } }`.
 ///
@@ -22,7 +24,7 @@ use serde::de::DeserializeOwned;
 /// The nested-block shape (exactly one key) lets every typed struct in the
 /// tree keep `deny_unknown_fields`. A flattened shape would disable that
 /// check.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct ComponentConfig {
     type_tag: String,
     raw: serde_yaml::Value,
@@ -36,6 +38,25 @@ pub struct ComponentConfig {
     /// Where this section sits in the pipeline config (`source`, `sink`,
     /// `deserializer`). Set after parsing, used to prefix error paths.
     section: Option<&'static str>,
+}
+
+// Hand-written: `raw` holds interpolated credentials. The destructure lists
+// every field so a new one cannot reach `Debug` unredacted.
+impl fmt::Debug for ComponentConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let ComponentConfig {
+            type_tag,
+            raw,
+            chunk,
+            section,
+        } = self;
+        f.debug_struct("ComponentConfig")
+            .field("type_tag", type_tag)
+            .field("raw", &redact::yaml(raw))
+            .field("chunk", &chunk.as_ref().map(redact::yaml))
+            .field("section", section)
+            .finish()
+    }
 }
 
 /// Remove the framework-reserved `chunk` key from a component body so the
@@ -211,6 +232,22 @@ mod tests {
     fn rejects_non_string_tag() {
         let err = parse("7: {}").unwrap_err().to_string();
         assert!(err.contains("type tag must be a string"), "{err}");
+    }
+
+    /// `Debug` shows the section's keys and shape and none of its values.
+    #[test]
+    fn debug_never_prints_component_values() {
+        let cc = parse(
+            "clickhouse:\n  password: hunter2\n  shards: [{replicas: [http://u:hunter2@ch]}]\n  \
+             chunk: {max_bytes: 1MiB}\n",
+        )
+        .unwrap();
+        let printed = format!("{cc:?}");
+        assert!(!printed.contains("hunter2"), "{printed}");
+        assert!(!printed.contains("1MiB"), "{printed}");
+        for visible in ["clickhouse", "password", "replicas", "max_bytes"] {
+            assert!(printed.contains(visible), "{visible}: {printed}");
+        }
     }
 
     #[test]

@@ -15,7 +15,7 @@
 
 use bytesize::ByteSize;
 use serde::{Deserialize, Serialize};
-use spate_core::config::{ComponentConfig, ConfigError};
+use spate_core::config::{ComponentConfig, ConfigError, redact};
 use std::collections::BTreeMap;
 use url::Url;
 
@@ -52,19 +52,6 @@ fn default_split_target_bytes() -> ByteSize {
 /// floor collapses and packing degenerates into thousands of one-object
 /// splits, taxing the coordination store for no read-parallelism gain.
 const SPLIT_TARGET_FLOOR: u64 = 1024 * 1024;
-
-/// Debug view of a raw option map: keys are configuration, values may be
-/// credentials (`aws_secret_access_key`, session tokens). Never print
-/// them.
-struct Redacted<'a>(&'a BTreeMap<String, String>);
-
-impl std::fmt::Debug for Redacted<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_map()
-            .entries(self.0.keys().map(|k| (k, "<redacted>")))
-            .finish()
-    }
-}
 
 /// Compression codec of the objects under the prefix.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
@@ -142,18 +129,27 @@ pub struct S3SourceConfig {
     pub store: BTreeMap<String, String>,
 }
 
-// Hand-written: the `store` map carries credentials; `{:?}` must never
-// print them.
+// Hand-written: the `store` map carries credentials. The destructure lists
+// every field so a new one cannot reach `Debug` unredacted.
 impl std::fmt::Debug for S3SourceConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let S3SourceConfig {
+            url,
+            compression,
+            split_target_bytes,
+            refresh_listing,
+            prefetch_bytes,
+            chunk_bytes,
+            store,
+        } = self;
         f.debug_struct("S3SourceConfig")
-            .field("url", &self.url)
-            .field("compression", &self.compression)
-            .field("split_target_bytes", &self.split_target_bytes)
-            .field("refresh_listing", &self.refresh_listing)
-            .field("prefetch_bytes", &self.prefetch_bytes)
-            .field("chunk_bytes", &self.chunk_bytes)
-            .field("store", &Redacted(&self.store))
+            .field("url", url)
+            .field("compression", compression)
+            .field("split_target_bytes", split_target_bytes)
+            .field("refresh_listing", refresh_listing)
+            .field("prefetch_bytes", prefetch_bytes)
+            .field("chunk_bytes", chunk_bytes)
+            .field("store", &redact::map(store.keys()))
             .finish()
     }
 }

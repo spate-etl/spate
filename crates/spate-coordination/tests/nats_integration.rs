@@ -119,7 +119,7 @@ fn partition_takeover_and_completion_over_real_nats() {
     );
 
     // A commits progress, then dies without releasing. Its leases expire
-    // server-side; the Purge markers reach B's watch; B takes everything
+    // server-side; the expiries reach B's watch; B takes everything
     // over with the progress carried and epochs bumped.
     let a_split = held_a.splits.keys().next().unwrap().clone();
     a.commit(

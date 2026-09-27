@@ -128,7 +128,9 @@ The lease bucket is where the server version floor comes from. NATS KV cannot
 re-arm a per-key TTL on update, but `max_age` applies per *message*, so every
 compare-and-swap rewrite restarts that key's clock, which **is** the heartbeat.
 An untouched key expires on its own, and the expiry surfaces to watchers as a
-limit marker.
+limit marker. The store reports a limit marker and a graceful delete the same
+way, as a deleted key. Whether a split was released or its owner died is read
+from its split record.
 
 ## Requirements
 

@@ -11,9 +11,10 @@
 //!   cannot re-arm a per-key TTL on update, but `max_age` applies per
 //!   *message*, so every CAS rewrite restarts the key's clock (that IS
 //!   the heartbeat), an untouched key expires, and the expiry surfaces to
-//!   watchers as a marker (`Operation::Purge`; graceful deletes surface
-//!   as `Operation::Delete`). The `nats_spike` integration test pins all
-//!   of these observations against a real server.
+//!   watchers as a limit marker (`Operation::Purge`; a graceful delete is
+//!   `Operation::Delete`). [`NatsStore`]'s watch reports both as
+//!   [`WatchEvent::Delete`]. The `nats_spike` integration test pins the
+//!   raw KV observations against a real server.
 //!
 //! Construction is synchronous and lazy: the connection and bucket
 //! provisioning happen on the first store operation, the coordinator's

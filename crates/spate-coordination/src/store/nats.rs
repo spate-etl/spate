@@ -878,7 +878,7 @@ mod tests {
     use super::*;
 
     /// Both spellings parse from YAML text: the single-key map and the tagged
-    /// form the derived `Deserialize` accepted.
+    /// form.
     #[test]
     fn credentials_parse_from_maps_and_tags() {
         for (yaml, expect) in [

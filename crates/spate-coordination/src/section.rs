@@ -167,7 +167,7 @@ mod tests {
     }
 
     /// The `credentials` spellings the NATS page documents, plus the tagged
-    /// forms the derived `Deserialize` accepted.
+    /// forms.
     #[test]
     fn documented_credential_spellings_parse() {
         for credentials in [

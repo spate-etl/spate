@@ -16,7 +16,9 @@
 //! are possible and loss is not. Errors that idempotence or configuration cannot heal
 //! (authorization, unknown topic, a fenced idempotent producer) are fatal:
 //! the batch is abandoned, the watermark stalls, and the pipeline fails
-//! fast instead of spinning.
+//! fast instead of spinning. A timed-out delivery is fatal too while the
+//! producer's latest SASL or TLS rejection by a broker is inside the
+//! rejection window, and its reason carries the rejection's text.
 
 use crate::sink::context::{BatchInflight, SinkContext};
 use crate::sink::frame::{FrameParser, MessageRef};
@@ -34,7 +36,7 @@ use std::time::{Duration, Instant};
 /// `delivery.timeout.ms` bounds time-to-report only from each message's
 /// *enqueue*, and the send loop itself may have spent time in queue-full
 /// backoff.
-const DELIVERY_GRACE: Duration = Duration::from_secs(5);
+pub(crate) const DELIVERY_GRACE: Duration = Duration::from_secs(5);
 
 /// Queue-full backoff bounds: librdkafka signals queue-full synchronously
 /// from `send`; the writer sleeps and retries that message while the
@@ -87,6 +89,8 @@ impl std::fmt::Debug for KafkaEndpoint {
 /// Built by the sink's config factory; cheap to clone.
 #[derive(Clone, Debug)]
 pub struct KafkaWriter {
+    /// How long a rejection by a broker makes a timed-out delivery fatal.
+    rejection_window: Duration,
     topic: String,
     delivery_timeout: Duration,
     /// Shared with the main producer's context, which publishes through
@@ -97,17 +101,28 @@ pub struct KafkaWriter {
 
 impl KafkaWriter {
     pub(crate) fn new(
+        rejection_window: Duration,
         topic: String,
         delivery_timeout: Duration,
         stats_slot: Arc<Mutex<Option<KafkaSinkStatsMetrics>>>,
         statistics_enabled: bool,
     ) -> Self {
         KafkaWriter {
+            rejection_window,
             topic,
             delivery_timeout,
             stats_slot,
             statistics_enabled,
         }
+    }
+
+    /// The latest rejection recorded by `endpoint`'s producer, when it is
+    /// inside the rejection window now.
+    fn rejection(&self, endpoint: &KafkaEndpoint) -> Option<(Duration, String)> {
+        endpoint
+            .producer
+            .context()
+            .rejection_within(Instant::now(), self.rejection_window)
     }
 
     fn parse_messages<'a>(&self, batch: &'a SealedBatch) -> Result<Vec<MessageRef<'a>>, SinkError> {
@@ -229,23 +244,24 @@ impl ShardWriter for KafkaWriter {
         // and force a duplicate-producing retry under sustained queue-full.
         let wait_deadline = Instant::now() + self.delivery_timeout + DELIVERY_GRACE;
         if !inflight.wait(wait_deadline).await {
-            return Err(SinkError::Client {
-                class: ErrorClass::Retryable,
-                reason: format!(
+            return Err(report_error(
+                Some(RDKafkaErrorCode::MessageTimedOut),
+                &format!(
                     "delivery reports missing past the deadline ({:?} + {:?} \
-                     grace); the batch will be retried (already-delivered \
-                     messages will duplicate — at-least-once)",
+                     grace)",
                     self.delivery_timeout, DELIVERY_GRACE
                 ),
-            });
+                self.rejection(endpoint),
+            ));
         }
         if let Some((code, reason)) = inflight.first_error() {
-            return Err(classify(
+            return Err(report_error(
                 *code,
                 &format!(
                     "{} of {total} delivery reports failed; first: {reason}",
                     inflight.failed()
                 ),
+                self.rejection(endpoint),
             ));
         }
         Ok(())
@@ -284,13 +300,44 @@ impl ShardWriter for KafkaWriter {
             Ok(())
         })
         .await;
-        outcome.unwrap_or_else(|join_error| {
+        let outcome = outcome.unwrap_or_else(|join_error| {
             Err(SinkError::Client {
                 class: ErrorClass::Retryable,
                 reason: format!("probe task failed: {join_error}"),
             })
-        })
+        });
+        match (outcome, self.rejection(endpoint)) {
+            (Err(SinkError::Client { class, reason }), Some(rejection)) => Err(SinkError::Client {
+                class,
+                reason: with_rejection(&reason, &rejection),
+            }),
+            (outcome, _) => outcome,
+        }
     }
+}
+
+/// Map a failed delivery report onto the framework taxonomy.
+///
+/// A `MessageTimedOut` report is [`ErrorClass::Fatal`] when `rejection`, the
+/// age and text of a rejection by a broker, is present, and its reason ends
+/// with that rejection. Any other report defers to [`classify`].
+fn report_error(
+    code: Option<RDKafkaErrorCode>,
+    reason: &str,
+    rejection: Option<(Duration, String)>,
+) -> SinkError {
+    match rejection {
+        Some(rejection) if code == Some(RDKafkaErrorCode::MessageTimedOut) => SinkError::Client {
+            class: ErrorClass::Fatal,
+            reason: with_rejection(reason, &rejection),
+        },
+        _ => classify(code, reason),
+    }
+}
+
+/// `reason` followed by a rejection's age and text.
+fn with_rejection(reason: &str, (age, text): &(Duration, String)) -> String {
+    format!("{reason}; a broker rejected the connection {age:?} ago: {text}")
 }
 
 /// Map a produce/report error onto the framework taxonomy.
@@ -342,6 +389,7 @@ mod tests {
 
     fn test_writer(statistics_enabled: bool) -> KafkaWriter {
         KafkaWriter::new(
+            Duration::from_secs(1),
             "t".to_string(),
             Duration::from_secs(1),
             Arc::new(Mutex::new(None)),
@@ -420,6 +468,65 @@ mod tests {
         assert!(reason.contains("message.max.bytes"), "actionable: {reason}");
     }
 
+    /// A timed-out report is fatal while a rejection is in the window, from
+    /// the failed-reports exit and the missing-reports exit alike, and the
+    /// reason ends with the rejection's age and text. Without one it stays
+    /// retryable.
+    #[test]
+    fn a_timed_out_report_after_a_rejection_is_fatal() {
+        use crate::sink::context::tests::SASL_REFUSED;
+        let ctx = SinkContext::detached();
+        let t0 = Instant::now();
+        ctx.note_error(RDKafkaErrorCode::Authentication, SASL_REFUSED, t0);
+        let rejection = ctx.rejection_within(t0 + Duration::from_secs(2), Duration::from_secs(75));
+
+        for reason in [
+            "1 of 1 delivery reports failed; first: Message production error: MessageTimedOut \
+             (Local: Message timed out)",
+            "delivery reports missing past the deadline (1s + 5s grace)",
+        ] {
+            let timed_out = Some(RDKafkaErrorCode::MessageTimedOut);
+            let SinkError::Client { class, reason: got } =
+                report_error(timed_out, reason, rejection.clone())
+            else {
+                unreachable!()
+            };
+            assert_eq!(class, ErrorClass::Fatal, "{got}");
+            assert_eq!(
+                got,
+                format!("{reason}; a broker rejected the connection 2s ago: {SASL_REFUSED}")
+            );
+            assert_eq!(
+                class_of(&report_error(timed_out, reason, None)),
+                ErrorClass::Retryable
+            );
+        }
+    }
+
+    /// A report other than a timeout keeps its code's class while a
+    /// rejection is in the window.
+    #[test]
+    fn other_reports_keep_their_class_after_a_rejection() {
+        let rejection = Some((Duration::from_secs(2), "rejected".to_owned()));
+        for (code, class) in [
+            (
+                RDKafkaErrorCode::BrokerTransportFailure,
+                ErrorClass::Retryable,
+            ),
+            (RDKafkaErrorCode::MessageSizeTooLarge, ErrorClass::Fatal),
+        ] {
+            assert_eq!(
+                class_of(&report_error(Some(code), "x", rejection.clone())),
+                class,
+                "{code:?}"
+            );
+        }
+        assert_eq!(
+            class_of(&report_error(None, "x", rejection)),
+            ErrorClass::Retryable
+        );
+    }
+
     #[test]
     fn parse_messages_rejects_row_count_mismatch() {
         use bytes::BytesMut;
@@ -460,5 +567,52 @@ mod tests {
             "kafka", "orders", "out", "kafka",
         )));
         assert!(enabled.stats_slot.lock().unwrap().is_some());
+    }
+
+    #[cfg(feature = "tls")]
+    mod tls_rejection {
+        use super::*;
+        use crate::sink::config::{KafkaSinkConfig, build};
+
+        fn one_row() -> SealedBatch {
+            let mut frame = bytes::BytesMut::new();
+            crate::sink::frame::write_message(&mut frame, None, std::iter::empty(), Some(b"p"))
+                .unwrap();
+            SealedBatch {
+                frames: vec![frame.freeze()],
+                rows: 1,
+                bytes: 0,
+                dedup_token: "t".to_string(),
+            }
+        }
+
+        /// A batch written to a broker that answers the TLS handshake with a
+        /// listed alert fails `Fatal`, and the error carries librdkafka's
+        /// text. A live 116 arrives under the `SSL` code.
+        #[tokio::test]
+        async fn a_rejected_handshake_fails_the_batch() {
+            for alert in [40, 48, 70, 116] {
+                let brokers = spate_test::tls_alert_server(b"", alert).to_string();
+                let mut cfg = KafkaSinkConfig::new(brokers, "t");
+                cfg.delivery_timeout = Duration::from_secs(1);
+                cfg.statistics_interval = Duration::ZERO;
+                cfg.rdkafka.insert("security.protocol".into(), "ssl".into());
+                let sink = build(cfg).expect("build");
+
+                let err = sink
+                    .writer
+                    .write_batch(&sink.endpoints[0][0], &one_row())
+                    .await
+                    .expect_err("no broker accepts the batch");
+                let SinkError::Client { class, reason } = err else {
+                    panic!("alert {alert}: unexpected error shape: {err:?}");
+                };
+                assert!(
+                    reason.contains(&format!("SSL alert number {alert} ")),
+                    "alert {alert}: {reason}"
+                );
+                assert_eq!(class, ErrorClass::Fatal, "alert {alert}: {reason}");
+            }
+        }
     }
 }

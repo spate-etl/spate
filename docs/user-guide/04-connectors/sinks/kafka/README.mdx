@@ -65,7 +65,7 @@ sink:
 | `brokers` | string | `required` | Comma-separated bootstrap servers. |
 | `topic` | string | `required` | The topic to produce to. One topic per sink instance; multi-topic is the `split` terminal. |
 | `shards` | int | `1` | Framework worker parallelism. All shards share the single producer, so raising this adds contention on that one client, not parallelism — keep `shards = 1` and use batch size as the throughput lever. |
-| `delivery_timeout` | duration | `30s` | librdkafka `delivery.timeout.ms`, and the bound on how long a batch write awaits its delivery reports before failing retryably. |
+| `delivery_timeout` | duration | `30s` | librdkafka `delivery.timeout.ms`, and the bound on how long a batch write awaits its delivery reports before failing. The failure is retryable unless a broker rejected the connection, as described under [Security](#security-tls-mtls-sasl). |
 | `max_message_bytes` | bytes | `1MB` | Per-message limit (key + payload + headers), enforced at **encode time** as a record-level error (Skip/Fail policy) and applied to the producer as `message.max.bytes`. `1MB` decodes to 1,000,000 bytes. Keep aligned with the topic/broker limit — a message passing this guard but rejected by the broker fails the batch fatally instead. |
 | `statistics_interval` | duration | `5s` | librdkafka statistics interval, feeding the `spate_kafka_sink_*` families; `0s` disables statistics and those families with it. |
 | `compression` | `none\|gzip\|snappy\|lz4\|zstd` | `none` | Producer compression (`compression.codec`). `zstd` needs an rdkafka build with zstd support — an unavailable codec fails at startup, never mid-stream. |
@@ -117,9 +117,11 @@ poll loop). Report errors map onto the framework taxonomy:
   exponential backoff. Messages already delivered in the failed attempt
   are re-produced, which duplicates records but never loses them.
 - **Fatal** (unknown topic, authorization failures, a message over the
-  broker limit, the idempotent producer's fenced states): the batch is
+  broker limit, the idempotent producer's fenced states, and timed-out
+  reports after a broker rejected the connection): the batch is
   abandoned, its partition watermark stalls, and the pipeline fails once
-  `checkpoint.stalled_fail_after` elapses.
+  `checkpoint.stalled_fail_after` elapses. A batch whose reports time out
+  fails once `delivery_timeout` passes.
 
 Oversized records never reach the writer. The encoder's
 `max_message_bytes` guard fails them record-level, where the sink stage's

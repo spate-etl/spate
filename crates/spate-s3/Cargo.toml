@@ -25,6 +25,8 @@ spate-core = { workspace = true }
 flate2 = { workspace = true }
 futures-util = { workspace = true }
 object_store = { workspace = true, features = ["aws"] }
+# `tls_rejection!` expands against this crate's rustls.
+rustls = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
@@ -41,10 +43,12 @@ spate-test = { workspace = true }
 spate-json = { workspace = true }
 gungraun = { workspace = true }
 proptest = { workspace = true }
+rcgen = { workspace = true }
 serde_yaml = { workspace = true }
 tempfile = { workspace = true }
 testcontainers = { workspace = true, features = ["blocking"] }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "test-util"] }
+tokio-rustls = { workspace = true, features = ["aws_lc_rs"] }
 
 [[bench]]
 name = "split_gungraun"

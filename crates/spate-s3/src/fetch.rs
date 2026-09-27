@@ -524,8 +524,9 @@ async fn stream_object_streaming(
                                 class: ErrorClass::Fatal,
                                 reason: format!(
                                     "split {split}: reading \"{}\" failed mid-object at byte \
-                                     {delivered}: {e}",
-                                    entry.key
+                                     {delivered}: {}",
+                                    entry.key,
+                                    crate::error::reason(&e)
                                 ),
                             }));
                         }
@@ -576,8 +577,9 @@ async fn retry_or_fail(
 ) -> Result<(), SplitFailure> {
     if classify(e) != ErrorClass::Retryable {
         let reason = format!(
-            "split {split}: reading \"{}\" failed at byte {delivered}: {e}",
-            entry.key
+            "split {split}: reading \"{}\" failed at byte {delivered}: {}",
+            entry.key,
+            crate::error::reason(e)
         );
         return Err(if crate::error::is_pipeline_fatal(e) {
             SplitFailure::Fatal(SourceError::Client {

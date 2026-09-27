@@ -65,7 +65,8 @@ meets the failure decide what you see:
   sink and the reason. `spate_sink_abandoned_batches_total` counts the batch.
 - **Retryable, in a source.** The source retries. Its connector page names any
   deadline or attempt budget that ends the retries. The error at that limit
-  names the limit, and the reason is in the warnings logged before it.
+  names the limit, and the reason is in the warnings logged before it. The
+  connector page says whether that error also carries the reason.
 - **Retryable, in a deserializer.** The batch is held and replayed while the
   failure lasts, counted by `spate_deser_not_ready_total`.
 - **Retryable, in a sink.** Under the default sink retry settings the sink

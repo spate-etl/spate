@@ -87,19 +87,35 @@ and testing only.
 
 ### When authentication or TLS fails
 
-The source fails at once on a SASL authentication failure, and the exit report
-carries the reason. A TLS failure is retryable. `startup_timeout` bounds the
-wait for a first partition assignment, and `assignment_timeout` the wait after
-an assignment is lost. Either ends in a `no partition assignment` error that
-does not name TLS.
+The source fails at once on a SASL authentication failure or a rejected TLS
+handshake, and the exit report carries the reason. A rejected handshake is one
+of:
+
+- a broker certificate the client fails to verify. The reason reads
+  `certificate verify failed` whether the CA is untrusted, the name does not
+  match or the certificate has expired by the client's clock.
+- a TLS alert listed in `spate::error::TLS_REJECTION_ALERTS`, with which the
+  broker rejects the handshake. The reason carries the alert's name and
+  number, such as `handshake failure` (`SSL alert number 40`), which a TLS 1.2
+  broker sends for a missing client certificate or no cipher suite in common,
+  `unknown ca` (48), `protocol version` (70) or, under TLS 1.3,
+  `certificate required` (116).
+
+A rejection by any broker the source connects to fails it. Any other TLS
+failure, such as a connection reset or closed during the handshake, a
+malformed message or an `internal error` alert (80), is retryable.
+`startup_timeout` bounds the wait for a first partition assignment, and
+`assignment_timeout` the wait after an assignment is lost. Either ends in a
+`no partition assignment` error that also names the last consumer error, such
+as a refused connection, and how long ago it arrived.
 
 In the sink, both failures show up as timed-out deliveries, which are
 retryable. Under the default
 [`retry` settings](../07-reference/configuration.mdx#sink-pool) the pipeline
 keeps running with nothing written, and `/readyz` reports not ready.
 
-For both roles, the broker's reason is in the log lines under the `librdkafka`
-target.
+For the sink, the broker's reason is only in the log lines under the
+`librdkafka` target.
 
 Keep secrets out of the file with
 [environment interpolation](../03-guides/configuring-pipelines.mdx#environment-interpolation);

@@ -120,6 +120,30 @@ pub enum SinkError {
     },
 }
 
+/// The first `T` in `err`'s source chain, `err` included.
+///
+/// At each [`std::io::Error`] it also follows the error the `io::Error`
+/// wraps, which `io::Error::source` skips.
+#[must_use]
+pub fn find_source<'a, T: std::error::Error + 'static>(
+    err: &'a (dyn std::error::Error + 'static),
+) -> Option<&'a T> {
+    let mut pending = vec![err];
+    while let Some(e) = pending.pop() {
+        if let Some(found) = e.downcast_ref() {
+            return Some(found);
+        }
+        if let Some(inner) = e
+            .downcast_ref::<std::io::Error>()
+            .and_then(|io| io.get_ref())
+        {
+            pending.push(inner);
+        }
+        pending.extend(e.source());
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -135,5 +159,25 @@ mod tests {
             reason: "truncated header".into(),
         };
         assert!(e.to_string().contains("truncated header"));
+    }
+
+    #[derive(Debug, thiserror::Error)]
+    #[error("target {0}")]
+    struct Target(u8);
+
+    #[derive(Debug, thiserror::Error)]
+    #[error("wrapper")]
+    struct Wrapper(#[source] std::io::Error);
+
+    /// A `T` inside an `io::Error` is found, though `io::Error::source` skips
+    /// it.
+    #[test]
+    fn find_source_reaches_the_error_an_io_error_wraps() {
+        let err = Wrapper(std::io::Error::other(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            Target(7),
+        )));
+        assert_eq!(find_source::<Target>(&err).map(|t| t.0), Some(7));
+        assert!(find_source::<FatalError>(&err).is_none());
     }
 }

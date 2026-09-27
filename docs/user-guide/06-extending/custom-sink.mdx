@@ -111,6 +111,8 @@ the frames) happens when the worker calls it, not when the future is polled:
   `Fatal`, and a failure to obtain credentials or reach the server is
   `Retryable`
   ([ADR-0047](../../adr/0047-a-rejected-credential-or-tls-handshake-is-fatal.md)).
+  `spate::error::find_source` finds the TLS library's error behind the
+  client's wrappers.
 - One writer instance is shared by every shard worker (`Send + Sync`); the
   per-replica state lives in `Endpoint`.
 

@@ -225,22 +225,10 @@ where
 /// The certificate rejection in `err`'s source chain, if the TLS handshake
 /// failed to verify the server.
 fn certificate_error<'a>(err: &'a (dyn Error + 'static)) -> Option<&'a CertificateError> {
-    let mut pending = vec![err];
-    while let Some(e) = pending.pop() {
-        if let Some(rustls::Error::InvalidCertificate(cert)) = e.downcast_ref() {
-            return Some(cert);
-        }
-        // `io::Error::source` skips the error it wraps, so reach it through
-        // `get_ref`.
-        if let Some(inner) = e
-            .downcast_ref::<std::io::Error>()
-            .and_then(|io| io.get_ref())
-        {
-            pending.push(inner);
-        }
-        pending.extend(e.source());
+    match spate_core::error::find_source::<rustls::Error>(err) {
+        Some(rustls::Error::InvalidCertificate(cert)) => Some(cert),
+        _ => None,
     }
-    None
 }
 
 fn client_config(roots: RootCertStore) -> ClientConfig {

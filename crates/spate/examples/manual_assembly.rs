@@ -180,7 +180,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::clone(&budget),
         shard_metrics,
         &pipeline_name,
-        "sink",
+        "default",
         failures.clone(),
         io.handle(),
     );

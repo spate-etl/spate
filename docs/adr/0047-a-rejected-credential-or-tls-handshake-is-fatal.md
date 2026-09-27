@@ -48,15 +48,16 @@ error names the cause.
 A rejection is identifiable when the client meets one of:
 
 - a certificate its own TLS stack fails to verify;
-- a fatal TLS alert from the server, such as `bad_certificate`,
-  `unknown_ca`, `certificate_required` or `handshake_failure`;
+- a fatal TLS alert from the server that names the certificate, the
+  credential or the negotiation, such as `bad_certificate`, `unknown_ca`,
+  `certificate_required` or `handshake_failure`;
 - no protocol version or cipher suite in common with the server;
 - an authentication or authorization error code from the server;
 - an HTTP 401 or 403 from the service the connector talks to.
 
 Everything else stays retryable: a failure to fetch or refresh credentials, a
-connection reset, closed or timed out during the handshake, and a malformed
-TLS message.
+connection reset, closed or timed out during the handshake, a malformed
+TLS message, and an alert such as `internal_error` that names none of those.
 
 Leaving the classification to each connector was rejected because the
 connectors already disagree, and a new connector has nothing to follow.

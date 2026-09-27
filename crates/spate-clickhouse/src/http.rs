@@ -100,29 +100,35 @@ pub(crate) fn client(tls: &ClientConfig) -> clickhouse::Client {
     )
 }
 
-/// The certificate rejection in `err`'s source chain, if the TLS handshake
-/// failed to verify the server.
-pub(crate) fn certificate_error<'a>(
-    err: &'a (dyn Error + 'static),
-) -> Option<&'a CertificateError> {
-    match spate_core::error::find_source::<rustls::Error>(err) {
-        Some(rustls::Error::InvalidCertificate(cert)) => Some(cert),
-        _ => None,
-    }
+/// The TLS rejection in `err`'s source chain: a server certificate that
+/// failed verification, an alert in
+/// [`TLS_REJECTION_ALERTS`](spate_core::error::TLS_REJECTION_ALERTS), or no
+/// protocol version or cipher suite in common.
+pub(crate) fn tls_rejection<'a>(err: &'a (dyn Error + 'static)) -> Option<&'a rustls::Error> {
+    spate_core::error::find_source::<rustls::Error>(err).filter(|tls| match tls {
+        rustls::Error::InvalidCertificate(_) | rustls::Error::PeerIncompatible(_) => true,
+        rustls::Error::AlertReceived(alert) => {
+            spate_core::error::TLS_REJECTION_ALERTS.contains(&u8::from(*alert))
+        }
+        _ => false,
+    })
 }
 
-/// `err`'s message, with the certificate rejection behind it appended.
+/// `err`'s message, with the TLS rejection behind it appended.
 pub(crate) fn error_reason(err: &clickhouse::error::Error) -> String {
-    let Some(cert) = certificate_error(err) else {
-        return err.to_string();
-    };
-    let hint = match cert {
-        CertificateError::UnknownIssuer => {
-            "; add the issuing CA to the system trust store or `tls.root_ca`"
+    match tls_rejection(err) {
+        Some(rustls::Error::InvalidCertificate(cert)) => {
+            let hint = match cert {
+                CertificateError::UnknownIssuer => {
+                    "; add the issuing CA to the system trust store or `tls.root_ca`"
+                }
+                _ => "",
+            };
+            format!("{err}: invalid peer certificate: {cert}{hint}")
         }
-        _ => "",
-    };
-    format!("{err}: invalid peer certificate: {cert}{hint}")
+        Some(tls) => format!("{err}: {tls}"),
+        None => err.to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -221,5 +227,21 @@ mod tests {
             .await
             .unwrap_err();
         assert!(is_unknown_issuer(&err), "{err:?}");
+    }
+
+    /// No cipher suite in common is a rejection; an alert outside the list
+    /// is not.
+    #[test]
+    fn tls_rejection_covers_an_incompatible_peer_and_only_listed_alerts() {
+        let wrapped =
+            |tls: rustls::Error| std::io::Error::new(std::io::ErrorKind::InvalidData, tls);
+        let incompatible = wrapped(rustls::Error::PeerIncompatible(
+            rustls::PeerIncompatible::NoCipherSuitesInCommon,
+        ));
+        assert!(tls_rejection(&incompatible).is_some());
+        let internal = wrapped(rustls::Error::AlertReceived(
+            rustls::AlertDescription::InternalError,
+        ));
+        assert!(tls_rejection(&internal).is_none());
     }
 }

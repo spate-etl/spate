@@ -120,6 +120,31 @@ pub enum SinkError {
     },
 }
 
+/// The TLS alert descriptions (RFC 8446 numbering) with which a server
+/// rejects the client's certificate, credential or negotiated parameters.
+///
+/// A fatal alert from this list is a rejection that retrying cannot cure, so
+/// a connector classes it [`ErrorClass::Fatal`]. Any other alert, such as
+/// `decode_error` (50) or `internal_error` (80), stays retryable.
+pub const TLS_REJECTION_ALERTS: &[u8] = &[
+    40,  // handshake_failure
+    42,  // bad_certificate
+    43,  // unsupported_certificate
+    44,  // certificate_revoked
+    45,  // certificate_expired
+    46,  // certificate_unknown
+    48,  // unknown_ca
+    49,  // access_denied
+    51,  // decrypt_error
+    70,  // protocol_version
+    71,  // insufficient_security
+    109, // missing_extension
+    110, // unsupported_extension
+    112, // unrecognized_name
+    116, // certificate_required
+    120, // no_application_protocol
+];
+
 /// The first `T` in `err`'s source chain, `err` included.
 ///
 /// At each [`std::io::Error`] it also follows the error the `io::Error`

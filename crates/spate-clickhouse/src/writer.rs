@@ -148,8 +148,8 @@ const FATAL_EXCEPTION_CODES: &[u32] = &[
 
 /// Map a client error onto the framework's retryable/fatal taxonomy.
 ///
-/// - a server certificate the TLS handshake rejects → `Fatal`, whatever the
-///   variant carrying it;
+/// - a TLS rejection ([`tls_rejection`](crate::http::tls_rejection)) →
+///   `Fatal`, whatever the variant carrying it;
 /// - other transport (`Network`, `TimedOut`) and uncategorized client errors
 ///   (`Other`) → `Retryable`;
 /// - server exceptions (`BadResponse`) → fatal only for the schema/parse/
@@ -161,7 +161,7 @@ const FATAL_EXCEPTION_CODES: &[u32] = &[
 fn classify(err: clickhouse::error::Error) -> SinkError {
     use clickhouse::error::Error as ChError;
     let class = match &err {
-        _ if crate::http::certificate_error(&err).is_some() => ErrorClass::Fatal,
+        _ if crate::http::tls_rejection(&err).is_some() => ErrorClass::Fatal,
         ChError::Network(_) | ChError::TimedOut | ChError::Other(_) => ErrorClass::Retryable,
         ChError::BadResponse(reason) => {
             if exception_code(reason).is_some_and(|c| FATAL_EXCEPTION_CODES.contains(&c)) {
@@ -352,5 +352,55 @@ mod tests {
             unreachable!()
         };
         assert_eq!(class, ErrorClass::Retryable, "{reason}");
+    }
+
+    /// A handshake alert that rejects the client classifies `Fatal` and names
+    /// the alert; `decode_error`, which reports a malformed message, stays
+    /// `Retryable`.
+    #[tokio::test]
+    async fn a_rejecting_tls_alert_classifies_fatal() {
+        let ca = TestCa::new("any");
+        for (alert, name, expected) in [
+            (40, "HandshakeFailure", ErrorClass::Fatal),
+            (70, "ProtocolVersion", ErrorClass::Fatal),
+            (50, "DecodeError", ErrorClass::Retryable),
+        ] {
+            let addr = spate_test::tls_alert_server(b"", alert);
+            let err = endpoint_trusting(&ca, &format!("https://{addr}"))
+                .client()
+                .query("SELECT 1")
+                .execute()
+                .await
+                .unwrap_err();
+            assert!(format!("{err:?}").contains(name), "{err:?}");
+            let SinkError::Client { class, reason } = classify(err) else {
+                unreachable!()
+            };
+            assert_eq!(class, expected, "{reason}");
+            if expected == ErrorClass::Fatal {
+                assert!(reason.contains(name), "{reason}");
+            }
+        }
+    }
+
+    /// A TLS 1.3 server refuses a missing client certificate after the
+    /// handshake, and the alert on the first read classifies `Fatal`.
+    #[tokio::test]
+    async fn a_refused_client_certificate_classifies_fatal() {
+        let server = TestCa::new("server");
+        let url = server
+            .serve_requiring_client_cert(&TestCa::new("clients"))
+            .await;
+        let err = endpoint_trusting(&server, &url)
+            .client()
+            .query("SELECT 1")
+            .execute()
+            .await
+            .unwrap_err();
+        let SinkError::Client { class, reason } = classify(err) else {
+            unreachable!()
+        };
+        assert_eq!(class, ErrorClass::Fatal, "{reason}");
+        assert!(reason.contains("CertificateRequired"), "{reason}");
     }
 }

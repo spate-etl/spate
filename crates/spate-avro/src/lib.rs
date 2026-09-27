@@ -45,7 +45,8 @@ mod registry;
 mod wire;
 
 pub use config::{
-    AvroConfigError, AvroDeserializerBuilder, AvroMode, AvroSettings, RegistrySection, SchemaSource,
+    AvroConfigError, AvroDeserializerBuilder, AvroMode, AvroSettings, RegistrySection,
+    SchemaSource, TlsSection,
 };
 pub use datum::AvroDatumDeserializer;
 pub use deser::{AvroSerdeDeserializer, AvroValue, AvroValueDeserializer};

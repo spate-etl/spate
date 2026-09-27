@@ -3965,6 +3965,7 @@ name = "spate-avro"
 version = "0.2.0"
 dependencies = [
  "apache-avro",
+ "base64 0.22.1",
  "bytes",
  "gungraun",
  "http-body-util",

@@ -12,6 +12,8 @@
 //!       url: ${SCHEMA_REGISTRY_URL}
 //!       username: ${SR_USER}         # optional basic auth
 //!       password: ${SR_PASSWORD}
+//!       tls:
+//!         root_ca: /etc/spate/registry-ca.pem  # optional: a private CA
 //!     prewarm_subjects: [orders-value]
 //!     negative_cache_ttl: 30s
 //!     reader_schema:                 # optional: pin the resolved shape
@@ -27,6 +29,7 @@ use apache_avro::Schema;
 use apache_avro::rabin::Rabin;
 use serde::Deserialize;
 use spate_core::config::ComponentConfig;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -99,8 +102,13 @@ impl SchemaSource {
 }
 
 /// Registry connection section.
+///
+/// Construct with [`RegistrySection::new`] and set the optional fields. The
+/// struct is `#[non_exhaustive]` so new knobs can be added without breaking
+/// callers.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct RegistrySection {
     /// Base URL of the Confluent-compatible schema registry.
     pub url: String,
@@ -110,6 +118,45 @@ pub struct RegistrySection {
     /// Basic-auth password (optional; use `${VAR}` interpolation).
     #[serde(default)]
     pub password: Option<String>,
+    /// Trust settings for an `https://` registry.
+    #[serde(default)]
+    pub tls: TlsSection,
+}
+
+impl RegistrySection {
+    /// A registry at `url`, without basic auth or extra trust roots.
+    #[must_use]
+    pub fn new(url: impl Into<String>) -> Self {
+        RegistrySection {
+            url: url.into(),
+            username: None,
+            password: None,
+            tls: TlsSection::default(),
+        }
+    }
+}
+
+/// Trust settings for an `https://` registry.
+///
+/// ```yaml
+/// deserializer:
+///   avro:
+///     registry:
+///       url: https://registry.internal:8081
+///       tls:
+///         root_ca: /etc/spate/registry-ca.pem
+/// ```
+///
+/// Construct with [`TlsSection::default`] and set the fields. The struct is
+/// `#[non_exhaustive]` so new knobs can be added without breaking callers.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct TlsSection {
+    /// PEM bundle of root CAs trusted in addition to the system trust store.
+    /// Requires an `https://` URL.
+    #[serde(default)]
+    pub root_ca: Option<PathBuf>,
 }
 
 /// The `avro` component configuration.
@@ -195,8 +242,8 @@ impl AvroDeserializerBuilder {
 
     /// Build from already-parsed settings.
     ///
-    /// In `confluent` mode on Linux and other non-Apple Unix, this reads the
-    /// system trust store.
+    /// In `confluent` mode this reads `registry.tls.root_ca`, and on Linux and
+    /// other non-Apple Unix the system trust store.
     ///
     /// # Errors
     ///
@@ -225,12 +272,21 @@ impl AvroDeserializerBuilder {
                             .into(),
                     });
                 }
+                if registry.tls.root_ca.is_some()
+                    && !reqwest::Url::parse(&registry.url).is_ok_and(|url| url.scheme() == "https")
+                {
+                    return Err(AvroConfigError::Invalid {
+                        detail: "registry.tls.root_ca is set, but registry.url is not https://"
+                            .into(),
+                    });
+                }
                 let registry = RegistryConfig {
                     url: registry.url.clone(),
                     basic_auth: registry
                         .username
                         .as_ref()
                         .map(|u| (u.clone(), registry.password.clone())),
+                    root_ca: registry.tls.root_ca.clone(),
                 };
                 let rejection = Rejection::default();
                 let client = Arc::new(sr_settings(&registry, &rejection)?);
@@ -489,6 +545,32 @@ mod tests {
         assert_eq!(settings.negative_cache_ttl, Duration::from_secs(45));
         let rt = runtime();
         AvroDeserializerBuilder::from_settings(&settings, rt.handle()).unwrap();
+    }
+
+    /// `registry.tls.root_ca` parses, rejects unknown keys beside it, and
+    /// requires an `https://` registry URL.
+    #[test]
+    fn registry_tls_root_ca_parses_and_requires_https() {
+        let settings: AvroSettings =
+            component("registry: {url: https://sr, tls: {root_ca: /etc/ca.pem}}")
+                .deserialize_into()
+                .unwrap();
+        let registry = settings.registry.unwrap();
+        assert_eq!(registry.tls.root_ca, Some(PathBuf::from("/etc/ca.pem")));
+
+        let err = component("registry: {url: https://sr, tls: {bogus: 1}}")
+            .deserialize_into::<AvroSettings>()
+            .unwrap_err();
+        assert!(err.to_string().contains("bogus"), "{err}");
+
+        let settings: AvroSettings =
+            component("registry: {url: http://sr, tls: {root_ca: /etc/ca.pem}}")
+                .deserialize_into()
+                .unwrap();
+        let rt = runtime();
+        let err = AvroDeserializerBuilder::from_settings(&settings, rt.handle()).unwrap_err();
+        assert!(matches!(err, AvroConfigError::Invalid { .. }), "{err}");
+        assert!(err.to_string().contains("registry.tls.root_ca"), "{err}");
     }
 
     #[test]

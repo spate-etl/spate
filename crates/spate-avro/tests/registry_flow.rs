@@ -174,11 +174,7 @@ fn settings(addr: std::net::SocketAddr, ttl: Duration) -> AvroSettings {
 fn settings_at(url: String, ttl: Duration) -> AvroSettings {
     AvroSettings {
         mode: AvroMode::Confluent,
-        registry: Some(RegistrySection {
-            url,
-            username: None,
-            password: None,
-        }),
+        registry: Some(RegistrySection::new(url)),
         negative_cache_ttl: ttl,
         ..AvroSettings::default()
     }

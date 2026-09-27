@@ -37,6 +37,8 @@ deserializer:
       url: ${SCHEMA_REGISTRY_URL}
       username: ${SR_USER}         # optional basic auth
       password: ${SR_PASSWORD}
+      tls:
+        root_ca: /etc/spate/registry-ca.pem  # optional: a private CA
     prewarm_subjects: [orders-value]
     negative_cache_ttl: 30s
     reader_schema:                 # optional: pin the resolved shape
@@ -49,6 +51,7 @@ deserializer:
 | `mode` | string | `confluent` | Payload framing: `confluent`, `raw`, or `single_object`. |
 | `registry.url` | string | `required` | Base URL of a Confluent-compatible schema registry. Required in `confluent` mode; rejected in the others. |
 | `registry.username` / `registry.password` | string | `none` | Basic auth (interpolate secrets via `${VAR}`). |
+| `registry.tls.root_ca` | path | `none` | PEM bundle of root CAs trusted in addition to the system trust store. Requires an `https://` URL. |
 | `prewarm_subjects` | string list | `[]` | Subjects whose latest schemas are fetched at startup (`confluent` mode only). |
 | `negative_cache_ttl` | duration | `30s` | How long a schema id the registry could not serve stays negatively cached before a refetch is allowed. |
 | `reader_schema` | `{ inline }` or `{ path }` | `none` | Reader schema pinning the resolved record shape (`confluent` and `raw` modes; not `single_object`). |
@@ -67,6 +70,14 @@ Unix systems the client reads the system store, and when `SSL_CERT_FILE` or
 yields no certificates, as on a container image without a CA package, the
 client logs a warning and uses the Mozilla root bundle compiled into the
 binary.
+
+For a private CA, set `registry.tls.root_ca` to a PEM file. Its certificates are
+trusted in addition to the system store, and on Linux and other Unix systems
+also when `SSL_CERT_FILE` or `SSL_CERT_DIR` replace that store. A relative path
+resolves against the working directory. A file that cannot be read, holds no
+certificate or holds a malformed one fails the deserializer at startup, and so
+does `registry.tls.root_ca` with a registry URL that is not `https://`. Android
+builds reject the setting.
 
 `registry.username` and `registry.password` carry basic auth to the schema
 registry. Interpolate them from the environment (`${SR_USER}` / `${SR_PASSWORD}`)

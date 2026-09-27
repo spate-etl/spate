@@ -460,11 +460,7 @@ pub(crate) fn typed_flatten_rig()
 pub(crate) fn confluent_settings(url: String) -> AvroSettings {
     AvroSettings {
         mode: AvroMode::Confluent,
-        registry: Some(RegistrySection {
-            url,
-            username: None,
-            password: None,
-        }),
+        registry: Some(RegistrySection::new(url)),
         negative_cache_ttl: NEGATIVE_TTL,
         ..AvroSettings::default()
     }

@@ -672,11 +672,7 @@ fn the_stub_registry_warms_a_ready_and_a_poisoned_id() {
     let stub = StubRegistry::start(&[(corpora::READY_ID, orders::SCHEMA)]);
     let settings = AvroSettings {
         mode: AvroMode::Confluent,
-        registry: Some(RegistrySection {
-            url: stub.url(),
-            username: None,
-            password: None,
-        }),
+        registry: Some(RegistrySection::new(stub.url())),
         negative_cache_ttl: Duration::from_secs(3_600),
         ..AvroSettings::default()
     };
@@ -714,11 +710,7 @@ fn the_stub_registry_warms_a_ready_and_a_poisoned_id() {
 fn an_undriven_runtime_leaves_every_id_missing() {
     let settings = AvroSettings {
         mode: AvroMode::Confluent,
-        registry: Some(RegistrySection {
-            url: "http://127.0.0.1:1".to_owned(),
-            username: None,
-            password: None,
-        }),
+        registry: Some(RegistrySection::new("http://127.0.0.1:1".to_owned())),
         negative_cache_ttl: Duration::from_secs(3_600),
         ..AvroSettings::default()
     };

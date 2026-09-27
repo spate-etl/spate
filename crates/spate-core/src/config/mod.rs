@@ -80,6 +80,7 @@ pub use serde_yaml::Value as YamlValue;
 
 use bytesize::ByteSize;
 use serde::Deserialize;
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::Path;
@@ -547,11 +548,15 @@ impl PipelineConfig {
 
     fn parse_interpolated(text: &str) -> Result<Self, ConfigError> {
         let de = serde_yaml::Deserializer::from_str(text);
-        let mut cfg: PipelineConfig =
-            serde_path_to_error::deserialize(de).map_err(|e| ConfigError::Parse {
-                path: e.path().to_string(),
-                source: e.into_inner(),
-            })?;
+        let mut cfg: PipelineConfig = serde_path_to_error::deserialize(de).map_err(|e| {
+            let path = e.path().to_string();
+            let source = e.into_inner();
+            let source = match redact::error_message(&source.to_string()) {
+                Cow::Borrowed(_) => source,
+                Cow::Owned(message) => serde::de::Error::custom(message),
+            };
+            ConfigError::Parse { path, source }
+        })?;
         cfg.source.set_section("source");
         if let Some(sink) = cfg.sink.as_mut() {
             sink.set_section("sink");
@@ -1216,6 +1221,32 @@ sinks:
         let err = PipelineConfig::from_str(yaml).unwrap_err();
         let text = err.to_string();
         assert!(text.contains("pipeline.io_threads"), "{text}");
+    }
+
+    /// A parse error keeps its path and position and does not quote the
+    /// value, including an explicit tag inside a connector body.
+    /// Regression for #764.
+    #[test]
+    fn parse_errors_omit_the_value() {
+        for (yaml, path, expected) in [
+            (
+                "pipeline: { name: x }\ncheckpoint: { interval: hunter2 }\nsource: { m: {} }\nsink: { m: {} }",
+                "checkpoint.interval",
+                "expected a duration at line 2 column",
+            ),
+            (
+                "pipeline: { name: x }\nsource: { m: {} }\nsink: { m: { password: !!int hunter2 } }",
+                "sink.m.password",
+                "expected an integer at line 3 column",
+            ),
+        ] {
+            let err = PipelineConfig::from_str(yaml).unwrap_err();
+            for shown in [err.to_string(), format!("{err:?}")] {
+                assert!(!shown.contains("hunter2"), "{shown}");
+                assert!(shown.contains(path), "{shown}");
+                assert!(shown.contains(expected), "{shown}");
+            }
+        }
     }
 
     #[test]

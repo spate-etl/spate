@@ -14,12 +14,14 @@ use spate_core::error::ErrorClass;
 ///   **one object**, so it becomes split poison rather than a fleet-wide
 ///   failure.
 /// - Authentication, permission, and configuration errors hold for every
-///   object on every instance: non-retryable *and* pipeline-fatal.
-/// - Everything else (`Generic` transport failures, timeouts, 5xx) is
-///   retryable.
+///   object on every instance: non-retryable *and* pipeline-fatal. A listing
+///   the store answers 401 or 403 is non-retryable, and the planner fails the
+///   pipeline on it.
+/// - Everything else (other `Generic` failures, timeouts, 5xx) is retryable.
 pub(crate) fn classify(e: &object_store::Error) -> ErrorClass {
     use object_store::Error as E;
     match e {
+        _ if list_rejected(e) => ErrorClass::Fatal,
         E::NotFound { .. }
         | E::Precondition { .. }
         | E::NotModified { .. }
@@ -56,6 +58,29 @@ pub(crate) fn is_pipeline_fatal(e: &object_store::Error) -> bool {
             | E::Unauthenticated { .. }
             | E::UnknownConfigurationKey { .. }
     )
+}
+
+/// Whether `e` is a listing the store answered with 401 or 403.
+///
+/// object_store reports a failed listing as `Generic` and keeps the error types
+/// in its chain private, so this matches each link by its message prefix. The
+/// tests against a local server fail if that text changes.
+fn list_rejected(e: &object_store::Error) -> bool {
+    let object_store::Error::Generic { source, .. } = e else {
+        return false;
+    };
+    source
+        .to_string()
+        .starts_with("Error performing list request: ")
+        && source
+            .source()
+            .and_then(|request| request.source())
+            .is_some_and(|status| {
+                status
+                    .to_string()
+                    .strip_prefix("Server returned non-2xx status code: ")
+                    .is_some_and(|code| code.starts_with("401 ") || code.starts_with("403 "))
+            })
 }
 
 /// Classify an object-level (non-pipeline-fatal, non-retryable) failure
@@ -144,6 +169,117 @@ mod tests {
                 "classify({e})"
             );
             assert_eq!(is_pipeline_fatal(e), *fatal, "is_pipeline_fatal({e})");
+        }
+    }
+
+    /// A listing the store answers 401 or 403 is `Fatal`; a listing answered
+    /// 500 stays `Retryable`. A rejected listing that arrives typed fails the
+    /// test, since `list_rejected` then matches nothing.
+    #[tokio::test]
+    async fn a_rejected_listing_is_fatal() {
+        use futures_util::StreamExt as _;
+        use object_store::ObjectStore as _;
+        for (status, expected) in [
+            ("403 Forbidden", ErrorClass::Fatal),
+            ("401 Unauthorized", ErrorClass::Fatal),
+            ("500 Internal Server Error", ErrorClass::Retryable),
+        ] {
+            let store = crate::test_servers::store_at(&crate::test_servers::status_server(status));
+            let e = store.list(None).next().await.unwrap().unwrap_err();
+            assert!(e.to_string().contains(status), "{e}");
+            if expected == ErrorClass::Fatal {
+                assert!(
+                    matches!(e, object_store::Error::Generic { .. }),
+                    "object_store reports a rejected listing as a typed error, so \
+                     `list_rejected` is dead and can be deleted: {e:?}"
+                );
+            }
+            assert_eq!(classify(&e), expected, "{e}");
+        }
+    }
+
+    /// An object read the store answers 403 or 401 arrives typed, names the
+    /// status, and is `Fatal` and pipeline-fatal.
+    #[tokio::test]
+    async fn a_rejected_read_is_fatal() {
+        use object_store::ObjectStore as _;
+        for status in ["403 Forbidden", "401 Unauthorized"] {
+            let store = crate::test_servers::store_at(&crate::test_servers::status_server(status));
+            let e = store
+                .get_opts(&"k".into(), object_store::GetOptions::default())
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(
+                    e,
+                    object_store::Error::PermissionDenied { .. }
+                        | object_store::Error::Unauthenticated { .. }
+                ),
+                "{e:?}"
+            );
+            assert!(e.to_string().contains(status), "{e}");
+            assert_eq!(classify(&e), ErrorClass::Fatal, "{e}");
+            assert!(is_pipeline_fatal(&e), "{e}");
+        }
+    }
+
+    /// A `Generic` error whose text carries a 403 is `Retryable` unless its
+    /// source chain is a listing answered with that status.
+    #[test]
+    fn a_403_outside_a_listing_is_retryable() {
+        for text in [
+            "Error performing PUT http://127.0.0.1/latest/api/token in 1ms - \
+             Server returned non-2xx status code: 403 Forbidden: denied",
+            "Error performing list request: Server returned non-2xx status code: 403 Forbidden: ",
+        ] {
+            let e = object_store::Error::Generic {
+                store: "S3",
+                source: text.into(),
+            };
+            assert_eq!(classify(&e), ErrorClass::Retryable, "{e}");
+            assert!(!is_pipeline_fatal(&e), "{e}");
+        }
+    }
+
+    /// An error with the listing's three-link shape and a 403 is `Fatal` only
+    /// when its first link is the list request.
+    #[test]
+    fn a_403_chain_is_fatal_only_under_a_list_request() {
+        #[derive(Debug)]
+        struct Link(String, Option<Box<Link>>);
+        impl std::fmt::Display for Link {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(&self.0)
+            }
+        }
+        impl std::error::Error for Link {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                self.1.as_deref().map(|l| l as _)
+            }
+        }
+        let status = "Server returned non-2xx status code: 403 Forbidden: denied";
+        let chain = |top: &str| {
+            let request = format!("Error performing POST http://127.0.0.1/b in 1ms - {status}");
+            object_store::Error::Generic {
+                store: "S3",
+                source: Box::new(Link(
+                    format!("{top}: {request}"),
+                    Some(Box::new(Link(
+                        request,
+                        Some(Box::new(Link(status.to_owned(), None))),
+                    ))),
+                )),
+            }
+        };
+        for (top, expected) in [
+            ("Error performing list request", ErrorClass::Fatal),
+            (
+                "Error performing CreateSession request",
+                ErrorClass::Retryable,
+            ),
+        ] {
+            let e = chain(top);
+            assert_eq!(classify(&e), expected, "{e}");
         }
     }
 }

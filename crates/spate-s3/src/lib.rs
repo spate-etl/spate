@@ -91,6 +91,8 @@ mod source;
 mod split;
 mod split_ctx;
 #[cfg(test)]
+mod test_servers;
+#[cfg(test)]
 mod testutil;
 
 pub use config::{Compression, S3SourceConfig};

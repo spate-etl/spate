@@ -336,4 +336,34 @@ mod tests {
         };
         assert_eq!(classify(&generic), ErrorClass::Retryable);
     }
+
+    /// A listing the store answers 403 or 401 fails the plan as `Fatal` on the
+    /// first attempt, naming the status.
+    #[test]
+    fn a_rejected_listing_fails_the_first_plan() {
+        let rt = runtime();
+        for status in ["403 Forbidden", "401 Unauthorized"] {
+            let store = crate::test_servers::store_at(&crate::test_servers::status_server(status));
+            let mut p = planner(Arc::new(store), rt.handle().clone(), 64 * MB);
+            let err = p.plan(PlanContext::new(None, 1)).unwrap_err();
+            assert_eq!(err.kind, CoordinationErrorKind::Fatal, "{}", err.reason);
+            assert!(err.reason.contains(status), "{}", err.reason);
+            assert!(!err.reason.contains("plan attempts"), "{}", err.reason);
+        }
+    }
+
+    /// A credential endpoint that answers 403 leaves the plan `Retryable`.
+    #[test]
+    fn a_rejected_credential_fetch_is_retryable() {
+        let rt = runtime();
+        let url = crate::test_servers::status_server("403 Forbidden");
+        let store = crate::test_servers::builder_at(&url)
+            .with_metadata_endpoint(&url)
+            .build()
+            .unwrap();
+        let mut p = planner(Arc::new(store), rt.handle().clone(), 64 * MB);
+        let err = p.plan(PlanContext::new(None, 1)).unwrap_err();
+        assert_eq!(err.kind, CoordinationErrorKind::Retryable, "{}", err.reason);
+        assert!(err.reason.contains("latest/api/token"), "{}", err.reason);
+    }
 }

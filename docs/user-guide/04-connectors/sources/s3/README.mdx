@@ -176,13 +176,14 @@ from the environment):
       aws_container_authorization_token_file: "${AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE}"
 ```
 
-An object read the store rejects as unauthenticated or forbidden, and a
+A listing or object read the store answers with `401` or `403`, and a
 client-configuration error, fail the pipeline immediately, because no peer
-would fare better. The store reports a rejected listing as a generic error, so
-the listing is retried on each replan tick, and the pipeline fails with the
-listing error after eight consecutive failures. A read whose credentials cannot be resolved
-or refreshed is retried like a transport error, and the split is then handed
-back and quarantined at the attempt cap. Non-S3 schemes (`file://`) do
+would fare better. The error names the status. Any other failed listing is
+retried on each replan tick, and the pipeline fails with the listing error
+after eight consecutive failures. Credentials that cannot be resolved or
+refreshed, including a `401` or `403` from the credential endpoint, are retried
+like a transport error. For a read, the split is then handed back and
+quarantined at the attempt cap. Non-S3 schemes (`file://`) do
 not read the AWS environment. See
 [Securing connections](../../../03-guides/securing-connections.mdx) for the
 generic model.

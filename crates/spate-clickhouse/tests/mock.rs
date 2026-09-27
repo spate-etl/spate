@@ -606,6 +606,37 @@ async fn probe_fn_covers_every_replica_with_its_own_clients() {
     assert!(sink.probe_fn()().await.is_err());
 }
 
+/// A credential in a replica URL's query never reaches `Debug`, the replica
+/// metric labels or schema errors. Regression for #754.
+#[tokio::test]
+async fn replica_url_credentials_never_reach_debug_labels_or_errors() {
+    use spate_core::sink::SinkBundle;
+
+    let with_query = |url: &str| format!("{url}/?password=hunter2");
+    let redacted = |url: &str| format!("{url}/?<redacted>");
+
+    let mock = Mock::new();
+    mock.add(handlers::provide(matching_columns()));
+    let sink = sink_for(&with_query(mock.url())).await;
+    let printed = format!("{sink:?}");
+    assert!(!printed.contains("hunter2"), "{printed}");
+    assert!(printed.contains(&redacted(mock.url())), "{printed}");
+    let parts = sink.into_parts();
+    assert_eq!(parts.replica_labels, vec![vec![redacted(mock.url())]]);
+
+    let missing = Mock::new();
+    missing.add(handlers::provide(Vec::<ColumnRow>::new()));
+    let err = failed_sink(&with_query(missing.url())).await.to_string();
+    assert!(!err.contains("hunter2"), "{err}");
+    assert!(err.contains(&redacted(missing.url())), "{err}");
+
+    let down = Mock::new();
+    down.add(handlers::failure(hyper::StatusCode::SERVICE_UNAVAILABLE));
+    let err = failed_sink(&with_query(down.url())).await.to_string();
+    assert!(!err.contains("hunter2"), "{err}");
+    assert!(err.contains(&redacted(down.url())), "{err}");
+}
+
 #[tokio::test]
 async fn probe_maps_select_one() {
     let mock = Mock::new();
@@ -888,6 +919,38 @@ async fn non_distributed_engine_fails_with_the_engine_name() {
     assert!(
         err.to_string().contains("ReplacingMergeTree"),
         "names the actual engine: {err}"
+    );
+}
+
+/// A credential in the `distributed_check` endpoint URL never reaches the
+/// check's mismatch or fetch errors. Regression for #754.
+#[tokio::test]
+async fn distributed_check_errors_never_print_endpoint_credentials() {
+    let check = |url: &str| {
+        format!(
+            "distributed_check: {{ cluster: prod, table: orders_dist, sharding_key: id, \
+             endpoint: \"{url}/?password=hunter2\" }}"
+        )
+    };
+
+    let mock = Mock::new();
+    let sink = checked_sink(&mock, &[1], &check(mock.url())).await;
+    mock.add(handlers::provide::<ClusterRow>(Vec::new()));
+    let err = sink.validate_distributed().await.unwrap_err().to_string();
+    assert!(!err.contains("hunter2"), "{err}");
+    assert!(
+        err.contains(&format!("{}/?<redacted>", mock.url())),
+        "{err}"
+    );
+
+    let failing = Mock::new();
+    let sink = checked_sink(&failing, &[1], &check(failing.url())).await;
+    failing.add(handlers::failure(hyper::StatusCode::SERVICE_UNAVAILABLE));
+    let err = sink.validate_distributed().await.unwrap_err().to_string();
+    assert!(!err.contains("hunter2"), "{err}");
+    assert!(
+        err.contains(&format!("{}/?<redacted>", failing.url())),
+        "{err}"
     );
 }
 

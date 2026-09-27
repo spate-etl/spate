@@ -15,7 +15,8 @@ every security property is set through the connector's raw `rdkafka:`
 passthrough; these keys are **not** on the denylist, and the configuration is
 identical for the Kafka source and the Kafka sink. Setting any security
 property **without** the feature fails fast at config load with an actionable
-message rather than an obscure runtime error.
+message rather than an obscure runtime error. Every `rdkafka:` value renders
+`<redacted>` in the config's `Debug` output; the keys stay visible.
 
 ```toml
 # Cargo.toml

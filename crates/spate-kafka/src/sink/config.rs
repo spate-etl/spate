@@ -36,7 +36,7 @@ use crate::sink::writer::{DELIVERY_GRACE, KafkaEndpoint, KafkaWriter};
 use bytesize::ByteSize;
 use rdkafka::producer::ThreadedProducer;
 use serde::Deserialize;
-use spate_core::config::{ComponentConfig, ConfigError};
+use spate_core::config::{ComponentConfig, ConfigError, redact};
 use spate_core::deser::{Owned, RecFamily};
 use spate_core::sink::{
     BatchConfig, BreakerConfig, InflightConfig, RetryConfig, SinkBundle, SinkParts, SinkPoolConfig,
@@ -180,7 +180,7 @@ impl Compression {
 /// Construct with [`KafkaSinkConfig::new`] and set the optional fields. The
 /// struct is `#[non_exhaustive]` so new knobs can be added without breaking
 /// callers.
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct KafkaSinkConfig {
@@ -238,6 +238,41 @@ pub struct KafkaSinkConfig {
     /// set.
     #[serde(default)]
     pub rdkafka: BTreeMap<String, String>,
+}
+
+// Hand-written: the `rdkafka` map carries credentials. The destructure lists
+// every field so a new one cannot reach `Debug` unredacted.
+impl std::fmt::Debug for KafkaSinkConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let KafkaSinkConfig {
+            brokers,
+            topic,
+            shards,
+            delivery_timeout,
+            max_message_bytes,
+            statistics_interval,
+            compression,
+            batch,
+            inflight,
+            retry,
+            breaker,
+            rdkafka,
+        } = self;
+        f.debug_struct("KafkaSinkConfig")
+            .field("brokers", brokers)
+            .field("topic", topic)
+            .field("shards", shards)
+            .field("delivery_timeout", delivery_timeout)
+            .field("max_message_bytes", max_message_bytes)
+            .field("statistics_interval", statistics_interval)
+            .field("compression", compression)
+            .field("batch", batch)
+            .field("inflight", inflight)
+            .field("retry", retry)
+            .field("breaker", breaker)
+            .field("rdkafka", &redact::map(rdkafka.keys()))
+            .finish()
+    }
 }
 
 impl KafkaSinkConfig {
@@ -555,6 +590,19 @@ mod tests {
         let cfg: KafkaSinkConfig = section(body).deserialize_into()?;
         cfg.validate()?;
         Ok(cfg)
+    }
+
+    /// `Debug` shows every `rdkafka` key and none of the values.
+    #[test]
+    fn debug_never_prints_rdkafka_values() {
+        let body = format!("{}  rdkafka:\n    sasl.password: hunter2\n", minimal());
+        let cfg: KafkaSinkConfig = section(&body).deserialize_into().unwrap();
+        let printed = format!("{cfg:?}");
+        assert!(!printed.contains("hunter2"), "{printed}");
+        assert!(
+            printed.contains("\"sasl.password\": <redacted>"),
+            "{printed}"
+        );
     }
 
     /// The rejection window is `delivery_timeout` + 5s + 30s +

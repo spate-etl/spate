@@ -62,6 +62,7 @@ mod chunk;
 mod component;
 mod error;
 mod interpolate;
+pub mod redact;
 
 pub use component::ComponentConfig;
 pub use error::ConfigError;
@@ -745,6 +746,21 @@ pipeline: { name: demo }
 source: { memory: {} }
 sink: { memory: {} }
 "#;
+
+    /// `Debug` on the whole pipeline config prints no connector value.
+    #[test]
+    fn pipeline_config_debug_never_prints_component_values() {
+        let cfg = PipelineConfig::from_str(
+            "pipeline: { name: demo }\n\
+             source: { kafka: { rdkafka: { sasl.password: hunter2 } } }\n\
+             deserializer: { avro: { registry: { url: https://sr, password: hunter2 } } }\n\
+             sink: { clickhouse: { password: hunter2 } }\n",
+        )
+        .unwrap();
+        let printed = format!("{cfg:?}");
+        assert!(!printed.contains("hunter2"), "{printed}");
+        assert!(printed.contains("sasl.password"), "{printed}");
+    }
 
     #[test]
     fn minimal_config_applies_documented_defaults() {

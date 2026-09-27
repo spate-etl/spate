@@ -36,6 +36,7 @@ use async_nats::jetstream::stream::LastRawMessageErrorKind;
 use async_nats::jetstream::{kv, stream};
 use futures_util::StreamExt as _;
 use serde::Deserialize;
+use spate_core::config::redact;
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -131,7 +132,7 @@ pub struct NatsTls {
 /// breaking callers.
 ///
 /// `Debug` is safe to log: every secret field redacts itself.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct NatsConfig {
@@ -153,6 +154,30 @@ pub struct NatsConfig {
     /// JetStream cluster). Default 1.
     #[serde(default = "default_replicas")]
     pub replicas: usize,
+}
+
+// Hand-written: server URLs can carry credentials. The destructure lists every
+// field so a new one cannot reach `Debug` unredacted.
+impl fmt::Debug for NatsConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let NatsConfig {
+            servers,
+            job,
+            credentials,
+            tls,
+            replicas,
+        } = self;
+        f.debug_struct("NatsConfig")
+            .field(
+                "servers",
+                &servers.iter().map(|s| redact::url(s)).collect::<Vec<_>>(),
+            )
+            .field("job", job)
+            .field("credentials", credentials)
+            .field("tls", tls)
+            .field("replicas", replicas)
+            .finish()
+    }
 }
 
 fn default_replicas() -> usize {
@@ -805,6 +830,25 @@ mod tests {
         with_tls(&["nats-1.internal:4222"]).unwrap();
         let plain = NatsConfig::new(vec!["ws://nats-1.internal:8080".into()], "orders");
         NatsStore::new(plain, Duration::from_secs(30)).unwrap();
+    }
+
+    /// Server URL userinfo never reaches `Debug`. Regression for #754.
+    #[test]
+    fn debug_never_prints_server_userinfo() {
+        let config = NatsConfig::new(
+            vec![
+                "nats://svc:hunter2@n1:4222".into(),
+                "svc:hunter2@n2:4222".into(),
+            ],
+            "orders",
+        );
+        let rendered = format!("{config:?}");
+        assert!(!rendered.contains("hunter2"), "{rendered}");
+        assert!(
+            rendered.contains("\"nats://<redacted>@n1:4222\""),
+            "{rendered}"
+        );
+        assert!(rendered.contains("\"<redacted>@n2:4222\""), "{rendered}");
     }
 
     #[test]

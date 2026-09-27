@@ -28,7 +28,7 @@ use crate::registry::{RegistryConfig, Rejection, spawn_fetcher, sr_settings};
 use apache_avro::Schema;
 use apache_avro::rabin::Rabin;
 use serde::Deserialize;
-use spate_core::config::ComponentConfig;
+use spate_core::config::{ComponentConfig, redact};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -106,7 +106,7 @@ impl SchemaSource {
 /// Construct with [`RegistrySection::new`] and set the optional fields. The
 /// struct is `#[non_exhaustive]` so new knobs can be added without breaking
 /// callers.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct RegistrySection {
@@ -157,6 +157,25 @@ pub struct TlsSection {
     /// Requires an `https://` URL.
     #[serde(default)]
     pub root_ca: Option<PathBuf>,
+}
+
+// Hand-written: `password` and the URL userinfo are credentials. The
+// destructure lists every field so a new one cannot reach `Debug` unredacted.
+impl std::fmt::Debug for RegistrySection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let RegistrySection {
+            url,
+            username,
+            password,
+            tls,
+        } = self;
+        f.debug_struct("RegistrySection")
+            .field("url", &redact::url(url))
+            .field("username", username)
+            .field("password", &redact::option(password))
+            .field("tls", tls)
+            .finish()
+    }
 }
 
 /// The `avro` component configuration.
@@ -522,6 +541,23 @@ mod tests {
             .enable_all()
             .build()
             .unwrap()
+    }
+
+    /// `Debug` on the settings hides the registry password and URL userinfo
+    /// and keeps the host and username. Regression for #754.
+    #[test]
+    fn debug_never_prints_registry_credentials() {
+        let settings: AvroSettings = component(
+            "registry: {url: 'https://svc:hunter2@sr:8081', username: svc, password: hunter2, \
+             tls: {root_ca: /etc/ca.pem}}",
+        )
+        .deserialize_into()
+        .unwrap();
+        let printed = format!("{settings:?}");
+        assert!(!printed.contains("hunter2"), "{printed}");
+        for visible in ["sr:8081", "\"svc\"", "Some(<redacted>)", "/etc/ca.pem"] {
+            assert!(printed.contains(visible), "{visible}: {printed}");
+        }
     }
 
     #[test]

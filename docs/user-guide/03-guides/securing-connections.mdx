@@ -44,6 +44,12 @@ may contain YAML-significant characters. The four `${...}` forms and the
 quoting rules are in
 [Configuring pipelines](configuring-pipelines.mdx#environment-interpolation).
 
+A pipeline config's `Debug` output shows its keys and renders every value
+inside a connector body as `<redacted>`. A bundled connector's own config
+renders its passwords, the values of its passthrough option maps, and any
+userinfo, query or fragment in its URLs as `<redacted>`. Other fields print as
+configured, including usernames.
+
 Secrets that never enter the config file are better still: a connector
 that resolves ambient cloud credentials, or reads a mounted credentials file,
 gives you nothing to leak.

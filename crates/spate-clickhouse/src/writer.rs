@@ -1,6 +1,7 @@
 //! The I/O half of the sink: writing sealed batches to replica endpoints.
 
 use bytes::Bytes;
+use spate_core::config::redact;
 use spate_core::error::{ErrorClass, SinkError};
 use spate_core::sink::{SealedBatch, ShardWriter};
 use std::fmt;
@@ -25,6 +26,12 @@ impl ClickHouseEndpoint {
         &self.url
     }
 
+    /// [`url`](Self::url) with its userinfo, query and fragment redacted, for
+    /// error text and metric labels.
+    pub(crate) fn display_url(&self) -> impl fmt::Display + '_ {
+        redact::url(&self.url)
+    }
+
     /// Crate-internal access for schema validation queries; the client
     /// type stays out of the public API.
     pub(crate) fn client(&self) -> &clickhouse::Client {
@@ -35,7 +42,7 @@ impl ClickHouseEndpoint {
 impl fmt::Debug for ClickHouseEndpoint {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ClickHouseEndpoint")
-            .field("url", &self.url)
+            .field("url", &redact::url(&self.url))
             .finish_non_exhaustive()
     }
 }
@@ -48,13 +55,34 @@ impl fmt::Debug for ClickHouseEndpoint {
 /// (RowBinary rows behind their header, or a stream of Native blocks).
 /// `write_batch` returning `Ok` is the durable-ack point (the server confirmed
 /// the insert, materialized views included, thanks to `wait_end_of_query=1`).
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ClickHouseWriter {
     insert_sql: String,
     header: Option<Bytes>,
     settings: Vec<(String, String)>,
     send_timeout: Option<Duration>,
     end_timeout: Option<Duration>,
+}
+
+// Hand-written: the `settings` values can carry credentials. The destructure
+// lists every field so a new one cannot reach `Debug` unredacted.
+impl fmt::Debug for ClickHouseWriter {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let ClickHouseWriter {
+            insert_sql,
+            header,
+            settings,
+            send_timeout,
+            end_timeout,
+        } = self;
+        f.debug_struct("ClickHouseWriter")
+            .field("insert_sql", insert_sql)
+            .field("header", header)
+            .field("settings", &redact::map(settings.iter().map(|(k, _)| k)))
+            .field("send_timeout", send_timeout)
+            .field("end_timeout", end_timeout)
+            .finish()
+    }
 }
 
 impl ClickHouseWriter {

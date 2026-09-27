@@ -110,14 +110,14 @@ impl DistributedCheck {
             .await
             .map_err(|e| DistributedCheckError::Fetch {
                 what: "cluster topology",
-                url: self.endpoint.url().to_string(),
+                url: self.endpoint.display_url().to_string(),
                 reason: crate::http::error_reason(&e),
             })?;
         if replicas.is_empty() {
             return Err(self.mismatch(format!(
                 "cluster `{}` not found in system.clusters on {}",
                 self.cluster,
-                self.endpoint.url()
+                self.endpoint.display_url()
             )));
         }
 
@@ -219,7 +219,7 @@ impl DistributedCheck {
         let engines = query.fetch_all::<TableEngineRow>().await.map_err(|e| {
             DistributedCheckError::Fetch {
                 what: "table engine",
-                url: self.endpoint.url().to_string(),
+                url: self.endpoint.display_url().to_string(),
                 reason: crate::http::error_reason(&e),
             }
         })?;
@@ -227,7 +227,7 @@ impl DistributedCheck {
             return Err(self.mismatch(format!(
                 "table {} not found (or not visible to this user) on {}",
                 self.display_table(),
-                self.endpoint.url()
+                self.endpoint.display_url()
             )));
         };
         if row.engine != "Distributed" {

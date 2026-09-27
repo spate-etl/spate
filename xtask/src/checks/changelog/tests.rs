@@ -1,311 +1,68 @@
 use super::*;
 
-/// The classifier's verdict, spelt as the table spells it.
-fn verdict(subject: &str) -> &'static str {
-    if needs_entry(subject) {
-        "need"
-    } else {
-        "exempt"
-    }
-}
-
-/// The crate scopes, read from `crates/`. A tenth crate must not become exempt
-/// by being left out of a list.
-fn crate_scopes() -> Vec<String> {
-    let root = crate::repo_root().unwrap();
-    let mut out: Vec<String> = std::fs::read_dir(root.join("crates"))
-        .unwrap()
-        .map(|e| e.unwrap())
-        .filter(|e| e.path().is_dir())
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .collect();
-    out.sort();
-    out
-}
-
-/// The classifier's verdict on every row of the table, each row grouped under
-/// what it is there to hold.
+/// Which paths are part of what a crate ships.
 #[test]
-fn the_classifier_agrees_with_the_table() {
-    const TABLE: &[(&str, &str)] = &[
-        // Crate-scoped and user-visible: a fragment is required.
-        ("feat(spate-core): a windowed operator", "need"),
-        ("fix(spate-kafka): stop dropping offsets on revoke", "need"),
-        ("perf(spate-clickhouse): halve the encode cost", "need"),
-        ("feat(spate-core,docs): a thing and its page", "need"),
-        (
-            "fix(spate-core,docs): stop the quarantine wait consuming the ladder",
-            "need",
-        ),
-        (
-            "feat(spate-avro,bench): decode datums straight into typed records",
-            "need",
-        ),
-        // Crate-scoped, but the type says nobody upgrading cares.
-        (
-            "docs(spate-core): rewrite the module documentation",
-            "exempt",
-        ),
-        (
-            "test(spate-kafka): retry the container suite once",
-            "exempt",
-        ),
-        ("chore(spate-core): tidy an import", "exempt"),
-        ("refactor(spate-core): extract a helper", "exempt"),
-        ("style(spate-kafka): rustfmt", "exempt"),
-        ("ci(spate-core): pin an action", "exempt"),
-        // Reverting a release and moving an MSRV floor are not that.
-        ("revert(spate-core): back out the windowed operator", "need"),
-        ("build(spate-core): raise the MSRV floor to 1.95", "need"),
-        // A user-visible type, but the scope names no crate.
-        (
-            "feat(docs): give Spate a mark that works on a square canvas",
-            "exempt",
-        ),
-        ("feat(ci): a new job", "exempt"),
-        ("feat(website): restyle the navigation", "exempt"),
-        (
-            "fix(bench): pin the iteration count for both legs",
-            "exempt",
-        ),
-        ("fix(ci,docs): lowercase the Pages project name", "exempt"),
-        // The automation's own subjects, verbatim from its config.
-        (
-            "chore(workspace): bump the cargo-compatible group",
-            "exempt",
-        ),
-        ("chore(ci): bump mikepenz/action-junit-report", "exempt"),
-        ("chore(website): bump typescript in /website", "exempt"),
-        ("chore(examples): bump a dependency", "exempt"),
-        ("chore: release v0.2.0", "exempt"),
-        // The breaking marker decides on its own, before either axis.
-        ("refactor(spate-core)!: rename a public trait", "need"),
-        ("perf(spate-kafka)!: change the batch shape", "need"),
-        ("feat(spate-s3)!: fence the split leases", "need"),
-        // `docs(workspace)!:` is real history (c6a7a5c) and it carried a
-        // BREAKING CHANGE to `breaker.open_for` inside a documentation scope.
-        // Reading the scope first exempted it and 0.2.0 shipped without the
-        // entry.
-        ("docs(workspace)!: migrate CLAUDE.md to AGENTS.md", "need"),
-        ("chore(ci)!: drop a workflow input", "need"),
-        (
-            "test(spate-core)!: rename a test helper somebody imports",
-            "need",
-        ),
-        // No scope is not an exemption. All five are real history.
-        ("refactor!: rename the framework to spate", "need"),
-        (
-            "feat!: leader-computed sticky assignment for source coordination",
-            "need",
-        ),
-        (
-            "feat: dynamic work-stealing source coordination over NATS JetStream KV",
-            "need",
-        ),
-        (
-            "feat: multi-sink split — per-type ClickHouse tables from one pipeline",
-            "need",
-        ),
-        (
-            "feat: record-aware sink sharding with ClickHouse Distributed parity",
-            "need",
-        ),
-        // Nothing unparseable gets a free pass.
-        (
-            "Relicense under Apache-2.0, drop the LGPL dependency",
-            "need",
-        ),
-        ("Update the readme", "need"),
-        ("WIP", "need"),
-        // One keystroke from an exemption is not an exemption.
-        ("feature(spate-core): the type is misspelt", "need"),
-        ("feat(spate-kafkaa): the scope is misspelt", "need"),
-        ("feat(sapte-core): the scope is transposed", "need"),
-        // Tolerated spellings that must still classify.
-        ("feat( spate-core ): a spaced scope", "need"),
-        ("FEAT(spate-core): a shouty type", "need"),
-        ("DOCS(spate-core): a shouty exemption", "exempt"),
-        ("Refactor(spate-core): a titled exemption", "exempt"),
-    ];
-
-    for (subject, want) in TABLE {
-        assert_eq!(verdict(subject), *want, "{subject}");
-    }
-}
-
-/// Every crate under `crates/` is a scope the classifier reads, and the type
-/// axis still exempts one. The table above stays green if the crate list is
-/// never read, because every scope would become unrecognized and every case
-/// would still classify as `need`.
-#[test]
-fn every_crate_is_read_on_the_scope_axis_and_exempted_on_the_type_axis() {
-    let crates = crate_scopes();
-    assert!(
-        !crates.is_empty(),
-        "no crate scopes derived from crates/, so this guard is checking nothing"
-    );
-    for name in &crates {
-        assert_eq!(
-            verdict(&format!("feat({name}): x")),
-            "need",
-            "'feat({name}): x' is exempt, so crates/ is not being read"
-        );
-        assert_eq!(
-            verdict(&format!("docs({name}): x")),
-            "exempt",
-            "'docs({name}): x' needs a fragment, so the type axis is dead"
-        );
-    }
-}
-
-/// Every exempt scope exempts a user-visible type, and none of them names a
-/// crate.
-#[test]
-fn every_exempt_scope_exempts_and_names_no_crate() {
-    let root = crate::repo_root().unwrap();
-    assert_eq!(
-        EXEMPT_SCOPES,
-        ["ci", "docs", "examples", "bench", "workspace", "website"],
-        "a scope left this list stops exempting, and one added starts"
-    );
-    for scope in EXEMPT_SCOPES {
-        assert_eq!(
-            verdict(&format!("feat({scope}): x")),
-            "exempt",
-            "'{scope}' is in EXEMPT_SCOPES but still requires a fragment"
-        );
-        assert!(
-            !root.join("crates").join(scope).is_dir(),
-            "EXEMPT_SCOPES names 'crates/{scope}', a crate"
-        );
-    }
-}
-
-/// The five user-visible types require a fragment under a crate scope, and
-/// every type on the internal list is exempt under one.
-#[test]
-fn both_type_axes_are_read() {
-    for kind in ["feat", "fix", "perf", "revert", "build"] {
-        assert_eq!(verdict(&format!("{kind}(spate-core): x")), "need", "{kind}");
-    }
-    for kind in INTERNAL_TYPES {
-        assert_eq!(
-            verdict(&format!("{kind}(spate-core): x")),
-            "exempt",
-            "{kind}"
-        );
-    }
-}
-
-/// A subject the pattern does not match requires a fragment, whatever it looks
-/// like.
-#[test]
-fn an_unparseable_subject_requires_a_fragment() {
-    for subject in [
-        "",
-        ":",
-        "feat:",
-        "feat: ",
-        "feat:\t",
-        "(spate-core): x",
-        "feat(a)(b): x",
-        "feat(a)b: x",
-        "feat(a)!x: y",
-        "feat(a: x",
-        "feat2(ci): x",
-        "(ci): x",
-        "9(ci): x",
-        "9feat: x",
-        "docs:",
-        "docs: ",
-        "docs:\t",
-        "féat: x",
-        "Merge branch 'main' into topic",
+fn a_crate_ships_its_source_manifest_and_build_script() {
+    for path in [
+        "crates/spate-core/src/lib.rs",
+        "crates/spate-core/src/pipeline/tests.rs",
+        "crates/spate-kafka/Cargo.toml",
+        "crates/spate-kafka/build.rs",
     ] {
-        assert!(needs_entry(subject), "{subject:?}");
+        assert!(ships(path), "{path}");
+    }
+    for path in [
+        "crates/spate-core/tests/pipeline.rs",
+        "crates/spate-core/benches/pool.rs",
+        "crates/spate-core/README.md",
+        "crates/spate-core/examples/x.rs",
+        "crates/Cargo.toml",
+        "xtask/src/main.rs",
+        "Cargo.toml",
+        "Cargo.lock",
+        "docs/src/lib.rs",
+        "",
+    ] {
+        assert!(!ships(path), "{path}");
     }
 }
 
-/// The scope group runs to the first `)`, and a type is ASCII letters.
+/// A `rust-version` line added or removed moves it; a context line or another
+/// key does not.
 #[test]
-fn a_subject_parses_into_its_three_fields() {
-    assert_eq!(
-        parse_subject("feat(a(b): x"),
-        Some(Parsed {
-            kind: "feat",
-            scopes: "a(b",
-            bang: false
-        })
-    );
-    assert_eq!(
-        parse_subject("FEAT(spate-core)!:x"),
-        Some(Parsed {
-            kind: "FEAT",
-            scopes: "spate-core",
-            bang: true
-        })
-    );
-    assert_eq!(
-        parse_subject("feat: \u{a0}"),
-        Some(Parsed {
-            kind: "feat",
-            scopes: "",
-            bang: false
-        }),
-        "only ASCII whitespace separates the colon from the text"
-    );
-    assert_eq!(parse_subject("feat(a)(b): x"), None);
+fn a_rust_version_line_in_the_diff_moves_it() {
+    assert!(diff_moves_rust_version(
+        "--- a/Cargo.toml\n+++ b/Cargo.toml\n@@ -5 +5 @@\n-rust-version = \"1.95\"\n+rust-version = \"1.96\"\n"
+    ));
+    assert!(diff_moves_rust_version("+rust-version = \"1.96\"\n"));
+    assert!(!diff_moves_rust_version(
+        "+version = \"0.3.0\"\n-version = \"0.2.0\"\n"
+    ));
+    assert!(!diff_moves_rust_version(" rust-version = \"1.96\"\n"));
+    assert!(!diff_moves_rust_version(""));
 }
 
-/// A comma splits the scope list, a trailing comma closes the last scope, and
-/// an empty list has no scopes at all.
-#[test]
-fn a_scope_list_splits_on_commas() {
-    assert_eq!(scope_list(""), Vec::<&str>::new());
-    assert_eq!(scope_list("a,b"), ["a", "b"]);
-    assert_eq!(scope_list("a,,b"), ["a", "", "b"]);
-    assert_eq!(scope_list("a,"), ["a"]);
-    assert_eq!(scope_list(",a"), ["", "a"]);
-    assert_eq!(scope_list(","), [""]);
-    assert_eq!(scope_list(",,"), ["", ""]);
-    assert_eq!(scope_list(" a , b "), [" a ", " b "]);
-}
-
-/// An empty scope is not a known scope, so it reaches a crate.
-#[test]
-fn an_empty_scope_reaches_a_crate() {
-    assert_eq!(verdict("feat(): x"), "need");
-    assert_eq!(verdict("feat(,): x"), "need");
-    assert_eq!(verdict("feat( ): x"), "need");
-    assert_eq!(verdict("docs(): x"), "exempt");
-}
-
-/// A scope list needs a fragment when any one of its scopes is unrecognized.
-#[test]
-fn any_unrecognized_scope_requires_a_fragment() {
-    assert_eq!(verdict("feat(docs,ci): x"), "exempt");
-    assert_eq!(verdict("feat(docs,spate-core): x"), "need");
-    assert_eq!(verdict("feat(spate-core,docs): x"), "need");
-    assert_eq!(verdict("feat( docs , ci ): x"), "exempt");
-}
-
-/// Membership is a run of the list's own spelling, so a scope holding a space
-/// can name two of them at once.
+/// Membership is a run of the list's own spelling.
 #[test]
 fn membership_matches_a_space_delimited_run() {
-    assert!(in_list(EXEMPT_SCOPES, "docs"));
-    assert!(!in_list(EXEMPT_SCOPES, "doc"));
-    assert!(!in_list(EXEMPT_SCOPES, ""));
-    assert!(in_list(EXEMPT_SCOPES, "docs examples"));
+    assert!(in_list(TYPES, "fixed"));
+    assert!(!in_list(TYPES, "fix"));
+    assert!(!in_list(TYPES, ""));
+    assert!(in_list(TYPES, "removed fixed"));
 }
 
-/// The breaking marker decides before either axis, including for a type and a
-/// scope both exempt.
+/// A fragment opens with the breaking marker only as its first words.
 #[test]
-fn the_breaking_marker_decides_before_either_axis() {
-    assert_eq!(verdict("docs(docs)!: x"), "need");
-    assert_eq!(verdict("chore(ci)!: x"), "need");
-    assert_eq!(verdict("docs(docs): x"), "exempt");
+fn only_an_opening_marker_is_breaking() {
+    assert!(opens_breaking(
+        "**Breaking:** **A title** (`spate-core`)\n\nProse.\n"
+    ));
+    assert!(opens_breaking("\n  **Breaking:** **A title**\n"));
+    assert!(!opens_breaking(
+        "**A title** (`spate-core`)\n\n**Breaking:** later.\n"
+    ));
+    assert!(!opens_breaking("Breaking: a title\n"));
+    assert!(!opens_breaking(""));
 }
 
 /// A fragment filename carries its type, one directory level down, and nothing
@@ -351,21 +108,6 @@ fn the_trailer_is_read_in_any_casing() {
     assert!(!trailer_says_none("Changelogs: none"));
     assert!(!trailer_says_none(" Changelog: none"));
     assert!(!trailer_says_none(""));
-}
-
-/// The offending line pads the subject so the origins line up, and a subject
-/// past the column is not truncated.
-#[test]
-fn an_offending_line_pads_the_subject() {
-    assert_eq!(
-        offender_line("feat: x", "commit abc1234"),
-        format!("    feat: x{} (commit abc1234)", " ".repeat(63))
-    );
-    let long = "f".repeat(80);
-    assert_eq!(
-        offender_line(&long, "pull request title"),
-        format!("    {long} (pull request title)")
-    );
 }
 
 /// A `git` invocation that failed, and one that answered with nothing, both
@@ -422,57 +164,6 @@ fn a_pull_request_that_evaluated_nothing_is_refused() {
     assert!(!evaluated_nothing(&required, true, "pull_request"));
 }
 
-/// The pull request title is a subject in its own right, and each of its lines
-/// is one, so a title carrying a second line cannot smuggle one past the gate.
-#[test]
-fn the_title_is_a_subject_of_its_own() {
-    let root = crate::repo_root().unwrap();
-    let got = subjects(&root, "HEAD..HEAD", "feat(ci): a\n\nfeat(spate-core): b");
-    assert_eq!(
-        got,
-        vec![
-            Subject {
-                text: "feat(ci): a".to_owned(),
-                origin: "pull request title".to_owned(),
-                source: Source::Body,
-            },
-            Subject {
-                text: "feat(spate-core): b".to_owned(),
-                origin: "pull request title".to_owned(),
-                source: Source::Body,
-            },
-        ]
-    );
-    assert!(subjects(&root, "HEAD..HEAD", "").is_empty());
-}
-
-/// A commit's subject and its short sha come back as one subject, split at the
-/// tab between them, so a subject carrying spaces survives whole.
-#[test]
-fn a_commit_subject_names_the_commit_it_came_from() {
-    let repo = Repo::new("a_commit_subject_names_the_commit_it_came_from");
-    let base = repo.git(&["rev-parse", "HEAD"]);
-    let text = "fix(spate-kafka): stop dropping offsets on revoke";
-    let head = repo.commit(text);
-    let short = repo.git(&["log", "-1", "--format=%h", &head]);
-
-    assert_eq!(
-        subjects(repo.path(), &format!("{base}..{head}"), ""),
-        vec![Subject {
-            text: text.to_owned(),
-            origin: format!("commit {short}"),
-            source: Source::Commit(short),
-        }]
-    );
-}
-
-/// A range git cannot resolve yields no subjects, and the gate carries on.
-#[test]
-fn an_unresolvable_range_yields_no_subjects() {
-    let root = crate::repo_root().unwrap();
-    assert!(subjects(&root, "0000000000000000000000000000000000000000..HEAD", "").is_empty());
-}
-
 /// A working directory of this test's own.
 fn scratch(name: &str) -> Scratch {
     Scratch::new(&format!("spate-xtask-changelog-{name}")).unwrap()
@@ -488,7 +179,7 @@ impl Repo {
         repo.git(&["init", "--quiet", "-b", "main", "."]);
         repo.write("changelog.d/README.md", "the conventions\n");
         repo.git(&["add", "-A"]);
-        repo.commit("chore: the first commit");
+        repo.commit("workspace: the first commit");
         repo
     }
 
@@ -538,52 +229,15 @@ impl Repo {
 fn the_laptop_arm_reads_the_first_upstream_that_is_behind_head() {
     let repo = Repo::new("the_laptop_arm_reads_the_first_upstream_that_is_behind_head");
     let first = repo.git(&["rev-parse", "HEAD"]);
-    let second = repo.commit("chore: a second commit");
+    let second = repo.commit("workspace: a second commit");
     assert_eq!(laptop_base(repo.path()), None, "main is the tip itself");
 
     repo.git(&["checkout", "--quiet", "-b", "topic"]);
-    repo.commit("feat(spate-core): a thing");
+    repo.commit("core: a thing");
     assert_eq!(laptop_base(repo.path()), Some(second.clone()));
 
     repo.git(&["update-ref", "refs/remotes/origin/main", &first]);
     assert_eq!(laptop_base(repo.path()), Some(first));
-}
-
-/// A trailer on a commit excuses that commit's subject alone. A subject with
-/// nothing excusing it is reported with where it came from, and the pull
-/// request title is reported even where a commit carries the same text.
-#[test]
-fn a_trailer_excuses_one_subject_and_leaves_the_rest() {
-    let repo = Repo::new("a_trailer_excuses_one_subject_and_leaves_the_rest");
-    let scratch = scratch("a_trailer_excuses_one_subject_and_leaves_the_rest");
-    let excused = repo.commit("feat(spate-core): never released\n\nChangelog: none\n");
-    let subjects = vec![
-        Subject {
-            text: "feat(spate-core): never released".to_owned(),
-            origin: "commit abc1234".to_owned(),
-            source: Source::Commit(excused),
-        },
-        Subject {
-            text: "fix(spate-kafka): a real one".to_owned(),
-            origin: "commit def5678".to_owned(),
-            source: Source::Commit(repo.commit("fix(spate-kafka): a real one")),
-        },
-        Subject {
-            text: "feat(spate-core): never released".to_owned(),
-            origin: "pull request title".to_owned(),
-            source: Source::Body,
-        },
-    ];
-
-    let (offending, excused) = offenders(repo.path(), &scratch, &subjects);
-    assert_eq!(excused, 1);
-    assert_eq!(
-        offending,
-        vec![
-            offender_line("fix(spate-kafka): a real one", "commit def5678"),
-            offender_line("feat(spate-core): never released", "pull request title"),
-        ]
-    );
 }
 
 /// A fragment written but not yet committed counts only for a run with no head
@@ -592,7 +246,7 @@ fn a_trailer_excuses_one_subject_and_leaves_the_rest() {
 fn the_worktree_counts_only_without_a_head() {
     let repo = Repo::new("the_worktree_counts_only_without_a_head");
     let base = repo.git(&["rev-parse", "HEAD"]);
-    let head = repo.commit("chore: a commit adding nothing");
+    let head = repo.commit("workspace: a commit adding nothing");
     repo.write("changelog.d/untracked.fixed.md", "A real note.\n");
 
     assert_eq!(
@@ -608,39 +262,12 @@ fn no_event_orients_against_the_upstream() {
     let repo = Repo::new("no_event_orients_against_the_upstream");
     let base = repo.git(&["rev-parse", "HEAD"]);
     repo.git(&["checkout", "--quiet", "-b", "topic"]);
-    repo.commit("feat(spate-core): a thing");
+    repo.commit("core: a thing");
 
     assert_eq!(
         select(repo.path(), &Fields::default()).unwrap(),
         Mode::Require { base, head: None }
     );
-}
-
-/// A merge commit's subject is unparseable, so reading one would demand a
-/// fragment for it.
-#[test]
-fn a_merge_subject_is_left_out() {
-    let repo = Repo::new("a_merge_subject_is_left_out");
-    let base = repo.git(&["rev-parse", "HEAD"]);
-    repo.git(&["checkout", "--quiet", "-b", "topic"]);
-    repo.commit("docs(ci): a page");
-    repo.git(&["checkout", "--quiet", "main"]);
-    repo.commit("docs(ci): another page");
-    repo.git(&[
-        "merge",
-        "--quiet",
-        "--no-ff",
-        "-m",
-        "Merge branch 'topic'",
-        "topic",
-    ]);
-
-    let texts: Vec<String> = subjects(repo.path(), &format!("{base}..HEAD"), "")
-        .into_iter()
-        .map(|s| s.text)
-        .collect();
-    assert_eq!(texts.len(), 2, "{texts:?}");
-    assert!(!texts.iter().any(|t| t.starts_with("Merge")), "{texts:?}");
 }
 
 /// A fragment is written with the template, and a second one at the same path
@@ -701,13 +328,12 @@ fn the_gate_refuses_a_tree_missing_the_fragment_directory() {
 }
 
 /// The fields a pull request run reads, over one range.
-fn pull_request(base: &str, head: &str, title: &str) -> Fields {
+fn pull_request(base: &str, head: &str, body: &str) -> Fields {
     Fields {
         event: "pull_request".to_owned(),
         base_sha: base.to_owned(),
         head_sha: head.to_owned(),
-        title: title.to_owned(),
-        body: String::new(),
+        body: body.to_owned(),
     }
 }
 
@@ -717,12 +343,70 @@ fn pull_request(base: &str, head: &str, title: &str) -> Fields {
 fn the_gate_counts_the_fragments_of_the_head_it_was_given() {
     let repo = Repo::new("the_gate_counts_the_fragments_of_the_head_it_was_given");
     let base = repo.git(&["rev-parse", "HEAD"]);
-    let head = repo.commit("feat(spate-core): a windowed operator");
+    repo.write("crates/spate-core/src/window.rs", "pub struct Window;\n");
+    let head = repo.commit("core: a windowed operator");
     repo.write("changelog.d/untracked.fixed.md", "A real note.\n");
 
     let refused = gate(repo.path(), &pull_request(&base, &head, ""), false, "").unwrap_err();
     assert_eq!(refused.code, Some(1));
     assert_eq!(refused.message, "");
+}
+
+/// A change that ships nothing needs no fragment, and one that ships something
+/// needs one unless the pull request or a commit of the branch says otherwise.
+#[test]
+fn the_requirement_follows_what_the_change_ships() {
+    let repo = Repo::new("the_requirement_follows_what_the_change_ships");
+    let base = repo.git(&["rev-parse", "HEAD"]);
+    repo.write("crates/spate-core/tests/pipeline.rs", "#[test] fn t() {}\n");
+    repo.write("docs/page.md", "prose\n");
+    let unshipped = repo.commit("core: a test and a page");
+    assert!(gate(repo.path(), &pull_request(&base, &unshipped, ""), false, "").is_ok());
+
+    repo.write("crates/spate-core/src/lib.rs", "pub fn f() {}\n");
+    let shipped = repo.commit("core: a function");
+    assert!(gate(repo.path(), &pull_request(&base, &shipped, ""), false, "").is_err());
+    let body = "## What this changes\n\nA refactor.\n\nChangelog: none\n\n## Checks\n\n- [x] ci\n";
+    assert!(gate(repo.path(), &pull_request(&base, &shipped, body), false, "").is_ok());
+
+    let excused = repo.commit("core: nothing more\n\nChangelog: none\n");
+    assert!(gate(repo.path(), &pull_request(&base, &excused, ""), false, "").is_ok());
+}
+
+/// Moving the workspace `rust-version` reaches every crate, with no crate path
+/// touched.
+#[test]
+fn a_rust_version_move_needs_a_fragment() {
+    let repo = Repo::new("a_rust_version_move_needs_a_fragment");
+    repo.write(
+        "Cargo.toml",
+        "[workspace.package]\nversion = \"0.2.0\"\nrust-version = \"1.95\"\n",
+    );
+    let base = repo.commit("workspace: a manifest");
+    repo.write(
+        "Cargo.toml",
+        "[workspace.package]\nversion = \"0.2.0\"\nrust-version = \"1.96\"\n",
+    );
+    let head = repo.commit("workspace: raise the msrv");
+    assert_eq!(
+        shipped_changes(repo.path(), &base, Some(&head)),
+        vec!["Cargo.toml (rust-version)".to_owned()]
+    );
+    assert!(gate(repo.path(), &pull_request(&base, &head, ""), false, "").is_err());
+}
+
+/// Without a head the worktree is compared, so an uncommitted edit counts.
+#[test]
+fn an_uncommitted_edit_ships_without_a_head() {
+    let repo = Repo::new("an_uncommitted_edit_ships_without_a_head");
+    let base = repo.git(&["rev-parse", "HEAD"]);
+    repo.write("crates/spate-core/src/lib.rs", "pub fn f() {}\n");
+    repo.git(&["add", "-A"]);
+    assert_eq!(
+        shipped_changes(repo.path(), &base, None),
+        vec!["crates/spate-core/src/lib.rs".to_owned()]
+    );
+    assert!(shipped_changes(repo.path(), &base, Some(&base)).is_empty());
 }
 
 /// A fragment added with nothing in it is refused by name, so an empty file
@@ -732,7 +416,8 @@ fn the_gate_names_an_added_fragment_that_is_empty() {
     let repo = Repo::new("the_gate_names_an_added_fragment_that_is_empty");
     let base = repo.git(&["rev-parse", "HEAD"]);
     repo.write("changelog.d/silent.fixed.md", "   \n\n");
-    let head = repo.commit("feat(spate-core): a windowed operator");
+    repo.write("crates/spate-core/src/window.rs", "pub struct Window;\n");
+    let head = repo.commit("core: a windowed operator");
 
     let refused = gate(repo.path(), &pull_request(&base, &head, ""), false, "").unwrap_err();
     assert_eq!(
@@ -753,7 +438,7 @@ fn an_added_fragment_counts_and_an_empty_one_is_named() {
     repo.write("changelog.d/said.fixed.md", "A real note.\n");
     repo.write("changelog.d/silent.fixed.md", "   \n\n");
     repo.write("changelog.d/notes.txt", "not a fragment\n");
-    let head = repo.commit("feat(spate-core): a thing");
+    let head = repo.commit("core: a thing");
 
     assert_eq!(
         added_fragments(repo.path(), &base, Some(&head)),
@@ -763,7 +448,7 @@ fn an_added_fragment_counts_and_an_empty_one_is_named() {
     // The range ends at the named head. A later commit's fragments belong to
     // a later range.
     repo.write("changelog.d/later.fixed.md", "A later note.\n");
-    repo.commit("feat(spate-core): a later thing");
+    repo.commit("core: a later thing");
     assert_eq!(
         added_fragments(repo.path(), &base, Some(&head)),
         (1, vec!["changelog.d/silent.fixed.md".to_owned()])
@@ -775,9 +460,9 @@ fn an_added_fragment_counts_and_an_empty_one_is_named() {
 fn an_edited_fragment_does_not_count() {
     let repo = Repo::new("an_edited_fragment_does_not_count");
     repo.write("changelog.d/said.fixed.md", "A real note.\n");
-    let base = repo.commit("feat(spate-core): a thing");
+    let base = repo.commit("core: a thing");
     repo.write("changelog.d/said.fixed.md", "A corrected note.\n");
-    let head = repo.commit("fix(spate-core): a typo");
+    let head = repo.commit("core: a typo");
 
     assert_eq!(
         added_fragments(repo.path(), &base, Some(&head)),
@@ -806,7 +491,7 @@ fn an_uncommitted_fragment_counts() {
 fn an_uncommitted_edit_does_not_count() {
     let repo = Repo::new("an_uncommitted_edit_does_not_count");
     repo.write("changelog.d/said.fixed.md", "A real note.\n");
-    repo.commit("feat(spate-core): a thing");
+    repo.commit("core: a thing");
     repo.write("changelog.d/said.fixed.md", "A corrected note.\n");
     assert_eq!(uncommitted_fragments(repo.path()), 0);
 }
@@ -817,30 +502,96 @@ fn an_uncommitted_edit_does_not_count() {
 fn a_commit_trailer_excuses_its_own_subject() {
     let repo = Repo::new("a_commit_trailer_excuses_its_own_subject");
     let scratch = scratch("a_commit_trailer_excuses_its_own_subject");
-    let excused = repo.commit("feat(spate-core): a thing\n\nChangelog: none\n");
-    let plain = repo.commit("feat(spate-core): another\n\nChangelog: none of this applies\n");
+    let excused = repo.commit("core: a thing\n\nChangelog: none\n");
+    let plain = repo.commit("core: another\n\nChangelog: none of this applies\n");
 
     assert!(commit_says_none(repo.path(), &scratch, &excused));
     assert!(!commit_says_none(repo.path(), &scratch, &plain));
     assert!(!commit_says_none(repo.path(), &scratch, "0000000"));
 }
 
-/// The pull request body's trailer is read from the body's last block, so a
-/// body that is only the trailer is a subject line and excuses nothing.
+/// The pull request body says `Changelog: none` on a line of its own,
+/// wherever that line sits, and a sentence carrying the words does not.
 #[test]
-fn the_body_trailer_is_read_from_the_last_block() {
-    let repo = Repo::new("the_body_trailer_is_read_from_the_last_block");
-    let scratch = scratch("the_body_trailer_is_read_from_the_last_block");
-    let read = |body: &str| body_says_none(repo.path(), &scratch, body);
+fn the_body_is_read_line_by_line() {
+    assert!(body_says_none("why this exists\n\nChangelog: none"));
+    assert!(body_says_none("Changelog: none"));
+    assert!(body_says_none("Changelog: none\r\n\n## Checks\n\n- [x] ci"));
+    assert!(body_says_none("  changelog:none  "));
+    assert!(!body_says_none(""));
+    assert!(!body_says_none("The Changelog: none of it applies"));
+    assert!(!body_says_none("Changelog: none of it applies"));
+    assert!(!body_says_none("`Changelog: none`"));
+}
 
-    assert!(read("why this exists\n\nChangelog: none"));
-    assert!(read(
-        "why this exists\n\nSigned-off-by: A <a@a>\nChangelog: none"
-    ));
-    assert!(!read("Changelog: none"));
-    assert!(!read(""));
-    assert!(!read("Changelog: none\n\nmore prose after the block"));
-    assert!(!read("The Changelog: none of it applies"));
+/// A fragment at `HEAD` opening with the marker announces a break, and one
+/// only written to disk does not.
+#[test]
+fn a_committed_breaking_fragment_announces_a_break() {
+    let repo = Repo::new("a_committed_breaking_fragment_announces_a_break");
+    repo.git(&["tag", "v0.2.0"]);
+    repo.write("Cargo.toml", "[workspace.package]\nversion = \"0.2.0\"\n");
+    repo.write("CHANGELOG.md", "# Changelog\n");
+    repo.write(
+        "changelog.d/plain.fixed.md",
+        "**A fix** (`spate-core`)\n\nProse.\n",
+    );
+    repo.commit("core: a fix");
+    assert!(!breaking_announced(repo.path()).unwrap());
+
+    repo.write(
+        "changelog.d/moved.changed.md",
+        "**Breaking:** **A move** (`spate-core`)\n\nProse.\n",
+    );
+    assert!(!breaking_announced(repo.path()).unwrap());
+    repo.commit("core: a move");
+    assert!(breaking_announced(repo.path()).unwrap());
+}
+
+/// A tag that names no release is not the newest release tag, so it cannot put
+/// the workspace version ahead of one. Regression for the `v*` glob.
+#[test]
+fn a_non_release_tag_is_not_a_release() {
+    let repo = Repo::new("a_non_release_tag_is_not_a_release");
+    repo.write("Cargo.toml", "[workspace.package]\nversion = \"0.2.0\"\n");
+    repo.write(
+        "CHANGELOG.md",
+        "# Changelog\n\n## [0.2.0] - 2026-08-23\n\n- **Breaking:** an old one.\n",
+    );
+    repo.commit("workspace: the manifest");
+    repo.git(&["tag", "v0.2.0"]);
+    repo.git(&["tag", "vnext"]);
+    assert_eq!(previous_tag(repo.path()), Some("v0.2.0".to_owned()));
+    assert!(!breaking_announced(repo.path()).unwrap());
+}
+
+/// Between a release merge and its tag the fragments are gone, and the section
+/// the release wrote carries the announcement.
+#[test]
+fn a_release_awaiting_its_tag_announces_through_its_section() {
+    let repo = Repo::new("a_release_awaiting_its_tag_announces_through_its_section");
+    repo.write("Cargo.toml", "[workspace.package]\nversion = \"0.2.0\"\n");
+    repo.write("CHANGELOG.md", "# Changelog\n");
+    repo.commit("workspace: the manifest");
+    repo.git(&["tag", "v0.2.0"]);
+
+    repo.write("Cargo.toml", "[workspace.package]\nversion = \"0.3.0\"\n");
+    repo.write(
+        "CHANGELOG.md",
+        "# Changelog\n\n## [Unreleased]\n\n## [0.3.0] - 2026-09-30\n\n### Fixed\n\n- A fix.\n\n## [0.2.0] - 2026-08-23\n\n- **Breaking:** an old one.\n",
+    );
+    repo.commit("release: v0.3.0");
+    assert!(!breaking_announced(repo.path()).unwrap());
+
+    repo.write(
+        "CHANGELOG.md",
+        "# Changelog\n\n## [Unreleased]\n\n## [0.3.0] - 2026-09-30\n\n### Changed\n\n- **Breaking:** **A move**.\n\n## [0.2.0] - 2026-08-23\n",
+    );
+    repo.commit("release: v0.3.0");
+    assert!(breaking_announced(repo.path()).unwrap());
+
+    repo.git(&["tag", "v0.3.0"]);
+    assert!(!breaking_announced(repo.path()).unwrap());
 }
 
 /// A fragment on disk with nothing in it is not prose, and a path that is not
@@ -1171,34 +922,25 @@ fn the_subject_parser_agrees_with_the_table() {
     const TABLE: &[(&str, Option<&str>)] = &[
         // A squash subject, which GitHub numbers.
         (
-            "fix(spate-core): enforce max_pending_batches at the poll boundary (#200)",
+            "core: enforce max_pending_batches at the poll boundary (#200)",
             Some("200"),
         ),
-        (
-            "feat(spate-avro,bench): decode datums into typed records (#31)",
-            Some("31"),
-        ),
+        ("avro: decode datums into typed records (#31)", Some("31")),
         // A rebase merge appends nothing.
         (
-            "fix(spate-kafka): count logical coordinator links toward broker_up",
+            "kafka: count logical coordinator links toward broker_up",
             None,
         ),
         (
             "refactor(examples)!: name the JSON example for what it teaches",
             None,
         ),
-        ("chore: release v0.2.0", None),
+        ("release: v0.2.0", None),
         // A citation mid-subject is not the merge's own number.
-        (
-            "docs(workspace): supersede (#12) with a record of its own",
-            None,
-        ),
-        (
-            "fix(spate-s3): restore what (#42) changed, and pin the ETag",
-            None,
-        ),
+        ("docs: supersede (#12) with a record of its own", None),
+        ("s3: restore what (#42) changed, and pin the ETag", None),
         // The last one wins when the subject ends in two.
-        ("fix(spate-core): revert (#41) (#57)", Some("57")),
+        ("core: revert (#41) (#57)", Some("57")),
         // Neither shape is a number.
         ("fix: a thing (#)", None),
         ("fix: a thing (##12)", None),
@@ -1461,7 +1203,7 @@ fn the_newest_version_tag_bounds_the_range() {
 fn the_contributors_are_the_authors_of_the_range() {
     let release = Release::new("the_contributors_are_the_authors_of_the_range");
     let base = release.0.git(&["rev-parse", "HEAD"]);
-    for message in ["chore: one", "chore: two"] {
+    for message in ["workspace: one", "workspace: two"] {
         release.0.git(&[
             "-c",
             "user.name=Zoe",
@@ -1483,7 +1225,7 @@ fn the_contributors_are_the_authors_of_the_range() {
         "--quiet",
         "--allow-empty",
         "-m",
-        "chore: three",
+        "workspace: three",
     ]);
     release.0.git(&[
         "-c",
@@ -1494,7 +1236,7 @@ fn the_contributors_are_the_authors_of_the_range() {
         "--quiet",
         "--allow-empty",
         "-m",
-        "chore: four",
+        "workspace: four",
     ]);
     assert_eq!(
         contributors(release.path(), &format!("{base}..HEAD")),
@@ -1533,14 +1275,14 @@ fn the_reference_takes_the_first_of_the_three_sources() {
         None
     );
 
-    let numbered = release.0.commit("fix(spate-core): a thing (#77)");
+    let numbered = release.0.commit("core: a thing (#77)");
     assert_eq!(
         fragment_reference(release.path(), "changelog.d/a.fixed.md", &unanswered).unwrap(),
         Some(Reference::Pull("77".to_owned()))
     );
 
     release.0.write("changelog.d/b.added.md", "B.\n");
-    let plain = release.0.commit("feat(spate-core): a thing with no number");
+    let plain = release.0.commit("core: a thing with no number");
     assert_ne!(plain, numbered);
     assert_eq!(
         fragment_reference(release.path(), "changelog.d/b.added.md", &unanswered).unwrap(),
@@ -1620,7 +1362,7 @@ fn a_derived_reference_goes_on_its_own_line() {
         "changelog.d/a.added.md",
         "A thing that ends in a fence:\n\n```rust\nlet x = 1;\n```\n",
     );
-    release.0.commit("feat(spate-core): a fenced thing (#12)");
+    release.0.commit("core: a fenced thing (#12)");
     let block = assemble(release.path(), "nothing..HEAD", None, &unanswered).unwrap();
     assert_eq!(
         block,
@@ -1648,7 +1390,7 @@ fn a_trailing_reference_stands_in_for_the_derived_one() {
         "changelog.d/a.fixed.md",
         "A thing that landed elsewhere. ([#31])\n",
     );
-    release.0.commit("fix(spate-core): a thing (#77)");
+    release.0.commit("core: a thing (#77)");
     assert_eq!(
         assemble(release.path(), "nothing..HEAD", None, &unanswered).unwrap(),
         "\
@@ -1667,7 +1409,7 @@ fn a_trailing_reference_stands_in_for_the_derived_one() {
 fn a_commit_with_no_pull_request_links_to_itself() {
     let release = Release::new("a_commit_with_no_pull_request_links_to_itself");
     release.0.write("changelog.d/a.fixed.md", "A thing.\n");
-    let sha = release.0.commit("fix(spate-core): a thing with no number");
+    let sha = release.0.commit("core: a thing with no number");
     let block = assemble(release.path(), "nothing..HEAD", None, &unanswered).unwrap();
     assert_eq!(
         block,

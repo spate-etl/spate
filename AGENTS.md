@@ -71,8 +71,8 @@ job. Framework users test with `spate-test` mocks; keep those first-class.
 Written for a senior Rust engineer, new to this line of code but not to the
 language or the domain. A comment says what the code does and what a caller may
 rely on, and carries only what they cannot get from the code beside it. Why it
-is this way and not the alternative belongs in the commit message. If deleting a
-sentence changes nothing a reader would do differently, it goes.
+is this way and not the alternative belongs in the pull request body. If
+deleting a sentence changes nothing a reader would do differently, it goes.
 
 - **One sentence is the default.** A second carries a constraint, a guardrail,
   or a mechanism the caller cannot see. A doc longer than its item, or any doc
@@ -96,7 +96,8 @@ sentence changes nothing a reader would do differently, it goes.
 
 A test's doc says what the test pins, in one or two sentences, plus
 `Regression for #N.` where it guards a fixed defect, and the issue holds the
-account of the defect. The same rules hold in commit messages.
+account of the defect. The same rules hold in commit messages and pull request
+bodies.
 
 The em-dash used as a dramatic pause, the antithesis frame ("a bound on
 patience, not a deadline"), the evaluative tail (", which is the whole point"),
@@ -117,8 +118,8 @@ The rules that break most often:
   exempt; the prose around them is not. `docs/adr/` sits outside the rule, and
   should not grow connector *usage* guidance either.
 - **Docs read as the present, never as a changelog.** No "now", "recently", "as
-  of". If something changed, the page describes what is and the commit says what
-  moved. The one exception is `docs/adr/`; see below.
+  of". If something changed, the page describes what is and the pull request
+  says what moved. The one exception is `docs/adr/`; see below.
 
 Decision records live in `docs/adr/`, one file per decision, and are the only
 place under `docs/` that reads as history. Scaffold one with
@@ -130,11 +131,20 @@ reverse. `docs/adr/_template.md` states both rules in full and is normative;
 
 ## Commits and pull requests
 
-Conventional Commits. Scope = crate touched (`spate-core`, `spate-kafka`, …),
-comma-separated for several; [`CONTRIBUTING.md`](CONTRIBUTING.md) names the
-areas that are not crates. Dependabot raises bumps as `chore` scoped by area,
-so prefer `fix` or `feat` for your own commits; `chore` should read as "a bot
-bumped a version".
+Subjects are `area: description` in at most 72 characters. The area is a
+crate's directory name without `spate-` (`core`, `kafka`, `spate`) or one of the
+areas [`CONTRIBUTING.md`](CONTRIBUTING.md) names. Name one area, the one whose
+behavior the change is about; a change across crates is `workspace`. The
+description starts lowercase unless it opens with a `code` reference, and has no
+trailing period. Run `cargo xtask hooks install` once per clone so the
+commit-msg hook checks each subject; `cargo xtask tidy title` checks the pull
+request title in CI.
+
+`main` is squash-merged with the pull request title as the subject and an empty
+body, and the merge appends ` (#N)`. The title therefore gets 72 characters less
+that suffix. A branch commit body is optional: one line of why where the diff
+does not show it. The pull request body carries the argument, since it is the
+record that outlives the branch.
 
 Messages must make sense to outsiders: no plan or phase references, no issue
 shorthand that only resolves in this session. **No AI attribution in git**: no
@@ -175,13 +185,13 @@ closed unfixed). Check the issue afterwards.
 
 - `cargo xtask ci` green.
 - Normative docs changed in the *same commit* as the behavior they describe.
-- A **changelog fragment** under `changelog.d/` whenever the change reaches a
-  crate and somebody upgrading would care: `feat`, `fix`, `perf`, `revert` and
-  `build`, plus **anything carrying `!` whatever its scope**.
-  `cargo xtask changelog new fixed …` scaffolds one, and
-  `changelog.d/README.md` has the conventions. Naming no scope is *not* an
-  exemption; only naming one of the non-crate areas is. For a fix to a bug that
-  was never released, put a `Changelog: none` trailer on the commit it excuses,
-  or in the pull request body to excuse the whole thing.
+- A **changelog fragment** under `changelog.d/` whenever the change touches
+  what a crate ships: a crate's `src/`, `build.rs` or `Cargo.toml`, or the
+  workspace `rust-version`. `cargo xtask changelog new fixed …` scaffolds one,
+  and `changelog.d/README.md` has the conventions. A breaking change is a
+  fragment that opens with `**Breaking:**`, and the release derives its minor
+  bump from it. When nobody upgrading would notice, as with a refactor, a test
+  or a fix to a bug that was never released, put a line reading
+  `Changelog: none` in the pull request body.
 - No unrun or failing tests handed over. If something is blocked, say which part
   and why, rather than narrowing the task to what passed.

@@ -1,7 +1,7 @@
 <!--
-Delete every section that does not apply, and every comment like this one. If
-the commit message already carries the argument, a link and a sentence is a
-complete description.
+Delete every section that does not apply, and every comment like this one. The
+squash merge keeps only the title, so this body is the lasting record of why the
+change is shaped the way it is.
 
 Contributions are accepted under Apache-2.0 §5. There is no CLA to sign.
 -->
@@ -15,8 +15,7 @@ One sentence: why this exists. Then what it does, and where its scope stops.
 Open on the problem a user hits, not the symptom in the code: "the final batch
 never reaches the sink on shutdown", not "`ChunkWriter` drops the last frame".
 
-The commit message carries the argument for the approach, dated and attached to
-the diff. Cite it rather than restating it here.
+Then the argument for the approach: why this shape and not the alternative.
 
 Say where this delivers less, more, or something other than the issue asked
 for. That comparison is the one a reviewer cannot make alone.
@@ -40,7 +39,7 @@ does.
 <!-- Delete all but one. Pre-1.0, a breaking change is fine if it is announced. -->
 
 - [ ] Additive — nothing existing changes
-- [ ] Breaking — and the commit subject carries `!`
+- [ ] Breaking — and a fragment under `changelog.d/` opens with `**Breaking:**`
 
 ## Checks
 
@@ -48,10 +47,10 @@ does.
 
 - [ ] `cargo xtask ci`
 - [ ] `cargo xtask docs`, if this touches docs
-- [ ] Conventional Commits, scoped to the crate touched, no AI attribution
-      trailers
-- [ ] A fragment under `changelog.d/`, if this reaches a crate somebody
-      upgrading would care about. `changelog.d/README.md` says when
+- [ ] Title is `area: description` for one area, no AI attribution trailers
+- [ ] A fragment under `changelog.d/` if this touches what a crate ships, or a
+      line reading `Changelog: none` in this body. `changelog.d/README.md`
+      says when
 
 ## Anything else
 

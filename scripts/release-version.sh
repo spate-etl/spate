@@ -19,7 +19,7 @@
 # `--check` and `--self-test` need git and no toolchain. `--bump` runs
 # `cargo update --workspace` after the rewrite so Cargo.lock follows the
 # manifest in the same change. `--derive` reads tags and commits, so it needs
-# the full history, not a shallow clone. `--check-publish-metadata` needs
+# the full history, not a shallow clone, and cargo for the fragment reading. `--check-publish-metadata` needs
 # cargo and jq: it checks the manifest fields crates.io rejects at upload
 # while `cargo publish --dry-run` warns and exits 0 (cargo issue 14249).
 #
@@ -314,17 +314,11 @@ check_publish_metadata() {
 }
 
 # ---------------------------------------------------------------------------
-# --derive: the next version, from history since the last tag.
+# --derive: the next version, from the fragments and the manifest.
 # ---------------------------------------------------------------------------
 
-# The conventional breaking marker, matched against every line of every
-# message body since the last tag: the squash subject is the pull request
-# title, and a squash body carries its constituent subjects, so a marker
-# anywhere in the log means a breaking change shipped.
-MARKER_ERE='^[a-zA-Z]+(\([^)]*\))?!:'
-
 derive_mode() {
-    local last cur kind=patch reason marker msrv_old msrv_new
+    local last cur kind=patch reason announced msrv_old msrv_new
     # `v[0-9]*` and not `v*`: the repository also carries non-release tags,
     # and a bare glob would pick them.
     last=$(git tag --list 'v[0-9]*' --sort=-v:refname | head -n 1)
@@ -344,12 +338,15 @@ derive_mode() {
     # judged by comparing the two values: an annotation or a lowering is not
     # a raise.
     reason="no breaking change since $last"
-    git log --no-merges --format=%B "$last..HEAD" >"$scratch/log"
-    marker=$(grep -E -m 1 "$MARKER_ERE" "$scratch/log") || true
-    if [ -n "$marker" ]; then
+    announced=$(cargo xtask changelog breaking)
+    case "$announced" in
+    breaking)
         kind=minor
-        reason="'$marker' carries the breaking marker"
-    fi
+        reason="a changelog fragment opens with **Breaking:**"
+        ;;
+    none) ;;
+    *) fail "cargo xtask changelog breaking answered '$announced'" ;;
+    esac
     if [ "$kind" = "patch" ]; then
         msrv_old=$(git show "$last:Cargo.toml" | sed -n 's/^rust-version = "\(.*\)".*$/\1/p')
         msrv_new=$(sed -n 's/^rust-version = "\(.*\)".*$/\1/p' "$manifest")
@@ -554,7 +551,7 @@ myspate = "0.2"|clean
 serde = { version = "1", features = ["derive"] }|clean
 spate-core = { version = "=0.2.0", path = "crates/spate-core" }|clean
 the default for retry.jitter is 0.2, a plain number in prose|clean
-chore: release v0.2.0|clean
+release: v0.2.0|clean
 TABLE
 
     # The version a snippet line carries, read from the snippet's own
@@ -567,33 +564,6 @@ TABLE
     got=$(snippet_version 'spate-test = "0.2"')
     if [ "$got" != "0.2" ]; then
         echo "release-version.sh: snippet_version read '$got' from a bare snippet, expected 0.2" >&2
-        failures=$((failures + 1))
-    fi
-
-    # The breaking-marker pattern behind --derive, driven line by line the
-    # way the log scan sees a squash body.
-    while IFS='|' read -r line verdict; do
-        case "$line" in '' | '#'*) continue ;; esac
-        if printf '%s\n' "$line" | grep -qE "$MARKER_ERE"; then got=breaking; else got=plain; fi
-        if [ "$got" != "$verdict" ]; then
-            echo "release-version.sh: derive: '$line' -> $got, expected $verdict" >&2
-            failures=$((failures + 1))
-        fi
-    done <<'TABLE'
-feat(spate-core)!: seal the framework configuration sections|breaking
-refactor!: rename the framework to spate|breaking
-docs(workspace)!: migrate CLAUDE.md to AGENTS.md|breaking
-* feat(spate-core)!: a constituent subject inside a squash body|plain
-feat(spate-core): a windowed operator|plain
-chore: release v0.2.0|plain
-revert(spate-core): back out the windowed operator!|plain
-TABLE
-    # The constituent-subject case above is `plain` per line because squash
-    # bodies prefix list items; the log scan matches it through the
-    # unprefixed copy git keeps on its own line. Hold that shape too:
-    printf 'Rework the sink pool (#412)\n\nfeat(spate-core)!: drop flush from the trait\n' >"$scratch/body"
-    if ! grep -qE "$MARKER_ERE" "$scratch/body"; then
-        echo "release-version.sh: a marker on its own body line was not found" >&2
         failures=$((failures + 1))
     fi
 

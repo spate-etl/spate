@@ -42,6 +42,20 @@ build refuses; `cargo fmt` resolves nothing, reading only `.rs` files; and
 under it, so a plain `npm run build` skips redirect validation, and a redirect
 pointing at a page you deleted is a hard failure.
 
+## Git hooks
+
+```sh
+cargo xtask hooks install   # once per clone; every worktree shares it
+```
+
+This points `core.hooksPath` at `.githooks/`, whose commit-msg hook checks each
+subject against the rule in [`CONTRIBUTING.md`](CONTRIBUTING.md). The hook
+builds xtask first. When cargo is missing or xtask does not build, it prints a
+warning and lets the commit through, so a broken tree can still be committed;
+the title gate in CI applies the rule regardless. The command refuses to
+replace a `core.hooksPath` that points elsewhere, and names any hook in the
+default directory that stops running.
+
 ## The test suite
 
 Tests run under [cargo-nextest](https://nexte.st), one process per test

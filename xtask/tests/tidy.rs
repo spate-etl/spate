@@ -61,17 +61,26 @@ fn table() -> Vec<(&'static str, String)> {
 }
 
 /// The arguments the shellcheck member carries, which are the shell scripts
-/// present rather than a list stated anywhere.
+/// and git hooks present rather than a list stated anywhere.
 fn shell_scripts() -> Vec<String> {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts");
-    let mut names: Vec<String> = std::fs::read_dir(&dir)
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-        .filter(|name| name.ends_with(".sh"))
-        .map(|name| format!("scripts/{name}"))
-        .collect();
+    let mut names = Vec::new();
+    for (dir, suffix) in [("scripts", ".sh"), (".githooks", "")] {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join(dir);
+        let before = names.len();
+        names.extend(
+            std::fs::read_dir(&path)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .filter(|name| name.ends_with(suffix))
+                .map(|name| format!("{dir}/{name}")),
+        );
+        assert!(
+            names.len() > before,
+            "{} holds no shell script",
+            path.display()
+        );
+    }
     names.sort();
-    assert!(!names.is_empty(), "{} holds no shell script", dir.display());
     names
 }
 

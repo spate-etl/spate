@@ -1,0 +1,16 @@
+#!/bin/sh
+#
+# Checks the subject against the rule in CONTRIBUTING.md. `cargo xtask hooks
+# install` enables it. A tree where xtask does not build still commits, with
+# a warning: CI checks the pull request title either way.
+set -u
+
+if ! command -v cargo >/dev/null 2>&1; then
+    echo "commit-msg: cargo is not on PATH, so the subject was not checked" >&2
+    exit 0
+fi
+if ! cargo build --quiet --locked --package spate-xtask 2>/dev/null; then
+    echo "commit-msg: xtask does not build, so the subject was not checked" >&2
+    exit 0
+fi
+exec cargo xtask commit-msg "$1"

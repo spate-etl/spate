@@ -416,7 +416,7 @@ jobs:
           cargo xtask release-version --bump "$next"
           git config user.name 'spate-release[bot]'
           git config user.email 'spate-release[bot]@users.noreply.github.com'
-          git commit --all --quiet --message "chore: simulate the release bump to $next"
+          git commit --all --quiet --message "workspace: simulate the release bump to $next"
 
       # The dry run cannot see these: it packages a crate with no description
       # or license with a warning and exit 0, while the upload rejects it

@@ -16,6 +16,8 @@ pub(crate) enum TidyCheck {
     SelfTest,
     /// A user-visible change carries a changelog fragment
     Changelog,
+    /// The pull request title follows the subject rule
+    Title,
     /// The decision records stay consistent with their index
     Adr,
     /// The perf report's flag file stays parseable by perf-label.yml
@@ -45,10 +47,10 @@ pub(super) const ALL: &[TidyCheck] = &[
 
 /// Runs one named check, or every member of `ALL`.
 ///
-/// `Changelog` sits outside `ALL`. It reads the pull request's title, body and
-/// endpoints, and enforces against `origin/main` when they are absent, so a
-/// caller without them would demand a fragment while unable to see the
-/// exemptions that excuse it.
+/// `Changelog` and `Title` sit outside `ALL`. Both read the pull request's
+/// fields. `Changelog` enforces against `origin/main` when they are absent, so
+/// a caller without them would demand a fragment while unable to see the
+/// `Changelog: none` that excuses it; `Title` has nothing to check.
 pub(crate) fn tidy(root: &Path, explain: bool, check: Option<TidyCheck>, list: bool) -> Outcome {
     if list {
         for one in TidyCheck::value_variants() {
@@ -95,6 +97,7 @@ fn one_check(root: &Path, explain: bool, check: TidyCheck) -> Outcome {
             &Step::new("cargo", ["test", "-p", "spate-xtask", "--locked"]),
         ),
         TidyCheck::Changelog => crate::checks::changelog::check(root, explain),
+        TidyCheck::Title => crate::checks::subject::check_title(root, explain),
         TidyCheck::Adr => crate::checks::adr::check(root, explain),
         TidyCheck::PerfReport => crate::checks::perf_report::self_test(explain),
         TidyCheck::GungraunBenches => crate::checks::gungraun::check(root, explain),
@@ -112,18 +115,21 @@ fn script(root: &Path, explain: bool, name: &str, mode: &str) -> Outcome {
     )
 }
 
-/// The shell scripts, sorted, so the lint covers whatever is present without a
-/// list to keep current.
+/// The shell scripts and the git hooks, sorted, so the lint covers whatever is
+/// present without a list to keep current.
 fn shell_scripts(root: &Path) -> Result<Vec<String>, crate::run::Error> {
-    let dir = root.join("scripts");
     let mut out = Vec::new();
-    for entry in std::fs::read_dir(&dir)
-        .map_err(|e| crate::run::Error::msg(format!("{}: {e}", dir.display())))?
-    {
-        let entry = entry.map_err(|e| crate::run::Error::msg(format!("{}: {e}", dir.display())))?;
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if name.ends_with(".sh") {
-            out.push(format!("scripts/{name}"));
+    for (dir, suffix) in [("scripts", ".sh"), (".githooks", "")] {
+        let path = root.join(dir);
+        for entry in std::fs::read_dir(&path)
+            .map_err(|e| crate::run::Error::msg(format!("{}: {e}", path.display())))?
+        {
+            let entry =
+                entry.map_err(|e| crate::run::Error::msg(format!("{}: {e}", path.display())))?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.ends_with(suffix) {
+                out.push(format!("{dir}/{name}"));
+            }
         }
     }
     out.sort();

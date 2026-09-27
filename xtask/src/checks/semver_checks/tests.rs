@@ -26,64 +26,6 @@ fn only_zero_is_clean_and_only_one_hundred_is_breaking() {
     }
 }
 
-// ── The conventional breaking marker ───────────────────────────────────
-
-#[test]
-fn the_marker_is_a_type_an_optional_scope_and_a_bang() {
-    for subject in [
-        "feat(spate-core)!: seal the framework configuration sections",
-        "refactor!: rename the framework",
-        "docs(workspace)!: migrate one file to another",
-        "feat()!: an empty scope",
-    ] {
-        assert!(subject_is_breaking(subject), "{subject}");
-    }
-    for subject in [
-        "feat(spate-core): a windowed operator",
-        "chore: release v0.2.0",
-        "revert(spate-core): back out the windowed operator!",
-        "",
-        "!: no type",
-        "feat(unterminated!: a scope with no close",
-        "feat(!: a scope opened and never closed",
-        "féat!: a non-ascii letter in the type",
-        "feat(a)b!: a scope followed by more type",
-        " feat!: a leading space",
-        "feat1!: a digit in the type",
-        "feat! no colon",
-        "feat(spate-core)! no colon",
-        "feat!",
-    ] {
-        assert!(!subject_is_breaking(subject), "{subject}");
-    }
-}
-
-/// A scope may hold anything but a close paren, including a newline, since the
-/// title is matched whole.
-#[test]
-fn a_scope_holds_anything_but_a_close_paren() {
-    assert!(subject_is_breaking(
-        "feat(a b, c-d/e)!: spaces and punctuation"
-    ));
-    assert!(subject_is_breaking(
-        "feat(a\nb)!: a newline inside the scope"
-    ));
-    assert!(!subject_is_breaking("feat(a)(b)!: two scopes"));
-}
-
-/// The log scan anchors per line, so a marker on any line of any commit body
-/// announces the break.
-#[test]
-fn the_log_scan_anchors_each_line() {
-    assert!(log_has_marker("chore: a subject\n\nfeat!: a body line\n"));
-    assert!(log_has_marker("feat!: the first line"));
-    assert!(!log_has_marker(
-        "chore: a subject\n\n  feat!: an indented line\n"
-    ));
-    assert!(!log_has_marker(""));
-    assert!(!log_has_marker("a feat!: mid-line"));
-}
-
 // ── The baseline a crate is compared against ───────────────────────────
 
 /// One index entry, as the sparse index spells it.

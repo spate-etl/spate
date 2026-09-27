@@ -4,6 +4,7 @@
 mod bench;
 mod docs;
 mod fuzz;
+mod hooks;
 mod lint;
 
 use std::path::Path;
@@ -95,6 +96,18 @@ pub(crate) enum Command {
     Changelog {
         #[command(subcommand)]
         cmd: ChangelogCommand,
+    },
+
+    /// Check a commit message's subject; the commit-msg hook runs this
+    CommitMsg {
+        #[arg(value_name = "FILE")]
+        file: std::path::PathBuf,
+    },
+
+    /// The git hooks under .githooks
+    Hooks {
+        #[command(subcommand)]
+        cmd: HooksCommand,
     },
 
     /// Fuzz targets
@@ -233,6 +246,14 @@ pub(crate) enum ChangelogCommand {
         #[arg(value_name = "VERSION")]
         version: String,
     },
+    /// Print `breaking` when the release being prepared announces a break, else `none`
+    Breaking,
+}
+
+#[derive(Subcommand)]
+pub(crate) enum HooksCommand {
+    /// Point this clone's core.hooksPath at .githooks
+    Install,
 }
 
 /// Runs one command.
@@ -369,6 +390,11 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: Command) -> Outcome {
             ChangelogCommand::Notes { version } => {
                 crate::checks::changelog::notes(root, explain, version)
             }
+            ChangelogCommand::Breaking => crate::checks::changelog::breaking(root, explain),
+        },
+        Command::CommitMsg { file } => crate::checks::subject::commit_msg(root, explain, &file),
+        Command::Hooks { cmd } => match cmd {
+            HooksCommand::Install => hooks::install(root, explain),
         },
         Command::Fuzz { cmd } => fuzz::dispatch(root, explain, cmd),
         Command::SiteCheck => crate::checks::site_check::check(root, explain),
@@ -762,7 +788,7 @@ mod tests {
         let listed = super::lint::ALL;
         for check in TidyCheck::value_variants() {
             let count = listed.iter().filter(|c| *c == check).count();
-            let expected = usize::from(*check != TidyCheck::Changelog);
+            let expected = usize::from(!matches!(check, TidyCheck::Changelog | TidyCheck::Title));
             assert_eq!(
                 count,
                 expected,

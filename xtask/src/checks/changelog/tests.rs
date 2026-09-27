@@ -1312,7 +1312,7 @@ fn the_block_renders_the_six_in_order() {
     release.fragment("b.added.md", "Another added thing. ([#3])\n");
     release.fragment("c.fixed.md", "A fixed thing.\n");
 
-    let block = assemble(release.path(), "nothing..HEAD", None, &unanswered).unwrap();
+    let block = assemble(release.path(), "nothing..HEAD", None, None, &unanswered).unwrap();
     assert_eq!(
         block,
         "\
@@ -1345,6 +1345,7 @@ fn a_tree_with_no_fragments_has_nothing_to_release() {
             release.path(),
             "nothing..HEAD",
             Some("v0.2.0"),
+            None,
             &unanswered
         )),
         "no fragments in changelog.d/, so nothing to release.\n  \
@@ -1363,7 +1364,7 @@ fn a_derived_reference_goes_on_its_own_line() {
         "A thing that ends in a fence:\n\n```rust\nlet x = 1;\n```\n",
     );
     release.0.commit("core: a fenced thing (#12)");
-    let block = assemble(release.path(), "nothing..HEAD", None, &unanswered).unwrap();
+    let block = assemble(release.path(), "nothing..HEAD", None, None, &unanswered).unwrap();
     assert_eq!(
         block,
         "\
@@ -1392,7 +1393,7 @@ fn a_trailing_reference_stands_in_for_the_derived_one() {
     );
     release.0.commit("core: a thing (#77)");
     assert_eq!(
-        assemble(release.path(), "nothing..HEAD", None, &unanswered).unwrap(),
+        assemble(release.path(), "nothing..HEAD", None, None, &unanswered).unwrap(),
         "\
 ### Fixed
 
@@ -1410,7 +1411,7 @@ fn a_commit_with_no_pull_request_links_to_itself() {
     let release = Release::new("a_commit_with_no_pull_request_links_to_itself");
     release.0.write("changelog.d/a.fixed.md", "A thing.\n");
     let sha = release.0.commit("core: a thing with no number");
-    let block = assemble(release.path(), "nothing..HEAD", None, &unanswered).unwrap();
+    let block = assemble(release.path(), "nothing..HEAD", None, None, &unanswered).unwrap();
     assert_eq!(
         block,
         format!(
@@ -1599,5 +1600,200 @@ fn the_notes_read_a_changelog_that_is_there() {
     assert_eq!(
         refused(notes(release.path(), false, "0.2.0")),
         "CHANGELOG.md not found"
+    );
+}
+
+/// A root manifest holding `entries` under `[workspace.dependencies]`.
+fn workspace_manifest(entries: &str) -> String {
+    format!(
+        "[workspace]\nmembers = [\"crates/json\"]\n\n[workspace.package]\nversion = \"0.2.0\"\n\n[workspace.dependencies]\n{entries}"
+    )
+}
+
+/// Writes a root table and one crate, `json`, inheriting `simd-json` and the
+/// first-party `own-crate`.
+fn requirements(repo: &Repo, simd_json: &str, own_crate: &str) {
+    repo.write(
+        "Cargo.toml",
+        &workspace_manifest(&format!(
+            "own-crate = {{ version = \"={own_crate}\", path = \"crates/own-crate\" }}\nsimd-json = \"{simd_json}\"\n"
+        )),
+    );
+    repo.write(
+        "crates/json/Cargo.toml",
+        "[package]\nname = \"json\"\nversion.workspace = true\n\n[dependencies]\nown-crate = { workspace = true }\nsimd-json = { workspace = true }\n",
+    );
+}
+
+/// The entry `json` gets when `simd-json` moved from `before` to `now`.
+fn simd_json_entry(before: &str, now: &str) -> String {
+    format!(
+        "\
+**Dependency requirements** (`json`)
+
+The published manifests of these crates carry new requirements for the
+dependencies listed below. Cargo resolves your lockfile against these
+requirements, so a raised requirement can raise the version your project builds
+with. Each line shows the requirement in this release first, then the
+requirement in the previous release. A crate can enable more features than a
+line shows.
+
+- `simd-json` (`json`): `{now}`. Previously `{before}`.
+"
+    )
+}
+
+/// A requirement raised twice after the tag yields one line comparing the tag
+/// with `HEAD`, and the value in between appears nowhere.
+#[test]
+fn a_requirement_raised_twice_between_tags_yields_one_line() {
+    let repo = Repo::new("a_requirement_raised_twice_between_tags_yields_one_line");
+    requirements(&repo, "0.18.1", "0.1.0");
+    repo.commit("workspace: the manifests");
+    repo.git(&["tag", "v0.1.0"]);
+    requirements(&repo, "0.18.2", "0.1.0");
+    repo.commit("workspace: bump simd-json");
+    requirements(&repo, "0.19.0", "0.1.0");
+    repo.commit("workspace: bump simd-json again");
+
+    assert_eq!(
+        requirements::entry(repo.path(), Some("v0.1.0")).unwrap(),
+        Some(simd_json_entry("0.18.1", "0.19.0"))
+    );
+}
+
+/// `HEAD` is read through git, so an edit that is not committed does not reach
+/// the entry.
+#[test]
+fn an_uncommitted_manifest_edit_is_not_read() {
+    let repo = Repo::new("an_uncommitted_manifest_edit_is_not_read");
+    requirements(&repo, "0.18.1", "0.1.0");
+    repo.commit("workspace: the manifests");
+    repo.git(&["tag", "v0.1.0"]);
+    requirements(&repo, "0.19.0", "0.1.0");
+    repo.commit("workspace: bump simd-json");
+    requirements(&repo, "0.20.0", "0.2.0");
+
+    assert_eq!(
+        requirements::entry(repo.path(), Some("v0.1.0")).unwrap(),
+        Some(simd_json_entry("0.18.1", "0.19.0"))
+    );
+}
+
+/// No previous tag, or no root manifest at the tag, yields no entry.
+#[test]
+fn without_a_previous_tag_or_manifest_there_is_no_entry() {
+    let repo = Repo::new("without_a_previous_tag_or_manifest_there_is_no_entry");
+    repo.git(&["tag", "v0.1.0"]);
+    requirements(&repo, "0.18.1", "0.1.0");
+    repo.commit("workspace: the manifests");
+    assert_eq!(requirements::entry(repo.path(), None).unwrap(), None);
+    assert_eq!(
+        requirements::entry(repo.path(), Some("v0.1.0")).unwrap(),
+        None
+    );
+}
+
+/// A root manifest at `HEAD` that does not parse is a refusal naming it.
+#[test]
+fn a_root_manifest_that_does_not_parse_is_refused() {
+    let repo = Repo::new("a_root_manifest_that_does_not_parse_is_refused");
+    requirements(&repo, "0.18.1", "0.1.0");
+    repo.commit("workspace: the manifests");
+    repo.git(&["tag", "v0.1.0"]);
+    repo.write("Cargo.toml", "[workspace.dependencies\n");
+    repo.commit("workspace: break the manifest");
+    assert!(
+        refused(requirements::entry(repo.path(), Some("v0.1.0"))).starts_with("HEAD:Cargo.toml: ")
+    );
+}
+
+/// A table whose only moves are a comment and a first-party pin leaves the
+/// assembled section as it would be without the table.
+#[test]
+fn an_unmoved_table_leaves_the_section_as_it_was() {
+    let release = Release::new("an_unmoved_table_leaves_the_section_as_it_was");
+    requirements(&release.0, "0.18.1", "0.2.0");
+    release.0.commit("workspace: the manifests");
+    release.0.git(&["tag", "v0.2.0"]);
+    requirements(&release.0, "0.18.1", "0.3.0");
+    let manifest = std::fs::read_to_string(release.path().join("Cargo.toml")).unwrap();
+    release
+        .0
+        .write("Cargo.toml", &format!("{manifest}# A comment.\n"));
+    release.0.commit("workspace: pin the next version");
+    release.fragment("a.fixed.md", "A thing.\n");
+
+    build(release.path(), false, "0.3.0").unwrap();
+    assert_eq!(
+        section_notes(&release.changelog(), "0.3.0", CHANGELOG).unwrap(),
+        "\
+### Fixed
+
+- A thing.
+
+### Contributors
+
+- t
+"
+    );
+}
+
+/// The generated entry is the last in the `Changed` group, after the fragments
+/// of that type, with no reference of its own, and the notes read it back.
+#[test]
+fn the_generated_entry_closes_the_changed_group() {
+    let release = Release::new("the_generated_entry_closes_the_changed_group");
+    requirements(&release.0, "0.18.1", "0.2.0");
+    release.0.commit("workspace: the manifests");
+    release.0.git(&["tag", "v0.2.0"]);
+    requirements(&release.0, "0.19.0", "0.2.0");
+    release.0.commit("workspace: bump simd-json");
+    release.fragment("a.changed.md", "A changed thing. ([#31])\n");
+    release.fragment("b.fixed.md", "A fixed thing.\n");
+
+    build(release.path(), false, "0.3.0").unwrap();
+    let entry = simd_json_entry("0.18.1", "0.19.0");
+    let section = format!(
+        "\
+### Changed
+
+- A changed thing. ([#31])
+{}
+### Fixed
+
+- A fixed thing.
+
+### Contributors
+
+- t
+
+[#31]: https://github.com/spate-etl/spate/pull/31
+",
+        bullet(entry.trim_end_matches('\n'))
+    );
+    assert_eq!(
+        section_notes(&release.changelog(), "0.3.0", CHANGELOG).unwrap(),
+        section
+    );
+}
+
+/// A release holding requirement changes and no fragment assembles.
+#[test]
+fn a_release_of_requirement_changes_alone_assembles() {
+    let release = Release::new("a_release_of_requirement_changes_alone_assembles");
+    requirements(&release.0, "0.18.1", "0.2.0");
+    release.0.commit("workspace: the manifests");
+    release.0.git(&["tag", "v0.2.0"]);
+    requirements(&release.0, "0.19.0", "0.2.0");
+    release.0.commit("workspace: bump simd-json");
+
+    build(release.path(), false, "0.3.0").unwrap();
+    assert_eq!(
+        section_notes(&release.changelog(), "0.3.0", CHANGELOG).unwrap(),
+        format!(
+            "### Changed\n\n{}\n### Contributors\n\n- t\n",
+            bullet(simd_json_entry("0.18.1", "0.19.0").trim_end_matches('\n'))
+        )
     );
 }

@@ -10,6 +10,7 @@ publish = false
 clap = { workspace = true, features = ["derive"] }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["raw_value"] }
+toml = { workspace = true }
 
 [lints]
 workspace = true

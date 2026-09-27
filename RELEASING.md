@@ -56,7 +56,7 @@ from the version input, in one commit on `release/vX.Y.Z`:
 | `[workspace.package] version` and the `=` pins | `scripts/release-version.sh --bump` |
 | `Cargo.lock` | `cargo update --workspace`, inside the bump |
 | The install snippets at `X.Y` | the same bump; `--check` holds the set closed |
-| `CHANGELOG.md`, fragments consumed | `cargo xtask changelog build` |
+| `CHANGELOG.md`, fragments consumed, moved dependency requirements listed | `cargo xtask changelog build` |
 | `THIRD-PARTY.md` | `cargo xtask attribution`, as a drift backstop |
 
 The pull request it opens is titled `release: vX.Y.Z`, labeled

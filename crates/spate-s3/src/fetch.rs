@@ -1413,4 +1413,27 @@ mod tests {
             "the open object finishes; the boundary stop precedes the next object"
         );
     }
+
+    /// A read the store refuses with a TLS alert fails the lane as
+    /// pipeline-fatal, and the error names the alert.
+    #[tokio::test]
+    async fn a_tls_rejection_on_a_read_is_fatal_and_named() {
+        let addr =
+            spate_test::tls_alert_server(b"", u8::from(rustls::AlertDescription::HandshakeFailure));
+        let store: Arc<dyn ObjectStore> = Arc::new(crate::test_servers::tls_store_at(
+            &format!("https://{addr}"),
+            &crate::test_servers::TestCa::new("any"),
+        ));
+        let slice = vec![ObjectEntry {
+            key: "p/a".to_owned(),
+            size: 10,
+            etag: Some("\"e\"".to_owned()),
+            last_modified_ms: 0,
+        }];
+        let msgs = collect_fetch(store, slice, 0, 64, 64).await;
+        let Some(ChunkMsg::LaneFailed(SplitFailure::Fatal(e))) = msgs.into_iter().last() else {
+            panic!("expected a pipeline-fatal lane failure");
+        };
+        assert!(e.to_string().contains("HandshakeFailure"), "{e}");
+    }
 }

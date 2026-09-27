@@ -18,8 +18,9 @@
 //! the CPU-pinned pipeline threads never perform I/O. Ids the registry
 //! cannot serve are negatively cached (with a TTL) and handled by the
 //! deserializer's `ErrorPolicy` like any other poison payload. A registry
-//! that rejects the credentials or the TLS handshake makes the next cache
-//! miss stop the pipeline, whatever the `ErrorPolicy`.
+//! that rejects the credentials or the TLS handshake, or whose certificate
+//! fails verification, makes the next cache miss stop the pipeline, whatever
+//! the `ErrorPolicy`.
 //!
 //! # Schema evolution
 //!

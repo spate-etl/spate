@@ -443,9 +443,10 @@ fn is_auth_rejection(e: &SRCError) -> bool {
 }
 
 /// Fetch the latest version of every configured subject into the cache
-/// (startup pre-warm). A `401` is recorded in `rejection` and ends the
-/// pre-warm; any other failure is logged, and the id is fetched on demand
-/// when it first appears in a payload.
+/// (startup pre-warm). A `401` is recorded in `rejection`, and any recorded
+/// rejection, a TLS rejection included, ends the pre-warm; any other failure
+/// is logged, and the id is fetched on demand when it first appears in a
+/// payload.
 pub(crate) async fn prewarm(
     settings: &SrSettings,
     subjects: &[String],

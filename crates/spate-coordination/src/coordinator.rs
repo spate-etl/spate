@@ -272,8 +272,9 @@ impl<S: CoordinationStore + Clone> StoreCoordinator<S> {
 
     /// Direct-store release for teardown paths where the background task
     /// (or its runtime) is already gone: a private current-thread runtime
-    /// runs guarded lease deletes and owner-clears under one aggregate
-    /// deadline. Best-effort; anything it cannot reach expires.
+    /// runs guarded owner-clears and lease deletes under one aggregate
+    /// deadline on the coordinator's clock. Best-effort; anything it cannot
+    /// reach expires.
     fn release_direct(&self, splits: &[(SplitId, u64)]) {
         let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
             .enable_time()
@@ -285,30 +286,19 @@ impl<S: CoordinationStore + Clone> StoreCoordinator<S> {
         let store = self.store.clone();
         let instance = self.instance.clone();
         let nonce = self.nonce.clone();
+        let clock = self.clock.clone();
         let ids: Vec<(String, u64)> = splits
             .iter()
             .map(|(s, epoch)| (s.as_str().to_string(), *epoch))
             .collect();
-        let result = runtime.block_on(async move {
-            tokio::time::timeout(deadline, async {
+        let finished = runtime.block_on(async move {
+            let release = async {
                 for (id, epoch) in ids {
                     let key = records::split_key_str(&id);
-                    // Lease: delete only if it is really ours.
-                    if let Ok(Some(entry)) = store.get(Keyspace::Ephemeral, &key).await
-                        && let Ok(lease) = serde_json::from_slice::<LeaseVal>(&entry.value)
-                        && lease.owner == instance
-                        && lease.nonce == nonce
-                    {
-                        let _ = store
-                            .delete(Keyspace::Ephemeral, &key, Some(entry.revision))
-                            .await;
-                    }
-                    // Record: clear the owner so the next claim is
-                    // attempt-free. The owner string alone is not proof of
-                    // tenancy. A restarted worker with the same stable
-                    // instance id may have reclaimed the split under a
-                    // higher epoch, and clearing ITS owner would fence a
-                    // live peer. The epoch pins our tenancy. Parsed
+                    // Record: clear the owner before deleting the lease, so
+                    // a claim that follows the delete reads no owner and
+                    // consumes no attempt. The epoch guards against a
+                    // same-named restart that reclaimed the split. Parsed
                     // leniently (no fingerprint at hand); the CAS on the
                     // read revision is still safe.
                     if let Ok(Some(entry)) = store.get(Keyspace::Durable, &key).await
@@ -323,11 +313,27 @@ impl<S: CoordinationStore + Clone> StoreCoordinator<S> {
                             .update(Keyspace::Durable, &key, record.encode(), entry.revision)
                             .await;
                     }
+                    // Lease: delete only if it is really ours.
+                    if let Ok(Some(entry)) = store.get(Keyspace::Ephemeral, &key).await
+                        && let Ok(lease) = serde_json::from_slice::<LeaseVal>(&entry.value)
+                        && lease.owner == instance
+                        && lease.nonce == nonce
+                    {
+                        let _ = store
+                            .delete(Keyspace::Ephemeral, &key, Some(entry.revision))
+                            .await;
+                    }
                 }
-            })
-            .await
+            };
+            // Built inside `block_on`: the system clock's sleep needs this
+            // runtime's timer.
+            let expiry = clock.sleep_until(clock.now() + deadline);
+            tokio::select! {
+                () = release => true,
+                () = expiry => false,
+            }
         });
-        if result.is_err() {
+        if !finished {
             tracing::warn!("direct release ran out of time; remaining leases will expire");
         }
     }
@@ -552,8 +558,8 @@ impl<S: CoordinationStore + Clone> SplitCoordinator for StoreCoordinator<S> {
 impl<S: CoordinationStore + Clone> Drop for StoreCoordinator<S> {
     fn drop(&mut self) {
         if let Some(running) = self.running.take() {
-            // Anything still held gets a best-effort direct release; the
-            // task is then aborted (its leases would expire anyway).
+            // Abort the task, then give anything still held a best-effort
+            // direct release (its leases would expire anyway).
             let held: Vec<(SplitId, u64)> = running
                 .held
                 .iter()

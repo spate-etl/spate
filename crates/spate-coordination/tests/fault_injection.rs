@@ -5,9 +5,10 @@
 
 mod support;
 
+use futures_util::StreamExt;
 use spate_coordination::store::memory::MemoryStore;
 use spate_coordination::store::{
-    CasOutcome, CoordinationStore, Entry, Keyspace, Revision, StoreError, WatchStream,
+    CasOutcome, CoordinationStore, Entry, Keyspace, Revision, StoreError, WatchEvent, WatchStream,
 };
 use spate_coordination::{CoordinationEvent, SplitCoordinator, SplitProgress, StoreCoordinator};
 use spate_core::clock::tokio::Clock;
@@ -15,7 +16,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use support::{DEADLINE, Held, PhasedPlanner, config, runtime, split_id};
+use support::{DEADLINE, Held, PhasedPlanner, TestClock, config, runtime, split_id};
 
 /// A [`MemoryStore`] with scripted faults on specific writes.
 #[derive(Clone)]
@@ -379,5 +380,238 @@ fn a_dropped_release_write_still_surrenders_the_split() {
         "the split is held twice: a={:?} b={:?}",
         held_a.splits.keys().collect::<Vec<_>>(),
         held_b.splits.keys().collect::<Vec<_>>()
+    );
+}
+
+/// How [`ReleaseStore`] treats the lease delete of its armed split key.
+#[derive(Clone, Copy)]
+enum LeaseDeleteFault {
+    /// Delete, then hold the call until another worker owns the split
+    /// record.
+    HoldUntilClaimed,
+    /// Return an error without deleting.
+    Fail,
+}
+
+/// A [`MemoryStore`] that applies one [`LeaseDeleteFault`] to the lease of
+/// the armed split key.
+#[derive(Clone)]
+struct ReleaseStore {
+    inner: MemoryStore,
+    fault: LeaseDeleteFault,
+    armed: Arc<Mutex<Option<String>>>,
+    fired: Arc<AtomicBool>,
+    /// The foreign owner the hold observed before returning.
+    claimed_by: Arc<Mutex<Option<String>>>,
+}
+
+impl ReleaseStore {
+    fn new(inner: MemoryStore, fault: LeaseDeleteFault) -> ReleaseStore {
+        ReleaseStore {
+            inner,
+            fault,
+            armed: Arc::new(Mutex::new(None)),
+            fired: Arc::new(AtomicBool::new(false)),
+            claimed_by: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// The first owner other than worker-a that the split record carries.
+    async fn foreign_owner(&self, key: &str) -> Option<String> {
+        let mut watch = self.inner.watch(Keyspace::Durable, key).await.ok()?;
+        while let Some(Ok(event)) = watch.next().await {
+            if let WatchEvent::Put(entry) = event
+                && entry.key == key
+                && let Some(owner) = record_json(&entry.value)["owner"].as_str()
+                && owner != "worker-a"
+            {
+                return Some(owner.to_string());
+            }
+        }
+        None
+    }
+}
+
+impl CoordinationStore for ReleaseStore {
+    fn lease_ttl(&self) -> Duration {
+        self.inner.lease_ttl()
+    }
+
+    async fn create(
+        &self,
+        ks: Keyspace,
+        key: &str,
+        value: Vec<u8>,
+    ) -> Result<CasOutcome, StoreError> {
+        self.inner.create(ks, key, value).await
+    }
+
+    async fn update(
+        &self,
+        ks: Keyspace,
+        key: &str,
+        value: Vec<u8>,
+        expected: Revision,
+    ) -> Result<CasOutcome, StoreError> {
+        self.inner.update(ks, key, value, expected).await
+    }
+
+    async fn get(&self, ks: Keyspace, key: &str) -> Result<Option<Entry>, StoreError> {
+        self.inner.get(ks, key).await
+    }
+
+    async fn delete(
+        &self,
+        ks: Keyspace,
+        key: &str,
+        expected: Option<Revision>,
+    ) -> Result<CasOutcome, StoreError> {
+        let armed =
+            ks == Keyspace::Ephemeral && self.armed.lock().expect("armed").as_deref() == Some(key);
+        if !armed {
+            return self.inner.delete(ks, key, expected).await;
+        }
+        self.fired.store(true, Ordering::Release);
+        match self.fault {
+            LeaseDeleteFault::Fail => Err(StoreError::Retryable(
+                "injected: lease delete dropped".into(),
+            )),
+            LeaseDeleteFault::HoldUntilClaimed => {
+                let outcome = self.inner.delete(ks, key, expected).await?;
+                *self.claimed_by.lock().expect("claimed by") = self.foreign_owner(key).await;
+                Ok(outcome)
+            }
+        }
+    }
+
+    async fn watch(&self, ks: Keyspace, prefix: &str) -> Result<WatchStream, StoreError> {
+        self.inner.watch(ks, prefix).await
+    }
+
+    async fn list(&self, ks: Keyspace, prefix: &str) -> Result<Vec<Entry>, StoreError> {
+        self.inner.list(ks, prefix).await
+    }
+}
+
+fn record_json(value: &[u8]) -> serde_json::Value {
+    serde_json::from_slice(value).expect("record json")
+}
+
+/// Starts worker-a on `store` and worker-b on the store beneath it, both on
+/// `clock`, arms the fault on the split the leader revokes from worker-a,
+/// and drops worker-a so the direct release hands it back. Returns the
+/// split and its record once worker-b holds it.
+fn drop_during_revocation(
+    store: &ReleaseStore,
+    clock: &Arc<TestClock>,
+) -> (String, serde_json::Value) {
+    let rt = runtime();
+    let ids = ["r0", "r1"];
+    let planner = || Box::new(PhasedPlanner::one_final("direct-release:v1", &ids));
+    // Both workers are alive while the clock moves, so each step stays
+    // under a renew interval.
+    let step = support::LEASE / 12;
+
+    // A drain deadline the test never reaches, so the revocation is not
+    // forced through the task before the drop.
+    let mut cfg_a = config(Some("worker-a"));
+    cfg_a.drain_deadline = DEADLINE;
+    let mut a = StoreCoordinator::with_clock(
+        store.clone(),
+        cfg_a,
+        rt.handle().clone(),
+        None,
+        clock.clone(),
+    )
+    .expect("coordinator");
+    a.start(planner()).unwrap();
+    let mut fleet = support::Fleet::new(&store.inner, rt.handle());
+    fleet.join(&a);
+    let mut held_a = Held::default();
+    let deadline = Instant::now() + DEADLINE;
+    while held_a.splits.len() < ids.len() {
+        assert!(Instant::now() < deadline, "worker-a never took the plan");
+        fleet.step(clock, step);
+        held_a.fold(a.poll().expect("poll a"));
+    }
+    support::commit_held(&mut a, &held_a);
+
+    let mut b =
+        support::worker_with_clock(&store.inner, rt.handle(), Some("worker-b"), clock.clone());
+    b.start(planner()).unwrap();
+    fleet.join(&b);
+    let mut held_b = Held::default();
+    while held_a.revoke_requests.is_empty() {
+        assert!(Instant::now() < deadline, "no revocation was requested");
+        fleet.step(clock, step);
+        held_a.fold(a.poll().expect("poll a"));
+        held_b.fold(b.poll().expect("poll b"));
+    }
+    let moved = held_a.revoke_requests[0].clone();
+    let key = format!("split.{moved}");
+    *store.armed.lock().expect("armed") = Some(key.clone());
+
+    // `Drop` runs the direct release and blocks, so it gets its own thread.
+    // The clock does not move until it returns.
+    fleet.forget("worker-a");
+    let (dropped_tx, dropped) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        drop(a);
+        let _ = dropped_tx.send(());
+    });
+    dropped
+        .recv_timeout(DEADLINE)
+        .expect("the direct release never returned");
+    assert!(
+        store.fired.load(Ordering::Acquire),
+        "the direct release never deleted the lease of {moved}, so this proved nothing"
+    );
+
+    while !held_b.splits.contains_key(&moved) {
+        assert!(Instant::now() < deadline, "worker-b never took {moved}");
+        fleet.step(clock, step);
+        held_b.fold(b.poll().expect("poll b"));
+    }
+    let entry = rt
+        .block_on(store.inner.get(Keyspace::Durable, &key))
+        .expect("get")
+        .expect("split record");
+    (moved, record_json(&entry.value))
+}
+
+/// A peer that claims a split before the direct release handing it back
+/// returns consumes no delivery attempt. Regression for #759.
+#[test]
+fn a_claim_during_a_direct_release_consumes_no_attempt() {
+    let clock = TestClock::frozen();
+    let store = ReleaseStore::new(
+        support::store_with_clock(clock.clone()),
+        LeaseDeleteFault::HoldUntilClaimed,
+    );
+    let (moved, record) = drop_during_revocation(&store, &clock);
+    assert_eq!(
+        store.claimed_by.lock().expect("claimed by").as_deref(),
+        Some("worker-b"),
+        "worker-b did not claim {moved} before the direct release returned, so this proved nothing"
+    );
+    assert_eq!(
+        record["attempts"], 0,
+        "a graceful direct release charged {moved} a delivery attempt: {record}"
+    );
+}
+
+/// A direct release whose lease delete fails still hands the split back
+/// without an attempt: the peer claims it once the lease expires.
+#[test]
+fn a_direct_release_whose_lease_delete_fails_consumes_no_attempt() {
+    let clock = TestClock::frozen();
+    let store = ReleaseStore::new(
+        support::store_with_clock(clock.clone()),
+        LeaseDeleteFault::Fail,
+    );
+    let (moved, record) = drop_during_revocation(&store, &clock);
+    assert_eq!(
+        record["attempts"], 0,
+        "a direct release with a failed lease delete charged {moved} a delivery attempt: {record}"
     );
 }

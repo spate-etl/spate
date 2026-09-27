@@ -17,6 +17,7 @@ pub use barrier::DrainBarrier;
 
 use crate::checkpoint::AckIssuer;
 use crate::checkpoint::AckRef;
+use crate::config::{ConfigError, CoordinationSection};
 use crate::error::SourceError;
 use crate::framing::FramingContract;
 use crate::metrics::{Meter, SourceMetrics};
@@ -244,6 +245,24 @@ pub trait Source: Send {
     /// does not frame).
     fn framing_contract(&self) -> FramingContract {
         FramingContract::WholePayload
+    }
+
+    /// Accept the pipeline's `coordination:` section. The runtime calls this
+    /// once, before [`open`](Self::open) and before any thread starts, and only
+    /// when the section is present.
+    ///
+    /// A coordinated source validates the section here and builds its
+    /// coordinator from it in `open`. The default rejects the section, so a
+    /// source that does not coordinate fails at startup when one is set.
+    fn configure_coordination(&mut self, section: &CoordinationSection) -> Result<(), ConfigError> {
+        let _ = section;
+        Err(ConfigError::Component {
+            context: "coordination".into(),
+            message: format!(
+                "the source (`{}`) does not use coordination; remove the section",
+                self.component_type()
+            ),
+        })
     }
 
     /// Connect and prepare. Called once before any other method.

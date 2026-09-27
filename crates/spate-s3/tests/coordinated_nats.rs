@@ -11,8 +11,6 @@
 
 mod support;
 
-use spate_coordination::store::nats::{NatsConfig, NatsStore};
-use spate_coordination::{CoordinationConfig, StoreCoordinator};
 use spate_core::pipeline::ExitState;
 use spate_test::{SinkScript, WriteOutcome, wait_until};
 use std::time::Duration;
@@ -65,9 +63,8 @@ sink: {{ capture: {{}} }}
     )
 }
 
-/// Assemble one instance the way a deployment does: a `NatsStore` over
-/// the shared server, a `StoreCoordinator` with this instance's identity,
-/// injected via `with_coordinator`.
+/// Launch one instance the way a deployment does: the shared NATS server
+/// and this instance's identity in the `coordination:` section.
 fn launch_nats_instance(
     yaml: &str,
     nats_port: u16,
@@ -75,18 +72,18 @@ fn launch_nats_instance(
     instance: &str,
     pre: impl FnOnce(&SinkScript),
 ) -> Launched {
-    let nats = NatsConfig::new(vec![format!("nats://127.0.0.1:{nats_port}")], job);
-    let mut tuning = CoordinationConfig::default();
-    tuning.lease_duration = LEASE;
-    tuning.op_timeout = Duration::from_secs(1);
-    tuning.instance_id = Some(instance.to_string());
-    tuning.replan_interval = LEASE;
-    launch_customized(yaml, test_options(), pre, move |source, io| {
-        let store = NatsStore::new(nats, LEASE).expect("nats store");
-        let coordinator =
-            StoreCoordinator::new(store, tuning, io, None).expect("coordinator builds");
-        line_framer(source).with_coordinator(Box::new(coordinator))
-    })
+    let secs = LEASE.as_secs();
+    let yaml = format!(
+        "{yaml}coordination:
+  instance_id: {instance}
+  lease_duration: {secs}s
+  op_timeout: 1s
+  replan_interval: {secs}s
+  store:
+    nats: {{ servers: [\"nats://127.0.0.1:{nats_port}\"], job: {job} }}
+"
+    );
+    launch_customized(&yaml, test_options(), pre, |source, _| line_framer(source))
 }
 
 /// Durable resume across a process boundary: run 1 makes partial

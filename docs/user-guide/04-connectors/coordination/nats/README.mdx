@@ -12,27 +12,29 @@ it; it carries split records, leases, and the plan, at roughly one small write
 per held split per third of a lease, so a handful of writes per second per
 worker.
 
-Construct it and hand it to a `StoreCoordinator`, which the source takes as
-assembly wiring; there is no `coordination:` section in the pipeline YAML
-([why](../../../07-reference/configuration.mdx#code-level-knobs-not-yaml)):
+Select it under `store:` in the pipeline's
+[`coordination:` section](../../../07-reference/configuration.mdx#coordination):
 
-```rust file=crates/spate/examples/nats_coordinated_backfill.rs region=coordinator
+```yaml file=crates/spate/examples/nats_coordinated_backfill.rs region=coordination
 ```
 
-`servers` is the URL list and `JOB` the job name, the two required fields of
-`NatsConfig`; `tuning` is the `CoordinationConfig` the coordinator runs on,
-whose `lease_duration` is the TTL the store is handed. That code comes from
+`servers` and `job` are the two required keys of the `nats` body; the keys
+beside `store:` are the coordinator's tuning, and `lease_duration` is also the
+TTL the store is built with. That section comes from
 [`nats_coordinated_backfill.rs`](repo:crates/spate/examples/nats_coordinated_backfill.rs),
 one instance per process against a JetStream server on `nats://127.0.0.1:4222`
 (override with `NATS_URL`) meeting the [Requirements](#requirements) below.
-Two terminals, each with a
-distinct `POD_NAME` (the example's `instance_id`), divide one backfill between
-them, and two live workers claiming one identity is detected and fatal:
+Two terminals, each with a distinct `POD_NAME` (the section's `instance_id`),
+divide one backfill between them, and two live workers claiming one identity
+is detected and fatal:
 
 ```sh
 POD_NAME=worker-a cargo run -p spate --features s3,json,coordination-nats --example nats_coordinated_backfill
 POD_NAME=worker-b cargo run -p spate --features s3,json,coordination-nats --example nats_coordinated_backfill
 ```
+
+A binary built without the `coordination-nats` feature rejects a `nats` store
+at startup, naming the feature.
 
 Construction is synchronous and lazy, so the connection and bucket provisioning
 happen on the first store operation, which is the coordinator's startup probe.
@@ -45,50 +47,43 @@ retried like an [outage](#what-an-outage-does).
 
 ## Configuration
 
-`NatsConfig` is built in code, not deserialized from the pipeline file.
-Construct it with `NatsConfig::new(servers, job)` and set the optional fields;
-the struct is `#[non_exhaustive]`, so new knobs are added without breaking
-callers. `Debug` is safe to log, because every secret field redacts itself.
+The keys of the `nats` body under `coordination.store`. Errors name the key as
+`coordination.store.nats.<key>`, and `Debug` output redacts every secret.
 
-{/*
-  Two lines (a constructor and the one optional field being set), so this
-  fence claims docs/STYLE.md §10's first exemption and stays hand-written.
-  Outgrow that and render it from a region of a compiled source instead.
-*/}
-
-```rust
-let mut cfg = NatsConfig::new(vec!["nats://nats:4222".into()], "exports-backfill");
-cfg.replicas = 3;
-```
-
-| Field | Type | Default | Description |
+| Key | Type | Default | Description |
 |---|---|---|---|
-| `servers` | `Vec<String>` | `required` | Server URLs (`nats://host:4222`, `tls://…`, `ws://…`, `wss://…`). At least one. Userinfo and any query render `<redacted>` in `Debug` output. |
-| `job` | `String` | `required` | Job identity, `[A-Za-z0-9_-]{1,64}`. Suffixes both bucket names. Every worker of one job uses the same value; two different jobs must never share one. |
-| `credentials` | `NatsCredentials` | `none` | Anonymous by default. See [Security](#security-authentication-and-tls). |
-| `tls` | `Option<NatsTls>` | `none` | TLS material. Its presence requires TLS on every server and rejects a `ws://` server. |
-| `replicas` | `usize` | `1` | Replication factor for both buckets (1, 3, or 5). 3 or more needs a JetStream cluster. |
+| `servers` | list of strings | `required` | Server URLs (`nats://host:4222`, `tls://…`, `ws://…`, `wss://…`). At least one. Userinfo and any query render `<redacted>` in `Debug` output. |
+| `job` | string | `required` | Job identity, `[A-Za-z0-9_-]{1,64}`. Suffixes both bucket names. Every worker of one job uses the same value; two different jobs must never share one. |
+| `credentials` | mapping | `none` | Anonymous by default. See [Security](#security-authentication-and-tls). |
+| `tls` | mapping | `none` | TLS material. Its presence requires TLS on every server and rejects a `ws://` server. |
+| `replicas` | integer | `1` | Replication factor for both buckets (1, 3, or 5). 3 or more needs a JetStream cluster. |
 
-The second argument to `NatsStore::new` is the lease TTL. It must be the same
-value as the coordinator's `lease_duration`. One drives the bucket's age limit
-and the other drives the lease protocol, and they only agree if you pass the
-same number. The floor is 2s, because expiry-marker precision is one second.
+`coordination.lease_duration` is the lease TTL, with a floor of 2s on NATS
+because expiry-marker precision is one second.
+
+A store built in code instead takes the same fields as `NatsConfig`
+(`NatsConfig::new(servers, job)` plus the optional fields), and `NatsStore::new`
+takes the lease TTL as its second argument. That value must equal the
+coordinator's `lease_duration`: one drives the bucket's age limit and the other
+drives the lease protocol, and the coordinator rejects a store whose TTL
+differs.
 
 Values are capped at 512 KiB, well below the NATS 1 MiB message ceiling, so a
 split descriptor cannot grow into an unwritable record.
 
 ## Security (authentication and TLS)
 
-`NatsCredentials` selects the mechanism:
+`credentials` selects the mechanism. Supply secrets through
+[environment interpolation](../../../07-reference/configuration.mdx#environment-interpolation):
 
-| Variant | Use |
+| Value | Use |
 |---|---|
-| `None` | Anonymous. Development clusters only. |
-| `UserPassword { username, password }` | Username and password. The password is a `Secret` and renders `<redacted>` in all `Debug` output. |
-| `Token(Secret)` | A bearer token. |
-| `CredsFile(PathBuf)` | A `.creds` file (NKey + JWT) — the NATS-native mechanism, and the right choice for a managed cluster. |
+| `none` | Anonymous. Development clusters only. |
+| `{ user_password: { username: …, password: "${NATS_PASSWORD}" } }` | Username and password. The password renders `<redacted>` in all `Debug` output. |
+| `{ token: "${NATS_TOKEN}" }` | A bearer token. |
+| `{ creds_file: /etc/nats/worker.creds }` | A `.creds` file (NKey + JWT) — the NATS-native mechanism, and the right choice for a managed cluster. |
 
-`NatsTls` carries `root_ca` (a PEM bundle, for private CAs), and `client_cert` +
+`tls` carries `root_ca` (a PEM bundle, for private CAs), and `client_cert` +
 `client_key` for mutual TLS. Those two are set together or not at all; half a
 client identity fails at startup rather than connecting without mutual TLS.
 Setting the `tls` field at all requires TLS on every server in `servers`. A
@@ -165,11 +160,11 @@ services:
     deploy: { replicas: 2 }
     environment:
       NATS_URL: nats://nats:4222
-      # instance_id from the container hostname — unique per replica
+      # the pipeline file sets instance_id: "${HOSTNAME}", unique per replica
 ```
 
-For production, run a 3-node cluster with JetStream and set `replicas: 3` on
-`NatsConfig` so the buckets survive losing a node. The client learns the other
+For production, run a 3-node cluster with JetStream and set `replicas: 3` in
+the `nats` body so the buckets survive losing a node. The client learns the other
 nodes from the first server it reaches, so one reachable entry in `servers` is
 enough. List more than one, or a DNS name that resolves to every node, so the
 first connection survives a node being down.

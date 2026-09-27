@@ -11,7 +11,7 @@
 //! |---|---|
 //! | `kafka` | [`kafka`] — Kafka source built on `rdkafka` (single consumer, partition-queue lanes) |
 //! | `kafka-tls` | TLS, mTLS and SASL for [`kafka`]; librdkafka is built with a vendored OpenSSL. The [Kafka security section] lists the SASL mechanisms the feature supports. Without it a security property in the `rdkafka` passthrough fails config validation |
-//! | `s3` | [`s3`] — coordinated bounded object-storage (S3) backfill source: the fleet's leader plans the prefix into splits, workers lease them through an injected coordinator (solo in-process by default; progress is ephemeral without a durable store), and the job self-terminates once the plan is final and every split completes (`refresh_listing` keeps it open) |
+//! | `s3` | [`s3`] — coordinated bounded object-storage (S3) backfill source: the fleet's leader plans the prefix into splits, workers lease them through the coordinator the `coordination:` section configures (solo in-process without one; progress is then ephemeral), and the job self-terminates once the plan is final and every split completes (`refresh_listing` keeps it open) |
 //! | `clickhouse` | [`clickhouse`] — ClickHouse sink (RowBinary, dedup tokens, replica rotation) |
 //! | `clickhouse-uuid` | `uuid::Uuid` fields for `UUID` columns (`clickhouse::serde::uuid`) |
 //! | `clickhouse-chrono` | `chrono` fields for `Date`/`DateTime`/`DateTime64`/`Time` columns |
@@ -22,7 +22,7 @@
 //! | `json-float-roundtrip`, `json-arbitrary-precision`, `json-raw-value` | Opt-in `serde_json` fidelity knobs for [`json`]. `arbitrary-precision` is crate-wide |
 //! | `json-simd` | SIMD decode backend for [`json`] (`simd-json` replacing `serde_json`). The fidelity knobs above do not apply under it |
 //! | `coordination` | [`coordination`] backend — multi-instance leader-assigned work distribution for broker-less sources: the protocol, `StoreCoordinator`, and the in-memory store (zero-infrastructure embedding). The seam types and the `CoordinationDriver` live in `spate::coordination` without any feature |
-//! | `coordination-nats` | The production NATS JetStream KV store (server >= 2.11) on top of [`coordination`]; pulls the async-nats dependency tree |
+//! | `coordination-nats` | The production NATS JetStream KV store (server >= 2.11), selected by `coordination.store.nats`, on top of [`coordination`]; pulls the async-nats dependency tree |
 //! | `datagen` | [`datagen`] — synthetic storefront-event source (orders, payments, refunds) for a pipeline that needs no broker, bucket or coordination store. A demo and test source: it keeps no durable progress |
 //! | `datagen-avro` | Avro payloads from [`datagen`] instead of JSON (implies `datagen`) |
 //!

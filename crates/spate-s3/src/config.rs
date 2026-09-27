@@ -1,11 +1,8 @@
 //! S3 source configuration: typed fields plus a validated raw
 //! `object_store` option passthrough.
 //!
-//! Deliberately absent: any coordination-backend configuration. The
-//! source takes a fully built coordinator at assembly time
-//! ([`S3Source::with_coordinator`](crate::S3Source::with_coordinator)) —
-//! which backend to use, and its tuning, is the deployer's wiring, not
-//! this connector's.
+//! Deliberately absent: coordination. The store and its tuning come from
+//! the pipeline's top-level `coordination:` section.
 //!
 //! What is here splits in two. `url`, `compression`, `split_target_bytes`
 //! and `refresh_listing` shape the **work itself**: they feed the job
@@ -284,10 +281,8 @@ mod tests {
 
     #[test]
     fn removed_knobs_are_rejected() {
-        // `lanes`, `checkpoint:`, and a source-level `coordination:` all
-        // died with the manifest checkpoint and the assembly-only
-        // coordinator wiring; deny_unknown_fields turns a stale config
-        // into a load error.
+        // None of these are source keys; `coordination:` sits at the top
+        // level of the pipeline config.
         for extra in [
             "  lanes: 4\n",
             "  checkpoint:\n    url: s3://bucket/_etl/b.json\n",

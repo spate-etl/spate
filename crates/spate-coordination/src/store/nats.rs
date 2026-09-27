@@ -87,8 +87,11 @@ impl fmt::Display for Secret {
 }
 
 /// How the client authenticates to the NATS cluster.
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(rename_all = "snake_case")]
+///
+/// Deserializes from `none`, or from a single-key map naming the mechanism:
+/// `{ user_password: { username, password } }`, `{ token: … }` or
+/// `{ creds_file: … }`.
+#[derive(Clone, Debug, Default)]
 #[non_exhaustive]
 pub enum NatsCredentials {
     /// Anonymous (dev clusters).
@@ -105,6 +108,66 @@ pub enum NatsCredentials {
     Token(Secret),
     /// A `.creds` file (NKey + JWT), the NATS-native mechanism.
     CredsFile(PathBuf),
+}
+
+const CREDENTIAL_KEYS: &[&str] = &["user_password", "token", "creds_file"];
+
+impl<'de> Deserialize<'de> for NatsCredentials {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct UserPassword {
+            username: String,
+            password: Secret,
+        }
+
+        struct Mechanism;
+
+        impl<'de> serde::de::Visitor<'de> for Mechanism {
+            type Value = NatsCredentials;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("`none`, or a map with one of `user_password`, `token`, `creds_file`")
+            }
+
+            // The value is never echoed: a mistyped secret would land here.
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<NatsCredentials, E> {
+                if v == "none" {
+                    Ok(NatsCredentials::None)
+                } else {
+                    Err(E::invalid_value(
+                        serde::de::Unexpected::Other("a string"),
+                        &self,
+                    ))
+                }
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<NatsCredentials, A::Error> {
+                use serde::de::Error as _;
+                let Some(key) = map.next_key::<String>()? else {
+                    return Err(A::Error::invalid_length(0, &self));
+                };
+                let credentials = match key.as_str() {
+                    "user_password" => {
+                        let UserPassword { username, password } = map.next_value()?;
+                        NatsCredentials::UserPassword { username, password }
+                    }
+                    "token" => NatsCredentials::Token(map.next_value()?),
+                    "creds_file" => NatsCredentials::CredsFile(map.next_value()?),
+                    other => return Err(A::Error::unknown_field(other, CREDENTIAL_KEYS)),
+                };
+                if map.next_key::<String>()?.is_some() {
+                    return Err(A::Error::custom("credentials name exactly one mechanism"));
+                }
+                Ok(credentials)
+            }
+        }
+
+        deserializer.deserialize_any(Mechanism)
+    }
 }
 
 /// TLS material for the NATS connection. Presence of this section

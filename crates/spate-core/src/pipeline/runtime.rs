@@ -184,6 +184,11 @@ impl<S: Source + 'static> PipelineRuntime<S> {
         if threads == 0 || self.config.pipeline.io_threads == 0 {
             return Err(StartError::Config("thread counts must be non-zero".into()));
         }
+        if let Some(section) = &self.config.coordination {
+            self.source
+                .configure_coordination(section)
+                .map_err(|e| StartError::Config(e.to_string()))?;
+        }
         let pipeline_name = self.config.pipeline.name.clone();
 
         // The source's declared component_type feeds both its stage-metric

@@ -14,7 +14,9 @@ One YAML file configures one process. The framework owns the typed sections
 strictly (`deny_unknown_fields` at every level, so typos fail at startup with
 the offending YAML path). The `source`, `deserializer`, and `sink` sections are
 single-key mappings selecting a component type; their bodies are opaque to the
-framework and deserialized by the component's own factory.
+framework and deserialized by the component's own factory. The optional
+[`coordination`](#coordination) section configures a coordinated source's
+store and coordinator.
 
 ```yaml
 pipeline: { name: orders, threads: 4, io_threads: 2 }
@@ -249,6 +251,41 @@ and [multi-sink split](../02-concepts/06-multi-sink.mdx);
 [ClickHouse multi-table](../04-connectors/sinks/clickhouse/multi-table.mdx) shows the
 connector end-to-end.
 
+## `coordination:` {#coordination}
+
+Optional. The coordinator of a [coordinated source](../02-concepts/07-source-coordination.mdx):
+the store its instances share, and the coordinator's tuning. Without the
+section a coordinated source runs solo over an in-process store, and set on a
+source that does not coordinate it fails startup. These keys are checked when
+the pipeline starts, before the source opens and before any thread runs.
+
+```yaml
+coordination:
+  instance_id: "${POD_NAME}"
+  lease_duration: 30s
+  store:
+    nats: { servers: ["nats://nats:4222"], job: exports-backfill }
+```
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `store` | component | `required` | Single-key mapping selecting the [coordination store](../04-connectors/coordination/README.mdx); its body is documented on the store's page. |
+| `instance_id` | string | `none` | This instance's identity, `[A-Za-z0-9_-]`, 1–128 bytes. Unique per live instance; two live instances sharing one is fatal. A stable value (the pod name) lets a restarted instance reclaim its own splits. Unset, each run takes a random id. Quote an interpolated value (`"${POD_NAME}"`), so an empty variable fails validation. |
+| `lease_duration` | duration | `30s` | Takeover latency after an ungraceful death; heartbeats run at a third of it. Also the store's lease TTL. Must be at least `2 × op_timeout`. |
+| `op_timeout` | duration | `10s` | Deadline for one store operation. At least `50ms`. |
+| `max_in_flight` | integer | `8` | The working set: splits an instance holds and processes at once, and its data-lane count. |
+| `max_attempts` | integer | `4` | Failing tenancies before a split is quarantined. |
+| `replan_interval` | duration | `60s` | How often the leader re-runs an open plan. At least `lease_duration`. Final plans stop replanning. |
+| `reconcile_interval` | duration | `30s` | How often each instance checks its watch-fed view against a full listing. |
+| `rebalance_delay` | duration | `20s` | How long the leader withholds a departed instance's splits before reassigning them, so a restart reclaims its own work. Cancelled early when the instance returns; `0s` reassigns at once. |
+| `drain_deadline` | duration | `10s` | How long a revoked split may keep draining before its release is forced and its uncommitted tail replays. Also the no-progress timeout for a drain whose revocation was cancelled. At least `op_timeout`; may exceed `lease_duration`, since a draining split is still heartbeated. See [time to balance](../05-deployment/scaling-out.mdx#time-to-balance). |
+| `startup_max_attempts` | integer | `8` | Attempts at the startup steps (store probe, join, seeding) before startup fails. |
+
+Every instance of one job runs with the same source body, because the keys that
+shape the work form the job fingerprint and a mismatch is rejected at startup.
+The `coordination:` section may differ per instance, and `instance_id` must.
+Each coordinated source's page marks which of its keys are fingerprinted.
+
 ## Code-level knobs (not YAML) {#code-level-knobs-not-yaml}
 
 These knobs live in the assembly code rather than the file, because they
@@ -263,19 +300,6 @@ per-sink YAML [`chunk:` block](#chunk); `SinkOptions::with_chunk` is its
 install-time equivalent for pipelines assembled in code (mutually exclusive with
 the YAML block on the same sink).
 
-**Coordination is assembly wiring, not source YAML.** A coordinated
-source takes a fully built coordinator through its `with_coordinator`
-builder, which takes a `StoreCoordinator` over a
-[coordination store](../04-connectors/coordination/README.mdx) with a
-`CoordinationConfig` for `lease_duration`, `instance_id`, `max_in_flight`
-and the rest. No connector grows per-backend config keys or compile-time
-features, and a new store backend needs no connector changes.
-
-The wiring recipe lives in
-[Coordination-aware sources](../06-extending/custom-source.mdx#coordination-aware-sources)
-and the deployment shape in [Scaling out](../05-deployment/scaling-out.mdx);
-what stays in the source YAML is the work and how this instance reads it.
-Those two are worth telling apart, because they behave differently across a
-fleet: keys that shape the *work itself* form the job fingerprint and must be
-byte-equal on every instance, while local read tuning may differ per replica.
-Each coordinated source's page marks which of its keys are fingerprinted.
+A coordinator built in code, over a custom store, is handed to the source
+instead of a [`coordination:`](#coordination) section; the recipe is in
+[Coordination-aware sources](../06-extending/custom-source.mdx#coordination-aware-sources).

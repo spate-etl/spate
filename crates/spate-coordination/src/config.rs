@@ -6,8 +6,8 @@ use serde::Deserialize;
 use spate_core::coordination::CoordinationError;
 use std::time::Duration;
 
-/// Tuning for one worker's coordinator; embed under a source's
-/// `coordination:` config section.
+/// Tuning for one worker's coordinator; the keys of the pipeline's
+/// `coordination:` section beside `store:`.
 ///
 /// The mechanical floors here (`validate`) keep the protocol sound in
 /// tests as well as production. User-facing floors (e.g. "a lease below

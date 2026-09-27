@@ -47,9 +47,9 @@ runs two instances over one shared store
 
 The `source: { s3: ... }` section deserializes into `S3SourceConfig`
 ([`spate-s3/src/config.rs`](repo:crates/spate-s3/src/config.rs)); unknown
-fields are rejected with the offending key. Coordination is deliberately
-**not** here. It is assembly wiring
-([why](../../../07-reference/configuration.mdx#code-level-knobs-not-yaml)),
+fields are rejected with the offending key. Coordination is not a key of the
+source body: it is the pipeline's top-level
+[`coordination:` section](../../../07-reference/configuration.mdx#coordination),
 covered under [Scaling out](#scaling-out-and-the-solo-default).
 
 ```yaml
@@ -203,27 +203,34 @@ generic model.
 
 ## Scaling out and the solo default
 
-The coordinator is **assembly wiring**: build one over a durable
-[coordination store](../../coordination/README.mdx) and inject it, and every
+Point the pipeline's
+[`coordination:` section](../../../07-reference/configuration.mdx#coordination)
+at a durable [coordination store](../../coordination/README.mdx), and every
 worker running the same pipeline shares the backfill. Splits are leased, moved
 between live workers by the elected leader, and taken over from dead ones, with
 per-split [fenced](../../../07-reference/glossary.mdx#fencing-token) commits
-making revocations replay-safe.
+making revocations replay-safe. The source builds its coordinator from the
+section when the pipeline starts, with no code in `main`:
+
+```yaml file=crates/spate/examples/nats_coordinated_backfill.rs region=coordination title="nats_coordinated_backfill.rs"
+```
+
+[NATS JetStream](../../coordination/nats/README.mdx) is the production store.
+Deployment shape, the production values, and failure modes are in
+[Scaling out](../../../05-deployment/scaling-out.mdx).
+
+A coordinator built in code goes in through `with_coordinator(...)` instead,
+and setting both it and the section fails startup. The in-process example
+below uses it, because two instances in one process need one shared in-memory
+store:
 
 ```rust file=crates/spate/examples/s3_coordinated_backfill.rs region=coordinator title="s3_coordinated_backfill.rs"
 ```
 
-`store` is the coordination store the fleet meets in, and building it is the
-store's business; [NATS JetStream](../../coordination/nats/README.mdx) is the
-production backend. The `CoordinationConfig` literal is that example's
-demo-fast tuning, chosen so two instances trade splits within seconds;
-deployment shape, the production values, and failure modes are in
-[Scaling out](../../../05-deployment/scaling-out.mdx).
-
 :::warning No coordinator ⇒ solo, with **ephemeral** progress
 
-With no `with_coordinator(...)`, the source runs the same coordinated
-path over an internal in-process store. That is correct and
+With no `coordination:` section and no `with_coordinator(...)`, the source
+runs the same coordinated path over an internal in-process store. That is correct and
 self-terminating, but the store dies with the process, so **a restart
 replays the whole prefix** (at-least-once: wasteful, never lossy). A
 startup WARN says exactly this. Durable resume requires a durable

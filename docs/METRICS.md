@@ -333,9 +333,11 @@ way to reason about where a flush went, not an identity to compute.
 
 ## Coordination (`spate_coordination_*`)
 
-Registered only when a source runs with multi-instance split coordination
-(the `coordination`/`coordination-nats` features' backend, or any custom `SplitCoordinator`
-handed a `CoordinationMetrics`). They fire alongside the source's own
+Registered only when a source's coordinator was built with a
+`CoordinationMetrics`. The S3 source passes one to every coordinator it
+builds, from the pipeline's `coordination:` section or as its solo default. A
+coordinator built in code and handed to a source has these families only when
+that code passed one. They fire alongside the source's own
 `spate_source_rebalances_total` / `spate_source_lanes_active`.
 
 | Metric | Type | Extra labels | Description |

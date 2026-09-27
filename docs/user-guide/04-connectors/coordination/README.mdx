@@ -11,15 +11,19 @@ of this; a source that does not gets its scale-out story from
 [source coordination](../../02-concepts/07-source-coordination.mdx) and one of
 the stores below.
 
-| Store | Crate | Feature on `spate` | Summary |
+| Store | `store:` key | Feature on `spate` | Summary |
 |---|---|---|---|
-| [NATS JetStream](nats/README.mdx) | `spate-coordination` | `coordination-nats` | The production backend. Two KV buckets per job; leases ride per-message age limits. |
-| In-memory | `spate-coordination` | `coordination` | The seam plus a process-local store. Correct and self-terminating, but progress dies with the process — development, tests, and single-instance runs only. |
+| [NATS JetStream](nats/README.mdx) | `nats` | `coordination-nats` | The production backend. Two KV buckets per job; leases ride per-message age limits. |
+| In-memory | none | `coordination` | A process-local store. Correct and self-terminating, but progress dies with the process. A coordinated source runs solo over one when the pipeline has no `coordination:` section; tests build one in code to share between instances in one process. |
 
-A store is **assembly wiring, not YAML**
-([why](../../07-reference/configuration.mdx#code-level-knobs-not-yaml)): you
-build one and hand it to a `StoreCoordinator`, which you inject into the
-source. Nothing about the store appears in the pipeline config file.
+A store is selected under `store:` in the pipeline's
+[`coordination:` section](../../07-reference/configuration.mdx#coordination),
+next to the coordinator's tuning. Its body is the store's own configuration,
+documented on its page. Both stores live in `spate-coordination`.
+
+A store built in code, such as a custom one, goes to the source through a
+`StoreCoordinator` passed to its `with_coordinator` builder, in place of the
+section.
 
 Custom stores implement
 [`CoordinationStore`](https://docs.rs/spate-coordination/latest/spate_coordination/store/trait.CoordinationStore.html).

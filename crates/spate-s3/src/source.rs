@@ -2,9 +2,10 @@
 //! [`Source`] trait by delegating the entire assignment choreography to
 //! the coordination layer's `CoordinationDriver`.
 //!
-//! Lifecycle: `open` builds the data store, takes the coordinator the
-//! deployer assembled ([`S3Source::with_coordinator`]; a solo in-process
-//! one is built when none was injected), and stashes the planner; the
+//! Lifecycle: `open` builds the data store, takes its coordinator (one
+//! injected with [`S3Source::with_coordinator`], else one built from the
+//! pipeline's `coordination:` section, else a solo in-process one), and
+//! stashes the planner; the
 //! first `poll_events` joins the job via `driver.start` (leader-only
 //! listing + packing happen in the planner), and every later call drains
 //! poison reports into `driver.fail` and then delegates to
@@ -15,10 +16,10 @@
 //! progress store.
 //!
 //! No coordination backend appears in this crate's public API or in its
-//! cargo features: which store a deployment uses is assembly wiring, kept
-//! out of every connector.
-//! The one backend it does link is `spate-coordination`'s in-process
-//! `MemoryStore`, unconditionally, as the solo fallback below.
+//! cargo features. The store comes from the `coordination:` section through
+//! `spate-coordination`, whose features decide which stores a build has.
+//! The one backend this crate links itself is the in-process `MemoryStore`,
+//! unconditionally, as the solo fallback below.
 
 use crate::config::S3SourceConfig;
 use crate::lane::S3Lane;
@@ -28,8 +29,8 @@ use crate::split_ctx::SplitCtx;
 use object_store::aws::{AmazonS3Builder, AmazonS3ConfigKey};
 use object_store::{ClientConfigKey, ObjectStore, ObjectStoreScheme};
 use spate_coordination::store::memory::MemoryStore;
-use spate_coordination::{CoordinationConfig, StoreCoordinator};
-use spate_core::config::{ComponentConfig, ConfigError};
+use spate_coordination::{CoordinationConfig, CoordinatorSpec, StoreCoordinator};
+use spate_core::config::{ComponentConfig, ConfigError, CoordinationSection};
 use spate_core::coordination::driver::CoordinationDriver;
 use spate_core::coordination::{PlanFinality, SplitCoordinator};
 use spate_core::error::{ErrorClass, SourceError};
@@ -71,9 +72,10 @@ pub struct S3Source {
     /// [`with_framer`](S3Source::with_framer). Required before the pipeline
     /// opens the source; `spate-s3` is a transport and owns no framing itself.
     framer: Option<crate::framer::FramerFactory>,
-    /// A coordinator injected via [`with_coordinator`](S3Source::with_coordinator),
-    /// overriding the config-driven store construction.
+    /// A coordinator injected via [`with_coordinator`](S3Source::with_coordinator).
     coordinator: Option<Box<dyn SplitCoordinator>>,
+    /// The pipeline's `coordination:` section, validated and built in `open`.
+    spec: Option<CoordinatorSpec>,
     /// A data store injected via the `testing`-gated `with_store` seam.
     store: Option<Arc<dyn ObjectStore>>,
     state: State,
@@ -104,6 +106,7 @@ impl S3Source {
             handle: io,
             framer: None,
             coordinator: None,
+            spec: None,
             store: None,
             state: State::Created,
         }
@@ -140,14 +143,12 @@ impl S3Source {
         self
     }
 
-    /// Hand the source its coordinator, the multi-instance seam.
-    /// Build any [`SplitCoordinator`] at assembly time (e.g.
-    /// `StoreCoordinator` over the NATS store from `spate-coordination`,
-    /// with your own tuning) and inject it here; run more replicas of the
-    /// same pipeline against the same backend and they share the
-    /// backfill. Must be called before the pipeline opens the source.
+    /// Hand the source a coordinator built in code, such as a
+    /// `StoreCoordinator` over a custom store. Must be called before the
+    /// pipeline opens the source, and conflicts with a `coordination:`
+    /// section in the pipeline config.
     ///
-    /// Without it the source runs **solo** over an in-process store:
+    /// Without either the source runs **solo** over an in-process store:
     /// correct and self-terminating, but progress is ephemeral. A restart
     /// replays the whole prefix (a startup WARN says so).
     #[must_use]
@@ -183,6 +184,19 @@ impl Source for S3Source {
         // A framed source always emits one record per payload. (The framer is
         // required; a missing one is caught at `open`.)
         FramingContract::PerRecord
+    }
+
+    fn configure_coordination(&mut self, section: &CoordinationSection) -> Result<(), ConfigError> {
+        if self.coordinator.is_some() {
+            return Err(ConfigError::Component {
+                context: "coordination".into(),
+                message: "the S3 source was also given a coordinator with `with_coordinator`; \
+                          remove the `coordination:` section or drop `with_coordinator`"
+                    .into(),
+            });
+        }
+        self.spec = Some(CoordinatorSpec::from_section(section)?);
+        Ok(())
     }
 
     fn open(&mut self, ctx: SourceCtx) -> Result<(), SourceError> {
@@ -228,18 +242,23 @@ impl Source for S3Source {
         };
 
         let metrics = ctx.meter.as_ref().map(S3Metrics::new);
-        let coordinator = match self.coordinator.take() {
-            Some(injected) => injected,
-            None => {
-                // Coordination metrics are opt-in and constructor-injected
-                // (there is no later hook); the solo coordinator shares
-                // the source's labels.
-                let coord_metrics = ctx
-                    .meter
-                    .as_ref()
-                    .map(|m| CoordinationMetrics::new(m.labels()));
-                solo_coordinator(self.handle.clone(), coord_metrics)?
+        // Coordination metrics are constructor-injected (there is no later
+        // hook); a coordinator built here shares the source's labels.
+        let coord_metrics = || {
+            ctx.meter
+                .as_ref()
+                .map(|m| CoordinationMetrics::new(m.labels()))
+        };
+        let coordinator = match (self.coordinator.take(), self.spec.take()) {
+            (Some(injected), _) => injected,
+            (None, Some(spec)) => {
+                spec.build(self.handle.clone(), coord_metrics())
+                    .map_err(|e| SourceError::Client {
+                        class: e.class(),
+                        reason: format!("building the coordinator from `coordination:`: {e}"),
+                    })?
             }
+            (None, None) => solo_coordinator(self.handle.clone(), coord_metrics())?,
         };
 
         let finality = if self.config.refresh_listing {
@@ -360,8 +379,8 @@ fn solo_coordinator(
     tracing::warn!(
         "no coordinator injected: running solo over an in-process store; progress is \
          EPHEMERAL and a restart replays the entire prefix (at-least-once, safe but \
-         wasteful) — inject one via with_coordinator (e.g. a StoreCoordinator over a \
-         durable backend) for durable resume and multi-instance sharing"
+         wasteful) — configure a durable store under `coordination:` for durable resume \
+         and multi-instance sharing"
     );
     let tuning = CoordinationConfig::default();
     let store = MemoryStore::new(tuning.lease_duration);

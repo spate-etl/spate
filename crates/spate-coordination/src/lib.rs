@@ -43,10 +43,12 @@ mod leader;
 pub mod loop_probe;
 mod protocol;
 mod records;
+mod section;
 mod task;
 
 pub use config::CoordinationConfig;
 pub use coordinator::StoreCoordinator;
+pub use section::CoordinatorSpec;
 
 /// [`StoreCoordinator`] over the in-memory store: tests and
 /// single-process embedding.

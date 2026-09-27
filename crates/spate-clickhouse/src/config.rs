@@ -1089,6 +1089,10 @@ shards:
                 "shard 0 replica 0 URL",
             ),
             (
+                "shards: [{replicas: ['http://:hunter2@a:8123']}]\n".to_owned(),
+                "shard 0 replica 0 URL",
+            ),
+            (
                 format!("shards: [{{replicas: ['http://a']}}]\n{check}'http://svc:hunter2@b'}}\n"),
                 "distributed_check: endpoint URL",
             ),

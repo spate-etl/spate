@@ -140,6 +140,9 @@ Framework users test their pipelines with `spate-test`'s in-memory source and
 capture sink. Keep those first-class, and prefer them for reproductions. A test
 written against them needs no infrastructure and runs in milliseconds.
 
+Helpers that only this repository's tests need, such as reading a pinned image,
+belong in the unpublished `spate-test-support` crate under `test-support/`.
+
 One trap worth knowing: `cargo test` runs a binary's tests in one process, and
 metric series ownership is process-wide (INV-10). Fixtures therefore need
 per-test `pipeline` and `component` labels; a local recorder does not isolate the

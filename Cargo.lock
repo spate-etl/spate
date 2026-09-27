@@ -3953,6 +3953,7 @@ dependencies = [
  "spate-kafka",
  "spate-s3",
  "spate-test",
+ "spate-test-support",
  "tempfile",
  "testcontainers",
  "testcontainers-modules",
@@ -4035,6 +4036,7 @@ dependencies = [
  "spate-clickhouse-derive",
  "spate-core",
  "spate-test",
+ "spate-test-support",
  "tempfile",
  "testcontainers-modules",
  "thiserror",
@@ -4243,6 +4245,10 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
 ]
+
+[[package]]
+name = "spate-test-support"
+version = "0.2.0"
 
 [[package]]
 name = "spate-xtask"

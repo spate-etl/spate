@@ -1,8 +1,9 @@
 # Spate
 
 High-performance, at-least-once ETL pipeline framework in Rust. Publishable
-crates under `crates/`, plus the unpublished wall-clock benchmark harness in
-`bench/`.
+crates under `crates/`, plus unpublished members at the top level such as the
+wall-clock benchmark harness in `bench/` and the shared test helpers in
+`test-support/`.
 
 [`CONTRIBUTING.md`](CONTRIBUTING.md) is the contributor-facing entry point.
 [`DEVELOPING.md`](DEVELOPING.md) carries the build, test and benchmark mechanics

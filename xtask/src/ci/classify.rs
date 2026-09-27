@@ -137,6 +137,7 @@ pub(crate) fn is_manifest(path: &str) -> bool {
             "crates/*/Cargo.toml",
             "bench/Cargo.toml",
             "fuzz/Cargo.toml",
+            "test-support/Cargo.toml",
             "xtask/Cargo.toml",
             "scripts/release-version.sh",
             "xtask/*",
@@ -188,6 +189,10 @@ pub(crate) fn classify(
             // Which container suites can this file reach?
             if let Some(name) = crate_of(path) {
                 out.container_pkgs.extend(graph.container_suites_for(name));
+            }
+            if glob(path, "test-support/*") {
+                out.container_pkgs
+                    .extend(graph.container_suites_for("spate-test-support"));
             }
             // The pinned server image one suite runs against. Booting the
             // others for it proves nothing.
@@ -457,6 +462,20 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["spate-test"]
         );
+    }
+
+    /// The shared test helpers reach the suites that dev-depend on them, and
+    /// no published API.
+    #[test]
+    fn a_test_support_change_selects_its_dependent_suites() {
+        let out = run(&["test-support/src/lib.rs"]);
+        assert_eq!(suites(&out), ["spate", "spate-clickhouse"]);
+        assert!(out.semver_pkgs.is_empty());
+    }
+
+    #[test]
+    fn the_test_support_manifest_is_a_manifest() {
+        assert!(run(&["test-support/Cargo.toml"]).manifests);
     }
 
     #[test]

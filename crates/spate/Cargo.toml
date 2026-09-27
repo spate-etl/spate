@@ -29,6 +29,7 @@ flate2 = { workspace = true }
 bytes = { workspace = true }
 clickhouse = { workspace = true }
 spate-test = { workspace = true }
+spate-test-support = { workspace = true }
 http-body-util = { workspace = true }
 hyper = { workspace = true, features = ["http1", "server"] }
 hyper-util = { workspace = true }

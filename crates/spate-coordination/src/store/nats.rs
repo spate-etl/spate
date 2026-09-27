@@ -910,9 +910,9 @@ mod tests {
         port
     }
 
-    /// Connects to `servers` with a password and returns the first store
-    /// operation's result.
-    async fn get_with_wrong_password(servers: Vec<String>) -> Result<Option<Entry>, StoreError> {
+    /// Connects to `servers` as a user the server rejects and returns the
+    /// first store operation's result.
+    async fn get_as_rejected_user(servers: Vec<String>) -> Result<Option<Entry>, StoreError> {
         let mut config = NatsConfig::new(servers, "auth_test");
         config.credentials = NatsCredentials::UserPassword {
             username: "spate".into(),
@@ -927,7 +927,7 @@ mod tests {
     #[tokio::test]
     async fn a_rejected_credential_is_fatal() {
         let port = serve_authorization_violation().await;
-        match get_with_wrong_password(vec![format!("nats://127.0.0.1:{port}")]).await {
+        match get_as_rejected_user(vec![format!("nats://127.0.0.1:{port}")]).await {
             Err(StoreError::Fatal(message)) => {
                 assert!(message.contains("authorization violation"), "{message}");
             }
@@ -947,7 +947,7 @@ mod tests {
             format!("nats://127.0.0.1:{closed_port}"),
             format!("nats://127.0.0.1:{port}"),
         ];
-        match get_with_wrong_password(servers).await {
+        match get_as_rejected_user(servers).await {
             Err(StoreError::Fatal(message)) => {
                 assert!(message.contains("authorization violation"), "{message}");
             }

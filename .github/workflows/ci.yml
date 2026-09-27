@@ -115,7 +115,7 @@ jobs:
           # would race the owner the first time it is missing.
           shared-key: xtask
           cache-save: never
-      - uses: taiki-e/install-action@26e9283f268b880168bdbd2c545dfcd60ec2c6ab # v2.87.13
+      - uses: taiki-e/install-action@94c31af3204a9f15ab40b35ad084410b905bbc73 # v2.87.17
         with:
           # zizmor alone carries a version: a release can relax the default
           # audit policy this job rests on, and the action's own bump would
@@ -422,7 +422,7 @@ jobs:
           path: lcov.info
 
       - name: Upload to Codecov
-        uses: codecov/codecov-action@0b35c9ecc4f0529d0eb674914510c22f85b196b4 # v7.1.0
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         # Keyed on the token's presence, not on a fork check: Dependabot resolves
         # `secrets.*` from a separate store, so a bot pull request has none and
         # `fail_ci_if_error` sinks it. Do not move to `pull_request_target`.

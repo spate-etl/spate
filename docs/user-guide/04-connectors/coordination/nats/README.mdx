@@ -61,10 +61,10 @@ cfg.replicas = 3;
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `servers` | `Vec<String>` | `required` | Server URLs (`nats://host:4222`, `tls://…`). At least one. |
+| `servers` | `Vec<String>` | `required` | Server URLs (`nats://host:4222`, `tls://…`, `ws://…`, `wss://…`). At least one. |
 | `job` | `String` | `required` | Job identity, `[A-Za-z0-9_-]{1,64}`. Suffixes both bucket names. Every worker of one job uses the same value; two different jobs must never share one. |
 | `credentials` | `NatsCredentials` | `none` | Anonymous by default. See [Security](#security-authentication-and-tls). |
-| `tls` | `Option<NatsTls>` | `none` | TLS material. Its presence requires TLS on every server. |
+| `tls` | `Option<NatsTls>` | `none` | TLS material. Its presence requires TLS on every server and rejects a `ws://` server. |
 | `replicas` | `usize` | `1` | Replication factor for both buckets (1, 3, or 5). 3 or more needs a JetStream cluster. |
 
 The second argument to `NatsStore::new` is the lease TTL. It must be the same
@@ -89,7 +89,9 @@ split descriptor cannot grow into an unwritable record.
 `NatsTls` carries `root_ca` (a PEM bundle, for private CAs), and `client_cert` +
 `client_key` for mutual TLS. Those two are set together or not at all; half a
 client identity fails at startup rather than connecting without mutual TLS.
-Setting the `tls` field at all requires TLS on every server in `servers`.
+Setting the `tls` field at all requires TLS on every server in `servers`. A
+`ws://` server never uses TLS, so with `tls` set it fails at startup; use
+`wss://` instead.
 
 The store verifies servers against the system trust store, which on macOS
 includes the Keychain. When `SSL_CERT_FILE` or `SSL_CERT_DIR` is set, the

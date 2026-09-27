@@ -100,7 +100,8 @@ them wherever your source resumes from instead.
 
 **Class a rejected credential or TLS handshake `Fatal`.** That covers a
 certificate your TLS stack fails to verify, a fatal TLS alert from the server
-listed in `spate::error::TLS_REJECTION_ALERTS`, no protocol version or cipher suite in common, an authentication or
+listed in `spate::error::TLS_REJECTION_ALERTS`, no protocol version, cipher
+suite or other handshake parameter in common, an authentication or
 authorization error from the server, and a 401 or 403 from the service. A
 failure to obtain credentials or reach the server stays `Retryable`, and so
 do a connection reset, closed or timed out during the handshake and a

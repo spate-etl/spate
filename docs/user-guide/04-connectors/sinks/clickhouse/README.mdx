@@ -130,15 +130,23 @@ at startup. A config with no `https://` URL reads no trust store and rejects
 
 A replica certificate that fails verification is a
 [fatal error](../../../02-concepts/04-error-handling.mdx#fatal-errors-panics-and-stalled-watermarks),
-and its message carries the rustls reason, such as `UnknownIssuer`. A user the
+and its message carries the rustls reason, such as `UnknownIssuer` or
+`certificate expired`. The check uses the client's clock, so a clock that is
+wrong can fail a valid certificate the same way. A TLS alert with which the
+server rejects the handshake, such as `HandshakeFailure` or
+`CertificateRequired`, is fatal too, and so is a server that shares no protocol
+version, cipher suite or other handshake parameter with the client. The
+message names the alert or the mismatch. A user the
 server does not know, a wrong password and a denied grant are fatal the same
 way, and the message carries the server's exception, such as `Code: 516`
 (`AUTHENTICATION_FAILED`). Startup fails with that message, as it does on any
 other TLS failure. Mid-run, the `sink write failed` warning carries it, the
 batch is not retried on another replica, and the pipeline fails once
-`checkpoint.stalled_fail_after` elapses. A TLS failure other than a certificate
-rejection, such as a protocol error or an alert from the server, is retryable
-mid-run.
+`checkpoint.stalled_fail_after` elapses. Any other TLS failure, such as a
+malformed message, an `InternalError` alert or a connection closed during the
+handshake, is retryable mid-run. A proxy in front of ClickHouse that answers
+`401` or `403` with a body is retryable too, because the client reports the
+body without the status.
 
 Client-certificate (**mTLS**) authentication is not supported. For the
 framework-wide view of transport security across connectors, see

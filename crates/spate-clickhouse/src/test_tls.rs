@@ -9,6 +9,8 @@ use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use rustls::server::WebPkiClientVerifier;
+use rustls::server::danger::ClientCertVerifier;
 use rustls::{CertificateError, RootCertStore, ServerConfig};
 use std::convert::Infallible;
 use std::error::Error;
@@ -59,22 +61,44 @@ impl TestCa {
     /// certificate for that address signed by this CA, and returns the
     /// server's `https://` URL. The server runs until the runtime shuts down.
     pub(crate) async fn serve(&self) -> String {
+        self.serve_with(None).await
+    }
+
+    /// [`serve`](Self::serve), requiring a client certificate signed by
+    /// `clients`.
+    pub(crate) async fn serve_requiring_client_cert(&self, clients: &TestCa) -> String {
+        let mut roots = RootCertStore::empty();
+        roots.add(clients.der()).unwrap();
+        let verifier = WebPkiClientVerifier::builder_with_provider(
+            Arc::new(roots),
+            Arc::new(rustls::crypto::aws_lc_rs::default_provider()),
+        )
+        .build()
+        .unwrap();
+        self.serve_with(Some(verifier)).await
+    }
+
+    async fn serve_with(&self, client_verifier: Option<Arc<dyn ClientCertVerifier>>) -> String {
         let key = KeyPair::generate().unwrap();
         let leaf = CertificateParams::new(vec!["127.0.0.1".to_owned()])
             .unwrap()
             .signed_by(&key, &self.issuer)
             .unwrap();
-        let config = ServerConfig::builder_with_provider(Arc::new(
+        let builder = ServerConfig::builder_with_provider(Arc::new(
             rustls::crypto::aws_lc_rs::default_provider(),
         ))
         .with_safe_default_protocol_versions()
-        .unwrap()
-        .with_no_client_auth()
-        .with_single_cert(
-            vec![leaf.der().clone()],
-            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der())),
-        )
         .unwrap();
+        let builder = match client_verifier {
+            Some(verifier) => builder.with_client_cert_verifier(verifier),
+            None => builder.with_no_client_auth(),
+        };
+        let config = builder
+            .with_single_cert(
+                vec![leaf.der().clone()],
+                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der())),
+            )
+            .unwrap();
         let acceptor = TlsAcceptor::from(Arc::new(config));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -105,10 +129,27 @@ pub(crate) fn endpoint_trusting(ca: &TestCa, url: &str) -> ClickHouseEndpoint {
     ClickHouseEndpoint::new(client, url.to_owned())
 }
 
+/// The error a `SELECT 1` to `url` fails with, from a client that trusts
+/// `ca` and nothing else.
+///
+/// # Panics
+///
+/// Panics when the query succeeds.
+pub(crate) async fn failed_query(ca: &TestCa, url: &str) -> clickhouse::error::Error {
+    endpoint_trusting(ca, url)
+        .client()
+        .query("SELECT 1")
+        .execute()
+        .await
+        .unwrap_err()
+}
+
 /// Whether `err`'s source chain holds rustls's unknown-issuer rejection.
 pub(crate) fn is_unknown_issuer(err: &(dyn Error + 'static)) -> bool {
     matches!(
-        crate::http::certificate_error(err),
-        Some(CertificateError::UnknownIssuer)
+        crate::http::tls_rejection(err),
+        Some(rustls::Error::InvalidCertificate(
+            CertificateError::UnknownIssuer
+        ))
     )
 }

@@ -74,6 +74,7 @@ mod logs;
 mod run;
 mod sink;
 mod source;
+mod tls;
 
 #[cfg(feature = "proptest")]
 pub mod strategies;
@@ -92,3 +93,4 @@ pub use source::{
 
 /// Re-export of the framework's byte-passthrough deserializer.
 pub use spate_core::deser::BytesPassthrough;
+pub use tls::tls_alert_server;

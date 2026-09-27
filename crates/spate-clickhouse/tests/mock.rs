@@ -922,6 +922,38 @@ async fn non_distributed_engine_fails_with_the_engine_name() {
     );
 }
 
+/// A credential in the `distributed_check` endpoint URL never reaches the
+/// check's mismatch or fetch errors. Regression for #754.
+#[tokio::test]
+async fn distributed_check_errors_never_print_endpoint_credentials() {
+    let check = |url: &str| {
+        format!(
+            "distributed_check: {{ cluster: prod, table: orders_dist, sharding_key: id, \
+             endpoint: \"{url}/?password=hunter2\" }}"
+        )
+    };
+
+    let mock = Mock::new();
+    let sink = checked_sink(&mock, &[1], &check(mock.url())).await;
+    mock.add(handlers::provide::<ClusterRow>(Vec::new()));
+    let err = sink.validate_distributed().await.unwrap_err().to_string();
+    assert!(!err.contains("hunter2"), "{err}");
+    assert!(
+        err.contains(&format!("{}/?<redacted>", mock.url())),
+        "{err}"
+    );
+
+    let failing = Mock::new();
+    let sink = checked_sink(&failing, &[1], &check(failing.url())).await;
+    failing.add(handlers::failure(hyper::StatusCode::SERVICE_UNAVAILABLE));
+    let err = sink.validate_distributed().await.unwrap_err().to_string();
+    assert!(!err.contains("hunter2"), "{err}");
+    assert!(
+        err.contains(&format!("{}/?<redacted>", failing.url())),
+        "{err}"
+    );
+}
+
 #[tokio::test]
 async fn unknown_cluster_fails_distinguishably() {
     use spate_clickhouse::DistributedCheckError;

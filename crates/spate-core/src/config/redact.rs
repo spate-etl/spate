@@ -1,8 +1,7 @@
 //! `Debug` and `Display` adapters that keep credential values out of
 //! formatted output, for hand-written `Debug` impls on config types.
 //!
-//! Every adapter fails closed: it redacts each value it cannot prove is
-//! structure, rather than matching a list of sensitive names.
+//! Every adapter redacts all values it prints, whatever their key or name.
 
 use serde_yaml::Value;
 use std::fmt;
@@ -56,8 +55,9 @@ pub fn option<T>(value: &Option<T>) -> impl fmt::Debug + '_ {
 /// the host replaced by `<redacted>`.
 ///
 /// The scheme, host, port and path stay visible. Userinfo runs to the last
-/// `@` after the scheme, so an `@` later in the URL redacts the host as well.
-/// A string without `://` is read the same way from its start, so
+/// `@` after the scheme, so an `@` later in the path redacts the host as well.
+/// When a `?` or `#` comes before that `@`, everything after the scheme is
+/// redacted. A string without `://` is read the same way from its start, so
 /// `user:pass@host:4222` renders as `<redacted>@host:4222`.
 pub fn url(url: &str) -> impl fmt::Debug + fmt::Display + '_ {
     Url(url)
@@ -74,6 +74,12 @@ impl fmt::Display for Url<'_> {
             }
             None => self.0,
         };
+        let at = rest.rfind('@');
+        if let (Some(at), Some(tail)) = (at, rest.find(['?', '#']))
+            && tail < at
+        {
+            return f.write_str("<redacted>");
+        }
         let rest = match rest.rsplit_once('@') {
             Some((_, host)) => {
                 f.write_str("<redacted>@")?;
@@ -151,8 +157,19 @@ mod tests {
                 "http://ch:8123/?<redacted>",
             ),
             ("http://ch:8123#hunter2", "http://ch:8123#<redacted>"),
-            // A raw `/`, `?` or `#` inside the password still ends at the last `@`.
-            ("https://u:hun/te?r2@sr/x", "https://<redacted>@sr/x"),
+            // A raw `/` inside the password still ends at the last `@`.
+            ("https://u:hun/ter2@sr/x", "https://<redacted>@sr/x"),
+            // A `?` or `#` before the last `@` cannot be placed, so all of it goes.
+            ("https://u:hun?ter2@sr/x", "https://<redacted>"),
+            (
+                "http://ch:8123/?user=svc@corp&password=hunter2",
+                "http://<redacted>",
+            ),
+            ("http://ch:8123/#a@hunter2", "http://<redacted>"),
+            (
+                "http://ch:8123/p@x?password=hunter2",
+                "http://<redacted>@x?<redacted>",
+            ),
             ("nats://a:hunter2@n1:4222", "nats://<redacted>@n1:4222"),
         ];
         for (raw, want) in cases {

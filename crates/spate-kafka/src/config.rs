@@ -347,8 +347,6 @@ mod tests {
         cfg
     }
 
-    /// Every spelling librdkafka accepts maps to the same start, and an unset
-    /// policy starts at the end, as librdkafka's default does.
     /// `Debug` shows every `rdkafka` key and none of the values.
     #[test]
     fn debug_never_prints_rdkafka_values() {
@@ -362,6 +360,8 @@ mod tests {
         );
     }
 
+    /// Every spelling librdkafka accepts maps to the same start, and an unset
+    /// policy starts at the end, as librdkafka's default does.
     #[test]
     fn the_reset_policy_maps_to_a_start_offset() {
         use rdkafka::Offset;

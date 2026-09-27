@@ -592,9 +592,6 @@ mod tests {
         Ok(cfg)
     }
 
-    /// The rejection window is `delivery_timeout` + 5s + 30s +
-    /// `reconnect.backoff.max.ms`, with librdkafka's 10s default when the
-    /// property is unset or not a number.
     /// `Debug` shows every `rdkafka` key and none of the values.
     #[test]
     fn debug_never_prints_rdkafka_values() {
@@ -608,6 +605,9 @@ mod tests {
         );
     }
 
+    /// The rejection window is `delivery_timeout` + 5s + 30s +
+    /// `reconnect.backoff.max.ms`, with librdkafka's 10s default when the
+    /// property is unset or not a number.
     #[test]
     fn rejection_window_follows_the_reconnect_backoff() {
         let window = |backoff: Option<&str>| {

@@ -174,9 +174,9 @@ async fn heartbeat_and_expiry(js: &async_nats::jetstream::Context) {
             break entry.operation;
         }
     };
-    // Pinned observation: the max_age limit marker surfaces as Purge
-    // (marker reason MaxAge), NOT Delete. Watchers distinguishing
-    // graceful release (Delete) from expiry (Purge) can rely on this.
+    // Pinned observation: a raw KV watcher sees the max_age limit marker
+    // as Purge. `NatsStore` reports it as `WatchEvent::Delete`, like a
+    // graceful delete.
     assert_eq!(
         expiry_op,
         kv::Operation::Purge,

@@ -1,9 +1,11 @@
 //! `Debug` and `Display` adapters that keep credential values out of
-//! formatted output, for hand-written `Debug` impls on config types.
+//! formatted output, for hand-written `Debug` impls on config types, and the
+//! same guarantee for config error messages.
 //!
 //! Every adapter redacts all values it prints, whatever their key or name.
 
 use serde_yaml::Value;
+use std::borrow::Cow;
 use std::fmt;
 
 /// Formats as `<redacted>` under both `Debug` and `Display`.
@@ -135,6 +137,91 @@ impl fmt::Debug for YamlKey<'_> {
     }
 }
 
+/// A serde error message with the value removed from its `invalid type`,
+/// `invalid value` or `unknown variant` clause.
+///
+/// The path, the expected type and any position stay. A message without one
+/// of those clauses is returned unchanged.
+pub(crate) fn error_message(message: &str) -> Cow<'_, str> {
+    const TYPE: &str = "invalid type: ";
+    const VALUE: &str = "invalid value: ";
+    const VARIANT: &str = "unknown variant `";
+
+    // The clause opens before the value, so the earliest marker is the real one.
+    let Some((at, marker)) = [TYPE, VALUE, VARIANT]
+        .into_iter()
+        .filter_map(|marker| message.find(marker).map(|at| (at, marker)))
+        .min()
+    else {
+        return Cow::Borrowed(message);
+    };
+    let start = at + marker.len();
+
+    // The expected half is built from type and variant names, so the last
+    // separator is the one that closes the value.
+    let separators: &[&str] = if marker == VARIANT {
+        &["`, expected ", "`, there are no variants"]
+    } else {
+        &[", expected "]
+    };
+    let Some(end) = separators
+        .iter()
+        .filter_map(|sep| message.rfind(sep))
+        .filter(|&end| end >= start)
+        .max()
+    else {
+        return Cow::Borrowed(message);
+    };
+
+    if marker == VARIANT {
+        return Cow::Owned(format!(
+            "{}unknown variant{}",
+            &message[..at],
+            &message[end + 1..]
+        ));
+    }
+    let unexpected = &message[start..end];
+    let kind = unexpected_kind(unexpected);
+    if kind == unexpected {
+        return Cow::Borrowed(message);
+    }
+    Cow::Owned(format!("{}{kind}{}", &message[..start], &message[end..]))
+}
+
+/// The kind named by a rendered `serde::de::Unexpected`, without its value.
+fn unexpected_kind(unexpected: &str) -> &str {
+    const VALUE_FREE: [&str; 11] = [
+        "unit value",
+        "Option value",
+        "byte array",
+        "newtype struct",
+        "sequence",
+        "map",
+        "enum",
+        "unit variant",
+        "newtype variant",
+        "tuple variant",
+        "struct variant",
+    ];
+    if VALUE_FREE.contains(&unexpected) {
+        return unexpected;
+    }
+    [
+        "boolean",
+        "integer",
+        "floating point",
+        "character",
+        "string",
+    ]
+    .into_iter()
+    .find(|kind| {
+        unexpected
+            .strip_prefix(kind)
+            .is_some_and(|rest| rest.starts_with(' '))
+    })
+    .unwrap_or("value")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,5 +306,76 @@ mod tests {
         );
         let tagged: Value = serde_yaml::from_str("!secret hunter2").unwrap();
         assert_eq!(shown(yaml(&tagged)), "!secret <redacted>");
+    }
+
+    #[test]
+    fn error_message_drops_the_value_and_keeps_the_rest() {
+        let cases = [
+            (
+                "invalid type: integer `918273645`, expected a string",
+                "invalid type: integer, expected a string",
+            ),
+            (
+                "invalid type: boolean `true`, expected a string",
+                "invalid type: boolean, expected a string",
+            ),
+            (
+                "invalid type: floating point `1500.0`, expected u8",
+                "invalid type: floating point, expected u8",
+            ),
+            (
+                "invalid type: character `h`, expected u8",
+                "invalid type: character, expected u8",
+            ),
+            (
+                "invalid value: string \"hunter2\", expected a duration",
+                "invalid value: string, expected a duration",
+            ),
+            (
+                "invalid value: integer `-5` as i128, expected u16",
+                "invalid value: integer, expected u16",
+            ),
+            (
+                "invalid type: i128, expected a string",
+                "invalid type: value, expected a string",
+            ),
+            (
+                "invalid value: string \"a, expected b\", expected u16",
+                "invalid value: string, expected u16",
+            ),
+            (
+                "unknown variant `hunter2`, expected `plain` or `scram`",
+                "unknown variant, expected `plain` or `scram`",
+            ),
+            (
+                "unknown variant `a`, expected b`, expected `plain`",
+                "unknown variant, expected `plain`",
+            ),
+            (
+                "unknown variant `hunter2`, there are no variants",
+                "unknown variant, there are no variants",
+            ),
+            (
+                "a.port: invalid type: string \"invalid value: x\", expected u16 at line 1 column 7",
+                "a.port: invalid type: string, expected u16 at line 1 column 7",
+            ),
+        ];
+        for (raw, want) in cases {
+            assert_eq!(error_message(raw), want, "{raw}");
+        }
+    }
+
+    #[test]
+    fn error_message_leaves_value_free_messages_unchanged() {
+        for raw in [
+            "invalid type: map, expected a string",
+            "invalid type: unit value, expected a string",
+            "invalid length 2, expected a tuple of size 3",
+            "missing field `topic`",
+            "unknown field `bogus`, expected `brokers` or `topic`",
+            "mapping values are not allowed in this context at line 2 column 6",
+        ] {
+            assert!(matches!(error_message(raw), Cow::Borrowed(_)), "{raw}");
+        }
     }
 }

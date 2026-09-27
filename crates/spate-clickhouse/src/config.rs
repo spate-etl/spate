@@ -221,15 +221,13 @@ impl FromStr for Compression {
             "zstd" => Ok(Compression::Zstd(ZSTD_DEFAULT_LEVEL)),
             other => {
                 let raw = other.strip_prefix("zstd:").ok_or_else(|| {
-                    format!(
-                        "unknown compression `{other}`: expected off, lz4, zstd, or zstd:<1-22>"
-                    )
+                    "unknown compression: expected off, lz4, zstd, or zstd:<1-22>".to_owned()
                 })?;
-                let level: i32 = raw.parse().map_err(|_| {
-                    format!("invalid zstd level `{raw}`: expected an integer in [1, 22]")
-                })?;
+                let level: i32 = raw
+                    .parse()
+                    .map_err(|_| "invalid zstd level: expected an integer in [1, 22]".to_owned())?;
                 if !(1..=22).contains(&level) {
-                    return Err(format!("zstd level must be in [1, 22] (got {level})"));
+                    return Err("zstd level must be in [1, 22]".to_owned());
                 }
                 Ok(Compression::Zstd(level))
             }
@@ -1290,19 +1288,24 @@ settings: { insert_quorum: "auto" }
     #[test]
     fn compression_rejects_invalid_strings_with_a_path() {
         let base = "table: t\nshards: [{replicas: [\"http://a\"]}]\n";
-        for (value, needle) in [
-            ("gzip", "unknown compression"),
-            ("\"zstd:0\"", "[1, 22]"),
-            ("\"zstd:99\"", "[1, 22]"),
-            ("\"zstd:x\"", "invalid zstd level"),
+        for (value, input, needle) in [
+            ("gzip", "gzip", "unknown compression"),
+            ("\"zstd:0\"", "zstd:0", "[1, 22]"),
+            ("\"zstd:99\"", "99", "[1, 22]"),
+            ("\"zstd:hunter2\"", "hunter2", "invalid zstd level"),
         ] {
             let err = serde_yaml::from_str::<ClickHouseSinkConfig>(&format!(
                 "{base}compression: {value}\n"
             ))
-            .unwrap_err();
+            .unwrap_err()
+            .to_string();
             assert!(
-                err.to_string().contains(needle),
+                err.contains(needle),
                 "expected `{needle}` for `{value}`: {err}"
+            );
+            assert!(
+                !err.contains(input),
+                "`{input}` echoed for `{value}`: {err}"
             );
         }
     }

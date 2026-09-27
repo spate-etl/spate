@@ -37,7 +37,8 @@ pub enum ConfigError {
         /// Dotted YAML path to the offending value (best effort; `.` when
         /// the error is not attributable to a specific field).
         path: String,
-        /// Underlying YAML/serde error.
+        /// Underlying YAML/serde error, with any offending value removed. Its
+        /// message carries the position, and `location()` may be `None`.
         #[source]
         source: serde_yaml::Error,
     },

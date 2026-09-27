@@ -76,7 +76,8 @@ impl ComponentConfig {
     /// Deserialize the opaque body into the component's typed config.
     ///
     /// Errors carry the full dotted path from the pipeline config root,
-    /// e.g. `source.kafka.brokers: missing field \`brokers\``.
+    /// e.g. `source.kafka.brokers: missing field \`brokers\``, and name the
+    /// expected type without the value.
     pub fn deserialize_into<T: DeserializeOwned>(&self) -> Result<T, ConfigError> {
         serde_path_to_error::deserialize(self.raw.clone())
             .map_err(|e| self.component_error(None, e))
@@ -132,7 +133,7 @@ impl ComponentConfig {
         }
         ConfigError::Component {
             context,
-            message: e.into_inner().to_string(),
+            message: redact::error_message(&e.into_inner().to_string()).into_owned(),
         }
     }
 
@@ -258,6 +259,72 @@ mod tests {
         let text = err.to_string();
         assert!(text.starts_with("source.kafka"), "{text}");
         assert!(text.contains("topic"), "{text}");
+    }
+
+    /// A type error names the field and the expected type and does not quote
+    /// the value. Regression for #764.
+    #[test]
+    fn type_errors_omit_the_value() {
+        #[derive(Debug, Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        enum Mechanism {
+            Plain,
+            Scram,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        #[allow(dead_code)]
+        struct Credentials {
+            password: Option<String>,
+            port: Option<u16>,
+            mechanism: Option<Mechanism>,
+            #[serde(default, with = "humantime_serde")]
+            timeout: Option<std::time::Duration>,
+        }
+
+        for (body, secret, path, expected) in [
+            (
+                "password: 918273645",
+                "918273645",
+                "password",
+                "expected a string",
+            ),
+            ("password: true", "true", "password", "expected a string"),
+            ("password: 1.5e3", "1500", "password", "expected a string"),
+            ("port: hunter2", "hunter2", "port", "expected u16"),
+            ("port: 918273645", "918273645", "port", "expected u16"),
+            (
+                "mechanism: hunter2",
+                "hunter2",
+                "mechanism",
+                "expected `plain` or `scram`",
+            ),
+            (
+                "mechanism: !hunter2 ~",
+                "hunter2",
+                "mechanism",
+                "expected `plain` or `scram`",
+            ),
+            (
+                "timeout: hunter2",
+                "hunter2",
+                "timeout",
+                "expected a duration",
+            ),
+        ] {
+            let mut cc = parse(&format!("clickhouse:\n  {body}\n")).unwrap();
+            cc.set_section("sink");
+            let err = cc.deserialize_into::<Credentials>().unwrap_err();
+            for shown in [err.to_string(), format!("{err:?}")] {
+                assert!(!shown.contains(secret), "{body}: {shown}");
+                assert!(
+                    shown.contains(&format!("sink.clickhouse.{path}")),
+                    "{body}: {shown}"
+                );
+                assert!(shown.contains(expected), "{body}: {shown}");
+            }
+        }
     }
 
     #[test]

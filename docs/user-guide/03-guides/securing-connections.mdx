@@ -50,6 +50,9 @@ renders its passwords, the values of its passthrough option maps, and any
 userinfo, query or fragment in its URLs as `<redacted>`. Other fields print as
 configured, including usernames.
 
+A config error names the field and the type it expected, and does not print
+the value it rejected.
+
 Secrets that never enter the config file are better still: a connector
 that resolves ambient cloud credentials, or reads a mounted credentials file,
 gives you nothing to leak.

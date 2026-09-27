@@ -209,8 +209,8 @@ impl NatsConfig {
                     .is_ok_and(|addr| addr.scheme() == "ws")
             })
         {
-            // Parsed as the client parses it, so every spelling it connects as
-            // `ws` is caught. Named by index: a server URL can carry credentials.
+            // The client's own parser, so each entry's scheme reads as the
+            // connection reads it. Named by index: a URL can carry credentials.
             return Err(StoreError::Fatal(format!(
                 "nats.servers[{i}] is a ws:// server, which never uses TLS; use wss://, \
                  or remove nats.tls"

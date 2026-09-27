@@ -178,12 +178,25 @@ from the environment):
 
 A listing or object read the store answers with `401` or `403`, and a
 client-configuration error, fail the pipeline immediately, because no peer
-would fare better. The error names the status. Any other failed listing is
-retried on each replan tick, and the pipeline fails with the listing error
-after eight consecutive failures. Credentials that cannot be resolved or
-refreshed, including a `401` or `403` from the credential endpoint, are retried
-like a transport error. For a read, the split is then handed back and
-quarantined at the attempt cap. Non-S3 schemes (`file://`) do
+would fare better. The error names the status.
+
+A TLS rejection by the store or by the credential endpoint fails the pipeline
+the same way. That covers a certificate that fails verification, including one
+expired by the client's clock, and a TLS alert with which the server rejects
+the handshake, such as `HandshakeFailure` or `CertificateRequired`. It also
+covers a server that shares no protocol version, cipher suite or other
+handshake parameter with the client. The message names the alert, the mismatch
+or the verification failure. Before a handshake failure reaches the source, the
+client retries the connection up to 10 times, usually for a few seconds and at
+most about a minute. A refusal after the handshake, when the alert arrives, is
+not retried. Any other TLS failure, such as a malformed message or an
+`InternalError` alert, is retried like a transport error.
+
+Any other failed listing is retried on each replan tick, and the pipeline fails
+with the listing error after eight consecutive failures. Credentials that
+cannot be resolved or refreshed, including a `401` or `403` from the credential
+endpoint, are retried like a transport error. For a read, the split is then
+handed back and quarantined at the attempt cap. Non-S3 schemes (`file://`) do
 not read the AWS environment. See
 [Securing connections](../../../03-guides/securing-connections.mdx) for the
 generic model.

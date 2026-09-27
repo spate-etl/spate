@@ -524,8 +524,9 @@ async fn stream_object_streaming(
                                 class: ErrorClass::Fatal,
                                 reason: format!(
                                     "split {split}: reading \"{}\" failed mid-object at byte \
-                                     {delivered}: {e}",
-                                    entry.key
+                                     {delivered}: {}",
+                                    entry.key,
+                                    crate::error::reason(&e)
                                 ),
                             }));
                         }
@@ -576,8 +577,9 @@ async fn retry_or_fail(
 ) -> Result<(), SplitFailure> {
     if classify(e) != ErrorClass::Retryable {
         let reason = format!(
-            "split {split}: reading \"{}\" failed at byte {delivered}: {e}",
-            entry.key
+            "split {split}: reading \"{}\" failed at byte {delivered}: {}",
+            entry.key,
+            crate::error::reason(e)
         );
         return Err(if crate::error::is_pipeline_fatal(e) {
             SplitFailure::Fatal(SourceError::Client {
@@ -1410,5 +1412,28 @@ mod tests {
             vec![("p/a".to_string(), b"0123456789".to_vec())],
             "the open object finishes; the boundary stop precedes the next object"
         );
+    }
+
+    /// A read the store refuses with a TLS alert fails the lane as
+    /// pipeline-fatal, and the error names the alert.
+    #[tokio::test]
+    async fn a_tls_rejection_on_a_read_is_fatal_and_named() {
+        let addr =
+            spate_test::tls_alert_server(b"", u8::from(rustls::AlertDescription::HandshakeFailure));
+        let store: Arc<dyn ObjectStore> = Arc::new(crate::test_servers::tls_store_at(
+            &format!("https://{addr}"),
+            &crate::test_servers::TestCa::new("any"),
+        ));
+        let slice = vec![ObjectEntry {
+            key: "p/a".to_owned(),
+            size: 10,
+            etag: Some("\"e\"".to_owned()),
+            last_modified_ms: 0,
+        }];
+        let msgs = collect_fetch(store, slice, 0, 64, 64).await;
+        let Some(ChunkMsg::LaneFailed(SplitFailure::Fatal(e))) = msgs.into_iter().last() else {
+            panic!("expected a pipeline-fatal lane failure");
+        };
+        assert!(e.to_string().contains("HandshakeFailure"), "{e}");
     }
 }

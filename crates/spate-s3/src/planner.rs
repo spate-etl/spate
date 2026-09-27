@@ -130,15 +130,16 @@ impl SplitPlanner for S3Planner {
                     CoordinationErrorKind::Fatal
                 };
                 let attempts = self.consecutive_failures;
+                let reason = crate::error::reason(&e);
                 return Err(CoordinationError::new(
                     kind,
                     if kind == CoordinationErrorKind::Fatal && attempts >= MAX_ATTEMPTS {
                         format!(
                             "listing the backfill prefix still failing after {attempts} \
-                             plan attempts: {e}"
+                             plan attempts: {reason}"
                         )
                     } else {
-                        format!("listing the backfill prefix: {e}")
+                        format!("listing the backfill prefix: {reason}")
                     },
                 ));
             }
@@ -365,5 +366,44 @@ mod tests {
         let err = p.plan(PlanContext::new(None, 1)).unwrap_err();
         assert_eq!(err.kind, CoordinationErrorKind::Retryable, "{}", err.reason);
         assert!(err.reason.contains("latest/api/token"), "{}", err.reason);
+    }
+
+    /// A listing refused with a `handshake_failure` alert fails the plan as
+    /// `Fatal` on the first attempt, naming the alert.
+    #[test]
+    fn a_rejecting_tls_alert_fails_the_first_plan() {
+        let rt = runtime();
+        let addr =
+            spate_test::tls_alert_server(b"", u8::from(rustls::AlertDescription::HandshakeFailure));
+        let store = crate::test_servers::tls_store_at(
+            &format!("https://{addr}"),
+            &crate::test_servers::TestCa::new("any"),
+        );
+        let mut p = planner(Arc::new(store), rt.handle().clone(), 64 * MB);
+        let err = p.plan(PlanContext::new(None, 1)).unwrap_err();
+        assert_eq!(err.kind, CoordinationErrorKind::Fatal, "{}", err.reason);
+        assert!(err.reason.contains("HandshakeFailure"), "{}", err.reason);
+    }
+
+    /// A credential endpoint that rejects the TLS handshake fails the plan as
+    /// `Fatal` on the first attempt, naming the endpoint and the alert.
+    #[test]
+    fn a_tls_rejection_by_the_credential_endpoint_fails_the_first_plan() {
+        let rt = runtime();
+        let addr =
+            spate_test::tls_alert_server(b"", u8::from(rustls::AlertDescription::HandshakeFailure));
+        let url = format!("https://{addr}");
+        let store = crate::test_servers::builder_at(&url)
+            .with_client_options(crate::test_servers::tls_trusting(
+                &crate::test_servers::TestCa::new("any"),
+            ))
+            .with_metadata_endpoint(&url)
+            .build()
+            .unwrap();
+        let mut p = planner(Arc::new(store), rt.handle().clone(), 64 * MB);
+        let err = p.plan(PlanContext::new(None, 1)).unwrap_err();
+        assert_eq!(err.kind, CoordinationErrorKind::Fatal, "{}", err.reason);
+        assert!(err.reason.contains("latest/api/token"), "{}", err.reason);
+        assert!(err.reason.contains("HandshakeFailure"), "{}", err.reason);
     }
 }

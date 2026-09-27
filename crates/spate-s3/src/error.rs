@@ -17,11 +17,15 @@ use spate_core::error::ErrorClass;
 ///   object on every instance: non-retryable *and* pipeline-fatal. A listing
 ///   the store answers 401 or 403 is non-retryable, and the planner fails the
 ///   pipeline on it.
+/// - A TLS rejection ([`tls_rejection!`](spate_core::tls_rejection)) by the
+///   store or the credential endpoint is non-retryable and pipeline-fatal.
 /// - Everything else (other `Generic` failures, timeouts, 5xx) is retryable.
 pub(crate) fn classify(e: &object_store::Error) -> ErrorClass {
     use object_store::Error as E;
     match e {
-        _ if list_rejected(e) => ErrorClass::Fatal,
+        _ if list_rejected(e) || spate_core::tls_rejection!(rustls, e).is_some() => {
+            ErrorClass::Fatal
+        }
         E::NotFound { .. }
         | E::Precondition { .. }
         | E::NotModified { .. }
@@ -39,9 +43,9 @@ pub(crate) fn classify(e: &object_store::Error) -> ErrorClass {
 /// Whether a non-retryable **data-read** failure condemns the whole
 /// pipeline rather than just the object being read.
 ///
-/// Credentials, permissions, and client misconfiguration hold for every
-/// object on every instance, and no peer will fare better, so they stay
-/// pipeline-fatal. The rest of the non-retryable classes (`NotFound`,
+/// Credentials, permissions, TLS rejections and client misconfiguration hold
+/// for every object on every instance, and no peer will fare better, so they
+/// stay pipeline-fatal. The rest of the non-retryable classes (`NotFound`,
 /// `Precondition`, `NotModified`, `AlreadyExists`) are facts about **one
 /// object** (deleted after planning, overwritten under its ETag pin) and
 /// are handled as split poison: the split is handed back, retried
@@ -49,15 +53,16 @@ pub(crate) fn classify(e: &object_store::Error) -> ErrorClass {
 /// fleet-wide backfill.
 pub(crate) fn is_pipeline_fatal(e: &object_store::Error) -> bool {
     use object_store::Error as E;
-    matches!(
-        e,
-        E::InvalidPath { .. }
-            | E::NotSupported { .. }
-            | E::NotImplemented { .. }
-            | E::PermissionDenied { .. }
-            | E::Unauthenticated { .. }
-            | E::UnknownConfigurationKey { .. }
-    )
+    spate_core::tls_rejection!(rustls, e).is_some()
+        || matches!(
+            e,
+            E::InvalidPath { .. }
+                | E::NotSupported { .. }
+                | E::NotImplemented { .. }
+                | E::PermissionDenied { .. }
+                | E::Unauthenticated { .. }
+                | E::UnknownConfigurationKey { .. }
+        )
 }
 
 /// Whether `e` is a listing the store answered with 401 or 403.
@@ -81,6 +86,14 @@ fn list_rejected(e: &object_store::Error) -> bool {
                     .strip_prefix("Server returned non-2xx status code: ")
                     .is_some_and(|code| code.starts_with("401 ") || code.starts_with("403 "))
             })
+}
+
+/// `e`'s message, with the TLS rejection behind it appended.
+pub(crate) fn reason(e: &object_store::Error) -> String {
+    match spate_core::tls_rejection!(rustls, e) {
+        Some(tls) => format!("{e}: {tls}"),
+        None => e.to_string(),
+    }
 }
 
 /// Classify an object-level (non-pipeline-fatal, non-retryable) failure
@@ -281,5 +294,82 @@ mod tests {
             let e = chain(top);
             assert_eq!(classify(&e), expected, "{e}");
         }
+    }
+
+    async fn list_error(store: &object_store::aws::AmazonS3) -> object_store::Error {
+        use futures_util::StreamExt as _;
+        use object_store::ObjectStore as _;
+        store.list(None).next().await.unwrap().unwrap_err()
+    }
+
+    async fn get_error(store: &object_store::aws::AmazonS3) -> object_store::Error {
+        use object_store::ObjectStore as _;
+        store
+            .get_opts(&"k".into(), object_store::GetOptions::default())
+            .await
+            .unwrap_err()
+    }
+
+    /// A TLS alert that rejects the handshake is `Fatal` and pipeline-fatal on
+    /// a listing and a read, and the reason names it; `decode_error` stays
+    /// `Retryable`.
+    #[tokio::test]
+    async fn a_rejecting_tls_alert_is_fatal() {
+        use rustls::AlertDescription as A;
+        let ca = crate::test_servers::TestCa::new("any");
+        for (alert, expected) in [
+            (A::HandshakeFailure, ErrorClass::Fatal),
+            (A::ProtocolVersion, ErrorClass::Fatal),
+            (A::DecodeError, ErrorClass::Retryable),
+        ] {
+            let name = format!("{alert:?}");
+            let addr = spate_test::tls_alert_server(b"", u8::from(alert));
+            let store = crate::test_servers::tls_store_at(&format!("https://{addr}"), &ca);
+            for e in [list_error(&store).await, get_error(&store).await] {
+                assert!(format!("{e:?}").contains(&name), "{e:?}");
+                assert_eq!(classify(&e), expected, "{e:?}");
+                assert_eq!(is_pipeline_fatal(&e), expected == ErrorClass::Fatal, "{e}");
+                if expected == ErrorClass::Fatal {
+                    assert!(reason(&e).contains(&name), "{}", reason(&e));
+                }
+            }
+        }
+    }
+
+    /// A server certificate from a CA the client does not trust is `Fatal` and
+    /// pipeline-fatal on a listing and a read, and the reason names the
+    /// verification failure.
+    #[tokio::test]
+    async fn an_untrusted_certificate_is_fatal() {
+        let url = crate::test_servers::TestCa::new("server")
+            .serve_with(None)
+            .await;
+        let store =
+            crate::test_servers::tls_store_at(&url, &crate::test_servers::TestCa::new("other"));
+        for e in [list_error(&store).await, get_error(&store).await] {
+            assert_eq!(classify(&e), ErrorClass::Fatal, "{e:?}");
+            assert!(is_pipeline_fatal(&e), "{e}");
+            assert!(
+                matches!(
+                    spate_core::tls_rejection!(rustls, &e),
+                    Some(rustls::Error::InvalidCertificate(_))
+                ),
+                "{e:?}"
+            );
+            assert!(reason(&e).contains("UnknownIssuer"), "{}", reason(&e));
+        }
+    }
+
+    /// A TLS 1.3 server that refuses the client for presenting no certificate
+    /// fails a listing as `Fatal`, and the reason names `CertificateRequired`.
+    #[tokio::test]
+    async fn a_refused_client_certificate_is_fatal() {
+        let server = crate::test_servers::TestCa::new("server");
+        let url = server
+            .serve_requiring_client_cert(&crate::test_servers::TestCa::new("clients"))
+            .await;
+        let e = list_error(&crate::test_servers::tls_store_at(&url, &server)).await;
+        assert_eq!(classify(&e), ErrorClass::Fatal, "{e:?}");
+        assert!(reason(&e).contains("CertificateRequired"), "{}", reason(&e));
     }
 }

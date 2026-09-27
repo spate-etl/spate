@@ -109,15 +109,15 @@ pub struct KafkaSourceConfig {
     pub commit_interval: Duration,
     /// How long to wait for the first partition assignment before the
     /// source reports a fatal startup error, which names the last consumer
-    /// error before the deadline. Zero disables the deadline, and the source
-    /// waits for as long as the group takes.
+    /// error and how long ago it arrived. Zero disables the deadline, and
+    /// the source waits for as long as the group takes.
     #[serde(with = "humantime_serde", default = "default_startup_timeout")]
     pub startup_timeout: Duration,
     /// How long the source may run with no assignment, after having had one,
     /// before it reports a fatal error, which names the last consumer error
-    /// before the deadline. Measured from the moment ownership is released,
-    /// cleared by the next accepted assignment, including an empty one. Zero
-    /// disables the deadline.
+    /// and how long ago it arrived. Measured from the moment ownership is
+    /// released, cleared by the next accepted assignment, including an empty
+    /// one. Zero disables the deadline.
     #[serde(with = "humantime_serde", default = "default_assignment_timeout")]
     pub assignment_timeout: Duration,
     /// librdkafka statistics emission interval, feeding the lag metrics and

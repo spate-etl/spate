@@ -106,9 +106,8 @@ failure, such as a connection reset or closed during the handshake, a
 malformed message or an `internal error` alert (80), is retryable.
 `startup_timeout` bounds the wait for a first partition assignment, and
 `assignment_timeout` the wait after an assignment is lost. Either ends in a
-`no partition assignment` error that also names the last consumer error before
-the deadline, such as a refused connection, and how long before the deadline
-it arrived.
+`no partition assignment` error that also names the last consumer error, such
+as a refused connection, and how long ago it arrived.
 
 In the sink, both failures show up as timed-out deliveries, which are
 retryable. Under the default

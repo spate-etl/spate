@@ -497,8 +497,8 @@ fn publish_lag(stats: &Statistics, topic: &str, owned: &[PartitionId], metrics: 
 /// `assignment_timeout` bounds and whose error names the group and the
 /// event that took them.
 ///
-/// `last_error` is the latest consumer error and its age, which either
-/// message ends with.
+/// `last_error` is the latest consumer error and its age when the error
+/// is reported, which either message ends with.
 ///
 /// Free function taking the elapsed time rather than a method reading the
 /// clock, so a unit test pins the boundaries and the messages directly. The
@@ -529,9 +529,7 @@ fn assignment_deadline_error(
         ),
     };
     if let Some((age, error)) = last_error {
-        reason.push_str(&format!(
-            "; last consumer error {age:?} before the deadline: {error}"
-        ));
+        reason.push_str(&format!("; last consumer error {age:?} ago: {error}"));
     }
     Some(SourceError::Client {
         class: ErrorClass::Fatal,
@@ -689,9 +687,8 @@ impl Source for KafkaSource {
                     // deleted topic, unsupported protocol, a rejected TLS
                     // handshake) must fail fast rather than retry forever
                     // behind a green health probe.
-                    let text = e
-                        .rdkafka_error_code()
-                        .and_then(|code| consumer.context().take_error(code));
+                    let code = e.rdkafka_error_code();
+                    let text = code.and_then(|code| consumer.context().take_error(code));
                     let class = crate::error::classify_poll_error(
                         &e,
                         self.saw_first_assignment,
@@ -703,9 +700,7 @@ impl Source for KafkaSource {
                     };
                     // Every broker's failure is followed by `AllBrokersDown`,
                     // which would otherwise hide it from the deadline error.
-                    if e.rdkafka_error_code()
-                        != Some(rdkafka::error::RDKafkaErrorCode::AllBrokersDown)
-                    {
+                    if code != Some(rdkafka::error::RDKafkaErrorCode::AllBrokersDown) {
                         self.last_consumer_error = Some((Instant::now(), reason.clone()));
                     }
                     return Err(SourceError::Client { class, reason });
@@ -1257,9 +1252,7 @@ mod tests {
                         "names the group: {reason}"
                     );
                     assert!(
-                        reason.ends_with(
-                            "; last consumer error 12s before the deadline: consumer poll: SSL"
-                        ),
+                        reason.ends_with("; last consumer error 12s ago: consumer poll: SSL"),
                         "names the last consumer error: {reason}"
                     );
                 }
@@ -1313,10 +1306,9 @@ mod tests {
         }
 
         /// Before the first assignment `startup_timeout` is the deadline,
-        /// and its error names the topic and the brokers, which is what a
-        /// pipeline that never joins usually has wrong, and the last consumer
-        /// error. The much longer
-        /// `assignment_timeout` does not govern that window.
+        /// and the much longer `assignment_timeout` does not govern that
+        /// window. Its error names the topic, the brokers and the last
+        /// consumer error with its age.
         #[test]
         fn the_startup_window_has_its_own_deadline_and_message() {
             let mut cfg = test_config();
@@ -1351,9 +1343,7 @@ mod tests {
                         "names the brokers: {reason}"
                     );
                     assert!(
-                        reason.ends_with(
-                            "; last consumer error 2s before the deadline: consumer poll: SSL"
-                        ),
+                        reason.ends_with("; last consumer error 2s ago: consumer poll: SSL"),
                         "names the last consumer error: {reason}"
                     );
                 }
@@ -1433,6 +1423,33 @@ mod tests {
                     assert!(reason.contains("BrokerTransportFailure"), "{reason}");
                     assert!(reason.contains("Connection refused"), "{reason}");
                     assert!(!reason.contains("AllBrokersDown"), "{reason}");
+                }
+                other => panic!("expected the deadline error, got {other:?}"),
+            }
+        }
+
+        /// The deadline error gives the last consumer error's age as time
+        /// before the error is reported, which holds for an error recorded
+        /// after the deadline passed.
+        #[test]
+        fn an_error_after_the_deadline_is_reported_by_its_age() {
+            let mut cfg = test_config();
+            cfg.brokers = "127.0.0.1:1".into();
+            let mut source = KafkaSource::new(cfg);
+            let cp = Checkpointer::new();
+            source.open(SourceCtx::new(cp.handle())).expect("open");
+            spate_test::wait_until(Duration::from_secs(20), "a consumer error", || {
+                let _ = source.poll_events(Duration::from_millis(50));
+                source.last_consumer_error.is_some()
+            });
+
+            // The deadline passed 1ns after `open`, before the error arrived.
+            source.config.startup_timeout = Duration::from_nanos(1);
+            match source.poll_events(Duration::from_millis(50)) {
+                Err(SourceError::Client { class, reason }) => {
+                    assert_eq!(class, ErrorClass::Fatal, "{reason}");
+                    assert!(!reason.contains("before the deadline"), "{reason}");
+                    assert!(reason.contains(" ago: consumer poll: "), "{reason}");
                 }
                 other => panic!("expected the deadline error, got {other:?}"),
             }

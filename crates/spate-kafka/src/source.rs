@@ -1184,7 +1184,10 @@ mod tests {
             });
             let (class, reason) = seen.expect("wait_until returned");
             assert_eq!(class, ErrorClass::Fatal, "{reason}");
-            assert!(reason.contains("Static consumer fenced"), "{reason}");
+            assert!(
+                reason.contains("test_fatal_error: fenced by test"),
+                "{reason}"
+            );
             assert!(
                 reason.contains(r#"group.instance.id "worker-a""#),
                 "{reason}"

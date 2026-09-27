@@ -87,6 +87,7 @@ that a section plus `with_coordinator` fails startup.
 
 ## More information
 
+- Landed in [#782](https://github.com/spate-etl/spate/pull/782).
 - [ADR-0036](0036-coordinator-wiring-at-assembly.md) is the record this
   replaces. [ADR-0029](0029-framework-owned-coordination-driver.md)'s
   statement that backends are injected at assembly holds only for coordinators

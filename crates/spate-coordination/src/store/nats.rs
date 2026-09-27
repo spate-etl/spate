@@ -21,6 +21,8 @@
 //! startup probe, so an unreachable server rides the startup retry budget.
 //! Misconfiguration, and a credential, certificate or TLS handshake
 //! rejected on the first connection, are Fatal with an actionable message.
+//! The first connection tries each server once; only a rejected credential
+//! ends it early, so another rejection is Fatal only on the last server tried.
 //! No `async-nats` type appears in any public signature (0.x policy: single
 //! pinned minor, internal only).
 //!
@@ -174,6 +176,19 @@ impl NatsConfig {
     fn validate(&self) -> Result<(), StoreError> {
         if self.servers.is_empty() {
             return Err(StoreError::Fatal("nats.servers must not be empty".into()));
+        }
+        // Named by index: a server URL can carry credentials.
+        for (i, server) in self.servers.iter().enumerate() {
+            if server.contains(',') {
+                return Err(StoreError::Fatal(format!(
+                    "nats.servers[{i}] holds a comma; list each server as its own entry"
+                )));
+            }
+            if let Err(e) = server.parse::<async_nats::ServerAddr>() {
+                return Err(StoreError::Fatal(format!(
+                    "nats.servers[{i}] is not a NATS server URL: {e}"
+                )));
+            }
         }
         if self.job.is_empty()
             || self.job.len() > 64
@@ -336,7 +351,7 @@ async fn connect(config: &NatsConfig, lease_ttl: Duration) -> Result<Buckets, St
     // `nats://` connection through it.
     options = options.tls_client_config(tls_config);
     let client = options
-        .connect(config.servers.join(","))
+        .connect(config.servers.as_slice())
         .await
         .map_err(connect_error)?;
     if fallback && !tls_certain && client.server_info().tls_required {
@@ -829,10 +844,29 @@ mod tests {
 
         let no_servers = NatsConfig {
             servers: vec![],
-            ..base
+            ..base.clone()
         };
         let err = NatsStore::new(no_servers, Duration::from_secs(30)).unwrap_err();
         assert!(err.to_string().contains("servers"), "{err}");
+
+        let with_second = |server: &str| {
+            let config = NatsConfig {
+                servers: vec!["nats://localhost:4222".into(), server.into()],
+                ..base.clone()
+            };
+            NatsStore::new(config, Duration::from_secs(30))
+        };
+        for (server, reason) in [
+            ("nats://secret-host:notaport", "not a NATS server URL"),
+            ("nats://secret-host:4222,nats://b:4222", "holds a comma"),
+            ("secret-host,b", "holds a comma"),
+        ] {
+            let err = with_second(server).unwrap_err().to_string();
+            assert!(err.contains("nats.servers[1]"), "{err}");
+            assert!(err.contains(reason), "{err}");
+            assert!(!err.contains("secret-host"), "{err}");
+        }
+        with_second("localhost:4223").unwrap();
     }
 
     #[test]
@@ -857,10 +891,9 @@ mod tests {
         assert_eq!(with_message_ttls(patched, Duration::from_secs(30)), None);
     }
 
-    /// A server that answers the CONNECT with an authorization violation fails
-    /// the connect with a fatal error. Regression for #634.
-    #[tokio::test]
-    async fn a_rejected_credential_is_fatal() {
+    /// Serves a NATS server on `127.0.0.1` that answers every CONNECT with an
+    /// authorization violation, and returns its port.
+    async fn serve_authorization_violation() -> u16 {
         use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -881,13 +914,47 @@ mod tests {
                     .unwrap();
             }
         });
-        let mut config = NatsConfig::new(vec![format!("nats://127.0.0.1:{port}")], "auth_test");
+        port
+    }
+
+    /// Connects to `servers` with a password and returns the first store
+    /// operation's result.
+    async fn get_with_wrong_password(servers: Vec<String>) -> Result<Option<Entry>, StoreError> {
+        let mut config = NatsConfig::new(servers, "auth_test");
         config.credentials = NatsCredentials::UserPassword {
             username: "spate".into(),
             password: Secret::new("wrong"),
         };
         let store = NatsStore::new(config, Duration::from_secs(30)).unwrap();
-        match store.get(Keyspace::Durable, "k").await {
+        store.get(Keyspace::Durable, "k").await
+    }
+
+    /// A server that answers the CONNECT with an authorization violation fails
+    /// the connect with a fatal error. Regression for #634.
+    #[tokio::test]
+    async fn a_rejected_credential_is_fatal() {
+        let port = serve_authorization_violation().await;
+        match get_with_wrong_password(vec![format!("nats://127.0.0.1:{port}")]).await {
+            Err(StoreError::Fatal(message)) => {
+                assert!(message.contains("authorization violation"), "{message}");
+            }
+            other => panic!("expected Fatal, got {other:?}"),
+        }
+    }
+
+    /// With two servers, the connect reaches the one that answers whichever
+    /// order it tries them in. Regression for #753.
+    #[tokio::test]
+    async fn every_listed_server_joins_the_pool() {
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let closed_port = closed.local_addr().unwrap().port();
+        drop(closed);
+        let port = serve_authorization_violation().await;
+        let servers = vec![
+            format!("nats://127.0.0.1:{closed_port}"),
+            format!("nats://127.0.0.1:{port}"),
+        ];
+        match get_with_wrong_password(servers).await {
             Err(StoreError::Fatal(message)) => {
                 assert!(message.contains("authorization violation"), "{message}");
             }

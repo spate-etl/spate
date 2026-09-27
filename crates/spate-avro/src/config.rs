@@ -548,13 +548,14 @@ mod tests {
     #[test]
     fn debug_never_prints_registry_credentials() {
         let settings: AvroSettings = component(
-            "registry: {url: 'https://svc:hunter2@sr:8081', username: svc, password: hunter2}",
+            "registry: {url: 'https://svc:hunter2@sr:8081', username: svc, password: hunter2, \
+             tls: {root_ca: /etc/ca.pem}}",
         )
         .deserialize_into()
         .unwrap();
         let printed = format!("{settings:?}");
         assert!(!printed.contains("hunter2"), "{printed}");
-        for visible in ["sr:8081", "\"svc\"", "Some(<redacted>)"] {
+        for visible in ["sr:8081", "\"svc\"", "Some(<redacted>)", "/etc/ca.pem"] {
             assert!(printed.contains(visible), "{visible}: {printed}");
         }
     }

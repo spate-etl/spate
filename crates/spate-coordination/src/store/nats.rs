@@ -184,9 +184,15 @@ impl NatsConfig {
                     "nats.servers[{i}] holds a comma; list each server as its own entry"
                 )));
             }
-            if let Err(e) = server.parse::<async_nats::ServerAddr>() {
+            // The client's own parser, so each entry's scheme reads as the
+            // connection reads it.
+            let addr = server.parse::<async_nats::ServerAddr>().map_err(|e| {
+                StoreError::Fatal(format!("nats.servers[{i}] is not a NATS server URL: {e}"))
+            })?;
+            if self.tls.is_some() && addr.scheme() == "ws" {
                 return Err(StoreError::Fatal(format!(
-                    "nats.servers[{i}] is not a NATS server URL: {e}"
+                    "nats.servers[{i}] is a ws:// server, which never uses TLS; use wss://, \
+                     or remove nats.tls"
                 )));
             }
         }
@@ -218,19 +224,6 @@ impl NatsConfig {
                  needs both; remove both for server-only TLS)"
                     .into(),
             ));
-        }
-        if self.tls.is_some()
-            && let Some(i) = self.servers.iter().position(|s| {
-                s.parse::<async_nats::ServerAddr>()
-                    .is_ok_and(|addr| addr.scheme() == "ws")
-            })
-        {
-            // The client's own parser, so each entry's scheme reads as the
-            // connection reads it. Named by index: a URL can carry credentials.
-            return Err(StoreError::Fatal(format!(
-                "nats.servers[{i}] is a ws:// server, which never uses TLS; use wss://, \
-                 or remove nats.tls"
-            )));
         }
         Ok(())
     }

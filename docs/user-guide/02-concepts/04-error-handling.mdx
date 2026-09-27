@@ -99,7 +99,8 @@ messages are being skipped. See
   stalled behind a failed batch longer than
   `checkpoint.stalled_fail_after` (default 120s), the controller fails the
   whole pipeline, so it restarts and replays instead of running indefinitely
-  while committing nothing for that partition. Alert on
+  while committing nothing for that partition. The failure names each sink
+  that abandoned a batch, with the error that ended its latest one. Alert on
   `spate_checkpoint_watermark_age_seconds` well before that deadline.
 - **Exit codes are the contract with the orchestrator**: `run` returns an
   exit report; `report.exit_code()` is non-zero for any failed state. Wire

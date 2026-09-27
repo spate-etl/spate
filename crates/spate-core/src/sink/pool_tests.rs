@@ -207,6 +207,8 @@ fn fixture(shards: usize, replicas: usize, cfg: SinkPoolConfig, queue_cap: usize
         Arc::clone(&budget),
         metrics,
         "test",
+        "test",
+        SinkFailures::new(),
         &tokio::runtime::Handle::current(),
     );
     Fixture {

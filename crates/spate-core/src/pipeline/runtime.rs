@@ -455,6 +455,7 @@ impl<S: Source + 'static> PipelineRuntime<S> {
             drain_timeout: self.config.checkpoint.drain_timeout,
             event_poll_timeout: self.options.event_poll_timeout,
             stalled_fail_after: self.config.checkpoint.stalled_fail_after,
+            sink_failures: self.sink.failures.clone(),
             checkpoint_metrics,
             budget: Arc::clone(&self.budget),
             budget_metrics,

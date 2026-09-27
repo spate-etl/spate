@@ -34,6 +34,7 @@ fn test_sink() -> (SinkRuntime, Arc<AtomicBool>) {
             queues: vec![queues],
             drain,
             probe: None,
+            failures: SinkFailures::new(),
         },
         drained,
     )
@@ -833,6 +834,7 @@ fn caller_owned_io_runtime_is_used_and_shut_down_by_run() {
         queues: vec![queues],
         drain,
         probe: None,
+        failures: SinkFailures::new(),
     };
 
     let (source, _shared, _script) = FakeSource::new();

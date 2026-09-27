@@ -134,6 +134,9 @@ impossibility; manually, they are yours again:
   logs, all of it before threads spawn.
 - **One I/O runtime** — build once, pass to `SinkPool::spawn` by handle and
   to the runtime by value.
+- **One `SinkFailures`** — pass a clone to every `SinkPool::spawn` and the
+  register itself to `SinkRuntime`. A pool given a different register
+  records its reasons where the runtime never reads them.
 - **Queue drop ordering** — the sink drains only when every `ShardQueues`
   clone is gone; audit every clone you make (see
   [Graceful shutdown](graceful-shutdown.mdx)).

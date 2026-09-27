@@ -67,8 +67,8 @@ use crate::metrics::{
 use crate::ops::{ChunkConfig, RunnableChain, SinkCtx};
 use crate::pipeline::ExitReport;
 use crate::sink::{
-    DrainReport, ShardQueues, ShardWriter, SinkBundle, SinkDrainFn, SinkPool, SinkProbeFn,
-    shard_queues,
+    DrainReport, ShardQueues, ShardWriter, SinkBundle, SinkDrainFn, SinkFailures, SinkPool,
+    SinkProbeFn, shard_queues,
 };
 use crate::source::Source;
 use crate::telemetry::{self, LogFormat};
@@ -345,6 +345,7 @@ pub struct Pipeline {
     metrics: MetricsHandle,
     io: tokio::runtime::Runtime,
     budget: Arc<InflightBudget>,
+    sink_failures: SinkFailures,
     sinks: Vec<(String, SinkAssembly)>,
     chains: Option<ChainFactoryFn>,
     options: RuntimeOptions,
@@ -419,6 +420,7 @@ impl Pipeline {
             metrics,
             io,
             budget: Arc::new(InflightBudget::new()),
+            sink_failures: SinkFailures::new(),
             sinks: Vec::new(),
             chains: None,
             options: RuntimeOptions::default(),
@@ -652,6 +654,8 @@ impl Pipeline {
             Arc::clone(&self.budget),
             shard_metrics,
             &pipeline_name,
+            &sink_name,
+            self.sink_failures.clone(),
             self.io.handle(),
         );
         self.sinks.push((
@@ -770,6 +774,7 @@ impl Pipeline {
                 queues: intro_queues,
                 drain: combine_drains(drains),
                 probe: combine_probes(probes),
+                failures: self.sink_failures,
             },
             self.budget,
         )

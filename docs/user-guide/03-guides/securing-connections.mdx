@@ -58,11 +58,11 @@ meets the failure decide what you see:
 - **Fatal, in a source or deserializer.** The pipeline stops, and the exit
   report carries the reason. A component that connects on demand meets the
   failure at the first record that needs the connection.
-- **Fatal, in a sink.** The `sink write failed` warning carries the reason, and
-  the batch is abandoned. The pipeline fails once a partition's watermark has
-  stalled behind that batch for `checkpoint.stalled_fail_after`, with an error
-  that names the partition; the reason stays in the warning.
-  `spate_sink_abandoned_batches_total` counts the batch.
+- **Fatal, in a sink.** The batch is abandoned, and the `sink write failed`
+  warning and the `abandoning sink batch` error carry the reason. The pipeline
+  fails once a partition's watermark has stalled behind that batch for
+  `checkpoint.stalled_fail_after`, and the exit report names the partition, the
+  sink and the reason. `spate_sink_abandoned_batches_total` counts the batch.
 - **Retryable, in a source.** The source retries. Its connector page names any
   deadline or attempt budget that ends the retries. The error at that limit
   names the limit, and the reason is in the warnings logged before it.

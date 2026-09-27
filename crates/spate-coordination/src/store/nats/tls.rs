@@ -366,7 +366,8 @@ mod tests {
     }
 
     /// An unreadable system trust store fails the connect with a fatal error
-    /// for a `tls://` server, and for a `nats://` server under a `tls` section.
+    /// for a `tls://` or `wss://` server in any spelling async-nats accepts,
+    /// and for a `nats://` server under a `tls` section. Regression for #761.
     #[tokio::test(flavor = "multi_thread")]
     async fn an_unreadable_trust_store_is_fatal_when_tls_is_certain() {
         if child_connects().await {
@@ -375,11 +376,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let port = TestCa::new("system").serve_nats(None).await;
         let expect = (EXPECT_FATAL, OsString::from("SSL_CERT_FILE"));
+        let mut envs: Vec<_> = [
+            format!("tls://127.0.0.1:{port}"),
+            format!("TLS://127.0.0.1:{port}"),
+            format!("WSS://127.0.0.1:{port}"),
+            format!(" tls://127.0.0.1:{port}\n"),
+        ]
+        .into_iter()
+        .map(|url| vec![(URL, url.into()), expect.clone()])
+        .collect();
         let nats_url = OsString::from(format!("nats://127.0.0.1:{port}"));
-        for env in [
-            vec![(URL, tls_url(port)), expect.clone()],
-            vec![(URL, nats_url), (WITH_TLS, "1".into()), expect],
-        ] {
+        envs.push(vec![(URL, nats_url), (WITH_TLS, "1".into()), expect]);
+        for env in envs {
             run_in_child(
                 "an_unreadable_trust_store_is_fatal_when_tls_is_certain",
                 dir.path().join("missing.pem"),

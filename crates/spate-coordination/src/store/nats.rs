@@ -198,10 +198,11 @@ impl NatsConfig {
         }
     }
 
-    fn validate(&self) -> Result<(), StoreError> {
+    fn validate(&self) -> Result<Vec<async_nats::ServerAddr>, StoreError> {
         if self.servers.is_empty() {
             return Err(StoreError::Fatal("nats.servers must not be empty".into()));
         }
+        let mut addrs = Vec::with_capacity(self.servers.len());
         // Named by index: a server URL can carry credentials.
         for (i, server) in self.servers.iter().enumerate() {
             if server.contains(',') {
@@ -220,6 +221,7 @@ impl NatsConfig {
                      or remove nats.tls"
                 )));
             }
+            addrs.push(addr);
         }
         if self.job.is_empty()
             || self.job.len() > 64
@@ -250,7 +252,7 @@ impl NatsConfig {
                     .into(),
             ));
         }
-        Ok(())
+        Ok(addrs)
     }
 }
 
@@ -263,6 +265,9 @@ struct Buckets {
 
 struct Lazy {
     config: NatsConfig,
+    /// `config.servers`, parsed by `validate`. Holds credentials; keep out of
+    /// `Debug`.
+    servers: Vec<async_nats::ServerAddr>,
     lease_ttl: Duration,
     buckets: tokio::sync::OnceCell<Buckets>,
 }
@@ -291,7 +296,7 @@ impl NatsStore {
     ///
     /// Fatal on invalid configuration or a lease below the NATS floor.
     pub fn new(config: NatsConfig, lease_ttl: Duration) -> Result<NatsStore, StoreError> {
-        config.validate()?;
+        let servers = config.validate()?;
         if lease_ttl < MIN_LEASE {
             return Err(StoreError::Fatal(format!(
                 "lease_duration must be >= {MIN_LEASE:?} on NATS (marker granularity is \
@@ -301,6 +306,7 @@ impl NatsStore {
         Ok(NatsStore {
             inner: Arc::new(Lazy {
                 config,
+                servers,
                 lease_ttl,
                 buckets: tokio::sync::OnceCell::new(),
             }),
@@ -310,7 +316,13 @@ impl NatsStore {
     async fn buckets(&self) -> Result<&Buckets, StoreError> {
         self.inner
             .buckets
-            .get_or_try_init(|| connect(&self.inner.config, self.inner.lease_ttl))
+            .get_or_try_init(|| {
+                connect(
+                    &self.inner.config,
+                    &self.inner.servers,
+                    self.inner.lease_ttl,
+                )
+            })
             .await
     }
 
@@ -327,7 +339,11 @@ impl NatsStore {
     }
 }
 
-async fn connect(config: &NatsConfig, lease_ttl: Duration) -> Result<Buckets, StoreError> {
+async fn connect(
+    config: &NatsConfig,
+    servers: &[async_nats::ServerAddr],
+    lease_ttl: Duration,
+) -> Result<Buckets, StoreError> {
     let mut options = async_nats::ConnectOptions::new();
     match &config.credentials {
         NatsCredentials::None => {}
@@ -347,11 +363,8 @@ async fn connect(config: &NatsConfig, lease_ttl: Duration) -> Result<Buckets, St
     if config.tls.is_some() {
         options = options.require_tls(true);
     }
-    let tls_certain = config.tls.is_some()
-        || config
-            .servers
-            .iter()
-            .any(|s| s.starts_with("tls://") || s.starts_with("wss://"));
+    let tls_certain =
+        config.tls.is_some() || servers.iter().any(|s| matches!(s.scheme(), "tls" | "wss"));
     let section = config.tls.clone();
     let (tls_config, fallback) = tokio::task::spawn_blocking(move || {
         tls::client_config(
@@ -368,10 +381,7 @@ async fn connect(config: &NatsConfig, lease_ttl: Duration) -> Result<Buckets, St
     // Passed without `tls` too: a server that requires TLS upgrades a
     // `nats://` connection through it.
     options = options.tls_client_config(tls_config);
-    let client = options
-        .connect(config.servers.as_slice())
-        .await
-        .map_err(connect_error)?;
+    let client = options.connect(servers).await.map_err(connect_error)?;
     if fallback && !tls_certain && client.server_info().tls_required {
         warn_mozilla_fallback();
     }

@@ -5,4 +5,4 @@
 # the `lts` lane, and the version matrix runs no separate job while that holds.
 # ../README.md has the account.
 
-FROM clickhouse/clickhouse-server:26.8.8.8@sha256:cc7f5901580ec744d75c62817a226c61e67403c3b268d417193d212c843c0277
+FROM clickhouse/clickhouse-server:26.8.9.10@sha256:85ddbad63bd6779d4b3c64af17a0720c85e9dc6e5fa636f80bfdbb6096bdc5ab

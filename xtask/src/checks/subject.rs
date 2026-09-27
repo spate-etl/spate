@@ -147,11 +147,28 @@ fn comment_char(root: &Path) -> char {
     }
 }
 
+/// `text` with each control character escaped, and the second `#` of `##[`
+/// escaped too. The Actions runner reads a `\r` as a line break, a line
+/// opening with `::` is a workflow command, and so is `##[` anywhere in a line.
+fn printable(text: &str) -> String {
+    let escaped: String = text
+        .chars()
+        .map(|c| {
+            if c.is_control() {
+                c.escape_default().to_string()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect();
+    escaped.replace("##[", "#\\u{23}[")
+}
+
 /// Prints a refusal and the rule, and fails.
 fn refuse(subject: &str, found: &[String]) -> Outcome {
-    eprintln!("{TOOL}: {subject}");
+    eprintln!("{TOOL}: {}", printable(subject));
     for problem in found {
-        eprintln!("  - {problem}");
+        eprintln!("  - {}", printable(problem));
     }
     eprintln!("{GUIDANCE}");
     Err(Error::status(1))
@@ -218,8 +235,9 @@ pub(crate) fn check_title(root: &Path, explain: bool) -> Outcome {
 
 /// The gate's verdict over one set of fields and one runner state.
 fn title_gate(root: &Path, fields: &Fields, in_actions: bool, github_event: &str) -> Outcome {
+    let base_only = github_event == "pull_request_target";
     if fields.event != "pull_request" {
-        if in_actions && github_event == "pull_request" {
+        if in_actions && (github_event == "pull_request" || base_only) {
             return Err(Error::msg(
                 "running on a pull request inside GitHub Actions with no EVENT_NAME, so this\n  \
                  would have checked nothing and passed. The job that runs this has to pass\n  \
@@ -243,6 +261,12 @@ fn title_gate(root: &Path, fields: &Fields, in_actions: bool, github_event: &str
     // next rebase.
     let limit = (fields.author != "dependabot[bot]")
         .then(|| LIMIT - format!(" (#{})", fields.number).len());
+    if base_only {
+        println!(
+            "{TOOL}: the areas are the ones on `main`. A crate this pull request adds\n  \
+             is an area in its CI run, which checks the title again."
+        );
+    }
     let found = problems(&fields.title, &areas(root), limit);
     if found.is_empty() {
         println!("{TOOL}: the pull request title follows the rule.");

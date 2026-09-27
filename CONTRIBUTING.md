@@ -59,7 +59,11 @@ maintainers included, and the branch rules enforce it.
 
 CI on a pull request from a fork waits for an explicit approval before it runs. A
 workflow runs as it exists in the pull request, so an unreviewed run is an
-unreviewed change to what CI proves. It costs you one round-trip.
+unreviewed change to what CI proves. It costs you one round-trip. The title
+check below runs without that approval, from `main`'s definition, so a title
+that breaks the rule is reported as soon as the pull request opens. It knows
+only the areas on `main`, so a title naming a crate the pull request adds fails
+it; the approved CI run checks that title against the pull request's own tree.
 
 A subject names one area and says what the change does, in at most 72
 characters:

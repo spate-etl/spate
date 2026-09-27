@@ -1,0 +1,38 @@
+name: Pull request title
+
+# Checks the pull request title with the default branch's xtask, so a fork's
+# title is reported before its CI run is approved. `pull_request_target` runs
+# the default branch's definition with the default branch checked out. This job
+# checks out no pull request code, holds a token with no permissions, uses no
+# cache, and reads the title only through `env:`. The xtask test
+# `the_title_workflow_keeps_its_pull_request_target_posture` holds each of
+# those.
+on:
+  pull_request_target:
+    types: [opened, edited, reopened]
+
+concurrency:
+  group: title-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  title:
+    name: Pull request title
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # No `shared-key`: a cache here would be the default branch's.
+      - uses: ./.github/actions/setup-rust
+
+      - env:
+          EVENT_NAME: pull_request
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: cargo xtask tidy title

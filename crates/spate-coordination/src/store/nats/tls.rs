@@ -107,7 +107,7 @@ fn fatal(field: &str, path: &Path, why: &str) -> StoreError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::nats::test_tls::TestCa;
+    use crate::store::nats::test_tls::{INFO_REQUIRING_TLS, TestCa};
     use crate::store::nats::{NatsConfig, NatsStore};
     use crate::store::{CoordinationStore, Keyspace};
     use async_nats::rustls::AlertDescription;
@@ -122,11 +122,6 @@ mod tests {
     const WITH_TLS: &str = "SPATE_TEST_NATS_TLS_SECTION";
     const EXPECT_FATAL: &str = "SPATE_TEST_NATS_TLS_EXPECT_FATAL";
     const EXPECT_RETRYABLE: &str = "SPATE_TEST_NATS_TLS_EXPECT_RETRYABLE";
-
-    /// A NATS `INFO` that requires TLS; async-nats ignores its `port`.
-    const INFO_REQUIRING_TLS: &[u8] = b"INFO {\"server_id\":\"test\",\"version\":\"2.11.0\",\
-        \"proto\":1,\"host\":\"127.0.0.1\",\"port\":4222,\"max_payload\":1048576,\
-        \"tls_required\":true}\r\n";
 
     fn loaded(certs: Vec<CertificateDer<'static>>) -> CertificateResult {
         let mut result = CertificateResult::default();

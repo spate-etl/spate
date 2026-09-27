@@ -220,6 +220,7 @@ fn only_dependabot_is_let_off_the_length() {
 #[test]
 fn a_pull_request_run_without_its_fields_fails_closed() {
     assert!(title_gate(root(), &Fields::default(), true, "pull_request").is_err());
+    assert!(title_gate(root(), &Fields::default(), true, "pull_request_target").is_err());
     assert!(title_gate(root(), &Fields::default(), true, "push").is_ok());
     assert!(title_gate(root(), &Fields::default(), false, "").is_ok());
     assert!(
@@ -240,4 +241,16 @@ fn a_pull_request_run_without_its_fields_fails_closed() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn a_refusal_prints_no_workflow_command() {
+    assert_eq!(printable("x\r::error::y\n\tz"), "x\\r::error::y\\n\\tz");
+    assert_eq!(printable("core: `Clock` \"é\""), "core: `Clock` \"é\"");
+    assert_eq!(
+        printable("fix: a ##[error]forged"),
+        "fix: a #\\u{23}[error]forged"
+    );
+    assert_eq!(printable("###[x"), "##\\u{23}[x");
+    assert!(!printable("a ##[b ##[c").contains("##["));
 }

@@ -1,15 +1,27 @@
-# zizmor flags `workflow_run` unconditionally (dangerous-triggers, High).
+# zizmor flags every `workflow_run` and `pull_request_target` workflow
+# (dangerous-triggers, High). Its one exception is a `pull_request_target`
+# workflow with a single job whose single step is `actions/labeler`.
 #
-# `perf-label.yml` is the privileged half of such a split. It checks out
-# nothing, executes nothing from the pull request, reads one artifact bound to
-# the triggering run by `run-id:` and parses it as nothing but `true`/`false`,
+# `perf-label.yml` is the privileged half of a `workflow_run` split. It checks
+# out nothing, executes nothing from the pull request, reads one artifact bound
+# to the triggering run by `run-id:` and parses it as nothing but `true`/`false`,
 # and the only write its token allows is one label. The unprivileged half runs
 # the untrusted code with a read-only token.
 #
-# The ignore is file- and rule-scoped. A new `workflow_run` workflow does not
-# inherit it: state its posture in a comment like the one in perf-label.yml and
-# add it here, or find a design without the trigger.
+# `title.yml` runs on `pull_request_target`. It checks out the default branch
+# with a token that has no permissions, uses no cache, and passes the title to
+# `cargo xtask tidy title` through `env:` alone. The xtask test
+# `the_title_workflow_keeps_its_pull_request_target_posture` fails on a head
+# checkout, a granted permission, a cache, another trigger, or the title
+# reaching anything but `env:`, in the workflow or in the `setup-rust` action it
+# uses. `actions/checkout` also refuses a fork's code on this trigger unless
+# `allow-unsafe-pr-checkout` is set, which the test forbids.
+#
+# The ignore is file- and rule-scoped. A new workflow on either trigger does
+# not inherit it: state its posture in a comment like the ones above and add it
+# here, or find a design without the trigger.
 rules:
   dangerous-triggers:
     ignore:
       - perf-label.yml
+      - title.yml

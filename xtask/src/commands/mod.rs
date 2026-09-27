@@ -739,6 +739,187 @@ mod tests {
         assert!(checked > 0, "no workflow invokes this binary");
     }
 
+    /// Each non-comment line of a YAML file as `(indent, key, value)`, with a
+    /// list item's `- ` counted as indent and a trailing ` # comment` dropped.
+    /// Enough for the flat files the tests below read.
+    fn entries(text: &str) -> Vec<(usize, &str, &str)> {
+        text.lines()
+            .filter(|line| !line.trim().is_empty() && !line.trim_start().starts_with('#'))
+            .map(|line| {
+                let body = line.trim_start();
+                let indent = line.len() - body.len();
+                let (indent, body) = match body.strip_prefix("- ") {
+                    Some(item) => (indent + 2, item),
+                    None => (indent, body),
+                };
+                let body = body.split_once(" #").map_or(body, |(b, _)| b);
+                let (key, value) = body.split_once(':').unwrap_or((body, ""));
+                (indent, key.trim(), value.trim())
+            })
+            .collect()
+    }
+
+    /// `title.yml` runs on `pull_request_target`, with the default branch's
+    /// token and cache scope. This pins that it checks out no pull request
+    /// code, holds no permission, uses no cache, and passes the title only
+    /// through `env:`, in the workflow and in the `setup-rust` action it uses.
+    #[test]
+    fn the_title_workflow_keeps_its_pull_request_target_posture() {
+        let root = crate::repo_root().unwrap();
+        let text = std::fs::read_to_string(root.join(".github/workflows/title.yml")).unwrap();
+        let all = entries(&text);
+        let values = |key: &str| -> Vec<&str> {
+            all.iter()
+                .filter(|(_, k, _)| *k == key)
+                .map(|(_, _, v)| *v)
+                .collect()
+        };
+
+        // Any other key, `ref`, `repository`, `allow-unsafe-pr-checkout`,
+        // `shared-key` and `contents` among them, fails here.
+        let allowed = [
+            "name",
+            "on",
+            "pull_request_target",
+            "types",
+            "concurrency",
+            "group",
+            "cancel-in-progress",
+            "permissions",
+            "jobs",
+            "title",
+            "runs-on",
+            "timeout-minutes",
+            "steps",
+            "uses",
+            "with",
+            "persist-credentials",
+            "env",
+            "EVENT_NAME",
+            "PR_TITLE",
+            "PR_NUMBER",
+            "PR_AUTHOR",
+            "run",
+        ];
+        for (_, key, value) in &all {
+            assert!(
+                allowed.contains(key),
+                "title.yml sets `{key}: {value}`, a key this test does not allow"
+            );
+        }
+
+        let on = all.iter().position(|(_, k, _)| *k == "on").unwrap();
+        let triggers: Vec<_> = all[on + 1..]
+            .iter()
+            .take_while(|(indent, _, _)| *indent > 0)
+            .map(|(_, k, v)| (*k, *v))
+            .collect();
+        assert_eq!(
+            triggers,
+            [
+                ("pull_request_target", ""),
+                ("types", "[opened, edited, reopened]")
+            ],
+            "title.yml runs on another trigger"
+        );
+
+        let permissions: Vec<_> = all.iter().filter(|(_, k, _)| *k == "permissions").collect();
+        assert_eq!(
+            permissions,
+            [&(0, "permissions", "{}")],
+            "title.yml grants its token a permission"
+        );
+
+        let uses = values("uses");
+        assert!(
+            uses.len() == 2
+                && uses[0].starts_with("actions/checkout@")
+                && uses[1] == "./.github/actions/setup-rust",
+            "title.yml uses {uses:?}, not only the checkout and setup-rust"
+        );
+        assert_eq!(values("with").len(), 1, "only the checkout takes inputs");
+        assert_eq!(
+            values("persist-credentials"),
+            ["false"],
+            "the checkout persists its credential"
+        );
+
+        let expressions: Vec<&str> = text
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.contains("${{"))
+            .collect();
+        assert_eq!(
+            expressions,
+            [
+                "group: title-${{ github.event.pull_request.number }}",
+                "PR_TITLE: ${{ github.event.pull_request.title }}",
+                "PR_NUMBER: ${{ github.event.pull_request.number }}",
+                "PR_AUTHOR: ${{ github.event.pull_request.user.login }}",
+            ],
+            "title.yml evaluates an expression outside `env:`"
+        );
+        assert_eq!(
+            values("EVENT_NAME"),
+            ["pull_request"],
+            "`tidy title` passes without checking unless EVENT_NAME is `pull_request`"
+        );
+        assert_eq!(values("run"), ["cargo xtask tidy title"]);
+
+        // setup-rust runs an action beyond the toolchain only for an input
+        // this workflow leaves empty, and reads nothing of the pull request.
+        let text =
+            std::fs::read_to_string(root.join(".github/actions/setup-rust/action.yml")).unwrap();
+        for forbidden in [
+            "github.event",
+            "github.head_ref",
+            "github.token",
+            "secrets.",
+            "GITHUB_EVENT_PATH",
+            "GITHUB_HEAD_REF",
+        ] {
+            assert!(!text.contains(forbidden), "setup-rust reads `{forbidden}`");
+        }
+        let composite = entries(&text);
+        for (i, (_, key, value)) in composite.iter().enumerate() {
+            if *key != "uses" || value.starts_with("dtolnay/rust-toolchain@") {
+                continue;
+            }
+            let guard = if value.starts_with("Swatinem/rust-cache@") {
+                "inputs.shared-key != ''"
+            } else if value.starts_with("taiki-e/install-action@") {
+                "inputs.tools != ''"
+            } else {
+                panic!("setup-rust uses `{value}`, which title.yml would run");
+            };
+            assert_eq!(
+                composite[i - 1],
+                (composite[i].0, "if", guard),
+                "setup-rust runs `{value}` without `if: {guard}`"
+            );
+        }
+        // The guards hold only while the inputs title.yml leaves unset stay
+        // empty by default.
+        for input in ["shared-key", "tools"] {
+            assert_eq!(
+                input_default(&text, input),
+                Some("\"\""),
+                "setup-rust's `{input}` input no longer defaults to empty"
+            );
+        }
+    }
+
+    /// The `default:` of one input of a composite action, as written.
+    fn input_default<'a>(action: &'a str, input: &str) -> Option<&'a str> {
+        let header = format!("  {input}:");
+        let mut lines = action.lines().skip_while(|line| *line != header).skip(1);
+        lines
+            .by_ref()
+            .take_while(|line| line.is_empty() || line.starts_with("    "))
+            .find_map(|line| line.trim_start().strip_prefix("default:"))
+            .map(str::trim)
+    }
+
     /// Each mode takes a fixed number of positional arguments, and a spare one
     /// is a usage error.
     #[test]

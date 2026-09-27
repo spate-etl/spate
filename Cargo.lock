@@ -4043,6 +4043,7 @@ dependencies = [
  "tokio-rustls",
  "tracing",
  "twox-hash",
+ "url",
  "uuid",
  "webpki-roots 1.0.9",
  "yaml_serde",

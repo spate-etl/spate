@@ -106,7 +106,8 @@ failure to obtain credentials or reach the server stays `Retryable`, and so
 do a connection reset, closed or timed out during the handshake and a
 malformed TLS message. Under TLS 1.3 a server refuses a client certificate
 after the handshake completes, so look for its alert on the first read as
-well as on the connect call.
+well as on the connect call. `spate::error::find_source` finds your TLS
+library's error behind the client's wrappers, including inside an `io::Error`.
 [ADR-0047](../../adr/0047-a-rejected-credential-or-tls-handshake-is-fatal.md)
 states the rule.
 

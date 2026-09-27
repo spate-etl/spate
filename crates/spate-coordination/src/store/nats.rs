@@ -391,7 +391,7 @@ fn connect_error(e: async_nats::ConnectError) -> StoreError {
         | ConnectErrorKind::Authentication
         | ConnectErrorKind::Tls => true,
         _ => matches!(
-            find_source::<TlsError>(&e),
+            spate_core::error::find_source::<TlsError>(&e),
             Some(
                 TlsError::InvalidCertificate(_)
                     | TlsError::AlertReceived(
@@ -414,28 +414,6 @@ fn connect_error(e: async_nats::ConnectError) -> StoreError {
     } else {
         StoreError::Retryable(message)
     }
-}
-
-/// The first `T` in `err`'s source chain, `err` included.
-fn find_source<'a, T: std::error::Error + 'static>(
-    err: &'a (dyn std::error::Error + 'static),
-) -> Option<&'a T> {
-    let mut pending = vec![err];
-    while let Some(e) = pending.pop() {
-        if let Some(found) = e.downcast_ref() {
-            return Some(found);
-        }
-        // `io::Error::source` skips the error it wraps, so reach it through
-        // `get_ref`.
-        if let Some(inner) = e
-            .downcast_ref::<std::io::Error>()
-            .and_then(|io| io.get_ref())
-        {
-            pending.push(inner);
-        }
-        pending.extend(e.source());
-    }
-    None
 }
 
 /// `config` with per-message TTLs enabled, or `None` when it allows them

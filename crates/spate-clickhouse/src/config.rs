@@ -1472,7 +1472,7 @@ settings: { insert_quorum: "auto" }
         }
         let dir = tempfile::tempdir().unwrap();
         let ca = crate::test_tls::TestCa::new("system");
-        let url = ca.serve().await;
+        let url = crate::test_tls::serve(&ca, None).await;
         let ca_file = ca.write(dir.path());
         tokio::task::block_in_place(|| {
             spate_test_support::run_in_child(NAME, |child| {

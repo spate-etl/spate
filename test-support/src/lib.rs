@@ -4,10 +4,14 @@
 mod child;
 mod corpus;
 mod http;
+#[cfg(feature = "tls")]
+mod tls;
 
 pub use child::run_in_child;
 pub use corpus::{fnv1a, pin};
 pub use http::http;
+#[cfg(feature = "tls")]
+pub use tls::{TestCa, native_certs, serve_tls};
 
 use std::path::Path;
 use std::process::Command;

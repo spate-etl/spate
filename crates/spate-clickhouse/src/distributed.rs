@@ -542,9 +542,9 @@ mod tests {
     /// names the rejection.
     #[tokio::test]
     async fn an_unverified_certificate_names_its_cause() {
-        use crate::test_tls::{TestCa, endpoint_trusting};
+        use crate::test_tls::{TestCa, endpoint_trusting, serve};
         let (server, other) = (TestCa::new("server"), TestCa::new("other"));
-        let url = server.serve().await;
+        let url = serve(&server, None).await;
         let check = DistributedCheck {
             endpoint: endpoint_trusting(&other, &url),
             cluster: "prod".into(),

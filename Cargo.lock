@@ -4013,7 +4013,6 @@ dependencies = [
 name = "spate-clickhouse"
 version = "0.2.0"
 dependencies = [
- "base64 0.22.1",
  "bytes",
  "bytesize",
  "chrono",
@@ -4027,7 +4026,6 @@ dependencies = [
  "hyper-rustls",
  "hyper-util",
  "proptest",
- "rcgen",
  "rust_decimal",
  "rustls",
  "rustls-native-certs",
@@ -4043,7 +4041,6 @@ dependencies = [
  "thiserror",
  "time",
  "tokio",
- "tokio-rustls",
  "tracing",
  "twox-hash",
  "url",
@@ -4219,7 +4216,6 @@ dependencies = [
  "gungraun",
  "object_store",
  "proptest",
- "rcgen",
  "rustls",
  "serde",
  "serde_json",
@@ -4233,7 +4229,6 @@ dependencies = [
  "tempfile",
  "testcontainers",
  "tokio",
- "tokio-rustls",
  "tracing",
  "url",
  "yaml_serde",
@@ -4259,6 +4254,15 @@ dependencies = [
 [[package]]
 name = "spate-test-support"
 version = "0.2.0"
+dependencies = [
+ "base64 0.22.1",
+ "rcgen",
+ "rustls",
+ "rustls-native-certs",
+ "tempfile",
+ "tokio",
+ "tokio-rustls",
+]
 
 [[package]]
 name = "spate-xtask"

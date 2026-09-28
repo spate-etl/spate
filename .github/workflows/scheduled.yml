@@ -96,8 +96,8 @@ jobs:
       - id: regen
         run: cargo xtask attribution
 
-      # Gated on the regen step, not `failure()`: a setup failure would file an
-      # issue asserting the generator broke.
+      # Files only when the regen step fails; a setup failure would otherwise
+      # file an issue asserting the generator broke.
       - name: Report the failure as an issue
         if: failure() && steps.regen.conclusion == 'failure'
         env:
@@ -146,8 +146,8 @@ jobs:
       - id: deny
         run: cargo deny --all-features --locked check advisories
 
-      # Gated on the deny step, not `failure()`: a checkout failure would file
-      # an issue asserting an advisory was found.
+      # Files only when the deny step fails; a checkout failure would otherwise
+      # file an issue asserting an advisory was found.
       - name: Report the failure as an issue
         if: failure() && steps.deny.conclusion == 'failure'
         env:

@@ -6,8 +6,8 @@
 cargo xtask attribution
 ```
 
-Each release regenerates this file, so the copy at a release tag lists what
-that release carries. On `main`, `Cargo.lock` can move ahead of it.
+The release flow regenerates this file when it assembles a release, and
+`Cargo.lock` can move ahead of it afterwards.
 
 Spate itself is licensed under Apache-2.0 (see [LICENSE](LICENSE)). This file
 inventories the **dependencies** it links, and the terms each is used under.

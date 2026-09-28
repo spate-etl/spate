@@ -18,6 +18,9 @@ zero infrastructure.
   `unique_name` to build a stage's input, its config, and per-test names.
 - `render_metrics`, `metric_value`, `metric_sum` and `metric_series` to
   render a test's metrics and read series back out.
+- `LogCapture`, `capture_logs` and `show_logs` to assert on what a
+  component logged; `LogCapture::wait_for` and `wait_for_line` wait on the
+  capture and print it on timeout.
 - A `proptest` feature with strategies for payloads, lane layouts, and
   writer-outcome scripts.
 

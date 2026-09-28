@@ -1,10 +1,12 @@
 //! Assertions over what a component logged.
 //!
-//! [`LogCapture`] is a writer a `tracing` subscriber can be pointed at.
-//! [`capture_logs`] and [`show_logs`] install one around a call, scoped to the
-//! calling thread.
+//! [`LogCapture`] is a writer a `tracing` subscriber can be pointed at, and
+//! waits on what it has captured. [`capture_logs`] and [`show_logs`] install
+//! one around a call, scoped to the calling thread.
 
+use crate::run::poll_until;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tracing::Level;
 use tracing_subscriber::fmt::writer::MakeWriterExt;
 use tracing_subscriber::fmt::{MakeWriter, TestWriter};
@@ -27,6 +29,35 @@ impl LogCapture {
             .lines()
             .map(str::to_string)
             .collect()
+    }
+
+    /// Poll `check` until it returns a value, on the cadence of
+    /// [`wait_until`](crate::wait_until).
+    ///
+    /// Panics once `timeout` elapses, naming `what` and carrying every line
+    /// captured so far.
+    pub fn wait_for<T>(
+        &self,
+        timeout: Duration,
+        what: &str,
+        check: impl FnMut() -> Option<T>,
+    ) -> T {
+        poll_until(timeout, check).unwrap_or_else(|| {
+            panic!(
+                "timed out after {timeout:?} waiting for: {what}\n--- captured ---\n{}",
+                self.lines().join("\n")
+            )
+        })
+    }
+
+    /// The first captured line containing `needle`, waiting up to `timeout`
+    /// for one to arrive.
+    ///
+    /// Panics on timeout as [`wait_for`](Self::wait_for) does.
+    pub fn wait_for_line(&self, timeout: Duration, needle: &str) -> String {
+        self.wait_for(timeout, &format!("a line containing {needle:?}"), || {
+            self.lines().into_iter().find(|l| l.contains(needle))
+        })
     }
 }
 
@@ -79,4 +110,29 @@ where
         .without_time()
         .finish();
     tracing::subscriber::with_default(subscriber, f);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn wait_for_line_returns_the_matching_line() {
+        let mut capture = LogCapture::new();
+        capture.write_all(b"starting\nready at 1\n").unwrap();
+        assert_eq!(
+            capture.wait_for_line(Duration::from_secs(1), "ready"),
+            "ready at 1"
+        );
+    }
+
+    /// A timeout's panic carries every line captured so far.
+    #[test]
+    #[should_panic(expected = "--- captured ---\nstarting")]
+    fn a_timeout_panics_with_the_capture() {
+        let mut capture = LogCapture::new();
+        capture.write_all(b"starting\n").unwrap();
+        capture.wait_for_line(Duration::from_millis(20), "ready");
+    }
 }

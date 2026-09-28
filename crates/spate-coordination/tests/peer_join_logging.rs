@@ -66,30 +66,6 @@ fn assigned(rt: &Runtime, store: &MemoryStore, instance: &str) -> Vec<String> {
     serde_json::from_value(record["splits"].clone()).expect("assignment names its splits")
 }
 
-/// Wait for a line containing `needle`.
-fn wait_for_line(capture: &LogCapture, needle: &str) {
-    wait_until(&format!("a line containing {needle:?}"), capture, |c| {
-        c.lines().iter().any(|l| l.contains(needle))
-    });
-}
-
-/// Wait for `what` to become true of the capture, so the assertions below
-/// run against a fleet that has finished reacting to the join rather than
-/// one still mid-flight.
-fn wait_until(what: &str, capture: &LogCapture, mut check: impl FnMut(&LogCapture) -> bool) {
-    let deadline = Instant::now() + support::DEADLINE;
-    while Instant::now() < deadline {
-        if check(capture) {
-            return;
-        }
-        std::thread::sleep(support::POLL_INTERVAL);
-    }
-    panic!(
-        "timed out waiting for {what}\n--- captured ---\n{}",
-        capture.lines().join("\n")
-    );
-}
-
 #[test]
 fn a_peer_joining_is_announced_and_nothing_reads_as_a_fault() {
     let capture = LogCapture::new();
@@ -172,15 +148,15 @@ fn a_peer_joining_is_announced_and_nothing_reads_as_a_fault() {
     // followed. Waiting on the *count* rather than on the phrase: the solo
     // handout above already emitted one `assignment published`, so waiting
     // for the phrase would be satisfied before the join happened.
-    wait_for_line(&capture, "peer joined");
-    wait_until(
+    capture.wait_for_line(support::DEADLINE, "peer joined");
+    capture.wait_for(
+        support::DEADLINE,
         "the join is announced as a rebalance of its own",
-        &capture,
-        |c| announcements(c) > announced_alone,
+        || (announcements(&capture) > announced_alone).then_some(()),
     );
     // The newcomer says what it found, rather than announcing every member
     // of it as an arrival.
-    wait_for_line(&capture, "joined a fleet already running");
+    capture.wait_for_line(support::DEADLINE, "joined a fleet already running");
 
     let lines = capture.lines();
     // Neither an exact count nor a claim about every line. This runs on the
@@ -250,7 +226,7 @@ fn a_peer_joining_is_announced_and_nothing_reads_as_a_fault() {
         "worker-a inherits the departed share",
         |h| h.splits.len() == 2,
     );
-    wait_for_line(&capture, "peer left");
+    capture.wait_for_line(support::DEADLINE, "peer left");
     let moves = announced_moves(&capture);
     assert!(
         moves[before_departure..].iter().any(|m| *m > 0),

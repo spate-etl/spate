@@ -53,12 +53,19 @@ const POLL_INTERVAL: Duration = Duration::from_millis(5);
 /// Poll `check` until it returns `true` or `timeout` elapses; panics with `what`
 /// on timeout.
 pub fn wait_until(timeout: Duration, what: &str, mut check: impl FnMut() -> bool) {
+    if poll_until(timeout, || check().then_some(())).is_none() {
+        panic!("timed out after {timeout:?} waiting for: {what}");
+    }
+}
+
+/// Poll `check` until it returns a value, or `None` once `timeout` elapses.
+pub(crate) fn poll_until<T>(timeout: Duration, mut check: impl FnMut() -> Option<T>) -> Option<T> {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
-        if check() {
-            return;
+        if let Some(value) = check() {
+            return Some(value);
         }
         std::thread::sleep(POLL_INTERVAL);
     }
-    panic!("timed out after {timeout:?} waiting for: {what}");
+    None
 }

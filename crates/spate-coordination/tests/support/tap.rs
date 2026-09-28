@@ -29,17 +29,20 @@ pub struct Write<'a> {
 
 type Hide = Arc<dyn Fn(Keyspace, &str) -> bool + Send + Sync>;
 type Hook = Arc<dyn Fn(&Write<'_>) -> Option<StoreError> + Send + Sync>;
+type ListHook = Arc<dyn Fn(Keyspace, &str) -> Option<StoreError> + Send + Sync>;
 type Injectors = Vec<(Keyspace, mpsc::UnboundedSender<WatchEvent>)>;
 
 /// Wraps `S`. Watches drop every event whose key [`hide`](Self::hide)
 /// matches, and deliver whatever [`inject`](Self::inject) sends; every write
-/// passes through the [`on_write`](Self::on_write) hook, which fails it by
+/// passes through the [`on_write`](Self::on_write) hook and every listing
+/// through [`on_list`](Self::on_list), either of which fails the call by
 /// returning an error. Clones share their taps.
 #[derive(Clone)]
 pub struct TapStore<S> {
     inner: S,
     hide: Arc<Mutex<Option<Hide>>>,
     hook: Arc<Mutex<Option<Hook>>>,
+    list_hook: Arc<Mutex<Option<ListHook>>>,
     injectors: Arc<Mutex<Injectors>>,
 }
 
@@ -49,6 +52,7 @@ impl<S> TapStore<S> {
             inner,
             hide: Arc::default(),
             hook: Arc::default(),
+            list_hook: Arc::default(),
             injectors: Arc::default(),
         }
     }
@@ -70,6 +74,14 @@ impl<S> TapStore<S> {
         hook: impl Fn(&Write<'_>) -> Option<StoreError> + Send + Sync + 'static,
     ) {
         *self.hook.lock().expect("tap") = Some(Arc::new(hook));
+    }
+
+    /// Run `hook` on every later listing; an error it returns fails it.
+    pub fn on_list(
+        &self,
+        hook: impl Fn(Keyspace, &str) -> Option<StoreError> + Send + Sync + 'static,
+    ) {
+        *self.list_hook.lock().expect("tap") = Some(Arc::new(hook));
     }
 
     /// Deliver `event` on every live watch of `ks`.
@@ -166,6 +178,10 @@ impl<S: CoordinationStore + Clone> CoordinationStore for TapStore<S> {
     }
 
     async fn list(&self, ks: Keyspace, prefix: &str) -> Result<Vec<Entry>, StoreError> {
+        let hook = self.list_hook.lock().expect("tap").clone();
+        if let Some(error) = hook.and_then(|hook| hook(ks, prefix)) {
+            return Err(error);
+        }
         self.inner.list(ks, prefix).await
     }
 }

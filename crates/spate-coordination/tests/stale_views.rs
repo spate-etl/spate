@@ -272,13 +272,11 @@ impl CoordinationStore for WriteFirst {
     }
 }
 
-/// A takeover whose first ownership write loses to the dead owner's late
-/// commit adopts that commit, and its winning retry still counts the
-/// delivery attempt the takeover consumes.
-#[test]
-fn a_takeover_that_adopts_a_late_commit_still_counts_its_attempt() {
+/// A dead owner's split taken over by worker-b, whose first ownership write
+/// loses to `interposed`: the record as the takeover left it.
+fn takeover_after(interposed: fn(&mut serde_json::Value)) -> serde_json::Value {
     let inner = store();
-    let planner = || Box::new(PhasedPlanner::one_final("late-commit:v1", &["x"]));
+    let planner = || Box::new(PhasedPlanner::one_final("takeover-race:v1", &["x"]));
 
     let rt_a = runtime();
     let mut a = StoreCoordinator::new(
@@ -296,12 +294,11 @@ fn a_takeover_that_adopts_a_late_commit_still_counts_its_attempt() {
     crash(rt_a, a);
 
     let rt = runtime();
-    // The dead owner's late commit lands just before B's ownership write.
     let late = WriteFirst::new(
         inner.clone(),
         "split.x",
         |record| record["owner"] == "worker-b",
-        |record| record["watermark"] = (record["watermark"].as_i64().unwrap() + 1).into(),
+        interposed,
     );
     let armed = Arc::clone(&late.armed);
     let mut b = StoreCoordinator::new(late, tuned("worker-b"), rt.handle().clone(), None)
@@ -313,17 +310,85 @@ fn a_takeover_that_adopts_a_late_commit_still_counts_its_attempt() {
     });
     assert!(
         !armed.load(Ordering::Acquire),
-        "the late commit never landed"
+        "the interposed write never landed"
     );
+    serde_json::from_slice(&durable(&rt, &inner, "split.x").value).unwrap()
+}
 
-    let record: serde_json::Value =
-        serde_json::from_slice(&durable(&rt, &inner, "split.x").value).unwrap();
+/// A takeover whose first ownership write loses to the dead owner's late
+/// commit adopts that commit, and its winning retry still counts the
+/// delivery attempt the takeover consumes.
+#[test]
+fn a_takeover_that_adopts_a_late_commit_still_counts_its_attempt() {
+    let record = takeover_after(|record| {
+        record["watermark"] = (record["watermark"].as_i64().unwrap() + 1).into();
+    });
     assert_eq!(record["owner"], "worker-b");
     assert_eq!(record["watermark"], 6, "the late commit was adopted");
     assert_eq!(
         record["attempts"], 1,
         "the takeover's attempt was not counted"
     );
+}
+
+/// A takeover that loses to a write taking the split to its last attempt
+/// parks it instead of claiming it past the cap.
+#[test]
+fn a_takeover_that_loses_to_the_last_attempt_quarantines_instead() {
+    let max = tuned("worker-b").max_attempts;
+    assert_eq!(max, 4, "the edit below assumes the default cap");
+    let inner = store();
+    let planner = || Box::new(PhasedPlanner::one_final("takeover-cap:v1", &["x"]));
+    let rt_a = runtime();
+    let mut a = StoreCoordinator::new(
+        inner.clone(),
+        tuned("worker-a"),
+        rt_a.handle().clone(),
+        None,
+    )
+    .expect("coordinator");
+    a.start(planner()).unwrap();
+    drive(&mut a, &mut Held::default(), "A claiming x", |h| {
+        h.splits.len() == 1
+    });
+    crash(rt_a, a);
+
+    let rt = runtime();
+    let late = WriteFirst::new(
+        inner.clone(),
+        "split.x",
+        |record| record["owner"] == "worker-b",
+        |record| record["attempts"] = 3.into(),
+    );
+    let mut b = StoreCoordinator::new(late, tuned("worker-b"), rt.handle().clone(), None)
+        .expect("coordinator");
+    b.start(planner()).unwrap();
+    let mut held_b = Held::default();
+    let gained = gains(&mut b, &mut held_b, "the quarantine", |h| {
+        !h.quarantined.is_empty()
+    });
+    assert!(gained.is_empty(), "claimed past the cap: {gained:?}");
+}
+
+/// A takeover that loses to the previous owner's release costs no attempt:
+/// the split was handed back, not abandoned.
+#[test]
+fn a_takeover_that_loses_to_a_release_costs_no_attempt() {
+    let record = takeover_after(|record| record["owner"] = serde_json::Value::Null);
+    assert_eq!(record["owner"], "worker-b");
+    assert_eq!(record["attempts"], 0, "a release was charged an attempt");
+}
+
+/// A takeover that loses to the previous owner's failure report counts that
+/// failure once.
+#[test]
+fn a_takeover_that_loses_to_a_failure_report_counts_it_once() {
+    let record = takeover_after(|record| {
+        record["owner"] = serde_json::Value::Null;
+        record["attempts"] = (record["attempts"].as_u64().unwrap() + 1).into();
+    });
+    assert_eq!(record["owner"], "worker-b");
+    assert_eq!(record["attempts"], 1, "the failure was counted twice");
 }
 
 /// A leader whose first assignment write fails publishes it again on a later

@@ -1978,12 +1978,14 @@ impl<S: CoordinationStore> Task<S> {
                 return Ok(());
             };
             let split = spec_record.spec()?;
+            // A takeover consumes an attempt only while the record it
+            // replaces still names an owner. A release costs none, and a
+            // failure report has counted its own.
+            let consumes = kind.consumes_attempt() && state.progress.owner.is_some();
             let mut record = state.progress.clone();
             record.epoch = next_epoch;
             record.owner = Some(self.instance.clone());
-            // Built from the latest record, which never carries a lost CAS's
-            // increment, so every attempt adds it.
-            record.attempts += u32::from(kind.consumes_attempt());
+            record.attempts += u32::from(consumes);
             record.written_at_ms = records::now_ms();
             let expected = state.progress_rev;
             let outcome = self
@@ -2015,6 +2017,7 @@ impl<S: CoordinationStore> Task<S> {
                             self.apply_state_put(&entry)?;
                             let fresh = &self.splits[id];
                             let capped = kind.consumes_attempt()
+                                && fresh.progress.owner.is_some()
                                 && fresh.progress.attempts + 1 >= self.config.max_attempts;
                             if fresh.progress.status != SplitStatus::Runnable
                                 || fresh.progress.epoch >= next_epoch

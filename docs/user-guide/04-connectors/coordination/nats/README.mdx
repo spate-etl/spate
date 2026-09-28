@@ -135,9 +135,9 @@ from its split record.
 
 ## Requirements
 
-- **NATS server ≥ 2.11**, with JetStream enabled (`-js`). Per-message age
-  limits and limit markers shipped in 2.11; the worker verifies the version at
-  startup and fails actionably against anything older.
+- **A NATS server on a [supported line](#supported-server-versions)**, with
+  JetStream enabled (`-js`). The worker verifies the version at startup and
+  fails actionably against an older one.
 - **One job name per coordinated job.** A fingerprint check rejects
   misconfigured workers before they can touch anything.
 - **Permission to update the state bucket's stream** when an earlier version
@@ -168,6 +168,18 @@ the `nats` body so the buckets survive losing a node. The client learns the othe
 nodes from the first server it reaches, so one reachable entry in `servers` is
 enough. List more than one, or a DNS name that resolves to every node, so the
 first connection survives a node being down.
+
+## Supported server versions
+
+| NATS | Support |
+| --- | --- |
+| 2.11 | Guaranteed |
+
+Guaranteed means every change to this store runs against that line before it
+ships, and a defect you hit on it is a defect this project fixes. The store
+needs per-message age limits and limit markers, and the worker refuses a server
+too old to have them at startup. Later releases are accepted, and CI does not
+run them.
 
 ## What an outage does
 

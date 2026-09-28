@@ -355,7 +355,8 @@ The whole coordinated lifecycle runs against `file://` URLs with no
 infrastructure, which is what the examples this page draws on do: solo,
 and two-instance over a shared in-process store. The Docker-gated suites run
 against a **SeaweedFS** S3 gateway, and, for durable resume and multi-instance
-over the production backend, SeaweedFS plus a NATS 2.11 container
+over the production backend, SeaweedFS plus a
+[NATS](../../coordination/nats/README.mdx#supported-server-versions) container
 (`cargo test -p spate-s3 -- --ignored --test-threads=1`).
 
 ## Metrics

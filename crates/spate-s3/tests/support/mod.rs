@@ -26,7 +26,7 @@ use std::time::Duration;
 pub(crate) struct PipelineYaml {
     name: String,
     threads: u32,
-    checkpoint: Option<String>,
+    checkpoint: String,
     url: String,
     source: Vec<(String, String)>,
     store: Option<String>,
@@ -49,7 +49,7 @@ impl PipelineYaml {
         PipelineYaml {
             name: name.to_owned(),
             threads: 2,
-            checkpoint: Some("100ms".to_owned()),
+            checkpoint: "100ms".to_owned(),
             url,
             source: vec![("split_target_bytes".to_owned(), "1MiB".to_owned())],
             store,
@@ -63,7 +63,7 @@ impl PipelineYaml {
     }
 
     pub(crate) fn checkpoint(mut self, interval: &str) -> Self {
-        self.checkpoint = Some(interval.to_owned());
+        self.checkpoint = interval.to_owned();
         self
     }
 
@@ -82,12 +82,9 @@ impl PipelineYaml {
 
     pub(crate) fn build(&self) -> String {
         let mut yaml = format!(
-            "pipeline: {{ name: {}, threads: {} }}\nadmin: {{ listen: none }}\n",
-            self.name, self.threads
+            "pipeline: {{ name: {}, threads: {} }}\nadmin: {{ listen: none }}\ncheckpoint: {{ interval: {} }}\n",
+            self.name, self.threads, self.checkpoint
         );
-        if let Some(interval) = &self.checkpoint {
-            yaml.push_str(&format!("checkpoint: {{ interval: {interval} }}\n"));
-        }
         yaml.push_str("metrics: { exporter: none }\nsource:\n  s3:\n");
         yaml.push_str(&format!("    url: \"{}\"\n", self.url));
         for (key, value) in &self.source {

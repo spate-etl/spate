@@ -13,6 +13,7 @@ mod support;
 
 use spate_core::pipeline::ExitState;
 use spate_test::{SinkScript, WriteOutcome, wait_until};
+use spate_test_support::container_image;
 use std::time::Duration;
 use support::seaweed::Gateway;
 use support::{
@@ -23,15 +24,14 @@ use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::runners::SyncRunner;
 use testcontainers::{Container, GenericImage, ImageExt};
 
-const NATS_IMAGE: &str = "nats";
-const NATS_TAG: &str = "2.11-alpine";
 const NATS_CLIENT_PORT: u16 = 4222;
 
 /// The NATS floor for leases is 2s.
 const LEASE: Duration = Duration::from_secs(2);
 
 fn start_nats() -> (Container<GenericImage>, u16) {
-    let container = GenericImage::new(NATS_IMAGE, NATS_TAG)
+    let (image, tag) = container_image(&["--pull", "nats"]);
+    let container = GenericImage::new(image, tag)
         .with_exposed_port(NATS_CLIENT_PORT.tcp())
         .with_wait_for(WaitFor::message_on_stderr("Server is ready"))
         .with_cmd(["-js"])

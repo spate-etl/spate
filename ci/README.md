@@ -25,6 +25,7 @@ are testing, so adding either is a change inside `ci/`.
 | [`clickhouse`](clickhouse/README.md) | `lts-previous`, `lts`, `stable` | `spate-clickhouse`, and `spate`'s examples tier |
 | [`debian`](debian/README.md) | `trixie` | `spate-kafka`'s `tls_system_ca`, as its client image |
 | [`kafka`](kafka/README.md) | `stable` | `spate-kafka`, and `spate`'s end-to-end suites |
+| [`nats`](nats/README.md) | `floor`, `below-floor` | `spate-coordination`, `spate-s3`'s `coordinated_nats`, and `spate`'s examples tier |
 
 A service's own README carries what is specific to it: which release lines it
 has, its vendor's support window, and why those lanes.
@@ -72,15 +73,16 @@ digest on every run.
 
 **Exact tags**, the vendor's full release version, so a bump diff names the
 release it moved to: `YY.M.P.B` for ClickHouse, `MAJOR.POINT` for Debian,
-`MAJOR.MINOR.PATCH` for Kafka.
+`MAJOR.MINOR.PATCH` for Kafka, `MAJOR.MINOR.PATCH-alpine` for NATS.
 
 ## What CI runs
 
 The `containers` job runs the whole container tier on each service's primary
-lane. Any other lane resolving to a different image gets a job of its own, one
-runner each. A lane resolving to the primary lane's image is dropped, and
-`cargo xtask ci-changes` logs which and why, so a service whose `stable` and `lts`
-point at one release costs no extra job until they diverge.
+lane. For a service whose extra lanes `cargo xtask ci-changes` reads, any other
+lane resolving to a different image gets a job of its own, one runner each. A
+lane resolving to the primary lane's image is dropped, and
+`cargo xtask ci-changes` logs which and why, so a service whose `stable` and
+`lts` point at one release costs no extra job until they diverge.
 
 ## Bumps
 
@@ -110,8 +112,9 @@ The bump usually cannot be fixed inside its own pull request, so:
 3. A row in the table above.
 4. The suite's harness reads its manifest through the same helper.
 5. `cargo xtask ci-changes` maps `ci/<service>/*` to that suite. A service with
-   more than one lane also has its extra lanes read for the matrix, and a
-   `ci.yml` job consuming them.
+   more than one lane the suite runs on also has its extra lanes read for the
+   matrix, and a `ci.yml` job consuming them. A lane only one test boots, such as
+   NATS's `below-floor`, is not read.
 6. The Dependabot entries.
 
 Steps 1 to 3 are this tree, and `cargo xtask integration-test` picks the service up from

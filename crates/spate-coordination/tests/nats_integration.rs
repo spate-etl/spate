@@ -1,4 +1,4 @@
-//! The coordination protocol over a real NATS 2.11 server: validates the
+//! The coordination protocol over a real NATS server: validates the
 //! whole `NatsStore` mapping, covering bucket provisioning, the startup
 //! probe, revision CAS, marker-driven expiry surfacing through the watch,
 //! and heartbeats keeping leases alive across many TTLs, by running the same
@@ -20,24 +20,31 @@ use spate_coordination::{
     CoordinationConfig, CoordinationErrorKind, NatsCoordinator, SplitCoordinator, SplitProgress,
     StoreCoordinator,
 };
+use spate_test_support::container_image;
 use std::time::{Duration, Instant};
 use support::{Held, PhasedPlanner, crash, drive, drive_pair, runtime, split_id};
 use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::runners::SyncRunner;
 use testcontainers::{Container, GenericImage, ImageExt};
 
-const IMAGE: &str = "nats";
-const TAG: &str = "2.11-alpine";
-const OLD_TAG: &str = "2.10-alpine";
 const CLIENT_PORT: u16 = 4222;
 
 /// The NATS floor for leases is 2s; timing assertions scale from this.
 const LEASE: Duration = Duration::from_secs(2);
 
-fn start_nats(tag: &str) -> (Container<GenericImage>, u16) {
-    let container = GenericImage::new(IMAGE, tag)
+/// The server `ci/nats/` pins for `lane`, or for the primary lane, pulled by
+/// digest.
+fn nats_image(lane: Option<&str>) -> GenericImage {
+    let mut args = vec!["--pull", "nats"];
+    args.extend(lane);
+    let (name, tag) = container_image(&args);
+    GenericImage::new(name, tag)
         .with_exposed_port(CLIENT_PORT.tcp())
         .with_wait_for(WaitFor::message_on_stderr("Server is ready"))
+}
+
+fn start_nats(lane: Option<&str>) -> (Container<GenericImage>, u16) {
+    let container = nats_image(lane)
         .with_cmd(["-js"])
         .start()
         .expect("start NATS (is Docker running? first run pulls the image)");
@@ -79,7 +86,7 @@ fn worker_with(
 #[test]
 #[ignore = "needs Docker; run explicitly"]
 fn partition_takeover_and_completion_over_real_nats() {
-    let (_nats, port) = start_nats(TAG);
+    let (_nats, port) = start_nats(None);
     let rt = runtime();
     let ids = ["n0", "n1", "n2", "n3"];
     let planner = || Box::new(PhasedPlanner::one_final("nats-smoke:v1", &ids));
@@ -164,7 +171,7 @@ fn partition_takeover_and_completion_over_real_nats() {
 #[test]
 #[ignore = "needs Docker; run explicitly"]
 fn resume_after_full_restart_reads_durable_records() {
-    let (_nats, port) = start_nats(TAG);
+    let (_nats, port) = start_nats(None);
     let planner = || Box::new(PhasedPlanner::one_final("nats-resume:v1", &["r0"]));
 
     // First incarnation commits progress and releases gracefully.
@@ -206,7 +213,7 @@ fn resume_after_full_restart_reads_durable_records() {
 #[test]
 #[ignore = "needs Docker; run explicitly"]
 fn servers_below_the_floor_are_rejected_actionably() {
-    let (_nats, port) = start_nats(OLD_TAG);
+    let (_nats, port) = start_nats(Some("below-floor"));
     let rt = runtime();
     let mut w = worker(port, "floor", rt.handle(), "worker-a");
     let planner = Box::new(PhasedPlanner::one_final("nats-floor:v1", &["f0"]));
@@ -234,7 +241,7 @@ fn servers_below_the_floor_are_rejected_actionably() {
 #[test]
 #[ignore = "needs Docker; run explicitly"]
 fn delete_outcomes_match_the_trait() {
-    let (_nats, port) = start_nats(TAG);
+    let (_nats, port) = start_nats(None);
     let rt = runtime();
     let store = NatsStore::new(nats_config(port, "delete"), LEASE).expect("nats store");
     rt.block_on(async {
@@ -310,7 +317,7 @@ async fn fill_lease_bucket(
 #[test]
 #[ignore = "needs Docker; run explicitly"]
 fn a_listing_whose_undelivered_tail_expires_ends() {
-    let (_nats, port) = start_nats(TAG);
+    let (_nats, port) = start_nats(None);
     let rt = runtime();
     rt.block_on(async {
         let store = NatsStore::new(nats_config(port, "stall-list"), LEASE).expect("store");
@@ -332,7 +339,7 @@ fn a_listing_whose_undelivered_tail_expires_ends() {
 #[ignore = "needs Docker; run explicitly"]
 #[allow(clippy::print_stderr)]
 fn a_watch_snapshot_whose_undelivered_tail_expires_ends() {
-    let (_nats, port) = start_nats(TAG);
+    let (_nats, port) = start_nats(None);
     let rt = runtime();
     // The poll's timer and the watch's drop both need a runtime context.
     let _context = rt.enter();
@@ -485,7 +492,7 @@ fn await_leases_expired(port: u16, job: &str) {
 #[test]
 #[ignore = "needs Docker; run explicitly"]
 fn durable_markers_expire_across_restarts() {
-    let (_nats, port) = start_nats(TAG);
+    let (_nats, port) = start_nats(None);
     for i in 0..4 {
         start_claim_release(nats_config(port, "markers"), None, &format!("start {i}"));
         // The next leader deletes the record of an instance whose lease is gone.
@@ -502,7 +509,7 @@ fn durable_markers_expire_across_restarts() {
 #[test]
 #[ignore = "needs Docker; run explicitly"]
 fn an_existing_state_bucket_gains_message_ttls() {
-    let (_nats, port) = start_nats(TAG);
+    let (_nats, port) = start_nats(None);
     let rt = runtime();
     // The polls' timers and the clients' drops need a runtime context.
     let _context = rt.enter();
@@ -598,9 +605,7 @@ authorization {
   ]
 }
 "#;
-    let nats = GenericImage::new(IMAGE, TAG)
-        .with_exposed_port(CLIENT_PORT.tcp())
-        .with_wait_for(WaitFor::message_on_stderr("Server is ready"))
+    let nats = nats_image(None)
         .with_copy_to("/etc/nats/deny-update.conf", CONF.as_bytes().to_vec())
         .with_cmd(["-c", "/etc/nats/deny-update.conf"])
         .start()
@@ -650,9 +655,7 @@ fn a_rejected_password_is_fatal() {
 jetstream: enabled
 authorization { users: [ { user: spate, password: spate } ] }
 "#;
-    let nats = GenericImage::new(IMAGE, TAG)
-        .with_exposed_port(CLIENT_PORT.tcp())
-        .with_wait_for(WaitFor::message_on_stderr("Server is ready"))
+    let nats = nats_image(None)
         .with_copy_to("/etc/nats/auth.conf", CONF.as_bytes().to_vec())
         .with_cmd(["-c", "/etc/nats/auth.conf"])
         .start()

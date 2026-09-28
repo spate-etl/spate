@@ -40,6 +40,7 @@ use apache_avro::{Schema, to_avro_datum};
 use rdkafka::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
+use spate_test_support::container_image;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -950,14 +951,15 @@ fn clickhouse_aggregating_mv_example_builds_states() {
 #[test]
 #[ignore = "requires Docker"]
 fn nats_coordinated_backfill_example_covers_the_prefix() {
-    // The store version floor is 2.11. The coordinator refuses anything older
-    // at startup, so this tag cannot be lowered.
-    let nats: Container<GenericImage> = GenericImage::new("nats", "2.11-alpine")
+    // The server `ci/nats/` pins, fetched by digest and re-tagged so this
+    // starts the pinned bytes.
+    let (nats_image, nats_tag) = container_image(&["--pull", "nats"]);
+    let nats: Container<GenericImage> = GenericImage::new(&nats_image, &nats_tag)
         .with_exposed_port(4222.tcp())
         .with_wait_for(WaitFor::message_on_stderr("Server is ready"))
         .with_cmd(["-js"])
         .start()
-        .expect("start NATS (is Docker running? first run pulls nats:2.11-alpine)");
+        .unwrap_or_else(|e| panic!("start NATS container {nats_image}:{nats_tag}: {e}"));
     let port = nats.get_host_port_ipv4(4222).expect("nats client port");
     let url = format!("nats://127.0.0.1:{port}");
 

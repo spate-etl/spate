@@ -50,8 +50,8 @@ jobs:
       # A JSON array of `{package, arm, cargo_features}` objects, one per shard.
       bench-shards: ${{ steps.classify.outputs.bench-shards }}
       # A JSON array of `{lane}` objects: the ClickHouse lanes needing a job
-      # beyond the `lts` one `containers` runs. Empty when the two lanes
-      # resolve to the same image, which they do until `stable` moves ahead.
+      # beyond the `lts` one `containers` runs, which are those pinning a
+      # different image from `lts`.
       clickhouse-lanes: ${{ steps.classify.outputs.clickhouse-lanes }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

@@ -419,6 +419,7 @@ pub(crate) fn test_config(threads: usize) -> PipelineConfig {
         deserializer: None,
         sink: Some(ComponentConfig::new("fake", serde_yaml::Value::Null)),
         sinks: None,
+        coordination: None,
     }
 }
 

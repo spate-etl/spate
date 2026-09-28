@@ -1,13 +1,13 @@
 ---
-description: "The coordination backend is injected at pipeline assembly rather than configured per connector, so adding a backend touches no connector code."
+description: "The coordination backend is injected at pipeline assembly rather than configured per connector, so a new backend touches no connector. Superseded by ADR-0049."
 ---
 
 # ADR-0036 — The coordination backend is injected at assembly, never configured per connector
 
-- **Status:** accepted
+- **Status:** superseded
 - **Date:** 2026-07-18 (recorded 2026-08-06 from the decision log)
 - **Supersedes:** —
-- **Superseded by:** —
+- **Superseded by:** [ADR-0049](0049-coordination-section-in-the-pipeline-config.md)
 
 ## Context and problem statement
 

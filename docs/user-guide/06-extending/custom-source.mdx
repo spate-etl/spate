@@ -97,6 +97,10 @@ them wherever your source resumes from instead.
   and restart fetching for specific lanes. Sources that can't pause rely on
   bounded-queue pushback alone, but a pausable source keeps memory flat
   under sink pressure.
+- **`configure_coordination`** receives the pipeline's `coordination:`
+  section before `open`, when the file has one. The default rejects it, so
+  only a [coordination-aware source](#coordination-aware-sources) overrides
+  it.
 
 **Class a rejected credential or TLS handshake `Fatal`.** That covers a
 certificate your TLS stack fails to verify, a fatal TLS alert from the server
@@ -414,9 +418,9 @@ attempt cap instead.
 ```rust file=crates/spate/examples/custom_coordinated_source.rs region=driver
 ```
 
-- **The coordinator arrives fully built**, from assembly (step 4 below); expose
-  that as a `with_coordinator(...)` builder on a config-driven source.
-  `CoordinationDriver::new` takes the boxed coordinator and nothing else.
+- **The coordinator arrives built**, from the pipeline's `coordination:`
+  section or from code (step 4 below). `CoordinationDriver::new` takes the
+  boxed coordinator and nothing else.
 - **`driver.start` returns the empty ready signal**,
   `SourceEvent::LanesAssigned(vec![])`. It bumps the controller's assignment
   epoch and marks the pipeline running while the claims race, and the splits
@@ -498,8 +502,18 @@ signal drain.
 
 ### 4. Construct a backend
 
-The coordinator is injected at assembly time, exactly like the framer
-seam. Whatever the backend, the shape is the same: build a
+A source that reads the pipeline's
+[`coordination:` section](../07-reference/configuration.mdx#coordination)
+overrides `configure_coordination`. It decodes the section there with
+`CoordinatorSpec::from_section`, which checks every key and does no I/O, and
+keeps the spec. In `open` it calls `spec.build(io, metrics)`, passing the
+`CoordinationMetrics` built from the source's `Meter`. The section then selects
+the store and its tuning with no code in `main`, and the store's TTL and
+`lease_duration` are one value.
+
+A coordinator built in code takes a `with_coordinator(...)` builder instead;
+reject the section in `configure_coordination` when one was given. Whatever the
+backend, the shape is the same: build a
 [coordination store](../04-connectors/coordination/README.mdx), wrap it in a
 `StoreCoordinator`, hand that to your source:
 

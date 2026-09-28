@@ -25,9 +25,10 @@
 //! plus the reusable source-side driver
 //! ([`CoordinationDriver`](driver::CoordinationDriver)). Concrete backends
 //! live in backend crates (the NATS JetStream KV backend in
-//! `spate-coordination`); a source receives its coordinator at
-//! pipeline-assembly time, mirroring the framing seam
-//! ([`RecordFramer`](crate::framing::RecordFramer)).
+//! `spate-coordination`). A source builds its coordinator from the
+//! pipeline's `coordination:` section
+//! ([`Source::configure_coordination`](crate::source::Source::configure_coordination))
+//! or receives one built in code.
 //!
 //! # Delivery contract
 //!
@@ -491,8 +492,7 @@ pub trait SplitPlanner: Send {
 /// Per-worker coordination handle: leases splits toward a bounded working
 /// set, surfaces ownership changes, and owns the fenced progress commit.
 ///
-/// Dyn-compatible; sources hold a `Box<dyn SplitCoordinator>` injected at
-/// assembly time (typically via the
+/// Dyn-compatible; sources hold a `Box<dyn SplitCoordinator>` (typically via the
 /// [`CoordinationDriver`](driver::CoordinationDriver) rather than
 /// directly). Driven from the controller thread; implementations do their
 /// I/O elsewhere and bound every call.

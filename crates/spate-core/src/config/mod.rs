@@ -7,7 +7,9 @@
 //! (`deny_unknown_fields` at every level). The `source`, `deserializer`,
 //! and `sink` sections are single-key mappings selecting a component type;
 //! their bodies are opaque [`ComponentConfig`]s handed to the component's
-//! factory, which deserializes its own typed config.
+//! factory, which deserializes its own typed config. The optional
+//! `coordination` section is a [`CoordinationSection`] handed to a
+//! coordinated source.
 //!
 //! ```yaml
 //! pipeline: { name: orders, threads: 4, io_threads: 2 }
@@ -60,11 +62,13 @@
 
 mod chunk;
 mod component;
+mod coordination;
 mod error;
 mod interpolate;
 pub mod redact;
 
 pub use component::ComponentConfig;
+pub use coordination::CoordinationSection;
 pub use error::ConfigError;
 
 /// Re-export of `serde_yaml::Value`, the opaque body type carried by a
@@ -128,6 +132,10 @@ pub struct PipelineConfig {
     /// with `sink`. Resolve via [`sink_config`](Self::sink_config).
     #[serde(default)]
     pub sinks: Option<BTreeMap<String, ComponentConfig>>,
+    /// Coordinator tuning and the shared store for a coordinated source.
+    /// `None` leaves the source to its own default.
+    #[serde(default)]
+    pub coordination: Option<CoordinationSection>,
 }
 
 /// Identity and thread budget (`pipeline:`).
@@ -520,6 +528,7 @@ impl PipelineConfig {
             deserializer: None,
             sink,
             sinks,
+            coordination: None,
         }
     }
 
@@ -967,6 +976,28 @@ sink: { memory: {} }
         let err = PipelineConfig::from_str(yaml).unwrap_err().to_string();
         assert!(err.contains("chunk"), "{err}");
         assert!(err.contains("source"), "{err}");
+    }
+
+    #[test]
+    fn coordination_section_is_optional_and_parsed_when_present() {
+        let base = "pipeline: { name: demo }\nsource: { memory: {} }\nsink: { memory: {} }\n";
+        assert!(
+            PipelineConfig::from_str(base)
+                .unwrap()
+                .coordination
+                .is_none()
+        );
+
+        let yaml =
+            format!("{base}coordination:\n  lease_duration: 10s\n  store: {{ nats: {{}} }}\n");
+        let cfg = PipelineConfig::from_str(&yaml).unwrap();
+        let section = cfg.coordination.expect("section");
+        assert_eq!(section.store().type_tag(), "nats");
+
+        let yaml = format!("{base}coordination: {{ lease_duration: 10s }}\n");
+        let err = PipelineConfig::from_str(&yaml).unwrap_err().to_string();
+        assert!(err.contains("coordination"), "{err}");
+        assert!(err.contains("store"), "{err}");
     }
 
     #[test]

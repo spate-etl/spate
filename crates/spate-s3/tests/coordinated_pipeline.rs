@@ -330,3 +330,73 @@ fn a_cooperative_revocation_moves_splits_with_zero_duplicates() {
         total - union.len(),
     );
 }
+
+/// [`config_yaml`] plus a `coordination:` section naming a NATS server on a
+/// port nothing listens on.
+fn unreachable_nats_yaml(data: &std::path::Path) -> String {
+    format!(
+        "{}coordination:
+  op_timeout: 100ms
+  lease_duration: 2s
+  replan_interval: 2s
+  startup_max_attempts: 1
+  store:
+    nats: {{ servers: [\"nats://127.0.0.1:1\"], job: unreachable }}
+",
+        config_yaml(data)
+    )
+}
+
+/// The `coordination:` section reaches the S3 source's coordinator: the run
+/// fails on the store named there instead of completing solo.
+#[test]
+fn the_coordination_section_builds_the_coordinator() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    fs::create_dir_all(&data).unwrap();
+    fs::write(data.join("obj.ndjson"), lines_bytes(&recs("o", 5))).unwrap();
+
+    let launched = launch_customized(
+        &unreachable_nats_yaml(&data),
+        test_options(),
+        |_| {},
+        |source, _| line_framer(source),
+    );
+    let report = launched
+        .run
+        .wait_exit(Duration::from_secs(60))
+        .expect("run exits")
+        .expect("no start error");
+    let ExitState::Failed(failure) = report.state else {
+        panic!("expected the unreachable store to fail the run");
+    };
+    assert!(failure.reason.contains("store probe"), "{}", failure.reason);
+}
+
+/// A `coordination:` section and `with_coordinator` on one source is a
+/// startup error.
+#[test]
+fn a_coordination_section_conflicts_with_an_injected_coordinator() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    fs::create_dir_all(&data).unwrap();
+
+    let store = shared_store();
+    let launched = launch_customized(
+        &unreachable_nats_yaml(&data),
+        test_options(),
+        |_| {},
+        move |source, io| {
+            let coordinator =
+                spate_coordination::StoreCoordinator::new(store, test_tuning(), io, None)
+                    .expect("coordinator builds");
+            line_framer(source).with_coordinator(Box::new(coordinator))
+        },
+    );
+    let err = launched
+        .run
+        .wait_exit(Duration::from_secs(30))
+        .expect("run exits")
+        .expect_err("startup fails");
+    assert!(err.to_string().contains("with_coordinator"), "{err}");
+}

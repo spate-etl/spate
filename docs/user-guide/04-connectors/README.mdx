@@ -32,7 +32,7 @@ Connectors are grouped by role:
 | [ClickHouse](sinks/clickhouse/README.mdx) | Sink | `spate-clickhouse` | `clickhouse` | `sink: { clickhouse: ... }` (or [`sinks:` for multi-table](sinks/clickhouse/multi-table.mdx)) |
 | [Avro](formats/avro/README.mdx) | Format (deserializer) | `spate-avro` | `avro` | `deserializer: { avro: ... }` |
 | [JSON](formats/json/README.mdx) | Format (deserializer) | `spate-json` | `json` | `deserializer: { json: ... }` |
-| [NATS JetStream](coordination/nats/README.mdx) | Coordination store | `spate-coordination` | `coordination-nats` | — (assembly wiring, not YAML) |
+| [NATS JetStream](coordination/nats/README.mdx) | Coordination store | `spate-coordination` | `coordination-nats` | `coordination: { store: { nats: ... } }` |
 | [Memory / Capture](memory.mdx) | Test source + sink | `spate-test` | — (separate dev-dependency) | `source: { memory: {} }` / `sink: { capture: {} }` (informational) |
 
 Datagen and Memory / Capture are not for production deployments. Datagen

@@ -30,8 +30,8 @@ where requirements, provisioning, and outage behavior live.
 
 ## Deploying the fleet
 
-The coordinator is assembly wiring; there is no `coordination:` YAML on the
-source ([why](../07-reference/configuration.mdx#code-level-knobs-not-yaml)).
+Each replica names its store and its identity in the pipeline file's
+[`coordination:`](../07-reference/configuration.mdx#coordination) section.
 Deployment carries a narrow set of guarantees:
 
 - **Every replica runs the same binary with the same source config.** A
@@ -53,12 +53,13 @@ Deployment carries a narrow set of guarantees:
 A plain `Deployment`, with no StatefulSet, no persistent volumes and no
 per-replica configuration:
 
-- **`instance_id` from the pod name.** It must be unique per live
-  replica; a stable identity lets a restarted pod reclaim its own splits
-  instantly instead of waiting out the lease. Two live processes sharing
-  an id is detected and fatal. (A pod name is already unique per live
-  replica; the id charset is `[A-Za-z0-9_-]`, 1–128 bytes, so a name
-  containing dots is rejected; substitute them, e.g. with `-`.)
+- **`instance_id` from the pod name.** Expose it through the downward
+  API as `POD_NAME` and set `instance_id: "${POD_NAME}"`. It must be unique
+  per live replica; a stable identity lets a restarted pod reclaim its own
+  splits instantly instead of waiting out the lease. Two live processes
+  sharing an id is detected and fatal. The id charset is `[A-Za-z0-9_-]`,
+  1–128 bytes, so a pod name containing dots is rejected at startup; name
+  the pods without dots.
 - **`terminationGracePeriodSeconds` > drain timeout.** A SIGTERM'd
   replica drains, commits, and releases its splits on the way out, so
   peers pick them up immediately; a SIGKILL'd one is covered by lease
@@ -172,15 +173,10 @@ irreducible at-least-once replay.
 
 ## Tuning
 
-| Knob | Default | Description |
-|---|---|---|
-| `lease_duration` | 30s | Takeover latency after an ungraceful death. Heartbeats run at a third of it. Lower = faster failover, more store traffic, more sensitivity to pauses. |
-| `max_in_flight` | 8 | The working set: splits a worker holds (and processes) at once — also its data-lane count. Size it like a thread pool. |
-| `max_attempts` | 4 | Failing tenancies before a split is quarantined. |
-| `replan_interval` | 60s | How often the leader re-runs an open plan (growing inputs). Final plans stop replanning. |
-| `instance_id` | random | Stable identity for instant reclaim after restarts. Use the pod name. |
-| `rebalance_delay` | 20s | How long the leader withholds a departed instance's splits before reassigning them, so a pod bounce reclaims its own work instead of the fleet churning around it. Cancelled early when the instance returns. 0 reassigns immediately. |
-| `drain_deadline` | 10s | How long a revoked split may keep draining before the release is forced (and its uncommitted tail replays). Doubles as the no-progress timeout over a drain whose revocation was cancelled: that one is forced only if it commits nothing at all for this long. Larger = more patience with slow-draining sinks, slower rebalances; smaller = faster rebalances, more duplicates. May exceed `lease_duration` — a draining split is still heartbeated, so a long drain does not race its own lease; size it against how long the sink takes to flush a split's tail. See [time to balance](#time-to-balance). |
+The coordinator's knobs (`lease_duration`, `max_in_flight`,
+`rebalance_delay`, `drain_deadline` and the rest) are keys of the
+[`coordination:` section](../07-reference/configuration.mdx#coordination),
+which lists each with its default and floor.
 
 Split sizing: aim for roughly uniform-cost splits in the tens-of-MB to
 ~128 MB range (or the row-count equivalent), big enough that lease

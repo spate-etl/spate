@@ -74,6 +74,10 @@ These top-level sections belong to the framework:
   hysteresis: `max_inflight_bytes`, `high_ratio`, `low_ratio`, `min_pause`.
 - **`metrics`** — exporter selection and observability knobs: `exporter`,
   `per_partition_detail`, `e2e_basis`.
+- **`coordination`** — the store a coordinated source's instances share and
+  the coordinator's tuning: `store`, `instance_id`, `lease_duration`,
+  `max_in_flight` and the rest
+  ([reference](../07-reference/configuration.mdx#coordination)).
 
 Only `pipeline`, `source`, and `sink` are required; every other section and
 field has a documented default (`deserializer` is optional entirely, since
@@ -90,7 +94,9 @@ These conventions apply throughout:
 
 Cross-field validation runs at load as well. For example,
 `checkpoint.interval` has a 100ms floor, and the backpressure ratios must
-satisfy `0 < low_ratio < high_ratio <= 1`.
+satisfy `0 < low_ratio < high_ratio <= 1`. The `coordination` keys are the
+exception: the source checks them when the pipeline starts, before the
+pipeline threads run, and the errors carry the same dotted paths.
 
 ## Environment interpolation
 

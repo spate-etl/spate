@@ -920,6 +920,32 @@ fn startup_error_after_driver_spawn_stops_drivers_and_returns_err() {
     drop(occupied);
 }
 
+/// A `coordination:` section on a source that does not take one fails `run`
+/// before the source opens.
+#[test]
+fn coordination_section_on_an_uncoordinated_source_fails_startup() {
+    let mut cfg = test_config(1);
+    cfg.coordination = Some(
+        serde_yaml::from_str("store: { nats: { servers: [\"nats://n:4222\"], job: j } }")
+            .expect("section"),
+    );
+    let h = start_with_config(cfg, |shared, log| FakeChain {
+        shared,
+        log,
+        mode: ChainMode::Ok,
+        batches_seen: 0,
+    });
+    let result = h.join.join().unwrap();
+    let Err(err @ StartError::Config(_)) = result else {
+        panic!("expected StartError::Config, got {result:?}");
+    };
+    assert!(
+        err.to_string().contains("does not use coordination"),
+        "{err}"
+    );
+    assert!(!h.shared.lock().unwrap().opened, "the source must not open");
+}
+
 /// `admin.listen: none` runs and drains with no admin server. With no
 /// listener there is no stop channel to signal, and the run has to reach its
 /// drain and its controller join anyway.

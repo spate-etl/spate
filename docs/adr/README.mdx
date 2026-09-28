@@ -69,7 +69,7 @@ record appears in the table below.
 | [0033](0033-s3-split-packing.md) | Listing-order first-fit packing with a bounded lookback and a per-object open cost | accepted | 2026-07-18 |
 | [0034](0034-s3-split-identity.md) | Split identity is a truncated digest over member keys, versions and a packing version | accepted | 2026-07-18 |
 | [0035](0035-s3-poison-policy.md) | Object-level failures poison the split; credential and configuration failures are fatal | accepted | 2026-07-18 |
-| [0036](0036-coordinator-wiring-at-assembly.md) | The coordination backend is injected at assembly, never configured per connector | accepted | 2026-07-18 |
+| [0036](0036-coordinator-wiring-at-assembly.md) | The coordination backend is injected at assembly, never configured per connector | superseded | 2026-07-18 |
 | [0037](0037-control-plane-wait-ownership.md) | The driver owns the wait, not the coordination backend | accepted | 2026-07-18 |
 | [0038](0038-leader-computed-sticky-assignment.md) | Leader-computed sticky assignment replaces peer-to-peer work stealing | accepted | 2026-07-21 |
 | [0039](0039-split-revocation-cooperative-then-forced.md) | Split revocation is cooperative first, forced second | accepted | 2026-07-21 |
@@ -82,6 +82,7 @@ record appears in the table below.
 | [0046](0046-fatal-deserializer-error-outside-the-record-policy.md) | A deserializer can stop the pipeline outside its record policy | accepted | 2026-09-24 |
 | [0047](0047-a-rejected-credential-or-tls-handshake-is-fatal.md) | A rejected credential or TLS handshake is fatal in every connector | accepted | 2026-09-26 |
 | [0048](0048-changelog-fragments-are-the-release-signal.md) | Changelog fragments carry the release signal, so subjects carry none | accepted | 2026-09-27 |
+| [0049](0049-coordination-section-in-the-pipeline-config.md) | The coordination store is configured in a top-level pipeline section, and the source builds its coordinator from it | accepted | 2026-09-27 |
 
 ## Related
 

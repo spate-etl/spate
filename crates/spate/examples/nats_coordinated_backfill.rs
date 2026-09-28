@@ -48,8 +48,8 @@
 //! down, at `RUST_LOG=info,spate_coordination=debug`, which is the run to
 //! make to watch one object's worth of reassignment.
 //!
-//! Draining a paced chain takes time, so `drain_deadline` below sits far
-//! above its default. A drain that outruns the deadline is revoked outright
+//! Draining a paced chain takes time, so the `drain_deadline` in
+//! [`COORDINATION`] sits far above its default. A drain that outruns the deadline is revoked outright
 //! and its uncommitted tail replays under the new owner instead. Both are
 //! safe; only the first is a clean revocation.
 //!
@@ -73,8 +73,8 @@
 //! reaches the survivor as a limit marker, and the leader then withholds
 //! the dead instance's splits for `rebalance_delay` before assigning them.
 //! That window lets a restarting worker reclaim its own work instead of the
-//! fleet churning around a bounce. With the values below it is at most
-//! twenty seconds.
+//! fleet churning around a bounce. With the values in [`COORDINATION`] it
+//! is at most twenty seconds.
 //!
 //! Either way the new owner resumes from the last committed watermark, so
 //! records written after it are replayed. Delivery is at-least-once.
@@ -96,8 +96,6 @@
 // Examples talk to their user on stdout/stderr by design.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
-use spate::coordination::store::nats::{NatsConfig, NatsStore};
-use spate::coordination::{CoordinationConfig, StoreCoordinator};
 use spate::json::NdjsonFramer;
 use spate::prelude::*;
 use spate::s3::S3Source;
@@ -106,21 +104,33 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::time::Duration;
 
-/// One constant drives both sides of the lease agreement: the store's TTL
-/// (the bucket age limit that expires an unheartbeated key) and the
-/// coordinator's `lease_duration` (the protocol's takeover ceiling). They
-/// are separate mechanisms and the coordinator rejects a store whose TTL
-/// diverges from its config, so they are built from the same value.
+/// The coordination section, as a deployment would write it. The store's
+/// lease TTL and the coordinator's lease are both `lease_duration`.
 ///
-/// Demo-fast; the default is 30s and the NATS floor is 2s, below which
-/// one-second marker granularity would dominate.
-const LEASE: Duration = Duration::from_secs(10);
-
-/// Job identity: it suffixes both KV bucket names, every instance of one
-/// job uses it, and two different jobs must never share one.
-const JOB: &str = "nats-backfill-demo";
-
-const DEFAULT_NATS: &str = "nats://127.0.0.1:4222";
+/// `instance_id` must be unique per *live* worker and stable across a
+/// restart, so a bounced worker reclaims its own splits inside the
+/// rebalance window: `POD_NAME` is the Kubernetes downward-API spelling.
+/// Two live workers claiming one id is detected and fatal.
+///
+/// The tuning is demo-fast. `lease_duration` defaults to 30s and the NATS
+/// floor is 2s. `rebalance_delay` is shortened from 20s so a `kill -9` demo
+/// is quick; `drain_deadline` is raised from 10s because a revoked split
+/// drains by pushing its tail through this paced chain to a final commit.
+const COORDINATION: &str = r#"
+# ANCHOR: coordination
+coordination:
+  instance_id: "${POD_NAME}"
+  lease_duration: 10s
+  op_timeout: 2s
+  replan_interval: 10s
+  rebalance_delay: 10s
+  drain_deadline: 60s
+  store:
+    nats:
+      servers: ["${NATS_URL:-nats://127.0.0.1:4222}"]
+      job: nats-backfill-demo
+# ANCHOR_END: coordination
+"#;
 
 const OBJECTS: usize = 96;
 const RECORDS_PER_OBJECT: usize = 250;
@@ -131,35 +141,6 @@ const RECORDS_PER_OBJECT: usize = 250;
 /// second instance. At this rate one instance takes roughly a minute and
 /// two take roughly half of it.
 const PACE: Duration = Duration::from_millis(2);
-
-/// The instance identity, the way a real deployment supplies it: unique
-/// per *live* worker, and stable across a restart, so a bounced worker can
-/// reclaim its own splits inside the rebalance window. `POD_NAME` is the
-/// Kubernetes downward-API spelling, `HOSTNAME`
-/// the equivalent elsewhere, and the last resort is unique but not stable.
-///
-/// Give each terminal its own `POD_NAME` when running both instances on one
-/// host: `HOSTNAME` is stable but shared, and two live workers claiming one
-/// id is detected and fatal.
-///
-/// The id must be 1..=128 bytes of `[A-Za-z0-9_-]`, so a hostname's dots are
-/// rewritten rather than rejected at startup. A variable set to the empty
-/// string falls through to the next rung, as an unset one does.
-fn instance_id() -> String {
-    let from_env = |key| std::env::var(key).ok().filter(|v: &String| !v.is_empty());
-    let raw = from_env("POD_NAME")
-        .or_else(|| from_env("HOSTNAME"))
-        .unwrap_or_else(|| format!("worker-{}", std::process::id()));
-    raw.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect()
-}
 
 /// Stage the "bucket" at a fixed path. Both processes must read the same
 /// objects, so a per-process tempdir would give them different jobs.
@@ -226,7 +207,7 @@ source:
     url: "file://{data}/"
     split_target_bytes: 1MiB
 sink: {{ capture: {{}} }}
-"#,
+{COORDINATION}"#,
         data = data.display(),
     )
 }
@@ -234,47 +215,13 @@ sink: {{ capture: {{}} }}
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     spate::telemetry::init(spate::telemetry::LogFormat::Pretty, "info");
 
-    let instance = instance_id();
-    let servers = vec![std::env::var("NATS_URL").unwrap_or_else(|_| DEFAULT_NATS.to_string())];
+    let instance = std::env::var("POD_NAME").unwrap_or_default();
     let data = stage_bucket()?;
-    println!(
-        "instance {instance}: job {JOB} on {}, prefix {}",
-        servers[0],
-        data.display()
-    );
+    println!("instance {instance}: prefix {}", data.display());
 
     let pipeline = Pipeline::from_config(PipelineConfig::from_str(&config_yaml(&data))?)?;
-
-    let mut tuning = CoordinationConfig::default();
-    tuning.lease_duration = LEASE;
-    tuning.op_timeout = Duration::from_secs(2);
-    tuning.instance_id = Some(instance.clone());
-    // Replanning faster than leadership can be observed to fail is churn;
-    // the floor is the lease and the prefix never grows here.
-    tuning.replan_interval = LEASE;
-    // Shortened from its 20s default so a `kill -9` demo does not outlast
-    // the reader's patience. See the module docs.
-    tuning.rebalance_delay = LEASE;
-    // Raised well above its 10s default, and above the lease: a revoked
-    // split drains by pushing its tail through the chain to a final commit,
-    // and this chain is paced. A draining split is still owned and still
-    // heartbeated, so a long drain costs a slow rebalance, never a race. The
-    // default leaves the drain racing the deadline on this workload, and a
-    // drain that loses is forced instead of cooperative. The tail still
-    // replays, but the revocation is not the one this example shows.
-    tuning.drain_deadline = Duration::from_secs(60);
-    // Construction is lazy: connecting and provisioning the two buckets
-    // happen on the coordinator's startup probe, so a wrong URL rides the
-    // startup retry budget and a wrong server version is fatal at startup
-    // with an actionable message.
-    // ANCHOR: coordinator
-    let store = NatsStore::new(NatsConfig::new(servers, JOB), tuning.lease_duration)?;
-    let coordinator = StoreCoordinator::new(store, tuning, pipeline.io_handle(), None)?;
-    // ANCHOR_END: coordinator
-
     let source = S3Source::from_component_config(&pipeline.config().source, pipeline.io_handle())?
-        .with_framer(|| Box::new(NdjsonFramer::new(1 << 20)))
-        .with_coordinator(Box::new(coordinator));
+        .with_framer(|| Box::new(NdjsonFramer::new(1 << 20)));
 
     let (sink, script) = capture_sink(1, 1);
     let pool_cfg = {

@@ -24,15 +24,13 @@
 //! - **Progress lives in the coordination store, nowhere else.** Commits
 //!   are fenced per-split writes; a lost or stolen split resumes on its
 //!   next owner from the acked watermark, drift-checked against the
-//!   descriptor's ETag pins. The coordinator is **assembly wiring**: hand
-//!   one in via [`S3Source::with_coordinator`] (e.g. `spate-coordination`'s
-//!   `StoreCoordinator` over its NATS JetStream store) and every replica
-//!   of the pipeline shares the backfill, takes a leader-assigned share, and
-//!   takes over from the dead. Without one the source runs solo over an
-//!   in-process store: correct, but a restart replays the prefix (a
-//!   startup WARN says so). This crate names no concrete backend; which
-//!   store a deployment uses is the deployer's choice, not a connector
-//!   compile-time feature.
+//!   descriptor's ETag pins. Point the pipeline's `coordination:` section
+//!   at a shared store (or hand in a coordinator built in code via
+//!   [`S3Source::with_coordinator`]) and every replica of the pipeline
+//!   shares the backfill, takes a leader-assigned share, and takes over
+//!   from the dead. Without one the source runs solo over an in-process
+//!   store: correct, but a restart replays the prefix (a startup WARN says
+//!   so). This crate names no concrete backend and has no store feature.
 //! - **Bad objects poison their split, not the pipeline.** An object
 //!   deleted after planning, overwritten under its ETag pin, corrupt, or
 //!   unreadable past the retry budget hands its split back (surfaced in

@@ -439,25 +439,9 @@ mod first_record_check {
     use crate::schema::RowSchema;
     use crate::types::DateTime64Millis;
     use bytes::BytesMut;
-    use spate_core::checkpoint::AckRef;
     use spate_core::error::{ErrorClass, SinkError};
-    use spate_core::record::{PartitionId, Record, RecordMeta};
     use spate_core::sink::RowEncoder;
-
-    fn record<T>(payload: T) -> Record<T> {
-        let (ack, rx) = AckRef::test_pair();
-        std::mem::forget(rx);
-        Record {
-            payload,
-            meta: RecordMeta {
-                partition: PartitionId(0),
-                offset: 0,
-                event_time_ms: 0,
-                key_hash: None,
-            },
-            ack,
-        }
-    }
+    use spate_test::record;
 
     /// A schema as `native_schema()` would build it from a live table.
     fn full_schema(cols: &[(&str, &str)]) -> Arc<NativeSchema> {

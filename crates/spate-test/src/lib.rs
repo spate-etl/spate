@@ -67,9 +67,13 @@
 //! ([`SinkScript::enqueue_for`]) and the deserializer
 //! ([`TestDeserializer::fail_on_prefix`]); for property tests, enable the
 //! `proptest` feature and use [`strategies`].
+//!
+//! To test one stage without a source, build its input with [`raw_payload`],
+//! [`record`] and [`test_ack`], and its config with [`component_config`].
 
 mod coordination;
 mod deser;
+mod fixtures;
 mod logs;
 mod run;
 mod sink;
@@ -81,6 +85,7 @@ pub mod strategies;
 
 pub use coordination::{CoordinatorScript, ScriptedCoordinator, scripted_coordinator};
 pub use deser::{EmitCollector, TestDeserializer};
+pub use fixtures::{component_config, raw_payload, record, test_ack, unique_name};
 pub use logs::{LogCapture, capture_logs, show_logs};
 pub use run::{PipelineRun, wait_until};
 pub use sink::{

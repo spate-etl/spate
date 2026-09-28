@@ -9,6 +9,7 @@ use spate_clickhouse::serialize_row;
 use spate_clickhouse::{ClickHouseRow, ClickHouseRowFamily};
 use spate_core::deser::Owned;
 use spate_core::sink::SealedBatch;
+use spate_test::record;
 use spate_test_support::container_image;
 // The concern modules under tests/container/ reach the writer trait through
 // `use super::*`; re-export it so that stays a no-op for the root helpers.
@@ -208,21 +209,6 @@ async fn count(admin: &clickhouse::Client) -> u64 {
 }
 
 // ---- helpers for encoder-path and schema-validation tests --------------------
-
-fn record<T>(payload: T) -> spate_core::record::Record<T> {
-    let (ack, rx) = spate_core::checkpoint::AckRef::test_pair();
-    std::mem::forget(rx);
-    spate_core::record::Record {
-        payload,
-        meta: spate_core::record::RecordMeta {
-            partition: spate_core::record::PartitionId(0),
-            offset: 0,
-            event_time_ms: 0,
-            key_hash: None,
-        },
-        ack,
-    }
-}
 
 async fn sink_with<F: ClickHouseRowFamily>(
     url: &str,

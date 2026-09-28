@@ -182,8 +182,7 @@ mod tests {
     use spate_core::config::{ComponentConfig, YamlValue};
 
     fn component(yaml: &str) -> ComponentConfig {
-        let raw: YamlValue = serde_yaml::from_str(yaml).unwrap();
-        ComponentConfig::new("json", raw)
+        spate_test::component_config("json", yaml)
     }
 
     #[test]

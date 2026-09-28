@@ -21,17 +21,16 @@ use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::message::{Headers, Message};
 use rdkafka::mocking::MockCluster;
 use rdkafka::types::RDKafkaRespErr;
-use spate_core::checkpoint::AckRef;
 use spate_core::config::PipelineConfig;
 use spate_core::deser::{BytesPassthrough, Owned};
 use spate_core::error::{ErrorClass, SinkError};
 use spate_core::ops::chain_owned;
 use spate_core::pipeline::{Pipeline, RuntimeOptions};
-use spate_core::record::{PartitionId, Record, RecordMeta};
+use spate_core::record::{PartitionId, Record};
 use spate_core::sink::{KeyHashRouter, RowEncoder, SealedBatch, ShardWriter};
 use spate_core::source::LaneId;
 use spate_kafka::sink::{KafkaEncoder, KafkaMessage, KafkaSink, KafkaSinkConfig, MessageEncoder};
-use spate_test::{PipelineRun, memory_source, wait_until};
+use spate_test::{PipelineRun, memory_source, record, unique_name, wait_until};
 use std::time::{Duration, Instant};
 
 const TOPIC: &str = "orders-out";
@@ -95,20 +94,6 @@ fn consume_all(brokers: &str, n: usize) -> Vec<Consumed> {
     out
 }
 
-fn record(payload: &[u8]) -> Record<Vec<u8>> {
-    let (ack, _rx) = AckRef::test_pair();
-    Record {
-        payload: payload.to_vec(),
-        meta: RecordMeta {
-            partition: PartitionId(0),
-            offset: 0,
-            event_time_ms: 0,
-            key_hash: None,
-        },
-        ack,
-    }
-}
-
 /// Test encoder over `key|header|payload` structured payloads, exercising
 /// keys, headers, and tombstones through the public `MessageEncoder` seam.
 #[derive(Clone)]
@@ -154,7 +139,9 @@ async fn write_batch_round_trips_keys_headers_payloads() {
         b"user-2||__tombstone__",
     ];
     for input in inputs {
-        encoder.encode(&record(input), &mut frame).expect("encode");
+        encoder
+            .encode(&record(input.to_vec()), &mut frame)
+            .expect("encode");
     }
     let batch = SealedBatch {
         rows: inputs.len() as u64,
@@ -193,18 +180,11 @@ async fn write_batch_round_trips_keys_headers_payloads() {
 }
 
 /// One pipeline config per spawn, with a distinct pipeline name.
-///
-/// Metric gauge series have a single live owner per process and the pipeline
-/// name is part of every key, so two pipelines called `kafka-sink-test` alive
-/// at once, which is what `cargo test` does with the tests in this file,
-/// are a collision the builder refuses. In production these would be separate
-/// processes.
 fn pipeline_config() -> String {
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let name = unique_name("kafka-sink-test");
     format!(
         r#"
-pipeline: {{ name: kafka-sink-test-{n}, threads: 1, io_threads: 1 }}
+pipeline: {{ name: {name}, threads: 1, io_threads: 1 }}
 admin: {{ listen: none }}
 metrics: {{ exporter: none }}
 source: {{ memory: {{}} }}
@@ -352,7 +332,7 @@ async fn delivery_failure_maps_to_retryable() {
     let mut encoder = sink.encoder_bytes();
     let mut frame = BytesMut::new();
     encoder
-        .encode(&record(b"doomed"), &mut frame)
+        .encode(&record(b"doomed".to_vec()), &mut frame)
         .expect("encode");
     let batch = SealedBatch {
         rows: 1,

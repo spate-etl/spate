@@ -124,8 +124,7 @@ mod tests {
     use super::*;
     use crate::schema::typeparse;
     use serde::Serialize;
-    use spate_core::checkpoint::AckRef;
-    use spate_core::record::{PartitionId, RecordMeta};
+    use spate_test::record;
 
     /// A schema as `with_row` would fetch it from a live table.
     fn schema(cols: &[(&str, &str)]) -> Arc<RowSchema> {
@@ -149,31 +148,9 @@ mod tests {
         name: String,
     }
 
-    fn record<T>(
-        payload: T,
-    ) -> (
-        Record<T>,
-        crossbeam_channel::Receiver<spate_core::checkpoint::AckMsg>,
-    ) {
-        let (ack, rx) = AckRef::test_pair();
-        (
-            Record {
-                payload,
-                meta: RecordMeta {
-                    partition: PartitionId(0),
-                    offset: 0,
-                    event_time_ms: 0,
-                    key_hash: None,
-                },
-                ack,
-            },
-            rx,
-        )
-    }
-
     #[test]
     fn encodes_serializable_rows() {
-        let (rec, _rx) = record(Row {
+        let rec = record(Row {
             id: 7,
             name: "x".into(),
         });
@@ -199,7 +176,7 @@ mod tests {
         }
 
         let name = String::from("x");
-        let (rec, _rx) = record(RowRef { id: 7, name: &name });
+        let rec = record(RowRef { id: 7, name: &name });
         let mut buf = BytesMut::new();
         ClickHouseEncoder::<RowRefFam>::with_schema(id_name())
             .encode(&rec, &mut buf)
@@ -213,7 +190,7 @@ mod tests {
         struct Bad {
             c: char,
         }
-        let (rec, _rx) = record(Bad { c: 'x' });
+        let rec = record(Bad { c: 'x' });
         let err = ClickHouseEncoder::<Owned<Bad>>::unchecked()
             .encode(&rec, &mut BytesMut::new())
             .unwrap_err();
@@ -231,7 +208,7 @@ mod tests {
         struct Bad {
             c: char,
         }
-        let (rec, _rx) = record(Bad { c: 'x' });
+        let rec = record(Bad { c: 'x' });
         let err = ClickHouseEncoder::<Owned<Bad>>::with_schema(schema(&[("c", "String")]))
             .encode(&rec, &mut BytesMut::new())
             .unwrap_err();
@@ -251,7 +228,7 @@ mod tests {
     /// pipeline thread never inherits another thread's verdict.
     #[test]
     fn a_clone_revalidates_its_own_first_record() {
-        let (rec, _rx) = record(Row {
+        let rec = record(Row {
             id: 7,
             name: "x".into(),
         });
@@ -269,7 +246,7 @@ mod tests {
 
     #[test]
     fn pre_encoded_rows_pass_through() {
-        let (rec, _rx) = record(vec![1u8, 2, 3]);
+        let rec = record(vec![1u8, 2, 3]);
         let mut buf = BytesMut::new();
         PreEncodedRows.encode(&rec, &mut buf).unwrap();
         assert_eq!(buf.as_ref(), &[1, 2, 3]);

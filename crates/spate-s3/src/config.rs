@@ -234,9 +234,7 @@ mod tests {
     use super::*;
 
     fn section(body: &str) -> ComponentConfig {
-        let yaml = format!("s3:\n{body}");
-        let value: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
-        ComponentConfig::new("s3", value["s3"].clone())
+        spate_test::component_config("s3", body)
     }
 
     fn minimal() -> String {

@@ -372,22 +372,7 @@ where
 mod tests {
     use super::*;
     use crate::sink::frame::FrameParser;
-    use spate_core::checkpoint::AckRef;
-    use spate_core::record::{PartitionId, RecordMeta};
-
-    fn record<T>(payload: T) -> Record<T> {
-        let (ack, _rx) = AckRef::test_pair();
-        Record {
-            payload,
-            meta: RecordMeta {
-                partition: PartitionId(0),
-                offset: 0,
-                event_time_ms: 0,
-                key_hash: None,
-            },
-            ack,
-        }
-    }
+    use spate_test::record;
 
     fn single_message(buf: &[u8]) -> (Option<Vec<u8>>, Option<Vec<u8>>) {
         let messages: Vec<_> = FrameParser::new(buf).map(|m| m.unwrap()).collect();

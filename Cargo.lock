@@ -3994,7 +3994,6 @@ dependencies = [
  "tower-service",
  "tracing",
  "webpki-roots 1.0.9",
- "yaml_serde",
 ]
 
 [[package]]
@@ -4018,7 +4017,6 @@ dependencies = [
  "chrono",
  "clickhouse",
  "criterion",
- "crossbeam-channel",
  "foldhash",
  "gungraun",
  "humantime-serde",
@@ -4134,8 +4132,8 @@ dependencies = [
  "serde",
  "serde_json",
  "spate-core",
+ "spate-test",
  "tracing",
- "yaml_serde",
 ]
 
 [[package]]
@@ -4174,7 +4172,6 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
- "yaml_serde",
 ]
 
 [[package]]
@@ -4231,7 +4228,6 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
- "yaml_serde",
  "zstd",
 ]
 
@@ -4249,6 +4245,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "yaml_serde",
 ]
 
 [[package]]

@@ -238,9 +238,7 @@ mod tests {
     use super::*;
 
     fn section(body: &str) -> ComponentConfig {
-        let yaml = format!("datagen:\n{body}");
-        let value: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
-        ComponentConfig::new("datagen", value["datagen"].clone())
+        spate_test::component_config("datagen", body)
     }
 
     /// The two default paths, serde's and `Default::default()`, must not be

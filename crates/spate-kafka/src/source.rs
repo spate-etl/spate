@@ -1699,11 +1699,7 @@ mod tests {
         /// exposition. Hence the label string comes back with the
         /// rendering rather than being a constant.
         fn render(f: impl FnOnce(&SourceMetrics)) -> (String, String) {
-            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-            let component = format!(
-                "source-{}",
-                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            );
+            let component = spate_test::unique_name("source");
             let std =
                 format!(r#"pipeline="orders",component="{component}",component_type="kafka""#);
             let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();

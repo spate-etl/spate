@@ -533,7 +533,7 @@ mod tests {
     const SCHEMA: &str = r#"{"type":"record","name":"E","fields":[{"name":"id","type":"long"}]}"#;
 
     fn component(yaml: &str) -> ComponentConfig {
-        ComponentConfig::new("avro", serde_yaml::from_str(yaml).unwrap())
+        spate_test::component_config("avro", yaml)
     }
 
     fn runtime() -> tokio::runtime::Runtime {

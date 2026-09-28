@@ -17,7 +17,8 @@ use proptest::prelude::*;
 use spate_avro::{AvroDeserializerBuilder, AvroMode, AvroSettings, SchemaSource};
 use spate_core::checkpoint::AckRef;
 use spate_core::deser::{Deserializer, EmitRecord};
-use spate_core::record::{Flow, PartitionId, RawPayload, Record};
+use spate_core::record::{Flow, Record};
+use spate_test::raw_payload;
 use std::collections::HashMap;
 use std::fmt::Debug;
 
@@ -26,16 +27,6 @@ impl<'buf, T> EmitRecord<'buf, T> for Collected<T> {
     fn emit(&mut self, rec: Record<T>) -> Flow {
         self.0.push(rec);
         Flow::Continue
-    }
-}
-
-fn raw(bytes: &[u8]) -> RawPayload<'_> {
-    RawPayload {
-        bytes,
-        key: None,
-        partition: PartitionId(0),
-        offset: 7,
-        timestamp_ms: 0,
     }
 }
 
@@ -65,12 +56,12 @@ where
     let mut two_pass = Collected::<T>(Vec::new());
     b.build_serde::<T>()
         .unwrap()
-        .deserialize(&raw(datum), &ack, &mut two_pass)
+        .deserialize(&raw_payload(datum), &ack, &mut two_pass)
         .expect("two-pass decode");
     let mut single_pass = Collected::<T>(Vec::new());
     b.build_serde_datum::<T>()
         .unwrap()
-        .deserialize(&raw(datum), &ack, &mut single_pass)
+        .deserialize(&raw_payload(datum), &ack, &mut single_pass)
         .expect("single-pass decode");
 
     assert_eq!(two_pass.0.len(), 1);
@@ -617,7 +608,7 @@ fn truncated_trailing_option_diverges_by_design() {
     let mut two_pass = Collected::<T>(Vec::new());
     b.build_serde::<T>()
         .unwrap()
-        .deserialize(&raw(&truncated), &ack, &mut two_pass)
+        .deserialize(&raw_payload(&truncated), &ack, &mut two_pass)
         .expect("the two-pass path lenient-decodes the truncation");
     assert_eq!(two_pass.0[0].payload, T { a: 9, b: None });
 
@@ -625,7 +616,7 @@ fn truncated_trailing_option_diverges_by_design() {
     let err = b
         .build_serde_datum::<T>()
         .unwrap()
-        .deserialize(&raw(&truncated), &ack, &mut single_pass)
+        .deserialize(&raw_payload(&truncated), &ack, &mut single_pass)
         .unwrap_err();
     assert!(
         matches!(err, spate_core::error::DeserError::Malformed { .. }),
@@ -681,14 +672,14 @@ fn invalid_utf8_in_a_skipped_field_diverges_by_design() {
     let mut two_pass = Collected::<T>(Vec::new());
     b.build_serde::<T>()
         .unwrap()
-        .deserialize(&raw(&datum), &ack, &mut two_pass)
+        .deserialize(&raw_payload(&datum), &ack, &mut two_pass)
         .unwrap_err();
     assert!(two_pass.0.is_empty());
 
     let mut single_pass = Collected::<T>(Vec::new());
     b.build_serde_datum::<T>()
         .unwrap()
-        .deserialize(&raw(&datum), &ack, &mut single_pass)
+        .deserialize(&raw_payload(&datum), &ack, &mut single_pass)
         .expect("the single-pass path skips the field structurally");
     assert_eq!(single_pass.0[0].payload, T { keep: 5 });
 }
@@ -711,7 +702,7 @@ fn zero_width_item_bomb_diverges_by_design() {
     let mut two_pass = Collected::<Vec<()>>(Vec::new());
     b.build_serde::<Vec<()>>()
         .unwrap()
-        .deserialize(&raw(&datum), &ack, &mut two_pass)
+        .deserialize(&raw_payload(&datum), &ack, &mut two_pass)
         .expect("the two-pass path walks the bomb");
     assert_eq!(two_pass.0[0].payload.len(), 100_000);
 
@@ -719,7 +710,7 @@ fn zero_width_item_bomb_diverges_by_design() {
     let err = b
         .build_serde_datum::<Vec<()>>()
         .unwrap()
-        .deserialize(&raw(&datum), &ack, &mut single_pass)
+        .deserialize(&raw_payload(&datum), &ack, &mut single_pass)
         .unwrap_err();
     assert!(
         matches!(err, spate_core::error::DeserError::Malformed { .. }),
@@ -749,13 +740,13 @@ fn union_into_map_target_diverges_by_design() {
     let mut two_pass = Collected::<HashMap<String, i64>>(Vec::new());
     b.build_serde::<HashMap<String, i64>>()
         .unwrap()
-        .deserialize(&raw(&datum), &ack, &mut two_pass)
+        .deserialize(&raw_payload(&datum), &ack, &mut two_pass)
         .unwrap_err();
 
     let mut single_pass = Collected::<HashMap<String, i64>>(Vec::new());
     b.build_serde_datum::<HashMap<String, i64>>()
         .unwrap()
-        .deserialize(&raw(&datum), &ack, &mut single_pass)
+        .deserialize(&raw_payload(&datum), &ack, &mut single_pass)
         .expect("the single-pass path unwraps the union");
     assert_eq!(
         single_pass.0[0].payload,
@@ -771,11 +762,11 @@ fn garbage_errors_on_both_paths() {
     let mut out = Collected::<SensorBatch>(Vec::new());
     b.build_serde::<SensorBatch>()
         .unwrap()
-        .deserialize(&raw(&garbage), &ack, &mut out)
+        .deserialize(&raw_payload(&garbage), &ack, &mut out)
         .unwrap_err();
     b.build_serde_datum::<SensorBatch>()
         .unwrap()
-        .deserialize(&raw(&garbage), &ack, &mut out)
+        .deserialize(&raw_payload(&garbage), &ack, &mut out)
         .unwrap_err();
     assert!(out.0.is_empty());
 }
@@ -853,7 +844,7 @@ fn char_and_wide_integer_targets_diverge_by_design() {
         let mut two_pass = Collected::<T>(Vec::new());
         b.build_serde::<T>()
             .unwrap()
-            .deserialize(&raw(datum), &ack, &mut two_pass)
+            .deserialize(&raw_payload(datum), &ack, &mut two_pass)
             .expect("the two-pass path decodes this target");
         assert_eq!(two_pass.0.len(), 1);
 
@@ -861,7 +852,7 @@ fn char_and_wide_integer_targets_diverge_by_design() {
         let err = b
             .build_serde_datum::<T>()
             .unwrap()
-            .deserialize(&raw(datum), &ack, &mut single_pass)
+            .deserialize(&raw_payload(datum), &ack, &mut single_pass)
             .unwrap_err();
         assert!(
             matches!(err, spate_core::error::DeserError::Malformed { .. }),

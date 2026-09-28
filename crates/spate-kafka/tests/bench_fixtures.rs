@@ -14,12 +14,11 @@
 //! thing. That claim is checked here.
 
 use bytes::BytesMut;
-use spate_core::checkpoint::AckRef;
 use spate_core::deser::Owned;
 use spate_core::error::{ErrorClass, SinkError};
-use spate_core::record::{PartitionId, Record, RecordMeta};
 use spate_core::sink::RowEncoder;
 use spate_kafka::sink::{KafkaBytesEncoder, KafkaEncoder, KafkaJsonEncoder, MessageEncoder};
+use spate_test::record;
 use spate_test_support::fnv1a;
 use std::collections::HashSet;
 
@@ -27,21 +26,6 @@ use std::collections::HashSet;
 mod messages;
 
 use messages::{Event, GUARD_LIMIT, HEADER_BYTES, HeaderStamp, KEY_LEN, PAYLOAD_LEN, RECORDS};
-
-fn record<T>(payload: T) -> Record<T> {
-    let (ack, rx) = AckRef::test_pair();
-    std::mem::forget(rx);
-    Record {
-        payload,
-        meta: RecordMeta {
-            partition: PartitionId(0),
-            offset: 0,
-            event_time_ms: 0,
-            key_hash: None,
-        },
-        ack,
-    }
-}
 
 /// What one corpus through one encoder produced: how many records were
 /// accepted, how many bytes were framed, and the first error if any. The same

@@ -329,9 +329,7 @@ mod tests {
     use spate_core::config::ComponentConfig;
 
     fn section(body: &str) -> ComponentConfig {
-        let yaml = format!("kafka:\n{body}");
-        let value: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
-        ComponentConfig::new("kafka", value["kafka"].clone())
+        spate_test::component_config("kafka", body)
     }
 
     fn minimal() -> String {

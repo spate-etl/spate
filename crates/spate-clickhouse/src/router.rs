@@ -213,9 +213,8 @@ impl<F: RecFamily> fmt::Debug for DistributedRouter<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spate_core::checkpoint::AckRef;
     use spate_core::deser::Owned;
-    use spate_core::record::{PartitionId, RecordMeta};
+    use spate_test::record;
 
     /// The owned family every test routes over.
     type OwnedBytes = Owned<Vec<u8>>;
@@ -227,20 +226,6 @@ mod tests {
         ShardKey::Bytes(&rec[..1])
     }
 
-    fn record(payload: Vec<u8>) -> Record<Vec<u8>> {
-        let (ack, _rx) = AckRef::test_pair();
-        Record {
-            payload,
-            meta: RecordMeta {
-                partition: PartitionId(0),
-                offset: 0,
-                event_time_ms: 0,
-                key_hash: None,
-            },
-            ack,
-        }
-    }
-
     /// A borrowing family: the record holds a key borrowed from the payload
     /// buffer, and an extractor over it returns a key borrowed from the
     /// record it is given.
@@ -250,20 +235,6 @@ mod tests {
     struct EvFam;
     impl RecFamily for EvFam {
         type Rec<'buf> = Ev<'buf>;
-    }
-
-    fn ev_record(key: &str) -> Record<Ev<'_>> {
-        let (ack, _rx) = AckRef::test_pair();
-        Record {
-            payload: Ev { key },
-            meta: RecordMeta {
-                partition: PartitionId(0),
-                offset: 0,
-                event_time_ms: 0,
-                key_hash: None,
-            },
-            ack,
-        }
     }
 
     /// `xxHash64("abc")`, the key hash the borrowed-family tests route on.
@@ -372,7 +343,7 @@ mod tests {
         }
 
         let router = DistributedRouter::<EvFam>::new(key_of, &[1, 1]).unwrap();
-        let rec = ev_record("abc");
+        let rec = record(Ev { key: "abc" });
         assert_eq!(
             RecordRouter::route_record(&router, &rec, 2),
             (ABC_HASH % 2) as usize,
@@ -386,7 +357,7 @@ mod tests {
         let extract: KeyExtractor<EvFam> = |rec| ShardKey::Str(rec.key);
 
         let router = DistributedRouter::<EvFam>::new(extract, &[1, 1]).unwrap();
-        let rec = ev_record("abc");
+        let rec = record(Ev { key: "abc" });
         assert_eq!(
             RecordRouter::route_record(&router, &rec, 2),
             (ABC_HASH % 2) as usize,

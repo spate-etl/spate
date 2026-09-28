@@ -356,7 +356,7 @@ mod tests {
     use super::*;
     use apache_avro::to_avro_datum;
     use apache_avro::types::Value;
-    use spate_core::record::{Flow, PartitionId};
+    use spate_core::record::Flow;
 
     const WRITER_V1: &str = r#"{"type":"record","name":"Event","fields":[
         {"name":"id","type":"int"},
@@ -376,11 +376,8 @@ mod tests {
 
     fn raw_payload(bytes: &[u8]) -> RawPayload<'_> {
         RawPayload {
-            bytes,
-            key: Some(b"k"),
-            partition: PartitionId(3),
             offset: 42,
-            timestamp_ms: 1_000,
+            ..spate_test::raw_payload(bytes)
         }
     }
 
@@ -550,9 +547,7 @@ mod tests {
         )
     }
 
-    fn test_ack() -> AckRef {
-        AckRef::test_pair().0
-    }
+    use spate_test::test_ack;
 
     #[test]
     fn value_round_trip_and_meta() {

@@ -4,12 +4,12 @@
 use spate_core::checkpoint::Checkpointer;
 use spate_core::deser::Deserializer;
 use spate_core::error::SinkError;
-use spate_core::record::{Flow, PartitionId};
+use spate_core::record::{Flow, PartitionId, RawPayload};
 use spate_core::sink::{RowEncoder, SealedBatch, ShardWriter};
 use spate_core::source::{LaneId, PayloadBatch, Source, SourceCtx, SourceEvent, SourceLane};
 use spate_test::{
     EmitCollector, ReplicaTag, TestDeserializer, TestEncoder, WriteOutcome, capture_writer,
-    decode_rows, memory_source,
+    decode_rows, memory_source, raw_payload, record, test_ack,
 };
 use std::time::Duration;
 
@@ -346,25 +346,13 @@ async fn probes_fail_and_heal() {
 
 // ---- encoder / deserializer / collector ----
 
-fn record(payload: &[u8]) -> spate_core::record::Record<Vec<u8>> {
-    let (ack, _rx) = spate_core::checkpoint::AckRef::test_pair();
-    spate_core::record::Record {
-        payload: payload.to_vec(),
-        meta: spate_core::record::RecordMeta {
-            partition: P0,
-            offset: 0,
-            event_time_ms: 0,
-            key_hash: None,
-        },
-        ack,
-    }
-}
-
 #[test]
 fn encoder_round_trips_rows() {
     let mut buf = bytes::BytesMut::new();
     for payload in [&b"one"[..], b"", b"three"] {
-        TestEncoder.encode(&record(payload), &mut buf).unwrap();
+        TestEncoder
+            .encode(&record(payload.to_vec()), &mut buf)
+            .unwrap();
     }
     assert_eq!(
         decode_rows(&buf),
@@ -376,19 +364,19 @@ fn encoder_round_trips_rows() {
 #[should_panic(expected = "truncated")]
 fn decode_rows_panics_on_truncation() {
     let mut buf = bytes::BytesMut::new();
-    TestEncoder.encode(&record(b"whole"), &mut buf).unwrap();
+    TestEncoder
+        .encode(&record(b"whole".to_vec()), &mut buf)
+        .unwrap();
     let _ = decode_rows(&buf[..buf.len() - 1]);
 }
 
 #[test]
 fn deserializer_modes() {
-    let (ack, _rx) = spate_core::checkpoint::AckRef::test_pair();
-    let raw = spate_core::record::RawPayload {
-        bytes: b"a,b,,c",
-        key: None,
-        partition: P0,
+    let ack = test_ack();
+    let raw = RawPayload {
         offset: 5,
         timestamp_ms: 5,
+        ..raw_payload(b"a,b,,c")
     };
 
     let mut out = EmitCollector::new();
@@ -418,14 +406,8 @@ fn deserializer_modes() {
 
 #[test]
 fn blocked_collector_stops_split_emission() {
-    let (ack, _rx) = spate_core::checkpoint::AckRef::test_pair();
-    let raw = spate_core::record::RawPayload {
-        bytes: b"1|2|3|4",
-        key: None,
-        partition: P0,
-        offset: 0,
-        timestamp_ms: 0,
-    };
+    let ack = test_ack();
+    let raw = raw_payload(b"1|2|3|4");
     let mut out = EmitCollector::blocking_after(2);
     TestDeserializer::split_on(b'|')
         .deserialize(&raw, &ack, &mut out)
@@ -438,6 +420,6 @@ fn blocked_collector_stops_split_emission() {
 fn collector_reports_flow() {
     let mut out = EmitCollector::blocking_after(0);
     use spate_core::deser::EmitRecord;
-    assert_eq!(out.emit(record(b"x")), Flow::Blocked);
+    assert_eq!(out.emit(record(b"x".to_vec())), Flow::Blocked);
     assert!(out.records.is_empty());
 }

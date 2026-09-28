@@ -14,10 +14,9 @@
 //! asserts fixed families only; per-broker translation is
 //! covered by the unit tests in `src/sink/metrics.rs`.
 
+mod support;
+
 use bytes::BytesMut;
-use rdkafka::ClientConfig;
-use rdkafka::config::RDKafkaLogLevel;
-use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::message::{Headers, Message};
 use rdkafka::mocking::MockCluster;
 use rdkafka::types::RDKafkaRespErr;
@@ -31,7 +30,8 @@ use spate_core::sink::{KeyHashRouter, RowEncoder, SealedBatch, ShardWriter};
 use spate_core::source::LaneId;
 use spate_kafka::sink::{KafkaEncoder, KafkaMessage, KafkaSink, KafkaSinkConfig, MessageEncoder};
 use spate_test::{PipelineRun, memory_source, record, unique_name, wait_until};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use support::consume;
 
 const TOPIC: &str = "orders-out";
 
@@ -57,41 +57,28 @@ type Consumed = (Option<Vec<u8>>, Option<Vec<u8>>, Vec<(String, Vec<u8>)>);
 /// Read `n` messages back from the mock cluster (order within the single
 /// partition is the produce order).
 fn consume_all(brokers: &str, n: usize) -> Vec<Consumed> {
-    let consumer: BaseConsumer = ClientConfig::new()
-        .set("bootstrap.servers", brokers)
-        .set("group.id", "verify")
-        .set("auto.offset.reset", "earliest")
-        .set_log_level(RDKafkaLogLevel::Alert)
-        .create()
-        .expect("consumer");
-    consumer.subscribe(&[TOPIC]).expect("subscribe");
-    let deadline = Instant::now() + Duration::from_secs(30);
-    let mut out = Vec::new();
-    while out.len() < n {
-        assert!(
-            Instant::now() < deadline,
-            "consumed only {} of {n} messages within the deadline",
-            out.len()
-        );
-        let Some(message) = consumer.poll(Duration::from_millis(250)) else {
-            continue;
-        };
-        let message = message.expect("message");
-        let headers = message
-            .headers()
-            .map(|hs| {
-                hs.iter()
-                    .map(|h| (h.key.to_string(), h.value.unwrap_or(&[]).to_vec()))
-                    .collect()
-            })
-            .unwrap_or_default();
-        out.push((
-            message.key().map(<[u8]>::to_vec),
-            message.payload().map(<[u8]>::to_vec),
-            headers,
-        ));
-    }
-    out
+    consume(
+        brokers,
+        TOPIC,
+        "verify",
+        n,
+        Duration::from_secs(30),
+        |message| {
+            let headers = message
+                .headers()
+                .map(|hs| {
+                    hs.iter()
+                        .map(|h| (h.key.to_string(), h.value.unwrap_or(&[]).to_vec()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            Some((
+                message.key().map(<[u8]>::to_vec),
+                message.payload().map(<[u8]>::to_vec),
+                headers,
+            ))
+        },
+    )
 }
 
 /// Test encoder over `key|header|payload` structured payloads, exercising

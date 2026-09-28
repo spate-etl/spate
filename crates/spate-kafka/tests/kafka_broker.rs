@@ -9,13 +9,12 @@ mod support;
 
 use rdkafka::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
-use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
 use spate_core::checkpoint::Checkpointer;
 use spate_core::source::{Source, SourceCtx, SourceEvent, SourceLane};
 use spate_kafka::{KafkaSource, KafkaSourceConfig};
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
-use support::{broker, drain_lane};
+use support::{await_assignment, broker, drain_lane, produce};
 use testcontainers::runners::SyncRunner;
 use testcontainers_modules::kafka::apache::KAFKA_PORT;
 
@@ -42,39 +41,14 @@ fn real_broker_full_lifecycle() {
     // Auto-created topic has a single partition, which is enough for the
     // lifecycle; the multi-partition rebalance path is covered by the
     // MockCluster suite.
-    let producer: BaseProducer = ClientConfig::new()
-        .set("bootstrap.servers", &brokers)
-        .set("message.timeout.ms", "30000")
-        .create()
-        .expect("producer");
-    for i in 0..100 {
-        let payload = format!("real-{i}");
-        producer
-            .send(
-                BaseRecord::to(TOPIC)
-                    .payload(payload.as_bytes())
-                    .key(format!("k{i}").as_bytes())
-                    .partition(0),
-            )
-            .expect("enqueue");
-    }
-    producer.flush(Duration::from_secs(30)).expect("flush");
+    produce(&brokers, TOPIC, 100, 1, "real");
 
     let mut cp = Checkpointer::new();
     let mut source = KafkaSource::new(config(&brokers, "real-life"));
     source.open(SourceCtx::new(cp.handle())).expect("open");
 
     // Await assignment.
-    let deadline = Instant::now() + Duration::from_secs(60);
-    let mut lanes = loop {
-        assert!(Instant::now() < deadline, "no assignment");
-        if let SourceEvent::LanesAssigned(lanes) = source
-            .poll_events(Duration::from_millis(200))
-            .expect("poll_events")
-        {
-            break lanes;
-        }
-    };
+    let mut lanes = await_assignment(&mut source, Duration::from_secs(60));
     assert_eq!(lanes.len(), 1);
     cp.begin_epoch(&[lanes[0].partition()], 1);
 
@@ -126,22 +100,7 @@ fn real_broker_revocation_commit_persists_revoked_offsets() {
     let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
     let brokers = format!("127.0.0.1:{port}");
 
-    let producer: BaseProducer = ClientConfig::new()
-        .set("bootstrap.servers", &brokers)
-        .set("message.timeout.ms", "30000")
-        .create()
-        .expect("producer");
-    for i in 0..50 {
-        producer
-            .send(
-                BaseRecord::to(TOPIC)
-                    .payload(format!("rev-{i}").as_bytes())
-                    .key(format!("k{i}").as_bytes())
-                    .partition(0),
-            )
-            .expect("enqueue");
-    }
-    producer.flush(Duration::from_secs(30)).expect("flush");
+    produce(&brokers, TOPIC, 50, 1, "rev");
 
     let mut cp = Checkpointer::new();
     let mut source = KafkaSource::new(config(&brokers, "rev-commit"));
@@ -149,16 +108,7 @@ fn real_broker_revocation_commit_persists_revoked_offsets() {
 
     // Await assignment and drain all 50 records, producing a watermark at
     // offset 50, but do not commit yet (the inter-tick window).
-    let deadline = Instant::now() + Duration::from_secs(60);
-    let mut lanes = loop {
-        assert!(Instant::now() < deadline, "no assignment");
-        if let SourceEvent::LanesAssigned(lanes) = source
-            .poll_events(Duration::from_millis(200))
-            .expect("poll_events")
-        {
-            break lanes;
-        }
-    };
+    let mut lanes = await_assignment(&mut source, Duration::from_secs(60));
     assert_eq!(lanes.len(), 1);
     cp.begin_epoch(&[lanes[0].partition()], 1);
     drain_lane(&mut source, &mut lanes[0], 50, Duration::from_secs(60));
@@ -277,24 +227,7 @@ fn real_broker_backlog_reports_summable_lag() {
         r.expect("topic created");
     });
 
-    let producer: BaseProducer = ClientConfig::new()
-        .set("bootstrap.servers", &brokers)
-        .set("message.timeout.ms", "30000")
-        .create()
-        .expect("producer");
-    for p in 0..PARTITIONS {
-        for i in 0..PER_PARTITION {
-            producer
-                .send(
-                    BaseRecord::to(TOPIC)
-                        .payload(format!("backlog-p{p}-{i}").as_bytes())
-                        .key(format!("k{p}-{i}").as_bytes())
-                        .partition(p),
-                )
-                .expect("enqueue");
-        }
-    }
-    producer.flush(Duration::from_secs(60)).expect("flush");
+    produce(&brokers, TOPIC, PER_PARTITION, PARTITIONS, "backlog");
     let produced = PER_PARTITION * PARTITIONS as usize;
 
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
@@ -311,15 +244,7 @@ fn real_broker_backlog_reports_summable_lag() {
             .expect("open");
 
         let deadline = Instant::now() + Duration::from_secs(120);
-        let mut lanes = loop {
-            assert!(Instant::now() < deadline, "no assignment");
-            if let SourceEvent::LanesAssigned(lanes) = source
-                .poll_events(Duration::from_millis(200))
-                .expect("poll_events")
-            {
-                break lanes;
-            }
-        };
+        let mut lanes = await_assignment(&mut source, Duration::from_secs(120));
         assert_eq!(lanes.len(), PARTITIONS as usize, "one lane per partition");
         let partitions: Vec<_> = lanes.iter().map(SourceLane::partition).collect();
         cp.begin_epoch(&partitions, 1);

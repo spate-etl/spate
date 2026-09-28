@@ -21,8 +21,9 @@ trait, so a backend is a few hundred lines rather than a fork.
 
 - **The fence is the correctness boundary, not the lease.** A lease that has
   expired is not proof the previous owner has stopped; the epoch fence on
-  every commit is what makes a stale writer's progress unobservable. Backends
-  must provide a genuine compare-and-swap for this to hold.
+  every commit is what makes a stale writer's progress unobservable. For this
+  to hold, a backend must provide a genuine compare-and-swap that never rolls
+  back a write it acknowledged.
 - **Draining is cooperative and takes as long as the work in flight.** A split
   moving between workers waits for the losing worker to finish and commit, so
   time-to-balance is dominated by the drain rather than by the protocol.

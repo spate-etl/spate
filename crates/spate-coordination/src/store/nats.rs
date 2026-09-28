@@ -1,5 +1,8 @@
 //! NATS JetStream KV [`CoordinationStore`]: the production backend.
 //!
+//! A production server needs the settings under [the store page's
+//! requirements].
+//!
 //! Two KV buckets per job carry the two keyspaces:
 //!
 //! - `spate_coordination_{job}_state` — durable: no age limit; split
@@ -28,6 +31,8 @@
 //!
 //! TLS connections use rustls with the `ring` provider, whatever other rustls
 //! features the build enables.
+//!
+//! [the store page's requirements]: https://spate.kainth.dev/docs/user-guide/connectors/coordination/nats#requirements
 
 use super::{
     CasOutcome, CoordinationStore, Entry, Keyspace, Revision, StoreError, WatchEvent, WatchStream,

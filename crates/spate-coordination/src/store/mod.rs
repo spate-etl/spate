@@ -13,7 +13,10 @@
 //!
 //! - Operations on one handle must be safe to run concurrently.
 //! - [`Revision`]s are store-assigned and **strictly increase per key**
-//!   across its write history (bucket-wide sequences satisfy this).
+//!   across its write history (bucket-wide sequences satisfy this). While
+//!   any handle can reach the store, an acknowledged write is never rolled
+//!   back and its revision is never reused, including across a server
+//!   crash or failover.
 //! - `update` on an [`Ephemeral`](Keyspace::Ephemeral) key re-arms its
 //!   TTL; expiry surfaces to watchers as [`WatchEvent::Delete`].
 //! - A watch delivers a snapshot of live keys, then [`WatchEvent::

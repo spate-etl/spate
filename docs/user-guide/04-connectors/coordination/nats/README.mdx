@@ -138,6 +138,12 @@ from its split record.
 - **A NATS server on a [supported line](#supported-server-versions)**, with
   JetStream enabled (`-js`). The worker verifies the version at startup and
   fails actionably against an older one.
+- **`sync_interval: always` on every server in production.** By default the
+  server acknowledges a write before it reaches disk and syncs every two
+  minutes, so an OS crash or power loss can lose writes it acknowledged
+  ([Jepsen's NATS 2.12.1 analysis](https://jepsen.io/analyses/nats-2.12.1)).
+  The worker does not check the setting. [What an outage
+  does](#what-an-outage-does) says what a lost write breaks.
 - **One job name per coordinated job.** A fingerprint check rejects
   misconfigured workers before they can touch anything.
 - **Permission to update the state bucket's stream** when an earlier version
@@ -169,6 +175,22 @@ nodes from the first server it reaches, so one reachable entry in `servers` is
 enough. List more than one, or a DNS name that resolves to every node, so the
 first connection survives a node being down.
 
+Set [`sync_interval`](https://docs.nats.io/reference/config/jetstream/sync_interval)
+in each server's configuration file:
+
+```text
+jetstream {
+  sync_interval: always
+}
+```
+
+A configuration reload does not apply it, so restart each server. Every write
+then waits for an fsync before the server acknowledges it.
+`spate_coordination_store_op_duration_seconds` shows what that adds to this
+store's operations. The setting is server-wide, so every other stream on those
+servers pays the same cost. Once a server runs with it, its `/varz` monitoring
+endpoint reports `jetstream.config.sync_always: true`.
+
 ## Supported server versions
 
 | NATS | Support |
@@ -191,6 +213,10 @@ returns: degraded, never corrupted.
 This is the store being unavailable, not the store lying. Correctness does not
 rest on the store staying up; it rests on the compare-and-swap, which a
 partitioned worker cannot win.
+
+The compare-and-swap relies on the server never losing a write it acknowledged.
+A server that loses one can put a split record back at an earlier revision, and
+a worker the lost write had fenced can then win its next compare-and-swap.
 
 ## Metrics
 

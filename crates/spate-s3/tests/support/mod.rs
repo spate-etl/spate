@@ -18,6 +18,105 @@ use std::collections::VecDeque;
 use std::io;
 use std::time::Duration;
 
+/// Pipeline YAML for an S3 source feeding a capture sink, with the admin
+/// server and exporter off.
+///
+/// Defaults to two threads, a 100ms checkpoint interval and a 1MiB split
+/// target.
+pub(crate) struct PipelineYaml {
+    name: String,
+    threads: u32,
+    checkpoint: Option<String>,
+    url: String,
+    source: Vec<(String, String)>,
+    store: Option<String>,
+    sections: String,
+}
+
+impl PipelineYaml {
+    /// Reads the files under `data`.
+    pub(crate) fn file(name: &str, data: &std::path::Path) -> Self {
+        Self::over(name, format!("file://{}/", data.display()), None)
+    }
+
+    /// Reads `data/` in the gateway's bucket.
+    pub(crate) fn bucket(name: &str, gw: &seaweed::Gateway) -> Self {
+        let url = format!("s3://{}/data/", gw.bucket);
+        Self::over(name, url, Some(gw.store_options_yaml()))
+    }
+
+    fn over(name: &str, url: String, store: Option<String>) -> Self {
+        PipelineYaml {
+            name: name.to_owned(),
+            threads: 2,
+            checkpoint: Some("100ms".to_owned()),
+            url,
+            source: vec![("split_target_bytes".to_owned(), "1MiB".to_owned())],
+            store,
+            sections: String::new(),
+        }
+    }
+
+    pub(crate) fn threads(mut self, threads: u32) -> Self {
+        self.threads = threads;
+        self
+    }
+
+    pub(crate) fn checkpoint(mut self, interval: &str) -> Self {
+        self.checkpoint = Some(interval.to_owned());
+        self
+    }
+
+    /// Adds `key: value` under `source.s3`.
+    pub(crate) fn source(mut self, key: &str, value: &str) -> Self {
+        self.source.push((key.to_owned(), value.to_owned()));
+        self
+    }
+
+    /// Appends a top-level section, written as YAML.
+    pub(crate) fn section(mut self, yaml: &str) -> Self {
+        self.sections.push_str(yaml.trim_end());
+        self.sections.push('\n');
+        self
+    }
+
+    pub(crate) fn build(&self) -> String {
+        let mut yaml = format!(
+            "pipeline: {{ name: {}, threads: {} }}\nadmin: {{ listen: none }}\n",
+            self.name, self.threads
+        );
+        if let Some(interval) = &self.checkpoint {
+            yaml.push_str(&format!("checkpoint: {{ interval: {interval} }}\n"));
+        }
+        yaml.push_str("metrics: { exporter: none }\nsource:\n  s3:\n");
+        yaml.push_str(&format!("    url: \"{}\"\n", self.url));
+        for (key, value) in &self.source {
+            yaml.push_str(&format!("    {key}: {value}\n"));
+        }
+        if let Some(store) = &self.store {
+            yaml.push_str(&format!("    store:\n{store}\n"));
+        }
+        yaml.push_str("sink: { capture: {} }\n");
+        yaml.push_str(&self.sections);
+        yaml
+    }
+}
+
+/// A `coordination:` section naming a NATS server on a port nothing listens
+/// on, with timeouts short enough that startup fails fast.
+pub(crate) fn unreachable_nats(job: &str) -> String {
+    format!(
+        "coordination:
+  op_timeout: 100ms
+  lease_duration: 2s
+  replan_interval: 2s
+  startup_max_attempts: 1
+  store:
+    nats: {{ servers: [\"nats://127.0.0.1:1\"], job: {job} }}
+"
+    )
+}
+
 /// A newline-delimited [`RecordFramer`] for the integration suites: `spate-s3`
 /// no longer ships a framer, so the tests supply one, mirroring `spate-json`'s
 /// `NdjsonFramer` without depending on a format crate. Splits on `\n`, strips

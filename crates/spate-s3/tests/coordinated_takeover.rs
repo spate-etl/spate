@@ -23,8 +23,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use support::{
-    Launched, captured_rows, launch_customized, launch_tuned, line_framer, lines_bytes, recs,
-    shared_store, test_options, test_tuning,
+    Launched, PipelineYaml, captured_rows, launch_customized, launch_tuned, line_framer,
+    lines_bytes, recs, shared_store, test_options, test_tuning,
 };
 
 /// Delegates to a [`MemoryStore`] until the switch flips, then fails every
@@ -110,20 +110,7 @@ impl CoordinationStore for KillSwitchStore {
 }
 
 fn config_yaml(data: &std::path::Path, name: &str) -> String {
-    format!(
-        r#"
-pipeline: {{ name: {name}, threads: 2 }}
-admin: {{ listen: none }}
-checkpoint: {{ interval: 100ms }}
-metrics: {{ exporter: none }}
-source:
-  s3:
-    url: "file://{data}/"
-    split_target_bytes: 1MiB
-sink: {{ capture: {{}} }}
-"#,
-        data = data.display(),
-    )
+    PipelineYaml::file(name, data).build()
 }
 
 #[test]

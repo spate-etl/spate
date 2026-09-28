@@ -22,8 +22,8 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
 use support::{
-    captured_rows, launch, launch_on_store, launch_scripted, launch_tuned, lines_bytes, recs,
-    shared_store, sorted, test_options, test_tuning,
+    PipelineYaml, captured_rows, launch, launch_on_store, launch_scripted, launch_tuned,
+    lines_bytes, recs, shared_store, sorted, test_options, test_tuning,
 };
 
 /// A tempdir holding the object prefix (`data/`).
@@ -65,21 +65,9 @@ impl Fixture {
     /// per-object cost floor is 64KiB: sixteen small objects per split,
     /// letting fixtures shape split counts deterministically.
     fn config_yaml(&self, extra_sections: &str) -> String {
-        format!(
-            r#"
-pipeline: {{ name: s3-backfill-test, threads: 2 }}
-admin: {{ listen: none }}
-checkpoint: {{ interval: 100ms }}
-metrics: {{ exporter: none }}
-{extra_sections}
-source:
-  s3:
-    url: "file://{data}/"
-    split_target_bytes: 1MiB
-sink: {{ capture: {{}} }}
-"#,
-            data = self.dir.path().join("data").display(),
-        )
+        PipelineYaml::file("s3-backfill-test", &self.dir.path().join("data"))
+            .section(extra_sections)
+            .build()
     }
 }
 

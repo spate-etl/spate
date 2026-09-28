@@ -6,7 +6,9 @@ mod support;
 use spate_core::metrics::{Exporter, MetricsSettings, install};
 use std::fs;
 use std::time::Duration;
-use support::{launch_customized, line_framer, lines_bytes, recs, test_options};
+use support::{
+    PipelineYaml, launch_customized, line_framer, lines_bytes, recs, test_options, unreachable_nats,
+};
 
 /// The coordinator the S3 source builds from the section registers the
 /// `spate_coordination_*` families under the source's labels.
@@ -21,25 +23,10 @@ fn a_section_built_coordinator_publishes_coordination_metrics() {
     let data = dir.path().join("data");
     fs::create_dir_all(&data).unwrap();
     fs::write(data.join("obj.ndjson"), lines_bytes(&recs("o", 5))).unwrap();
-    let yaml = format!(
-        r#"
-pipeline: {{ name: s3-coordination-metrics, threads: 1 }}
-admin: {{ listen: none }}
-metrics: {{ exporter: none }}
-source:
-  s3:
-    url: "file://{data}/"
-sink: {{ capture: {{}} }}
-coordination:
-  op_timeout: 100ms
-  lease_duration: 2s
-  replan_interval: 2s
-  startup_max_attempts: 1
-  store:
-    nats: {{ servers: ["nats://127.0.0.1:1"], job: metrics }}
-"#,
-        data = data.display(),
-    );
+    let yaml = PipelineYaml::file("s3-coordination-metrics", &data)
+        .threads(1)
+        .section(&unreachable_nats("metrics"))
+        .build();
 
     let launched = launch_customized(
         &yaml,

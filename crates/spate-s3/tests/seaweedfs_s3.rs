@@ -17,26 +17,10 @@ mod support;
 use spate_core::pipeline::ExitState;
 use std::time::Duration;
 use support::seaweed::Gateway;
-use support::{captured_rows, launch, lines_bytes, recs, sorted, test_options};
+use support::{PipelineYaml, captured_rows, launch, lines_bytes, recs, sorted, test_options};
 
 fn config_yaml(gw: &Gateway) -> String {
-    format!(
-        r#"
-pipeline: {{ name: s3-seaweedfs-test, threads: 2 }}
-admin: {{ listen: none }}
-checkpoint: {{ interval: 100ms }}
-metrics: {{ exporter: none }}
-source:
-  s3:
-    url: "s3://{bucket}/data/"
-    split_target_bytes: 1MiB
-    store:
-{opts}
-sink: {{ capture: {{}} }}
-"#,
-        bucket = gw.bucket,
-        opts = gw.store_options_yaml(),
-    )
+    PipelineYaml::bucket("s3-seaweedfs-test", gw).build()
 }
 
 /// More than 1000 keys forces ListObjectsV2 pagination; ordering must

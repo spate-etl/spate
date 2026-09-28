@@ -1,8 +1,7 @@
 //! The pinned broker and the lane-draining helpers shared by the Kafka
 //! integration suites.
 
-// Module-wide `allow` rather than a per-item `expect`: an `expect` would
-// itself go unfulfilled in whichever target does use the item.
+// A per-item `expect` goes unfulfilled in whichever target uses the item.
 #![allow(dead_code, reason = "each target uses a different subset")]
 
 use spate_core::error::{ErrorClass, SourceError};

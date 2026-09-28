@@ -24,13 +24,12 @@
 
 use async_nats::jetstream::kv;
 use futures_util::StreamExt as _;
+use spate_test_support::container_image;
 use std::time::{Duration, Instant};
 use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::runners::SyncRunner;
 use testcontainers::{GenericImage, ImageExt};
 
-const IMAGE: &str = "nats";
-const TAG: &str = "2.11-alpine";
 const CLIENT_PORT: u16 = 4222;
 
 /// Lease TTL used by the expiry scenarios. Kept short so the whole spike
@@ -40,7 +39,8 @@ const MAX_AGE: Duration = Duration::from_secs(2);
 #[test]
 #[ignore = "needs Docker; run explicitly"]
 fn kv_semantics() {
-    let container = GenericImage::new(IMAGE, TAG)
+    let (image, tag) = container_image(&["--pull", "nats"]);
+    let container = GenericImage::new(image, tag)
         .with_exposed_port(CLIENT_PORT.tcp())
         .with_wait_for(WaitFor::message_on_stderr("Server is ready"))
         .with_cmd(["-js"])

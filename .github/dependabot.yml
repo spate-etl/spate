@@ -247,6 +247,31 @@ updates:
     cooldown:
       default-days: 7
 
+  # ------------------------------------------- Docker (NATS test server) ----
+  # `ci/nats/floor` pins the server the NATS container suites boot, and
+  # `ci/nats/below-floor` the older one a single test expects the store to
+  # refuse. Both are held on their lines: `ignore` matches the first two
+  # segments, so `2.11.17` admits `2.11.18` and nothing from 2.12 up. Moving the
+  # floor is a maintainer edit.
+  - package-ecosystem: docker
+    directories:
+      - "/ci/nats/floor"
+      - "/ci/nats/below-floor"
+    schedule:
+      interval: monthly
+      day: friday
+    open-pull-requests-limit: 2
+    labels: ["dependencies", "area: ci"]
+    commit-message:
+      prefix: "ci"
+    cooldown:
+      default-days: 7
+    ignore:
+      - dependency-name: "nats"
+        update-types:
+          - "version-update:semver-minor"
+          - "version-update:semver-major"
+
   # ------------------------------------- Docker (Kafka TLS client image) ----
   # `ci/debian/trixie/Dockerfile` pins the image `spate-kafka`'s `tls_system_ca`
   # runs its clients in. Held on Debian 13: a new release moves glibc, which

@@ -206,6 +206,12 @@ pub(crate) fn classify(
                 image_suites.extend(graph.container_suites_for("spate-kafka"));
                 out.container_pkgs.extend(image_suites.iter().cloned());
             }
+            // The server the NATS suites run against. `spate` boots it only in
+            // its examples tier, which the container suites leave out.
+            if glob(path, "ci/nats/*") {
+                image_suites.extend(["spate-coordination", "spate-s3"].map(String::from));
+                out.container_pkgs.extend(image_suites.iter().cloned());
+            }
             // The client image `spate-kafka`'s TLS suite runs its clients in.
             if glob(path, "ci/debian/*") {
                 image_suites.insert("spate-kafka".to_string());
@@ -683,6 +689,26 @@ mod tests {
         let image = vec!["ci/kafka/stable/Dockerfile".to_string()];
         let out = classify(&image, Event::PullRequest, &ctx, &graph(), &[]);
         assert_eq!(suites(&out), ["spate", "spate-kafka"]);
+    }
+
+    /// A NATS server bump selects the suites that boot NATS, on a Dependabot
+    /// pull request too.
+    #[test]
+    fn a_nats_image_bump_selects_the_suites_that_boot_nats() {
+        for lane in ["floor", "below-floor"] {
+            let image = vec![format!("ci/nats/{lane}/Dockerfile")];
+            assert_eq!(
+                suites(&run(&[image[0].as_str()])),
+                ["spate-coordination", "spate-s3"]
+            );
+
+            let ctx = Context {
+                author: "dependabot[bot]".into(),
+                labels: vec![],
+            };
+            let out = classify(&image, Event::PullRequest, &ctx, &graph(), &[]);
+            assert_eq!(suites(&out), ["spate-coordination", "spate-s3"]);
+        }
     }
 
     #[test]

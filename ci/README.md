@@ -112,8 +112,9 @@ The bump usually cannot be fixed inside its own pull request, so:
 3. A row in the table above.
 4. The suite's harness reads its manifest through the same helper.
 5. `cargo xtask ci-changes` maps `ci/<service>/*` to that suite. A service with
-   more than one lane also has its extra lanes read for the matrix, and a
-   `ci.yml` job consuming them.
+   more than one lane the suite runs on also has its extra lanes read for the
+   matrix, and a `ci.yml` job consuming them. A lane only one test boots, such as
+   NATS's `below-floor`, is not read.
 6. The Dependabot entries.
 
 Steps 1 to 3 are this tree, and `cargo xtask integration-test` picks the service up from

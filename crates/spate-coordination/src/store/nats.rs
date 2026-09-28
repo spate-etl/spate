@@ -780,13 +780,14 @@ impl CoordinationStore for NatsStore {
     async fn watch(&self, ks: Keyspace, prefix: &str) -> Result<WatchStream, StoreError> {
         let buckets = self.buckets().await?;
         let store = self.bucket(buckets, ks).clone();
-        let filter = match prefix {
-            "" => ">".to_string(),
-            p if p.ends_with('.') => format!("{p}>"),
-            p => p.to_string(),
+        // A subject filter matches whole tokens, so a prefix that ends
+        // mid-token watches every key and is filtered here.
+        let (filter, watched): (String, fn(&str, &str) -> bool) = match prefix {
+            p if p.is_empty() || p.ends_with('.') => (format!("{p}>"), |_, _| true),
+            _ => (">".to_string(), |key, prefix| key.starts_with(prefix)),
         };
-        // An empty bucket has no entry to carry `seen_current`, so the
-        // snapshot boundary must be synthesized immediately. Emptiness
+        // A filter with no live key has no entry to carry `seen_current`, so
+        // the snapshot boundary must be synthesized immediately. Emptiness
         // comes from `keys()`, the one API that answers "are there live
         // keys" (bucket status counts messages, markers included, and is
         // not that answer).
@@ -795,10 +796,18 @@ impl CoordinationStore for NatsStore {
                 .keys()
                 .await
                 .map_err(|e| StoreError::Retryable(format!("listing keys: {e}")))?;
-            next_within(&mut keys, self.stall_bound(), "listing keys")
-                .await?
-                .is_none()
+            let mut empty = true;
+            while let Some(key) = next_within(&mut keys, self.stall_bound(), "listing keys").await?
+            {
+                let key = key.map_err(|e| StoreError::Retryable(format!("listing keys: {e}")))?;
+                if filter == ">" || key.starts_with(prefix) {
+                    empty = false;
+                    break;
+                }
+            }
+            empty
         };
+        let prefix = prefix.to_string();
         let watcher = store
             .watch_with_history(&filter)
             .await
@@ -812,31 +821,32 @@ impl CoordinationStore for NatsStore {
         let caught_up = empty;
         let stall = self.stall_bound();
         let tail = futures_util::stream::unfold(
-            (watcher, caught_up),
-            move |(mut watcher, mut caught_up)| async move {
+            (watcher, caught_up, prefix),
+            move |(mut watcher, mut caught_up, prefix)| async move {
                 let next = if caught_up {
                     watcher.next().await
                 } else {
                     match next_within(&mut watcher, stall, "watch snapshot").await {
                         Ok(next) => next,
-                        Err(e) => return Some((vec![Err(e)], (watcher, caught_up))),
+                        Err(e) => return Some((vec![Err(e)], (watcher, caught_up, prefix))),
                     }
                 };
                 match next {
                     Some(Ok(entry)) => {
                         let mark_done = !caught_up && entry.seen_current;
                         caught_up |= entry.seen_current;
-                        let event = to_event(entry);
-                        let out: Vec<Result<WatchEvent, StoreError>> = if mark_done {
-                            vec![Ok(event), Ok(WatchEvent::SnapshotDone)]
-                        } else {
-                            vec![Ok(event)]
-                        };
-                        Some((out, (watcher, caught_up)))
+                        let mut out: Vec<Result<WatchEvent, StoreError>> = Vec::new();
+                        if watched(&entry.key, &prefix) {
+                            out.push(Ok(to_event(entry)));
+                        }
+                        if mark_done {
+                            out.push(Ok(WatchEvent::SnapshotDone));
+                        }
+                        Some((out, (watcher, caught_up, prefix)))
                     }
                     Some(Err(e)) => Some((
                         vec![Err(StoreError::Retryable(format!("watch: {e}")))],
-                        (watcher, caught_up),
+                        (watcher, caught_up, prefix),
                     )),
                     None => None,
                 }

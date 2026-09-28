@@ -1,8 +1,11 @@
 //! Shared harness for the multi-worker integration suites: real
-//! coordinators over one shared in-memory store, driven through the
-//! public synchronous API exactly as a source would drive them.
+//! coordinators over one shared store, driven through the public
+//! synchronous API exactly as a source would drive them.
 // Each test binary compiles this module independently and uses a subset.
 #![allow(dead_code, unreachable_pub)]
+
+pub mod contract;
+pub mod polled;
 
 use spate_coordination::loop_probe::LoopProbe;
 use spate_coordination::store::memory::MemoryStore;
@@ -34,17 +37,23 @@ pub const POLL_INTERVAL: Duration = Duration::from_millis(5);
 pub const DEADLINE: Duration = Duration::from_secs(20);
 
 pub fn config(instance_id: Option<&str>) -> CoordinationConfig {
+    config_for(LEASE, instance_id)
+}
+
+/// [`config`] scaled to `lease`. At [`LEASE`] that is a 200ms `op_timeout`
+/// and a 300ms `reconcile_interval`.
+pub fn config_for(lease: Duration, instance_id: Option<&str>) -> CoordinationConfig {
     let mut cfg = CoordinationConfig::default();
-    cfg.lease_duration = LEASE;
-    cfg.op_timeout = Duration::from_millis(200);
+    cfg.lease_duration = lease;
+    cfg.op_timeout = lease * 2 / 15;
     cfg.instance_id = instance_id.map(str::to_string);
-    cfg.replan_interval = LEASE;
-    cfg.reconcile_interval = Duration::from_millis(300);
+    cfg.replan_interval = lease;
+    cfg.reconcile_interval = lease / 5;
     // Both defaults are sized against the 30s production lease and would
     // swamp a 1.5s test one; `drain_deadline` would not validate. Scaled
     // here rather than in `Default` so production keeps the documented
     // values.
-    cfg.drain_deadline = LEASE / 2;
+    cfg.drain_deadline = lease / 2;
     // Zero by default: most tests assert that a dead worker's splits flow
     // back promptly, and a grace window would just add latency to every one
     // of them. The tests that care about the window set it.
@@ -62,6 +71,64 @@ pub fn runtime() -> tokio::runtime::Runtime {
 
 pub fn store() -> MemoryStore {
     MemoryStore::new(LEASE)
+}
+
+/// One coordination namespace that every worker of a scenario joins.
+pub trait Backend {
+    type Store: CoordinationStore + Clone;
+
+    /// A handle for one worker. Each call stands for a separate process, so
+    /// a store with per-handle state gives every worker its own.
+    fn store(&self) -> Self::Store;
+
+    /// The lease every handle is built with. Scenario timing scales from it.
+    fn lease(&self) -> Duration;
+
+    /// Tuning for a worker of this backend.
+    fn config(&self, instance_id: Option<&str>) -> CoordinationConfig {
+        config_for(self.lease(), instance_id)
+    }
+
+    fn worker(
+        &self,
+        io: &tokio::runtime::Handle,
+        instance_id: Option<&str>,
+    ) -> StoreCoordinator<Self::Store> {
+        self.worker_with(io, instance_id, |_| {})
+    }
+
+    /// A worker whose [`config`](Backend::config) `tune` adjusts first.
+    fn worker_with(
+        &self,
+        io: &tokio::runtime::Handle,
+        instance_id: Option<&str>,
+        tune: impl FnOnce(&mut CoordinationConfig),
+    ) -> StoreCoordinator<Self::Store> {
+        let mut config = self.config(instance_id);
+        tune(&mut config);
+        StoreCoordinator::new(self.store(), config, io.clone(), None).expect("coordinator")
+    }
+}
+
+/// Every worker shares one [`MemoryStore`] on wall time.
+pub struct MemoryBackend(MemoryStore);
+
+impl MemoryBackend {
+    pub fn new() -> MemoryBackend {
+        MemoryBackend(store())
+    }
+}
+
+impl Backend for MemoryBackend {
+    type Store = MemoryStore;
+
+    fn store(&self) -> MemoryStore {
+        self.0.clone()
+    }
+
+    fn lease(&self) -> Duration {
+        LEASE
+    }
 }
 
 /// The frozen clock for the suites. Share one instance between the store

@@ -5,6 +5,7 @@
 
 mod support;
 
+use futures_util::StreamExt as _;
 use spate_coordination::store::{
     CasOutcome, CoordinationStore, Entry, Keyspace, Revision, WatchEvent,
 };
@@ -81,4 +82,39 @@ fn a_listing_diff_reports_each_change_once() {
         ]
     );
     assert!(diff(&mut seen, listed()).is_empty());
+}
+
+/// A key created and deleted between two listings never reaches a polled
+/// watch; the next listing reports only what is live.
+#[tokio::test(start_paused = true)]
+async fn a_polled_watch_misses_a_key_that_lives_between_two_listings() {
+    let store = PolledStore::new(support::store(), LEASE / 10);
+    let mut watch = store.watch(Keyspace::Durable, "m.").await.unwrap();
+    assert_eq!(
+        watch.next().await.unwrap().unwrap(),
+        WatchEvent::SnapshotDone
+    );
+    let short = store
+        .create(Keyspace::Durable, "m.short", b"s".to_vec())
+        .await
+        .unwrap()
+        .won()
+        .unwrap();
+    assert!(matches!(
+        store
+            .delete(Keyspace::Durable, "m.short", Some(short))
+            .await
+            .unwrap(),
+        CasOutcome::Won(_)
+    ));
+    store
+        .create(Keyspace::Durable, "m.long", b"l".to_vec())
+        .await
+        .unwrap()
+        .won()
+        .unwrap();
+    match watch.next().await.unwrap().unwrap() {
+        WatchEvent::Put(entry) => assert_eq!(entry.key, "m.long"),
+        other => panic!("expected m.long's put, got {other:?}"),
+    }
 }

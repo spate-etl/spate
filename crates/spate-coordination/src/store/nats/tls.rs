@@ -107,10 +107,11 @@ fn fatal(field: &str, path: &Path, why: &str) -> StoreError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::nats::test_tls::{INFO_REQUIRING_TLS, TestCa};
+    use crate::store::nats::test_tls::{INFO_REQUIRING_TLS, TestCa, serve_nats};
     use crate::store::nats::{NatsConfig, NatsStore};
     use crate::store::{CoordinationStore, Keyspace};
     use async_nats::rustls::AlertDescription;
+    use spate_test_support::native_certs;
     use std::ffi::OsString;
     use std::path::PathBuf;
     use std::time::Duration;
@@ -122,12 +123,6 @@ mod tests {
     const WITH_TLS: &str = "SPATE_TEST_NATS_TLS_SECTION";
     const EXPECT_FATAL: &str = "SPATE_TEST_NATS_TLS_EXPECT_FATAL";
     const EXPECT_RETRYABLE: &str = "SPATE_TEST_NATS_TLS_EXPECT_RETRYABLE";
-
-    fn loaded(certs: Vec<CertificateDer<'static>>) -> CertificateResult {
-        let mut result = CertificateResult::default();
-        result.certs = certs;
-        result
-    }
 
     fn with_root_ca(path: &Path) -> NatsTls {
         NatsTls {
@@ -151,7 +146,7 @@ mod tests {
         let (system, extra) = (TestCa::new("system"), TestCa::new("extra"));
         let tls = with_root_ca(&extra.write(dir.path()));
         let (roots, fallback) =
-            root_store(Some(&tls), true, || loaded(vec![system.der()])).unwrap();
+            root_store(Some(&tls), true, || native_certs(vec![system.der()])).unwrap();
         assert_eq!(roots.len(), 2);
         assert!(!fallback);
     }
@@ -175,7 +170,7 @@ mod tests {
     fn system_store_errors_are_fatal_only_when_tls_is_certain() {
         let system = TestCa::new("system");
         let broken = || {
-            let mut result = loaded(vec![system.der()]);
+            let mut result = native_certs(vec![system.der()]);
             result.errors.push(rustls_native_certs::Error {
                 context: "failed to read PEM from file",
                 kind: rustls_native_certs::ErrorKind::Io {
@@ -301,7 +296,7 @@ mod tests {
         }
         let dir = tempfile::tempdir().unwrap();
         let (system, private) = (TestCa::new("system"), TestCa::new("private"));
-        let port = system.serve_nats(None).await;
+        let port = serve_nats(&system, None).await;
         let env = vec![
             (URL, tls_url(port)),
             (WITH_TLS, "1".into()),
@@ -322,7 +317,7 @@ mod tests {
         }
         let dir = tempfile::tempdir().unwrap();
         let (system, private) = (TestCa::new("system"), TestCa::new("private"));
-        let port = private.serve_nats(None).await;
+        let port = serve_nats(&private, None).await;
         let env = vec![
             (URL, tls_url(port)),
             (WITH_TLS, "1".into()),
@@ -344,7 +339,7 @@ mod tests {
             TestCa::new("private"),
             TestCa::new("unknown"),
         );
-        let port = unknown.serve_nats(None).await;
+        let port = serve_nats(&unknown, None).await;
         let env = vec![
             (URL, tls_url(port)),
             (WITH_TLS, "1".into()),
@@ -363,7 +358,7 @@ mod tests {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
-        let port = TestCa::new("system").serve_nats(None).await;
+        let port = serve_nats(&TestCa::new("system"), None).await;
         let expect = (EXPECT_FATAL, OsString::from("SSL_CERT_FILE"));
         let mut envs: Vec<_> = [
             format!("tls://127.0.0.1:{port}"),
@@ -393,7 +388,7 @@ mod tests {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
-        let port = TestCa::new("system").serve_nats(None).await;
+        let port = serve_nats(&TestCa::new("system"), None).await;
         let env = vec![
             (URL, format!("nats://127.0.0.1:{port}").into()),
             (EXPECT_FATAL, "platform certs".into()),
@@ -419,7 +414,7 @@ mod tests {
         );
         let dir = tempfile::tempdir().unwrap();
         let system = TestCa::new("system");
-        let port = system.serve_nats(None).await;
+        let port = serve_nats(&system, None).await;
         for url in [tls_url(port), format!("nats://127.0.0.1:{port}").into()] {
             run_in_child(
                 "tls_connects_with_both_rustls_providers",
@@ -437,7 +432,7 @@ mod tests {
         }
         let dir = tempfile::tempdir().unwrap();
         let (system, clients) = (TestCa::new("system"), TestCa::new("clients"));
-        let port = system.serve_nats(Some(&clients)).await;
+        let port = serve_nats(&system, Some(&clients)).await;
         let (cert, key) = clients.write_identity(dir.path());
         let env = vec![
             (URL, tls_url(port)),
@@ -461,7 +456,7 @@ mod tests {
         }
         let dir = tempfile::tempdir().unwrap();
         let (system, clients) = (TestCa::new("system"), TestCa::new("clients"));
-        let port = system.serve_nats(Some(&clients)).await;
+        let port = serve_nats(&system, Some(&clients)).await;
         let (cert, key) = TestCa::new("strangers").write_identity(dir.path());
         for env in [
             vec![

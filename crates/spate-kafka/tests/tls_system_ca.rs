@@ -7,9 +7,7 @@
 
 mod support;
 
-use base64::Engine as _;
 use bytes::BytesMut;
-use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair};
 use rdkafka::ClientConfig;
 use rdkafka::client::ClientContext;
 use rdkafka::consumer::{BaseConsumer, ConsumerContext};
@@ -22,7 +20,7 @@ use spate_core::sink::{RowEncoder, SealedBatch, ShardWriter};
 use spate_core::source::{Source, SourceCtx, SourceEvent};
 use spate_kafka::sink::KafkaSinkConfig;
 use spate_kafka::{KafkaSource, KafkaSourceConfig};
-use spate_test_support::container_image;
+use spate_test_support::{TestCa, container_image, pem};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -114,35 +112,13 @@ fn probe_ca_default_completes_a_tls_handshake() {
 
 /// A CA certificate, and a broker key and chain it signs for `127.0.0.1`, as PEM.
 fn certificates() -> (String, String, String) {
-    let mut ca = CertificateParams::new(Vec::<String>::new()).expect("CA params");
-    ca.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-    ca.distinguished_name
-        .push(DnType::CommonName, "spate-kafka-test CA");
-    let ca_key = KeyPair::generate().expect("CA key");
-    let ca_cert = ca.self_signed(&ca_key).expect("CA cert");
-    let issuer = Issuer::new(ca, ca_key);
-
-    let broker_key = KeyPair::generate().expect("broker key");
-    let broker = CertificateParams::new(vec!["127.0.0.1".to_string(), "localhost".to_string()])
-        .expect("broker params")
-        .signed_by(&broker_key, &issuer)
-        .expect("broker cert");
+    let ca = TestCa::new("spate-kafka-test CA");
+    let (broker, key) = ca.leaf(&["127.0.0.1", "localhost"]);
     (
-        pem("CERTIFICATE", ca_cert.der()),
-        pem("PRIVATE KEY", &broker_key.serialize_der()),
-        pem("CERTIFICATE", broker.der()),
+        pem("CERTIFICATE", &ca.der()),
+        pem("PRIVATE KEY", key.secret_pkcs8_der()),
+        pem("CERTIFICATE", &broker),
     )
-}
-
-fn pem(label: &str, der: &[u8]) -> String {
-    let body = base64::engine::general_purpose::STANDARD.encode(der);
-    let mut out = format!("-----BEGIN {label}-----\n");
-    for line in body.as_bytes().chunks(64) {
-        out.push_str(std::str::from_utf8(line).expect("base64 is ASCII"));
-        out.push('\n');
-    }
-    out.push_str(&format!("-----END {label}-----\n"));
-    out
 }
 
 fn probe_arm(brokers: &str) {

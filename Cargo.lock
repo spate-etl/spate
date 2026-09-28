@@ -3966,7 +3966,6 @@ name = "spate-avro"
 version = "0.2.0"
 dependencies = [
  "apache-avro",
- "base64 0.22.1",
  "bytes",
  "gungraun",
  "http-body-util",
@@ -3975,7 +3974,6 @@ dependencies = [
  "hyper-util",
  "ouroboros",
  "proptest",
- "rcgen",
  "reqwest",
  "rustls",
  "rustls-native-certs",
@@ -3989,7 +3987,6 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
- "tokio-rustls",
  "tower-layer",
  "tower-service",
  "tracing",
@@ -4071,7 +4068,6 @@ dependencies = [
  "gungraun",
  "humantime-serde",
  "proptest",
- "rcgen",
  "rustls-native-certs",
  "serde",
  "serde_json",
@@ -4181,14 +4177,12 @@ dependencies = [
 name = "spate-kafka"
 version = "0.2.0"
 dependencies = [
- "base64 0.22.1",
  "bytes",
  "bytesize",
  "gungraun",
  "humantime-serde",
  "metrics",
  "metrics-exporter-prometheus",
- "rcgen",
  "rdkafka",
  "serde",
  "serde_json",

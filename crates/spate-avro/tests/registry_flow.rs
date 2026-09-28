@@ -670,40 +670,9 @@ async fn a_cached_schema_decodes_after_a_rejection() {
 /// Serves `https://127.0.0.1:<port>` with a certificate from a CA no trust
 /// store holds, and returns the URL.
 async fn serve_untrusted_https() -> String {
-    use rcgen::{BasicConstraints, CertificateParams, IsCa, Issuer, KeyPair};
-    use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
-    let mut ca = CertificateParams::new(Vec::<String>::new()).unwrap();
-    ca.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-    let ca_key = KeyPair::generate().unwrap();
-    let issuer = Issuer::new(ca, ca_key);
-    let key = KeyPair::generate().unwrap();
-    let leaf = CertificateParams::new(vec!["127.0.0.1".to_owned()])
-        .unwrap()
-        .signed_by(&key, &issuer)
-        .unwrap();
-    let config = rustls::ServerConfig::builder_with_provider(Arc::new(
-        rustls::crypto::aws_lc_rs::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .unwrap()
-    .with_no_client_auth()
-    .with_single_cert(
-        vec![leaf.der().clone()],
-        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der())),
-    )
-    .unwrap();
-    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    tokio::spawn(async move {
-        while let Ok((tcp, _)) = listener.accept().await {
-            let acceptor = acceptor.clone();
-            tokio::spawn(async move {
-                let _ = acceptor.accept(tcp).await;
-            });
-        }
-    });
-    format!("https://127.0.0.1:{port}")
+    let ca = spate_test_support::TestCa::new("untrusted");
+    let addr = spate_test_support::serve_tls(ca.server_config(None), |_| async {}).await;
+    format!("https://{addr}")
 }
 
 /// A registry certificate the client does not trust is fatal.

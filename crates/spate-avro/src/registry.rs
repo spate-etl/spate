@@ -567,22 +567,11 @@ pub(crate) async fn prewarm(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::Engine as _;
     use http_body_util::Full;
     use hyper::body::Bytes;
-    use rcgen::{
-        BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer,
-        KeyPair, KeyUsagePurpose,
-    };
-    use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+    use spate_test_support::{TestCa, native_certs, pem};
 
     const SCHEMA: &str = r#"{"type":"record","name":"E","fields":[{"name":"id","type":"long"}]}"#;
-
-    fn loaded(certs: Vec<CertificateDer<'static>>) -> CertificateResult {
-        let mut result = CertificateResult::default();
-        result.certs = certs;
-        result
-    }
 
     fn config(url: &str, root_ca: Option<&Path>) -> RegistryConfig {
         RegistryConfig {
@@ -592,88 +581,24 @@ mod tests {
         }
     }
 
-    struct TestCa {
-        name: String,
-        der: CertificateDer<'static>,
-        issuer: Issuer<'static, KeyPair>,
-    }
-
-    impl TestCa {
-        fn new(name: &str) -> TestCa {
-            let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
-            params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-            params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
-            params.distinguished_name.push(DnType::CommonName, name);
-            let key = KeyPair::generate().unwrap();
-            let der = params.self_signed(&key).unwrap().der().clone();
-            TestCa {
-                name: name.to_owned(),
-                der,
-                issuer: Issuer::new(params, key),
+    /// Serves `SCHEMA` as every registry response on `127.0.0.1`, over a
+    /// certificate `ca` signed, and returns the `https://` URL.
+    async fn serve(ca: &TestCa) -> String {
+        let body = serde_json::json!({ "schema": SCHEMA }).to_string();
+        let addr = spate_test_support::serve_tls(ca.server_config(None), move |tls| {
+            let body = body.clone();
+            async move {
+                let respond = hyper::service::service_fn(move |_| {
+                    let body = Full::new(Bytes::from(body.clone()));
+                    async move { Ok::<_, std::convert::Infallible>(hyper::Response::new(body)) }
+                });
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(hyper_util::rt::TokioIo::new(tls), respond)
+                    .await;
             }
-        }
-
-        /// Writes the CA certificate as PEM into `dir` and returns its path.
-        fn write(&self, dir: &Path) -> PathBuf {
-            let path = dir.join(format!("{}.pem", self.name));
-            std::fs::write(&path, pem(&self.der)).unwrap();
-            path
-        }
-
-        /// Serves `SCHEMA` as every registry response on `127.0.0.1`, over a
-        /// certificate this CA signed, and returns the `https://` URL.
-        async fn serve(&self) -> String {
-            let key = KeyPair::generate().unwrap();
-            // rcgen's default validity starts before 2019-07-01, which exempts
-            // the leaf from Apple's 825-day limit.
-            let mut params = CertificateParams::new(vec!["127.0.0.1".to_owned()]).unwrap();
-            params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
-            let leaf = params.signed_by(&key, &self.issuer).unwrap();
-            let config = rustls::ServerConfig::builder_with_provider(Arc::new(
-                rustls::crypto::aws_lc_rs::default_provider(),
-            ))
-            .with_safe_default_protocol_versions()
-            .unwrap()
-            .with_no_client_auth()
-            .with_single_cert(
-                vec![leaf.der().clone()],
-                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der())),
-            )
-            .unwrap();
-            let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let port = listener.local_addr().unwrap().port();
-            let body = serde_json::json!({ "schema": SCHEMA }).to_string();
-            tokio::spawn(async move {
-                while let Ok((tcp, _)) = listener.accept().await {
-                    let (acceptor, body) = (acceptor.clone(), body.clone());
-                    tokio::spawn(async move {
-                        let Ok(tls) = acceptor.accept(tcp).await else {
-                            return;
-                        };
-                        let respond = hyper::service::service_fn(move |_| {
-                            let body = Full::new(Bytes::from(body.clone()));
-                            async move { Ok::<_, std::convert::Infallible>(hyper::Response::new(body)) }
-                        });
-                        let _ = hyper::server::conn::http1::Builder::new()
-                            .serve_connection(hyper_util::rt::TokioIo::new(tls), respond)
-                            .await;
-                    });
-                }
-            });
-            format!("https://127.0.0.1:{port}")
-        }
-    }
-
-    fn pem(der: &[u8]) -> String {
-        let body = base64::engine::general_purpose::STANDARD.encode(der);
-        let mut pem = String::from("-----BEGIN CERTIFICATE-----\n");
-        for line in body.as_bytes().chunks(64) {
-            pem.push_str(std::str::from_utf8(line).unwrap());
-            pem.push('\n');
-        }
-        pem.push_str("-----END CERTIFICATE-----\n");
-        pem
+        })
+        .await;
+        format!("https://{addr}")
     }
 
     /// Fetches schema 1 from `cfg`, with `system` standing in for the system
@@ -683,7 +608,7 @@ mod tests {
         system: Vec<CertificateDer<'static>>,
     ) -> (Result<String, SRCError>, Rejection) {
         let rejection = Rejection::default();
-        let settings = sr_settings_with(cfg, &rejection, || loaded(system)).unwrap();
+        let settings = sr_settings_with(cfg, &rejection, || native_certs(system)).unwrap();
         let fetched = schema_registry::get_schema_by_id_and_type(1, &settings, SchemaType::Avro)
             .await
             .map(|registered| registered.schema);
@@ -696,9 +621,8 @@ mod tests {
     fn an_empty_system_store_falls_back_to_the_mozilla_roots() {
         let roots = root_store(CertificateResult::default);
         assert_eq!(roots.len(), webpki_roots::TLS_SERVER_ROOTS.len());
-        let cert = rcgen::generate_simple_self_signed(vec!["sr".to_owned()]).unwrap();
         assert_eq!(
-            root_store(|| loaded(vec![cert.cert.der().clone()])).len(),
+            root_store(|| native_certs(vec![TestCa::new("sr").der()])).len(),
             1
         );
     }
@@ -711,7 +635,7 @@ mod tests {
         let empty = dir.path().join("empty.pem");
         std::fs::write(&empty, "not a certificate\n").unwrap();
         let malformed = dir.path().join("malformed.pem");
-        std::fs::write(&malformed, pem(b"not DER")).unwrap();
+        std::fs::write(&malformed, pem("CERTIFICATE", b"not DER")).unwrap();
         for path in [dir.path().join("missing.pem"), empty, malformed] {
             let cfg = config("https://sr", Some(&path));
             let err = sr_settings_with(&cfg, &Rejection::default(), CertificateResult::default)
@@ -728,7 +652,7 @@ mod tests {
     async fn a_registry_signed_by_root_ca_is_trusted() {
         let dir = tempfile::tempdir().unwrap();
         let ca = TestCa::new("private");
-        let url = ca.serve().await;
+        let url = serve(&ca).await;
         let (fetched, _) = fetch(&config(&url, Some(&ca.write(dir.path()))), vec![]).await;
         assert_eq!(fetched.expect("the private CA is trusted"), SCHEMA);
     }
@@ -739,7 +663,7 @@ mod tests {
     async fn an_unknown_ca_is_rejected_with_the_root_ca_hint() {
         let dir = tempfile::tempdir().unwrap();
         let (registry, other) = (TestCa::new("registry"), TestCa::new("other"));
-        let url = registry.serve().await;
+        let url = serve(&registry).await;
         let (fetched, rejection) =
             fetch(&config(&url, Some(&other.write(dir.path()))), vec![]).await;
         fetched.expect_err("an unknown CA is rejected");
@@ -781,9 +705,9 @@ mod tests {
         async fn root_ca_is_merged_with_the_system_roots() {
             let dir = tempfile::tempdir().unwrap();
             let (system, extra) = (TestCa::new("system"), TestCa::new("extra"));
-            let url = system.serve().await;
+            let url = serve(&system).await;
             let cfg = config(&url, Some(&extra.write(dir.path())));
-            let (fetched, _) = fetch(&cfg, vec![system.der.clone()]).await;
+            let (fetched, _) = fetch(&cfg, vec![system.der()]).await;
             assert_eq!(fetched.expect("the system CA is trusted"), SCHEMA);
         }
 
@@ -793,7 +717,7 @@ mod tests {
         async fn an_http_registry_redirected_to_https_is_trusted() {
             use tokio::io::{AsyncReadExt, AsyncWriteExt};
             let registry = TestCa::new("registry");
-            let target = registry.serve().await;
+            let target = serve(&registry).await;
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let port = listener.local_addr().unwrap().port();
             tokio::spawn(async move {
@@ -810,7 +734,7 @@ mod tests {
                 }
             });
             let url = format!("http://127.0.0.1:{port}");
-            let (fetched, _) = fetch(&config(&url, None), vec![registry.der.clone()]).await;
+            let (fetched, _) = fetch(&config(&url, None), vec![registry.der()]).await;
             assert_eq!(fetched.expect("the redirect target is trusted"), SCHEMA);
         }
 
@@ -819,10 +743,10 @@ mod tests {
         #[tokio::test]
         async fn an_https_registry_is_verified_against_the_system_roots() {
             let (registry, other) = (TestCa::new("registry"), TestCa::new("other"));
-            let url = registry.serve().await;
-            let (fetched, _) = fetch(&config(&url, None), vec![registry.der.clone()]).await;
+            let url = serve(&registry).await;
+            let (fetched, _) = fetch(&config(&url, None), vec![registry.der()]).await;
             assert_eq!(fetched.expect("the registry's CA is trusted"), SCHEMA);
-            let (fetched, _) = fetch(&config(&url, None), vec![other.der.clone()]).await;
+            let (fetched, _) = fetch(&config(&url, None), vec![other.der()]).await;
             fetched.expect_err("an unknown CA is rejected");
         }
     }

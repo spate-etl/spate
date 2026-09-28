@@ -186,12 +186,15 @@ sink:
     compression: lz4     # lz4 (default) | zstd | zstd:N | off
 ```
 
-This compresses the HTTP insert body. `lz4` is cheap and a good default on most
+This compresses the HTTP insert body and the responses to the sink's queries.
+Under `lz4` the sink sends `network_compression_method=LZ4` on every request, so
+a server whose network codec defaults to ZSTD still answers in LZ4, the only
+codec the client decodes. `lz4` is cheap and a good default on most
 links. `zstd` (optionally `zstd:N`) compresses smaller for a bit more CPU, worth
 it on metered or cross-region links where bandwidth, not CPU, is the limit. `off`
 saves client CPU on a fast, trusted LAN where the wire is not the bottleneck.
 Match the choice to whichever of client CPU or bandwidth is scarce; it does not
-affect on-disk storage, only the request.
+affect on-disk storage, only the traffic between the sink and the server.
 
 ## ClickHouse `async_insert`
 

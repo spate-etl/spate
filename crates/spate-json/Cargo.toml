@@ -41,6 +41,7 @@ metrics-exporter-prometheus = { workspace = true }
 serde_yaml = { workspace = true }
 proptest = { workspace = true }
 spate-bench = { workspace = true }
+spate-test-support = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [[bench]]

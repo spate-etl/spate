@@ -275,27 +275,17 @@ mod tests {
 
     /// Runs test `name` in a child process whose system trust store is the
     /// PEM file `system`, with `env` set.
-    async fn run_in_child(name: &str, system: PathBuf, env: Vec<(&'static str, OsString)>) {
+    fn run_in_child(name: &str, system: PathBuf, env: Vec<(&'static str, OsString)>) {
         let (_, module) = module_path!().split_once("::").unwrap();
         let name = format!("{module}::{name}");
-        let out = tokio::task::spawn_blocking(move || {
-            std::process::Command::new(std::env::current_exe().expect("test binary"))
-                .args(["--exact", &name])
-                .env_remove("SSL_CERT_DIR")
-                .env("SSL_CERT_FILE", system)
-                .envs(env)
-                .output()
-                .expect("spawn the test binary")
-        })
-        .await
-        .unwrap();
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        // A filter that matches nothing also exits 0.
-        assert!(
-            out.status.success() && stdout.contains("1 passed"),
-            "{stdout}{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
+        tokio::task::block_in_place(|| {
+            spate_test_support::run_in_child(&name, |child| {
+                child
+                    .env_remove("SSL_CERT_DIR")
+                    .env("SSL_CERT_FILE", system)
+                    .envs(env)
+            });
+        });
     }
 
     fn tls_url(port: u16) -> OsString {
@@ -321,8 +311,7 @@ mod tests {
             "root_ca_adds_to_the_system_trust_store",
             system.write(dir.path()),
             env,
-        )
-        .await;
+        );
     }
 
     /// A server whose CA is only in `root_ca` is trusted.
@@ -339,7 +328,7 @@ mod tests {
             (WITH_TLS, "1".into()),
             (ROOT_CA, private.write(dir.path()).into()),
         ];
-        run_in_child("root_ca_trusts_a_private_ca", system.write(dir.path()), env).await;
+        run_in_child("root_ca_trusts_a_private_ca", system.write(dir.path()), env);
     }
 
     /// A server whose CA is in neither the system store nor `root_ca` fails
@@ -362,7 +351,7 @@ mod tests {
             (ROOT_CA, private.write(dir.path()).into()),
             (EXPECT_FATAL, "UnknownIssuer".into()),
         ];
-        run_in_child("an_unknown_ca_is_rejected", system.write(dir.path()), env).await;
+        run_in_child("an_unknown_ca_is_rejected", system.write(dir.path()), env);
     }
 
     /// An unreadable system trust store fails the connect with a fatal error
@@ -392,8 +381,7 @@ mod tests {
                 "an_unreadable_trust_store_is_fatal_when_tls_is_certain",
                 dir.path().join("missing.pem"),
                 env,
-            )
-            .await;
+            );
         }
     }
 
@@ -414,8 +402,7 @@ mod tests {
             "an_unreadable_trust_store_is_fatal_when_the_server_asks_for_tls",
             dir.path().join("missing.pem"),
             env,
-        )
-        .await;
+        );
     }
 
     /// With both rustls providers compiled in and no `tls` section, a
@@ -438,8 +425,7 @@ mod tests {
                 "tls_connects_with_both_rustls_providers",
                 system.write(dir.path()),
                 vec![(URL, url)],
-            )
-            .await;
+            );
         }
     }
 
@@ -463,8 +449,7 @@ mod tests {
             "mutual_tls_presents_the_client_identity",
             system.write(dir.path()),
             env,
-        )
-        .await;
+        );
     }
 
     /// A server that rejects the client certificate, or its absence, fails the
@@ -496,8 +481,7 @@ mod tests {
                 "a_rejected_client_certificate_is_fatal",
                 system.write(dir.path()),
                 env,
-            )
-            .await;
+            );
         }
     }
 
@@ -525,8 +509,7 @@ mod tests {
                 "a_rejecting_tls_alert_is_fatal",
                 system.write(dir.path()),
                 env,
-            )
-            .await;
+            );
         }
     }
 
@@ -550,7 +533,6 @@ mod tests {
             "an_unlisted_tls_alert_is_retryable",
             TestCa::new("system").write(dir.path()),
             env,
-        )
-        .await;
+        );
     }
 }

@@ -38,9 +38,8 @@ use spate::pipeline::{
     ExitReport, Pipeline, RuntimeOptions, ShutdownHandle, SinkOptions, StartError,
 };
 use spate::sink::KeyHashRouter;
-use spate_test_support::container_image;
+use spate_test_support::{container_image, http};
 use std::collections::HashMap;
-use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -114,12 +113,16 @@ impl Harness {
             .unwrap_or_else(|e| panic!("start ClickHouse container {ch_image}:{ch_tag}: {e}"));
         let ch_port = ch.get_host_port_ipv4(8123).expect("clickhouse port");
         let ch_url = format!("http://127.0.0.1:{ch_port}");
-        // GenericImage has no ready condition; /ping is unauthenticated
-        // and turns 200 once the server accepts connections.
-        let ping: SocketAddr = format!("127.0.0.1:{ch_port}").parse().expect("addr");
-        wait_until(Duration::from_secs(60), "clickhouse /ping", || {
-            std::panic::catch_unwind(|| http_get(ping, "/ping").0 == 200).unwrap_or(false)
-        });
+        // GenericImage has no ready condition. `/ping` answers before the
+        // entrypoint has necessarily applied `CLICKHOUSE_PASSWORD`, so wait for
+        // a query as the user the pipeline connects as.
+        let ch_addr = SocketAddr::from(([127, 0, 0, 1], ch_port));
+        let query = format!("/?user=default&password={CH_PASSWORD}&query=SELECT%201");
+        wait_until(
+            Duration::from_secs(60),
+            "clickhouse to answer a query",
+            || http(ch_addr, "GET", &query).is_ok_and(|(status, _)| status == 200),
+        );
 
         let schemas: Schemas = Arc::new(Mutex::new(HashMap::from([(
             SCHEMA_ID,
@@ -591,28 +594,7 @@ async fn serve_stub_registry(schemas: Schemas) -> SocketAddr {
 
 /// Blocking HTTP GET against the pipeline's admin server.
 pub fn http_get(addr: SocketAddr, path: &str) -> (u16, String) {
-    let mut stream = std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(5))
-        .expect("connect admin server");
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .expect("read timeout");
-    write!(
-        stream,
-        "GET {path} HTTP/1.1\r\nHost: e2e\r\nConnection: close\r\n\r\n"
-    )
-    .expect("write request");
-    let mut response = String::new();
-    stream.read_to_string(&mut response).expect("read response");
-    let status: u16 = response
-        .split_whitespace()
-        .nth(1)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-    let body = response
-        .split_once("\r\n\r\n")
-        .map(|(_, b)| b.to_string())
-        .unwrap_or_default();
-    (status, body)
+    http(addr, "GET", path).unwrap_or_else(|e| panic!("GET {path} from {addr}: {e}"))
 }
 
 /// Sum every sample of a metric family in a Prometheus exposition body

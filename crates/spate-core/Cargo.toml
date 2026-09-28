@@ -42,6 +42,7 @@ proptest = { workspace = true }
 rustls = { workspace = true }
 serde_json = { workspace = true }
 spate-bench = { workspace = true }
+spate-test-support = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "test-util"] }
 

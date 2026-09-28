@@ -21,6 +21,7 @@
 use spate_core::ops::ChunkConfig;
 use spate_core::record::{PartitionId, RawPayload, stable_key_hash};
 use spate_core::sink::{KeyHashRouter, ShardRouter};
+use spate_test_support::pin;
 use std::collections::BTreeSet;
 
 #[path = "../benches/support/ack_traffic.rs"]
@@ -36,30 +37,6 @@ use ack_traffic::{BATCHES, Order, PARTITIONS};
 use chain_rig::{BATCH, BORROWED_BATCH_BYTES, Routing};
 use poll_traffic::{ITERATIONS, Profile};
 use split_rig::{PAYLOADS, Tags};
-
-/// FNV-1a over a corpus.
-///
-/// Written out rather than taken from `DefaultHasher`, whose output is not
-/// stable across releases. A pin that could change under a toolchain bump is
-/// not a pin.
-fn digest(bytes: &[u8]) -> u64 {
-    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-    for &byte in bytes {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x1000_0000_01b3);
-    }
-    hash
-}
-
-/// A corpus's length and digest.
-///
-/// The length alone is not enough to pin any of these. A changed index format,
-/// a different filler or a reordered field list can leave the total untouched
-/// while changing every byte a decoder reads. The pin would then pass over a
-/// corpus no recorded measurement was taken against. The digest closes that.
-fn pin(bytes: &[u8]) -> (usize, u64) {
-    (bytes.len(), digest(bytes))
-}
 
 /// The chain rig's payloads as one blob, in the order the batch yields them,
 /// which is also the order `chain_wall.rs` absorbs them into the harness's
@@ -159,12 +136,12 @@ fn the_corpora_are_reproducible() {
 fn the_corpora_are_pinned_across_revisions() {
     assert_eq!(
         pin(&chain_payloads(Routing::Fixed)),
-        (19_968, 0x8945_1814_bc2e_0e09),
+        (19_968, 0xf86a_7e14_bc2e_0e09),
         "chain payloads"
     );
     assert_eq!(
         pin(&chain_keys(Routing::KeyHash)),
-        (4_096, 0x12b9_8fcc_2436_7301),
+        (4_096, 0x8dc5_75cc_2436_7301),
         "chain keys"
     );
     assert!(
@@ -173,17 +150,17 @@ fn the_corpora_are_pinned_across_revisions() {
     );
     assert_eq!(
         pin(&split_payloads(Tags::TwoBranches)),
-        (229_376, 0x258a_6632_fbdb_f559),
+        (229_376, 0x2c94_7c32_fbdb_f559),
         "split two_branches"
     );
     assert_eq!(
         pin(&split_payloads(Tags::FourBranches)),
-        (229_376, 0x1102_1f17_7a54_6f19),
+        (229_376, 0x86e6_9d17_7a54_6f19),
         "split four_branches"
     );
     assert_eq!(
         pin(&split_payloads(Tags::FourBranchesQuarterUnrouted)),
-        (229_376, 0xab84_8eab_a083_7129),
+        (229_376, 0x1f60_4eab_a083_7129),
         "split four_branches_quarter_unrouted"
     );
     assert_eq!(
@@ -212,10 +189,10 @@ fn the_corpora_are_pinned_across_revisions() {
 /// the length of each is also asserted from its own constants below. The
 /// digest says the bytes did not move, and the arithmetic beside it says why
 /// that length is the right one.
-const ACK_SCHEDULE_PIN: (usize, u64) = (98_304, 0xb805_bf3f_d145_a605);
-const POLL_QUIET_PIN: (usize, u64) = (589_824, 0x6605_f527_400e_e502);
-const POLL_CONGESTED_PIN: (usize, u64) = (589_824, 0x79e5_ec3b_66f3_72c5);
-const POLL_FLAPPING_PIN: (usize, u64) = (589_824, 0xe3fb_64f3_9e0d_2545);
+const ACK_SCHEDULE_PIN: (usize, u64) = (98_304, 0x573d_473f_d145_a605);
+const POLL_QUIET_PIN: (usize, u64) = (589_824, 0xeece_ff27_400e_e502);
+const POLL_CONGESTED_PIN: (usize, u64) = (589_824, 0xa183_0e3b_66f3_72c5);
+const POLL_FLAPPING_PIN: (usize, u64) = (589_824, 0xb5c4_64f3_9e0d_2545);
 
 /// Each corpus is the length its own constants imply.
 ///

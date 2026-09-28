@@ -18,7 +18,7 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 # Docker/testcontainers runs:
 #   cargo nextest run --profile docker --run-ignored all
 #
-# These boot real containers (SeaweedFS, NATS, Redpanda, ClickHouse). Warn late
+# These boot real containers (SeaweedFS, NATS, Kafka, ClickHouse). Warn late
 # and do not terminate: a cold image pull exceeds any period worth setting, and
 # a SIGKILL reports TIMEOUT, indistinguishable from a genuine hang, leaving the
 # container orphaned.

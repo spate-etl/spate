@@ -35,8 +35,8 @@ impl MetricSample {
 /// order they appear.
 ///
 /// `name` is a sample name, so a histogram is read through `<family>_bucket`,
-/// `<family>_sum` and `<family>_count`. Label values compare against the
-/// rendered text, such as `le="0.5"`.
+/// `<family>_sum` and `<family>_count`. Label values compare unescaped, in
+/// the exporter's formatting, so a bucket bound reads `("le", "0.5")`.
 ///
 /// # Panics
 ///

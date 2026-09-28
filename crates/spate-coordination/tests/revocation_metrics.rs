@@ -19,7 +19,7 @@ use spate_core::coordination::{CoordinationEvent, SplitCoordinator, SplitProgres
 use spate_core::metrics::{
     ComponentLabels, CoordinationMetrics, Exporter, MetricsSettings, install,
 };
-use spate_test::metric_sum;
+use spate_test::{metric_sum, metric_value};
 use std::time::{Duration, Instant};
 use support::{Held, LEASE, PhasedPlanner, crash, runtime, split_id, store};
 
@@ -143,14 +143,13 @@ fn a_real_revocation_moves_every_metric_seam() {
         {
             // The leader can revoke more than one split at once, so the
             // gauge is however many are draining; assert it is positive.
-            if handle.render().lines().any(|l| {
-                l.starts_with("spate_coordination_splits_draining")
-                    && l.contains(r#"component="worker-a""#)
-                    && l.rsplit(' ')
-                        .next()
-                        .and_then(|v| v.parse::<f64>().ok())
-                        .is_some_and(|v| v >= 1.0)
-            }) {
+            if metric_value(
+                &handle.render(),
+                "spate_coordination_splits_draining",
+                &[("component", "worker-a")],
+            )
+            .is_some_and(|v| v >= 1.0)
+            {
                 saw_draining = true;
             }
             // Keep A committing its still-held splits while B waits, exactly
@@ -355,14 +354,12 @@ fn a_cancelled_revocation_moves_its_own_metric_seam() {
         )
         .unwrap_or(0.0);
         if cancelled > 0.0 {
-            draining_after_cancel = text.lines().any(|l| {
-                l.starts_with("spate_coordination_splits_draining")
-                    && l.contains(r#"component="cancel-worker-a""#)
-                    && l.rsplit(' ')
-                        .next()
-                        .and_then(|v| v.parse::<f64>().ok())
-                        .is_some_and(|v| v >= 1.0)
-            });
+            draining_after_cancel = metric_value(
+                &text,
+                "spate_coordination_splits_draining",
+                &[("component", "cancel-worker-a")],
+            )
+            .is_some_and(|v| v >= 1.0);
         }
     }
 

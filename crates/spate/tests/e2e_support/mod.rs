@@ -94,9 +94,14 @@ impl Harness {
             .build()
             .expect("harness runtime");
 
-        let kafka = Kafka::default().start().expect(
-            "start Kafka container (is Docker running? first run pulls apache/kafka — slow)",
-        );
+        // The broker `ci/kafka/` pins, fetched by digest and re-tagged so this
+        // starts the pinned bytes.
+        let (kafka_image, kafka_tag) = container_image(&["--pull", "kafka"]);
+        let kafka = Kafka::default()
+            .with_name(&kafka_image)
+            .with_tag(&kafka_tag)
+            .start()
+            .unwrap_or_else(|e| panic!("start Kafka container {kafka_image}:{kafka_tag}: {e}"));
         let kafka_port = kafka.get_host_port_ipv4(KAFKA_PORT).expect("kafka port");
         let brokers = format!("127.0.0.1:{kafka_port}");
 

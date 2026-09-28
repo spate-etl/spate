@@ -200,6 +200,12 @@ pub(crate) fn classify(
                 image_suites.extend(graph.container_suites_for("spate-clickhouse"));
                 out.container_pkgs.extend(image_suites.iter().cloned());
             }
+            // The broker the Kafka suites run against, and the end-to-end
+            // suites through them.
+            if glob(path, "ci/kafka/*") {
+                image_suites.extend(graph.container_suites_for("spate-kafka"));
+                out.container_pkgs.extend(image_suites.iter().cloned());
+            }
             // The client image `spate-kafka`'s TLS suite runs its clients in.
             if glob(path, "ci/debian/*") {
                 image_suites.insert("spate-kafka".to_string());
@@ -650,6 +656,24 @@ mod tests {
         let image = vec!["ci/debian/trixie/Dockerfile".to_string()];
         let out = classify(&image, Event::PullRequest, &ctx, &graph(), &[]);
         assert_eq!(suites(&out), ["spate-kafka"]);
+    }
+
+    /// A broker bump selects the Kafka suite and `spate`'s end-to-end suites,
+    /// on a Dependabot pull request too.
+    #[test]
+    fn a_broker_image_bump_selects_the_suites_that_boot_kafka() {
+        assert_eq!(
+            suites(&run(&["ci/kafka/stable/Dockerfile"])),
+            ["spate", "spate-kafka"]
+        );
+
+        let ctx = Context {
+            author: "dependabot[bot]".into(),
+            labels: vec![],
+        };
+        let image = vec!["ci/kafka/stable/Dockerfile".to_string()];
+        let out = classify(&image, Event::PullRequest, &ctx, &graph(), &[]);
+        assert_eq!(suites(&out), ["spate", "spate-kafka"]);
     }
 
     #[test]

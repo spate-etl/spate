@@ -26,12 +26,12 @@ use spate_test_support::container_image;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use support::drain_lane;
+use support::{broker, drain_lane};
 use testcontainers::core::WaitFor;
 use testcontainers::core::wait::ExitWaitStrategy;
 use testcontainers::runners::SyncRunner;
 use testcontainers::{CopyTargetOptions, GenericImage, ImageExt};
-use testcontainers_modules::kafka::apache::{KAFKA_PORT, Kafka};
+use testcontainers_modules::kafka::apache::KAFKA_PORT;
 
 const NAME: &str = "probe_ca_default_completes_a_tls_handshake";
 const ARM: &str = "SPATE_TEST_PROBE_ARM";
@@ -60,7 +60,7 @@ fn probe_ca_default_completes_a_tls_handshake() {
     let (ca_pem, broker_key, broker_chain) = certificates();
     // Kafka reads these as properties, where `\n` is a newline.
     let inline = |pem: &str| pem.replace('\n', "\\n");
-    let kafka = Kafka::default()
+    let kafka = broker()
         .with_env_var(
             "KAFKA_LISTENER_SECURITY_PROTOCOL_MAP",
             "BROKER:PLAINTEXT,PLAINTEXT:SSL,CONTROLLER:PLAINTEXT",

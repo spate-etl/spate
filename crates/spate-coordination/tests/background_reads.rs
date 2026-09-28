@@ -5,6 +5,7 @@
 
 mod support;
 
+use futures_util::StreamExt as _;
 use spate_coordination::store::memory::MemoryStore;
 use spate_coordination::store::{
     CasOutcome, CoordinationStore, Entry, Keyspace, Revision, StoreError, WatchEvent, WatchStream,
@@ -22,12 +23,18 @@ use support::{
 /// A store whose ephemeral listings of `""` are held back. The first is
 /// read at once and delivered when [`release`](Self::release) is called;
 /// later ones never finish, so only the first can change a view.
+///
+/// The first ephemeral watch ends on [`break_watch`](Self::break_watch), and
+/// the next one starts only after [`open_rewatch`](Self::open_rewatch).
 #[derive(Clone)]
 struct HeldListing {
     inner: MemoryStore,
     read: Arc<AtomicBool>,
     released: Arc<tokio::sync::Notify>,
     calls: Arc<AtomicU64>,
+    broken: Arc<tokio::sync::Notify>,
+    watches: Arc<AtomicU64>,
+    rewatch: Arc<tokio::sync::Semaphore>,
 }
 
 impl HeldListing {
@@ -37,11 +44,23 @@ impl HeldListing {
             read: Arc::default(),
             released: Arc::default(),
             calls: Arc::default(),
+            broken: Arc::default(),
+            watches: Arc::default(),
+            rewatch: Arc::new(tokio::sync::Semaphore::new(0)),
         }
     }
 
     fn release(&self) {
         self.released.notify_one();
+    }
+
+    fn break_watch(&self) {
+        self.broken.notify_one();
+    }
+
+    fn open_rewatch(&self) {
+        self.rewatch
+            .add_permits(tokio::sync::Semaphore::MAX_PERMITS / 2);
     }
 }
 
@@ -83,6 +102,17 @@ impl CoordinationStore for HeldListing {
     }
 
     async fn watch(&self, ks: Keyspace, prefix: &str) -> Result<WatchStream, StoreError> {
+        if ks != Keyspace::Ephemeral || !prefix.is_empty() {
+            return self.inner.watch(ks, prefix).await;
+        }
+        if self.watches.fetch_add(1, Ordering::AcqRel) == 0 {
+            let broken = Arc::clone(&self.broken);
+            let stream = self.inner.watch(ks, prefix).await?;
+            return Ok(stream
+                .take_until(async move { broken.notified().await })
+                .boxed());
+        }
+        let _open = self.rewatch.acquire().await.expect("rewatch gate");
         self.inner.watch(ks, prefix).await
     }
 
@@ -229,7 +259,6 @@ fn a_verdict_listing_slower_than_a_lease_leaves_renewals_running() {
         .unwrap();
     let seen = Arc::clone(&expired);
     rt.spawn(async move {
-        use futures_util::StreamExt as _;
         while let Some(Ok(event)) = presence.next().await {
             if matches!(event, WatchEvent::Delete { .. }) {
                 seen.store(true, Ordering::Release);
@@ -333,6 +362,20 @@ fn a_listing_older_than_a_claim_does_not_drop_it() {
 fn a_listing_does_not_restore_a_lease_deleted_since() {
     let rt = runtime();
     let inner = store();
+    // A peer's lease on b, live from before the worker starts until after
+    // its listing reads, so every listing holds it.
+    let foreign = serde_json::json!({
+        "schema": 3, "owner": "worker-z", "nonce": "z", "epoch": 1
+    });
+    let rev = rt
+        .block_on(inner.create(
+            Keyspace::Ephemeral,
+            "split.b",
+            serde_json::to_vec(&foreign).unwrap(),
+        ))
+        .unwrap()
+        .won()
+        .expect("foreign lease");
     let listing = HeldListing::new(inner.clone());
     let mut w = StoreCoordinator::new(
         listing.clone(),
@@ -347,43 +390,114 @@ fn a_listing_does_not_restore_a_lease_deleted_since() {
     )))
     .unwrap();
     let mut held = Held::default();
-    drive(&mut w, &mut held, "claiming one split", |h| {
-        h.splits.len() == 1
+    drive(&mut w, &mut held, "claiming a", |h| {
+        h.splits.contains_key("a")
     });
-    let first = held.splits.keys().next().cloned().expect("held");
-    let other = if first == "a" { "b" } else { "a" };
+    spate_test::wait_until(DEADLINE, "the listing read", || {
+        listing.read.load(Ordering::Acquire)
+    });
+    let deleted = rt
+        .block_on(inner.delete(Keyspace::Ephemeral, "split.b", Some(rev)))
+        .unwrap();
+    assert!(
+        matches!(deleted, CasOutcome::Won(_)),
+        "the foreign lease expired before the listing read it"
+    );
+    // The watch delivers in order: once the worker applies a key written
+    // after the delete, it has applied the delete.
+    let marker = rt
+        .block_on(inner.create(Keyspace::Ephemeral, "_marker", Vec::new()))
+        .unwrap()
+        .won()
+        .expect("marker");
+    let probe = w.loop_probe();
+    spate_test::wait_until(DEADLINE, "the worker applying the delete", || {
+        probe.state().is_some_and(|s| s.ephemeral >= marker)
+    });
+    listing.release();
+    hold_for(&mut w, &mut held, LEASE / 2, "after the listing landed");
 
-    // A peer's lease on the queued split, live when the listing reads it.
+    w.commit(&split_id("a"), &SplitProgress::completed(1, vec![]))
+        .unwrap();
+    held.splits.remove("a");
+    drive(
+        &mut w,
+        &mut held,
+        "claiming the split whose lease was deleted",
+        |h| h.splits.contains_key("b"),
+    );
+}
+
+/// A lease deleted while the lease watch is re-established is not restored
+/// by a listing read before the delete and applied after the rebuild.
+#[test]
+fn a_listing_does_not_restore_a_lease_deleted_during_a_rewatch() {
+    let rt = runtime();
+    let inner = store();
     let foreign = serde_json::json!({
         "schema": 3, "owner": "worker-z", "nonce": "z", "epoch": 1
     });
-    let lease_key = format!("split.{other}");
     let rev = rt
         .block_on(inner.create(
             Keyspace::Ephemeral,
-            &lease_key,
+            "split.b",
             serde_json::to_vec(&foreign).unwrap(),
         ))
         .unwrap()
         .won()
         .expect("foreign lease");
+    let listing = HeldListing::new(inner.clone());
+    let mut w = StoreCoordinator::new(
+        listing.clone(),
+        tuned("worker-a", |c| c.max_in_flight = 1),
+        rt.handle().clone(),
+        None,
+    )
+    .expect("coordinator");
+    w.start(Box::new(PhasedPlanner::one_final(
+        "rewatch:v1",
+        &["a", "b"],
+    )))
+    .unwrap();
+    let mut held = Held::default();
+    drive(&mut w, &mut held, "claiming a", |h| {
+        h.splits.contains_key("a")
+    });
     spate_test::wait_until(DEADLINE, "the listing read", || {
         listing.read.load(Ordering::Acquire)
     });
+
+    listing.break_watch();
+    spate_test::wait_until(DEADLINE, "the lease watch re-established", || {
+        listing.watches.load(Ordering::Acquire) >= 2
+    });
     let deleted = rt
-        .block_on(inner.delete(Keyspace::Ephemeral, &lease_key, Some(rev)))
+        .block_on(inner.delete(Keyspace::Ephemeral, "split.b", Some(rev)))
         .unwrap();
-    assert!(matches!(deleted, CasOutcome::Won(_)));
+    assert!(
+        matches!(deleted, CasOutcome::Won(_)),
+        "the foreign lease expired before the listing read it"
+    );
+    listing.open_rewatch();
+    let marker = rt
+        .block_on(inner.create(Keyspace::Ephemeral, "_marker", Vec::new()))
+        .unwrap()
+        .won()
+        .expect("marker");
+    let probe = w.loop_probe();
+    spate_test::wait_until(DEADLINE, "the worker rebuilding its view", || {
+        probe.state().is_some_and(|s| s.ephemeral >= marker)
+    });
     listing.release();
     hold_for(&mut w, &mut held, LEASE / 2, "after the listing landed");
 
-    w.commit(&split_id(&first), &SplitProgress::completed(1, vec![]))
+    w.commit(&split_id("a"), &SplitProgress::completed(1, vec![]))
         .unwrap();
-    held.splits.remove(&first);
+    held.splits.remove("a");
     drive(
         &mut w,
         &mut held,
         "claiming the split whose lease was deleted",
-        |h| h.splits.contains_key(other),
+        |h| h.splits.contains_key("b"),
     );
 }

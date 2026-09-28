@@ -450,7 +450,7 @@ impl Fleet {
     }
 
     /// Return once every worker has handled every store write and every
-    /// timer due at the clock's current time, and none is planning.
+    /// timer due at the clock's current time, and none has work off its loop.
     ///
     /// Writes [`SETTLE_KEY`] in both keyspaces and waits for each worker to
     /// apply it at an idle loop top; a second write one revision later

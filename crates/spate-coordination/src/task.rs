@@ -852,14 +852,33 @@ impl<S: CoordinationStore + Clone> Task<S> {
         // The snapshot is authoritative for its keyspace: rebuild.
         match ks {
             Keyspace::Ephemeral => {
+                // The snapshot omits deletes, so an in-flight listing must
+                // not restore any key cleared here.
+                let mut cleared: Vec<String> = self
+                    .presence
+                    .keys()
+                    .map(|i| records::worker_key(i))
+                    .chain(
+                        self.pending_leases
+                            .keys()
+                            .map(|id| records::split_key_str(id)),
+                    )
+                    .collect();
+                if self.leader_observed.take().is_some() {
+                    cleared.push(records::LEADER_KEY.to_string());
+                }
+                for (id, state) in &mut self.splits {
+                    if state.lease.take().is_some() {
+                        cleared.push(records::split_key_str(id));
+                    }
+                }
+                for key in &cleared {
+                    self.note_deleted(Keyspace::Ephemeral, key);
+                }
                 self.presence.clear();
                 self.member_caps.clear();
                 self.assign_dirty = true;
-                self.leader_observed = None;
                 self.pending_leases.clear();
-                for state in self.splits.values_mut() {
-                    state.lease = None;
-                }
                 for entry in snapshot {
                     self.apply_lease_put(&entry)?;
                 }

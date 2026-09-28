@@ -318,6 +318,7 @@ mod tests {
     use crate::config::{JsonDeserializerBuilder, JsonSettings};
     use serde::Deserialize;
     use spate_core::record::Flow;
+    use spate_test::render_metrics;
 
     #[derive(Debug, Deserialize, PartialEq)]
     struct Ev {
@@ -513,20 +514,10 @@ mod tests {
         }
     }
 
-    /// Run `f` against a local Prometheus recorder and return the rendered
-    /// exposition. Handles must be resolved inside `f`.
-    fn render(f: impl FnOnce()) -> String {
-        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
-        let handle = recorder.handle();
-        metrics::with_local_recorder(&recorder, f);
-        handle.run_upkeep();
-        handle.render()
-    }
-
     #[test]
     fn skipped_records_are_counted_in_metrics() {
         const STD: &str = r#"pipeline="orders",component="main",component_type="deserializer""#;
-        let rendered = render(|| {
+        let rendered = render_metrics(|| {
             let mut d = builder(JsonFraming::Ndjson, OnError::Skip, false)
                 .with_metrics("orders", "main")
                 .build_serde::<Ev>();

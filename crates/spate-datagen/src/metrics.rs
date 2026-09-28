@@ -136,17 +136,8 @@ impl DatagenMetrics {
 mod tests {
     use super::*;
     use crate::events::{OrderPlaced, PaymentCaptured, RefundIssued};
+    use spate_test::render_metrics;
     use std::borrow::Cow;
-
-    /// Run `f` against a local Prometheus recorder and return the rendered
-    /// exposition. Handles must be resolved inside `f`.
-    fn render(f: impl FnOnce()) -> String {
-        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
-        let handle = recorder.handle();
-        metrics::with_local_recorder(&recorder, f);
-        handle.run_upkeep();
-        handle.render()
-    }
 
     /// A test `Meter` under the `datagen` namespace. Names render as
     /// `spate_datagen_<local>`; the runtime's role-scoped variant is
@@ -186,7 +177,7 @@ mod tests {
     /// its count reaches, so a transposed index fails here.
     #[test]
     fn every_event_kind_counts_against_its_own_pre_registered_handle() {
-        let rendered = render(|| {
+        let rendered = render_metrics(|| {
             let metrics = DatagenMetrics::new(&meter("events"), 2, false);
             let counters = metrics.counters();
             let mut tally = [0u64; 3];
@@ -216,7 +207,7 @@ mod tests {
 
     #[test]
     fn the_control_plane_gauges_publish_what_it_was_given() {
-        let rendered = render(|| {
+        let rendered = render_metrics(|| {
             DatagenMetrics::new(&meter("gauges"), 2, false).publish(97, 12);
         });
         assert!(
@@ -235,11 +226,12 @@ mod tests {
     /// with the flag off it does not register at all.
     #[test]
     fn committed_offset_is_gated_on_per_partition_detail() {
-        let off =
-            render(|| DatagenMetrics::new(&meter("detail-off"), 2, false).set_committed(1, 9));
+        let off = render_metrics(|| {
+            DatagenMetrics::new(&meter("detail-off"), 2, false).set_committed(1, 9)
+        });
         assert!(!off.contains("committed_offset"), "{off}");
 
-        let on = render(|| {
+        let on = render_metrics(|| {
             let metrics = DatagenMetrics::new(&meter("detail-on"), 2, true);
             metrics.set_committed(0, 5);
             metrics.set_committed(1, 9);

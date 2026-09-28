@@ -7,7 +7,6 @@
 /// Metric handles must be built inside `f`. Gauge ownership stays
 /// process-wide (INV-10), so name each pipeline or component with
 /// [`unique_name`](crate::unique_name).
-#[must_use]
 pub fn render_metrics(f: impl FnOnce()) -> String {
     spate_core::metrics::render_local(f)
 }

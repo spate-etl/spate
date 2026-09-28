@@ -239,16 +239,7 @@ fn us_to_secs(v: i64) -> f64 {
 mod tests {
     use super::*;
     use rdkafka::statistics::{Broker, Window};
-
-    /// Run `f` against a local Prometheus recorder and return the rendered
-    /// exposition. Handles must be resolved inside `f`.
-    fn render(f: impl FnOnce()) -> String {
-        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
-        let handle = recorder.handle();
-        metrics::with_local_recorder(&recorder, f);
-        handle.run_upkeep();
-        handle.render()
-    }
+    use spate_test::render_metrics;
 
     /// A test Meter under the `kafka` namespace: names render as
     /// `spate_kafka_<local>` (the runtime's role-scoped variant would be
@@ -280,7 +271,7 @@ mod tests {
 
     #[test]
     fn producer_totals_and_queue_gauges_render() {
-        let rendered = render(|| {
+        let rendered = render_metrics(|| {
             let mut m = KafkaSinkStatsMetrics::new(meter());
             let stats = Statistics {
                 tx: 42,
@@ -311,7 +302,7 @@ mod tests {
 
     #[test]
     fn broker_latency_windows_convert_and_gate_on_cnt() {
-        let rendered = render(|| {
+        let rendered = render_metrics(|| {
             let mut m = KafkaSinkStatsMetrics::new(meter());
             let mut b = broker("k1:9092/1", "learned", 1);
             b.rtt = Some(window(1_500, 3_000, 10)); // microseconds
@@ -341,7 +332,7 @@ mod tests {
 
     #[test]
     fn internal_logical_and_bootstrap_brokers_are_filtered() {
-        let rendered = render(|| {
+        let rendered = render_metrics(|| {
             let mut m = KafkaSinkStatsMetrics::new(meter());
             let mut learned = broker("k1:9092/1", "learned", 1);
             learned.txretries = 5;
@@ -382,7 +373,7 @@ mod tests {
     /// join no sums.
     #[test]
     fn a_coordinator_only_broker_counts_as_up() {
-        let rendered = render(|| {
+        let rendered = render_metrics(|| {
             let mut m = KafkaSinkStatsMetrics::new(meter());
             let mut coordinator_only = broker("k1:9092/1", "learned", 1);
             coordinator_only.nodename = "k1:9092".to_owned();
@@ -436,7 +427,7 @@ mod tests {
     #[test]
     fn departed_brokers_stop_updating_after_retain() {
         let mut m_holder: Option<KafkaSinkStatsMetrics> = None;
-        render(|| {
+        render_metrics(|| {
             let mut m = KafkaSinkStatsMetrics::new(meter());
             let two = Statistics {
                 brokers: HashMap::from([
@@ -468,7 +459,7 @@ mod tests {
     fn absolute_counters_hold_the_high_water_mark_on_regression() {
         // Documents the fetch-max contract (see the module docs): a
         // regressing upstream total would flat-line, not dip.
-        let rendered = render(|| {
+        let rendered = render_metrics(|| {
             let mut m = KafkaSinkStatsMetrics::new(meter());
             m.update(&Statistics {
                 txmsgs: 100,

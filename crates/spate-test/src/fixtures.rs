@@ -87,6 +87,6 @@ mod tests {
             component_config("t", "  brokers: a\n  topic: b\n"),
             component_config("t", "brokers: a\ntopic: b\n"),
         );
-        component_config("t", "  {}\n");
+        assert_eq!(component_config("t", "  {}\n").type_tag(), "t");
     }
 }

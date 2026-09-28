@@ -189,9 +189,7 @@ mod tests {
         )
     }
 
-    fn test_ack() -> AckRef {
-        AckRef::test_pair().0
-    }
+    use spate_test::test_ack;
 
     #[derive(Debug, serde::Deserialize, PartialEq)]
     struct Event {

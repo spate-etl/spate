@@ -23,7 +23,8 @@ use spate_avro::{
 };
 use spate_core::checkpoint::AckRef;
 use spate_core::deser::{Deserializer, EmitRecord, RecFamily};
-use spate_core::record::{Flow, PartitionId, RawPayload, Record};
+use spate_core::record::{Flow, Record};
+use spate_test::raw_payload;
 use std::time::Duration;
 
 #[path = "../benches/support/batches.rs"]
@@ -55,16 +56,6 @@ fn runtime() -> tokio::runtime::Runtime {
         .unwrap()
 }
 
-fn raw(bytes: &[u8]) -> RawPayload<'_> {
-    RawPayload {
-        bytes,
-        key: None,
-        partition: PartitionId(0),
-        offset: 1,
-        timestamp_ms: 0,
-    }
-}
-
 fn builder(settings: &AvroSettings, rt: &tokio::runtime::Runtime) -> AvroDeserializerBuilder {
     AvroDeserializerBuilder::from_settings(settings, rt.handle()).unwrap()
 }
@@ -90,7 +81,10 @@ where
     let mut ok = 0;
     let mut err = 0;
     for payload in payloads {
-        if deser.deserialize(&raw(payload), &ack, &mut sink).is_ok() {
+        if deser
+            .deserialize(&raw_payload(payload), &ack, &mut sink)
+            .is_ok()
+        {
             ok += 1;
         } else {
             err += 1;
@@ -118,7 +112,9 @@ where
         .unwrap();
     let (ack, _rx) = AckRef::test_pair();
     let mut out = Collected::<T>(Vec::new());
-    deser.deserialize(&raw(payload), &ack, &mut out).unwrap();
+    deser
+        .deserialize(&raw_payload(payload), &ack, &mut out)
+        .unwrap();
     assert_eq!(out.0.len(), 1);
     out.0.pop().unwrap().payload
 }
@@ -132,7 +128,9 @@ fn decode_one_value(schema: &str, reader: Option<&str>, payload: &[u8]) -> AvroV
         .unwrap();
     let (ack, _rx) = AckRef::test_pair();
     let mut out = Collected::<AvroValue>(Vec::new());
-    deser.deserialize(&raw(payload), &ack, &mut out).unwrap();
+    deser
+        .deserialize(&raw_payload(payload), &ack, &mut out)
+        .unwrap();
     assert_eq!(out.0.len(), 1);
     out.0.pop().unwrap().payload
 }
@@ -397,7 +395,9 @@ fn both_flattens_emit_the_same_rows() {
     }
     let mut sink = Count(0);
     for payload in &payloads {
-        deser.deserialize(&raw(payload), &ack, &mut sink).unwrap();
+        deser
+            .deserialize(&raw_payload(payload), &ack, &mut sink)
+            .unwrap();
     }
     from_typed += sink.0;
 
@@ -642,7 +642,7 @@ fn a_reader_field_alias_does_not_resolve() {
     let (ack, _rx) = AckRef::test_pair();
     let mut out = Collected::<AvroValue>(Vec::new());
     let err = deser
-        .deserialize(&raw(datum), &ack, &mut out)
+        .deserialize(&raw_payload(datum), &ack, &mut out)
         .expect_err("a reader field alias resolves after all");
     assert!(
         err.to_string().contains("label"),

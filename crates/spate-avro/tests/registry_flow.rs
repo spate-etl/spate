@@ -15,7 +15,8 @@ use spate_avro::{AvroDeserializerBuilder, AvroMode, AvroSettings, AvroValue, Reg
 use spate_core::checkpoint::AckRef;
 use spate_core::deser::{Deserializer, EmitRecord, RecFamily};
 use spate_core::error::DeserError;
-use spate_core::record::{Flow, PartitionId, RawPayload, Record};
+use spate_core::record::{Flow, Record};
+use spate_test::raw_payload;
 use spate_test_support::run_in_child;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -150,16 +151,6 @@ fn confluent_payload(id: u32, event_id: i64) -> Vec<u8> {
     payload
 }
 
-fn raw(bytes: &[u8]) -> RawPayload<'_> {
-    RawPayload {
-        bytes,
-        key: None,
-        partition: PartitionId(0),
-        offset: 1,
-        timestamp_ms: 0,
-    }
-}
-
 struct Collected(Vec<AvroValue>);
 impl EmitRecord<'_, AvroValue> for Collected {
     fn emit(&mut self, rec: Record<AvroValue>) -> Flow {
@@ -200,7 +191,7 @@ where
     let (ack, _rx) = AckRef::test_pair();
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        match deser.deserialize(&raw(payload), &ack, out) {
+        match deser.deserialize(&raw_payload(payload), &ack, out) {
             Err(DeserError::NotReady { .. }) if Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(20));
             }
@@ -228,7 +219,7 @@ async fn miss_reports_not_ready_then_decodes_after_fetch() {
 
     // First call: not ready (fetch just triggered), nothing emitted.
     let err = deser
-        .deserialize(&raw(&payload), &ack, &mut out)
+        .deserialize(&raw_payload(&payload), &ack, &mut out)
         .unwrap_err();
     assert!(matches!(err, DeserError::NotReady { .. }), "{err}");
     assert!(out.0.is_empty());
@@ -307,7 +298,7 @@ async fn unknown_id_negative_caches_until_ttl_expiry() {
     let (ack, _rx) = AckRef::test_pair();
     let mut out = Collected(Vec::new());
     let err = deser
-        .deserialize(&raw(&payload), &ack, &mut out)
+        .deserialize(&raw_payload(&payload), &ack, &mut out)
         .unwrap_err();
     assert!(matches!(err, DeserError::SchemaUnavailable { .. }), "{err}");
     assert_eq!(stub.hits.load(Ordering::Relaxed), hits_after_first);
@@ -411,7 +402,9 @@ async fn slow_fetch_does_not_block_other_ids() {
     let (ack, _rx) = AckRef::test_pair();
     let mut sink = Collected(Vec::new());
     assert!(matches!(
-        deser.deserialize(&raw(&slow), &ack, &mut sink).unwrap_err(),
+        deser
+            .deserialize(&raw_payload(&slow), &ack, &mut sink)
+            .unwrap_err(),
         DeserError::NotReady { .. }
     ));
 
@@ -427,7 +420,7 @@ async fn slow_fetch_does_not_block_other_ids() {
         let mut out = Collected(Vec::new());
         assert!(matches!(
             deser
-                .deserialize(&raw(&slow_probe), &ack, &mut out)
+                .deserialize(&raw_payload(&slow_probe), &ack, &mut out)
                 .unwrap_err(),
             DeserError::NotReady { .. }
         ));
@@ -791,7 +784,9 @@ async fn datum_path_not_ready_then_decodes_and_interleaves_ids() {
     // First call misses: NotReady, and the contract demands zero emits.
     let (ack, _rx) = AckRef::test_pair();
     let mut out = CollectedRec(Vec::new());
-    let err = deser.deserialize(&raw(&p61), &ack, &mut out).unwrap_err();
+    let err = deser
+        .deserialize(&raw_payload(&p61), &ack, &mut out)
+        .unwrap_err();
     assert!(matches!(err, DeserError::NotReady { .. }), "{err}");
     assert!(out.0.is_empty());
 

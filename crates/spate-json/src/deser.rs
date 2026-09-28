@@ -343,9 +343,7 @@ mod tests {
         }
     }
 
-    fn test_ack() -> AckRef {
-        AckRef::test_pair().0
-    }
+    use spate_test::test_ack;
 
     fn builder(framing: JsonFraming, on_error: OnError, dup: bool) -> JsonDeserializerBuilder {
         JsonDeserializerBuilder::from_settings(JsonSettings {

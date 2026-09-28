@@ -6,7 +6,7 @@ use proptest::prelude::*;
 use spate_core::record::PartitionId;
 use spate_core::source::LaneId;
 use spate_test::strategies;
-use spate_test::{ScriptedResult, TestEncoder, decode_rows};
+use spate_test::{ScriptedResult, TestEncoder, decode_rows, record};
 use std::collections::HashSet;
 
 proptest! {
@@ -17,18 +17,7 @@ proptest! {
         use spate_core::sink::RowEncoder;
         let mut buf = bytes::BytesMut::new();
         for p in &payloads {
-            let (ack, _rx) = spate_core::checkpoint::AckRef::test_pair();
-            let rec = spate_core::record::Record {
-                payload: p.clone(),
-                meta: spate_core::record::RecordMeta {
-                    partition: PartitionId(0),
-                    offset: 0,
-                    event_time_ms: 0,
-                    key_hash: None,
-                },
-                ack,
-            };
-            TestEncoder.encode(&rec, &mut buf).unwrap();
+            TestEncoder.encode(&record(p.clone()), &mut buf).unwrap();
         }
         prop_assert_eq!(decode_rows(&buf), payloads);
     }

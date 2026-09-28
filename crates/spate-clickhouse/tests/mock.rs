@@ -21,6 +21,7 @@ use spate_clickhouse::testing::{ColumnRow, system_columns};
 use spate_core::deser::Owned;
 use spate_core::error::{ErrorClass, SinkError};
 use spate_core::sink::{SealedBatch, ShardWriter};
+use spate_test::record;
 
 #[derive(Debug, Clone, PartialEq, clickhouse::Row, Serialize, Deserialize, ClickHouseRow)]
 struct TestRow {
@@ -213,21 +214,6 @@ shards:
         .with_row::<Owned<TestRow>>()
         .await
         .expect_err("the fetch must fail")
-}
-
-fn record<T>(payload: T) -> spate_core::record::Record<T> {
-    let (ack, rx) = spate_core::checkpoint::AckRef::test_pair();
-    std::mem::forget(rx);
-    spate_core::record::Record {
-        payload,
-        meta: spate_core::record::RecordMeta {
-            partition: spate_core::record::PartitionId(0),
-            offset: 0,
-            event_time_ms: 0,
-            key_hash: None,
-        },
-        ack,
-    }
 }
 
 #[tokio::test]

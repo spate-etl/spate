@@ -18,8 +18,8 @@
 use spate_core::checkpoint::AckRef;
 use spate_core::deser::{Deserializer, Owned};
 use spate_core::framing::RecordFramer;
-use spate_core::record::{PartitionId, RawPayload};
 use spate_json::{JsonDeserializerBuilder, JsonFraming, JsonSettings, NdjsonFramer, OnError};
+use spate_test::raw_payload;
 use spate_test_support::pin;
 
 #[path = "../benches/support/decode_rig.rs"]
@@ -37,16 +37,6 @@ use decode_rig::Sink;
 use lines::Eol;
 use orders::{BAD_EVERY, Corruption, LineItem, RECORDS};
 
-fn raw(bytes: &[u8]) -> RawPayload<'_> {
-    RawPayload {
-        bytes,
-        key: None,
-        partition: PartitionId(0),
-        offset: 1,
-        timestamp_ms: 0,
-    }
-}
-
 /// What one payload through one deserializer produced: whether the call
 /// failed, and how many records reached the sink. The same two quantities
 /// every bench case asserts.
@@ -54,7 +44,9 @@ fn drive(settings: JsonSettings, payload: &[u8]) -> (bool, u64) {
     let mut deser = JsonDeserializerBuilder::from_settings(settings).build_serde::<LineItem>();
     let (ack, _rx) = AckRef::test_pair();
     let mut sink = Sink(0);
-    let failed = deser.deserialize(&raw(payload), &ack, &mut sink).is_err();
+    let failed = deser
+        .deserialize(&raw_payload(payload), &ack, &mut sink)
+        .is_err();
     (failed, sink.0)
 }
 
@@ -62,7 +54,9 @@ fn drive_value(settings: JsonSettings, payload: &[u8]) -> (bool, u64) {
     let mut deser = JsonDeserializerBuilder::from_settings(settings).build_value();
     let (ack, _rx) = AckRef::test_pair();
     let mut sink = Sink(0);
-    let failed = deser.deserialize(&raw(payload), &ack, &mut sink).is_err();
+    let failed = deser
+        .deserialize(&raw_payload(payload), &ack, &mut sink)
+        .is_err();
     (failed, sink.0)
 }
 
@@ -403,7 +397,7 @@ fn the_two_corruptions_fail_for_different_reasons() {
         let (ack, _rx) = AckRef::test_pair();
         let mut sink = Sink(0);
         deser
-            .deserialize(&raw(bytes), &ack, &mut sink)
+            .deserialize(&raw_payload(bytes), &ack, &mut sink)
             .expect_err("a poison record decodes cleanly")
             .to_string()
     };

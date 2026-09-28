@@ -550,9 +550,7 @@ mod tests {
         )
     }
 
-    fn test_ack() -> AckRef {
-        AckRef::test_pair().0
-    }
+    use spate_test::test_ack;
 
     #[test]
     fn value_round_trip_and_meta() {

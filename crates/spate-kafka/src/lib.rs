@@ -61,6 +61,8 @@ mod metrics;
 mod security;
 pub mod sink;
 mod source;
+#[cfg(test)]
+mod testutil;
 
 pub use config::KafkaSourceConfig;
 pub use lane::{KafkaBatch, KafkaLane};

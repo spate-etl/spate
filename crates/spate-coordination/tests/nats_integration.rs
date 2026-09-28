@@ -12,6 +12,8 @@
 #![cfg(feature = "nats")]
 
 mod support;
+#[macro_use]
+mod scenarios;
 
 use futures_util::StreamExt as _;
 use spate_coordination::store::nats::{NatsConfig, NatsCredentials, NatsStore, Secret};
@@ -81,6 +83,56 @@ fn worker_with(
     cfg.rebalance_delay = Duration::ZERO;
     cfg.drain_deadline = LEASE / 2;
     StoreCoordinator::new(store, cfg, io.clone(), None).expect("coordinator")
+}
+
+/// One NATS server per scenario; every worker connects on its own.
+struct NatsBackend {
+    _server: Container<GenericImage>,
+    port: u16,
+}
+
+impl NatsBackend {
+    fn start() -> NatsBackend {
+        let (server, port) = start_nats(None);
+        NatsBackend {
+            _server: server,
+            port,
+        }
+    }
+}
+
+impl support::Backend for NatsBackend {
+    type Store = NatsStore;
+
+    fn store(&self) -> NatsStore {
+        NatsStore::new(nats_config(self.port, "scenario"), LEASE).expect("nats store")
+    }
+
+    fn lease(&self) -> Duration {
+        LEASE
+    }
+
+    /// The suite's scaled tuning, with the store deadlines [`worker_with`]
+    /// uses against a container.
+    fn config(&self, instance_id: Option<&str>) -> CoordinationConfig {
+        let mut cfg = support::config_for(LEASE, instance_id);
+        cfg.op_timeout = Duration::from_secs(1);
+        cfg.reconcile_interval = Duration::from_secs(1);
+        cfg
+    }
+}
+
+multi_worker_scenarios!(NatsBackend::start(); #[ignore = "needs Docker; run explicitly"]);
+
+#[test]
+#[ignore = "needs Docker; run explicitly"]
+fn the_store_contract_holds_over_real_nats() {
+    let (_nats, port) = start_nats(None);
+    let rt = runtime();
+    let store = NatsStore::new(nats_config(port, "contract"), LEASE).expect("nats store");
+    rt.block_on(support::contract::all(&store, async |by| {
+        tokio::time::sleep(by).await;
+    }));
 }
 
 #[test]

@@ -17,9 +17,11 @@
 //! - `update` on an [`Ephemeral`](Keyspace::Ephemeral) key re-arms its
 //!   TTL; expiry surfaces to watchers as [`WatchEvent::Delete`].
 //! - A watch delivers a snapshot of live keys, then [`WatchEvent::
-//!   SnapshotDone`], then live updates. A broken watch stream is
-//!   [`StoreError::Retryable`]: consumers re-watch and apply `Put`s only
-//!   at a revision above the last one they saw, so replays are idempotent.
+//!   SnapshotDone`], then live updates. Either part may also replay
+//!   deletes of keys that were gone before the watch began. A broken watch
+//!   stream is [`StoreError::Retryable`]: consumers re-watch and apply
+//!   `Put`s only at a revision above the last one they saw, so replays are
+//!   idempotent.
 //! - `list` is the loss-proof backstop for missed watch events: a key the
 //!   consumer believes live but absent from a listing is treated as
 //!   deleted. (The protocol never depends on *which* marker a watch

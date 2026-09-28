@@ -7,6 +7,8 @@ and one per release line under it:
 ```
 ci/<service>/PRIMARY              the lane to use when nothing selects one
 ci/<service>/<lane>/Dockerfile    the pin for that lane
+ci/<service>/DOCS                 pages whose support claims the lanes back (optional)
+ci/<service>/UNSUPPORTED          lanes that back no support claim (optional)
 ```
 
 Each `Dockerfile` holds a single `FROM` carrying an exact release tag and the
@@ -74,6 +76,14 @@ digest on every run.
 **Exact tags**, the vendor's full release version, so a bump diff names the
 release it moved to: `YY.M.P.B` for ClickHouse, `MAJOR.POINT` for Debian,
 `MAJOR.MINOR.PATCH` for Kafka, `MAJOR.MINOR.PATCH-alpine` for NATS.
+
+## Support claims
+
+`cargo xtask tidy supported-versions` holds a page listed in `DOCS` to the lanes.
+Every release line its `## Supported` table names, and every image tag its code
+blocks run, must be a line some lane pins. A lane listed in `UNSUPPORTED` pins a
+server the software refuses, such as NATS's `below-floor`, and backs no claim.
+Nothing else reads either file.
 
 ## What CI runs
 

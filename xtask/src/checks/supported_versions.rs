@@ -1,4 +1,5 @@
-//! Holds a supported-versions table to the servers CI pins.
+//! Holds a supported-versions table, and the images a page's code blocks name,
+//! to the servers CI pins.
 //!
 //! A connector page states a support guarantee; `ci/<service>/` states what CI
 //! runs. Every version a table names must be a release line the service still
@@ -9,8 +10,13 @@
 //! moving the `stable` lane never fails here. Moving an LTS line removes the
 //! number a table names, which is the case this catches.
 //!
+//! An image reference such as `nats:2.11-alpine` inside a fenced block is held
+//! to the same set. A floating tag with no `<major>.<minor>` is not checked.
+//!
 //! No service or page is named here. A service opts in by listing its pages in
-//! `ci/<service>/DOCS`, one path per line.
+//! `ci/<service>/DOCS`, one path per line. Lanes listed in
+//! `ci/<service>/UNSUPPORTED` pin a server the software refuses, and back no
+//! claim.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -18,6 +24,12 @@ use std::path::Path;
 use crate::run::{Error, Outcome};
 
 const HEADING: &str = "## Supported";
+
+/// The file listing a service's pages.
+const DOCS: &str = "DOCS";
+
+/// The file listing lanes that back no support claim.
+const UNSUPPORTED: &str = "UNSUPPORTED";
 
 /// Resolves a `(service, lane)` pair to the `name:tag` it pins.
 type Resolve<'a> = &'a dyn Fn(&str, &str) -> Result<String, Error>;
@@ -27,7 +39,9 @@ pub(crate) fn check(root: &Path, explain: bool) -> Outcome {
     let pairs = pairs(&ci_root)?;
     if explain {
         for (service, page) in &pairs {
-            println!("(reads ci/{service}/*/Dockerfile against {page})");
+            println!(
+                "(reads ci/{service}/*/Dockerfile and ci/{service}/{UNSUPPORTED} against {page})"
+            );
         }
         return Ok(());
     }
@@ -42,10 +56,10 @@ pub(crate) fn check(root: &Path, explain: bool) -> Outcome {
         }
     }
     if failures > 0 {
-        return Err(Error::msg(format!("{failures} table(s) do not match")));
+        return Err(Error::msg(format!("{failures} page(s) do not match")));
     }
     println!(
-        "supported-versions: {} table(s) match the lines CI pins",
+        "supported-versions: {} page(s) match the lines CI pins",
         pairs.len()
     );
     Ok(())
@@ -56,24 +70,49 @@ pub(crate) fn check(root: &Path, explain: bool) -> Outcome {
 fn pairs(ci_root: &Path) -> Result<Vec<(String, String)>, Error> {
     let mut out = Vec::new();
     for service in services(ci_root)? {
-        let docs = ci_root.join(&service).join("DOCS");
-        let Ok(text) = std::fs::read_to_string(&docs) else {
-            continue;
-        };
-        for line in text.lines() {
-            let line = line.split('#').next().unwrap_or_default();
-            let page: String = line.chars().filter(|c| !c.is_whitespace()).collect();
-            if !page.is_empty() {
-                out.push((service.clone(), page));
-            }
+        for page in entries(&ci_root.join(&service).join(DOCS)) {
+            out.push((service.clone(), page));
         }
     }
     Ok(out)
 }
 
+/// The entries of a list file under `ci/<service>/`: one per line, with `#`
+/// opening a comment and whitespace dropped. A missing file lists nothing.
+fn entries(path: &Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    text.lines()
+        .map(|line| line.split('#').next().unwrap_or_default())
+        .map(|line| {
+            line.chars()
+                .filter(|c| !c.is_whitespace())
+                .collect::<String>()
+        })
+        .filter(|entry| !entry.is_empty())
+        .collect()
+}
+
 /// Every lane a service pins, in directory order.
 fn lanes(ci_root: &Path, service: &str) -> Result<Vec<String>, Error> {
     services(&ci_root.join(service))
+}
+
+/// The lanes a support claim may rest on: every lane less those `UNSUPPORTED`
+/// lists. An entry naming no lane is an error.
+fn supported_lanes(ci_root: &Path, service: &str) -> Result<Vec<String>, Error> {
+    let lanes = lanes(ci_root, service)?;
+    let unsupported = entries(&ci_root.join(service).join(UNSUPPORTED));
+    if let Some(stale) = unsupported.iter().find(|l| !lanes.contains(l)) {
+        return Err(Error::msg(format!(
+            "ci/{service}/{UNSUPPORTED} names {stale}, which is not a lane"
+        )));
+    }
+    Ok(lanes
+        .into_iter()
+        .filter(|l| !unsupported.contains(l))
+        .collect())
 }
 
 /// Every service with pinned images, in directory order.
@@ -101,45 +140,71 @@ fn check_page(
     let path = root.join(page);
     let Ok(text) = std::fs::read_to_string(&path) else {
         return Err(Error::msg(format!(
-            "ci/{service}/DOCS names {page}, which does not exist"
+            "ci/{service}/{DOCS} names {page}, which does not exist"
         )));
     };
-    let pinned = pinned_lines(&lanes(ci_root, service)?, service, resolve)?;
+    let pinned = pinned(&supported_lanes(ci_root, service)?, service, resolve)?;
     verify(service, page, &text, &pinned)
 }
 
-/// The rule itself: the section exists, and every line the table names is
-/// pinned. A lane that appears in no row is allowed.
-fn verify(service: &str, page: &str, text: &str, pinned: &BTreeSet<String>) -> Result<(), Error> {
+/// The rule itself: the section exists, and every line the table or a fenced
+/// image reference names is pinned. A lane that appears nowhere is allowed.
+fn verify(service: &str, page: &str, text: &str, pinned: &Pinned) -> Result<(), Error> {
     if !text.lines().any(|l| l.starts_with(HEADING)) {
         return Err(Error::msg(format!(
             "{page}: no '{HEADING}' heading; the section moved or was renamed"
         )));
     }
-    let bad: Vec<_> = claimed_lines(text).difference(pinned).cloned().collect();
+    let lines = pinned.lines.iter().cloned().collect::<Vec<_>>().join(" ");
+    let mut failures = Vec::new();
+    let bad: Vec<_> = claimed_lines(text)
+        .difference(&pinned.lines)
+        .cloned()
+        .collect();
     if !bad.is_empty() {
-        return Err(Error::msg(format!(
-            "{page}: claims {}, which ci/{service} no longer pins (pinned: {})\n  \
-             Update the table, or the lane under ci/{service}/.",
+        failures.push(format!(
+            "{page}: claims {}, which no supported lane of ci/{service} pins (pinned: {lines})\n  \
+             Update the table, or the lanes under ci/{service}/.",
             bad.join(" "),
-            pinned.iter().cloned().collect::<Vec<_>>().join(" ")
-        )));
+        ));
     }
-    Ok(())
+    let bad: Vec<_> = image_references(text, &pinned.images)
+        .into_iter()
+        .filter(|(_, line)| !pinned.lines.contains(line))
+        .map(|(reference, _)| reference)
+        .collect();
+    if !bad.is_empty() {
+        failures.push(format!(
+            "{page}: runs {}, whose line no supported lane of ci/{service} pins (pinned: {lines})\n  \
+             Update the image tag, or the lanes under ci/{service}/.",
+            bad.join(" "),
+        ));
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(Error::msg(failures.join("\n")))
+    }
 }
 
-/// Every release line a service pins, as `<major>.<minor>`, across the lanes
-/// given. Two lanes on the same line collapse to one entry.
-fn pinned_lines(
-    lanes: &[String],
-    service: &str,
-    resolve: Resolve<'_>,
-) -> Result<BTreeSet<String>, Error> {
-    let mut out = BTreeSet::new();
+/// What a service's supported lanes pin.
+struct Pinned {
+    /// The image names, the `name` of each `name:tag`.
+    images: BTreeSet<String>,
+    /// The release lines, as `<major>.<minor>`. Two lanes on one line collapse.
+    lines: BTreeSet<String>,
+}
+
+fn pinned(lanes: &[String], service: &str, resolve: Resolve<'_>) -> Result<Pinned, Error> {
+    let mut out = Pinned {
+        images: BTreeSet::new(),
+        lines: BTreeSet::new(),
+    };
     for lane in lanes {
         let reference = resolve(service, lane)?;
-        let tag = reference.rsplit(':').next().unwrap_or_default();
-        out.insert(major_minor(tag));
+        let (image, tag) = reference.rsplit_once(':').unwrap_or((&reference, ""));
+        out.images.insert(image.to_owned());
+        out.lines.insert(major_minor(tag));
     }
     Ok(out)
 }
@@ -174,16 +239,62 @@ fn claimed_lines(page: &str) -> BTreeSet<String> {
     out
 }
 
+/// Every `<image>:<tag>` inside a fenced block whose image is one of `images`
+/// and whose tag opens with `<major>.<minor>`, paired with that line.
+///
+/// A registry or namespace prefix is allowed, so `docker.io/library/nats:2.10`
+/// is a `nats` reference and `mynats:2.10` is not.
+fn image_references(page: &str, images: &BTreeSet<String>) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut fenced = false;
+    for line in page.lines() {
+        if line.trim_start().starts_with("```") {
+            fenced = !fenced;
+            continue;
+        }
+        if !fenced {
+            continue;
+        }
+        for image in images {
+            let prefix = format!("{image}:");
+            for (at, _) in line.match_indices(&prefix) {
+                let continues = line[..at]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|c| c.is_ascii_alphanumeric() || "._-".contains(c));
+                if continues {
+                    continue;
+                }
+                let rest = &line[at + prefix.len()..];
+                let tag_len = rest
+                    .find(|c: char| !(c.is_ascii_alphanumeric() || "._-".contains(c)))
+                    .unwrap_or(rest.len());
+                let tag = &rest[..tag_len];
+                if let Some(end) = leading_line(tag) {
+                    out.push((format!("{prefix}{tag}"), tag[..end].to_owned()));
+                }
+            }
+        }
+    }
+    out
+}
+
 /// The `<major>.<minor>` opening a table row's first cell, where a pipe follows
 /// the number and the number is not part of a longer digit run. Only spaces
 /// separate the opening pipe from the number.
 fn row_line(line: &str) -> Option<String> {
     let rest = line.strip_prefix('|')?.trim_start_matches(' ');
-    let mut chars = rest.char_indices();
+    let end = leading_line(rest)?;
+    rest[end..].contains('|').then(|| rest[..end].to_owned())
+}
+
+/// The length of the `<major>.<minor>` opening `text`: a digit run, one dot and
+/// a digit run.
+fn leading_line(text: &str) -> Option<usize> {
     let mut end = 0;
     let mut dot = false;
     let mut digits = 0;
-    for (i, c) in chars.by_ref() {
+    for (i, c) in text.char_indices() {
         if c.is_ascii_digit() {
             digits += 1;
             end = i + 1;
@@ -194,15 +305,8 @@ fn row_line(line: &str) -> Option<String> {
             break;
         }
     }
-    let candidate = &rest[..end];
-    let (major, minor) = candidate.split_once('.')?;
-    if major.is_empty() || minor.is_empty() {
-        return None;
-    }
-    if !rest[end..].contains('|') {
-        return None;
-    }
-    Some(candidate.to_owned())
+    let (major, minor) = text[..end].split_once('.')?;
+    (!major.is_empty() && !minor.is_empty()).then_some(end)
 }
 
 #[cfg(test)]
@@ -253,18 +357,29 @@ mod tests {
         assert_eq!(row_line("| Newest stable release | Guaranteed |"), None);
     }
 
-    /// The pinned set for lanes tagged as given, resolved the way
-    /// the pinned-image resolver does: `name:tag`, digest already stripped.
-    fn pinned(lanes: &[(&str, &str)]) -> BTreeSet<String> {
-        let names: Vec<String> = lanes.iter().map(|(l, _)| (*l).to_owned()).collect();
-        let resolve = |_service: &str, lane: &str| {
+    /// A resolver pinning `image` at the tag given for each lane, in the form
+    /// the pinned-image resolver returns: `name:tag`, digest already stripped.
+    fn resolver<'a>(
+        image: &'a str,
+        lanes: &'a [(&'a str, &'a str)],
+    ) -> impl Fn(&str, &str) -> Result<String, Error> + 'a {
+        move |_service: &str, lane: &str| {
             lanes
                 .iter()
                 .find(|(l, _)| *l == lane)
-                .map(|(_, tag)| format!("vendor/db:{tag}"))
+                .map(|(_, tag)| format!("{image}:{tag}"))
                 .ok_or_else(|| Error::msg(format!("no such lane: {lane}")))
-        };
-        pinned_lines(&names, "db", &resolve).unwrap()
+        }
+    }
+
+    /// What `image` pins at the lanes and tags given.
+    fn pinned_image(image: &str, lanes: &[(&str, &str)]) -> Pinned {
+        let names: Vec<String> = lanes.iter().map(|(l, _)| (*l).to_owned()).collect();
+        pinned(&names, "db", &resolver(image, lanes)).unwrap()
+    }
+
+    fn pinned_db(lanes: &[(&str, &str)]) -> Pinned {
+        pinned_image("vendor/db", lanes)
     }
 
     const BASE: &[(&str, &str)] = &[
@@ -285,31 +400,33 @@ mod tests {
 
     #[test]
     fn the_pinned_set_collapses_lanes_sharing_a_line() {
-        assert_eq!(pinned(BASE), set(&["9.1", "9.4"]));
+        let pinned = pinned_db(BASE);
+        assert_eq!(pinned.lines, set(&["9.1", "9.4"]));
+        assert_eq!(pinned.images, set(&["vendor/db"]));
     }
 
     /// Dependabot's move of the stable lane adds a line and removes none, so
     /// the subset rule leaves it alone.
     #[test]
     fn a_stable_lane_move_is_not_a_failure() {
-        assert!(verify("db", "page.mdx", PAGE, &pinned(STABLE_MOVED)).is_ok());
+        assert!(verify("db", "page.mdx", PAGE, &pinned_db(STABLE_MOVED)).is_ok());
     }
 
     /// Moving an LTS line takes away a number the table still names.
     #[test]
     fn an_lts_line_move_is_caught() {
-        let e = verify("db", "page.mdx", PAGE, &pinned(LTS_MOVED)).unwrap_err();
+        let e = verify("db", "page.mdx", PAGE, &pinned_db(LTS_MOVED)).unwrap_err();
         assert_eq!(
             e.message,
-            "page.mdx: claims 9.4, which ci/db no longer pins (pinned: 9.1 9.5 9.6)\n  \
-             Update the table, or the lane under ci/db/."
+            "page.mdx: claims 9.4, which no supported lane of ci/db pins (pinned: 9.1 9.5 9.6)\n  \
+             Update the table, or the lanes under ci/db/."
         );
     }
 
     #[test]
     fn a_renamed_section_is_caught() {
         let renamed = PAGE.replace("## Supported server versions", "## Versions");
-        let e = verify("db", "page.mdx", &renamed, &pinned(BASE)).unwrap_err();
+        let e = verify("db", "page.mdx", &renamed, &pinned_db(BASE)).unwrap_err();
         assert_eq!(
             e.message,
             "page.mdx: no '## Supported' heading; the section moved or was renamed"
@@ -335,6 +452,82 @@ mod tests {
         assert_eq!(row_line("|   9.4 | x |").as_deref(), Some("9.4"));
         assert_eq!(row_line("|\t9.4 | x |"), None);
         assert_eq!(row_line("|\u{a0}9.4 | x |"), None);
+    }
+
+    const NATS_PAGE: &str = "\
+## Requirements
+
+```yaml
+services:
+  nats:
+    image: nats:2.11-alpine
+    environment:
+      NATS_URL: nats://nats:4222
+```
+
+## Supported server versions
+
+| NATS | Support |
+| --- | --- |
+| 2.11 | Guaranteed |
+";
+
+    #[test]
+    fn a_fenced_image_reference_is_read_as_its_line() {
+        let images = set(&["nats"]);
+        let page = "```sh\ndocker run nats:2.10.29-alpine -js\ndocker pull docker.io/library/nats:2.12\n```\n";
+        assert_eq!(
+            image_references(page, &images),
+            vec![
+                ("nats:2.10.29-alpine".to_owned(), "2.10".to_owned()),
+                ("nats:2.12".to_owned(), "2.12".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_reference_naming_no_line_or_another_image_is_not_read() {
+        let images = set(&["nats"]);
+        let page = "```yaml\nurl: nats://nats:4222\nhost: nats:4222\nimage: mynats:2.10\nimage: nats:latest\nimage: nats:2-alpine\n```\n";
+        assert!(image_references(page, &images).is_empty());
+    }
+
+    /// A fence inside a list item is indented, as in a numbered setup step.
+    #[test]
+    fn an_indented_fence_is_read() {
+        let images = set(&["nats"]);
+        let page = "1. Start a server:\n\n   ```sh\n   docker run nats:2.10-alpine -js\n   ```\n";
+        assert_eq!(
+            image_references(page, &images),
+            vec![("nats:2.10-alpine".to_owned(), "2.10".to_owned())]
+        );
+    }
+
+    #[test]
+    fn an_image_reference_in_prose_is_not_read() {
+        let images = set(&["nats"]);
+        let page = "A server such as `nats:2.10-alpine` is refused.\n\n```yaml\nimage: nats:2.11\n```\n\nNor is nats:2.9.\n";
+        assert_eq!(
+            image_references(page, &images),
+            vec![("nats:2.11".to_owned(), "2.11".to_owned())]
+        );
+    }
+
+    #[test]
+    fn a_stale_image_tag_is_caught() {
+        let page = NATS_PAGE.replace("| 2.11 |", "| 2.12 |");
+        let e = verify(
+            "nats",
+            "page.mdx",
+            &page,
+            &pinned_image("nats", &[("floor", "2.12.0-alpine")]),
+        )
+        .unwrap_err();
+        assert_eq!(
+            e.message,
+            "page.mdx: runs nats:2.11-alpine, whose line no supported lane of ci/nats pins (pinned: 2.12)\n  \
+             Update the image tag, or the lanes under ci/nats/."
+        );
     }
 
     /// A directory under the system temporary directory, removed on drop.
@@ -376,6 +569,59 @@ mod tests {
                 ("db".to_owned(), "docs/page.mdx".to_owned()),
                 ("db".to_owned(), "docs/other.mdx".to_owned()),
             ]
+        );
+    }
+
+    /// Moving the floor moves the fixture below it onto the old floor's line.
+    /// Excluding the fixture keeps that line from passing as supported.
+    #[test]
+    fn a_floor_move_with_its_fixture_following_is_caught() {
+        let scratch = Scratch::new("floor-move");
+        scratch
+            .service("ci/nats/floor")
+            .service("ci/nats/below-floor");
+        std::fs::write(scratch.0.join("ci/nats/UNSUPPORTED"), "below-floor\n").unwrap();
+        std::fs::write(scratch.0.join("page.mdx"), NATS_PAGE).unwrap();
+        let ci_root = scratch.0.join("ci");
+        let check = |lanes: &[(&str, &str)]| {
+            check_page(
+                &scratch.0,
+                &ci_root,
+                "nats",
+                "page.mdx",
+                &resolver("nats", lanes),
+            )
+        };
+
+        assert!(
+            check(&[
+                ("floor", "2.11.17-alpine"),
+                ("below-floor", "2.10.29-alpine")
+            ])
+            .is_ok()
+        );
+        let e = check(&[
+            ("floor", "2.12.0-alpine"),
+            ("below-floor", "2.11.17-alpine"),
+        ])
+        .unwrap_err();
+        assert_eq!(
+            e.message,
+            "page.mdx: claims 2.11, which no supported lane of ci/nats pins (pinned: 2.12)\n  \
+             Update the table, or the lanes under ci/nats/.\n\
+             page.mdx: runs nats:2.11-alpine, whose line no supported lane of ci/nats pins (pinned: 2.12)\n  \
+             Update the image tag, or the lanes under ci/nats/."
+        );
+    }
+
+    #[test]
+    fn an_unsupported_entry_naming_no_lane_is_an_error() {
+        let scratch = Scratch::new("stale-unsupported");
+        scratch.service("db/lts");
+        std::fs::write(scratch.0.join("db/UNSUPPORTED"), "# fixtures\nold\n").unwrap();
+        assert_eq!(
+            supported_lanes(&scratch.0, "db").unwrap_err().message,
+            "ci/db/UNSUPPORTED names old, which is not a lane"
         );
     }
 

@@ -23,12 +23,12 @@
 //!
 //! # Run it
 //!
-//! A NATS server with JetStream enabled, version 2.11 or newer. The
-//! store needs per-message age limits and KV limit markers, and the worker
-//! refuses anything older at startup:
+//! A NATS server with JetStream enabled, on a line the NATS store page lists
+//! as supported. The worker refuses an older one at startup. This starts the
+//! server CI runs:
 //!
 //! ```sh
-//! docker run --rm -p 4222:4222 nats:2.11 --jetstream
+//! docker run --rm -p 4222:4222 "$(cargo xtask container-image --pull nats)" -js
 //! NATS_URL=nats://127.0.0.1:4222 POD_NAME=worker-a cargo run -p spate --features s3,json,coordination-nats --example nats_coordinated_backfill
 //! NATS_URL=nats://127.0.0.1:4222 POD_NAME=worker-b cargo run -p spate --features s3,json,coordination-nats --example nats_coordinated_backfill
 //! ```

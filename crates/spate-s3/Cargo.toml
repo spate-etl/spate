@@ -40,16 +40,14 @@ async-trait = { workspace = true }
 spate-s3 = { path = ".", features = ["testing"] }
 spate-coordination = { workspace = true, features = ["nats"] }
 spate-test = { workspace = true }
-spate-test-support = { workspace = true }
+spate-test-support = { workspace = true, features = ["tls"] }
 spate-json = { workspace = true }
 gungraun = { workspace = true }
 proptest = { workspace = true }
-rcgen = { workspace = true }
 serde_yaml = { workspace = true }
 tempfile = { workspace = true }
 testcontainers = { workspace = true, features = ["blocking"] }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "test-util"] }
-tokio-rustls = { workspace = true, features = ["aws_lc_rs"] }
 
 [[bench]]
 name = "split_gungraun"

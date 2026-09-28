@@ -341,9 +341,8 @@ mod tests {
     /// verification failure.
     #[tokio::test]
     async fn an_untrusted_certificate_is_fatal() {
-        let url = crate::test_servers::TestCa::new("server")
-            .serve_with(None)
-            .await;
+        let url =
+            crate::test_servers::serve(&crate::test_servers::TestCa::new("server"), None).await;
         let store =
             crate::test_servers::tls_store_at(&url, &crate::test_servers::TestCa::new("other"));
         for e in [list_error(&store).await, get_error(&store).await] {
@@ -365,9 +364,8 @@ mod tests {
     #[tokio::test]
     async fn a_refused_client_certificate_is_fatal() {
         let server = crate::test_servers::TestCa::new("server");
-        let url = server
-            .serve_requiring_client_cert(&crate::test_servers::TestCa::new("clients"))
-            .await;
+        let clients = crate::test_servers::TestCa::new("clients");
+        let url = crate::test_servers::serve(&server, Some(&clients)).await;
         let e = list_error(&crate::test_servers::tls_store_at(&url, &server)).await;
         assert_eq!(classify(&e), ErrorClass::Fatal, "{e:?}");
         assert!(reason(&e).contains("CertificateRequired"), "{}", reason(&e));

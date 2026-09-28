@@ -231,7 +231,7 @@ fn exception_code(reason: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_tls::{TestCa, endpoint_trusting, failed_query};
+    use crate::test_tls::{TestCa, endpoint_trusting, failed_query, serve};
     use tokio::io::AsyncWriteExt as _;
     use tokio::net::TcpListener;
 
@@ -330,7 +330,7 @@ mod tests {
     #[tokio::test]
     async fn an_unverified_certificate_classifies_fatal_with_its_cause() {
         let (server, other) = (TestCa::new("server"), TestCa::new("other"));
-        let url = server.serve().await;
+        let url = serve(&server, None).await;
         let endpoint = endpoint_trusting(&other, &url);
         let writer = ClickHouseWriter::new(
             "INSERT INTO t FORMAT RowBinaryWithNamesAndTypes".into(),
@@ -407,9 +407,7 @@ mod tests {
     #[tokio::test]
     async fn a_refused_client_certificate_classifies_fatal() {
         let server = TestCa::new("server");
-        let url = server
-            .serve_requiring_client_cert(&TestCa::new("clients"))
-            .await;
+        let url = serve(&server, Some(&TestCa::new("clients"))).await;
         let err = failed_query(&server, &url).await;
         let SinkError::Client { class, reason } = classify(err) else {
             unreachable!()

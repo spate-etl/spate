@@ -119,13 +119,8 @@ pub(crate) fn error_reason(err: &clickhouse::error::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_tls::{TestCa, is_unknown_issuer};
-
-    fn loaded(certs: Vec<CertificateDer<'static>>) -> CertificateResult {
-        let mut result = CertificateResult::default();
-        result.certs = certs;
-        result
-    }
+    use crate::test_tls::{TestCa, is_unknown_issuer, serve};
+    use spate_test_support::native_certs;
 
     fn with_root_ca(path: &Path) -> TlsSection {
         TlsSection {
@@ -140,7 +135,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (system, extra) = (TestCa::new("system"), TestCa::new("extra"));
         let roots = root_store(&with_root_ca(&extra.write(dir.path())), true, || {
-            loaded(vec![system.der()])
+            native_certs(vec![system.der()])
         })
         .unwrap();
         assert_eq!(roots.len(), 2);
@@ -185,9 +180,9 @@ mod tests {
     async fn a_replica_signed_by_root_ca_is_trusted() {
         let dir = tempfile::tempdir().unwrap();
         let ca = TestCa::new("private");
-        let url = ca.serve().await;
+        let url = serve(&ca, None).await;
         let roots = root_store(&with_root_ca(&ca.write(dir.path())), true, || {
-            loaded(vec![])
+            native_certs(vec![])
         })
         .unwrap();
         client(&client_config(roots))
@@ -203,8 +198,11 @@ mod tests {
     #[tokio::test]
     async fn a_replica_signed_by_an_unknown_ca_is_rejected() {
         let (server_ca, other) = (TestCa::new("server"), TestCa::new("other"));
-        let url = server_ca.serve().await;
-        let roots = root_store(&TlsSection::default(), true, || loaded(vec![other.der()])).unwrap();
+        let url = serve(&server_ca, None).await;
+        let roots = root_store(&TlsSection::default(), true, || {
+            native_certs(vec![other.der()])
+        })
+        .unwrap();
         let err = client(&client_config(roots))
             .with_url(url)
             .query("SELECT 1")

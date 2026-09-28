@@ -1,124 +1,28 @@
-//! A private CA for TLS tests, and a local HTTPS server presenting a
-//! certificate it signed.
+//! A local HTTPS server for TLS tests, and endpoints that trust a test CA.
 
 use crate::writer::ClickHouseEndpoint;
-use base64::Engine as _;
 use hyper::Response;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
-use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair};
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
-use rustls::server::WebPkiClientVerifier;
-use rustls::server::danger::ClientCertVerifier;
-use rustls::{CertificateError, RootCertStore, ServerConfig};
+use rustls::{CertificateError, RootCertStore};
 use std::convert::Infallible;
 use std::error::Error;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use tokio::net::TcpListener;
-use tokio_rustls::TlsAcceptor;
 
-pub(crate) struct TestCa {
-    name: String,
-    der: CertificateDer<'static>,
-    issuer: Issuer<'static, KeyPair>,
-}
+pub(crate) use spate_test_support::TestCa;
 
-impl TestCa {
-    pub(crate) fn new(name: &str) -> TestCa {
-        let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
-        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-        params.distinguished_name.push(DnType::CommonName, name);
-        let key = KeyPair::generate().unwrap();
-        let der = params.self_signed(&key).unwrap().der().clone();
-        TestCa {
-            name: name.to_owned(),
-            der,
-            issuer: Issuer::new(params, key),
-        }
-    }
-
-    pub(crate) fn der(&self) -> CertificateDer<'static> {
-        self.der.clone()
-    }
-
-    /// Writes the CA certificate as PEM into `dir` and returns its path.
-    pub(crate) fn write(&self, dir: &Path) -> PathBuf {
-        let body = base64::engine::general_purpose::STANDARD.encode(&self.der);
-        let mut pem = String::from("-----BEGIN CERTIFICATE-----\n");
-        for line in body.as_bytes().chunks(64) {
-            pem.push_str(std::str::from_utf8(line).unwrap());
-            pem.push('\n');
-        }
-        pem.push_str("-----END CERTIFICATE-----\n");
-        let path = dir.join(format!("{}.pem", self.name));
-        std::fs::write(&path, pem).unwrap();
-        path
-    }
-
-    /// Serves an empty `200 OK` to every request on `127.0.0.1`, over a
-    /// certificate for that address signed by this CA, and returns the
-    /// server's `https://` URL. The server runs until the runtime shuts down.
-    pub(crate) async fn serve(&self) -> String {
-        self.serve_with(None).await
-    }
-
-    /// [`serve`](Self::serve), requiring a client certificate signed by
-    /// `clients`.
-    pub(crate) async fn serve_requiring_client_cert(&self, clients: &TestCa) -> String {
-        let mut roots = RootCertStore::empty();
-        roots.add(clients.der()).unwrap();
-        let verifier = WebPkiClientVerifier::builder_with_provider(
-            Arc::new(roots),
-            Arc::new(rustls::crypto::aws_lc_rs::default_provider()),
-        )
-        .build()
-        .unwrap();
-        self.serve_with(Some(verifier)).await
-    }
-
-    async fn serve_with(&self, client_verifier: Option<Arc<dyn ClientCertVerifier>>) -> String {
-        let key = KeyPair::generate().unwrap();
-        let leaf = CertificateParams::new(vec!["127.0.0.1".to_owned()])
-            .unwrap()
-            .signed_by(&key, &self.issuer)
-            .unwrap();
-        let builder = ServerConfig::builder_with_provider(Arc::new(
-            rustls::crypto::aws_lc_rs::default_provider(),
-        ))
-        .with_safe_default_protocol_versions()
-        .unwrap();
-        let builder = match client_verifier {
-            Some(verifier) => builder.with_client_cert_verifier(verifier),
-            None => builder.with_no_client_auth(),
-        };
-        let config = builder
-            .with_single_cert(
-                vec![leaf.der().clone()],
-                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der())),
-            )
-            .unwrap();
-        let acceptor = TlsAcceptor::from(Arc::new(config));
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        tokio::spawn(async move {
-            while let Ok((tcp, _)) = listener.accept().await {
-                let acceptor = acceptor.clone();
-                tokio::spawn(async move {
-                    let Ok(tls) = acceptor.accept(tcp).await else {
-                        return;
-                    };
-                    let ok =
-                        service_fn(|_| async { Ok::<_, Infallible>(Response::new(String::new())) });
-                    let _ = http1::Builder::new()
-                        .serve_connection(TokioIo::new(tls), ok)
-                        .await;
-                });
-            }
-        });
-        format!("https://127.0.0.1:{port}")
-    }
+/// Serves an empty `200 OK` to every request on `127.0.0.1`, over a
+/// certificate `ca` signed, and returns the server's `https://` URL. With
+/// `clients` set, the server requires a client certificate that CA signed.
+pub(crate) async fn serve(ca: &TestCa, clients: Option<&TestCa>) -> String {
+    let addr = spate_test_support::serve_tls(ca.server_config(clients), |tls| async move {
+        let ok = service_fn(|_| async { Ok::<_, Infallible>(Response::new(String::new())) });
+        let _ = http1::Builder::new()
+            .serve_connection(TokioIo::new(tls), ok)
+            .await;
+    })
+    .await;
+    format!("https://{addr}")
 }
 
 /// An endpoint for `url` whose client trusts `ca` and nothing else.

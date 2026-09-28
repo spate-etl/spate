@@ -15,10 +15,9 @@ use spate_core::sink::KeyHashRouter;
 use spate_test::{BytesPassthrough, LogCapture, TestEncoder, capture_sink, memory_source};
 use spate_test_support::http;
 use std::net::SocketAddr;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 const DEADLINE: Duration = Duration::from_secs(10);
-const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 // Port 0 is the case under test. `exporter: none` leaves `/metrics` a 404 and
 // installs no process-global recorder; the probes do not depend on one.
@@ -48,24 +47,6 @@ fn logged_addr(capture: &LogCapture) -> Option<SocketAddr> {
                 .parse()
                 .expect("addr is a socket address")
         })
-}
-
-/// Wait for `check` to produce a value, so the assertions below run against a
-/// pipeline that has finished starting rather than one still mid-flight. The
-/// whole capture goes into the panic, since the reason for a timeout is
-/// whatever the pipeline logged instead.
-fn wait_until<T>(what: &str, capture: &LogCapture, mut check: impl FnMut() -> Option<T>) -> T {
-    let deadline = Instant::now() + DEADLINE;
-    while Instant::now() < deadline {
-        if let Some(value) = check() {
-            return value;
-        }
-        std::thread::sleep(POLL_INTERVAL);
-    }
-    panic!(
-        "timed out waiting for {what}\n--- captured ---\n{}",
-        capture.lines().join("\n")
-    );
 }
 
 #[test]
@@ -109,7 +90,7 @@ fn the_bound_admin_address_is_logged_and_serves() {
     let shutdown = runtime.shutdown_handle();
     let join = std::thread::spawn(move || runtime.run());
 
-    let addr = wait_until("the admin server to announce its address", &capture, || {
+    let addr = capture.wait_for(DEADLINE, "the admin server to announce its address", || {
         logged_addr(&capture)
     });
     assert_ne!(
@@ -122,9 +103,10 @@ fn the_bound_admin_address_is_logged_and_serves() {
     // to answer at all, which needs the spawned server to reach its accept
     // loop; what it answers is asserted once, so a probe reporting 503 fails
     // here rather than being polled past.
-    let (status, body) = wait_until("/healthz to answer at the logged address", &capture, || {
-        http(addr, "GET", "/healthz").ok()
-    });
+    let (status, body) =
+        capture.wait_for(DEADLINE, "/healthz to answer at the logged address", || {
+            http(addr, "GET", "/healthz").ok()
+        });
     assert_eq!(status, 200, "the logged address serves the probes");
     assert_eq!(body, "ok");
 

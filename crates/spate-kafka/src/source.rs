@@ -1686,30 +1686,18 @@ mod tests {
         use spate_core::metrics::ComponentLabels;
         use std::collections::HashMap;
 
-        /// Run `f` against a local Prometheus recorder; returns the rendered
-        /// exposition and the standard label string its series carry. Handles
-        /// must be resolved inside `f`.
-        ///
-        /// The component name is unique per call because `SourceMetrics` owns
-        /// its gauge series: one live handle set per `(pipeline, component,
-        /// component_type)` publishes, later ones shadow. That check is
-        /// process-wide and blind to the local recorder here, so under
-        /// `cargo test` (one process, tests in parallel) a fixed component
-        /// would leave every test but the first asserting on an empty
-        /// exposition. Hence the label string comes back with the
-        /// rendering rather than being a constant.
+        /// Run `f` over a `SourceMetrics` whose component name is unique to the
+        /// call, and return the exposition with the standard label string its
+        /// series carry.
         fn render(f: impl FnOnce(&SourceMetrics)) -> (String, String) {
             let component = spate_test::unique_name("source");
             let std =
                 format!(r#"pipeline="orders",component="{component}",component_type="kafka""#);
-            let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
-            let handle = recorder.handle();
-            metrics::with_local_recorder(&recorder, || {
+            let rendered = spate_test::render_metrics(|| {
                 let m = SourceMetrics::new(&ComponentLabels::new("orders", component, "kafka"));
                 f(&m);
             });
-            handle.run_upkeep();
-            (handle.render(), std)
+            (rendered, std)
         }
 
         /// `(partition, consumer_lag)` pairs into a snapshot for `orders`.

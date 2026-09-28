@@ -265,14 +265,14 @@ first or your handles record into the void. See
 
 ## Testing
 
-Assert your instrumentation the way the framework tests its own: build a
-**local** (non-global) recorder, exercise the code, and match against the
-rendered exposition, with no global install, so tests stay isolated and parallel.
-`metrics::with_local_recorder(&recorder, || { /* drive the connector */ })` then
-`handle.render()` gives you the scrape text to `assert!(...contains(...))`
-against, exactly as
-[`custom_metrics.rs`](repo:crates/spate/examples/custom_metrics.rs) and the
-`metrics` module's own tests do.
+Assert your instrumentation against a recorder local to the test, so tests
+stay isolated and parallel. `spate_test::render_metrics(|| { /* drive the
+connector */ })` runs the closure under one, with the histogram buckets the
+exporter uses, and returns the rendered exposition. Build your handles inside
+the closure, since a handle binds to the recorder present at construction.
+`metric_value(&rendered, "spate_source_records_total", &[("component",
+"orders_in")])` reads one series back, `metric_sum` adds up every match, and
+`metric_series` returns the matching samples with their labels.
 
 **Give each test its own `pipeline` and `component` labels.** A local recorder
 isolates the *exposition*, but it does not isolate the gauge-ownership claim
@@ -280,7 +280,9 @@ described above, which is process-wide. `cargo test` runs a binary's tests in
 one process, so two tests building the same handle with the same labels have the
 second one become a shadow, whose counters still sum but whose gauges publish
 nothing, so the assertion fails somewhere unrelated to the change that broke
-it. Distinct labels per test avoid the collision entirely.
+it. Distinct labels per test avoid the collision entirely, and
+`spate_test::unique_name("orders_in")` returns a name no other call in the
+process returns.
 
 ## From a built-in source or sink
 

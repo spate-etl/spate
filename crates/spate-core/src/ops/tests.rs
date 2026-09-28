@@ -2044,19 +2044,11 @@ fn sorted(mut v: Vec<String>) -> Vec<String> {
     v
 }
 
-/// Render `f` against a recorder of its own.
-fn render(f: impl FnOnce()) -> String {
-    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
-    let handle = recorder.handle();
-    metrics::with_local_recorder(&recorder, f);
-    handle.render()
-}
-
 /// A `try_map` stopping the pipeline is counted on the stage that stopped it,
 /// and no stage carries a `retryable` series. Regression for #335.
 #[test]
 fn a_try_map_fail_trip_counts_a_fatal_on_its_own_stage() {
-    let rendered = render(|| {
+    let rendered = crate::metrics::render_local(|| {
         let (queues, _rxs) = shard_queues(1, 64);
         let mut c = chain_owned(OwnedPassthrough)
             .with_metrics("errtest", "main")
@@ -2094,7 +2086,7 @@ fn a_try_map_fail_trip_counts_a_fatal_on_its_own_stage() {
 /// `Fatal` class overrides the Skip policy and counts as fatal.
 #[test]
 fn encoder_error_classes_land_on_their_own_error_type() {
-    let record_level = render(|| {
+    let record_level = crate::metrics::render_local(|| {
         let (queues, mut rxs) = shard_queues(1, 64);
         let mut c = chain(LogDeser)
             .with_metrics("errtest", "main")
@@ -2121,7 +2113,7 @@ fn encoder_error_classes_land_on_their_own_error_type() {
         "a skipped row is record-level:\n{record_level}"
     );
 
-    let fatal = render(|| {
+    let fatal = crate::metrics::render_local(|| {
         let (queues, _rxs) = shard_queues(1, 64);
         let mut c = chain(LogDeser)
             .with_metrics("errtest", "main")
@@ -2151,7 +2143,7 @@ fn encoder_error_classes_land_on_their_own_error_type() {
 /// `Skip` counts a drop and no error.
 #[test]
 fn split_unmatched_counts_a_fatal_only_under_the_fail_policy() {
-    let fail = render(|| {
+    let fail = crate::metrics::render_local(|| {
         let (sub_q, _rx) = shard_queues(1, 64);
         let mut split = chain(LogDeser)
             .with_metrics("errtest", "main")
@@ -2180,7 +2172,7 @@ fn split_unmatched_counts_a_fatal_only_under_the_fail_policy() {
         "the split stage stopped the pipeline:\n{fail}"
     );
 
-    let skip = render(|| {
+    let skip = crate::metrics::render_local(|| {
         let (sub_q, _rx) = shard_queues(1, 64);
         let mut split = chain(LogDeser)
             .with_metrics("errtest", "main")
@@ -2219,7 +2211,7 @@ fn split_unmatched_counts_a_fatal_only_under_the_fail_policy() {
 /// Regression for #351.
 #[test]
 fn a_finish_chunk_failure_counts_a_fatal_on_the_stage_that_raised_it() {
-    let rendered = render(|| {
+    let rendered = crate::metrics::render_local(|| {
         let (queues, mut rxs) = shard_queues(1, 64);
         let mut c = chain_owned(OwnedPassthrough)
             .with_metrics("errtest", "main")
@@ -2255,7 +2247,7 @@ fn a_finish_chunk_failure_counts_a_fatal_on_the_stage_that_raised_it() {
 /// A record the Skip policy drops counts a record-level error and no fatal.
 #[test]
 fn a_skipped_record_counts_no_fatal() {
-    let rendered = render(|| {
+    let rendered = crate::metrics::render_local(|| {
         let (queues, _rxs) = shard_queues(1, 64);
         let mut c = chain_owned(OwnedPassthrough)
             .with_metrics("errtest", "main")
@@ -2577,7 +2569,7 @@ fn series_value(rendered: &str, name: &str, label: &str) -> u64 {
 #[test]
 fn a_fatal_deser_error_stops_the_chain_under_skip() {
     let mut ack_status = None;
-    let rendered = render(|| {
+    let rendered = crate::metrics::render_local(|| {
         let (queues, _rxs) = shard_queues(1, 64);
         let mut c = chain(FatalDeser { not_ready_first: 0 })
             .with_metrics("fataltest", "main")
@@ -2625,7 +2617,7 @@ fn a_fatal_deser_error_stops_the_chain_under_skip() {
 #[test]
 fn a_fatal_on_replay_fails_the_batch_and_clears_the_stash() {
     let mut statuses = Vec::new();
-    let rendered = render(|| {
+    let rendered = crate::metrics::render_local(|| {
         let (queues, _rxs) = shard_queues(1, 64);
         let mut c = chain(FatalDeser { not_ready_first: 1 })
             .with_metrics("fataltest", "main")

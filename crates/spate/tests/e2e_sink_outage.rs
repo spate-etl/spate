@@ -15,6 +15,7 @@
 #[path = "e2e_support/mod.rs"]
 mod support;
 
+use spate_test::metric_sum;
 use std::time::{Duration, Instant};
 use support::*;
 
@@ -55,7 +56,7 @@ fn sink_outage_backpressures_and_loses_nothing() {
     let mut saw_paused = false;
     while start.elapsed() < outage {
         let (_, body) = http_get(pipeline.admin, "/metrics");
-        if metric_sum(&body, "spate_backpressure_paused") >= 1.0 {
+        if metric_sum(&body, "spate_backpressure_paused", &[]).unwrap_or(0.0) >= 1.0 {
             saw_paused = true;
         }
         std::thread::sleep(Duration::from_millis(500));
@@ -63,7 +64,8 @@ fn sink_outage_backpressures_and_loses_nothing() {
     h.unpause_clickhouse();
 
     let (_, body) = http_get(pipeline.admin, "/metrics");
-    let pause_events = metric_sum(&body, "spate_backpressure_pause_events_total");
+    let pause_events =
+        metric_sum(&body, "spate_backpressure_pause_events_total", &[]).unwrap_or(0.0);
     assert!(
         saw_paused || pause_events >= 1.0,
         "backpressure engaged during the outage (gauge seen: {saw_paused}, events: {pause_events})"

@@ -70,9 +70,12 @@
 //!
 //! To test one stage without a source, build its input with [`raw_payload`],
 //! [`record`] and [`test_ack`], and its config with [`component_config`].
+//! To assert on metrics, render them with [`render_metrics`] and read series
+//! back with [`metric_value`], [`metric_sum`] or [`metric_series`].
 
 mod coordination;
 mod deser;
+mod exposition;
 mod fixtures;
 mod logs;
 mod run;
@@ -85,6 +88,7 @@ pub mod strategies;
 
 pub use coordination::{CoordinatorScript, ScriptedCoordinator, scripted_coordinator};
 pub use deser::{EmitCollector, TestDeserializer};
+pub use exposition::{MetricSample, metric_series, metric_sum, metric_value, render_metrics};
 pub use fixtures::{component_config, raw_payload, record, test_ack, unique_name};
 pub use logs::{LogCapture, capture_logs, show_logs};
 pub use run::{PipelineRun, wait_until};

@@ -28,6 +28,7 @@ use spate_core::sink::KeyHashRouter;
 use spate_core::source::LaneId;
 use spate_test::{
     BytesPassthrough, CaptureSink, MemorySource, TestEncoder, capture_sink, memory_source,
+    metric_series,
 };
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -63,11 +64,10 @@ sinks:
 /// count each, so summing them alongside the aggregate would add the max
 /// across partitions to the partitions themselves.
 fn pending_gauge(render: &dyn Fn() -> String) -> f64 {
-    render()
-        .lines()
-        .filter(|l| !l.starts_with('#') && l.starts_with("spate_checkpoint_pending_batches"))
-        .filter(|l| !l.contains(r#"partition=""#))
-        .filter_map(|l| l.rsplit(' ').next()?.parse::<f64>().ok())
+    metric_series(&render(), "spate_checkpoint_pending_batches", &[])
+        .iter()
+        .filter(|s| s.label("partition").is_none())
+        .map(|s| s.value)
         .sum()
 }
 

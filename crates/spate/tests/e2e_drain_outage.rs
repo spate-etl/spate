@@ -32,6 +32,7 @@
 #[path = "e2e_support/mod.rs"]
 mod support;
 
+use spate_test::metric_sum;
 use std::time::{Duration, Instant};
 use support::*;
 
@@ -79,7 +80,7 @@ fn shutdown_during_a_sink_outage_still_exits_under_its_deadline() {
         "backpressure engaged (worker holds a batch it cannot dispatch)",
         || {
             let (_, body) = http_get(pipeline.admin, "/metrics");
-            metric_sum(&body, "spate_backpressure_paused") >= 1.0
+            metric_sum(&body, "spate_backpressure_paused", &[]).unwrap_or(0.0) >= 1.0
         },
     );
 

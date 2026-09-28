@@ -553,16 +553,7 @@ fn ms_to_secs(v: i64) -> f64 {
 mod tests {
     use super::*;
     use rdkafka::statistics::{Broker, ConsumerGroup, Topic, Window};
-
-    /// Run `f` against a local Prometheus recorder and return the rendered
-    /// exposition. Handles must be resolved inside `f`.
-    fn render(f: impl FnOnce()) -> String {
-        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
-        let handle = recorder.handle();
-        metrics::with_local_recorder(&recorder, f);
-        handle.run_upkeep();
-        handle.render()
-    }
+    use spate_test::render_metrics;
 
     /// A test Meter under the `kafka` namespace: names render as
     /// `spate_kafka_<local>` (the runtime's role-scoped variant would be
@@ -655,7 +646,7 @@ mod tests {
 
     #[test]
     fn transport_counters_render_absolute_totals() {
-        let rendered = render(|| {
+        let rendered = render_metrics(|| {
             let mut m = KafkaStatsMetrics::new(meter(), false);
             let stats = Statistics {
                 tx: 31,
@@ -684,7 +675,7 @@ mod tests {
 
     #[test]
     fn window_units_convert_to_seconds() {
-        let rendered = render(|| {
+        let rendered = render_metrics(|| {
             let mut m = KafkaStatsMetrics::new(meter(), false);
             let mut b = broker("k1:9092/1", "learned", 1);
             b.rtt = Some(window(1_500, 3_000, 10)); // microseconds
@@ -708,7 +699,7 @@ mod tests {
 
     #[test]
     fn empty_windows_and_missing_cgrp_publish_nothing() {
-        let rendered = render(|| {
+        let rendered = render_metrics(|| {
             let mut m = KafkaStatsMetrics::new(meter(), false);
             let mut b = broker("k1:9092/1", "learned", 1);
             b.rtt = Some(window(0, 0, 0)); // sampled nothing
@@ -735,7 +726,7 @@ mod tests {
 
     #[test]
     fn internal_logical_and_bootstrap_brokers_are_filtered() {
-        let rendered = render(|| {
+        let rendered = render_metrics(|| {
             let mut m = KafkaStatsMetrics::new(meter(), false);
             let mut learned = broker("k1:9092/1", "learned", 1);
             learned.txretries = 5;
@@ -779,7 +770,7 @@ mod tests {
     /// reads -1 even once bound (observed against a live client).
     #[test]
     fn a_coordinator_only_broker_counts_as_up() {
-        let rendered = render(|| {
+        let rendered = render_metrics(|| {
             let mut m = KafkaStatsMetrics::new(meter(), false);
             // Real link down, coordinator link up: up.
             let mut coordinator_only = broker("k1:9092/1", "learned", 1);
@@ -841,7 +832,7 @@ mod tests {
             ("query-coord", "steady", " 0"),
         ];
         for (state, join_state, expect) in cases {
-            let rendered = render(|| {
+            let rendered = render_metrics(|| {
                 let mut m = KafkaStatsMetrics::new(meter(), false);
                 let stats = Statistics {
                     cgrp: Some(ConsumerGroup {
@@ -891,7 +882,7 @@ mod tests {
     #[test]
     fn fetch_queue_aggregates_and_partition_detail_gating() {
         // Detail off: aggregate only, no partition label.
-        let rendered = render(|| {
+        let rendered = render_metrics(|| {
             let mut m = KafkaStatsMetrics::new(meter(), false);
             let stats = Statistics {
                 topics: HashMap::from([(
@@ -913,7 +904,7 @@ mod tests {
         );
 
         // Detail on: per-partition series, pid -1 skipped, negative lag skipped.
-        let rendered = render(|| {
+        let rendered = render_metrics(|| {
             let mut m = KafkaStatsMetrics::new(meter(), true);
             let stats = Statistics {
                 topics: HashMap::from([(
@@ -950,7 +941,7 @@ mod tests {
         // A two-member group on a two-partition topic: partition 2 is in the
         // snapshot because librdkafka emits every partition in the topic's
         // metadata, but the sibling member holds it.
-        let rendered = render(|| {
+        let rendered = render_metrics(|| {
             let mut m = KafkaStatsMetrics::new(meter(), true);
             let stats = Statistics {
                 topics: HashMap::from([(
@@ -985,7 +976,7 @@ mod tests {
     #[test]
     fn revoked_partitions_stop_updating_after_retain() {
         let mut m_holder: Option<KafkaStatsMetrics> = None;
-        let rendered = render(|| {
+        let rendered = render_metrics(|| {
             let mut m = KafkaStatsMetrics::new(meter(), true);
             let two = Statistics {
                 topics: HashMap::from([(
@@ -1020,7 +1011,7 @@ mod tests {
 
     #[test]
     fn not_fetching_gauge_follows_the_fetch_state() {
-        let rendered = render(|| {
+        let rendered = render_metrics(|| {
             let mut m = KafkaStatsMetrics::new(meter(), true);
             let stats = stats_with_states(&[
                 (0, "active"),
@@ -1055,7 +1046,7 @@ mod tests {
 
     #[test]
     fn a_revoked_partition_reads_zero() {
-        let rendered = render(|| {
+        let rendered = render_metrics(|| {
             let mut m = KafkaStatsMetrics::new(meter(), true);
             m.update(
                 &stats_with_states(&[(0, "stopped")]),
@@ -1077,7 +1068,7 @@ mod tests {
 
     #[test]
     fn a_revoked_partition_zeroes_its_other_gauges_too() {
-        let rendered = render(|| {
+        let rendered = render_metrics(|| {
             let mut m = KafkaStatsMetrics::new(meter(), true);
             let stats = Statistics {
                 topics: HashMap::from([(
@@ -1115,7 +1106,7 @@ mod tests {
         // and an eager revoke empties it for every window until the new
         // assignment lands. A parked partition reading 0 through that window
         // resets the `for:` timer on the alert this gauge exists for.
-        let rendered = render(|| {
+        let rendered = render_metrics(|| {
             let mut m = KafkaStatsMetrics::new(meter(), true);
             m.update(
                 &stats_with_states(&[(0, "stopped")]),
@@ -1139,7 +1130,7 @@ mod tests {
         // The run outlives the windows of the rebalance, so a partition
         // handed straight back is not reported a second time.
         let lines = capture_logs(|| {
-            render(|| {
+            render_metrics(|| {
                 let mut m = KafkaStatsMetrics::new(meter(), true);
                 let held = owned(&[0]);
                 for _ in 0..2 {
@@ -1168,7 +1159,7 @@ mod tests {
         // `retain_partitions` drops the run, so the same state is a new
         // diagnosis when the partition comes back.
         let lines = capture_logs(|| {
-            render(|| {
+            render_metrics(|| {
                 let mut m = KafkaStatsMetrics::new(meter(), true);
                 let held = owned(&[0]);
                 for _ in 0..2 {
@@ -1192,7 +1183,7 @@ mod tests {
         // twenty-minute run says nothing to a reader who arrives at minute
         // ten.
         let lines = capture_logs(|| {
-            render(|| {
+            render_metrics(|| {
                 let mut m = KafkaStatsMetrics::new(meter(), false);
                 let held = owned(&[0]);
                 for _ in 0..(2 * NOT_FETCHING_REPEAT_WINDOWS) {
@@ -1221,7 +1212,7 @@ mod tests {
         // between `offset-query` and `offset-wait`, so consecutive windows
         // sample different non-active states for one stuck partition.
         let lines = capture_logs(|| {
-            render(|| {
+            render_metrics(|| {
                 let mut m = KafkaStatsMetrics::new(meter(), true);
                 let held = owned(&[0]);
                 for window in 0..10 {
@@ -1248,7 +1239,7 @@ mod tests {
     #[test]
     fn a_parked_partition_is_reported_once_per_episode() {
         let lines = capture_logs(|| {
-            render(|| {
+            render_metrics(|| {
                 let mut m = KafkaStatsMetrics::new(meter(), true);
                 let held = owned(&[0]);
                 // Two windows stopped: the run crosses the threshold and is
@@ -1286,7 +1277,7 @@ mod tests {
     #[test]
     fn a_single_non_active_window_is_not_reported() {
         let lines = capture_logs(|| {
-            render(|| {
+            render_metrics(|| {
                 let mut m = KafkaStatsMetrics::new(meter(), true);
                 let held = owned(&[0]);
                 // One window resolving an offset is ordinary right after an
@@ -1302,7 +1293,7 @@ mod tests {
     #[test]
     fn a_partition_another_member_holds_is_not_reported() {
         let lines = capture_logs(|| {
-            render(|| {
+            render_metrics(|| {
                 let mut m = KafkaStatsMetrics::new(meter(), true);
                 for _ in 0..5 {
                     m.update(
@@ -1323,7 +1314,7 @@ mod tests {
         // never set it still has to be told.
         let mut rendered = String::new();
         let lines = capture_logs(|| {
-            rendered = render(|| {
+            rendered = render_metrics(|| {
                 let mut m = KafkaStatsMetrics::new(meter(), false);
                 let held = owned(&[0]);
                 for _ in 0..2 {
@@ -1343,7 +1334,7 @@ mod tests {
     #[test]
     fn a_revoked_partition_closes_its_run_silently() {
         let lines = capture_logs(|| {
-            render(|| {
+            render_metrics(|| {
                 let mut m = KafkaStatsMetrics::new(meter(), true);
                 for _ in 0..2 {
                     m.update(
@@ -1370,7 +1361,7 @@ mod tests {
     fn absolute_counters_hold_the_high_water_mark_on_regression() {
         // Documents the fetch-max contract: a regressing upstream total
         // would flat-line, not dip. See the module docs.
-        let rendered = render(|| {
+        let rendered = render_metrics(|| {
             let mut m = KafkaStatsMetrics::new(meter(), false);
             let high = Statistics {
                 rxmsgs: 100,

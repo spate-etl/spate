@@ -11,6 +11,7 @@
 #[path = "e2e_support/mod.rs"]
 mod support;
 
+use spate_test::metric_sum;
 use std::time::Duration;
 use support::*;
 
@@ -49,9 +50,10 @@ fn happy_path_delivers_exactly_and_commits() {
         "every stage counted records",
         || {
             let (_, body) = http_get(pipeline.admin, "/metrics");
-            metric_sum(&body, "spate_source_records_total") >= total as f64
-                && metric_sum(&body, "spate_operator_records_in_total") >= total as f64
-                && metric_sum(&body, "spate_sink_records_total") >= total as f64
+            metric_sum(&body, "spate_source_records_total", &[]).unwrap_or(0.0) >= total as f64
+                && metric_sum(&body, "spate_operator_records_in_total", &[]).unwrap_or(0.0)
+                    >= total as f64
+                && metric_sum(&body, "spate_sink_records_total", &[]).unwrap_or(0.0) >= total as f64
         },
     );
 

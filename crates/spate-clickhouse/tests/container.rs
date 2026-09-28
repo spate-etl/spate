@@ -3,14 +3,16 @@
 //! Ignored by default; run explicitly:
 //! `cargo test -p spate-clickhouse --test container -- --ignored`
 
+mod support;
+
 use bytes::BytesMut;
 use spate_clickhouse::config::{self, ClickHouseSinkConfig};
-use spate_clickhouse::serialize_row;
 use spate_clickhouse::{ClickHouseRow, ClickHouseRowFamily};
 use spate_core::deser::Owned;
 use spate_core::sink::SealedBatch;
 use spate_test::record;
 use spate_test_support::container_image;
+use support::sealed;
 // The concern modules under tests/container/ reach the writer trait through
 // `use super::*`; re-export it so that stays a no-op for the root helpers.
 use serde::{Deserialize, Serialize};
@@ -168,26 +170,6 @@ shards:
         .with_row::<Owned<Order>>()
         .await
         .expect("schema fetch")
-}
-
-fn sealed<T: Serialize>(rows: &[T], token: &str, frames: usize) -> SealedBatch {
-    let per = rows.len().div_ceil(frames);
-    let mut out = Vec::new();
-    let mut bytes = 0u64;
-    for chunk in rows.chunks(per) {
-        let mut buf = BytesMut::new();
-        for row in chunk {
-            serialize_row(row, &mut buf).expect("encode");
-        }
-        bytes += buf.len() as u64;
-        out.push(buf.freeze());
-    }
-    SealedBatch {
-        frames: out,
-        rows: rows.len() as u64,
-        bytes,
-        dedup_token: token.to_string(),
-    }
 }
 
 fn orders(range: std::ops::Range<u64>) -> Vec<Order> {

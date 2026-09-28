@@ -17,8 +17,8 @@ use spate_test_support::container_image;
 use std::time::Duration;
 use support::seaweed::Gateway;
 use support::{
-    Launched, captured_rows, launch_customized, line_framer, lines_bytes, recs, sorted,
-    test_options,
+    Launched, PipelineYaml, captured_rows, launch_customized, line_framer, lines_bytes, recs,
+    sorted, test_options,
 };
 use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::runners::SyncRunner;
@@ -44,23 +44,7 @@ fn start_nats() -> (Container<GenericImage>, u16) {
 }
 
 fn config_yaml(gw: &Gateway) -> String {
-    format!(
-        r#"
-pipeline: {{ name: s3-nats-test, threads: 2 }}
-admin: {{ listen: none }}
-checkpoint: {{ interval: 100ms }}
-metrics: {{ exporter: none }}
-source:
-  s3:
-    url: "s3://{bucket}/data/"
-    split_target_bytes: 1MiB
-    store:
-{opts}
-sink: {{ capture: {{}} }}
-"#,
-        bucket = gw.bucket,
-        opts = gw.store_options_yaml(),
-    )
+    PipelineYaml::bucket("s3-nats-test", gw).build()
 }
 
 /// Launch one instance the way a deployment does: the shared NATS server

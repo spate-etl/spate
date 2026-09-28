@@ -16,25 +16,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use support::spy::counting_local_store;
 use support::{
-    Launched, captured_rows, launch, launch_customized, launch_tuned, line_framer, lines_bytes,
-    recs, shared_store, sorted, test_options, test_tuning,
+    Launched, PipelineYaml, captured_rows, launch, launch_customized, launch_tuned, line_framer,
+    lines_bytes, recs, shared_store, sorted, test_options, test_tuning, unreachable_nats,
 };
 
 fn config_yaml(data: &std::path::Path) -> String {
-    format!(
-        r#"
-pipeline: {{ name: s3-coordinated-test, threads: 2 }}
-admin: {{ listen: none }}
-checkpoint: {{ interval: 100ms }}
-metrics: {{ exporter: none }}
-source:
-  s3:
-    url: "file://{data}/"
-    split_target_bytes: 1MiB
-sink: {{ capture: {{}} }}
-"#,
-        data = data.display(),
-    )
+    PipelineYaml::file("s3-coordinated-test", data).build()
 }
 
 /// [`config_yaml`] with a small in-flight budget, so a paced sink (delay per
@@ -42,21 +29,9 @@ sink: {{ capture: {{}} }}
 /// delays. The revocation test needs the owner to hold its splits open across
 /// several rebalance rounds.
 fn throttled_config_yaml(data: &std::path::Path) -> String {
-    format!(
-        r#"
-pipeline: {{ name: s3-coordinated-test, threads: 2 }}
-checkpoint: {{ interval: 100ms }}
-backpressure: {{ max_inflight_bytes: 128KiB }}
-admin: {{ listen: none }}
-metrics: {{ exporter: none }}
-source:
-  s3:
-    url: "file://{data}/"
-    split_target_bytes: 1MiB
-sink: {{ capture: {{}} }}
-"#,
-        data = data.display(),
-    )
+    PipelineYaml::file("s3-coordinated-test", data)
+        .section("backpressure: { max_inflight_bytes: 128KiB }")
+        .build()
 }
 
 /// Launch one coordinated instance with a LIST-counting data store.
@@ -334,17 +309,9 @@ fn a_cooperative_revocation_moves_splits_with_zero_duplicates() {
 /// [`config_yaml`] plus a `coordination:` section naming a NATS server on a
 /// port nothing listens on.
 fn unreachable_nats_yaml(data: &std::path::Path) -> String {
-    format!(
-        "{}coordination:
-  op_timeout: 100ms
-  lease_duration: 2s
-  replan_interval: 2s
-  startup_max_attempts: 1
-  store:
-    nats: {{ servers: [\"nats://127.0.0.1:1\"], job: unreachable }}
-",
-        config_yaml(data)
-    )
+    PipelineYaml::file("s3-coordinated-test", data)
+        .section(&unreachable_nats("unreachable"))
+        .build()
 }
 
 /// The `coordination:` section reaches the S3 source's coordinator: the run

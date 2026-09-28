@@ -11,6 +11,8 @@
 //! Building a sink reads `system.columns`, so every mock here queues that
 //! answer first: handlers are consumed in order.
 
+mod support;
+
 use bytes::BytesMut;
 use clickhouse::test::{Mock, handlers};
 use serde::{Deserialize, Serialize};
@@ -22,6 +24,7 @@ use spate_core::deser::Owned;
 use spate_core::error::{ErrorClass, SinkError};
 use spate_core::sink::{SealedBatch, ShardWriter};
 use spate_test::record;
+use support::sealed;
 
 #[derive(Debug, Clone, PartialEq, clickhouse::Row, Serialize, Deserialize, ClickHouseRow)]
 struct TestRow {
@@ -62,27 +65,6 @@ shards:
         .expect("schema fetch and column check")
 }
 
-fn sealed(rows: &[TestRow], token: &str) -> SealedBatch {
-    // Two frames to exercise multi-frame sends.
-    let mid = rows.len() / 2;
-    let mut frames = Vec::new();
-    let mut bytes = 0u64;
-    for part in [&rows[..mid], &rows[mid..]] {
-        let mut buf = BytesMut::new();
-        for row in part {
-            serialize_row(row, &mut buf).expect("encode");
-        }
-        bytes += buf.len() as u64;
-        frames.push(buf.freeze());
-    }
-    SealedBatch {
-        frames,
-        rows: rows.len() as u64,
-        bytes,
-        dedup_token: token.to_string(),
-    }
-}
-
 fn rows(n: u64) -> Vec<TestRow> {
     (0..n)
         .map(|i| TestRow {
@@ -112,7 +94,7 @@ async fn our_frames_decode_through_the_crates_deserializer() {
     let recorder = mock.add(handlers::record::<TestRow>());
 
     let expected = rows(101);
-    post_frames(mock.url(), &sealed(&expected, "tok-1")).await;
+    post_frames(mock.url(), &sealed(&expected, "tok-1", 2)).await;
 
     let received: Vec<TestRow> = recorder.collect().await;
     assert_eq!(
@@ -131,7 +113,7 @@ async fn write_batch_sends_every_frame() {
     let sink = sink_for(mock.url()).await;
 
     sink.writer
-        .write_batch(&sink.endpoints[0][0], &sealed(&rows(101), "tok-1"))
+        .write_batch(&sink.endpoints[0][0], &sealed(&rows(101), "tok-1", 2))
         .await
         .expect("write");
 }
@@ -145,7 +127,7 @@ async fn transport_failures_are_retryable() {
 
     let err = sink
         .writer
-        .write_batch(&sink.endpoints[0][0], &sealed(&rows(3), "tok-2"))
+        .write_batch(&sink.endpoints[0][0], &sealed(&rows(3), "tok-2", 2))
         .await
         .expect_err("must fail");
     match err {
@@ -164,7 +146,7 @@ async fn schema_class_exceptions_are_fatal() {
 
     let err = sink
         .writer
-        .write_batch(&sink.endpoints[0][0], &sealed(&rows(3), "tok-3"))
+        .write_batch(&sink.endpoints[0][0], &sealed(&rows(3), "tok-3", 2))
         .await
         .expect_err("must fail");
     match err {
@@ -185,7 +167,7 @@ async fn capacity_class_exceptions_stay_retryable() {
 
     let err = sink
         .writer
-        .write_batch(&sink.endpoints[0][0], &sealed(&rows(3), "tok-4"))
+        .write_batch(&sink.endpoints[0][0], &sealed(&rows(3), "tok-4", 2))
         .await
         .expect_err("must fail");
     match err {

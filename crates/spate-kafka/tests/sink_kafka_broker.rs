@@ -22,8 +22,8 @@ use spate_kafka::sink::KafkaSinkConfig;
 use spate_kafka::{KafkaSource, KafkaSourceConfig};
 use spate_test::{PipelineRun, wait_until};
 use std::collections::BTreeMap;
-use std::time::{Duration, Instant};
-use support::broker;
+use std::time::Duration;
+use support::{broker, consume};
 use testcontainers::runners::SyncRunner;
 use testcontainers_modules::kafka::apache::KAFKA_PORT;
 
@@ -72,33 +72,20 @@ fn produce(brokers: &str, topic: &str, payloads: &[Vec<u8>]) {
     producer.flush(Duration::from_secs(30)).expect("flush");
 }
 
-/// Consume from `topic` until `deadline` yields nothing new for a second,
-/// returning payloads (excluding the warmup marker).
+/// The first `expect` payloads on `topic`, leaving out the warmup marker.
 fn consume_payloads(brokers: &str, topic: &str, expect: usize) -> Vec<Vec<u8>> {
-    let consumer: BaseConsumer = ClientConfig::new()
-        .set("bootstrap.servers", brokers)
-        .set("group.id", format!("verify-{topic}"))
-        .set("auto.offset.reset", "earliest")
-        .create()
-        .expect("consumer");
-    consumer.subscribe(&[topic]).expect("subscribe");
-    let deadline = Instant::now() + Duration::from_secs(60);
-    let mut out = Vec::new();
-    while out.len() < expect {
-        assert!(
-            Instant::now() < deadline,
-            "{topic}: consumed only {} of {expect} within the deadline",
-            out.len()
-        );
-        if let Some(message) = consumer.poll(Duration::from_millis(250)) {
-            let message = message.expect("message");
-            let payload = message.payload().unwrap_or_default().to_vec();
-            if payload != b"warmup" {
-                out.push(payload);
-            }
-        }
-    }
-    out
+    let group = format!("verify-{topic}");
+    consume(
+        brokers,
+        topic,
+        &group,
+        expect,
+        Duration::from_secs(60),
+        |message| {
+            let payload = message.payload().unwrap_or_default();
+            (payload != b"warmup").then(|| payload.to_vec())
+        },
+    )
 }
 
 #[test]

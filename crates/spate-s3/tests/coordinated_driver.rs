@@ -14,23 +14,12 @@ use std::fs;
 use std::path::Path;
 use std::time::Duration;
 use support::{
-    Launched, captured_rows, launch_customized, line_framer, lines_bytes, recs, test_options,
+    Launched, PipelineYaml, captured_rows, launch_customized, line_framer, lines_bytes, recs,
+    test_options,
 };
 
-fn config_yaml(data: &Path) -> String {
-    format!(
-        r#"
-pipeline: {{ name: s3-scripted-test, threads: 2 }}
-admin: {{ listen: none }}
-checkpoint: {{ interval: 100ms }}
-metrics: {{ exporter: none }}
-source:
-  s3:
-    url: "file://{data}/"
-sink: {{ capture: {{}} }}
-"#,
-        data = data.display(),
-    )
+fn config_yaml(data: &Path) -> PipelineYaml {
+    PipelineYaml::file("s3-scripted-test", data)
 }
 
 /// Build a real `SplitSpec` over staged files: sizes from the
@@ -77,7 +66,7 @@ fn gains_stream_commits_carry_completion_and_all_complete_drains() {
 
     let (coordinator, script) = scripted_coordinator();
     script.gain(split, 1, None);
-    let l = launch_scripted_coordinator(&config_yaml(&data), coordinator, |_| {});
+    let l = launch_scripted_coordinator(&config_yaml(&data).build(), coordinator, |_| {});
 
     // The driver commits acked watermarks; the final commit (or sweep)
     // must carry the terminal completion flag.
@@ -128,7 +117,7 @@ fn a_mid_flow_gain_folds_the_drain_commit_and_completes() {
     script.gain(flow, 1, None);
     // Pace the sink so A still has acked-but-uncommitted progress in
     // flight when B arrives, the shape that crashed the earlier code.
-    let yaml = config_yaml(&data).replace("interval: 100ms", "interval: 60s");
+    let yaml = config_yaml(&data).checkpoint("60s").build();
     let l = launch_scripted_coordinator(&yaml, coordinator, |sink| {
         for _ in 0..20 {
             sink.enqueue_global(WriteOutcome::ok().after(Duration::from_millis(100)));
@@ -170,7 +159,7 @@ fn losing_a_split_detaches_it_without_failing_the_pipeline() {
     script.gain(lost, 1, None);
     // Pace the sink so the lost split is still mid-flight when the loss
     // arrives.
-    let l = launch_scripted_coordinator(&config_yaml(&data), coordinator, |sink| {
+    let l = launch_scripted_coordinator(&config_yaml(&data).build(), coordinator, |sink| {
         for _ in 0..4 {
             sink.enqueue_global(WriteOutcome::ok().after(Duration::from_millis(150)));
         }
@@ -235,7 +224,7 @@ fn a_missing_object_reports_the_split_as_failed() {
 
     let (coordinator, script) = scripted_coordinator();
     script.gain(ghost, 1, None);
-    let l = launch_scripted_coordinator(&config_yaml(&data), coordinator, |_| {});
+    let l = launch_scripted_coordinator(&config_yaml(&data).build(), coordinator, |_| {});
 
     wait_until(Duration::from_secs(30), "failure reported", || {
         !script.failed().is_empty()
@@ -266,7 +255,7 @@ fn a_retryable_commit_is_recommitted_on_a_later_tick() {
     let (coordinator, script) = scripted_coordinator();
     script.fail_next_commit(&id, CoordinationErrorKind::Retryable);
     script.gain(split, 1, None);
-    let l = launch_scripted_coordinator(&config_yaml(&data), coordinator, |_| {});
+    let l = launch_scripted_coordinator(&config_yaml(&data).build(), coordinator, |_| {});
 
     // Despite the transient store failure, the driver recommits until the
     // terminal progress lands.
@@ -291,7 +280,7 @@ fn stalled_is_fatal_by_default() {
 
     let (coordinator, script) = scripted_coordinator();
     script.gain(split, 1, None);
-    let l = launch_scripted_coordinator(&config_yaml(&data), coordinator, |sink| {
+    let l = launch_scripted_coordinator(&config_yaml(&data).build(), coordinator, |sink| {
         for _ in 0..4 {
             sink.enqueue_global(WriteOutcome::ok().after(Duration::from_millis(150)));
         }
@@ -329,11 +318,11 @@ fn shutdown_releases_splits_still_held() {
     // most of the object unfetched: the drain can flush what is in
     // flight, but the split stays incomplete, which is the release path's
     // precondition.
-    let yaml = config_yaml(&data).replace(
-        "    url:",
-        "    prefetch_bytes: 64KiB\n    chunk_bytes: 16KiB\n    url:",
-    );
-    let yaml = format!("{yaml}backpressure: {{ max_inflight_bytes: 4KiB }}\n");
+    let yaml = config_yaml(&data)
+        .source("prefetch_bytes", "64KiB")
+        .source("chunk_bytes", "16KiB")
+        .section("backpressure: { max_inflight_bytes: 4KiB }")
+        .build();
     let l = launch_scripted_coordinator(&yaml, coordinator, |sink| {
         for _ in 0..30 {
             sink.enqueue_global(WriteOutcome::ok().after(Duration::from_millis(150)));

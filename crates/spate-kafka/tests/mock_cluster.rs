@@ -5,7 +5,6 @@ mod support;
 use rdkafka::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::mocking::MockCluster;
-use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
 use spate_core::checkpoint::Checkpointer;
 use spate_core::error::{ErrorClass, SourceError};
 use spate_core::record::PartitionId;
@@ -13,7 +12,7 @@ use spate_core::source::{Source, SourceCtx, SourceEvent, SourceLane};
 use spate_kafka::{KafkaSource, KafkaSourceConfig};
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
-use support::{drain_lane, serve_events};
+use support::{await_assignment, drain_lane, produce, serve_events};
 
 const TOPIC: &str = "orders";
 
@@ -42,42 +41,8 @@ fn config(brokers: &str, group: &str) -> KafkaSourceConfig {
     cfg
 }
 
-fn produce(brokers: &str, per_partition: usize, partitions: i32, tag: &str) {
-    let producer: BaseProducer = ClientConfig::new()
-        .set("bootstrap.servers", brokers)
-        .create()
-        .expect("producer");
-    for p in 0..partitions {
-        for i in 0..per_partition {
-            let payload = format!("{tag}-p{p}-{i}");
-            let key = format!("k{p}-{i}");
-            producer
-                .send(
-                    BaseRecord::to(TOPIC)
-                        .partition(p)
-                        .payload(payload.as_bytes())
-                        .key(key.as_bytes()),
-                )
-                .expect("enqueue");
-        }
-    }
-    producer.flush(Duration::from_secs(10)).expect("flush");
-}
-
-/// Drive `poll_events` until an assignment arrives (or panic on deadline).
-fn await_assignment(source: &mut KafkaSource) -> Vec<<KafkaSource as Source>::Lane> {
-    let deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        assert!(Instant::now() < deadline, "no assignment within deadline");
-        match source
-            .poll_events(Duration::from_millis(200))
-            .expect("poll_events")
-        {
-            SourceEvent::LanesAssigned(lanes) => return lanes,
-            _ => continue,
-        }
-    }
-}
+/// How long a mock-cluster group takes to hand out an assignment.
+const ASSIGNMENT: Duration = Duration::from_secs(30);
 
 /// Group state changes after startup reach the tracing subscriber.
 /// Regression for #651.
@@ -92,7 +57,7 @@ fn consumer_debug_logs_continue_through_group_join() {
         let cp = Checkpointer::new();
         let mut source = KafkaSource::new(cfg);
         source.open(SourceCtx::new(cp.handle())).expect("open");
-        let _lanes = await_assignment(&mut source);
+        let _lanes = await_assignment(&mut source, ASSIGNMENT);
     });
 
     let states: Vec<_> = lines
@@ -110,13 +75,13 @@ fn full_lifecycle_polls_acks_and_commits() {
     let cluster = MockCluster::new(1).expect("mock cluster");
     cluster.create_topic(TOPIC, 3, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
-    produce(&brokers, 10, 3, "a");
+    produce(&brokers, TOPIC, 10, 3, "a");
 
     let mut cp = Checkpointer::new();
     let mut source = KafkaSource::new(config(&brokers, "life"));
     source.open(SourceCtx::new(cp.handle())).expect("open");
 
-    let mut lanes = await_assignment(&mut source);
+    let mut lanes = await_assignment(&mut source, ASSIGNMENT);
     assert_eq!(lanes.len(), 3, "one lane per partition");
     let partitions: Vec<PartitionId> = lanes.iter().map(SourceLane::partition).collect();
     cp.begin_epoch(&partitions, 1);
@@ -182,12 +147,12 @@ fn pause_stops_delivery_and_resume_recovers_gapless() {
     source
         .open(SourceCtx::new(cp.handle()).with_meter(Some(meter)))
         .expect("open");
-    let mut lanes = await_assignment(&mut source);
+    let mut lanes = await_assignment(&mut source, ASSIGNMENT);
     assert_eq!(lanes.len(), 1);
     cp.begin_epoch(&[lanes[0].partition()], 1);
 
     source.pause(&[lanes[0].id()]).expect("pause");
-    produce(&brokers, 5, 1, "b");
+    produce(&brokers, TOPIC, 5, 1, "b");
 
     // A failure from here on carries the source's warnings: a main-queue
     // rewind, librdkafka's errors, and a held partition that is not fetching,
@@ -229,7 +194,7 @@ fn the_fetcher_starts_before_the_lane_is_handed_out() {
     let cluster = MockCluster::new(1).expect("mock cluster");
     cluster.create_topic(TOPIC, 1, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
-    produce(&brokers, 5, 1, "c");
+    produce(&brokers, TOPIC, 5, 1, "c");
     // Replies land after the request that asked for them has returned.
     cluster
         .broker_round_trip_time(1, Duration::from_millis(300))
@@ -242,7 +207,7 @@ fn the_fetcher_starts_before_the_lane_is_handed_out() {
 
     let lines = spate_test::capture_logs(tracing::Level::DEBUG, || {
         source.open(SourceCtx::new(cp.handle())).expect("open");
-        let mut lanes = await_assignment(&mut source);
+        let mut lanes = await_assignment(&mut source, ASSIGNMENT);
         source.pause(&[lanes[0].id()]).expect("pause");
         source.resume(&[lanes[0].id()]).expect("resume");
         let rows = drain_lane(&mut source, &mut lanes[0], 5, Duration::from_secs(30));
@@ -293,7 +258,7 @@ fn a_failed_offset_lookup_starts_from_the_committed_offset() {
     let cluster = MockCluster::new(1).expect("mock cluster");
     cluster.create_topic(TOPIC, 1, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
-    produce(&brokers, 6, 1, "d");
+    produce(&brokers, TOPIC, 6, 1, "d");
     commit_as(&brokers, "lookup-error", 3);
     // Fails the source's lookup; librdkafka's own query after it succeeds.
     cluster.request_errors(
@@ -309,7 +274,7 @@ fn a_failed_offset_lookup_starts_from_the_committed_offset() {
 
     let lines = spate_test::capture_logs(tracing::Level::WARN, || {
         source.open(SourceCtx::new(cp.handle())).expect("open");
-        let mut lanes = await_assignment(&mut source);
+        let mut lanes = await_assignment(&mut source, ASSIGNMENT);
         let rows = drain_lane(&mut source, &mut lanes[0], 3, Duration::from_secs(30));
         let offsets: Vec<i64> = rows.iter().map(|(_, _, o)| *o).collect();
         assert_eq!(offsets, vec![3, 4, 5]);
@@ -329,7 +294,7 @@ fn a_restarted_member_publishes_lag_before_committing() {
     let cluster = MockCluster::new(1).expect("mock cluster");
     cluster.create_topic(TOPIC, 1, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
-    produce(&brokers, 10, 1, "e");
+    produce(&brokers, TOPIC, 10, 1, "e");
     commit_as(&brokers, "restart", 3);
 
     let mut cfg = config(&brokers, "restart");
@@ -345,7 +310,7 @@ fn a_restarted_member_publishes_lag_before_committing() {
         source
             .open(SourceCtx::new(cp.handle()).with_stage_metrics(Some(metrics)))
             .expect("open");
-        let _lanes = await_assignment(&mut source);
+        let _lanes = await_assignment(&mut source, ASSIGNMENT);
         spate_test::wait_until(Duration::from_secs(30), "lag published", || {
             source
                 .poll_events(Duration::from_millis(100))
@@ -371,7 +336,7 @@ fn second_member_triggers_revoke_then_fresh_assignment() {
     let cp = Checkpointer::new();
     let mut source = KafkaSource::new(config(&brokers, "grp"));
     source.open(SourceCtx::new(cp.handle())).expect("open");
-    let lanes = await_assignment(&mut source);
+    let lanes = await_assignment(&mut source, ASSIGNMENT);
     assert_eq!(lanes.len(), 4, "sole member owns everything");
     let first_ids: Vec<_> = lanes.iter().map(SourceLane::id).collect();
 
@@ -524,7 +489,7 @@ fn empty_assignment_completes_rebalance_protocol() {
     let cluster = MockCluster::new(1).expect("mock cluster");
     cluster.create_topic(TOPIC, 1, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
-    produce(&brokers, 5, 1, "e");
+    produce(&brokers, TOPIC, 5, 1, "e");
 
     let mut cp_a = Checkpointer::new();
     let mut cp_b = Checkpointer::new();
@@ -744,7 +709,7 @@ fn statistics_populate_kafka_source_metrics() {
     let cluster = MockCluster::new(1).expect("mock cluster");
     cluster.create_topic(TOPIC, 2, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
-    produce(&brokers, 5, 2, "stats");
+    produce(&brokers, TOPIC, 5, 2, "stats");
 
     // MockCluster runs real librdkafka, so a non-zero interval fires the
     // stats callback; field values are environment-dependent, so this test
@@ -771,7 +736,7 @@ fn statistics_populate_kafka_source_metrics() {
         // A failure carries the source's warnings: a partition that is not
         // fetching, with its fetch state, and any main-queue rewind.
         spate_test::show_logs(tracing::Level::WARN, || {
-            let _lanes = await_assignment(&mut source);
+            let _lanes = await_assignment(&mut source, ASSIGNMENT);
 
             // Poll past at least one statistics interval; stop as soon as the
             // families appear. The not-fetching series is waited on by value
@@ -863,7 +828,7 @@ fn statistics_disabled_registers_no_families() {
             .expect("open");
         // Drive the control plane a few times; with stats off no snapshot
         // ever arrives and nothing should register.
-        let _lanes = await_assignment(&mut source);
+        let _lanes = await_assignment(&mut source, ASSIGNMENT);
         for _ in 0..5 {
             source
                 .poll_events(Duration::from_millis(100))
@@ -911,7 +876,7 @@ fn a_backlogged_consumer_publishes_its_lag() {
         .create_topic(TOPIC, PARTITIONS, 1)
         .expect("create topic");
     let brokers = cluster.bootstrap_servers();
-    produce(&brokers, PRODUCED, PARTITIONS, "lag");
+    produce(&brokers, TOPIC, PRODUCED, PARTITIONS, "lag");
 
     let mut cfg = config(&brokers, "lag");
     cfg.statistics_interval = Duration::from_millis(100);
@@ -935,7 +900,7 @@ fn a_backlogged_consumer_publishes_its_lag() {
             .open(SourceCtx::new(cp.handle()).with_stage_metrics(Some(metrics)))
             .expect("open");
 
-        let mut lanes = await_assignment(&mut source);
+        let mut lanes = await_assignment(&mut source, ASSIGNMENT);
         assert_eq!(lanes.len(), PARTITIONS as usize, "one lane per partition");
         let partitions: Vec<PartitionId> = lanes.iter().map(SourceLane::partition).collect();
         cp.begin_epoch(&partitions, 1);
@@ -1056,7 +1021,7 @@ fn the_main_queue_delivers_a_partition_that_was_never_split() {
     let cluster = MockCluster::new(1).expect("mock cluster");
     cluster.create_topic(TOPIC, 1, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
-    produce(&brokers, 20, 1, "p");
+    produce(&brokers, TOPIC, 20, 1, "p");
 
     let consumer = assigned_consumer(&brokers, "plain", 1);
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -1083,7 +1048,7 @@ fn a_split_partition_never_returns_to_the_main_queue() {
     let cluster = MockCluster::new(1).expect("mock cluster");
     cluster.create_topic(TOPIC, 1, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
-    produce(&brokers, 20, 1, "w");
+    produce(&brokers, TOPIC, 20, 1, "w");
 
     let consumer = assigned_consumer(&brokers, "fwdapp", 1);
     let queue = consumer

@@ -21,8 +21,8 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use support::spy::{GetRecord, RangeKind, SpyOptions, StoreSpy, spying_local_store};
 use support::{
-    Launched, TEST_LEASE, captured_rows, launch_customized, line_framer, lines_bytes, recs,
-    shared_store, sorted, test_options, test_tuning,
+    Launched, PipelineYaml, TEST_LEASE, captured_rows, launch_customized, line_framer, lines_bytes,
+    recs, shared_store, sorted, test_options, test_tuning,
 };
 
 /// A bounded backfill over `data`, with the read-window knobs a test needs to
@@ -32,23 +32,11 @@ use support::{
 /// field these tests are about, since it makes the plan final, and a final
 /// plan is never re-listed.
 fn config_yaml(data: &std::path::Path, prefetch: &str, chunk: &str) -> String {
-    format!(
-        r#"
-pipeline: {{ name: s3-request-shape, threads: 2 }}
-admin: {{ listen: none }}
-checkpoint: {{ interval: 100ms }}
-metrics: {{ exporter: none }}
-source:
-  s3:
-    url: "file://{data}/"
-    split_target_bytes: 1MiB
-    refresh_listing: false
-    prefetch_bytes: {prefetch}
-    chunk_bytes: {chunk}
-sink: {{ capture: {{}} }}
-"#,
-        data = data.display(),
-    )
+    PipelineYaml::file("s3-request-shape", data)
+        .source("refresh_listing", "false")
+        .source("prefetch_bytes", prefetch)
+        .source("chunk_bytes", chunk)
+        .build()
 }
 
 /// Objects staged on disk, with the sizes the range assertions check against.

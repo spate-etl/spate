@@ -552,7 +552,8 @@ fn ms_to_secs(v: i64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rdkafka::statistics::{Broker, ConsumerGroup, Topic, Window};
+    use crate::testutil::{broker, window};
+    use rdkafka::statistics::{ConsumerGroup, Topic};
     use spate_test::render_metrics;
 
     /// A test Meter under the `kafka` namespace: names render as
@@ -618,28 +619,6 @@ mod tests {
                     ..Default::default()
                 },
             )]),
-            ..Default::default()
-        }
-    }
-
-    fn broker(name: &str, source: &str, nodeid: i32) -> Broker {
-        Broker {
-            name: name.to_owned(),
-            nodename: name
-                .trim_end_matches(|c: char| c == '/' || c.is_ascii_digit())
-                .to_owned(),
-            source: source.to_owned(),
-            nodeid,
-            state: "UP".to_owned(),
-            ..Default::default()
-        }
-    }
-
-    fn window(avg: i64, p99: i64, cnt: i64) -> Window {
-        Window {
-            avg,
-            p99,
-            cnt,
             ..Default::default()
         }
     }

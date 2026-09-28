@@ -238,7 +238,7 @@ fn us_to_secs(v: i64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rdkafka::statistics::{Broker, Window};
+    use crate::testutil::{broker, window};
     use spate_test::render_metrics;
 
     /// A test Meter under the `kafka` namespace: names render as
@@ -249,25 +249,6 @@ mod tests {
     }
 
     const STD: &str = r#"pipeline="orders",component="orders_out",component_type="kafka""#;
-
-    fn broker(name: &str, source: &str, nodeid: i32) -> Broker {
-        Broker {
-            name: name.to_owned(),
-            source: source.to_owned(),
-            nodeid,
-            state: "UP".to_owned(),
-            ..Default::default()
-        }
-    }
-
-    fn window(avg: i64, p99: i64, cnt: i64) -> Window {
-        Window {
-            avg,
-            p99,
-            cnt,
-            ..Default::default()
-        }
-    }
 
     #[test]
     fn producer_totals_and_queue_gauges_render() {

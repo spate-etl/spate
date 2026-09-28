@@ -6,6 +6,7 @@
 
 pub mod contract;
 pub mod polled;
+pub mod tap;
 
 use spate_coordination::loop_probe::LoopProbe;
 use spate_coordination::store::memory::MemoryStore;
@@ -219,6 +220,21 @@ pub fn worker_rebalance_delay_clock(
 ) -> MemoryCoordinator {
     let mut config = config(instance_id);
     config.rebalance_delay = rebalance_delay;
+    StoreCoordinator::with_clock(store.clone(), config, io.clone(), None, clock)
+        .expect("coordinator")
+}
+
+/// A worker on `clock` whose [`config`] `tune` adjusts first. Build the
+/// store with [`store_with_clock`] and the same clock.
+pub fn worker_tuned_clock(
+    store: &MemoryStore,
+    io: &tokio::runtime::Handle,
+    instance_id: &str,
+    clock: Arc<dyn Clock>,
+    tune: impl FnOnce(&mut CoordinationConfig),
+) -> MemoryCoordinator {
+    let mut config = config(Some(instance_id));
+    tune(&mut config);
     StoreCoordinator::with_clock(store.clone(), config, io.clone(), None, clock)
         .expect("coordinator")
 }

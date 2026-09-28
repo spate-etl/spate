@@ -21,6 +21,15 @@ pub(crate) fn store_error(context: &str, e: &StoreError) -> CoordinationError {
     }
 }
 
+/// `Err` for a fatal store failure, so the task stops; `Ok` for a retryable
+/// one, which the next tick retries.
+pub(crate) fn fatal_only(context: &str, e: &StoreError) -> Result<(), CoordinationError> {
+    match e {
+        StoreError::Fatal(_) => Err(store_error(context, e)),
+        StoreError::Retryable(_) => Ok(()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

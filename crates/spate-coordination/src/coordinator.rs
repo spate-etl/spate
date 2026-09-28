@@ -276,8 +276,9 @@ impl<S: CoordinationStore + Clone> StoreCoordinator<S> {
     /// deadline on the coordinator's clock. Best-effort; anything it cannot
     /// reach expires.
     fn release_direct(&self, splits: &[(SplitId, u64)]) {
+        // IO too: a store client may open connections on this runtime.
         let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
+            .enable_all()
             .build()
         else {
             return;

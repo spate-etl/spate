@@ -71,7 +71,7 @@ fn a_listing_diff_reports_each_change_once() {
         .collect();
     let listed = || vec![entry("same", 1), entry("moved", 5), entry("new", 6)];
     assert_eq!(
-        diff(&mut seen, listed()),
+        diff(&mut seen, listed(), |_| None),
         vec![
             WatchEvent::Put(entry("moved", 5)),
             WatchEvent::Put(entry("new", 6)),
@@ -81,7 +81,47 @@ fn a_listing_diff_reports_each_change_once() {
             },
         ]
     );
-    assert!(diff(&mut seen, listed()).is_empty());
+    assert!(diff(&mut seen, listed(), |_| None).is_empty());
+}
+
+/// A key this handle rewrote after the watch last reported it is deleted one
+/// above the rewrite, so a consumer holding the rewrite's revision applies
+/// the delete.
+#[tokio::test(start_paused = true)]
+async fn a_polled_delete_sits_above_the_handles_own_rewrite() {
+    let store = PolledStore::new(support::store(), LEASE / 10);
+    let ks = Keyspace::Durable;
+    let r1 = store
+        .create(ks, "k.a", b"1".to_vec())
+        .await
+        .unwrap()
+        .won()
+        .unwrap();
+    let mut watch = store.watch(ks, "k.").await.unwrap();
+    assert!(matches!(
+        watch.next().await.unwrap().unwrap(),
+        WatchEvent::Put(e) if e.revision == r1
+    ));
+    assert_eq!(
+        watch.next().await.unwrap().unwrap(),
+        WatchEvent::SnapshotDone
+    );
+    let r2 = store
+        .update(ks, "k.a", b"2".to_vec(), r1)
+        .await
+        .unwrap()
+        .won()
+        .unwrap();
+    assert!(matches!(
+        store.delete(ks, "k.a", Some(r2)).await.unwrap(),
+        CasOutcome::Won(_)
+    ));
+    match watch.next().await.unwrap().unwrap() {
+        WatchEvent::Delete { revision, .. } => {
+            assert!(revision > r2, "delete {revision:?} is not above {r2:?}");
+        }
+        other => panic!("expected the delete of k.a, got {other:?}"),
+    }
 }
 
 /// A key created and deleted between two listings never reaches a polled

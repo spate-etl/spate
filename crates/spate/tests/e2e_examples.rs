@@ -40,12 +40,13 @@ use apache_avro::{Schema, to_avro_datum};
 use rdkafka::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
+use spate_test::metric_sum;
 use spate_test_support::container_image;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
-use support::{CH_PASSWORD, Harness, http_get, metric_sum_where};
+use support::{CH_PASSWORD, Harness, http_get};
 use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::runners::SyncRunner;
 use testcontainers::{Container, GenericImage, ImageExt};
@@ -691,11 +692,13 @@ fn kafka_to_clickhouse_examples_deliver_and_drain() {
     example.wait_for("the unrouted drops to be counted", || {
         let (status, body) = http_get(admin, "/metrics");
         status == 200
-            && metric_sum_where(
+            && metric_sum(
                 &body,
                 "spate_operator_records_dropped_total",
-                r#"reason="unrouted""#,
-            ) >= per_table as f64
+                &[("reason", "unrouted")],
+            )
+            .unwrap_or(0.0)
+                >= per_table as f64
     });
     let log = example.terminate();
     // The placed orders must reach the split and be dropped there as
@@ -803,11 +806,13 @@ fn kafka_to_kafka_split_example_fans_out_and_drains() {
     example.wait_for("the unrouted drops to be counted", || {
         let (status, body) = http_get(admin, "/metrics");
         status == 200
-            && metric_sum_where(
+            && metric_sum(
                 &body,
                 "spate_operator_records_dropped_total",
-                r#"reason="unrouted""#,
-            ) >= per_region as f64
+                &[("reason", "unrouted")],
+            )
+            .unwrap_or(0.0)
+                >= per_region as f64
     });
     example.terminate();
     // Equal fifths were produced, one fifth of them unroutable. Both

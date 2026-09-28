@@ -19,6 +19,7 @@ use spate_core::coordination::{CoordinationEvent, SplitCoordinator, SplitProgres
 use spate_core::metrics::{
     ComponentLabels, CoordinationMetrics, Exporter, MetricsSettings, install,
 };
+use spate_test::metric_sum;
 use std::time::{Duration, Instant};
 use support::{Held, LEASE, PhasedPlanner, crash, runtime, split_id, store};
 
@@ -29,16 +30,7 @@ use support::{Held, LEASE, PhasedPlanner, crash, runtime, split_id, store};
 /// whichever component the exporter rendered first and call a wired seam
 /// dead.
 fn histogram_count(text: &str, name: &str) -> Option<f64> {
-    let needle = format!("{name}_count");
-    let mut seen = false;
-    let mut total = 0.0;
-    for line in text.lines().filter(|l| l.starts_with(&needle)) {
-        if let Some(value) = line.rsplit(' ').next().and_then(|v| v.parse::<f64>().ok()) {
-            seen = true;
-            total += value;
-        }
-    }
-    seen.then_some(total)
+    metric_sum(text, &format!("{name}_count"), &[])
 }
 
 /// How many observations across all component series landed strictly above
@@ -51,50 +43,22 @@ fn histogram_count(text: &str, name: &str) -> Option<f64> {
 /// buckets, so this returns 0 against it.
 #[track_caller]
 fn observations_above(text: &str, name: &str, threshold: f64) -> f64 {
-    let count = format!("{name}_count");
-    let total: f64 = text
-        .lines()
-        .filter(|l| l.starts_with(&count))
-        .filter_map(|l| l.rsplit(' ').next().and_then(|v| v.parse::<f64>().ok()))
-        .sum();
+    let total = histogram_count(text, name).unwrap_or(0.0);
     // Cumulative count in the smallest bucket whose `le` is >= threshold.
     let bucket = format!("{name}_bucket");
-    let le_needle = format!("le=\"{threshold}\"");
-    let matched: Vec<&str> = text
-        .lines()
-        .filter(|l| l.starts_with(&bucket) && l.contains(&le_needle))
-        .collect();
+    let le = threshold.to_string();
     // Without this the helper degrades to vacuous when it stops working:
     // no matching bucket line means `below == 0`, so it returns the full
     // count and every assertion built on it passes against any observation
     // at all. It matches only because the threshold formats as a bucket
     // boundary the exporter is free to change.
-    assert!(
-        !matched.is_empty(),
-        "no `{bucket}` line at `{le_needle}` — the threshold is not a bucket boundary, \
-         so this assertion would silently stop testing anything"
-    );
-    let below: f64 = matched
-        .iter()
-        .filter_map(|l| l.rsplit(' ').next().and_then(|v| v.parse::<f64>().ok()))
-        .sum();
+    let below = metric_sum(text, &bucket, &[("le", &le)]).unwrap_or_else(|| {
+        panic!(
+            "no `{bucket}` line at `le=\"{le}\"` — the threshold is not a bucket boundary, \
+             so this assertion would silently stop testing anything"
+        )
+    });
     total - below
-}
-
-/// Sum a counter across every component/label series.
-fn counter_sum(text: &str, name: &str, label: &str) -> Option<f64> {
-    let mut seen = false;
-    let mut total = 0.0;
-    for line in text
-        .lines()
-        .filter(|l| l.starts_with(name) && l.contains(label))
-    {
-        if let Some(value) = line.rsplit(' ').next().and_then(|v| v.parse::<f64>().ok()) {
-            seen = true;
-            total += value;
-        }
-    }
-    seen.then_some(total)
 }
 
 /// A real cooperative revocation must move every seam it touches: the
@@ -240,19 +204,19 @@ fn a_real_revocation_moves_every_metric_seam() {
     );
 
     assert!(
-        counter_sum(
+        metric_sum(
             &text,
             "spate_coordination_revocations_total",
-            r#"outcome="requested""#
+            &[("outcome", "requested")]
         )
         .is_some_and(|c| c > 0.0),
         "revocations_total{{outcome=requested}} never moved:\n{text}"
     );
     assert!(
-        counter_sum(
+        metric_sum(
             &text,
             "spate_coordination_revocations_total",
-            r#"outcome="drained""#
+            &[("outcome", "drained")]
         )
         .is_some_and(|c| c > 0.0),
         "revocations_total{{outcome=drained}} never moved — the clean release \
@@ -384,10 +348,10 @@ fn a_cancelled_revocation_moves_its_own_metric_seam() {
         held_a.fold(a.poll().expect("poll a"));
         support::commit_held(&mut a, &held_a);
         let text = handle.render();
-        cancelled = counter_sum(
+        cancelled = metric_sum(
             &text,
             "spate_coordination_revocations_total",
-            r#"outcome="cancelled""#,
+            &[("outcome", "cancelled")],
         )
         .unwrap_or(0.0);
         if cancelled > 0.0 {
@@ -404,19 +368,19 @@ fn a_cancelled_revocation_moves_its_own_metric_seam() {
 
     let text = handle.render();
     assert!(
-        counter_sum(
+        metric_sum(
             &text,
             "spate_coordination_revocations_total",
-            r#"outcome="requested""#
+            &[("outcome", "requested")]
         )
         .is_some_and(|c| c >= cancelled),
         "every cancelled revocation must have been requested first:\n{text}"
     );
     assert_eq!(
-        counter_sum(
+        metric_sum(
             &text,
             "spate_coordination_revocations_total",
-            r#"outcome="forced""#
+            &[("outcome", "forced")]
         ),
         Some(0.0),
         "the cancelled revocation was forced as well — the outcomes must be \

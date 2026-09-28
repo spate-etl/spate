@@ -10,6 +10,7 @@ use spate_core::coordination::SplitCoordinator;
 use spate_core::metrics::{
     ComponentLabels, CoordinationMetrics, Exporter, MetricsSettings, install,
 };
+use spate_test::metric_value;
 use spate_test::wait_until;
 use std::sync::Arc;
 use std::sync::atomic::Ordering::SeqCst;
@@ -27,14 +28,11 @@ fn a_failed_seed_stops_new_splits_and_counts_the_in_flight_wins() {
     })
     .expect("install the exporter");
     let planned_total = || {
-        handle
-            .render()
-            .lines()
-            .find(|l| {
-                l.starts_with("spate_coordination_splits_planned_total")
-                    && l.contains(r#"component="seed-failure""#)
-            })
-            .and_then(|l| l.rsplit(' ').next()?.parse::<f64>().ok())
+        metric_value(
+            &handle.render(),
+            "spate_coordination_splits_planned_total",
+            &[("component", "seed-failure")],
+        )
     };
 
     let rt = runtime();

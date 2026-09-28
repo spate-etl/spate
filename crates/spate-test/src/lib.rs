@@ -86,7 +86,7 @@ pub mod strategies;
 
 pub use coordination::{CoordinatorScript, ScriptedCoordinator, scripted_coordinator};
 pub use deser::{EmitCollector, TestDeserializer};
-pub use exposition::{MetricSample, metric_series, metric_value, render_metrics};
+pub use exposition::{MetricSample, metric_series, metric_sum, metric_value, render_metrics};
 pub use fixtures::{component_config, raw_payload, record, test_ack, unique_name};
 pub use logs::{LogCapture, capture_logs, show_logs};
 pub use run::{PipelineRun, wait_until};

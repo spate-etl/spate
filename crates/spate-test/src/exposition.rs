@@ -77,6 +77,14 @@ pub fn metric_value(rendered: &str, name: &str, labels: &[(&str, &str)]) -> Opti
     matched.pop().map(|s| s.value)
 }
 
+/// The sum of every sample [`metric_series`] selects, or `None` if it selects
+/// none.
+#[must_use]
+pub fn metric_sum(rendered: &str, name: &str, labels: &[(&str, &str)]) -> Option<f64> {
+    let matched = metric_series(rendered, name, labels);
+    (!matched.is_empty()).then(|| matched.iter().map(|s| s.value).sum())
+}
+
 /// Parse what follows the sample name: an optional label set, then the value.
 fn parse_sample(rest: &str) -> Option<MetricSample> {
     let mut labels = Vec::new();
@@ -156,6 +164,13 @@ spate_wait_seconds_count{pipeline="p"} 2
             metric_value(RENDERED, "spate_rows", &[("pipeline", "q")]),
             None
         );
+    }
+
+    #[test]
+    fn a_sum_covers_every_match_and_none_when_absent() {
+        assert_eq!(metric_sum(RENDERED, "spate_rows_total", &[]), Some(7.0));
+        assert_eq!(metric_sum(RENDERED, "spate_rows", &[]), Some(0.0));
+        assert_eq!(metric_sum(RENDERED, "spate_absent", &[]), None);
     }
 
     #[test]

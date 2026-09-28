@@ -12,6 +12,7 @@
 #[path = "e2e_support/mod.rs"]
 mod support;
 
+use spate_test::metric_sum;
 use std::time::Duration;
 use support::*;
 
@@ -52,7 +53,7 @@ fn poison_payloads_are_skipped_counted_and_do_not_stall() {
 
     let (status, body) = http_get(pipeline.admin, "/metrics");
     assert_eq!(status, 200);
-    let dropped = metric_sum(&body, "spate_deser_records_dropped_total");
+    let dropped = metric_sum(&body, "spate_deser_records_dropped_total", &[]).unwrap_or(0.0);
     assert!(
         dropped >= poison as f64,
         "poison drops surface in metrics (saw {dropped}, expected >= {poison})"

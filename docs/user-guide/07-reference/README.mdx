@@ -30,7 +30,7 @@ Signatures, trait contracts, and per-item docs live in the rustdoc:
 | [spate-json](https://docs.rs/spate-json) | JSON deserializer: single, NDJSON and array framings, optional SIMD backend. |
 | [spate-coordination](https://docs.rs/spate-coordination) | Distributed work assignment: leader-elected planner, leases and fenced commits over a pluggable store. |
 | [spate-datagen](https://docs.rs/spate-datagen) | Synthetic storefront source: one built-in dataset, generated in process, keeping no durable progress. |
-| [spate-test](https://docs.rs/spate-test) | In-memory source/sink mocks with scripting handles, for testing pipelines. |
+| [spate-test](https://docs.rs/spate-test) | In-memory source/sink mocks with scripting handles, and fixtures for testing pipelines, stages and their metrics. |
 
 Applications should import through `spate` (which re-exports the connector
 crates behind features); the per-crate docs matter mostly to connector

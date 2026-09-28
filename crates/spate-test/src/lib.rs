@@ -70,6 +70,8 @@
 //!
 //! To test one stage without a source, build its input with [`raw_payload`],
 //! [`record`] and [`test_ack`], and its config with [`component_config`].
+//! To assert on metrics, render them with [`render_metrics`] and read series
+//! back with [`metric_value`], [`metric_sum`] or [`metric_series`].
 
 mod coordination;
 mod deser;

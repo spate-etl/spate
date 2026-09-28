@@ -16,6 +16,8 @@ zero infrastructure.
   in isolation.
 - `record`, `raw_payload`, `test_ack`, `component_config` and
   `unique_name` to build a stage's input, its config, and per-test names.
+- `render_metrics`, `metric_value`, `metric_sum` and `metric_series` to
+  render a test's metrics and read series back out.
 - A `proptest` feature with strategies for payloads, lane layouts, and
   writer-outcome scripts.
 

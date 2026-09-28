@@ -74,7 +74,7 @@ sink:
 | `batch` / `inflight` / `retry` / `breaker` | sections | `none` | Shared sink-pool tuning (batching, in-flight limit, retry backoff, circuit breaker). Unset means the framework's defaults apply; keys and defaults are in the [configuration reference](../../../07-reference/configuration.mdx#sink-pool), and the breaker is described under [Replica rotation](#replica-rotation-and-the-circuit-breaker) below. |
 | `timeouts.send` | duration | `30s` | ClickHouse-only. Per-send timeout (one frame reaching the socket); configures the HTTP client, not the shared pool. |
 | `timeouts.end` | duration | `180s` | End-to-end insert timeout: the server fully processing the insert, materialized views included. |
-| `compression` | string | `lz4` | Transport (HTTP-body) compression: `off`/`none`, `lz4`, `zstd` (level 3), or `zstd:N` with N in `1..=22`. Unrelated to on-disk column codecs. |
+| `compression` | string | `lz4` | Transport compression of insert bodies and query responses: `off`/`none`, `lz4`, `zstd` (level 3), or `zstd:N` with N in `1..=22`. `lz4` also sends `network_compression_method=LZ4` on every request. Unrelated to on-disk column codecs. |
 | `format` | string | `rowbinary` | Insert wire format: `rowbinary` (row-wise, default) or `native` (columnar blocks). See [Native format](./native-format.mdx). |
 | `distributed_check` | section | `none` | Opt-in startup parity check against the cluster topology and a `Distributed` table's DDL. Absent means no queries are issued. Its keys are on [Distributed parity](./distributed-parity.mdx). |
 

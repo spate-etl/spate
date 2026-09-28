@@ -93,6 +93,13 @@ pub(crate) fn jitter(seed: u64, round: u64, base: Duration) -> Duration {
     base.mul_f64(0.8 + 0.4 * (h as f64) / 1024.0)
 }
 
+/// A delay in `[0, base)` keyed by `seed`, so workers started together
+/// spread their first tick across one interval.
+pub(crate) fn spread(seed: u64, base: Duration) -> Duration {
+    let h = stable_hash(seed, u64::MAX) % 1024;
+    base.mul_f64((h as f64) / 1024.0)
+}
+
 /// Fleet size from the explicit membership keys (self is always counted,
 /// even before its own presence write lands).
 pub(crate) fn live_workers(presence: &BTreeMap<String, Revision>, instance: &str) -> usize {
@@ -640,6 +647,20 @@ mod tests {
             assert!(j >= base.mul_f64(0.8) && j < base.mul_f64(1.2), "{j:?}");
         }
         assert_ne!(jitter(7, 1, base), jitter(8, 1, base));
+    }
+
+    /// First ticks for different workers fall inside one interval and
+    /// differ, so a fleet started together does not reconcile together.
+    #[test]
+    fn spread_stays_in_one_interval_and_decorrelates() {
+        let base = Duration::from_secs(30);
+        let ticks: BTreeSet<Duration> = (0..64).map(|seed| spread(seed, base)).collect();
+        assert!(ticks.iter().all(|t| *t < base), "{ticks:?}");
+        assert!(
+            ticks.len() > 32,
+            "{} distinct first ticks of 64",
+            ticks.len()
+        );
     }
 
     #[test]

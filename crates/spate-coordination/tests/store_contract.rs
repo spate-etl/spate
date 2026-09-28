@@ -200,3 +200,45 @@ async fn a_polled_delete_sits_above_a_revision_the_handle_read() {
         other => panic!("expected the delete of k.a, got {other:?}"),
     }
 }
+
+/// A key this handle listed at a revision the watch never reported is
+/// deleted one above that listing.
+#[tokio::test(start_paused = true)]
+async fn a_polled_delete_sits_above_a_revision_the_handle_listed() {
+    let inner = support::store();
+    let store = PolledStore::new(inner.clone(), LEASE / 10);
+    let ks = Keyspace::Durable;
+    let r1 = inner
+        .create(ks, "k.a", b"1".to_vec())
+        .await
+        .unwrap()
+        .won()
+        .unwrap();
+    let mut watch = store.watch(ks, "k.").await.unwrap();
+    assert!(matches!(
+        watch.next().await.unwrap().unwrap(),
+        WatchEvent::Put(e) if e.revision == r1
+    ));
+    assert_eq!(
+        watch.next().await.unwrap().unwrap(),
+        WatchEvent::SnapshotDone
+    );
+    let r2 = inner
+        .update(ks, "k.a", b"2".to_vec(), r1)
+        .await
+        .unwrap()
+        .won()
+        .unwrap();
+    let listed = store.list(ks, "k.").await.unwrap();
+    assert_eq!(listed[0].revision, r2);
+    assert!(matches!(
+        inner.delete(ks, "k.a", Some(r2)).await.unwrap(),
+        CasOutcome::Won(_)
+    ));
+    match watch.next().await.unwrap().unwrap() {
+        WatchEvent::Delete { revision, .. } => {
+            assert!(revision > r2, "delete {revision:?} is not above {r2:?}");
+        }
+        other => panic!("expected the delete of k.a, got {other:?}"),
+    }
+}

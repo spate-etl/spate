@@ -15,9 +15,9 @@ use spate_core::source::{Source, SourceCtx, SourceEvent, SourceLane};
 use spate_kafka::{KafkaSource, KafkaSourceConfig};
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
-use support::drain_lane;
+use support::{broker, drain_lane};
 use testcontainers::runners::SyncRunner;
-use testcontainers_modules::kafka::apache::{KAFKA_PORT, Kafka};
+use testcontainers_modules::kafka::apache::KAFKA_PORT;
 
 const TOPIC: &str = "orders";
 
@@ -35,7 +35,7 @@ fn config(brokers: &str, group: &str) -> KafkaSourceConfig {
 #[test]
 #[ignore = "requires Docker"]
 fn real_broker_full_lifecycle() {
-    let container = Kafka::default().start().expect("start kafka container");
+    let container = broker().start().expect("start kafka container");
     let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
     let brokers = format!("127.0.0.1:{port}");
 
@@ -122,7 +122,7 @@ fn real_broker_full_lifecycle() {
 #[test]
 #[ignore = "requires Docker"]
 fn real_broker_revocation_commit_persists_revoked_offsets() {
-    let container = Kafka::default().start().expect("start kafka container");
+    let container = broker().start().expect("start kafka container");
     let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
     let brokers = format!("127.0.0.1:{port}");
 
@@ -253,7 +253,7 @@ fn real_broker_backlog_reports_summable_lag() {
     const PER_PARTITION: usize = 5_000;
     const CONSUME_PER_LANE: usize = 100;
 
-    let container = Kafka::default().start().expect("start kafka container");
+    let container = broker().start().expect("start kafka container");
     let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
     let brokers = format!("127.0.0.1:{port}");
 

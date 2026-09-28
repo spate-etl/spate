@@ -1,9 +1,22 @@
-//! Lane-draining helpers shared by the Kafka integration suites.
+//! The pinned broker and the lane-draining helpers shared by the Kafka
+//! integration suites.
+
+// A per-item `expect` goes unfulfilled in whichever target uses the item.
+#![allow(dead_code, reason = "each target uses a different subset")]
 
 use spate_core::error::{ErrorClass, SourceError};
 use spate_core::source::{PayloadBatch, Source, SourceEvent, SourceLane};
 use spate_kafka::KafkaSource;
+use spate_test_support::container_image;
 use std::time::{Duration, Instant};
+use testcontainers::{ContainerRequest, ImageExt};
+use testcontainers_modules::kafka::apache::Kafka;
+
+/// A broker on the image `ci/kafka/` pins, pulled by digest.
+pub(crate) fn broker() -> ContainerRequest<Kafka> {
+    let (name, tag) = container_image(&["--pull", "kafka"]);
+    Kafka::default().with_name(name).with_tag(tag)
+}
 
 /// Serve the source's control plane once. Panics on any event but `Idle` and
 /// on a non-retryable error; retryable errors are appended to `errors`.

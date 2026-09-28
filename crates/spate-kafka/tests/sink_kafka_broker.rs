@@ -6,6 +6,8 @@
 //! cargo test -p spate-kafka --test sink_kafka_broker -- --ignored
 //! ```
 
+mod support;
+
 use rdkafka::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::message::Message;
@@ -21,8 +23,9 @@ use spate_kafka::{KafkaSource, KafkaSourceConfig};
 use spate_test::{PipelineRun, wait_until};
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
+use support::broker;
 use testcontainers::runners::SyncRunner;
-use testcontainers_modules::kafka::apache::{KAFKA_PORT, Kafka};
+use testcontainers_modules::kafka::apache::KAFKA_PORT;
 
 const IN_TOPIC: &str = "orders";
 const A_TOPIC: &str = "orders-a";
@@ -101,7 +104,7 @@ fn consume_payloads(brokers: &str, topic: &str, expect: usize) -> Vec<Vec<u8>> {
 #[test]
 #[ignore = "requires Docker"]
 fn kafka_to_kafka_split_round_trip() {
-    let container = Kafka::default().start().expect("start kafka container");
+    let container = broker().start().expect("start kafka container");
     let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
     let brokers = format!("127.0.0.1:{port}");
 

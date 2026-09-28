@@ -147,7 +147,7 @@ mod tests {
     use apache_avro::Schema;
     use apache_avro::to_avro_datum;
     use spate_core::deser::Owned;
-    use spate_core::record::{Flow, PartitionId};
+    use spate_core::record::Flow;
     use std::sync::Arc;
 
     const WRITER: &str = r#"{"type":"record","name":"Event","fields":[
@@ -164,11 +164,8 @@ mod tests {
 
     fn raw_payload(bytes: &[u8]) -> RawPayload<'_> {
         RawPayload {
-            bytes,
-            key: Some(b"k"),
-            partition: PartitionId(3),
             offset: 42,
-            timestamp_ms: 1_000,
+            ..spate_test::raw_payload(bytes)
         }
     }
 

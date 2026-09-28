@@ -163,7 +163,7 @@ feature adds ready-made `strategies`.
 
 To feed a stage of your own, `raw_payload(bytes)` builds a deserializer's
 input and `record(payload)` an encoder's, both with zeroed metadata you can
-overwrite field by field. The acknowledgement handle they carry, and the one
+overwrite field by field. A record's acknowledgment handle, and the one
 `test_ack()` returns, discards its resolution, so a test that asserts on a
 commit polls its batch against a real `Checkpointer` instead.
 `component_config("json", yaml)` builds a component's config section from its

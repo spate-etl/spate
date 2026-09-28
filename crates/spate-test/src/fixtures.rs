@@ -1,5 +1,5 @@
 //! Constructors for the framework values a stage or connector test feeds in:
-//! records, raw payloads, acknowledgement handles, component configs, and
+//! records, raw payloads, acknowledgment handles, component configs, and
 //! per-test names.
 
 use spate_core::checkpoint::AckRef;
@@ -7,7 +7,7 @@ use spate_core::config::ComponentConfig;
 use spate_core::record::{PartitionId, RawPayload, Record, RecordMeta};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// An acknowledgement handle whose resolution is discarded.
+/// An acknowledgment handle whose resolution is discarded.
 ///
 /// To observe a resolution, take the handle from a batch polled against a
 /// real `Checkpointer`, as the crate-level example does.

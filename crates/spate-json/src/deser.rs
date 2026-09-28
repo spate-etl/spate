@@ -317,7 +317,7 @@ mod tests {
     use super::*;
     use crate::config::{JsonDeserializerBuilder, JsonSettings};
     use serde::Deserialize;
-    use spate_core::record::{Flow, PartitionId};
+    use spate_core::record::Flow;
 
     #[derive(Debug, Deserialize, PartialEq)]
     struct Ev {
@@ -335,11 +335,8 @@ mod tests {
 
     fn raw(bytes: &[u8]) -> RawPayload<'_> {
         RawPayload {
-            bytes,
-            key: Some(b"k"),
-            partition: PartitionId(3),
             offset: 42,
-            timestamp_ms: 1_000,
+            ..spate_test::raw_payload(bytes)
         }
     }
 

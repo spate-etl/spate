@@ -55,7 +55,6 @@ spate-clickhouse = { path = ".", features = ["testing"] }
 gungraun = { workspace = true }
 criterion = { workspace = true }
 clickhouse = { workspace = true, features = ["lz4", "zstd", "test-util"] }
-crossbeam-channel = { workspace = true }
 spate-test = { workspace = true }
 spate-test-support = { workspace = true, features = ["tls"] }
 proptest = { workspace = true }

@@ -4017,7 +4017,6 @@ dependencies = [
  "chrono",
  "clickhouse",
  "criterion",
- "crossbeam-channel",
  "foldhash",
  "gungraun",
  "humantime-serde",

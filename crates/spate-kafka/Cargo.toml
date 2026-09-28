@@ -26,13 +26,11 @@ tokio = { workspace = true, features = ["rt", "sync", "time"] }
 tracing = { workspace = true }
 
 [dev-dependencies]
-base64 = { workspace = true }
 gungraun = { workspace = true }
 spate-test = { workspace = true }
-spate-test-support = { workspace = true }
+spate-test-support = { workspace = true, features = ["tls"] }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
-rcgen = { workspace = true }
 serde_yaml = { workspace = true }
 testcontainers = { workspace = true, features = ["blocking"] }
 testcontainers-modules = { workspace = true, features = ["kafka"] }

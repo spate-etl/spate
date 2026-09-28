@@ -65,6 +65,22 @@ impl TestCa {
         path
     }
 
+    /// Writes a [`leaf`](Self::leaf) for `127.0.0.1` and its PKCS#8 key as PEM
+    /// to `<name>-leaf.pem` and `<name>-leaf.key` in `dir`, and returns their
+    /// paths.
+    ///
+    /// # Panics
+    ///
+    /// Panics when a file cannot be written.
+    pub fn write_identity(&self, dir: &Path) -> (PathBuf, PathBuf) {
+        let (cert, key) = self.leaf(&["127.0.0.1"]);
+        let cert_path = dir.join(format!("{}-leaf.pem", self.name));
+        let key_path = dir.join(format!("{}-leaf.key", self.name));
+        std::fs::write(&cert_path, pem("CERTIFICATE", &cert)).unwrap();
+        std::fs::write(&key_path, pem("PRIVATE KEY", key.secret_pkcs8_der())).unwrap();
+        (cert_path, key_path)
+    }
+
     /// A certificate this CA signed for the DNS names or IP addresses in
     /// `names`, valid for both server and client authentication, and its key.
     ///
@@ -125,7 +141,8 @@ impl TestCa {
 }
 
 /// `der` as a PEM block with the label `label`, such as `CERTIFICATE`.
-fn pem(label: &str, der: &[u8]) -> String {
+#[must_use]
+pub fn pem(label: &str, der: &[u8]) -> String {
     use base64::Engine as _;
     let body = base64::engine::general_purpose::STANDARD.encode(der);
     let mut out = format!("-----BEGIN {label}-----\n");
@@ -250,12 +267,15 @@ mod tests {
         );
     }
 
-    /// The PEM file `write` produces parses back to the CA certificate.
+    /// The PEM files `write` and `write_identity` produce parse back.
     #[test]
-    fn write_round_trips_through_pem() {
+    fn written_files_round_trip_through_pem() {
         let dir = tempfile::tempdir().unwrap();
         let ca = TestCa::new("round-trip");
         let parsed = CertificateDer::from_pem_file(ca.write(dir.path())).unwrap();
         assert_eq!(parsed, ca.der());
+        let (cert, key) = ca.write_identity(dir.path());
+        CertificateDer::from_pem_file(cert).unwrap();
+        PrivateKeyDer::from_pem_file(key).unwrap();
     }
 }

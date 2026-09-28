@@ -288,6 +288,20 @@ fn configured_builder() -> Result<PrometheusBuilder, BuildError> {
         )
 }
 
+/// Run `f` under a recorder local to the calling thread, and return its text
+/// exposition with the histogram buckets [`install`] configures.
+#[doc(hidden)]
+#[must_use]
+pub fn render_local(f: impl FnOnce()) -> String {
+    let recorder = configured_builder()
+        .expect("bucket config must be valid")
+        .build_recorder();
+    let handle = recorder.handle();
+    metrics::with_local_recorder(&recorder, f);
+    handle.run_upkeep();
+    handle.render()
+}
+
 /// The handle from this process's first Prometheus [`install`]; later
 /// Prometheus calls return it.
 static INSTALLED: std::sync::OnceLock<MetricsHandle> = std::sync::OnceLock::new();
@@ -363,18 +377,6 @@ mod tests {
     use crate::error::ErrorClass;
     use crate::record::PartitionId;
 
-    /// Build a local (non-global) recorder with the production bucket
-    /// configuration, run `f` against it, and return the rendered output.
-    fn render_with_local_recorder(f: impl FnOnce()) -> String {
-        let recorder = configured_builder()
-            .expect("bucket config must be valid")
-            .build_recorder();
-        let handle = recorder.handle();
-        metrics::with_local_recorder(&recorder, f);
-        handle.run_upkeep();
-        handle.render()
-    }
-
     /// Labels for one test's handle sets.
     ///
     /// Every test passes its own `component`. Gauge series have one live owner
@@ -388,7 +390,7 @@ mod tests {
 
     #[test]
     fn handle_structs_register_and_render_the_taxonomy() {
-        let rendered = render_with_local_recorder(|| {
+        let rendered = render_local(|| {
             let src = SourceMetrics::new(&labels("orders_kafka"));
             src.batch(512, 131_072);
             src.poll_duration(Duration::from_millis(3));
@@ -749,7 +751,7 @@ mod tests {
 
     #[test]
     fn custom_meter_inherits_standard_labels_and_namespace() {
-        let rendered = render_with_local_recorder(|| {
+        let rendered = render_local(|| {
             // A connector owns the `kafka` namespace: local names are
             // auto-prefixed `spate_kafka_`.
             let meter = Meter::with_namespace("kafka", "orders", "orders_kafka", "kafka");
@@ -832,7 +834,7 @@ mod tests {
         assert!(Meter::for_component("clickhouse-v2", MetricRole::Sink, "p", "c").is_none());
         assert!(Meter::for_component("", MetricRole::Source, "p", "c").is_none());
 
-        let rendered = render_with_local_recorder(|| {
+        let rendered = render_local(|| {
             Meter::for_component("kafka", MetricRole::Source, "orders", "orders_in")
                 .expect("valid namespace")
                 .counter("bytes_total", &[])
@@ -853,7 +855,7 @@ mod tests {
 
     #[test]
     fn duration_histograms_use_configured_buckets() {
-        let rendered = render_with_local_recorder(|| {
+        let rendered = render_local(|| {
             let src = SourceMetrics::new(&labels("buckets"));
             src.poll_duration(Duration::from_millis(3));
         });
@@ -873,7 +875,7 @@ mod tests {
     /// consumer reports nothing" failure.
     #[test]
     fn source_lag_publishes_independently_of_partition_detail() {
-        let rendered = render_with_local_recorder(|| {
+        let rendered = render_local(|| {
             let src = SourceMetrics::new(&labels("lag_ungated"));
             src.set_partition_lag(PartitionId(1), 5);
         });
@@ -890,7 +892,7 @@ mod tests {
     /// read 0 on every Kafka pipeline for 14 days.
     #[test]
     fn unmeasured_source_lag_registers_no_series() {
-        let rendered = render_with_local_recorder(|| {
+        let rendered = render_local(|| {
             let src = SourceMetrics::new(&labels("lag_unmeasured"));
             src.batch(10, 100);
         });
@@ -907,7 +909,7 @@ mod tests {
         // *unlabeled* aggregate is registered eagerly either way; only the
         // `partition`-labeled series are gated.
         let gated_labels = ComponentLabels::new("orders", "gated_checkpoint", "checkpoint");
-        let rendered = render_with_local_recorder(|| {
+        let rendered = render_local(|| {
             let gated = CheckpointMetrics::new(&gated_labels, false);
             gated.set_partition_pending(PartitionId(1), 5);
 
@@ -945,7 +947,7 @@ mod tests {
 
     #[test]
     fn state_gauge_flips_exactly_one_state() {
-        let rendered = render_with_local_recorder(|| {
+        let rendered = render_local(|| {
             let pl = PipelineMetrics::new(&labels("state_gauge"), "0.1.0");
             pl.set_state(PipelineState::Draining);
         });

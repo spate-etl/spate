@@ -254,8 +254,6 @@ assemble() {
     group "Generate every artefact"
     ./scripts/release-version.sh --bump "$version"
     cargo xtask changelog build "$version"
-    # The inventory holds no first-party rows, so this is a no-op unless a
-    # dependency changed underneath the release.
     cargo xtask attribution
     endgroup
 

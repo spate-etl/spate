@@ -6,7 +6,8 @@
 cargo xtask attribution
 ```
 
-CI regenerates this and fails on any diff, so it cannot drift from `Cargo.lock`.
+Each release regenerates this file, so the copy at a release tag lists what
+that release carries. On `main`, `Cargo.lock` can move ahead of it.
 
 Spate itself is licensed under Apache-2.0 (see [LICENSE](LICENSE)). This file
 inventories the **dependencies** it links, and the terms each is used under.
@@ -35,9 +36,8 @@ are listed.
 Spate's **own** crates (`spate`, `spate-core`, …) are not listed. They are
 first-party, Apache-2.0, covered by [LICENSE](LICENSE), and
 `cargo xtask attribution` filters them out of what `cargo-about` emits, which
-includes every publishable workspace member. With them gone, this file changes
-only when a real dependency changes, which is what the nightly drift check
-exists to detect.
+includes every publishable workspace member. With them gone, a release's
+version bump alone leaves this file unchanged.
 
 
 ## Summary

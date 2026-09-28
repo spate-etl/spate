@@ -57,7 +57,7 @@ from the version input, in one commit on `release/vX.Y.Z`:
 | `Cargo.lock` | `cargo update --workspace`, inside the bump |
 | The install snippets at `X.Y` | the same bump; `--check` holds the set closed |
 | `CHANGELOG.md`, fragments consumed, moved dependency requirements listed | `cargo xtask changelog build` |
-| `THIRD-PARTY.md` | `cargo xtask attribution`, as a drift backstop |
+| `THIRD-PARTY.md` | `cargo xtask attribution` |
 
 The pull request it opens is titled `release: vX.Y.Z`, labeled
 `release`, and set to auto-merge. Re-dispatching the same version refreshes
@@ -112,7 +112,8 @@ that a previous release exercised; the last runs inside the real publish.
 The same packaging proof also runs continuously: `ci.yml` runs a
 simulated-bump `cargo publish --dry-run` on pushes to `main` that reach a
 manifest, and `scheduled.yml` repeats it nightly, so a packaging problem
-surfaces before release day.
+surfaces before release day. `scheduled.yml` also generates `THIRD-PARTY.md`
+nightly, so a generator failure surfaces the same way.
 
 ## Judging a release
 

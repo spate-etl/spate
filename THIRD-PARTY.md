@@ -6,7 +6,8 @@
 cargo xtask attribution
 ```
 
-CI regenerates this and fails on any diff, so it cannot drift from `Cargo.lock`.
+Each release regenerates this file, so the copy at a release tag lists what
+that release carries. On `main`, `Cargo.lock` can move ahead of it.
 
 Spate itself is licensed under Apache-2.0 (see [LICENSE](LICENSE)). This file
 inventories the **dependencies** it links, and the terms each is used under.
@@ -35,16 +36,15 @@ are listed.
 Spate's **own** crates (`spate`, `spate-core`, …) are not listed. They are
 first-party, Apache-2.0, covered by [LICENSE](LICENSE), and
 `cargo xtask attribution` filters them out of what `cargo-about` emits, which
-includes every publishable workspace member. With them gone, this file changes
-only when a real dependency changes, which is what the nightly drift check
-exists to detect.
+includes every publishable workspace member. With them gone, a release's
+version bump alone leaves this file unchanged.
 
 
 ## Summary
 
 | License | Crates |
 |---|---|
-| `MIT` | 299 |
+| `MIT` | 300 |
 | `Unicode-3.0` | 19 |
 | `Apache-2.0` | 13 |
 | `ISC` | 6 |
@@ -86,7 +86,7 @@ above from what is left. The elected license ids are unaffected either way.
 | `ed25519-dalek` | 2.2.0 | `BSD-3-Clause` |
 | `subtle` | 2.6.1 | `BSD-3-Clause` |
 | `webpki-roots` | 0.26.11 | `CDLA-Permissive-2.0` |
-| `webpki-roots` | 1.0.8 | `CDLA-Permissive-2.0` |
+| `webpki-roots` | 1.0.9 | `CDLA-Permissive-2.0` |
 | `aws-lc-rs` | 1.18.1 | `ISC` |
 | `aws-lc-sys` | 0.45.0 | `ISC` |
 | `libloading` | 0.8.9 | `ISC` |
@@ -103,6 +103,7 @@ above from what is left. The elected license ids are unaffected either way.
 | `autocfg` | 1.5.1 | `MIT` |
 | `aws-lc-sys` | 0.45.0 | `MIT` |
 | `base64` | 0.22.1 | `MIT` |
+| `base64` | 0.23.1 | `MIT` |
 | `base64ct` | 1.8.3 | `MIT` |
 | `bigdecimal` | 0.4.10 | `MIT` |
 | `bit-set` | 0.8.0 | `MIT` |
@@ -197,7 +198,7 @@ above from what is left. The elected license ids are unaffected either way.
 | `humantime-serde` | 1.1.1 | `MIT` |
 | `hybrid-array` | 0.4.13 | `MIT` |
 | `hyper` | 1.11.1 | `MIT` |
-| `hyper-rustls` | 0.27.9 | `MIT` |
+| `hyper-rustls` | 0.27.10 | `MIT` |
 | `hyper-util` | 0.1.20 | `MIT` |
 | `iana-time-zone` | 0.1.65 | `MIT` |
 | `ident_case` | 1.0.1 | `MIT` |
@@ -240,7 +241,7 @@ above from what is left. The elected license ids are unaffected either way.
 | `num_cpus` | 1.17.0 | `MIT` |
 | `num_enum` | 0.7.6 | `MIT` |
 | `num_enum_derive` | 0.7.6 | `MIT` |
-| `object_store` | 0.14.1 | `MIT` |
+| `object_store` | 0.14.2 | `MIT` |
 | `once_cell` | 1.21.4 | `MIT` |
 | `openssl-probe` | 0.2.1 | `MIT` |
 | `openssl-src` | 300.6.1+3.6.3 | `MIT` |
@@ -290,7 +291,7 @@ above from what is left. The elected license ids are unaffected either way.
 | `regex-automata` | 0.4.14 | `MIT` |
 | `regex-lite` | 0.1.9 | `MIT` |
 | `regex-syntax` | 0.8.11 | `MIT` |
-| `reqwest` | 0.13.4 | `MIT` |
+| `reqwest` | 0.13.5 | `MIT` |
 | `rlimit` | 0.11.0 | `MIT` |
 | `rust_decimal` | 1.43.0 | `MIT` |
 | `rustc-hash` | 2.1.3 | `MIT` |
@@ -340,7 +341,7 @@ above from what is left. The elected license ids are unaffected either way.
 | `strum` | 0.28.0 | `MIT` |
 | `strum_macros` | 0.28.0 | `MIT` |
 | `syn` | 2.0.119 | `MIT` |
-| `syn` | 3.0.5 | `MIT` |
+| `syn` | 3.0.6 | `MIT` |
 | `synstructure` | 0.13.2 | `MIT` |
 | `tempfile` | 3.27.0 | `MIT` |
 | `thiserror` | 2.0.20 | `MIT` |
@@ -351,7 +352,7 @@ above from what is left. The elected license ids are unaffected either way.
 | `time-macros` | 0.2.32 | `MIT` |
 | `tokio` | 1.53.1 | `MIT` |
 | `tokio-macros` | 2.7.0 | `MIT` |
-| `tokio-rustls` | 0.26.4 | `MIT` |
+| `tokio-rustls` | 0.26.5 | `MIT` |
 | `tokio-stream` | 0.1.18 | `MIT` |
 | `tokio-util` | 0.7.18 | `MIT` |
 | `tokio-websockets` | 0.10.1 | `MIT` |

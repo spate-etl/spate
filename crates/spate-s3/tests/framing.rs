@@ -53,9 +53,7 @@ impl RecordFramer for SemicolonSplitter {
 }
 
 fn s3_section(url: &str) -> ComponentConfig {
-    let yaml = format!("s3:\n  url: \"{url}\"\n");
-    let value: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
-    ComponentConfig::new("s3", value["s3"].clone())
+    spate_test::component_config("s3", &format!("url: \"{url}\"\n"))
 }
 
 #[test]

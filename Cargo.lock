@@ -3994,7 +3994,6 @@ dependencies = [
  "tower-service",
  "tracing",
  "webpki-roots 1.0.9",
- "yaml_serde",
 ]
 
 [[package]]
@@ -4134,8 +4133,8 @@ dependencies = [
  "serde",
  "serde_json",
  "spate-core",
+ "spate-test",
  "tracing",
- "yaml_serde",
 ]
 
 [[package]]
@@ -4174,7 +4173,6 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
- "yaml_serde",
 ]
 
 [[package]]
@@ -4231,7 +4229,6 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
- "yaml_serde",
  "zstd",
 ]
 

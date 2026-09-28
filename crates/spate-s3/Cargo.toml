@@ -44,7 +44,6 @@ spate-test-support = { workspace = true, features = ["tls"] }
 spate-json = { workspace = true }
 gungraun = { workspace = true }
 proptest = { workspace = true }
-serde_yaml = { workspace = true }
 tempfile = { workspace = true }
 testcontainers = { workspace = true, features = ["blocking"] }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "test-util"] }

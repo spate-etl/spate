@@ -1000,8 +1000,7 @@ mod tests {
     use spate_core::deser::Owned;
 
     fn component(yaml: &str) -> ComponentConfig {
-        let value: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
-        ComponentConfig::new("clickhouse", value)
+        spate_test::component_config("clickhouse", yaml)
     }
 
     #[derive(Serialize, ClickHouseRow)]

@@ -14,6 +14,8 @@ zero infrastructure.
 - `TestDeserializer` (passthrough / split / fail-on-prefix),
   `TestEncoder`/`decode_rows`, and `EmitCollector` for exercising stages
   in isolation.
+- `record`, `raw_payload`, `test_ack`, `component_config` and
+  `unique_name` to build a stage's input, its config, and per-test names.
 - A `proptest` feature with strategies for payloads, lane layouts, and
   writer-outcome scripts.
 

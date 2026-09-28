@@ -171,11 +171,6 @@ pub(crate) fn launch_tuned(
 /// (e.g. `.with_framer(...)`, `.with_coordinator(...)`) before it is
 /// handed to the runtime; it receives the pipeline's I/O handle for
 /// coordinator construction.
-fn next_launch() -> u64 {
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-}
-
 pub(crate) fn launch_customized(
     yaml: &str,
     options: RuntimeOptions,
@@ -190,7 +185,7 @@ pub(crate) fn launch_customized(
     // multi-instance test running two workers in-process) would collide.
     // Coordination is unaffected: splits are namespaced by the store, not by
     // the pipeline name.
-    config.pipeline.name = format!("{}-{}", config.pipeline.name, next_launch());
+    config.pipeline.name = spate_test::unique_name(&config.pipeline.name);
     let pipeline = Pipeline::from_config(config).expect("pipeline builds");
     let io = pipeline.io_handle();
     let source = make_source(

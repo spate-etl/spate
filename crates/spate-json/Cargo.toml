@@ -38,7 +38,6 @@ gungraun = { workspace = true }
 spate-test = { workspace = true }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
-serde_yaml = { workspace = true }
 proptest = { workspace = true }
 spate-bench = { workspace = true }
 spate-test-support = { workspace = true }

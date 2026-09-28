@@ -1474,24 +1474,14 @@ settings: { insert_quorum: "auto" }
         let ca = crate::test_tls::TestCa::new("system");
         let url = ca.serve().await;
         let ca_file = ca.write(dir.path());
-        let out = tokio::task::spawn_blocking(move || {
-            std::process::Command::new(std::env::current_exe().expect("test binary"))
-                .args(["--exact", NAME])
-                .env_remove("SSL_CERT_DIR")
-                .env("SSL_CERT_FILE", ca_file)
-                .env(URL, url)
-                .output()
-                .expect("spawn the test binary")
-        })
-        .await
-        .unwrap();
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        // A filter that matches nothing also exits 0.
-        assert!(
-            out.status.success() && stdout.contains("1 passed"),
-            "{stdout}{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
+        tokio::task::block_in_place(|| {
+            spate_test_support::run_in_child(NAME, |child| {
+                child
+                    .env_remove("SSL_CERT_DIR")
+                    .env("SSL_CERT_FILE", ca_file)
+                    .env(URL, url)
+            });
+        });
     }
 
     /// The trust store is read when a replica or the `distributed_check`

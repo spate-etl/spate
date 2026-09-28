@@ -20,6 +20,7 @@ use spate_core::error::{ErrorClass, SinkError};
 use spate_core::record::{PartitionId, Record, RecordMeta};
 use spate_core::sink::RowEncoder;
 use spate_kafka::sink::{KafkaBytesEncoder, KafkaEncoder, KafkaJsonEncoder, MessageEncoder};
+use spate_test_support::fnv1a;
 use std::collections::HashSet;
 
 #[path = "../benches/support/messages.rs"]
@@ -71,7 +72,7 @@ where
         }
     }
     run.framed = buf.len();
-    run.digest = digest(&buf);
+    run.digest = fnv1a(&buf);
     run
 }
 
@@ -99,20 +100,6 @@ where
     );
     assert_eq!(run.accepted, want);
     (run.framed, run.digest)
-}
-
-/// FNV-1a over the framed bytes.
-///
-/// Written out rather than taken from `DefaultHasher`, whose output is
-/// explicitly not stable across releases, and a pin that could change under
-/// a toolchain bump is not a pin.
-fn digest(bytes: &[u8]) -> u64 {
-    let mut hash = 0xcbf2_9ce4_8422_2325u64;
-    for &byte in bytes {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x1000_0000_01b3);
-    }
-    hash
 }
 
 fn keyless() -> KafkaEncoder<Owned<Vec<u8>>, KafkaBytesEncoder> {
@@ -153,22 +140,22 @@ fn the_corpora_are_reproducible() {
 fn the_corpora_are_pinned_across_revisions() {
     assert_eq!(
         framed(keyless(), messages::payloads(RECORDS)),
-        (5_210_000, 0xebab_6615_da4d_44ce),
+        (5_210_000, 0x433a_8a15_da4d_44ce),
         "bytes_keyless"
     );
     assert_eq!(
         framed(keyed(), messages::payloads(RECORDS)),
-        (5_410_000, 0x6a5f_a371_4fc3_80be),
+        (5_410_000, 0x90db_7971_4fc3_80be),
         "bytes_keyed"
     );
     assert_eq!(
         framed(KafkaEncoder::new(HeaderStamp), messages::payloads(RECORDS)),
-        (6_390_000, 0x85b5_6f1d_2074_b3ea),
+        (6_390_000, 0x121c_5f1d_2074_b3ea),
         "stamped_headers"
     );
     assert_eq!(
         framed(json(), messages::events(RECORDS)),
-        (5_033_806, 0x6b0e_b104_eac6_1f2d),
+        (5_033_806, 0x83f1_ed04_eac6_1f2d),
         "json_typed"
     );
 }

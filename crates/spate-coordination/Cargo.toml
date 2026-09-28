@@ -44,6 +44,7 @@ gungraun = { workspace = true }
 proptest = { workspace = true }
 rcgen = { workspace = true }
 spate-test = { workspace = true }
+spate-test-support = { workspace = true }
 serde_yaml = { workspace = true }
 testcontainers = { workspace = true, features = ["blocking"] }
 tempfile = { workspace = true }

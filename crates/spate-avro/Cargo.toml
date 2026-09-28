@@ -40,6 +40,7 @@ rcgen = { workspace = true }
 tokio-rustls = { workspace = true, features = ["aws_lc_rs"] }
 spate-bench = { workspace = true }
 spate-test = { workspace = true }
+spate-test-support = { workspace = true }
 http-body-util = { workspace = true }
 hyper = { workspace = true, features = ["http1", "server"] }
 hyper-util = { workspace = true, features = ["http1", "server", "tokio"] }

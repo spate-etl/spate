@@ -201,21 +201,13 @@ mod tests {
             (&[("SSL_CERT_FILE", "/etc/kafka/ca.pem")][..], "1"),
             (&[("SSL_CERT_DIR", "/etc/kafka/certs")][..], "1"),
         ] {
-            let out = std::process::Command::new(std::env::current_exe().expect("test binary"))
-                .args(["--exact", NAME])
-                .env_remove("SSL_CERT_FILE")
-                .env_remove("SSL_CERT_DIR")
-                .envs(vars.iter().copied())
-                .env(EXPECT, expected)
-                .output()
-                .expect("spawn the test binary");
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            // A filter that matches nothing also exits 0.
-            assert!(
-                out.status.success() && stdout.contains("1 passed"),
-                "{vars:?}: {stdout}{}",
-                String::from_utf8_lossy(&out.stderr)
-            );
+            spate_test_support::run_in_child(NAME, |child| {
+                child
+                    .env_remove("SSL_CERT_FILE")
+                    .env_remove("SSL_CERT_DIR")
+                    .envs(vars.iter().copied())
+                    .env(EXPECT, expected)
+            });
         }
     }
 }

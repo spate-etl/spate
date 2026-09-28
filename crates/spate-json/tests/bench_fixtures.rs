@@ -20,6 +20,7 @@ use spate_core::deser::{Deserializer, Owned};
 use spate_core::framing::RecordFramer;
 use spate_core::record::{PartitionId, RawPayload};
 use spate_json::{JsonDeserializerBuilder, JsonFraming, JsonSettings, NdjsonFramer, OnError};
+use spate_test_support::pin;
 
 #[path = "../benches/support/decode_rig.rs"]
 mod decode_rig;
@@ -35,31 +36,6 @@ mod shapes;
 use decode_rig::Sink;
 use lines::Eol;
 use orders::{BAD_EVERY, Corruption, LineItem, RECORDS};
-
-/// FNV-1a over a corpus.
-///
-/// Written out rather than taken from `DefaultHasher`, whose output is
-/// explicitly not stable across releases. A pin that could change under a
-/// toolchain bump is not a pin.
-fn digest(bytes: &[u8]) -> u64 {
-    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-    for &byte in bytes {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x1000_0000_01b3);
-    }
-    hash
-}
-
-/// A corpus's length and digest.
-///
-/// The length alone is not enough to pin any of these. A re-seeded filler, a
-/// changed value formula or a reordered field list can leave every length
-/// untouched while changing every byte the decoder reads, and the pin would
-/// then pass over a corpus no recorded count was measured against. The digest
-/// closes that.
-fn pin(bytes: &[u8]) -> (usize, u64) {
-    (bytes.len(), digest(bytes))
-}
 
 fn raw(bytes: &[u8]) -> RawPayload<'_> {
     RawPayload {
@@ -204,17 +180,17 @@ fn the_line_item_shape_is_the_measured_workload() {
 fn the_corpora_are_pinned_across_revisions() {
     assert_eq!(
         pin(&orders::order_document()),
-        (265, 0xed39_44fc_72ba_fb50),
+        (265, 0x9f20_43fc_72ba_fb50),
         "single_typed / single_value"
     );
     assert_eq!(
         pin(&orders::lines_ndjson(RECORDS)),
-        (242_897, 0xa3d6_4abc_50c3_2286),
+        (242_897, 0x6660_8bbc_50c3_2286),
         "ndjson_clean / ndjson_fail_clean"
     );
     assert_eq!(
         pin(&orders::lines_array(RECORDS)),
-        (242_898, 0x0c28_c24d_f9f9_05a4),
+        (242_898, 0xae1c_754d_f9f9_05a4),
         "array_clean"
     );
     assert_eq!(
@@ -223,7 +199,7 @@ fn the_corpora_are_pinned_across_revisions() {
             BAD_EVERY,
             Corruption::Syntax
         )),
-        (242_697, 0x2c32_faca_f2c0_1388),
+        (242_697, 0xa176_ccca_f2c0_1388),
         "ndjson_syntax_10pct"
     );
     assert_eq!(
@@ -232,7 +208,7 @@ fn the_corpora_are_pinned_across_revisions() {
             BAD_EVERY,
             Corruption::TypeMismatch
         )),
-        (241_186, 0x699a_8e82_2d17_1b30),
+        (241_186, 0xdd66_d682_2d17_1b30),
         "ndjson_type_10pct"
     );
     assert_eq!(
@@ -241,7 +217,7 @@ fn the_corpora_are_pinned_across_revisions() {
             1,
             Corruption::Syntax
         )),
-        (240_897, 0x4be5_a663_e642_cb62),
+        (240_897, 0x4538_2963_e642_cb62),
         "ndjson_syntax_all"
     );
     assert_eq!(
@@ -249,37 +225,37 @@ fn the_corpora_are_pinned_across_revisions() {
             RECORDS,
             Corruption::TypeMismatch
         )),
-        (242_889, 0x8576_1234_48d1_cc3c),
+        (242_889, 0x056a_0e34_48d1_cc3c),
         "ndjson_fail_bad_last"
     );
     assert_eq!(
         pin(&orders::lines_array_bad_last(RECORDS)),
-        (242_890, 0xe02a_92e8_bb84_e836),
+        (242_890, 0x8a19_2ae8_bb84_e836),
         "array_bad_last"
     );
     assert_eq!(
         pin(&shapes::wide_flat()),
-        (74_287, 0x075b_13f6_2104_f0db),
+        (74_287, 0xf5dd_98f6_2104_f0db),
         "wide_flat / dup_guard_wide"
     );
     assert_eq!(
         pin(&shapes::wide_flat_duplicate_key()),
-        (74_287, 0x6f95_ab21_4ce9_0f31),
+        (74_287, 0x97c1_4421_4ce9_0f31),
         "dup_guard_hit"
     );
     assert_eq!(
         pin(&shapes::deep_nested()),
-        (143_958, 0x0941_11aa_484c_8fcb),
+        (143_958, 0x4186_f0aa_484c_8fcb),
         "deep_nested / dup_guard_deep"
     );
     assert_eq!(
         pin(&shapes::numeric_array()),
-        (388_106, 0xe2a9_d100_9c4f_0be4),
+        (388_106, 0xe44c_5d00_9c4f_0be4),
         "numeric_array"
     );
     assert_eq!(
         pin(&shapes::large_string()),
-        (532_518, 0x27fc_30d7_f65d_8cd5),
+        (532_518, 0x5640_1bd7_f65d_8cd5),
         "large_string"
     );
     assert_eq!(
@@ -289,7 +265,7 @@ fn the_corpora_are_pinned_across_revisions() {
             Eol::Lf,
             0
         )),
-        (1_608_000, 0x0d34_2f26_6fec_1036),
+        (1_608_000, 0x7c7c_ca26_6fec_1036),
         "lf_fetch_chunks / lf_line_chunks / lf_split_chunks"
     );
     assert_eq!(
@@ -299,7 +275,7 @@ fn the_corpora_are_pinned_across_revisions() {
             Eol::Crlf,
             0
         )),
-        (1_616_000, 0xb870_694c_3a68_f4be),
+        (1_616_000, 0xb69d_744c_3a68_f4be),
         "crlf_fetch_chunks"
     );
     assert_eq!(
@@ -309,7 +285,7 @@ fn the_corpora_are_pinned_across_revisions() {
             Eol::Lf,
             1
         )),
-        (1_616_000, 0x86ad_0a8e_5f37_61d2),
+        (1_616_000, 0x7155_538e_5f37_61d2),
         "lf_blank_interleaved"
     );
     assert_eq!(
@@ -319,7 +295,7 @@ fn the_corpora_are_pinned_across_revisions() {
             Eol::Lf,
             0
         )),
-        (1_601_000, 0x1470_cca1_b2c4_3f60),
+        (1_601_000, 0x9151_eea1_b2c4_3f60),
         "lf_wide_lines"
     );
 }

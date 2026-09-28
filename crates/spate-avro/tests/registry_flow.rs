@@ -16,6 +16,7 @@ use spate_core::checkpoint::AckRef;
 use spate_core::deser::{Deserializer, EmitRecord, RecFamily};
 use spate_core::error::DeserError;
 use spate_core::record::{Flow, PartitionId, RawPayload, Record};
+use spate_test_support::run_in_child;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -491,28 +492,6 @@ async fn prewarm_loads_subjects_at_startup() {
 /// The registry URL a re-executed child test builds against.
 const CHILD_REGISTRY_URL: &str = "SPATE_TEST_AVRO_REGISTRY_URL";
 
-/// Runs the test `name` in a child test binary with `SSL_CERT_DIR` unset and
-/// `env` applied, and asserts that it passed.
-async fn run_in_child(name: &'static str, env: Vec<(&'static str, String)>) {
-    let out = tokio::task::spawn_blocking(move || {
-        std::process::Command::new(std::env::current_exe().expect("test binary"))
-            .args(["--exact", name])
-            .env_remove("SSL_CERT_DIR")
-            .envs(env)
-            .output()
-            .expect("spawn the test binary")
-    })
-    .await
-    .unwrap();
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    // A filter that matches nothing also exits 0.
-    assert!(
-        out.status.success() && stdout.contains("1 passed"),
-        "{stdout}{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
-
 /// With an empty system trust store, an `http://` registry builds and
 /// decodes, and an `https://` registry builds. Regression for #624.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -545,14 +524,14 @@ async fn an_empty_trust_store_does_not_fail_the_build() {
     let dir = tempfile::tempdir().unwrap();
     let empty = dir.path().join("empty.pem");
     std::fs::write(&empty, "").unwrap();
-    run_in_child(
-        NAME,
-        vec![
-            ("SSL_CERT_FILE", empty.display().to_string()),
-            (CHILD_REGISTRY_URL, format!("http://{addr}")),
-        ],
-    )
-    .await;
+    tokio::task::block_in_place(|| {
+        run_in_child(NAME, |child| {
+            child
+                .env_remove("SSL_CERT_DIR")
+                .env("SSL_CERT_FILE", &empty)
+                .env(CHILD_REGISTRY_URL, format!("http://{addr}"))
+        });
+    });
 }
 
 /// A schema the parser refuses — here a record named `"my-record"`, which

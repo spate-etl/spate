@@ -474,7 +474,16 @@ mod tests {
     #[test]
     fn a_test_support_change_selects_its_dependent_suites() {
         let out = run(&["test-support/src/lib.rs"]);
-        assert_eq!(suites(&out), ["spate", "spate-clickhouse", "spate-kafka"]);
+        assert_eq!(
+            suites(&out),
+            [
+                "spate",
+                "spate-clickhouse",
+                "spate-coordination",
+                "spate-kafka",
+                "spate-s3"
+            ]
+        );
         assert!(out.semver_pkgs.is_empty());
     }
 

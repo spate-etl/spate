@@ -1,5 +1,13 @@
-//! Test helpers shared across this workspace's crates. Not published: they
+//! Test helpers shared across this workspace's crates. Not published: some
 //! depend on this repository's layout and its `cargo xtask` task runner.
+
+mod child;
+mod corpus;
+mod http;
+
+pub use child::run_in_child;
+pub use corpus::{fnv1a, pin};
+pub use http::http;
 
 use std::path::Path;
 use std::process::Command;

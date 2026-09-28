@@ -5,8 +5,8 @@
 use object_store::path::Path as StorePath;
 use object_store::{ObjectStore, ObjectStoreExt as _, PutPayload};
 use spate_test::wait_until;
-use std::io::{Read as _, Write as _};
-use std::net::TcpStream;
+use spate_test_support::http;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use testcontainers::core::{IntoContainerPort, WaitFor};
@@ -54,33 +54,14 @@ impl Gateway {
             client,
         };
         // The gateway logs readiness slightly before the filer finishes
-        // registering; retry bucket creation until it sticks.
+        // registering; retry bucket creation until it sticks. SeaweedFS
+        // accepts an unsigned request when no identities are configured.
+        let gateway = SocketAddr::from(([127, 0, 0, 1], port));
+        let path = format!("/{bucket}");
         wait_until(Duration::from_secs(60), "bucket created", || {
-            gw.http_put(&format!("/{bucket}")) == 200
+            http(gateway, "PUT", &path).is_ok_and(|(status, _)| status == 200)
         });
         gw
-    }
-
-    /// Minimal anonymous HTTP PUT (SeaweedFS accepts unsigned requests
-    /// when no identities are configured); returns the status code.
-    fn http_put(&self, path: &str) -> u16 {
-        let Ok(mut stream) = TcpStream::connect(("127.0.0.1", self.port)) else {
-            return 0;
-        };
-        let req = format!(
-            "PUT {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-        );
-        if stream.write_all(req.as_bytes()).is_err() {
-            return 0;
-        }
-        let mut buf = String::new();
-        if stream.read_to_string(&mut buf).is_err() {
-            return 0;
-        }
-        buf.split_whitespace()
-            .nth(1)
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0)
     }
 
     /// The `store:` passthrough options a source needs to reach this

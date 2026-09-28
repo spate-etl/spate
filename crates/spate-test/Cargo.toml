@@ -23,6 +23,7 @@ tracing-subscriber = { workspace = true, features = ["fmt"] }
 [dev-dependencies]
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
+spate-test-support = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "test-util", "time"] }
 
 [features]

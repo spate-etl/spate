@@ -13,7 +13,7 @@ use spate_core::ops::chain_owned;
 use spate_core::pipeline::{Pipeline, RuntimeOptions};
 use spate_core::sink::KeyHashRouter;
 use spate_test::{BytesPassthrough, LogCapture, TestEncoder, capture_sink, memory_source};
-use std::io::{Read, Write};
+use spate_test_support::http;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
@@ -66,29 +66,6 @@ fn wait_until<T>(what: &str, capture: &LogCapture, mut check: impl FnMut() -> Op
         "timed out waiting for {what}\n--- captured ---\n{}",
         capture.lines().join("\n")
     );
-}
-
-/// Minimal HTTP/1.1 GET. Hand-rolled to keep an HTTP client out of
-/// `spate-test`'s dev-dependencies for one request.
-fn get(addr: SocketAddr, path: &str) -> std::io::Result<(u16, String)> {
-    let mut stream = std::net::TcpStream::connect(addr)?;
-    write!(
-        stream,
-        "GET {path} HTTP/1.1\r\nHost: admin\r\nConnection: close\r\n\r\n"
-    )?;
-    stream.flush()?;
-    let mut text = String::new();
-    stream.read_to_string(&mut text)?;
-    let status = text
-        .split_whitespace()
-        .nth(1)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or_else(|| panic!("no status code in: {text}"));
-    let body = text
-        .split_once("\r\n\r\n")
-        .map(|(_, b)| b.to_owned())
-        .unwrap_or_default();
-    Ok((status, body))
 }
 
 #[test]
@@ -146,7 +123,7 @@ fn the_bound_admin_address_is_logged_and_serves() {
     // loop; what it answers is asserted once, so a probe reporting 503 fails
     // here rather than being polled past.
     let (status, body) = wait_until("/healthz to answer at the logged address", &capture, || {
-        get(addr, "/healthz").ok()
+        http(addr, "GET", "/healthz").ok()
     });
     assert_eq!(status, 200, "the logged address serves the probes");
     assert_eq!(body, "ok");

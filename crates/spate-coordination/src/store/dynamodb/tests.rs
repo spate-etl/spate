@@ -537,6 +537,57 @@ async fn one_poller_serves_every_watch_of_a_prefix_and_stops_with_the_last() {
     assert_eq!(table.count(FakeOp::Query), stopped);
 }
 
+/// A poll that fails fatally hands the error to every stream of the
+/// prefix, and each stream then ends.
+#[tokio::test(start_paused = true)]
+async fn a_fatal_poll_ends_every_stream_with_its_error() {
+    let table = FakeTable::new();
+    let a = handle(&table, &TestClock::frozen());
+    let mut streams = [a.watch(E, "").await.unwrap(), a.watch(E, "").await.unwrap()];
+    for watch in &mut streams {
+        snapshot(watch).await;
+    }
+    table.fail_fatally(FakeOp::Query);
+    for watch in &mut streams {
+        let event = tokio::time::timeout(TTL * 20, watch.next()).await;
+        assert!(
+            matches!(event, Ok(Some(Err(StoreError::Fatal(_))))),
+            "{event:?}"
+        );
+        let after = tokio::time::timeout(TTL * 20, watch.next()).await;
+        assert!(matches!(after, Ok(None)), "{after:?}");
+    }
+}
+
+/// A handle whose poller stopped with its runtime starts another on the
+/// runtime of its next watch, which then delivers events.
+#[test]
+fn a_poller_whose_runtime_stopped_is_replaced() {
+    let runtime = || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .unwrap()
+    };
+    let table = FakeTable::new();
+    let a = handle(&table, &TestClock::frozen());
+    let first = runtime();
+    let held = first.block_on(async {
+        let mut watch = a.watch(E, "").await.unwrap();
+        snapshot(&mut watch).await;
+        watch
+    });
+    drop(first);
+    runtime().block_on(async {
+        let mut watch = a.watch(E, "").await.expect("a watch on the second runtime");
+        snapshot(&mut watch).await;
+        let rev = won(a.create(E, "k", b"v".to_vec()).await.unwrap());
+        assert_eq!(put_without_delete(&mut watch, "k").await, rev);
+    });
+    drop(held);
+}
+
 /// Each poll records one `op="poll"` store operation.
 #[test]
 fn polls_are_metered() {

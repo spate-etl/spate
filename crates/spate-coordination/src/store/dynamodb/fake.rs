@@ -41,6 +41,7 @@ struct State {
     meta: HashMap<String, Meta>,
     shape: Option<Shape>,
     ttl: Ttl,
+    /// Ops that fail, mapped to whether the failure is fatal.
     failures: HashMap<FakeOp, bool>,
     counts: HashMap<FakeOp, u64>,
     queries: Vec<Query>,
@@ -160,7 +161,18 @@ impl FakeTable {
 
     /// Fails every call of `op` with a retryable error while `failing` holds.
     pub fn fail(&self, op: FakeOp, failing: bool) {
-        self.state().failures.insert(op, failing);
+        let mut state = self.state();
+        if failing {
+            state.failures.insert(op, false);
+        } else {
+            state.failures.remove(&op);
+        }
+    }
+
+    /// Fails every call of `op` with a fatal error.
+    #[cfg(test)]
+    pub(crate) fn fail_fatally(&self, op: FakeOp) {
+        self.state().failures.insert(op, true);
     }
 
     pub fn set_page_bytes(&self, bytes: usize) {
@@ -228,8 +240,10 @@ impl FakeTable {
     fn call(&self, op: FakeOp) -> Result<MutexGuard<'_, State>, StoreError> {
         let mut state = self.state();
         *state.counts.entry(op).or_default() += 1;
-        if state.failures.get(&op).copied().unwrap_or(false) {
-            return Err(StoreError::Retryable(format!("injected {op:?} failure")));
+        match state.failures.get(&op) {
+            Some(true) => return Err(StoreError::Fatal(format!("injected {op:?} failure"))),
+            Some(false) => return Err(StoreError::Retryable(format!("injected {op:?} failure"))),
+            None => {}
         }
         Ok(state)
     }

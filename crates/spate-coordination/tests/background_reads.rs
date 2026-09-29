@@ -24,8 +24,9 @@ use support::{
 /// read at once and delivered when [`release`](Self::release) is called;
 /// later ones never finish, so only the first can change a view.
 ///
-/// The first ephemeral watch ends on [`break_watch`](Self::break_watch), and
-/// the next one starts only after [`open_rewatch`](Self::open_rewatch).
+/// The first ephemeral watch never delivers `unseen` and ends on
+/// [`break_watch`](Self::break_watch); the next one starts only after
+/// [`open_rewatch`](Self::open_rewatch).
 #[derive(Clone)]
 struct HeldListing {
     inner: MemoryStore,
@@ -35,6 +36,7 @@ struct HeldListing {
     broken: Arc<tokio::sync::Notify>,
     watches: Arc<AtomicU64>,
     rewatch: Arc<tokio::sync::Semaphore>,
+    unseen: Option<&'static str>,
 }
 
 impl HeldListing {
@@ -47,7 +49,13 @@ impl HeldListing {
             broken: Arc::default(),
             watches: Arc::default(),
             rewatch: Arc::new(tokio::sync::Semaphore::new(0)),
+            unseen: None,
         }
+    }
+
+    fn unseen_by_first_watch(mut self, key: &'static str) -> HeldListing {
+        self.unseen = Some(key);
+        self
     }
 
     fn release(&self) {
@@ -107,8 +115,17 @@ impl CoordinationStore for HeldListing {
         }
         if self.watches.fetch_add(1, Ordering::AcqRel) == 0 {
             let broken = Arc::clone(&self.broken);
+            let unseen = self.unseen;
             let stream = self.inner.watch(ks, prefix).await?;
             return Ok(stream
+                .filter(move |event| {
+                    let key = match event {
+                        Ok(WatchEvent::Put(entry)) => Some(entry.key.as_str()),
+                        Ok(WatchEvent::Delete { key, .. }) => Some(key.as_str()),
+                        _ => None,
+                    };
+                    std::future::ready(key.is_none() || key != unseen)
+                })
                 .take_until(async move { broken.notified().await })
                 .boxed());
         }
@@ -428,8 +445,9 @@ fn a_listing_does_not_restore_a_lease_deleted_since() {
     );
 }
 
-/// A lease deleted while the lease watch is re-established is not restored
-/// by a listing read before the delete and applied after the rebuild.
+/// A lease the view never saw, deleted while the lease watch is
+/// re-established, is not restored by a listing read before the delete and
+/// applied after the rebuild.
 #[test]
 fn a_listing_does_not_restore_a_lease_deleted_during_a_rewatch() {
     let rt = runtime();
@@ -446,7 +464,7 @@ fn a_listing_does_not_restore_a_lease_deleted_during_a_rewatch() {
         .unwrap()
         .won()
         .expect("foreign lease");
-    let listing = HeldListing::new(inner.clone());
+    let listing = HeldListing::new(inner.clone()).unseen_by_first_watch("split.b");
     let mut w = StoreCoordinator::new(
         listing.clone(),
         tuned("worker-a", |c| c.max_in_flight = 1),

@@ -121,6 +121,17 @@ pub(crate) struct ReconcileRun {
     assignments: BTreeMap<String, Revision>,
 }
 
+/// What the view learned while a reconcile listing was in flight.
+#[derive(Default)]
+struct SinceListing {
+    /// Ephemeral keys deleted from the view.
+    leases: BTreeSet<String>,
+    /// Durable keys deleted from the view.
+    records: BTreeSet<String>,
+    /// The lease view was rebuilt from a newer snapshot.
+    leases_rebuilt: bool,
+}
+
 /// How one release attempt ended. The caller needs the distinction to
 /// avoid reporting a tenancy end twice: a fenced release has already been
 /// announced by [`Task::drop_owned`].
@@ -279,10 +290,9 @@ pub(crate) struct Task<S: CoordinationStore + Clone> {
     /// computed over. A publish whose member set matches it did not follow
     /// a fleet change, so whatever it rewrote came from splits completing.
     announced_members: BTreeSet<String>,
-    /// While a reconcile listing is in flight, the ephemeral and durable
-    /// keys deleted from the view since it began: the listing may still
-    /// hold them.
-    deleted_since_listing: Option<(BTreeSet<String>, BTreeSet<String>)>,
+    /// While a reconcile listing is in flight, what the view learned since
+    /// it began that the listing cannot know.
+    since_listing: Option<SinceListing>,
     /// The terminal verdict wants an authoritative listing.
     terminal_due: bool,
     #[cfg(feature = "testing")]
@@ -348,7 +358,7 @@ impl<S: CoordinationStore + Clone> Task<S> {
             departed: BTreeMap::new(),
             reported_members: None,
             announced_members: BTreeSet::new(),
-            deleted_since_listing: None,
+            since_listing: None,
             terminal_due: false,
             #[cfg(feature = "testing")]
             probe: Arc::default(),
@@ -852,33 +862,20 @@ impl<S: CoordinationStore + Clone> Task<S> {
         // The snapshot is authoritative for its keyspace: rebuild.
         match ks {
             Keyspace::Ephemeral => {
-                // The snapshot omits deletes, so an in-flight listing must
-                // not restore any key cleared here.
-                let mut cleared: Vec<String> = self
-                    .presence
-                    .keys()
-                    .map(|i| records::worker_key(i))
-                    .chain(
-                        self.pending_leases
-                            .keys()
-                            .map(|id| records::split_key_str(id)),
-                    )
-                    .collect();
-                if self.leader_observed.take().is_some() {
-                    cleared.push(records::LEADER_KEY.to_string());
-                }
-                for (id, state) in &mut self.splits {
-                    if state.lease.take().is_some() {
-                        cleared.push(records::split_key_str(id));
-                    }
-                }
-                for key in &cleared {
-                    self.note_deleted(Keyspace::Ephemeral, key);
+                // The snapshot is newer than any listing in flight and
+                // carries no deletes: that listing's lease puts can only
+                // restore what is gone.
+                if let Some(since) = &mut self.since_listing {
+                    since.leases_rebuilt = true;
                 }
                 self.presence.clear();
                 self.member_caps.clear();
                 self.assign_dirty = true;
+                self.leader_observed = None;
                 self.pending_leases.clear();
+                for state in self.splits.values_mut() {
+                    state.lease = None;
+                }
                 for entry in snapshot {
                     self.apply_lease_put(&entry)?;
                 }
@@ -1291,7 +1288,7 @@ impl<S: CoordinationStore + Clone> Task<S> {
             (leases, records)
         }
         .boxed();
-        self.deleted_since_listing = Some(Default::default());
+        self.since_listing = Some(SinceListing::default());
         ReconcileRun {
             listings,
             started: Instant::now(),
@@ -1312,16 +1309,16 @@ impl<S: CoordinationStore + Clone> Task<S> {
 
     /// Apply a reconcile's listings like fresh snapshots: a key the view
     /// believes live but the listing omits is treated as deleted. Only keys
-    /// the view has not changed since the listing began are judged, and a
-    /// key deleted meanwhile is not restored from it. Watches whose streams
+    /// the view has not changed since the listing began are judged. A key
+    /// deleted meanwhile is not restored from it, and after a lease-watch
+    /// rebuild none of its lease puts apply. Watches whose streams
     /// died silently get re-established by their select arms.
     fn finish_reconcile(
         &mut self,
         run: &ReconcileRun,
         (leases, records): (Listed, Listed),
     ) -> Result<(), CoordinationError> {
-        let (deleted_leases, deleted_records) =
-            self.deleted_since_listing.take().unwrap_or_default();
+        let since = self.since_listing.take().unwrap_or_default();
         let leases = match leases {
             Ok(entries) => entries,
             Err(e) => {
@@ -1362,8 +1359,10 @@ impl<S: CoordinationStore + Clone> Task<S> {
         for key in gone_leases {
             self.apply_lease_delete(&key, None);
         }
-        for entry in leases.iter().filter(|e| !deleted_leases.contains(&e.key)) {
-            self.apply_lease_put(entry)?;
+        if !since.leases_rebuilt {
+            for entry in leases.iter().filter(|e| !since.leases.contains(&e.key)) {
+                self.apply_lease_put(entry)?;
+            }
         }
         match records {
             Ok(entries) => {
@@ -1391,7 +1390,7 @@ impl<S: CoordinationStore + Clone> Task<S> {
                         self.awaiting.clear();
                     }
                 }
-                for entry in entries.iter().filter(|e| !deleted_records.contains(&e.key)) {
+                for entry in entries.iter().filter(|e| !since.records.contains(&e.key)) {
                     self.apply_state_put(entry)?;
                 }
             }
@@ -1409,10 +1408,10 @@ impl<S: CoordinationStore + Clone> Task<S> {
     /// Remember a key deleted from the view while a reconcile listing is in
     /// flight, so the listing does not restore it.
     fn note_deleted(&mut self, ks: Keyspace, key: &str) {
-        if let Some((leases, records)) = &mut self.deleted_since_listing {
+        if let Some(since) = &mut self.since_listing {
             match ks {
-                Keyspace::Ephemeral => leases.insert(key.to_string()),
-                Keyspace::Durable => records.insert(key.to_string()),
+                Keyspace::Ephemeral => since.leases.insert(key.to_string()),
+                Keyspace::Durable => since.records.insert(key.to_string()),
             };
         }
     }

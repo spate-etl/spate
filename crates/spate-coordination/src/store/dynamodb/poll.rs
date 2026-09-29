@@ -82,6 +82,7 @@ async fn run(
         ks,
         prefix,
         seen: BTreeMap::new(),
+        deleted: BTreeMap::new(),
         subscribers: Vec::new(),
     };
     let mut next = Instant::now() + interval;
@@ -109,6 +110,9 @@ struct Poll {
     prefix: String,
     /// The revision last delivered for each key.
     seen: BTreeMap<String, u64>,
+    /// The tombstone revision of each durable key deleted on the watch; a
+    /// later put must sit above it.
+    deleted: BTreeMap<String, u64>,
     subscribers: Vec<mpsc::UnboundedSender<Event>>,
 }
 
@@ -208,7 +212,8 @@ impl Poll {
     }
 
     /// A durable read may be eventually consistent, so only a tombstone
-    /// above the delivered revision deletes, and only a higher revision puts.
+    /// above the delivered revision deletes, and only a revision above both
+    /// the delivered one and any delete already reported puts.
     fn apply_durable(&mut self, items: Vec<(String, Item)>, consistent: bool) -> Vec<Entry> {
         let mut listed = BTreeSet::new();
         let mut snapshot = Vec::new();
@@ -225,19 +230,31 @@ impl Poll {
                         },
                     );
                     self.seen.remove(&key);
+                    self.deleted.insert(key.clone(), item.v);
                 }
+                listed.insert(key);
+                continue;
+            }
+            let floor = delivered.or_else(|| self.deleted.get(&key).copied());
+            if floor.is_some_and(|f| item.v <= f) {
+                // Unchanged, or an eventually consistent read of the item
+                // from before a delete this watch reported.
+                if delivered.is_some() {
+                    snapshot.push(entry(&key, &item));
+                }
+                listed.insert(key);
                 continue;
             }
             let live = entry(&key, &item);
-            if delivered.is_none_or(|d| item.v > d) {
-                send(&mut self.subscribers, &WatchEvent::Put(live.clone()));
-                self.seen.insert(key.clone(), item.v);
-            }
+            send(&mut self.subscribers, &WatchEvent::Put(live.clone()));
+            self.seen.insert(key.clone(), item.v);
+            self.deleted.remove(&key);
             snapshot.push(live);
             listed.insert(key);
         }
         if consistent {
             self.seen.retain(|k, _| listed.contains(k));
+            self.deleted.retain(|k, _| listed.contains(k));
         }
         snapshot
     }

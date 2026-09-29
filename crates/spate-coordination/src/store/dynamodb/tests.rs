@@ -223,6 +223,30 @@ async fn deleting_an_observed_expired_key_at_a_stale_revision_wins_without_a_cal
     );
 }
 
+/// The delete that removes an expired item is conditional on the expired
+/// revision, so it spares an incarnation another handle wrote since.
+#[tokio::test(start_paused = true)]
+async fn a_cleanup_delete_spares_a_newer_incarnation() {
+    let table = FakeTable::new();
+    table.freeze_wall(1_000);
+    let clock = TestClock::frozen();
+    let (a, b, c) = (
+        handle(&table, &clock),
+        handle(&table, &clock),
+        handle(&table, &clock),
+    );
+    let old = won(a.create(E, "k", b"a".to_vec()).await.unwrap());
+    let mut watch = b.watch(E, "").await.unwrap();
+    assert_eq!(snapshot(&mut watch).await.len(), 1);
+    clock.advance(TTL);
+    assert!(matches!(next(&mut watch).await, WatchEvent::Delete { .. }));
+    won(c.delete(E, "k", Some(old)).await.unwrap());
+    table.freeze_wall(2_000);
+    let new = won(c.create(E, "k", b"c".to_vec()).await.unwrap());
+    assert!(b.delete(E, "k", Some(old)).await.unwrap().won().is_some());
+    assert_eq!(table.item("job#e", "k").map(|i| i.v), Some(new.0));
+}
+
 /// An owner's renewal that lands between an observer's expiry judgment and
 /// its takeover stands, and the observer loses.
 #[tokio::test]
@@ -310,6 +334,59 @@ async fn a_durable_ec_poll_emits_no_delete_on_absence_or_older_put() {
         WatchEvent::Put(entry) => assert_eq!(entry.key, "d.c"),
         other => panic!("expected d.c's put, got {other:?}"),
     }
+}
+
+/// After a durable watch reports a delete, an eventually consistent read of
+/// the item from before it puts nothing.
+#[tokio::test(start_paused = true)]
+async fn durable_watch_puts_nothing_below_its_delete() {
+    let table = FakeTable::new();
+    let a = handle(&table, &TestClock::frozen());
+    let v1 = won(a.create(D, "assign.x", b"old".to_vec()).await.unwrap());
+    let mut watch = a.watch(D, "assign.").await.unwrap();
+    assert_eq!(snapshot(&mut watch).await[0].revision, v1);
+    let v2 = won(a.delete(D, "assign.x", Some(v1)).await.unwrap());
+    assert!(
+        matches!(next(&mut watch).await, WatchEvent::Delete { revision, .. } if revision == v2)
+    );
+    table.set_stale_reads(true);
+    let after = tokio::time::timeout(POLL * 5, watch.next()).await;
+    assert!(after.is_err(), "after the delete at {v2:?}: {after:?}");
+}
+
+/// A key this handle creates, then deletes while a poll that read it is in
+/// flight, never reaches the watch as a put.
+#[tokio::test(start_paused = true)]
+async fn a_key_deleted_during_a_poll_is_not_put() {
+    let table = FakeTable::new();
+    let a = handle(&table, &TestClock::frozen());
+    let mut watch = a.watch(E, "").await.unwrap();
+    assert!(snapshot(&mut watch).await.is_empty());
+    let mut gate = table.hold_next_query();
+    let v = won(a.create(E, "k", b"a".to_vec()).await.unwrap());
+    gate.reached().await;
+    won(a.delete(E, "k", Some(v)).await.unwrap());
+    gate.release();
+    let after = tokio::time::timeout(POLL * 5, watch.next()).await;
+    assert!(after.is_err(), "{after:?}");
+}
+
+/// A listing of four 300 KiB values reads more than one page, as a Query
+/// returns at most 1 MB of items per page.
+#[tokio::test]
+async fn pages_of_a_1_2_mb_listing() {
+    let table = FakeTable::new();
+    let a = handle(&table, &TestClock::frozen());
+    for i in 0..4 {
+        won(a
+            .create(D, &format!("big.{i}"), vec![7; 300 * 1024])
+            .await
+            .unwrap());
+    }
+    let before = table.count(FakeOp::Query);
+    assert_eq!(a.list(D, "big.").await.unwrap().len(), 4);
+    let pages = table.count(FakeOp::Query) - before;
+    assert!(pages >= 2, "a 1.2 MB listing came back in {pages} page(s)");
 }
 
 /// A key this handle re-creates sits above the delete its watch emitted.
@@ -672,6 +749,15 @@ fn op_timeout_is_checked_and_forwarded() {
         None,
     )
     .expect_err("a differing op_timeout was accepted");
+    assert!(err.to_string().contains("op_timeout"), "{err}");
+    coordination.op_timeout = OP_TIMEOUT / 2;
+    let err = crate::StoreCoordinator::new(
+        handle(&table, &clock),
+        coordination.clone(),
+        rt.handle().clone(),
+        None,
+    )
+    .expect_err("a longer store op_timeout was accepted");
     assert!(err.to_string().contains("op_timeout"), "{err}");
     coordination.op_timeout = OP_TIMEOUT;
     let started = handle(&table, &clock);

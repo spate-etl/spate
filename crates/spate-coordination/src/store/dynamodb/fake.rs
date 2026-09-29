@@ -150,6 +150,8 @@ impl FakeTable {
         }
     }
 
+    /// A test that compares revisions while a frozen `TestClock` passes a
+    /// lease freezes the wall too, or a re-create can reuse a revision.
     pub fn freeze_wall(&self, ms: u64) {
         self.0.wall_ms.store(ms.max(1), Ordering::SeqCst);
     }
@@ -341,7 +343,8 @@ impl FakeTable {
         let prefix = query.prefix.as_deref().unwrap_or("");
         let mut page = Page::default();
         let mut read = 0;
-        let mut matching = state
+        let mut last = None;
+        let matching = state
             .items
             .range((from, Bound::Unbounded))
             .take_while(|((pk, _), _)| *pk == query.pk)
@@ -349,16 +352,20 @@ impl FakeTable {
             .filter_map(|((_, sk), slot)| {
                 let item = if stale { &slot.prev } else { &slot.cur };
                 item.as_ref().map(|i| (sk, i))
-            })
-            .peekable();
-        while let Some((sk, item)) = matching.next() {
-            read += item_bytes(&query.pk, sk, item);
+            });
+        // "A single Query only returns a result set that fits within the 1 MB
+        // size limit", counted before the filter:
+        // https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Query.Pagination.html
+        for (sk, item) in matching {
+            let size = item_bytes(&query.pk, sk, item);
+            if last.is_some() && read + size > budget {
+                page.next = last;
+                break;
+            }
+            read += size;
+            last = Some(sk.clone());
             if !(query.filter_tombs && item.tomb) {
                 page.items.push((sk.clone(), item.clone()));
-            }
-            if read >= budget && matching.peek().is_some() {
-                page.next = Some(sk.clone());
-                break;
             }
         }
         Ok(page)

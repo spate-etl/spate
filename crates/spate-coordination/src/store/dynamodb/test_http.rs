@@ -417,11 +417,22 @@ fn an_empty_system_store_falls_back_to_the_bundled_roots() {
     assert_eq!(count(&roots), 1);
 }
 
+/// A `DescribeTable` answer for a table the store can use.
+const ACTIVE_TABLE: &str = r#"{"Table":{"TableStatus":"ACTIVE",
+    "KeySchema":[{"AttributeName":"pk","KeyType":"HASH"},
+                 {"AttributeName":"sk","KeyType":"RANGE"}],
+    "AttributeDefinitions":[{"AttributeName":"pk","AttributeType":"S"},
+                            {"AttributeName":"sk","AttributeType":"S"}]}}"#;
+
 /// A store over `table` with a frozen clock and wall.
 fn store_over(table: SdkTable) -> DynamoDbStore {
+    store_with(table, DynamoDbConfig::new("spate-test", "job"))
+}
+
+fn store_with(table: SdkTable, config: DynamoDbConfig) -> DynamoDbStore {
     let table: Arc<dyn Table> = Arc::new(table);
     DynamoDbStore::build(
-        DynamoDbConfig::new("spate-test", "job"),
+        config,
         Duration::from_secs(10),
         OP_TIMEOUT,
         TestClock::frozen(),
@@ -442,15 +453,7 @@ async fn a_retried_write_whose_first_attempt_landed_wins() {
     let writes = Arc::new(AtomicUsize::new(0));
     let seen = writes.clone();
     let script: Script = Arc::new(move |request: &Request| match request.op.as_str() {
-        "describetable" => Reply::Json(
-            200,
-            r#"{"Table":{"TableStatus":"ACTIVE",
-                "KeySchema":[{"AttributeName":"pk","KeyType":"HASH"},
-                             {"AttributeName":"sk","KeyType":"RANGE"}],
-                "AttributeDefinitions":[{"AttributeName":"pk","AttributeType":"S"},
-                                        {"AttributeName":"sk","AttributeType":"S"}]}}"#
-                .into(),
-        ),
+        "describetable" => Reply::Json(200, ACTIVE_TABLE.into()),
         "describetimetolive" => Reply::Json(
             200,
             r#"{"TimeToLiveDescription":{"TimeToLiveStatus":"ENABLED","AttributeName":"x"}}"#
@@ -520,4 +523,122 @@ async fn requests_go_through_the_proxy_the_environment_names() {
         target_hits.load(Ordering::SeqCst),
     );
     assert_eq!(hits, (1, 0), "(proxy, endpoint) requests");
+}
+
+/// Answers a store's startup and a `GetItem` of an absent key, with the time
+/// to live answers `describe_ttl` and `update_ttl` give, counting
+/// `UpdateTimeToLive` calls in `updates`.
+fn startup_script(
+    describe_ttl: fn() -> Reply,
+    update_ttl: fn() -> Reply,
+    updates: Arc<AtomicUsize>,
+) -> Script {
+    Arc::new(move |request: &Request| match request.op.as_str() {
+        "describetable" => Reply::Json(200, ACTIVE_TABLE.into()),
+        "describetimetolive" => describe_ttl(),
+        "updatetimetolive" => {
+            updates.fetch_add(1, Ordering::SeqCst);
+            update_ttl()
+        }
+        _ => Reply::Json(200, "{}".into()),
+    })
+}
+
+/// Runs `f` on a runtime of its own and returns the WARN lines it logged.
+fn warnings(f: impl AsyncFnOnce()) -> Vec<String> {
+    spate_test::capture_logs(tracing::Level::WARN, || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(f());
+    })
+}
+
+/// A policy that denies `DescribeTimeToLive` gets a warning, and the store
+/// starts.
+#[test]
+fn a_denied_ttl_describe_warns_and_the_store_starts() {
+    let lines = warnings(async || {
+        let updates = Arc::new(AtomicUsize::new(0));
+        let denied = || Reply::Json(400, error_body("AccessDeniedException"));
+        let never = || Reply::Json(500, error_body("InternalServerError"));
+        let (url, _) = serve(startup_script(denied, never, updates)).await;
+        let store = store_over(table_at(&url));
+        assert_eq!(store.get(Keyspace::Durable, "k").await.unwrap(), None);
+    });
+    assert!(
+        lines.iter().any(|l| l.contains("time to live")),
+        "{lines:?}"
+    );
+}
+
+/// A worker whose `UpdateTimeToLive` meets TTL another worker enabled first
+/// starts.
+#[tokio::test]
+async fn enabling_ttl_another_worker_enabled_starts_the_store() {
+    let updates = Arc::new(AtomicUsize::new(0));
+    let off = || {
+        Reply::Json(
+            200,
+            r#"{"TimeToLiveDescription":{"TimeToLiveStatus":"DISABLED"}}"#.into(),
+        )
+    };
+    let already = || {
+        Reply::Json(
+            400,
+            r#"{"__type":"com.amazon.coral.validate#ValidationException",
+                "message":"TimeToLive is already enabled"}"#
+                .into(),
+        )
+    };
+    let (url, _) = serve(startup_script(off, already, updates.clone())).await;
+    let mut config = DynamoDbConfig::new("spate-test", "job");
+    config.create_table = true;
+    let store = store_with(table_at(&url), config);
+    assert_eq!(store.get(Keyspace::Durable, "k").await.unwrap(), None);
+    assert_eq!(updates.load(Ordering::SeqCst), 1);
+}
+
+/// A `CreateTable` that meets a table another worker is creating adopts it.
+#[tokio::test]
+async fn create_table_adopts_a_table_another_worker_is_creating() {
+    let (url, _) = serve(always(|| {
+        Reply::Json(400, error_body("ResourceInUseException"))
+    }))
+    .await;
+    table_at(&url).create_table().await.unwrap();
+}
+
+/// `DescribeTable` reports replicas and a status the store cannot use.
+#[tokio::test]
+async fn describe_reports_replicas_and_an_unusable_status() {
+    let (url, _) = serve(always(|| {
+        Reply::Json(
+            200,
+            r#"{"Table":{"TableStatus":"DELETING",
+                "KeySchema":[{"AttributeName":"pk","KeyType":"HASH"},
+                             {"AttributeName":"sk","KeyType":"RANGE"}],
+                "AttributeDefinitions":[{"AttributeName":"pk","AttributeType":"S"},
+                                        {"AttributeName":"sk","AttributeType":"S"}],
+                "Replicas":[{"RegionName":"eu-west-2","ReplicaStatus":"ACTIVE"}]}}"#
+                .into(),
+        )
+    }))
+    .await;
+    let shape = table_at(&url).describe().await.unwrap().expect("a table");
+    assert_eq!(shape.status, super::table::Status::Other("DELETING".into()));
+    assert_eq!(shape.replicas, 1);
+}
+
+/// Falling back to the bundled roots is logged at WARN.
+#[test]
+fn an_empty_system_store_warns() {
+    let lines = warnings(async || {
+        http_client(|| native_certs(vec![])).await.unwrap();
+    });
+    assert!(
+        lines.iter().any(|l| l.contains("Mozilla root bundle")),
+        "{lines:?}"
+    );
 }

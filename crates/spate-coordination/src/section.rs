@@ -264,6 +264,22 @@ mod tests {
         spec.build(rt.handle().clone(), None).unwrap();
     }
 
+    /// A reconcile interval under a minute on the DynamoDB store is logged
+    /// at WARN.
+    #[test]
+    #[cfg(feature = "dynamodb")]
+    fn a_short_reconcile_interval_warns() {
+        let warned = |interval: &str| {
+            let body = format!("{DYNAMODB}  reconcile_interval: {interval}\n");
+            let lines = spate_test::capture_logs(tracing::Level::WARN, || {
+                CoordinatorSpec::from_section(&section(&body)).unwrap();
+            });
+            lines.iter().any(|l| l.contains("reconcile"))
+        };
+        assert!(warned("30s"));
+        assert!(!warned("5m"));
+    }
+
     #[test]
     #[cfg(feature = "dynamodb")]
     fn dynamodb_errors_carry_the_store_path() {

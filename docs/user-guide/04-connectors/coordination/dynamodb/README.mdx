@@ -81,6 +81,10 @@ SSO sessions and `credential_process`), web identity tokens (IAM roles for
 service accounts on EKS), container credentials (ECS task roles and EKS Pod
 Identity), and EC2 instance metadata (IMDSv2).
 
+Requests to DynamoDB and to the credential providers go through the proxies
+the standard variables name (`HTTPS_PROXY`, `HTTP_PROXY` and `ALL_PROXY`),
+except for hosts `NO_PROXY` lists.
+
 The store verifies the endpoint's certificate against the system trust store,
 read once per worker. When `SSL_CERT_FILE` or `SSL_CERT_DIR` is set, the
 certificates they name replace the system store. If the store yields no

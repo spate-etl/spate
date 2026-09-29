@@ -486,3 +486,38 @@ async fn a_retried_write_whose_first_attempt_landed_wins() {
         "one attempt and one retry"
     );
 }
+
+/// Names the endpoint for the child run of
+/// [`requests_go_through_the_proxy_the_environment_names`].
+const PROXY_TARGET: &str = "SPATE_TEST_DYNAMODB_PROXY_TARGET";
+
+/// A request goes through the proxy `HTTP_PROXY` names. The client runs in a
+/// child process, so the variable reaches no other test.
+#[tokio::test(flavor = "multi_thread")]
+async fn requests_go_through_the_proxy_the_environment_names() {
+    if let Ok(target) = std::env::var(PROXY_TARGET) {
+        let http = http_client(|| native_certs(vec![])).await.unwrap();
+        let found = table_over(&target, http).get("job#d", "k").await.unwrap();
+        assert_eq!(found, None);
+        return;
+    }
+    let (proxy, proxy_hits) = serve(always(|| Reply::Json(200, "{}".into()))).await;
+    let (target, target_hits) = serve(always(|| Reply::Json(200, "{}".into()))).await;
+    let (_, module) = module_path!().split_once("::").unwrap();
+    let name = format!("{module}::requests_go_through_the_proxy_the_environment_names");
+    tokio::task::block_in_place(|| {
+        spate_test_support::run_in_child(&name, |child| {
+            child
+                .env_remove("http_proxy")
+                .env_remove("NO_PROXY")
+                .env_remove("no_proxy")
+                .env("HTTP_PROXY", &proxy)
+                .env(PROXY_TARGET, &target)
+        });
+    });
+    let hits = (
+        proxy_hits.load(Ordering::SeqCst),
+        target_hits.load(Ordering::SeqCst),
+    );
+    assert_eq!(hits, (1, 0), "(proxy, endpoint) requests");
+}

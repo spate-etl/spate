@@ -20,6 +20,8 @@ use aws_sdk_dynamodb::types::{
     ReturnValuesOnConditionCheckFailure, ScalarAttributeType, TableStatus, TimeToLiveSpecification,
     TimeToLiveStatus,
 };
+use aws_smithy_http_client::ConnectorBuilder;
+use aws_smithy_http_client::proxy::ProxyConfig;
 use aws_smithy_http_client::tls::rustls_provider::CryptoMode;
 use aws_smithy_http_client::tls::{Provider, TlsContext, TrustStore};
 use rustls_native_certs::CertificateResult;
@@ -58,7 +60,8 @@ pub(super) async fn connect(settings: &Settings) -> Result<Arc<dyn Table>, Store
 }
 
 /// An HTTPS client that verifies servers against the certificates `system`
-/// yields, or against the bundled Mozilla roots when none of them parse.
+/// yields, or against the bundled Mozilla roots when none of them parse. It
+/// goes through the proxies the standard environment variables name.
 pub(super) async fn http_client(
     system: impl FnOnce() -> CertificateResult + Send + 'static,
 ) -> Result<aws_sdk_dynamodb::config::SharedHttpClient, StoreError> {
@@ -75,10 +78,22 @@ pub(super) async fn http_client(
         .with_trust_store(TrustStore::empty().with_pem_certificate(roots))
         .build()
         .map_err(|e| StoreError::Fatal(format!("building the DynamoDB TLS context: {e}")))?;
-    Ok(aws_smithy_http_client::Builder::new()
-        .tls_provider(Provider::Rustls(CryptoMode::AwsLc))
-        .tls_context(tls)
-        .build_https())
+    // The connector the SDK's default client builds, with this trust store.
+    Ok(
+        aws_smithy_http_client::Builder::new().build_with_connector_fn(
+            move |settings, components| {
+                let mut connector = ConnectorBuilder::default()
+                    .tls_provider(Provider::Rustls(CryptoMode::AwsLc))
+                    .tls_context(tls.clone())
+                    .proxy_config(ProxyConfig::from_env());
+                connector.set_connector_settings(settings.cloned());
+                if let Some(components) = components {
+                    connector.set_sleep_impl(components.sleep_impl());
+                }
+                connector.build()
+            },
+        ),
+    )
 }
 
 /// The parsable certificates in `loaded` as one PEM bundle, or the Mozilla

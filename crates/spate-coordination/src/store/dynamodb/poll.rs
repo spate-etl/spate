@@ -345,3 +345,39 @@ impl Poll {
         snapshot
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item(v: u64, tomb: bool) -> (String, Item) {
+        let item = Item {
+            v,
+            b: (!tomb).then(|| b"v".to_vec()),
+            w: None,
+            tomb,
+            x: None,
+        };
+        ("assign.x".to_string(), item)
+    }
+
+    /// An eventually consistent read of an older tombstone after a newer one
+    /// leaves the floor at the newer, so the older incarnation between them
+    /// is not put.
+    #[test]
+    fn a_floor_never_falls_to_an_older_tombstone() {
+        let (events, mut received) = mpsc::unbounded_channel();
+        let mut poll = Poll {
+            ks: Keyspace::Durable,
+            prefix: "assign.".to_string(),
+            seen: BTreeMap::new(),
+            deleted: BTreeMap::new(),
+            subscribers: vec![events],
+        };
+        for read in [item(4, true), item(2, true), item(3, false)] {
+            poll.apply_durable(vec![read], false);
+        }
+        let event = received.try_recv();
+        assert!(event.is_err(), "{event:?}");
+    }
+}

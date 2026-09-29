@@ -1847,9 +1847,12 @@ impl<S: CoordinationStore + Clone> Task<S> {
     /// Leader side: compute the desired assignment and publish the records
     /// that changed.
     ///
-    /// Gated on `assign_dirty`, which every input to the decision sets:
-    /// membership, split status, ownership, spec arrival, and a grace window
-    /// elapsing. [`protocol::desired_assignment`] is a fixpoint, so
+    /// Gated on `assign_dirty`, which membership, split status, ownership,
+    /// spec arrival, a grace window elapsing and a deleted assignment record
+    /// set. A put of another writer's assignment record sets nothing; it
+    /// reaches the decision at the next publish something else triggers, the
+    /// reconcile backstop at the latest.
+    /// [`protocol::desired_assignment`] is a fixpoint, so
     /// recomputing on a clean fleet would publish nothing; it is skipped
     /// anyway because the recompute itself is an O(members x splits) scan
     /// and `step` runs on every watch event, which on a commit-heavy fleet

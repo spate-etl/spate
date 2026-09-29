@@ -116,11 +116,12 @@ page.
 2. **No split assigned twice.** No split appears in two instances'
    assignments. — `no_split_is_assigned_twice`
 3. **Stable under unchanged input.** Feeding the function's own output back
-   as the last published assignment reproduces it exactly, whether each
-   split's claim is in the leader's view or not yet; the assignment is a
-   fixpoint. A steady-state fleet therefore publishes nothing and drains
-   nothing, and a claim on its way to the leader moves nothing. —
-   `assignment_is_stable_under_unchanged_input`,
+   as the last published assignment reproduces it exactly, while each
+   split's claim in the leader's view matches that output or is absent; the
+   assignment is a fixpoint. A steady-state fleet therefore publishes
+   nothing and drains nothing, and a claim on its way to the leader moves
+   nothing. — `assignment_is_stable_under_unchanged_input`,
+   `assignment_is_stable_under_unchanged_ownership`,
    `assignment_is_stable_before_its_claims_are_seen`
 4. **Locally optimal.** No single split can move to a member with lane
    budget and reduce imbalance. — `assignment_admits_no_improving_move`

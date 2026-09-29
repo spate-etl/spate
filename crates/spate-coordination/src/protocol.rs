@@ -135,12 +135,13 @@ pub(crate) fn live_workers(presence: &BTreeMap<String, Revision>, instance: &str
 ///
 /// The passes run in order:
 ///
-/// 1. **Sticky.** Every split stays with the first of its lease owner, its
-///    `previous` assignee and its progress record's owner that is a live
-///    member with a free lane. A move costs a drain, so the assignment does
-///    not churn for a marginally better balance. The `previous` assignee
-///    keeps a split whose claim the leader has not observed yet with the
-///    member told to claim it.
+/// 1. **Sticky.** Every split whose lease owner is a live member with a
+///    free lane stays with it. Each remaining split then stays with the
+///    first of its `previous` assignee and its progress record's owner that
+///    is a live member with a free lane. A move costs a drain, so the
+///    assignment does not churn for a marginally better balance. The
+///    `previous` assignee keeps a split whose claim the leader has not
+///    observed yet with the member told to claim it.
 /// 2. **Fill.** Unassigned splits go to the least-loaded member that has
 ///    lane budget, heaviest split first (longest-processing-time greedy).
 /// 3. **Improve.** While some split can move from a heavier member to a
@@ -218,32 +219,47 @@ pub(crate) fn desired_assignment(
     // which splits an over-capacity owner keeps.
     pool.sort_by_key(|(id, weight, _)| (std::cmp::Reverse(*weight), *id));
 
-    // Pass 1 — sticky. The record owner covers a split whose owner died and
-    // whose lease has expired but which no worker has reclaimed yet.
+    // Pass 1 — sticky. Leased splits go first over the whole pool: in a
+    // single walk, a split kept only by `previous` can take the lane its
+    // lease owner still needs. The record owner covers a split whose owner
+    // died and whose lease has expired but which no worker has reclaimed yet.
     //
     // Loads are summed with `saturating_add`: a weight is planner-supplied
     // and unbounded (`spate-s3` reports bytes), and a leader must publish a
     // slightly-wrong assignment rather than panic on an overflow it cannot
     // influence.
+    let fits = |out: &BTreeMap<String, Vec<String>>, m: &str| {
+        members.contains(m) && out[m].len() < caps[m]
+    };
+    let place = |out: &mut BTreeMap<String, Vec<String>>,
+                 load: &mut BTreeMap<&str, u64>,
+                 member: &str,
+                 id: &str,
+                 weight: u64| {
+        out.get_mut(member)
+            .expect("live member")
+            .push(id.to_string());
+        let l = load.get_mut(member).expect("live member");
+        *l = l.saturating_add(weight);
+    };
+    let mut rest: Vec<(&str, u64, &SplitState)> = Vec::new();
+    for &(id, weight, state) in &pool {
+        let owner = state.lease.as_ref().map(|(lease, _)| lease.owner.as_str());
+        match owner.filter(|m| fits(&out, m)) {
+            Some(member) => place(&mut out, &mut load, member, id, weight),
+            None => rest.push((id, weight, state)),
+        }
+    }
     let mut unplaced: Vec<(&str, u64)> = Vec::new();
-    for (id, weight, state) in &pool {
-        let fits = |m: &&str| members.contains(*m) && out[*m].len() < caps[*m];
-        let sticky = state
-            .lease
-            .as_ref()
-            .map(|(lease, _)| lease.owner.as_str())
-            .filter(fits)
-            .or_else(|| previous.get(id).copied().filter(fits))
-            .or_else(|| state.progress.owner.as_deref().filter(fits));
+    for (id, weight, state) in rest {
+        let sticky = previous
+            .get(id)
+            .copied()
+            .filter(|m| fits(&out, m))
+            .or_else(|| state.progress.owner.as_deref().filter(|m| fits(&out, m)));
         match sticky {
-            Some(member) => {
-                out.get_mut(member)
-                    .expect("live member")
-                    .push(id.to_string());
-                let l = load.get_mut(member).expect("live member");
-                *l = l.saturating_add(*weight);
-            }
-            None => unplaced.push((id, *weight)),
+            Some(member) => place(&mut out, &mut load, member, id, weight),
+            None => unplaced.push((id, weight)),
         }
     }
 
@@ -1112,6 +1128,46 @@ mod tests {
         );
         assert_eq!(out["w1"], ["a"], "w1 advertised a single lane");
         assert_eq!(out["w2"], ["b", "heavy"]);
+    }
+
+    /// A split its lease owner still holds keeps that owner's lane ahead of
+    /// a split kept only by its last assignee.
+    #[test]
+    fn a_draining_split_returns_to_its_lease_owner() {
+        // b is leased by w1 and was last published to w2; w1 was last given a.
+        let map = assign_map(&[("a", 1, None), ("b", 1, Some("w1"))]);
+        let previous: BTreeMap<String, String> = [("a", "w1"), ("b", "w2")]
+            .into_iter()
+            .map(|(s, m)| (s.to_string(), m.to_string()))
+            .collect();
+        let out = assign_after(
+            &members(&["w1", "w2"]),
+            &map,
+            &BTreeSet::new(),
+            &previous,
+            1,
+            7,
+        );
+        assert_eq!(out["w1"], ["b"], "the revocation of b is not taken back");
+    }
+
+    /// A heavier split kept by its last assignee, which pass 1 reaches first,
+    /// does not take the lane of the lease owner it names, whether or not the
+    /// leased split's own last assignee is still a member.
+    #[test]
+    fn a_heavier_unclaimed_split_leaves_a_lease_owner_its_lane() {
+        let map = assign_map(&[("d", 1, Some("w0")), ("q", 2, None)]);
+        let previous: BTreeMap<String, String> = [("d", "w1"), ("q", "w0")]
+            .into_iter()
+            .map(|(s, m)| (s.to_string(), m.to_string()))
+            .collect();
+        for fleet in [["w0", "w1"], ["w0", "w2"]] {
+            for seed in 0..32 {
+                let out =
+                    assign_after(&members(&fleet), &map, &BTreeSet::new(), &previous, 1, seed);
+                assert_eq!(out["w0"], ["d"], "fleet {fleet:?}, seed {seed}");
+            }
+        }
     }
 
     proptest! {

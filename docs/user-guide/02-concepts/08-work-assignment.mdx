@@ -158,14 +158,16 @@ known at planning time and cost nothing to collect.
 
 The passes:
 
-1. **Sticky** — every split stays with the first of these that is a live
-   member with a free lane: the owner of its lease, the member the last
+1. **Sticky** — every split whose lease owner is a live member with a
+   free lane stays with it. Each remaining split then stays with the first
+   of these that is a live member with a free lane: the member the last
    published assignment named for it, and the owner on its progress record.
-   A move costs a drain, so an assignment that churns for a marginally
-   better balance is worse than one that does not. The last published
-   assignment covers the time between an assignment and its claim reaching
-   the leader's view, which is a store round trip, or up to a poll interval
-   on a store whose watch is polled.
+   Leased splits go first, so a split waiting for its claim cannot take a
+   lane its lease owner still holds. A move costs a drain, so an assignment
+   that churns for a marginally better balance is worse than one that does
+   not. The last published assignment covers the time between an
+   assignment and its claim reaching the leader's view: a store round trip,
+   or up to about two poll intervals on a store whose watch is polled.
 2. **Fill** — unassigned splits go to the least-loaded member with lane
    budget, heaviest split first (longest-processing-time greedy).
 3. **Improve** — while a split can move from a heavier member to a lighter

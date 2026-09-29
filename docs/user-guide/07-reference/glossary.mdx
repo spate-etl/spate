@@ -181,8 +181,10 @@ How a coordinated fleet stays balanced: the elected leader computes which
 `assign.{instance}` record per worker; each worker reconciles toward its
 own record, claiming what is named and cooperatively giving up what is
 not. Workers never select work for themselves. Balance is on split
-*weight* (not count), and sticky. A split whose owner is alive stays put
-unless moving it strictly reduces imbalance, because every move costs a
+*weight* (not count), and sticky. A split stays with the worker holding its
+lease, else the worker it was last assigned to, else the owner on its
+progress record, whichever first is alive with a free lane. It moves only
+when that strictly reduces imbalance, because every move costs a
 [revocation](#cooperative-revocation).
 
 An assignment is an *instruction, not a fence*: it says what a worker

@@ -2,7 +2,6 @@
 //! error classification, timeouts, TLS and write-id resolution.
 
 use super::sdk::{SdkTable, Settings, http_client, trust_roots};
-use super::table::Table as _;
 use super::*;
 use aws_config::SdkConfig;
 use aws_credential_types::provider::error::CredentialsError;

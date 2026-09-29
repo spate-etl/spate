@@ -47,6 +47,7 @@ pub struct TapStore<S> {
     hook: Arc<Mutex<Option<Hook>>>,
     list_hook: Arc<Mutex<Option<ListHook>>>,
     get_hook: Arc<Mutex<Option<GetHook>>>,
+    watched: Arc<Mutex<Vec<(Keyspace, String)>>>,
     injectors: Arc<Mutex<Injectors>>,
 }
 
@@ -58,6 +59,7 @@ impl<S> TapStore<S> {
             hook: Arc::default(),
             list_hook: Arc::default(),
             get_hook: Arc::default(),
+            watched: Arc::default(),
             injectors: Arc::default(),
         }
     }
@@ -95,6 +97,11 @@ impl<S> TapStore<S> {
         hook: impl Fn(Keyspace, &str) -> Option<StoreError> + Send + Sync + 'static,
     ) {
         *self.get_hook.lock().expect("tap") = Some(Arc::new(hook));
+    }
+
+    /// Every watch established through this handle, in order.
+    pub fn watched(&self) -> Vec<(Keyspace, String)> {
+        self.watched.lock().expect("tap").clone()
     }
 
     /// Deliver `event` on every live watch of `ks`.
@@ -178,6 +185,10 @@ impl<S: CoordinationStore + Clone> CoordinationStore for TapStore<S> {
     }
 
     async fn watch(&self, ks: Keyspace, prefix: &str) -> Result<WatchStream, StoreError> {
+        self.watched
+            .lock()
+            .expect("tap")
+            .push((ks, prefix.to_string()));
         let inner = self.inner.watch(ks, prefix).await?;
         let (tx, rx) = mpsc::unbounded_channel();
         self.injectors.lock().expect("tap").push((ks, tx));

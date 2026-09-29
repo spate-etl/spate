@@ -277,7 +277,7 @@ coordination:
 | `max_in_flight` | integer | `8` | The working set: splits an instance holds and processes at once, and its data-lane count. |
 | `max_attempts` | integer | `4` | Failing tenancies before a split is quarantined. |
 | `replan_interval` | duration | `60s` | How often the leader re-runs an open plan. At least `lease_duration`. Final plans stop replanning. |
-| `reconcile_interval` | duration | `30s` | How often each instance checks its watch-fed view against a full listing. |
+| `reconcile_interval` | duration | `30s` | How often each instance checks its watch-fed view against a full listing. On a store whose watch is polled, only the leader reconciles, and only the split records. |
 | `rebalance_delay` | duration | `20s` | How long the leader withholds a departed instance's splits before reassigning them, so a restart reclaims its own work. Cancelled early when the instance returns; `0s` reassigns at once. |
 | `drain_deadline` | duration | `10s` | How long a revoked split may keep draining before its release is forced and its uncommitted tail replays. Also the no-progress timeout for a drain whose revocation was cancelled. At least `op_timeout`; may exceed `lease_duration`, since a draining split is still heartbeated. See [time to balance](../05-deployment/scaling-out.mdx#time-to-balance). |
 | `startup_max_attempts` | integer | `8` | Attempts at the startup steps (store probe, join, seeding) before startup fails. |

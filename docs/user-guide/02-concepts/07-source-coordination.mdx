@@ -36,9 +36,10 @@ desired assignment and publishes it; each worker claims what it is named
 for, up to `max_in_flight`, and materializes a data lane per split it
 holds. Splits above the fleet's total lane budget sit unleased in the
 store, forming the queue. A lease is a TTL'd key the owner heartbeats at
-a third of the lease duration; distribution is push-driven (workers watch
-the store), so an assignment or a release is acted on in milliseconds,
-not poll intervals.
+a third of the lease duration. Workers watch the store, so an assignment
+or a release is acted on at the store's discovery latency: milliseconds on
+a store that pushes changes, one poll interval on a store whose watch is
+polled.
 
 **Failures flow back automatically.** A dead worker stops heartbeating;
 its leases expire one TTL later and its work is reassigned, resuming each

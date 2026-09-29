@@ -388,6 +388,54 @@ async fn a_durable_key_deleted_between_polls_is_not_put() {
     assert!(after.is_err(), "deleted at {v2:?}: {after:?}");
 }
 
+/// An eventually consistent poll that omits a tombstoned key keeps its
+/// floor, so a later stale read of the item from before the delete puts
+/// nothing.
+#[tokio::test(start_paused = true)]
+async fn an_eventually_consistent_omission_keeps_the_floor() {
+    let table = FakeTable::new();
+    let a = handle(&table, &TestClock::frozen());
+    let mut watch = a.watch(D, "assign.").await.unwrap();
+    assert!(snapshot(&mut watch).await.is_empty());
+    let polled = async |table: &FakeTable| {
+        let polls = table.count(FakeOp::Query);
+        while table.count(FakeOp::Query) < polls + 1 {
+            tokio::time::sleep(POLL / 2).await;
+        }
+    };
+    let v1 = won(a.create(D, "assign.x", b"old".to_vec()).await.unwrap());
+    let v2 = won(a.delete(D, "assign.x", Some(v1)).await.unwrap());
+    polled(&table).await;
+    table.set_unseen("job#d", "assign.x", true);
+    polled(&table).await;
+    table.set_unseen("job#d", "assign.x", false);
+    table.set_stale_reads(true);
+    let after = tokio::time::timeout(POLL * 5, watch.next()).await;
+    assert!(after.is_err(), "deleted at {v2:?}: {after:?}");
+}
+
+/// A key's second incarnation, created and deleted between two polls,
+/// raises its floor to the newer tombstone, so a stale read of that
+/// incarnation puts nothing.
+#[tokio::test(start_paused = true)]
+async fn a_floor_rises_to_the_newest_tombstone_read() {
+    let table = FakeTable::new();
+    let a = handle(&table, &TestClock::frozen());
+    let v1 = won(a.create(D, "assign.x", b"old".to_vec()).await.unwrap());
+    won(a.delete(D, "assign.x", Some(v1)).await.unwrap());
+    let mut watch = a.watch(D, "assign.").await.unwrap();
+    assert!(snapshot(&mut watch).await.is_empty());
+    let v3 = won(a.create(D, "assign.x", b"mid".to_vec()).await.unwrap());
+    let v4 = won(a.delete(D, "assign.x", Some(v3)).await.unwrap());
+    let polls = table.count(FakeOp::Query);
+    while table.count(FakeOp::Query) < polls + 1 {
+        tokio::time::sleep(POLL / 2).await;
+    }
+    table.set_stale_reads(true);
+    let after = tokio::time::timeout(POLL * 5, watch.next()).await;
+    assert!(after.is_err(), "deleted at {v4:?}: {after:?}");
+}
+
 /// Once a consistent read no longer lists a tombstone, as after native TTL
 /// collects it, a key re-created below its revision reaches the watch.
 #[tokio::test(start_paused = true)]

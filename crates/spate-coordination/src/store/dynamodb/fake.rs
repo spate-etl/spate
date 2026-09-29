@@ -6,7 +6,7 @@ use super::table::{
     BoxFuture, Cond, Item, KeyAttr, Meta, Page, Query, Shape, Status, Table, Ttl, Write, Written,
 };
 use crate::store::StoreError;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::Bound;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -45,6 +45,8 @@ struct State {
     failures: HashMap<FakeOp, bool>,
     counts: HashMap<FakeOp, u64>,
     queries: Vec<Query>,
+    /// Keys eventually consistent reads serve as absent.
+    unseen: BTreeSet<(String, String)>,
 }
 
 #[derive(Debug)]
@@ -127,6 +129,7 @@ impl FakeTable {
                 failures: HashMap::new(),
                 counts: HashMap::new(),
                 queries: Vec::new(),
+                unseen: BTreeSet::new(),
             }),
             page_bytes: AtomicUsize::new(PAGE_BYTES),
             stale_reads: AtomicBool::new(false),
@@ -184,6 +187,19 @@ impl FakeTable {
     /// Serves eventually consistent reads from each item's previous state.
     pub fn set_stale_reads(&self, stale: bool) {
         self.0.stale_reads.store(stale, Ordering::SeqCst);
+    }
+
+    /// While `unseen` holds, eventually consistent reads omit `sk`, as a
+    /// replica that has applied neither its create nor its later writes does.
+    #[cfg(test)]
+    pub(crate) fn set_unseen(&self, pk: &str, sk: &str, unseen: bool) {
+        let key = (pk.to_string(), sk.to_string());
+        let mut state = self.state();
+        if unseen {
+            state.unseen.insert(key);
+        } else {
+            state.unseen.remove(&key);
+        }
     }
 
     /// Applies the next write, then reports its condition failed against
@@ -349,6 +365,7 @@ impl FakeTable {
             .range((from, Bound::Unbounded))
             .take_while(|((pk, _), _)| *pk == query.pk)
             .filter(|((_, sk), _)| sk.starts_with(prefix))
+            .filter(|(key, _)| query.consistent || !state.unseen.contains(*key))
             .filter_map(|((_, sk), slot)| {
                 let item = if stale { &slot.prev } else { &slot.cur };
                 item.as_ref().map(|i| (sk, i))

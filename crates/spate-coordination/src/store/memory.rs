@@ -17,7 +17,7 @@ use super::{
 use futures_util::StreamExt as _;
 use spate_core::clock::tokio::{Clock, SystemClock};
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use tokio::sync::broadcast;
@@ -70,7 +70,8 @@ struct Inner {
     durable: Space,
     ephemeral: Space,
     lease_ttl: Duration,
-    sweeper_started: AtomicBool,
+    /// The expiry sweeper, on the runtime of the call that last spawned it.
+    sweeper: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Time source for ephemeral deadlines and expiry. `SystemClock` in
     /// production; a frozen clock in tests makes expiry deterministic.
     clock: Arc<dyn Clock>,
@@ -110,25 +111,22 @@ impl MemoryStore {
                 durable: Space::new(),
                 ephemeral: Space::new(),
                 lease_ttl,
-                sweeper_started: AtomicBool::new(false),
+                sweeper: Mutex::new(None),
                 clock,
             }),
         }
     }
 
-    /// Spawn the expiry sweeper on first ephemeral use. Called from async
-    /// context only, so a runtime is guaranteed.
+    /// Spawn the expiry sweeper on first ephemeral use, and again once the
+    /// runtime it ran on has stopped. Called from async context only, so a
+    /// runtime is guaranteed.
     fn ensure_sweeper(&self) {
-        if self
-            .inner
-            .sweeper_started
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
+        let mut sweeper = self.inner.sweeper.lock().expect("memory store poisoned");
+        if sweeper.as_ref().is_some_and(|task| !task.is_finished()) {
             return;
         }
         let weak = Arc::downgrade(&self.inner);
-        tokio::spawn(async move {
+        *sweeper = Some(tokio::spawn(async move {
             loop {
                 tokio::time::sleep(SWEEP_INTERVAL).await;
                 let Some(inner) = weak.upgrade() else {
@@ -150,7 +148,7 @@ impl MemoryStore {
                 });
                 drop(entries);
             }
-        });
+        }));
     }
 
     /// Drop an ephemeral entry that expired between sweeps: reads must
@@ -532,6 +530,43 @@ mod tests {
             }
         }
         assert!(deleted.contains("split.a") && deleted.contains("split.b"));
+    }
+
+    /// Expiry keeps reaching watchers after the runtime that first used the
+    /// store stops.
+    #[test]
+    fn expiry_outlives_the_runtime_that_first_used_the_store() {
+        let runtime = || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+        };
+        let s = store();
+        let first = runtime();
+        first.block_on(async {
+            s.create(Keyspace::Ephemeral, "lease", b"v".to_vec())
+                .await
+                .unwrap()
+                .won()
+                .unwrap();
+        });
+        drop(first);
+
+        runtime().block_on(async {
+            let mut watch = s.watch(Keyspace::Ephemeral, "").await.unwrap();
+            let deadline = tokio::time::Instant::now() + TTL * 10;
+            loop {
+                let event = tokio::time::timeout_at(deadline, watch.next())
+                    .await
+                    .expect("expiry must surface after the first runtime stopped")
+                    .unwrap()
+                    .unwrap();
+                if matches!(event, WatchEvent::Delete { ref key, .. } if key == "lease") {
+                    break;
+                }
+            }
+        });
     }
 
     #[tokio::test]

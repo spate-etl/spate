@@ -615,3 +615,112 @@ fn a_direct_release_whose_lease_delete_fails_consumes_no_attempt() {
         "a direct release with a failed lease delete charged {moved} a delivery attempt: {record}"
     );
 }
+
+/// A store that opens a TCP connection on every operation once `io` is set,
+/// as a client that dials per request does.
+#[derive(Clone)]
+struct DialingStore {
+    inner: MemoryStore,
+    io: Arc<AtomicBool>,
+    peer: std::net::SocketAddr,
+}
+
+impl DialingStore {
+    async fn dial(&self) -> Result<(), StoreError> {
+        if self.io.load(Ordering::Acquire) {
+            tokio::net::TcpStream::connect(self.peer)
+                .await
+                .map_err(|e| StoreError::Retryable(format!("dial: {e}")))?;
+        }
+        Ok(())
+    }
+}
+
+impl CoordinationStore for DialingStore {
+    fn lease_ttl(&self) -> Duration {
+        self.inner.lease_ttl()
+    }
+
+    async fn create(
+        &self,
+        ks: Keyspace,
+        key: &str,
+        value: Vec<u8>,
+    ) -> Result<CasOutcome, StoreError> {
+        self.dial().await?;
+        self.inner.create(ks, key, value).await
+    }
+
+    async fn update(
+        &self,
+        ks: Keyspace,
+        key: &str,
+        value: Vec<u8>,
+        expected: Revision,
+    ) -> Result<CasOutcome, StoreError> {
+        self.dial().await?;
+        self.inner.update(ks, key, value, expected).await
+    }
+
+    async fn get(&self, ks: Keyspace, key: &str) -> Result<Option<Entry>, StoreError> {
+        self.dial().await?;
+        self.inner.get(ks, key).await
+    }
+
+    async fn delete(
+        &self,
+        ks: Keyspace,
+        key: &str,
+        expected: Option<Revision>,
+    ) -> Result<CasOutcome, StoreError> {
+        self.dial().await?;
+        self.inner.delete(ks, key, expected).await
+    }
+
+    async fn watch(&self, ks: Keyspace, prefix: &str) -> Result<WatchStream, StoreError> {
+        self.inner.watch(ks, prefix).await
+    }
+
+    async fn list(&self, ks: Keyspace, prefix: &str) -> Result<Vec<Entry>, StoreError> {
+        self.dial().await?;
+        self.inner.list(ks, prefix).await
+    }
+}
+
+/// Dropping a coordinator hands its splits back through a store whose
+/// client opens connections, so a peer claims them without waiting out the
+/// lease.
+#[test]
+fn a_drop_time_release_can_open_connections() {
+    let rt = runtime();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let store = DialingStore {
+        inner: MemoryStore::new(support::LEASE),
+        io: Arc::new(AtomicBool::new(false)),
+        peer: listener.local_addr().unwrap(),
+    };
+    let mut w = StoreCoordinator::new(
+        store.clone(),
+        config(Some("worker-a")),
+        rt.handle().clone(),
+        None,
+    )
+    .expect("coordinator");
+    w.start(Box::new(PhasedPlanner::one_final("dial:v1", &["d0"])))
+        .unwrap();
+    support::drive(&mut w, &mut Held::default(), "claiming d0", |h| {
+        h.splits.len() == 1
+    });
+
+    store.io.store(true, Ordering::Release);
+    drop(w);
+    let record = rt
+        .block_on(store.inner.get(Keyspace::Durable, "split.d0"))
+        .unwrap()
+        .expect("record");
+    let record = record_json(&record.value);
+    assert!(
+        record["owner"].is_null(),
+        "the split was not released: {record}"
+    );
+}

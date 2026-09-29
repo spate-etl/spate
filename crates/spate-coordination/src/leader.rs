@@ -15,7 +15,7 @@
 //! [`Task::finish_plan`] lands it). A slow enumeration must never stall
 //! heartbeats, watch processing, or command service.
 
-use crate::error::store_error;
+use crate::error::{fatal_only, store_error};
 use crate::records::{self, LeaderVal, PlanFinalityRepr, SplitProgressRecord, SplitSpecRecord};
 use crate::store::{CasOutcome, CoordinationStore, Keyspace, Revision, StoreError};
 use crate::task::Task;
@@ -74,7 +74,7 @@ impl<S: CoordinationStore> Task<S> {
             Ok(CasOutcome::Lost) => Ok(()), // someone else won; watch will show them
             Err(e) => {
                 tracing::warn!(error = %e, "election write failed; retrying on observation");
-                Ok(())
+                fatal_only("writing the leader key", &e)
             }
         }
     }
@@ -88,7 +88,7 @@ impl<S: CoordinationStore> Task<S> {
             };
             if plan.generation >= generation {
                 // A racing successor already fenced past us; demote.
-                self.demote().await;
+                self.demote().await?;
                 return Ok(());
             }
             let mut bumped = plan.clone();
@@ -131,18 +131,23 @@ impl<S: CoordinationStore> Task<S> {
         }
         // Could not fence the generation: give leadership back rather
         // than plan without a fence.
-        self.demote().await;
+        self.demote().await?;
         Ok(())
     }
 
-    pub(crate) async fn demote(&mut self) {
+    /// Give leadership up. Only a fatal store error is returned.
+    pub(crate) async fn demote(&mut self) -> Result<(), CoordinationError> {
         if let Some(rev) = self.leadership.take() {
             self.metrics(|m| m.set_leader(false));
-            let _ = self
+            if let Err(e) = self
                 .store
                 .delete(Keyspace::Ephemeral, records::LEADER_KEY, Some(rev))
-                .await;
+                .await
+            {
+                fatal_only("deleting the leader key", &e)?;
+            }
         }
+        Ok(())
     }
 
     /// Kick a planner run off onto the blocking pool if one is due. The
@@ -240,7 +245,7 @@ impl<S: CoordinationStore> Task<S> {
             tracing::warn!(%split, record, error = %e,
                 "split seeding failed; next replan tick retries");
             self.metrics(|m| m.replan(ReplanOutcome::Error, run.started.elapsed()));
-            return Ok(());
+            return fatal_only(&format!("seeding the {record} record of split {split}"), &e);
         }
 
         // `planned` is recounted from an authoritative listing, never
@@ -257,7 +262,7 @@ impl<S: CoordinationStore> Task<S> {
             Err(e) => {
                 tracing::warn!(error = %e, "planned recount failed; next replan tick retries");
                 self.metrics(|m| m.replan(ReplanOutcome::Error, run.started.elapsed()));
-                return Ok(());
+                return fatal_only("recounting planned splits", &e);
             }
         };
 
@@ -306,13 +311,13 @@ impl<S: CoordinationStore> Task<S> {
                 // recounts them from the store. Demote quietly.
                 tracing::warn!("plan publish fenced; a successor leads");
                 self.metrics(|m| m.replan(ReplanOutcome::Error, run.started.elapsed()));
-                self.demote().await;
+                self.demote().await?;
                 Ok(())
             }
             Err(e) => {
                 tracing::warn!(error = %e, "plan publish failed; next replan tick retries");
                 self.metrics(|m| m.replan(ReplanOutcome::Error, run.started.elapsed()));
-                Ok(())
+                fatal_only("publishing the plan", &e)
             }
         }
     }

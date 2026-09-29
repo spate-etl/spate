@@ -37,7 +37,7 @@ mod polled {
 #[test]
 fn a_zero_rebalance_delay_reassigns_immediately() {
     assert!(
-        reassignment_delay(std::time::Duration::ZERO) < LEASE * 3,
+        reassignment_delay(std::time::Duration::ZERO, RECONCILE) < LEASE * 3,
         "zero delay must not withhold the split"
     );
 }
@@ -46,47 +46,56 @@ fn a_zero_rebalance_delay_reassigns_immediately() {
 /// measuring the window rather than the lease expiry it sits on top of.
 #[test]
 fn a_departed_workers_splits_are_withheld_for_the_grace_window() {
-    let withheld = reassignment_delay(LEASE * 5);
+    let withheld = reassignment_delay(LEASE * 5, RECONCILE);
     assert!(
         withheld >= LEASE * 3,
         "a grace window must actually delay reassignment, took {withheld:?}"
     );
 }
 
+/// A grace window ends on its own clock: the leader reassigns a departed
+/// worker's splits one window after the departure, not at the next reconcile.
+#[test]
+fn a_grace_window_ends_without_waiting_for_a_reconcile() {
+    let taken = reassignment_delay(LEASE * 2, LEASE * 50);
+    assert!(
+        taken < LEASE * 4,
+        "reassignment waited past the window, took {taken:?}"
+    );
+}
+
+/// The suite's reconcile interval.
+const RECONCILE: std::time::Duration = std::time::Duration::from_millis(300);
+
 /// Crash one of two workers and return how much *clock time* the survivor
-/// needed to pick up its split. Both workers share `delay`, because the
-/// leader's copy is the one that governs.
+/// needed to pick up its split. Both workers share `delay` and `reconcile`,
+/// because the leader's copy is the one that governs.
 ///
 /// Runs on a frozen clock the test steps itself: the grace window is a span
 /// of clock time, so measuring it against wall time flakes (#45's cousin),
 /// because a loaded CI scheduler stretches "how long it took" for reasons
 /// unrelated to the window. Stepping the clock measures the window and
 /// nothing else, and collapses a ~10s wall-clock wait to milliseconds.
-fn reassignment_delay(delay: std::time::Duration) -> std::time::Duration {
+fn reassignment_delay(
+    delay: std::time::Duration,
+    reconcile: std::time::Duration,
+) -> std::time::Duration {
     let rt = runtime();
     let clock = support::TestClock::frozen();
     let store = support::store_with_clock(clock.clone());
     let ids = ["s0", "s1"];
     let planner = || Box::new(PhasedPlanner::one_final("delay:v1", &ids));
 
-    let mut a = support::worker_rebalance_delay_clock(
-        &store,
-        rt.handle(),
-        Some("worker-a"),
-        delay,
-        clock.clone(),
-    );
+    let tune = |c: &mut spate_coordination::CoordinationConfig| {
+        c.rebalance_delay = delay;
+        c.reconcile_interval = reconcile;
+    };
+    let mut a = support::worker_tuned_clock(&store, rt.handle(), "worker-a", clock.clone(), tune);
     // B gets its own runtime so it can be killed outright rather than shut
     // down cleanly; a clean stop releases its split and proves nothing
     // about reassignment.
     let rt_b = runtime();
-    let mut b = support::worker_rebalance_delay_clock(
-        &store,
-        rt_b.handle(),
-        Some("worker-b"),
-        delay,
-        clock.clone(),
-    );
+    let mut b = support::worker_tuned_clock(&store, rt_b.handle(), "worker-b", clock.clone(), tune);
     a.start(planner()).unwrap();
     b.start(planner()).unwrap();
     let mut fleet = support::Fleet::new(&store, rt.handle());
@@ -318,6 +327,37 @@ fn a_withdrawn_assignment_record_does_not_release_anything() {
         republished.is_some(),
         "the leader never republished, so the window proved nothing"
     );
+}
+
+/// A leader republishes an assignment record deleted under it without
+/// waiting for a reconcile.
+#[test]
+fn a_withdrawn_assignment_record_is_republished_without_a_reconcile() {
+    let rt = runtime();
+    let clock = support::TestClock::frozen();
+    let store = support::store_with_clock(clock.clone());
+    let mut a = support::worker_tuned_clock(&store, rt.handle(), "worker-a", clock.clone(), |c| {
+        c.reconcile_interval = LEASE * 50;
+    });
+    a.start(Box::new(PhasedPlanner::one_final("republish:v1", &["r0"])))
+        .unwrap();
+    let mut held = Held::default();
+    support::drive_clocked(&mut a, &clock, &mut held, "claiming r0", |h| {
+        h.splits.len() == 1
+    });
+    let mut fleet = support::Fleet::new(&store, rt.handle());
+    fleet.join(&a);
+    fleet.settle(&clock);
+
+    let outcome = rt
+        .block_on(store.delete(Keyspace::Durable, "assign.worker-a", None))
+        .expect("delete");
+    assert!(matches!(outcome, CasOutcome::Won(_)));
+    fleet.settle(&clock);
+    let republished = rt
+        .block_on(store.get(Keyspace::Durable, "assign.worker-a"))
+        .expect("get");
+    assert!(republished.is_some(), "the record was not republished");
 }
 
 /// A revocation the leader takes back is **cancelled**, not forced.

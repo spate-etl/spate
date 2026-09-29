@@ -15,7 +15,7 @@
 //! claimant on its CAS retry, which reduces replay.
 
 use crate::config::CoordinationConfig;
-use crate::error::{fatal, store_error};
+use crate::error::{fatal, fatal_only, store_error};
 use crate::leader::PlanRun;
 use crate::protocol::{self, ClaimAction, ClaimKind, SplitState};
 use crate::records::{
@@ -641,6 +641,7 @@ impl<S: CoordinationStore> Task<S> {
             .map_err(|e| store_error(ctx, &e))?
         {
             let plan = PlanRecord::parse(&entry.value, &self.fingerprint)?;
+            self.plan_rev_seen = entry.revision.0;
             self.plan = Some((plan, entry.revision));
             return Ok(());
         }
@@ -652,6 +653,7 @@ impl<S: CoordinationStore> Task<S> {
             .map_err(|e| store_error("creating the plan record", &e))?
         {
             CasOutcome::Won(rev) => {
+                self.plan_rev_seen = rev.0;
                 self.plan = Some((fresh, rev));
                 Ok(())
             }
@@ -804,6 +806,15 @@ impl<S: CoordinationStore> Task<S> {
 
     fn apply_lease_put(&mut self, entry: &Entry) -> Result<(), CoordinationError> {
         if entry.key == records::LEADER_KEY {
+            // A put at or below a revision already held is a stale echo.
+            let held = self
+                .leader_observed
+                .as_ref()
+                .map(|(_, rev)| *rev)
+                .max(self.leadership);
+            if held.is_some_and(|rev| rev >= entry.revision) {
+                return Ok(());
+            }
             let leader: LeaderVal = records::parse_val(&entry.key, &entry.value)?;
             if self.leadership.is_some() && leader.nonce != self.nonce {
                 // Deposed: someone else won the key after our lease
@@ -816,6 +827,13 @@ impl<S: CoordinationStore> Task<S> {
             return Ok(());
         }
         if let Some(instance) = records::parse_worker_key(&entry.key) {
+            if self
+                .presence
+                .get(instance)
+                .is_some_and(|rev| *rev >= entry.revision)
+            {
+                return Ok(());
+            }
             if self
                 .presence
                 .insert(instance.to_string(), entry.revision)
@@ -980,6 +998,8 @@ impl<S: CoordinationStore> Task<S> {
                 // records for departed instances, and startup probe keys.
                 if let Some(instance) = records::parse_assign_key(&key) {
                     self.assignments.remove(instance);
+                    // A leader republishes it if the instance is a member.
+                    self.assign_dirty = true;
                     if instance == self.instance {
                         // An absent record means "nothing has been
                         // decided", never "release everything".
@@ -1170,7 +1190,7 @@ impl<S: CoordinationStore> Task<S> {
             Ok(entries) => entries,
             Err(e) => {
                 tracing::warn!(error = %e, "reconcile listing failed; next tick retries");
-                return Ok(());
+                return fatal_only("listing the ephemeral keyspace", &e);
             }
         };
         let live: std::collections::BTreeSet<&str> =
@@ -1231,9 +1251,10 @@ impl<S: CoordinationStore> Task<S> {
             }
             Err(e) => {
                 tracing::warn!(error = %e, "durable reconcile listing failed; next tick retries");
+                fatal_only("listing the durable keyspace", &e)?;
             }
         }
-        // A departed instance's grace window elapses on time, not on an event.
+        // A backstop for any input whose change set no flag.
         self.assign_dirty = true;
         self.metrics(|m| m.reconcile(started.elapsed()));
         Ok(())
@@ -1420,9 +1441,8 @@ impl<S: CoordinationStore> Task<S> {
     /// that changed.
     ///
     /// Gated on `assign_dirty`, which every input to the decision sets:
-    /// membership, split status, ownership, spec arrival, and the reconcile
-    /// tick (a grace window elapsing is time-based rather than
-    /// event-driven). [`protocol::desired_assignment`] is a fixpoint, so
+    /// membership, split status, ownership, spec arrival, and a grace window
+    /// elapsing. [`protocol::desired_assignment`] is a fixpoint, so
     /// recomputing on a clean fleet would publish nothing; it is skipped
     /// anyway because the recompute itself is an O(members x splits) scan
     /// and `step` runs on every watch event, which on a commit-heavy fleet
@@ -1520,15 +1540,26 @@ impl<S: CoordinationStore> Task<S> {
                     published += 1;
                     self.apply_assignment(&instance, val, rev);
                 }
-                // Someone else wrote it, or the key is gone and the
-                // cached revision is a ghost. Drop the entry: the next
-                // attempt creates.
+                // Someone else wrote it, or the key is gone and the cached
+                // revision is a ghost. Read what is there, so the next step
+                // updates it or creates it instead of losing again.
                 Ok(CasOutcome::Lost) => {
-                    self.assignments.remove(&instance);
                     self.assign_dirty = true;
+                    match self.store.get(Keyspace::Durable, &key).await {
+                        Ok(Some(entry)) => self.apply_state_put(&entry)?,
+                        Ok(None) => {
+                            self.assignments.remove(&instance);
+                        }
+                        Err(e) => {
+                            self.assignments.remove(&instance);
+                            fatal_only("re-reading an assignment", &e)?;
+                        }
+                    }
                 }
                 Err(e) => {
                     tracing::debug!(%instance, error = %e, "assignment publish failed; retrying");
+                    self.assign_dirty = true;
+                    fatal_only("publishing an assignment", &e)?;
                 }
             }
         }
@@ -1556,13 +1587,15 @@ impl<S: CoordinationStore> Task<S> {
             .collect();
         for instance in stale {
             let key = records::assign_key(&instance);
-            if let Some((_, rev)) = self.assignments.get(&instance)
-                && matches!(
-                    self.store.delete(Keyspace::Durable, &key, Some(*rev)).await,
-                    Ok(CasOutcome::Won(_))
-                )
-            {
-                self.assignments.remove(&instance);
+            let Some((_, rev)) = self.assignments.get(&instance) else {
+                continue;
+            };
+            match self.store.delete(Keyspace::Durable, &key, Some(*rev)).await {
+                Ok(CasOutcome::Won(_)) => {
+                    self.assignments.remove(&instance);
+                }
+                Ok(CasOutcome::Lost) => {}
+                Err(e) => fatal_only("deleting a departed instance's assignment", &e)?,
             }
         }
         Ok(())
@@ -1596,8 +1629,13 @@ impl<S: CoordinationStore> Task<S> {
         }
         let delay = self.config.rebalance_delay;
         let now = self.clock.now();
+        let before = self.departed.len();
         self.departed
             .retain(|_, since| now.duration_since(*since) < delay);
+        // An elapsed window frees its splits for the next publish.
+        if self.departed.len() < before {
+            self.assign_dirty = true;
+        }
     }
 
     /// Splits withheld from assignment because their owner departed less
@@ -1854,6 +1892,15 @@ impl<S: CoordinationStore> Task<S> {
         let Some(state) = self.splits.get(id) else {
             return Ok(());
         };
+        // The refreshed record can show the split finished, parked or out
+        // of attempts since the candidate was chosen.
+        if state.progress.status != SplitStatus::Runnable {
+            return Ok(());
+        }
+        if kind.consumes_attempt() && state.progress.attempts + 1 >= self.config.max_attempts {
+            self.quarantine_scan = true;
+            return Ok(());
+        }
         let next_epoch = state.progress.epoch + 1;
         let lease_key = records::split_key_str(id);
         let lease_val = records::encode_val(&LeaseVal {
@@ -1881,7 +1928,7 @@ impl<S: CoordinationStore> Task<S> {
             Err(e) => {
                 tracing::warn!(split = %id, error = %e, "lease write failed; next tick retries");
                 self.metrics(|m| m.write(WriteOutcome::Error, started.elapsed()));
-                return Ok(());
+                return fatal_only("writing a claim's lease", &e);
             }
         };
         let reason = match kind {
@@ -1920,21 +1967,25 @@ impl<S: CoordinationStore> Task<S> {
         started: Instant,
     ) -> Result<(), CoordinationError> {
         let key = records::split_key_str(id);
-        for attempt in 0..2 {
+        for _ in 0..2 {
             let Some(state) = self.splits.get(id) else {
-                self.release_lease_key(id, lease_rev).await;
+                self.release_lease_key(id, lease_rev).await?;
                 return Ok(());
             };
             let Some(spec_record) = &state.spec else {
                 // The spec put is in flight; the source needs the descriptor.
-                self.release_lease_key(id, lease_rev).await;
+                self.release_lease_key(id, lease_rev).await?;
                 return Ok(());
             };
             let split = spec_record.spec()?;
+            // A takeover consumes an attempt only while the record it
+            // replaces still names an owner. A release costs none, and a
+            // failure report has counted its own.
+            let consumes = kind.consumes_attempt() && state.progress.owner.is_some();
             let mut record = state.progress.clone();
             record.epoch = next_epoch;
             record.owner = Some(self.instance.clone());
-            record.attempts += u32::from(kind.consumes_attempt() && attempt == 0);
+            record.attempts += u32::from(consumes);
             record.written_at_ms = records::now_ms();
             let expected = state.progress_rev;
             let outcome = self
@@ -1965,31 +2016,41 @@ impl<S: CoordinationStore> Task<S> {
                         Ok(Some(entry)) => {
                             self.apply_state_put(&entry)?;
                             let fresh = &self.splits[id];
+                            let capped = kind.consumes_attempt()
+                                && fresh.progress.owner.is_some()
+                                && fresh.progress.attempts + 1 >= self.config.max_attempts;
                             if fresh.progress.status != SplitStatus::Runnable
                                 || fresh.progress.epoch >= next_epoch
+                                || capped
                             {
-                                // Terminal, or another claimant beat us
-                                // between our lease write and record CAS.
-                                self.release_lease_key(id, lease_rev).await;
+                                // Terminal, another claimant beat us between
+                                // our lease write and record CAS, or the
+                                // split is now due for quarantine.
+                                self.quarantine_scan |= capped;
+                                self.release_lease_key(id, lease_rev).await?;
                                 return Ok(());
                             }
                             // else: adopted progress; retry the CAS once.
                         }
-                        Ok(None) | Err(_) => {
-                            self.release_lease_key(id, lease_rev).await;
+                        Ok(None) => {
+                            self.release_lease_key(id, lease_rev).await?;
                             return Ok(());
+                        }
+                        Err(e) => {
+                            self.release_lease_key(id, lease_rev).await?;
+                            return fatal_only("re-reading a claimed record", &e);
                         }
                     }
                 }
                 Err(e) => {
                     tracing::warn!(split = %id, error = %e, "claim record write failed");
                     self.metrics(|m| m.write(WriteOutcome::Error, started.elapsed()));
-                    self.release_lease_key(id, lease_rev).await;
-                    return Ok(());
+                    self.release_lease_key(id, lease_rev).await?;
+                    return fatal_only("writing a claim", &e);
                 }
             }
         }
-        self.release_lease_key(id, lease_rev).await;
+        self.release_lease_key(id, lease_rev).await?;
         Ok(())
     }
 
@@ -2026,17 +2087,24 @@ impl<S: CoordinationStore> Task<S> {
                     && let Some(state) = self.splits.get(id)
                     && let Some((_, lease_rev)) = state.lease
                 {
-                    self.release_lease_key(id, lease_rev).await;
+                    self.release_lease_key(id, lease_rev).await?;
                 }
                 Ok(())
             }
             Ok(CasOutcome::Lost) => {
                 self.metrics(|m| m.write(WriteOutcome::Conflict, started.elapsed()));
-                Ok(()) // someone else moved it; the view will refresh
+                // Someone else moved it. Read it, so the next step decides
+                // on the record rather than losing the same CAS again.
+                match self.store.get(Keyspace::Durable, &key).await {
+                    Ok(Some(entry)) => self.apply_state_put(&entry),
+                    Ok(None) => Ok(()),
+                    Err(e) => fatal_only("re-reading a split record", &e),
+                }
             }
             Err(e) => {
                 tracing::warn!(split = %id, error = %e, "quarantine write failed; next tick retries");
                 self.metrics(|m| m.write(WriteOutcome::Error, started.elapsed()));
+                fatal_only("quarantining a split", &e)?;
                 // Re-arm the scan: `reconcile_assignment` takes the flag
                 // before deciding whether to scan, so a worker at its
                 // lane budget never re-derives this candidate and the
@@ -2048,7 +2116,12 @@ impl<S: CoordinationStore> Task<S> {
     }
 
     /// Best-effort removal of a lease key we hold (guarded by revision).
-    async fn release_lease_key(&mut self, id: &str, lease_rev: Revision) {
+    /// Only a fatal store error is returned.
+    async fn release_lease_key(
+        &mut self,
+        id: &str,
+        lease_rev: Revision,
+    ) -> Result<(), CoordinationError> {
         let key = records::split_key_str(id);
         if let Err(e) = self
             .store
@@ -2056,6 +2129,7 @@ impl<S: CoordinationStore> Task<S> {
             .await
         {
             tracing::debug!(split = %id, error = %e, "lease cleanup failed; it will expire");
+            fatal_only("deleting a lease", &e)?;
         }
         if let Some(state) = self.splits.get_mut(id)
             && state
@@ -2065,6 +2139,7 @@ impl<S: CoordinationStore> Task<S> {
         {
             state.lease = None;
         }
+        Ok(())
     }
 
     /// Fold our own successful claim into the view so later decisions see
@@ -2119,7 +2194,7 @@ impl<S: CoordinationStore> Task<S> {
 
     async fn heartbeat(&mut self) -> Result<(), CoordinationError> {
         // Presence first: membership must outlive lease hiccups.
-        self.renew_presence().await;
+        self.renew_presence().await?;
         if self.leadership.is_some() {
             self.renew_leadership().await?;
         }
@@ -2147,23 +2222,25 @@ impl<S: CoordinationStore> Task<S> {
         Ok(())
     }
 
-    async fn renew_presence(&mut self) {
+    async fn renew_presence(&mut self) -> Result<(), CoordinationError> {
         let key = records::worker_key(&self.instance);
         let val = records::encode_val(&self.worker_val());
-        // Failures are tolerated: presence tunes fair-share, and
+        // Retryable failures are tolerated: presence tunes fair-share, and
         // correctness does not depend on it.
-        match self.store.get(Keyspace::Ephemeral, &key).await {
+        let written = match self.store.get(Keyspace::Ephemeral, &key).await {
             Ok(Some(entry)) => {
-                let _ = self
-                    .store
+                self.store
                     .update(Keyspace::Ephemeral, &key, val, entry.revision)
-                    .await;
+                    .await
             }
-            Ok(None) => {
-                let _ = self.store.create(Keyspace::Ephemeral, &key, val).await;
-            }
-            Err(e) => tracing::debug!(error = %e, "presence renewal failed; next beat retries"),
+            Ok(None) => self.store.create(Keyspace::Ephemeral, &key, val).await,
+            Err(e) => Err(e),
+        };
+        if let Err(e) = written {
+            tracing::debug!(error = %e, "presence renewal failed; next beat retries");
+            fatal_only("renewing presence", &e)?;
         }
+        Ok(())
     }
 
     async fn renew_leadership(&mut self) -> Result<(), CoordinationError> {
@@ -2194,7 +2271,7 @@ impl<S: CoordinationStore> Task<S> {
             }
             Err(e) => {
                 tracing::warn!(error = %e, "leadership renewal failed; next beat retries");
-                Ok(())
+                fatal_only("renewing leadership", &e)
             }
         }
     }
@@ -2276,15 +2353,15 @@ impl<S: CoordinationStore> Task<S> {
                         self.drop_owned(id, SplitLossReason::Starved);
                         Ok(())
                     }
-                    Err(_) => {
+                    Err(e) => {
                         // Cannot tell; the next beat decides.
-                        Ok(())
+                        fatal_only("re-reading a lease", &e)
                     }
                 }
             }
             Err(e) => {
                 tracing::warn!(split = %id, error = %e, "lease renewal failed; next beat retries");
-                Ok(())
+                fatal_only("renewing a lease", &e)
             }
         }
     }
@@ -2293,42 +2370,22 @@ impl<S: CoordinationStore> Task<S> {
     // Commands.
 
     async fn handle_command(&mut self, command: Command) -> Result<(), CoordinationError> {
-        match command {
+        let (result, reply) = match command {
             Command::Commit {
                 split,
                 progress,
                 reply,
-            } => {
-                let result = self.commit(&split, &progress).await;
-                let fatal_error = result
-                    .as_ref()
-                    .err()
-                    .filter(|e| e.kind == CoordinationErrorKind::Fatal)
-                    .map(|e| fatal(e.reason.clone()));
-                let _ = reply.try_send(result);
-                if let Some(e) = fatal_error {
-                    return Err(e);
-                }
-                Ok(())
-            }
+            } => (self.commit(&split, &progress).await, reply),
             Command::Fail {
                 split,
                 reason,
                 reply,
-            } => {
-                let result = self.fail_split(&split, &reason).await;
-                let _ = reply.try_send(result);
-                Ok(())
-            }
+            } => (self.fail_split(&split, &reason).await, reply),
             Command::Release {
                 splits,
                 departure,
                 reply,
-            } => {
-                let result = self.release_splits(&splits, departure).await;
-                let _ = reply.try_send(result);
-                Ok(())
-            }
+            } => (self.release_splits(&splits, departure).await, reply),
             Command::DeclineRevoke { split, reply } => {
                 let id = split.as_str().to_string();
                 // A decline says the source never stopped intake, so
@@ -2343,9 +2400,19 @@ impl<S: CoordinationStore> Task<S> {
                 } else {
                     Ok(()) // never offered, or already settled
                 };
-                let _ = reply.try_send(result);
-                Ok(())
+                (result, reply)
             }
+        };
+        // A fatal failure is answered, then stops the task.
+        let fatal_error = result
+            .as_ref()
+            .err()
+            .filter(|e| e.kind == CoordinationErrorKind::Fatal)
+            .map(|e| fatal(e.reason.clone()));
+        let _ = reply.try_send(result);
+        match fatal_error {
+            Some(e) => Err(e),
+            None => Ok(()),
         }
     }
 
@@ -2405,7 +2472,7 @@ impl<S: CoordinationStore> Task<S> {
                 }
                 self.upsert_progress(id, record, rev)?;
                 if progress.completed {
-                    self.finish_completed(id).await;
+                    self.finish_completed(id).await?;
                 }
                 Ok(())
             }
@@ -2422,7 +2489,7 @@ impl<S: CoordinationStore> Task<S> {
                     {
                         self.upsert_progress(id, fresh, entry.revision)?;
                         if progress.completed {
-                            self.finish_completed(id).await;
+                            self.finish_completed(id).await?;
                         }
                         return Ok(());
                     }
@@ -2442,15 +2509,16 @@ impl<S: CoordinationStore> Task<S> {
     }
 
     /// Terminal commit bookkeeping: hand the lease back, stop tracking.
-    async fn finish_completed(&mut self, id: &str) {
+    async fn finish_completed(&mut self, id: &str) -> Result<(), CoordinationError> {
         let lease_rev = self.owned.get(id).map(|o| o.lease_rev);
         self.owned.remove(id);
         // A split that finishes mid-revocation ends it: its tail is
         // committed and nothing replays.
         self.settle_revocation(id, RevocationOutcome::Drained);
         if let Some(lease_rev) = lease_rev {
-            self.release_lease_key(id, lease_rev).await;
+            self.release_lease_key(id, lease_rev).await?;
         }
+        Ok(())
     }
 
     /// Explicit failure report: consumes an attempt, ends this tenancy
@@ -2493,7 +2561,7 @@ impl<S: CoordinationStore> Task<S> {
                 // A failure mid-revocation leaves an uncommitted tail to replay.
                 self.settle_revocation(id, RevocationOutcome::Forced);
                 self.upsert_progress(id, record, rev)?;
-                self.release_lease_key(id, lease_rev).await;
+                self.release_lease_key(id, lease_rev).await?;
                 Ok(())
             }
             Ok(CasOutcome::Lost) => {
@@ -2537,9 +2605,11 @@ impl<S: CoordinationStore> Task<S> {
         // worker that keeps claiming strands splits when the process exits.
         if self.owned.is_empty() && !splits.is_empty() {
             self.parting = true;
-            self.demote().await;
+            self.demote().await?;
             let key = records::worker_key(&self.instance);
-            let _ = self.store.delete(Keyspace::Ephemeral, &key, None).await;
+            if let Err(e) = self.store.delete(Keyspace::Ephemeral, &key, None).await {
+                fatal_only("deleting presence", &e)?;
+            }
             self.presence.remove(&self.instance);
         }
         Ok(())
@@ -2575,7 +2645,7 @@ impl<S: CoordinationStore> Task<S> {
             Ok(CasOutcome::Won(rev)) => {
                 self.owned.remove(id);
                 self.upsert_progress(id, record, rev)?;
-                self.release_lease_key(id, lease_rev).await;
+                self.release_lease_key(id, lease_rev).await?;
                 // The cooperative outcome: the tail is committed and the
                 // owner cleared, so the next owner replays nothing.
                 self.settle_revocation(id, RevocationOutcome::Drained);
@@ -2592,8 +2662,9 @@ impl<S: CoordinationStore> Task<S> {
                 // Still drop the lease key best-effort: the attempt
                 // accounting is conservative (counts as non-graceful).
                 self.owned.remove(id);
-                self.release_lease_key(id, lease_rev).await;
+                self.release_lease_key(id, lease_rev).await?;
                 self.settle_revocation(id, RevocationOutcome::Forced);
+                fatal_only("releasing a split", &e)?;
                 Ok(ReleaseOutcome::WriteFailed)
             }
         }
@@ -2652,7 +2723,7 @@ impl<S: CoordinationStore> Task<S> {
             Err(e) => {
                 // Refusing to judge is the safe direction.
                 tracing::warn!(error = %e, "terminal listing failed; deferring the verdict");
-                return Ok(());
+                return fatal_only("listing splits for the verdict", &e);
             }
         };
         for entry in &entries {

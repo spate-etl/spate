@@ -38,8 +38,8 @@ holds. Splits above the fleet's total lane budget sit unleased in the
 store, forming the queue. A lease is a TTL'd key the owner heartbeats at
 a third of the lease duration. Workers watch the store, so an assignment
 or a release is acted on at the store's discovery latency: milliseconds on
-a store that pushes changes, one poll interval on a store whose watch is
-polled.
+a store that pushes changes, a poll interval or two on a store whose watch
+is polled.
 
 **Failures flow back automatically.** A dead worker stops heartbeating;
 its leases expire one TTL later and its work is reassigned, resuming each

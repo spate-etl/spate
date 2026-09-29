@@ -731,9 +731,38 @@ fn a_record_seeded_behind_the_leader_becomes_assignable() {
     );
 }
 
+/// A polled worker whose assignment watch closes after its snapshot watches
+/// again, and still learns the assignment that names it.
+#[test]
+fn a_closed_assignment_watch_is_established_again() {
+    let rt = runtime();
+    let inner = store();
+    let ids = ["a", "b"];
+    let mut a = worker(
+        tapped(&inner, |_, _| false),
+        rt.handle(),
+        tuned("worker-a", |_| {}),
+        &ids,
+    );
+    let mut held_a = Held::default();
+    drive(&mut a, &mut held_a, "A claiming one split", |h| {
+        h.splits.len() == 1
+    });
+    let b_store = tapped(&inner, |_, _| false);
+    b_store.end_next_watch(|ks, prefix| ks == Keyspace::Durable && prefix == "assign.");
+    let mut b = worker(b_store, rt.handle(), tuned("worker-b", |_| {}), &ids);
+    let mut held_b = Held::default();
+    drive_pair(
+        (&mut a, &mut held_a),
+        (&mut b, &mut held_b),
+        "B claiming the split it was assigned",
+        |_, b| b.splits.len() == 1,
+    );
+}
+
 /// On a polled store the durable watch covers assignments, the plan and the
-/// verdict marker; a follower lists only the split records, once it judges
-/// the verdict, and a leader lists only split and spec records.
+/// verdict marker; a follower lists the split records once, to judge the
+/// verdict, and a leader lists only split and spec records.
 #[test]
 fn polled_workers_list_only_the_records_no_watch_carries() {
     let rt = runtime();
@@ -786,9 +815,10 @@ fn polled_workers_list_only_the_records_no_watch_carries() {
         "the leader listed {by_a:?}"
     );
     let by_b = by_b.lock().unwrap().clone();
-    assert!(
-        !by_b.is_empty() && by_b.iter().all(|l| *l == durable("split.")),
-        "the follower listed {by_b:?}"
+    assert_eq!(
+        by_b,
+        [durable("split.")],
+        "the follower listed more than the verdict's split records"
     );
     let watched: Vec<_> = watches_a
         .watched()

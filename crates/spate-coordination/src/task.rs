@@ -971,7 +971,15 @@ impl<S: CoordinationStore + Clone> Task<S> {
         }
         let stream = match tails.len() {
             1 => tails.pop().expect("one tail"),
-            _ => futures_util::stream::select_all(tails).boxed(),
+            // A merged stream ends only when every tail has, so a tail that
+            // ends reports it as an error, which re-establishes them all.
+            _ => futures_util::stream::select_all(tails.into_iter().map(|tail| {
+                tail.chain(futures_util::stream::once(async {
+                    Err(StoreError::Retryable("a merged watch tail ended".into()))
+                }))
+                .boxed()
+            }))
+            .boxed(),
         };
         // The snapshot is authoritative for its keyspace: rebuild.
         match ks {

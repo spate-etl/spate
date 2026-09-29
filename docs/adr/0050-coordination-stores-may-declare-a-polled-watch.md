@@ -38,8 +38,8 @@ rather than to the job's history.
 `CoordinationStore::watch_mode` returns `Push` unless the store says otherwise.
 On a store that returns `Polled`, the durable watch covers the assignment
 records, the plan record and a verdict marker. A worker reads the records of a
-split it is assigned and has not seen. The leader re-reads each assigned split
-that shows no lease every poll interval, reads the spec of any split it has seen
+split it is assigned and has not seen. The leader re-reads each assigned
+runnable split that shows no lease every poll interval, reads the spec of any split it has seen
 without one, and is the only worker that reconciles, over the split records
 only. A new leader lists every split and spec record before it plans or
 publishes. A worker that reports the job terminal writes the marker, and a
@@ -54,7 +54,7 @@ reads only fill a view.
 - Good, because a store with no push channel can host coordination, and a
   push store runs exactly as before.
 - Good, because a follower's steady-state reads no longer grow with the job's
-  split history, only with the fleet's leases and its own assignment.
+  split history, only with the fleet's leases and assignment records.
 - Bad, because discovery on a polled store takes up to one poll interval, and a
   lease expiry reaches peers at their next poll.
 - Bad, because the leader pays a point read per assigned split with no lease

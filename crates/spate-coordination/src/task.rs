@@ -12,7 +12,9 @@
 //! splits it was assigned and has not seen, and the leader re-reads, every
 //! poll interval, each assigned split that shows no lease. These reads
 //! supply the records a durable watch narrower than the whole keyspace
-//! does not deliver.
+//! does not deliver. A worker that reports the job terminal writes a
+//! `verdict` marker, and a worker that sees it lists the split records and
+//! judges, whatever its own view covers.
 //!
 //! Correctness recap (see `protocol.rs` for the pure rules): the durable
 //! progress record's CAS revision is the only fence; lease keys are
@@ -310,13 +312,26 @@ pub(crate) struct Task<S: CoordinationStore + Clone> {
     terminal_due: bool,
     /// `Some(interval)` on a store whose watches are polled. Every branch
     /// that differs between the two modes reads this field.
-    polled: Option<Duration>,
+    pub(crate) polled: Option<Duration>,
     /// Durable keys a point read found absent or could not read, skipped
     /// until the next refresh tick.
     parked_reads: BTreeSet<String>,
     /// A refresh tick fired: the next read run retries parked keys and
     /// re-reads the leader's unleased assigned splits.
     refresh_due: bool,
+    /// A leader on a polled store lists split and spec records before its
+    /// first plan run and publish; this is due until a listing lands.
+    pub(crate) catch_up_due: bool,
+    /// False from a polled election win until that listing lands.
+    pub(crate) caught_up: bool,
+    /// A `verdict` marker was seen: the view may be partial, so the
+    /// verdict listing runs without the local gate.
+    verdict_seen: bool,
+    /// The verdict marker may start a listing; spent by each listing it
+    /// starts and restored on each refresh tick.
+    verdict_listing_allowed: bool,
+    /// This worker wrote the verdict marker, or saw one.
+    verdict_written: bool,
     #[cfg(feature = "testing")]
     probe: Arc<crate::loop_probe::LoopProbe>,
 }
@@ -389,6 +404,11 @@ impl<S: CoordinationStore + Clone> Task<S> {
             polled,
             parked_reads: BTreeSet::new(),
             refresh_due: false,
+            catch_up_due: false,
+            caught_up: true,
+            verdict_seen: false,
+            verdict_listing_allowed: false,
+            verdict_written: false,
             #[cfg(feature = "testing")]
             probe: Arc::default(),
         }
@@ -447,6 +467,7 @@ impl<S: CoordinationStore + Clone> Task<S> {
         let mut reconciling: Option<ReconcileRun> = None;
         let mut terminal: Option<Listing> = None;
         let mut reads: Option<Reads> = None;
+        let mut catch_up: Option<Listing> = None;
 
         let mut heartbeat = self.clock.now() + self.next_heartbeat();
         // The first reconcile lands anywhere in the first interval, so a
@@ -470,6 +491,18 @@ impl<S: CoordinationStore + Clone> Task<S> {
                         .boxed(),
                 );
             }
+            if catch_up.is_none() && std::mem::take(&mut self.catch_up_due) {
+                let store = self.store.clone();
+                catch_up = Some(
+                    async move {
+                        let mut entries =
+                            store.list(Keyspace::Durable, records::SPLIT_PREFIX).await?;
+                        entries.extend(store.list(Keyspace::Durable, records::SPEC_PREFIX).await?);
+                        Ok(entries)
+                    }
+                    .boxed(),
+                );
+            }
             if reads.is_none() {
                 let wanted = self.wanted_reads();
                 if !wanted.is_empty() {
@@ -480,7 +513,8 @@ impl<S: CoordinationStore + Clone> Task<S> {
                 || seeding.is_some()
                 || reconciling.is_some()
                 || terminal.is_some()
-                || reads.is_some();
+                || reads.is_some()
+                || catch_up.is_some();
             let next_timer = heartbeat.min(reconcile).min(replan);
             self.probe_loop_top(refresh.map_or(next_timer, |r| r.min(next_timer)), busy);
             tokio::select! {
@@ -565,8 +599,19 @@ impl<S: CoordinationStore + Clone> Task<S> {
                     self.finish_reads(read)?;
                     Box::pin(self.step()).await?;
                 }
+                listed = async { catch_up.as_mut().expect("guarded by is_some").await },
+                    if catch_up.is_some() =>
+                {
+                    catch_up = None;
+                    self.finish_catch_up(listed)?;
+                    Box::pin(self.step()).await?;
+                }
                 () = self.clock.sleep_until(refresh.unwrap_or(heartbeat)), if refresh.is_some() => {
                     self.refresh_due = true;
+                    self.verdict_listing_allowed = self.verdict_seen;
+                    self.catch_up_due |= catch_up.is_none()
+                        && self.leadership.is_some()
+                        && !self.caught_up;
                     refresh = self.polled.map(|interval| self.clock.now() + interval);
                     Box::pin(self.step()).await?;
                 }
@@ -1193,6 +1238,14 @@ impl<S: CoordinationStore + Clone> Task<S> {
             self.apply_assignment(instance, val, entry.revision);
             return Ok(());
         }
+        if entry.key == records::VERDICT_KEY {
+            if !self.verdict_seen {
+                self.verdict_seen = true;
+                self.verdict_listing_allowed = true;
+            }
+            self.verdict_written = true;
+            return Ok(());
+        }
         if entry.key == records::PLAN_KEY {
             if entry.revision.0 <= self.plan_rev_seen {
                 return Ok(());
@@ -1559,6 +1612,9 @@ impl<S: CoordinationStore + Clone> Task<S> {
         self.prune_departed();
         self.observe_membership();
         if self.terminal_reported {
+            if self.polled.is_some() && !self.verdict_written {
+                self.write_verdict().await?;
+            }
             self.update_gauges();
             return Ok(());
         }
@@ -1745,7 +1801,7 @@ impl<S: CoordinationStore + Clone> Task<S> {
     /// acknowledgment protocol: the leader learns that a revocation
     /// completed by watching the split's lease disappear.
     async fn publish_assignments(&mut self) -> Result<(), CoordinationError> {
-        if !std::mem::take(&mut self.assign_dirty) {
+        if !self.caught_up || !std::mem::take(&mut self.assign_dirty) {
             return Ok(());
         }
         let generation = match &self.plan {
@@ -2997,6 +3053,11 @@ impl<S: CoordinationStore + Clone> Task<S> {
             return;
         }
         let planned = plan.planned;
+        // A peer has judged the job terminal; this view may be partial.
+        if std::mem::take(&mut self.verdict_listing_allowed) {
+            self.terminal_due = true;
+            return;
+        }
         // Cheap gate: pay for the listing only once this worker's view
         // covers what the plan promised and looks terminal. `planned` is
         // a lower bound, so this is `<`, not `!=`.
@@ -3005,6 +3066,47 @@ impl<S: CoordinationStore + Clone> Task<S> {
             return;
         }
         self.terminal_due = true;
+    }
+
+    /// Mark the job terminal for workers whose polled view is partial.
+    async fn write_verdict(&mut self) -> Result<(), CoordinationError> {
+        let val = records::encode_val(&records::VerdictVal {
+            schema: records::SCHEMA,
+            reporter: self.instance.clone(),
+        });
+        match self
+            .store
+            .create(Keyspace::Durable, records::VERDICT_KEY, val)
+            .await
+        {
+            Ok(_) => {
+                self.verdict_written = true;
+                Ok(())
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "verdict marker write failed; next step retries");
+                fatal_only("writing the verdict marker", &e)
+            }
+        }
+    }
+
+    /// Fold a new leader's listing of split and spec records into the view,
+    /// and open planning and publishing.
+    fn finish_catch_up(&mut self, listed: Listed) -> Result<(), CoordinationError> {
+        match listed {
+            Ok(entries) => {
+                for entry in &entries {
+                    self.apply_state_put(entry)?;
+                }
+                self.caught_up = true;
+                self.assign_dirty = true;
+                Ok(())
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "leader catch-up listing failed; next refresh retries");
+                fatal_only("listing records for a new leader", &e)
+            }
+        }
     }
 
     /// Render the verdict [`Task::check_terminal`] asked for against its

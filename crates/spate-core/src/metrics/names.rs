@@ -254,7 +254,7 @@ pub const COORDINATION_REPLAN_DURATION_SECONDS: &str = "spate_coordination_repla
 pub const COORDINATION_RECONCILE_DURATION_SECONDS: &str =
     "spate_coordination_reconcile_duration_seconds";
 /// Store primitive round-trip time, by [`L_OP`] (`get`, `put`, `delete`,
-/// `list`, `watch`).
+/// `list`, `watch`, `poll`).
 pub const COORDINATION_STORE_OP_DURATION_SECONDS: &str =
     "spate_coordination_store_op_duration_seconds";
 

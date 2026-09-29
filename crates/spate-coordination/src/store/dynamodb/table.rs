@@ -1,4 +1,4 @@
-//! The seam between the store logic and a table: item-level calls whose
+//! The interface between the store logic and a table: item-level calls whose
 //! outcomes arrive decoded, with errors already classified.
 
 use crate::store::StoreError;

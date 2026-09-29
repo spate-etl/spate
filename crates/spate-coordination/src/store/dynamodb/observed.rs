@@ -20,7 +20,7 @@ struct Obs {
     since: Instant,
     /// Every revision returned, written or emitted as a delete.
     hw: u64,
-    /// Bumped by every applied observation, own write and emitted delete.
+    /// Bumped by every own write, emitted delete, and observation that changed `v`.
     seq: u64,
     /// Set when `v` was judged expired and its delete emitted.
     expired: bool,
@@ -41,8 +41,8 @@ impl Observed {
         self.seq
     }
 
-    /// Whether an own write, a newer read or an emitted delete touched
-    /// `key` after a read that began at `s0`.
+    /// Whether an own write or delete, an emitted delete, or a read that
+    /// changed the key's version landed after a read that began at `s0`.
     pub(super) fn newer_than(&self, key: &str, s0: u64) -> bool {
         self.keys.get(key).is_some_and(|o| o.seq > s0)
     }

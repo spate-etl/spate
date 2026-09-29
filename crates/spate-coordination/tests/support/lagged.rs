@@ -5,6 +5,7 @@ use futures_util::StreamExt as _;
 use spate_coordination::store::{
     CasOutcome, CoordinationStore, Entry, Keyspace, Revision, StoreError, WatchMode, WatchStream,
 };
+use spate_core::metrics::CoordinationMetrics;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
@@ -30,6 +31,14 @@ impl<S: CoordinationStore + Clone> CoordinationStore for LaggedStore<S> {
 
     fn watch_mode(&self) -> WatchMode {
         self.inner.watch_mode()
+    }
+
+    fn op_timeout(&self) -> Option<Duration> {
+        self.inner.op_timeout()
+    }
+
+    fn attach_metrics(&self, metrics: &CoordinationMetrics) {
+        self.inner.attach_metrics(metrics);
     }
 
     async fn create(

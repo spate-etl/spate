@@ -15,7 +15,7 @@ use spate_coordination::{
     StoreCoordinator,
 };
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use support::polled::PolledStore;
 use support::tap::TapStore;
@@ -182,6 +182,52 @@ fn an_assigned_split_whose_spec_read_failed_is_read_again() {
         |_, b| b.splits.len() == 1,
     );
     assert!(failed.load(Ordering::Acquire), "no spec read failed");
+}
+
+/// A read that fails waits for the next poll interval before it is taken
+/// again.
+#[test]
+fn a_failed_read_waits_for_the_next_interval() {
+    let rt = runtime();
+    let inner = store();
+    let ids = ["w", "x"];
+    let mut a = worker(
+        tapped(&inner, |_, _| false),
+        rt.handle(),
+        tuned("worker-a", |_| {}),
+        &ids,
+    );
+    let mut held_a = Held::default();
+    drive(&mut a, &mut held_a, "A claiming one split", |h| {
+        h.splits.len() == 1
+    });
+    let failing = tapped(&inner, records);
+    let attempts = Arc::new(AtomicU64::new(0));
+    let counted = Arc::clone(&attempts);
+    failing.on_get(move |ks, key| {
+        (ks == Keyspace::Durable && key.starts_with("spec.")).then(|| {
+            counted.fetch_add(1, Ordering::AcqRel);
+            StoreError::Retryable("injected: read timed out".into())
+        })
+    });
+    let mut b = worker(failing, rt.handle(), tuned("worker-b", |_| {}), &ids);
+    let mut held_b = Held::default();
+    drive_pair(
+        (&mut a, &mut held_a),
+        (&mut b, &mut held_b),
+        "B's first spec read",
+        |_, _| attempts.load(Ordering::Acquire) > 0,
+    );
+    let window = POLL * 6;
+    let until = Instant::now() + window;
+    while Instant::now() < until {
+        held_a.fold(a.poll().expect("poll A"));
+        held_b.fold(b.poll().expect("poll B"));
+        std::thread::sleep(support::POLL_INTERVAL);
+    }
+    // One read per interval, and one more for the interval already started.
+    let taken = attempts.load(Ordering::Acquire);
+    assert!(taken <= 8, "{taken} spec reads in six poll intervals");
 }
 
 /// A leader that never sees a peer's lease or record learns of the peer's

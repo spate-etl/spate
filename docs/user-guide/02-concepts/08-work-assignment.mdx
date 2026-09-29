@@ -297,6 +297,9 @@ the watch. On such a store:
   that sees the marker lists the split records and judges from that
   listing, since its own view may not cover the plan.
 
+On a store whose expiry is judged by each observer, a peer that starts
+watching late sees a stale lease expire one lease after its first read of it.
+
 ## Failure behavior
 
 | Failure | Consequence |

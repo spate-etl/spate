@@ -14,8 +14,9 @@ rather than reshuffling everything.
 
 Applications should depend on the [`spate`](https://crates.io/crates/spate)
 facade with the `coordination` feature (in-memory store, for a single process
-and for tests) or `coordination-nats` (NATS JetStream KV). The store is a
-trait, so a backend is a few hundred lines rather than a fork.
+and for tests), `coordination-nats` (NATS JetStream KV) or
+`coordination-dynamodb` (one DynamoDB table). The store is a trait, so a
+backend is a few hundred lines rather than a fork.
 
 ## Sharp edges worth knowing
 

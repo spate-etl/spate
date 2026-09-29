@@ -23,6 +23,7 @@
 //! | `json-simd` | SIMD decode backend for [`json`] (`simd-json` replacing `serde_json`). The fidelity knobs above do not apply under it |
 //! | `coordination` | [`coordination`] backend — multi-instance leader-assigned work distribution for broker-less sources: the protocol, `StoreCoordinator`, and the in-memory store (zero-infrastructure embedding). The seam types and the `CoordinationDriver` live in `spate::coordination` without any feature |
 //! | `coordination-nats` | The production NATS JetStream KV store (server >= 2.11), selected by `coordination.store.nats`, on top of [`coordination`]; pulls the async-nats dependency tree |
+//! | `coordination-dynamodb` | The DynamoDB store over one table, selected by `coordination.store.dynamodb`, on top of [`coordination`]; pulls the AWS SDK dependency tree |
 //! | `datagen` | [`datagen`] — synthetic storefront-event source (orders, payments, refunds) for a pipeline that needs no broker, bucket or coordination store. A demo and test source: it keeps no durable progress |
 //! | `datagen-avro` | Avro payloads from [`datagen`] instead of JSON (implies `datagen`) |
 //!

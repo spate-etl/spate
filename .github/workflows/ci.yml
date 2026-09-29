@@ -924,8 +924,8 @@ jobs:
       - name: Pull the pinned ClickHouse image
         if: contains(needs.changes.outputs.container-args, 'spate-clickhouse')
         run: cargo xtask container-image --pull clickhouse
-      # Serial: 2 cores and ~7 GB across SeaweedFS, NATS, Kafka and ClickHouse
-      # OOMs in parallel.
+      # Serial: 2 cores and ~7 GB across SeaweedFS, NATS, DynamoDB Local, Kafka
+      # and ClickHouse OOMs in parallel.
       - name: Container suites
         env:
           PKGS: ${{ needs.changes.outputs.container-args }}

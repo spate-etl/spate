@@ -64,9 +64,36 @@ impl CoordinatorSpec {
             }
             #[cfg(not(feature = "nats"))]
             "nats" => Err(nats_not_compiled()),
+            #[cfg(feature = "dynamodb")]
+            "dynamodb" => {
+                use crate::store::dynamodb::{DynamoDbConfig, DynamoDbStore};
+                let config: DynamoDbConfig = section.store().deserialize_into()?;
+                let store = DynamoDbStore::new(config, tuning.lease_duration, tuning.op_timeout)
+                    .map_err(|e| ConfigError::Component {
+                        context: "coordination.store".into(),
+                        message: e.to_string(),
+                    })?;
+                if tuning.reconcile_interval < RECONCILE_FLOOR {
+                    tracing::warn!(
+                        reconcile_interval = ?tuning.reconcile_interval,
+                        "the leader's reconcile on the DynamoDB store reads every split record; \
+                         an interval below {RECONCILE_FLOOR:?} raises its read cost"
+                    );
+                }
+                Ok(CoordinatorSpec {
+                    build: Box::new(move |io, metrics| {
+                        let coordinator = crate::StoreCoordinator::new(store, tuning, io, metrics)?;
+                        Ok(Box::new(coordinator) as Box<dyn SplitCoordinator>)
+                    }),
+                })
+            }
+            #[cfg(not(feature = "dynamodb"))]
+            "dynamodb" => Err(dynamodb_not_compiled()),
             other => Err(ConfigError::Component {
                 context: "coordination.store".into(),
-                message: format!("unknown store `{other}`; the known store is `nats`"),
+                message: format!(
+                    "unknown store `{other}`; the known stores are `nats` and `dynamodb`"
+                ),
             }),
         }
     }
@@ -85,12 +112,26 @@ impl CoordinatorSpec {
     }
 }
 
+/// The reconcile interval below which the DynamoDB store warns.
+#[cfg(feature = "dynamodb")]
+const RECONCILE_FLOOR: std::time::Duration = std::time::Duration::from_secs(60);
+
 #[cfg_attr(feature = "nats", allow(dead_code))]
 fn nats_not_compiled() -> ConfigError {
     ConfigError::Component {
         context: "coordination.store.nats".into(),
         message: "this build has no NATS store; enable the `coordination-nats` feature of \
                   `spate`, or `nats` on `spate-coordination`"
+            .into(),
+    }
+}
+
+#[cfg_attr(feature = "dynamodb", allow(dead_code))]
+fn dynamodb_not_compiled() -> ConfigError {
+    ConfigError::Component {
+        context: "coordination.store.dynamodb".into(),
+        message: "this build has no DynamoDB store; enable the `coordination-dynamodb` feature \
+                  of `spate`, or `dynamodb` on `spate-coordination`"
             .into(),
     }
 }
@@ -203,6 +244,42 @@ mod tests {
             assert!(err.contains(expect), "{credentials}: {err}");
             assert!(!err.contains("hunter2"), "{err}");
         }
+    }
+
+    #[cfg(feature = "dynamodb")]
+    const DYNAMODB: &str = "  store:\n    dynamodb: { table: spate-coordination, job: j, region: \
+                            eu-west-1, endpoint: \"http://127.0.0.1:1\" }\n";
+
+    #[test]
+    #[cfg(feature = "dynamodb")]
+    fn builds_a_dynamodb_coordinator_without_connecting() {
+        let spec = CoordinatorSpec::from_section(&section(DYNAMODB)).unwrap();
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        // StoreCoordinator::new rejects a store whose TTL or op_timeout
+        // differs from the tuning's.
+        spec.build(rt.handle().clone(), None).unwrap();
+    }
+
+    #[test]
+    #[cfg(feature = "dynamodb")]
+    fn dynamodb_errors_carry_the_store_path() {
+        let err = error("  store: { dynamodb: { job: j } }\n");
+        assert!(err.starts_with("coordination.store.dynamodb"), "{err}");
+        assert!(err.contains("table"), "{err}");
+        let err = error("  store: { dynamodb: { table: t1234, job: j, endpoint: \"ftp://h\" } }\n");
+        assert!(err.starts_with("coordination.store"), "{err}");
+        assert!(err.contains("dynamodb.endpoint"), "{err}");
+    }
+
+    #[test]
+    fn a_missing_dynamodb_feature_names_both_spellings() {
+        let err = dynamodb_not_compiled().to_string();
+        assert!(err.contains("coordination-dynamodb"), "{err}");
+        assert!(err.contains("`dynamodb` on `spate-coordination`"), "{err}");
     }
 
     #[test]

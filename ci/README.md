@@ -26,6 +26,7 @@ are testing, so adding either is a change inside `ci/`.
 | --- | --- | --- |
 | [`clickhouse`](clickhouse/README.md) | `lts-previous`, `lts`, `stable` | `spate-clickhouse`, and `spate`'s examples tier |
 | [`debian`](debian/README.md) | `trixie` | `spate-kafka`'s `tls_system_ca`, as its client image |
+| [`dynamodb`](dynamodb/README.md) | `stable` | `spate-coordination`'s DynamoDB store |
 | [`kafka`](kafka/README.md) | `stable` | `spate-kafka`, and `spate`'s end-to-end suites |
 | [`nats`](nats/README.md) | `floor`, `below-floor` | `spate-coordination`, `spate-s3`'s `coordinated_nats`, and `spate`'s examples tier |
 
@@ -75,7 +76,8 @@ digest on every run.
 
 **Exact tags**, the vendor's full release version, so a bump diff names the
 release it moved to: `YY.M.P.B` for ClickHouse, `MAJOR.POINT` for Debian,
-`MAJOR.MINOR.PATCH` for Kafka, `MAJOR.MINOR.PATCH-alpine` for NATS.
+`MAJOR.MINOR.PATCH` for DynamoDB Local and Kafka, `MAJOR.MINOR.PATCH-alpine` for
+NATS.
 
 ## Support claims
 

@@ -896,7 +896,8 @@ fn op_timeout_is_checked_and_forwarded() {
     assert!(store.inner.metrics.get().is_some());
 }
 
-/// Construction refuses a malformed table or job name, and a lease below
+/// Construction refuses a malformed table or job name, an empty region, an
+/// endpoint that is not an http or https URL with a host, and a lease below
 /// one second or shorter than five poll intervals.
 #[test]
 fn invalid_configs_are_fatal() {
@@ -916,11 +917,16 @@ fn invalid_configs_are_fatal() {
         )
         .is_ok()
     );
-    let invalid: [(Edit, Duration); 7] = [
+    assert!(build(|c| c.endpoint = Some("http://127.0.0.1:8000".into()), TTL).is_ok());
+    let invalid: [(Edit, Duration); 11] = [
         (|c| c.table = "ab".into(), TTL),
         (|c| c.table = "a b c".into(), TTL),
         (|c| c.job = String::new(), TTL),
         (|c| c.job = "a#b".into(), TTL),
+        (|c| c.region = Some(String::new()), TTL),
+        (|c| c.endpoint = Some("127.0.0.1:8000".into()), TTL),
+        (|c| c.endpoint = Some("ftp://host".into()), TTL),
+        (|c| c.endpoint = Some("https:///path".into()), TTL),
         (|c| c.poll_interval = Duration::ZERO, TTL),
         (|c| c.poll_interval = TTL / 4, TTL),
         (|_| {}, Duration::from_millis(999)),
@@ -928,4 +934,30 @@ fn invalid_configs_are_fatal() {
     for (edit, lease) in invalid {
         assert!(matches!(build(edit, lease), Err(StoreError::Fatal(_))));
     }
+}
+
+/// Every documented key parses, the optional ones default, an unknown key
+/// is refused, and `Debug` redacts the endpoint's userinfo.
+#[test]
+fn the_config_parses_and_redacts_its_endpoint() {
+    let full: DynamoDbConfig = serde_yaml::from_str(
+        "{ table: spate-coordination, job: backfill, region: eu-west-1, \
+         endpoint: \"http://user:hunter2@127.0.0.1:8000\", create_table: true, \
+         poll_interval: 3s }",
+    )
+    .unwrap();
+    assert_eq!(full.region.as_deref(), Some("eu-west-1"));
+    assert!(full.create_table);
+    assert_eq!(full.poll_interval, Duration::from_secs(3));
+    let debug = format!("{full:?}");
+    assert!(!debug.contains("hunter2"), "{debug}");
+    assert!(debug.contains("127.0.0.1:8000"), "{debug}");
+
+    let minimal: DynamoDbConfig = serde_yaml::from_str("{ table: t12, job: j }").unwrap();
+    assert_eq!(
+        (minimal.region, minimal.endpoint, minimal.create_table),
+        (None, None, false)
+    );
+    assert_eq!(minimal.poll_interval, Duration::from_secs(2));
+    assert!(serde_yaml::from_str::<DynamoDbConfig>("{ table: t12, job: j, secret: s }").is_err());
 }

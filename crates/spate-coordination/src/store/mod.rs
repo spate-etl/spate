@@ -7,7 +7,7 @@
 //! whose keys expire one TTL after their last write, holding leases
 //! that every heartbeat rewrite re-arms. [`CoordinationStore`] is
 //! that contract, public so deployments can bring their own backend
-//! (Redis, etcd) next to the built-in NATS and in-memory stores.
+//! (Redis, etcd) next to the built-in NATS, DynamoDB and in-memory stores.
 //!
 //! # Contract notes for implementors
 //!
@@ -42,8 +42,7 @@ use spate_core::metrics::CoordinationMetrics;
 use std::future::Future;
 use std::time::Duration;
 
-#[cfg(any(test, feature = "testing"))]
-#[doc(hidden)]
+#[cfg(feature = "dynamodb")]
 pub mod dynamodb;
 pub mod memory;
 pub(crate) mod metered;

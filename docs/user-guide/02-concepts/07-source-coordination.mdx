@@ -42,15 +42,16 @@ a store that pushes changes, a poll interval or two on a store whose watch
 is polled.
 
 **Failures flow back automatically.** A dead worker stops heartbeating;
-its leases expire one TTL later and its work is reassigned, resuming each
-split from its last committed progress. A worker that is alive but
-over-loaded is rebalanced by **revocation**: the leader stops assigning it
-a split, and the worker drains that split (intake stopped, the emitted
-tail acknowledged, the final watermark committed) and releases it, so the
-transfer replays nothing. A source that cannot stop cleanly has the
-release forced after `drain_deadline` instead, and its uncommitted tail
-replays under the next owner, bounded by one commit interval. A revocation
-the leader cancels mid-drain leaves the split where it is.
+its leases expire one TTL later, measured by the store or by each peer,
+and its work is reassigned, resuming each split from its last committed
+progress. A worker that is alive but over-loaded is rebalanced by
+**revocation**: the leader stops assigning it a split, and the worker
+drains that split (intake stopped, the emitted tail acknowledged, the
+final watermark committed) and releases it, so the transfer replays
+nothing. A source that cannot stop cleanly has the release forced after
+`drain_deadline` instead, and its uncommitted tail replays under the next
+owner, bounded by one commit interval. A revocation the leader cancels
+mid-drain leaves the split where it is.
 
 [Work assignment](./08-work-assignment.mdx) specifies how the assignment
 itself is computed: the balance objective, the stickiness and convergence
@@ -114,8 +115,8 @@ decision.
 The store dependency is deliberately narrow: six primitives
 (create-if-absent, compare-and-swap, guarded delete, point read, prefix
 watch, listing) behind a public trait, so Redis- or etcd-class backends can
-be added without touching the protocol. Correctness never leans on the
-store's clock or its watch semantics. Fencing is the only correctness
+be added without touching the protocol. Correctness never leans on any
+clock or on the store's watch semantics. Fencing is the only correctness
 mechanism; the store supplies latency.
 
 ## What this is not

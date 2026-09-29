@@ -20,6 +20,8 @@
 //!   single-machine embedding.
 //! - A NATS JetStream KV store (default `nats` feature, server >= 2.11) —
 //!   the production backend.
+//! - A DynamoDB store (`dynamodb` feature) over one table, whose watches
+//!   poll.
 //!
 //! Custom backends (Redis, etcd) implement the store trait; the protocol,
 //! fencing, election, and work assignment live above it and are shared.
@@ -60,3 +62,10 @@ pub type MemoryCoordinator = StoreCoordinator<store::memory::MemoryStore>;
 /// synchronous; the connection is made lazily under the startup budget.
 #[cfg(feature = "nats")]
 pub type NatsCoordinator = StoreCoordinator<store::nats::NatsStore>;
+
+/// [`StoreCoordinator`] over one DynamoDB table. Build the store with
+/// [`DynamoDbStore::new`](store::dynamodb::DynamoDbStore::new). Construction
+/// is synchronous; the AWS configuration loads lazily under the startup
+/// budget.
+#[cfg(feature = "dynamodb")]
+pub type DynamoDbCoordinator = StoreCoordinator<store::dynamodb::DynamoDbStore>;

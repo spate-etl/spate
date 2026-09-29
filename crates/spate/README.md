@@ -26,6 +26,7 @@ tree, and never resolves `rdkafka` into its lockfile.
 | `json` | JSON deserialization ([`spate-json`](https://crates.io/crates/spate-json)) |
 | `coordination` | Multi-instance work assignment, in-memory store |
 | `coordination-nats` | The same over NATS JetStream KV |
+| `coordination-dynamodb` | The same over one DynamoDB table |
 | `datagen` | Synthetic storefront source, no infrastructure ([`spate-datagen`](https://crates.io/crates/spate-datagen)) — keeps no durable progress |
 | `datagen-avro` | Avro payloads from that generator instead of JSON (implies `datagen`) |
 

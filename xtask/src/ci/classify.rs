@@ -212,6 +212,11 @@ pub(crate) fn classify(
                 image_suites.extend(["spate-coordination", "spate-s3"].map(String::from));
                 out.container_pkgs.extend(image_suites.iter().cloned());
             }
+            // The emulator the DynamoDB store's suite runs against.
+            if glob(path, "ci/dynamodb/*") {
+                image_suites.insert("spate-coordination".to_string());
+                out.container_pkgs.extend(image_suites.iter().cloned());
+            }
             // The client image `spate-kafka`'s TLS suite runs its clients in.
             if glob(path, "ci/debian/*") {
                 image_suites.insert("spate-kafka".to_string());
@@ -709,6 +714,21 @@ mod tests {
             let out = classify(&image, Event::PullRequest, &ctx, &graph(), &[]);
             assert_eq!(suites(&out), ["spate-coordination", "spate-s3"]);
         }
+    }
+
+    /// A DynamoDB Local bump selects the coordination suite alone, on a
+    /// Dependabot pull request too.
+    #[test]
+    fn a_dynamodb_image_bump_selects_the_coordination_suite() {
+        let image = vec!["ci/dynamodb/stable/Dockerfile".to_string()];
+        assert_eq!(suites(&run(&[image[0].as_str()])), ["spate-coordination"]);
+
+        let ctx = Context {
+            author: "dependabot[bot]".into(),
+            labels: vec![],
+        };
+        let out = classify(&image, Event::PullRequest, &ctx, &graph(), &[]);
+        assert_eq!(suites(&out), ["spate-coordination"]);
     }
 
     #[test]

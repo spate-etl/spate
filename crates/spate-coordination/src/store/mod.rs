@@ -25,6 +25,9 @@
 //!   stream is [`StoreError::Retryable`]: consumers re-watch and apply
 //!   `Put`s only at a revision above the last one they saw, so replays are
 //!   idempotent.
+//! - A store whose watch lists its prefix at an interval declares
+//!   [`WatchMode::Polled`]; the protocol then reads what such a watch
+//!   cannot deliver.
 //! - `list` is the loss-proof backstop for missed watch events: a key the
 //!   consumer believes live but absent from a listing is treated as
 //!   deleted. (The protocol never depends on *which* marker a watch
@@ -48,6 +51,21 @@ pub enum Keyspace {
     /// from write time on the store's clock; expiry surfaces to watchers
     /// as a delete.
     Ephemeral,
+}
+
+/// How a store's watches learn of changes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum WatchMode {
+    /// Every write and expiry reaches the watch as it happens.
+    Push,
+    /// The watch lists its prefix every `interval` and reports the
+    /// difference. A key written and removed between two listings is never
+    /// reported, and several writes to one key arrive as one put.
+    Polled {
+        /// Time between two listings.
+        interval: Duration,
+    },
 }
 
 /// Store-assigned version token, strictly increasing per key —
@@ -144,6 +162,12 @@ pub trait CoordinationStore: Send + Sync + 'static {
     /// The TTL every [`Ephemeral`](Keyspace::Ephemeral) write re-arms.
     /// Fixed at store construction (per-write TTLs are not portable).
     fn lease_ttl(&self) -> Duration;
+
+    /// How this store's watches learn of changes. Fixed at store
+    /// construction.
+    fn watch_mode(&self) -> WatchMode {
+        WatchMode::Push
+    }
 
     /// Create `key` if absent.
     fn create(

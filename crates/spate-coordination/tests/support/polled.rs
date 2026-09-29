@@ -5,7 +5,8 @@ use super::{Backend, LEASE, store};
 use futures_util::StreamExt as _;
 use spate_coordination::store::memory::MemoryStore;
 use spate_coordination::store::{
-    CasOutcome, CoordinationStore, Entry, Keyspace, Revision, StoreError, WatchEvent, WatchStream,
+    CasOutcome, CoordinationStore, Entry, Keyspace, Revision, StoreError, WatchEvent, WatchMode,
+    WatchStream,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
@@ -76,6 +77,12 @@ pub fn diff(
 impl<S: CoordinationStore + Clone> CoordinationStore for PolledStore<S> {
     fn lease_ttl(&self) -> Duration {
         self.inner.lease_ttl()
+    }
+
+    fn watch_mode(&self) -> WatchMode {
+        WatchMode::Polled {
+            interval: self.interval,
+        }
     }
 
     async fn create(

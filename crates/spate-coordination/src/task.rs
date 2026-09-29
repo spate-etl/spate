@@ -8,6 +8,12 @@
 //! planner runs on the blocking pool and is awaited as a **select arm**,
 //! never inline, so a slow enumeration cannot stall renewals.
 //!
+//! On a store whose watch is polled, each worker reads the records of
+//! splits it was assigned and has not seen, and the leader re-reads, every
+//! poll interval, each assigned split that shows no lease. These reads
+//! supply the records a durable watch narrower than the whole keyspace
+//! does not deliver.
+//!
 //! Correctness recap (see `protocol.rs` for the pure rules): the durable
 //! progress record's CAS revision is the only fence; lease keys are
 //! liveness. A zombie's commit that lands *before* a takeover CAS is legal
@@ -23,7 +29,8 @@ use crate::records::{
     SplitStatus, WorkerVal,
 };
 use crate::store::{
-    CasOutcome, CoordinationStore, Entry, Keyspace, Revision, StoreError, WatchEvent, WatchStream,
+    CasOutcome, CoordinationStore, Entry, Keyspace, Revision, StoreError, WatchEvent, WatchMode,
+    WatchStream,
 };
 use futures_util::FutureExt as _;
 use futures_util::StreamExt as _;
@@ -109,6 +116,12 @@ pub(crate) type Listed = Result<Vec<Entry>, StoreError>;
 
 /// A listing read beside the task loop.
 pub(crate) type Listing = BoxFuture<'static, Listed>;
+
+/// Point reads of durable keys beside the task loop, each with its result.
+pub(crate) type Reads = BoxFuture<'static, Vec<(String, Result<Option<Entry>, StoreError>)>>;
+
+/// Point reads one read run keeps in flight at once.
+const READ_CONCURRENCY: usize = 64;
 
 /// A reconcile whose listings are in flight, and the view's revisions when
 /// they began.
@@ -295,6 +308,15 @@ pub(crate) struct Task<S: CoordinationStore + Clone> {
     since_listing: Option<SinceListing>,
     /// The terminal verdict wants an authoritative listing.
     terminal_due: bool,
+    /// `Some(interval)` on a store whose watches are polled. Every branch
+    /// that differs between the two modes reads this field.
+    polled: Option<Duration>,
+    /// Durable keys a point read found absent or could not read, skipped
+    /// until the next refresh tick.
+    parked_reads: BTreeSet<String>,
+    /// A refresh tick fired: the next read run retries parked keys and
+    /// re-reads the leader's unleased assigned splits.
+    refresh_due: bool,
     #[cfg(feature = "testing")]
     probe: Arc<crate::loop_probe::LoopProbe>,
 }
@@ -316,6 +338,10 @@ impl<S: CoordinationStore + Clone> Task<S> {
     ) -> Task<S> {
         let seed = protocol::stable_hash_str(0, &format!("{instance}/{nonce}"));
         let fp = records::fingerprint_hash(&fingerprint);
+        let polled = match store.watch_mode() {
+            WatchMode::Push => None,
+            WatchMode::Polled { interval } => Some(interval),
+        };
         Task {
             store,
             waker,
@@ -360,6 +386,9 @@ impl<S: CoordinationStore + Clone> Task<S> {
             announced_members: BTreeSet::new(),
             since_listing: None,
             terminal_due: false,
+            polled,
+            parked_reads: BTreeSet::new(),
+            refresh_due: false,
             #[cfg(feature = "testing")]
             probe: Arc::default(),
         }
@@ -417,6 +446,7 @@ impl<S: CoordinationStore + Clone> Task<S> {
         let mut seeding: Option<SeedRun> = None;
         let mut reconciling: Option<ReconcileRun> = None;
         let mut terminal: Option<Listing> = None;
+        let mut reads: Option<Reads> = None;
 
         let mut heartbeat = self.clock.now() + self.next_heartbeat();
         // The first reconcile lands anywhere in the first interval, so a
@@ -424,6 +454,7 @@ impl<S: CoordinationStore + Clone> Task<S> {
         let mut reconcile =
             self.clock.now() + protocol::spread(self.seed, self.config.reconcile_interval);
         let mut replan = self.clock.now() + self.config.replan_interval;
+        let mut refresh = self.polled.map(|interval| self.clock.now() + interval);
 
         loop {
             if planning.is_none() && seeding.is_none() {
@@ -439,11 +470,19 @@ impl<S: CoordinationStore + Clone> Task<S> {
                         .boxed(),
                 );
             }
+            if reads.is_none() {
+                let wanted = self.wanted_reads();
+                if !wanted.is_empty() {
+                    reads = Some(self.start_reads(wanted));
+                }
+            }
             let busy = planning.is_some()
                 || seeding.is_some()
                 || reconciling.is_some()
-                || terminal.is_some();
-            self.probe_loop_top(heartbeat.min(reconcile).min(replan), busy);
+                || terminal.is_some()
+                || reads.is_some();
+            let next_timer = heartbeat.min(reconcile).min(replan);
+            self.probe_loop_top(refresh.map_or(next_timer, |r| r.min(next_timer)), busy);
             tokio::select! {
                 command = self.commands.recv() => {
                     let Some(command) = command else {
@@ -517,6 +556,18 @@ impl<S: CoordinationStore + Clone> Task<S> {
                 {
                     terminal = None;
                     self.finish_terminal(listed)?;
+                    Box::pin(self.step()).await?;
+                }
+                read = async { reads.as_mut().expect("guarded by is_some").await },
+                    if reads.is_some() =>
+                {
+                    reads = None;
+                    self.finish_reads(read)?;
+                    Box::pin(self.step()).await?;
+                }
+                () = self.clock.sleep_until(refresh.unwrap_or(heartbeat)), if refresh.is_some() => {
+                    self.refresh_due = true;
+                    refresh = self.polled.map(|interval| self.clock.now() + interval);
                     Box::pin(self.step()).await?;
                 }
                 () = self.clock.sleep_until(replan) => {
@@ -1403,6 +1454,89 @@ impl<S: CoordinationStore + Clone> Task<S> {
         // A backstop for any input whose change set no flag.
         self.assign_dirty = true;
         self.metrics(|m| m.reconcile(run.started.elapsed()));
+        Ok(())
+    }
+
+    /// The durable keys a polled store's watch may never deliver and the
+    /// view needs: the records of splits this worker was assigned, and on a
+    /// refresh tick the records of the leader's assigned splits that show
+    /// no lease. Empty on a store that pushes changes.
+    fn wanted_reads(&mut self) -> Vec<String> {
+        if self.polled.is_none() {
+            return Vec::new();
+        }
+        let refresh = std::mem::take(&mut self.refresh_due);
+        if refresh {
+            self.parked_reads.clear();
+        }
+        let mut wanted = BTreeSet::new();
+        for id in &self.assigned {
+            match self.splits.get(id) {
+                None => {
+                    wanted.insert(records::split_key_str(id));
+                }
+                Some(state) if state.spec.is_some() => continue,
+                Some(_) => {}
+            }
+            if !self.pending_specs.contains_key(id) {
+                wanted.insert(records::spec_key_str(id));
+            }
+        }
+        if refresh && self.leadership.is_some() {
+            for (val, _) in self.assignments.values() {
+                for id in &val.splits {
+                    let unleased = self.splits.get(id).is_none_or(|state| {
+                        state.lease.is_none() && state.progress.status == SplitStatus::Runnable
+                    });
+                    if unleased {
+                        wanted.insert(records::split_key_str(id));
+                    }
+                }
+            }
+        }
+        wanted
+            .into_iter()
+            .filter(|key| !self.parked_reads.contains(key))
+            .collect()
+    }
+
+    fn start_reads(&self, keys: Vec<String>) -> Reads {
+        let store = self.store.clone();
+        async move {
+            futures_util::stream::iter(keys)
+                .map(|key| {
+                    let store = store.clone();
+                    async move {
+                        let read = store.get(Keyspace::Durable, &key).await;
+                        (key, read)
+                    }
+                })
+                .buffer_unordered(READ_CONCURRENCY)
+                .collect()
+                .await
+        }
+        .boxed()
+    }
+
+    /// Fold a read run's results into the view. A key found absent or not
+    /// read waits for the next refresh tick.
+    fn finish_reads(
+        &mut self,
+        results: Vec<(String, Result<Option<Entry>, StoreError>)>,
+    ) -> Result<(), CoordinationError> {
+        for (key, read) in results {
+            match read {
+                Ok(Some(entry)) => self.apply_state_put(&entry)?,
+                Ok(None) => {
+                    self.parked_reads.insert(key);
+                }
+                Err(e) => {
+                    tracing::warn!(key = %key, error = %e, "record read failed; next refresh retries");
+                    self.parked_reads.insert(key);
+                    fatal_only("reading a durable record", &e)?;
+                }
+            }
+        }
         Ok(())
     }
 

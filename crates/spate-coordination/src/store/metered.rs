@@ -2,7 +2,9 @@
 //! `spate_coordination_store_op_duration_seconds` histograms, applied in
 //! one place instead of at thirty call sites.
 
-use super::{CasOutcome, CoordinationStore, Entry, Keyspace, Revision, StoreError, WatchStream};
+use super::{
+    CasOutcome, CoordinationStore, Entry, Keyspace, Revision, StoreError, WatchMode, WatchStream,
+};
 use spate_core::metrics::{CoordinationMetrics, StoreOp};
 use std::future::Future;
 use std::time::{Duration, Instant};
@@ -75,6 +77,10 @@ impl<S> Metered<S> {
 impl<S: CoordinationStore> CoordinationStore for Metered<S> {
     fn lease_ttl(&self) -> Duration {
         self.inner.lease_ttl()
+    }
+
+    fn watch_mode(&self) -> WatchMode {
+        self.inner.watch_mode()
     }
 
     async fn create(

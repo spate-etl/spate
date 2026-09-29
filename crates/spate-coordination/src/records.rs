@@ -86,6 +86,11 @@ pub(crate) fn spec_key(id: &SplitId) -> String {
     format!("{SPEC_PREFIX}{id}")
 }
 
+/// `spec.{id}` key from a raw id string.
+pub(crate) fn spec_key_str(id: &str) -> String {
+    format!("{SPEC_PREFIX}{id}")
+}
+
 /// `worker.{instance}` presence key.
 pub(crate) fn worker_key(instance: &str) -> String {
     format!("{WORKER_PREFIX}{instance}")

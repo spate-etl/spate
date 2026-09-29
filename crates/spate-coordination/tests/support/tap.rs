@@ -3,7 +3,8 @@
 
 use futures_util::StreamExt as _;
 use spate_coordination::store::{
-    CasOutcome, CoordinationStore, Entry, Keyspace, Revision, StoreError, WatchEvent, WatchStream,
+    CasOutcome, CoordinationStore, Entry, Keyspace, Revision, StoreError, WatchEvent, WatchMode,
+    WatchStream,
 };
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -30,19 +31,22 @@ pub struct Write<'a> {
 type Hide = Arc<dyn Fn(Keyspace, &str) -> bool + Send + Sync>;
 type Hook = Arc<dyn Fn(&Write<'_>) -> Option<StoreError> + Send + Sync>;
 type ListHook = Arc<dyn Fn(Keyspace, &str) -> Option<StoreError> + Send + Sync>;
+type GetHook = Arc<dyn Fn(Keyspace, &str) -> Option<StoreError> + Send + Sync>;
 type Injectors = Vec<(Keyspace, mpsc::UnboundedSender<WatchEvent>)>;
 
 /// Wraps `S`. Watches drop every event whose key [`hide`](Self::hide)
 /// matches, and deliver whatever [`inject`](Self::inject) sends; every write
-/// passes through the [`on_write`](Self::on_write) hook and every listing
-/// through [`on_list`](Self::on_list), either of which fails the call by
-/// returning an error. Clones share their taps.
+/// passes through the [`on_write`](Self::on_write) hook, every listing
+/// through [`on_list`](Self::on_list) and every read through
+/// [`on_get`](Self::on_get), any of which fails the call by returning an
+/// error. Clones share their taps.
 #[derive(Clone)]
 pub struct TapStore<S> {
     inner: S,
     hide: Arc<Mutex<Option<Hide>>>,
     hook: Arc<Mutex<Option<Hook>>>,
     list_hook: Arc<Mutex<Option<ListHook>>>,
+    get_hook: Arc<Mutex<Option<GetHook>>>,
     injectors: Arc<Mutex<Injectors>>,
 }
 
@@ -53,6 +57,7 @@ impl<S> TapStore<S> {
             hide: Arc::default(),
             hook: Arc::default(),
             list_hook: Arc::default(),
+            get_hook: Arc::default(),
             injectors: Arc::default(),
         }
     }
@@ -84,6 +89,14 @@ impl<S> TapStore<S> {
         *self.list_hook.lock().expect("tap") = Some(Arc::new(hook));
     }
 
+    /// Run `hook` on every later read; an error it returns fails it.
+    pub fn on_get(
+        &self,
+        hook: impl Fn(Keyspace, &str) -> Option<StoreError> + Send + Sync + 'static,
+    ) {
+        *self.get_hook.lock().expect("tap") = Some(Arc::new(hook));
+    }
+
     /// Deliver `event` on every live watch of `ks`.
     pub fn inject(&self, ks: Keyspace, event: WatchEvent) {
         self.injectors
@@ -104,6 +117,10 @@ impl<S> TapStore<S> {
 impl<S: CoordinationStore + Clone> CoordinationStore for TapStore<S> {
     fn lease_ttl(&self) -> Duration {
         self.inner.lease_ttl()
+    }
+
+    fn watch_mode(&self) -> WatchMode {
+        self.inner.watch_mode()
     }
 
     async fn create(
@@ -138,6 +155,10 @@ impl<S: CoordinationStore + Clone> CoordinationStore for TapStore<S> {
     }
 
     async fn get(&self, ks: Keyspace, key: &str) -> Result<Option<Entry>, StoreError> {
+        let hook = self.get_hook.lock().expect("tap").clone();
+        if let Some(error) = hook.and_then(|hook| hook(ks, key)) {
+            return Err(error);
+        }
         self.inner.get(ks, key).await
     }
 

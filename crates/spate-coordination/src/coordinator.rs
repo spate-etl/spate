@@ -12,7 +12,7 @@ use crate::config::CoordinationConfig;
 use crate::error::fatal;
 use crate::records::{self, LeaseVal, SplitProgressRecord};
 use crate::store::metered::Metered;
-use crate::store::{CoordinationStore, Keyspace};
+use crate::store::{CoordinationStore, Keyspace, WatchMode};
 use crate::task::{Command, Task, TaskEvent};
 use spate_core::clock::tokio::{Clock, SystemClock};
 use spate_core::coordination::ControlWaker;
@@ -79,8 +79,9 @@ impl<S: CoordinationStore + Clone> StoreCoordinator<S> {
     ///
     /// # Errors
     ///
-    /// Fatal on invalid configuration, a current-thread runtime, or a
-    /// store whose lease TTL diverges from `config.lease_duration`.
+    /// Fatal on invalid configuration, a current-thread runtime, a store
+    /// whose lease TTL diverges from `config.lease_duration`, or a polled
+    /// store whose interval is zero or not below it.
     pub fn new(
         store: S,
         config: CoordinationConfig,
@@ -97,8 +98,9 @@ impl<S: CoordinationStore + Clone> StoreCoordinator<S> {
     ///
     /// # Errors
     ///
-    /// Fatal on invalid configuration, a current-thread runtime, or a
-    /// store whose lease TTL diverges from `config.lease_duration`.
+    /// Fatal on invalid configuration, a current-thread runtime, a store
+    /// whose lease TTL diverges from `config.lease_duration`, or a polled
+    /// store whose interval is zero or not below it.
     #[doc(hidden)]
     pub fn with_clock(
         store: S,
@@ -124,6 +126,15 @@ impl<S: CoordinationStore + Clone> StoreCoordinator<S> {
                 "the store's lease TTL ({store_ttl:?}) does not match \
                  coordination.lease_duration ({:?}): both must be built from the same \
                  value — construct the store with the config's lease_duration",
+                config.lease_duration
+            )));
+        }
+        if let WatchMode::Polled { interval } = store.watch_mode()
+            && (interval.is_zero() || interval >= config.lease_duration)
+        {
+            return Err(fatal(format!(
+                "the store polls its watches every {interval:?}, which must be above zero \
+                 and below coordination.lease_duration ({:?})",
                 config.lease_duration
             )));
         }

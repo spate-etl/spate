@@ -225,7 +225,8 @@ fn a_failed_read_waits_for_the_next_interval() {
         held_b.fold(b.poll().expect("poll B"));
         std::thread::sleep(support::POLL_INTERVAL);
     }
-    // One read per interval, and one more for the interval already started.
+    // The read the drive waited for, one per interval, and one more for the
+    // interval already started.
     let taken = attempts.load(Ordering::Acquire);
     assert!(taken <= 8, "{taken} spec reads in six poll intervals");
 }

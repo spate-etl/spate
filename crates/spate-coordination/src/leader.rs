@@ -19,7 +19,9 @@ use crate::error::{fatal_only, store_error};
 use crate::records::{self, LeaderVal, PlanFinalityRepr, SplitProgressRecord, SplitSpecRecord};
 use crate::store::{CasOutcome, CoordinationStore, Keyspace, Revision, StoreError};
 use crate::task::Task;
+use futures_util::FutureExt as _;
 use futures_util::StreamExt as _;
+use futures_util::future::BoxFuture;
 use futures_util::stream::FuturesUnordered;
 use spate_core::coordination::{
     CoordinationError, CoordinationErrorKind, PlanContext, PlanFinality, SplitId, SplitPlan,
@@ -46,7 +48,7 @@ pub(crate) struct PlanRun {
     started: Instant,
 }
 
-impl<S: CoordinationStore> Task<S> {
+impl<S: CoordinationStore + Clone> Task<S> {
     /// Race for the leadership lease; the winner schedules a plan run.
     pub(crate) async fn try_elect(&mut self) -> Result<(), CoordinationError> {
         let generation = self.plan.as_ref().map_or(0, |(p, _)| p.generation) + 1;
@@ -186,14 +188,14 @@ impl<S: CoordinationStore> Task<S> {
         }))
     }
 
-    /// Land a planner run: seed the splits this leader has not observed
-    /// with create-if-absent, recount, then CAS the plan record, the write
-    /// that makes the run count.
-    pub(crate) async fn finish_plan(
+    /// Land a planner run: return the seeding of the splits this leader has
+    /// not observed, to run beside the task loop. `None` when the planner
+    /// failed retryably.
+    pub(crate) fn land_plan(
         &mut self,
         joined: Result<PlannerOutput, tokio::task::JoinError>,
         run: PlanRun,
-    ) -> Result<(), CoordinationError> {
+    ) -> Result<Option<SeedRun>, CoordinationError> {
         let (planner, result) = match joined {
             Ok(parts) => parts,
             Err(join_error) => {
@@ -208,14 +210,14 @@ impl<S: CoordinationStore> Task<S> {
             Err(e) if e.kind == CoordinationErrorKind::Retryable => {
                 tracing::warn!(error = %e, "planner failed; next replan tick retries");
                 self.metrics(|m| m.replan(ReplanOutcome::Error, run.started.elapsed()));
-                return Ok(());
+                return Ok(None);
             }
             Err(e) => return Err(e),
         };
 
         // Skipping splits whose progress and spec are both in the view
         // relies on split records never being deleted.
-        let jobs = split_plan
+        let jobs: Vec<SeedJob> = split_plan
             .splits
             .iter()
             .filter(|planned| {
@@ -231,46 +233,84 @@ impl<S: CoordinationStore> Task<S> {
                     self.fp,
                     planned.seed.as_ref(),
                 ),
-            });
-        let (won, failed) = seed_all(&self.store, jobs).await;
-        let created = won.len() as u64;
-        for (job, rev) in won {
+            })
+            .collect();
+        let store = self.store.clone();
+        let seeded = async move {
+            let (won, failed) = seed_all(&store, jobs.into_iter()).await;
+            // `planned` is recounted from an authoritative listing, never
+            // accumulated: only creates that WON are countable locally, so
+            // a crash or failed publish between seeding and publishing
+            // would otherwise leave records no future run ever counts, and
+            // terminal detection compares against this number forever.
+            let listed = match failed {
+                None => Some(
+                    store
+                        .list(Keyspace::Durable, records::SPLIT_PREFIX)
+                        .await
+                        .map(|entries| entries.len() as u64),
+                ),
+                Some(_) => None,
+            };
+            Seeded {
+                won,
+                failed,
+                listed,
+            }
+        }
+        .boxed();
+        Ok(Some(SeedRun {
+            seeded,
+            plan: run.plan,
+            plan_rev: run.plan_rev,
+            started: run.started,
+            split_plan,
+        }))
+    }
+
+    /// Fold a seeding run's creates into the view, then CAS the plan record,
+    /// the write that makes the run count.
+    pub(crate) async fn finish_plan(
+        &mut self,
+        seed: SeedRun,
+        seeded: Seeded,
+    ) -> Result<(), CoordinationError> {
+        let SeedRun {
+            plan,
+            plan_rev,
+            started,
+            split_plan,
+            ..
+        } = seed;
+        let created = seeded.won.len() as u64;
+        for (job, rev) in seeded.won {
             // Fold our own writes into the view; the watch echoes
             // arrive at revisions we already know.
             self.attach_spec(job.id.as_str(), job.spec);
             self.upsert_progress(job.id.as_str(), job.progress, rev)?;
         }
         self.metrics(|m| m.planned(created));
-        if let Some((split, record, e)) = failed {
+        if let Some((split, record, e)) = seeded.failed {
             tracing::warn!(%split, record, error = %e,
                 "split seeding failed; next replan tick retries");
-            self.metrics(|m| m.replan(ReplanOutcome::Error, run.started.elapsed()));
+            self.metrics(|m| m.replan(ReplanOutcome::Error, started.elapsed()));
             return fatal_only(&format!("seeding the {record} record of split {split}"), &e);
         }
-
-        // `planned` is recounted from an authoritative listing, never
-        // accumulated: only creates that WON are countable locally, so a
-        // crash or failed publish between seeding and publishing would
-        // otherwise leave records no future run ever counts, and
-        // terminal detection compares against this number forever.
-        let listed = match self
-            .store
-            .list(Keyspace::Durable, records::SPLIT_PREFIX)
-            .await
-        {
-            Ok(entries) => entries.len() as u64,
-            Err(e) => {
+        let listed = match seeded.listed {
+            Some(Ok(listed)) => listed,
+            Some(Err(e)) => {
                 tracing::warn!(error = %e, "planned recount failed; next replan tick retries");
-                self.metrics(|m| m.replan(ReplanOutcome::Error, run.started.elapsed()));
+                self.metrics(|m| m.replan(ReplanOutcome::Error, started.elapsed()));
                 return fatal_only("recounting planned splits", &e);
             }
+            None => return Ok(()),
         };
 
         // Publish the run: counts, cursor, finality, fenced by revision.
         let finality = PlanFinalityRepr::from(split_plan.finality);
-        let finality_changed = run.plan.finality != finality;
-        let count_changed = run.plan.planned != listed;
-        let mut published = run.plan.clone();
+        let finality_changed = plan.finality != finality;
+        let count_changed = plan.planned != listed;
+        let mut published = plan.clone();
         published.planned = listed;
         published.finality = finality;
         if let Some(state) = &split_plan.planner_state {
@@ -283,7 +323,7 @@ impl<S: CoordinationStore> Task<S> {
                 Keyspace::Durable,
                 records::PLAN_KEY,
                 published.encode(),
-                run.plan_rev,
+                plan_rev,
             )
             .await
         {
@@ -295,7 +335,7 @@ impl<S: CoordinationStore> Task<S> {
                 } else {
                     ReplanOutcome::Noop
                 };
-                self.metrics(|m| m.replan(outcome, run.started.elapsed()));
+                self.metrics(|m| m.replan(outcome, started.elapsed()));
                 if split_plan.finality == PlanFinality::Final {
                     tracing::info!(
                         planned = self.plan.as_ref().map_or(0, |(p, _)| p.planned),
@@ -310,17 +350,35 @@ impl<S: CoordinationStore> Task<S> {
                 // will seed (deterministic ids), and its own publish
                 // recounts them from the store. Demote quietly.
                 tracing::warn!("plan publish fenced; a successor leads");
-                self.metrics(|m| m.replan(ReplanOutcome::Error, run.started.elapsed()));
+                self.metrics(|m| m.replan(ReplanOutcome::Error, started.elapsed()));
                 self.demote().await?;
                 Ok(())
             }
             Err(e) => {
                 tracing::warn!(error = %e, "plan publish failed; next replan tick retries");
-                self.metrics(|m| m.replan(ReplanOutcome::Error, run.started.elapsed()));
+                self.metrics(|m| m.replan(ReplanOutcome::Error, started.elapsed()));
                 fatal_only("publishing the plan", &e)
             }
         }
     }
+}
+
+/// A plan run's seeding and recount, running beside the task loop, and
+/// what its publish needs once they finish.
+pub(crate) struct SeedRun {
+    pub(crate) seeded: BoxFuture<'static, Seeded>,
+    plan: records::PlanRecord,
+    plan_rev: Revision,
+    started: Instant,
+    split_plan: SplitPlan,
+}
+
+/// What a seeding run wrote: the progress creates that won, the first
+/// failure, and the recount, taken only when nothing failed.
+pub(crate) struct Seeded {
+    won: Vec<(SeedJob, Revision)>,
+    failed: Option<(SplitId, &'static str, StoreError)>,
+    listed: Option<Result<u64, StoreError>>,
 }
 
 /// One split to seed, owned so its write future borrows only the store.

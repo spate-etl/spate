@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 /// so a fixed per-op deadline would starve reconciliation on large jobs.
 /// A dead store still fails it fast through the client's own transport
 /// errors; a slow-but-alive one is paced by the reconcile interval.
+#[derive(Clone)]
 pub(crate) struct Metered<S> {
     inner: S,
     op_timeout: Duration,

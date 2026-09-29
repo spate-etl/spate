@@ -1,6 +1,6 @@
 //! The coordinator task's control-loop state as of its last loop top: the
-//! watch revisions it has applied, its next timer, and whether it is
-//! planning.
+//! watch revisions it has applied, its next timer, and whether work runs
+//! off the loop.
 
 use crate::store::{Keyspace, Revision};
 use std::sync::Mutex;
@@ -13,7 +13,8 @@ pub struct LoopState {
     /// The earliest heartbeat, reconcile or replan deadline on the task's
     /// clock.
     pub next_timer: Instant,
-    /// A plan is being computed off the loop.
+    /// Work runs off the loop: a plan, a seeding run, a reconcile listing
+    /// or a verdict listing.
     pub planning: bool,
     /// The highest revision the task has applied from its durable watch.
     pub durable: Revision,

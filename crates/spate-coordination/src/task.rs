@@ -16,16 +16,18 @@
 
 use crate::config::CoordinationConfig;
 use crate::error::{fatal, fatal_only, store_error};
-use crate::leader::PlanRun;
+use crate::leader::{PlanRun, SeedRun};
 use crate::protocol::{self, ClaimAction, ClaimKind, SplitState};
 use crate::records::{
     self, AssignmentVal, LeaderVal, LeaseVal, PlanRecord, SplitProgressRecord, SplitSpecRecord,
     SplitStatus, WorkerVal,
 };
 use crate::store::{
-    CasOutcome, CoordinationStore, Entry, Keyspace, Revision, WatchEvent, WatchStream,
+    CasOutcome, CoordinationStore, Entry, Keyspace, Revision, StoreError, WatchEvent, WatchStream,
 };
+use futures_util::FutureExt as _;
 use futures_util::StreamExt as _;
+use futures_util::future::BoxFuture;
 use spate_core::clock::tokio::Clock;
 use spate_core::coordination::ControlWaker;
 use spate_core::coordination::{
@@ -102,6 +104,34 @@ struct OwnedSplit {
     last_ok_write: Instant,
 }
 
+/// One listing's result.
+pub(crate) type Listed = Result<Vec<Entry>, StoreError>;
+
+/// A listing read beside the task loop.
+pub(crate) type Listing = BoxFuture<'static, Listed>;
+
+/// A reconcile whose listings are in flight, and the view's revisions when
+/// they began.
+pub(crate) struct ReconcileRun {
+    listings: BoxFuture<'static, (Listed, Listed)>,
+    started: Instant,
+    leader: Option<Revision>,
+    presence: BTreeMap<String, Revision>,
+    leases: BTreeMap<String, Revision>,
+    assignments: BTreeMap<String, Revision>,
+}
+
+/// What the view learned while a reconcile listing was in flight.
+#[derive(Default)]
+struct SinceListing {
+    /// Ephemeral keys deleted from the view.
+    leases: BTreeSet<String>,
+    /// Durable keys deleted from the view.
+    records: BTreeSet<String>,
+    /// The lease view was rebuilt from a newer snapshot.
+    leases_rebuilt: bool,
+}
+
 /// How one release attempt ended. The caller needs the distinction to
 /// avoid reporting a tenancy end twice: a fenced release has already been
 /// announced by [`Task::drop_owned`].
@@ -144,7 +174,7 @@ struct Revoking {
     cancelled: bool,
 }
 
-pub(crate) struct Task<S: CoordinationStore> {
+pub(crate) struct Task<S: CoordinationStore + Clone> {
     pub(crate) store: S,
     pub(crate) config: CoordinationConfig,
     /// Time source for every deadline in the control loop, covering lease
@@ -260,11 +290,16 @@ pub(crate) struct Task<S: CoordinationStore> {
     /// computed over. A publish whose member set matches it did not follow
     /// a fleet change, so whatever it rewrote came from splits completing.
     announced_members: BTreeSet<String>,
+    /// While a reconcile listing is in flight, what the view learned since
+    /// it began that the listing cannot know.
+    since_listing: Option<SinceListing>,
+    /// The terminal verdict wants an authoritative listing.
+    terminal_due: bool,
     #[cfg(feature = "testing")]
     probe: Arc<crate::loop_probe::LoopProbe>,
 }
 
-impl<S: CoordinationStore> Task<S> {
+impl<S: CoordinationStore + Clone> Task<S> {
     #[expect(clippy::too_many_arguments, reason = "assembled once, by the handle")]
     pub(crate) fn new(
         store: S,
@@ -323,6 +358,8 @@ impl<S: CoordinationStore> Task<S> {
             departed: BTreeMap::new(),
             reported_members: None,
             announced_members: BTreeSet::new(),
+            since_listing: None,
+            terminal_due: false,
             #[cfg(feature = "testing")]
             probe: Arc::default(),
         }
@@ -374,17 +411,39 @@ impl<S: CoordinationStore> Task<S> {
         let mut state_watch = Box::pin(self.rewatch(Keyspace::Durable)).await?;
         Box::pin(self.step()).await?;
 
+        // Store reads that can outlast a lease run beside the loop, so a
+        // slow listing never holds up a renewal.
         let mut planning: Option<PlanRun> = None;
+        let mut seeding: Option<SeedRun> = None;
+        let mut reconciling: Option<ReconcileRun> = None;
+        let mut terminal: Option<Listing> = None;
 
         let mut heartbeat = self.clock.now() + self.next_heartbeat();
-        let mut reconcile = self.clock.now() + self.config.reconcile_interval;
+        // The first reconcile lands anywhere in the first interval, so a
+        // fleet started together does not list together.
+        let mut reconcile =
+            self.clock.now() + protocol::spread(self.seed, self.config.reconcile_interval);
         let mut replan = self.clock.now() + self.config.replan_interval;
 
         loop {
-            if planning.is_none() {
+            if planning.is_none() && seeding.is_none() {
                 planning = self.maybe_start_plan()?;
             }
-            self.probe_loop_top(heartbeat.min(reconcile).min(replan), planning.is_some());
+            if terminal.is_none()
+                && std::mem::take(&mut self.terminal_due)
+                && !self.terminal_reported
+            {
+                let store = self.store.clone();
+                terminal = Some(
+                    async move { store.list(Keyspace::Durable, records::SPLIT_PREFIX).await }
+                        .boxed(),
+                );
+            }
+            let busy = planning.is_some()
+                || seeding.is_some()
+                || reconciling.is_some()
+                || terminal.is_some();
+            self.probe_loop_top(heartbeat.min(reconcile).min(replan), busy);
             tokio::select! {
                 command = self.commands.recv() => {
                     let Some(command) = command else {
@@ -441,8 +500,23 @@ impl<S: CoordinationStore> Task<S> {
                     Box::pin(self.step()).await?;
                 }
                 () = self.clock.sleep_until(reconcile) => {
-                    Box::pin(self.reconcile()).await?;
-                    reconcile = self.clock.now() + self.config.reconcile_interval;
+                    if reconciling.is_none() {
+                        reconciling = Some(self.start_reconcile());
+                    }
+                    reconcile = self.clock.now() + self.next_reconcile();
+                }
+                listed = async { (&mut reconciling.as_mut().expect("guarded by is_some").listings).await },
+                    if reconciling.is_some() =>
+                {
+                    let run = reconciling.take().expect("selected arm requires it");
+                    self.finish_reconcile(&run, listed)?;
+                    Box::pin(self.step()).await?;
+                }
+                listed = async { terminal.as_mut().expect("guarded by is_some").await },
+                    if terminal.is_some() =>
+                {
+                    terminal = None;
+                    self.finish_terminal(listed)?;
                     Box::pin(self.step()).await?;
                 }
                 () = self.clock.sleep_until(replan) => {
@@ -456,7 +530,14 @@ impl<S: CoordinationStore> Task<S> {
                     if planning.is_some() =>
                 {
                     let run = planning.take().expect("selected arm requires it");
-                    Box::pin(self.finish_plan(joined, run)).await?;
+                    seeding = self.land_plan(joined, run)?;
+                    Box::pin(self.step()).await?;
+                }
+                seeded = async { (&mut seeding.as_mut().expect("guarded by is_some").seeded).await },
+                    if seeding.is_some() =>
+                {
+                    let run = seeding.take().expect("selected arm requires it");
+                    Box::pin(self.finish_plan(run, seeded)).await?;
                     Box::pin(self.step()).await?;
                 }
             }
@@ -465,6 +546,15 @@ impl<S: CoordinationStore> Task<S> {
 
     fn next_heartbeat(&self) -> Duration {
         protocol::jitter(self.seed, self.round, self.config.renew_interval())
+    }
+
+    /// Reconcile ticks are jittered like heartbeats, on their own key.
+    fn next_reconcile(&self) -> Duration {
+        protocol::jitter(
+            self.seed.rotate_left(32),
+            self.round,
+            self.config.reconcile_interval,
+        )
     }
 
     pub(crate) fn plan_is_open(&self) -> bool {
@@ -772,6 +862,13 @@ impl<S: CoordinationStore> Task<S> {
         // The snapshot is authoritative for its keyspace: rebuild.
         match ks {
             Keyspace::Ephemeral => {
+                // A listing in flight is older than this snapshot, which
+                // carries no deletes: its lease puts could restore a key
+                // deleted while the watch was down, and every live key
+                // arrives through the new watch.
+                if let Some(since) = &mut self.since_listing {
+                    since.leases_rebuilt = true;
+                }
                 self.presence.clear();
                 self.member_caps.clear();
                 self.assign_dirty = true;
@@ -920,6 +1017,7 @@ impl<S: CoordinationStore> Task<S> {
     /// of deletes the key has since been rewritten past); `None` means
     /// authoritative absence from a reconcile listing.
     fn apply_lease_delete(&mut self, key: &str, revision: Option<Revision>) {
+        self.note_deleted(Keyspace::Ephemeral, key);
         let newer_than = |current: Revision| revision.is_none_or(|rev| rev > current);
         if key == records::LEADER_KEY {
             if !self
@@ -994,6 +1092,7 @@ impl<S: CoordinationStore> Task<S> {
         match event {
             WatchEvent::Put(entry) => self.apply_state_put(&entry),
             WatchEvent::Delete { key, .. } => {
+                self.note_deleted(Keyspace::Durable, &key);
                 // The protocol deletes two durable keys: assignment
                 // records for departed instances, and startup probe keys.
                 if let Some(instance) = records::parse_assign_key(&key) {
@@ -1179,30 +1278,70 @@ impl<S: CoordinationStore> Task<S> {
         Ok(())
     }
 
-    /// The reconcile backstop: authoritative listings of both keyspaces,
-    /// applied like fresh snapshots (a key we believe live but absent
-    /// from the listing is treated as deleted). Watches whose streams
-    /// died silently get re-established by their select arms; nothing to
-    /// do for them here.
-    async fn reconcile(&mut self) -> Result<(), CoordinationError> {
-        let started = Instant::now();
-        let leases = match self.store.list(Keyspace::Ephemeral, "").await {
+    /// Begin the reconcile backstop: list both keyspaces beside the task
+    /// loop, and record the view's revisions now so the result, older than
+    /// anything the view learns meanwhile, changes only what it can see.
+    fn start_reconcile(&mut self) -> ReconcileRun {
+        let store = self.store.clone();
+        let listings = async move {
+            let leases = store.list(Keyspace::Ephemeral, "").await;
+            let records = store.list(Keyspace::Durable, "").await;
+            (leases, records)
+        }
+        .boxed();
+        self.since_listing = Some(SinceListing::default());
+        ReconcileRun {
+            listings,
+            started: Instant::now(),
+            leader: self.leader_observed.as_ref().map(|(_, rev)| *rev),
+            presence: self.presence.clone(),
+            leases: self
+                .splits
+                .iter()
+                .filter_map(|(id, state)| state.lease.as_ref().map(|(_, rev)| (id.clone(), *rev)))
+                .collect(),
+            assignments: self
+                .assignments
+                .iter()
+                .map(|(instance, (_, rev))| (instance.clone(), *rev))
+                .collect(),
+        }
+    }
+
+    /// Apply a reconcile's listings like fresh snapshots: a key the view
+    /// believes live but the listing omits is treated as deleted. Only keys
+    /// the view has not changed since the listing began are judged. A key
+    /// deleted meanwhile is not restored from it, and after a lease-watch
+    /// rebuild none of its lease puts apply. Watches whose streams
+    /// died silently get re-established by their select arms.
+    fn finish_reconcile(
+        &mut self,
+        run: &ReconcileRun,
+        (leases, records): (Listed, Listed),
+    ) -> Result<(), CoordinationError> {
+        let since = self.since_listing.take().unwrap_or_default();
+        let leases = match leases {
             Ok(entries) => entries,
             Err(e) => {
                 tracing::warn!(error = %e, "reconcile listing failed; next tick retries");
                 return fatal_only("listing the ephemeral keyspace", &e);
             }
         };
-        let live: std::collections::BTreeSet<&str> =
-            leases.iter().map(|e| e.key.as_str()).collect();
-        if self.leader_observed.is_some() && !live.contains(records::LEADER_KEY) {
+        let live: BTreeSet<&str> = leases.iter().map(|e| e.key.as_str()).collect();
+        if let Some((_, rev)) = &self.leader_observed
+            && run.leader == Some(*rev)
+            && !live.contains(records::LEADER_KEY)
+        {
             self.apply_lease_delete(records::LEADER_KEY, None);
         }
         let gone_workers: Vec<String> = self
             .presence
-            .keys()
-            .filter(|i| !live.contains(records::worker_key(i).as_str()))
-            .cloned()
+            .iter()
+            .filter(|(i, rev)| {
+                run.presence.get(*i) == Some(*rev)
+                    && !live.contains(records::worker_key(i).as_str())
+            })
+            .map(|(i, _)| i.clone())
             .collect();
         for instance in gone_workers {
             self.apply_lease_delete(&records::worker_key(&instance), None);
@@ -1211,29 +1350,36 @@ impl<S: CoordinationStore> Task<S> {
             .splits
             .iter()
             .filter(|(id, s)| {
-                s.lease.is_some() && !live.contains(records::split_key_str(id).as_str())
+                s.lease
+                    .as_ref()
+                    .is_some_and(|(_, rev)| run.leases.get(*id) == Some(rev))
+                    && !live.contains(records::split_key_str(id).as_str())
             })
             .map(|(id, _)| records::split_key_str(id))
             .collect();
         for key in gone_leases {
             self.apply_lease_delete(&key, None);
         }
-        for entry in &leases {
-            self.apply_lease_put(entry)?;
+        if !since.leases_rebuilt {
+            for entry in leases.iter().filter(|e| !since.leases.contains(&e.key)) {
+                self.apply_lease_put(entry)?;
+            }
         }
-        match self.store.list(Keyspace::Durable, "").await {
+        match records {
             Ok(entries) => {
                 // Assignment records are the one durable key this
                 // protocol deletes, and watch snapshots drop delete
                 // markers. A missed deletion leaves a cached revision
                 // whose instance never receives another assignment.
-                let live: std::collections::BTreeSet<&str> =
-                    entries.iter().map(|e| e.key.as_str()).collect();
+                let live: BTreeSet<&str> = entries.iter().map(|e| e.key.as_str()).collect();
                 let gone: Vec<String> = self
                     .assignments
-                    .keys()
-                    .filter(|i| !live.contains(records::assign_key(i).as_str()))
-                    .cloned()
+                    .iter()
+                    .filter(|(i, (_, rev))| {
+                        run.assignments.get(*i) == Some(rev)
+                            && !live.contains(records::assign_key(i).as_str())
+                    })
+                    .map(|(i, _)| i.clone())
                     .collect();
                 for instance in gone {
                     self.assignments.remove(&instance);
@@ -1245,7 +1391,7 @@ impl<S: CoordinationStore> Task<S> {
                         self.awaiting.clear();
                     }
                 }
-                for entry in &entries {
+                for entry in entries.iter().filter(|e| !since.records.contains(&e.key)) {
                     self.apply_state_put(entry)?;
                 }
             }
@@ -1256,8 +1402,19 @@ impl<S: CoordinationStore> Task<S> {
         }
         // A backstop for any input whose change set no flag.
         self.assign_dirty = true;
-        self.metrics(|m| m.reconcile(started.elapsed()));
+        self.metrics(|m| m.reconcile(run.started.elapsed()));
         Ok(())
+    }
+
+    /// Remember a key deleted from the view while a reconcile listing is in
+    /// flight, so the listing does not restore it.
+    fn note_deleted(&mut self, ks: Keyspace, key: &str) {
+        if let Some(since) = &mut self.since_listing {
+            match ks {
+                Keyspace::Ephemeral => since.leases.insert(key.to_string()),
+                Keyspace::Durable => since.records.insert(key.to_string()),
+            };
+        }
     }
 
     // ------------------------------------------------------------------
@@ -1273,7 +1430,7 @@ impl<S: CoordinationStore> Task<S> {
         }
         if self.parting {
             // Leaving the fleet: observe only. The released work belongs to the others.
-            self.check_terminal().await?;
+            self.check_terminal();
             self.update_gauges();
             return Ok(());
         }
@@ -1287,7 +1444,7 @@ impl<S: CoordinationStore> Task<S> {
         }
         self.reconcile_assignment().await?;
         self.service_revocations().await?;
-        self.check_terminal().await?;
+        self.check_terminal();
         self.update_gauges();
         Ok(())
     }
@@ -1592,6 +1749,7 @@ impl<S: CoordinationStore> Task<S> {
             };
             match self.store.delete(Keyspace::Durable, &key, Some(*rev)).await {
                 Ok(CasOutcome::Won(_)) => {
+                    self.note_deleted(Keyspace::Durable, &key);
                     self.assignments.remove(&instance);
                 }
                 Ok(CasOutcome::Lost) => {}
@@ -2123,6 +2281,7 @@ impl<S: CoordinationStore> Task<S> {
         lease_rev: Revision,
     ) -> Result<(), CoordinationError> {
         let key = records::split_key_str(id);
+        self.note_deleted(Keyspace::Ephemeral, &key);
         if let Err(e) = self
             .store
             .delete(Keyspace::Ephemeral, &key, Some(lease_rev))
@@ -2693,15 +2852,15 @@ impl<S: CoordinationStore> Task<S> {
     ///
     /// The listing costs one store round trip and is gated behind a local
     /// pre-check, so it runs essentially once per job.
-    async fn check_terminal(&mut self) -> Result<(), CoordinationError> {
+    fn check_terminal(&mut self) {
         if self.terminal_reported {
-            return Ok(());
+            return;
         }
         let Some((plan, _)) = &self.plan else {
-            return Ok(());
+            return;
         };
         if plan.finality != records::PlanFinalityRepr::Final {
-            return Ok(());
+            return;
         }
         let planned = plan.planned;
         // Cheap gate: pay for the listing only once this worker's view
@@ -2709,16 +2868,20 @@ impl<S: CoordinationStore> Task<S> {
         // a lower bound, so this is `<`, not `!=`.
         let local = self.splits.len() as u64;
         if local < planned || self.completed_count + self.quarantined_count != local {
+            return;
+        }
+        self.terminal_due = true;
+    }
+
+    /// Render the verdict [`Task::check_terminal`] asked for against its
+    /// authoritative listing.
+    fn finish_terminal(&mut self, listed: Listed) -> Result<(), CoordinationError> {
+        if self.terminal_reported {
             return Ok(());
         }
-
         // Authoritative recount. Applying the entries is idempotent, so
         // this doubles as catch-up for a view missing records.
-        let entries = match self
-            .store
-            .list(Keyspace::Durable, records::SPLIT_PREFIX)
-            .await
-        {
+        let entries = match listed {
             Ok(entries) => entries,
             Err(e) => {
                 // Refusing to judge is the safe direction.

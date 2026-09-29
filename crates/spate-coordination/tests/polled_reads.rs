@@ -604,6 +604,49 @@ fn a_standby_that_never_saw_a_record_reports_the_verdict() {
     });
 }
 
+/// A standby whose verdict listing keeps failing lists once per poll
+/// interval.
+#[test]
+fn a_failing_verdict_listing_waits_for_the_next_interval() {
+    let rt = runtime();
+    let inner = store();
+    let two = |c: &mut CoordinationConfig| c.max_in_flight = 2;
+    let ids = ["a", "b"];
+    let mut a = worker(
+        tapped(&inner, |_, _| false),
+        rt.handle(),
+        tuned("worker-a", two),
+        &ids,
+    );
+    finish_alone(&rt, &inner, &mut a);
+    let failing = tapped(&inner, records);
+    let attempts = Arc::new(AtomicU64::new(0));
+    let counted = Arc::clone(&attempts);
+    failing.on_list(move |ks, prefix| {
+        (ks == Keyspace::Durable && prefix == "split.").then(|| {
+            counted.fetch_add(1, Ordering::AcqRel);
+            StoreError::Retryable("injected: listing timed out".into())
+        })
+    });
+    let mut c = worker(failing, rt.handle(), tuned("worker-c", |_| {}), &ids);
+    let mut held = Held::default();
+    drive(
+        &mut c,
+        &mut held,
+        "the standby's first verdict listing",
+        |_| attempts.load(Ordering::Acquire) > 0,
+    );
+    let until = Instant::now() + POLL * 6;
+    while Instant::now() < until {
+        held.fold(c.poll().expect("poll C"));
+        std::thread::sleep(support::POLL_INTERVAL);
+    }
+    // The listing the drive waited for, one per interval, and one more for
+    // the interval already started.
+    let taken = attempts.load(Ordering::Acquire);
+    assert!(taken <= 8, "{taken} verdict listings in six poll intervals");
+}
+
 /// A standby whose verdict listing fails lists again on the next poll
 /// interval.
 #[test]

@@ -354,6 +354,62 @@ async fn durable_watch_puts_nothing_below_its_delete() {
     assert!(after.is_err(), "after the delete at {v2:?}: {after:?}");
 }
 
+/// A durable watch that starts after a key's delete never puts the item
+/// from before the delete.
+#[tokio::test(start_paused = true)]
+async fn a_durable_watch_started_after_a_delete_puts_nothing_below_it() {
+    let table = FakeTable::new();
+    let a = handle(&table, &TestClock::frozen());
+    let v1 = won(a.create(D, "assign.x", b"old".to_vec()).await.unwrap());
+    let v2 = won(a.delete(D, "assign.x", Some(v1)).await.unwrap());
+    let mut watch = a.watch(D, "assign.").await.unwrap();
+    assert!(snapshot(&mut watch).await.is_empty());
+    table.set_stale_reads(true);
+    let after = tokio::time::timeout(POLL * 5, watch.next()).await;
+    assert!(after.is_err(), "deleted at {v2:?}: {after:?}");
+}
+
+/// A durable key created and deleted between two polls never reaches the
+/// watch as a put.
+#[tokio::test(start_paused = true)]
+async fn a_durable_key_deleted_between_polls_is_not_put() {
+    let table = FakeTable::new();
+    let a = handle(&table, &TestClock::frozen());
+    let mut watch = a.watch(D, "assign.").await.unwrap();
+    assert!(snapshot(&mut watch).await.is_empty());
+    let v1 = won(a.create(D, "assign.x", b"old".to_vec()).await.unwrap());
+    let v2 = won(a.delete(D, "assign.x", Some(v1)).await.unwrap());
+    let polls = table.count(FakeOp::Query);
+    while table.count(FakeOp::Query) < polls + 1 {
+        tokio::time::sleep(POLL / 2).await;
+    }
+    table.set_stale_reads(true);
+    let after = tokio::time::timeout(POLL * 5, watch.next()).await;
+    assert!(after.is_err(), "deleted at {v2:?}: {after:?}");
+}
+
+/// Once a consistent read no longer lists a tombstone, as after native TTL
+/// collects it, a key re-created below its revision reaches the watch.
+#[tokio::test(start_paused = true)]
+async fn a_collected_tombstone_leaves_no_floor() {
+    let table = FakeTable::new();
+    table.freeze_wall(1_000);
+    let a = handle(&table, &TestClock::frozen());
+    let v1 = won(a.create(D, "assign.x", b"old".to_vec()).await.unwrap());
+    let tomb = won(a.delete(D, "assign.x", Some(v1)).await.unwrap());
+    let mut watch = a.watch(D, "assign.").await.unwrap();
+    assert!(snapshot(&mut watch).await.is_empty());
+    table
+        .write("job#d", "assign.x", Write::Remove { expected: None })
+        .await
+        .unwrap();
+    let mut again = a.watch(D, "assign.").await.unwrap();
+    assert!(snapshot(&mut again).await.is_empty());
+    let recreated = won(a.create(D, "assign.x", b"new".to_vec()).await.unwrap());
+    assert!(recreated <= tomb, "{recreated:?} above {tomb:?}");
+    assert!(matches!(next(&mut watch).await, WatchEvent::Put(e) if e.revision == recreated));
+}
+
 /// A key this handle creates, then deletes while a poll that read it is in
 /// flight, never reaches the watch as a put.
 #[tokio::test(start_paused = true)]

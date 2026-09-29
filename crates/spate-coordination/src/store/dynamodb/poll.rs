@@ -110,8 +110,9 @@ struct Poll {
     prefix: String,
     /// The revision last delivered for each key.
     seen: BTreeMap<String, u64>,
-    /// The tombstone revision of each durable key deleted on the watch; a
-    /// later put must sit above it.
+    /// The highest tombstone revision read for each durable key that holds
+    /// no delivered revision; a later put must sit above it. A consistent
+    /// read that no longer lists the tombstone drops it.
     deleted: BTreeMap<String, u64>,
     subscribers: Vec<mpsc::UnboundedSender<Event>>,
 }
@@ -213,7 +214,7 @@ impl Poll {
 
     /// A durable read may be eventually consistent, so only a tombstone
     /// above the delivered revision deletes, and only a revision above both
-    /// the delivered one and any delete already reported puts.
+    /// the delivered one and any tombstone already read puts.
     fn apply_durable(&mut self, items: Vec<(String, Item)>, consistent: bool) -> Vec<Entry> {
         let mut listed = BTreeSet::new();
         let mut snapshot = Vec::new();
@@ -230,7 +231,10 @@ impl Poll {
                         },
                     );
                     self.seen.remove(&key);
-                    self.deleted.insert(key.clone(), item.v);
+                }
+                if !self.seen.contains_key(&key) {
+                    let floor = self.deleted.entry(key.clone()).or_insert(item.v);
+                    *floor = (*floor).max(item.v);
                 }
                 listed.insert(key);
                 continue;
@@ -238,7 +242,7 @@ impl Poll {
             let floor = delivered.or_else(|| self.deleted.get(&key).copied());
             if floor.is_some_and(|f| item.v <= f) {
                 // Unchanged, or an eventually consistent read of the item
-                // from before a delete this watch reported.
+                // from before a tombstone this watch read.
                 if delivered.is_some() {
                     snapshot.push(entry(&key, &item));
                 }

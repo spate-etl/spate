@@ -5,6 +5,7 @@
 #![allow(dead_code, unreachable_pub)]
 
 pub mod contract;
+pub mod dynamodb;
 pub mod polled;
 pub mod tap;
 

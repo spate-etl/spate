@@ -1,11 +1,12 @@
-//! The [`CoordinationStore`] contract held by the in-memory store and by the
-//! polling test double.
+//! The [`CoordinationStore`] contract held by the in-memory store, by the
+//! polling test double, and by the DynamoDB store over an in-memory table.
 //!
 //! `nats_integration` runs the same checks against a real NATS server.
 
 mod support;
 
 use futures_util::StreamExt as _;
+use spate_coordination::store::dynamodb::FakeTable;
 use spate_coordination::store::{
     CasOutcome, CoordinationStore, Entry, Keyspace, Revision, WatchEvent,
 };
@@ -17,6 +18,14 @@ use support::{LEASE, TestClock, contract, store_with_clock};
 async fn the_contract_holds_on_the_memory_store() {
     let clock = TestClock::frozen();
     let store = store_with_clock(clock.clone());
+    contract::all(&store, async |by| clock.advance(by)).await;
+}
+
+#[tokio::test]
+async fn the_contract_holds_on_the_dynamodb_store() {
+    let clock = TestClock::frozen();
+    let table = FakeTable::new();
+    let store = support::dynamodb::store(&table, clock.clone());
     contract::all(&store, async |by| clock.advance(by)).await;
 }
 

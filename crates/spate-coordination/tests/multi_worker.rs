@@ -2,9 +2,10 @@
 //! real coordinators race through the public synchronous API, exactly as
 //! pipeline instances would.
 //!
-//! The scenarios in `scenarios/` run here over the store directly and over
+//! The scenarios in `scenarios/` run here over the store directly, over
 //! [`PolledStore`](support::polled::PolledStore), which delivers changes by
-//! polling. The scenarios below need a frozen clock and run here only.
+//! polling, and over the DynamoDB store on an in-memory table. The scenarios
+//! below need a frozen clock and run here only.
 
 mod support;
 #[macro_use]
@@ -19,6 +20,10 @@ multi_worker_scenarios!(support::MemoryBackend::new());
 
 mod polled {
     multi_worker_scenarios!(crate::support::polled::PolledBackend::new());
+}
+
+mod dynamodb {
+    multi_worker_scenarios!(crate::support::dynamodb::DynamoDbFakeBackend::new());
 }
 
 // ----------------------------------------------------------------------

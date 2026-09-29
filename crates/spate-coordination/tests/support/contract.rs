@@ -179,8 +179,8 @@ pub async fn listing<S: CoordinationStore>(store: &S) {
         "a deleted key is absent from a listing"
     );
 
-    let big: Vec<u8> = (0..=u8::MAX).cycle().take(400 * 1024).collect();
-    for i in 0..3 {
+    let big: Vec<u8> = (0..=u8::MAX).cycle().take(300 * 1024).collect();
+    for i in 0..4 {
         won(
             store
                 .create(Keyspace::Durable, &format!("big.{i}"), big.clone())
@@ -190,7 +190,7 @@ pub async fn listing<S: CoordinationStore>(store: &S) {
         );
     }
     let listed = store.list(Keyspace::Durable, "big.").await.unwrap();
-    assert_eq!(listed.len(), 3, "a listing larger than a megabyte");
+    assert_eq!(listed.len(), 4, "a listing larger than a megabyte");
     assert!(listed.iter().all(|e| e.value == big), "values arrive whole");
 }
 

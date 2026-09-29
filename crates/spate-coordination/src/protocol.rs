@@ -491,12 +491,12 @@ mod tests {
         }
     }
 
-    fn lease(owner: &str, nonce: &str, epoch: u64) -> (LeaseVal, Revision) {
+    fn lease(owner: &str, run: &str, epoch: u64) -> (LeaseVal, Revision) {
         (
             LeaseVal {
                 schema: SCHEMA,
                 owner: owner.to_string(),
-                nonce: nonce.to_string(),
+                nonce: run.to_string(),
                 epoch,
             },
             Revision(1),

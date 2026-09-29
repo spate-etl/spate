@@ -1873,21 +1873,11 @@ impl<S: CoordinationStore + Clone> Task<S> {
             return Ok(());
         }
         let reserved = self.reserved_splits();
-        // The tie-break seed is the job fingerprint, NOT `self.seed`,
-        // which mixes in a per-run nonce: a leader-specific seed makes
-        // every failover re-break every tie and churn the fleet.
-        let desired = protocol::desired_assignment(
-            &members,
-            &self.splits,
-            &reserved,
-            &self.member_caps,
-            self.config.max_in_flight,
-            self.fp,
-        );
-        // Where the last published assignment put each split, read
-        // before the writes consume `desired`. This is the leader's own
-        // record of what it decided; ownership cannot answer it, since a
-        // graceful release clears `owner` before dropping presence.
+        // Where the last published assignment put each split. This is the
+        // leader's own record of what it decided; ownership cannot answer
+        // it, since a claim reaches the leader's view some time after the
+        // assignment, and a graceful release clears `owner` before dropping
+        // presence.
         //
         // Two passes, in this order: a departed instance's record
         // outlives it and is the only evidence of where its splits were
@@ -1904,6 +1894,18 @@ impl<S: CoordinationStore + Clone> Task<S> {
                 }
             }
         }
+        // The tie-break seed is the job fingerprint, NOT `self.seed`,
+        // which mixes in a per-run nonce: a leader-specific seed makes
+        // every failover re-break every tie and churn the fleet.
+        let desired = protocol::desired_assignment(
+            &members,
+            &self.splits,
+            &reserved,
+            &previous,
+            &self.member_caps,
+            self.config.max_in_flight,
+            self.fp,
+        );
         // A split named for the first time is work being handed out, not
         // a move. This counts what was *published*, not what landed, so a
         // write that fails below has its move counted again on each

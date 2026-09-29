@@ -155,10 +155,13 @@ fn assigned(assignment: &BTreeMap<String, Vec<String>>) -> usize {
 #[bench::joined_member(joined_member())]
 #[bench::skewed_joined_member(skewed_joined_member())]
 fn plan(rig: Rig) -> (Rig, BTreeMap<String, Vec<String>>) {
+    // No last published assignment: every split in every profile is either
+    // leased, which pass 1 consults first, or never assigned yet.
     let assignment = plan_assignment(
         black_box(&rig.splits),
         &rig.members,
         &rig.reserved,
+        &BTreeMap::new(),
         &rig.caps,
         fleet::LANE_CAP,
         fleet::SEED,

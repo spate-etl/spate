@@ -108,16 +108,20 @@ named here so a deleted or weakened test is visible as a divergence from this
 page.
 
 1. **Deterministic.** The same `(members, splits, ownership, reserved,
-   lane budgets, seed)` always yields the same assignment. The seed keys
-   the tie-breaks and is the *job* fingerprint, never the leader's identity.
-   A leader-specific seed would re-break every tie on failover and churn
-   the fleet for nothing. — `assignment_is_deterministic`
+   last published assignment, lane budgets, seed)` always yields the same
+   assignment. The seed keys the tie-breaks and is the *job* fingerprint,
+   never the leader's identity. A leader-specific seed would re-break every
+   tie on failover and churn the fleet for nothing. —
+   `assignment_is_deterministic`
 2. **No split assigned twice.** No split appears in two instances'
    assignments. — `no_split_is_assigned_twice`
 3. **Stable under unchanged input.** Feeding the function's own output back
-   as current ownership reproduces it exactly; the assignment is a
+   as the last published assignment reproduces it exactly, whether each
+   split's claim is in the leader's view or not yet; the assignment is a
    fixpoint. A steady-state fleet therefore publishes nothing and drains
-   nothing. — `assignment_is_stable_under_unchanged_input`
+   nothing, and a claim on its way to the leader moves nothing. —
+   `assignment_is_stable_under_unchanged_input`,
+   `assignment_is_stable_before_its_claims_are_seen`
 4. **Locally optimal.** No single split can move to a member with lane
    budget and reduce imbalance. — `assignment_admits_no_improving_move`
 5. **Total over the claimable pool.** Every assignable split is assigned
@@ -154,10 +158,14 @@ known at planning time and cost nothing to collect.
 
 The passes:
 
-1. **Sticky** — every split whose current owner is still a live member
-   stays put, within the lane cap. A move costs a drain, so an assignment
-   that churns for a marginally better balance is worse than one that does
-   not.
+1. **Sticky** — every split stays with the first of these that is a live
+   member with a free lane: the owner of its lease, the member the last
+   published assignment named for it, and the owner on its progress record.
+   A move costs a drain, so an assignment that churns for a marginally
+   better balance is worse than one that does not. The last published
+   assignment covers the time between an assignment and its claim reaching
+   the leader's view, which is a store round trip, or up to a poll interval
+   on a store whose watch is polled.
 2. **Fill** — unassigned splits go to the least-loaded member with lane
    budget, heaviest split first (longest-processing-time greedy).
 3. **Improve** — while a split can move from a heavier member to a lighter

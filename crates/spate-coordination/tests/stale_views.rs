@@ -391,6 +391,19 @@ fn a_takeover_that_loses_to_a_failure_report_counts_it_once() {
     assert_eq!(record["attempts"], 1, "the failure was counted twice");
 }
 
+/// A takeover that loses to a newer claimant gives the split up instead of
+/// retrying at that claimant's epoch; it takes the split later at a higher
+/// one, so no two tenancies share a fencing epoch.
+#[test]
+fn a_takeover_that_loses_to_a_newer_claimant_never_reuses_its_epoch() {
+    let record = takeover_after(|record| {
+        record["owner"] = "worker-z".into();
+        record["epoch"] = (record["epoch"].as_u64().unwrap() + 1).into();
+    });
+    assert_eq!(record["owner"], "worker-b");
+    assert_eq!(record["epoch"], 3, "B took the split at worker-z's epoch");
+}
+
 /// A leader whose first assignment write fails publishes it again on a later
 /// step, without waiting for a reconcile.
 #[test]

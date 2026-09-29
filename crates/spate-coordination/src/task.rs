@@ -1873,27 +1873,10 @@ impl<S: CoordinationStore + Clone> Task<S> {
             return Ok(());
         }
         let reserved = self.reserved_splits();
-        // Where the last published assignment put each split. This is the
-        // leader's own record of what it decided; ownership cannot answer
-        // it, since a claim reaches the leader's view some time after the
-        // assignment, and a graceful release clears `owner` before dropping
-        // presence.
-        //
-        // Two passes, in this order: a departed instance's record
-        // outlives it and is the only evidence of where its splits were
-        // assigned, while a live member's record has to win when both
-        // name the same split.
-        let mut previous: BTreeMap<&str, &str> = BTreeMap::new();
-        for pass in [false, true] {
-            for (instance, (val, _)) in &self.assignments {
-                if pass != members.contains(instance.as_str()) {
-                    continue;
-                }
-                for id in &val.splits {
-                    previous.insert(id.as_str(), instance.as_str());
-                }
-            }
-        }
+        // Ownership cannot stand in for this: a claim reaches the leader's
+        // view some time after the assignment, and a graceful release clears
+        // `owner` before dropping presence.
+        let previous = protocol::last_assignees(&self.assignments, &members);
         // The tie-break seed is the job fingerprint, NOT `self.seed`,
         // which mixes in a per-run nonce: a leader-specific seed makes
         // every failover re-break every tie and churn the fleet.

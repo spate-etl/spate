@@ -21,7 +21,7 @@
 //!
 //! [the work-assignment page]: https://spate.kainth.dev/docs/user-guide/concepts/work-assignment
 
-use crate::records::{LeaseVal, SplitProgressRecord, SplitSpecRecord, SplitStatus};
+use crate::records::{AssignmentVal, LeaseVal, SplitProgressRecord, SplitSpecRecord, SplitStatus};
 use crate::store::Revision;
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::BuildHasher as _;
@@ -298,6 +298,29 @@ pub(crate) fn desired_assignment(
         splits.sort();
     }
     out
+}
+
+/// Where the published assignment records put each split, as split id to
+/// instance: the leader's own record of what it decided. A live member's
+/// record wins over a departed instance's when both name the same split; a
+/// departed instance's record outlives it and is the only evidence of where
+/// its splits were assigned.
+pub(crate) fn last_assignees<'a>(
+    records: &'a BTreeMap<String, (AssignmentVal, Revision)>,
+    members: &BTreeSet<String>,
+) -> BTreeMap<&'a str, &'a str> {
+    let mut previous = BTreeMap::new();
+    for live in [false, true] {
+        for (instance, (val, _)) in records {
+            if live != members.contains(instance) {
+                continue;
+            }
+            for id in &val.splits {
+                previous.insert(id.as_str(), instance.as_str());
+            }
+        }
+    }
+    previous
 }
 
 /// Termination backstop for the improving-move pass. Each accepted move
@@ -1101,14 +1124,17 @@ mod tests {
                 .into_iter()
                 .map(|(id, m)| (id.to_string(), m.to_string()))
                 .collect();
-        // One lane each, so neither the fill nor the improving pass can
-        // change what pass 1 placed.
+        // One lane each, so the improving pass cannot change what pass 1
+        // placed. Every seed, so the fill pass's tie-break cannot land a split
+        // where pass 1 should have put it.
         let ms = members(&["w1", "w2", "w3", "w4"]);
-        let out = assign_after(&ms, &map, &BTreeSet::new(), &previous, 1, 7);
-        assert_eq!(out["w1"], ["held"]);
-        assert_eq!(out["w2"], ["unclaimed"]);
-        assert_eq!(out["w3"], ["expired"]);
-        assert!(out["w4"].is_empty());
+        for seed in 0..32 {
+            let out = assign_after(&ms, &map, &BTreeSet::new(), &previous, 1, seed);
+            assert_eq!(out["w1"], ["held"], "seed {seed}");
+            assert_eq!(out["w2"], ["unclaimed"], "seed {seed}");
+            assert_eq!(out["w3"], ["expired"], "seed {seed}");
+            assert!(out["w4"].is_empty(), "seed {seed}");
+        }
     }
 
     /// A last assignee whose lane budget is full keeps only what fits.
@@ -1170,6 +1196,50 @@ mod tests {
         }
     }
 
+    /// A lease naming a member that has left passes the split to its last
+    /// assignee.
+    #[test]
+    fn a_departed_lease_owner_passes_the_split_to_its_last_assignee() {
+        let map = splits(vec![state(
+            record("s", SplitStatus::Runnable, None, 1, 0),
+            1,
+            Some(lease("gone", "n", 1)),
+        )]);
+        let previous: BTreeMap<String, String> =
+            [("s".to_string(), "w2".to_string())].into_iter().collect();
+        let ms = members(&["w1", "w2"]);
+        for seed in 0..32 {
+            let out = assign_after(&ms, &map, &BTreeSet::new(), &previous, 1, seed);
+            assert_eq!(out["w2"], ["s"], "seed {seed}");
+        }
+    }
+
+    /// A live member's record names a split's last assignee over a departed
+    /// instance's record naming the same split, and a departed instance's
+    /// record still counts for a split no live record names.
+    #[test]
+    fn a_live_members_record_outranks_a_departed_ones() {
+        let record = |splits: &[&str]| {
+            let val = AssignmentVal {
+                schema: SCHEMA,
+                generation: 1,
+                splits: splits.iter().map(|s| (*s).to_string()).collect(),
+            };
+            (val, Revision(1))
+        };
+        // One departed record sorts before the live one and one after it.
+        let records: BTreeMap<String, (AssignmentVal, Revision)> = [
+            ("a-gone".to_string(), record(&["shared", "orphan"])),
+            ("m-live".to_string(), record(&["shared"])),
+            ("z-gone".to_string(), record(&["shared"])),
+        ]
+        .into_iter()
+        .collect();
+        let previous = last_assignees(&records, &members(&["m-live"]));
+        assert_eq!(previous.get("shared"), Some(&"m-live"));
+        assert_eq!(previous.get("orphan"), Some(&"a-gone"));
+    }
+
     proptest! {
         /// Invariant 1 — deterministic in its inputs.
         #[test]
@@ -1221,6 +1291,24 @@ mod tests {
             let next = claimed(&map, &owner_of, |_| true);
             let second = assign_after(&ms, &next, &reserved, &owner_of, cap, seed);
             prop_assert_eq!(first, second, "assignment is not a fixpoint");
+        }
+
+        /// Invariant 3 — stable under unchanged ownership alone. Feeding the
+        /// output back as current ownership, with no last published
+        /// assignment, reproduces it exactly.
+        #[test]
+        fn assignment_is_stable_under_unchanged_ownership(
+            entries in assignment_entries(),
+            fleet in 1usize..5,
+            cap in 1u32..5,
+            seed in any::<u64>(),
+            reserved in reserved_ids(),
+        ) {
+            let (map, ms, previous) = assignment_input(entries, fleet);
+            let first = assign_after(&ms, &map, &reserved, &previous, cap, seed);
+            let next = claimed(&map, &published(&first), |_| true);
+            let second = assign(&ms, &next, &reserved, cap, seed);
+            prop_assert_eq!(first, second, "ownership alone is not a fixpoint");
         }
 
         /// Invariant 3 — stable before its claims are seen. Feeding the

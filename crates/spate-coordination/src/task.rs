@@ -8,13 +8,13 @@
 //! planner runs on the blocking pool and is awaited as a **select arm**,
 //! never inline, so a slow enumeration cannot stall renewals.
 //!
-//! On a store whose watch is polled, each worker reads the records of
-//! splits it was assigned and has not seen, and the leader re-reads, every
-//! poll interval, each assigned split that shows no lease. These reads
-//! supply the records a durable watch narrower than the whole keyspace
-//! does not deliver. A worker that reports the job terminal writes a
-//! `verdict` marker, and a worker that sees it lists the split records and
-//! judges, whatever its own view covers.
+//! On a store whose watch is polled, the durable watch covers only the
+//! assignment records, the plan record and the `verdict` marker. Each
+//! worker reads the records of splits it was assigned and has not seen, and
+//! the leader re-reads, every poll interval, each assigned split that shows
+//! no lease; only the leader reconciles, over the split records. A worker
+//! that reports the job terminal writes the marker, and a worker that sees
+//! it lists the split records and judges, whatever its own view covers.
 //!
 //! Correctness recap (see `protocol.rs` for the pure rules): the durable
 //! progress record's CAS revision is the only fence; lease keys are
@@ -574,7 +574,7 @@ impl<S: CoordinationStore + Clone> Task<S> {
                 }
                 () = self.clock.sleep_until(reconcile) => {
                     if reconciling.is_none() {
-                        reconciling = Some(self.start_reconcile());
+                        reconciling = self.start_reconcile();
                     }
                     reconcile = self.clock.now() + self.next_reconcile();
                 }
@@ -933,28 +933,54 @@ impl<S: CoordinationStore + Clone> Task<S> {
     }
 
     async fn try_rewatch(&mut self, ks: Keyspace) -> Result<WatchStream, CoordinationError> {
-        let mut stream = self
-            .store
-            .watch(ks, "")
-            .await
-            .map_err(|e| store_error("establishing watch", &e))?;
+        // On a polled store the durable watch covers only the keys every
+        // worker must learn of promptly; split records arrive through reads.
+        let prefixes: &[&str] = match (ks, self.polled) {
+            (Keyspace::Durable, Some(_)) => &[
+                records::ASSIGN_PREFIX,
+                records::PLAN_KEY,
+                records::VERDICT_KEY,
+            ],
+            _ => &[""],
+        };
+        let mut tails = Vec::with_capacity(prefixes.len());
         let mut snapshot = Vec::new();
-        loop {
-            match stream.next().await {
-                Some(Ok(WatchEvent::SnapshotDone)) => break,
-                Some(Ok(WatchEvent::Put(entry))) => {
-                    self.probe_applied(ks, entry.revision);
-                    snapshot.push(entry);
-                }
-                Some(Ok(WatchEvent::Delete { .. })) => {}
-                Some(Err(e)) => return Err(store_error("watch snapshot", &e)),
-                None => {
-                    return Err(crate::error::retryable(
-                        "watch stream ended during snapshot",
-                    ));
+        for prefix in prefixes {
+            let mut stream = self
+                .store
+                .watch(ks, prefix)
+                .await
+                .map_err(|e| store_error("establishing watch", &e))?;
+            loop {
+                match stream.next().await {
+                    Some(Ok(WatchEvent::SnapshotDone)) => break,
+                    Some(Ok(WatchEvent::Put(entry))) => {
+                        self.probe_applied(ks, entry.revision);
+                        snapshot.push(entry);
+                    }
+                    Some(Ok(WatchEvent::Delete { .. })) => {}
+                    Some(Err(e)) => return Err(store_error("watch snapshot", &e)),
+                    None => {
+                        return Err(crate::error::retryable(
+                            "watch stream ended during snapshot",
+                        ));
+                    }
                 }
             }
+            tails.push(stream);
         }
+        let stream = match tails.len() {
+            1 => tails.pop().expect("one tail"),
+            // A merged stream ends only when every tail has, so a tail that
+            // ends reports it as an error, which re-establishes them all.
+            _ => futures_util::stream::select_all(tails.into_iter().map(|tail| {
+                tail.chain(futures_util::stream::once(async {
+                    Err(StoreError::Retryable("a merged watch tail ended".into()))
+                }))
+                .boxed()
+            }))
+            .boxed(),
+        };
         // The snapshot is authoritative for its keyspace: rebuild.
         match ks {
             Keyspace::Ephemeral => {
@@ -1385,7 +1411,10 @@ impl<S: CoordinationStore + Clone> Task<S> {
     /// Begin the reconcile backstop: list both keyspaces beside the task
     /// loop, and record the view's revisions now so the result, older than
     /// anything the view learns meanwhile, changes only what it can see.
-    fn start_reconcile(&mut self) -> ReconcileRun {
+    fn start_reconcile(&mut self) -> Option<ReconcileRun> {
+        if self.polled.is_some() {
+            return self.start_polled_reconcile();
+        }
         let store = self.store.clone();
         let listings = async move {
             let leases = store.list(Keyspace::Ephemeral, "").await;
@@ -1394,7 +1423,7 @@ impl<S: CoordinationStore + Clone> Task<S> {
         }
         .boxed();
         self.since_listing = Some(SinceListing::default());
-        ReconcileRun {
+        Some(ReconcileRun {
             listings,
             started: Instant::now(),
             leader: self.leader_observed.as_ref().map(|(_, rev)| *rev),
@@ -1409,7 +1438,28 @@ impl<S: CoordinationStore + Clone> Task<S> {
                 .iter()
                 .map(|(instance, (_, rev))| (instance.clone(), *rev))
                 .collect(),
+        })
+    }
+
+    /// A polled watch is itself a listing of what it covers, so on a polled
+    /// store only the leader reconciles, and only the split records, which
+    /// no watch carries there. The run judges no absence.
+    fn start_polled_reconcile(&mut self) -> Option<ReconcileRun> {
+        self.leadership?;
+        let store = self.store.clone();
+        let listings = async move {
+            let records = store.list(Keyspace::Durable, records::SPLIT_PREFIX).await;
+            (Ok(Vec::new()), records)
         }
+        .boxed();
+        Some(ReconcileRun {
+            listings,
+            started: Instant::now(),
+            leader: None,
+            presence: BTreeMap::new(),
+            leases: BTreeMap::new(),
+            assignments: BTreeMap::new(),
+        })
     }
 
     /// Apply a reconcile's listings like fresh snapshots: a key the view
@@ -1511,9 +1561,10 @@ impl<S: CoordinationStore + Clone> Task<S> {
     }
 
     /// The durable keys a polled store's watch may never deliver and the
-    /// view needs: the records of splits this worker was assigned, and on a
-    /// refresh tick the records of the leader's assigned splits that show
-    /// no lease. Empty on a store that pushes changes.
+    /// view needs: the records of splits this worker was assigned, the
+    /// specs of splits in the leader's view, and on a refresh tick the
+    /// records of the leader's assigned splits that show no lease. Empty on
+    /// a store that pushes changes.
     fn wanted_reads(&mut self) -> Vec<String> {
         if self.polled.is_none() {
             return Vec::new();
@@ -1533,6 +1584,15 @@ impl<S: CoordinationStore + Clone> Task<S> {
             }
             if !self.pending_specs.contains_key(id) {
                 wanted.insert(records::spec_key_str(id));
+            }
+        }
+        if self.leadership.is_some() {
+            // A split the leader has seen without its spec cannot be
+            // assigned until the spec is read.
+            for (id, state) in &self.splits {
+                if state.spec.is_none() {
+                    wanted.insert(records::spec_key_str(id));
+                }
             }
         }
         if refresh && self.leadership.is_some() {

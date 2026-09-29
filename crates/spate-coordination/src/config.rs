@@ -42,7 +42,9 @@ pub struct CoordinationConfig {
     #[serde(with = "humantime_serde")]
     pub replan_interval: Duration,
     /// How often every worker reconciles its watch-fed view against a
-    /// full listing (the missed-event backstop). Default 30s.
+    /// full listing (the missed-event backstop). On a store whose watch is
+    /// polled, only the leader reconciles, over the split records. Default
+    /// 30s.
     #[serde(with = "humantime_serde")]
     pub reconcile_interval: Duration,
     /// Startup retry budget (store probe, join, seeding) before giving

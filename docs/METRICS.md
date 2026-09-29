@@ -343,7 +343,7 @@ that code passed one. They fire alongside the source's own
 | Metric | Type | Extra labels | Description |
 |---|---|---|---|
 | `spate_coordination_splits_owned` | gauge | | Splits this worker currently leases (its working set). |
-| `spate_coordination_splits_completed` | gauge | | Splits observed completed across the fleet (bounded jobs). |
+| `spate_coordination_splits_completed` | gauge | | Splits observed completed across the fleet (bounded jobs). On a store whose watch is polled, a worker other than the leader observes only the splits it has read, until the verdict. |
 | `spate_coordination_splits_quarantined` | gauge | | Splits parked after exhausting delivery attempts — **alert on > 0**: a bounded job with quarantined splits ends stalled, not complete. |
 | `spate_coordination_live_workers` | gauge | | Distinct live workers observed (the fleet view), including this one. |
 | `spate_coordination_leader` | gauge | | 1 while this worker holds the planner leadership lease. |

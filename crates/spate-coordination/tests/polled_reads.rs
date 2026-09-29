@@ -675,3 +675,211 @@ fn a_verdict_listing_that_fails_is_taken_again() {
     });
     assert!(failed.load(Ordering::Acquire), "no verdict listing failed");
 }
+
+/// A split record written behind the leader, as a deposed leader's late
+/// seeding writes it, reaches the leader through its reconcile listing; the
+/// leader reads the spec and assigns the split.
+#[test]
+fn a_record_seeded_behind_the_leader_becomes_assignable() {
+    let rt = runtime();
+    let inner = store();
+    let lanes = |c: &mut CoordinationConfig| {
+        c.max_in_flight = 3;
+        c.reconcile_interval = LEASE / 5;
+    };
+    let mut a = worker(
+        tapped(&inner, |_, _| false),
+        rt.handle(),
+        tuned("worker-a", lanes),
+        &["a", "b"],
+    );
+    let mut held = Held::default();
+    drive(&mut a, &mut held, "A claiming both splits", |h| {
+        h.splits.len() == 2
+    });
+    rt.block_on(async {
+        let spec = inner
+            .get(Keyspace::Durable, "spec.b")
+            .await
+            .unwrap()
+            .expect("spec");
+        let mut spec: serde_json::Value = serde_json::from_slice(&spec.value).unwrap();
+        spec["id"] = "m9".into();
+        let split = inner
+            .get(Keyspace::Durable, "split.b")
+            .await
+            .unwrap()
+            .expect("record");
+        let mut split: serde_json::Value = serde_json::from_slice(&split.value).unwrap();
+        split["id"] = "m9".into();
+        split["owner"] = serde_json::Value::Null;
+        split["epoch"] = 0.into();
+        split["attempts"] = 0.into();
+        for (key, value) in [("spec.m9", spec), ("split.m9", split)] {
+            let created = inner
+                .create(Keyspace::Durable, key, serde_json::to_vec(&value).unwrap())
+                .await
+                .unwrap();
+            assert!(created.won().is_some(), "{key}");
+        }
+    });
+    drive(
+        &mut a,
+        &mut held,
+        "A gaining the split seeded behind it",
+        |h| h.splits.contains_key("m9"),
+    );
+}
+
+/// A polled worker whose assignment watch closes after its snapshot watches
+/// again, and still learns the assignment that names it.
+#[test]
+fn a_closed_assignment_watch_is_established_again() {
+    let rt = runtime();
+    let inner = store();
+    let ids = ["a", "b"];
+    let mut a = worker(
+        tapped(&inner, |_, _| false),
+        rt.handle(),
+        tuned("worker-a", |_| {}),
+        &ids,
+    );
+    let mut held_a = Held::default();
+    drive(&mut a, &mut held_a, "A claiming one split", |h| {
+        h.splits.len() == 1
+    });
+    let b_store = tapped(&inner, |_, _| false);
+    b_store.end_next_watch(|ks, prefix| ks == Keyspace::Durable && prefix == "assign.");
+    let mut b = worker(b_store, rt.handle(), tuned("worker-b", |_| {}), &ids);
+    let mut held_b = Held::default();
+    drive_pair(
+        (&mut a, &mut held_a),
+        (&mut b, &mut held_b),
+        "B claiming the split it was assigned",
+        |_, b| b.splits.len() == 1,
+    );
+}
+
+/// On a polled store the durable watch covers assignments, the plan and the
+/// verdict marker; a follower lists the split records once, to judge the
+/// verdict, and a leader lists only split and spec records.
+#[test]
+fn polled_workers_list_only_the_records_no_watch_carries() {
+    let rt = runtime();
+    let inner = store();
+    let ids = ["a", "b"];
+    let listed = |tap: &Tapped| {
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = Arc::clone(&log);
+        tap.on_list(move |ks, prefix| {
+            seen.lock().unwrap().push((ks, prefix.to_string()));
+            None
+        });
+        log
+    };
+    let short = |c: &mut CoordinationConfig| c.reconcile_interval = LEASE / 5;
+    let a_store = tapped(&inner, |_, _| false);
+    let by_a = listed(&a_store);
+    let watches_a = a_store.clone();
+    let mut a = worker(a_store, rt.handle(), tuned("worker-a", short), &ids);
+    let mut held_a = Held::default();
+    drive(&mut a, &mut held_a, "A claiming one split", |h| {
+        h.splits.len() == 1
+    });
+    let b_store = tapped(&inner, |_, _| false);
+    let by_b = listed(&b_store);
+    let mut b = worker(b_store, rt.handle(), tuned("worker-b", short), &ids);
+    let mut held_b = Held::default();
+    drive_pair(
+        (&mut a, &mut held_a),
+        (&mut b, &mut held_b),
+        "B claiming the other split",
+        |_, b| b.splits.len() == 1,
+    );
+    for (w, held) in [(&mut a, &held_a), (&mut b, &held_b)] {
+        let id = held.splits.keys().next().expect("held").clone();
+        w.commit(&split_id(&id), &SplitProgress::completed(1, vec![]))
+            .unwrap();
+    }
+    drive_pair(
+        (&mut a, &mut held_a),
+        (&mut b, &mut held_b),
+        "both verdicts",
+        |a, b| a.all_complete && b.all_complete,
+    );
+    let durable = |prefix: &str| (Keyspace::Durable, prefix.to_string());
+    let by_a = by_a.lock().unwrap().clone();
+    assert!(
+        by_a.iter()
+            .all(|l| *l == durable("split.") || *l == durable("spec.")),
+        "the leader listed {by_a:?}"
+    );
+    let by_b = by_b.lock().unwrap().clone();
+    assert_eq!(
+        by_b,
+        [durable("split.")],
+        "the follower listed more than the verdict's split records"
+    );
+    let watched: Vec<_> = watches_a
+        .watched()
+        .into_iter()
+        .filter(|(ks, _)| *ks == Keyspace::Durable)
+        .collect();
+    assert_eq!(
+        watched,
+        [durable("assign."), durable("plan"), durable("verdict")],
+        "the durable watch"
+    );
+}
+
+/// On a store that pushes changes, workers reconcile both whole keyspaces
+/// and write no verdict marker.
+#[test]
+fn a_push_store_keeps_the_full_reconcile_and_no_marker() {
+    let rt = runtime();
+    let inner = store();
+    let tap = TapStore::new(inner.clone());
+    let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = Arc::clone(&log);
+    tap.on_list(move |ks, prefix| {
+        seen.lock().unwrap().push((ks, prefix.to_string()));
+        None
+    });
+    let mut config = config_for(LEASE, Some("worker-a"));
+    config.max_in_flight = 2;
+    let mut a = StoreCoordinator::new(tap, config, rt.handle().clone(), None).expect("coordinator");
+    a.start(Box::new(PhasedPlanner::one_final(
+        "polled-reads:v1",
+        &["a", "b"],
+    )))
+    .unwrap();
+    let mut held = Held::default();
+    drive(&mut a, &mut held, "claiming both splits", |h| {
+        h.splits.len() == 2
+    });
+    let listed_whole = |log: &[(Keyspace, String)]| {
+        log.contains(&(Keyspace::Ephemeral, String::new()))
+            && log.contains(&(Keyspace::Durable, String::new()))
+    };
+    let deadline = Instant::now() + DEADLINE;
+    while !listed_whole(&log.lock().unwrap()) {
+        assert!(Instant::now() < deadline, "no full reconcile listing");
+        held.fold(a.poll().expect("poll"));
+        std::thread::sleep(support::POLL_INTERVAL);
+    }
+    for id in held.splits.keys() {
+        a.commit(&split_id(id), &SplitProgress::completed(1, vec![]))
+            .unwrap();
+    }
+    drive(&mut a, &mut held, "the verdict", |h| h.all_complete);
+    for _ in 0..20 {
+        a.poll().expect("poll");
+        std::thread::sleep(support::POLL_INTERVAL);
+    }
+    assert!(
+        rt.block_on(inner.get(Keyspace::Durable, "verdict"))
+            .unwrap()
+            .is_none(),
+        "a push store wrote the verdict marker"
+    );
+}

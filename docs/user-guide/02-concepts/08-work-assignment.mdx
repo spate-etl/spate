@@ -42,8 +42,9 @@ There is no ack protocol between leader and worker, and no barrier. The
 leader publishes the new assignment immediately, without waiting for the
 previous owner to let go. What waits is the **claim**: the new owner cannot
 take the split until the previous owner's lease key has disappeared, which
-it observes directly through its watch. An assignment is permission to try,
-not a promise the split is free yet.
+it observes directly through its watch, at its next poll on a store whose
+watch is polled. An assignment is permission to try, not a promise the
+split is free yet.
 
 Other designs resolve the same dependency with an explicit acknowledgment:
 a unit of work is only assigned to its new owner once the old owner has
@@ -257,11 +258,39 @@ minutes. The only floor is `op_timeout`: a deadline below one store
 round-trip would force every revocation before its final commit could
 land.
 
+## Discovery
+
+On a store that pushes changes, every worker watches both keyspaces whole
+and checks its view against a full listing every `reconcile_interval`.
+
+A store whose watch is polled lists what each watch covers once per
+interval, and a key written and removed between two listings never reaches
+the watch. On such a store:
+
+- Every worker watches the lease keyspace whole, and of the durable
+  keyspace only the assignment records, the plan record and the verdict
+  marker.
+- A worker reads the records of a split it is assigned and has not seen,
+  and claims it once they are in its view.
+- The leader re-reads, every poll interval, each split it assigned that is
+  runnable and shows no lease, so a completion, failure or quarantine whose
+  lease it never saw still reaches it. It reads the spec of every split it
+  has seen without one.
+- Only the leader reconciles, and only the split records. That listing
+  brings in a split written without passing through its view, such as a
+  deposed leader's late seeding.
+- A new leader lists every split and spec record before it plans or
+  publishes. Until that listing lands it writes no assignment, so no worker
+  is told to give up a split the leader has not seen yet.
+- A worker that reports the job terminal writes a verdict marker. A worker
+  that sees the marker lists the split records and judges from that
+  listing, since its own view may not cover the plan.
+
 ## Failure behavior
 
 | Failure | Consequence |
 |---|---|
-| Leader dies | No rebalancing until re-election (one lease). Held work continues; assignments are durable and survive the gap. There is **no leaderless balancing fallback** — one mechanism, not two. |
+| Leader dies | No rebalancing until re-election (one lease). Held work continues; assignments are durable and survive the gap. There is **no leaderless balancing fallback** — one mechanism, not two. On a store whose watch is polled, the new leader lists the split records before its first assignment. |
 | Worker dies | Presence key expires; after `rebalance_delay` the leader reassigns. Split leases expire independently, so the work is claimable. |
 | Worker wedged but alive | Its lease stops being renewed and expires, and its presence key with it; the leader withholds its splits for `rebalance_delay` and then assigns them elsewhere. The expiry makes the split *claimable*; the assignment is still what makes someone claim it. |
 | Assignment write lost | The worker keeps its previous assignment. The leader republishes on its next step. |
@@ -286,6 +315,7 @@ land.
 |---|---|
 | The assignment function and its property tests | [`spate-coordination/src/protocol.rs`](repo:crates/spate-coordination/src/protocol.rs) (`desired_assignment`) |
 | Publishing, and the delay window | [`spate-coordination/src/task.rs`](repo:crates/spate-coordination/src/task.rs) (`publish_assignments`, `reserved_splits`) |
+| Reads, the new leader's listing and the verdict marker on a polled store | [`spate-coordination/src/task.rs`](repo:crates/spate-coordination/src/task.rs) (`wanted_reads`, `finish_catch_up`, `write_verdict`) |
 | Worker reconciliation and revocation | [`spate-coordination/src/task.rs`](repo:crates/spate-coordination/src/task.rs) (`reconcile_assignment`, `service_revocations`) |
 | The record on the store | [`spate-coordination/src/records.rs`](repo:crates/spate-coordination/src/records.rs) (`AssignmentVal`) |
 | Tuning knobs | [`spate-coordination/src/config.rs`](repo:crates/spate-coordination/src/config.rs) |

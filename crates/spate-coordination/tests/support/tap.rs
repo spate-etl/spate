@@ -32,6 +32,7 @@ type Hide = Arc<dyn Fn(Keyspace, &str) -> bool + Send + Sync>;
 type Hook = Arc<dyn Fn(&Write<'_>) -> Option<StoreError> + Send + Sync>;
 type ListHook = Arc<dyn Fn(Keyspace, &str) -> Option<StoreError> + Send + Sync>;
 type GetHook = Arc<dyn Fn(Keyspace, &str) -> Option<StoreError> + Send + Sync>;
+type EndFilter = Box<dyn Fn(Keyspace, &str) -> bool + Send + Sync>;
 type Injectors = Vec<(Keyspace, mpsc::UnboundedSender<WatchEvent>)>;
 
 /// Wraps `S`. Watches drop every event whose key [`hide`](Self::hide)
@@ -47,6 +48,8 @@ pub struct TapStore<S> {
     hook: Arc<Mutex<Option<Hook>>>,
     list_hook: Arc<Mutex<Option<ListHook>>>,
     get_hook: Arc<Mutex<Option<GetHook>>>,
+    watched: Arc<Mutex<Vec<(Keyspace, String)>>>,
+    end_next: Arc<Mutex<Option<EndFilter>>>,
     injectors: Arc<Mutex<Injectors>>,
 }
 
@@ -58,6 +61,8 @@ impl<S> TapStore<S> {
             hook: Arc::default(),
             list_hook: Arc::default(),
             get_hook: Arc::default(),
+            watched: Arc::default(),
+            end_next: Arc::default(),
             injectors: Arc::default(),
         }
     }
@@ -95,6 +100,17 @@ impl<S> TapStore<S> {
         hook: impl Fn(Keyspace, &str) -> Option<StoreError> + Send + Sync + 'static,
     ) {
         *self.get_hook.lock().expect("tap") = Some(Arc::new(hook));
+    }
+
+    /// End the next watch whose keyspace and prefix match right after its
+    /// snapshot, as a stream that closes cleanly does.
+    pub fn end_next_watch(&self, filter: impl Fn(Keyspace, &str) -> bool + Send + Sync + 'static) {
+        *self.end_next.lock().expect("tap") = Some(Box::new(filter));
+    }
+
+    /// Every watch established through this handle, in order.
+    pub fn watched(&self) -> Vec<(Keyspace, String)> {
+        self.watched.lock().expect("tap").clone()
     }
 
     /// Deliver `event` on every live watch of `ks`.
@@ -178,7 +194,20 @@ impl<S: CoordinationStore + Clone> CoordinationStore for TapStore<S> {
     }
 
     async fn watch(&self, ks: Keyspace, prefix: &str) -> Result<WatchStream, StoreError> {
+        self.watched
+            .lock()
+            .expect("tap")
+            .push((ks, prefix.to_string()));
         let inner = self.inner.watch(ks, prefix).await?;
+        let ends = {
+            let mut end_next = self.end_next.lock().expect("tap");
+            let ends = end_next.as_ref().is_some_and(|filter| filter(ks, prefix));
+            if ends {
+                *end_next = None;
+            }
+            ends
+        };
+
         let (tx, rx) = mpsc::unbounded_channel();
         self.injectors.lock().expect("tap").push((ks, tx));
         let injected = futures_util::stream::unfold(rx, |mut rx| async move {
@@ -195,7 +224,18 @@ impl<S: CoordinationStore + Clone> CoordinationStore for TapStore<S> {
             let hidden = key.is_some_and(|key| filter.is_some_and(|hide| hide(ks, key)));
             std::future::ready(!hidden)
         });
-        Ok(futures_util::stream::select(visible, injected).boxed())
+        let merged = futures_util::stream::select(visible, injected);
+        if !ends {
+            return Ok(merged.boxed());
+        }
+        let mut done = false;
+        Ok(merged
+            .take_while(move |event| {
+                let keep = !done;
+                done |= matches!(event, Ok(WatchEvent::SnapshotDone));
+                std::future::ready(keep)
+            })
+            .boxed())
     }
 
     async fn list(&self, ks: Keyspace, prefix: &str) -> Result<Vec<Entry>, StoreError> {

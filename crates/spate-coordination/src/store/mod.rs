@@ -211,7 +211,8 @@ pub trait CoordinationStore: Send + Sync + 'static {
         prefix: &str,
     ) -> impl Future<Output = Result<WatchStream, StoreError>> + Send;
 
-    /// Point-in-time listing of every live key under `prefix`.
+    /// Every key under `prefix` that is live throughout the listing. A key
+    /// created or removed while the listing runs may or may not appear.
     fn list(
         &self,
         ks: Keyspace,

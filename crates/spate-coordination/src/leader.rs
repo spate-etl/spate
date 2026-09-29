@@ -14,6 +14,10 @@
 //! arm in the task loop ([`Task::maybe_start_plan`] starts it,
 //! [`Task::finish_plan`] lands it). A slow enumeration must never stall
 //! heartbeats, watch processing, or command service.
+//!
+//! On a store whose watch is polled, a new leader lists every split and
+//! spec record before it plans or publishes, so its first assignment covers
+//! splits its watch never delivered.
 
 use crate::error::{fatal_only, store_error};
 use crate::records::{self, LeaderVal, PlanFinalityRepr, SplitProgressRecord, SplitSpecRecord};
@@ -70,6 +74,13 @@ impl<S: CoordinationStore + Clone> Task<S> {
                 // A fresh leader has published nothing yet, whatever this
                 // process's assignment bookkeeping happens to say.
                 self.mark_assignment_dirty();
+                if self.polled.is_some() {
+                    // The watch may never have delivered records written
+                    // before this worker led: list them before planning or
+                    // publishing.
+                    self.caught_up = false;
+                    self.catch_up_due = true;
+                }
                 self.bump_generation(generation).await?;
                 Ok(())
             }
@@ -156,7 +167,7 @@ impl<S: CoordinationStore + Clone> Task<S> {
     /// run is joined by the task loop's select arm and never awaited here,
     /// so heartbeats keep flowing through a slow enumeration.
     pub(crate) fn maybe_start_plan(&mut self) -> Result<Option<PlanRun>, CoordinationError> {
-        if !self.plan_now || self.leadership.is_none() {
+        if !self.plan_now || self.leadership.is_none() || !self.caught_up {
             return Ok(None);
         }
         self.plan_now = false;

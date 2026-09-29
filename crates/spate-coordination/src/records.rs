@@ -52,6 +52,10 @@ pub(crate) const SCHEMA: u32 = 3;
 pub(crate) const PLAN_KEY: &str = "plan";
 /// Key of the leadership lease in the ephemeral keyspace.
 pub(crate) const LEADER_KEY: &str = "leader";
+/// Key of the verdict marker in the durable keyspace. A worker on a polled
+/// store writes it once it has reported the job terminal; the others take it
+/// as the signal to list and judge.
+pub(crate) const VERDICT_KEY: &str = "verdict";
 /// Prefix of progress keys (durable) and lease keys (ephemeral). The
 /// progress record and the lease of one split share a key name: they are
 /// the two faces of the same contended entity.
@@ -473,6 +477,15 @@ pub(crate) struct LeaderVal {
     pub(crate) nonce: String,
     /// The generation this leadership planned under.
     pub(crate) generation: u64,
+}
+
+/// The durable verdict-marker value. Workers act on the key's presence;
+/// the value names the writer for an operator reading the store.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct VerdictVal {
+    pub(crate) schema: u32,
+    pub(crate) reporter: String,
 }
 
 /// The ephemeral worker-presence value (explicit membership).

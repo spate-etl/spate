@@ -4,7 +4,7 @@
 //! update, point read, guarded delete, prefix watch, and a reconcile
 //! listing) over two keyspaces: a **durable** one holding split records and
 //! the plan record, which survive owner death, and an **ephemeral** one
-//! whose keys expire a fixed TTL after their last write, holding leases
+//! whose keys expire one TTL after their last write, holding leases
 //! that every heartbeat rewrite re-arms. [`CoordinationStore`] is
 //! that contract, public so deployments can bring their own backend
 //! (Redis, etcd) next to the built-in NATS and in-memory stores.
@@ -18,7 +18,11 @@
 //!   back and its revision is never reused, including across a server
 //!   crash or failover.
 //! - `update` on an [`Ephemeral`](Keyspace::Ephemeral) key re-arms its
-//!   TTL; expiry surfaces to watchers as [`WatchEvent::Delete`].
+//!   TTL; expiry surfaces to watchers as [`WatchEvent::Delete`]. A store
+//!   may judge expiry on its own clock, or each handle may judge it on its
+//!   own clock from the first read that returned the key's current
+//!   revision, confirmed by a later read of that revision. A handle that
+//!   first reads a key late sees it expire one TTL after that read.
 //! - A watch delivers a snapshot of live keys, then [`WatchEvent::
 //!   SnapshotDone`], then live updates. Either part may also replay
 //!   deletes of keys that were gone before the watch began. A broken watch
@@ -34,9 +38,13 @@
 //!   delivered; graceful release vs expiry is decided from durable
 //!   record state, not from watch semantics.)
 
+use spate_core::metrics::CoordinationMetrics;
 use std::future::Future;
 use std::time::Duration;
 
+#[cfg(any(test, feature = "testing"))]
+#[doc(hidden)]
+pub mod dynamodb;
 pub mod memory;
 pub(crate) mod metered;
 #[cfg(feature = "nats")]
@@ -48,8 +56,8 @@ pub enum Keyspace {
     /// Never expires; survives owner death (split records, plan record).
     Durable,
     /// Every write re-arms expiry [`lease_ttl`](CoordinationStore::lease_ttl)
-    /// from write time on the store's clock; expiry surfaces to watchers
-    /// as a delete.
+    /// from write time, as the store or the reading handle measures it;
+    /// expiry surfaces to watchers as a delete.
     Ephemeral,
 }
 
@@ -168,6 +176,17 @@ pub trait CoordinationStore: Send + Sync + 'static {
     fn watch_mode(&self) -> WatchMode {
         WatchMode::Push
     }
+
+    /// The per-operation deadline the store sizes its own client timeouts
+    /// from, when it has one. The coordinator rejects a store whose value
+    /// differs from its `op_timeout`.
+    fn op_timeout(&self) -> Option<Duration> {
+        None
+    }
+
+    /// Receives the coordinator's metrics once, at start, for the I/O a
+    /// store runs outside the trait's operations.
+    fn attach_metrics(&self, _metrics: &CoordinationMetrics) {}
 
     /// Create `key` if absent.
     fn create(

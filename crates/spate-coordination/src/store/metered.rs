@@ -83,6 +83,14 @@ impl<S: CoordinationStore> CoordinationStore for Metered<S> {
         self.inner.watch_mode()
     }
 
+    fn op_timeout(&self) -> Option<Duration> {
+        self.inner.op_timeout()
+    }
+
+    fn attach_metrics(&self, metrics: &CoordinationMetrics) {
+        self.inner.attach_metrics(metrics);
+    }
+
     async fn create(
         &self,
         ks: Keyspace,

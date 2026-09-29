@@ -15,9 +15,9 @@
 //!
 //! Liveness discipline: a split is claimable exactly when its durable
 //! progress record says `runnable` and no live lease key exists for it.
-//! Lease keys expire server-side (a single clock, the store's), so there
-//! are no cross-machine clock comparisons anywhere; fencing (the progress
-//! record CAS) remains the only *correctness* mechanism regardless.
+//! Lease keys expire on the store's clock or on each observer's own, so no
+//! decision compares clocks across machines; fencing (the progress record
+//! CAS) remains the only *correctness* mechanism regardless.
 //!
 //! [the work-assignment page]: https://spate.kainth.dev/docs/user-guide/concepts/work-assignment
 

@@ -5,6 +5,7 @@
 #![allow(dead_code, unreachable_pub)]
 
 pub mod contract;
+pub mod dynamodb;
 pub mod polled;
 pub mod tap;
 
@@ -828,8 +829,9 @@ impl CoordinationStore for CountingStore {
 }
 
 /// Asserts the [`CoordinationStore::delete`] outcomes in both keyspaces: a
-/// delete of an absent key wins guarded or not, and a guarded delete of a
-/// live key at another revision loses and leaves the key in place.
+/// delete of an absent key wins guarded or not, a deleted key reads as
+/// absent, and a guarded delete of a live key at another revision loses and
+/// leaves the key in place.
 pub async fn delete_contract<S: CoordinationStore>(store: &S) {
     for ks in [Keyspace::Durable, Keyspace::Ephemeral] {
         let won = |outcome: Result<CasOutcome, StoreError>| {
@@ -851,6 +853,10 @@ pub async fn delete_contract<S: CoordinationStore>(store: &S) {
             .won()
             .expect("create of a fresh key wins");
         assert!(won(store.delete(ks, "deleted", Some(rev)).await));
+        assert!(
+            store.get(ks, "deleted").await.expect("get").is_none(),
+            "{ks:?}: a deleted key reads as absent"
+        );
         assert!(
             won(store.delete(ks, "deleted", Some(rev)).await),
             "{ks:?}: guarded delete of a deleted key"

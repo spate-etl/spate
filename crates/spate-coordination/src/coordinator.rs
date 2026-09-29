@@ -80,8 +80,9 @@ impl<S: CoordinationStore + Clone> StoreCoordinator<S> {
     /// # Errors
     ///
     /// Fatal on invalid configuration, a current-thread runtime, a store
-    /// whose lease TTL diverges from `config.lease_duration`, or a polled
-    /// store whose interval is zero or not below it.
+    /// whose lease TTL diverges from `config.lease_duration` or whose
+    /// `op_timeout` diverges from `config.op_timeout`, or a polled store
+    /// whose interval is zero or not below it.
     pub fn new(
         store: S,
         config: CoordinationConfig,
@@ -99,8 +100,9 @@ impl<S: CoordinationStore + Clone> StoreCoordinator<S> {
     /// # Errors
     ///
     /// Fatal on invalid configuration, a current-thread runtime, a store
-    /// whose lease TTL diverges from `config.lease_duration`, or a polled
-    /// store whose interval is zero or not below it.
+    /// whose lease TTL diverges from `config.lease_duration` or whose
+    /// `op_timeout` diverges from `config.op_timeout`, or a polled store
+    /// whose interval is zero or not below it.
     #[doc(hidden)]
     pub fn with_clock(
         store: S,
@@ -127,6 +129,16 @@ impl<S: CoordinationStore + Clone> StoreCoordinator<S> {
                  coordination.lease_duration ({:?}): both must be built from the same \
                  value — construct the store with the config's lease_duration",
                 config.lease_duration
+            )));
+        }
+        if let Some(store_timeout) = store.op_timeout()
+            && store_timeout != config.op_timeout
+        {
+            return Err(fatal(format!(
+                "the store sizes its timeouts from an op_timeout of {store_timeout:?}, which \
+                 differs from coordination.op_timeout ({:?}): construct the store with the \
+                 config's op_timeout",
+                config.op_timeout
             )));
         }
         if let WatchMode::Polled { interval } = store.watch_mode()
@@ -364,6 +376,9 @@ impl<S: CoordinationStore + Clone> SplitCoordinator for StoreCoordinator<S> {
         let (command_tx, command_rx) = mpsc::channel(COMMAND_DEPTH);
         let (event_tx, event_rx) = std_mpsc::channel();
         let metrics = self.metrics.take();
+        if let Some(m) = &metrics {
+            self.store.attach_metrics(m);
+        }
         // The decorator applies the per-op deadline and the store-op
         // latency histograms to every primitive in one place.
         let store = Metered::new(self.store.clone(), self.config.op_timeout, metrics.clone());

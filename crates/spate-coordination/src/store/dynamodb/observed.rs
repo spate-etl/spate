@@ -1,0 +1,153 @@
+//! What one handle has observed of each ephemeral key, and the expiry rule
+//! judged from it on the handle's own clock.
+
+use std::collections::HashMap;
+use std::time::Duration;
+use tokio::time::Instant;
+
+#[derive(Debug)]
+pub(super) struct Observed {
+    ttl: Duration,
+    seq: u64,
+    keys: HashMap<String, Obs>,
+}
+
+#[derive(Debug)]
+struct Obs {
+    /// The last version observed; `None` after an observed absence or an own delete.
+    v: Option<u64>,
+    /// When `v` was first observed.
+    since: Instant,
+    /// Every revision returned, written or emitted as a delete.
+    hw: u64,
+    /// Bumped by every own write, emitted delete, and observation that changed `v`.
+    seq: u64,
+    /// Set when `v` was judged expired and its delete emitted.
+    expired: bool,
+    touched: Instant,
+}
+
+impl Observed {
+    pub(super) fn new(ttl: Duration) -> Observed {
+        Observed {
+            ttl,
+            seq: 0,
+            keys: HashMap::new(),
+        }
+    }
+
+    /// The sequence a read takes before it starts.
+    pub(super) fn seq(&self) -> u64 {
+        self.seq
+    }
+
+    /// Whether an own write or delete, an emitted delete, or a read that
+    /// changed the key's version landed after a read that began at `s0`.
+    pub(super) fn newer_than(&self, key: &str, s0: u64) -> bool {
+        self.keys.get(key).is_some_and(|o| o.seq > s0)
+    }
+
+    pub(super) fn hw(&self, key: &str) -> u64 {
+        self.keys.get(key).map_or(0, |o| o.hw)
+    }
+
+    fn entry(&mut self, key: &str, now: Instant) -> &mut Obs {
+        self.keys.entry(key.to_string()).or_insert(Obs {
+            v: None,
+            since: now,
+            hw: 0,
+            seq: 0,
+            expired: false,
+            touched: now,
+        })
+    }
+
+    /// An own write landed at `v`; `now` is when the call returned.
+    pub(super) fn own_write(&mut self, key: &str, v: u64, now: Instant) {
+        self.seq += 1;
+        let seq = self.seq;
+        let o = self.entry(key, now);
+        *o = Obs {
+            v: Some(v),
+            since: now,
+            hw: o.hw.max(v),
+            seq,
+            expired: false,
+            touched: now,
+        };
+    }
+
+    /// An own delete removed the key.
+    pub(super) fn own_delete(&mut self, key: &str, now: Instant) {
+        self.seq += 1;
+        let seq = self.seq;
+        let o = self.entry(key, now);
+        o.v = None;
+        o.seq = seq;
+        o.expired = false;
+        o.touched = now;
+    }
+
+    /// A consistent read that began at sequence `s0` and returned at `t1`
+    /// found the key at `v`, or absent. Ignored when a newer write or read
+    /// of the key landed after the read began.
+    pub(super) fn observe(&mut self, key: &str, v: Option<u64>, s0: u64, t1: Instant) {
+        if self.newer_than(key, s0) {
+            return;
+        }
+        let next = self.seq + 1;
+        let o = self.entry(key, t1);
+        o.touched = t1;
+        if let Some(v) = v {
+            o.hw = o.hw.max(v);
+        }
+        if o.v != v {
+            o.v = v;
+            o.since = t1;
+            o.expired = false;
+            o.seq = next;
+            self.seq = next;
+        }
+    }
+
+    /// Whether `v` is expired as judged by a successful read of it that
+    /// began at `t0`: one TTL after it was first observed, or already
+    /// judged so.
+    pub(super) fn expired(&self, key: &str, v: u64, t0: Instant) -> bool {
+        self.keys
+            .get(key)
+            .is_some_and(|o| o.v == Some(v) && (o.expired || t0 >= o.since + self.ttl))
+    }
+
+    /// The version already judged expired, if the key holds one.
+    pub(super) fn expired_version(&self, key: &str) -> Option<u64> {
+        self.keys.get(key).filter(|o| o.expired).and_then(|o| o.v)
+    }
+
+    /// The revision of a delete emitted now: above every revision this
+    /// handle saw for the key and above `delivered`.
+    pub(super) fn emit_delete(
+        &mut self,
+        key: &str,
+        delivered: u64,
+        expiry: bool,
+        now: Instant,
+    ) -> u64 {
+        self.seq += 1;
+        let seq = self.seq;
+        let o = self.entry(key, now);
+        let d = o.hw.max(delivered) + 1;
+        o.hw = d;
+        o.seq = seq;
+        o.expired = expiry;
+        o.touched = now;
+        d
+    }
+
+    /// Drops keys that are gone or expired and untouched for two TTLs.
+    pub(super) fn evict(&mut self, now: Instant) {
+        let idle = self.ttl * 2;
+        self.keys
+            .retain(|_, o| !((o.v.is_none() || o.expired) && now >= o.touched + idle));
+    }
+}

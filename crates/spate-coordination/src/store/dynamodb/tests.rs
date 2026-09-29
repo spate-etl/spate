@@ -1,5 +1,5 @@
 use super::fake::good_shape;
-use super::table::{Cond, KeyAttr, Meta, Shape, Status, Table as _, Ttl, Write};
+use super::table::{Cond, KeyAttr, Meta, Shape, Status, Ttl, Write};
 use super::*;
 use crate::store::WatchEvent;
 use futures_util::StreamExt as _;

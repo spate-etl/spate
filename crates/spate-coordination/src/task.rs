@@ -862,9 +862,10 @@ impl<S: CoordinationStore + Clone> Task<S> {
         // The snapshot is authoritative for its keyspace: rebuild.
         match ks {
             Keyspace::Ephemeral => {
-                // The snapshot is newer than any listing in flight and
-                // carries no deletes: that listing's lease puts can only
-                // restore what is gone.
+                // A listing in flight is older than this snapshot, which
+                // carries no deletes: its lease puts could restore a key
+                // deleted while the watch was down, and every live key
+                // arrives through the new watch.
                 if let Some(since) = &mut self.since_listing {
                     since.leases_rebuilt = true;
                 }

@@ -39,9 +39,9 @@ rather than to the job's history.
 On a store that returns `Polled`, the durable watch covers the assignment
 records, the plan record and a verdict marker. A worker reads the records of a
 split it is assigned and has not seen. The leader re-reads each assigned
-runnable split that shows no lease every poll interval, reads the spec of any split it has seen
-without one, and is the only worker that reconciles, over the split records
-only. A new leader lists every split and spec record before it plans or
+runnable split that shows no lease every poll interval, reads the spec of any
+split it has seen without one, and is the only worker that reconciles, over the
+split records only. A new leader lists every split and spec record before it plans or
 publishes. A worker that reports the job terminal writes the marker, and a
 worker that sees it judges from a listing.
 

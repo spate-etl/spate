@@ -34,7 +34,7 @@ pub struct DynamoDbConfig {
     #[serde(default)]
     pub endpoint: Option<String>,
     /// Create a pay-per-request table when it is missing, and enable TTL on
-    /// `x` when it is off.
+    /// `x` when it is off on an active table.
     #[serde(default)]
     pub create_table: bool,
     /// Time between two listings of a watched prefix. Default 2s.

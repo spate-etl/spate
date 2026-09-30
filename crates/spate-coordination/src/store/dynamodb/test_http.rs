@@ -576,6 +576,53 @@ fn a_cut_startup_check_keeps_the_loaded_credentials() {
     assert_eq!(spawns.lines().count(), 1, "credential_process runs");
 }
 
+/// Every startup attempt against a malformed shared config file names the
+/// parse error, and a file fixed between attempts is read on the next one.
+#[test]
+fn a_malformed_config_is_named_on_every_attempt_until_fixed() {
+    if let Ok(target) = std::env::var(BARE_TARGET) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let store = bare_store(&target);
+        for attempt in 1..=2 {
+            let got = rt.block_on(store.get(Keyspace::Durable, "k"));
+            assert!(
+                matches!(&got, Err(StoreError::Retryable(e)) if e.contains("could not parse profile file")),
+                "attempt {attempt}: {got:?}"
+            );
+        }
+        let config = std::env::var("AWS_CONFIG_FILE").unwrap();
+        let credentials = std::env::var("AWS_SHARED_CREDENTIALS_FILE").unwrap();
+        std::fs::write(config, "[default]\n").unwrap();
+        std::fs::write(
+            credentials,
+            "[default]\naws_access_key_id = test\naws_secret_access_key = test\n",
+        )
+        .unwrap();
+        let got = rt.block_on(store.get(Keyspace::Durable, "k"));
+        assert!(matches!(got, Ok(None)), "after the fix: {got:?}");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("config"),
+        "[default\ncredential_process = \n",
+    )
+    .unwrap();
+    let updates = Arc::new(AtomicUsize::new(0));
+    let bare = Bare::new(
+        startup_script(ttl_on, not_called, updates),
+        always(|| Reply::Json(404, String::new())),
+    );
+    bare.run(
+        "a_malformed_config_is_named_on_every_attempt_until_fixed",
+        dir.path(),
+        &[],
+    );
+}
+
 /// With no region configured and a provider chain that names none,
 /// connecting fails fatally before any request, naming the setting.
 #[test]

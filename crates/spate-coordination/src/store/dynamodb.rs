@@ -87,8 +87,8 @@ struct Inner {
     now_ms: Box<dyn Fn() -> u64 + Send + Sync>,
     pks: [String; 3],
     connect: Connect,
-    /// The table as connected, before the startup checks.
-    connected: tokio::sync::OnceCell<Arc<dyn Table>>,
+    /// The table as connected, before the startup checks pass.
+    connected: Mutex<Option<Arc<dyn Table>>>,
     /// The table once the startup checks pass.
     table: tokio::sync::OnceCell<Arc<dyn Table>>,
     observed: Mutex<observed::Observed>,
@@ -103,7 +103,10 @@ impl fmt::Debug for Inner {
             .field("job", &self.config.job)
             .field("lease_ttl", &self.lease_ttl)
             .field("poll_interval", &self.config.poll_interval)
-            .field("connected", &self.connected.initialized())
+            .field(
+                "connected",
+                &self.connected.lock().is_ok_and(|c| c.is_some()),
+            )
             .field("checked", &self.table.initialized())
             .finish_non_exhaustive()
     }
@@ -115,6 +118,10 @@ impl Inner {
             Keyspace::Durable => &self.pks[0],
             Keyspace::Ephemeral => &self.pks[1],
         }
+    }
+
+    fn connected(&self) -> MutexGuard<'_, Option<Arc<dyn Table>>> {
+        self.connected.lock().expect("connection slot poisoned")
     }
 
     fn observed(&self) -> MutexGuard<'_, observed::Observed> {
@@ -162,7 +169,7 @@ impl DynamoDbStore {
                 now_ms,
                 pks,
                 connect,
-                connected: tokio::sync::OnceCell::new(),
+                connected: Mutex::default(),
                 table: tokio::sync::OnceCell::new(),
                 observed: Mutex::new(observed::Observed::new(lease_ttl)),
                 pollers: Mutex::default(),
@@ -297,19 +304,30 @@ impl DynamoDbStore {
 
     /// The table, after the startup checks pass once for this handle.
     ///
-    /// The handle connects once; a check that fails or is cancelled runs
-    /// again on the next call over the same connection.
+    /// A check the caller's deadline cancels runs again on the next call
+    /// over the same connection, so credentials already loaded are kept. A
+    /// connect or check that returns an error drops the connection, and the
+    /// next call loads the AWS configuration and credentials again.
     async fn table(&self) -> Result<&Arc<dyn Table>, StoreError> {
         let inner = &self.inner;
         inner
             .table
             .get_or_try_init(|| async {
-                let table = inner
-                    .connected
-                    .get_or_try_init(|| (inner.connect)())
-                    .await?;
-                startup::check(&**table, &inner.config, inner.lease_ttl, &inner.pks[2]).await?;
-                Ok(Arc::clone(table))
+                let held = inner.connected().clone();
+                let table = match held {
+                    Some(table) => table,
+                    None => {
+                        let table = (inner.connect)().await?;
+                        *inner.connected() = Some(Arc::clone(&table));
+                        table
+                    }
+                };
+                let checked =
+                    startup::check(&*table, &inner.config, inner.lease_ttl, &inner.pks[2]).await;
+                if checked.is_err() {
+                    *inner.connected() = None;
+                }
+                checked.map(|()| table)
             })
             .await
     }

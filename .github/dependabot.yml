@@ -55,14 +55,20 @@ updates:
     # Under Cargo's default `increase-if-necessary`, a manifest edit in a bump
     # signals a dependency moved outside its declared requirement.
     groups:
-      # syn, quote and proc-macro2 release in lockstep; nothing else in this
-      # workspace has that guarantee, so nothing else is grouped.
+      # syn, quote and proc-macro2 release in lockstep.
       #
       # Grouping is Cargo-aware. For a 0.x crate 0.39 -> 0.40 classifies as
       # major and arrives as its own pull request, so the "minor" entry here
       # only matches these three at 1.0 or above.
       proc-macro-trio:
         patterns: ["syn", "quote", "proc-macro2"]
+        update-types: ["minor", "patch"]
+      # smithy-rs releases the SDK crates together, and a client built with
+      # one release and a config loader from another can disagree. aws-lc-rs
+      # and aws-lc-sys release on their own schedule, so the patterns name the
+      # SDK crates alone.
+      aws-sdk:
+        patterns: ["aws-config", "aws-sdk-*", "aws-smithy-*", "aws-credential-types"]
         update-types: ["minor", "patch"]
 
   # --------------------------------------------------- Rust (the nightly) ----
@@ -239,6 +245,21 @@ updates:
     directory: "/ci/kafka/stable"
     schedule:
       interval: weekly
+      day: friday
+    open-pull-requests-limit: 1
+    labels: ["dependencies", "area: ci"]
+    commit-message:
+      prefix: "ci"
+    cooldown:
+      default-days: 7
+
+  # --------------------------------------------- Docker (DynamoDB Local) ----
+  # `ci/dynamodb/stable/Dockerfile` pins the emulator the DynamoDB store's
+  # container suite boots. No `ignore`, so it follows every release.
+  - package-ecosystem: docker
+    directory: "/ci/dynamodb/stable"
+    schedule:
+      interval: monthly
       day: friday
     open-pull-requests-limit: 1
     labels: ["dependencies", "area: ci"]

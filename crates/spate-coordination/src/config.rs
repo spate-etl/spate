@@ -21,8 +21,12 @@ use std::time::Duration;
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
 pub struct CoordinationConfig {
-    /// Takeover-latency ceiling: a dead worker's splits flow back to the
-    /// fleet one lease after its last heartbeat. Default 30s.
+    /// How long a lease outlives its last heartbeat: one lease as the store
+    /// measures it, or, on a store whose expiry each peer judges, one lease
+    /// from when the peer first read that heartbeat, seen at the peer's
+    /// first poll after it. A dead worker's split moves once the leader has
+    /// seen its lease expire, `rebalance_delay` has passed, and the lease
+    /// has expired in the new owner's view too. Default 30s.
     #[serde(with = "humantime_serde")]
     pub lease_duration: Duration,
     /// Per-store-operation deadline. Default 10s.

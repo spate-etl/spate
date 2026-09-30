@@ -15,7 +15,7 @@ running the affected version, and there is no way to take it back.
 A report is easier to act on with:
 
 - the version or commit, and which features were enabled (`kafka`, `s3`,
-  `coordination-nats`, …);
+  `coordination-nats`, `coordination-dynamodb`, …);
 - what an attacker gains, and what they need in order to reach it;
 - the smallest reproduction you have. A failing test against `spate-test`'s mocks
   is ideal, but a description of the sequence is enough.

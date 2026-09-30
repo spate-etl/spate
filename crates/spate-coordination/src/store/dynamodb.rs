@@ -17,12 +17,27 @@
 //! - Every write carries a random write id, and a failed condition returns
 //!   the item it failed against, so a retried write whose first attempt
 //!   landed resolves as won.
+//!
+//! Construction is synchronous and lazy: the first store operation, the
+//! coordinator's startup probe, loads the AWS configuration and checks the
+//! table, so a table still being created rides the startup retry budget.
+//! Credentials come from the AWS provider chain. TLS uses rustls with the
+//! `aws-lc-rs` provider, verifying against the system trust store, or the
+//! bundled Mozilla roots when that store yields none. A rejected credential,
+//! certificate or request, a missing table or region, and a table this store
+//! cannot use are Fatal; throttling, server errors, timeouts and a failure to
+//! load credentials are Retryable. No AWS SDK type appears in any public
+//! signature.
+//!
+//! The [store page] documents the table, the IAM policy and the costs.
+//!
+//! [store page]: https://spate.kainth.dev/docs/user-guide/connectors/coordination/dynamodb
 
 use super::{
     CasOutcome, CoordinationStore, Entry, Keyspace, Revision, StoreError, WatchMode, WatchStream,
 };
 use futures_util::future::BoxFuture;
-use spate_core::clock::tokio::Clock;
+use spate_core::clock::tokio::{Clock, SystemClock};
 use spate_core::metrics::CoordinationMetrics;
 use std::collections::HashMap;
 use std::fmt;
@@ -32,15 +47,22 @@ use table::{Cond, Item, Query, Table, Write, WriteId, Written};
 use tokio::time::Instant;
 
 mod config;
+mod errors;
+#[cfg(any(test, feature = "testing"))]
 mod fake;
 mod observed;
 mod poll;
+mod sdk;
 mod startup;
 mod table;
+#[cfg(test)]
+mod test_http;
 #[cfg(test)]
 mod tests;
 
 pub use config::DynamoDbConfig;
+#[cfg(any(test, feature = "testing"))]
+#[doc(hidden)]
 pub use fake::{FakeOp, FakeTable, QueryGate};
 
 /// The largest value a key holds, leaving room in DynamoDB's 400 KB item
@@ -65,6 +87,9 @@ struct Inner {
     now_ms: Box<dyn Fn() -> u64 + Send + Sync>,
     pks: [String; 3],
     connect: Connect,
+    /// The table as connected, before the startup checks pass.
+    connected: Mutex<Option<Arc<dyn Table>>>,
+    /// The table once the startup checks pass.
     table: tokio::sync::OnceCell<Arc<dyn Table>>,
     observed: Mutex<observed::Observed>,
     pollers: Mutex<HashMap<(Keyspace, String), Weak<poll::Poller>>>,
@@ -78,7 +103,11 @@ impl fmt::Debug for Inner {
             .field("job", &self.config.job)
             .field("lease_ttl", &self.lease_ttl)
             .field("poll_interval", &self.config.poll_interval)
-            .field("connected", &self.table.initialized())
+            .field(
+                "connected",
+                &self.connected.lock().is_ok_and(|c| c.is_some()),
+            )
+            .field("checked", &self.table.initialized())
             .finish_non_exhaustive()
     }
 }
@@ -89,6 +118,10 @@ impl Inner {
             Keyspace::Durable => &self.pks[0],
             Keyspace::Ephemeral => &self.pks[1],
         }
+    }
+
+    fn connected(&self) -> MutexGuard<'_, Option<Arc<dyn Table>>> {
+        self.connected.lock().expect("connection slot poisoned")
     }
 
     fn observed(&self) -> MutexGuard<'_, observed::Observed> {
@@ -136,6 +169,7 @@ impl DynamoDbStore {
                 now_ms,
                 pks,
                 connect,
+                connected: Mutex::default(),
                 table: tokio::sync::OnceCell::new(),
                 observed: Mutex::new(observed::Observed::new(lease_ttl)),
                 pollers: Mutex::default(),
@@ -144,11 +178,107 @@ impl DynamoDbStore {
         })
     }
 
+    /// Configure the store. No I/O: the first operation, the coordinator's
+    /// startup probe, loads the AWS configuration and checks the table under
+    /// the startup budget.
+    ///
+    /// `lease_ttl` and `op_timeout` must equal the coordinator's
+    /// `lease_duration` and `op_timeout`. The SDK's timeouts and retries are
+    /// built to finish inside `op_timeout`.
+    ///
+    /// # Errors
+    ///
+    /// Fatal on invalid configuration, naming the `dynamodb.*` key.
+    pub fn new(
+        config: DynamoDbConfig,
+        lease_ttl: Duration,
+        op_timeout: Duration,
+    ) -> Result<DynamoDbStore, StoreError> {
+        DynamoDbStore::with_clock(config, lease_ttl, op_timeout, Arc::new(SystemClock))
+    }
+
+    /// [`new`](Self::new) with expiry judged on `clock`.
+    ///
+    /// # Errors
+    ///
+    /// As [`new`](Self::new).
+    #[doc(hidden)]
+    pub fn with_clock(
+        config: DynamoDbConfig,
+        lease_ttl: Duration,
+        op_timeout: Duration,
+        clock: Arc<dyn Clock>,
+    ) -> Result<DynamoDbStore, StoreError> {
+        DynamoDbStore::over_sdk(config, lease_ttl, op_timeout, clock, None)
+    }
+
+    /// [`new`](Self::new) signing with a fixed key pair in place of the
+    /// AWS provider chain.
+    ///
+    /// # Errors
+    ///
+    /// As [`new`](Self::new).
+    #[cfg(feature = "testing")]
+    #[doc(hidden)]
+    pub fn with_static_credentials(
+        config: DynamoDbConfig,
+        lease_ttl: Duration,
+        op_timeout: Duration,
+        access_key_id: &str,
+        secret_access_key: &str,
+    ) -> Result<DynamoDbStore, StoreError> {
+        let credentials = aws_sdk_dynamodb::config::Credentials::new(
+            access_key_id,
+            secret_access_key,
+            None,
+            None,
+            "static",
+        );
+        DynamoDbStore::over_sdk(
+            config,
+            lease_ttl,
+            op_timeout,
+            Arc::new(SystemClock),
+            Some(aws_sdk_dynamodb::config::SharedCredentialsProvider::new(
+                credentials,
+            )),
+        )
+    }
+
+    fn over_sdk(
+        config: DynamoDbConfig,
+        lease_ttl: Duration,
+        op_timeout: Duration,
+        clock: Arc<dyn Clock>,
+        credentials: Option<aws_sdk_dynamodb::config::SharedCredentialsProvider>,
+    ) -> Result<DynamoDbStore, StoreError> {
+        let settings = Arc::new(sdk::Settings {
+            table: config.table.clone(),
+            region: config.region.clone(),
+            endpoint: config.endpoint.clone(),
+            op_timeout,
+            credentials,
+            roots: rustls_native_certs::load_native_certs,
+        });
+        DynamoDbStore::build(
+            config,
+            lease_ttl,
+            op_timeout,
+            clock,
+            Box::new(|| crate::records::now_ms().max(1).unsigned_abs()),
+            Box::new(move || {
+                let settings = Arc::clone(&settings);
+                Box::pin(async move { sdk::connect(&settings).await })
+            }),
+        )
+    }
+
     /// A store over `table`, whose wall time it reads.
     ///
     /// # Errors
     ///
     /// Fatal on invalid configuration.
+    #[cfg(any(test, feature = "testing"))]
     #[doc(hidden)]
     pub fn over_fake_table(
         config: DynamoDbConfig,
@@ -173,14 +303,31 @@ impl DynamoDbStore {
     }
 
     /// The table, after the startup checks pass once for this handle.
+    ///
+    /// A check the caller's deadline cancels runs again on the next call
+    /// over the same connection, so credentials already loaded are kept. A
+    /// connect or check that returns an error drops the connection, and the
+    /// next call loads the AWS configuration and credentials again.
     async fn table(&self) -> Result<&Arc<dyn Table>, StoreError> {
         let inner = &self.inner;
         inner
             .table
             .get_or_try_init(|| async {
-                let table = (inner.connect)().await?;
-                startup::check(&*table, &inner.config, inner.lease_ttl, &inner.pks[2]).await?;
-                Ok(table)
+                let held = inner.connected().clone();
+                let table = match held {
+                    Some(table) => table,
+                    None => {
+                        let table = (inner.connect)().await?;
+                        *inner.connected() = Some(Arc::clone(&table));
+                        table
+                    }
+                };
+                let checked =
+                    startup::check(&*table, &inner.config, inner.lease_ttl, &inner.pks[2]).await;
+                if checked.is_err() {
+                    *inner.connected() = None;
+                }
+                checked.map(|()| table)
             })
             .await
     }

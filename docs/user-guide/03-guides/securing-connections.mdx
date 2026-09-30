@@ -21,6 +21,7 @@ concrete mechanism.
 | S3 source | Ambient cloud credentials, or static keys | none | [S3 source → Security](../04-connectors/sources/s3/README.mdx#security-credentials-and-region) |
 | Avro format | TLS, registry basic auth | none | [Avro → Security](../04-connectors/formats/avro/README.mdx#security-tls-and-registry-credentials) |
 | NATS JetStream store | TLS, mTLS, token, creds file | opt-in `coordination-nats` feature | [NATS → Security](../04-connectors/coordination/nats/README.mdx#security-authentication-and-tls) |
+| DynamoDB store | AWS provider chain, TLS | opt-in `coordination-dynamodb` feature | [DynamoDB → Security](../04-connectors/coordination/dynamodb/README.mdx#security-credentials-and-tls) |
 
 Connectors that share a client share a matrix; the Kafka source and sink
 render the same one, from the same partial.

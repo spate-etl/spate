@@ -168,7 +168,8 @@ The passes:
    that churns for a marginally better balance is worse than one that does
    not. The last published assignment covers the time between an
    assignment and its claim reaching the leader's view: a store round trip,
-   or up to about two poll intervals on a store whose watch is polled.
+   or up to about two poll intervals on a store whose watch is polled, and
+   one more for each poll that reads data a recent write has not reached.
 2. **Fill** — unassigned splits go to the least-loaded member with lane
    budget, heaviest split first (longest-processing-time greedy).
 3. **Improve** — while a split can move from a heavier member to a lighter
@@ -296,6 +297,16 @@ the watch. On such a store:
 - A worker that reports the job terminal writes a verdict marker. A worker
   that sees the marker lists the split records and judges from that
   listing, since its own view may not cover the plan.
+
+On a store whose expiry is judged by each observer, a peer judges a lease
+expired at the first poll that starts one lease after the peer first read the
+lease's current revision. A watching peer sees a dead worker's lease expire up
+to one lease plus two poll intervals after the last heartbeat, plus the time
+its polls spend reading. A peer that starts watching late sees a stale lease
+expire one lease after its first read of it, plus up to one poll interval. A
+worker claims a split only once the split's lease has expired in its own view,
+so a worker that started watching after the death takes over a split assigned
+to it no sooner than that.
 
 ## Failure behavior
 

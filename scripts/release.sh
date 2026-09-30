@@ -528,7 +528,7 @@ version = "0.0.0"
 edition = "2021"
 
 [dependencies]
-spate = { version = "=$version", features = ["kafka", "clickhouse", "avro", "s3", "json", "coordination-nats"] }
+spate = { version = "=$version", features = ["kafka", "clickhouse", "avro", "s3", "json", "coordination-nats", "coordination-dynamodb"] }
 
 [dev-dependencies]
 spate-test = "=$version"

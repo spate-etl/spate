@@ -6,6 +6,7 @@
 mod support;
 
 use futures_util::StreamExt as _;
+#[cfg(feature = "dynamodb")]
 use spate_coordination::store::dynamodb::FakeTable;
 use spate_coordination::store::{
     CasOutcome, CoordinationStore, Entry, Keyspace, Revision, WatchEvent,
@@ -21,6 +22,7 @@ async fn the_contract_holds_on_the_memory_store() {
     contract::all(&store, async |by| clock.advance(by)).await;
 }
 
+#[cfg(feature = "dynamodb")]
 #[tokio::test]
 async fn the_contract_holds_on_the_dynamodb_store() {
     let clock = TestClock::frozen();

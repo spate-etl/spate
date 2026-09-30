@@ -98,10 +98,6 @@ pub(crate) struct Meta {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the fake table reports these only under test")
-)]
 pub(crate) enum Status {
     Creating,
     Active,
@@ -128,10 +124,6 @@ pub(crate) struct Shape {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the fake table reports these only under test")
-)]
 pub(crate) enum Ttl {
     /// Enabled or being enabled on this attribute.
     On(String),

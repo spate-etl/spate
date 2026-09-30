@@ -1,6 +1,6 @@
 [package]
 name = "spate-coordination"
-description = "Distributed work coordination backend for the Spate pipeline framework: a leader-elected planner enumerates weighted splits into a shared low-latency store (NATS JetStream KV) and publishes a desired assignment per instance; workers lease and heartbeat what they are assigned, cooperatively drain what they are not, and commit progress through epoch-fenced compare-and-swap. Applications should depend on the `spate` facade crate with the `coordination` feature (in-memory store) or `coordination-nats` (the NATS backend)."
+description = "Distributed work coordination backend for the Spate pipeline framework: a leader-elected planner enumerates weighted splits into a shared store (NATS JetStream KV or DynamoDB) and publishes a desired assignment per instance; workers lease and heartbeat what they are assigned, cooperatively drain what they are not, and commit progress through epoch-fenced compare-and-swap. Applications should depend on the `spate` facade crate with the `coordination` feature (in-memory store), `coordination-nats` (the NATS backend) or `coordination-dynamodb` (the DynamoDB backend)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -16,12 +16,24 @@ default = ["nats"]
 # The NATS JetStream KV store backend. Off leaves the store trait, the
 # protocol, and the in-memory store (tests, single-process embedding).
 nats = ["dep:async-nats", "dep:rustls-native-certs", "dep:webpki-roots"]
+# The DynamoDB store backend, over the AWS SDK.
+dynamodb = [
+    "dep:aws-config",
+    "dep:aws-sdk-dynamodb",
+    "dep:aws-smithy-http-client",
+    "dep:rustls",
+    "dep:rustls-native-certs",
+    "dep:webpki-root-certs",
+]
 # Test-only. Off by default, not enabled by the `spate` facade, and outside
 # the semver surface.
 testing = ["spate-core/testing"]
 
 [dependencies]
 async-nats = { workspace = true, optional = true, features = ["ring"] }
+aws-config = { workspace = true, optional = true }
+aws-sdk-dynamodb = { workspace = true, optional = true }
+aws-smithy-http-client = { workspace = true, optional = true }
 base64 = { workspace = true }
 spate-core = { workspace = true }
 foldhash = { workspace = true }
@@ -30,6 +42,8 @@ foldhash = { workspace = true }
 futures-util = { workspace = true, features = ["alloc"] }
 humantime-serde = { workspace = true }
 rustls-native-certs = { workspace = true, optional = true }
+# The rustls the SDK's client links, for `tls_rejection!` and root parsing.
+rustls = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -37,9 +51,11 @@ tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
 tracing = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 webpki-roots = { workspace = true, optional = true }
+webpki-root-certs = { workspace = true, optional = true }
 
 [dev-dependencies]
 spate-coordination = { path = ".", features = ["testing"] }
+aws-credential-types = { workspace = true }
 gungraun = { workspace = true }
 proptest = { workspace = true }
 spate-test = { workspace = true }
@@ -62,6 +78,7 @@ name = "claims_gungraun"
 harness = false
 
 [package.metadata.docs.rs]
+features = ["dynamodb"]
 rustdoc-args = ["--cfg", "docsrs"]
 
 [lints]

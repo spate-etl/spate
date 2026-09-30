@@ -190,7 +190,7 @@ which case its own page documents it.
 
 | Failure | What happens |
 |---|---|
-| Replica killed (OOM, node loss) | Its leases expire after one `lease_duration`, and on a store whose watch is polled peers see the expiry at their next poll; peers claim the splits and **resume from the last committed progress**. The uncommitted tail replays: duplicates, never loss. |
+| Replica killed (OOM, node loss) | Its leases expire after one `lease_duration`, as the store or each peer measures it, and on a store whose watch is polled peers see the expiry at their next poll; peers claim the splits and **resume from the last committed progress**. The uncommitted tail replays: duplicates, never loss. |
 | Replica drained (SIGTERM) | Final commit, then release: peers claim immediately, no lease wait, no attempt consumed. |
 | Zombie resumes after takeover | Its next commit loses the record CAS: nothing written, split reported lost locally. The duplicate window is at most one commit interval. |
 | Leader dies | Any worker takes the leadership lease after it expires, bumps the plan generation (fencing any in-flight stale plan write), and re-runs the planner — idempotently: deterministic split ids make replanning a no-op for existing splits. On a store whose watch is polled, the new leader first lists the split records its watch does not carry. |

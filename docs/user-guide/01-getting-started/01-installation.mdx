@@ -42,6 +42,7 @@ builder) with no connectors. Enable what you need:
 | `s3` | `spate::s3` — coordinated object-storage backfill source. See [S3 connector](../04-connectors/sources/s3/README.mdx). |
 | `coordination` | Multi-instance work assignment with the in-memory store. |
 | `coordination-nats` | The same over NATS JetStream KV (implies `coordination`). See [NATS JetStream](../04-connectors/coordination/nats/README.mdx). |
+| `coordination-dynamodb` | The same over one DynamoDB table (implies `coordination`). See [DynamoDB](../04-connectors/coordination/dynamodb/README.mdx). |
 | `datagen` | `spate::datagen` — synthetic storefront source needing no infrastructure. Keeps no durable progress. See [Datagen connector](../04-connectors/sources/datagen/README.mdx). |
 | `datagen-avro` | Avro payloads from that generator instead of JSON (implies `datagen`). |
 

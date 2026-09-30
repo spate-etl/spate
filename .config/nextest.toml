@@ -18,10 +18,10 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 # Docker/testcontainers runs:
 #   cargo nextest run --profile docker --run-ignored all
 #
-# These boot real containers (SeaweedFS, NATS, Kafka, ClickHouse). Warn late
-# and do not terminate: a cold image pull exceeds any period worth setting, and
-# a SIGKILL reports TIMEOUT, indistinguishable from a genuine hang, leaving the
-# container orphaned.
+# These boot real containers (SeaweedFS, NATS, DynamoDB Local, Kafka,
+# ClickHouse). Warn late and do not terminate: a cold image pull exceeds any
+# period worth setting, and a SIGKILL reports TIMEOUT, indistinguishable from a
+# genuine hang, leaving the container orphaned.
 [profile.docker]
 # The example container tier is opt-in. `scheduled.yml` selects it back with an
 # explicit `-E 'binary(e2e_examples)' --ignore-default-filter`.

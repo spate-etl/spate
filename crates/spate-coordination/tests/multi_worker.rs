@@ -22,6 +22,7 @@ mod polled {
     multi_worker_scenarios!(crate::support::polled::PolledBackend::new());
 }
 
+#[cfg(feature = "dynamodb")]
 mod dynamodb {
     multi_worker_scenarios!(crate::support::dynamodb::DynamoDbFakeBackend::new());
 }

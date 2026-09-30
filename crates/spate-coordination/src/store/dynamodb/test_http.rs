@@ -30,8 +30,9 @@ enum Reply {
     Hang,
     /// A response head whose body never arrives.
     Stall,
-    /// A 200 with this JSON body, sent after the delay.
-    Delayed(Duration, &'static str),
+    /// A 200 whose head is sent at once and whose JSON body follows after
+    /// the delay.
+    SlowBody(Duration, &'static str),
 }
 
 type Script = Arc<dyn Fn(&Request) -> Reply + Send + Sync>;
@@ -85,9 +86,20 @@ async fn answer<S: AsyncRead + AsyncWrite + Unpin>(
                 tokio::time::sleep(Duration::from_secs(3600)).await;
                 return;
             }
-            Reply::Delayed(delay, body) => {
+            Reply::SlowBody(delay, body) => {
+                let head = format!(
+                    "HTTP/1.1 200 X\r\ncontent-type: application/x-amz-json-1.0\r\n\
+                     content-length: {}\r\n\r\n",
+                    body.len()
+                );
+                if stream.write_all(head.as_bytes()).await.is_err() {
+                    return;
+                }
                 tokio::time::sleep(delay).await;
-                (200, "application/x-amz-json-1.0", body.to_string())
+                if stream.write_all(body.as_bytes()).await.is_err() {
+                    return;
+                }
+                continue;
             }
             Reply::Stall => {
                 let _ = stream
@@ -552,14 +564,16 @@ fn a_cut_startup_check_keeps_the_loaded_credentials() {
         format!("[default]\ncredential_process = sh {}\n", script.display()),
     )
     .unwrap();
-    // The first attempt's `DescribeTable` takes a second and its
-    // `DescribeTimeToLive` never finishes, so the deadline cuts the check
-    // after the credentials loaded.
+    // The first attempt's `DescribeTable` answers its head at once and its
+    // body a second later, and its `DescribeTimeToLive` body never arrives,
+    // so the deadline cuts the check after the credentials loaded and before
+    // any SDK timeout fires.
     let described = Arc::new(AtomicUsize::new(0));
     let ttl_described = Arc::new(AtomicUsize::new(0));
+    let (describes, ttl_describes) = (described.clone(), ttl_described.clone());
     let table: Script = Arc::new(move |request: &Request| match request.op.as_str() {
         "describetable" if described.fetch_add(1, Ordering::SeqCst) == 0 => {
-            Reply::Delayed(Duration::from_secs(1), ACTIVE_TABLE)
+            Reply::SlowBody(Duration::from_secs(1), ACTIVE_TABLE)
         }
         "describetable" => Reply::Json(200, ACTIVE_TABLE.into()),
         "describetimetolive" if ttl_described.fetch_add(1, Ordering::SeqCst) == 0 => Reply::Stall,
@@ -574,6 +588,15 @@ fn a_cut_startup_check_keeps_the_loaded_credentials() {
     );
     let spawns = std::fs::read_to_string(dir.path().join("spawns")).unwrap();
     assert_eq!(spawns.lines().count(), 1, "credential_process runs");
+    let requests = (
+        describes.load(Ordering::SeqCst),
+        ttl_describes.load(Ordering::SeqCst),
+    );
+    assert_eq!(
+        requests,
+        (2, 2),
+        "(DescribeTable, DescribeTimeToLive), one per get"
+    );
 }
 
 /// Every startup attempt against a malformed shared config file names the

@@ -168,7 +168,8 @@ The passes:
    that churns for a marginally better balance is worse than one that does
    not. The last published assignment covers the time between an
    assignment and its claim reaching the leader's view: a store round trip,
-   or up to about two poll intervals on a store whose watch is polled.
+   or up to about two poll intervals on a store whose watch is polled, and
+   one more for each poll that reads data a recent write has not reached.
 2. **Fill** — unassigned splits go to the least-loaded member with lane
    budget, heaviest split first (longest-processing-time greedy).
 3. **Improve** — while a split can move from a heavier member to a lighter

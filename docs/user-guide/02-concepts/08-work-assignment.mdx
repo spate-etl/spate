@@ -302,7 +302,10 @@ expired at the first poll that starts one lease after the peer first read the
 lease's current revision. A watching peer sees a dead worker's lease expire up
 to one lease plus two poll intervals after the last heartbeat, plus the time
 its polls spend reading. A peer that starts watching late sees a stale lease
-expire one lease after its first read of it, plus up to one poll interval.
+expire one lease after its first read of it, plus up to one poll interval. A
+worker claims a split only once the split's lease has expired in its own view,
+so a worker that started watching after the death takes over a split assigned
+to it no sooner than that.
 
 ## Failure behavior
 

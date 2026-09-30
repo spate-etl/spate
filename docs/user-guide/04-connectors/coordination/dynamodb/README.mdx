@@ -277,7 +277,16 @@ A change reaches a watch at the watcher's next poll, so discovery takes up to
 one `poll_interval` (default `2s`). Takeover of a dead worker's splits waits for
 the leader to see its lease expire, as [Lease expiry](#lease-expiry) bounds it,
 then `coordination.rebalance_delay` while the leader withholds the splits, then
-up to one more poll interval for the new owner to read its assignment.
+up to one poll interval for the leader's next assignment and one more for the
+new owner to read it. The new owner claims a split only once the split's lease
+has expired in its own view too. A worker that was watching before the death
+has seen that by then. A worker that started watching after the death sees it
+one lease plus up to one poll interval after it started.
+
+By arithmetic at the defaults (a `30s` lease, a `2s` poll interval and a `20s`
+`rebalance_delay`), before query time: a watching worker takes over within 58 s
+of the last heartbeat. A worker that joins just before the leader reassigns,
+about 56 s after the heartbeat, takes over about 88 s after it.
 
 `coordination.reconcile_interval` sets how often the leader lists every split
 record. On this store it is a billed read of the job's whole split history, so

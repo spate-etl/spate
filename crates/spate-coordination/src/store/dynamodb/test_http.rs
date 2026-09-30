@@ -689,7 +689,7 @@ async fn the_sdk_timeout_fires_inside_op_timeout() {
     }
 }
 
-/// An attempt whose answer never comes ends early enough for a retry to
+/// An attempt that gets no response head ends early enough for a retry to
 /// succeed inside `op_timeout`.
 #[tokio::test]
 async fn a_hung_attempt_is_retried_inside_op_timeout() {

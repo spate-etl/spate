@@ -119,7 +119,10 @@ The store classifies the other failures itself:
 | Throttling, a 5xx, a timeout, a connection failure (including a proxy that refuses the tunnel), a conflict, or a code the store does not know | Retryable |
 
 The SDK retries throttling and server errors itself, up to three attempts
-inside `op_timeout`, before the store reports them. See
+inside `op_timeout`, before the store reports them. An attempt that gets no
+response within a quarter of `op_timeout` ends and is retried. A response whose
+body stops arriving runs to the SDK's operation timeout, 0.9 × `op_timeout`,
+and is reported as Retryable without a retry. See
 [Securing connections](../../../03-guides/securing-connections.mdx) for the
 generic model.
 

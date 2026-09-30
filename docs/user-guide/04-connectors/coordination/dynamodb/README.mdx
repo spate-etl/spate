@@ -22,8 +22,10 @@ Select it under `store:` in the pipeline's
 
 `table` and `job` are the two required keys of the `dynamodb` body. The keys
 beside `store:` are the coordinator's tuning, and `lease_duration` is also the
-lease TTL the store is built with. The tuning is shortened for a demo:
-`lease_duration` defaults to `30s` and `poll_interval` to `2s`.
+lease TTL the store is built with. The values suit a demo against DynamoDB
+Local, and the example's comment gives each one's default and why it differs.
+`endpoint` and `create_table` are there for DynamoDB Local; a deployment leaves
+both unset.
 
 That section comes from
 [`dynamodb_coordinated_backfill.rs`](repo:crates/spate/examples/dynamodb_coordinated_backfill.rs),

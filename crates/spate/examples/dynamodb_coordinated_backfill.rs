@@ -6,9 +6,9 @@
 //! member of it. Nothing in the code below knows how many peers exist.
 //!
 //! The work being divided is a bounded backfill of a `file://` prefix,
-//! 96 small NDJSON objects staged into the temp directory on first run and
-//! packed into six splits at the 1 MiB target, so the only thing to stand
-//! up is DynamoDB Local. Whichever instance holds leadership lists the
+//! 96 small NDJSON objects staged into the temp directory on first run, so
+//! the only thing to stand up is DynamoDB Local. The planner puts at most 16
+//! objects in a split, so they pack into six. Whichever instance holds leadership lists the
 //! prefix once and writes the split table; every instance leases the splits
 //! it is assigned, reads them straight from the split descriptors, and
 //! commits fenced per-split progress. Each exits `Completed` once every
@@ -57,12 +57,12 @@
 //! # Killing one instance
 //!
 //! **Ctrl-C** is a graceful departure. The pipeline drains, the source is
-//! dropped, and the coordinator releases: every split's owner field is
-//! cleared, its lease item deleted, leadership handed back, and the
-//! presence item deleted. The survivor sees the release at its next poll
-//! and picks the splits up once it holds the leadership that assigns them,
-//! seconds after the signal. Because the departing instance commits its
-//! tail before letting go, the release replays nothing.
+//! dropped, and the coordinator clears each held split's owner field and
+//! deletes its lease item. The leader and presence items stay until the
+//! survivor judges them expired, so it picks the splits up about one lease
+//! after the signal. An instance holding no split when the signal lands
+//! writes nothing. Because the departing instance commits its tail before
+//! letting go, the release replays nothing.
 //!
 //! **`kill -9`** writes nothing. The table enforces no expiry: the survivor
 //! judges the dead instance's leases expired from its own polls, up to one
@@ -77,8 +77,9 @@
 //!
 //! # Running it again
 //!
-//! Split records are durable, so a finished job stays finished: a later run
-//! under the same job name finds every split complete and exits at once.
+//! Split records are durable, so a finished job stays finished. A later run
+//! under the same job name finds every split complete and exits, after up to
+//! one lease while it takes over the leadership the finished run left behind.
 //! DynamoDB Local above keeps the table in memory, and `--rm` throws the
 //! container away, so stopping it and starting a fresh one is the reset.
 
@@ -107,13 +108,16 @@ use std::time::Duration;
 /// rebalance window: `POD_NAME` is the Kubernetes downward-API spelling.
 /// Two live workers claiming one id is detected and fatal.
 ///
-/// The tuning is demo-fast. `lease_duration` defaults to 30s and
-/// `poll_interval` to 2s, and the lease must span five polls.
-/// `rebalance_delay` is shortened from 20s so a `kill -9` demo is quick;
-/// `drain_deadline` is raised from 10s because a revoked split drains by
-/// pushing its tail through this paced chain to a final commit.
-/// `reconcile_interval` is the store page's recommendation, since each
-/// reconcile reads the job's whole split history.
+/// The tuning suits a demo against DynamoDB Local. `lease_duration` (30s
+/// by default), `poll_interval` (2s) and `rebalance_delay` (20s) are
+/// shortened so a takeover after `kill -9` is quick, and `op_timeout` (10s)
+/// and `replan_interval` (60s) shrink with the lease they are checked
+/// against. `drain_deadline` is raised from 10s because a revoked split
+/// drains by pushing its tail through this paced chain to a final commit.
+/// `reconcile_interval` is raised from 30s to the store page's 5m, since
+/// each reconcile reads the job's whole split history. `endpoint` and
+/// `create_table` are there for DynamoDB Local; a deployment leaves both
+/// unset.
 const COORDINATION: &str = r#"
 # ANCHOR: coordination
 coordination:
@@ -188,10 +192,6 @@ fn object_of(line: &str) -> Option<&str> {
         .map(|(id, _)| id)
 }
 
-/// `split_target_bytes` at its 1 MiB floor charges each object a 64 KiB
-/// open cost, so 96 small objects pack into six splits, which is enough for
-/// a fleet to divide. Real deployments keep the 64 MiB default.
-///
 /// The pipeline name is not instance-scoped: each instance is its own
 /// process, so the metric series a name claims has one live owner
 /// (INV-10) without any help. Neither instance is scraped, so neither asks
@@ -206,7 +206,6 @@ checkpoint: {{ interval: 500ms }}
 source:
   s3:
     url: "file://{data}/"
-    split_target_bytes: 1MiB
 sink: {{ capture: {{}} }}
 {COORDINATION}"#,
         data = data.display(),

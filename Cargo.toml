@@ -48,8 +48,8 @@ spate-test-support = { path = "test-support" }
 
 tokio = { version = "1.52", default-features = false }
 hyper = "1.10"
-hyper-util = "0.1.12"
-http-body-util = "0.1.2"
+hyper-util = "0.1.16"
+http-body-util = "0.1.3"
 
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
@@ -110,7 +110,7 @@ aws-credential-types = "1.3"
 # default client, and the roots spate-avro's registry client verifies against.
 hyper-rustls = { version = "0.27.9", default-features = false, features = ["http1", "tls12"] }
 rustls = { version = "0.23.45", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
-url = "2.5"
+url = "2.5.4"
 futures-util = { version = "0.3.31", default-features = false }
 base64 = "0.22.1"
 flate2 = "1.1"
@@ -142,8 +142,8 @@ libfuzzer-sys = "0.4.9"
 arbitrary = { version = "1.4.2", features = ["derive"] }
 # spate-clickhouse-derive's proc-macro toolchain.
 syn = { version = "3", features = ["full"] }
-quote = "1.0.35"
-proc-macro2 = "1.0.91"
+quote = "1.0.44"
+proc-macro2 = "1.0.106"
 # Resolves the derive's emitted paths against whichever of spate-clickhouse or
 # the spate facade the invoking crate actually depends on.
 proc-macro-crate = "3"

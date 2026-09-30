@@ -7,8 +7,8 @@ description: "The DynamoDB coordination store: one table holds every job, watche
 The DynamoDB store (`spate-coordination`, feature `coordination-dynamodb` on
 the `spate` facade) keeps a coordinated job's split records, leases and plan in
 one DynamoDB table. It needs no servers of its own and authenticates through
-IAM. DynamoDB has no change feed a client library can consume, so its watches
-list their prefix every `poll_interval` and report the difference
+IAM. Its watches list their prefix every `poll_interval` and report the
+difference; the store does not read DynamoDB Streams
 ([ADR-0050](../../../../adr/0050-coordination-stores-may-declare-a-polled-watch.md)).
 Discovery is therefore slower than on a store that pushes changes, and every
 poll is a billed read. Leases carry no expiry the table enforces: each worker
@@ -98,18 +98,23 @@ whole build. Every rustls client on `aws-lc-rs` in a binary built with
 first, and its ClientHello grows by that key share. A TLS-inspecting proxy that
 rejects a large ClientHello breaks those connections.
 
-Failures are classified as
+Credential and TLS failures are classified as
 [ADR-0047](../../../../adr/0047-a-rejected-credential-or-tls-handshake-is-fatal.md)
 states:
 
 | Failure | Class |
 |---|---|
-| `AccessDeniedException`, `UnrecognizedClientException`, `InvalidSignatureException`, `MissingAuthenticationTokenException`, `IncompleteSignatureException`, `ExpiredTokenException`, or any 401 or 403 | Fatal |
+| `AccessDeniedException`, `UnrecognizedClientException`, `InvalidSignatureException`, `MissingAuthenticationTokenException`, `IncompleteSignatureException`, `ExpiredTokenException`, or a 401 or 403 from DynamoDB | Fatal |
 | A certificate the store does not trust, or a handshake the server refuses | Fatal |
+| A failure to load or refresh credentials | Retryable; the message carries the provider's reason |
+
+The store classifies the other failures itself:
+
+| Failure | Class |
+|---|---|
 | `ResourceNotFoundException`, `ValidationException`, `ItemCollectionSizeLimitExceededException` | Fatal |
 | No region from the config or the provider chain | Fatal |
-| A failure to load or refresh credentials | Retryable; the message carries the provider's reason |
-| Throttling, a 5xx, a timeout, a connection failure, a conflict, or a code the store does not know | Retryable |
+| Throttling, a 5xx, a timeout, a connection failure (including a proxy that refuses the tunnel), a conflict, or a code the store does not know | Retryable |
 
 The SDK retries throttling and server errors itself, up to three attempts
 inside `op_timeout`, before the store reports them. See
@@ -209,11 +214,14 @@ fatal error naming both values. Finish the job, or delete its items, before
 changing `lease_duration`. `poll_interval` is not recorded, so it can change in
 a rolling restart.
 
-DynamoDB serves each partition key at up to 3,000 read units and 1,000 write
-units per second. All of a job's leases share one partition key, and so do all
-of its durable records. Those limits bound how large one job's fleet can grow
-on this store. [Latency and cost](#latency-and-cost) gives the read rate against the
-fleet size.
+DynamoDB serves each physical partition of a table at up to 3,000 read units
+and 1,000 write units per second, as its
+[partition key guidance](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/bp-partition-key-design.html)
+states. All of a job's leases share one partition key, and so do all of its
+durable records, so each set starts on one physical partition. Those limits
+bound how large one job's fleet can grow on this store.
+[Latency and cost](#latency-and-cost) gives the read rate against the fleet
+size.
 
 For development, DynamoDB Local stands in for the service:
 
@@ -236,9 +244,15 @@ judges expiry from its own consistent reads, on its own clock:
 - A read that fails judges nothing. A worker whose reads fail through an
   outage expires no lease in its view, however long the outage lasts.
 
-A dead worker's splits are therefore claimable one lease plus up to one poll
-interval after its last heartbeat. A worker that starts watching late sees a
-stale lease expire one lease after its own first read of it. No decision
+A peer that is watching sees a dead worker's lease expire up to one lease plus
+two poll intervals after the worker's last heartbeat, plus the time its polls
+spend querying the table. The peer first reads the heartbeat at its next poll,
+up to one interval later, and the poll that judges the lease starts up to one
+interval after the lease has run from that read, since each poll starts one
+`poll_interval` after the previous one ends. A worker that starts watching
+after the death sees the lease expire one lease after its own first read of it,
+plus up to one poll interval: close to two leases after the death when it
+starts just before the lease would have run out. No decision
 compares clocks across machines. The owner stops its splits one lease after
 its last successful renewal, measured from when the renewal returned, and a
 peer's lease measure starts when its read returned. The two can overlap by one
@@ -253,8 +267,10 @@ watcher reports a delete and then the new lease.
 ## Latency and cost
 
 A change reaches a watch at the watcher's next poll, so discovery takes up to
-one `poll_interval` (default `2s`). Takeover of a dead worker's splits takes one
-lease plus up to one poll interval.
+one `poll_interval` (default `2s`). Takeover of a dead worker's splits waits for
+the leader to see its lease expire, as [Lease expiry](#lease-expiry) bounds it,
+then `coordination.rebalance_delay` while the leader withholds the splits, then
+up to one more poll interval for the new owner to read its assignment.
 
 `coordination.reconcile_interval` sets how often the leader lists every split
 record. On this store it is a billed read of the job's whole split history, so

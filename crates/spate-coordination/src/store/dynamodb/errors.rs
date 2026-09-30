@@ -1,4 +1,5 @@
-//! SDK errors as [`StoreError`]s, classified per ADR-0047.
+//! SDK errors as [`StoreError`]s: ADR-0047's credential and TLS classes,
+//! and the store's own for the other failures.
 
 use crate::store::StoreError;
 use aws_sdk_dynamodb::config::http::HttpResponse;
@@ -20,8 +21,8 @@ const FATAL_CODES: &[&str] = &[
     "ItemCollectionSizeLimitExceededException",
 ];
 
-/// Fatal for a TLS rejection, a fatal service code, or a 401 or 403, and
-/// Retryable for everything else, including throttling, 5xx, timeouts, IO
+/// Fatal for a TLS rejection, a fatal service code, or a 401 or 403 the
+/// service answered, and Retryable for everything else, including throttling, 5xx, timeouts, IO
 /// and a failure to load credentials. The message carries the error's
 /// source chain.
 pub(super) fn classify<E>(op: &str, e: &SdkError<E, HttpResponse>) -> StoreError

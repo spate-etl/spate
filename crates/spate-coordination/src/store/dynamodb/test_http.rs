@@ -171,8 +171,9 @@ fn class(e: &StoreError) -> &'static str {
     }
 }
 
-/// Each service answer classifies as ADR-0047 says: a rejected credential,
-/// signature or request, and any 401 or 403, is Fatal after one request;
+/// Each service answer classifies as ADR-0047 and the store's own rules
+/// say: a rejected credential, signature or request, and a 401 or 403, is
+/// Fatal after one request;
 /// throttling, server errors, conflicts and unknown answers are Retryable,
 /// after the SDK's retries for the kinds it retries.
 #[tokio::test]

@@ -297,8 +297,12 @@ the watch. On such a store:
   that sees the marker lists the split records and judges from that
   listing, since its own view may not cover the plan.
 
-On a store whose expiry is judged by each observer, a peer that starts
-watching late sees a stale lease expire one lease after its first read of it.
+On a store whose expiry is judged by each observer, a peer judges a lease
+expired at the first poll that starts one lease after the peer first read the
+lease's current revision. A watching peer sees a dead worker's lease expire up
+to one lease plus two poll intervals after the last heartbeat, plus the time
+its polls spend reading. A peer that starts watching late sees a stale lease
+expire one lease after its first read of it, plus up to one poll interval.
 
 ## Failure behavior
 

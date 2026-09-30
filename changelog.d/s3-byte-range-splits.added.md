@@ -20,7 +20,8 @@ job fingerprint. A coordinated S3 job that started on a previous version
 cannot resume on this one: the worker stops at startup with
 `job fingerprint mismatch: this worker is configured as ... but the store
 prefix belongs to ...`. Finish the job on the previous version, or run it
-under a new `job` value in the `coordination:` store section. A new `job`
-starts from nothing and delivers every record again. A job without a
-`coordination:` section keeps no progress across restarts and is not
-affected.
+under a new job name: the `job` key of the `coordination:` store section, or
+the `job` field of the store behind a coordinator passed to
+`with_coordinator`. A new job name starts from nothing and delivers every
+record again. A solo job, with neither a `coordination:` section nor
+`with_coordinator`, keeps no progress across restarts and is not affected.

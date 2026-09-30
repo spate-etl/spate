@@ -95,8 +95,8 @@ object.
 
 ## More information
 
-- Landed in PR_NUMBER, on top of the ranged reader in
-  [#858](https://github.com/spate-etl/spate/pull/858).
+- Landed in [#862](https://github.com/spate-etl/spate/pull/862), on top of
+  the ranged reader in [#858](https://github.com/spate-etl/spate/pull/858).
 - [ADR-0033](0033-s3-split-packing.md) — the packing this supersedes, whose
   lookback and open cost carry over.
 - [ADR-0034](0034-s3-split-identity.md) — the identity digest the range and

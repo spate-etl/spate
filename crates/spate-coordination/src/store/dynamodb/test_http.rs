@@ -670,8 +670,63 @@ fn a_missing_region_is_fatal_at_startup() {
     assert_eq!(hits, 0);
 }
 
+/// Names the metadata server's CA for the child run of
+/// [`the_region_lookup_uses_the_store_roots`].
+const METADATA_CA: &str = "SPATE_TEST_DYNAMODB_METADATA_CA";
+
+/// The region lookup reaches instance metadata over the store's own
+/// client, told apart from the SDK's default client by its trust roots.
+#[test]
+fn the_region_lookup_uses_the_store_roots() {
+    if let Ok(target) = std::env::var(BARE_TARGET) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (_, mut settings) = settings_within(&target, static_credentials(), BARE_OP_TIMEOUT);
+        settings.region = None;
+        settings.roots = || {
+            use base64::Engine as _;
+            let der = base64::engine::general_purpose::STANDARD
+                .decode(std::env::var(METADATA_CA).unwrap())
+                .unwrap();
+            native_certs(vec![rustls::pki_types::CertificateDer::from(der)])
+        };
+        let err = rt.block_on(super::sdk::connect(&settings)).unwrap_err();
+        assert!(err.to_string().contains("dynamodb.region"), "{err}");
+        return;
+    }
+    use base64::Engine as _;
+    let dir = tempfile::tempdir().unwrap();
+    let ca = TestCa::new("metadata-test-ca");
+    let bare = Bare::new(always(not_called), always(|| Reply::Hang));
+    let hits = Arc::new(AtomicUsize::new(0));
+    let counted = hits.clone();
+    let addr = bare
+        .rt
+        .block_on(serve_tls(ca.server_config(None), move |tls| {
+            answer(
+                tls,
+                always(|| Reply::Json(404, String::new())),
+                counted.clone(),
+            )
+        }));
+    let der = base64::engine::general_purpose::STANDARD.encode(ca.der());
+    in_bare_environment(
+        "the_region_lookup_uses_the_store_roots",
+        dir.path(),
+        &bare.table,
+        &format!("https://{addr}"),
+        &[(METADATA_CA, &der)],
+    );
+    assert!(
+        hits.load(Ordering::SeqCst) > 0,
+        "no metadata request completed a handshake"
+    );
+}
+
 /// The region lookup reaches instance metadata through the proxy
-/// `HTTP_PROXY` names, over the store's own client.
+/// `HTTP_PROXY` names.
 #[test]
 fn the_region_lookup_goes_through_the_proxy_the_environment_names() {
     if let Ok(target) = std::env::var(BARE_TARGET) {

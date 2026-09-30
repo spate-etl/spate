@@ -1397,8 +1397,8 @@ fn enabling_ttl_inside_the_change_window_starts_the_store() {
     );
 }
 
-/// A retryable `UpdateTimeToLive` failure fails the startup attempt, so
-/// the next one enables time to live again.
+/// A retryable `UpdateTimeToLive` failure fails the startup attempt, and
+/// the next attempt sends `UpdateTimeToLive` again.
 #[tokio::test]
 async fn a_retryable_ttl_enable_failure_fails_the_startup_attempt() {
     let updates = Arc::new(AtomicUsize::new(0));
@@ -1413,12 +1413,14 @@ async fn a_retryable_ttl_enable_failure_fails_the_startup_attempt() {
     let mut config = DynamoDbConfig::new("spate-test", "job");
     config.create_table = true;
     let store = store_with(table_at(&url), config);
-    let got = store.get(Keyspace::Durable, "k").await;
-    assert!(
-        matches!(&got, Err(StoreError::Retryable(e)) if e.contains("UpdateTimeToLive")),
-        "{got:?}"
-    );
-    assert_eq!(updates.load(Ordering::SeqCst), 1);
+    for attempt in 1..=2 {
+        let got = store.get(Keyspace::Durable, "k").await;
+        assert!(
+            matches!(&got, Err(StoreError::Retryable(e)) if e.contains("UpdateTimeToLive")),
+            "attempt {attempt}: {got:?}"
+        );
+        assert_eq!(updates.load(Ordering::SeqCst), attempt);
+    }
 }
 
 /// A `CreateTable` that meets a table another worker is creating adopts it.

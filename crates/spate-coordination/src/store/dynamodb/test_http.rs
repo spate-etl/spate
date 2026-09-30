@@ -1327,6 +1327,30 @@ fn enabling_ttl_inside_the_change_window_starts_the_store() {
     );
 }
 
+/// A retryable `UpdateTimeToLive` failure fails the startup attempt, so
+/// the next one enables time to live again.
+#[tokio::test]
+async fn a_retryable_ttl_enable_failure_fails_the_startup_attempt() {
+    let updates = Arc::new(AtomicUsize::new(0));
+    let off = || {
+        Reply::Json(
+            200,
+            r#"{"TimeToLiveDescription":{"TimeToLiveStatus":"DISABLED"}}"#.into(),
+        )
+    };
+    let unknown = || Reply::Json(400, error_body("SomethingNewException"));
+    let (url, _) = serve(startup_script(off, unknown, updates.clone())).await;
+    let mut config = DynamoDbConfig::new("spate-test", "job");
+    config.create_table = true;
+    let store = store_with(table_at(&url), config);
+    let got = store.get(Keyspace::Durable, "k").await;
+    assert!(
+        matches!(&got, Err(StoreError::Retryable(e)) if e.contains("UpdateTimeToLive")),
+        "{got:?}"
+    );
+    assert_eq!(updates.load(Ordering::SeqCst), 1);
+}
+
 /// A `CreateTable` that meets a table another worker is creating adopts it.
 #[tokio::test]
 async fn create_table_adopts_a_table_another_worker_is_creating() {

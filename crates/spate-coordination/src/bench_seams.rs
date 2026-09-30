@@ -166,10 +166,11 @@ pub fn snapshot(observed: Vec<ObservedSplit>) -> Opaque {
 /// state: the fill pass places what the sticky pass left over, and the
 /// improve pass runs to fixpoint over the result of both.
 ///
-/// `caps` gives each member the lane budget it advertised, `default_cap`
-/// covers a member that advertised none, and `seed` keys the tie-breaks,
-/// taking the job fingerprint hash in production so that a leader failover
-/// does not re-break every tie.
+/// `previous` maps a split to the member the last published assignment
+/// named, `caps` gives each member the lane budget it advertised,
+/// `default_cap` covers a member that advertised none, and `seed` keys the
+/// tie-breaks, taking the job fingerprint hash in production so that a
+/// leader failover does not re-break every tie.
 ///
 /// # Panics
 ///
@@ -179,12 +180,13 @@ pub fn plan_assignment(
     snapshot: &Opaque,
     members: &BTreeSet<String>,
     reserved: &BTreeSet<String>,
+    previous: &BTreeMap<&str, &str>,
     caps: &BTreeMap<String, u32>,
     default_cap: u32,
     seed: u64,
 ) -> BTreeMap<String, Vec<String>> {
     let splits = downcast(snapshot);
-    protocol::desired_assignment(members, splits, reserved, caps, default_cap, seed)
+    protocol::desired_assignment(members, splits, reserved, previous, caps, default_cap, seed)
 }
 
 /// Scan the observed state for splits this worker may act on, with the

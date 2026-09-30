@@ -76,9 +76,10 @@ yet held, revoke what is held and no longer named. Workers never choose
 for themselves, so there is nothing to negotiate and no race between peers.
 
 The assignment is sticky. A move costs a drain, so the leader
-keeps every split whose owner is still alive where it is, fills unassigned
-work to the least-loaded worker heaviest-first, and only then moves splits
-that strictly reduce imbalance. Feeding the result back in reproduces it, so a
+keeps every split with the live worker holding its lease, or else with the
+live worker it was last assigned to, fills unassigned work to the
+least-loaded worker heaviest-first, and only then moves splits that strictly
+reduce imbalance. Feeding the result back in reproduces it, so a
 steady fleet republishes nothing and drains nothing.
 
 ### What a rebalance costs {#what-a-rebalance-costs}

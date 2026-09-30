@@ -1847,9 +1847,12 @@ impl<S: CoordinationStore + Clone> Task<S> {
     /// Leader side: compute the desired assignment and publish the records
     /// that changed.
     ///
-    /// Gated on `assign_dirty`, which every input to the decision sets:
-    /// membership, split status, ownership, spec arrival, and a grace window
-    /// elapsing. [`protocol::desired_assignment`] is a fixpoint, so
+    /// Gated on `assign_dirty`, which membership, split status, ownership,
+    /// spec arrival, a grace window elapsing and a deleted assignment record
+    /// set. A put of another writer's assignment record sets nothing; it
+    /// reaches the decision at the next publish something else triggers, the
+    /// reconcile backstop at the latest.
+    /// [`protocol::desired_assignment`] is a fixpoint, so
     /// recomputing on a clean fleet would publish nothing; it is skipped
     /// anyway because the recompute itself is an O(members x splits) scan
     /// and `step` runs on every watch event, which on a commit-heavy fleet
@@ -1873,6 +1876,10 @@ impl<S: CoordinationStore + Clone> Task<S> {
             return Ok(());
         }
         let reserved = self.reserved_splits();
+        // Ownership cannot stand in for this: a claim reaches the leader's
+        // view some time after the assignment, and a graceful release clears
+        // `owner` before dropping presence.
+        let previous = protocol::last_assignees(&self.assignments, &members);
         // The tie-break seed is the job fingerprint, NOT `self.seed`,
         // which mixes in a per-run nonce: a leader-specific seed makes
         // every failover re-break every tie and churn the fleet.
@@ -1880,30 +1887,11 @@ impl<S: CoordinationStore + Clone> Task<S> {
             &members,
             &self.splits,
             &reserved,
+            &previous,
             &self.member_caps,
             self.config.max_in_flight,
             self.fp,
         );
-        // Where the last published assignment put each split, read
-        // before the writes consume `desired`. This is the leader's own
-        // record of what it decided; ownership cannot answer it, since a
-        // graceful release clears `owner` before dropping presence.
-        //
-        // Two passes, in this order: a departed instance's record
-        // outlives it and is the only evidence of where its splits were
-        // assigned, while a live member's record has to win when both
-        // name the same split.
-        let mut previous: BTreeMap<&str, &str> = BTreeMap::new();
-        for pass in [false, true] {
-            for (instance, (val, _)) in &self.assignments {
-                if pass != members.contains(instance.as_str()) {
-                    continue;
-                }
-                for id in &val.splits {
-                    previous.insert(id.as_str(), instance.as_str());
-                }
-            }
-        }
         // A split named for the first time is work being handed out, not
         // a move. This counts what was *published*, not what landed, so a
         // write that fails below has its move counted again on each

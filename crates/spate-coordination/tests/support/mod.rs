@@ -6,6 +6,7 @@
 
 pub mod contract;
 pub mod dynamodb;
+pub mod lagged;
 pub mod polled;
 pub mod tap;
 

@@ -21,7 +21,7 @@
 //!
 //! [the work-assignment page]: https://spate.kainth.dev/docs/user-guide/concepts/work-assignment
 
-use crate::records::{LeaseVal, SplitProgressRecord, SplitSpecRecord, SplitStatus};
+use crate::records::{AssignmentVal, LeaseVal, SplitProgressRecord, SplitSpecRecord, SplitStatus};
 use crate::store::Revision;
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::BuildHasher as _;
@@ -130,11 +130,18 @@ pub(crate) fn live_workers(presence: &BTreeMap<String, Revision>, instance: &str
 /// itself is the leader's bookkeeping (it needs a clock); this function
 /// only sees the resulting set, so it stays pure and replayable.
 ///
+/// `previous` maps a split to the instance the last published assignment
+/// named for it.
+///
 /// The passes run in order:
 ///
-/// 1. **Sticky.** Every split whose current owner is still a live member
-///    stays put, subject to the lane cap. A move costs a drain, so the
-///    assignment does not churn for a marginally better balance.
+/// 1. **Sticky.** Every split whose lease owner is a live member with a
+///    free lane stays with it. Each remaining split then stays with the
+///    first of its `previous` assignee and its progress record's owner that
+///    is a live member with a free lane. A move costs a drain, so the
+///    assignment does not churn for a marginally better balance. The
+///    `previous` assignee keeps a split whose claim the leader has not
+///    observed yet with the member told to claim it.
 /// 2. **Fill.** Unassigned splits go to the least-loaded member that has
 ///    lane budget, heaviest split first (longest-processing-time greedy).
 /// 3. **Improve.** While some split can move from a heavier member to a
@@ -151,10 +158,12 @@ pub(crate) fn live_workers(presence: &BTreeMap<String, Revision>, instance: &str
 /// input.
 ///
 /// The result is idempotent: feeding this function's own output back as
-/// current ownership reproduces it exactly. Pass 1 restores every
-/// placement, pass 2 finds nothing unassigned, and pass 3 finds no
-/// improving move because it already ran to fixpoint. A steady-state
-/// fleet therefore publishes an unchanging assignment and drains nothing.
+/// `previous` reproduces it exactly, whether each split's ownership in view
+/// matches that output or is absent because its claim has not been observed
+/// yet. Pass 1 restores every placement, pass 2 finds nothing unassigned,
+/// and pass 3 finds no improving move because it already ran to fixpoint. A
+/// steady-state fleet therefore publishes an unchanging assignment and
+/// drains nothing.
 ///
 /// `seed` keys the tie-breaks only (equal loads in pass 2, equal gains in
 /// pass 3). It must be a property of the **job**, not of the leader, or
@@ -164,6 +173,7 @@ pub(crate) fn desired_assignment(
     members: &BTreeSet<String>,
     splits: &BTreeMap<String, SplitState>,
     reserved: &BTreeSet<String>,
+    previous: &BTreeMap<&str, &str>,
     caps: &BTreeMap<String, u32>,
     default_cap: u32,
     seed: u64,
@@ -192,7 +202,7 @@ pub(crate) fn desired_assignment(
     // Assignable pool: runnable, spec observed (its weight is the balance
     // input, and a worker cannot start a split whose descriptor no worker
     // has), and not withheld by the rebalance delay.
-    let mut pool: Vec<(&str, u64, Option<&str>)> = splits
+    let mut pool: Vec<(&str, u64, &SplitState)> = splits
         .iter()
         .filter(|(id, state)| {
             state.progress.status == SplitStatus::Runnable
@@ -202,28 +212,54 @@ pub(crate) fn desired_assignment(
         })
         .map(|(id, state)| {
             let weight = state.spec.as_ref().map_or(1, |s| s.weight.max(1));
-            (id.as_str(), weight, current_owner(state))
+            (id.as_str(), weight, state)
         })
         .collect();
     // Heaviest first: pass 2 is LPT, and pass 1 needs a stable rule for
     // which splits an over-capacity owner keeps.
     pool.sort_by_key(|(id, weight, _)| (std::cmp::Reverse(*weight), *id));
 
-    // Pass 1 — sticky. Loads are summed with `saturating_add`: a weight is
-    // planner-supplied and unbounded (`spate-s3` reports bytes), and a leader
-    // must publish a slightly-wrong assignment rather than panic on an
-    // overflow it cannot influence.
+    // Pass 1 — sticky. Leased splits go first over the whole pool: in a
+    // single walk, a split kept only by `previous` can take the lane its
+    // lease owner still needs. The record owner covers a split whose owner
+    // died and whose lease has expired but which no worker has reclaimed yet.
+    //
+    // Loads are summed with `saturating_add`: a weight is planner-supplied
+    // and unbounded (`spate-s3` reports bytes), and a leader must publish a
+    // slightly-wrong assignment rather than panic on an overflow it cannot
+    // influence.
+    let fits = |out: &BTreeMap<String, Vec<String>>, m: &str| {
+        members.contains(m) && out[m].len() < caps[m]
+    };
+    let place = |out: &mut BTreeMap<String, Vec<String>>,
+                 load: &mut BTreeMap<&str, u64>,
+                 member: &str,
+                 id: &str,
+                 weight: u64| {
+        out.get_mut(member)
+            .expect("live member")
+            .push(id.to_string());
+        let l = load.get_mut(member).expect("live member");
+        *l = l.saturating_add(weight);
+    };
+    let mut rest: Vec<(&str, u64, &SplitState)> = Vec::new();
+    for &(id, weight, state) in &pool {
+        let owner = state.lease.as_ref().map(|(lease, _)| lease.owner.as_str());
+        match owner.filter(|m| fits(&out, m)) {
+            Some(member) => place(&mut out, &mut load, member, id, weight),
+            None => rest.push((id, weight, state)),
+        }
+    }
     let mut unplaced: Vec<(&str, u64)> = Vec::new();
-    for (id, weight, owner) in &pool {
-        match owner {
-            Some(owner) if members.contains(*owner) && out[*owner].len() < caps[*owner] => {
-                out.get_mut(*owner)
-                    .expect("live member")
-                    .push(id.to_string());
-                let l = load.get_mut(*owner).expect("live member");
-                *l = l.saturating_add(*weight);
-            }
-            _ => unplaced.push((id, *weight)),
+    for (id, weight, state) in rest {
+        let sticky = previous
+            .get(id)
+            .copied()
+            .filter(|m| fits(&out, m))
+            .or_else(|| state.progress.owner.as_deref().filter(|m| fits(&out, m)));
+        match sticky {
+            Some(member) => place(&mut out, &mut load, member, id, weight),
+            None => unplaced.push((id, weight)),
         }
     }
 
@@ -264,6 +300,29 @@ pub(crate) fn desired_assignment(
     out
 }
 
+/// Where the published assignment records put each split, as split id to
+/// instance: the leader's own record of what it decided. A live member's
+/// record wins over a departed instance's when both name the same split; a
+/// departed instance's record outlives it and is the only evidence of where
+/// its splits were assigned.
+pub(crate) fn last_assignees<'a>(
+    records: &'a BTreeMap<String, (AssignmentVal, Revision)>,
+    members: &BTreeSet<String>,
+) -> BTreeMap<&'a str, &'a str> {
+    let mut previous = BTreeMap::new();
+    for live in [false, true] {
+        for (instance, (val, _)) in records {
+            if live != members.contains(instance) {
+                continue;
+            }
+            for id in &val.splits {
+                previous.insert(id.as_str(), instance.as_str());
+            }
+        }
+    }
+    previous
+}
+
 /// Termination backstop for the improving-move pass. Each accepted move
 /// strictly decreases the sum of squared loads, so the pass converges
 /// without this; the bound guarantees a leader publishes *something* on
@@ -271,19 +330,6 @@ pub(crate) fn desired_assignment(
 /// above what greedy needs in practice. If this ever binds, the
 /// local-optimality property test reports it.
 const MAX_IMPROVING_MOVES: usize = 4096;
-
-/// Who holds a split now. The live lease is authoritative; the durable
-/// record's owner is the fallback for a split whose owner died and whose
-/// lease has expired but which no worker has reclaimed yet. Either way the
-/// caller only acts on it when the name is a live member, so a stale
-/// owner reads as "unplaced".
-fn current_owner(state: &SplitState) -> Option<&str> {
-    state
-        .lease
-        .as_ref()
-        .map(|(lease, _)| lease.owner.as_str())
-        .or(state.progress.owner.as_deref())
-}
 
 /// The member with the least load that still has lane budget. `hashes`
 /// carries each member name's tie-break hash, precomputed by the caller —
@@ -445,12 +491,12 @@ mod tests {
         }
     }
 
-    fn lease(owner: &str, nonce: &str, epoch: u64) -> (LeaseVal, Revision) {
+    fn lease(owner: &str, run: &str, epoch: u64) -> (LeaseVal, Revision) {
         (
             LeaseVal {
                 schema: SCHEMA,
                 owner: owner.to_string(),
-                nonce: nonce.to_string(),
+                nonce: run.to_string(),
                 epoch,
             },
             Revision(1),
@@ -707,11 +753,14 @@ mod tests {
             .collect()
     }
 
-    /// `(id, weight, owner slot, status)`. The owner slot is drawn wider
-    /// than any fleet size the tests use, so a share of splits carry an
-    /// owner that is *not* a live member. That is the departed-owner case,
-    /// where reassignment has to happen.
-    type AssignEntry = (String, u64, Option<u8>, u8);
+    /// `(id, weight, owner slot, ownership, previous slot, status)`. Both
+    /// slots are drawn wider than any fleet size the tests use, so a share
+    /// of splits name an owner or a last assignee that is *not* a live
+    /// member. That is the departed-member case, where reassignment has to
+    /// happen. `ownership` picks what the view shows of the owner: a lease
+    /// and a record, the record alone (an expired lease), or the lease alone
+    /// (a claim whose record write is not in view yet).
+    type AssignEntry = (String, u64, Option<u8>, u8, Option<u8>, u8);
 
     fn assignment_entries() -> impl Strategy<Value = Vec<AssignEntry>> {
         proptest::collection::vec(
@@ -721,6 +770,8 @@ mod tests {
                 // lane-cap logic; byte-scale ones are what an object-store
                 // planner emits, and are where `weight * load` left `u64`.
                 prop_oneof![1u64..50, 1_000_000_000u64..8_000_000_000],
+                proptest::option::of(0u8..7),
+                0u8..3,
                 proptest::option::of(0u8..7),
                 0u8..3,
             ),
@@ -735,27 +786,36 @@ mod tests {
         proptest::collection::vec("[a-z]{1,6}", 0..4).prop_map(|v| v.into_iter().collect())
     }
 
-    fn assignment_input(
-        entries: Vec<AssignEntry>,
-        fleet: usize,
-    ) -> (BTreeMap<String, SplitState>, BTreeSet<String>) {
+    /// The splits, the members, and the last published assignment as a map
+    /// from split to member.
+    type AssignInput = (
+        BTreeMap<String, SplitState>,
+        BTreeSet<String>,
+        BTreeMap<String, String>,
+    );
+
+    fn assignment_input(entries: Vec<AssignEntry>, fleet: usize) -> AssignInput {
         let ms: BTreeSet<String> = (0..fleet).map(|i| format!("w{i}")).collect();
-        let map = splits(
-            entries
-                .into_iter()
-                .map(|(id, weight, owner, status)| {
-                    let status = match status {
-                        0 => SplitStatus::Runnable,
-                        1 => SplitStatus::Completed,
-                        _ => SplitStatus::Quarantined,
-                    };
-                    let owner = owner.map(|o| format!("w{o}"));
-                    let l = owner.as_deref().map(|o| lease(o, "n", 1));
-                    state(record(&id, status, owner.as_deref(), 1, 0), weight, l)
-                })
-                .collect(),
-        );
-        (map, ms)
+        let mut previous = BTreeMap::new();
+        let mut states = Vec::new();
+        for (id, weight, owner, ownership, last, status) in entries {
+            let status = match status {
+                0 => SplitStatus::Runnable,
+                1 => SplitStatus::Completed,
+                _ => SplitStatus::Quarantined,
+            };
+            let owner = owner.map(|o| format!("w{o}"));
+            let l = owner
+                .as_deref()
+                .filter(|_| ownership != 1)
+                .map(|o| lease(o, "n", 1));
+            let record_owner = owner.as_deref().filter(|_| ownership != 2);
+            if let Some(last) = last {
+                previous.insert(id.clone(), format!("w{last}"));
+            }
+            states.push(state(record(&id, status, record_owner, 1, 0), weight, l));
+        }
+        (splits(states), ms, previous)
     }
 
     /// [`desired_assignment`] with one lane budget shared by every member —
@@ -768,7 +828,55 @@ mod tests {
         cap: u32,
         seed: u64,
     ) -> BTreeMap<String, Vec<String>> {
-        desired_assignment(members, splits, reserved, &BTreeMap::new(), cap, seed)
+        assign_after(members, splits, reserved, &BTreeMap::new(), cap, seed)
+    }
+
+    /// [`assign`] after a published assignment, given as split to member.
+    fn assign_after(
+        members: &BTreeSet<String>,
+        splits: &BTreeMap<String, SplitState>,
+        reserved: &BTreeSet<String>,
+        previous: &BTreeMap<String, String>,
+        cap: u32,
+        seed: u64,
+    ) -> BTreeMap<String, Vec<String>> {
+        let previous: BTreeMap<&str, &str> = previous
+            .iter()
+            .map(|(id, m)| (id.as_str(), m.as_str()))
+            .collect();
+        desired_assignment(
+            members,
+            splits,
+            reserved,
+            &previous,
+            &BTreeMap::new(),
+            cap,
+            seed,
+        )
+    }
+
+    /// An assignment as a map from split to member.
+    fn published(assignment: &BTreeMap<String, Vec<String>>) -> BTreeMap<String, String> {
+        assignment
+            .iter()
+            .flat_map(|(m, ids)| ids.iter().map(move |id| (id.clone(), m.clone())))
+            .collect()
+    }
+
+    /// `map` with each split owned, lease and record, by its member in
+    /// `owner_of` where `seen` holds, and owned by nobody everywhere else.
+    fn claimed(
+        map: &BTreeMap<String, SplitState>,
+        owner_of: &BTreeMap<String, String>,
+        seen: impl Fn(&String) -> bool,
+    ) -> BTreeMap<String, SplitState> {
+        let mut next = map.clone();
+        for (id, st) in &mut next {
+            let owner = owner_of.get(id).filter(|_| seen(id));
+            st.lease = owner.map(|o| lease(o, "n", 1));
+            st.progress.owner = owner.cloned();
+        }
+        next
     }
 
     #[test]
@@ -794,7 +902,15 @@ mod tests {
             ("f", 1, None),
         ]);
         let caps: BTreeMap<String, u32> = [("w2".to_string(), 1)].into_iter().collect();
-        let out = desired_assignment(&members(&["w1", "w2"]), &map, &BTreeSet::new(), &caps, 8, 7);
+        let out = desired_assignment(
+            &members(&["w1", "w2"]),
+            &map,
+            &BTreeSet::new(),
+            &BTreeMap::new(),
+            &caps,
+            8,
+            7,
+        );
         assert_eq!(out["w2"].len(), 1, "w2 advertised a single lane");
         assert_eq!(
             out["w1"].len(),
@@ -938,8 +1054,194 @@ mod tests {
         assert_eq!(out["w2"], vec!["b".to_string(), "d".to_string()]);
     }
 
+    /// Splits the last publish assigned, and whose claims the leader has not
+    /// seen, stay with their assignees when another split completes.
+    /// Regression for #820.
+    #[test]
+    fn a_completion_leaves_unclaimed_assignments_with_their_assignees() {
+        let ms = members(&["w0", "w1", "w2", "w3", "w4", "w5", "w6", "w7"]);
+        // Each member holds 2 of its 3 lanes, and 20 splits are queued.
+        let mut entries: Vec<(String, u64, Option<String>)> = Vec::new();
+        for m in 0..8 {
+            for k in 0..2 {
+                entries.push((format!("a{m}{k}"), 1, Some(format!("w{m}"))));
+            }
+        }
+        for q in 0..20 {
+            entries.push((format!("q{q:02}"), 1, None));
+        }
+        let view = |e: &[(String, u64, Option<String>)]| {
+            let r: Vec<(&str, u64, Option<&str>)> = e
+                .iter()
+                .map(|(id, w, o)| (id.as_str(), *w, o.as_deref()))
+                .collect();
+            assign_map(&r)
+        };
+        let first = published(&assign(&ms, &view(&entries), &BTreeSet::new(), 3, 7));
+        let unclaimed: Vec<&String> = first.keys().filter(|id| id.starts_with('q')).collect();
+        assert_eq!(unclaimed.len(), 8, "one queued split per free lane");
+
+        entries.retain(|(id, _, _)| id != "a50");
+        let second = published(&assign_after(
+            &ms,
+            &view(&entries),
+            &BTreeSet::new(),
+            &first,
+            3,
+            7,
+        ));
+        let moved: Vec<(&String, &String, Option<&String>)> = unclaimed
+            .iter()
+            .filter(|id| second.get(**id) != first.get(**id))
+            .map(|id| (*id, &first[*id], second.get(*id)))
+            .collect();
+        assert!(moved.is_empty(), "unclaimed assignments moved: {moved:?}");
+    }
+
+    /// Pass 1 keeps a split with the first of its lease owner, its last
+    /// assignee and its record owner that is a live member.
+    #[test]
+    fn a_split_sticks_to_its_lease_then_its_last_assignee_then_its_record_owner() {
+        let map = splits(vec![
+            state(
+                record("held", SplitStatus::Runnable, Some("w1"), 1, 0),
+                1,
+                Some(lease("w1", "n", 1)),
+            ),
+            state(
+                record("unclaimed", SplitStatus::Runnable, Some("w4"), 1, 0),
+                1,
+                None,
+            ),
+            state(
+                record("expired", SplitStatus::Runnable, Some("w3"), 1, 0),
+                1,
+                None,
+            ),
+        ]);
+        let previous: BTreeMap<String, String> =
+            [("held", "w2"), ("unclaimed", "w2"), ("expired", "gone")]
+                .into_iter()
+                .map(|(id, m)| (id.to_string(), m.to_string()))
+                .collect();
+        // One lane each, so the improving pass cannot change what pass 1
+        // placed. Every seed, so the fill pass's tie-break cannot land a split
+        // where pass 1 should have put it.
+        let ms = members(&["w1", "w2", "w3", "w4"]);
+        for seed in 0..32 {
+            let out = assign_after(&ms, &map, &BTreeSet::new(), &previous, 1, seed);
+            assert_eq!(out["w1"], ["held"], "seed {seed}");
+            assert_eq!(out["w2"], ["unclaimed"], "seed {seed}");
+            assert_eq!(out["w3"], ["expired"], "seed {seed}");
+            assert!(out["w4"].is_empty(), "seed {seed}");
+        }
+    }
+
+    /// A last assignee whose lane budget is full keeps only what fits.
+    #[test]
+    fn a_last_assignee_at_its_lane_cap_does_not_keep_the_split() {
+        let map = assign_map(&[("heavy", 10, Some("w2")), ("a", 1, None), ("b", 1, None)]);
+        let previous: BTreeMap<&str, &str> = [("a", "w1"), ("b", "w1")].into_iter().collect();
+        let caps: BTreeMap<String, u32> = [("w1".to_string(), 1)].into_iter().collect();
+        let out = desired_assignment(
+            &members(&["w1", "w2"]),
+            &map,
+            &BTreeSet::new(),
+            &previous,
+            &caps,
+            8,
+            7,
+        );
+        assert_eq!(out["w1"], ["a"], "w1 advertised a single lane");
+        assert_eq!(out["w2"], ["b", "heavy"]);
+    }
+
+    /// A split its lease owner still holds keeps that owner's lane ahead of
+    /// a split kept only by its last assignee.
+    #[test]
+    fn a_draining_split_returns_to_its_lease_owner() {
+        // b is leased by w1 and was last published to w2; w1 was last given a.
+        let map = assign_map(&[("a", 1, None), ("b", 1, Some("w1"))]);
+        let previous: BTreeMap<String, String> = [("a", "w1"), ("b", "w2")]
+            .into_iter()
+            .map(|(s, m)| (s.to_string(), m.to_string()))
+            .collect();
+        let out = assign_after(
+            &members(&["w1", "w2"]),
+            &map,
+            &BTreeSet::new(),
+            &previous,
+            1,
+            7,
+        );
+        assert_eq!(out["w1"], ["b"], "the revocation of b is not taken back");
+    }
+
+    /// A heavier split kept by its last assignee, which pass 1 reaches first,
+    /// does not take the lane of the lease owner it names, whether or not the
+    /// leased split's own last assignee is still a member.
+    #[test]
+    fn a_heavier_unclaimed_split_leaves_a_lease_owner_its_lane() {
+        let map = assign_map(&[("d", 1, Some("w0")), ("q", 2, None)]);
+        let previous: BTreeMap<String, String> = [("d", "w1"), ("q", "w0")]
+            .into_iter()
+            .map(|(s, m)| (s.to_string(), m.to_string()))
+            .collect();
+        for fleet in [["w0", "w1"], ["w0", "w2"]] {
+            for seed in 0..32 {
+                let out =
+                    assign_after(&members(&fleet), &map, &BTreeSet::new(), &previous, 1, seed);
+                assert_eq!(out["w0"], ["d"], "fleet {fleet:?}, seed {seed}");
+            }
+        }
+    }
+
+    /// A lease naming a member that has left passes the split to its last
+    /// assignee.
+    #[test]
+    fn a_departed_lease_owner_passes_the_split_to_its_last_assignee() {
+        let map = splits(vec![state(
+            record("s", SplitStatus::Runnable, None, 1, 0),
+            1,
+            Some(lease("gone", "n", 1)),
+        )]);
+        let previous: BTreeMap<String, String> =
+            [("s".to_string(), "w2".to_string())].into_iter().collect();
+        let ms = members(&["w1", "w2"]);
+        for seed in 0..32 {
+            let out = assign_after(&ms, &map, &BTreeSet::new(), &previous, 1, seed);
+            assert_eq!(out["w2"], ["s"], "seed {seed}");
+        }
+    }
+
+    /// A live member's record names a split's last assignee over a departed
+    /// instance's record naming the same split, and a departed instance's
+    /// record still counts for a split no live record names.
+    #[test]
+    fn a_live_members_record_outranks_a_departed_ones() {
+        let record = |splits: &[&str]| {
+            let val = AssignmentVal {
+                schema: SCHEMA,
+                generation: 1,
+                splits: splits.iter().map(|s| (*s).to_string()).collect(),
+            };
+            (val, Revision(1))
+        };
+        // One departed record sorts before the live one and one after it.
+        let records: BTreeMap<String, (AssignmentVal, Revision)> = [
+            ("a-gone".to_string(), record(&["shared", "orphan"])),
+            ("m-live".to_string(), record(&["shared"])),
+            ("z-gone".to_string(), record(&["shared"])),
+        ]
+        .into_iter()
+        .collect();
+        let previous = last_assignees(&records, &members(&["m-live"]));
+        assert_eq!(previous.get("shared"), Some(&"m-live"));
+        assert_eq!(previous.get("orphan"), Some(&"a-gone"));
+    }
+
     proptest! {
-        /// Invariant 1 — deterministic in `(members, splits, ownership)`.
+        /// Invariant 1 — deterministic in its inputs.
         #[test]
         fn assignment_is_deterministic(
             entries in assignment_entries(),
@@ -948,9 +1250,9 @@ mod tests {
             seed in any::<u64>(),
             reserved in reserved_ids(),
         ) {
-            let (map, ms) = assignment_input(entries, fleet);
-            let a = assign(&ms, &map, &reserved, cap, seed);
-            let b = assign(&ms, &map, &reserved, cap, seed);
+            let (map, ms, previous) = assignment_input(entries, fleet);
+            let a = assign_after(&ms, &map, &reserved, &previous, cap, seed);
+            let b = assign_after(&ms, &map, &reserved, &previous, cap, seed);
             prop_assert_eq!(a, b);
         }
 
@@ -963,8 +1265,8 @@ mod tests {
             seed in any::<u64>(),
             reserved in reserved_ids(),
         ) {
-            let (map, ms) = assignment_input(entries, fleet);
-            let out = assign(&ms, &map, &reserved, cap, seed);
+            let (map, ms, previous) = assignment_input(entries, fleet);
+            let out = assign_after(&ms, &map, &reserved, &previous, cap, seed);
             let mut seen = BTreeSet::new();
             for id in out.values().flatten() {
                 prop_assert!(seen.insert(id.clone()), "split {} assigned twice", id);
@@ -972,9 +1274,9 @@ mod tests {
         }
 
         /// Invariant 3 — stable under unchanged input. Feeding the
-        /// function's own output back as current ownership must reproduce
-        /// it exactly, or a steady-state fleet would drain on every
-        /// replan.
+        /// function's own output back as current ownership and as the last
+        /// published assignment must reproduce it exactly, or a
+        /// steady-state fleet would drain on every replan.
         #[test]
         fn assignment_is_stable_under_unchanged_input(
             entries in assignment_entries(),
@@ -983,31 +1285,53 @@ mod tests {
             seed in any::<u64>(),
             reserved in reserved_ids(),
         ) {
-            let (map, ms) = assignment_input(entries, fleet);
-            let first = assign(&ms, &map, &reserved, cap, seed);
-
-            // Re-key ownership to match `first`, leaving everything else.
-            let mut next = map.clone();
-            let mut owner_of: BTreeMap<&str, &str> = BTreeMap::new();
-            for (m, ids) in &first {
-                for id in ids {
-                    owner_of.insert(id.as_str(), m.as_str());
-                }
-            }
-            for (id, st) in next.iter_mut() {
-                match owner_of.get(id.as_str()) {
-                    Some(o) => {
-                        st.lease = Some(lease(o, "n", 1));
-                        st.progress.owner = Some((*o).to_string());
-                    }
-                    None => {
-                        st.lease = None;
-                        st.progress.owner = None;
-                    }
-                }
-            }
-            let second = assign(&ms, &next, &reserved, cap, seed);
+            let (map, ms, previous) = assignment_input(entries, fleet);
+            let first = assign_after(&ms, &map, &reserved, &previous, cap, seed);
+            let owner_of = published(&first);
+            let next = claimed(&map, &owner_of, |_| true);
+            let second = assign_after(&ms, &next, &reserved, &owner_of, cap, seed);
             prop_assert_eq!(first, second, "assignment is not a fixpoint");
+        }
+
+        /// Invariant 3 — stable under unchanged ownership alone. Feeding the
+        /// output back as current ownership, with no last published
+        /// assignment, reproduces it exactly.
+        #[test]
+        fn assignment_is_stable_under_unchanged_ownership(
+            entries in assignment_entries(),
+            fleet in 1usize..5,
+            cap in 1u32..5,
+            seed in any::<u64>(),
+            reserved in reserved_ids(),
+        ) {
+            let (map, ms, previous) = assignment_input(entries, fleet);
+            let first = assign_after(&ms, &map, &reserved, &previous, cap, seed);
+            let next = claimed(&map, &published(&first), |_| true);
+            let second = assign(&ms, &next, &reserved, cap, seed);
+            prop_assert_eq!(first, second, "ownership alone is not a fixpoint");
+        }
+
+        /// Invariant 3 — stable before its claims are seen. Feeding the
+        /// output back as the last published assignment reproduces it while
+        /// any share of its splits show no owner yet, so a claim still on
+        /// its way to the leader's view moves nothing.
+        #[test]
+        fn assignment_is_stable_before_its_claims_are_seen(
+            entries in assignment_entries(),
+            fleet in 1usize..5,
+            cap in 1u32..5,
+            seed in any::<u64>(),
+            reserved in reserved_ids(),
+            seen in any::<u16>(),
+        ) {
+            let (map, ms, previous) = assignment_input(entries, fleet);
+            let first = assign_after(&ms, &map, &reserved, &previous, cap, seed);
+            let owner_of = published(&first);
+            let index: BTreeMap<&String, usize> =
+                map.keys().enumerate().map(|(i, id)| (id, i)).collect();
+            let next = claimed(&map, &owner_of, |id| seen & (1 << index[id]) != 0);
+            let second = assign_after(&ms, &next, &reserved, &owner_of, cap, seed);
+            prop_assert_eq!(first, second, "an unseen claim moved a split");
         }
 
         /// Invariant 4 — converges to a local optimum: no single split can
@@ -1022,8 +1346,8 @@ mod tests {
             seed in any::<u64>(),
             reserved in reserved_ids(),
         ) {
-            let (map, ms) = assignment_input(entries, fleet);
-            let out = assign(&ms, &map, &reserved, cap, seed);
+            let (map, ms, previous) = assignment_input(entries, fleet);
+            let out = assign_after(&ms, &map, &reserved, &previous, cap, seed);
             let by_load = loads(&out, &map);
             for (from, ids) in &out {
                 for id in ids {
@@ -1051,8 +1375,8 @@ mod tests {
             seed in any::<u64>(),
             reserved in reserved_ids(),
         ) {
-            let (map, ms) = assignment_input(entries, fleet);
-            let out = assign(&ms, &map, &reserved, cap, seed);
+            let (map, ms, previous) = assignment_input(entries, fleet);
+            let out = assign_after(&ms, &map, &reserved, &previous, cap, seed);
             let assigned: BTreeSet<&String> = out.values().flatten().collect();
             let budget = ms.len() * cap as usize;
             for (id, st) in &map {

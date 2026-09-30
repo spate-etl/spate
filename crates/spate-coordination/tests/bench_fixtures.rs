@@ -31,6 +31,7 @@ fn assign(corpus: Vec<ObservedSplit>, fleet: usize) -> BTreeMap<String, Vec<Stri
         &snapshot(corpus),
         &fleet::members(fleet),
         &BTreeSet::new(),
+        &BTreeMap::new(),
         &fleet::caps(fleet),
         fleet::LANE_CAP,
         fleet::SEED,

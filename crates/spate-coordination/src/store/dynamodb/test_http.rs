@@ -374,7 +374,13 @@ fn in_bare_environment(name: &str, dir: &std::path::Path, target: &str, metadata
             .env("AWS_CONFIG_FILE", dir.join("config"))
             .env("AWS_SHARED_CREDENTIALS_FILE", dir.join("credentials"))
             .env("AWS_EC2_METADATA_SERVICE_ENDPOINT", metadata)
-            .env(BARE_TARGET, target)
+            .env(BARE_TARGET, target);
+        // Under a coverage run the child writes its profile where the
+        // parent's does, or its coverage is lost.
+        if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
+            child.env("LLVM_PROFILE_FILE", profile);
+        }
+        child
     });
 }
 

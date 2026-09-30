@@ -145,6 +145,71 @@ fn reassignment_delay(
     advanced
 }
 
+/// A worker that releases every split it holds stays out of the fleet while
+/// its task runs. Its presence key stays deleted and a peer takes all the
+/// work.
+/// Regression for #857.
+#[test]
+fn a_worker_that_releases_its_last_split_stays_out_of_the_fleet() {
+    let rt = runtime();
+    let clock = support::TestClock::frozen();
+    let store = support::store_with_clock(clock.clone());
+    let ids = ["p0", "p1"];
+    let planner = || Box::new(PhasedPlanner::one_final("parting:v1", &ids));
+    let presence = || {
+        rt.block_on(store.get(Keyspace::Ephemeral, "worker.worker-a"))
+            .expect("get")
+    };
+
+    let mut a = support::worker_with_clock(&store, rt.handle(), Some("worker-a"), clock.clone());
+    a.start(planner()).unwrap();
+    let mut held_a = Held::default();
+    support::drive_clocked(
+        &mut a,
+        &clock,
+        &mut held_a,
+        "worker-a claims both splits",
+        |h| h.splits.len() == 2,
+    );
+    a.release(&[support::split_id("p0"), support::split_id("p1")])
+        .unwrap();
+    assert!(presence().is_none(), "release kept worker-a's presence key");
+
+    let mut b = support::worker_with_clock(&store, rt.handle(), Some("worker-b"), clock.clone());
+    b.start(planner()).unwrap();
+    let mut held_b = Held::default();
+    // `settle` waits on each joined worker's due timers, so A's heartbeats
+    // have run before every check below.
+    let mut fleet = support::Fleet::new(&store, rt.handle());
+    fleet.join(&a);
+    fleet.join(&b);
+    let step = LEASE / 12;
+    let mut advanced = std::time::Duration::ZERO;
+    let deadline = Instant::now() + support::DEADLINE;
+    while advanced < LEASE || held_b.splits.len() < 2 {
+        assert!(
+            Instant::now() < deadline,
+            "worker-b never held both splits: {:?}",
+            held_b.splits.keys().collect::<Vec<_>>()
+        );
+        fleet.step(&clock, step);
+        advanced += step;
+        for event in a.poll().expect("poll a") {
+            assert!(
+                !matches!(event, spate_coordination::CoordinationEvent::Gained { .. }),
+                "worker-a claimed after leaving the fleet: {event:?}"
+            );
+        }
+        held_b.fold(b.poll().expect("poll b"));
+        assert!(presence().is_none(), "worker-a's presence key came back");
+        assert!(
+            held_b.revoke_requests.is_empty(),
+            "the leader moved work to worker-a: {:?}",
+            held_b.revoke_requests
+        );
+    }
+}
+
 /// A source that will not stop cleanly still has to give the split up —
 /// a leader's revocation is a decision, not a request. The expensive path
 /// (replay) is the price of declining, not an escape from it.

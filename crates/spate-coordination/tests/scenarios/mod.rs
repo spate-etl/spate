@@ -24,6 +24,7 @@ macro_rules! multi_worker_scenarios {
             racing_workers_partition_the_splits_and_complete_collectively
             death_takeover_waits_out_the_lease_and_carries_progress
             graceful_release_hands_off_without_waiting_out_the_lease
+            a_departure_leaves_nothing_to_expire
             stable_instance_id_reclaims_fast_after_a_restart
             live_twins_sharing_an_instance_id_are_fatal
             a_fenced_zombie_commit_writes_nothing
@@ -217,6 +218,46 @@ pub fn graceful_release_hands_off_without_waiting_out_the_lease(backend: &impl B
         "released splits must be reassigned without a lease wait: {:?}",
         released_at.elapsed()
     );
+}
+
+/// `depart` clears the owner of every split it held and deletes their
+/// leases, the leader key and the presence key before it returns, and the
+/// handle refuses later calls. Regression for #854.
+pub fn a_departure_leaves_nothing_to_expire(backend: &impl Backend) {
+    let rt = runtime();
+    let store = backend.store();
+    let mut a = backend.worker(rt.handle(), Some("worker-a"));
+    a.start(Box::new(PhasedPlanner::one_final(
+        "depart:v1",
+        &["p0", "p1"],
+    )))
+    .unwrap();
+    let mut held = Held::default();
+    drive(&mut a, &mut held, "A claiming both splits", |h| {
+        h.splits.len() == 2
+    });
+
+    // Held splits go unnamed: the task hands back everything it owns.
+    a.depart(&[]).unwrap();
+
+    let get = |ks: Keyspace, key: &str| rt.block_on(store.get(ks, key)).expect("read the store");
+    for key in ["leader", "worker.worker-a", "split.p0", "split.p1"] {
+        assert!(
+            get(Keyspace::Ephemeral, key).is_none(),
+            "{key} outlived the departure"
+        );
+    }
+    for key in ["split.p0", "split.p1"] {
+        let record: serde_json::Value = serde_json::from_slice(
+            &get(Keyspace::Durable, key)
+                .expect("the split record stays")
+                .value,
+        )
+        .expect("a JSON split record");
+        assert!(record["owner"].is_null(), "{key} still names an owner");
+    }
+    let err = a.poll().expect_err("a departed coordinator refuses calls");
+    assert!(err.reason.contains("departed"), "{err}");
 }
 
 pub fn stable_instance_id_reclaims_fast_after_a_restart(backend: &impl Backend) {

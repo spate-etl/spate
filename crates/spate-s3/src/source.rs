@@ -361,9 +361,9 @@ impl Source for S3Source {
 impl Drop for S3Source {
     fn drop(&mut self) {
         if let State::Open(open) = &mut self.state {
-            // Graceful hand-back: peers claim the splits without waiting
-            // out the lease. Fetchers are detached and exit as their lanes
-            // drop.
+            // Graceful departure: peers take over this worker's splits and
+            // roles without waiting out a lease. Fetchers are detached and
+            // exit as their lanes drop.
             open.driver.release();
         }
     }

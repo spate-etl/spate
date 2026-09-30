@@ -55,15 +55,15 @@ per-replica configuration:
 
 - **`instance_id` from the pod name.** Expose it through the downward
   API as `POD_NAME` and set `instance_id: "${POD_NAME}"`. It must be unique
-  per live replica; a stable identity lets a restarted pod reclaim its own
-  splits instantly instead of waiting out the lease. Two live processes
+  per live replica; a stable identity lets a pod restarted after a crash
+  reclaim its own splits instantly instead of waiting out the lease. Two live processes
   sharing an id is detected and fatal. The id charset is `[A-Za-z0-9_-]`,
   1–128 bytes, so a pod name containing dots is rejected at startup; name
   the pods without dots.
 - **`terminationGracePeriodSeconds` > drain timeout.** A SIGTERM'd
-  replica drains, commits, and releases its splits on the way out, so
-  peers pick them up immediately; a SIGKILL'd one is covered by lease
-  expiry instead.
+  replica drains, commits, and hands back its splits, leadership and
+  membership on the way out, so peers take the work over without a lease
+  wait; a SIGKILL'd one is covered by lease expiry instead.
 - Readiness/liveness probes are unchanged (the admin server's endpoints).
 
 Scaling events are *cooperative* rebalances, but the decision is central
@@ -191,7 +191,7 @@ which case its own page documents it.
 | Failure | What happens |
 |---|---|
 | Replica killed (OOM, node loss) | Its leases expire after one `lease_duration`, as the store or each peer measures it, and on a store whose watch is polled peers see the expiry at their next poll; peers claim the splits and **resume from the last committed progress**. The uncommitted tail replays: duplicates, never loss. |
-| Replica drained (SIGTERM) | Final commit, then release: peers claim immediately, no lease wait, no attempt consumed. |
+| Replica drained (SIGTERM) | Final commit, then departure: splits, leadership and membership are handed back, and peers take over with no lease wait and no attempt consumed. |
 | Zombie resumes after takeover | Its next commit loses the record CAS: nothing written, split reported lost locally. The duplicate window is at most one commit interval. |
 | Leader dies | Any worker takes the leadership lease after it expires, bumps the plan generation (fencing any in-flight stale plan write), and re-runs the planner — idempotently: deterministic split ids make replanning a no-op for existing splits. On a store whose watch is polled, the new leader first lists the split records its watch does not carry. |
 | Coordination store unreachable | Commits go retryable; workers self-fence their splits after one lease without a successful write; everything resumes on reconnect. |

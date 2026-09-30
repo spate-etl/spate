@@ -58,11 +58,11 @@
 //!
 //! **Ctrl-C** is a graceful departure. The pipeline drains, the source is
 //! dropped, and the coordinator clears each held split's owner field and
-//! deletes its lease item. The leader and presence items stay until the
-//! survivor judges them expired, so it picks the splits up about one lease
-//! after the signal. An instance holding no split when the signal lands
-//! writes nothing. Because the departing instance commits its tail before
-//! letting go, the release replays nothing.
+//! deletes its lease item, the presence item and, if it leads, the leader
+//! item. The survivor sees the departure at its next poll and picks the
+//! splits up a poll or two later, with no lease to wait out. Because the
+//! departing instance commits its tail before letting go, the release
+//! replays nothing.
 //!
 //! **`kill -9`** writes nothing. The table enforces no expiry: the survivor
 //! judges the dead instance's leases expired from its own polls, up to one
@@ -78,8 +78,8 @@
 //! # Running it again
 //!
 //! Split records are durable, so a finished job stays finished. A later run
-//! under the same job name finds every split complete and exits, after up to
-//! one lease while it takes over the leadership the finished run left behind.
+//! under the same job name finds every split complete and exits. The finished
+//! run left its `verdict` item and no leader item behind.
 //! DynamoDB Local above keeps the table in memory, and `--rm` throws the
 //! container away, so stopping it and starting a fresh one is the reset.
 
@@ -230,7 +230,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cfg
     };
     // `handle_signals` stays at its default: Ctrl-C drains the pipeline,
-    // which drops the source, which releases every split.
+    // which drops the source, which departs the job.
     let report = pipeline
         .sink(sink.with_pool_config(pool_cfg))?
         .chains(|ctx| {

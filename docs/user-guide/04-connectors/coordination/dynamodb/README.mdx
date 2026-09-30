@@ -302,6 +302,14 @@ sees it: a watching worker takes over within 58 s
 of the last heartbeat. A worker that joins just before the leader reassigns,
 about 56 s after the heartbeat, takes over about 88 s after it.
 
+A graceful stop deletes the worker's leases, its presence item and, if it led,
+the leader item, and clears the owner of each split it held. Takeover then
+waits for no lease expiry and no `rebalance_delay`. It takes the leader's next
+poll to see the departure and the new owner's next poll to read the
+assignment. When the departing worker led, a peer first sees the leader item
+gone at its next poll, takes the leadership and lists the job's records before
+it assigns.
+
 `coordination.reconcile_interval` sets how often the leader lists every split
 record. On this store it is a billed read of the job's whole split history, so
 `5m` suits it. A section that builds this store with an interval below `1m`

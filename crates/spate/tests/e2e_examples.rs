@@ -1017,6 +1017,23 @@ fn nats_coordinated_backfill_example_covers_the_prefix() {
         second.contains("0 records, covering 0 of 96 objects"),
         "a finished job stays finished: the second instance read nothing\n--- log ---\n{second}"
     );
+    assert_clean_departure("worker-e2e-a", &first);
+    assert_clean_departure("worker-e2e-b", &second);
+}
+
+/// Fails when a coordinated run's log shows its hand-back falling back to
+/// direct writes, or its store watches breaking as the process stops.
+fn assert_clean_departure(pod: &str, log: &str) {
+    for warn in [
+        "releasing directly",
+        "re-watching",
+        "watch establishment failed",
+    ] {
+        assert!(
+            !log.contains(warn),
+            "{pod} logged {warn:?} on its way out\n--- log ---\n{log}"
+        );
+    }
 }
 
 // ── DynamoDB Local ─────────────────────────────────────────────────────────
@@ -1117,4 +1134,11 @@ fn dynamodb_coordinated_backfill_example_covers_the_prefix() {
         share(&c_log, "worker-e2e-c").is_empty(),
         "a finished job stays finished\n--- log ---\n{c_log}"
     );
+    for (pod, log) in [
+        ("worker-e2e-a", &a_log),
+        ("worker-e2e-b", &b_log),
+        ("worker-e2e-c", &c_log),
+    ] {
+        assert_clean_departure(pod, log);
+    }
 }

@@ -56,11 +56,9 @@
 //! # Killing one instance
 //!
 //! **Ctrl-C** is a graceful departure. The pipeline drains, the source is
-//! dropped, and the coordinator releases: every split's owner field is
+//! dropped, and the coordinator departs: every split's owner field is
 //! cleared, its lease key deleted, leadership handed back, and the presence
-//! key dropped, so an instance that held splits leaves nothing to expire.
-//! (One holding none when the signal lands sends no release at all, and its
-//! presence key goes on the age limit like any other.) The survivor sees
+//! key dropped, so the instance leaves nothing to expire. The survivor sees
 //! the released records on its watch and picks them up as soon as it holds
 //! the leadership that assigns them, seconds after the signal rather than a
 //! lease after it. Because the departing instance commits its tail before
@@ -230,7 +228,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cfg
     };
     // `handle_signals` stays at its default: Ctrl-C drains the pipeline,
-    // which drops the source, which releases every split.
+    // which drops the source, which departs the job.
     let report = pipeline
         .sink(sink.with_pool_config(pool_cfg))?
         .chains(|ctx| {

@@ -364,8 +364,8 @@ impl Source for LedgerSource {
 
 impl Drop for LedgerSource {
     fn drop(&mut self) {
-        // Graceful shutdown: hand splits back so peers claim them now
-        // rather than after the lease TTL.
+        // Graceful shutdown: depart the job so peers take over now rather
+        // than after the lease TTL.
         self.driver.release();
     }
 }

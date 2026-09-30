@@ -69,11 +69,15 @@ pub(crate) enum Command {
     },
     Release {
         splits: Vec<SplitId>,
-        /// Whether this release is a departure from the fleet (shutdown,
-        /// scale-down) rather than a revocation hand-back. Only a
-        /// departure that empties the working set retires this worker; a
-        /// revocation of the last split keeps it in the fleet.
+        /// Whether this release is a departure from the fleet (scale-down)
+        /// rather than a revocation hand-back. Only a departure that
+        /// empties the working set retires this worker; a revocation of the
+        /// last split keeps it in the fleet. Shutdown sends `Depart`.
         departure: bool,
+        reply: std_mpsc::SyncSender<Result<(), CoordinationError>>,
+    },
+    /// Leave the job for good. The task stops once it has replied.
+    Depart {
         reply: std_mpsc::SyncSender<Result<(), CoordinationError>>,
     },
     /// The source cannot stop this split at a safe boundary. A revocation
@@ -91,6 +95,7 @@ impl Command {
             Command::Commit { reply, .. }
             | Command::Fail { reply, .. }
             | Command::Release { reply, .. }
+            | Command::Depart { reply }
             | Command::DeclineRevoke { reply, .. } => reply,
         }
     }
@@ -261,6 +266,8 @@ pub(crate) struct Task<S: CoordinationStore + Clone> {
     /// the fleet, so it must not claim or lead again; otherwise it
     /// re-claims its own hand-backs.
     parting: bool,
+    /// Set once a `Depart` has been answered; the loop stops on it.
+    stopping: bool,
     terminal_reported: bool,
     round: u64,
     /// The splits this worker has been told to hold. Empty and
@@ -388,6 +395,7 @@ impl<S: CoordinationStore + Clone> Task<S> {
             plan_now: false,
             quarantine_scan: false,
             parting: false,
+            stopping: false,
             terminal_reported: false,
             round: 0,
             assigned: BTreeSet::new(),
@@ -525,8 +533,13 @@ impl<S: CoordinationStore + Clone> Task<S> {
                     };
                     Box::pin(self.handle_command(command)).await?;
                     // The control thread is waiting on these replies.
-                    while let Ok(command) = self.commands.try_recv() {
+                    while !self.stopping
+                        && let Ok(command) = self.commands.try_recv()
+                    {
                         Box::pin(self.handle_command(command)).await?;
+                    }
+                    if self.stopping {
+                        return Ok(());
                     }
                     Box::pin(self.step()).await?;
                 }
@@ -2783,6 +2796,11 @@ impl<S: CoordinationStore + Clone> Task<S> {
                 departure,
                 reply,
             } => (self.release_splits(&splits, departure).await, reply),
+            Command::Depart { reply } => {
+                let result = self.depart().await;
+                self.stopping = true;
+                (result, reply)
+            }
             Command::DeclineRevoke { split, reply } => {
                 let id = split.as_str().to_string();
                 // A decline says the source never stopped intake, so
@@ -3001,15 +3019,47 @@ impl<S: CoordinationStore + Clone> Task<S> {
         // what was ASKED, not on what the store acknowledged: a departing
         // worker that keeps claiming strands splits when the process exits.
         if self.owned.is_empty() && !splits.is_empty() {
-            self.parting = true;
-            self.demote().await?;
-            let key = records::worker_key(&self.instance);
-            if let Err(e) = self.store.delete(Keyspace::Ephemeral, &key, None).await {
-                fatal_only("deleting presence", &e)?;
-            }
-            self.presence.remove(&self.instance);
+            self.leave_fleet().await?;
         }
         Ok(())
+    }
+
+    /// Stop claiming, hand leadership back and drop the presence key. Both
+    /// writes run; the first fatal error is returned.
+    async fn leave_fleet(&mut self) -> Result<(), CoordinationError> {
+        self.parting = true;
+        let demoted = self.demote().await;
+        let key = records::worker_key(&self.instance);
+        let deleted = match self.store.delete(Keyspace::Ephemeral, &key, None).await {
+            Ok(_) => Ok(()),
+            Err(e) => fatal_only("deleting presence", &e),
+        };
+        self.presence.remove(&self.instance);
+        demoted.and(deleted)
+    }
+
+    /// Leave the job: hand back every owned split, write a verdict marker
+    /// still owed, and leave the fleet. Every step runs; the first fatal
+    /// error is returned.
+    async fn depart(&mut self) -> Result<(), CoordinationError> {
+        let mut first = Ok(());
+        let mut released = 0u64;
+        let ids: Vec<String> = self.owned.keys().cloned().collect();
+        for id in ids {
+            let Ok(split) = SplitId::new(id) else {
+                continue;
+            };
+            match self.release_one(&split).await {
+                Ok(ReleaseOutcome::Released) => released += 1,
+                Ok(_) => {}
+                Err(e) => first = first.and(Err(e)),
+            }
+        }
+        self.metrics(|m| m.released(released));
+        if self.terminal_reported && self.polled.is_some() && !self.verdict_written {
+            first = first.and(self.write_verdict().await);
+        }
+        first.and(self.leave_fleet().await)
     }
 
     /// Release one held split, reporting how the tenancy ended so

@@ -41,12 +41,13 @@ use rdkafka::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
 use spate_test::metric_sum;
-use spate_test_support::container_image;
+use spate_test_support::{container_image, http};
+use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
-use support::{CH_PASSWORD, Harness, http_get};
+use support::{CH_PASSWORD, Harness, http_get, wait_until};
 use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::runners::SyncRunner;
 use testcontainers::{Container, GenericImage, ImageExt};
@@ -1015,5 +1016,105 @@ fn nats_coordinated_backfill_example_covers_the_prefix() {
     assert!(
         second.contains("0 records, covering 0 of 96 objects"),
         "a finished job stays finished: the second instance read nothing\n--- log ---\n{second}"
+    );
+}
+
+// ── DynamoDB Local ─────────────────────────────────────────────────────────
+
+/// `dynamodb_coordinated_backfill`: two instances run at once on one job over
+/// the DynamoDB store, against DynamoDB Local. Each must take a share, the
+/// shares must not overlap, and together they must cover the prefix. A third
+/// instance, started after both exit, must find the job finished.
+#[test]
+#[ignore = "requires Docker"]
+fn dynamodb_coordinated_backfill_example_covers_the_prefix() {
+    // The emulator `ci/dynamodb/` pins, fetched by digest and re-tagged so
+    // this starts the pinned bytes.
+    let (image, tag) = container_image(&["--pull", "dynamodb"]);
+    let local: Container<GenericImage> = GenericImage::new(&image, &tag)
+        .with_exposed_port(8000.tcp())
+        .with_wait_for(WaitFor::message_on_stdout("Initializing DynamoDB Local"))
+        .with_cmd(["-jar", "DynamoDBLocal.jar", "-inMemory"])
+        .start()
+        .unwrap_or_else(|e| panic!("start DynamoDB Local {image}:{tag}: {e}"));
+    let port = local.get_host_port_ipv4(8000).expect("dynamodb port");
+    // The log line comes before the listener accepts.
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    wait_until(OUTPUT_DEADLINE, "DynamoDB Local answers", || {
+        http(addr, "GET", "/").is_ok()
+    });
+
+    // Credentials and the region reach the example through its own
+    // environment, as a deployment's provider chain would find them.
+    let env = |pod: &str| {
+        vec![
+            ("DYNAMODB_ENDPOINT", format!("http://{addr}")),
+            ("AWS_ACCESS_KEY_ID", "local".to_string()),
+            ("AWS_SECRET_ACCESS_KEY", "local".to_string()),
+            ("AWS_REGION", "us-east-1".to_string()),
+            ("POD_NAME", pod.to_string()),
+        ]
+    };
+    let run = |pod: &str| {
+        spawn_as(
+            "dynamodb_coordinated_backfill",
+            &format!("dynamodb_coordinated_backfill.{pod}"),
+            None,
+            &env(pod),
+        )
+    };
+    // The objects one run printed as its share.
+    let share = |log: &str, pod: &str| -> BTreeSet<String> {
+        let prefix = format!("{pod} objects:");
+        log.lines()
+            .find_map(|line| line.strip_prefix(prefix.as_str()))
+            .unwrap_or_else(|| panic!("{pod} printed no share\n--- log ---\n{log}"))
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect()
+    };
+
+    // The second instance starts once the first holds the whole job, and the
+    // paced backfill leaves it most of a minute to take a share.
+    let mut a = run("worker-e2e-a");
+    let a_log = a.log.clone();
+    a.wait_for("the first assignment", || {
+        std::fs::read_to_string(&a_log)
+            .unwrap_or_default()
+            .contains("assignment published members=1")
+    });
+    let b = run("worker-e2e-b");
+    let a_log = a.wait_exit(Duration::from_secs(300));
+    let b_log = b.wait_exit(Duration::from_secs(300));
+    for (pod, log) in [("worker-e2e-a", &a_log), ("worker-e2e-b", &b_log)] {
+        // The source logs this WARN when it builds the in-process store in
+        // place of the configured one.
+        assert!(
+            !log.contains("no coordinator injected"),
+            "{pod} ran against the DynamoDB store\n--- log ---\n{log}"
+        );
+    }
+    let (a_share, b_share) = (share(&a_log, "worker-e2e-a"), share(&b_log, "worker-e2e-b"));
+    assert!(
+        !a_share.is_empty() && !b_share.is_empty(),
+        "both instances took a share: {a_share:?} / {b_share:?}"
+    );
+    assert!(
+        a_share.is_disjoint(&b_share),
+        "no object was read by both: {:?}",
+        a_share.intersection(&b_share).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        a_share.union(&b_share).count(),
+        96,
+        "together the shares cover the prefix"
+    );
+
+    // The split records live in the table, so a later instance on the same
+    // job finds every split complete and reads nothing.
+    let c_log = run("worker-e2e-c").wait_exit(Duration::from_secs(120));
+    assert!(
+        share(&c_log, "worker-e2e-c").is_empty(),
+        "a finished job stays finished\n--- log ---\n{c_log}"
     );
 }

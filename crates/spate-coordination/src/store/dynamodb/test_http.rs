@@ -28,6 +28,8 @@ enum Reply {
     Json(u16, String),
     Raw(u16, &'static str, String),
     Hang,
+    /// A response head whose body never arrives.
+    Stall,
 }
 
 type Script = Arc<dyn Fn(&Request) -> Reply + Send + Sync>;
@@ -81,6 +83,13 @@ async fn answer<S: AsyncRead + AsyncWrite + Unpin>(
                 tokio::time::sleep(Duration::from_secs(3600)).await;
                 return;
             }
+            Reply::Stall => {
+                let _ = stream
+                    .write_all(b"HTTP/1.1 200 X\r\ncontent-length: 1\r\n\r\n")
+                    .await;
+                tokio::time::sleep(Duration::from_secs(3600)).await;
+                return;
+            }
         };
         let response = format!(
             "HTTP/1.1 {status} X\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\n\r\n{body}",
@@ -130,6 +139,7 @@ fn settings_within(
         endpoint: Some(endpoint.into()),
         op_timeout,
         credentials: None,
+        roots: || native_certs(vec![]),
     };
     let sdk = SdkConfig::builder()
         .behavior_version(BehaviorVersion::v2026_01_12())
@@ -344,6 +354,166 @@ async fn a_missing_region_is_fatal_at_startup() {
     assert_eq!(hits.load(Ordering::SeqCst), 0);
 }
 
+/// Names the endpoint for the child run of a test in
+/// [`in_bare_environment`].
+const BARE_TARGET: &str = "SPATE_TEST_DYNAMODB_BARE_TARGET";
+
+const BARE_OP_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Runs the test `name` of this module in a child whose environment holds
+/// only `PATH`, `HOME` and the AWS config files at `dir`, instance metadata
+/// at `metadata`, and `BARE_TARGET` set to `target`.
+fn in_bare_environment(name: &str, dir: &std::path::Path, target: &str, metadata: &str) {
+    let (_, module) = module_path!().split_once("::").unwrap();
+    spate_test_support::run_in_child(&format!("{module}::{name}"), |child| {
+        child
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("HOME", dir)
+            .env("AWS_CONFIG_FILE", dir.join("config"))
+            .env("AWS_SHARED_CREDENTIALS_FILE", dir.join("credentials"))
+            .env("AWS_EC2_METADATA_SERVICE_ENDPOINT", metadata)
+            .env(BARE_TARGET, target)
+    });
+}
+
+/// A store at `target` that takes its credentials from the AWS provider
+/// chain and trusts only the bundled roots.
+fn bare_store(target: &str) -> DynamoDbStore {
+    let (_, settings) = settings_within(target, static_credentials(), BARE_OP_TIMEOUT);
+    let settings = Arc::new(settings);
+    DynamoDbStore::build(
+        DynamoDbConfig::new("spate-test", "job"),
+        Duration::from_secs(10),
+        BARE_OP_TIMEOUT,
+        TestClock::frozen(),
+        Box::new(|| 1),
+        Box::new(move || {
+            let settings = settings.clone();
+            Box::pin(async move { super::sdk::connect(&settings).await })
+        }),
+    )
+    .unwrap()
+}
+
+fn ttl_on() -> Reply {
+    Reply::Json(
+        200,
+        r#"{"TimeToLiveDescription":{"TimeToLiveStatus":"ENABLED","AttributeName":"x"}}"#.into(),
+    )
+}
+
+fn not_called() -> Reply {
+    Reply::Json(500, error_body("InternalServerError"))
+}
+
+/// Serves a startup and absent reads, and instance metadata answering
+/// `metadata`, then runs the test `name` in [`in_bare_environment`] with
+/// `dir`, and returns how many requests reached the table.
+fn serve_to_bare_child(name: &str, dir: &std::path::Path, metadata: fn() -> Reply) -> usize {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let updates = Arc::new(AtomicUsize::new(0));
+    let (url, hits) = rt.block_on(serve(startup_script(ttl_on, not_called, updates)));
+    let (metadata, _) = rt.block_on(serve(always(metadata)));
+    in_bare_environment(name, dir, &url, &metadata);
+    hits.load(Ordering::SeqCst)
+}
+
+/// A `credential_process` that takes a second loads, and the first
+/// operation succeeds, with an `op_timeout` of two seconds.
+#[test]
+fn a_slow_credential_process_loads_inside_op_timeout() {
+    if let Ok(target) = std::env::var(BARE_TARGET) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let store = bare_store(&target);
+        let got = rt.block_on(store.get(Keyspace::Durable, "k"));
+        assert!(matches!(got, Ok(None)), "{got:?}");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("credentials.sh");
+    std::fs::write(
+        &script,
+        "sleep 1\necho '{\"Version\":1,\"AccessKeyId\":\"test\",\"SecretAccessKey\":\"test\"}'\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("config"),
+        format!("[default]\ncredential_process = sh {}\n", script.display()),
+    )
+    .unwrap();
+    let hits = serve_to_bare_child(
+        "a_slow_credential_process_loads_inside_op_timeout",
+        dir.path(),
+        || Reply::Hang,
+    );
+    assert!(hits > 0);
+}
+
+/// A provider chain with no source reports its reason as a Retryable
+/// error inside `op_timeout`.
+#[test]
+fn a_chain_with_no_source_reports_why() {
+    if let Ok(target) = std::env::var(BARE_TARGET) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let store = bare_store(&target);
+        let err = rt.block_on(store.get(Keyspace::Durable, "k")).unwrap_err();
+        assert!(matches!(err, StoreError::Retryable(_)), "{err}");
+        assert!(
+            err.to_string().contains("no credentials found in chain"),
+            "{err}"
+        );
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let hits = serve_to_bare_child("a_chain_with_no_source_reports_why", dir.path(), || {
+        Reply::Hang
+    });
+    assert_eq!(hits, 0);
+}
+
+/// With no region configured and instance metadata that never finishes
+/// an answer, connecting fails fatally inside `op_timeout`, naming the
+/// setting.
+#[test]
+fn a_region_lookup_that_hangs_is_fatal_inside_op_timeout() {
+    if let Ok(target) = std::env::var(BARE_TARGET) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (_, mut settings) = settings_within(&target, static_credentials(), BARE_OP_TIMEOUT);
+        settings.region = None;
+        let (err, elapsed) = rt.block_on(async {
+            let started = tokio::time::Instant::now();
+            let err = super::sdk::connect(&settings).await.unwrap_err();
+            (err, started.elapsed())
+        });
+        assert!(matches!(err, StoreError::Fatal(_)), "{err}");
+        assert!(err.to_string().contains("dynamodb.region"), "{err}");
+        assert!(err.to_string().contains("timed out"), "{err}");
+        assert!(elapsed < BARE_OP_TIMEOUT, "Fatal after {elapsed:?}: {err}");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let hits = serve_to_bare_child(
+        "a_region_lookup_that_hangs_is_fatal_inside_op_timeout",
+        dir.path(),
+        || Reply::Stall,
+    );
+    assert_eq!(hits, 0);
+}
+
 /// Against a server that never answers, every call returns Retryable
 /// before `op_timeout`, the deadline the coordinator puts on it.
 #[tokio::test]
@@ -363,6 +533,26 @@ async fn the_sdk_timeout_fires_inside_op_timeout() {
         assert!(matches!(err, StoreError::Retryable(_)), "{err}");
         assert!(elapsed < op_timeout, "returned after {elapsed:?}: {err}");
     }
+}
+
+/// An attempt whose answer never comes ends early enough for a retry to
+/// succeed inside `op_timeout`.
+#[tokio::test]
+async fn a_hung_attempt_is_retried_inside_op_timeout() {
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let counted = attempts.clone();
+    let (url, _) = serve(Arc::new(move |_: &Request| {
+        if counted.fetch_add(1, Ordering::SeqCst) == 0 {
+            Reply::Hang
+        } else {
+            Reply::Json(200, "{}".into())
+        }
+    }))
+    .await;
+    let (sdk, settings) = settings_within(&url, static_credentials(), Duration::from_secs(4));
+    let table = SdkTable::new(&sdk, &settings).unwrap();
+    assert_eq!(table.get("job#d", "k").await.unwrap(), None);
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
 }
 
 /// A server whose certificate no trusted root signed is rejected fatally,

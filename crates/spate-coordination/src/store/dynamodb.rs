@@ -246,6 +246,7 @@ impl DynamoDbStore {
             endpoint: config.endpoint.clone(),
             op_timeout,
             credentials,
+            roots: rustls_native_certs::load_native_certs,
         });
         DynamoDbStore::build(
             config,

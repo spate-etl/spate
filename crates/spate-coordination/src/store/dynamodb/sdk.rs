@@ -8,10 +8,17 @@ use super::table::{
 };
 use crate::store::StoreError;
 use aws_config::SdkConfig;
+use aws_config::environment::region::EnvironmentVariableRegionProvider;
+use aws_config::imds::region::ImdsRegionProvider;
+use aws_config::meta::region::RegionProviderChain;
+use aws_config::profile::region::ProfileFileRegionProvider;
+use aws_config::provider_config::ProviderConfig;
 use aws_sdk_dynamodb::Client;
 use aws_sdk_dynamodb::config::retry::RetryConfig;
 use aws_sdk_dynamodb::config::timeout::TimeoutConfig;
-use aws_sdk_dynamodb::config::{BehaviorVersion, Region, SharedCredentialsProvider};
+use aws_sdk_dynamodb::config::{
+    BehaviorVersion, Region, SharedCredentialsProvider, SharedHttpClient,
+};
 use aws_sdk_dynamodb::error::{ProvideErrorMetadata, SdkError};
 use aws_sdk_dynamodb::operation::update_item::UpdateItemError;
 use aws_sdk_dynamodb::primitives::Blob;
@@ -43,15 +50,22 @@ pub(super) struct Settings {
     pub(super) op_timeout: Duration,
     /// In place of the AWS provider chain.
     pub(super) credentials: Option<SharedCredentialsProvider>,
+    /// The system trust store.
+    pub(super) roots: fn() -> CertificateResult,
 }
+
+const NO_REGION: &str = "no AWS region: set dynamodb.region, or AWS_REGION in the environment";
 
 /// Loads the AWS configuration and builds the table over it.
 pub(super) async fn connect(settings: &Settings) -> Result<Arc<dyn Table>, StoreError> {
-    let http = http_client(rustls_native_certs::load_native_certs).await?;
-    let mut loader = aws_config::defaults(BehaviorVersion::v2026_01_12()).http_client(http);
-    if let Some(region) = &settings.region {
-        loader = loader.region(Region::new(region.clone()));
-    }
+    let http = http_client(settings.roots).await?;
+    let region = match &settings.region {
+        Some(region) => Region::new(region.clone()),
+        None => chain_region(&http, settings.op_timeout / 4).await?,
+    };
+    let mut loader = aws_config::defaults(BehaviorVersion::v2026_01_12())
+        .http_client(http)
+        .region(region);
     if let Some(credentials) = &settings.credentials {
         loader = loader.credentials_provider(credentials.clone());
     }
@@ -59,12 +73,39 @@ pub(super) async fn connect(settings: &Settings) -> Result<Arc<dyn Table>, Store
     Ok(Arc::new(SdkTable::new(&sdk, settings)?))
 }
 
+/// The region the environment, the shared config file or instance metadata
+/// names, looked up over `http` within `limit`.
+///
+/// The SDK's default region chain builds its own HTTP client, which reads
+/// the system trust store on the calling thread and can block past `limit`.
+///
+/// # Errors
+///
+/// Fatal when the chain finds none or does not answer in time.
+async fn chain_region(http: &SharedHttpClient, limit: Duration) -> Result<Region, StoreError> {
+    let conf = ProviderConfig::default().with_http_client(http.clone());
+    let chain = RegionProviderChain::first_try(EnvironmentVariableRegionProvider::new())
+        .or_else(
+            ProfileFileRegionProvider::builder()
+                .configure(&conf)
+                .build(),
+        )
+        .or_else(ImdsRegionProvider::builder().configure(&conf).build());
+    match tokio::time::timeout(limit, chain.region()).await {
+        Ok(Some(region)) => Ok(region),
+        Ok(None) => Err(StoreError::Fatal(NO_REGION.into())),
+        Err(_) => Err(StoreError::Fatal(format!(
+            "{NO_REGION}; the provider chain's region lookup timed out after {limit:?}"
+        ))),
+    }
+}
+
 /// An HTTPS client that verifies servers against the certificates `system`
 /// yields, or against the bundled Mozilla roots when none of them parse. It
 /// goes through the proxies the standard environment variables name.
 pub(super) async fn http_client(
     system: impl FnOnce() -> CertificateResult + Send + 'static,
-) -> Result<aws_sdk_dynamodb::config::SharedHttpClient, StoreError> {
+) -> Result<SharedHttpClient, StoreError> {
     let (roots, fallback) = tokio::task::spawn_blocking(move || trust_roots(system()))
         .await
         .map_err(|e| StoreError::Fatal(format!("loading the system trust store: {e}")))?;
@@ -149,22 +190,23 @@ impl SdkTable {
     /// A client over `sdk` whose attempts, retries and backoff all fit
     /// inside `settings.op_timeout`.
     ///
+    /// It sets no attempt timeout: the SDK loads credentials inside an
+    /// attempt, and a load that timeout cancels starts over on the next one.
+    ///
     /// # Errors
     ///
     /// Fatal when `sdk` has no region.
     pub(super) fn new(sdk: &SdkConfig, settings: &Settings) -> Result<SdkTable, StoreError> {
         if sdk.region().is_none() {
-            return Err(StoreError::Fatal(
-                "no AWS region: set dynamodb.region, or AWS_REGION in the environment".into(),
-            ));
+            return Err(StoreError::Fatal(NO_REGION.into()));
         }
         let t = settings.op_timeout;
         let mut config = aws_sdk_dynamodb::config::Builder::from(sdk)
             .timeout_config(
                 TimeoutConfig::builder()
                     .operation_timeout(t * 9 / 10)
-                    .operation_attempt_timeout(t / 4)
                     .connect_timeout(t / 4)
+                    .read_timeout(t / 4)
                     .build(),
             )
             .retry_config(

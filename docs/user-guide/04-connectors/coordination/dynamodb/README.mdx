@@ -53,7 +53,7 @@ unknown fields are rejected with the offending key. Errors name the key as
 |---|---|---|---|
 | `table` | string | `required` | Table name (3 to 255 characters of `[A-Za-z0-9_.-]`) or table ARN. Many jobs can share one table. |
 | `job` | string | `required` | Job identity, `[A-Za-z0-9_-]{1,64}`. Prefixes the partition keys of every item the job writes. Every worker of one job uses the same value; two different jobs must never share one. |
-| `region` | string | `none` | AWS region. Unset, the AWS provider chain supplies it (`AWS_REGION`, the shared config file, instance metadata). Startup fails when neither does. |
+| `region` | string | `none` | AWS region. Unset, the AWS provider chain supplies it (`AWS_REGION`, the shared config file, instance metadata). Startup fails when neither does, or when the chain has not answered within a quarter of `coordination.op_timeout`. |
 | `endpoint` | string | `none` | An `http://` or `https://` URL in place of the region's endpoint, such as DynamoDB Local's. |
 | `create_table` | boolean | `false` | Create the table when it is missing, with on-demand billing and time to live on `x`. See [The table](#the-table). |
 | `poll_interval` | duration | `2s` | Time between two listings of a watched prefix. See [Latency and cost](#latency-and-cost). |

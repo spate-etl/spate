@@ -83,6 +83,10 @@ impl RecordFramer for Recording {
     fn decoded_bytes(&self) -> u64 {
         self.inner.decoded_bytes()
     }
+
+    fn resync_delimiter(&self) -> Option<u8> {
+        self.inner.resync_delimiter()
+    }
 }
 
 /// One framing run.

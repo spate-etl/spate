@@ -153,6 +153,10 @@ impl RecordFramer for LineFramer {
     fn decoded_bytes(&self) -> u64 {
         self.decoded
     }
+
+    fn resync_delimiter(&self) -> Option<u8> {
+        Some(b'\n')
+    }
 }
 
 impl LineFramer {

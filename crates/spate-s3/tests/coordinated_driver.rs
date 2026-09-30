@@ -6,20 +6,31 @@
 
 mod support;
 
-use spate_core::coordination::{CoordinationErrorKind, SplitSpec};
+use object_store::ObjectStoreExt as _;
+use spate_core::coordination::{CoordinationErrorKind, SplitProgress, SplitSpec};
+use spate_core::framing::RecordFramer;
 use spate_core::pipeline::ExitState;
-use spate_s3::{SplitDescriptor, split_id_for};
+use spate_s3::{SplitDescriptor, SplitRange, split_id_for, split_id_for_range};
 use spate_test::{WriteOutcome, scripted_coordinator, wait_until};
 use std::fs;
+use std::io;
 use std::path::Path;
 use std::time::Duration;
 use support::{
-    Launched, PipelineYaml, captured_rows, launch_customized, line_framer, lines_bytes, recs,
-    test_options,
+    Launched, LineFramer, PipelineYaml, captured_rows, launch_customized, line_framer, lines_bytes,
+    recs, test_options,
 };
 
 fn config_yaml(data: &Path) -> PipelineYaml {
     PipelineYaml::file("s3-scripted-test", data)
+}
+
+/// The key the source's `file://` store reads `name` under `data` at.
+fn key_of(data: &Path, name: &str) -> String {
+    data.join(name)
+        .to_string_lossy()
+        .trim_start_matches('/')
+        .to_string()
 }
 
 /// Build a real `SplitSpec` over staged files: sizes from the
@@ -29,11 +40,7 @@ fn spec_over(data: &Path, names: &[&str]) -> SplitSpec {
     let entries: Vec<spate_s3::DescriptorObject> = names
         .iter()
         .map(|name| spate_s3::DescriptorObject {
-            key: data
-                .join(name)
-                .to_string_lossy()
-                .trim_start_matches('/')
-                .to_string(),
+            key: key_of(data, name),
             size: fs::metadata(data.join(name)).unwrap().len(),
             etag: None,
             last_modified_ms: 1,
@@ -42,6 +49,42 @@ fn spec_over(data: &Path, names: &[&str]) -> SplitSpec {
     let id = split_id_for(entries.iter().map(|e| (e.key.as_str(), None))).unwrap();
     let descriptor = SplitDescriptor::new(entries);
     SplitSpec::new(id, descriptor.encode().unwrap())
+}
+
+/// A `SplitSpec` for the byte range `[start, end)` of the staged file `name`,
+/// pinned to the ETag the `file://` store reports for it.
+fn ranged_spec(data: &Path, name: &str, start: u64, end: u64, delimiter: u8) -> SplitSpec {
+    let key = key_of(data, name);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let meta = rt
+        .block_on(object_store::local::LocalFileSystem::new().head(&key.as_str().into()))
+        .unwrap();
+    let etag = meta.e_tag.expect("the file store reports an ETag");
+    let range = SplitRange::new(start, end, delimiter);
+    let object = spate_s3::DescriptorObject {
+        key: key.clone(),
+        size: meta.size,
+        etag: Some(etag.clone()),
+        last_modified_ms: 1,
+    };
+    SplitSpec::new(
+        split_id_for_range(&key, &etag, range).unwrap(),
+        SplitDescriptor::with_range(object, range).encode().unwrap(),
+    )
+}
+
+/// Byte offset at which each line of `lines_bytes(lines)` starts.
+fn line_starts(lines: &[String]) -> Vec<u64> {
+    lines
+        .iter()
+        .scan(0, |at, line| {
+            let start = *at;
+            *at += line.len() as u64 + 1;
+            Some(start)
+        })
+        .collect()
 }
 
 fn launch_scripted_coordinator(
@@ -339,4 +382,185 @@ fn shutdown_releases_splits_still_held() {
     let report = l.run.join().expect("run exits");
     assert_eq!(report.state, ExitState::Completed, "drain completes");
     assert_eq!(script.released(), vec![id], "the held split was released");
+}
+
+/// A peer taking over a ranged split mid-range delivers exactly the owned
+/// records past the carried watermark. The range starts right after a
+/// delimiter and ends inside a record.
+#[test]
+fn a_ranged_split_taken_over_mid_range_delivers_the_rest_of_its_records() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    fs::create_dir_all(&data).unwrap();
+    let lines = recs("r", 20);
+    fs::write(data.join("big.ndjson"), lines_bytes(&lines)).unwrap();
+    let starts = line_starts(&lines);
+    // Owns records 5 through 10: record 10 starts before `end`.
+    let spec = ranged_spec(&data, "big.ndjson", starts[5], starts[10] + 3, b'\n');
+    let id = spec.id.clone();
+
+    let (coordinator, script) = scripted_coordinator();
+    // The previous owner committed the range's first two records.
+    script.gain(spec, 2, Some(SplitProgress::new(2, Vec::new())));
+    let l = launch_scripted_coordinator(&config_yaml(&data).build(), coordinator, |_| {});
+
+    wait_until(Duration::from_secs(30), "terminal commit", || {
+        script
+            .commits()
+            .iter()
+            .any(|(sid, p)| sid == &id && p.completed)
+    });
+    script.all_complete();
+    let report = l.run.wait_exit(Duration::from_secs(30)).unwrap().unwrap();
+    assert_eq!(report.state, ExitState::Completed);
+    assert_eq!(captured_rows(&l.script), lines[7..=10].to_vec());
+    assert_eq!(script.last_commit(&id).unwrap().watermark, 6);
+}
+
+/// A range lying inside one record owns nothing, and its split completes at
+/// watermark 0 without emitting.
+#[test]
+fn a_range_that_owns_no_record_completes_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    fs::create_dir_all(&data).unwrap();
+    let lines = recs("r", 5);
+    fs::write(data.join("big.ndjson"), lines_bytes(&lines)).unwrap();
+    let starts = line_starts(&lines);
+    let spec = ranged_spec(&data, "big.ndjson", starts[3] + 1, starts[3] + 4, b'\n');
+    let id = spec.id.clone();
+
+    let (coordinator, script) = scripted_coordinator();
+    script.gain(spec, 1, None);
+    let l = launch_scripted_coordinator(&config_yaml(&data).build(), coordinator, |_| {});
+
+    wait_until(Duration::from_secs(30), "terminal commit", || {
+        script
+            .commits()
+            .iter()
+            .any(|(sid, p)| sid == &id && p.completed)
+    });
+    script.all_complete();
+    let report = l.run.wait_exit(Duration::from_secs(30)).unwrap().unwrap();
+    assert_eq!(report.state, ExitState::Completed);
+    assert!(captured_rows(&l.script).is_empty());
+    assert_eq!(script.last_commit(&id).unwrap().watermark, 0);
+    assert!(script.failed().is_empty(), "no split failed");
+}
+
+/// A record over the framer's cap inside one range fails that range's split
+/// alone; the other range of the same object completes.
+#[test]
+fn an_oversized_record_fails_only_the_range_that_owns_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    fs::create_dir_all(&data).unwrap();
+    let mut lines = recs("r", 10);
+    lines[2] = format!("{{\"k\":\"{}\"}}", "x".repeat(200));
+    fs::write(data.join("big.ndjson"), lines_bytes(&lines)).unwrap();
+    let starts = line_starts(&lines);
+    let size = fs::metadata(data.join("big.ndjson")).unwrap().len();
+    let oversized = ranged_spec(&data, "big.ndjson", 0, starts[5], b'\n');
+    let healthy = ranged_spec(&data, "big.ndjson", starts[5], size, b'\n');
+    let (oversized_id, healthy_id) = (oversized.id.clone(), healthy.id.clone());
+
+    let (coordinator, script) = scripted_coordinator();
+    script.gain(oversized, 1, None);
+    script.gain(healthy, 1, None);
+    let l = launch_customized(
+        &config_yaml(&data).build(),
+        test_options(),
+        |_| {},
+        move |source, _io| {
+            source
+                .with_framer(|| Box::new(spate_json::NdjsonFramer::new(64)))
+                .with_coordinator(Box::new(coordinator))
+        },
+    );
+
+    wait_until(
+        Duration::from_secs(30),
+        "one failure and one completion",
+        || {
+            !script.failed().is_empty()
+                && script
+                    .commits()
+                    .iter()
+                    .any(|(sid, p)| sid == &healthy_id && p.completed)
+        },
+    );
+    script.all_complete();
+    let report = l.run.wait_exit(Duration::from_secs(30)).unwrap().unwrap();
+    assert_eq!(report.state, ExitState::Completed);
+    let failed = script.failed();
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert_eq!(failed[0].0, oversized_id);
+    assert!(failed[0].1.contains("max_record_bytes"), "{}", failed[0].1);
+    assert_eq!(captured_rows(&l.script), lines[5..].to_vec());
+}
+
+/// A line framer that declares no resync delimiter.
+#[derive(Default)]
+struct NoResync(LineFramer);
+
+impl RecordFramer for NoResync {
+    fn push(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.0.push(bytes)
+    }
+
+    fn finish(&mut self) -> io::Result<()> {
+        self.0.finish()
+    }
+
+    fn pop(&mut self) -> Option<Vec<u8>> {
+        self.0.pop()
+    }
+
+    fn decoded_bytes(&self) -> u64 {
+        self.0.decoded_bytes()
+    }
+}
+
+/// A ranged split whose delimiter differs from the one the source's framer
+/// declares, or whose framer declares none, fails the pipeline.
+#[test]
+fn a_ranged_split_planned_for_another_framer_is_fatal() {
+    type MakeFramer = fn() -> Box<dyn RecordFramer>;
+    let cases: [(u8, MakeFramer); 2] = [
+        (b';', || Box::new(LineFramer::default())),
+        (b'\n', || Box::new(NoResync::default())),
+    ];
+    for (delimiter, make_framer) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        fs::create_dir_all(&data).unwrap();
+        fs::write(data.join("big.ndjson"), lines_bytes(&recs("r", 5))).unwrap();
+        let spec = ranged_spec(&data, "big.ndjson", 0, 10, delimiter);
+
+        let (coordinator, script) = scripted_coordinator();
+        script.gain(spec, 1, None);
+        let l = launch_customized(
+            &config_yaml(&data).build(),
+            test_options(),
+            |_| {},
+            move |source, _io| {
+                source
+                    .with_framer(make_framer)
+                    .with_coordinator(Box::new(coordinator))
+            },
+        );
+        let report = l.run.wait_exit(Duration::from_secs(30)).unwrap().unwrap();
+        let ExitState::Failed(failure) = report.state else {
+            panic!(
+                "a framer mismatch must fail the pipeline, got {:?}",
+                report.state
+            );
+        };
+        assert!(
+            failure.reason.contains("different framer"),
+            "{}",
+            failure.reason
+        );
+        assert!(captured_rows(&l.script).is_empty());
+    }
 }

@@ -280,11 +280,13 @@ impl Source for S3Source {
             ),
             metrics.clone(),
         );
+        let delimiter = make_framer().resync_delimiter();
         let split_ctx = SplitCtx::new(
             store,
             self.handle.clone(),
             ctx.issuer,
             make_framer,
+            delimiter,
             self.config.compression,
             self.config.chunk_bytes.as_u64() as usize,
             self.config.prefetch_bytes.as_u64() as usize,

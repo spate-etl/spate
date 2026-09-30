@@ -7,6 +7,10 @@
 //! covers both halves at once: a preimage two distinct member sets share, and
 //! a digest that moves when only the input order does.
 //!
+//! Ranged ids get the same two checks: two ranges of objects mint equal ids
+//! exactly when key, ETag and range are equal, and no ranged id equals the
+//! member-set id of its object.
+//!
 //! Every id is also checked against its published shape, 25 characters over
 //! `[A-Za-z0-9_-]` behind the `s3-` prefix, whatever the keys contain.
 
@@ -14,13 +18,48 @@
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use spate_s3::split_id_for;
+use spate_core::coordination::SplitId;
+use spate_s3::{SplitRange, split_id_for, split_id_for_range};
 use std::collections::BTreeSet;
 
 #[derive(Arbitrary, Debug)]
 struct Input {
     left: Vec<Member>,
     right: Vec<Member>,
+    left_range: Ranged,
+    right_range: Ranged,
+}
+
+#[derive(Arbitrary, Debug, PartialEq)]
+struct Ranged {
+    key: String,
+    etag: String,
+    start: u64,
+    end: u64,
+    delimiter: u8,
+}
+
+/// The ranged id of `r`, or `None` for an empty range.
+fn ranged_id(r: &Ranged) -> Option<SplitId> {
+    let id = split_id_for_range(
+        &r.key,
+        &r.etag,
+        SplitRange::new(r.start, r.end, r.delimiter),
+    );
+    assert_eq!(id.is_ok(), r.start < r.end, "{r:?} minted {id:?}");
+    id.ok()
+}
+
+fn assert_shape(id: &SplitId) {
+    let id = id.as_str();
+    assert_eq!(id.len(), 25, "id `{id}` is not 25 characters");
+    assert!(id.starts_with("s3-"), "id `{id}` lacks the s3- prefix");
+    assert!(
+        id.bytes()
+            .skip(3)
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'),
+        "id `{id}` carries a character outside [A-Za-z0-9_-]"
+    );
 }
 
 #[derive(Arbitrary, Debug)]
@@ -52,6 +91,22 @@ fn canonical<'a>(members: &[(&'a str, Option<&'a str>)]) -> Vec<(&'a str, Option
 }
 
 fuzz_target!(|input: Input| {
+    if let (Some(left), Some(right)) = (ranged_id(&input.left_range), ranged_id(&input.right_range))
+    {
+        assert_shape(&left);
+        assert_eq!(
+            left == right,
+            input.left_range == input.right_range,
+            "ranged ids {left:?} and {right:?} disagree with {:?} and {:?}",
+            input.left_range,
+            input.right_range
+        );
+        let r = &input.left_range;
+        let whole =
+            split_id_for([(r.key.as_str(), Some(r.etag.as_str()))]).expect("non-empty member set");
+        assert_ne!(left, whole, "a ranged id equals the member-set id of {r:?}");
+    }
+
     let left = deduped(&input.left);
     let right = deduped(&input.right);
     if left.is_empty() || right.is_empty() {
@@ -66,15 +121,7 @@ fuzz_target!(|input: Input| {
     let right_id = split_id_for(right.iter().copied()).expect("non-empty member set");
 
     for id in [&left_id, &right_id] {
-        let id = id.as_str();
-        assert_eq!(id.len(), 25, "id `{id}` is not 25 characters");
-        assert!(id.starts_with("s3-"), "id `{id}` lacks the s3- prefix");
-        assert!(
-            id.bytes()
-                .skip(3)
-                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'),
-            "id `{id}` carries a character outside [A-Za-z0-9_-]"
-        );
+        assert_shape(id);
     }
 
     assert_eq!(

@@ -92,8 +92,12 @@ mod split_ctx;
 mod test_servers;
 #[cfg(test)]
 mod testutil;
+mod trim;
 
 pub use config::{Compression, S3SourceConfig};
 pub use lane::{S3Batch, S3Lane};
 pub use source::S3Source;
-pub use split::{DESCRIPTOR_VERSION, DescriptorObject, SplitDescriptor, split_id_for};
+pub use split::{
+    DESCRIPTOR_VERSION, DescriptorObject, SplitDescriptor, SplitRange, split_id_for,
+    split_id_for_range,
+};

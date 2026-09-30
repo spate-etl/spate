@@ -516,7 +516,7 @@ fn a_region_lookup_that_hangs_is_fatal_inside_op_timeout() {
 
 /// Against a server that never answers, every call returns Retryable
 /// before `op_timeout`, the deadline the coordinator puts on it.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn the_sdk_timeout_fires_inside_op_timeout() {
     let op_timeout = Duration::from_secs(2);
     let (url, _) = serve(always(|| Reply::Hang)).await;
@@ -525,7 +525,7 @@ async fn the_sdk_timeout_fires_inside_op_timeout() {
     // Concurrent, since one call can finish in time by the luck of its
     // retry backoff.
     let calls = (0..16).map(|_| async {
-        let started = std::time::Instant::now();
+        let started = tokio::time::Instant::now();
         let err = table.get("job#d", "k").await.unwrap_err();
         (err, started.elapsed())
     });

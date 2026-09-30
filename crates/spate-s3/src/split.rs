@@ -1205,8 +1205,9 @@ mod tests {
             n in 2u64..=1 << 12,
             extra in any::<u64>(),
         ) {
-            // A size in `((n - 1) * target, n * target]`.
+            // A size in `((n - 1) * target, n * target]`, and its upper end.
             assert_tiles((n - 1) * target + 1 + extra % target, target);
+            assert_tiles(n * target, target);
         }
 
         #[test]

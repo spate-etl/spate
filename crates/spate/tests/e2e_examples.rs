@@ -41,12 +41,12 @@ use rdkafka::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
 use spate_test::metric_sum;
-use spate_test_support::container_image;
+use spate_test_support::{container_image, http};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
-use support::{CH_PASSWORD, Harness, http_get};
+use support::{CH_PASSWORD, Harness, http_get, wait_until};
 use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::runners::SyncRunner;
 use testcontainers::{Container, GenericImage, ImageExt};
@@ -1010,6 +1010,73 @@ fn nats_coordinated_backfill_example_covers_the_prefix() {
         "nats_coordinated_backfill.2",
         None,
         &env,
+    )
+    .wait_exit(Duration::from_secs(120));
+    assert!(
+        second.contains("0 records, covering 0 of 96 objects"),
+        "a finished job stays finished: the second instance read nothing\n--- log ---\n{second}"
+    );
+}
+
+// ── DynamoDB Local ─────────────────────────────────────────────────────────
+
+/// `dynamodb_coordinated_backfill`: the same bounded backfill over the
+/// DynamoDB store, against DynamoDB Local. As with NATS, the first run must
+/// use the store rather than the solo fallback, and a second run against the
+/// same table must find the job already finished.
+#[test]
+#[ignore = "requires Docker"]
+fn dynamodb_coordinated_backfill_example_covers_the_prefix() {
+    // The emulator `ci/dynamodb/` pins, fetched by digest and re-tagged so
+    // this starts the pinned bytes.
+    let (image, tag) = container_image(&["--pull", "dynamodb"]);
+    let local: Container<GenericImage> = GenericImage::new(&image, &tag)
+        .with_exposed_port(8000.tcp())
+        .with_wait_for(WaitFor::message_on_stdout("Initializing DynamoDB Local"))
+        .with_cmd(["-jar", "DynamoDBLocal.jar", "-inMemory"])
+        .start()
+        .unwrap_or_else(|e| panic!("start DynamoDB Local {image}:{tag}: {e}"));
+    let port = local.get_host_port_ipv4(8000).expect("dynamodb port");
+    // The log line comes before the listener accepts.
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    wait_until(OUTPUT_DEADLINE, "DynamoDB Local answers", || {
+        http(addr, "GET", "/").is_ok()
+    });
+
+    // Credentials and the region reach the example through its own
+    // environment, as a deployment's provider chain would find them.
+    let env = |pod: &str| {
+        vec![
+            ("DYNAMODB_ENDPOINT", format!("http://{addr}")),
+            ("AWS_ACCESS_KEY_ID", "local".to_string()),
+            ("AWS_SECRET_ACCESS_KEY", "local".to_string()),
+            ("AWS_REGION", "us-east-1".to_string()),
+            ("POD_NAME", pod.to_string()),
+        ]
+    };
+    let first = spawn_as(
+        "dynamodb_coordinated_backfill",
+        "dynamodb_coordinated_backfill.1",
+        None,
+        &env("worker-e2e-a"),
+    )
+    .wait_exit(Duration::from_secs(300));
+    assert!(
+        !first.contains("no coordinator injected"),
+        "the example ran against the DynamoDB store, not the solo fallback\n--- log ---\n{first}"
+    );
+    assert!(
+        first.contains("24000 records, covering 96 of 96 objects"),
+        "the sole instance covered the whole prefix\n--- log ---\n{first}"
+    );
+
+    // The split records live in the table, so a second identity on the same
+    // job finds every split complete and reads nothing.
+    let second = spawn_as(
+        "dynamodb_coordinated_backfill",
+        "dynamodb_coordinated_backfill.2",
+        None,
+        &env("worker-e2e-b"),
     )
     .wait_exit(Duration::from_secs(120));
     assert!(

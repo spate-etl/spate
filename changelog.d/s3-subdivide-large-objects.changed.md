@@ -8,15 +8,13 @@ the framer returns a delimiter from `RecordFramer::resync_delimiter`, as
 end. Compressed objects, and objects under a framer that returns `None`, are
 still read whole.
 
-A backfill started on 0.2 cannot resume on this release. The split ids and the
-job fingerprint change, so a worker fails at startup with
-`job fingerprint mismatch: this worker is configured as ... but the store
-prefix belongs to ...`. Finish the backfill on 0.2, or run it under a new job
-name in the `coordination:` store, which delivers every record again.
+The packing version changes, so every split id changes, and the framer's
+delimiter joins the job fingerprint. Every worker of a job needs a framer that
+declares the same delimiter. A coordinated job started on a previous version
+cannot resume on this one. The entry "The S3 source reads a split that covers
+a byte range of one object" gives the startup error and how to migrate.
 
-The framer's delimiter is part of the job fingerprint, so every worker of a
-job needs a framer that declares the same one. The records of one object no
-longer arrive in object order, because its ranges are read in parallel.
-`spate_s3_source_objects_completed_total` and
+The records of one object no longer arrive in object order, because its ranges
+are read in parallel. `spate_s3_source_objects_completed_total` and
 `spate_s3_source_objects_remaining` count each byte range as one object, so
 completed objects can exceed `spate_s3_source_objects_listed_total`.

@@ -70,7 +70,7 @@ pub(super) async fn connect(settings: &Settings) -> Result<Arc<dyn Table>, Store
         loader = loader.credentials_provider(credentials.clone());
     }
     let sdk = loader.load().await;
-    Ok(Arc::new(SdkTable::new(&sdk, settings)?))
+    Ok(Arc::new(SdkTable::new(&sdk, settings)))
 }
 
 /// The region the environment, the shared config file or instance metadata
@@ -192,14 +192,7 @@ impl SdkTable {
     ///
     /// It sets no attempt timeout: the SDK loads credentials inside an
     /// attempt, and a load that timeout cancels starts over on the next one.
-    ///
-    /// # Errors
-    ///
-    /// Fatal when `sdk` has no region.
-    pub(super) fn new(sdk: &SdkConfig, settings: &Settings) -> Result<SdkTable, StoreError> {
-        if sdk.region().is_none() {
-            return Err(StoreError::Fatal(NO_REGION.into()));
-        }
+    pub(super) fn new(sdk: &SdkConfig, settings: &Settings) -> SdkTable {
         let t = settings.op_timeout;
         let mut config = aws_sdk_dynamodb::config::Builder::from(sdk)
             .timeout_config(
@@ -217,10 +210,10 @@ impl SdkTable {
         if let Some(endpoint) = &settings.endpoint {
             config = config.endpoint_url(endpoint);
         }
-        Ok(SdkTable {
+        SdkTable {
             client: Client::from_conf(config.build()),
             table: settings.table.clone(),
-        })
+        }
     }
 }
 

@@ -161,13 +161,13 @@ fn static_credentials() -> SharedCredentialsProvider {
 
 fn table_at(endpoint: &str) -> SdkTable {
     let (sdk, settings) = settings(endpoint, static_credentials());
-    SdkTable::new(&sdk, &settings).expect("sdk table")
+    SdkTable::new(&sdk, &settings)
 }
 
 fn table_over(endpoint: &str, http: SharedHttpClient) -> SdkTable {
     let (sdk, settings) = settings(endpoint, static_credentials());
     let sdk = sdk.into_builder().http_client(http).build();
-    SdkTable::new(&sdk, &settings).expect("sdk table")
+    SdkTable::new(&sdk, &settings)
 }
 
 fn class(e: &StoreError) -> &'static str {
@@ -331,7 +331,7 @@ impl ProvideCredentials for Unreachable {
 async fn a_credential_fetch_failure_is_retryable() {
     let (url, hits) = serve(always(|| Reply::Json(200, "{}".into()))).await;
     let (sdk, settings) = settings(&url, SharedCredentialsProvider::new(Unreachable));
-    let table = SdkTable::new(&sdk, &settings).unwrap();
+    let table = SdkTable::new(&sdk, &settings);
     let err = table.get("job#d", "k").await.unwrap_err();
     assert!(matches!(err, StoreError::Retryable(_)), "{err}");
     assert!(
@@ -339,25 +339,6 @@ async fn a_credential_fetch_failure_is_retryable() {
             .contains("the instance metadata service is unreachable"),
         "{err}"
     );
-    assert_eq!(hits.load(Ordering::SeqCst), 0);
-}
-
-/// Without a region the store fails fatally before any request, naming the
-/// setting.
-#[tokio::test]
-async fn a_missing_region_is_fatal_at_startup() {
-    let (url, hits) = serve(always(|| Reply::Json(200, "{}".into()))).await;
-    let (_, settings) = settings(&url, static_credentials());
-    let sdk = SdkConfig::builder()
-        .behavior_version(BehaviorVersion::v2026_01_12())
-        .credentials_provider(static_credentials())
-        .build();
-    let err = match SdkTable::new(&sdk, &settings) {
-        Err(e) => e,
-        Ok(table) => table.get("job#d", "k").await.unwrap_err(),
-    };
-    assert!(matches!(err, StoreError::Fatal(_)), "{err}");
-    assert!(err.to_string().contains("dynamodb.region"), "{err}");
     assert_eq!(hits.load(Ordering::SeqCst), 0);
 }
 
@@ -399,10 +380,11 @@ fn in_bare_environment(
 
 /// The servers a bare child talks to, on a runtime that outlives it.
 struct Bare {
-    _rt: tokio::runtime::Runtime,
+    rt: tokio::runtime::Runtime,
     table: String,
     table_hits: Arc<AtomicUsize>,
     metadata: String,
+    metadata_hits: Arc<AtomicUsize>,
 }
 
 impl Bare {
@@ -413,13 +395,19 @@ impl Bare {
             .build()
             .unwrap();
         let (table, table_hits) = rt.block_on(serve(table));
-        let (metadata, _) = rt.block_on(serve(metadata));
+        let (metadata, metadata_hits) = rt.block_on(serve(metadata));
         Bare {
-            _rt: rt,
+            rt,
             table,
             table_hits,
             metadata,
+            metadata_hits,
         }
+    }
+
+    /// Serves `script` on the same runtime; returns its URL and hit count.
+    fn serve(&self, script: Script) -> (String, Arc<AtomicUsize>) {
+        self.rt.block_on(serve(script))
     }
 
     fn run(&self, name: &str, dir: &std::path::Path, extra: &[(&str, &str)]) {
@@ -588,6 +576,66 @@ fn a_cut_startup_check_keeps_the_loaded_credentials() {
     assert_eq!(spawns.lines().count(), 1, "credential_process runs");
 }
 
+/// With no region configured and a provider chain that names none,
+/// connecting fails fatally before any request, naming the setting.
+#[test]
+fn a_missing_region_is_fatal_at_startup() {
+    if let Ok(target) = std::env::var(BARE_TARGET) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (_, mut settings) = settings_within(&target, static_credentials(), BARE_OP_TIMEOUT);
+        settings.region = None;
+        let err = rt.block_on(super::sdk::connect(&settings)).unwrap_err();
+        assert!(matches!(err, StoreError::Fatal(_)), "{err}");
+        assert!(err.to_string().contains("dynamodb.region"), "{err}");
+        assert!(!err.to_string().contains("timed out"), "{err}");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let hits = serve_to_bare_child("a_missing_region_is_fatal_at_startup", dir.path(), || {
+        Reply::Json(404, String::new())
+    });
+    assert_eq!(hits, 0);
+}
+
+/// The region lookup reaches instance metadata through the proxy
+/// `HTTP_PROXY` names, over the store's own client.
+#[test]
+fn the_region_lookup_goes_through_the_proxy_the_environment_names() {
+    if let Ok(target) = std::env::var(BARE_TARGET) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (_, mut settings) = settings_within(&target, static_credentials(), BARE_OP_TIMEOUT);
+        settings.region = None;
+        let err = rt.block_on(super::sdk::connect(&settings)).unwrap_err();
+        assert!(err.to_string().contains("dynamodb.region"), "{err}");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let bare = Bare::new(
+        always(not_called),
+        always(|| Reply::Json(404, String::new())),
+    );
+    let (proxy, proxied) = bare.serve(always(|| Reply::Json(404, String::new())));
+    bare.run(
+        "the_region_lookup_goes_through_the_proxy_the_environment_names",
+        dir.path(),
+        &[("HTTP_PROXY", &proxy)],
+    );
+    let hits = (
+        proxied.load(Ordering::SeqCst),
+        bare.metadata_hits.load(Ordering::SeqCst),
+    );
+    assert!(
+        hits.0 > 0 && hits.1 == 0,
+        "(proxy, metadata) requests: {hits:?}"
+    );
+}
+
 /// With no region configured and instance metadata that never finishes
 /// an answer, connecting fails fatally inside `op_timeout`, naming the
 /// setting.
@@ -607,7 +655,7 @@ fn a_region_lookup_that_hangs_is_fatal_inside_op_timeout() {
         });
         assert!(matches!(err, StoreError::Fatal(_)), "{err}");
         assert!(err.to_string().contains("dynamodb.region"), "{err}");
-        assert!(err.to_string().contains("timed out"), "{err}");
+        assert!(err.to_string().contains("timed out after 500ms"), "{err}");
         assert!(elapsed < BARE_OP_TIMEOUT, "Fatal after {elapsed:?}: {err}");
         return;
     }
@@ -627,7 +675,7 @@ async fn the_sdk_timeout_fires_inside_op_timeout() {
     let op_timeout = Duration::from_secs(2);
     let (url, _) = serve(always(|| Reply::Hang)).await;
     let (sdk, settings) = settings_within(&url, static_credentials(), op_timeout);
-    let table = SdkTable::new(&sdk, &settings).unwrap();
+    let table = SdkTable::new(&sdk, &settings);
     // Concurrent, since one call can finish in time by the luck of its
     // retry backoff.
     let calls = (0..16).map(|_| async {
@@ -656,7 +704,7 @@ async fn a_hung_attempt_is_retried_inside_op_timeout() {
     }))
     .await;
     let (sdk, settings) = settings_within(&url, static_credentials(), Duration::from_secs(4));
-    let table = SdkTable::new(&sdk, &settings).unwrap();
+    let table = SdkTable::new(&sdk, &settings);
     assert_eq!(table.get("job#d", "k").await.unwrap(), None);
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
 }

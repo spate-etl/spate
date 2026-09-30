@@ -253,7 +253,10 @@ mod tests {
     #[test]
     #[cfg(feature = "dynamodb")]
     fn builds_a_dynamodb_coordinator_without_connecting() {
-        let spec = CoordinatorSpec::from_section(&section(DYNAMODB)).unwrap();
+        // An interval under the floor would log the warning another test
+        // captures, from a thread with no subscriber.
+        let body = format!("{DYNAMODB}  reconcile_interval: 5m\n");
+        let spec = CoordinatorSpec::from_section(&section(&body)).unwrap();
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .enable_all()

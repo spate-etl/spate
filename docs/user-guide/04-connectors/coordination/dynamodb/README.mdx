@@ -125,8 +125,10 @@ The store classifies the other failures itself:
 The SDK retries throttling and server errors itself, up to three attempts
 inside `op_timeout`, before the store reports them. An attempt that gets no
 response within a quarter of `op_timeout` ends and is retried. A response whose
-body stops arriving runs to the SDK's operation timeout, 0.9 × `op_timeout`,
-and is reported as Retryable without a retry. See
+body delivers nothing for 5 s, the SDK's stalled-stream grace period, which the
+store leaves at its default, ends and is retried when that and the backoff fit
+inside the SDK's operation timeout of 0.9 × `op_timeout`. Otherwise it runs to
+the operation timeout and is reported as Retryable. See
 [Securing connections](../../../03-guides/securing-connections.mdx) for the
 generic model.
 

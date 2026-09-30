@@ -55,7 +55,7 @@ unknown fields are rejected with the offending key. Errors name the key as
 | `job` | string | `required` | Job identity, `[A-Za-z0-9_-]{1,64}`. Prefixes the partition keys of every item the job writes. Every worker of one job uses the same value; two different jobs must never share one. |
 | `region` | string | `none` | AWS region. Unset, the AWS provider chain supplies it (`AWS_REGION`, the shared config file, instance metadata). Startup fails when neither does, or when the chain has not answered within a quarter of `coordination.op_timeout`. |
 | `endpoint` | string | `none` | An `http://` or `https://` URL in place of the region's endpoint, such as DynamoDB Local's. |
-| `create_table` | boolean | `false` | Create the table when it is missing, with on-demand billing and time to live on `x`. See [The table](#the-table). |
+| `create_table` | boolean | `false` | Create the table when it is missing, with on-demand billing, and enable time to live on `x` when it is off. See [The table](#the-table). |
 | `poll_interval` | duration | `2s` | Time between two listings of a watched prefix. See [Latency and cost](#latency-and-cost). |
 
 `coordination.lease_duration` has two floors on this store: at least `1s`, and
@@ -178,14 +178,21 @@ A global secondary index logs a warning, since every write also updates it.
 
 The store writes `x`, an epoch-seconds time to live, on every lease write (a
 day ahead) and on every durable delete marker (seven days ahead), so the table
-collects items nothing renews. Expiry never reads `x`. With time to live off,
-or on another attribute, the store logs a warning at startup, and those items
-stay in the table.
+collects items nothing renews. Expiry never reads `x`. The store logs a
+warning at startup, and starts, when time to live is off or on another
+attribute, or when `DescribeTimeToLive` is denied and its status is unknown.
+Those items then stay in the table.
 
-With `create_table: true`, a missing table is created with on-demand billing
-and time to live on `x`, and a table that already exists is adopted. Creating
-takes one or more startup attempts; if the table is still not active when they
-run out, raise `coordination.startup_max_attempts`. To create the table by hand:
+With `create_table: true`, a missing table is created with on-demand billing,
+and a table that already exists is adopted. On either, the store enables time
+to live on `x` when startup reads it as off, including while it is being
+disabled. When `DescribeTimeToLive` is denied, the store leaves time to live
+unset. When DynamoDB refuses the enable, as it does for up to an hour after a
+change to the table's time to live
+([`UpdateTimeToLive`](https://docs.aws.amazon.com/amazondynamodb/latest/APIReference/API_UpdateTimeToLive.html)),
+the store logs the reason as a warning and starts. Creating takes one or more
+startup attempts; if the table is still not active when they run out, raise
+`coordination.startup_max_attempts`. To create the table by hand:
 
 ```sh
 aws dynamodb create-table --table-name spate-coordination \

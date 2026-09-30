@@ -10,6 +10,9 @@ pub(super) const LAYOUT: u64 = 1;
 
 /// Checks the table's shape and TTL, creating the table and enabling TTL
 /// when the config allows, then fixes or compares the job's meta item.
+///
+/// TTL that is off, on another attribute, unreadable, or refused its
+/// enable logs a warning and does not fail the check.
 pub(super) async fn check(
     table: &dyn Table,
     config: &DynamoDbConfig,
@@ -33,7 +36,16 @@ pub(super) async fn check(
     match table.describe_ttl().await? {
         Ttl::On(attr) if attr == "x" => {}
         Ttl::Off if config.create_table && shape.status == Status::Active => {
-            table.enable_ttl().await?;
+            match table.enable_ttl().await {
+                Ok(()) => {}
+                Err(StoreError::Fatal(reason)) => tracing::warn!(
+                    table = %name,
+                    %reason,
+                    "time to live could not be enabled on attribute `x`; deleted and expired \
+                     items stay in the table"
+                ),
+                Err(e) => return Err(e),
+            }
         }
         other => tracing::warn!(
             table = %name,

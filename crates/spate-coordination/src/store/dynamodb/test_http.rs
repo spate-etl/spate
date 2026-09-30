@@ -790,6 +790,43 @@ async fn enabling_ttl_another_worker_enabled_starts_the_store() {
     assert_eq!(updates.load(Ordering::SeqCst), 1);
 }
 
+/// An `UpdateTimeToLive` refused inside the service's change window, on a
+/// table whose TTL is being disabled, logs the reason at WARN, and the
+/// store starts.
+#[test]
+fn enabling_ttl_inside_the_change_window_starts_the_store() {
+    let lines = warnings(async || {
+        let updates = Arc::new(AtomicUsize::new(0));
+        let disabling = || {
+            Reply::Json(
+                200,
+                r#"{"TimeToLiveDescription":{"TimeToLiveStatus":"DISABLING"}}"#.into(),
+            )
+        };
+        let window = || {
+            Reply::Json(
+                400,
+                r#"{"__type":"com.amazon.coral.validate#ValidationException",
+                    "message":"Time to live has been modified multiple times within a fixed interval"}"#
+                    .into(),
+            )
+        };
+        let (url, _) = serve(startup_script(disabling, window, updates.clone())).await;
+        let mut config = DynamoDbConfig::new("spate-test", "job");
+        config.create_table = true;
+        let store = store_with(table_at(&url), config);
+        let got = store.get(Keyspace::Durable, "k").await;
+        assert_eq!(updates.load(Ordering::SeqCst), 1);
+        assert!(matches!(got, Ok(None)), "{got:?}");
+    });
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("time to live") && l.contains("modified multiple times")),
+        "{lines:?}"
+    );
+}
+
 /// A `CreateTable` that meets a table another worker is creating adopts it.
 #[tokio::test]
 async fn create_table_adopts_a_table_another_worker_is_creating() {

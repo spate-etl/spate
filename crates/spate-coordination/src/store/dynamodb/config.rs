@@ -33,7 +33,8 @@ pub struct DynamoDbConfig {
     /// Endpoint URL in place of the region's, such as a local emulator's.
     #[serde(default)]
     pub endpoint: Option<String>,
-    /// Create a pay-per-request table and enable TTL on it when missing.
+    /// Create a pay-per-request table when it is missing, and enable TTL on
+    /// `x` when it is off.
     #[serde(default)]
     pub create_table: bool,
     /// Time between two listings of a watched prefix. Default 2s.

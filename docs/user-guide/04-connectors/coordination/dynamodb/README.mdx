@@ -37,7 +37,9 @@ the feature.
 
 Construction is synchronous and lazy. The first store operation, the
 coordinator's startup probe, loads the AWS configuration and checks the table,
-so a table still being created rides the startup retry budget.
+so a table still being created rides the startup retry budget. A check that
+fails or runs out of time runs again on the next operation, over the same
+connection and the credentials it already loaded.
 Misconfiguration, such as a malformed table name or an endpoint that is not a
 URL, fails startup with a fatal error that names the key.
 

@@ -30,6 +30,8 @@ enum Reply {
     Hang,
     /// A response head whose body never arrives.
     Stall,
+    /// A 200 with this JSON body, sent after the delay.
+    Delayed(Duration, &'static str),
 }
 
 type Script = Arc<dyn Fn(&Request) -> Reply + Send + Sync>;
@@ -82,6 +84,10 @@ async fn answer<S: AsyncRead + AsyncWrite + Unpin>(
             Reply::Hang => {
                 tokio::time::sleep(Duration::from_secs(3600)).await;
                 return;
+            }
+            Reply::Delayed(delay, body) => {
+                tokio::time::sleep(delay).await;
+                (200, "application/x-amz-json-1.0", body.to_string())
             }
             Reply::Stall => {
                 let _ = stream
@@ -363,8 +369,14 @@ const BARE_OP_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Runs the test `name` of this module in a child whose environment holds
 /// only `PATH`, `HOME` and the AWS config files at `dir`, instance metadata
-/// at `metadata`, and `BARE_TARGET` set to `target`.
-fn in_bare_environment(name: &str, dir: &std::path::Path, target: &str, metadata: &str) {
+/// at `metadata`, `BARE_TARGET` set to `target`, and `extra`.
+fn in_bare_environment(
+    name: &str,
+    dir: &std::path::Path,
+    target: &str,
+    metadata: &str,
+    extra: &[(&str, &str)],
+) {
     let (_, module) = module_path!().split_once("::").unwrap();
     spate_test_support::run_in_child(&format!("{module}::{name}"), |child| {
         child
@@ -374,7 +386,8 @@ fn in_bare_environment(name: &str, dir: &std::path::Path, target: &str, metadata
             .env("AWS_CONFIG_FILE", dir.join("config"))
             .env("AWS_SHARED_CREDENTIALS_FILE", dir.join("credentials"))
             .env("AWS_EC2_METADATA_SERVICE_ENDPOINT", metadata)
-            .env(BARE_TARGET, target);
+            .env(BARE_TARGET, target)
+            .envs(extra.iter().copied());
         // Under a coverage run the child writes its profile where the
         // parent's does, or its coverage is lost.
         if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
@@ -382,6 +395,36 @@ fn in_bare_environment(name: &str, dir: &std::path::Path, target: &str, metadata
         }
         child
     });
+}
+
+/// The servers a bare child talks to, on a runtime that outlives it.
+struct Bare {
+    _rt: tokio::runtime::Runtime,
+    table: String,
+    table_hits: Arc<AtomicUsize>,
+    metadata: String,
+}
+
+impl Bare {
+    fn new(table: Script, metadata: Script) -> Bare {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let (table, table_hits) = rt.block_on(serve(table));
+        let (metadata, _) = rt.block_on(serve(metadata));
+        Bare {
+            _rt: rt,
+            table,
+            table_hits,
+            metadata,
+        }
+    }
+
+    fn run(&self, name: &str, dir: &std::path::Path, extra: &[(&str, &str)]) {
+        in_bare_environment(name, dir, &self.table, &self.metadata, extra);
+    }
 }
 
 /// A store at `target` that takes its credentials from the AWS provider
@@ -418,16 +461,13 @@ fn not_called() -> Reply {
 /// `metadata`, then runs the test `name` in [`in_bare_environment`] with
 /// `dir`, and returns how many requests reached the table.
 fn serve_to_bare_child(name: &str, dir: &std::path::Path, metadata: fn() -> Reply) -> usize {
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(1)
-        .enable_all()
-        .build()
-        .unwrap();
     let updates = Arc::new(AtomicUsize::new(0));
-    let (url, hits) = rt.block_on(serve(startup_script(ttl_on, not_called, updates)));
-    let (metadata, _) = rt.block_on(serve(always(metadata)));
-    in_bare_environment(name, dir, &url, &metadata);
-    hits.load(Ordering::SeqCst)
+    let bare = Bare::new(
+        startup_script(ttl_on, not_called, updates),
+        always(metadata),
+    );
+    bare.run(name, dir, &[]);
+    bare.table_hits.load(Ordering::SeqCst)
 }
 
 /// A `credential_process` that takes a second loads, and the first
@@ -487,6 +527,65 @@ fn a_chain_with_no_source_reports_why() {
         Reply::Hang
     });
     assert_eq!(hits, 0);
+}
+
+/// A startup check the coordinator's deadline cuts runs again on the next
+/// operation over the same connection, and the `credential_process` the
+/// first attempt ran is not run again.
+#[test]
+fn a_cut_startup_check_keeps_the_loaded_credentials() {
+    if let Ok(target) = std::env::var(BARE_TARGET) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let store = crate::store::metered::Metered::new(bare_store(&target), BARE_OP_TIMEOUT, None);
+        let first = rt.block_on(store.get(Keyspace::Durable, "k"));
+        assert!(
+            matches!(&first, Err(StoreError::Retryable(e)) if e.contains("timed out after")),
+            "{first:?}"
+        );
+        let second = rt.block_on(store.get(Keyspace::Durable, "k"));
+        assert!(matches!(second, Ok(None)), "{second:?}");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("credentials.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "echo spawn >> {}\necho '{{\"Version\":1,\"AccessKeyId\":\"test\",\"SecretAccessKey\":\"test\"}}'\n",
+            dir.path().join("spawns").display()
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("config"),
+        format!("[default]\ncredential_process = sh {}\n", script.display()),
+    )
+    .unwrap();
+    // The first attempt's `DescribeTable` takes a second and its
+    // `DescribeTimeToLive` never finishes, so the deadline cuts the check
+    // after the credentials loaded.
+    let described = Arc::new(AtomicUsize::new(0));
+    let ttl_described = Arc::new(AtomicUsize::new(0));
+    let table: Script = Arc::new(move |request: &Request| match request.op.as_str() {
+        "describetable" if described.fetch_add(1, Ordering::SeqCst) == 0 => {
+            Reply::Delayed(Duration::from_secs(1), ACTIVE_TABLE)
+        }
+        "describetable" => Reply::Json(200, ACTIVE_TABLE.into()),
+        "describetimetolive" if ttl_described.fetch_add(1, Ordering::SeqCst) == 0 => Reply::Stall,
+        "describetimetolive" => ttl_on(),
+        _ => Reply::Json(200, "{}".into()),
+    });
+    let bare = Bare::new(table, always(|| Reply::Hang));
+    bare.run(
+        "a_cut_startup_check_keeps_the_loaded_credentials",
+        dir.path(),
+        &[],
+    );
+    let spawns = std::fs::read_to_string(dir.path().join("spawns")).unwrap();
+    assert_eq!(spawns.lines().count(), 1, "credential_process runs");
 }
 
 /// With no region configured and instance metadata that never finishes

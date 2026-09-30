@@ -9,8 +9,8 @@
 //! - `gzip_whole`, `zstd_whole` — the same body stored compressed. These are
 //!   the **negative control** for byte-range subdivision: a whole-stream
 //!   codec cannot be entered at an arbitrary offset, so subdivision must
-//!   never apply to them. If either count moves when subdivision lands, the
-//!   capability probe has leaked into the whole-stream path.
+//!   never apply to them. If either count moves with a change to
+//!   subdivision, the capability probe has leaked into the whole-stream path.
 //! - `gzip_multi_member`, `zstd_multi_frame` — the same body again, stored as
 //!   sixteen independently-encoded streams concatenated into one object,
 //!   which is what an export key appended to by a run of upload sessions
@@ -25,14 +25,16 @@
 //!   object, and the asserted record count turns that into a failure rather
 //!   than into a welcome fall in the number.
 //! - `plain_mid_offset` — the same object fed from a byte offset that falls
-//!   *inside* a record, which is what a reader entering a subdivided object
-//!   faces. The case asserts the record count: the framer emits the partial
-//!   leading line as a record, so a subdivision change has to come here and
-//!   say what the new contract is rather than drift past it.
+//!   *inside* a record. The framer frames the bytes it is given, so it emits
+//!   the partial leading line as a record, and the case asserts that count.
+//! - `plain_range` — the same entry read as a byte-range split through
+//!   `frame_range`. A range owns only the records that start inside it, so
+//!   the trim drops the partial leading line and the case asserts one record
+//!   fewer than `plain_mid_offset`. The difference between the two is the
+//!   trim plus the window copy that stands in for the GET.
 //! - `plain_many_small` — sixteen small objects through one framer. The
 //!   open-cost floor caps a split at ~16 members, so this is a full split's
-//!   worth of per-object codec resolution and state reset, the cost that
-//!   grows when subdivision turns one object into several.
+//!   worth of per-object codec resolution and state reset.
 //!
 //! Bodies are compressed in the fixture, never in the measured region, so
 //! these count decompression only. Framing is done with `spate-json`'s
@@ -51,7 +53,7 @@
 use gungraun::{Dhat, LibraryBenchmarkConfig, library_benchmark, library_benchmark_group, main};
 use spate_json::NdjsonFramer;
 use spate_s3::Compression;
-use spate_s3::bench_seams::{MakeFramer, frame_objects};
+use spate_s3::bench_seams::{MakeFramer, frame_objects, frame_range};
 use std::hint::black_box;
 use std::sync::Arc;
 
@@ -135,11 +137,10 @@ fn zstd_multi_frame() -> Rig {
 /// The same object entered part-way through a record.
 ///
 /// The expected count is derived from the fixture rather than written down,
-/// so it tracks the record shape. The *rule* it encodes is the thing under
-/// review: the leading partial line counts as a record, because the framer
-/// has no way to know it entered mid-record. A reader that
-/// discarded through the first delimiter would emit one fewer, and this is
-/// where that change has to be stated.
+/// so it tracks the record shape. The rule it encodes: the leading partial
+/// line counts as a record, because the framer has no way to know it entered
+/// mid-record. A byte-range split drops that line before framing, which
+/// [`plain_range`] asserts.
 fn plain_mid_offset() -> Rig {
     let body = ndjson::whole_body();
     let at = ndjson::offset_inside_a_record(&body, body.len() / 2);
@@ -149,6 +150,27 @@ fn plain_mid_offset() -> Rig {
     Rig {
         compression: Compression::Auto,
         objects: vec![("part-000000.ndjson".to_owned(), ndjson::chunks(tail))],
+        expect_records,
+    }
+}
+
+/// One byte range of an object, from the offset [`plain_mid_offset`] enters
+/// at to the object's end.
+struct RangeRig {
+    body: Vec<u8>,
+    start: u64,
+    /// What the range owns: the records starting at or after `start`, one
+    /// fewer than the raw tail frames.
+    expect_records: usize,
+}
+
+fn plain_range() -> RangeRig {
+    let body = ndjson::whole_body();
+    let at = ndjson::offset_inside_a_record(&body, body.len() / 2);
+    let expect_records = body[at..].iter().filter(|&&b| b == b'\n').count() - 1;
+    RangeRig {
+        body,
+        start: at as u64,
         expect_records,
     }
 }
@@ -193,7 +215,28 @@ fn frame(rig: Rig) -> Rig {
     rig
 }
 
-library_benchmark_group!(name = framing; benchmarks = frame);
+#[library_benchmark]
+#[bench::plain_range(plain_range())]
+fn frame_one_range(rig: RangeRig) -> RangeRig {
+    let records = frame_range(
+        make_framer(),
+        black_box(&rig.body),
+        rig.start,
+        rig.body.len() as u64,
+        b'\n',
+        ndjson::RANGE_BYTES,
+        ndjson::CHUNK_BYTES,
+    )
+    .expect("the fixture frames cleanly");
+    assert_eq!(
+        records, rig.expect_records,
+        "a range framed a different record count; if that is intended, the \
+         fixture's expectation is the contract being edited"
+    );
+    rig
+}
+
+library_benchmark_group!(name = framing; benchmarks = frame, frame_one_range);
 
 // DHAT is scoped as an extra tool rather than a callgrind argument: the
 // callgrind invocation, and so every `Ir` baseline, is bit-identical with

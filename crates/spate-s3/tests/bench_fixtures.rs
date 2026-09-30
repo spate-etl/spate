@@ -9,7 +9,7 @@
 
 use spate_core::coordination::SplitId;
 use spate_json::NdjsonFramer;
-use spate_s3::bench_seams::{MakeFramer, frame_objects, plan_listing};
+use spate_s3::bench_seams::{MakeFramer, frame_objects, frame_range, plan_listing};
 use spate_s3::{Compression, SplitDescriptor};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -43,11 +43,11 @@ fn the_listing_corpora_are_reproducible() {
 fn the_corpora_are_pinned_across_revisions() {
     for (name, corpus, want) in [
         ("uniform_small", listing::uniform_small(), 625),
-        ("big_objects", listing::big_objects(), 2_000),
+        ("big_objects", listing::big_objects(), 21_097),
         ("mixed_tail", listing::mixed_tail(), 407),
         ("deep_keys", listing::deep_keys(), 63),
     ] {
-        let got = plan_listing(corpus, listing::TARGET_BYTES).len();
+        let got = plan_listing(corpus, listing::TARGET_BYTES, Some(b'\n')).len();
         assert_eq!(
             got, want,
             "{name} planned {got} splits, not {want} — if that is intended, \
@@ -108,7 +108,7 @@ fn every_planned_split_has_a_distinct_id() {
         listing::mixed_tail(),
         listing::deep_keys(),
     ] {
-        let ids = plan_listing(corpus, listing::TARGET_BYTES);
+        let ids = plan_listing(corpus, listing::TARGET_BYTES, Some(b'\n'));
         let unique: HashSet<&str> = ids.iter().map(SplitId::as_str).collect();
         assert!(!ids.is_empty());
         assert_eq!(unique.len(), ids.len(), "two splits minted the same id");
@@ -116,19 +116,28 @@ fn every_planned_split_has_a_distinct_id() {
 }
 
 /// The profiles have to stay *different* from each other, or the parameter is
-/// decorative. `big_objects` in particular must keep landing one object per
-/// split, the behavior a byte-range subdivision change alters and the reason
-/// the profile is here.
+/// decorative. `big_objects` in particular must be cut into byte ranges, the
+/// behavior the profile is here to measure, and read whole one object per
+/// split when the framer declares no delimiter.
 #[test]
 fn the_profiles_pack_differently() {
     let uniform = listing::uniform_small();
     let big = listing::big_objects();
 
-    let uniform_splits = plan_listing(uniform.clone(), listing::TARGET_BYTES).len();
-    let big_splits = plan_listing(big.clone(), listing::TARGET_BYTES).len();
+    let uniform_splits = plan_listing(uniform.clone(), listing::TARGET_BYTES, Some(b'\n')).len();
+    let big_splits = plan_listing(big.clone(), listing::TARGET_BYTES, Some(b'\n')).len();
+    let big_whole = plan_listing(big.clone(), listing::TARGET_BYTES, None).len();
 
+    let ranges: u64 = big
+        .iter()
+        .map(|(_, size, _)| size.div_ceil(listing::TARGET_BYTES))
+        .sum();
     assert_eq!(
-        big_splits,
+        big_splits as u64, ranges,
+        "an object above the target should be cut into ceil(size / target) ranges"
+    );
+    assert_eq!(
+        big_whole,
         big.len(),
         "an object at or above the target should close a bin on its own"
     );
@@ -199,7 +208,7 @@ fn the_deep_keys_sit_just_under_the_key_limit() {
 fn the_chunked_grouping_matches_the_real_packer() {
     let corpus = listing::uniform_small();
     let objects = corpus.len();
-    let splits = plan_listing(corpus, listing::TARGET_BYTES).len();
+    let splits = plan_listing(corpus, listing::TARGET_BYTES, Some(b'\n')).len();
     assert_eq!(
         splits,
         objects / descriptors::MEMBERS_PER_SPLIT,
@@ -368,10 +377,8 @@ fn the_mid_offset_entry_lands_inside_a_record() {
     );
 }
 
-/// The mid-object entry's record count is the contract the framing bench
-/// pins: entering part-way through a record, the framer emits the leading
-/// partial line *as a record*, and a reader that discarded through the first
-/// delimiter would emit one fewer.
+/// The framer frames whatever bytes it is given: entering part-way through a
+/// record, it emits the leading partial line *as a record*.
 ///
 /// Asserted here as well as inside the bench, which does not run under
 /// `cargo test`.
@@ -396,6 +403,29 @@ fn entering_mid_record_still_counts_the_leading_partial_line() {
          is intended, this is the contract being changed and the framing \
          bench's expectation moves with it"
     );
+}
+
+/// A byte-range split entering at the same offset owns only the records that
+/// start inside its range, so it frames one record fewer than the raw tail:
+/// the partial line belongs to the range before it.
+#[test]
+fn a_range_entered_mid_record_drops_the_leading_partial_line() {
+    let body = ndjson::whole_body();
+    let at = ndjson::offset_inside_a_record(&body, body.len() / 2);
+    let complete = body[at..].iter().filter(|&&b| b == b'\n').count();
+
+    let records = frame_range(
+        framer(),
+        &body,
+        at as u64,
+        body.len() as u64,
+        b'\n',
+        ndjson::RANGE_BYTES,
+        ndjson::CHUNK_BYTES,
+    )
+    .expect("frames cleanly");
+
+    assert_eq!(records, complete - 1);
 }
 
 #[test]

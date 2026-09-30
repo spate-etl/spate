@@ -10,18 +10,19 @@
 //! # Shape
 //!
 //! - **Work is planned as splits.** The fleet's elected leader lists the
-//!   prefix once and packs the sorted listing into **splits**, small
-//!   batches of whole objects at ~64 MiB by default, each with a
-//!   deterministic identity ([`split_id_for`]) and a self-contained
-//!   [`SplitDescriptor`] carrying its member keys, sizes, and ETags.
-//!   Workers lease splits through the coordination store and read them
-//!   straight from the descriptors: **workers never list**.
+//!   prefix once and packs the sorted listing into **splits** of ~64 MiB by
+//!   default: small batches of whole objects, or one byte range of a large
+//!   uncompressed object. Each has a deterministic identity
+//!   ([`split_id_for`], [`split_id_for_range`]) and a self-contained
+//!   [`SplitDescriptor`] carrying its member keys, sizes, and ETags, and its
+//!   range. Workers lease splits through the coordination store and read
+//!   them straight from the descriptors: **workers never list**.
 //! - **One lane per in-flight split.** A gained split materializes one
 //!   data lane (one framework partition, one monotonic offset stream); a
 //!   record's `i64` offset packs (member ordinal within the split, record
 //!   index within the object, or within the range for a split over a byte
-//!   range). `coordination.max_in_flight` bounds the
-//!   working set and therefore read parallelism.
+//!   range). `coordination.max_in_flight` bounds the working set and
+//!   therefore read parallelism.
 //! - **Progress lives in the coordination store, nowhere else.** Commits
 //!   are fenced per-split writes; a lost or stolen split resumes on its
 //!   next owner from the acked watermark, drift-checked against the
@@ -51,8 +52,8 @@
 //! # Split identity and drift
 //!
 //! A split's id digests its sorted member keys **and ETags** (plus the
-//! packing-algorithm version), and every GET is pinned `If-Match` to the
-//! descriptor's ETag. The consequences:
+//! packing-algorithm version, and a byte-range split's range), and every GET
+//! is pinned `If-Match` to the descriptor's ETag. The consequences:
 //!
 //! - Replanning an unchanged prefix reproduces identical ids, so replans
 //!   are create-if-absent no-ops and completed splits stay completed.

@@ -1,13 +1,13 @@
 ---
-description: "The object-storage planner packs splits by listing-order first-fit with a bounded lookback, trading bin evenness for prefix locality and low memory."
+description: "The object-storage planner packs splits by listing-order first-fit with a bounded lookback, trading bin evenness for prefix locality and low memory. Superseded by ADR-0054."
 ---
 
 # ADR-0033 — Listing-order first-fit packing with a bounded lookback and a per-object open cost
 
-- **Status:** accepted
+- **Status:** superseded
 - **Date:** 2026-07-18 (recorded 2026-08-06 from the decision log)
 - **Supersedes:** —
-- **Superseded by:** —
+- **Superseded by:** [ADR-0054](0054-s3-byte-range-subdivision.md)
 
 ## Context and problem statement
 

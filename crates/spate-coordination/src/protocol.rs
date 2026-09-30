@@ -111,10 +111,10 @@ pub(crate) fn live_workers(presence: &BTreeMap<String, Revision>, instance: &str
 /// made. Workers reconcile toward what they are given and never choose
 /// for themselves.
 ///
-/// **Balance is on weight, not split count.** An object at or above the
-/// packing target lands alone in its own split, so equal counts can mean
-/// unequal bytes. The lane budget still caps the *count* per member, as a
-/// materialization limit rather than a fairness one. Splits beyond the
+/// **Balance is on weight, not split count.** A planner may emit splits of
+/// very different sizes, so equal counts can mean unequal bytes. The lane
+/// budget still caps the *count* per member, as a materialization limit
+/// rather than a fairness one. Splits beyond the
 /// fleet's summed budget stay unassigned and form the queue.
 ///
 /// `caps` gives each member its own lane budget, as that member advertised
@@ -921,9 +921,9 @@ mod tests {
 
     #[test]
     fn byte_scale_weights_do_not_overflow_the_improving_move() {
-        // `spate-s3` reports weight in BYTES, and any object at or above the
-        // packing target gets a split to itself, so multi-GiB weights are
-        // the designed case. The improving-move gain is
+        // `spate-s3` reports weight in BYTES, and a compressed object at or
+        // above the packing target gets a split to itself, so multi-GiB
+        // weights are the designed case. The improving-move gain is
         // `weight * (from - to - weight)`, which leaves `u64` at around two
         // 4.3 GB splits on one member against an idle peer. Under the debug
         // profile's overflow checks that panicked the coordination task.

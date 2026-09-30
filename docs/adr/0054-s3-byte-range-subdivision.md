@@ -1,0 +1,105 @@
+---
+description: "The object-storage planner cuts a large uncompressed object into byte-range splits under a record-ownership rule, keeping ADR-0033's packing for everything else. Supersedes ADR-0033."
+---
+
+# ADR-0054 — A large uncompressed object is cut into byte-range splits, and the rest pack as before
+
+- **Status:** accepted
+- **Date:** 2026-09-30
+- **Supersedes:** [ADR-0033](0033-s3-split-packing.md)
+- **Superseded by:** —
+
+## Context and problem statement
+
+[ADR-0033](0033-s3-split-packing.md) gives an object at or above the split
+target a split of its own. One lane then reads it serially, one bounded GET of
+`prefetch_bytes` at a time, so the largest object in a prefix sets the longest
+split. That bounds how finely leases can be taken over and how long the job's
+tail runs while other workers sit idle. The object-storage planner in
+`spate-s3` decides the split boundaries, and the fetcher and lane in the same
+crate read them.
+
+A byte range can be read on its own only when a reader entering mid-object can
+find the next record boundary. That holds for an uncompressed object whose
+framer names a delimiter byte a record starts after. It does not hold for a
+whole-stream gzip or zstd object, or for a format with a header, a byte-order
+mark or quoted delimiters.
+
+## Considered options
+
+- Do nothing, as the Flink and Kafka Connect file sources do
+- A second GET window in flight per lane
+- Cut a qualifying object into byte ranges, one split each, and pack every
+  other object as ADR-0033 does
+
+## Decision outcome
+
+Chosen option: "Cut a qualifying object into byte ranges", because it spreads
+one large object across workers without changing how any other object is
+planned or read.
+
+An object qualifies when it is above the target, at most 5 TiB, uncompressed
+under the configured compression, has an ETag, and the framer declares a
+resync delimiter. It becomes `n = ceil(size / target)` ranges with boundaries
+at `floor(i * size / n)`, so each range is between half the target and the
+whole target. A range `[s, e)` owns the records whose first byte lies in it,
+where a record starts at byte 0 and after every delimiter, following Hadoop's
+`LineRecordReader`. The reader starts at `s - 1` and drops bytes through the
+first delimiter, and reads from `e - 1` on through the next delimiter. The
+descriptor carries the range and the delimiter, and the id digests both.
+
+The rest of ADR-0033 still holds. Packing is listing-order first-fit over a
+lookback of ten open bins, each object costs at least `target / 16`, and an
+object that does not qualify but sits at or above the target gets a split of
+its own. A cut object evicts an open bin exactly as an oversized one does, and
+its ranges are emitted at its listing position, so every other split is the
+same whether or not the object is cut.
+
+Doing nothing was rejected because the tail it leaves grows with the largest
+object, which the operator does not control. A second window in flight raises
+one lane's throughput without moving the object to other workers. It also
+keeps a connection open across the hand-off that the bounded GET releases, and
+doubles per-lane read-ahead memory.
+
+### Consequences
+
+- Good, because a large delimited object is read by as many workers as it has
+  ranges, so the longest split is about one target's worth of bytes.
+- Good, because compressed objects and small objects are planned and read
+  exactly as before.
+- Bad, because the packing version changes, so every split id changes. A job
+  planned by an earlier release cannot resume and has to be finished on that
+  release or run again from the start. This is the full re-run cost
+  [ADR-0034](0034-s3-split-identity.md) accepts for a packing change.
+- Bad, because the bytes around each range boundary are read twice, once by
+  each neighbor.
+- Bad, because records of one object no longer reach the pipeline in object
+  order.
+- Bad, because each range is a split, and each split adds seeding round trips
+  to the coordination store (#639).
+- Bad, because a large object the planner cannot cut, such as a whole-stream
+  compressed one, is still read in full by one lane.
+- Neutral, because the framer's delimiter becomes part of the job
+  fingerprint, so workers with different framers are refused at startup.
+
+### Confirmation
+
+`prop_packing_partitions_the_listing_exactly` and
+`prop_small_object_bins_do_not_depend_on_cutting` in
+`crates/spate-s3/src/split.rs` pin the tiling and that other splits do not
+move. `ranges_tiling_an_object_emit_each_record_once` in
+`crates/spate-s3/src/fetch.rs` pins that the ranges of an object deliver each
+record once. `a_large_plain_object_is_read_as_three_byte_ranges` in
+`crates/spate-s3/tests/backfill_pipeline.rs` runs the whole pipeline over a cut
+object.
+
+## More information
+
+- Landed in PR_NUMBER, on top of the ranged reader in
+  [#858](https://github.com/spate-etl/spate/pull/858).
+- [ADR-0033](0033-s3-split-packing.md) — the packing this supersedes, whose
+  lookback and open cost carry over.
+- [ADR-0034](0034-s3-split-identity.md) — the identity digest the range and
+  packing version feed.
+- [S3 source](../user-guide/04-connectors/sources/s3/README.mdx#large-objects-and-byte-ranges)
+  — which objects are cut, and what a reader of one sees.

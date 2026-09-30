@@ -16,9 +16,10 @@ backfill is never reported as done.
 Work is planned as
 [**splits**](../../../07-reference/glossary.mdx#split). The fleet's
 elected leader lists the prefix once and packs the sorted listing into
-splits, each a batch of whole objects of roughly `split_target_bytes`, with
-deterministic ids and self-contained descriptors (member keys, sizes,
-ETags). Workers lease splits through the coordination store and read them
+splits of roughly `split_target_bytes`, with deterministic ids and
+self-contained descriptors (member keys, sizes, ETags). A split is a batch of
+whole objects, or one byte range of a
+[large object](#large-objects-and-byte-ranges). Workers lease splits through the coordination store and read them
 straight from the descriptors, so **workers never list**. Solo and
 multi-worker are the same code path; the only difference is which
 coordination store the coordinator points at.
@@ -66,7 +67,7 @@ source:
 |---|---|---|---|
 | `url` | string | `required` | Bucket and prefix to backfill. Every object under the prefix is read. `file://` works for local runs; `memory://` fails at load, because it builds a fresh empty store per component and so cannot be shared. Part of the job fingerprint — byte-identical across every worker of a coordinated job. |
 | `compression` | `auto` \| `none` \| `gzip` \| `zstd` | `auto` | Object codec. `auto` decides per object by extension (`.gz`/`.gzip`, `.zst`/`.zstd`, else uncompressed). Multi-member gzip and multi-frame zstd are read fully; truncated or corrupt streams [poison the split](#object-errors-poison-the-split). Part of the job fingerprint. |
-| `split_target_bytes` | bytes | `64MiB` | Target size of one split — the unit of distribution. Objects pack toward it in listing order with a per-object cost floor of a sixteenth of the target (so ≤ ~16 objects per split); an object at or above the target gets a split of its own. Floor `1MiB`. Part of the job fingerprint. |
+| `split_target_bytes` | bytes | `64MiB` | Target size of one split — the unit of distribution. Objects pack toward it in listing order with a per-object cost floor of a sixteenth of the target (so ≤ ~16 objects per split). An object above the target is [cut into byte ranges](#large-objects-and-byte-ranges) when it qualifies, and otherwise gets a split of its own. Floor `1MiB`. Part of the job fingerprint. |
 | `refresh_listing` | bool | `false` | Re-list on the coordinator's replan interval, planning new objects as additional splits. `true` makes the job **open** (never self-terminates). Part of the job fingerprint. |
 | `prefetch_bytes` | bytes | `8MiB` | Per-[lane](../../../07-reference/glossary.mdx#lane) read window (one bounded ranged GET at a time, drained before the next). Total read-ahead ≈ in-flight splits × this. Must be at least `chunk_bytes`; a smaller value fails at load. |
 | `chunk_bytes` | bytes | `512KiB` | Target size of one buffered chunk. Zero fails at load. |
@@ -79,6 +80,10 @@ count**, so a worker spelling it `64MB` is refused at startup against a
 fleet on the `64MiB` default. Spellings that decode to the same number of
 bytes (`64MiB`, `67108864`) are interchangeable; it is the value that must
 match across workers, not the text.
+
+The framer's resync delimiter (see [Decoding records](#decoding-records)) is
+part of the job fingerprint too, so every worker of a job needs a framer that
+declares the same one.
 
 The record **format is not a config key**. The S3 source is a transport and
 owns no framing. The format's framer is wired into the source in code (see
@@ -102,11 +107,35 @@ other two, and the job finishes when the loaded thread does.
 
 Aim for a split count that is a multiple of `pipeline.threads`, or large
 enough that one extra split is a small share of the total. Prefixes of many
-small objects get this for free (packing coalesces them); a handful of large
-objects is where it bites, since an object at or above the target always
-gets a split of its own and the count is then fixed by the data. Raising
-`split_target_bytes` coarsens the split set and can make imbalance *worse*,
-so check the resulting count instead of assuming bigger is better.
+small objects get this for free (packing coalesces them), and so do large
+objects cut into byte ranges. A handful of large objects read whole is where
+it bites, since each gets a split of its own and the count is then fixed by
+the data. Raising `split_target_bytes` coarsens the split set and can make
+imbalance *worse*, so check the resulting count instead of assuming bigger is
+better.
+
+### Large objects and byte ranges
+
+The planner cuts an object above `split_target_bytes` into
+`ceil(size / split_target_bytes)` byte ranges of near-equal length, one split
+each, when all of these hold:
+
+- the object is uncompressed under `compression`;
+- the listing reports an ETag for it;
+- the framer declares a resync delimiter (see
+  [Decoding records](#decoding-records));
+- it is at most 5 TiB.
+
+Any other object at or above the target gets a split of its own, and one lane
+reads it from start to end.
+
+A byte-range split owns the records whose first byte lies inside its range, so
+each record of the object belongs to exactly one split. The split reads from
+the byte before its range to find the first record that starts inside it, and
+past the range's end to finish its last record. The bytes around each boundary
+are therefore read twice. Records within one range reach the pipeline in
+order, but the ranges of one object are read in parallel, so the object's
+records as a whole arrive in no fixed order.
 
 ## The `store` passthrough and the denylist
 
@@ -242,8 +271,9 @@ coordination store, which is the only place split progress lives.
 ## Split identity and drift
 
 A split's id digests its sorted member keys **and their ETags** (plus a
-packing-version constant), and every GET is pinned `If-Match` to the
-descriptor's ETag. What that buys:
+packing-version constant), and a byte-range split's id also digests its range
+and delimiter. Every GET is pinned `If-Match` to the descriptor's ETag. What
+that buys:
 
 - **Replans are no-ops** over an unchanged prefix: same listing, same
   packing, same ids; create-if-absent in the store, completed splits
@@ -266,7 +296,8 @@ never self-terminates; stop it with a signal drain).
 A lane's `i64` offset packs *(member ordinal within the split, record
 index within the object)*, which keeps one monotonic offset stream per
 split across object boundaries, the same watermark contract every other
-source honors. `commit` routes acked watermarks into **per-split fenced
+source honors. A byte-range split has one member, at ordinal 0, and counts
+record indexes from the first record its range owns. `commit` routes acked watermarks into **per-split fenced
 progress records** in the coordination store; each carries a versioned
 key/ETag pin for its position. Fencing means a split's previous owner can
 never overwrite its successor's progress. A stale commit loses the CAS,
@@ -276,13 +307,13 @@ new owner.
 On a gain with carried progress, the source drift-checks the progress
 against the split's descriptor (key and ETag at the watermark's ordinal;
 a mid-object resume with no pin anywhere is refused), replays the
-in-progress object from its start discarding exactly the committed record
-count, and continues. Delivery is **at-least-once**. Everything after the
+in-progress object or byte range from its start discarding exactly the
+committed record count, and continues. Delivery is **at-least-once**. Everything after the
 last committed watermark replays after a crash or forced revocation; duplicates are
 possible, loss is not.
 
-Limits: ~1.1 × 10¹² records per object (2⁴⁰ − 2); an object that
-overflows it **poisons its split** before any offset can be corrupted:
+Limits: ~1.1 × 10¹² records per object or byte range (2⁴⁰ − 2); an object
+that overflows it **poisons its split** before any offset can be corrupted:
 handed back, retried, and quarantined at the attempt cap like any other
 [object-terminal failure](#object-errors-poison-the-split). Split
 member counts are structurally capped by the packing floor, far below the
@@ -290,8 +321,9 @@ ordinal limit.
 
 The leader holds the **whole listing** in memory for the duration of a plan:
 one entry per object, carrying that object's key and ETag. Packing moves those
-entries into splits rather than copying them, so the keys are held once. Peak
-scales with object count *and* key length: a prefix of long keys costs
+entries into splits rather than copying them, so the keys are held once, except
+that each byte range of a cut object holds its own copy. Peak scales with
+object count *and* key length: a prefix of long keys costs
 materially more than the same number of short ones. Only the leader pays it, and
 only while planning, which for an open plan is every replan tick.
 
@@ -327,6 +359,13 @@ A different object layout needs a different `RecordFramer`, either a custom one
 via `S3Source::with_framer` or another format's framer, and no fork is
 required. The framer is **required**: a source built without one refuses to
 start.
+
+A framer takes part in [byte-range splits](#large-objects-and-byte-ranges)
+through `RecordFramer::resync_delimiter`. Returning `Some(byte)` declares that
+a record starts after every occurrence of that byte, which `NdjsonFramer` does
+with `\n`. A format with a header, a byte-order mark, magic bytes or a quoted
+delimiter, as CSV has, returns `None`, which is the default. The planner then
+reads every object whole, and the source logs that at `INFO` when it opens.
 
 ## Object errors poison the split
 
@@ -374,12 +413,12 @@ noted per family.
 | Metric | Type | Extra labels | Description |
 |---|---|---|---|
 | `spate_s3_source_objects_listed_total` | counter | | Objects enumerated by the planner's listing. **Leader-only**: only the worker that runs the plan increments it (once per plan run; open plans re-count on every replan tick). |
-| `spate_s3_source_objects_completed_total` | counter | | Objects fully framed and handed to the pipeline by this worker. |
-| `spate_s3_source_objects_remaining` | gauge | | Objects not yet completed across **this worker's currently-held splits** (rises on split gain, falls per completed object, settles on split close). Fleet totals come from the `spate_coordination_*` split gauges, not from summing this. |
-| `spate_s3_source_bytes_read_total` | counter | | Bytes read from the store, as stored (pre-decompression). |
-| `spate_s3_source_bytes_decoded_total` | counter | | Bytes after decompression (equals `bytes_read` for uncompressed objects; the ratio is the effective compression). |
+| `spate_s3_source_objects_completed_total` | counter | | Objects fully framed and handed to the pipeline by this worker. A byte range counts as one object, so completed over listed can exceed 100%. |
+| `spate_s3_source_objects_remaining` | gauge | | Objects not yet completed across **this worker's currently-held splits** (rises on split gain, falls per completed object, settles on split close). A byte range counts as one object. Fleet totals come from the `spate_coordination_*` split gauges, not from summing this. |
+| `spate_s3_source_bytes_read_total` | counter | | Bytes read from the store, as stored (pre-decompression), including the bytes a byte-range split reads around its range and drops. |
+| `spate_s3_source_bytes_decoded_total` | counter | | Bytes after decompression; for a byte-range split, the bytes of the records it owns. Equals `bytes_read` for uncompressed objects read whole; the ratio is the effective compression. |
 | `spate_s3_source_get_retries_total` | counter | | Object GET attempts beyond the first (transient failures, resumed with ranged reads). A rising rate means a flaky store or network; an exhausted attempt budget poisons the split rather than failing the pipeline. |
-| `spate_s3_source_objects_failed_total` | counter | `reason` | Objects that poisoned their split: `not_found` (deleted after planning), `etag_drift` (overwritten under the `If-Match` pin, or content shorter than committed progress), `undecodable` (corrupt/truncated content, over the per-object record limit, or unverifiable without an ETag), `retries_exhausted`. Each report hands the split back; quarantine at the attempt cap shows up in `spate_coordination_splits_quarantined`. |
+| `spate_s3_source_objects_failed_total` | counter | `reason` | Objects, or byte ranges of one, that poisoned their split: `not_found` (deleted after planning), `etag_drift` (overwritten under the `If-Match` pin, or content shorter than committed progress), `undecodable` (corrupt/truncated content, over the per-object record limit, or unverifiable without an ETag), `retries_exhausted`. Each report hands the split back; quarantine at the attempt cap shows up in `spate_coordination_splits_quarantined`. |
 
 A coordinated run adds the framework's `spate_coordination_*` families. See
 [Metrics](../../../../METRICS.md).

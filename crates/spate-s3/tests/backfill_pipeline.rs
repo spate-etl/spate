@@ -347,6 +347,31 @@ fn one_huge_object_spans_many_batches_in_order() {
     );
 }
 
+/// A plain object of three times the 1 MiB split target plans into three
+/// byte-range splits, and each of its lines arrives exactly once.
+#[test]
+fn a_large_plain_object_is_read_as_three_byte_ranges() {
+    let fx = Fixture::new();
+    // 64-byte lines, so the object is exactly 3 MiB.
+    let lines: Vec<String> = (0..3 * 1024 * 1024 / 64)
+        .map(|i| format!("{{\"k\":\"r-{i:08}\",\"pad\":\"{}\"}}", "x".repeat(36)))
+        .collect();
+    fx.write_plain("big.ndjson", &lines);
+    assert_eq!(
+        fs::metadata(fx.object_path("big.ndjson")).unwrap().len(),
+        3 * 1024 * 1024
+    );
+    let store = shared_store();
+
+    let l = launch_on_store(&fx.config_yaml(""), test_options(), &store, |_| {});
+    let report = l.run.wait_exit(Duration::from_secs(60)).unwrap().unwrap();
+    assert_eq!(report.state, ExitState::Completed);
+
+    let splits = split_progress(&store);
+    assert_eq!(splits.len(), 3, "{splits:?}");
+    assert_eq!(sorted(captured_rows(&l.script)), sorted(lines));
+}
+
 #[test]
 fn more_splits_than_threads_still_completes() {
     let fx = Fixture::new();

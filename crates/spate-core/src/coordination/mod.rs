@@ -153,8 +153,8 @@ pub struct SplitSpec {
     /// ranking key rather than a cost skews the leader's distribution.
     ///
     /// The leader distributes summed weight, not split count, so a planner
-    /// that emits wildly uneven splits (an object-store planner gives any
-    /// object at or above its packing target a split to itself) still
+    /// that emits wildly uneven splits (an object-store planner gives a
+    /// large object it cannot cut into ranges a split to itself) still
     /// balances correctly. A planner that leaves every weight at the
     /// default degrades to count-balancing, which is correct when splits
     /// are uniform. `0` is treated as `1`.

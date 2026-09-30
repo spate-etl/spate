@@ -38,11 +38,12 @@ the feature.
 Construction is synchronous and lazy. The first store operation, the
 coordinator's startup probe, loads the AWS configuration and checks the table,
 so a table still being created rides the startup retry budget. A check that
-runs out of time runs again on the next operation over the same connection,
-keeping the credentials it already loaded. A connect or check that fails drops
-the connection: the next attempt reads the AWS config and credentials files,
-the trust store and the region again, and its error names the reason as it
-stands then.
+the coordinator's `op_timeout` deadline cancels runs again on the next
+operation over the same connection, keeping the credentials it already loaded.
+A connect or check that returns an error, including one the SDK's own operation
+timeout ends, drops the connection: the next attempt reads the AWS config and
+credentials files, the trust store and the region again, and its error names
+the reason as it stands then.
 Misconfiguration, such as a malformed table name or an endpoint that is not a
 URL, fails startup with a fatal error that names the key.
 
@@ -92,7 +93,8 @@ except for hosts `NO_PROXY` lists.
 
 The store verifies the endpoint's certificate against the system trust store,
 read when the store connects: at its first operation, and again after a
-startup attempt that fails. When `SSL_CERT_FILE` or `SSL_CERT_DIR` is set, the
+connect or startup check that returns an error. An attempt the coordinator's
+deadline cancels reads nothing again. When `SSL_CERT_FILE` or `SSL_CERT_DIR` is set, the
 certificates they name replace the system store. If the store yields no
 certificates, the store logs a warning and uses the Mozilla root bundle
 compiled into the binary.

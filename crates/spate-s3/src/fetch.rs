@@ -1713,14 +1713,24 @@ mod tests {
     /// A range read under one window layout, then resumed at every record
     /// count under others, emits exactly the records past the resume point at
     /// the same offsets. The ranges put a delimiter at `start - 1`, `end - 1`
-    /// and `end`, include an empty range and one ending at the object's end,
-    /// and the layouts put a window edge at `end - 1` and at the object's end.
+    /// and `end`, include an empty range, one ending at the object's end and
+    /// one whose head spans several windows, and the layouts put a window edge
+    /// at `end - 1` and at the object's end.
     #[test]
     fn a_resumed_range_emits_the_same_tail_under_any_windows() {
         let rt = runtime();
         // Delimiters at 2, 7, 11, 13, 20 and 23; 27 bytes.
         let object = b"aa\nbbbb\ncc\r\n \ndddddd\nee\nfff";
-        let ranges = [(0, 3), (3, 8), (3, 7), (5, 14), (8, 21), (15, 20), (14, 27)];
+        let ranges = [
+            (0, 3),
+            (3, 8),
+            (3, 7),
+            (5, 14),
+            (8, 21),
+            (15, 20),
+            (14, 27),
+            (16, 27),
+        ];
         let reference = ReadPlan::windows(4, 2);
         let others = [
             ReadPlan {
@@ -1764,6 +1774,7 @@ mod tests {
             read(14, 27),
             vec![b"dddddd".to_vec(), b"ee".to_vec(), b"fff".to_vec()]
         );
+        assert_eq!(read(16, 27), vec![b"ee".to_vec(), b"fff".to_vec()]);
     }
 
     /// A ranged read counts the bytes it fetches and trims into

@@ -5,7 +5,7 @@ description: "Each handle may judge lease expiry on its own clock, and the Dynam
 # ADR-0051 — Lease expiry may be judged by each observer, and the DynamoDB store does so
 
 - **Status:** accepted
-- **Date:** 2026-09-30
+- **Date:** 2026-09-29
 - **Supersedes:** —
 - **Superseded by:** —
 
@@ -73,9 +73,11 @@ a store with a polled watch.
   from its own first read of the lease, plus up to one poll interval. That is
   close to two leases after the death when it starts just before the lease
   would have run out.
-- Bad, because the owner stops its splits one lease after its last renewal
-  returned, while a peer measures from when its read returned. The two overlap
-  by one renewal's response time, which ADR-0026's fence makes safe.
+- Bad, because the owner stops its splits at its first renewal tick or poll
+  after one lease has run from its last renewal, while a peer measures from
+  when its read returned. The two can overlap by one renewal's response time
+  plus up to one poll interval and its query. ADR-0026's fence makes that
+  overlap safe.
 - Neutral, because a lease created by another worker takes its revision from
   that worker's wall clock, kept above every revision it has seen for the key.
   Skew can put a re-created lease below the revision a watcher holds. The
@@ -98,15 +100,16 @@ Unit tests over the in-memory table in
   `a_recreated_key_on_one_handle_sits_above_its_watch_delete` pin the revision
   repair.
 
-`store_contract::the_contract_holds_on_the_dynamodb_store` and the
-multi-worker scenarios run the store under the coordinator in default CI, and
-`tests/dynamodb_integration.rs` runs them against DynamoDB Local. Nothing pins
+`store_contract::the_contract_holds_on_the_dynamodb_store` holds the trait
+contract, expiry included, and the multi-worker scenarios run the store under
+the coordinator. Both run in default CI, and `tests/dynamodb_integration.rs`
+runs them against DynamoDB Local. Nothing pins
 the latency bounds above; they follow from the poll cadence.
 
 ## More information
 
-- Landed in #818, which modelled the store over an in-memory table, and #819,
-  which backed it with the AWS SDK.
+- Landed in #818, which modelled the store over an in-memory table on
+  2026-09-29. #819 backed it with the AWS SDK and shipped it on 2026-09-30.
 - [DynamoDB store](../user-guide/04-connectors/coordination/dynamodb/README.mdx#lease-expiry)
   — lease expiry and takeover latency as the store page states them.
 - [Work assignment](../user-guide/02-concepts/08-work-assignment.mdx#discovery)

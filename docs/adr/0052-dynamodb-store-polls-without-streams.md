@@ -5,7 +5,7 @@ description: "The DynamoDB store discovers changes by querying each watched pref
 # ADR-0052 — The DynamoDB store discovers changes by polling, without Streams
 
 - **Status:** accepted
-- **Date:** 2026-09-30
+- **Date:** 2026-09-29
 - **Supersedes:** —
 - **Superseded by:** —
 
@@ -93,14 +93,15 @@ lease, with consumed capacity read from CloudWatch.
 | 10 | 9.03 | 65.7 | 82.6 | 59.9 | 75.2 |
 | 20 | 17.45 | 126.1 | 165.2 | 151.9 | 195.6 |
 
-Measured reads came in 16–26% below the model and writes 11–13% below. The run
+Against the model evaluated at each run's measured completion rate, reads came
+in 16–26% below and writes 11–13% below. The run
 reads table totals, so it does not separate the lease poll from other reads,
 and nothing has been run near 100 workers.
 
 ## More information
 
-- Landed in #818, which modelled the store over an in-memory table, and #819,
-  which backed it with the AWS SDK.
+- Landed in #818, which modelled the store over an in-memory table on
+  2026-09-29. #819 backed it with the AWS SDK and shipped it on 2026-09-30.
 - [ADR-0050](0050-coordination-stores-may-declare-a-polled-watch.md) — the
   polled watch and what the coordinator reads on such a store.
 - [ADR-0053](0053-one-dynamodb-table-holds-every-job.md) — why every lease of a

@@ -270,11 +270,12 @@ interval after the lease has run from that read, since each poll starts one
 after the death sees the lease expire one lease after its own first read of it,
 plus up to one poll interval: close to two leases after the death when it
 starts just before the lease would have run out. No decision
-compares clocks across machines. The owner stops its splits one lease after
-its last successful renewal, measured from when the renewal returned, and a
-peer's lease measure starts when its read returned. The two can overlap by one
-renewal's response time; the epoch fence on every commit makes that overlap
-safe, as it does on every store.
+compares clocks across machines. The owner stops its splits at its first
+renewal tick or poll after one lease has run from its last successful renewal,
+measured from when the renewal returned, and a peer's lease measure starts when
+its read returned. The two can overlap by one renewal's response time plus up
+to one poll interval and its query; the epoch fence on every commit makes that
+overlap safe, as it does on every store.
 
 A lease a worker creates takes its revision from that worker's wall clock, kept
 above every revision the worker has seen for the key. When skew between two

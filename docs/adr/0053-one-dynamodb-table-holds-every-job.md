@@ -5,7 +5,7 @@ description: "One operator-provisioned DynamoDB table holds every job, keyed by 
 # ADR-0053 — One operator-provisioned table holds every job, keyed by job and keyspace
 
 - **Status:** accepted
-- **Date:** 2026-09-30
+- **Date:** 2026-09-29
 - **Supersedes:** —
 - **Superseded by:** —
 
@@ -97,8 +97,8 @@ interval. The real-table run in #819 measured table-wide capacity at 3, 10 and
 
 ## More information
 
-- Landed in #818, which modelled the store over an in-memory table, and #819,
-  which backed it with the AWS SDK.
+- Landed in #818, which modelled the store over an in-memory table on
+  2026-09-29. #819 backed it with the AWS SDK and shipped it on 2026-09-30.
 - #848 — sharding a job's keyspaces over several partition keys.
 - [ADR-0052](0052-dynamodb-store-polls-without-streams.md) — the poll whose
   reads concentrate on the lease partition key.

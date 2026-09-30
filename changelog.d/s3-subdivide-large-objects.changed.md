@@ -2,8 +2,8 @@
 
 The planner cuts an uncompressed object above `split_target_bytes` into byte
 ranges of at most the target, one split each, so several workers read it at
-once. This applies when the object has an ETag, is at most 5 TiB, and the
-framer returns a delimiter from `RecordFramer::resync_delimiter`, as
+once. This applies when the object has an ETag, is at most 50,000 GiB, and
+the framer returns a delimiter from `RecordFramer::resync_delimiter`, as
 `NdjsonFramer` does. Previously one lane read every such object from start to
 end. Compressed objects, and objects under a framer that returns `None`, are
 still read whole.

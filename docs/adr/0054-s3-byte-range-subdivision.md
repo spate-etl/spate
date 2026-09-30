@@ -38,9 +38,9 @@ Chosen option: "Cut a qualifying object into byte ranges", because it spreads
 one large object across workers without changing how any other object is
 planned or read.
 
-An object qualifies when it is above the target, at most 5 TiB, uncompressed
-under the configured compression, has an ETag, and the framer declares a
-resync delimiter. It becomes `n = ceil(size / target)` ranges with boundaries
+An object qualifies when it is above the target, at most 50,000 GiB (the
+largest object S3 can hold), uncompressed under the configured compression,
+has an ETag, and the framer declares a resync delimiter. It becomes `n = ceil(size / target)` ranges with boundaries
 at `floor(i * size / n)`, so each range is between half the target and the
 whole target. A range `[s, e)` owns the records whose first byte lies in it,
 where a record starts at byte 0 and after every delimiter, following Hadoop's

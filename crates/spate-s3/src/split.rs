@@ -60,9 +60,10 @@ pub const DESCRIPTOR_VERSION: u32 = 2;
 /// explicit epoch (see the module docs).
 pub(crate) const PACKING_VERSION: u32 = 2;
 
-/// Largest object [`pack`] cuts into byte ranges, 5 TiB. A listing reporting a
-/// larger size is read whole, which bounds the splits one object can plan.
-pub(crate) const MAX_SUBDIVIDABLE_BYTES: u64 = 5 << 40;
+/// Largest object [`pack`] cuts into byte ranges: 50,000 GiB, the largest
+/// object S3 can hold (10,000 parts of 5 GiB). A listing reporting a larger
+/// size is read whole.
+pub(crate) const MAX_SUBDIVIDABLE_BYTES: u64 = 50_000 << 30;
 
 /// Maximum number of bins held open during packing. Bounds the open-bin
 /// window and how far out of listing order a member can land. The listing
@@ -533,7 +534,8 @@ impl Packed {
 /// between `target / 2` and `target` bytes long when `size > target`.
 fn tile(size: u64, target: u64, delimiter: u8) -> impl Iterator<Item = SplitRange> {
     let n = size.div_ceil(target);
-    // u128: `i * size` passes u64::MAX for a 5 TiB object at a 1 MiB target.
+    // u128: `i * size` reaches about 2^71 for the largest object at the 1 MiB
+    // target floor.
     let boundary = move |i: u64| (u128::from(i) * u128::from(size) / u128::from(n)) as u64;
     (0..n).map(move |i| SplitRange::new(boundary(i), boundary(i + 1), delimiter))
 }
@@ -961,10 +963,12 @@ mod tests {
     }
 
     /// An object above [`MAX_SUBDIVIDABLE_BYTES`] is read whole, and one at
-    /// the limit is cut.
+    /// the limit, or of 6 TiB, is cut.
     #[test]
     fn an_object_above_the_subdivision_limit_stays_whole() {
         let target = 1 << 30;
+        let six_tib = pack(vec![entry("6tib", 6 << 40)], &cut(target));
+        assert_eq!(six_tib.len(), 6 << 10);
         let over = entry("over", MAX_SUBDIVIDABLE_BYTES + 1);
         assert_eq!(
             pack(vec![over.clone()], &cut(target)),
@@ -1068,10 +1072,10 @@ mod tests {
     }
 
     fn assert_tiles(size: u64, target: u64) {
-        let ranges: Vec<SplitRange> = tile(size, target, b'\n').collect();
-        assert_eq!(ranges.len() as u64, size.div_ceil(target));
+        let mut count = 0;
         let mut next = 0;
-        for range in &ranges {
+        for range in tile(size, target, b'\n') {
+            count += 1;
             assert_eq!(range.start, next, "size {size} target {target}");
             let len = range.end - range.start;
             assert!(
@@ -1080,6 +1084,7 @@ mod tests {
             );
             next = range.end;
         }
+        assert_eq!(count, size.div_ceil(target), "size {size} target {target}");
         assert_eq!(next, size, "size {size} target {target}");
     }
 

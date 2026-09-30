@@ -124,7 +124,7 @@ each, when all of these hold:
 - the listing reports an ETag for it;
 - the framer declares a resync delimiter (see
   [Decoding records](#decoding-records));
-- it is at most 5 TiB.
+- it is at most 50,000 GiB, the largest object S3 can hold.
 
 Any other object at or above the target gets a split of its own, and one lane
 reads it from start to end.

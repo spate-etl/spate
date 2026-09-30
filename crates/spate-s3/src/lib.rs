@@ -19,7 +19,8 @@
 //! - **One lane per in-flight split.** A gained split materializes one
 //!   data lane (one framework partition, one monotonic offset stream); a
 //!   record's `i64` offset packs (member ordinal within the split, record
-//!   index within the object). `coordination.max_in_flight` bounds the
+//!   index within the object, or within the range for a split over a byte
+//!   range). `coordination.max_in_flight` bounds the
 //!   working set and therefore read parallelism.
 //! - **Progress lives in the coordination store, nowhere else.** Commits
 //!   are fenced per-split writes; a lost or stolen split resumes on its

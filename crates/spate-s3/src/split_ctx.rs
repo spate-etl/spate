@@ -22,7 +22,7 @@
 
 use crate::config::Compression;
 use crate::fetch::{FetcherParams, ObjectEntry, run_fetcher};
-use crate::framer::FramerFactory;
+use crate::framer::{Codec, FramerFactory};
 use crate::lane::S3Lane;
 use crate::metrics::S3Metrics;
 use crate::offset::Position;
@@ -341,6 +341,20 @@ impl SplitSource for SplitCtx {
                     }
                 ),
             });
+        }
+        if let (Some(_), [object]) = (descriptor.range, descriptor.objects.as_slice()) {
+            let codec = Codec::resolve(self.compression, &object.key);
+            if codec != Codec::Plain {
+                return Err(SourceError::Client {
+                    class: ErrorClass::Fatal,
+                    reason: format!(
+                        "split {split}: \"{}\" is split into byte ranges, but the source \
+                         decodes it as {} — a ranged split needs an uncompressed object",
+                        object.key,
+                        format!("{codec:?}").to_lowercase()
+                    ),
+                });
+            }
         }
         let objects: Arc<Vec<ObjectEntry>> = Arc::new(descriptor.to_entries());
 

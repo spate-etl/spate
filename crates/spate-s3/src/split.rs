@@ -47,7 +47,7 @@ use std::collections::VecDeque;
 /// Version of the [`SplitDescriptor`] wire encoding. Bumped on any change
 /// to the descriptor's schema; a worker refuses a descriptor written by an
 /// incompatible release instead of misreading it.
-pub const DESCRIPTOR_VERSION: u32 = 1;
+pub const DESCRIPTOR_VERSION: u32 = 2;
 
 /// Version of the packing algorithm, folded into every split id by
 /// [`split_id_for`]. Bumping it retires all previously planned ids as an
@@ -86,7 +86,9 @@ pub struct DescriptorObject {
 ///
 /// The range owns the records whose first byte lies in `[start, end)`, where a
 /// record starts at byte 0 and after every `delimiter` byte, so each record of
-/// an object belongs to exactly one range of a tiling.
+/// an object belongs to exactly one range of a tiling. The object must be
+/// uncompressed: a reader whose `compression` setting decodes the key fails
+/// the pipeline on a ranged split.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct SplitRange {
@@ -146,9 +148,9 @@ struct VersionProbe {
 
 impl SplitDescriptor {
     /// Build a descriptor over `objects` (listing order, since ordinals
-    /// index into it), stamped with the current [`DESCRIPTOR_VERSION`]. The only
-    /// way to construct one; [`encode`](SplitDescriptor::encode) refuses
-    /// any other version.
+    /// index into it), stamped with the current [`DESCRIPTOR_VERSION`].
+    /// [`with_range`](SplitDescriptor::with_range) builds a ranged one, and
+    /// [`encode`](SplitDescriptor::encode) refuses any other version.
     #[must_use]
     pub fn new(objects: Vec<DescriptorObject>) -> SplitDescriptor {
         SplitDescriptor {
@@ -161,7 +163,8 @@ impl SplitDescriptor {
     /// Build a descriptor over the byte `range` of `object`, stamped with the
     /// current [`DESCRIPTOR_VERSION`]. [`encode`](SplitDescriptor::encode)
     /// refuses it unless `object` has an ETag and
-    /// `range.start < range.end <= object.size`.
+    /// `range.start < range.end <= object.size`. `object` must be
+    /// uncompressed, as [`SplitRange`] states.
     #[must_use]
     pub fn with_range(object: DescriptorObject, range: SplitRange) -> SplitDescriptor {
         SplitDescriptor {
@@ -212,7 +215,9 @@ impl SplitDescriptor {
     /// # Errors
     ///
     /// [`Fatal`](CoordinationErrorKind::Fatal) when the descriptor's
-    /// version is not [`DESCRIPTOR_VERSION`]. A descriptor written under a
+    /// version is not [`DESCRIPTOR_VERSION`], or when it has a range and
+    /// not exactly one member, a member without an ETag, or a range that is
+    /// empty or extends past the member's size. A descriptor written under a
     /// wrong version fails pipeline-fatal on every worker that leases it.
     pub fn encode(&self) -> Result<Vec<u8>, CoordinationError> {
         if self.v != DESCRIPTOR_VERSION {
@@ -233,9 +238,10 @@ impl SplitDescriptor {
     ///
     /// # Errors
     ///
-    /// [`Fatal`](CoordinationErrorKind::Fatal) when the bytes do not parse
-    /// or were written under a different [`DESCRIPTOR_VERSION`]. A worker
-    /// must never guess at an incompatible descriptor.
+    /// [`Fatal`](CoordinationErrorKind::Fatal) when the bytes do not parse,
+    /// were written under a different [`DESCRIPTOR_VERSION`], or carry a range
+    /// [`encode`](SplitDescriptor::encode) would refuse. A worker must never
+    /// guess at an incompatible descriptor.
     pub fn decode(bytes: &[u8]) -> Result<SplitDescriptor, CoordinationError> {
         let fatal = |reason: String| CoordinationError::new(CoordinationErrorKind::Fatal, reason);
         let probe: VersionProbe = serde_json::from_slice(bytes)
@@ -590,7 +596,7 @@ mod tests {
         let desc = SplitDescriptor::from_entries(&[entry("k", 5)]);
         assert_eq!(
             String::from_utf8(desc.encode().unwrap()).unwrap(),
-            r#"{"v":1,"objects":[{"key":"k","size":5,"etag":"\"etag-k\"","last_modified_ms":1760000000000}]}"#,
+            r#"{"v":2,"objects":[{"key":"k","size":5,"etag":"\"etag-k\"","last_modified_ms":1760000000000}]}"#,
         );
     }
 
@@ -611,6 +617,18 @@ mod tests {
             err.reason
         );
         assert_eq!(SplitDescriptor::new(vec![]).version(), DESCRIPTOR_VERSION);
+    }
+
+    /// A version-1 descriptor, written before descriptors could carry a
+    /// range, is refused.
+    #[test]
+    fn a_version_1_descriptor_is_refused() {
+        let err = SplitDescriptor::decode(
+            br#"{"v":1,"objects":[{"key":"k","size":5,"etag":null,"last_modified_ms":1}]}"#,
+        )
+        .unwrap_err();
+        assert_eq!(err.kind, CoordinationErrorKind::Fatal);
+        assert!(err.reason.contains("version 1"), "reason: {}", err.reason);
     }
 
     #[test]
@@ -646,7 +664,7 @@ mod tests {
         let encoded = desc.encode().unwrap();
         assert_eq!(
             String::from_utf8(encoded.clone()).unwrap(),
-            r#"{"v":1,"objects":[{"key":"big.ndjson","size":100,"etag":"\"e\"","last_modified_ms":7}],"range":{"start":40,"end":80,"delimiter":10}}"#,
+            r#"{"v":2,"objects":[{"key":"big.ndjson","size":100,"etag":"\"e\"","last_modified_ms":7}],"range":{"start":40,"end":80,"delimiter":10}}"#,
         );
         assert_eq!(SplitDescriptor::decode(&encoded).unwrap(), desc);
     }

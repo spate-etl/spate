@@ -5,17 +5,20 @@
 pub(crate) mod seaweed;
 pub(crate) mod spy;
 
+use object_store::ObjectStoreExt as _;
 use spate_coordination::store::memory::MemoryStore;
 use spate_coordination::{CoordinationConfig, StoreCoordinator};
 use spate_core::config::PipelineConfig;
+use spate_core::coordination::SplitSpec;
 use spate_core::framing::RecordFramer;
 use spate_core::ops::chain_owned;
 use spate_core::pipeline::{Pipeline, RuntimeOptions, ShutdownHandle};
 use spate_core::sink::KeyHashRouter;
-use spate_s3::S3Source;
+use spate_s3::{S3Source, SplitDescriptor, SplitRange, split_id_for_range};
 use spate_test::{BytesPassthrough, PipelineRun, SinkScript, TestEncoder, capture_sink};
 use std::collections::VecDeque;
 use std::io;
+use std::path::Path;
 use std::time::Duration;
 
 /// Pipeline YAML for an S3 source feeding a capture sink, with the admin
@@ -35,7 +38,7 @@ pub(crate) struct PipelineYaml {
 
 impl PipelineYaml {
     /// Reads the files under `data`.
-    pub(crate) fn file(name: &str, data: &std::path::Path) -> Self {
+    pub(crate) fn file(name: &str, data: &Path) -> Self {
         Self::over(name, format!("file://{}/", data.display()), None)
     }
 
@@ -363,4 +366,54 @@ pub(crate) fn lines_bytes(lines: &[String]) -> Vec<u8> {
         out.push(b'\n');
     }
     out
+}
+
+/// The key the source's `file://` store reads `name` under `data` at.
+pub(crate) fn key_of(data: &Path, name: &str) -> String {
+    data.join(name)
+        .to_string_lossy()
+        .trim_start_matches('/')
+        .to_string()
+}
+
+/// A `SplitSpec` for the byte range `[start, end)` of the staged file `name`,
+/// pinned to the ETag the `file://` store reports for it.
+pub(crate) fn ranged_spec(
+    data: &Path,
+    name: &str,
+    start: u64,
+    end: u64,
+    delimiter: u8,
+) -> SplitSpec {
+    let key = key_of(data, name);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let meta = rt
+        .block_on(object_store::local::LocalFileSystem::new().head(&key.as_str().into()))
+        .unwrap();
+    let etag = meta.e_tag.expect("the file store reports an ETag");
+    let range = SplitRange::new(start, end, delimiter);
+    let object = spate_s3::DescriptorObject {
+        key: key.clone(),
+        size: meta.size,
+        etag: Some(etag.clone()),
+        last_modified_ms: 1,
+    };
+    SplitSpec::new(
+        split_id_for_range(&key, &etag, range).unwrap(),
+        SplitDescriptor::with_range(object, range).encode().unwrap(),
+    )
+}
+
+/// Byte offset at which each line of `lines_bytes(lines)` starts.
+pub(crate) fn line_starts(lines: &[String]) -> Vec<u64> {
+    lines
+        .iter()
+        .scan(0, |at, line| {
+            let start = *at;
+            *at += line.len() as u64 + 1;
+            Some(start)
+        })
+        .collect()
 }

@@ -1,8 +1,7 @@
 //! The coordination protocol over DynamoDB Local: the `DynamoDbStore`
 //! mapping against the service's API, covering table creation and the
-//! startup checks, conditional writes, the item a failed condition returns,
-//! paged queries and job isolation, by running the scenarios the in-memory
-//! suite proves.
+//! startup checks, conditional writes, the item a failed condition returns
+//! and job isolation, by running the scenarios the in-memory suite proves.
 //!
 //! Ignored by default; run with Docker available:
 //!

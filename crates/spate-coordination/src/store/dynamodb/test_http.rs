@@ -680,6 +680,225 @@ async fn a_retried_write_whose_first_attempt_landed_wins() {
     );
 }
 
+/// Answers every request with `reply` and keeps each request body.
+fn recorded(reply: &'static str) -> (Script, Arc<Mutex<Vec<serde_json::Value>>>) {
+    let bodies = Arc::new(Mutex::new(Vec::new()));
+    let kept = bodies.clone();
+    let script: Script = Arc::new(move |request: &Request| {
+        kept.lock().unwrap().push(request.body.clone());
+        Reply::Json(200, reply.into())
+    });
+    (script, bodies)
+}
+
+/// The attributes an `UpdateItem` body's expression sets, with their
+/// values, and the ones it removes, by attribute name.
+fn assigned(body: &serde_json::Value) -> (HashMap<String, serde_json::Value>, Vec<String>) {
+    let name = |token: &str| {
+        let token = token.trim();
+        body["ExpressionAttributeNames"][token]
+            .as_str()
+            .unwrap_or(token)
+            .to_string()
+    };
+    let expr = body["UpdateExpression"]
+        .as_str()
+        .expect("an update expression");
+    let (set, remove) = expr.split_once(" REMOVE ").unwrap_or((expr, ""));
+    let set = set.strip_prefix("SET ").expect("a SET clause");
+    let mut clauses = Vec::new();
+    let (mut depth, mut start) = (0, 0);
+    for (i, c) in set.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ',' if depth == 0 => {
+                clauses.push(&set[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    clauses.push(&set[start..]);
+    let sets = clauses
+        .into_iter()
+        .map(|clause| {
+            let (target, value) = clause.split_once('=').expect("an assignment");
+            let value = value.trim();
+            let value = body["ExpressionAttributeValues"]
+                .get(value)
+                .cloned()
+                .unwrap_or_else(|| value.into());
+            (name(target), value)
+        })
+        .collect();
+    let removed = remove
+        .split(',')
+        .filter(|t| !t.trim().is_empty())
+        .map(name)
+        .collect();
+    (sets, removed)
+}
+
+/// Every write stores its write id in `w`, which `decode` reads, and the
+/// collection time in `x`, which the table's TTL reads. A durable create
+/// clears the `x` of a tombstone it replaces.
+#[tokio::test]
+async fn writes_store_the_write_id_and_the_collection_time() {
+    use base64::Engine as _;
+    let (script, bodies) = recorded(r#"{"Attributes":{"v":{"N":"1"}}}"#);
+    let (url, _) = serve(script).await;
+    let table = table_at(&url);
+    let w: WriteId = [7; 16];
+    let id = serde_json::json!({ "B": base64::engine::general_purpose::STANDARD.encode(w) });
+    let b = b"v".to_vec();
+    let writes = [
+        Write::CreateDurable {
+            b: b.clone(),
+            w,
+            now_ms: 5,
+        },
+        Write::Put {
+            v: 2,
+            b: b.clone(),
+            w,
+            x: Some(9),
+            cond: Cond::Absent,
+        },
+        Write::Put {
+            v: 3,
+            b,
+            w,
+            x: None,
+            cond: Cond::LiveVersionIs(2),
+        },
+        Write::Tombstone {
+            expected: Some(3),
+            w,
+            x: 11,
+        },
+    ];
+    for write in writes {
+        table.write("job#d", "k", write).await.unwrap();
+    }
+    let bodies = bodies.lock().unwrap();
+    let [create, leased, durable, tombstone] = bodies.as_slice() else {
+        panic!("{bodies:?}");
+    };
+
+    let (sets, removed) = assigned(create);
+    assert_eq!(sets.get("w"), Some(&id), "{create}");
+    assert!(removed.iter().any(|r| r == "t"), "{create}");
+    assert!(removed.iter().any(|r| r == "x"), "{create}");
+
+    let (sets, _) = assigned(leased);
+    assert_eq!(sets.get("w"), Some(&id), "{leased}");
+    assert_eq!(
+        sets.get("x"),
+        Some(&serde_json::json!({ "N": "9" })),
+        "{leased}"
+    );
+
+    let (sets, _) = assigned(durable);
+    assert_eq!(sets.get("w"), Some(&id), "{durable}");
+    assert!(!sets.contains_key("x"), "{durable}");
+
+    let (sets, _) = assigned(tombstone);
+    assert_eq!(sets.get("w"), Some(&id), "{tombstone}");
+    assert_eq!(
+        sets.get("x"),
+        Some(&serde_json::json!({ "N": "11" })),
+        "{tombstone}"
+    );
+    assert_eq!(
+        sets.get("t"),
+        Some(&serde_json::json!({ "BOOL": true })),
+        "{tombstone}"
+    );
+}
+
+/// A point read is strongly consistent, and a query asks for the
+/// consistency its caller chose.
+#[tokio::test]
+async fn reads_ask_for_the_consistency_their_caller_needs() {
+    let (script, bodies) = recorded("{}");
+    let (url, _) = serve(script).await;
+    let table = table_at(&url);
+    table.get("job#d", "k").await.unwrap();
+    for consistent in [true, false] {
+        table
+            .query(Query {
+                pk: "job#e".into(),
+                prefix: None,
+                consistent,
+                start: None,
+                filter_tombs: false,
+            })
+            .await
+            .unwrap();
+    }
+    let bodies = bodies.lock().unwrap();
+    let read = |i: usize| bodies[i]["ConsistentRead"].as_bool().unwrap_or(false);
+    assert_eq!(
+        (read(0), read(1), read(2)),
+        (true, true, false),
+        "{bodies:?}"
+    );
+}
+
+/// A listing longer than one page reads every page, each starting after
+/// the key the last one ended on.
+#[tokio::test]
+async fn a_listing_reads_every_page() {
+    const KEYS: [&str; 5] = ["a", "b", "c", "d", "e"];
+    let queries = Arc::new(AtomicUsize::new(0));
+    let counted = queries.clone();
+    let script: Script = Arc::new(move |request: &Request| match request.op.as_str() {
+        "describetable" => Reply::Json(200, ACTIVE_TABLE.into()),
+        "describetimetolive" => ttl_on(),
+        "query" => {
+            // Ends a listing that never advances.
+            if counted.fetch_add(1, Ordering::SeqCst) >= 10 {
+                return Reply::Json(400, error_body("ValidationException"));
+            }
+            let after = request.body["ExclusiveStartKey"]["sk"]["S"].as_str();
+            let page: Vec<&str> = KEYS
+                .into_iter()
+                .filter(|k| after.is_none_or(|a| *k > a))
+                .take(2)
+                .collect();
+            let items: Vec<serde_json::Value> = page
+                .iter()
+                .map(|k| {
+                    serde_json::json!({
+                        "pk": { "S": "job#d" }, "sk": { "S": k },
+                        "v": { "N": "1" }, "b": { "B": "dg==" },
+                    })
+                })
+                .collect();
+            let mut out = serde_json::json!({ "Items": items });
+            if let Some(last) = page.last().filter(|k| **k != KEYS[KEYS.len() - 1]) {
+                out["LastEvaluatedKey"] = serde_json::json!({
+                    "pk": { "S": "job#d" }, "sk": { "S": last },
+                });
+            }
+            Reply::Json(200, out.to_string())
+        }
+        _ => Reply::Json(200, "{}".into()),
+    });
+    let (url, _) = serve(script).await;
+    let store = store_over(table_at(&url));
+    let listed: Vec<String> = store
+        .list(Keyspace::Durable, "")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|e| e.key)
+        .collect();
+    assert_eq!(listed, KEYS);
+    assert_eq!(queries.load(Ordering::SeqCst), 3);
+}
+
 /// Names the endpoint for the child run of
 /// [`requests_go_through_the_proxy_the_environment_names`].
 const PROXY_TARGET: &str = "SPATE_TEST_DYNAMODB_PROXY_TARGET";

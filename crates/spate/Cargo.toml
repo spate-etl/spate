@@ -145,6 +145,10 @@ name = "nats_coordinated_backfill"
 required-features = ["s3", "json", "coordination-nats"]
 
 [[example]]
+name = "dynamodb_coordinated_backfill"
+required-features = ["s3", "json", "coordination-dynamodb"]
+
+[[example]]
 name = "s3_backfill"
 required-features = ["s3", "json"]
 test = true

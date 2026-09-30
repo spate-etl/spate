@@ -17,21 +17,31 @@ judges a lease expired from its own reads.
 Select it under `store:` in the pipeline's
 [`coordination:` section](../../../07-reference/configuration.mdx#coordination):
 
-```yaml
-coordination:
-  instance_id: "${POD_NAME}"
-  lease_duration: 30s
-  reconcile_interval: 5m
-  store:
-    dynamodb:
-      table: spate-coordination
-      job: exports-backfill
-      region: eu-west-1
+```yaml file=crates/spate/examples/dynamodb_coordinated_backfill.rs region=coordination
 ```
 
 `table` and `job` are the two required keys of the `dynamodb` body. The keys
 beside `store:` are the coordinator's tuning, and `lease_duration` is also the
-lease TTL the store is built with. A binary built without the
+lease TTL the store is built with. The tuning is shortened for a demo:
+`lease_duration` defaults to `30s` and `poll_interval` to `2s`.
+
+That section comes from
+[`dynamodb_coordinated_backfill.rs`](repo:crates/spate/examples/dynamodb_coordinated_backfill.rs),
+one instance per process against DynamoDB Local, the emulator AWS publishes,
+on `http://127.0.0.1:8000` (override with `DYNAMODB_ENDPOINT`). DynamoDB Local
+accepts any key pair, so the environment gives the provider chain a dummy pair
+and a region. Two terminals, each with a distinct `POD_NAME` (the section's
+`instance_id`), divide one backfill between them, and two live workers claiming
+one identity is detected and fatal:
+
+```sh
+docker run --rm -p 8000:8000 amazon/dynamodb-local -jar DynamoDBLocal.jar -inMemory
+export AWS_ACCESS_KEY_ID=local AWS_SECRET_ACCESS_KEY=local AWS_REGION=us-east-1
+POD_NAME=worker-a cargo run -p spate --features s3,json,coordination-dynamodb --example dynamodb_coordinated_backfill
+POD_NAME=worker-b cargo run -p spate --features s3,json,coordination-dynamodb --example dynamodb_coordinated_backfill
+```
+
+Run the `export` line in both terminals. A binary built without the
 `coordination-dynamodb` feature rejects a `dynamodb` store at startup, naming
 the feature.
 
@@ -237,16 +247,6 @@ durable records, so each set starts on one physical partition. Those limits
 bound how large one job's fleet can grow on this store.
 [Latency and cost](#latency-and-cost) gives the read rate against the fleet
 size.
-
-For development, DynamoDB Local stands in for the service:
-
-```sh
-docker run --rm -p 8000:8000 amazon/dynamodb-local -jar DynamoDBLocal.jar -inMemory
-```
-
-Point `endpoint` at `http://127.0.0.1:8000`, set `create_table: true`, and give
-the provider chain any key pair, for example `AWS_ACCESS_KEY_ID=local` and
-`AWS_SECRET_ACCESS_KEY=local`, since DynamoDB Local accepts any.
 
 ## Lease expiry
 

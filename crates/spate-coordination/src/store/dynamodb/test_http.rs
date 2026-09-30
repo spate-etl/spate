@@ -934,6 +934,133 @@ async fn requests_go_through_the_proxy_the_environment_names() {
     assert_eq!(hits, (1, 0), "(proxy, endpoint) requests");
 }
 
+/// An HTTP proxy that answers `CONNECT` by tunnelling to the named host;
+/// returns its URL and a count of the tunnels it opened.
+async fn serve_connect_proxy() -> (String, Arc<AtomicUsize>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let tunnels = Arc::new(AtomicUsize::new(0));
+    let counted = tunnels.clone();
+    tokio::spawn(async move {
+        while let Ok((mut client, _)) = listener.accept().await {
+            let counted = counted.clone();
+            tokio::spawn(async move {
+                let mut head = Vec::new();
+                let mut byte = [0u8; 1];
+                while !head.ends_with(b"\r\n\r\n") {
+                    if client.read(&mut byte).await.ok()? == 0 {
+                        return None;
+                    }
+                    head.push(byte[0]);
+                }
+                let head = String::from_utf8_lossy(&head).to_string();
+                let authority = head
+                    .strip_prefix("CONNECT ")?
+                    .split(' ')
+                    .next()?
+                    .to_string();
+                let mut upstream = tokio::net::TcpStream::connect(authority).await.ok()?;
+                counted.fetch_add(1, Ordering::SeqCst);
+                client
+                    .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                    .await
+                    .ok()?;
+                tokio::io::copy_bidirectional(&mut client, &mut upstream)
+                    .await
+                    .ok();
+                Some(())
+            });
+        }
+    });
+    (url, tunnels)
+}
+
+/// Name the endpoint and the root it is signed by for the child run of
+/// [`https_requests_tunnel_through_the_proxy_and_keep_the_roots`].
+const TLS_PROXY_TARGET: &str = "SPATE_TEST_DYNAMODB_TLS_PROXY_TARGET";
+const TLS_PROXY_ROOT: &str = "SPATE_TEST_DYNAMODB_TLS_PROXY_ROOT";
+
+/// A request to an HTTPS endpoint tunnels through the proxy `HTTPS_PROXY`
+/// or `ALL_PROXY` names and verifies the endpoint against the store's
+/// roots, and `NO_PROXY` sends it direct.
+#[tokio::test(flavor = "multi_thread")]
+async fn https_requests_tunnel_through_the_proxy_and_keep_the_roots() {
+    use base64::Engine as _;
+    if let (Ok(target), Ok(root)) = (
+        std::env::var(TLS_PROXY_TARGET),
+        std::env::var(TLS_PROXY_ROOT),
+    ) {
+        let der = base64::engine::general_purpose::STANDARD
+            .decode(root)
+            .unwrap();
+        let root = rustls::pki_types::CertificateDer::from(der);
+        let http = http_client(move || native_certs(vec![root])).await.unwrap();
+        let found = table_over(&target, http).get("job#d", "k").await.unwrap();
+        assert_eq!(found, None);
+        return;
+    }
+    let ca = TestCa::new("dynamodb-proxy-ca");
+    let target_hits = Arc::new(AtomicUsize::new(0));
+    let counted = target_hits.clone();
+    let addr = serve_tls(ca.server_config(None), move |tls| {
+        answer(
+            tls,
+            always(|| Reply::Json(200, "{}".into())),
+            counted.clone(),
+        )
+    })
+    .await;
+    let target = format!("https://{addr}");
+    let (proxy, tunnels) = serve_connect_proxy().await;
+    let root = base64::engine::general_purpose::STANDARD.encode(ca.der().as_ref());
+    let (_, module) = module_path!().split_once("::").unwrap();
+    let name = format!("{module}::https_requests_tunnel_through_the_proxy_and_keep_the_roots");
+    let run = |proxy_var: &str, no_proxy: Option<&str>| {
+        tokio::task::block_in_place(|| {
+            spate_test_support::run_in_child(&name, |child| {
+                for var in [
+                    "HTTP_PROXY",
+                    "http_proxy",
+                    "HTTPS_PROXY",
+                    "https_proxy",
+                    "ALL_PROXY",
+                    "all_proxy",
+                    "NO_PROXY",
+                    "no_proxy",
+                ] {
+                    child.env_remove(var);
+                }
+                if let Some(hosts) = no_proxy {
+                    child.env("NO_PROXY", hosts);
+                }
+                child
+                    .env(proxy_var, &proxy)
+                    .env(TLS_PROXY_TARGET, &target)
+                    .env(TLS_PROXY_ROOT, &root)
+            });
+        });
+        (
+            tunnels.load(Ordering::SeqCst),
+            target_hits.load(Ordering::SeqCst),
+        )
+    };
+    assert_eq!(
+        run("HTTPS_PROXY", None),
+        (1, 1),
+        "(tunnels, endpoint requests) through HTTPS_PROXY"
+    );
+    assert_eq!(
+        run("HTTPS_PROXY", Some("127.0.0.1")),
+        (1, 2),
+        "(tunnels, endpoint requests) under NO_PROXY"
+    );
+    assert_eq!(
+        run("ALL_PROXY", None),
+        (2, 3),
+        "(tunnels, endpoint requests) through ALL_PROXY"
+    );
+}
+
 /// Answers a store's startup and a `GetItem` of an absent key, with the time
 /// to live answers `describe_ttl` and `update_ttl` give, counting
 /// `UpdateTimeToLive` calls in `updates`.

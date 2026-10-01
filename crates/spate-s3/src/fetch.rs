@@ -34,7 +34,9 @@
 //! and poisons the split on a mid-object break instead.
 
 use crate::error::classify;
+use crate::split::SplitRange;
 use crate::split_ctx::PoisonKind;
+use crate::trim::RangeTrim;
 use bytes::Bytes;
 use futures_util::StreamExt as _;
 use object_store::path::Path;
@@ -158,6 +160,11 @@ pub(crate) struct FetcherParams {
     pub(crate) retry_base: Duration,
     /// `spate_s3_source_get_retries_total`, when metrics are attached.
     pub(crate) retries: Option<spate_core::metrics::Counter>,
+    /// The byte range of the slice's one member, for a ranged split.
+    pub(crate) range: Option<SplitRange>,
+    /// `spate_s3_source_bytes_read_total`, counting the bytes a ranged read
+    /// fetches and trims; the lane counts the bytes it forwards.
+    pub(crate) bytes_read: Option<spate_core::metrics::Counter>,
 }
 
 /// How many attempts one object GET, and in the planner one prefix
@@ -184,6 +191,8 @@ pub(crate) async fn run_fetcher(params: FetcherParams) {
         stop,
         retry_base,
         retries,
+        range,
+        bytes_read,
     } = params;
 
     for (ordinal, entry) in slice.iter().enumerate().skip(start_ordinal as usize) {
@@ -224,12 +233,14 @@ pub(crate) async fn run_fetcher(params: FetcherParams) {
             &store,
             entry,
             pinned_etag.as_deref(),
+            range,
             range_bytes,
             chunk_bytes,
             &tx,
             &pause,
             retry_base,
             retries.as_ref(),
+            bytes_read.as_ref(),
         )
         .await
         {
@@ -298,12 +309,14 @@ async fn stream_object(
     store: &Arc<dyn ObjectStore>,
     entry: &ObjectEntry,
     pinned_etag: Option<&str>,
+    range: Option<SplitRange>,
     range_bytes: usize,
     chunk_bytes: usize,
     tx: &mpsc::Sender<ChunkMsg>,
     pause: &AtomicBool,
     retry_base: Duration,
     retries: Option<&spate_core::metrics::Counter>,
+    bytes_read: Option<&spate_core::metrics::Counter>,
 ) -> Result<bool, SplitFailure> {
     match pinned_etag {
         Some(etag) => {
@@ -312,15 +325,24 @@ async fn stream_object(
                 store,
                 entry,
                 etag,
+                range.map(|range| RangeTrim::new(range, entry.size)),
                 range_bytes,
                 chunk_bytes,
                 tx,
                 pause,
                 retry_base,
                 retries,
+                bytes_read,
             )
             .await
         }
+        None if range.is_some() => Err(SplitFailure::Fatal(SourceError::Client {
+            class: ErrorClass::Fatal,
+            reason: format!(
+                "split {split}: ranged read of \"{}\" has no ETag pin — internal wiring bug",
+                entry.key
+            ),
+        })),
         None => {
             stream_object_streaming(
                 split,
@@ -344,6 +366,10 @@ async fn stream_object(
 /// never an idle body left un-polled past the client's request timeout. The
 /// ETag pin keeps the multi-GET read splice-safe: an overwrite between windows
 /// trips the `if_match` precondition instead of blending versions.
+///
+/// With a `trim`, the windows follow [`RangeTrim::next_window`] and only the
+/// owned bytes are forwarded. A window reaching the range's end may run
+/// `chunk_bytes` past `range_bytes`.
 #[expect(
     clippy::too_many_arguments,
     reason = "internal read loop, mirrors stream_object_streaming"
@@ -353,22 +379,32 @@ async fn stream_object_ranged(
     store: &Arc<dyn ObjectStore>,
     entry: &ObjectEntry,
     etag: &str,
+    mut trim: Option<RangeTrim>,
     range_bytes: usize,
     chunk_bytes: usize,
     tx: &mpsc::Sender<ChunkMsg>,
     pause: &AtomicBool,
     retry_base: Duration,
     retries: Option<&spate_core::metrics::Counter>,
+    bytes_read: Option<&spate_core::metrics::Counter>,
 ) -> Result<bool, SplitFailure> {
     let path = Path::from(entry.key.as_str());
     let window = range_bytes.max(1) as u64;
-    let mut delivered: u64 = 0;
+    // `delivered` is the GET position of the next window, trimmed or not.
+    let mut delivered: u64 = trim.as_ref().map_or(0, RangeTrim::first_byte);
     let mut attempt: u32 = 0;
 
-    while delivered < entry.size {
+    loop {
         // Saturating: `entry.size` is remote listing data and may be
         // adversarially close to u64::MAX.
-        let end = delivered.saturating_add(window).min(entry.size);
+        let end = match &trim {
+            Some(trim) => match trim.next_window(delivered, window, chunk_bytes as u64) {
+                Some(end) => end,
+                None => break,
+            },
+            None if delivered < entry.size => delivered.saturating_add(window).min(entry.size),
+            None => break,
+        };
         let options = GetOptions {
             if_match: Some(etag.to_owned()),
             range: Some(GetRange::Bounded(delivered..end)),
@@ -423,7 +459,16 @@ async fn stream_object_ranged(
         }
         // Forward the buffered window. No connection is open here, so a paused /
         // back-pressured lane only parks on bytes already in memory.
-        let mut bytes = buffered;
+        let mut bytes = match &mut trim {
+            Some(trim) => {
+                let owned = trim.feed(delivered, buffered);
+                if let Some(counter) = bytes_read {
+                    counter.increment(read - owned.len() as u64);
+                }
+                owned
+            }
+            None => buffered,
+        };
         while !bytes.is_empty() {
             let take = bytes.len().min(chunk_bytes);
             let chunk = bytes.split_to(take);
@@ -658,14 +703,17 @@ mod tests {
     }
 
     /// Wraps a store, failing the first `fail_gets` `get_opts` calls with a
-    /// retryable error, and cutting the first `cut_streams` result streams
-    /// after `cut_after` bytes (with a retryable error, or `PermissionDenied`
-    /// when `cut_fatal` is set). Records every requested range in `ranges`
-    /// for read-path assertions.
+    /// retryable error, failing the first `fail_past_gets` bounded GETs that
+    /// end past byte `fail_past` the same way, and cutting the first
+    /// `cut_streams` result streams after `cut_after` bytes (with a retryable
+    /// error, or `PermissionDenied` when `cut_fatal` is set). Records every
+    /// requested range in `ranges` for read-path assertions.
     #[derive(Debug)]
     struct FlakyStore {
         inner: InMemory,
         fail_gets: AtomicU32,
+        fail_past: u64,
+        fail_past_gets: AtomicU32,
         cut_streams: AtomicU32,
         cut_after: usize,
         cut_fatal: bool,
@@ -682,6 +730,8 @@ mod tests {
             FlakyStore {
                 inner,
                 fail_gets: AtomicU32::new(0),
+                fail_past: u64::MAX,
+                fail_past_gets: AtomicU32::new(0),
                 cut_streams: AtomicU32::new(0),
                 cut_after: 0,
                 cut_fatal: false,
@@ -785,6 +835,15 @@ mod tests {
                 .is_ok()
             {
                 return Err(Self::generic("injected get failure"));
+            }
+            if let Some(GetRange::Bounded(r)) = &options.range
+                && r.end > self.fail_past
+                && self
+                    .fail_past_gets
+                    .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+                    .is_ok()
+            {
+                return Err(Self::generic("injected get failure past the range end"));
             }
             let result = self.inner.get_opts(location, options).await?;
             if self
@@ -906,6 +965,8 @@ mod tests {
             stop: Arc::new(AtomicBool::new(false)),
             retry_base: Duration::from_millis(1),
             retries: None,
+            range: None,
+            bytes_read: None,
         };
         let task = tokio::spawn(run_fetcher(params));
         let mut msgs = Vec::new();
@@ -1014,6 +1075,8 @@ mod tests {
             stop: Arc::new(AtomicBool::new(false)),
             retry_base: Duration::from_millis(1),
             retries: None,
+            range: None,
+            bytes_read: None,
         };
         tokio::spawn(run_fetcher(params));
         let mut saw_poison = false;
@@ -1049,6 +1112,8 @@ mod tests {
             stop: Arc::new(AtomicBool::new(false)),
             retry_base: Duration::from_millis(1),
             retries: None,
+            range: None,
+            bytes_read: None,
         };
         tokio::spawn(run_fetcher(params));
         let mut saw_poison = false;
@@ -1083,6 +1148,8 @@ mod tests {
             stop: Arc::new(AtomicBool::new(false)),
             retry_base: Duration::from_millis(1),
             retries: None,
+            range: None,
+            bytes_read: None,
         };
         tokio::spawn(run_fetcher(params));
         // Paused before the first send: nothing arrives. On paused time the
@@ -1121,6 +1188,8 @@ mod tests {
             stop: Arc::new(AtomicBool::new(false)),
             retry_base: Duration::from_millis(1),
             retries: None,
+            range: None,
+            bytes_read: None,
         };
         let task = tokio::spawn(run_fetcher(params));
         drop(rx);
@@ -1184,6 +1253,8 @@ mod tests {
             stop: Arc::new(AtomicBool::new(false)),
             retry_base: Duration::from_millis(1),
             retries: None,
+            range: None,
+            bytes_read: None,
         };
         let task = tokio::spawn(run_fetcher(params));
         // On paused time the sleep returns only once the fetcher is parked.
@@ -1296,6 +1367,8 @@ mod tests {
             stop: Arc::new(AtomicBool::new(true)),
             retry_base: Duration::from_millis(1),
             retries: None,
+            range: None,
+            bytes_read: None,
         };
         let task = tokio::spawn(run_fetcher(params));
         let mut msgs = Vec::new();
@@ -1332,6 +1405,8 @@ mod tests {
             stop: Arc::clone(&stop),
             retry_base: Duration::from_millis(1),
             retries: None,
+            range: None,
+            bytes_read: None,
         };
         let task = tokio::spawn(run_fetcher(params));
         // Parked on the pause: nothing arrives. On paused time the sleep
@@ -1381,6 +1456,8 @@ mod tests {
             stop: Arc::clone(&stop),
             retry_base: Duration::from_millis(1),
             retries: None,
+            range: None,
+            bytes_read: None,
         };
         let task = tokio::spawn(run_fetcher(params));
         // Take the first object's start and one data chunk, leaving the
@@ -1435,5 +1512,318 @@ mod tests {
             panic!("expected a pipeline-fatal lane failure");
         };
         assert!(e.to_string().contains("HandshakeFailure"), "{e}");
+    }
+
+    // ---------------------------------------------- ranged reads, end to end --
+
+    /// Window sizes and injected failures for one [`read_through_lane`] run.
+    #[derive(Clone, Copy, Debug)]
+    struct ReadPlan {
+        range_bytes: usize,
+        chunk_bytes: usize,
+        /// Retryable failures of the first GETs, which read the range's head.
+        head_failures: u32,
+        /// Retryable failures of the first GETs reaching past the range's end.
+        tail_failures: u32,
+        /// Cut the first GET's body after this many bytes.
+        cut_after: Option<usize>,
+    }
+
+    impl ReadPlan {
+        fn windows(range_bytes: usize, chunk_bytes: usize) -> ReadPlan {
+            ReadPlan {
+                range_bytes,
+                chunk_bytes,
+                head_failures: 0,
+                tail_failures: 0,
+                cut_after: None,
+            }
+        }
+    }
+
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    /// Read `range` of `object` through a fetcher over a [`FlakyStore`] and a
+    /// lane resuming `resume` records in, returning each emitted record's
+    /// offset and bytes. Panics if the split poisons.
+    fn read_through_lane(
+        rt: &tokio::runtime::Runtime,
+        object: &[u8],
+        range: Option<SplitRange>,
+        resume: u64,
+        plan: ReadPlan,
+    ) -> Vec<(i64, Vec<u8>)> {
+        use crate::lane::S3Lane;
+        use crate::offset::Position;
+        use crate::split_ctx::SplitTracker;
+        use spate_core::source::{PayloadBatch as _, SourceLane as _};
+
+        let flaky = FlakyStore {
+            cut_after: plan.cut_after.unwrap_or(0),
+            fail_past: range.map_or(u64::MAX, |r| r.end),
+            ..FlakyStore::new(rt.block_on(seeded(&[("p/big.ndjson", object)])))
+        };
+        flaky.fail_gets.store(plan.head_failures, Ordering::Relaxed);
+        flaky
+            .fail_past_gets
+            .store(plan.tail_failures, Ordering::Relaxed);
+        flaky
+            .cut_streams
+            .store(u32::from(plan.cut_after.is_some()), Ordering::Relaxed);
+        let store: Arc<dyn ObjectStore> = Arc::new(flaky);
+        let slice = rt.block_on(listed(&store));
+        let (tx, rx) = mpsc::channel(4);
+        rt.spawn(run_fetcher(FetcherParams {
+            split: SplitId::new("s3-test").unwrap(),
+            store,
+            slice: Arc::new(slice),
+            start_ordinal: 0,
+            resume_etag: None,
+            chunk_bytes: plan.chunk_bytes,
+            range_bytes: plan.range_bytes,
+            tx,
+            pause: Arc::new(AtomicBool::new(false)),
+            stop: Arc::new(AtomicBool::new(false)),
+            retry_base: Duration::from_millis(1),
+            retries: None,
+            range,
+            bytes_read: None,
+        }));
+        let tracker = Arc::new(SplitTracker::new());
+        let (poison_tx, poison_rx) = std::sync::mpsc::channel();
+        let mut lane = S3Lane::new(
+            spate_core::source::LaneId(0),
+            spate_core::record::PartitionId(0),
+            rx,
+            rt.handle().clone(),
+            spate_core::checkpoint::Checkpointer::new().handle(),
+            crate::config::Compression::None,
+            Arc::new(|| Box::new(crate::testutil::TestLineFramer::new(1 << 20))),
+            Some(Position {
+                ordinal: 0,
+                record: resume,
+            }),
+            SplitId::new("s3-test").unwrap(),
+            Arc::clone(&tracker),
+            poison_tx,
+            spate_core::coordination::ControlWaker::inert(),
+            None,
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let mut out = Vec::new();
+        loop {
+            match lane
+                .poll(1024, Duration::from_millis(20))
+                .expect("the lane polls")
+            {
+                Some(mut batch) => {
+                    while let Some(p) = batch.next_payload() {
+                        out.push((p.offset, p.bytes.to_vec()));
+                    }
+                }
+                None if tracker.terminal().is_some() => return out,
+                None => {
+                    if let Ok(report) = poison_rx.try_recv() {
+                        panic!("the split poisoned: {}", report.reason);
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "the lane never reached end of input"
+                    );
+                }
+            }
+        }
+    }
+
+    fn bytes_of(records: Vec<(i64, Vec<u8>)>) -> Vec<Vec<u8>> {
+        records.into_iter().map(|(_, bytes)| bytes).collect()
+    }
+
+    /// The records of `object` framed whole, in one chunk.
+    fn framed_whole(object: &[u8]) -> Vec<Vec<u8>> {
+        let mut framer = crate::framer::ObjectFramer::new(Arc::new(|| {
+            Box::new(crate::testutil::TestLineFramer::new(1 << 20))
+        }));
+        framer.begin_object(crate::framer::Codec::Plain).unwrap();
+        framer.push_chunk(object).unwrap();
+        framer.finish_object().unwrap();
+        std::iter::from_fn(|| framer.pop_record()).collect()
+    }
+
+    /// Object bytes of short records, `\r\n` endings, whitespace-only lines,
+    /// lines longer than a whole range, and an optional unterminated final
+    /// line.
+    fn arb_lines_object() -> impl proptest::strategy::Strategy<Value = Vec<u8>> {
+        use proptest::prelude::*;
+        (
+            proptest::collection::vec(
+                prop_oneof![
+                    4 => "[a-z]{1,6}".prop_map(|s| format!("{s}\n")),
+                    1 => "[a-z]{1,6}".prop_map(|s| format!("{s}\r\n")),
+                    1 => "[ \t]{0,3}".prop_map(|s| format!("{s}\n")),
+                    1 => "[a-z]{30,60}".prop_map(|s| format!("{s}\n")),
+                ],
+                1..30,
+            ),
+            proptest::option::of("[a-z]{1,6}"),
+        )
+            .prop_map(|(lines, last)| {
+                let mut object = lines.concat();
+                object.push_str(last.as_deref().unwrap_or_default());
+                object.into_bytes()
+            })
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(48))]
+
+        /// An object tiled into ranges, each read through the fetcher and a
+        /// lane with failures injected in the head and tail windows, yields
+        /// the whole object's records exactly once and in order.
+        #[test]
+        fn ranges_tiling_an_object_emit_each_record_once(
+            object in arb_lines_object(),
+            pieces in 1u64..10,
+            range_bytes in 1usize..32,
+            chunk_bytes in 1usize..16,
+            head_failures in 0u32..2,
+            tail_failures in 0u32..3,
+            cut_after in proptest::option::of(0usize..24),
+        ) {
+            let rt = runtime();
+            let size = object.len() as u64;
+            let n = pieces.min(size);
+            let bound = |i: u64| (u128::from(i) * u128::from(size) / u128::from(n)) as u64;
+            let plan = ReadPlan { range_bytes, chunk_bytes, head_failures, tail_failures, cut_after };
+            let mut joined = Vec::new();
+            for i in 0..n {
+                let range = SplitRange::new(bound(i), bound(i + 1), b'\n');
+                joined.extend(bytes_of(read_through_lane(&rt, &object, Some(range), 0, plan)));
+            }
+            proptest::prop_assert_eq!(joined, framed_whole(&object));
+        }
+    }
+
+    /// A range read under one window layout, then resumed at every record
+    /// count under others, emits exactly the records past the resume point at
+    /// the same offsets. The ranges put a delimiter at `start - 1`, `end - 1`
+    /// and `end`, include an empty range, one ending at the object's end and
+    /// one whose head spans several windows, and the layouts put a window edge
+    /// at `end - 1` and at the object's end.
+    #[test]
+    fn a_resumed_range_emits_the_same_tail_under_any_windows() {
+        let rt = runtime();
+        // Delimiters at 2, 7, 11, 13, 20 and 23; 27 bytes.
+        let object = b"aa\nbbbb\ncc\r\n \ndddddd\nee\nfff";
+        let ranges = [
+            (0, 3),
+            (3, 8),
+            (3, 7),
+            (5, 14),
+            (8, 21),
+            (15, 20),
+            (14, 27),
+            (16, 27),
+        ];
+        let reference = ReadPlan::windows(4, 2);
+        let others = [
+            ReadPlan {
+                head_failures: 1,
+                tail_failures: 1,
+                ..ReadPlan::windows(5, 3)
+            },
+            // From byte 7, windows end at 20, `end - 1` of (8, 21).
+            ReadPlan::windows(13, 1),
+            ReadPlan::windows(64, 64),
+        ];
+        for (start, end) in ranges {
+            let range = Some(SplitRange::new(start, end, b'\n'));
+            let full = read_through_lane(&rt, object, range, 0, reference);
+            for plan in others {
+                for k in 0..=full.len() {
+                    let resumed = read_through_lane(&rt, object, range, k as u64, plan);
+                    assert_eq!(
+                        resumed,
+                        full[k..],
+                        "range [{start}, {end}) resumed at {k} under {plan:?}"
+                    );
+                }
+            }
+        }
+        // Spot-check the reference reads against the ownership rule.
+        let read = |start, end| {
+            bytes_of(read_through_lane(
+                &rt,
+                object,
+                Some(SplitRange::new(start, end, b'\n')),
+                0,
+                reference,
+            ))
+        };
+        assert_eq!(read(3, 7), vec![b"bbbb".to_vec()]);
+        assert_eq!(read(5, 14), vec![b"cc".to_vec()]);
+        assert_eq!(read(8, 21), vec![b"cc".to_vec(), b"dddddd".to_vec()]);
+        assert!(read(15, 20).is_empty());
+        assert_eq!(
+            read(14, 27),
+            vec![b"dddddd".to_vec(), b"ee".to_vec(), b"fff".to_vec()]
+        );
+        assert_eq!(read(16, 27), vec![b"ee".to_vec(), b"fff".to_vec()]);
+    }
+
+    /// A ranged read counts the bytes it fetches and trims into
+    /// `bytes_read`, so with the forwarded bytes the lane counts, the total is
+    /// every byte read from the store.
+    #[tokio::test]
+    async fn a_ranged_read_counts_the_bytes_it_trims() {
+        let flaky = Arc::new(FlakyStore::new(
+            seeded(&[("p/a", b"aa\nbbbb\ncc\r\n \ndddddd\nee\nfff")]).await,
+        ));
+        let store: Arc<dyn ObjectStore> = flaky.clone();
+        let slice = listed(&store).await;
+        let trimmed = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let (tx, mut rx) = mpsc::channel(64);
+        let task = tokio::spawn(run_fetcher(FetcherParams {
+            split: SplitId::new("s3-test").unwrap(),
+            store,
+            slice: Arc::new(slice),
+            start_ordinal: 0,
+            resume_etag: None,
+            chunk_bytes: 2,
+            range_bytes: 4,
+            tx,
+            pause: Arc::new(AtomicBool::new(false)),
+            stop: Arc::new(AtomicBool::new(false)),
+            retry_base: Duration::from_millis(1),
+            retries: None,
+            range: Some(SplitRange::new(8, 21, b'\n')),
+            bytes_read: Some(spate_core::metrics::Counter::from_arc(Arc::clone(&trimmed))),
+        }));
+        let mut msgs = Vec::new();
+        while let Some(m) = rx.recv().await {
+            msgs.push(m);
+        }
+        task.await.unwrap();
+        let forwarded = assembled(&msgs);
+        assert_eq!(forwarded[0].1, b"cc\r\n \ndddddd\n");
+        let fetched: u64 = flaky
+            .recorded_ranges()
+            .iter()
+            .map(|r| match r {
+                RangeKind::Bounded(start, end) => end - start,
+                other => panic!("a ranged read issues bounded windows, got {other:?}"),
+            })
+            .sum();
+        assert_eq!(fetched, 16, "windows 7..11, 11..15, 15..19 and 19..23");
+        assert_eq!(
+            trimmed.load(Ordering::Relaxed) + forwarded[0].1.len() as u64,
+            fetched
+        );
     }
 }

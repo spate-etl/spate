@@ -50,6 +50,10 @@ impl RecordFramer for SemicolonSplitter {
     fn decoded_bytes(&self) -> u64 {
         self.decoded
     }
+
+    fn resync_delimiter(&self) -> Option<u8> {
+        Some(b';')
+    }
 }
 
 fn s3_section(url: &str) -> ComponentConfig {

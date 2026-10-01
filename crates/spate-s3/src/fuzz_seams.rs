@@ -1,11 +1,14 @@
-//! Entry points into two decoders that read bytes this process did not write,
-//! the composite offset codec and the object framer.
+//! Entry points into code that reads bytes this process did not write: the
+//! composite offset codec, the object framer, and the trim of a ranged read.
 //!
 //! Follows the rules [`bench_seams`](crate::bench_seams) states.
 
 use crate::config::Compression;
 use crate::framer::{Codec, ObjectFramer};
 use crate::offset::{self, Position};
+use crate::split::SplitRange;
+use crate::trim::RangeTrim;
+use bytes::Bytes;
 use spate_core::framing::RecordFramer;
 use std::io;
 use std::sync::Arc;
@@ -76,4 +79,36 @@ where
         }
     }
     (records, outcome)
+}
+
+/// The bytes a split reading `[start, end)` of `object` forwards, fetched in
+/// the windows the fetcher schedules for `range_bytes` and `chunk_bytes`.
+/// `None` when the range is empty or extends past the object.
+///
+/// # Panics
+///
+/// If the schedule asks for an empty window.
+#[must_use]
+pub fn read_range(
+    object: &[u8],
+    start: u64,
+    end: u64,
+    delimiter: u8,
+    range_bytes: u64,
+    chunk_bytes: u64,
+) -> Option<Vec<u8>> {
+    let size = object.len() as u64;
+    if start >= end || end > size {
+        return None;
+    }
+    let mut trim = RangeTrim::new(SplitRange::new(start, end, delimiter), size);
+    let mut pos = trim.first_byte();
+    let mut owned = Vec::new();
+    while let Some(window_end) = trim.next_window(pos, range_bytes, chunk_bytes) {
+        assert!(window_end > pos, "an empty window at byte {pos}");
+        let window = Bytes::copy_from_slice(&object[pos as usize..window_end as usize]);
+        owned.extend_from_slice(&trim.feed(pos, window));
+        pos = window_end;
+    }
+    Some(owned)
 }

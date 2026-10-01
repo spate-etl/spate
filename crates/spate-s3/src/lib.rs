@@ -19,7 +19,8 @@
 //! - **One lane per in-flight split.** A gained split materializes one
 //!   data lane (one framework partition, one monotonic offset stream); a
 //!   record's `i64` offset packs (member ordinal within the split, record
-//!   index within the object). `coordination.max_in_flight` bounds the
+//!   index within the object, or within the range for a split over a byte
+//!   range). `coordination.max_in_flight` bounds the
 //!   working set and therefore read parallelism.
 //! - **Progress lives in the coordination store, nowhere else.** Commits
 //!   are fenced per-split writes; a lost or stolen split resumes on its
@@ -92,8 +93,12 @@ mod split_ctx;
 mod test_servers;
 #[cfg(test)]
 mod testutil;
+mod trim;
 
 pub use config::{Compression, S3SourceConfig};
 pub use lane::{S3Batch, S3Lane};
 pub use source::S3Source;
-pub use split::{DESCRIPTOR_VERSION, DescriptorObject, SplitDescriptor, split_id_for};
+pub use split::{
+    DESCRIPTOR_VERSION, DescriptorObject, SplitDescriptor, SplitRange, split_id_for,
+    split_id_for_range,
+};

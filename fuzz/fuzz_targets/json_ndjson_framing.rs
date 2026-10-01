@@ -6,6 +6,11 @@
 //! `push`, and once split at fuzzer-chosen offsets, then compares the two
 //! outcomes. The record-size cap comes from the input as well, so the cap
 //! error is reached under both chunkings or neither.
+//!
+//! The framer's resync delimiter promises that framing the bytes through any
+//! delimiter and the bytes after it separately yields the whole stream's
+//! records. The target cuts the stream after a fuzzer-chosen delimiter and
+//! compares the concatenated halves with the whole.
 
 #![no_main]
 
@@ -21,6 +26,8 @@ struct Input {
     stream: Vec<u8>,
     /// Offsets into `stream`, taken modulo its length plus one.
     cuts: Vec<u16>,
+    /// Which delimiter to cut after, taken modulo their count.
+    resync: u16,
 }
 
 /// Feed `chunks` through a fresh framer and collect every record. `None` when
@@ -57,9 +64,30 @@ fuzz_target!(|input: Input| {
     }
     chunks.push(&stream[start..]);
 
+    let whole = frame(cap, &[stream]);
     assert_eq!(
-        frame(cap, &[stream]),
+        whole,
         frame(cap, &chunks),
         "framing of {stream:02x?} at cap {cap} depends on the chunking"
     );
+
+    let delimiter = NdjsonFramer::new(cap)
+        .resync_delimiter()
+        .expect("NDJSON declares a resync delimiter");
+    let delimiters: Vec<usize> = (0..stream.len())
+        .filter(|&d| stream[d] == delimiter)
+        .collect();
+    if !delimiters.is_empty() {
+        let d = delimiters[usize::from(input.resync) % delimiters.len()];
+        let halves = frame(cap, &[&stream[..=d]])
+            .zip(frame(cap, &[&stream[d + 1..]]))
+            .map(|(mut head, tail)| {
+                head.extend(tail);
+                head
+            });
+        assert_eq!(
+            halves, whole,
+            "framing of {stream:02x?} at cap {cap} changes when cut after byte {d}"
+        );
+    }
 });

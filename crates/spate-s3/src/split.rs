@@ -47,7 +47,7 @@ use std::collections::VecDeque;
 /// Version of the [`SplitDescriptor`] wire encoding. Bumped on any change
 /// to the descriptor's schema; a worker refuses a descriptor written by an
 /// incompatible release instead of misreading it.
-pub const DESCRIPTOR_VERSION: u32 = 1;
+pub const DESCRIPTOR_VERSION: u32 = 2;
 
 /// Version of the packing algorithm, folded into every split id by
 /// [`split_id_for`]. Bumping it retires all previously planned ids as an
@@ -82,6 +82,37 @@ pub struct DescriptorObject {
     pub last_modified_ms: i64,
 }
 
+/// A byte range `[start, end)` of one object, read as a split of its own.
+///
+/// The range owns the records whose first byte lies in `[start, end)`, where a
+/// record starts at byte 0 and after every `delimiter` byte, so each record of
+/// an object belongs to exactly one range of a tiling. The object must be
+/// uncompressed: a reader whose `compression` setting decodes the key fails
+/// the pipeline on a ranged split.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct SplitRange {
+    /// First byte of the range.
+    pub start: u64,
+    /// One past the last byte of the range.
+    pub end: u64,
+    /// The framer's [`resync_delimiter`](spate_core::framing::RecordFramer::resync_delimiter).
+    /// A reader whose framer declares a different one refuses the split.
+    pub delimiter: u8,
+}
+
+impl SplitRange {
+    /// The range `[start, end)` of an object framed on `delimiter`.
+    #[must_use]
+    pub fn new(start: u64, end: u64, delimiter: u8) -> SplitRange {
+        SplitRange {
+            start,
+            end,
+            delimiter,
+        }
+    }
+}
+
 /// The opaque payload carried in a
 /// [`SplitSpec::descriptor`](spate_core::coordination::SplitSpec): the
 /// split's member objects, in listing order.
@@ -89,10 +120,11 @@ pub struct DescriptorObject {
 /// The encoding is versioned JSON ([`DESCRIPTOR_VERSION`]); member order is
 /// meaningful (composite offsets index into it). Out-of-process producers
 /// (an event-notification planner, a single-shot invocation minting one
-/// split from an S3 event) construct via [`SplitDescriptor::new`] (which
-/// stamps the version; [`encode`](SplitDescriptor::encode) refuses anything
-/// else) and mint ids with [`split_id_for`], which together are the whole
-/// cross-process contract. Fields are freely readable.
+/// split from an S3 event) construct via [`SplitDescriptor::new`] or
+/// [`SplitDescriptor::with_range`] (which stamp the version;
+/// [`encode`](SplitDescriptor::encode) refuses anything else) and mint ids
+/// with [`split_id_for`] or [`split_id_for_range`] respectively, which
+/// together are the whole cross-process contract. Fields are freely readable.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SplitDescriptor {
     /// Encoding version; always [`DESCRIPTOR_VERSION`] at write. Private to
@@ -101,6 +133,10 @@ pub struct SplitDescriptor {
     pub(crate) v: u32,
     /// Member objects, in listing (and therefore read) order.
     pub objects: Vec<DescriptorObject>,
+    /// The byte range of the one member this split reads, or `None` when it
+    /// reads every member whole.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub range: Option<SplitRange>,
 }
 
 /// The version probe decoded before the full descriptor, so an
@@ -112,14 +148,29 @@ struct VersionProbe {
 
 impl SplitDescriptor {
     /// Build a descriptor over `objects` (listing order, since ordinals
-    /// index into it), stamped with the current [`DESCRIPTOR_VERSION`]. The only
-    /// way to construct one; [`encode`](SplitDescriptor::encode) refuses
-    /// any other version.
+    /// index into it), stamped with the current [`DESCRIPTOR_VERSION`].
+    /// [`with_range`](SplitDescriptor::with_range) builds a ranged one, and
+    /// [`encode`](SplitDescriptor::encode) refuses any other version.
     #[must_use]
     pub fn new(objects: Vec<DescriptorObject>) -> SplitDescriptor {
         SplitDescriptor {
             v: DESCRIPTOR_VERSION,
             objects,
+            range: None,
+        }
+    }
+
+    /// Build a descriptor over the byte `range` of `object`, stamped with the
+    /// current [`DESCRIPTOR_VERSION`]. [`encode`](SplitDescriptor::encode)
+    /// refuses it unless `object` has an ETag and
+    /// `range.start < range.end <= object.size`. `object` must be
+    /// uncompressed, as [`SplitRange`] states.
+    #[must_use]
+    pub fn with_range(object: DescriptorObject, range: SplitRange) -> SplitDescriptor {
+        SplitDescriptor {
+            v: DESCRIPTOR_VERSION,
+            objects: vec![object],
+            range: Some(range),
         }
     }
 
@@ -164,7 +215,9 @@ impl SplitDescriptor {
     /// # Errors
     ///
     /// [`Fatal`](CoordinationErrorKind::Fatal) when the descriptor's
-    /// version is not [`DESCRIPTOR_VERSION`]. A descriptor written under a
+    /// version is not [`DESCRIPTOR_VERSION`], or when it has a range and
+    /// not exactly one member, a member without an ETag, or a range that is
+    /// empty or extends past the member's size. A descriptor written under a
     /// wrong version fails pipeline-fatal on every worker that leases it.
     pub fn encode(&self) -> Result<Vec<u8>, CoordinationError> {
         if self.v != DESCRIPTOR_VERSION {
@@ -177,6 +230,7 @@ impl SplitDescriptor {
                 ),
             ));
         }
+        self.validate_range()?;
         Ok(serde_json::to_vec(self).expect("descriptor serialization is infallible: no non-string map keys, no fallible Serialize impls"))
     }
 
@@ -184,9 +238,10 @@ impl SplitDescriptor {
     ///
     /// # Errors
     ///
-    /// [`Fatal`](CoordinationErrorKind::Fatal) when the bytes do not parse
-    /// or were written under a different [`DESCRIPTOR_VERSION`]. A worker
-    /// must never guess at an incompatible descriptor.
+    /// [`Fatal`](CoordinationErrorKind::Fatal) when the bytes do not parse,
+    /// were written under a different [`DESCRIPTOR_VERSION`], or carry a range
+    /// [`encode`](SplitDescriptor::encode) would refuse. A worker must never
+    /// guess at an incompatible descriptor.
     pub fn decode(bytes: &[u8]) -> Result<SplitDescriptor, CoordinationError> {
         let fatal = |reason: String| CoordinationError::new(CoordinationErrorKind::Fatal, reason);
         let probe: VersionProbe = serde_json::from_slice(bytes)
@@ -198,8 +253,39 @@ impl SplitDescriptor {
                 probe.v
             )));
         }
-        serde_json::from_slice(bytes)
-            .map_err(|e| fatal(format!("split descriptor failed to decode: {e}")))
+        let descriptor: SplitDescriptor = serde_json::from_slice(bytes)
+            .map_err(|e| fatal(format!("split descriptor failed to decode: {e}")))?;
+        descriptor.validate_range()?;
+        Ok(descriptor)
+    }
+
+    /// Refuse a ranged descriptor unless it has exactly one member, that
+    /// member has an ETag, and `start < end <= size`.
+    fn validate_range(&self) -> Result<(), CoordinationError> {
+        let Some(range) = self.range else {
+            return Ok(());
+        };
+        let fatal = |reason: String| CoordinationError::new(CoordinationErrorKind::Fatal, reason);
+        let [object] = self.objects.as_slice() else {
+            return Err(fatal(format!(
+                "a ranged split descriptor has exactly one member, this one has {}",
+                self.objects.len()
+            )));
+        };
+        if object.etag.is_none() {
+            return Err(fatal(format!(
+                "ranged split descriptor over \"{}\" has no ETag to pin its reads to",
+                object.key
+            )));
+        }
+        if range.start >= range.end || range.end > object.size {
+            return Err(fatal(format!(
+                "ranged split descriptor over \"{}\" has range [{}, {}), which is empty or \
+                 extends past the object's {} bytes",
+                object.key, range.start, range.end, object.size
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -273,17 +359,85 @@ where
     hasher.update(b"spate-s3-split\n");
     hasher.update(version.to_le_bytes());
     for (key, etag) in members {
-        hasher.update(u32::try_from(key.len()).unwrap_or(u32::MAX).to_le_bytes());
-        hasher.update(key.as_bytes());
-        match etag {
-            Some(etag) => {
-                hasher.update([0x01]);
-                hasher.update(u32::try_from(etag.len()).unwrap_or(u32::MAX).to_le_bytes());
-                hasher.update(etag.as_bytes());
-            }
-            None => hasher.update([0x00]),
-        }
+        digest_member(&mut hasher, key, etag);
     }
+    id_from_digest(hasher)
+}
+
+/// Mint the deterministic split id for the byte `range` of one object.
+///
+/// The id digests the key, the ETag, the range and the packing version, and
+/// never equals an id [`split_id_for`] mints. The digest preimage is wire
+/// format:
+///
+/// 1. Feed SHA-256 with, in order:
+///    - the domain tag: the 15 ASCII bytes `spate-s3-range\n`;
+///    - the packing version as a little-endian `u32` (currently `1`, the
+///      crate's `PACKING_VERSION`);
+///    - the key's byte length as a little-endian `u32`, then the key's UTF-8
+///      bytes;
+///    - the byte `0x01`, the ETag's byte length as a little-endian `u32`,
+///      then its UTF-8 bytes;
+///    - `range.start` and `range.end`, each a little-endian `u64`, then the
+///      single byte `range.delimiter`.
+/// 2. Truncate and encode the digest as step 3 of [`split_id_for`] does.
+///
+/// ```
+/// use spate_s3::{SplitRange, split_id_for_range};
+///
+/// let id = split_id_for_range(
+///     "exports/2026/part-000.ndjson",
+///     "\"9b2cf5\"",
+///     SplitRange::new(0, 64 << 20, b'\n'),
+/// )
+/// .expect("non-empty range");
+/// assert_eq!(id.as_str().len(), 25);
+/// ```
+///
+/// # Errors
+///
+/// [`Fatal`](CoordinationErrorKind::Fatal) when `range.start >= range.end`.
+pub fn split_id_for_range(
+    key: &str,
+    etag: &str,
+    range: SplitRange,
+) -> Result<SplitId, CoordinationError> {
+    if range.start >= range.end {
+        return Err(CoordinationError::new(
+            CoordinationErrorKind::Fatal,
+            format!(
+                "cannot mint a split id for the empty range [{}, {})",
+                range.start, range.end
+            ),
+        ));
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(b"spate-s3-range\n");
+    hasher.update(PACKING_VERSION.to_le_bytes());
+    digest_member(&mut hasher, key, Some(etag));
+    hasher.update(range.start.to_le_bytes());
+    hasher.update(range.end.to_le_bytes());
+    hasher.update([range.delimiter]);
+    id_from_digest(hasher)
+}
+
+/// Feed one member's key and ETag in the length-prefixed form both id
+/// preimages share.
+fn digest_member(hasher: &mut Sha256, key: &str, etag: Option<&str>) {
+    hasher.update(u32::try_from(key.len()).unwrap_or(u32::MAX).to_le_bytes());
+    hasher.update(key.as_bytes());
+    match etag {
+        Some(etag) => {
+            hasher.update([0x01]);
+            hasher.update(u32::try_from(etag.len()).unwrap_or(u32::MAX).to_le_bytes());
+            hasher.update(etag.as_bytes());
+        }
+        None => hasher.update([0x00]),
+    }
+}
+
+/// The `s3-` id over the first 16 bytes of the digest, base64url unpadded.
+fn id_from_digest(hasher: Sha256) -> Result<SplitId, CoordinationError> {
     let digest = hasher.finalize();
     SplitId::new(format!("s3-{}", URL_SAFE_NO_PAD.encode(&digest[..16])))
 }
@@ -442,7 +596,7 @@ mod tests {
         let desc = SplitDescriptor::from_entries(&[entry("k", 5)]);
         assert_eq!(
             String::from_utf8(desc.encode().unwrap()).unwrap(),
-            r#"{"v":1,"objects":[{"key":"k","size":5,"etag":"\"etag-k\"","last_modified_ms":1760000000000}]}"#,
+            r#"{"v":2,"objects":[{"key":"k","size":5,"etag":"\"etag-k\"","last_modified_ms":1760000000000}]}"#,
         );
     }
 
@@ -453,6 +607,7 @@ mod tests {
         let rogue = SplitDescriptor {
             v: 0,
             objects: vec![],
+            range: None,
         };
         let err = rogue.encode().unwrap_err();
         assert_eq!(err.kind, CoordinationErrorKind::Fatal);
@@ -462,6 +617,18 @@ mod tests {
             err.reason
         );
         assert_eq!(SplitDescriptor::new(vec![]).version(), DESCRIPTOR_VERSION);
+    }
+
+    /// A version-1 descriptor, written before descriptors could carry a
+    /// range, is refused.
+    #[test]
+    fn a_version_1_descriptor_is_refused() {
+        let err = SplitDescriptor::decode(
+            br#"{"v":1,"objects":[{"key":"k","size":5,"etag":null,"last_modified_ms":1}]}"#,
+        )
+        .unwrap_err();
+        assert_eq!(err.kind, CoordinationErrorKind::Fatal);
+        assert!(err.reason.contains("version 1"), "reason: {}", err.reason);
     }
 
     #[test]
@@ -477,6 +644,111 @@ mod tests {
 
         let garbage = SplitDescriptor::decode(b"not json").unwrap_err();
         assert_eq!(garbage.kind, CoordinationErrorKind::Fatal);
+    }
+
+    fn ranged_object(size: u64, etag: Option<&str>) -> DescriptorObject {
+        DescriptorObject {
+            key: "big.ndjson".to_string(),
+            size,
+            etag: etag.map(str::to_owned),
+            last_modified_ms: 7,
+        }
+    }
+
+    #[test]
+    fn ranged_descriptor_round_trips_and_its_encoding_is_pinned() {
+        let desc = SplitDescriptor::with_range(
+            ranged_object(100, Some("\"e\"")),
+            SplitRange::new(40, 80, b'\n'),
+        );
+        let encoded = desc.encode().unwrap();
+        assert_eq!(
+            String::from_utf8(encoded.clone()).unwrap(),
+            r#"{"v":2,"objects":[{"key":"big.ndjson","size":100,"etag":"\"e\"","last_modified_ms":7}],"range":{"start":40,"end":80,"delimiter":10}}"#,
+        );
+        assert_eq!(SplitDescriptor::decode(&encoded).unwrap(), desc);
+    }
+
+    /// `encode` and `decode` refuse a ranged descriptor with other than one
+    /// member, without an ETag, or with an empty or out-of-bounds range.
+    #[test]
+    fn invalid_ranged_descriptors_are_refused_on_both_sides() {
+        let pinned = || ranged_object(100, Some("\"e\""));
+        let two_members = SplitDescriptor {
+            objects: vec![pinned(), pinned()],
+            ..SplitDescriptor::with_range(pinned(), SplitRange::new(0, 10, b'\n'))
+        };
+        let no_members = SplitDescriptor {
+            objects: vec![],
+            ..SplitDescriptor::with_range(pinned(), SplitRange::new(0, 10, b'\n'))
+        };
+        let cases = [
+            ("member", two_members),
+            ("member", no_members),
+            (
+                "ETag",
+                SplitDescriptor::with_range(
+                    ranged_object(100, None),
+                    SplitRange::new(0, 10, b'\n'),
+                ),
+            ),
+            (
+                "empty",
+                SplitDescriptor::with_range(pinned(), SplitRange::new(10, 10, b'\n')),
+            ),
+            (
+                "empty",
+                SplitDescriptor::with_range(pinned(), SplitRange::new(11, 10, b'\n')),
+            ),
+            (
+                "past the object",
+                SplitDescriptor::with_range(pinned(), SplitRange::new(0, 101, b'\n')),
+            ),
+        ];
+        for (needle, desc) in cases {
+            let err = desc.encode().unwrap_err();
+            assert_eq!(err.kind, CoordinationErrorKind::Fatal);
+            assert!(err.reason.contains(needle), "encode: {}", err.reason);
+            // The same bytes written by a producer that skipped validation.
+            let raw = serde_json::to_vec(&desc).unwrap();
+            let err = SplitDescriptor::decode(&raw).unwrap_err();
+            assert_eq!(err.kind, CoordinationErrorKind::Fatal);
+            assert!(err.reason.contains(needle), "decode: {}", err.reason);
+        }
+        // A range covering the whole object is valid.
+        let whole = SplitDescriptor::with_range(pinned(), SplitRange::new(0, 100, b'\n'));
+        SplitDescriptor::decode(&whole.encode().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn ranged_id_is_pinned() {
+        // Persisted identity, like `digest_id_is_pinned`; the value was
+        // recomputed from the documented preimage outside Rust.
+        let id = split_id_for_range(
+            "exports/2026/part-000.ndjson",
+            "\"9b2cf5\"",
+            SplitRange::new(0, 64 * MB, b'\n'),
+        )
+        .unwrap();
+        assert_eq!(id.as_str(), "s3-bG55RxpZddcsf8KDfxBbQw");
+    }
+
+    /// Every input of a ranged id moves it, and no ranged id equals the
+    /// member-set id of the same object.
+    #[test]
+    fn ranged_ids_digest_every_input_and_never_equal_member_set_ids() {
+        let base = split_id_for_range("k", "e", SplitRange::new(0, 10, b'\n')).unwrap();
+        for other in [
+            split_id_for_range("k2", "e", SplitRange::new(0, 10, b'\n')),
+            split_id_for_range("k", "e2", SplitRange::new(0, 10, b'\n')),
+            split_id_for_range("k", "e", SplitRange::new(1, 10, b'\n')),
+            split_id_for_range("k", "e", SplitRange::new(0, 11, b'\n')),
+            split_id_for_range("k", "e", SplitRange::new(0, 10, b';')),
+        ] {
+            assert_ne!(other.unwrap(), base);
+        }
+        assert_ne!(split_id_for([("k", Some("e"))]).unwrap(), base);
+        assert!(split_id_for_range("k", "e", SplitRange::new(10, 10, b'\n')).is_err());
     }
 
     // --- packing ---

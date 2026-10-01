@@ -23,7 +23,9 @@ pub(crate) struct S3Metrics {
     pub(crate) objects_remaining: Gauge,
     /// Bytes read from the store (as stored, pre-decompression).
     pub(crate) bytes_read: Counter,
-    /// Bytes after decompression (equals `bytes_read` for plain objects).
+    /// Bytes after decompression, as the framer receives them. For a plain
+    /// object read whole this equals `bytes_read`; the bytes a byte-range
+    /// read trims count in `bytes_read` alone.
     pub(crate) bytes_decoded: Counter,
     /// Object GET attempts beyond the first (transient failures).
     pub(crate) get_retries: Counter,

@@ -97,9 +97,11 @@ that stops the pipeline too. The error names the registry URL, without
 credentials, and the status, the certificate error, the alert or the mismatch.
 The deserializer learns of the rejection from a fetch, so the pipeline stops at
 the first payload whose schema is not cached. Schemas already cached keep
-decoding until then, and a pipeline that receives no payload keeps running. A `401` on a `prewarm_subjects` fetch counts too; a `403`
-there is logged, and the subject's schema is fetched on demand. Any other TLS
-or transport failure, such as an `InternalError` alert or a connection closed
+decoding until then, and a pipeline that receives no payload keeps running.
+A `401` on a `prewarm_subjects` fetch counts too. A `403` there refuses one
+subject, so it is logged and the subject's schema is fetched by id when a
+payload needs it. A `403` on that fetch stops the pipeline. Any other TLS or
+transport failure, such as an `InternalError` alert or a connection closed
 during the handshake, is transient: the batch is held and replayed while it
 lasts, logging `registry fetch failed transiently` and counting
 `spate_deser_not_ready_total`. See

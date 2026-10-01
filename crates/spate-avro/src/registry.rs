@@ -125,9 +125,9 @@ impl RegistryConfig {
     }
 }
 
-/// The HTTP client for one schema registry.
-pub(crate) struct RegistryClient {
-    http: reqwest::Client,
+/// Where one schema registry is and how to authenticate to it. Requests go
+/// through the client [`http_client`] builds, which this does not hold.
+pub(crate) struct Endpoint {
     /// The configured URL, userinfo included; reqwest sends the userinfo as
     /// basic auth.
     base: Url,
@@ -187,8 +187,27 @@ impl std::fmt::Display for Failure {
     }
 }
 
-impl RegistryClient {
-    /// The registry the client talks to, without credentials.
+impl Endpoint {
+    /// The endpoint at `cfg.url`. Fails when the URL is not an `http://` or
+    /// `https://` URL.
+    pub(crate) fn new(cfg: &RegistryConfig) -> Result<Endpoint, AvroConfigError> {
+        // The detail never echoes the URL, which may carry credentials.
+        let base = Url::parse(&cfg.url).map_err(|e| AvroConfigError::Invalid {
+            detail: format!("registry.url is not a URL: {e}"),
+        })?;
+        if !matches!(base.scheme(), "http" | "https") {
+            return Err(AvroConfigError::Invalid {
+                detail: "registry.url must be an http:// or https:// URL".into(),
+            });
+        }
+        Ok(Endpoint {
+            base,
+            basic_auth: cfg.basic_auth.clone(),
+            registry: cfg.display_url().into(),
+        })
+    }
+
+    /// The registry's URL, without credentials.
     pub(crate) fn registry(&self) -> &str {
         &self.registry
     }
@@ -213,14 +232,14 @@ impl RegistryClient {
         url.set_query(None);
         url.set_fragment(None);
         url.path_segments_mut()
-            .expect("registry_client admits only http(s) URLs")
+            .expect("Endpoint::new admits only http(s) URLs")
             .pop_if_empty()
             .extend(segments);
         url
     }
 
-    async fn get(&self, url: Url) -> Result<RegistrySchema, Failure> {
-        let mut request = self.http.get(url);
+    async fn get(&self, http: &reqwest::Client, url: Url) -> Result<RegistrySchema, Failure> {
+        let mut request = http.get(url);
         if let Some((user, password)) = &self.basic_auth {
             request = request.basic_auth(user, password.as_deref());
         }
@@ -277,36 +296,20 @@ fn chain(e: &(dyn Error + 'static)) -> String {
     rendered
 }
 
-/// The client for the registry at `cfg.url`, verifying an `https://`
-/// registry against the system trust store and `root_ca`. Fails when the URL
-/// is not an `http://` or `https://` URL.
-pub(crate) fn registry_client(cfg: &RegistryConfig) -> Result<RegistryClient, AvroConfigError> {
-    registry_client_with(cfg, rustls_native_certs::load_native_certs)
+/// The HTTP client for the registry, verifying an `https://` registry
+/// against the system trust store and `root_ca`.
+pub(crate) fn http_client(root_ca: Option<&Path>) -> Result<reqwest::Client, AvroConfigError> {
+    http_client_with(root_ca, rustls_native_certs::load_native_certs)
 }
 
-fn registry_client_with(
-    cfg: &RegistryConfig,
+fn http_client_with(
+    root_ca: Option<&Path>,
     system: impl FnOnce() -> CertificateResult,
-) -> Result<RegistryClient, AvroConfigError> {
-    // The detail never echoes the URL, which may carry credentials.
-    let base = Url::parse(&cfg.url).map_err(|e| AvroConfigError::Invalid {
-        detail: format!("registry.url is not a URL: {e}"),
-    })?;
-    if !matches!(base.scheme(), "http" | "https") {
-        return Err(AvroConfigError::Invalid {
-            detail: "registry.url must be an http:// or https:// URL".into(),
-        });
-    }
-    let http = client_builder(system, cfg.root_ca.as_deref())?
+) -> Result<reqwest::Client, AvroConfigError> {
+    client_builder(system, root_ca)?
         .timeout(REQUEST_TIMEOUT)
         .build()
-        .map_err(|e| AvroConfigError::Registry { detail: chain(&e) })?;
-    Ok(RegistryClient {
-        http,
-        base,
-        basic_auth: cfg.basic_auth.clone(),
-        registry: cfg.display_url().into(),
-    })
+        .map_err(|e| AvroConfigError::Registry { detail: chain(&e) })
 }
 
 /// The HTTP client builder, trusting the certificates in `root_ca` in
@@ -416,7 +419,8 @@ struct Backoff {
 
 /// Spawn the fetcher task on `handle` and return the requester side.
 pub(crate) fn spawn_fetcher(
-    client: Arc<RegistryClient>,
+    http: reqwest::Client,
+    endpoint: Arc<Endpoint>,
     rejection: Rejection,
     negative_cache_ttl: Duration,
     runtime: &tokio::runtime::Handle,
@@ -485,10 +489,11 @@ pub(crate) fn spawn_fetcher(
                     }
                     in_flight.insert(id);
                     let cache = Arc::clone(&task_cache);
-                    let client = Arc::clone(&client);
+                    let http = http.clone();
+                    let endpoint = Arc::clone(&endpoint);
                     let rejection = Arc::clone(&task_rejection);
                     tasks.spawn(async move {
-                        let outcome = fetch_one(id, &client, &cache, &rejection).await;
+                        let outcome = fetch_one(id, &http, &endpoint, &cache, &rejection).await;
                         (id, outcome)
                     });
                 }
@@ -508,12 +513,13 @@ pub(crate) fn spawn_fetcher(
 /// also stops one slow id from monopolizing a fetch slot for minutes.
 async fn fetch_one(
     id: u32,
-    client: &RegistryClient,
+    http: &reqwest::Client,
+    endpoint: &Endpoint,
     cache: &SchemaCache,
     rejection: &Rejection,
 ) -> FetchOutcome {
-    let registry = client.registry();
-    match client.get(client.schema_url(id)).await {
+    let registry = endpoint.registry();
+    match endpoint.get(http, endpoint.schema_url(id)).await {
         Ok(registered) => {
             if let Some(reason) = registered.unsupported(id) {
                 cache.insert_failed(id, reason);
@@ -578,17 +584,18 @@ fn record(rejection: &Rejection, reason: String) {
 /// failure is logged, and the id is fetched on demand when it first appears
 /// in a payload.
 pub(crate) async fn prewarm(
-    client: &RegistryClient,
+    http: &reqwest::Client,
+    endpoint: &Endpoint,
     subjects: &[String],
     cache: &SchemaCache,
     rejection: &Rejection,
 ) {
-    let registry = client.registry();
+    let registry = endpoint.registry();
     for subject in subjects {
         if rejection.get().is_some() {
             return;
         }
-        match client.get(client.latest_url(subject)).await {
+        match endpoint.get(http, endpoint.latest_url(subject)).await {
             Ok(registered) => {
                 let Some(id) = registered.id else {
                     tracing::warn!(
@@ -672,9 +679,10 @@ mod tests {
         cfg: &RegistryConfig,
         system: Vec<CertificateDer<'static>>,
     ) -> Result<String, Failure> {
-        let client = registry_client_with(cfg, || native_certs(system)).unwrap();
-        client
-            .get(client.schema_url(1))
+        let http = http_client_with(cfg.root_ca.as_deref(), || native_certs(system)).unwrap();
+        let endpoint = Endpoint::new(cfg).unwrap();
+        endpoint
+            .get(&http, endpoint.schema_url(1))
             .await
             .map(|registered| registered.schema)
     }
@@ -691,22 +699,18 @@ mod tests {
         }
     }
 
-    fn client(url: &str) -> RegistryClient {
-        registry_client_with(&config(url, None), CertificateResult::default).unwrap()
-    }
-
     /// Request paths extend the configured path, a trailing slash included,
     /// and a subject is one encoded segment.
     #[test]
     fn request_urls_extend_the_configured_path() {
         for base in ["https://sr:8081/registry", "https://sr:8081/registry/"] {
-            let client = client(base);
+            let endpoint = Endpoint::new(&config(base, None)).unwrap();
             assert_eq!(
-                client.schema_url(7).as_str(),
+                endpoint.schema_url(7).as_str(),
                 "https://sr:8081/registry/schemas/ids/7?deleted=true"
             );
             assert_eq!(
-                client.latest_url("a/b c?").as_str(),
+                endpoint.latest_url("a/b c?").as_str(),
                 "https://sr:8081/registry/subjects/a%2Fb%20c%3F/versions/latest"
             );
         }
@@ -717,7 +721,7 @@ mod tests {
     #[test]
     fn an_unusable_url_fails() {
         for url in ["not a url", "localhost:8081", "ftp://user:secret@sr"] {
-            let err = registry_client_with(&config(url, None), CertificateResult::default)
+            let err = Endpoint::new(&config(url, None))
                 .err()
                 .expect("the URL is rejected")
                 .to_string();
@@ -749,9 +753,8 @@ mod tests {
         std::fs::write(&malformed, pem("CERTIFICATE", b"not DER")).unwrap();
         for path in [dir.path().join("missing.pem"), empty, malformed] {
             let cfg = config("https://sr", Some(&path));
-            let err = registry_client_with(&cfg, CertificateResult::default)
-                .err()
-                .expect("the root CA is rejected")
+            let err = http_client_with(cfg.root_ca.as_deref(), CertificateResult::default)
+                .expect_err("the root CA is rejected")
                 .to_string();
             assert!(err.contains("registry.tls.root_ca"), "{err}");
             assert!(err.contains(&path.display().to_string()), "{err}");

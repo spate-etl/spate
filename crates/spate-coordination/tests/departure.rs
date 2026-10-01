@@ -19,17 +19,33 @@ use tokio::sync::mpsc;
 
 type Breaker = mpsc::UnboundedSender<Result<WatchEvent, StoreError>>;
 
-/// A [`MemoryStore`] a test can take down, wedge, or fail on chosen keys.
+/// Which primitive a [`FaultStore`] fault applies to.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Op {
+    Create,
+    Update,
+    Get,
+    Delete,
+    List,
+}
+
+/// A [`MemoryStore`] a test can take down, wedge, slow, or fail on chosen
+/// keys.
 ///
 /// Down: every call fails Retryable and every live watch breaks. Wedged:
-/// every write and read pends. Fatal: a write to a listed keyspace and key
-/// fails Fatal.
+/// every call but `watch` pends. Latency: every such call first waits that
+/// many milliseconds. Fatal: a listed primitive on a listed key fails
+/// Fatal. Plan lost: the plan record's update loses its CAS and its read
+/// fails Retryable.
 #[derive(Clone)]
 struct FaultStore {
     inner: MemoryStore,
     down: Arc<AtomicBool>,
     wedged: Arc<AtomicBool>,
-    fatal: Arc<Mutex<Vec<(Keyspace, String)>>>,
+    latency_ms: Arc<AtomicU64>,
+    fatal: Arc<Mutex<Vec<(Op, Keyspace, String)>>>,
+    plan_lost: Arc<AtomicBool>,
+    plan_refused: Arc<AtomicU64>,
     refused_watches: Arc<AtomicU64>,
     breakers: Arc<Mutex<Vec<Breaker>>>,
 }
@@ -40,7 +56,10 @@ impl FaultStore {
             inner: MemoryStore::new(lease),
             down: Arc::default(),
             wedged: Arc::default(),
+            latency_ms: Arc::default(),
             fatal: Arc::default(),
+            plan_lost: Arc::default(),
+            plan_refused: Arc::default(),
             refused_watches: Arc::default(),
             breakers: Arc::default(),
         }
@@ -50,15 +69,26 @@ impl FaultStore {
         StoreError::Retryable("injected: store unreachable".into())
     }
 
-    async fn gate(&self, ks: Keyspace, key: &str, write: bool) -> Result<(), StoreError> {
+    fn plan_lost(&self, ks: Keyspace, key: &str) -> bool {
+        ks == Keyspace::Durable && key == "plan" && self.plan_lost.load(Ordering::SeqCst)
+    }
+
+    async fn gate(&self, op: Op, ks: Keyspace, key: &str) -> Result<(), StoreError> {
         if self.wedged.load(Ordering::SeqCst) {
             std::future::pending::<()>().await;
+        }
+        let latency = self.latency_ms.load(Ordering::SeqCst);
+        if latency > 0 {
+            tokio::time::sleep(Duration::from_millis(latency)).await;
         }
         if self.down.load(Ordering::SeqCst) {
             return Err(Self::unreachable());
         }
         let fatal = self.fatal.lock().unwrap();
-        if write && fatal.iter().any(|(k, name)| *k == ks && name == key) {
+        if fatal
+            .iter()
+            .any(|(o, k, name)| *o == op && *k == ks && name == key)
+        {
             return Err(StoreError::Fatal(format!("injected: {key} refused")));
         }
         Ok(())
@@ -104,7 +134,7 @@ impl CoordinationStore for FaultStore {
         key: &str,
         value: Vec<u8>,
     ) -> Result<CasOutcome, StoreError> {
-        self.gate(ks, key, true).await?;
+        self.gate(Op::Create, ks, key).await?;
         self.inner.create(ks, key, value).await
     }
 
@@ -115,12 +145,19 @@ impl CoordinationStore for FaultStore {
         value: Vec<u8>,
         expected: Revision,
     ) -> Result<CasOutcome, StoreError> {
-        self.gate(ks, key, true).await?;
+        self.gate(Op::Update, ks, key).await?;
+        if self.plan_lost(ks, key) {
+            return Ok(CasOutcome::Lost);
+        }
         self.inner.update(ks, key, value, expected).await
     }
 
     async fn get(&self, ks: Keyspace, key: &str) -> Result<Option<Entry>, StoreError> {
-        self.gate(ks, key, false).await?;
+        self.gate(Op::Get, ks, key).await?;
+        if self.plan_lost(ks, key) {
+            self.plan_refused.fetch_add(1, Ordering::SeqCst);
+            return Err(Self::unreachable());
+        }
         self.inner.get(ks, key).await
     }
 
@@ -130,7 +167,7 @@ impl CoordinationStore for FaultStore {
         key: &str,
         expected: Option<Revision>,
     ) -> Result<CasOutcome, StoreError> {
-        self.gate(ks, key, true).await?;
+        self.gate(Op::Delete, ks, key).await?;
         self.inner.delete(ks, key, expected).await
     }
 
@@ -149,7 +186,7 @@ impl CoordinationStore for FaultStore {
     }
 
     async fn list(&self, ks: Keyspace, prefix: &str) -> Result<Vec<Entry>, StoreError> {
-        self.gate(ks, prefix, false).await?;
+        self.gate(Op::List, ks, prefix).await?;
         self.inner.list(ks, prefix).await
     }
 }
@@ -273,8 +310,8 @@ fn a_departure_runs_every_step_past_a_fatal_error() {
     );
 
     store.fatal.lock().unwrap().extend([
-        (Keyspace::Durable, "split.f0".to_string()),
-        (Keyspace::Ephemeral, "leader".to_string()),
+        (Op::Update, Keyspace::Durable, "split.f0".to_string()),
+        (Op::Delete, Keyspace::Ephemeral, "leader".to_string()),
     ]);
     assert!(a.depart(&[]).is_err(), "the injected errors are fatal");
 
@@ -282,5 +319,110 @@ fn a_departure_runs_every_step_past_a_fatal_error() {
     assert!(
         left.is_empty(),
         "the departure stopped early, leaving {left:?}"
+    );
+}
+
+/// Store calls that fail Retryable for a moment, with no watch broken, still
+/// let the departure hand everything back.
+#[test]
+fn a_departure_over_briefly_failing_writes_hands_back_everything() {
+    // A 15s lease scales `op_timeout` to 2s.
+    let lease = Duration::from_secs(15);
+    let rt = runtime();
+    let store = FaultStore::new(lease);
+    let mut a = holding(
+        &rt,
+        &store,
+        config_for(lease, Some("worker-a")),
+        &["p0", "p1"],
+    );
+
+    store.down.store(true, Ordering::SeqCst);
+    let back = Arc::clone(&store.down);
+    let comeback = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        back.store(false, Ordering::SeqCst);
+    });
+    let result = a.depart(&[]);
+    comeback.join().unwrap();
+
+    assert!(result.is_ok(), "{result:?}");
+    let keys = ["leader", "worker.worker-a", "split.p0", "split.p1"];
+    let left = store.present(&rt, Keyspace::Ephemeral, &keys);
+    assert!(left.is_empty(), "depart left {left:?}");
+}
+
+/// A departure over a store that fails for longer than the departure's
+/// budget reports the failure.
+#[test]
+fn a_departure_the_store_keeps_failing_reports_it() {
+    let rt = runtime();
+    let store = FaultStore::new(LEASE);
+    let mut a = holding(&rt, &store, config_for(LEASE, Some("worker-a")), &["k0"]);
+
+    store.down.store(true, Ordering::SeqCst);
+    let result = a.depart(&[]);
+    assert!(
+        result.is_err(),
+        "the store never answered, yet depart returned Ok"
+    );
+}
+
+/// A departure whose task already stopped on a Retryable error hands its
+/// split back by direct writes.
+#[test]
+fn a_departure_after_a_retryable_task_death_releases_directly() {
+    let rt = runtime();
+    let store = FaultStore::new(LEASE);
+    let mut a = holding(&rt, &store, config_for(LEASE, Some("worker-a")), &["r0"]);
+
+    // A lost generation bump whose plan re-read fails Retryable stops the
+    // task.
+    store.plan_lost.store(true, Ordering::SeqCst);
+    let _: CasOutcome = rt
+        .block_on(store.inner.delete(Keyspace::Ephemeral, "leader", None))
+        .unwrap();
+    let deadline = Instant::now() + support::DEADLINE;
+    while store.plan_refused.load(Ordering::SeqCst) == 0 {
+        assert!(Instant::now() < deadline, "the worker never re-elected");
+        std::thread::sleep(support::POLL_INTERVAL);
+    }
+    store.latency_ms.store(10, Ordering::SeqCst);
+    let result = a.depart(&[]);
+
+    let record = rt
+        .block_on(store.inner.get(Keyspace::Durable, "split.r0"))
+        .unwrap()
+        .expect("the split record stays");
+    let record: serde_json::Value = serde_json::from_slice(&record.value).unwrap();
+    assert!(
+        record["owner"].is_null(),
+        "depart returned {result:?}; owner {}",
+        record["owner"]
+    );
+    assert!(
+        store
+            .present(&rt, Keyspace::Ephemeral, &["split.r0"])
+            .is_empty()
+    );
+}
+
+/// Dropping a coordinator over a store that stops answering returns within
+/// one `op_timeout`.
+#[test]
+fn a_drop_over_a_wedged_store_returns_within_op_timeout() {
+    let rt = runtime();
+    let store = FaultStore::new(LEASE);
+    let config = config_for(LEASE, Some("worker-a"));
+    let budget = config.op_timeout;
+    let a = holding(&rt, &store, config, &["w0", "w1"]);
+
+    store.wedged.store(true, Ordering::SeqCst);
+    let started = Instant::now();
+    drop(a);
+    let took = started.elapsed();
+    assert!(
+        took < budget * 2,
+        "drop took {took:?} against a budget of {budget:?}"
     );
 }

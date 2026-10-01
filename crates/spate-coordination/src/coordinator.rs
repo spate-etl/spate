@@ -11,7 +11,7 @@
 use crate::config::CoordinationConfig;
 use crate::error::fatal;
 use crate::records::{self, LeaseVal, SplitProgressRecord};
-use crate::store::metered::Metered;
+use crate::store::metered::{Metered, RetryWindow};
 use crate::store::{CoordinationStore, Keyspace, WatchMode};
 use crate::task::{Command, Task, TaskEvent};
 use spate_core::clock::tokio::{Clock, SystemClock};
@@ -65,6 +65,8 @@ struct Running {
     /// fallback works from. The epoch pins the tenancy: a direct release must
     /// never clear a record a same-named restart has since reclaimed.
     held: BTreeMap<String, u64>,
+    /// Opened by `depart`, so the task's store retries transient failures.
+    retry: RetryWindow,
 }
 
 impl<S: CoordinationStore + Clone> std::fmt::Debug for StoreCoordinator<S> {
@@ -204,11 +206,15 @@ impl<S: CoordinationStore + Clone> StoreCoordinator<S> {
         &mut self,
         build: impl FnOnce(std_mpsc::SyncSender<Result<(), CoordinationError>>) -> Command,
     ) -> Result<(), CoordinationError> {
-        self.command_within(self.config.op_timeout * 3, build)
+        let budget = self.config.op_timeout * 3;
+        self.command_until(Instant::now() + budget, budget, build)
     }
 
-    fn command_within(
+    /// Send a command and wait for its reply until `deadline_at`; a timeout
+    /// reports `budget` as the wait it exceeded.
+    fn command_until(
         &mut self,
+        deadline_at: Instant,
         budget: Duration,
         build: impl FnOnce(std_mpsc::SyncSender<Result<(), CoordinationError>>) -> Command,
     ) -> Result<(), CoordinationError> {
@@ -217,8 +223,6 @@ impl<S: CoordinationStore + Clone> StoreCoordinator<S> {
             return Err(fatal("coordinator used before start"));
         };
         let commands = running.commands.clone();
-        // Real time: the budget bounds store I/O behind the task.
-        let deadline_at = Instant::now() + budget;
         let (reply_tx, reply_rx) = std_mpsc::sync_channel(1);
         // Enqueue with the same deadline as the reply: a full queue means
         // the task is backed up behind an unreachable store, and an
@@ -389,7 +393,9 @@ impl<S: CoordinationStore + Clone> SplitCoordinator for StoreCoordinator<S> {
         }
         // The decorator applies the per-op deadline and the store-op
         // latency histograms to every primitive in one place.
-        let store = Metered::new(self.store.clone(), self.config.op_timeout, metrics.clone());
+        let retry = RetryWindow::default();
+        let store = Metered::new(self.store.clone(), self.config.op_timeout, metrics.clone())
+            .with_retry_window(retry.clone());
         let task = Task::new(
             store,
             self.config.clone(),
@@ -411,6 +417,7 @@ impl<S: CoordinationStore + Clone> SplitCoordinator for StoreCoordinator<S> {
             events: event_rx,
             task: join,
             held: BTreeMap::new(),
+            retry,
         });
         Ok(())
     }
@@ -554,11 +561,16 @@ impl<S: CoordinationStore + Clone> SplitCoordinator for StoreCoordinator<S> {
         }
         let budget = self.config.op_timeout;
         let started = Instant::now();
+        let deadline = started + budget;
+        // The store stops retrying a quarter of the budget early, so the
+        // task can still reply before this handle gives up on it.
+        if let Some(running) = &self.running {
+            running.retry.open_until(started + budget * 3 / 4);
+        }
         // A task re-establishing a broken watch refuses commands as
         // Retryable at once; ask again while the budget lasts.
         let result = loop {
-            let remaining = budget.saturating_sub(started.elapsed());
-            let result = self.command_within(remaining, |reply| Command::Depart { reply });
+            let result = self.command_until(deadline, budget, |reply| Command::Depart { reply });
             match &result {
                 Err(e)
                     if e.kind == CoordinationErrorKind::Retryable
@@ -569,6 +581,25 @@ impl<S: CoordinationStore + Clone> SplitCoordinator for StoreCoordinator<S> {
                 }
                 _ => break result,
             }
+        };
+        // The task counts a write the store kept refusing as handed back;
+        // the store's window says whether one ran out.
+        let result = match result {
+            Ok(())
+                if self
+                    .running
+                    .as_ref()
+                    .is_some_and(|running| running.retry.exhausted()) =>
+            {
+                Err(CoordinationError::new(
+                    CoordinationErrorKind::Retryable,
+                    format!(
+                        "the store kept failing for the departure's {budget:?}; what was not \
+                         handed back expires"
+                    ),
+                ))
+            }
+            other => other,
         };
         let alive = self.task_alive();
         self.failed = Some((

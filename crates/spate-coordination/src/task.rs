@@ -297,9 +297,9 @@ pub(crate) struct Task<S: CoordinationStore + Clone> {
     /// an O(members x splits) scan per commit. Cleared by the publish.
     assign_dirty: bool,
     /// Leader side only: instances whose presence key vanished, and when.
-    /// Their splits are withheld from assignment until `rebalance_delay`
-    /// elapses, so a pod bounce reclaims its own work instead of the fleet
-    /// churning around it. Cleared the moment the instance reappears.
+    /// Splits that still name them as owner are withheld from assignment
+    /// until `rebalance_delay` elapses, so a pod that crashed and comes back
+    /// reclaims its own work. Cleared the moment the instance reappears.
     departed: BTreeMap<String, Instant>,
     /// The peers last reported by `observe_membership`; `None` until it has
     /// run at all. An empty set instead means a worker that has looked and
@@ -2994,10 +2994,10 @@ impl<S: CoordinationStore + Clone> Task<S> {
     /// consumes no attempt), then drop the lease key (so peers claim
     /// instantly instead of after the TTL).
     ///
-    /// `departure` distinguishes a shutdown/scale-down release, which
-    /// retires this worker once its working set empties, from a
-    /// revocation's hand-back, which never leaves the fleet even when it
-    /// gives up the last split.
+    /// `departure` distinguishes an embedder's own release, which retires
+    /// this worker once its working set empties, from a revocation's
+    /// hand-back, which never leaves the fleet even when it gives up the
+    /// last split. Shutdown sends `Depart`.
     async fn release_splits(
         &mut self,
         splits: &[SplitId],

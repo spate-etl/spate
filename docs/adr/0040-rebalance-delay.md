@@ -1,5 +1,5 @@
 ---
-description: "A departed instance's splits are withheld for a short delay before reassignment, canceled on its return, with zero handled as an immediate, distinct path. Superseded by ADR-0054."
+description: "A departed instance's splits are withheld for a short delay before reassignment, with zero handled as an immediate, distinct path. Superseded by ADR-0054."
 ---
 
 # ADR-0040 — A departed instance's splits are withheld briefly, and zero is a distinct path

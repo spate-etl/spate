@@ -359,7 +359,7 @@ that code passed one. They fire alongside the source's own
 | `spate_coordination_quarantines_total` | counter | | Splits parked at the attempt cap. |
 | `spate_coordination_writes_total` | counter | `outcome` (`ok`\|`conflict`\|`error`) | Split-record writes. `conflict` is a lost compare-and-swap — fencing working as designed, alarming only in bulk. |
 | `spate_coordination_write_duration_seconds` | histogram | | Split-record write round-trip. |
-| `spate_coordination_replan_duration_seconds` | histogram | | One planner run (enumeration included). |
+| `spate_coordination_replan_duration_seconds` | histogram | | One planner run (enumeration and seeding included). |
 | `spate_coordination_reconcile_duration_seconds` | histogram | | One full reconcile listing (the missed-watch-event backstop). |
 | `spate_coordination_store_op_duration_seconds` | histogram | `op` (`get`\|`put`\|`delete`\|`list`\|`watch`\|`poll`) | Store primitive round-trips — the NATS latency view. |
 | `spate_coordination_drain_duration_seconds` | histogram | | One cooperative drain, on the **releasing** worker: revocation requested to the release landing — stopping intake at a safe boundary, committing the drained tail, giving the split up. Only drains that end a revocation cooperatively are observed; a forced release is a *failed* drain and is counted as `revocations_total{outcome="forced"}` instead, so `drain_deadline` never shows up as a spike in this distribution. A drain whose revocation was `cancelled` is not observed either — when it lands it is no longer ending a revocation, so timing it would mix "how long a revocation takes" with "how long a withdrawn one took to unwind". Read it against `drain_deadline`: a p99 creeping toward it means forced revocations are imminent. |

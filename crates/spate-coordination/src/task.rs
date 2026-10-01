@@ -24,7 +24,7 @@
 
 use crate::config::CoordinationConfig;
 use crate::error::{fatal, fatal_only, retryable, store_error};
-use crate::leader::{PlanRun, SeedRun};
+use crate::leader::{PlanRun, SeedEvent, SeedRun};
 use crate::protocol::{self, ClaimAction, ClaimKind, SplitState};
 use crate::records::{
     self, AssignmentVal, LeaderVal, LeaseVal, PlanRecord, SplitProgressRecord, SplitSpecRecord,
@@ -616,6 +616,11 @@ impl<S: CoordinationStore + Clone> Task<S> {
         let mut refresh = self.polled.map(|interval| self.clock.now() + interval);
 
         loop {
+            if let Some(run) = &seeding
+                && !self.leads(run)
+            {
+                run.depose();
+            }
             if planning.is_none() && seeding.is_none() {
                 planning = self.maybe_start_plan()?;
             }
@@ -772,11 +777,17 @@ impl<S: CoordinationStore + Clone> Task<S> {
                     seeding = self.land_plan(joined, run)?;
                     Box::pin(self.step()).await?;
                 }
-                seeded = async { (&mut seeding.as_mut().expect("guarded by is_some").seeded).await },
+                event = async { seeding.as_mut().expect("guarded by is_some").next().await },
                     if seeding.is_some() =>
                 {
-                    let run = seeding.take().expect("selected arm requires it");
-                    Box::pin(self.finish_plan(run, seeded)).await?;
+                    match event {
+                        SeedEvent::Wins(wins) => self.fold_seeded(wins)?,
+                        SeedEvent::Done(seeded, wins) => {
+                            self.fold_seeded(wins)?;
+                            let run = seeding.take().expect("selected arm requires it");
+                            Box::pin(self.finish_plan(run, seeded)).await?;
+                        }
+                    }
                     Box::pin(self.step()).await?;
                 }
             }

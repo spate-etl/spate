@@ -41,8 +41,9 @@ pub struct CoordinationConfig {
     /// Working-set bound: how many splits this worker holds at once
     /// (also its data-plane lane count). Default 8.
     pub max_in_flight: u32,
-    /// How often the leader re-runs the planner while the plan is open.
-    /// Default 60s.
+    /// How often the leader re-runs the planner while the plan is open,
+    /// and how long a plan run retries failed split writes without seeding
+    /// a split before it gives up. Default 60s.
     #[serde(with = "humantime_serde")]
     pub replan_interval: Duration,
     /// How often every worker reconciles its watch-fed view against a
@@ -51,7 +52,7 @@ pub struct CoordinationConfig {
     /// 30s.
     #[serde(with = "humantime_serde")]
     pub reconcile_interval: Duration,
-    /// Startup retry budget (store probe, join, seeding) before giving
+    /// Startup retry budget (store probe, join, presence) before giving
     /// up; steady-state operations are not budgeted, and retry on the
     /// next tick and escalate through lease expiry. Default 8.
     pub startup_max_attempts: u32,

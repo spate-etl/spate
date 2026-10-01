@@ -549,7 +549,7 @@ impl CoordinationDriver {
         }
         let held: Vec<SplitId> = self.by_split.keys().cloned().collect();
         if let Err(e) = self.coordinator.depart(&held) {
-            tracing::warn!(error = %e, "graceful departure failed; leases will expire");
+            tracing::warn!(error = %e, "graceful departure reported an error; anything not handed back expires");
         }
     }
 

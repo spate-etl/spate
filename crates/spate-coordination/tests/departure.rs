@@ -105,18 +105,18 @@ impl FaultStore {
         }
     }
 
-    /// Split records, out of `keys`, that still name an owner.
+    /// Split records, out of `keys`, that exist and name an owner.
     fn owned<'a>(&self, rt: &tokio::runtime::Runtime, keys: &[&'a str]) -> Vec<&'a str> {
         keys.iter()
             .copied()
             .filter(|key| {
-                let entry = rt
-                    .block_on(self.inner.get(Keyspace::Durable, key))
+                rt.block_on(self.inner.get(Keyspace::Durable, key))
                     .expect("read the store")
-                    .expect("the split record stays");
-                let record: serde_json::Value =
-                    serde_json::from_slice(&entry.value).expect("a JSON split record");
-                !record["owner"].is_null()
+                    .is_some_and(|entry| {
+                        let record: serde_json::Value =
+                            serde_json::from_slice(&entry.value).expect("a JSON split record");
+                        !record["owner"].is_null()
+                    })
             })
             .collect()
     }
@@ -503,18 +503,20 @@ fn an_incomplete_departure_releases_directly() {
     );
 }
 
-/// A store that answers every call in a few tens of milliseconds still lets
-/// a departure of several splits hand everything back.
+/// A store slow enough that a departure of several splits takes most of
+/// the budget still lets it hand everything back: the task writes until
+/// seven eighths of `op_timeout`.
 #[test]
 fn a_departure_over_a_slow_store_hands_back_everything() {
-    // A 15s lease scales `op_timeout` to 2s.
-    let lease = Duration::from_secs(15);
+    // A 30s lease scales `op_timeout` to 4s, so the task stops at 3.5s.
+    // Sixteen writes at 200ms take 3.2s.
+    let lease = Duration::from_secs(30);
     let rt = runtime();
     let store = FaultStore::new(lease);
     let ids = ["s0", "s1", "s2", "s3", "s4", "s5", "s6"];
     let mut a = holding(&rt, &store, config_for(lease, Some("worker-a")), &ids);
 
-    store.latency_ms.store(80, Ordering::SeqCst);
+    store.latency_ms.store(200, Ordering::SeqCst);
     let result = a.depart(&[]);
     store.latency_ms.store(0, Ordering::SeqCst);
 
@@ -522,4 +524,176 @@ fn a_departure_over_a_slow_store_hands_back_everything() {
     let keys = ["leader", "worker.worker-a", "split.s0", "split.s6"];
     let left = store.present(&rt, Keyspace::Ephemeral, &keys);
     assert!(left.is_empty(), "depart left {left:?}");
+}
+
+/// A worker whose last commit the store applied but answered Retryable,
+/// on a polled store whose view lags that write, still has its owner
+/// cleared and its lease deleted by the departure.
+#[test]
+fn a_departure_after_an_ambiguous_commit_hands_the_split_back() {
+    let rt = runtime();
+    let fault = FaultStore::new(LEASE);
+    let store = support::polled::PolledStore::new(fault.clone(), LEASE / 10);
+    let mut a = StoreCoordinator::new(
+        store,
+        config_for(LEASE, Some("worker-a")),
+        rt.handle().clone(),
+        None,
+    )
+    .expect("coordinator");
+    a.start(Box::new(PhasedPlanner::one_final("departure:v1", &["c0"])))
+        .unwrap();
+    let mut held = Held::default();
+    drive(&mut a, &mut held, "claiming the split", |h| {
+        h.splits.len() == 1
+    });
+
+    fault
+        .ambiguous
+        .lock()
+        .unwrap()
+        .push((Keyspace::Durable, "split.c0".to_string()));
+    let committed = a.commit(
+        &support::split_id("c0"),
+        &spate_coordination::SplitProgress::new(7, vec![]),
+    );
+    assert!(committed.is_err(), "the injected reply loss surfaces");
+    let result = a.depart(&[]);
+
+    let owned = fault.owned(&rt, &["split.c0"]);
+    let lease = fault.present(&rt, Keyspace::Ephemeral, &["split.c0"]);
+    assert!(
+        owned.is_empty() && lease.is_empty(),
+        "depart returned {result:?}; still owned: {owned:?}; lease left: {lease:?}"
+    );
+}
+
+/// Waits until every armed `ambiguous` fault has fired.
+fn wait_ambiguous_drained(store: &FaultStore) {
+    let deadline = Instant::now() + support::DEADLINE;
+    while !store.ambiguous.lock().unwrap().is_empty() {
+        assert!(Instant::now() < deadline, "the write never ran");
+        std::thread::sleep(support::POLL_INTERVAL);
+    }
+}
+
+/// A leadership renewal the store applied but answered Retryable leaves
+/// the cached leader revision behind; the departure still deletes the key.
+#[test]
+fn a_departure_after_an_ambiguous_leader_renewal_deletes_the_leader_key() {
+    let rt = runtime();
+    let store = FaultStore::new(LEASE);
+    let mut a = holding(&rt, &store, config_for(LEASE, Some("worker-a")), &["l0"]);
+
+    store
+        .ambiguous
+        .lock()
+        .unwrap()
+        .push((Keyspace::Ephemeral, "leader".to_string()));
+    wait_ambiguous_drained(&store);
+    let result = a.depart(&[]);
+
+    let left = store.present(
+        &rt,
+        Keyspace::Ephemeral,
+        &["leader", "worker.worker-a", "split.l0"],
+    );
+    assert!(left.is_empty(), "depart returned {result:?}; left {left:?}");
+}
+
+/// A lease renewal the store applied but answered Retryable leaves the
+/// cached lease revision behind; the departure still deletes the lease.
+#[test]
+fn a_departure_after_an_ambiguous_lease_renewal_deletes_the_lease() {
+    let rt = runtime();
+    let store = FaultStore::new(LEASE);
+    let mut a = holding(&rt, &store, config_for(LEASE, Some("worker-a")), &["l0"]);
+
+    store
+        .ambiguous
+        .lock()
+        .unwrap()
+        .push((Keyspace::Ephemeral, "split.l0".to_string()));
+    wait_ambiguous_drained(&store);
+    let result = a.depart(&[]);
+
+    let owned = store.owned(&rt, &["split.l0"]);
+    let lease = store.present(&rt, Keyspace::Ephemeral, &["split.l0"]);
+    assert!(
+        owned.is_empty() && lease.is_empty(),
+        "depart returned {result:?}; still owned: {owned:?}; lease left: {lease:?}"
+    );
+}
+
+/// A store that breaks the watches and comes back after the first send's
+/// task deadline, inside the handle's budget, still takes the departure.
+#[test]
+fn a_store_back_after_the_task_deadline_takes_the_departure() {
+    // A 15s lease scales `op_timeout` to 2s; the first task deadline is 1.75s.
+    let lease = Duration::from_secs(15);
+    let rt = runtime();
+    let store = FaultStore::new(lease);
+    let mut a = holding(
+        &rt,
+        &store,
+        config_for(lease, Some("worker-a")),
+        &["q0", "q1"],
+    );
+
+    // A networked store's call does not complete on its first poll.
+    store.latency_ms.store(5, Ordering::SeqCst);
+    store.go_down();
+    let deadline = Instant::now() + support::DEADLINE;
+    while store.refused_watches.load(Ordering::SeqCst) == 0 {
+        assert!(Instant::now() < deadline, "the task never re-watched");
+        std::thread::sleep(support::POLL_INTERVAL);
+    }
+    let back = Arc::clone(&store.down);
+    let comeback = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(1780));
+        back.store(false, Ordering::SeqCst);
+    });
+    let result = a.depart(&[]);
+    comeback.join().unwrap();
+    store.latency_ms.store(0, Ordering::SeqCst);
+
+    let keys = ["leader", "worker.worker-a", "split.q0", "split.q1"];
+    let left = store.present(&rt, Keyspace::Ephemeral, &keys);
+    assert!(
+        left.is_empty() && result.is_ok(),
+        "depart returned {result:?}, leaving {left:?}"
+    );
+}
+
+/// A gain the handle never polled, whose owner clear the task cannot
+/// finish, is still handed back by the direct release.
+#[test]
+fn an_unpolled_gain_with_a_failed_clear_is_handed_back() {
+    let rt = runtime();
+    let store = FaultStore::new(LEASE);
+    let mut a = StoreCoordinator::new(
+        store.clone(),
+        config_for(LEASE, Some("worker-a")),
+        rt.handle().clone(),
+        None,
+    )
+    .expect("coordinator");
+    a.start(Box::new(PhasedPlanner::one_final("departure:v1", &["u0"])))
+        .unwrap();
+    // Never polled: the handle holds nothing it could release on its own.
+    let deadline = Instant::now() + support::DEADLINE;
+    while store.owned(&rt, &["split.u0"]).is_empty() {
+        assert!(Instant::now() < deadline, "the split was never claimed");
+        std::thread::sleep(support::POLL_INTERVAL);
+    }
+
+    store
+        .fatal
+        .lock()
+        .unwrap()
+        .push((Op::Update, Keyspace::Durable, "split.u0".to_string()));
+    let result = a.depart(&[]);
+
+    let owned = store.owned(&rt, &["split.u0"]);
+    assert!(owned.is_empty(), "owned {owned:?} after {result:?}");
 }

@@ -1025,7 +1025,7 @@ fn nats_coordinated_backfill_example_covers_the_prefix() {
 /// back to direct writes, or its store watches breaking as the process stops.
 fn assert_clean_departure(pod: &str, log: &str) {
     for warn in [
-        "graceful departure failed",
+        "graceful departure reported an error",
         "releasing directly",
         "re-watching",
         "watch establishment failed",

@@ -110,8 +110,12 @@ impl Command {
 
 /// The task's answer to a `Depart`.
 pub(crate) enum DepartReply {
-    /// The task ran the departure and writes nothing more.
-    Ran(Result<(), CoordinationError>),
+    /// The task ran the departure and writes nothing more. `unreleased`
+    /// names each split, with its epoch, whose owner it did not clear.
+    Ran {
+        result: Result<(), CoordinationError>,
+        unreleased: Vec<(SplitId, u64)>,
+    },
     /// The task could not take the command yet.
     Refused(CoordinationError),
 }
@@ -140,12 +144,37 @@ where
     }
 }
 
-/// What a departure could not do: its first fatal error, and the writes the
-/// store kept refusing.
+/// Delete `key` while it is still this worker's: at `rev`, then, each time
+/// that loses, at the revision a read finds while `ours` holds for its
+/// value. A renewal that applied unseen leaves `rev` behind the store.
+async fn delete_own<S: CoordinationStore>(
+    store: &S,
+    deadline: Instant,
+    ks: Keyspace,
+    key: &str,
+    mut rev: Revision,
+    ours: impl Fn(&[u8]) -> bool,
+) -> Result<(), StoreError> {
+    loop {
+        if until_deadline(deadline, || store.delete(ks, key, Some(rev))).await? == CasOutcome::Lost
+            && let Some(entry) = until_deadline(deadline, || store.get(ks, key)).await?
+            && entry.revision != rev
+            && ours(&entry.value)
+        {
+            rev = entry.revision;
+            continue;
+        }
+        return Ok(());
+    }
+}
+
+/// What a departure could not do: its first fatal error, the writes the
+/// store did not confirm, and the splits whose owner stays set.
 #[derive(Default)]
 struct Shortfall {
     fatal: Option<CoordinationError>,
     undone: Vec<String>,
+    unreleased: Vec<(SplitId, u64)>,
 }
 
 impl Shortfall {
@@ -162,14 +191,18 @@ impl Shortfall {
         self.fatal.get_or_insert(e);
     }
 
-    fn into_result(self) -> Result<(), CoordinationError> {
-        match self.fatal {
+    fn into_reply(self) -> DepartReply {
+        let result = match self.fatal {
             Some(e) => Err(e),
             None if self.undone.is_empty() => Ok(()),
             None => Err(retryable(format!(
-                "departure incomplete, the store kept refusing: {}",
+                "departure unconfirmed by the store before its deadline: {}",
                 self.undone.join("; ")
             ))),
+        };
+        DepartReply::Ran {
+            result,
+            unreleased: self.unreleased,
         }
     }
 }
@@ -2855,14 +2888,10 @@ impl<S: CoordinationStore + Clone> Task<S> {
     async fn handle_command(&mut self, command: Command) -> Result<(), CoordinationError> {
         let (result, reply) = match command {
             Command::Depart { deadline, reply } => {
-                let result = Box::pin(self.depart(Instant::from_std(deadline))).await;
+                let shortfall = Box::pin(self.depart(Instant::from_std(deadline))).await;
                 self.stopping = true;
-                let fatal_error = result
-                    .as_ref()
-                    .err()
-                    .filter(|e| e.kind == CoordinationErrorKind::Fatal)
-                    .map(|e| fatal(e.reason.clone()));
-                let _ = reply.try_send(DepartReply::Ran(result));
+                let fatal_error = shortfall.fatal.as_ref().map(|e| fatal(e.reason.clone()));
+                let _ = reply.try_send(shortfall.into_reply());
                 return fatal_error.map_or(Ok(()), Err);
             }
             Command::Commit {
@@ -3113,9 +3142,9 @@ impl<S: CoordinationStore + Clone> Task<S> {
     /// still owed, give up leadership and delete the presence key, retrying
     /// each write the store refuses until `deadline`. Every step runs.
     ///
-    /// Presence goes last: the leader withholds a split whose owner has no
-    /// presence key, so it must not vanish while an owner is still set.
-    async fn depart(&mut self, deadline: Instant) -> Result<(), CoordinationError> {
+    /// Presence goes after every owner clear has been tried: the leader
+    /// withholds a split whose owner has no presence key.
+    async fn depart(&mut self, deadline: Instant) -> Shortfall {
         self.parting = true;
         let mut shortfall = Shortfall::default();
         let mut released = 0u64;
@@ -3145,9 +3174,18 @@ impl<S: CoordinationStore + Clone> Task<S> {
         }
         if let Some(rev) = self.leadership.take() {
             self.metrics(|m| m.set_leader(false));
-            if let Err(e) = until_deadline(deadline, || {
-                store.delete(Keyspace::Ephemeral, records::LEADER_KEY, Some(rev))
-            })
+            let ours = |value: &[u8]| {
+                serde_json::from_slice::<LeaderVal>(value)
+                    .is_ok_and(|v| v.owner == self.instance && v.nonce == self.nonce)
+            };
+            if let Err(e) = delete_own(
+                &store,
+                deadline,
+                Keyspace::Ephemeral,
+                records::LEADER_KEY,
+                rev,
+                ours,
+            )
             .await
             {
                 shortfall.note("deleting the leader key".into(), &e);
@@ -3160,14 +3198,15 @@ impl<S: CoordinationStore + Clone> Task<S> {
             shortfall.note("deleting the presence key".into(), &e);
         }
         self.presence.remove(&self.instance);
-        shortfall.into_result()
+        shortfall
     }
 
     /// Hand back one owned split during a departure: clear its owner, then
     /// delete its lease. Returns whether the owner was cleared.
     ///
-    /// A clear whose reply was lost may have applied, and its retry then
-    /// loses the CAS, so a lost CAS reads the record back before judging.
+    /// A write whose reply was lost may have applied, so a lost CAS reads
+    /// the record back. Cleared at this tenancy's epoch, it is done; still
+    /// naming this worker, the clear goes again at the read revision.
     async fn depart_split(
         &mut self,
         id: &str,
@@ -3178,67 +3217,90 @@ impl<S: CoordinationStore + Clone> Task<S> {
             return false;
         };
         let lease_rev = owned.lease_rev;
-        let expected = state.progress_rev;
+        let mut expected = state.progress_rev;
         let mut record = state.progress.clone();
         let epoch = record.epoch;
-        record.owner = None;
-        record.written_at_ms = records::now_ms();
         let key = records::split_key_str(id);
-        let value = record.encode();
         let store = self.store.clone();
 
-        let cleared = match until_deadline(deadline, || {
-            store.update(Keyspace::Durable, &key, value.clone(), expected)
-        })
-        .await
-        {
-            Ok(CasOutcome::Won(rev)) => Some((record, rev)),
-            Ok(CasOutcome::Lost) => {
-                match until_deadline(deadline, || store.get(Keyspace::Durable, &key)).await {
-                    Ok(Some(entry)) => {
-                        match SplitProgressRecord::parse(&key, &entry.value, self.fp) {
-                            Ok(fresh) if fresh.owner.is_none() && fresh.epoch == epoch => {
-                                Some((fresh, entry.revision))
-                            }
-                            Ok(_) => {
-                                self.drop_owned(id, SplitLossReason::Fenced);
-                                return false;
-                            }
-                            Err(e) => {
-                                shortfall.fatal(e);
-                                None
+        let cleared = loop {
+            if Instant::now() >= deadline {
+                shortfall.undone.push(format!("releasing split {id}"));
+                break None;
+            }
+            record.owner = None;
+            record.written_at_ms = records::now_ms();
+            let value = record.encode();
+            match until_deadline(deadline, || {
+                store.update(Keyspace::Durable, &key, value.clone(), expected)
+            })
+            .await
+            {
+                Ok(CasOutcome::Won(rev)) => break Some((record, rev)),
+                Ok(CasOutcome::Lost) => {
+                    match until_deadline(deadline, || store.get(Keyspace::Durable, &key)).await {
+                        Ok(Some(entry)) => {
+                            match SplitProgressRecord::parse(&key, &entry.value, self.fp) {
+                                Ok(fresh) if fresh.epoch == epoch && fresh.owner.is_none() => {
+                                    break Some((fresh, entry.revision));
+                                }
+                                Ok(fresh)
+                                    if fresh.epoch == epoch
+                                        && fresh.owner.as_deref()
+                                            == Some(self.instance.as_str()) =>
+                                {
+                                    record = fresh;
+                                    expected = entry.revision;
+                                }
+                                Ok(_) => {
+                                    self.drop_owned(id, SplitLossReason::Fenced);
+                                    return false;
+                                }
+                                Err(e) => {
+                                    shortfall.fatal(e);
+                                    break None;
+                                }
                             }
                         }
-                    }
-                    Ok(None) => {
-                        self.drop_owned(id, SplitLossReason::Fenced);
-                        return false;
-                    }
-                    Err(e) => {
-                        shortfall.note(format!("reading split {id}"), &e);
-                        None
+                        Ok(None) => {
+                            self.drop_owned(id, SplitLossReason::Fenced);
+                            return false;
+                        }
+                        Err(e) => {
+                            shortfall.note(format!("reading split {id}"), &e);
+                            break None;
+                        }
                     }
                 }
-            }
-            Err(e) => {
-                shortfall.note(format!("releasing split {id}"), &e);
-                None
+                Err(e) => {
+                    shortfall.note(format!("releasing split {id}"), &e);
+                    break None;
+                }
             }
         };
         let released = cleared.is_some();
-        if let Some((record, rev)) = cleared
-            && let Err(e) = self.upsert_progress(id, record, rev)
-        {
-            shortfall.fatal(e);
+        match cleared {
+            Some((record, rev)) => {
+                if let Err(e) = self.upsert_progress(id, record, rev) {
+                    shortfall.fatal(e);
+                }
+            }
+            None => {
+                if let Ok(split) = SplitId::new(id.to_string()) {
+                    shortfall.unreleased.push((split, epoch));
+                }
+            }
         }
         // The lease goes even when the owner stays set: peers then take the
         // split over as expired without waiting out the lease.
         self.owned.remove(id);
         self.note_deleted(Keyspace::Ephemeral, &key);
-        if let Err(e) = until_deadline(deadline, || {
-            store.delete(Keyspace::Ephemeral, &key, Some(lease_rev))
-        })
-        .await
+        let ours = |value: &[u8]| {
+            serde_json::from_slice::<LeaseVal>(value)
+                .is_ok_and(|v| v.owner == self.instance && v.nonce == self.nonce)
+        };
+        if let Err(e) =
+            delete_own(&store, deadline, Keyspace::Ephemeral, &key, lease_rev, ours).await
         {
             shortfall.note(format!("deleting the lease of split {id}"), &e);
         }

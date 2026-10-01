@@ -558,20 +558,19 @@ impl<S: CoordinationStore + Clone> SplitCoordinator for StoreCoordinator<S> {
         let budget = self.config.op_timeout;
         let started = Instant::now();
         let deadline = started + budget;
-        // The task stops writing an eighth of the budget early, so its
-        // reply arrives while this handle still has time to act on it.
-        let task_deadline = started + budget * 7 / 8;
-        // A task re-establishing a broken watch refuses commands at once;
-        // ask again while the budget lasts.
+        // A task re-establishing a broken watch refuses commands between
+        // its attempts; ask again while the budget lasts.
         let reply = loop {
+            // The task stops writing an eighth of what is left early, so its
+            // reply arrives while this handle still has time to act on it.
+            let now = Instant::now();
+            let task_deadline = now + deadline.saturating_duration_since(now) * 7 / 8;
             let reply = self.send_until(deadline, budget, |reply| Command::Depart {
                 deadline: task_deadline,
                 reply,
             });
             match reply {
-                Ok(DepartReply::Refused(_))
-                    if self.task_alive() && started.elapsed() + DEPART_RETRY < budget =>
-                {
+                Ok(DepartReply::Refused(_)) if started.elapsed() + DEPART_RETRY < budget => {
                     std::thread::sleep(DEPART_RETRY);
                 }
                 reply => break reply,
@@ -580,15 +579,15 @@ impl<S: CoordinationStore + Clone> SplitCoordinator for StoreCoordinator<S> {
         // A task that ran the departure writes nothing more, and a gone one
         // cannot; either may leave a direct release work to do. A task that
         // never answered may still be writing, and one would race it.
-        let (result, release_directly) = match reply {
-            Ok(DepartReply::Ran(result)) => {
+        let (result, release_directly, mut unreleased) = match reply {
+            Ok(DepartReply::Ran { result, unreleased }) => {
                 let incomplete = result.is_err();
-                (result, incomplete)
+                (result, incomplete, unreleased)
             }
-            Ok(DepartReply::Refused(e)) => (Err(e), false),
+            Ok(DepartReply::Refused(e)) => (Err(e), false, Vec::new()),
             Err(e) => {
                 let gone = !self.task_alive();
-                (Err(e), gone)
+                (Err(e), gone, Vec::new())
             }
         };
         self.failed = Some((
@@ -603,13 +602,16 @@ impl<S: CoordinationStore + Clone> SplitCoordinator for StoreCoordinator<S> {
             && release_directly
         {
             tracing::warn!(error = %e, "task-path departure failed; releasing directly");
-            let held: Vec<(SplitId, u64)> = running
-                .held
-                .iter()
-                .filter_map(|(id, epoch)| SplitId::new(id.clone()).ok().map(|s| (s, *epoch)))
-                .collect();
-            if !held.is_empty() {
-                self.release_direct(&held, budget.saturating_sub(started.elapsed()));
+            // The task's list covers gains this handle never polled.
+            for (id, epoch) in &running.held {
+                if !unreleased.iter().any(|(s, _)| s.as_str() == id)
+                    && let Ok(split) = SplitId::new(id.clone())
+                {
+                    unreleased.push((split, *epoch));
+                }
+            }
+            if !unreleased.is_empty() {
+                self.release_direct(&unreleased, budget.saturating_sub(started.elapsed()));
             }
         }
         result

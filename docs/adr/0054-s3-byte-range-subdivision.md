@@ -5,7 +5,7 @@ description: "The object-storage planner cuts a large uncompressed object into b
 # ADR-0054 — A large uncompressed object is cut into byte-range splits, and the rest pack as before
 
 - **Status:** accepted
-- **Date:** 2026-09-30
+- **Date:** 2026-10-01
 - **Supersedes:** [ADR-0033](0033-s3-split-packing.md)
 - **Superseded by:** —
 

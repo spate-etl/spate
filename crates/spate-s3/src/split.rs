@@ -519,7 +519,8 @@ impl Packed {
         }
     }
 
-    /// The split's weight: the bytes it owns, at least 1.
+    /// The split's weight: its objects' summed sizes, or its range's length,
+    /// at least 1.
     pub(crate) fn weight(&self) -> u64 {
         match self {
             // Saturating: sizes are remote listing data.
@@ -637,6 +638,19 @@ mod tests {
     }
 
     const MB: u64 = 1024 * 1024;
+
+    /// A target that is not a multiple of 16 rounds the open-cost floor down.
+    #[test]
+    fn the_open_cost_floor_rounds_down() {
+        let target = "1.1MiB".parse::<bytesize::ByteSize>().unwrap().as_u64();
+        assert_ne!(target % 16, 0);
+        let listing: Vec<ObjectEntry> = (0..32).map(|i| entry(&format!("k{i:02}"), 1)).collect();
+        let bins: Vec<usize> = object_bins(&pack(listing, &whole(target)))
+            .iter()
+            .map(Vec::len)
+            .collect();
+        assert_eq!(bins, [16, 16]);
+    }
 
     /// Whole objects land in the same bins whether or not cutting is on,
     /// pinned with literal bins and lookback counts.

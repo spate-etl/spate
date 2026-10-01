@@ -328,10 +328,18 @@ materially more than the same number of short ones. A
 descriptor per range, so its cost also grows with its size divided by
 `split_target_bytes`. At the default target, one 50,000 GiB object plans 800,000
 splits and takes the leader about 362 MB to plan, measured by planning that one
-listing entry in a release build. Only the leader pays it, and only while
-planning, which for an open plan is every replan tick. The coordination store
-holds two records per split, so seeding that object's splits is 1.6 million
-store writes.
+listing entry in a release build. Planning runs on the leader only, once per
+plan and, for an open plan, on every replan tick.
+
+A cut object's splits then stay in the coordination view until the job ends:
+in the leader's view on every store, and in every worker's view on a store
+whose watch is pushed. The view holds about 950 bytes per split, so that
+object's 800,000 splits hold about 758 MB for the job's lifetime, measured by
+building the view's records for 800,000 such splits under a counting
+allocator. The coordination store holds two records per split, so seeding
+them is 1.6 million store writes. Each `reconcile_interval` the reconcile
+listing reads every split record again: every worker does on a store whose
+watch is pushed, and the leader does on a store whose watch is polled.
 
 ## Decoding records
 

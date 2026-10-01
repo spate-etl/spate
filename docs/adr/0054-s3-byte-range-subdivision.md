@@ -77,11 +77,15 @@ doubles per-lane read-ahead memory.
   order.
 - Bad, because each range is a split, and each split adds seeding round trips
   to the coordination store (#639).
-- Bad, because a cut object costs the leader one split per range, so planner
-  memory and coordination-store records grow with `size / target` as well as
-  with object count. At the default 64 MiB target, one 50,000 GiB object plans
-  800,000 splits, about 362 MB of leader memory, and 1.6 million store creates
-  to seed them. No cap bounds the ranges per object.
+- Bad, because a cut object costs one split per range, so planner memory, the
+  coordination view and the coordination store's records grow with
+  `size / target` as well as with object count. At the default 64 MiB target,
+  one 50,000 GiB object plans 800,000 splits. Planning them takes about 362 MB
+  of leader memory, and seeding them takes 1.6 million store creates. They
+  then hold about 758 MB of coordination view for the job's lifetime, in the
+  leader's view on every store and in every worker's view on a store whose
+  watch is pushed, and each reconcile listing reads all of them again. No cap
+  bounds the ranges per object.
 - Bad, because a large object the planner cannot cut, such as a whole-stream
   compressed one, is still read in full by one lane.
 - Neutral, because the framer's delimiter becomes part of the job
@@ -92,7 +96,9 @@ doubles per-lane read-ahead memory.
 `prop_packing_partitions_the_listing_exactly` and
 `prop_small_object_bins_do_not_depend_on_cutting` in
 `crates/spate-s3/src/split.rs` pin the tiling and that other splits do not
-move. `ranges_tiling_an_object_emit_each_record_once` in
+move. `whole_object_bins_are_pinned` and
+`prop_whole_object_packing_matches_the_reference` in the same file hold
+whole-object packing to the packing ADR-0033 describes. `ranges_tiling_an_object_emit_each_record_once` in
 `crates/spate-s3/src/fetch.rs` pins that the ranges of an object deliver each
 record once. `a_large_plain_object_is_read_as_three_byte_ranges` in
 `crates/spate-s3/tests/backfill_pipeline.rs` runs the whole pipeline over a cut
@@ -108,6 +114,11 @@ object.
 - Seeding writes two records per split, a spec and a progress record, so
   800,000 splits are 1.6 million creates, counted in a scratch run against an
   in-process store. Spike-measured, hand-recorded; no committed rig.
+- 800,000 split states built from 222-byte descriptors, the size one range of
+  a 50,000 GiB object encodes to at the 64 MiB target, and inserted into the
+  coordinator's view map under a counting allocator hold 758,353,608 live
+  bytes, 947 per split. Spike-measured during review of #862, hand-recorded; no
+  committed rig.
 
 ## More information
 

@@ -119,11 +119,12 @@ pass can improve on: a replica joining or leaving, splits completing, a
 new plan generation. A replica that joins with nothing claimable is given
 work by the next assignment, not by asking for it.
 
-A departing worker's splits are withheld from reassignment for
-`rebalance_delay` (default 20s) so a pod bounce reclaims its own work
-instead of the fleet churning around it; the window is cancelled the
+A crashed worker's splits are withheld from reassignment for
+`rebalance_delay` (default 20s) so a pod that comes back reclaims its own
+work instead of the fleet churning around it; the window is cancelled the
 moment the instance reappears, so a fast restart costs nothing. Setting it
-to zero reassigns immediately, and is supported.
+to zero reassigns immediately, and is supported. A worker that stops
+gracefully hands its splits back, and peers take them at once.
 
 A bounded job that completes before a transfer lands finishes on the
 instance that claimed it, with zero replay, which for a short job is the

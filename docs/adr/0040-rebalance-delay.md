@@ -1,13 +1,13 @@
 ---
-description: "A departed instance's splits are withheld for a short delay before reassignment, canceled on its return, with zero handled as an immediate, distinct path."
+description: "A departed instance's splits are withheld for a short delay before reassignment, canceled on its return, with zero handled as an immediate, distinct path. Superseded by ADR-0054."
 ---
 
 # ADR-0040 — A departed instance's splits are withheld briefly, and zero is a distinct path
 
-- **Status:** accepted
+- **Status:** superseded
 - **Date:** 2026-07-21 (recorded 2026-08-06 from the decision log)
 - **Supersedes:** —
-- **Superseded by:** —
+- **Superseded by:** [ADR-0054](0054-graceful-departure-not-withheld.md)
 
 ## Context and problem statement
 

@@ -31,6 +31,9 @@ use tokio::sync::mpsc;
 /// so anything above a handful only covers bursts around shutdown.
 const COMMAND_DEPTH: usize = 64;
 
+/// Pause before re-sending a `Depart` the task refused.
+const DEPART_RETRY: Duration = Duration::from_millis(20);
+
 /// A [`SplitCoordinator`] over any [`CoordinationStore`].
 ///
 /// Built with a multi-thread runtime handle (the background task and the
@@ -551,7 +554,22 @@ impl<S: CoordinationStore + Clone> SplitCoordinator for StoreCoordinator<S> {
         }
         let budget = self.config.op_timeout;
         let started = Instant::now();
-        let result = self.command_within(budget, |reply| Command::Depart { reply });
+        // A task re-establishing a broken watch refuses commands as
+        // Retryable at once; ask again while the budget lasts.
+        let result = loop {
+            let remaining = budget.saturating_sub(started.elapsed());
+            let result = self.command_within(remaining, |reply| Command::Depart { reply });
+            match &result {
+                Err(e)
+                    if e.kind == CoordinationErrorKind::Retryable
+                        && self.task_alive()
+                        && started.elapsed() + DEPART_RETRY < budget =>
+                {
+                    std::thread::sleep(DEPART_RETRY);
+                }
+                _ => break result,
+            }
+        };
         let alive = self.task_alive();
         self.failed = Some((
             CoordinationErrorKind::Fatal,

@@ -73,7 +73,7 @@ record appears in the table below.
 | [0037](0037-control-plane-wait-ownership.md) | The driver owns the wait, not the coordination backend | accepted | 2026-07-18 |
 | [0038](0038-leader-computed-sticky-assignment.md) | Leader-computed sticky assignment replaces peer-to-peer work stealing | accepted | 2026-07-21 |
 | [0039](0039-split-revocation-cooperative-then-forced.md) | Split revocation is cooperative first, forced second | accepted | 2026-07-21 |
-| [0040](0040-rebalance-delay.md) | A departed instance's splits are withheld briefly, and zero is a distinct path | accepted | 2026-07-21 |
+| [0040](0040-rebalance-delay.md) | A departed instance's splits are withheld briefly, and zero is a distinct path | superseded | 2026-07-21 |
 | [0041](0041-cancel-a-withdrawn-revocation.md) | A revocation the leader takes back is cancelled, leaving a no-progress timeout behind | accepted | 2026-07-22 |
 | [0042](0042-first-party-load-generator-source.md) | A first-party load generator shipping one named dataset, not a schema language | accepted | 2026-08-08 |
 | [0043](0043-clickhouse-columns-from-the-row-struct.md) | The row struct is the ClickHouse insert column list, replacing configured `columns` | accepted | 2026-08-21 |
@@ -87,6 +87,7 @@ record appears in the table below.
 | [0051](0051-lease-expiry-judged-by-each-observer.md) | Lease expiry may be judged by each observer, and the DynamoDB store does so | accepted | 2026-09-29 |
 | [0052](0052-dynamodb-store-polls-without-streams.md) | The DynamoDB store discovers changes by polling, without Streams | accepted | 2026-09-29 |
 | [0053](0053-one-dynamodb-table-holds-every-job.md) | One operator-provisioned table holds every job, keyed by job and keyspace | accepted | 2026-09-29 |
+| [0054](0054-graceful-departure-not-withheld.md) | A crashed instance's splits are withheld briefly, and a graceful departure's are not | accepted | 2026-10-01 |
 
 ## Related
 

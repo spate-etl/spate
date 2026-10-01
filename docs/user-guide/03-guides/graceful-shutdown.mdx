@@ -55,7 +55,10 @@ Keep `drain_timeout` comfortably **below**
 gap has to absorb what follows it: the pool's one-second backstop, the
 final commit (step 4), the source closing (step 5) and process teardown.
 The commit therefore always runs before SIGKILL. The defaults (25s vs 30s)
-encode this; if you raise one, raise the other.
+encode this; if you raise one, raise the other. A coordinated source's close
+can take up to `coordination.op_timeout` (10s by default) against a slow
+store, which is longer than that gap; size the gap for it where a slow store
+at shutdown is likely.
 :::
 
 ```yaml
@@ -65,8 +68,9 @@ checkpoint:
 
 A SIGKILL mid-drain is still safe for data (nothing uncommitted is lost;
 it replays), but it forfeits the clean commit, so the restart replays more
-than it needed to. A SIGKILL while the source closes costs only time: the
-leases it did not hand back expire, as after a crash.
+than it needed to. A SIGKILL while the source closes costs what a crash costs
+for whatever it had not handed back: those leases expire, and each takeover of
+one of those splits consumes a delivery attempt.
 
 ## Exit codes via `ExitReport`
 

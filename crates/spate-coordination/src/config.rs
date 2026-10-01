@@ -32,7 +32,7 @@ pub struct CoordinationConfig {
     /// Per-store-operation deadline. Default 10s.
     #[serde(with = "humantime_serde")]
     pub op_timeout: Duration,
-    /// Stable identity for fast reclaim after a restart (e.g. the pod
+    /// Stable identity for fast reclaim after a crash and restart (e.g. the pod
     /// name). It must be UNIQUE per live worker; two live processes sharing
     /// an id is detected and Fatal. Default: a random id per run.
     pub instance_id: Option<String>,
@@ -55,9 +55,10 @@ pub struct CoordinationConfig {
     /// up; steady-state operations are not budgeted, and retry on the
     /// next tick and escalate through lease expiry. Default 8.
     pub startup_max_attempts: u32,
-    /// How long the leader withholds a departed instance's splits before
+    /// How long the leader withholds a crashed instance's splits before
     /// reassigning them, so a restarting worker reclaims its own work
-    /// instead of the fleet churning around a bounce. Default 20s.
+    /// instead of the fleet churning around a bounce. Default 20s. A
+    /// graceful departure hands its splits back, and they are not withheld.
     ///
     /// The window is cancelled early when the instance comes back, so a
     /// fast restart costs nothing at all. Setting it to zero reassigns

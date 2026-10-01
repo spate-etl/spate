@@ -1021,10 +1021,11 @@ fn nats_coordinated_backfill_example_covers_the_prefix() {
     assert_clean_departure("worker-e2e-b", &second);
 }
 
-/// Fails when a coordinated run's log shows its hand-back falling back to
-/// direct writes, or its store watches breaking as the process stops.
+/// Fails when a coordinated run's log shows its departure failing or falling
+/// back to direct writes, or its store watches breaking as the process stops.
 fn assert_clean_departure(pod: &str, log: &str) {
     for warn in [
+        "graceful departure failed",
         "releasing directly",
         "re-watching",
         "watch establishment failed",

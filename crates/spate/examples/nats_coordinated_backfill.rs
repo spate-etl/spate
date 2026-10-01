@@ -106,8 +106,9 @@ use std::time::Duration;
 /// lease TTL and the coordinator's lease are both `lease_duration`.
 ///
 /// `instance_id` must be unique per *live* worker and stable across a
-/// restart, so a bounced worker reclaims its own splits inside the
-/// rebalance window: `POD_NAME` is the Kubernetes downward-API spelling.
+/// restart, so a worker that crashed and comes back reclaims its own splits
+/// inside the rebalance window: `POD_NAME` is the Kubernetes downward-API
+/// spelling.
 /// Two live workers claiming one id is detected and fatal.
 ///
 /// The tuning is demo-fast. `lease_duration` defaults to 30s and the NATS

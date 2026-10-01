@@ -525,7 +525,7 @@ Some of those arguments carry more than their names suggest:
 - **`instance_id` must be unique across live workers**, and it defaults to a
   fresh random id per run. Set it to something stable per replica (the pod
   name, the ordinal, whatever your scheduler guarantees) and a restart
-  reclaims its own splits without waiting a lease out. Two live processes
+  after a crash reclaims its own splits without waiting a lease out. Two live processes
   sharing one id is detected and fatal, so a value stable across *replicas*
   is worse than no value at all.
 - **`lease_duration` and the store's TTL must agree**, which is why the example

@@ -69,10 +69,10 @@ pub(crate) enum Command {
     },
     Release {
         splits: Vec<SplitId>,
-        /// Whether this release is a departure from the fleet (scale-down)
-        /// rather than a revocation hand-back. Only a departure that
-        /// empties the working set retires this worker; a revocation of the
-        /// last split keeps it in the fleet. Shutdown sends `Depart`.
+        /// Whether this release is a departure from the fleet rather than a
+        /// revocation hand-back. Only a departure that empties the working
+        /// set retires this worker; a revocation of the last split keeps it
+        /// in the fleet. Shutdown sends `Depart`.
         departure: bool,
         reply: std_mpsc::SyncSender<Result<(), CoordinationError>>,
     },

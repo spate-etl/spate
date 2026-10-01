@@ -245,7 +245,8 @@ impl<S: Source + 'static> PipelineRuntime<S> {
         // onto this runtime via its own handle), admin server, upkeep,
         // signals, the source's coordinator. A caller-owned runtime
         // (`with_io_runtime`) is adopted instead of built; either way this
-        // function shuts it down, after the source has dropped.
+        // function shuts it down, after the source has dropped once the
+        // controller has started.
         let io = match self.io.take() {
             Some(io) => io,
             None => tokio::runtime::Builder::new_multi_thread()

@@ -1,5 +1,5 @@
 ---
-description: "The object-storage planner cuts a large uncompressed object into byte-range splits under a record-ownership rule, keeping ADR-0033's packing for everything else. Supersedes ADR-0033."
+description: "The object-storage planner cuts a large uncompressed object into byte-range splits and packs every other object as before. Supersedes ADR-0033."
 ---
 
 # ADR-0054 — A large uncompressed object is cut into byte-range splits, and the rest pack as before
@@ -77,6 +77,11 @@ doubles per-lane read-ahead memory.
   order.
 - Bad, because each range is a split, and each split adds seeding round trips
   to the coordination store (#639).
+- Bad, because a cut object costs the leader one split per range, so planner
+  memory and coordination-store records grow with `size / target` as well as
+  with object count. At the default 64 MiB target, one 50,000 GiB object plans
+  800,000 splits, about 362 MB of leader memory, and 1.6 million store creates
+  to seed them. No cap bounds the ranges per object.
 - Bad, because a large object the planner cannot cut, such as a whole-stream
   compressed one, is still read in full by one lane.
 - Neutral, because the framer's delimiter becomes part of the job
@@ -92,6 +97,17 @@ move. `ranges_tiling_an_object_emit_each_record_once` in
 record once. `a_large_plain_object_is_read_as_three_byte_ranges` in
 `crates/spate-s3/tests/backfill_pipeline.rs` runs the whole pipeline over a cut
 object.
+
+## Evidence
+
+- One listing entry planned through `S3Planner::plan` in a release build, with
+  a store whose listing reports the object's size: 50,000 GiB at a 64 MiB
+  target gives 800,000 splits in 0.25 s with a 362 MB peak footprint, and the
+  same entry with no delimiter gives one split and 2.5 MB. Spike-measured during
+  review of #862, hand-recorded; no committed rig.
+- Seeding writes two records per split, a spec and a progress record, so
+  800,000 splits are 1.6 million creates, counted in a scratch run against an
+  in-process store. Spike-measured, hand-recorded; no committed rig.
 
 ## More information
 

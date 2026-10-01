@@ -321,11 +321,17 @@ ordinal limit.
 
 The leader holds the **whole listing** in memory for the duration of a plan:
 one entry per object, carrying that object's key and ETag. Packing moves those
-entries into splits rather than copying them, so the keys are held once, except
-that each byte range of a cut object holds its own copy. Peak scales with
-object count *and* key length: a prefix of long keys costs
-materially more than the same number of short ones. Only the leader pays it, and
-only while planning, which for an open plan is every replan tick.
+entries into splits rather than copying them, so the keys are held once. Peak
+scales with object count *and* key length: a prefix of long keys costs
+materially more than the same number of short ones. A
+[cut object](#large-objects-and-byte-ranges) adds one split and one encoded
+descriptor per range, so its cost also grows with its size divided by
+`split_target_bytes`. At the default target, one 50,000 GiB object plans 800,000
+splits and takes the leader about 362 MB to plan, measured by planning that one
+listing entry in a release build. Only the leader pays it, and only while
+planning, which for an open plan is every replan tick. The coordination store
+holds two records per split, so seeding that object's splits is 1.6 million
+store writes.
 
 ## Decoding records
 
@@ -413,8 +419,8 @@ noted per family.
 | Metric | Type | Extra labels | Description |
 |---|---|---|---|
 | `spate_s3_source_objects_listed_total` | counter | | Objects enumerated by the planner's listing. **Leader-only**: only the worker that runs the plan increments it (once per plan run; open plans re-count on every replan tick). |
-| `spate_s3_source_objects_completed_total` | counter | | Objects fully framed and handed to the pipeline by this worker. A byte range counts as one object, so completed over listed can exceed 100%. |
-| `spate_s3_source_objects_remaining` | gauge | | Objects not yet completed across **this worker's currently-held splits** (rises on split gain, falls per completed object, settles on split close). A byte range counts as one object. Fleet totals come from the `spate_coordination_*` split gauges, not from summing this. |
+| `spate_s3_source_objects_completed_total` | counter | | Objects fully framed and handed to the pipeline by this worker. A cut object counts once per range, so completed over listed can exceed 100%. |
+| `spate_s3_source_objects_remaining` | gauge | | Objects not yet completed across **this worker's currently-held splits** (rises on split gain, falls per completed object, settles on split close). A cut object counts once per range. Fleet totals come from the `spate_coordination_*` split gauges, not from summing this. |
 | `spate_s3_source_bytes_read_total` | counter | | Bytes read from the store, as stored (pre-decompression), including the bytes a byte-range split reads around its range and drops. |
 | `spate_s3_source_bytes_decoded_total` | counter | | Bytes after decompression; for a byte-range split, the bytes of the records it owns. Equals `bytes_read` for uncompressed objects read whole; the ratio is the effective compression. |
 | `spate_s3_source_get_retries_total` | counter | | Object GET attempts beyond the first (transient failures, resumed with ranged reads). A rising rate means a flaky store or network; an exhausted attempt budget poisons the split rather than failing the pipeline. |

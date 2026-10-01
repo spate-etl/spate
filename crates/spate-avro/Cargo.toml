@@ -16,14 +16,12 @@ apache-avro = { workspace = true }
 ouroboros = { workspace = true }
 bytes = { workspace = true }
 spate-core = { workspace = true }
-schema_registry_converter = { workspace = true, features = ["futures", "rustls_tls"] }
 reqwest = { workspace = true, features = ["rustls"] }
 rustls = { workspace = true }
 rustls-native-certs = { workspace = true }
 webpki-roots = { workspace = true }
-tower-layer = { workspace = true }
-tower-service = { workspace = true }
 humantime-serde = { workspace = true }
+serde_json = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync", "time"] }
@@ -41,7 +39,6 @@ spate-test-support = { workspace = true, features = ["tls"] }
 http-body-util = { workspace = true }
 hyper = { workspace = true, features = ["http1", "server"] }
 hyper-util = { workspace = true, features = ["http1", "server", "tokio"] }
-serde_json = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net"] }
 

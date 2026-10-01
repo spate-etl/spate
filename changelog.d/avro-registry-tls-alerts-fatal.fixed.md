@@ -5,6 +5,6 @@ TLS handshake with an alert such as `handshake_failure` or `protocol_version`,
 and when client and registry share no protocol version, cipher suite or other
 handshake parameter. The error names the registry URL and the alert or the
 mismatch. In previous versions these were retried without limit while the batch
-was held. Other alerts, such as `internal_error`, stay transient, and so does a
-TLS 1.3 registry's refusal after the handshake of a client that presents no
-certificate.
+was held. A registry that requires a client certificate stops the pipeline as
+well, including a TLS 1.3 registry that refuses the client after the
+handshake. Other alerts, such as `internal_error`, stay transient.

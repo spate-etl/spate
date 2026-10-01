@@ -24,7 +24,7 @@
 use crate::cache::CompiledSchema;
 use crate::datum::AvroDatumDeserializer;
 use crate::deser::{AvroSerdeDeserializer, AvroValueDeserializer, DecoderCore, SchemaSourceMode};
-use crate::registry::{RegistryConfig, Rejection, spawn_fetcher, sr_settings};
+use crate::registry::{RegistryConfig, Rejection, registry_client, spawn_fetcher};
 use apache_avro::Schema;
 use apache_avro::rabin::Rabin;
 use serde::Deserialize;
@@ -308,11 +308,9 @@ impl AvroDeserializerBuilder {
                     root_ca: registry.tls.root_ca.clone(),
                 };
                 let rejection = Rejection::default();
-                let client = Arc::new(sr_settings(&registry, &rejection)?);
-                let display_url: Arc<str> = registry.display_url().into();
+                let client = Arc::new(registry_client(&registry)?);
                 let handle = spawn_fetcher(
                     Arc::clone(&client),
-                    Arc::clone(&display_url),
                     Arc::clone(&rejection),
                     settings.negative_cache_ttl,
                     runtime,
@@ -321,14 +319,7 @@ impl AvroDeserializerBuilder {
                     let subjects = settings.prewarm_subjects.clone();
                     let cache = Arc::clone(&handle.cache);
                     runtime.spawn(async move {
-                        crate::registry::prewarm(
-                            &client,
-                            &subjects,
-                            &cache,
-                            &display_url,
-                            &rejection,
-                        )
-                        .await;
+                        crate::registry::prewarm(&client, &subjects, &cache, &rejection).await;
                     });
                 }
                 SchemaSourceMode::Confluent {

@@ -1,10 +1,11 @@
 //! In-memory [`CoordinationStore`]: full protocol semantics, no
 //! infrastructure.
 //!
-//! Backs the default-CI integration suites and single-process embedding
-//! (several pipeline instances in one process sharing an
-//! `Arc<MemoryStore>`), and doubles as the reference implementation for
-//! custom backends. Ephemeral expiry runs via a lazily spawned sweeper
+//! Backs the default-CI integration suites, a `coordination:` section's
+//! `store: { memory: {} }` (one store per pipeline, shared with nothing), and
+//! single-process embedding (several pipeline instances in one process
+//! sharing an `Arc<MemoryStore>`), and doubles as the reference
+//! implementation for custom backends. Ephemeral expiry runs via a lazily spawned sweeper
 //! task against an injected [`Clock`]. The default is
 //! real wall time ([`new`](MemoryStore::new)), so realistic sub-second lease
 //! tests need no clock plumbing; a frozen clock

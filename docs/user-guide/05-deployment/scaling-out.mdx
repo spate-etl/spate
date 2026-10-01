@@ -40,7 +40,9 @@ Deployment carries a narrow set of guarantees:
   with both fingerprints in the message. The rejection stops a half-upgraded
   fleet from planning the job two different ways.
 - **Every replica points at the same store, under the same job name.** The job
-  name is what separates two coordinated jobs sharing one store.
+  name is what separates two coordinated jobs sharing one store. The
+  in-process store is never shared, so replicas configured with it each run
+  the whole job.
 - **Every live replica has a distinct `instance_id`.** Two live processes
   sharing one is detected and fatal.
 - **Every replica reads the store at the same record schema.** A worker that

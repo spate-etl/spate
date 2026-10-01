@@ -278,6 +278,42 @@ fn concurrent_reads_reach_the_in_flight_budget() {
     );
 }
 
+/// A `coordination:` section selecting the in-process store sets a solo run's
+/// read parallelism: `max_in_flight: 12` over sixteen splits puts twelve reads
+/// in flight, above the default of eight. Regression for #866.
+#[test]
+fn the_memory_store_section_sets_solo_read_parallelism() {
+    let staged = stage(256, 20);
+    let yaml = PipelineYaml::file("s3-request-shape-memory", &staged.data)
+        .source("prefetch_bytes", "8MiB")
+        .source("chunk_bytes", "512KiB")
+        .section("coordination:\n  max_in_flight: 12\n  store: { memory: {} }\n")
+        .build();
+    let (spy_store, spy) = spying_local_store(SpyOptions {
+        gate_depth: 12,
+        ..SpyOptions::default()
+    });
+    let l = launch_customized(
+        &yaml,
+        test_options(),
+        |_| {},
+        move |source, _| line_framer(source).with_store(spy_store),
+    );
+
+    let report = l.run.wait_exit(Duration::from_secs(60)).unwrap().unwrap();
+    assert_eq!(report.state, ExitState::Completed);
+    assert_eq!(
+        sorted(captured_rows(&l.script)),
+        sorted(staged.expected.clone())
+    );
+    assert_eq!(
+        spy.peak_concurrent_gets(),
+        12,
+        "twelve in-flight splits must issue twelve concurrent get_opts calls"
+    );
+    assert_eq!(spy.lists(), 1, "one LIST across twelve lanes");
+}
+
 #[test]
 fn a_final_plan_is_never_re_listed() {
     // `refresh_listing: false` makes the plan final, and a final plan

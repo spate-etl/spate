@@ -34,6 +34,7 @@ Connectors are grouped by role:
 | [JSON](formats/json/README.mdx) | Format (deserializer) | `spate-json` | `json` | `deserializer: { json: ... }` |
 | [NATS JetStream](coordination/nats/README.mdx) | Coordination store | `spate-coordination` | `coordination-nats` | `coordination: { store: { nats: ... } }` |
 | [DynamoDB](coordination/dynamodb/README.mdx) | Coordination store | `spate-coordination` | `coordination-dynamodb` | `coordination: { store: { dynamodb: ... } }` |
+| [In-memory](coordination/README.mdx) | Coordination store (solo) | `spate-coordination` | — (linked by each coordinated source) | `coordination: { store: { memory: {} } }` |
 | [Memory / Capture](memory.mdx) | Test source + sink | `spate-test` | — (separate dev-dependency) | `source: { memory: {} }` / `sink: { capture: {} }` (informational) |
 
 Datagen and Memory / Capture are not for production deployments. Datagen
@@ -42,6 +43,10 @@ dev-dependency. Memory / Capture is dual-role, being neither a production
 source nor a sink, so it lives at the connectors root rather than under
 `sources/` or `sinks/`; Datagen fills the source role only and sits with the
 other sources.
+
+The in-memory coordination store is separate from the Memory / Capture
+connectors. It runs a coordinated source solo, with progress that dies with
+the process.
 
 ## Guarantee notes per connector
 

@@ -91,7 +91,8 @@ owns no framing. The format's framer is wired into the source in code (see
 framer (e.g. `NdjsonFramer::new(max_record_bytes)`), not in this table.
 
 A stale config still carrying `lanes` (read parallelism is the coordinator's
-`max_in_flight`, one data lane per in-flight split) or the source's own
+`max_in_flight`, one data lane per in-flight split; see
+[Read parallelism on a solo run](#read-parallelism-on-a-solo-run)) or the source's own
 `checkpoint:` block (progress lives in the coordination store) fails at load
 with the offending key. The pipeline-level
 [`checkpoint:`](../../../07-reference/configuration.mdx#checkpoint) section is
@@ -257,16 +258,36 @@ store:
 ```rust file=crates/spate/examples/s3_coordinated_backfill.rs region=coordinator title="s3_coordinated_backfill.rs"
 ```
 
-:::warning No coordinator ⇒ solo, with **ephemeral** progress
+:::warning Solo runs have **ephemeral** progress
 
 With no `coordination:` section and no `with_coordinator(...)`, the source
-runs the same coordinated path over an internal in-process store. That is correct and
-self-terminating, but the store dies with the process, so **a restart
-replays the whole prefix** (at-least-once: wasteful, never lossy). A
-startup WARN says exactly this. Durable resume requires a durable
-coordination store, which is the only place split progress lives.
+runs the same coordinated path over an internal in-process store with the
+default tuning. A section naming `store: { memory: {} }` runs that store with
+the section's tuning. Either way the store dies with the process, so **a
+restart replays the whole prefix** (at-least-once: wasteful, never lossy), and
+no other instance shares it: a second instance reads the whole prefix again. A
+startup WARN says this. Durable resume requires a durable coordination store,
+which is the only place split progress lives.
 
 :::
+
+### Read parallelism on a solo run
+
+A solo run reads `max_in_flight` splits at once, one lane each, and the default
+is 8. A lane is pinned to one pipeline thread, so with the default no more than
+8 pipeline threads do source work. Select the in-process store in the
+`coordination:` section to raise it:
+
+```yaml
+coordination:
+  max_in_flight: 48
+  store: { memory: {} }
+```
+
+Read-ahead memory grows with it, in proportion to
+`max_in_flight × prefetch_bytes`. The split
+count still sets how evenly the lanes divide over threads; see
+[Sizing splits against `pipeline.threads`](#sizing-splits-against-pipelinethreads).
 
 ## Split identity and drift
 

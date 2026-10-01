@@ -31,8 +31,9 @@
 //!   [`S3Source::with_coordinator`]) and every replica of the pipeline
 //!   shares the backfill, takes a leader-assigned share, and takes over
 //!   from the dead. Without one the source runs solo over an in-process
-//!   store: correct, but a restart replays the prefix (a startup WARN says
-//!   so). This crate names no concrete backend and has no store feature.
+//!   store with default tuning, and `store: { memory: {} }` runs that store
+//!   with the section's tuning: correct, but a restart replays the prefix (a
+//!   startup WARN says so). This crate names no concrete backend and has no store feature.
 //! - **Bad objects poison their split, not the pipeline.** An object
 //!   deleted after planning, overwritten under its ETag pin, corrupt, or
 //!   unreadable past the retry budget hands its split back (surfaced in

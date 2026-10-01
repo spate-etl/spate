@@ -45,6 +45,21 @@ impl CoordinatorSpec {
             message: e.reason,
         })?;
         match section.store().type_tag() {
+            "memory" => {
+                let MemoryConfig {} = section.store().deserialize_into()?;
+                Ok(CoordinatorSpec {
+                    build: Box::new(move |io, metrics| {
+                        tracing::warn!(
+                            "coordinating over an in-process store: no other process or \
+                             pipeline shares it, its progress is lost when the process exits, \
+                             and a restart replays the whole job"
+                        );
+                        let store = crate::store::memory::MemoryStore::new(tuning.lease_duration);
+                        let coordinator = crate::StoreCoordinator::new(store, tuning, io, metrics)?;
+                        Ok(Box::new(coordinator) as Box<dyn SplitCoordinator>)
+                    }),
+                })
+            }
             #[cfg(feature = "nats")]
             "nats" => {
                 use crate::store::nats::{NatsConfig, NatsStore};
@@ -92,7 +107,8 @@ impl CoordinatorSpec {
             other => Err(ConfigError::Component {
                 context: "coordination.store".into(),
                 message: format!(
-                    "unknown store `{other}`; the known stores are `nats` and `dynamodb`"
+                    "unknown store `{other}`; the known stores are `nats`, `dynamodb` and \
+                     `memory`"
                 ),
             }),
         }
@@ -111,6 +127,11 @@ impl CoordinatorSpec {
         (self.build)(io, metrics)
     }
 }
+
+/// The body of `store: { memory: {} }`, which takes no keys.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MemoryConfig {}
 
 /// The reconcile interval below which the DynamoDB store warns.
 #[cfg(feature = "dynamodb")]
@@ -180,6 +201,43 @@ mod tests {
         let err = error("  store: { etcd: {} }\n");
         assert!(err.starts_with("coordination.store"), "{err}");
         assert!(err.contains("etcd"), "{err}");
+        assert!(err.contains("`memory`"), "{err}");
+    }
+
+    /// `memory: {}` and a bare `memory:` both build the in-process store, which
+    /// warns at build that nothing outside the process shares it. Regression
+    /// for #866.
+    #[test]
+    fn builds_a_memory_coordinator_and_warns() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        for store in ["  store: { memory: {} }\n", "  store:\n    memory:\n"] {
+            let body = format!("  max_in_flight: 12\n{store}");
+            let spec = CoordinatorSpec::from_section(&section(&body))
+                .unwrap_or_else(|e| panic!("{store}: {e}"));
+            let lines = spate_test::capture_logs(tracing::Level::WARN, || {
+                spec.build(rt.handle().clone(), None).unwrap();
+            });
+            assert!(
+                lines.iter().any(|l| l.contains("in-process store")),
+                "{store}: {lines:?}"
+            );
+            // The e2e suites read this phrase's absence as "a durable store ran".
+            assert!(
+                !lines.iter().any(|l| l.contains("no coordinator injected")),
+                "{lines:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn memory_store_keys_are_rejected_with_the_store_path() {
+        let err = error("  store: { memory: { job: j } }\n");
+        assert!(err.starts_with("coordination.store.memory"), "{err}");
+        assert!(err.contains("job"), "{err}");
     }
 
     #[test]

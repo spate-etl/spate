@@ -589,6 +589,128 @@ async fn a_schema_that_is_not_avro_poisons_the_id() {
     );
 }
 
+/// A pre-warmed subject whose schema the registry types as other than Avro is
+/// not cached, so its id is fetched and poisoned on first use.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn prewarm_skips_a_schema_that_is_not_avro() {
+    let stub = StubRegistry::default();
+    let json =
+        serde_json::json!({ "schema": r#"{"type":"string"}"#, "schemaType": "JSON", "id": 79 })
+            .to_string();
+    stub.script("/subjects/json-value/versions/latest", 200, &json, 0);
+    stub.script("/schemas/ids/79", 200, &json, 0);
+    let addr = stub.clone().serve().await;
+    let mut cfg = settings(addr, Duration::from_secs(30));
+    // Subjects are pre-warmed in order, so a request for the second subject
+    // means the first has been handled. The second answers 404.
+    cfg.prewarm_subjects = vec!["json-value".into(), "sentinel-value".into()];
+    let builder =
+        AvroDeserializerBuilder::from_settings(&cfg, &tokio::runtime::Handle::current()).unwrap();
+    let mut deser = builder.build_value().unwrap();
+    let hits = stub.clone();
+    tokio::task::spawn_blocking(move || {
+        spate_test::wait_until(
+            Duration::from_secs(10),
+            "the pre-warm reaches the second subject",
+            || hits.path_hits("/subjects/sentinel-value/versions/latest") > 0,
+        );
+    })
+    .await
+    .unwrap();
+    // Confluent framing for id 79, then the Avro string "a".
+    let mut payload = vec![0x00];
+    payload.extend_from_slice(&79u32.to_be_bytes());
+    payload.extend_from_slice(&[0x02, b'a']);
+    let result = tokio::task::spawn_blocking(move || {
+        let mut out = Collected(Vec::new());
+        drive_until_ready(&mut deser, &payload, &mut out).map(|()| out.0.len())
+    })
+    .await
+    .unwrap();
+    assert!(
+        matches!(&result, Err(DeserError::SchemaUnavailable { reason }) if reason.contains("JSON")),
+        "{result:?}"
+    );
+}
+
+/// The target and `Authorization` headers of each request a stub received.
+type Seen = Arc<Mutex<Vec<(String, Vec<String>)>>>;
+
+/// Serves `SCHEMA_V1` to every request and records each request's target and
+/// `Authorization` headers.
+async fn serve_recording() -> (std::net::SocketAddr, Seen) {
+    let seen = Seen::default();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let record = Arc::clone(&seen);
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let record = Arc::clone(&record);
+            tokio::spawn(async move {
+                let service = service_fn(move |req: Request<hyper::body::Incoming>| {
+                    let record = Arc::clone(&record);
+                    async move {
+                        let auth = req
+                            .headers()
+                            .get_all(hyper::header::AUTHORIZATION)
+                            .iter()
+                            .map(|v| v.to_str().unwrap().to_owned())
+                            .collect();
+                        let target = req
+                            .uri()
+                            .path_and_query()
+                            .map(ToString::to_string)
+                            .unwrap_or_default();
+                        record.lock().unwrap().push((target, auth));
+                        Ok::<_, std::convert::Infallible>(Response::new(Full::new(Bytes::from(
+                            schema_body(SCHEMA_V1),
+                        ))))
+                    }
+                });
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
+                    .await;
+            });
+        }
+    });
+    (addr, seen)
+}
+
+/// The by-id fetch sends `registry.username`/`password`, or the URL userinfo,
+/// as basic auth.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fetch_sends_basic_auth() {
+    for (userinfo, username, expected) in [
+        ("", Some("svc"), "Basic c3ZjOmh1bnRlcjI="), // svc:hunter2
+        ("urluser:urlsecret@", None, "Basic dXJsdXNlcjp1cmxzZWNyZXQ="), // urluser:urlsecret
+    ] {
+        let (addr, seen) = serve_recording().await;
+        let mut cfg = settings_at(format!("http://{userinfo}{addr}"), Duration::from_secs(30));
+        let registry = cfg.registry.as_mut().unwrap();
+        registry.username = username.map(Into::into);
+        registry.password = username.map(|_| "hunter2".into());
+        let builder =
+            AvroDeserializerBuilder::from_settings(&cfg, &tokio::runtime::Handle::current())
+                .unwrap();
+        let mut deser = builder.build_value().unwrap();
+        let payload = confluent_payload(5, 1);
+        tokio::task::spawn_blocking(move || {
+            let mut out = Collected(Vec::new());
+            drive_until_ready(&mut deser, &payload, &mut out)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            [(
+                "/schemas/ids/5?deleted=true".to_owned(),
+                vec![expected.to_owned()]
+            )]
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Registry rejections that stop the pipeline
 // ---------------------------------------------------------------------------

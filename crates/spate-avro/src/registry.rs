@@ -720,7 +720,12 @@ mod tests {
     /// fails at startup without echoing the URL.
     #[test]
     fn an_unusable_url_fails() {
-        for url in ["not a url", "localhost:8081", "ftp://user:secret@sr"] {
+        for url in [
+            "not a url",
+            "https://user:secret@sr:99999",
+            "localhost:8081",
+            "ftp://user:secret@sr",
+        ] {
             let err = Endpoint::new(&config(url, None))
                 .err()
                 .expect("the URL is rejected")
@@ -815,6 +820,7 @@ mod tests {
         let reason =
             rejected(fetch(&config(&url, Some(&registry.write(dir.path()))), vec![]).await);
         assert!(reason.contains("CertificateRequired"), "{reason}");
+        assert!(reason.contains("requires a client certificate"), "{reason}");
     }
 
     #[cfg(not(any(target_vendor = "apple", windows, target_os = "android")))]

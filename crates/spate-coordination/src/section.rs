@@ -204,9 +204,9 @@ mod tests {
         assert!(err.contains("`memory`"), "{err}");
     }
 
-    /// `memory: {}` and a bare `memory:` both build the in-process store, which
-    /// warns at build that nothing outside the process shares it. Regression
-    /// for #866.
+    /// `memory: {}` and a bare `memory:` both build the in-process store with
+    /// the section's `lease_duration` as its TTL, and warn at build that no
+    /// other process shares it. Regression for #866.
     #[test]
     fn builds_a_memory_coordinator_and_warns() {
         let rt = tokio::runtime::Builder::new_multi_thread()
@@ -215,7 +215,9 @@ mod tests {
             .build()
             .unwrap();
         for store in ["  store: { memory: {} }\n", "  store:\n    memory:\n"] {
-            let body = format!("  max_in_flight: 12\n{store}");
+            // StoreCoordinator::new rejects a store TTL that differs from
+            // lease_duration, and 20s is not the default.
+            let body = format!("  lease_duration: 20s\n{store}");
             let spec = CoordinatorSpec::from_section(&section(&body))
                 .unwrap_or_else(|e| panic!("{store}: {e}"));
             let lines = spate_test::capture_logs(tracing::Level::WARN, || {

@@ -39,9 +39,10 @@ run's tuning in the file with the same keys a durable store takes, and keeps
 `store: { memory: {} }` builds a fresh in-process store for the pipeline and a
 `StoreCoordinator` over it with the section's tuning. Building it logs a WARN
 that no other process or pipeline shares the store and that a restart replays
-the whole job. No tuning key is rejected. The store needs no crate feature,
-unlike the new-store rule in ADR-0049, because `spate-coordination` links it
-unconditionally for the solo fallback.
+the whole job. No tuning key is rejected. ADR-0049 gives a new store a crate
+feature so a build links only the backends it selects. This store is already
+linked unconditionally for the solo fallback, so it gets no feature, and
+ADR-0049's decision stands unchanged.
 
 The store-less section was rejected because a deployment whose `store:` was
 dropped would run every instance solo over the whole input, with only a log
@@ -75,6 +76,7 @@ Code-only tuning is what the change replaces.
 
 ## More information
 
+- Landed in #868.
 - Requested in #866.
 - [ADR-0049](0049-coordination-section-in-the-pipeline-config.md) defines the
   section, and [ADR-0032](0032-s3-always-coordinated.md) the solo fallback this

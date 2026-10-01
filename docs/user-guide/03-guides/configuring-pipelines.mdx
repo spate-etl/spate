@@ -74,8 +74,8 @@ These top-level sections belong to the framework:
   hysteresis: `max_inflight_bytes`, `high_ratio`, `low_ratio`, `min_pause`.
 - **`metrics`** — exporter selection and observability knobs: `exporter`,
   `per_partition_detail`, `e2e_basis`.
-- **`coordination`** — the store a coordinated source's instances share and
-  the coordinator's tuning: `store`, `instance_id`, `lease_duration`,
+- **`coordination`** — the store a coordinated source's instances share, or
+  the in-process store of a solo run, and the coordinator's tuning: `store`, `instance_id`, `lease_duration`,
   `max_in_flight` and the rest
   ([reference](../07-reference/configuration.mdx#coordination)).
 

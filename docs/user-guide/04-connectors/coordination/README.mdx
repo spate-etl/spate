@@ -1,5 +1,5 @@
 ---
-description: "Coordination stores back a broker-less source's scale-out: NATS JetStream or DynamoDB for production, and an in-memory store for development and tests."
+description: "Coordination stores back a broker-less source's scale-out: NATS JetStream or DynamoDB for production, and an in-memory store for solo runs and tests."
 ---
 
 # Coordination stores
@@ -15,7 +15,7 @@ the stores below.
 |---|---|---|---|
 | [NATS JetStream](nats/README.mdx) | `nats` | `coordination-nats` | The production backend. Two KV buckets per job; leases ride per-message age limits. |
 | [DynamoDB](dynamodb/README.mdx) | `dynamodb` | `coordination-dynamodb` | One table, no servers to run. Watches poll, and each worker judges lease expiry on its own clock. |
-| In-memory | none | `coordination` | A process-local store. Correct and self-terminating, but progress dies with the process. A coordinated source runs solo over one when the pipeline has no `coordination:` section; tests build one in code to share between instances in one process. |
+| In-memory | `memory` | none for the section; `coordination` to build one in code | A process-local store, never shared between processes. Correct and self-terminating, but progress dies with the process. A coordinated source runs solo over one when the pipeline has no `coordination:` section; `store: { memory: {} }` runs it with the section's tuning, such as `max_in_flight`. Its body takes no keys. Tests build one in code to share between instances in one process. |
 
 A store is selected under `store:` in the pipeline's
 [`coordination:` section](../../07-reference/configuration.mdx#coordination),

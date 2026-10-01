@@ -255,8 +255,11 @@ connector end-to-end.
 
 Optional. The coordinator of a [coordinated source](../02-concepts/07-source-coordination.mdx):
 the store its instances share, and the coordinator's tuning. Without the
-section a coordinated source runs solo over an in-process store, and set on a
-source that does not coordinate it fails startup. These keys are checked when
+section a coordinated source runs solo over an in-process store with these
+defaults. A section that selects the
+[in-process store](../04-connectors/coordination/README.mdx) runs solo with its
+own tuning, and no other process shares that store. Set on a source that does
+not coordinate, the section fails startup. These keys are checked when
 the pipeline starts, before the source opens and before the pipeline threads
 run.
 

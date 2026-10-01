@@ -149,8 +149,9 @@ impl S3Source {
     /// pipeline opens the source, and conflicts with a `coordination:`
     /// section in the pipeline config.
     ///
-    /// Without either the source runs **solo** over an in-process store:
-    /// correct and self-terminating, but progress is ephemeral. A restart
+    /// Without either the source runs **solo** over an in-process store with
+    /// default tuning; a section naming `store: { memory: {} }` runs it with
+    /// the section's tuning. Either way progress is ephemeral, and a restart
     /// replays the whole prefix (a startup WARN says so).
     #[must_use]
     pub fn with_coordinator(mut self, coordinator: Box<dyn SplitCoordinator>) -> S3Source {

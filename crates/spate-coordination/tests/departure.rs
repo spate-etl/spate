@@ -32,10 +32,11 @@ enum Op {
 /// A [`MemoryStore`] a test can take down, wedge, slow, or fail on chosen
 /// keys.
 ///
-/// Down: every call fails Retryable and every live watch breaks. Wedged:
-/// every call but `watch` pends. Latency: every such call first waits that
-/// many milliseconds. Fatal: a listed primitive on a listed key fails
-/// Fatal. Plan lost: the plan record's update loses its CAS and its read
+/// Down: every call fails Retryable; `go_down` also breaks every live
+/// watch. Wedged: every call but `watch` pends. Latency: every such call first waits that
+/// many milliseconds. Fatal: the next listed primitive on a listed key
+/// fails Fatal. Ambiguous: a listed key's next update applies, then fails
+/// Retryable. Plan lost: the plan record's update loses its CAS and its read
 /// fails Retryable.
 #[derive(Clone)]
 struct FaultStore {
@@ -44,6 +45,7 @@ struct FaultStore {
     wedged: Arc<AtomicBool>,
     latency_ms: Arc<AtomicU64>,
     fatal: Arc<Mutex<Vec<(Op, Keyspace, String)>>>,
+    ambiguous: Arc<Mutex<Vec<(Keyspace, String)>>>,
     plan_lost: Arc<AtomicBool>,
     plan_refused: Arc<AtomicU64>,
     refused_watches: Arc<AtomicU64>,
@@ -58,6 +60,7 @@ impl FaultStore {
             wedged: Arc::default(),
             latency_ms: Arc::default(),
             fatal: Arc::default(),
+            ambiguous: Arc::default(),
             plan_lost: Arc::default(),
             plan_refused: Arc::default(),
             refused_watches: Arc::default(),
@@ -84,11 +87,12 @@ impl FaultStore {
         if self.down.load(Ordering::SeqCst) {
             return Err(Self::unreachable());
         }
-        let fatal = self.fatal.lock().unwrap();
-        if fatal
+        let mut fatal = self.fatal.lock().unwrap();
+        if let Some(i) = fatal
             .iter()
-            .any(|(o, k, name)| *o == op && *k == ks && name == key)
+            .position(|(o, k, name)| *o == op && *k == ks && name == key)
         {
+            fatal.remove(i);
             return Err(StoreError::Fatal(format!("injected: {key} refused")));
         }
         Ok(())
@@ -99,6 +103,22 @@ impl FaultStore {
         for tx in self.breakers.lock().unwrap().drain(..) {
             let _ = tx.send(Err(Self::unreachable()));
         }
+    }
+
+    /// Split records, out of `keys`, that still name an owner.
+    fn owned<'a>(&self, rt: &tokio::runtime::Runtime, keys: &[&'a str]) -> Vec<&'a str> {
+        keys.iter()
+            .copied()
+            .filter(|key| {
+                let entry = rt
+                    .block_on(self.inner.get(Keyspace::Durable, key))
+                    .expect("read the store")
+                    .expect("the split record stays");
+                let record: serde_json::Value =
+                    serde_json::from_slice(&entry.value).expect("a JSON split record");
+                !record["owner"].is_null()
+            })
+            .collect()
     }
 
     /// Keys of `ks` that still exist, out of `keys`.
@@ -149,7 +169,16 @@ impl CoordinationStore for FaultStore {
         if self.plan_lost(ks, key) {
             return Ok(CasOutcome::Lost);
         }
-        self.inner.update(ks, key, value, expected).await
+        let outcome = self.inner.update(ks, key, value, expected).await?;
+        let mut ambiguous = self.ambiguous.lock().unwrap();
+        if let Some(i) = ambiguous
+            .iter()
+            .position(|(k, name)| *k == ks && name == key)
+        {
+            ambiguous.remove(i);
+            return Err(StoreError::Retryable("injected: reply lost".into()));
+        }
+        Ok(outcome)
     }
 
     async fn get(&self, ks: Keyspace, key: &str) -> Result<Option<Entry>, StoreError> {
@@ -350,6 +379,7 @@ fn a_departure_over_briefly_failing_writes_hands_back_everything() {
     let keys = ["leader", "worker.worker-a", "split.p0", "split.p1"];
     let left = store.present(&rt, Keyspace::Ephemeral, &keys);
     assert!(left.is_empty(), "depart left {left:?}");
+    assert!(store.owned(&rt, &["split.p0", "split.p1"]).is_empty());
 }
 
 /// A departure over a store that fails for longer than the departure's
@@ -425,4 +455,71 @@ fn a_drop_over_a_wedged_store_returns_within_op_timeout() {
         took < budget * 2,
         "drop took {took:?} against a budget of {budget:?}"
     );
+}
+
+/// A release write that applies but loses its reply still leaves no lease
+/// and no owner: the retry loses its CAS, and the record read back shows
+/// the owner already cleared.
+#[test]
+fn an_ambiguous_release_write_leaves_no_lease() {
+    let rt = runtime();
+    let store = FaultStore::new(LEASE);
+    let mut a = holding(&rt, &store, config_for(LEASE, Some("worker-a")), &["a0"]);
+
+    store
+        .ambiguous
+        .lock()
+        .unwrap()
+        .push((Keyspace::Durable, "split.a0".to_string()));
+    let result = a.depart(&[]);
+
+    assert!(result.is_ok(), "{result:?}");
+    let left = store.present(&rt, Keyspace::Ephemeral, &["split.a0", "worker.worker-a"]);
+    assert!(left.is_empty(), "depart left {left:?}");
+    assert!(store.owned(&rt, &["split.a0"]).is_empty());
+}
+
+/// A departure the task could not finish hands the rest back by direct
+/// writes: the task's owner clear fails, and only the handle's direct
+/// release, which reads the record first, can clear it afterwards.
+#[test]
+fn an_incomplete_departure_releases_directly() {
+    let rt = runtime();
+    let store = FaultStore::new(LEASE);
+    let mut a = holding(&rt, &store, config_for(LEASE, Some("worker-a")), &["i0"]);
+
+    store
+        .fatal
+        .lock()
+        .unwrap()
+        .push((Op::Update, Keyspace::Durable, "split.i0".to_string()));
+    assert!(a.depart(&[]).is_err(), "the task could not clear the owner");
+
+    assert!(store.owned(&rt, &["split.i0"]).is_empty());
+    assert!(
+        store
+            .present(&rt, Keyspace::Ephemeral, &["split.i0"])
+            .is_empty()
+    );
+}
+
+/// A store that answers every call in a few tens of milliseconds still lets
+/// a departure of several splits hand everything back.
+#[test]
+fn a_departure_over_a_slow_store_hands_back_everything() {
+    // A 15s lease scales `op_timeout` to 2s.
+    let lease = Duration::from_secs(15);
+    let rt = runtime();
+    let store = FaultStore::new(lease);
+    let ids = ["s0", "s1", "s2", "s3", "s4", "s5", "s6"];
+    let mut a = holding(&rt, &store, config_for(lease, Some("worker-a")), &ids);
+
+    store.latency_ms.store(80, Ordering::SeqCst);
+    let result = a.depart(&[]);
+    store.latency_ms.store(0, Ordering::SeqCst);
+
+    assert!(result.is_ok(), "{result:?}");
+    let keys = ["leader", "worker.worker-a", "split.s0", "split.s6"];
+    let left = store.present(&rt, Keyspace::Ephemeral, &keys);
+    assert!(left.is_empty(), "depart left {left:?}");
 }

@@ -11,9 +11,9 @@
 use crate::config::CoordinationConfig;
 use crate::error::fatal;
 use crate::records::{self, LeaseVal, SplitProgressRecord};
-use crate::store::metered::{Metered, RetryWindow};
+use crate::store::metered::Metered;
 use crate::store::{CoordinationStore, Keyspace, WatchMode};
-use crate::task::{Command, Task, TaskEvent};
+use crate::task::{Command, DepartReply, Task, TaskEvent};
 use spate_core::clock::tokio::{Clock, SystemClock};
 use spate_core::coordination::ControlWaker;
 use spate_core::coordination::{
@@ -65,8 +65,6 @@ struct Running {
     /// fallback works from. The epoch pins the tenancy: a direct release must
     /// never clear a record a same-named restart has since reclaimed.
     held: BTreeMap<String, u64>,
-    /// Opened by `depart`, so the task's store retries transient failures.
-    retry: RetryWindow,
 }
 
 impl<S: CoordinationStore + Clone> std::fmt::Debug for StoreCoordinator<S> {
@@ -207,17 +205,18 @@ impl<S: CoordinationStore + Clone> StoreCoordinator<S> {
         build: impl FnOnce(std_mpsc::SyncSender<Result<(), CoordinationError>>) -> Command,
     ) -> Result<(), CoordinationError> {
         let budget = self.config.op_timeout * 3;
-        self.command_until(Instant::now() + budget, budget, build)
+        self.send_until(Instant::now() + budget, budget, build)?
     }
 
-    /// Send a command and wait for its reply until `deadline_at`; a timeout
-    /// reports `budget` as the wait it exceeded.
-    fn command_until(
+    /// Send a command and wait for its reply until `deadline_at`. `Err`
+    /// means no reply came; a timeout reports `budget` as the wait it
+    /// exceeded.
+    fn send_until<R>(
         &mut self,
         deadline_at: Instant,
         budget: Duration,
-        build: impl FnOnce(std_mpsc::SyncSender<Result<(), CoordinationError>>) -> Command,
-    ) -> Result<(), CoordinationError> {
+        build: impl FnOnce(std_mpsc::SyncSender<R>) -> Command,
+    ) -> Result<R, CoordinationError> {
         self.check_failed()?;
         let Some(running) = &self.running else {
             return Err(fatal("coordinator used before start"));
@@ -251,7 +250,7 @@ impl<S: CoordinationStore + Clone> StoreCoordinator<S> {
         // store surfaces as Retryable, not a hung pipeline.
         let remaining = deadline_at.saturating_duration_since(Instant::now());
         match reply_rx.recv_timeout(remaining) {
-            Ok(result) => result,
+            Ok(reply) => Ok(reply),
             Err(std_mpsc::RecvTimeoutError::Timeout) => Err(CoordinationError::new(
                 CoordinationErrorKind::Retryable,
                 format!(
@@ -393,9 +392,7 @@ impl<S: CoordinationStore + Clone> SplitCoordinator for StoreCoordinator<S> {
         }
         // The decorator applies the per-op deadline and the store-op
         // latency histograms to every primitive in one place.
-        let retry = RetryWindow::default();
-        let store = Metered::new(self.store.clone(), self.config.op_timeout, metrics.clone())
-            .with_retry_window(retry.clone());
+        let store = Metered::new(self.store.clone(), self.config.op_timeout, metrics.clone());
         let task = Task::new(
             store,
             self.config.clone(),
@@ -417,7 +414,6 @@ impl<S: CoordinationStore + Clone> SplitCoordinator for StoreCoordinator<S> {
             events: event_rx,
             task: join,
             held: BTreeMap::new(),
-            retry,
         });
         Ok(())
     }
@@ -562,46 +558,39 @@ impl<S: CoordinationStore + Clone> SplitCoordinator for StoreCoordinator<S> {
         let budget = self.config.op_timeout;
         let started = Instant::now();
         let deadline = started + budget;
-        // The store stops retrying a quarter of the budget early, so the
-        // task can still reply before this handle gives up on it.
-        if let Some(running) = &self.running {
-            running.retry.open_until(started + budget * 3 / 4);
-        }
-        // A task re-establishing a broken watch refuses commands as
-        // Retryable at once; ask again while the budget lasts.
-        let result = loop {
-            let result = self.command_until(deadline, budget, |reply| Command::Depart { reply });
-            match &result {
-                Err(e)
-                    if e.kind == CoordinationErrorKind::Retryable
-                        && self.task_alive()
-                        && started.elapsed() + DEPART_RETRY < budget =>
+        // The task stops writing an eighth of the budget early, so its
+        // reply arrives while this handle still has time to act on it.
+        let task_deadline = started + budget * 7 / 8;
+        // A task re-establishing a broken watch refuses commands at once;
+        // ask again while the budget lasts.
+        let reply = loop {
+            let reply = self.send_until(deadline, budget, |reply| Command::Depart {
+                deadline: task_deadline,
+                reply,
+            });
+            match reply {
+                Ok(DepartReply::Refused(_))
+                    if self.task_alive() && started.elapsed() + DEPART_RETRY < budget =>
                 {
                     std::thread::sleep(DEPART_RETRY);
                 }
-                _ => break result,
+                reply => break reply,
             }
         };
-        // The task counts a write the store kept refusing as handed back;
-        // the store's window says whether one ran out.
-        let result = match result {
-            Ok(())
-                if self
-                    .running
-                    .as_ref()
-                    .is_some_and(|running| running.retry.exhausted()) =>
-            {
-                Err(CoordinationError::new(
-                    CoordinationErrorKind::Retryable,
-                    format!(
-                        "the store kept failing for the departure's {budget:?}; what was not \
-                         handed back expires"
-                    ),
-                ))
+        // A task that ran the departure writes nothing more, and a gone one
+        // cannot; either may leave a direct release work to do. A task that
+        // never answered may still be writing, and one would race it.
+        let (result, release_directly) = match reply {
+            Ok(DepartReply::Ran(result)) => {
+                let incomplete = result.is_err();
+                (result, incomplete)
             }
-            other => other,
+            Ok(DepartReply::Refused(e)) => (Err(e), false),
+            Err(e) => {
+                let gone = !self.task_alive();
+                (Err(e), gone)
+            }
         };
-        let alive = self.task_alive();
         self.failed = Some((
             CoordinationErrorKind::Fatal,
             "the coordinator has departed".into(),
@@ -610,10 +599,8 @@ impl<S: CoordinationStore + Clone> SplitCoordinator for StoreCoordinator<S> {
             return result;
         };
         running.task.abort();
-        // A task still running when the budget ran out may yet write, so a
-        // direct release would race it; only a gone task gets one.
         if let Err(e) = &result
-            && !alive
+            && release_directly
         {
             tracing::warn!(error = %e, "task-path departure failed; releasing directly");
             let held: Vec<(SplitId, u64)> = running

@@ -2,17 +2,25 @@
 //! rejects while the client reconnects after startup.
 
 use crate::store::StoreError;
-use async_nats::{ConnectErrorKind, Server, Statistics};
+use async_nats::{ConnectErrorKind, Server, ServerAddr, Statistics};
 use spate_core::error::TLS_REJECTION_ALERTS;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, OnceLock};
 
-/// The rejection the reconnecting client last met on every server, stamped
-/// with the client's connect count at the time.
+/// The rejection the reconnecting client met on every server since its last
+/// successful connect, stamped with the client's connect count.
 #[derive(Default)]
 pub(super) struct Rejection {
-    record: Mutex<Option<(String, u64)>>,
+    state: Mutex<State>,
     stats: OnceLock<Arc<Statistics>>,
+}
+
+#[derive(Default)]
+struct State {
+    record: Option<(String, u64)>,
+    /// The connect count, and each server's `failed_attempts`, at the first
+    /// pool observed after that connect.
+    baseline: Option<(u64, Vec<(ServerAddr, usize)>)>,
 }
 
 impl Rejection {
@@ -21,31 +29,50 @@ impl Rejection {
         let _ = self.stats.set(client.statistics());
     }
 
-    /// Records the pool's rejection when every server's latest attempt was
-    /// one, and clears the record otherwise.
+    /// Records the pool's rejection when every server has failed since the
+    /// last successful connect and its latest failure was a rejection, and
+    /// clears the record otherwise.
     ///
-    /// A discovered server that has never been reached and holds no error is
-    /// left out, since an address that does not resolve never records one.
+    /// async-nats clears a server's `last_error` only when that server
+    /// connects, so a failure counts only once `failed_attempts` passes the
+    /// baseline.
     pub(super) fn observe(&self, pool: &[Server]) {
         let Some(stats) = self.stats.get() else {
             return;
         };
+        let connects = stats.connects.load(Ordering::Relaxed);
+        let mut state = self.state.lock().expect("rejection state poisoned");
+        let baseline = match &state.baseline {
+            Some((at, baseline)) if *at == connects => baseline,
+            _ => {
+                let counts = pool
+                    .iter()
+                    .map(|s| (s.addr.clone(), s.failed_attempts))
+                    .collect();
+                *state = State {
+                    record: None,
+                    baseline: Some((connects, counts)),
+                };
+                return;
+            }
+        };
         let mut reasons = Vec::new();
         let mut rejected = true;
         for server in pool {
+            let before = baseline
+                .iter()
+                .find(|(addr, _)| *addr == server.addr)
+                .map_or(0, |(_, count)| *count);
             match server.last_error.as_deref() {
-                Some(error) if rejection(error) => {
+                Some(error) if server.failed_attempts > before && rejection(error) => {
                     if !reasons.contains(&error) {
                         reasons.push(error);
                     }
                 }
-                None if server.is_discovered && !server.did_connect => {}
                 _ => rejected = false,
             }
         }
-        let record = (rejected && !reasons.is_empty())
-            .then(|| (reasons.join("; "), stats.connects.load(Ordering::Relaxed)));
-        *self.record.lock().expect("rejection record poisoned") = record;
+        state.record = (rejected && !reasons.is_empty()).then(|| (reasons.join("; "), connects));
     }
 
     /// Fatal while `client` is disconnected and no connection has succeeded
@@ -58,7 +85,7 @@ impl Rejection {
             return Ok(());
         }
         let connects = client.statistics().connects.load(Ordering::Relaxed);
-        match &*self.record.lock().expect("rejection record poisoned") {
+        match &self.state.lock().expect("rejection state poisoned").record {
             Some((reason, at)) if *at == connects => Err(StoreError::Fatal(format!(
                 "reconnecting to NATS: every server rejected the connection: {reason}"
             ))),
@@ -97,8 +124,8 @@ mod tests {
     use crate::store::nats::NatsConfig;
     use crate::store::nats::test_tls::{INFO_REQUIRING_TLS, TestCa, serve_nats};
     use crate::store::nats::tests::serve_authorization_violation;
+    use async_nats::ConnectError;
     use async_nats::rustls::{self, AlertDescription, CertificateError, PeerIncompatible};
-    use async_nats::{ConnectError, ServerAddr};
     use std::time::Duration;
 
     fn io_error(tls: rustls::Error) -> String {
@@ -170,41 +197,41 @@ mod tests {
         }
     }
 
-    fn server(port: u16, last_error: Option<String>) -> Server {
+    fn server(port: u16, failed_attempts: usize, last_error: Option<String>) -> Server {
         Server {
-            addr: format!("nats://127.0.0.1:{port}")
-                .parse::<ServerAddr>()
-                .unwrap(),
-            failed_attempts: usize::from(last_error.is_some()),
+            addr: format!("nats://127.0.0.1:{port}").parse().unwrap(),
+            failed_attempts,
             did_connect: false,
             is_discovered: false,
             last_error,
         }
     }
 
-    fn attached(connects: u64) -> Rejection {
+    fn attached(connects: u64) -> (Rejection, Arc<Statistics>) {
         let rejection = Rejection::default();
         let stats = Arc::new(Statistics::default());
         stats.connects.store(connects, Ordering::Relaxed);
-        rejection.stats.set(stats).unwrap();
-        rejection
+        rejection.stats.set(Arc::clone(&stats)).unwrap();
+        (rejection, stats)
     }
 
     fn recorded(rejection: &Rejection) -> Option<(String, u64)> {
-        rejection.record.lock().unwrap().clone()
+        rejection.state.lock().unwrap().record.clone()
     }
 
-    /// A pool whose every server last met a rejection is recorded with the
-    /// connect count; one server without a rejection clears it.
+    /// A pool whose every server has failed with a rejection since the
+    /// baseline is recorded with the connect count; a server that timed out
+    /// or has not failed since clears it.
     #[test]
     fn observe_records_only_a_pool_that_rejects_on_every_server() {
-        let rejection = attached(3);
+        let (rejection, _) = attached(3);
         let alert = io_error(rustls::Error::AlertReceived(
             AlertDescription::HandshakeFailure,
         ));
+        rejection.observe(&[server(1, 0, None), server(2, 0, None)]);
         rejection.observe(&[
-            server(1, Some(alert.clone())),
-            server(2, Some(auth_error())),
+            server(1, 1, Some(alert.clone())),
+            server(2, 1, Some(auth_error())),
         ]);
         let (reason, at) = recorded(&rejection).expect("every server rejected");
         assert!(reason.contains("HandshakeFailure"), "{reason}");
@@ -212,40 +239,64 @@ mod tests {
         assert_eq!(at, 3);
 
         let timed_out = ConnectError::new(ConnectErrorKind::TimedOut).to_string();
-        for other in [None, Some(timed_out)] {
-            rejection.observe(&[server(1, Some(alert.clone()))]);
+        for other in [server(2, 2, Some(timed_out)), server(2, 0, None)] {
+            rejection.observe(&[
+                server(1, 2, Some(alert.clone())),
+                server(2, 2, Some(auth_error())),
+            ]);
             assert!(recorded(&rejection).is_some());
-            rejection.observe(&[server(1, Some(alert.clone())), server(2, other)]);
+            rejection.observe(&[server(1, 2, Some(alert.clone())), other]);
             assert!(recorded(&rejection).is_none());
         }
     }
 
-    /// A discovered server never reached and holding no error does not keep
-    /// the pool from being rejected; an empty pool is never rejected.
+    /// A rejection a server met before the client's last successful connect
+    /// does not count toward the next outage.
     #[test]
-    fn observe_skips_an_unreached_discovered_server() {
-        let rejection = attached(1);
+    fn a_rejection_from_before_the_last_connect_does_not_record() {
+        let (rejection, _) = attached(2);
+        let stale = server(2, 8, Some(auth_error()));
+        rejection.observe(&[server(1, 0, None), stale.clone()]);
+        rejection.observe(&[server(1, 1, Some(auth_error())), stale]);
+        assert!(recorded(&rejection).is_none());
+    }
+
+    /// A server the client has not tried since the last connect, such as a
+    /// newly discovered one, keeps the pool from being rejected.
+    #[test]
+    fn an_untried_server_keeps_the_pool_from_rejecting() {
+        let (rejection, _) = attached(1);
         let discovered = Server {
             is_discovered: true,
-            ..server(2, None)
+            ..server(2, 0, None)
         };
-        rejection.observe(&[server(1, Some(auth_error())), discovered.clone()]);
-        assert!(recorded(&rejection).is_some());
-        let reached = Server {
-            did_connect: true,
-            ..discovered
-        };
-        rejection.observe(&[server(1, Some(auth_error())), reached]);
+        rejection.observe(&[server(1, 0, None), discovered.clone()]);
+        rejection.observe(&[server(1, 1, Some(auth_error())), discovered]);
         assert!(recorded(&rejection).is_none());
         rejection.observe(&[]);
         assert!(recorded(&rejection).is_none());
+    }
+
+    /// A successful connect clears the record and starts a new baseline.
+    #[test]
+    fn a_new_connect_starts_a_new_baseline() {
+        let (rejection, stats) = attached(1);
+        rejection.observe(&[server(1, 0, None)]);
+        rejection.observe(&[server(1, 1, Some(auth_error()))]);
+        assert!(recorded(&rejection).is_some());
+        stats.connects.store(2, Ordering::Relaxed);
+        rejection.observe(&[server(1, 1, Some(auth_error()))]);
+        assert!(recorded(&rejection).is_none());
+        rejection.observe(&[server(1, 2, Some(auth_error()))]);
+        assert_eq!(recorded(&rejection).map(|(_, at)| at), Some(2));
     }
 
     /// Before `attach`, a rejected pool records nothing.
     #[test]
     fn observe_ignores_pools_before_attach() {
         let rejection = Rejection::default();
-        rejection.observe(&[server(1, Some(auth_error()))]);
+        rejection.observe(&[server(1, 0, None)]);
+        rejection.observe(&[server(1, 1, Some(auth_error()))]);
         assert!(recorded(&rejection).is_none());
     }
 
@@ -360,5 +411,34 @@ mod tests {
                 });
             });
         }
+    }
+
+    /// A record stamped before the client's latest successful connect is not
+    /// fatal while the client is disconnected again.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_record_from_before_the_latest_connect_is_not_fatal() {
+        let plain = serve_plain().await;
+        let config = NatsConfig::new(vec![format!("nats://127.0.0.1:{plain}")], "reconnect");
+        let servers = config.validate().unwrap();
+        let client = crate::store::nats::client(&config, &servers, &Arc::default())
+            .await
+            .unwrap();
+        let connects = client.statistics().connects.load(Ordering::Relaxed);
+        let stale = Rejection::default();
+        stale.state.lock().unwrap().record = Some((auth_error(), connects - 1));
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let closed_port = closed.local_addr().unwrap().port();
+        drop(closed);
+        client
+            .set_server_pool(format!("nats://127.0.0.1:{closed_port}"))
+            .await
+            .unwrap();
+        client.force_reconnect().await.unwrap();
+        tokio::task::block_in_place(|| {
+            spate_test::wait_until(Duration::from_secs(10), "a disconnected client", || {
+                client.connection_state() != async_nats::connection::State::Connected
+            });
+        });
+        stale.check(&client).unwrap();
     }
 }

@@ -27,8 +27,8 @@
 //! The first connection tries each server once; only a rejected credential
 //! ends it early, so another rejection is Fatal only on the last server tried.
 //! After startup the client reconnects on its own, and store operations are
-//! Fatal while every server has rejected its latest attempt and no reconnect
-//! has succeeded since.
+//! Fatal once every server has failed since the last successful connect with
+//! a rejection as its latest failure.
 //! No `async-nats` type appears in any public signature (0.x policy: single
 //! pinned minor, internal only).
 //!

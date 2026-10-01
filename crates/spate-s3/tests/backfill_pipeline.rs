@@ -499,3 +499,82 @@ fn mismatched_planner_config_is_rejected_at_startup() {
         failure.reason
     );
 }
+
+/// A framer that declares no resync delimiter.
+#[derive(Default)]
+struct NoResync(support::LineFramer);
+
+impl spate_core::framing::RecordFramer for NoResync {
+    fn push(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        self.0.push(bytes)
+    }
+    fn finish(&mut self) -> std::io::Result<()> {
+        self.0.finish()
+    }
+    fn pop(&mut self) -> Option<Vec<u8>> {
+        self.0.pop()
+    }
+    fn decoded_bytes(&self) -> u64 {
+        self.0.decoded_bytes()
+    }
+}
+
+/// A worker whose framer declares a different resync delimiter is refused at
+/// startup on the job fingerprint.
+#[test]
+fn a_worker_with_another_delimiter_is_refused_at_startup() {
+    let fx = Fixture::new();
+    fx.write_plain("a.ndjson", &recs("a", 3));
+    let store = shared_store();
+
+    let l1 = launch_on_store(&fx.config_yaml(""), test_options(), &store, |_| {});
+    let r1 = l1.run.wait_exit(Duration::from_secs(30)).unwrap().unwrap();
+    assert_eq!(r1.state, ExitState::Completed);
+
+    let store2 = store.clone();
+    let l2 = support::launch_customized(
+        &fx.config_yaml(""),
+        test_options(),
+        |_| {},
+        move |source, io| {
+            let coordinator =
+                spate_coordination::StoreCoordinator::new(store2, test_tuning(), io, None)
+                    .expect("coordinator builds");
+            source
+                .with_framer(|| Box::new(NoResync::default()))
+                .with_coordinator(Box::new(coordinator))
+        },
+    );
+    let report = l2.run.wait_exit(Duration::from_secs(30)).unwrap().unwrap();
+    let ExitState::Failed(failure) = report.state else {
+        panic!(
+            "a delimiter mismatch must fail startup, got {:?}",
+            report.state
+        );
+    };
+    assert!(failure.reason.contains("fingerprint"), "{}", failure.reason);
+}
+
+/// A gzip object above the target whose key has no codec extension is read
+/// whole under `compression: gzip`.
+#[test]
+fn forced_gzip_without_extension_is_read_whole() {
+    use std::io::Write as _;
+    let fx = Fixture::new();
+    let lines: Vec<String> = (0..20_000)
+        .map(|i| format!("{{\"k\":\"gz-{i:06}\",\"pad\":\"{}\"}}", "g".repeat(60)))
+        .collect();
+    let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::none());
+    enc.write_all(&lines_bytes(&lines)).unwrap();
+    fs::write(fx.object_path("big.ndjson"), enc.finish().unwrap()).unwrap();
+    assert!(fs::metadata(fx.object_path("big.ndjson")).unwrap().len() > 1024 * 1024);
+    let store = shared_store();
+
+    let yaml = PipelineYaml::file("s3-forced-gzip", &fx.dir.path().join("data"))
+        .source("compression", "gzip")
+        .build();
+    let l = launch_on_store(&yaml, test_options(), &store, |_| {});
+    let report = l.run.wait_exit(Duration::from_secs(60)).unwrap().unwrap();
+    assert_eq!(report.state, ExitState::Completed);
+    assert_eq!(sorted(captured_rows(&l.script)), sorted(lines));
+}

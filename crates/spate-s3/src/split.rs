@@ -49,6 +49,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use spate_core::coordination::{CoordinationError, CoordinationErrorKind, SplitId};
 use std::collections::VecDeque;
+use std::rc::Rc;
 
 /// Version of the [`SplitDescriptor`] wire encoding. Bumped on any change
 /// to the descriptor's schema; a worker refuses a descriptor written by an
@@ -484,8 +485,9 @@ impl Packing {
 pub(crate) enum Packed {
     /// Whole objects, in listing order.
     Objects(Vec<ObjectEntry>),
-    /// One byte range of one object, which has an ETag.
-    Range(ObjectEntry, SplitRange),
+    /// One byte range of one object, which has an ETag. The object's ranges
+    /// share one entry.
+    Range(Rc<ObjectEntry>, SplitRange),
 }
 
 impl Packed {
@@ -512,12 +514,12 @@ impl Packed {
             Packed::Objects(members) => SplitDescriptor::from_entries(members),
             Packed::Range(entry, range) => SplitDescriptor {
                 range: Some(*range),
-                ..SplitDescriptor::from_entries(std::slice::from_ref(entry))
+                ..SplitDescriptor::from_entries(std::slice::from_ref(&**entry))
             },
         }
     }
 
-    /// The split's weight: the bytes it reads, at least 1.
+    /// The split's weight: the bytes it owns, at least 1.
     pub(crate) fn weight(&self) -> u64 {
         match self {
             // Saturating: sizes are remote listing data.
@@ -562,8 +564,8 @@ pub(crate) fn pack(entries: Vec<ObjectEntry>, packing: &Packing) -> Vec<Packed> 
     struct Bin {
         members: Vec<ObjectEntry>,
         cost: u64,
-        /// Set on a byte-range bin, which has one member and is never open.
-        range: Option<SplitRange>,
+        /// Set on a byte-range bin, which has no members and is never open.
+        range: Option<(Rc<ObjectEntry>, SplitRange)>,
     }
     let floor = (target_bytes / OPEN_COST_DIVISOR).max(1);
     let mut bins: Vec<Bin> = Vec::new();
@@ -574,10 +576,11 @@ pub(crate) fn pack(entries: Vec<ObjectEntry>, packing: &Packing) -> Vec<Packed> 
             if open.len() == PACKING_LOOKBACK {
                 open.pop_front();
             }
+            let entry = Rc::new(entry);
             bins.extend(tile(entry.size, target_bytes, delimiter).map(|range| Bin {
-                members: vec![entry.clone()],
+                members: Vec::new(),
                 cost: range.end - range.start,
-                range: Some(range),
+                range: Some((Rc::clone(&entry), range)),
             }));
             continue;
         }
@@ -612,14 +615,10 @@ pub(crate) fn pack(entries: Vec<ObjectEntry>, packing: &Packing) -> Vec<Packed> 
         }
     }
     bins.into_iter()
-        .map(
-            |Bin {
-                 mut members, range, ..
-             }| match range {
-                Some(range) => Packed::Range(members.swap_remove(0), range),
-                None => Packed::Objects(members),
-            },
-        )
+        .map(|Bin { members, range, .. }| match range {
+            Some((entry, range)) => Packed::Range(entry, range),
+            None => Packed::Objects(members),
+        })
         .collect()
 }
 
@@ -638,6 +637,81 @@ mod tests {
     }
 
     const MB: u64 = 1024 * 1024;
+
+    /// Whole objects land in the same bins whether or not cutting is on,
+    /// pinned with literal bins and lookback counts.
+    #[test]
+    fn whole_object_bins_are_pinned() {
+        let keys = |packed: Vec<Packed>| -> Vec<Vec<String>> {
+            object_bins(&packed)
+                .into_iter()
+                .map(|b| b.into_iter().map(|e| e.key).collect())
+                .collect()
+        };
+        for packing in [whole(64 * MB), cut(64 * MB)] {
+            // First fit: `c` joins the oldest bin with room.
+            let first_fit = vec![
+                entry("a", 40 * MB),
+                entry("b", 50 * MB),
+                entry("c", 10 * MB),
+            ];
+            assert_eq!(keys(pack(first_fit, &packing)), [vec!["a", "c"], vec!["b"]]);
+
+            // Ten open bins: the eleventh evicts `a`, so `z` cannot join it.
+            let mut evicted = vec![entry("a", 40 * MB)];
+            evicted.extend((0..10).map(|i| entry(&format!("m{i}"), 60 * MB)));
+            evicted.push(entry("z", 20 * MB));
+            assert_eq!(keys(pack(evicted, &packing)).len(), 12, "{packing:?}");
+
+            // A bin exactly at the target closes, so it does not hold a
+            // lookback slot.
+            let mut exact = vec![entry("a", 40 * MB), entry("b", 64 * MB)];
+            exact.extend((0..9).map(|i| entry(&format!("m{i}"), 60 * MB)));
+            exact.push(entry("z", 20 * MB));
+            let bins = keys(pack(exact, &packing));
+            assert_eq!(bins[0], ["a", "z"], "{packing:?}");
+        }
+    }
+
+    /// The whole-object packing this crate shipped before byte-range
+    /// subdivision, as the reference [`pack`] must reproduce with cutting off.
+    fn reference_pack(entries: Vec<ObjectEntry>, target_bytes: u64) -> Vec<Vec<ObjectEntry>> {
+        struct Bin {
+            members: Vec<ObjectEntry>,
+            cost: u64,
+        }
+        let floor = (target_bytes / 16).max(1);
+        let mut bins: Vec<Bin> = Vec::new();
+        let mut open: VecDeque<usize> = VecDeque::new();
+        for entry in entries {
+            let cost = entry.size.max(floor);
+            let idx = match open
+                .iter()
+                .position(|&i| bins[i].cost.saturating_add(cost) <= target_bytes)
+            {
+                Some(pos) => open[pos],
+                None => {
+                    if open.len() == 10 {
+                        open.pop_front();
+                    }
+                    bins.push(Bin {
+                        members: Vec::new(),
+                        cost: 0,
+                    });
+                    open.push_back(bins.len() - 1);
+                    bins.len() - 1
+                }
+            };
+            bins[idx].members.push(entry);
+            bins[idx].cost = bins[idx].cost.saturating_add(cost);
+            if bins[idx].cost >= target_bytes
+                && let Some(pos) = open.iter().position(|&i| i == idx)
+            {
+                open.remove(pos);
+            }
+        }
+        bins.into_iter().map(|b| b.members).collect()
+    }
 
     /// Packing that reads every object whole.
     fn whole(target: u64) -> Packing {
@@ -1155,7 +1229,7 @@ mod tests {
                 let ranges: Vec<SplitRange> = packed
                     .iter()
                     .filter_map(|p| match p {
-                        Packed::Range(e, range) if e == object => Some(*range),
+                        Packed::Range(e, range) if **e == *object => Some(*range),
                         _ => None,
                     })
                     .collect();
@@ -1193,7 +1267,7 @@ mod tests {
                     Packed::Objects(members) if members.len() == 1 => {
                         match packing.delimiter_for(&members[0]) {
                             Some(delimiter) => tile(members[0].size, packing.target_bytes, delimiter)
-                                .map(|range| Packed::Range(members[0].clone(), range))
+                                .map(|range| Packed::Range(Rc::new(members[0].clone()), range))
                                 .collect(),
                             None => vec![split],
                         }
@@ -1202,6 +1276,23 @@ mod tests {
                 })
                 .collect();
             prop_assert_eq!(pack(listing, &packing), expanded);
+        }
+
+        /// With cutting off, every split is the one the reference packing
+        /// makes.
+        #[test]
+        fn prop_whole_object_packing_matches_the_reference(
+            objects in proptest::collection::vec((0u64..300 * MB, 0u8..4), 0..120),
+            target_mb in 1u64..129,
+        ) {
+            let listing: Vec<ObjectEntry> = objects
+                .iter()
+                .enumerate()
+                .map(|(i, &(size, kind))| shaped(i, size, kind))
+                .collect();
+            let packed = pack(listing.clone(), &whole(target_mb * MB));
+            prop_assert_eq!(object_bins(&packed).len(), packed.len());
+            prop_assert_eq!(object_bins(&packed), reference_pack(listing, target_mb * MB));
         }
 
         #[test]

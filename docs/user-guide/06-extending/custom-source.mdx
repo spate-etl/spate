@@ -434,9 +434,9 @@ attempt cap instead.
   durable state stays authoritative meanwhile, so a crash before the recommit
   widens replay rather than losing data.
 - **Your `Drop` calls `driver.release()`.** The driver has no `Drop` of its
-  own, so a source that omits this leaves its splits to expire: releasing
-  hands them back and peers claim them immediately instead of waiting out the
-  lease.
+  own, so a source that omits this leaves its splits and its place in the job
+  to expire. The call departs the job whether or not the source holds a
+  split, and peers take over without waiting out the lease.
 
 What the driver owns so you don't: additive gains (each gain mints a
 fresh, never-reused lane id and joins the running assignment via
@@ -526,7 +526,7 @@ Some of those arguments carry more than their names suggest:
 - **`instance_id` must be unique across live workers**, and it defaults to a
   fresh random id per run. Set it to something stable per replica (the pod
   name, the ordinal, whatever your scheduler guarantees) and a restart
-  reclaims its own splits without waiting a lease out. Two live processes
+  after a crash reclaims its own splits without waiting a lease out. Two live processes
   sharing one id is detected and fatal, so a value stable across *replicas*
   is worse than no value at all.
 - **`lease_duration` and the store's TTL must agree**, which is why the example

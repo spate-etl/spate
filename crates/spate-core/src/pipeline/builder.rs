@@ -449,7 +449,8 @@ impl Pipeline {
 
     /// A handle to the I/O runtime, for connector edge work that must
     /// start before the chain exists (schema-registry fetchers, ...).
-    /// Valid until `run` returns.
+    /// Valid until `run` returns; once the pipeline has started, that
+    /// includes the source's `Drop`.
     #[must_use]
     pub fn io_handle(&self) -> tokio::runtime::Handle {
         self.io.handle().clone()

@@ -13,7 +13,7 @@ use crate::error::fatal;
 use crate::records::{self, LeaseVal, SplitProgressRecord};
 use crate::store::metered::Metered;
 use crate::store::{CoordinationStore, Keyspace, WatchMode};
-use crate::task::{Command, Task, TaskEvent};
+use crate::task::{Command, DepartReply, Task, TaskEvent};
 use spate_core::clock::tokio::{Clock, SystemClock};
 use spate_core::coordination::ControlWaker;
 use spate_core::coordination::{
@@ -30,6 +30,9 @@ use tokio::sync::mpsc;
 /// Command-queue depth; the controller thread sends one command at a time,
 /// so anything above a handful only covers bursts around shutdown.
 const COMMAND_DEPTH: usize = 64;
+
+/// Pause before re-sending a `Depart` the task refused.
+const DEPART_RETRY: Duration = Duration::from_millis(20);
 
 /// A [`SplitCoordinator`] over any [`CoordinationStore`].
 ///
@@ -201,13 +204,24 @@ impl<S: CoordinationStore + Clone> StoreCoordinator<S> {
         &mut self,
         build: impl FnOnce(std_mpsc::SyncSender<Result<(), CoordinationError>>) -> Command,
     ) -> Result<(), CoordinationError> {
+        let budget = self.config.op_timeout * 3;
+        self.send_until(Instant::now() + budget, budget, build)?
+    }
+
+    /// Send a command and wait for its reply until `deadline_at`. `Err`
+    /// means no reply came; a timeout reports `budget` as the wait it
+    /// exceeded.
+    fn send_until<R>(
+        &mut self,
+        deadline_at: Instant,
+        budget: Duration,
+        build: impl FnOnce(std_mpsc::SyncSender<R>) -> Command,
+    ) -> Result<R, CoordinationError> {
         self.check_failed()?;
         let Some(running) = &self.running else {
             return Err(fatal("coordinator used before start"));
         };
         let commands = running.commands.clone();
-        // Real time: the budget bounds store I/O behind the task.
-        let deadline_at = Instant::now() + self.config.op_timeout * 3;
         let (reply_tx, reply_rx) = std_mpsc::sync_channel(1);
         // Enqueue with the same deadline as the reply: a full queue means
         // the task is backed up behind an unreachable store, and an
@@ -236,13 +250,12 @@ impl<S: CoordinationStore + Clone> StoreCoordinator<S> {
         // store surfaces as Retryable, not a hung pipeline.
         let remaining = deadline_at.saturating_duration_since(Instant::now());
         match reply_rx.recv_timeout(remaining) {
-            Ok(result) => result,
+            Ok(reply) => Ok(reply),
             Err(std_mpsc::RecvTimeoutError::Timeout) => Err(CoordinationError::new(
                 CoordinationErrorKind::Retryable,
                 format!(
-                    "coordination command timed out after {:?}; the store may be slow or \
-                     unreachable",
-                    self.config.op_timeout * 3
+                    "coordination command timed out after {budget:?}; the store may be slow or \
+                     unreachable"
                 ),
             )),
             Err(std_mpsc::RecvTimeoutError::Disconnected) => Err(self.drain_failure()),
@@ -295,10 +308,9 @@ impl<S: CoordinationStore + Clone> StoreCoordinator<S> {
 
     /// Direct-store release for teardown paths where the background task
     /// (or its runtime) is already gone: a private current-thread runtime
-    /// runs guarded owner-clears and lease deletes under one aggregate
-    /// deadline on the coordinator's clock. Best-effort; anything it cannot
-    /// reach expires.
-    fn release_direct(&self, splits: &[(SplitId, u64)]) {
+    /// runs guarded owner-clears and lease deletes within `budget` on the
+    /// coordinator's clock. Best-effort; anything it cannot reach expires.
+    fn release_direct(&self, splits: &[(SplitId, u64)], budget: Duration) {
         // IO too: a store client may open connections on this runtime.
         let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -306,7 +318,6 @@ impl<S: CoordinationStore + Clone> StoreCoordinator<S> {
         else {
             return;
         };
-        let deadline = self.config.op_timeout * 2;
         let store = self.store.clone();
         let instance = self.instance.clone();
         let nonce = self.nonce.clone();
@@ -351,7 +362,7 @@ impl<S: CoordinationStore + Clone> StoreCoordinator<S> {
             };
             // Built inside `block_on`: the system clock's sleep needs this
             // runtime's timer.
-            let expiry = clock.sleep_until(clock.now() + deadline);
+            let expiry = clock.sleep_until(clock.now() + budget);
             tokio::select! {
                 () = release => true,
                 () = expiry => false,
@@ -510,10 +521,9 @@ impl<S: CoordinationStore + Clone> SplitCoordinator for StoreCoordinator<S> {
                 Ok(())
             }
             Err(e) => {
-                // The task or its runtime is gone (shutdown ordering can
-                // tear the io runtime down before the source drops).
-                // Fall back to direct guarded writes so peers claim
-                // instantly instead of waiting out the TTL.
+                // The task or its runtime is gone. Fall back to direct
+                // guarded writes so peers claim instantly instead of
+                // waiting out the TTL.
                 tracing::warn!(error = %e, "task-path release failed; releasing directly");
                 let pairs: Vec<(SplitId, u64)> = match &self.running {
                     Some(running) => splits
@@ -527,7 +537,7 @@ impl<S: CoordinationStore + Clone> SplitCoordinator for StoreCoordinator<S> {
                         .collect(),
                     None => Vec::new(),
                 };
-                self.release_direct(&pairs);
+                self.release_direct(&pairs, self.config.op_timeout * 2);
                 if let Some(running) = self.running.as_mut() {
                     for split in splits {
                         running.held.remove(split.as_str());
@@ -536,6 +546,75 @@ impl<S: CoordinationStore + Clone> SplitCoordinator for StoreCoordinator<S> {
                 Ok(())
             }
         }
+    }
+
+    /// Hands back every split the task holds, including ones this handle
+    /// has not polled yet, within one `op_timeout`. Past that the task is
+    /// aborted and its leases expire.
+    fn depart(&mut self, _held: &[SplitId]) -> Result<(), CoordinationError> {
+        if self.running.is_none() || self.failed.is_some() {
+            return Ok(());
+        }
+        let budget = self.config.op_timeout;
+        let started = Instant::now();
+        let deadline = started + budget;
+        // A task re-establishing a broken watch refuses commands between
+        // its attempts; ask again while the budget lasts.
+        let reply = loop {
+            // The task stops writing an eighth of what is left early, so its
+            // reply arrives while this handle still has time to act on it.
+            let now = Instant::now();
+            let task_deadline = now + deadline.saturating_duration_since(now) * 7 / 8;
+            let reply = self.send_until(deadline, budget, |reply| Command::Depart {
+                deadline: task_deadline,
+                reply,
+            });
+            match reply {
+                Ok(DepartReply::Refused(_)) if started.elapsed() + DEPART_RETRY < budget => {
+                    std::thread::sleep(DEPART_RETRY);
+                }
+                reply => break reply,
+            }
+        };
+        // A task that ran the departure writes nothing more, and a gone one
+        // cannot; either may leave a direct release work to do. A task that
+        // never answered may still be writing, and one would race it.
+        let (result, release_directly, mut unreleased) = match reply {
+            Ok(DepartReply::Ran { result, unreleased }) => {
+                let incomplete = result.is_err();
+                (result, incomplete, unreleased)
+            }
+            Ok(DepartReply::Refused(e)) => (Err(e), false, Vec::new()),
+            Err(e) => {
+                let gone = !self.task_alive();
+                (Err(e), gone, Vec::new())
+            }
+        };
+        self.failed = Some((
+            CoordinationErrorKind::Fatal,
+            "the coordinator has departed".into(),
+        ));
+        let Some(running) = self.running.take() else {
+            return result;
+        };
+        running.task.abort();
+        if let Err(e) = &result
+            && release_directly
+        {
+            tracing::warn!(error = %e, "task-path departure failed; releasing directly");
+            // The task's list covers gains this handle never polled.
+            for (id, epoch) in &running.held {
+                if !unreleased.iter().any(|(s, _)| s.as_str() == id)
+                    && let Ok(split) = SplitId::new(id.clone())
+                {
+                    unreleased.push((split, *epoch));
+                }
+            }
+            if !unreleased.is_empty() {
+                self.release_direct(&unreleased, budget.saturating_sub(started.elapsed()));
+            }
+        }
+        result
     }
 
     fn release_drained(&mut self, splits: &[SplitId]) -> Result<(), CoordinationError> {
@@ -594,7 +673,7 @@ impl<S: CoordinationStore + Clone> Drop for StoreCoordinator<S> {
                 .collect();
             running.task.abort();
             if !held.is_empty() {
-                self.release_direct(&held);
+                self.release_direct(&held, self.config.op_timeout);
             }
         }
     }

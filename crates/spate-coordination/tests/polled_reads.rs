@@ -604,6 +604,51 @@ fn a_standby_that_never_saw_a_record_reports_the_verdict() {
     });
 }
 
+/// A worker whose verdict marker write failed writes it while departing,
+/// holding nothing, and leaves no leader or presence key. Regression for
+/// #854.
+#[test]
+fn a_departure_writes_a_verdict_marker_still_owed() {
+    let rt = runtime();
+    let inner = store();
+    let store = tapped(&inner, |_, _| false);
+    let refuse = Arc::new(AtomicBool::new(true));
+    let refusing = Arc::clone(&refuse);
+    store.on_write(move |w| {
+        (w.op == Op::Create && w.key == "verdict" && refusing.load(Ordering::SeqCst))
+            .then(|| StoreError::Retryable("injected: write timed out".into()))
+    });
+    let two = |c: &mut CoordinationConfig| c.max_in_flight = 2;
+    let mut a = worker(store, rt.handle(), tuned("worker-a", two), &["a", "b"]);
+    let mut held = Held::default();
+    drive(&mut a, &mut held, "A claiming both splits", |h| {
+        h.splits.len() == 2
+    });
+    for id in held.splits.keys() {
+        a.commit(&split_id(id), &SplitProgress::completed(1, vec![]))
+            .unwrap();
+    }
+    drive(&mut a, &mut held, "A's verdict", |h| h.all_complete);
+    let get = |key: &str| {
+        rt.block_on(inner.get(Keyspace::Durable, key))
+            .unwrap()
+            .or_else(|| rt.block_on(inner.get(Keyspace::Ephemeral, key)).unwrap())
+    };
+    assert!(get("verdict").is_none(), "the marker write was refused");
+
+    refuse.store(false, Ordering::SeqCst);
+    a.depart(&[]).unwrap();
+    assert!(get("verdict").is_some(), "the departure wrote the marker");
+    assert!(
+        get("leader").is_none(),
+        "the leader key outlived the departure"
+    );
+    assert!(
+        get("worker.worker-a").is_none(),
+        "the presence key outlived the departure"
+    );
+}
+
 /// A standby whose verdict listing keeps failing lists once per poll
 /// interval.
 #[test]

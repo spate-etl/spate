@@ -12,7 +12,7 @@ use crate::ops::RunnableChain;
 use crate::pipeline::runtime::PipelineRuntime;
 use crate::record::PartitionId;
 use crate::sink::shard_queues;
-use crate::source::LaneId;
+use crate::source::{LaneId, Source, SourceCtx, SourceEvent};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -880,6 +880,97 @@ fn caller_owned_io_runtime_is_used_and_shut_down_by_run() {
     assert!(
         runtime_shut_down.load(Ordering::Relaxed),
         "run() must shut the caller-owned runtime down on exit"
+    );
+}
+
+/// The source drops while the io runtime still runs, so work its `Drop`
+/// spawns there completes. Regression for #854.
+#[test]
+fn the_source_drops_before_the_io_runtime_stops() {
+    struct NeedsIoOnDrop {
+        inner: FakeSource,
+        io: tokio::runtime::Handle,
+        ran: Arc<AtomicBool>,
+    }
+    impl Source for NeedsIoOnDrop {
+        type Lane = FakeLane;
+        fn open(&mut self, ctx: SourceCtx) -> Result<(), SourceError> {
+            self.inner.open(ctx)
+        }
+        fn poll_events(&mut self, timeout: Duration) -> Result<SourceEvent<FakeLane>, SourceError> {
+            self.inner.poll_events(timeout)
+        }
+        fn commit(&mut self, watermarks: &[(PartitionId, i64)]) -> Result<(), SourceError> {
+            self.inner.commit(watermarks)
+        }
+    }
+    impl Drop for NeedsIoOnDrop {
+        fn drop(&mut self) {
+            let (tx, rx) = std::sync::mpsc::channel();
+            // Outlives the moment main would stop the runtime if it did not
+            // wait for this thread. A stopped runtime drops the task, and
+            // with it the sender.
+            self.io.spawn(async move {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                let _ = tx.send(());
+            });
+            let ran = rx.recv_timeout(Duration::from_secs(10)).is_ok();
+            self.ran.store(ran, Ordering::Relaxed);
+        }
+    }
+
+    let io = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let ran = Arc::new(AtomicBool::new(false));
+    let (inner, _shared, _script) = FakeSource::new();
+    let source = NeedsIoOnDrop {
+        inner,
+        io: io.handle().clone(),
+        ran: Arc::clone(&ran),
+    };
+    let (queues, receivers) = shard_queues(1, 8);
+    let drain: super::SinkDrainFn = Box::new(move |_budget| {
+        Box::pin(async move {
+            let _receivers = receivers;
+            DrainReport::default()
+        })
+    });
+    let sink = SinkRuntime {
+        queues: vec![queues],
+        drain,
+        probe: None,
+        failures: SinkFailures::new(),
+    };
+    let chain_shared = Arc::new(ChainShared::default());
+    let log = Arc::new(Mutex::new(SourceLog::default()));
+    let runtime = PipelineRuntime::new(
+        test_config(1),
+        source,
+        move |_thread| {
+            Box::new(FakeChain {
+                shared: Arc::clone(&chain_shared),
+                log: Arc::clone(&log),
+                mode: ChainMode::Ok,
+                batches_seen: 0,
+            }) as Box<dyn RunnableChain>
+        },
+        sink,
+        Arc::new(crate::backpressure::InflightBudget::new()),
+    )
+    .with_options(test_options())
+    .with_io_runtime(io);
+    let shutdown = runtime.shutdown_handle();
+    let join = std::thread::spawn(move || runtime.run());
+    shutdown.trigger();
+    let report = join.join().unwrap().unwrap();
+
+    assert_eq!(report.state, ExitState::Completed);
+    assert!(
+        ran.load(Ordering::Relaxed),
+        "work the source's Drop spawns on the io runtime must run"
     );
 }
 

@@ -540,18 +540,16 @@ impl CoordinationDriver {
         Ok(())
     }
 
-    /// Best-effort graceful release of every held split, so peers claim
-    /// them without waiting out the lease. Call from the source's `Drop`.
+    /// Depart the job through [`SplitCoordinator::depart`], held splits or
+    /// none, so peers take over without waiting out a lease. Call from the
+    /// source's `Drop`; it blocks for at most the backend's bound.
     pub fn release(&mut self) {
         if !self.started {
             return;
         }
         let held: Vec<SplitId> = self.by_split.keys().cloned().collect();
-        if held.is_empty() {
-            return;
-        }
-        if let Err(e) = self.coordinator.release(&held) {
-            tracing::warn!(error = %e, "graceful split release failed; leases will expire");
+        if let Err(e) = self.coordinator.depart(&held) {
+            tracing::warn!(error = %e, "graceful departure reported an error; anything not handed back expires");
         }
     }
 
@@ -1055,6 +1053,8 @@ mod tests {
         /// the attempt is what a test asserts the driver made.
         fails: Vec<(SplitId, String)>,
         released: Vec<SplitId>,
+        /// The held set `depart` was called with, if it was.
+        departed: Option<Vec<SplitId>>,
         /// Captured separately from `released` so a test can prove the
         /// driver takes the revocation-release path, not a plain hand-back.
         released_drained: Vec<SplitId>,
@@ -1105,6 +1105,10 @@ mod tests {
 
         fn released(&self) -> Vec<SplitId> {
             self.0.lock().unwrap().released.clone()
+        }
+
+        fn departed(&self) -> Option<Vec<SplitId>> {
+            self.0.lock().unwrap().departed.clone()
         }
 
         fn released_drained(&self) -> Vec<SplitId> {
@@ -1175,6 +1179,11 @@ mod tests {
                 .unwrap()
                 .released
                 .extend(splits.iter().cloned());
+            Ok(())
+        }
+
+        fn depart(&mut self, held: &[SplitId]) -> Result<(), CoordinationError> {
+            self.0.0.lock().unwrap().departed = Some(held.to_vec());
             Ok(())
         }
 
@@ -1799,7 +1808,7 @@ mod tests {
     }
 
     #[test]
-    fn release_hands_back_every_live_split() {
+    fn release_departs_with_every_live_split() {
         let script = Script::default();
         let mut d = driver(&script);
         let mut s = TestSource::default();
@@ -1807,10 +1816,20 @@ mod tests {
         poll(&mut d, &mut s);
 
         d.release();
-        let released = script.released();
-        assert_eq!(released.len(), 2);
-        assert!(released.iter().any(|s| s.as_str() == "a"));
-        assert!(released.iter().any(|s| s.as_str() == "b"));
+        let departed = script.departed().expect("the driver departs");
+        assert_eq!(departed.len(), 2);
+        assert!(departed.iter().any(|s| s.as_str() == "a"));
+        assert!(departed.iter().any(|s| s.as_str() == "b"));
+    }
+
+    /// A worker holding nothing still departs, so the backend can hand back
+    /// what it keeps beyond splits.
+    #[test]
+    fn release_departs_with_nothing_held() {
+        let script = Script::default();
+        let mut d = driver(&script);
+        d.release();
+        assert_eq!(script.departed(), Some(Vec::new()));
     }
 
     #[test]

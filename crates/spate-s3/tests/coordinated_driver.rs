@@ -79,6 +79,11 @@ fn gains_stream_commits_carry_completion_and_all_complete_drains() {
     assert_eq!(report.state, ExitState::Completed);
     assert_eq!(captured_rows(&l.script).len(), 50);
     assert!(script.failed().is_empty(), "no split failed");
+    assert!(
+        script.departed(),
+        "a finished worker departs holding nothing"
+    );
+    assert!(script.released().is_empty());
 
     // Watermarks never regress across the commit sequence.
     let watermarks: Vec<i64> = script

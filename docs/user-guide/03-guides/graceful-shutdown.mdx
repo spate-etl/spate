@@ -33,8 +33,14 @@ revocation, one choreography tested constantly by every rebalance:
 4. **Offsets commit.** The controller drains the checkpointer and runs a
    final synchronous commit + `flush_commits`, committing only watermarks
    that cover durably written data, per the at-least-once invariant.
+5. **The source closes.** A coordinated source departs its job: it hands
+   back its splits, its leadership and its membership, so peers take over
+   without waiting out a lease. The departure is bounded by
+   [`coordination.op_timeout`](../07-reference/configuration.mdx#coordination);
+   whatever it cannot hand back expires.
 
-Then everything joins and `run` returns an `ExitReport`.
+The I/O runtime stops only after the source has closed. Then everything
+joins and `run` returns an `ExitReport`.
 
 ## Sizing `drain_timeout` for Kubernetes
 
@@ -47,9 +53,12 @@ kubelet sends SIGKILL. The rule:
 Keep `drain_timeout` comfortably **below**
 `terminationGracePeriodSeconds`. Steps 1 to 3 run inside the budget; the
 gap has to absorb what follows it: the pool's one-second backstop, the
-final commit (step 4) and process teardown. The commit therefore always runs
-before SIGKILL. The defaults (25s vs 30s) encode this; if you raise one,
-raise the other.
+final commit (step 4), the source closing (step 5) and process teardown.
+The commit therefore always runs before SIGKILL. The defaults (25s vs 30s)
+encode this; if you raise one, raise the other. A coordinated source's close
+can take up to `coordination.op_timeout` (10s by default) against a slow
+store, which is longer than that gap; size the gap for it where a slow store
+at shutdown is likely.
 :::
 
 ```yaml
@@ -59,7 +68,9 @@ checkpoint:
 
 A SIGKILL mid-drain is still safe for data (nothing uncommitted is lost;
 it replays), but it forfeits the clean commit, so the restart replays more
-than it needed to.
+than it needed to. A SIGKILL while the source closes costs what a crash costs
+for whatever it had not handed back: those leases expire, and each takeover of
+one of those splits consumes a delivery attempt.
 
 ## Exit codes via `ExitReport`
 

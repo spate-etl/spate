@@ -243,8 +243,10 @@ impl<S: Source + 'static> PipelineRuntime<S> {
 
         // I/O runtime: sink workers (spawned by the caller-built SinkPool
         // onto this runtime via its own handle), admin server, upkeep,
-        // signals. A caller-owned runtime (`with_io_runtime`) is adopted
-        // instead of built; either way this function owns its shutdown.
+        // signals, the source's coordinator. A caller-owned runtime
+        // (`with_io_runtime`) is adopted instead of built; either way this
+        // function shuts it down, after the source has dropped once the
+        // controller has started.
         let io = match self.io.take() {
             Some(io) => io,
             None => tokio::runtime::Builder::new_multi_thread()
@@ -557,8 +559,10 @@ impl<S: Source + 'static> PipelineRuntime<S> {
         if let Some(tx) = &admin_stop_tx {
             let _ = tx.send(true);
         }
-        io.shutdown_timeout(Duration::from_secs(2));
+        // The controller drops the source on its way out, and a source's
+        // `Drop` may still need the io runtime (a coordinator's hand-back).
         let _ = controller_handle.join();
+        io.shutdown_timeout(Duration::from_secs(2));
 
         Ok(ExitReport {
             state,

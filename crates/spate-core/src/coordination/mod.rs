@@ -645,10 +645,26 @@ pub trait SplitCoordinator: Send {
     /// [`release`](SplitCoordinator::release), which consumes nothing.
     fn fail(&mut self, split: &SplitId, reason: &str) -> Result<(), CoordinationError>;
 
-    /// Voluntarily hand back owned splits (shutdown, scale-down) so peers
-    /// claim them without waiting out a lease. Consumes no delivery
-    /// attempts. Best-effort and idempotent; splits not released expire.
+    /// Voluntarily hand back owned splits so peers claim them without
+    /// waiting out a lease. Consumes no delivery attempts. Best-effort and
+    /// idempotent; splits not released expire. Shutdown uses
+    /// [`depart`](SplitCoordinator::depart).
     fn release(&mut self, splits: &[SplitId]) -> Result<(), CoordinationError>;
+
+    /// Leave the job for good: hand back every held split, and any role or
+    /// membership the backend keeps, so peers take over without waiting out
+    /// a lease. The last call on a coordinator.
+    ///
+    /// A backend may hand back splits `held` does not name, such as gains
+    /// not yet polled. Best-effort and bounded; anything not handed back
+    /// expires. Defaulted to [`release`](SplitCoordinator::release) of
+    /// `held` when it is non-empty.
+    fn depart(&mut self, held: &[SplitId]) -> Result<(), CoordinationError> {
+        if held.is_empty() {
+            return Ok(());
+        }
+        self.release(held)
+    }
 
     /// Release splits given up through a cooperative revocation. The owner
     /// has drained each split, committed its tail, and is handing it

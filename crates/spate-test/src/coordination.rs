@@ -21,6 +21,7 @@ struct State {
     commits: Vec<(SplitId, SplitProgress)>,
     failed: Vec<(SplitId, String)>,
     released: Vec<SplitId>,
+    departed: bool,
     planner: Option<Box<dyn SplitPlanner>>,
     started: bool,
     waker: Option<ControlWaker>,
@@ -148,6 +149,13 @@ impl CoordinatorScript {
         self.lock().released.clone()
     }
 
+    /// Whether `depart` ran. Its held splits are also in
+    /// [`released`](CoordinatorScript::released).
+    #[must_use]
+    pub fn departed(&self) -> bool {
+        self.lock().departed
+    }
+
     /// Whether `start` ran.
     #[must_use]
     pub fn started(&self) -> bool {
@@ -238,6 +246,13 @@ impl SplitCoordinator for ScriptedCoordinator {
             .extend(splits.iter().cloned());
         Ok(())
     }
+
+    fn depart(&mut self, held: &[SplitId]) -> Result<(), CoordinationError> {
+        let mut state = self.state.lock().expect("coordinator script poisoned");
+        state.departed = true;
+        state.released.extend(held.iter().cloned());
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -298,5 +313,8 @@ mod tests {
         assert_eq!(script.failed()[0].1, "poison");
         coordinator.release(std::slice::from_ref(&id)).unwrap();
         assert_eq!(script.released(), vec![id]);
+        assert!(!script.departed());
+        coordinator.depart(&[]).unwrap();
+        assert!(script.departed());
     }
 }

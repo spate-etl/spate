@@ -137,10 +137,10 @@ fn empty_and_recordless_objects_complete_via_the_sweep() {
 }
 
 #[test]
-fn a_standby_instance_drains_when_the_job_completes() {
-    // A third instance joining a nearly-done job may hold zero splits; it
-    // must keep polling and still observe completion (the standby
-    // contract) instead of hanging or exiting early.
+fn an_instance_joining_a_finished_job_drains_without_reading() {
+    // An instance joining a job every split of which is complete holds zero
+    // splits; it must still observe completion instead of hanging or
+    // exiting early.
     let dir = tempfile::tempdir().unwrap();
     let data = dir.path().join("data");
     fs::create_dir_all(&data).unwrap();
@@ -163,6 +163,7 @@ fn a_standby_instance_drains_when_the_job_completes() {
     assert_eq!(rw.state, ExitState::Completed);
 
     // Joins after everything is complete: zero splits, must still drain.
+    // The finished worker departed, so the newcomer leads and re-plans once.
     let (standby, standby_lists) = launch_instance(&yaml, &store, "standby", |_| {});
     let rs = standby
         .run
@@ -177,8 +178,8 @@ fn a_standby_instance_drains_when_the_job_completes() {
     assert!(captured_rows(&standby.script).is_empty());
     assert_eq!(
         standby_lists.load(Ordering::Relaxed),
-        0,
-        "a standby never lists"
+        1,
+        "the new leader lists once"
     );
 }
 

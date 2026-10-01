@@ -19,6 +19,9 @@ use tokio::sync::mpsc;
 
 type Breaker = mpsc::UnboundedSender<Result<WatchEvent, StoreError>>;
 
+/// A key and the peer's value that replaces it.
+type PeerTake = (Keyspace, String, Vec<u8>);
+
 /// Which primitive a [`FaultStore`] fault applies to.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Op {
@@ -33,11 +36,12 @@ enum Op {
 /// keys.
 ///
 /// Down: every call fails Retryable; `go_down` also breaks every live
-/// watch. Wedged: every call but `watch` pends. Latency: every such call first waits that
-/// many milliseconds. Fatal: the next listed primitive on a listed key
-/// fails Fatal. Ambiguous: a listed key's next update applies, then fails
-/// Retryable. Plan lost: the plan record's update loses its CAS and its read
-/// fails Retryable.
+/// watch. Wedged: every call but `watch` pends. Latency: every such call
+/// first waits that many milliseconds. Fatal: the next listed primitive on
+/// a listed key fails Fatal. Ambiguous: a listed key's next update applies,
+/// then fails Retryable. Peer takes: a listed key is replaced by a peer's
+/// value just before its next delete. Plan lost: the plan record's update
+/// loses its CAS and its read fails Retryable.
 #[derive(Clone)]
 struct FaultStore {
     inner: MemoryStore,
@@ -46,6 +50,8 @@ struct FaultStore {
     latency_ms: Arc<AtomicU64>,
     fatal: Arc<Mutex<Vec<(Op, Keyspace, String)>>>,
     ambiguous: Arc<Mutex<Vec<(Keyspace, String)>>>,
+    peer_takes: Arc<Mutex<Vec<PeerTake>>>,
+    update_log: Arc<Mutex<Vec<(Keyspace, String)>>>,
     plan_lost: Arc<AtomicBool>,
     plan_refused: Arc<AtomicU64>,
     refused_watches: Arc<AtomicU64>,
@@ -61,6 +67,8 @@ impl FaultStore {
             latency_ms: Arc::default(),
             fatal: Arc::default(),
             ambiguous: Arc::default(),
+            peer_takes: Arc::default(),
+            update_log: Arc::default(),
             plan_lost: Arc::default(),
             plan_refused: Arc::default(),
             refused_watches: Arc::default(),
@@ -103,6 +111,16 @@ impl FaultStore {
         for tx in self.breakers.lock().unwrap().drain(..) {
             let _ = tx.send(Err(Self::unreachable()));
         }
+    }
+
+    /// How many updates of `key` have passed the gate.
+    fn updates(&self, ks: Keyspace, key: &str) -> usize {
+        self.update_log
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(k, name)| *k == ks && name == key)
+            .count()
     }
 
     /// Split records, out of `keys`, that exist and name an owner.
@@ -166,6 +184,7 @@ impl CoordinationStore for FaultStore {
         expected: Revision,
     ) -> Result<CasOutcome, StoreError> {
         self.gate(Op::Update, ks, key).await?;
+        self.update_log.lock().unwrap().push((ks, key.to_string()));
         if self.plan_lost(ks, key) {
             return Ok(CasOutcome::Lost);
         }
@@ -197,6 +216,17 @@ impl CoordinationStore for FaultStore {
         expected: Option<Revision>,
     ) -> Result<CasOutcome, StoreError> {
         self.gate(Op::Delete, ks, key).await?;
+        let take = {
+            let mut takes = self.peer_takes.lock().unwrap();
+            takes
+                .iter()
+                .position(|(k, name, _)| *k == ks && name == key)
+                .map(|i| takes.remove(i))
+        };
+        if let Some((_, _, value)) = take {
+            let _: CasOutcome = self.inner.delete(ks, key, None).await?;
+            let _: CasOutcome = self.inner.create(ks, key, value).await?;
+        }
         self.inner.delete(ks, key, expected).await
     }
 
@@ -563,7 +593,7 @@ fn a_departure_after_an_ambiguous_commit_hands_the_split_back() {
     let owned = fault.owned(&rt, &["split.c0"]);
     let lease = fault.present(&rt, Keyspace::Ephemeral, &["split.c0"]);
     assert!(
-        owned.is_empty() && lease.is_empty(),
+        result.is_ok() && owned.is_empty() && lease.is_empty(),
         "depart returned {result:?}; still owned: {owned:?}; lease left: {lease:?}"
     );
 }
@@ -696,4 +726,426 @@ fn an_unpolled_gain_with_a_failed_clear_is_handed_back() {
 
     let owned = store.owned(&rt, &["split.u0"]);
     assert!(owned.is_empty(), "owned {owned:?} after {result:?}");
+}
+
+/// Wraps a store. While `stale` is above zero, a read of the watched key
+/// answers with the entry as it stood `depth` applied writes earlier, as a
+/// replica that has not applied the latest writes answers a direct get.
+#[derive(Clone)]
+struct LaggingReads<S> {
+    inner: S,
+    watched: (Keyspace, String),
+    history: Arc<Mutex<Vec<Option<Entry>>>>,
+    depth: usize,
+    stale: Arc<Mutex<u64>>,
+}
+
+impl<S: CoordinationStore + Clone> LaggingReads<S> {
+    fn new(inner: S, ks: Keyspace, key: &str, depth: usize) -> Self {
+        LaggingReads {
+            inner,
+            watched: (ks, key.to_string()),
+            history: Arc::default(),
+            depth,
+            stale: Arc::default(),
+        }
+    }
+
+    fn is_watched(&self, ks: Keyspace, key: &str) -> bool {
+        self.watched.0 == ks && self.watched.1 == key
+    }
+
+    /// Run `write`, keeping the entry it replaced when it changed the key.
+    async fn record(
+        &self,
+        ks: Keyspace,
+        key: &str,
+        write: impl std::future::Future<Output = Result<CasOutcome, StoreError>>,
+    ) -> Result<CasOutcome, StoreError> {
+        if !self.is_watched(ks, key) {
+            return write.await;
+        }
+        let before = self.inner.get(ks, key).await?;
+        let out = write.await;
+        let after = self.inner.get(ks, key).await?;
+        if before.as_ref().map(|e| e.revision) != after.as_ref().map(|e| e.revision) {
+            self.history.lock().unwrap().push(before);
+        }
+        out
+    }
+}
+
+impl<S: CoordinationStore + Clone> CoordinationStore for LaggingReads<S> {
+    fn lease_ttl(&self) -> Duration {
+        self.inner.lease_ttl()
+    }
+
+    fn watch_mode(&self) -> WatchMode {
+        self.inner.watch_mode()
+    }
+
+    async fn create(
+        &self,
+        ks: Keyspace,
+        key: &str,
+        value: Vec<u8>,
+    ) -> Result<CasOutcome, StoreError> {
+        self.record(ks, key, self.inner.create(ks, key, value))
+            .await
+    }
+
+    async fn update(
+        &self,
+        ks: Keyspace,
+        key: &str,
+        value: Vec<u8>,
+        expected: Revision,
+    ) -> Result<CasOutcome, StoreError> {
+        self.record(ks, key, self.inner.update(ks, key, value, expected))
+            .await
+    }
+
+    async fn get(&self, ks: Keyspace, key: &str) -> Result<Option<Entry>, StoreError> {
+        let stale = self.is_watched(ks, key) && {
+            let mut left = self.stale.lock().unwrap();
+            let stale = *left > 0;
+            *left = left.saturating_sub(1);
+            stale
+        };
+        if stale {
+            let history = self.history.lock().unwrap();
+            if history.len() >= self.depth {
+                return Ok(history[history.len() - self.depth].clone());
+            }
+        }
+        self.inner.get(ks, key).await
+    }
+
+    async fn delete(
+        &self,
+        ks: Keyspace,
+        key: &str,
+        expected: Option<Revision>,
+    ) -> Result<CasOutcome, StoreError> {
+        self.record(ks, key, self.inner.delete(ks, key, expected))
+            .await
+    }
+
+    async fn watch(&self, ks: Keyspace, prefix: &str) -> Result<WatchStream, StoreError> {
+        self.inner.watch(ks, prefix).await
+    }
+
+    async fn list(&self, ks: Keyspace, prefix: &str) -> Result<Vec<Entry>, StoreError> {
+        self.inner.list(ks, prefix).await
+    }
+}
+
+/// A renewal of `key` that applied unseen, then one read of the key that
+/// lags it: the departure still deletes the key.
+fn renewal_then_lagging_read(key: &'static str) {
+    let rt = runtime();
+    let fault = FaultStore::new(LEASE);
+    let store = LaggingReads::new(fault.clone(), Keyspace::Ephemeral, key, 1);
+    let mut a = StoreCoordinator::new(
+        store.clone(),
+        config_for(LEASE, Some("worker-a")),
+        rt.handle().clone(),
+        None,
+    )
+    .expect("coordinator");
+    a.start(Box::new(PhasedPlanner::one_final("departure:v1", &["l0"])))
+        .unwrap();
+    let mut held = Held::default();
+    drive(&mut a, &mut held, "claiming the split", |h| {
+        h.splits.len() == 1
+    });
+
+    fault
+        .ambiguous
+        .lock()
+        .unwrap()
+        .push((Keyspace::Ephemeral, key.to_string()));
+    wait_ambiguous_drained(&fault);
+    *store.stale.lock().unwrap() = 1;
+    let result = a.depart(&[]);
+
+    let left = fault.present(&rt, Keyspace::Ephemeral, &[key]);
+    assert!(
+        left.is_empty(),
+        "depart returned {result:?} with {left:?} left"
+    );
+}
+
+/// A lease read back from a replica behind an unseen renewal is read again.
+#[test]
+fn a_lagging_read_after_an_ambiguous_lease_renewal_is_read_again() {
+    renewal_then_lagging_read("split.l0");
+}
+
+/// A leader key read back from a replica behind an unseen renewal is read
+/// again.
+#[test]
+fn a_lagging_read_after_an_ambiguous_leader_renewal_is_read_again() {
+    renewal_then_lagging_read("leader");
+}
+
+/// An ambiguous final commit on a polled store, then one read of the split
+/// record from before this tenancy's claim: the departure still clears the
+/// owner and deletes the lease.
+#[test]
+fn a_lagging_read_after_an_ambiguous_commit_is_read_again() {
+    let rt = runtime();
+    let fault = FaultStore::new(LEASE);
+    let lagging = LaggingReads::new(fault.clone(), Keyspace::Durable, "split.c0", 2);
+    let store = support::polled::PolledStore::new(lagging.clone(), LEASE / 10);
+    let mut a = StoreCoordinator::new(
+        store,
+        config_for(LEASE, Some("worker-a")),
+        rt.handle().clone(),
+        None,
+    )
+    .expect("coordinator");
+    a.start(Box::new(PhasedPlanner::one_final("departure:v1", &["c0"])))
+        .unwrap();
+    let mut held = Held::default();
+    drive(&mut a, &mut held, "claiming the split", |h| {
+        h.splits.len() == 1
+    });
+
+    fault
+        .ambiguous
+        .lock()
+        .unwrap()
+        .push((Keyspace::Durable, "split.c0".to_string()));
+    let committed = a.commit(
+        &support::split_id("c0"),
+        &spate_coordination::SplitProgress::new(7, vec![]),
+    );
+    assert!(committed.is_err(), "the injected reply loss surfaces");
+    *lagging.stale.lock().unwrap() = 1;
+    let result = a.depart(&[]);
+
+    let owned = fault.owned(&rt, &["split.c0"]);
+    let lease = fault.present(&rt, Keyspace::Ephemeral, &["split.c0"]);
+    assert!(
+        result.is_ok() && owned.is_empty() && lease.is_empty(),
+        "depart returned {result:?}; still owned: {owned:?}; lease left: {lease:?}"
+    );
+}
+
+/// After an unseen leadership renewal, the next heartbeat's renewal loses
+/// its CAS and gives up leadership; the departure still deletes the key,
+/// which is still this worker's.
+#[test]
+fn a_departure_after_a_self_demoting_renewal_deletes_the_leader_key() {
+    let rt = runtime();
+    let store = FaultStore::new(LEASE);
+    let mut a = holding(&rt, &store, config_for(LEASE, Some("worker-a")), &["d0"]);
+
+    store
+        .ambiguous
+        .lock()
+        .unwrap()
+        .push((Keyspace::Ephemeral, "leader".to_string()));
+    wait_ambiguous_drained(&store);
+    let renewed = store.updates(Keyspace::Ephemeral, "leader");
+    let deadline = Instant::now() + support::DEADLINE;
+    while store.updates(Keyspace::Ephemeral, "leader") == renewed {
+        assert!(Instant::now() < deadline, "the next renewal never ran");
+        std::thread::sleep(support::POLL_INTERVAL);
+    }
+    let result = a.depart(&[]);
+
+    let left = store.present(&rt, Keyspace::Ephemeral, &["leader"]);
+    assert!(left.is_empty(), "depart returned {result:?}; left {left:?}");
+}
+
+/// A gain whose owner clear lands but whose lease delete fails, polled or
+/// not, has its lease removed by the departure.
+fn lease_delete_fails(poll: bool) {
+    let rt = runtime();
+    let store = FaultStore::new(LEASE);
+    let mut a = StoreCoordinator::new(
+        store.clone(),
+        config_for(LEASE, Some("worker-a")),
+        rt.handle().clone(),
+        None,
+    )
+    .expect("coordinator");
+    a.start(Box::new(PhasedPlanner::one_final("departure:v1", &["u0"])))
+        .unwrap();
+    if poll {
+        let mut held = Held::default();
+        drive(&mut a, &mut held, "claiming the split", |h| {
+            h.splits.len() == 1
+        });
+    } else {
+        let deadline = Instant::now() + support::DEADLINE;
+        while store.owned(&rt, &["split.u0"]).is_empty()
+            || store
+                .present(&rt, Keyspace::Ephemeral, &["split.u0"])
+                .is_empty()
+        {
+            assert!(Instant::now() < deadline, "the split was never claimed");
+            std::thread::sleep(support::POLL_INTERVAL);
+        }
+    }
+
+    store
+        .fatal
+        .lock()
+        .unwrap()
+        .push((Op::Delete, Keyspace::Ephemeral, "split.u0".to_string()));
+    let result = a.depart(&[]);
+
+    let lease = store.present(&rt, Keyspace::Ephemeral, &["split.u0"]);
+    assert!(lease.is_empty(), "depart returned {result:?}; lease left");
+}
+
+/// The task's failed lease delete is finished by the direct release for a
+/// gain the handle never polled.
+#[test]
+fn an_unpolled_gain_whose_lease_delete_fails_loses_its_lease() {
+    lease_delete_fails(false);
+}
+
+/// The task's failed lease delete is finished by the direct release for a
+/// gain the handle polled.
+#[test]
+fn a_polled_gain_whose_lease_delete_fails_loses_its_lease() {
+    lease_delete_fails(true);
+}
+
+/// A peer that takes the lease between our cached revision and our delete
+/// keeps its lease through our departure.
+#[test]
+fn a_peers_lease_survives_the_departure() {
+    let rt = runtime();
+    let store = FaultStore::new(LEASE);
+    let mut a = holding(&rt, &store, config_for(LEASE, Some("worker-a")), &["t0"]);
+    let ours = rt
+        .block_on(store.inner.get(Keyspace::Ephemeral, "split.t0"))
+        .unwrap()
+        .expect("our lease");
+    let mut peer: serde_json::Value = serde_json::from_slice(&ours.value).unwrap();
+    peer["owner"] = "worker-b".into();
+    peer["nonce"] = "peer-nonce".into();
+    peer["epoch"] = (peer["epoch"].as_u64().unwrap() + 1).into();
+    let peer = serde_json::to_vec(&peer).unwrap();
+
+    store.peer_takes.lock().unwrap().push((
+        Keyspace::Ephemeral,
+        "split.t0".to_string(),
+        peer.clone(),
+    ));
+    let result = a.depart(&[]);
+
+    let left = rt
+        .block_on(store.inner.get(Keyspace::Ephemeral, "split.t0"))
+        .unwrap();
+    assert!(
+        left.as_ref().is_some_and(|e| e.value == peer),
+        "depart returned {result:?}; the peer's lease is gone"
+    );
+}
+
+/// A record a same-named later tenancy holds at a higher epoch keeps its
+/// owner when the earlier tenancy departs.
+#[test]
+fn a_later_tenancy_of_the_same_name_keeps_its_owner() {
+    let rt = runtime();
+    let fault = FaultStore::new(LEASE);
+    let store = support::polled::PolledStore::new(fault.clone(), LEASE / 10);
+    let mut a = StoreCoordinator::new(
+        store,
+        config_for(LEASE, Some("worker-a")),
+        rt.handle().clone(),
+        None,
+    )
+    .expect("coordinator");
+    a.start(Box::new(PhasedPlanner::one_final("departure:v1", &["j0"])))
+        .unwrap();
+    let mut held = Held::default();
+    drive(&mut a, &mut held, "claiming the split", |h| {
+        h.splits.len() == 1
+    });
+
+    // A restart under the same id claims it again, unseen by the poller.
+    let entry = rt
+        .block_on(fault.inner.get(Keyspace::Durable, "split.j0"))
+        .unwrap()
+        .expect("record");
+    let mut record: serde_json::Value = serde_json::from_slice(&entry.value).unwrap();
+    let epoch = record["epoch"].as_u64().unwrap() + 1;
+    record["epoch"] = epoch.into();
+    let won = rt
+        .block_on(fault.inner.update(
+            Keyspace::Durable,
+            "split.j0",
+            serde_json::to_vec(&record).unwrap(),
+            entry.revision,
+        ))
+        .unwrap();
+    assert!(matches!(won, CasOutcome::Won(_)));
+    let result = a.depart(&[]);
+
+    let after = rt
+        .block_on(fault.inner.get(Keyspace::Durable, "split.j0"))
+        .unwrap()
+        .expect("record");
+    let after: serde_json::Value = serde_json::from_slice(&after.value).unwrap();
+    assert!(
+        after["owner"] == "worker-a" && after["epoch"] == epoch,
+        "depart returned {result:?}; record {after}"
+    );
+}
+
+/// The handle polled a split at one epoch; the task lost it, claimed it
+/// again at a higher one and cannot clear it. The direct release uses the
+/// task's epoch.
+#[test]
+fn a_regained_split_is_released_at_the_task_epoch() {
+    let rt = runtime();
+    let store = FaultStore::new(LEASE);
+    let mut a = holding(&rt, &store, config_for(LEASE, Some("worker-a")), &["e0"]);
+    let record = |store: &FaultStore| -> serde_json::Value {
+        let entry = rt
+            .block_on(store.inner.get(Keyspace::Durable, "split.e0"))
+            .unwrap()
+            .expect("record");
+        serde_json::from_slice(&entry.value).unwrap()
+    };
+    let first = record(&store)["epoch"].as_u64().unwrap();
+
+    // The lease vanishes: the task drops the split and claims it again.
+    let _: CasOutcome = rt
+        .block_on(store.inner.delete(Keyspace::Ephemeral, "split.e0", None))
+        .unwrap();
+    let deadline = Instant::now() + support::DEADLINE;
+    loop {
+        let now = record(&store);
+        if now["epoch"].as_u64().unwrap() > first
+            && now["owner"] == "worker-a"
+            && !store
+                .present(&rt, Keyspace::Ephemeral, &["split.e0"])
+                .is_empty()
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "never regained: {now}");
+        std::thread::sleep(support::POLL_INTERVAL);
+    }
+
+    store
+        .fatal
+        .lock()
+        .unwrap()
+        .push((Op::Update, Keyspace::Durable, "split.e0".to_string()));
+    let result = a.depart(&[]);
+
+    let after = record(&store);
+    assert!(
+        after["owner"].is_null(),
+        "depart returned {result:?}; record {after}"
+    );
 }

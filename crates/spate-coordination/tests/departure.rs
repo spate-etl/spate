@@ -1149,3 +1149,87 @@ fn a_regained_split_is_released_at_the_task_epoch() {
         "depart returned {result:?}; record {after}"
     );
 }
+
+/// A worker that never led leaves the leader's key through its departure.
+#[test]
+fn a_departure_by_a_follower_keeps_the_leaders_key() {
+    let rt = runtime();
+    let store = FaultStore::new(LEASE);
+    let mut b = holding(
+        &rt,
+        &store,
+        config_for(LEASE, Some("worker-b")),
+        &["f0", "f1"],
+    );
+    let mut a = StoreCoordinator::new(
+        store.clone(),
+        config_for(LEASE, Some("worker-a")),
+        rt.handle().clone(),
+        None,
+    )
+    .expect("coordinator");
+    a.start(Box::new(PhasedPlanner::one_final(
+        "departure:v1",
+        &["f0", "f1"],
+    )))
+    .unwrap();
+    let (mut held_a, mut held_b) = (Held::default(), Held::default());
+    support::drive_pair(
+        (&mut a, &mut held_a),
+        (&mut b, &mut held_b),
+        "worker-a joining",
+        |a, _| a.splits.len() == 1,
+    );
+    let result = a.depart(&[]);
+
+    let leader = rt
+        .block_on(store.inner.get(Keyspace::Ephemeral, "leader"))
+        .unwrap()
+        .map(|e| serde_json::from_slice::<serde_json::Value>(&e.value).unwrap());
+    assert!(
+        leader.as_ref().is_some_and(|v| v["owner"] == "worker-b"),
+        "depart returned {result:?}; leader key {leader:?}"
+    );
+}
+
+/// A lease read that lags an unseen renewal for the whole departure is read
+/// again at a pause until the task's deadline, which reports the lease
+/// delete undone.
+#[test]
+fn a_lease_read_that_keeps_lagging_is_reported_at_the_deadline() {
+    let rt = runtime();
+    let fault = FaultStore::new(LEASE);
+    let store = LaggingReads::new(fault.clone(), Keyspace::Ephemeral, "split.l0", 1);
+    let mut a = StoreCoordinator::new(
+        store.clone(),
+        config_for(LEASE, Some("worker-a")),
+        rt.handle().clone(),
+        None,
+    )
+    .expect("coordinator");
+    a.start(Box::new(PhasedPlanner::one_final("departure:v1", &["l0"])))
+        .unwrap();
+    let mut held = Held::default();
+    drive(&mut a, &mut held, "claiming the split", |h| {
+        h.splits.len() == 1
+    });
+
+    fault
+        .ambiguous
+        .lock()
+        .unwrap()
+        .push((Keyspace::Ephemeral, "split.l0".to_string()));
+    wait_ambiguous_drained(&fault);
+    *store.stale.lock().unwrap() = u64::MAX;
+    let result = a.depart(&[]);
+
+    // A 200ms `op_timeout` holds four 50ms pauses.
+    let reads = u64::MAX - *store.stale.lock().unwrap();
+    assert!(
+        reads < 20
+            && result
+                .as_ref()
+                .is_err_and(|e| e.to_string().contains("deleting the lease of split l0")),
+        "{reads} lagging reads; depart returned {result:?}"
+    );
+}

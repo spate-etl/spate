@@ -111,7 +111,7 @@ impl Command {
 /// The task's answer to a `Depart`.
 pub(crate) enum DepartReply {
     /// The task ran the departure and writes nothing more. `unreleased`
-    /// names each split, with its epoch, whose owner it did not clear.
+    /// names each split, with its epoch, that it may have left behind.
     Ran {
         result: Result<(), CoordinationError>,
         unreleased: Vec<(SplitId, u64)>,

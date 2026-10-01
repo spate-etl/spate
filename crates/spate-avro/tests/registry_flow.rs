@@ -561,6 +561,34 @@ async fn a_refused_schema_poisons_the_id_rather_than_stalling() {
     );
 }
 
+/// A schema the registry types as other than Avro poisons the id, though its
+/// text also parses as an Avro schema.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_schema_that_is_not_avro_poisons_the_id() {
+    let stub = StubRegistry::default();
+    let body = serde_json::json!({ "schema": r#"{"type":"string"}"#, "schemaType": "JSON" });
+    stub.script("/schemas/ids/78", 200, &body.to_string(), 0);
+    let addr = stub.clone().serve().await;
+    let builder = AvroDeserializerBuilder::from_settings(
+        &settings(addr, Duration::from_secs(30)),
+        &tokio::runtime::Handle::current(),
+    )
+    .unwrap();
+    let mut deser = builder.build_value().expect("apache builder");
+    let payload = confluent_payload(78, 1);
+    let err = tokio::task::spawn_blocking(move || {
+        let mut out = Collected(Vec::new());
+        drive_until_ready(&mut deser, &payload, &mut out)
+    })
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert!(
+        matches!(&err, DeserError::SchemaUnavailable { reason } if reason.contains("JSON")),
+        "{err}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Registry rejections that stop the pipeline
 // ---------------------------------------------------------------------------

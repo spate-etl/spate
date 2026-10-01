@@ -9,9 +9,9 @@
 //! # Transient, permanent and rejected
 //!
 //! Only a *permanent* verdict about an id is negatively cached: the registry
-//! answering `404` (unknown id/subject/version), a schema that uses
-//! unsupported references, or a schema the parser rejects (`CompiledSchema`
-//! pre-renders the reason). A *transient* outage
+//! answering `404` (unknown id/subject/version), a schema that is not Avro or
+//! uses unsupported references, or a schema the parser rejects
+//! (`CompiledSchema` pre-renders the reason). A *transient* outage
 //! (any other 5xx, `429`, a timeout, a refused/black-holed connection)
 //! leaves the id **absent** so the deserializer's next replay refetches it:
 //! poisoning a transient blip would drop (and ack) perfectly decodable
@@ -142,12 +142,27 @@ struct RegistrySchema {
     /// Absent from a by-id response.
     id: Option<u32>,
     schema: String,
+    /// `AVRO` when absent.
+    #[serde(rename = "schemaType")]
+    schema_type: Option<String>,
     references: Option<Vec<serde::de::IgnoredAny>>,
 }
 
 impl RegistrySchema {
-    fn reference_count(&self) -> usize {
-        self.references.as_ref().map_or(0, Vec::len)
+    /// Why spate-avro cannot decode with schema `id`, if it cannot.
+    fn unsupported(&self, id: u32) -> Option<String> {
+        if let Some(kind) = self.schema_type.as_deref().filter(|kind| *kind != "AVRO") {
+            return Some(format!(
+                "schema {id} is a {kind} schema, which spate-avro does not decode"
+            ));
+        }
+        let references = self.references.as_ref().map_or(0, Vec::len);
+        (references > 0).then(|| {
+            format!(
+                "schema {id} uses {references} registry reference(s), which spate-avro does not \
+                 support yet"
+            )
+        })
     }
 }
 
@@ -500,15 +515,8 @@ async fn fetch_one(
     let registry = client.registry();
     match client.get(client.schema_url(id)).await {
         Ok(registered) => {
-            let references = registered.reference_count();
-            if references > 0 {
-                cache.insert_failed(
-                    id,
-                    format!(
-                        "schema {id} uses {references} registry reference(s), which spate-avro \
-                         does not support yet"
-                    ),
-                );
+            if let Some(reason) = registered.unsupported(id) {
+                cache.insert_failed(id, reason);
                 return FetchOutcome::Resolved;
             }
             let compiled = CompiledSchema::compile(id, &registered.schema);
@@ -581,7 +589,7 @@ pub(crate) async fn prewarm(
             return;
         }
         match client.get(client.latest_url(subject)).await {
-            Ok(registered) if registered.reference_count() == 0 => {
+            Ok(registered) => {
                 let Some(id) = registered.id else {
                     tracing::warn!(
                         subject,
@@ -589,6 +597,10 @@ pub(crate) async fn prewarm(
                     );
                     continue;
                 };
+                if let Some(reason) = registered.unsupported(id) {
+                    tracing::warn!(subject, %reason, "pre-warm skipped");
+                    continue;
+                }
                 // Per-backend compile with the parse-panic guard inside (see
                 // `fetch_one`), so one poison schema cannot kill this detached
                 // task mid-list and skip the remaining pre-warm.
@@ -602,9 +614,6 @@ pub(crate) async fn prewarm(
                         tracing::warn!(subject, %reason, "pre-warm parse failed; skipping subject");
                     }
                 }
-            }
-            Ok(_) => {
-                tracing::warn!(subject, "pre-warm skipped: schema references unsupported");
             }
             Err(Failure::Status(status @ StatusCode::UNAUTHORIZED)) => record(
                 rejection,

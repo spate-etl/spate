@@ -186,7 +186,8 @@ configuration; an optional `reader_schema` pins the shape records resolve
 into, using Avro's standard schema-resolution rules: field reordering,
 defaults for missing fields, type promotions. Pin a reader schema to keep a
 struct stable while producers evolve. Registry schemas using schema references
-are not supported and surface as unavailable.
+are not supported and surface as unavailable, and so does a registry schema
+whose type is not `AVRO`, such as `PROTOBUF` or `JSON`.
 
 A reader **field** alias is not applied. A reader field that renames a writer's
 field and lists the old name in `aliases` reports that field missing on every

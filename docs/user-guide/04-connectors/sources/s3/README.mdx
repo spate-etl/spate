@@ -331,15 +331,17 @@ splits and takes the leader about 362 MB to plan, measured by planning that one
 listing entry in a release build. Planning runs on the leader only, once per
 plan and, for an open plan, on every replan tick.
 
-A cut object's splits then stay in the coordination view until the job ends:
-in the leader's view on every store, and in every worker's view on a store
-whose watch is pushed. The view holds about 950 bytes per split, so that
-object's 800,000 splits hold about 758 MB for the job's lifetime, measured by
-building the view's records for 800,000 such splits under a counting
-allocator. The coordination store holds two records per split, so seeding
-them is 1.6 million store writes. Each `reconcile_interval` the reconcile
-listing reads every split record again: every worker does on a store whose
-watch is pushed, and the leader does on a store whose watch is polled.
+Every instance that tracks a split keeps its records in memory until the job
+ends. The leader tracks every split, and a worker tracks the splits its store's
+watch or its assignment gives it, which on a store whose watch is pushed is
+every split. A tracked split costs about 950 bytes with a 16-byte key, plus
+about 1.35 bytes per further key byte, since its descriptor carries the key as
+JSON and then base64. That object's 800,000 splits therefore hold about 758 MB
+on each tracking instance with a 16-byte key, and about 970 MB with a 212-byte
+key, measured by building those records under a counting allocator. The
+coordination store holds two records per split, so seeding them is 1.6 million
+store writes, and each `reconcile_interval` the reconcile listing reads every
+split record again.
 
 ## Decoding records
 

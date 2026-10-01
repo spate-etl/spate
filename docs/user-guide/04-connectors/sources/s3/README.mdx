@@ -336,10 +336,11 @@ job ends, and by the time the job ends, every instance tracks every split. A
 completed split costs up to about 1,100 bytes with a 16-byte key, plus about
 2.7 bytes per further key byte, since its descriptor and its resume state carry
 the key as JSON and then base64. That object's 800,000 splits therefore hold
-about 878 MB on each instance with 16-byte keys, and about 1.30 GB with
-212-byte keys. These figures assume the default 38-character instance id and a
-40-character ETag, and a longer `instance_id` adds bytes per split; they were
-measured by building those records under a counting allocator. The
+up to about 878 MB on each instance with 16-byte keys, and up to about 1.30 GB
+with 212-byte keys. These figures assume the default 38-character
+`instance_id` and a 40-character ETag, and a longer `instance_id` adds bytes
+per split; they were measured by building those records under a counting
+allocator. The
 coordination store holds two records per split, so seeding them is 1.6 million
 store writes, and each `reconcile_interval` the reconcile listing reads every
 split record again.

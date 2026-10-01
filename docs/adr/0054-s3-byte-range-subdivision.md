@@ -83,13 +83,13 @@ doubles per-lane read-ahead memory.
   instance keeps the records of the splits it tracks until the job ends, and
   by then every instance tracks every split. A completed split costs up to
   about 1,100 bytes with a 16-byte key, plus about 2.7 bytes per further key
-  byte, with the default 38-character instance id and a 40-character ETag; a
+  byte, with the default 38-character `instance_id` and a 40-character ETag; a
   longer `instance_id` adds bytes per split. At the default 64 MiB target, one
   50,000 GiB object plans 800,000 splits. Planning them takes about 362 MB of
   leader memory, seeding them takes 1.6 million store creates, each instance
-  ends the job holding about 878 MB with 16-byte keys or about 1.30 GB with
-  212-byte keys, and each reconcile listing reads all of them again. No cap
-  bounds the ranges per object.
+  ends the job holding up to about 878 MB with 16-byte keys or up to about
+  1.30 GB with 212-byte keys, and each reconcile listing reads all of them
+  again. No cap bounds the ranges per object.
 - Bad, because a large object the planner cannot cut, such as a whole-stream
   compressed one, is still read in full by one lane.
 - Neutral, because the framer's delimiter becomes part of the job

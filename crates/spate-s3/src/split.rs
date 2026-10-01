@@ -1279,16 +1279,16 @@ mod tests {
         }
 
         /// With cutting off, every split is the one the reference packing
-        /// makes.
+        /// makes. Sizes are whole MiB so bins often fill exactly.
         #[test]
         fn prop_whole_object_packing_matches_the_reference(
-            objects in proptest::collection::vec((0u64..300 * MB, 0u8..4), 0..120),
+            objects in proptest::collection::vec((0u64..300, 0u8..4), 0..120),
             target_mb in 1u64..129,
         ) {
             let listing: Vec<ObjectEntry> = objects
                 .iter()
                 .enumerate()
-                .map(|(i, &(size, kind))| shaped(i, size, kind))
+                .map(|(i, &(size_mb, kind))| shaped(i, size_mb * MB, kind))
                 .collect();
             let packed = pack(listing.clone(), &whole(target_mb * MB));
             prop_assert_eq!(object_bins(&packed).len(), packed.len());

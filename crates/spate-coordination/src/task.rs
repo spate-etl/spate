@@ -392,9 +392,9 @@ pub(crate) struct Task<S: CoordinationStore + Clone> {
     /// Without it a bounded job with a poison split idles instead of
     /// reaching `Stalled`.
     quarantine_scan: bool,
-    /// Set when this worker released its last split. The worker is leaving
-    /// the fleet, so it must not claim or lead again; otherwise it
-    /// re-claims its own hand-backs.
+    /// Set when this worker leaves the fleet. It must not claim, lead or
+    /// renew its presence again. A claim re-takes its own hand-backs, and a
+    /// renewed presence key has the leader assign it work it never takes.
     parting: bool,
     /// Set once a `Depart` has been answered; the loop stops on it.
     stopping: bool,
@@ -2733,8 +2733,11 @@ impl<S: CoordinationStore + Clone> Task<S> {
     // Heartbeat.
 
     async fn heartbeat(&mut self) -> Result<(), CoordinationError> {
-        // Presence first: membership must outlive lease hiccups.
-        self.renew_presence().await?;
+        // Presence first: membership must outlive lease hiccups. A parting
+        // worker's key stays deleted, or expires if the delete failed.
+        if !self.parting {
+            self.renew_presence().await?;
+        }
         if self.leadership.is_some() {
             self.renew_leadership().await?;
         }

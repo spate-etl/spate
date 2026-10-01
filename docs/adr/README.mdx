@@ -66,7 +66,7 @@ record appears in the table below.
 | [0030](0030-split-record-layout.md) | Two durable records per split: an immutable spec and a small progress record | accepted | 2026-07-17 |
 | [0031](0031-coordinated-gains-and-completion-latency.md) | Additive lane gains and eager terminal commits | accepted | 2026-07-18 |
 | [0032](0032-s3-always-coordinated.md) | The object-storage source is always coordinated; the manifest checkpoint is deleted | accepted | 2026-07-18 |
-| [0033](0033-s3-split-packing.md) | Listing-order first-fit packing with a bounded lookback and a per-object open cost | accepted | 2026-07-18 |
+| [0033](0033-s3-split-packing.md) | Listing-order first-fit packing with a bounded lookback and a per-object open cost | superseded | 2026-07-18 |
 | [0034](0034-s3-split-identity.md) | Split identity is a truncated digest over member keys, versions and a packing version | accepted | 2026-07-18 |
 | [0035](0035-s3-poison-policy.md) | Object-level failures poison the split; credential and configuration failures are fatal | accepted | 2026-07-18 |
 | [0036](0036-coordinator-wiring-at-assembly.md) | The coordination backend is injected at assembly, never configured per connector | superseded | 2026-07-18 |
@@ -87,7 +87,8 @@ record appears in the table below.
 | [0051](0051-lease-expiry-judged-by-each-observer.md) | Lease expiry may be judged by each observer, and the DynamoDB store does so | accepted | 2026-09-29 |
 | [0052](0052-dynamodb-store-polls-without-streams.md) | The DynamoDB store discovers changes by polling, without Streams | accepted | 2026-09-29 |
 | [0053](0053-one-dynamodb-table-holds-every-job.md) | One operator-provisioned table holds every job, keyed by job and keyspace | accepted | 2026-09-29 |
-| [0054](0054-graceful-departure-not-withheld.md) | A crashed instance's splits are withheld briefly, and a graceful departure's are not | accepted | 2026-10-01 |
+| [0054](0054-s3-byte-range-subdivision.md) | A large uncompressed object is cut into byte-range splits, and the rest pack as before | accepted | 2026-10-01 |
+| [0055](0055-graceful-departure-not-withheld.md) | A crashed instance's splits are withheld briefly, and a graceful departure's are not | accepted | 2026-10-01 |
 
 ## Related
 

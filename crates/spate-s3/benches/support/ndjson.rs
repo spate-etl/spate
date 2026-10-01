@@ -17,6 +17,10 @@ use std::io::Write as _;
 /// granularity production uses.
 pub(crate) const CHUNK_BYTES: usize = 512 * 1024;
 
+/// Bytes per GET window of a byte-range read, the source's default
+/// (`prefetch_bytes`, 8 MiB).
+pub(crate) const RANGE_BYTES: u64 = 8 * 1024 * 1024;
+
 /// Records per object in the single-object profiles. Chosen so the object
 /// lands around 4 MiB, which is ~16 chunks: enough that per-chunk work
 /// dominates per-object setup, and small enough to stay well inside the
@@ -123,9 +127,8 @@ pub(crate) fn zstd(bytes: &[u8]) -> Vec<u8> {
 }
 
 /// The byte offset of the first record boundary at or after `at`, plus a few
-/// bytes, so a chunk list starting here begins **inside** a record, which is
-/// what a reader entering a subdivided object at an arbitrary byte range
-/// faces.
+/// bytes, so a chunk list or a byte range starting here begins **inside** a
+/// record, as a planned range boundary usually does.
 pub(crate) fn offset_inside_a_record(bytes: &[u8], at: usize) -> usize {
     let boundary = bytes[at..]
         .iter()

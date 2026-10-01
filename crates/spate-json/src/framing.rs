@@ -126,6 +126,10 @@ impl RecordFramer for NdjsonFramer {
     fn decoded_bytes(&self) -> u64 {
         self.decoded_bytes
     }
+
+    fn resync_delimiter(&self) -> Option<u8> {
+        Some(b'\n')
+    }
 }
 
 #[cfg(test)]
@@ -254,6 +258,30 @@ mod tests {
             for split in 0..=stream.len() {
                 let framed = frame_all(TEST_CAP, &[&stream[..split], &stream[split..]]).unwrap();
                 prop_assert_eq!(&framed, &expected, "split at {}", split);
+            }
+        }
+
+        /// Framing the stream whole yields the records of the bytes through
+        /// any delimiter followed by the records of the bytes after it, each
+        /// framed on its own, under a record cap small enough to fail some
+        /// runs.
+        #[test]
+        fn framing_composes_across_a_cut_after_the_delimiter(
+            stream in arb_stream(),
+            cap in 1..96usize,
+        ) {
+            let delim = NdjsonFramer::new(cap)
+                .resync_delimiter()
+                .expect("NDJSON declares a resync delimiter");
+            let whole = frame_all(cap, &[&stream]).ok();
+            for d in (0..stream.len()).filter(|&d| stream[d] == delim) {
+                let head = frame_all(cap, &[&stream[..=d]]).ok();
+                let tail = frame_all(cap, &[&stream[d + 1..]]).ok();
+                let halves = head.zip(tail).map(|(mut head, tail)| {
+                    head.extend(tail);
+                    head
+                });
+                prop_assert_eq!(&halves, &whole, "cut after byte {}", d);
             }
         }
     }

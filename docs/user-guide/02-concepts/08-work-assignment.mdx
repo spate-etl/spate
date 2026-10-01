@@ -138,9 +138,9 @@ optimal, and invariant 4's test is what says so.
 **Weight, not split count.**
 
 Split count is a proxy for load, and a poor one for the sources this
-framework coordinates: an object-store planner gives any object at or above
-its packing target a split to itself, so two workers holding the same
-number of splits can be holding wildly different numbers of bytes. The
+framework coordinates: an object-store planner gives a large object it cannot
+cut into ranges a split to itself, so two workers holding the same number of
+splits can be holding wildly different numbers of bytes. The
 planner already reports a weight per split; balancing uses it.
 
 `max_in_flight` still caps the split *count* per worker. It is a lane

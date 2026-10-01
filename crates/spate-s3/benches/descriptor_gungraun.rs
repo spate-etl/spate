@@ -22,13 +22,12 @@
 //!   parsing dominates, and this is the denominator the other case is read
 //!   against.
 //! - `single_member_splits` — the same 6,400 members as one member each, the
-//!   shape a listing of at-or-above-target objects produces. Sixteen times
-//!   the documents for the same members, so the difference between the two is
-//!   the per-document term: the version probe, the document wrapper, and the
-//!   `SplitDescriptor` allocation. **This is the profile a byte-range
-//!   subdivision change moves in the opposite direction to `plan`'s
-//!   `big_objects`**: subdividing turns one such descriptor into several
-//!   members, trading documents for members.
+//!   shape a listing of at-or-above-target objects read whole produces.
+//!   Sixteen times the documents for the same members, so the difference
+//!   between the two is the per-document term: the version probe, the
+//!   document wrapper, and the `SplitDescriptor` allocation. A byte-range
+//!   split is this shape plus a `range` field, and a plan of them is one
+//!   document per range.
 //!
 //! Descriptors are encoded in the fixture, never in the measured region, so
 //! these count parsing only.

@@ -15,15 +15,18 @@ pub(crate) struct S3Metrics {
     /// Objects enumerated by the planner's listing (leader-only: only the
     /// instance that runs the plan increments it).
     pub(crate) objects_listed: Counter,
-    /// Objects fully framed and handed to the pipeline.
+    /// Objects, or byte ranges of one, fully framed and handed to the
+    /// pipeline.
     pub(crate) objects_completed: Counter,
     /// Objects not yet completed across this worker's currently-held
-    /// splits (rises on split gain, falls per completed object, settles on
-    /// split close).
+    /// splits, a cut object counting once per range (rises on split gain,
+    /// falls per completed object, settles on split close).
     pub(crate) objects_remaining: Gauge,
     /// Bytes read from the store (as stored, pre-decompression).
     pub(crate) bytes_read: Counter,
-    /// Bytes after decompression (equals `bytes_read` for plain objects).
+    /// Bytes after decompression, as the framer receives them. For a plain
+    /// object read whole this equals `bytes_read`; the bytes a byte-range
+    /// read trims count in `bytes_read` alone.
     pub(crate) bytes_decoded: Counter,
     /// Object GET attempts beyond the first (transient failures).
     pub(crate) get_retries: Counter,

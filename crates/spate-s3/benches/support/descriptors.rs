@@ -18,7 +18,8 @@
 //! against `plan_listing`, so a change to the member cap fails a test rather
 //! than silently reshaping this fixture. The single-member arrangement is
 //! pinned the same way by `the_profiles_pack_differently`, which holds the
-//! planner to one split per at-or-above-target object.
+//! planner to one split per at-or-above-target object when the framer
+//! declares no resync delimiter.
 //!
 //! # Determinism
 //!
@@ -110,7 +111,8 @@ pub(crate) fn full_split_plan() -> Vec<Vec<u8>> {
 }
 
 /// The same members as one per descriptor, the shape a listing of
-/// at-or-above-target objects produces, where each lands alone in its split.
+/// at-or-above-target objects read whole produces, where each lands alone in
+/// its split.
 pub(crate) fn single_member_plan() -> Vec<Vec<u8>> {
     plan(1)
 }

@@ -83,4 +83,8 @@ impl RecordFramer for TestLineFramer {
     fn decoded_bytes(&self) -> u64 {
         self.decoded_bytes
     }
+
+    fn resync_delimiter(&self) -> Option<u8> {
+        Some(b'\n')
+    }
 }

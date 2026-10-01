@@ -22,7 +22,7 @@
 
 use crate::config::Compression;
 use crate::fetch::{FetcherParams, ObjectEntry, run_fetcher};
-use crate::framer::FramerFactory;
+use crate::framer::{Codec, FramerFactory};
 use crate::lane::S3Lane;
 use crate::metrics::S3Metrics;
 use crate::offset::Position;
@@ -238,6 +238,8 @@ pub(crate) struct SplitCtx {
     handle: tokio::runtime::Handle,
     issuer: AckIssuer,
     make_framer: FramerFactory,
+    /// The framer's resync delimiter, probed once at open.
+    delimiter: Option<u8>,
     compression: Compression,
     chunk_bytes: usize,
     range_bytes: usize,
@@ -266,6 +268,7 @@ impl SplitCtx {
         handle: tokio::runtime::Handle,
         issuer: AckIssuer,
         make_framer: FramerFactory,
+        delimiter: Option<u8>,
         compression: Compression,
         chunk_bytes: usize,
         range_bytes: usize,
@@ -278,6 +281,7 @@ impl SplitCtx {
             handle,
             issuer,
             make_framer,
+            delimiter,
             compression,
             chunk_bytes,
             range_bytes,
@@ -322,6 +326,36 @@ impl SplitSource for SplitCtx {
                 reason: format!("split {split}: {}", e.reason),
             }
         })?;
+        if let Some(range) = descriptor.range
+            && self.delimiter != Some(range.delimiter)
+        {
+            return Err(SourceError::Client {
+                class: ErrorClass::Fatal,
+                reason: format!(
+                    "split {split}: the descriptor splits its object on byte {:#04x}, but the \
+                     source's framer {} — the split was planned for a different framer",
+                    range.delimiter,
+                    match self.delimiter {
+                        Some(d) => format!("resyncs on byte {d:#04x}"),
+                        None => "declares no resync delimiter".to_owned(),
+                    }
+                ),
+            });
+        }
+        if let (Some(_), [object]) = (descriptor.range, descriptor.objects.as_slice()) {
+            let codec = Codec::resolve(self.compression, &object.key);
+            if codec != Codec::Plain {
+                return Err(SourceError::Client {
+                    class: ErrorClass::Fatal,
+                    reason: format!(
+                        "split {split}: \"{}\" is split into byte ranges, but the source \
+                         decodes it as {} — a ranged split needs an uncompressed object",
+                        object.key,
+                        format!("{codec:?}").to_lowercase()
+                    ),
+                });
+            }
+        }
         let objects: Arc<Vec<ObjectEntry>> = Arc::new(descriptor.to_entries());
 
         // Store-supplied data: reject a negative watermark before
@@ -377,6 +411,8 @@ impl SplitSource for SplitCtx {
             stop: Arc::clone(&stop),
             retry_base: self.retry_base,
             retries: self.metrics.as_ref().map(|m| m.get_retries.clone()),
+            range: descriptor.range,
+            bytes_read: self.metrics.as_ref().map(|m| m.bytes_read.clone()),
         })));
 
         let remaining_at_open = (objects.len() as u64).saturating_sub(u64::from(start_ordinal));
@@ -683,6 +719,7 @@ mod tests {
             rt.handle().clone(),
             spate_core::checkpoint::Checkpointer::new().handle(),
             Arc::new(|| Box::new(crate::testutil::TestLineFramer::new(1 << 20))),
+            Some(b'\n'),
             Compression::Auto,
             64,
             1024,

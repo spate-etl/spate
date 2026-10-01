@@ -93,6 +93,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "s3_range_trim"
+path = "fuzz_targets/s3_range_trim.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "s3_split_descriptor"
 path = "fuzz_targets/s3_split_descriptor.rs"
 test = false

@@ -79,6 +79,20 @@ pub trait RecordFramer: Send {
 
     /// Total decoded bytes fed so far (for metrics).
     fn decoded_bytes(&self) -> u64;
+
+    /// The byte after which a reader can start framing mid-stream, or `None`
+    /// when the format has no such byte.
+    ///
+    /// Returning `Some(delim)` promises that for any stream `S` and any index
+    /// `d` with `S[d] == delim`, framing `S` yields the records of `S[..=d]`
+    /// followed by the records of `S[d + 1..]`, each framed by a fresh framer
+    /// through [`finish`](Self::finish). A source may then split one stream
+    /// into byte ranges and frame each on its own. A format with a header, a
+    /// BOM, magic bytes, or a delimiter that can appear quoted inside a record
+    /// (CSV) returns `None`.
+    fn resync_delimiter(&self) -> Option<u8> {
+        None
+    }
 }
 
 /// A [`Write`] adapter over a [`RecordFramer`], so a source whose decompressor
@@ -178,6 +192,13 @@ mod tests {
         framer.push(b"x").unwrap();
         framer.finish().unwrap();
         assert_eq!(framer.pop(), Some(b"x".to_vec()));
+    }
+
+    /// A framer that does not override `resync_delimiter` declares no resync
+    /// point.
+    #[test]
+    fn a_framer_declares_no_resync_delimiter_by_default() {
+        assert_eq!(WholeFramer::default().resync_delimiter(), None);
     }
 
     #[test]

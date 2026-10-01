@@ -7,10 +7,10 @@
 //!
 //! - `uniform_small` — 10,000 objects well under the target. The ordinary
 //!   backfill listing, and the denominator the other two are read against.
-//! - `big_objects` — 2,000 objects at or above the target, each closing a
-//!   bin on its own. **This is the profile a byte-range subdivision change
-//!   moves**: subdividing turns one such object into `ceil(size / target)`
-//!   members, which changes both the input cardinality and the digest count.
+//! - `big_objects` — 2,000 plain objects of four to sixteen times the target,
+//!   each cut into `ceil(size / target)` byte-range splits. **This is the
+//!   profile byte-range subdivision moves**: the split count, and with it the
+//!   digest and encoding count, is the sum of the range counts.
 //! - `mixed_tail` — tiny-object runs interleaved with objects sized just
 //!   under the target, which fills the open-bin deque to `PACKING_LOOKBACK`
 //!   and makes its linear scan walk most of the window. Sizing those objects
@@ -62,7 +62,7 @@ mod listing;
 #[bench::mixed_tail(listing::mixed_tail())]
 #[bench::deep_keys(listing::deep_keys())]
 fn plan(objects: Vec<(String, u64, String)>) -> Vec<spate_core::coordination::SplitId> {
-    let ids = plan_listing(black_box(objects), listing::TARGET_BYTES);
+    let ids = plan_listing(black_box(objects), listing::TARGET_BYTES, Some(b'\n'));
     assert!(!ids.is_empty(), "a non-empty listing planned no splits");
     ids
 }

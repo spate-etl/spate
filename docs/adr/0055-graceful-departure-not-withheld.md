@@ -2,7 +2,7 @@
 description: "A crashed instance's splits are withheld briefly before reassignment; a graceful departure hands its splits back and they move at once. Supersedes ADR-0040."
 ---
 
-# ADR-0054 — A crashed instance's splits are withheld briefly, and a graceful departure's are not
+# ADR-0055 — A crashed instance's splits are withheld briefly, and a graceful departure's are not
 
 - **Status:** accepted
 - **Date:** 2026-10-01

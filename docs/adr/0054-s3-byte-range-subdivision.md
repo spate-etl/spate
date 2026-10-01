@@ -79,15 +79,17 @@ doubles per-lane read-ahead memory.
   to the coordination store (#639).
 - Bad, because a cut object costs one split per range, so planner memory, the
   coordination store's records and the memory of every instance that tracks
-  the splits grow with `size / target` as well as with object count. The
-  leader tracks every split, and a worker tracks the splits its store's watch
-  or its assignment gives it. Each keeps those records until the job ends:
-  about 950 bytes per split with a 16-byte key, plus about 1.35 bytes per
-  further key byte. At the default 64 MiB target, one 50,000 GiB object plans 800,000
-  splits. Planning them takes about 362 MB of leader memory, seeding them takes
-  1.6 million store creates, each tracking instance holds about 758 MB with a
-  16-byte key or about 970 MB with a 212-byte key, and each reconcile listing
-  reads all of them again. No cap bounds the ranges per object.
+  the splits grow with `size / target` as well as with object count. Every
+  instance keeps the records of the splits it tracks until the job ends, and
+  by then every instance tracks every split. A completed split costs up to
+  about 1,100 bytes with a 16-byte key, plus about 2.7 bytes per further key
+  byte, with the default 38-character instance id and a 40-character ETag; a
+  longer `instance_id` adds bytes per split. At the default 64 MiB target, one
+  50,000 GiB object plans 800,000 splits. Planning them takes about 362 MB of
+  leader memory, seeding them takes 1.6 million store creates, each instance
+  ends the job holding about 878 MB with 16-byte keys or about 1.30 GB with
+  212-byte keys, and each reconcile listing reads all of them again. No cap
+  bounds the ranges per object.
 - Bad, because a large object the planner cannot cut, such as a whole-stream
   compressed one, is still read in full by one lane.
 - Neutral, because the framer's delimiter becomes part of the job
@@ -119,11 +121,13 @@ object.
   in-process store. Spike-measured, hand-recorded; no committed rig.
 - One range of a 50,000 GiB object at the 64 MiB target, with a 40-character
   ETag, encodes to a 222-byte descriptor with a 16-byte key and to 418 bytes
-  with a 212-byte key. 800,000 split states built from those descriptors and
-  inserted into the coordinator's view map under a counting allocator hold
-  758,353,608 live bytes (947.94 per split) and 969,553,608 (1,211.94 per
-  split). Spike-measured during review of #862, hand-recorded; no committed
-  rig.
+  with a 212-byte key. Its terminal resume state encodes to 82 and 278 bytes.
+  800,000 completed split states built from those records, with a 38-character
+  owner, and inserted into the coordinator's view map under a counting
+  allocator hold 878,353,608 live bytes (1,097.94 per split) with the 16-byte
+  key and 1,297,553,608 (1,621.94 per split) with the 212-byte key.
+  Spike-measured during review of #862 with a counting-allocator rig,
+  hand-recorded; no committed rig.
 
 ## More information
 

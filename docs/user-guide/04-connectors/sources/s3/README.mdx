@@ -331,14 +331,15 @@ splits and takes the leader about 362 MB to plan, measured by planning that one
 listing entry in a release build. Planning runs on the leader only, once per
 plan and, for an open plan, on every replan tick.
 
-Every instance that tracks a split keeps its records in memory until the job
-ends. The leader tracks every split, and a worker tracks the splits its store's
-watch or its assignment gives it, which on a store whose watch is pushed is
-every split. A tracked split costs about 950 bytes with a 16-byte key, plus
-about 1.35 bytes per further key byte, since its descriptor carries the key as
-JSON and then base64. That object's 800,000 splits therefore hold about 758 MB
-on each tracking instance with a 16-byte key, and about 970 MB with a 212-byte
-key, measured by building those records under a counting allocator. The
+Every instance keeps the records of the splits it tracks in memory until the
+job ends, and by the time the job ends, every instance tracks every split. A
+completed split costs up to about 1,100 bytes with a 16-byte key, plus about
+2.7 bytes per further key byte, since its descriptor and its resume state carry
+the key as JSON and then base64. That object's 800,000 splits therefore hold
+about 878 MB on each instance with 16-byte keys, and about 1.30 GB with
+212-byte keys. These figures assume the default 38-character instance id and a
+40-character ETag, and a longer `instance_id` adds bytes per split; they were
+measured by building those records under a counting allocator. The
 coordination store holds two records per split, so seeding them is 1.6 million
 store writes, and each `reconcile_interval` the reconcile listing reads every
 split record again.

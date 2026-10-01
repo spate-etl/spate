@@ -42,8 +42,8 @@ An unreachable server therefore rides the startup retry budget. Misconfiguration
 such as a `servers` entry that is not a URL or joins several with commas, fails
 startup with a fatal error that names the cause, and so does a credential
 rejected on the first connection, or a certificate or TLS handshake rejected by
-the last server it tries. A rejection met on a reconnect after startup is
-retried like an [outage](#what-an-outage-does).
+the last server it tries. After startup, the store fails with a fatal error
+once every server has rejected its latest reconnect attempt.
 
 ## Configuration
 
@@ -109,9 +109,15 @@ other TLS failure, such as a malformed message, an `InternalError` alert or a
 connection closed during the handshake, is retryable. These rules hold for the
 first connection, which tries each server in `servers` once. A rejected
 credential stops it at once; after any other failure it moves on to the next
-server, and the last server's failure decides. After startup the client reconnects on its own without limit,
-and a rejection it meets there is retried like an
-[outage](#what-an-outage-does). See
+server, and the last server's failure decides.
+
+After startup the client reconnects on its own without limit. Once every server
+has answered its latest attempt with one of these rejections, store operations
+fail with a fatal error that names them, and the coordinator stops. A server
+that cannot be reached keeps the store retrying like an
+[outage](#what-an-outage-does), and so does a server that refuses by closing
+the connection, a trust store that cannot be read, or a WebSocket upgrade
+refused with HTTP 401 or 403. See
 [Securing connections](../../../03-guides/securing-connections.mdx) for the
 generic model.
 

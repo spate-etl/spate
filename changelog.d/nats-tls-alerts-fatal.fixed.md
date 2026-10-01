@@ -6,4 +6,4 @@ the server rejects the TLS handshake with an alert such as `HandshakeFailure` or
 suite or other handshake parameter. The message names the alert or the
 mismatch. In previous versions each of these was retried until the
 coordinator's startup budget ran out. Other alerts, such as `InternalError`,
-stay retryable. A rejection met on a reconnect after startup is still retried.
+stay retryable.

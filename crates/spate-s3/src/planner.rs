@@ -11,7 +11,7 @@
 use crate::config::Compression;
 use crate::error::classify;
 use crate::fetch::{MAX_ATTEMPTS, list_all};
-use crate::split::{SplitDescriptor, split_id_for};
+use crate::split::Packing;
 use object_store::ObjectStore;
 use object_store::path::Path;
 use spate_core::coordination::{
@@ -29,21 +29,24 @@ use tokio::runtime::Handle;
 const MAX_DESCRIPTOR_BYTES: usize = 400 * 1024;
 
 /// Job identity presented by every worker. Derived from configuration
-/// only, never from the listing, so all correctly-configured workers are
-/// byte-equal and a misconfigured one is rejected at startup instead of
-/// interpreting the shared split table differently. The descriptor and
-/// packing versions are included because either changes what planned
-/// records *mean*.
+/// and the framer's resync delimiter only, never from the listing, so all
+/// correctly-configured workers are byte-equal and a misconfigured one is
+/// rejected at startup instead of interpreting the shared split table
+/// differently. The descriptor and packing versions are included because
+/// either changes what planned records *mean*.
 pub(crate) fn job_fingerprint(
     url: &str,
     compression: Compression,
     split_target_bytes: u64,
     refresh_listing: bool,
+    delimiter: Option<u8>,
 ) -> String {
     use crate::split::{DESCRIPTOR_VERSION, PACKING_VERSION};
+    let delimiter = delimiter.map_or_else(|| "none".to_owned(), |d| format!("{d:02x}"));
     format!(
         "spate-s3:fp1:d{DESCRIPTOR_VERSION}:p{PACKING_VERSION}:url={url}:\
-         compression={compression:?}:target={split_target_bytes}:refresh={refresh_listing}"
+         compression={compression:?}:target={split_target_bytes}:refresh={refresh_listing}:\
+         delim={delimiter}"
     )
 }
 
@@ -55,7 +58,7 @@ pub(crate) struct S3Planner {
     /// the planner captures its own at construction and blocks on it
     /// (safe: backends run `plan` on the blocking pool).
     handle: Handle,
-    target_bytes: u64,
+    packing: Packing,
     finality: PlanFinality,
     fingerprint: String,
     /// `objects_listed_total` is leader-only by construction: the planner
@@ -71,7 +74,7 @@ impl std::fmt::Debug for S3Planner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("S3Planner")
             .field("prefix", &self.prefix)
-            .field("target_bytes", &self.target_bytes)
+            .field("packing", &self.packing)
             .field("finality", &self.finality)
             .field("fingerprint", &self.fingerprint)
             .finish_non_exhaustive()
@@ -83,7 +86,7 @@ impl S3Planner {
         store: Arc<dyn ObjectStore>,
         prefix: Option<Path>,
         handle: Handle,
-        target_bytes: u64,
+        packing: Packing,
         finality: PlanFinality,
         fingerprint: String,
         metrics: Option<crate::metrics::S3Metrics>,
@@ -92,7 +95,7 @@ impl S3Planner {
             store,
             prefix,
             handle,
-            target_bytes,
+            packing,
             finality,
             fingerprint,
             metrics,
@@ -148,11 +151,11 @@ impl SplitPlanner for S3Planner {
             m.objects_listed.increment(entries.len() as u64);
         }
 
-        let bins = crate::split::pack(entries, self.target_bytes);
-        let mut splits = Vec::with_capacity(bins.len());
-        for members in bins {
-            let id = split_id_for(members.iter().map(|m| (m.key.as_str(), m.etag.as_deref())))?;
-            let descriptor = SplitDescriptor::from_entries(&members).encode()?;
+        let packed = crate::split::pack(entries, &self.packing);
+        let mut splits = Vec::with_capacity(packed.len());
+        for split in packed {
+            let id = split.id()?;
+            let descriptor = split.descriptor().encode()?;
             if descriptor.len() > MAX_DESCRIPTOR_BYTES {
                 return Err(CoordinationError::new(
                     CoordinationErrorKind::Fatal,
@@ -164,14 +167,8 @@ impl SplitPlanner for S3Planner {
                     ),
                 ));
             }
-            // Saturating: sizes are remote listing data; a hostile listing
-            // must not overflow (debug panic) the leader's planner.
-            let weight = members
-                .iter()
-                .fold(0u64, |acc, m| acc.saturating_add(m.size))
-                .max(1);
             splits.push(PlannedSplit::new(
-                SplitSpec::new(id, descriptor).with_weight(weight),
+                SplitSpec::new(id, descriptor).with_weight(split.weight()),
             ));
         }
         Ok(SplitPlan::new(splits, self.finality))
@@ -181,7 +178,7 @@ impl SplitPlanner for S3Planner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::split::DESCRIPTOR_VERSION;
+    use crate::split::{DESCRIPTOR_VERSION, SplitDescriptor, split_id_for_range};
     use object_store::memory::InMemory;
     use object_store::{ObjectStoreExt as _, PutPayload, path::Path};
 
@@ -205,14 +202,28 @@ mod tests {
         store
     }
 
+    fn packing(target: u64) -> Packing {
+        Packing {
+            target_bytes: target,
+            compression: Compression::Auto,
+            delimiter: Some(b'\n'),
+        }
+    }
+
     fn planner(store: Arc<dyn ObjectStore>, handle: Handle, target: u64) -> S3Planner {
         S3Planner::new(
             store,
             Some(Path::from("data")),
             handle,
-            target,
+            packing(target),
             PlanFinality::Final,
-            job_fingerprint("s3://bucket/data/", Compression::Auto, target, false),
+            job_fingerprint(
+                "s3://bucket/data/",
+                Compression::Auto,
+                target,
+                false,
+                Some(b'\n'),
+            ),
             None,
         )
     }
@@ -271,6 +282,34 @@ mod tests {
         );
     }
 
+    /// A plain object above the target plans into byte-range splits whose
+    /// ids, descriptors and weights are the range's.
+    #[test]
+    fn a_large_plain_object_plans_into_ranged_splits() {
+        let rt = runtime();
+        let store = seeded_store(&[("data/big.ndjson", 5 * MB as usize / 2)]);
+        let mut p = planner(store, rt.handle().clone(), MB);
+
+        let plan = p.plan(PlanContext::new(None, 1)).unwrap();
+        let mut next = 0;
+        for split in &plan.splits {
+            let spec = &split.spec;
+            let desc = SplitDescriptor::decode(&spec.descriptor).unwrap();
+            let range = desc.range.expect("a ranged split");
+            let object = &desc.objects[0];
+            assert_eq!(range.start, next, "ranges tile the object in order");
+            assert_eq!(range.delimiter, b'\n');
+            assert_eq!(spec.weight, range.end - range.start);
+            assert_eq!(
+                spec.id,
+                split_id_for_range(&object.key, object.etag.as_deref().unwrap(), range).unwrap()
+            );
+            next = range.end;
+        }
+        assert_eq!(plan.splits.len(), 3);
+        assert_eq!(next, 5 * MB / 2);
+    }
+
     #[test]
     fn empty_prefix_yields_an_empty_final_plan() {
         let rt = runtime();
@@ -304,9 +343,15 @@ mod tests {
             seeded_store(&[]),
             None,
             rt.handle().clone(),
-            64 * MB,
+            packing(64 * MB),
             PlanFinality::Final,
-            job_fingerprint("s3://other/", Compression::Auto, 64 * MB, false),
+            job_fingerprint(
+                "s3://other/",
+                Compression::Auto,
+                64 * MB,
+                false,
+                Some(b'\n'),
+            ),
             None,
         );
         assert_ne!(
@@ -314,11 +359,23 @@ mod tests {
             SplitPlanner::fingerprint(&other_url)
         );
 
-        let other_target = job_fingerprint("s3://bucket/data/", Compression::Auto, 32 * MB, false);
-        assert_ne!(SplitPlanner::fingerprint(&a), other_target);
-        let other_compression =
-            job_fingerprint("s3://bucket/data/", Compression::Gzip, 64 * MB, false);
-        assert_ne!(SplitPlanner::fingerprint(&a), other_compression);
+        let fingerprint = |compression, target, delimiter| {
+            job_fingerprint("s3://bucket/data/", compression, target, false, delimiter)
+        };
+        for other in [
+            fingerprint(Compression::Auto, 32 * MB, Some(b'\n')),
+            fingerprint(Compression::Gzip, 64 * MB, Some(b'\n')),
+            fingerprint(Compression::Auto, 64 * MB, Some(b';')),
+            fingerprint(Compression::Auto, 64 * MB, None),
+        ] {
+            assert_ne!(SplitPlanner::fingerprint(&a), other);
+        }
+        assert!(
+            SplitPlanner::fingerprint(&a).ends_with(":delim=0a"),
+            "{}",
+            SplitPlanner::fingerprint(&a)
+        );
+        assert!(fingerprint(Compression::Auto, 64 * MB, None).ends_with(":delim=none"));
     }
 
     #[test]

@@ -12,8 +12,7 @@ names the byte a record can start after. `RecordFramer` has a new method,
 `resync_delimiter`, which returns `None` unless a framer overrides it.
 `NdjsonFramer` returns `\n`. The pipeline stops on a ranged split whose
 delimiter differs from the framer's, or whose object the source's
-`compression` setting decodes. The planner does not produce ranged splits
-yet, so jobs still read every object whole.
+`compression` setting decodes.
 
 The split descriptor format is now version 2, and the version is part of the
 job fingerprint. A coordinated S3 job that started on a previous version

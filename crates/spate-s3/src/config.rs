@@ -87,11 +87,12 @@ pub struct S3SourceConfig {
     pub compression: Compression,
     /// Target size of one split, the unit of work distribution and the
     /// unit the leader balances. Objects are packed toward it in listing
-    /// order with a
-    /// per-object cost floor of a sixteenth of the target, so a split
-    /// holds at most ~16 objects; an object at or above the target gets a
-    /// split of its own. Part of the job fingerprint: every instance of a
-    /// coordinated job must agree on it. Default 64 MiB.
+    /// order with a per-object cost floor of a sixteenth of the target, so a
+    /// split holds at most ~16 objects. An object above the target is cut into
+    /// byte ranges of at most the target when it is uncompressed, has an ETag
+    /// and is at most 50,000 GiB, and the framer declares a resync delimiter;
+    /// any other object at or above the target gets a split of its own. Part of the job fingerprint: every instance
+    /// of a coordinated job must agree on it. Default 64 MiB.
     #[serde(default = "default_split_target_bytes")]
     pub split_target_bytes: ByteSize,
     /// Re-list the prefix on the coordinator's replan interval, planning

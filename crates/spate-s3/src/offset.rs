@@ -14,8 +14,10 @@
 //! - The sign bit stays clear: every encoded position is a valid,
 //!   non-negative `i64`.
 //! - Ordinals order objects within one lane's slice of the listing; record
-//!   indexes order records within one object. Lexicographic packing makes
-//!   the composite ordering match (ordinal, index) ordering exactly.
+//!   indexes order records within one object, or within the byte range a
+//!   ranged split reads, whose one member has ordinal 0. Lexicographic
+//!   packing makes the composite ordering match (ordinal, index) ordering
+//!   exactly.
 //! - A record is never emitted at index `MAX_RECORD_INDEX + 1 = 2^40 - 1`
 //!   (the lane's emit guard fails fatally first). That index is reserved so
 //!   a watermark ("one past the last acknowledged record") can always be
@@ -24,7 +26,7 @@
 
 use std::fmt;
 
-/// Bits reserved for the record index within an object.
+/// Bits reserved for the record index within an object or byte range.
 const RECORD_BITS: u32 = 40;
 /// Bits available for the object ordinal within a lane (63 − 40).
 const ORDINAL_BITS: u32 = 23;
@@ -50,7 +52,7 @@ pub(crate) const MAX_RECORD_INDEX: u64 = RECORD_MASK as u64 - 1;
 pub(crate) struct Position {
     /// Object ordinal within the lane's slice (0-based).
     pub(crate) ordinal: u32,
-    /// Record index within the object (0-based).
+    /// Record index within the object, or within its byte range (0-based).
     pub(crate) record: u64,
 }
 

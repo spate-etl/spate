@@ -25,6 +25,7 @@ use crate::config::S3SourceConfig;
 use crate::lane::S3Lane;
 use crate::metrics::S3Metrics;
 use crate::planner::{S3Planner, job_fingerprint};
+use crate::split::Packing;
 use crate::split_ctx::SplitCtx;
 use object_store::aws::{AmazonS3Builder, AmazonS3ConfigKey};
 use object_store::{ClientConfigKey, ObjectStore, ObjectStoreScheme};
@@ -266,21 +267,32 @@ impl Source for S3Source {
         } else {
             PlanFinality::Final
         };
+        let delimiter = make_framer().resync_delimiter();
+        if delimiter.is_none() {
+            tracing::info!(
+                "the record framer declares no resync delimiter, so objects above \
+                 split_target_bytes are read whole, one split each"
+            );
+        }
         let planner = S3Planner::new(
             Arc::clone(&store),
             Some(prefix),
             self.handle.clone(),
-            self.config.split_target_bytes.as_u64(),
+            Packing {
+                target_bytes: self.config.split_target_bytes.as_u64(),
+                compression: self.config.compression,
+                delimiter,
+            },
             finality,
             job_fingerprint(
                 &self.config.url,
                 self.config.compression,
                 self.config.split_target_bytes.as_u64(),
                 self.config.refresh_listing,
+                delimiter,
             ),
             metrics.clone(),
         );
-        let delimiter = make_framer().resync_delimiter();
         let split_ctx = SplitCtx::new(
             store,
             self.handle.clone(),

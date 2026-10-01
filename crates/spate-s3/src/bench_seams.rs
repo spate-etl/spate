@@ -27,7 +27,9 @@
 use crate::config::Compression;
 use crate::fetch::ObjectEntry;
 use crate::framer::{Codec, ObjectFramer};
-use crate::split::{SplitDescriptor, pack, split_id_for};
+use crate::split::{Packing, SplitRange, pack};
+use crate::trim::RangeTrim;
+use bytes::Bytes;
 use spate_core::coordination::SplitId;
 use spate_core::framing::RecordFramer;
 use std::hint::black_box;
@@ -47,6 +49,10 @@ pub type MakeFramer = Arc<dyn Fn() -> Box<dyn RecordFramer> + Send + Sync>;
 /// Taken by value so the keys move into the entries rather than being cloned
 /// inside the measured region.
 ///
+/// `delimiter` is the framer's resync delimiter, as the source probes it, and
+/// packing runs under `Compression::Auto`. With `None` every object is read
+/// whole.
+///
 /// The three stages are one function because the planner does them as one
 /// pass per split and a change to any of them moves the others: the id
 /// digests the member keys and ETags, and the descriptor serializes the same
@@ -60,7 +66,11 @@ pub type MakeFramer = Arc<dyn Fn() -> Box<dyn RecordFramer> + Send + Sync>;
 /// fails to encode. Neither is reachable from a well-formed listing; both are
 /// asserted rather than propagated because a bench has no policy to apply.
 #[must_use]
-pub fn plan_listing(objects: Vec<(String, u64, String)>, target_bytes: u64) -> Vec<SplitId> {
+pub fn plan_listing(
+    objects: Vec<(String, u64, String)>,
+    target_bytes: u64,
+    delimiter: Option<u8>,
+) -> Vec<SplitId> {
     let entries: Vec<ObjectEntry> = objects
         .into_iter()
         .map(|(key, size, etag)| ObjectEntry {
@@ -71,18 +81,20 @@ pub fn plan_listing(objects: Vec<(String, u64, String)>, target_bytes: u64) -> V
         })
         .collect();
 
-    pack(entries, target_bytes)
+    let packing = Packing {
+        target_bytes,
+        compression: Compression::Auto,
+        delimiter,
+    };
+    pack(entries, &packing)
         .into_iter()
-        .map(|bin| {
-            let id = split_id_for(bin.iter().map(|e| (e.key.as_str(), e.etag.as_deref())))
-                .expect("pack never returns an empty bin");
+        .map(|split| {
+            let id = split.id().expect("pack never returns an empty bin");
             // The planner encodes the descriptor here too, and its cost is
             // charged to the plan rather than hoisted out: the members are
             // consumed by it, so the measured region ends where the planner's
             // per-split work ends rather than part-way through it.
-            let encoded = SplitDescriptor::from_entries(&bin)
-                .encode()
-                .expect("a packed bin encodes");
+            let encoded = split.descriptor().encode().expect("a packed split encodes");
             black_box(encoded);
             id
         })
@@ -103,9 +115,9 @@ pub fn plan_listing(objects: Vec<(String, u64, String)>, target_bytes: u64) -> V
 /// deliver them, already compressed if `compression` says so, since
 /// compressing here would count the compressor rather than the decompressor.
 ///
-/// Entering an object part-way through needs no parameter: the framer's
-/// contract is that the record sequence is a pure function of the bytes it is
-/// given, so a mid-object entry is a chunk list that starts at an offset.
+/// The framer's record sequence is a pure function of the bytes it is given,
+/// so a chunk list starting part-way through a record frames that partial
+/// line as a record. [`frame_range`] is the entry a byte-range split takes.
 ///
 /// # Errors
 ///
@@ -140,6 +152,59 @@ pub fn frame_objects(
         while framer.pop_record().is_some() {
             records += 1;
         }
+    }
+    Ok(records)
+}
+
+/// Read the byte range `[start, end)` of one uncompressed object as a
+/// byte-range split does, returning how many records it owns.
+///
+/// The object is fetched in the windows the fetcher schedules for
+/// `range_bytes` and `chunk_bytes`, each copied out of `object` as a GET would
+/// deliver it. The owned bytes are trimmed out of each window and framed in
+/// `chunk_bytes` pieces through one framer.
+///
+/// # Errors
+///
+/// Whatever the framer reports, such as a record over its cap.
+///
+/// # Panics
+///
+/// If `start >= end` or `end` is past the object.
+pub fn frame_range(
+    make_framer: MakeFramer,
+    object: &[u8],
+    start: u64,
+    end: u64,
+    delimiter: u8,
+    range_bytes: u64,
+    chunk_bytes: usize,
+) -> io::Result<usize> {
+    let size = object.len() as u64;
+    assert!(
+        start < end && end <= size,
+        "[{start}, {end}) is not a range of the object"
+    );
+    let mut trim = RangeTrim::new(SplitRange::new(start, end, delimiter), size);
+    let mut framer = ObjectFramer::new(make_framer);
+    let mut records = 0;
+    framer.begin_object(Codec::Plain)?;
+    let mut pos = trim.first_byte();
+    while let Some(window_end) = trim.next_window(pos, range_bytes, chunk_bytes as u64) {
+        let window = Bytes::copy_from_slice(&object[pos as usize..window_end as usize]);
+        let mut owned = trim.feed(pos, window);
+        while !owned.is_empty() {
+            let chunk = owned.split_to(owned.len().min(chunk_bytes));
+            framer.push_chunk(&chunk)?;
+            while framer.pop_record().is_some() {
+                records += 1;
+            }
+        }
+        pos = window_end;
+    }
+    framer.finish_object()?;
+    while framer.pop_record().is_some() {
+        records += 1;
     }
     Ok(records)
 }

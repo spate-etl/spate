@@ -174,8 +174,8 @@ pub(crate) enum Weights {
     /// Packed splits either side of a 32 MiB target. This is the ordinary
     /// listing, and the denominator the skewed profile is read against.
     Packed,
-    /// One split in twenty is a single multi-gigabyte object, which an object
-    /// at or above the packing target becomes. This is the profile the
+    /// One split in twenty is a single multi-gigabyte object, which a
+    /// compressed object at or above the packing target becomes. This is the profile the
     /// improving pass has to work at: a heavy split can only reduce imbalance
     /// by moving to a member far lighter than its own weight, so the
     /// admission test `load(from) > load(to) + weight` rejects far more

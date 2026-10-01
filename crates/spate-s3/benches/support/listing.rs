@@ -200,12 +200,10 @@ pub(crate) fn deep_keys() -> Vec<(String, u64, String)> {
     )
 }
 
-/// Objects at or above the split target. Each closes a bin on its own the
-/// moment it is placed, so packing is one bin per object and the digest count
-/// equals the listing length, which is why a very large object bounds
-/// worst-case split duration. Subdividing by byte range turns
-/// each of these into several members, moving both the input cardinality and
-/// the open-bin scan, so this is the profile a subdivision change shows up in.
+/// Plain objects of four to sixteen times the split target. Each is cut into
+/// `ceil(size / target)` byte ranges, one split each, so the split count is
+/// the sum of the range counts and minting and encoding one split per range
+/// dominates the plan.
 pub(crate) fn big_objects() -> Vec<(String, u64, String)> {
     corpus(2_000, 0x5EED_0002, key, |_, lcg| {
         lcg.range(TARGET_BYTES * 4, TARGET_BYTES * 16)

@@ -171,7 +171,8 @@ continues from its last committed watermark. Distinct from a [lane](#lane)
 
 *Connector mapping:*
 [S3 source](../04-connectors/sources/s3/README.mdx#split-identity-and-drift) —
-a bin-packed batch of whole objects, identified by its members' keys and ETags.
+a bin-packed batch of whole objects, identified by its members' keys and ETags,
+or one byte range of a large object, identified by its key, ETag and range.
 A database source would instead plan an id range.
 
 ### Assignment
@@ -226,7 +227,7 @@ Watermarks, epochs, and the contiguity tracker are all per-partition.
 partition ·
 [S3 source](../04-connectors/sources/s3/README.mdx#offsets-progress-resume) —
 one per [split](#split), with the offset packing member ordinal and record
-index ·
+index within the object or byte range ·
 [Datagen source](../04-connectors/sources/datagen/README.mdx#configuration) —
 one per generated lane, set by `partitions`.
 

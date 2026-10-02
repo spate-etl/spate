@@ -713,13 +713,16 @@ pub struct SeedStats {
 }
 
 /// A [`MemoryStore`] that records seeding traffic, optionally delays each
-/// seeding create, and can fail one durable create by key.
+/// seeding create, and fails seeding creates on request.
 #[derive(Clone)]
 pub struct CountingStore {
     pub inner: MemoryStore,
     pub stats: Arc<SeedStats>,
     create_delay: Duration,
     fail_once: Arc<Mutex<Option<String>>>,
+    fail_always: Arc<Mutex<Option<String>>>,
+    fail_first: Arc<Mutex<u64>>,
+    fail_every: Arc<Mutex<(u64, u64)>>,
 }
 
 impl CountingStore {
@@ -729,6 +732,9 @@ impl CountingStore {
             stats: Arc::default(),
             create_delay: Duration::ZERO,
             fail_once: Arc::default(),
+            fail_always: Arc::default(),
+            fail_first: Arc::default(),
+            fail_every: Arc::default(),
         }
     }
 
@@ -742,6 +748,26 @@ impl CountingStore {
     /// writing nothing.
     pub fn fail_create_once(&self, key: &str) {
         *self.fail_once.lock().expect("fault") = Some(key.to_string());
+    }
+
+    /// Fail every durable create of `key` with a retryable error.
+    pub fn fail_create_always(&self, key: &str) {
+        *self.fail_always.lock().expect("fault") = Some(key.to_string());
+    }
+
+    /// Stop failing the key set by [`CountingStore::fail_create_always`].
+    pub fn heal(&self) {
+        *self.fail_always.lock().expect("fault") = None;
+    }
+
+    /// Fail every progress create but each `n`th with a retryable error.
+    pub fn pass_every(&self, n: u64) {
+        *self.fail_every.lock().expect("fault") = (n, 0);
+    }
+
+    /// Fail the next `k` seeding creates with a retryable error.
+    pub fn fail_first_creates(&self, k: u64) {
+        *self.fail_first.lock().expect("fault") = k;
     }
 
     pub fn worker(&self, io: &tokio::runtime::Handle, instance_id: &str) -> StoreCoordinator<Self> {
@@ -768,10 +794,25 @@ impl CoordinationStore for CountingStore {
         }
         let stats = &self.stats;
         stats.creates.fetch_add(1, Ordering::SeqCst);
-        let injected = {
-            let mut fault = self.fail_once.lock().expect("fault");
-            fault.take_if(|k| k == key).is_some()
+        let once = self
+            .fail_once
+            .lock()
+            .expect("fault")
+            .take_if(|k| k == key)
+            .is_some();
+        let always = self.fail_always.lock().expect("fault").as_deref() == Some(key);
+        let first = {
+            let mut left = self.fail_first.lock().expect("fault");
+            let fail = *left > 0;
+            *left = left.saturating_sub(1);
+            fail
         };
+        let nth = key.starts_with("split.") && {
+            let mut every = self.fail_every.lock().expect("fault");
+            every.1 += 1;
+            every.0 > 0 && !every.1.is_multiple_of(every.0)
+        };
+        let injected = once || always || first || nth;
         if injected {
             return Err(StoreError::Retryable(format!(
                 "injected: create {key} dropped"

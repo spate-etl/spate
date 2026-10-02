@@ -13,7 +13,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 use support::tap::{Op, TapStore, Write};
-use support::{DEADLINE, Held, PhasedPlanner, config, drive, runtime, split_id, store};
+use support::{
+    CountingStore, DEADLINE, Held, PhasedPlanner, config, drive, runtime, split_id, store,
+};
 
 fn denied() -> StoreError {
     StoreError::Fatal("injected: access denied".into())
@@ -264,4 +266,33 @@ fn a_rejected_verdict_listing_stops_the_coordinator() {
     claim_then_arm(&mut w, &armed);
     let _ = w.commit(&split_id("x"), &SplitProgress::completed(1, vec![]));
     expect_fatal(&mut w, "verdict listing");
+}
+
+/// A fatal seed write starts no new split: the splits in flight finish and
+/// nothing past the first 64 is written.
+#[test]
+fn a_fatal_seed_starts_no_new_split() {
+    let rt = runtime();
+    let counting =
+        CountingStore::new(store()).with_create_delay(std::time::Duration::from_millis(20));
+    let tap = TapStore::new(counting.clone());
+    // Rejected before any other create lands, so the run has started
+    // exactly the first 64 splits.
+    tap.on_write(|write| (write.op == Op::Create && write.key == "spec.c000").then(denied));
+    let ids: Vec<String> = (0..100).map(|i| format!("c{i:03}")).collect();
+    let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+    let mut w = StoreCoordinator::new(tap, config(Some("worker-a")), rt.handle().clone(), None)
+        .expect("coordinator");
+    w.start(Box::new(PhasedPlanner::one_final("fatal-seed:v1", &ids)))
+        .unwrap();
+    expect_fatal(&mut w, "seeding");
+    let specs = rt
+        .block_on(spate_coordination::store::CoordinationStore::list(
+            &counting.inner,
+            Keyspace::Durable,
+            "spec.",
+        ))
+        .unwrap();
+    assert_eq!(specs.len(), 63);
+    assert_eq!(counting.stats.creates.load(Ordering::SeqCst), 126);
 }

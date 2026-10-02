@@ -59,10 +59,10 @@ fn seeding_bounds_creates_in_flight_and_orders_spec_first() {
     assert!(!store.stats.progress_before_spec.load(SeqCst));
 }
 
-/// A split whose spec landed and whose progress create failed is seeded
-/// again on the next plan run, and the job completes.
+/// A split whose spec landed and whose progress create failed is retried
+/// within the run without re-creating its spec, and the job completes.
 #[test]
-fn a_failed_progress_create_is_seeded_on_the_next_run() {
+fn a_failed_progress_create_is_retried_within_the_run() {
     let rt = runtime();
     let store = CountingStore::new(store());
     store.fail_create_once("split.h1");
@@ -89,6 +89,7 @@ fn a_failed_progress_create_is_seeded_on_the_next_run() {
         .block_on(store.inner.list(Keyspace::Durable, "split."))
         .unwrap();
     assert_eq!(records.len(), 3);
+    assert_eq!(store.stats.creates.load(SeqCst), 7);
 }
 
 /// A leader whose view holds a progress record without its spec creates

@@ -24,7 +24,7 @@
 
 use crate::config::CoordinationConfig;
 use crate::error::{fatal, fatal_only, retryable, store_error};
-use crate::leader::{PlanRun, SeedRun};
+use crate::leader::{PlanRun, SeedEvent, SeedRun, SeedSteps};
 use crate::protocol::{self, ClaimAction, ClaimKind, SplitState};
 use crate::records::{
     self, AssignmentVal, LeaderVal, LeaseVal, PlanRecord, SplitProgressRecord, SplitSpecRecord,
@@ -602,6 +602,7 @@ impl<S: CoordinationStore + Clone> Task<S> {
         // slow listing never holds up a renewal.
         let mut planning: Option<PlanRun> = None;
         let mut seeding: Option<SeedRun> = None;
+        let mut seed_steps = SeedSteps::default();
         let mut reconciling: Option<ReconcileRun> = None;
         let mut terminal: Option<Listing> = None;
         let mut reads: Option<Reads> = None;
@@ -616,6 +617,11 @@ impl<S: CoordinationStore + Clone> Task<S> {
         let mut refresh = self.polled.map(|interval| self.clock.now() + interval);
 
         loop {
+            if let Some(run) = &seeding
+                && !self.leads(run)
+            {
+                run.depose();
+            }
             if planning.is_none() && seeding.is_none() {
                 planning = self.maybe_start_plan()?;
             }
@@ -772,11 +778,29 @@ impl<S: CoordinationStore + Clone> Task<S> {
                     seeding = self.land_plan(joined, run)?;
                     Box::pin(self.step()).await?;
                 }
-                seeded = async { (&mut seeding.as_mut().expect("guarded by is_some").seeded).await },
+                event = async { seeding.as_mut().expect("guarded by is_some").next().await },
                     if seeding.is_some() =>
                 {
-                    let run = seeding.take().expect("selected arm requires it");
-                    Box::pin(self.finish_plan(run, seeded)).await?;
+                    match event {
+                        SeedEvent::Wins(wins) => {
+                            self.fold_seeded(wins)?;
+                            if seed_steps.folded(self.clock.now()) {
+                                Box::pin(self.step()).await?;
+                            }
+                        }
+                        SeedEvent::Done(seeded, wins) => {
+                            self.fold_seeded(wins)?;
+                            seed_steps = SeedSteps::default();
+                            let run = seeding.take().expect("selected arm requires it");
+                            Box::pin(self.finish_plan(run, seeded)).await?;
+                            Box::pin(self.step()).await?;
+                        }
+                    }
+                }
+                () = self.clock.sleep_until(seed_steps.due().unwrap_or(heartbeat)),
+                    if seed_steps.due().is_some() =>
+                {
+                    seed_steps.fired(self.clock.now());
                     Box::pin(self.step()).await?;
                 }
             }

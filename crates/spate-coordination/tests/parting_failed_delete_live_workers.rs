@@ -82,16 +82,18 @@ fn a_parting_worker_counts_its_own_undeleted_key() {
             &[("component", c)],
         )
     };
+    let mut last = (None, None);
     loop {
         assert!(
             rt.block_on(store.get(Keyspace::Ephemeral, "worker.pu-a"))
                 .unwrap()
                 .is_some(),
-            "pu-a's key expired before both gauges read 2 (pu-a={:?}, pu-b={:?})",
-            live("pu-a"),
-            live("pu-b"),
+            "pu-a's key expired before both gauges read 2 (last read pu-a={:?}, pu-b={:?})",
+            last.0,
+            last.1,
         );
-        if live("pu-b") == Some(2.0) && live("pu-a") == Some(2.0) {
+        last = (live("pu-a"), live("pu-b"));
+        if last == (Some(2.0), Some(2.0)) {
             break;
         }
         fleet.step(&clock, LEASE / 12);

@@ -609,9 +609,9 @@ fn splits_folded_inside_the_step_interval_are_assigned_when_it_passes() {
     let rt = runtime();
     let clock = TestClock::frozen();
     let counting = CountingStore::new(MemoryStore::with_clock(lease, clock.clone()));
-    // The first wave's first ten creates fail, so the run pauses and seeds the
-    // rest only once the clock moves past the first fold.
-    counting.fail_first_creates(10);
+    // Every other split has started when c098 fails, so the run pauses and its
+    // retry folds alone once the clock moves.
+    counting.fail_create_once("spec.c098");
     // The run never ends, so no Done step assigns what was folded.
     counting.fail_create_always("spec.c099");
     let mut config = support::config_for(lease, Some("solo"));
@@ -643,23 +643,23 @@ fn splits_folded_inside_the_step_interval_are_assigned_when_it_passes() {
     };
 
     let mut held = support::Held::default();
-    support::drive(&mut worker, &mut held, "claiming the first fold", |h| {
-        !h.splits.is_empty()
-    });
-    // Ends the first pause: every split but c099 is seeded and folded inside
-    // the interval the first fold opened.
-    clock.advance(Duration::from_millis(100));
-    let deadline = Instant::now() + support::DEADLINE;
-    while planned() < (SPLITS - 1) as f64 {
-        assert!(
-            Instant::now() < deadline,
-            "timed out folding the seeded splits"
-        );
-        std::thread::sleep(support::POLL_INTERVAL);
+    let mut fold_until = |held: &mut support::Held, n: usize| {
+        let deadline = Instant::now() + support::DEADLINE;
+        while planned() < n as f64 {
+            assert!(Instant::now() < deadline, "timed out folding {n} splits");
+            std::thread::sleep(support::POLL_INTERVAL);
+            held.fold(worker.poll().expect("poll"));
+        }
+        // Any step that followed an earlier fold has sent its events by now.
         held.fold(worker.poll().expect("poll"));
-    }
+    };
+    // A recv takes at most 64 wins, so the 98 splits fold at least twice.
+    fold_until(&mut held, SPLITS - 2);
+    // Ends the pause: c098 folds inside the interval the first fold opened.
+    clock.advance(Duration::from_millis(100));
+    fold_until(&mut held, SPLITS - 1);
     assert!(
-        held.splits.len() < SPLITS - 1,
+        held.splits.len() <= 64,
         "a step ran before the interval passed"
     );
     // The first fold's interval ends here, and no other timer is due.

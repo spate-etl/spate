@@ -342,6 +342,24 @@ mod tests {
         assert!(recorded(&rejection).is_some());
     }
 
+    /// A server named twice counts from the baseline of its first entry, so a
+    /// rejection from before the last connect does not record.
+    #[test]
+    fn a_server_named_twice_counts_from_its_first_baseline() {
+        let (rejection, _) = attached(2);
+        rejection.observe(&[
+            server(1, 3, Some(auth_error())),
+            server(1, 0, None),
+            server(2, 0, None),
+        ]);
+        rejection.observe(&[
+            server(1, 3, Some(auth_error())),
+            server(1, 0, None),
+            server(2, 1, Some(auth_error())),
+        ]);
+        assert!(recorded(&rejection).is_none());
+    }
+
     /// Before `attach`, a rejected pool records nothing.
     #[test]
     fn observe_ignores_pools_before_attach() {

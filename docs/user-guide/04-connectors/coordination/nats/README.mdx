@@ -116,8 +116,9 @@ After startup the client reconnects on its own without limit. Once every server
 has failed since the last successful connection, each with one of these
 rejections as its latest failure, store operations fail with a fatal error that
 names them, and the coordinator stops. Every server means each `servers` entry
-and every address the cluster advertises to clients, so a cluster should
-advertise only addresses its clients can reach.
+and every address the cluster has advertised to clients since the store
+connected, including one it no longer advertises. An advertised address the
+client cannot reach therefore keeps a rejection retrying.
 
 A server not yet tried, or one whose latest failure is a refused or timed-out
 connection, keeps the store retrying like an [outage](#what-an-outage-does).

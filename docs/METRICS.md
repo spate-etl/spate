@@ -345,7 +345,7 @@ that code passed one. They fire alongside the source's own
 | `spate_coordination_splits_owned` | gauge | | Splits this worker currently leases (its working set). |
 | `spate_coordination_splits_completed` | gauge | | Splits observed completed across the fleet (bounded jobs). On a store whose watch is polled, a worker other than the leader observes only the splits it has read, until the verdict. |
 | `spate_coordination_splits_quarantined` | gauge | | Splits parked after exhausting delivery attempts — **alert on > 0**: a bounded job with quarantined splits ends stalled, not complete. |
-| `spate_coordination_live_workers` | gauge | | Distinct live workers observed (the fleet view), including this one. |
+| `spate_coordination_live_workers` | gauge | | Distinct live workers observed (the fleet view), including this one. A worker that has handed back its last split through `SplitCoordinator::release` counts itself only while its own presence key is in its view. |
 | `spate_coordination_leader` | gauge | | 1 while this worker holds the planner leadership lease. |
 | `spate_coordination_idle` | gauge | | 1 while this worker owns no splits and observes as a standby. |
 | `spate_coordination_splits_draining` | gauge | | Splits this worker is currently draining away under revocation — the **drain** count, so a drain whose revocation was cancelled keeps counting until it actually lands. It falls when the drain ends by any route: the release, a terminal commit, a `fail`, a fence. Sitting non-zero on one worker while the fleet stays visibly unbalanced means drains are not finishing — look at that worker's sink health, then at `drain_deadline`. |

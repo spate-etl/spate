@@ -355,7 +355,7 @@ impl CoordinationMetrics {
         self.splits_quarantined.set(quarantined as f64);
     }
 
-    /// Set the observed count of distinct live workers, including self.
+    /// Set the observed count of distinct live workers.
     pub fn set_live_workers(&self, workers: usize) {
         self.live_workers.set(workers as f64);
     }

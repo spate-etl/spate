@@ -100,10 +100,10 @@ pub(crate) fn spread(seed: u64, base: Duration) -> Duration {
     base.mul_f64((h as f64) / 1024.0)
 }
 
-/// Fleet size from the explicit membership keys (self is always counted,
-/// even before its own presence write lands).
-pub(crate) fn live_workers(presence: &BTreeMap<String, Revision>, instance: &str) -> usize {
-    presence.len() + usize::from(!presence.contains_key(instance))
+/// Fleet size from the explicit membership keys, plus `member` when its own
+/// key is absent; with `None`, only keys count.
+pub(crate) fn live_workers(presence: &BTreeMap<String, Revision>, member: Option<&str>) -> usize {
+    presence.len() + usize::from(member.is_some_and(|m| !presence.contains_key(m)))
 }
 
 /// The leader's desired assignment: which splits each live member should
@@ -712,11 +712,21 @@ mod tests {
     #[test]
     fn membership_counts_self_exactly_once() {
         let mut presence = BTreeMap::new();
-        assert_eq!(live_workers(&presence, "me"), 1);
+        assert_eq!(live_workers(&presence, Some("me")), 1);
         presence.insert("me".to_string(), Revision(1));
-        assert_eq!(live_workers(&presence, "me"), 1);
+        assert_eq!(live_workers(&presence, Some("me")), 1);
         presence.insert("peer".to_string(), Revision(2));
-        assert_eq!(live_workers(&presence, "me"), 2);
+        assert_eq!(live_workers(&presence, Some("me")), 2);
+    }
+
+    #[test]
+    fn membership_counts_a_parted_member_by_its_key() {
+        let mut presence = BTreeMap::new();
+        assert_eq!(live_workers(&presence, None), 0);
+        presence.insert("peer".to_string(), Revision(2));
+        assert_eq!(live_workers(&presence, None), 1);
+        presence.insert("me".to_string(), Revision(1));
+        assert_eq!(live_workers(&presence, None), 2);
     }
 
     /// Build an assignment input: `(id, weight, current owner)`.

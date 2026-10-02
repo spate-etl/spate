@@ -1881,18 +1881,17 @@ mod tests {
         script.push(vec![gained("a", 1, None)]);
         poll(&mut d, &mut s);
         script.fail_next_report("a", CoordinationErrorKind::Retryable);
-        script.fail_next_report("a", CoordinationErrorKind::Retryable);
         d.fail(&mut s, &SplitId::new("a").unwrap(), "undecodable object")
             .unwrap();
 
-        // The re-offer is refused again, then the loss arrives.
+        // The loss is drained before the next re-offer.
         script.push(vec![CoordinationEvent::Lost {
             split: split("a").id,
         }]);
         script.push(vec![gained("a", 2, None)]);
         poll(&mut d, &mut s);
         poll(&mut d, &mut s);
-        assert_eq!(script.fails().len(), 2, "a stale report is not re-offered");
+        assert_eq!(script.fails().len(), 1, "a stale report is not re-offered");
         assert_eq!(d.assignments().len(), 1, "the regained split stays live");
     }
 
@@ -2095,6 +2094,34 @@ mod tests {
             "the stale report is not re-offered"
         );
         assert_eq!(d.assignments().len(), 1);
+    }
+
+    /// A gain rejected and quarantined in one batch leaves no queued report to
+    /// outlive its split.
+    #[test]
+    fn rejected_gain_report_queued_in_the_batch_that_quarantines_the_split_is_dropped() {
+        let script = Script::default();
+        let mut d = driver(&script);
+        let mut s = rejecting(&["a"]);
+        for _ in 0..3 {
+            script.fail_next_report("a", CoordinationErrorKind::Retryable);
+        }
+        script.push(vec![
+            gained("a", 1, Some(7)),
+            CoordinationEvent::Quarantined {
+                split: split("a").id,
+                attempts: 3,
+            },
+        ]);
+        let _ = d.poll_events(&mut s, Duration::ZERO);
+        for _ in 0..4 {
+            let _ = d.poll_events(&mut s, Duration::ZERO);
+        }
+        assert_eq!(
+            script.fails().len(),
+            1,
+            "the stale report is not re-offered"
+        );
     }
 
     /// A queued gain-time report is dropped when its split is quarantined.

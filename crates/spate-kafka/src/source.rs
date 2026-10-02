@@ -60,6 +60,7 @@
 
 use crate::config::KafkaSourceConfig;
 use crate::context::{Intent, SourceContext};
+use crate::error::redacted_client_error;
 use crate::lane::KafkaLane;
 use crate::metrics::KafkaStatsMetrics;
 use rdkafka::consumer::{BaseConsumer, Consumer};
@@ -597,7 +598,10 @@ impl Source for KafkaSource {
             .config
             .client_config()
             .create_with_context(SourceContext::default())
-            .map_err(fatal("create consumer"))?;
+            .map_err(|e| SourceError::Client {
+                class: ErrorClass::Fatal,
+                reason: format!("create consumer: {}", redacted_client_error(&e)),
+            })?;
         consumer
             .subscribe(&[&self.config.topic])
             .map_err(fatal("subscribe"))?;
@@ -988,6 +992,25 @@ mod tests {
             assert!(msg.contains("kafka-tls"), "actionable: {msg}");
             assert!(msg.contains("source.kafka.rdkafka"), "scoped: {msg}");
         }
+    }
+
+    /// A rejected passthrough value is absent from the consumer-creation
+    /// error.
+    #[test]
+    fn open_omits_a_rejected_passthrough_value() {
+        use spate_core::checkpoint::Checkpointer;
+        let mut config = test_config();
+        config
+            .rdkafka
+            .insert("partition.assignment.strategy".into(), "hunter2".into());
+        let mut source = KafkaSource::new(config);
+        let cp = Checkpointer::new();
+        let msg = source
+            .open(SourceCtx::new(cp.handle()))
+            .expect_err("librdkafka rejects the strategy")
+            .to_string();
+        assert!(msg.contains("create consumer"), "{msg}");
+        assert!(!msg.contains("hunter2"), "{msg}");
     }
 
     /// Reproduces the assignment bookkeeping of a partial revocation: lanes

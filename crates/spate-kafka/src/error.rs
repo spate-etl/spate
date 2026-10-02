@@ -14,6 +14,22 @@
 use rdkafka::error::{KafkaError, RDKafkaErrorCode};
 use spate_core::error::{ErrorClass, TLS_REJECTION_ALERTS};
 
+/// Render a client-creation error without any rejected property value.
+///
+/// A config rejection names the property and librdkafka's result code. A
+/// creation failure reports that librdkafka's detail text is withheld.
+pub(crate) fn redacted_client_error(e: &KafkaError) -> String {
+    match e {
+        KafkaError::ClientConfig(res, _, key, _) => {
+            format!("Client config error: librdkafka rejected the value of {key} ({res:?})")
+        }
+        KafkaError::ClientCreation(_) => {
+            "Client creation error (librdkafka detail withheld)".to_string()
+        }
+        other => other.to_string(),
+    }
+}
+
 /// Classify a single librdkafka consumer/queue error code.
 ///
 /// `after_startup` gates [`RDKafkaErrorCode::UnknownTopicOrPartition`]:
@@ -99,6 +115,50 @@ pub(crate) fn classify_poll_error(
 mod tests {
     use super::*;
     use rdkafka::error::RDKafkaErrorCode as C;
+
+    /// Rejected values never reach the rendered error, whatever shape
+    /// librdkafka quotes them in, and the property key stays.
+    #[test]
+    fn client_error_omits_the_value() {
+        use rdkafka::ClientConfig;
+        use rdkafka::consumer::BaseConsumer;
+
+        let long = format!("hunter2{}", "x".repeat(600));
+        let cases = [
+            ("auto.offset.reset", "hunter2".to_string()),
+            ("auto.offset.reset", " hunter2".to_string()),
+            ("auto.offset.reset", long),
+            ("debug", "all,hunter2".to_string()),
+            ("partition.assignment.strategy", "hunter2".to_string()),
+        ];
+        for (key, value) in cases {
+            let err = ClientConfig::new()
+                .set("bootstrap.servers", "localhost:1")
+                .set(key, &value)
+                .create::<BaseConsumer>()
+                .err()
+                .expect("value is rejected");
+            let msg = redacted_client_error(&err);
+            assert!(!msg.contains("unter2"), "{key}: {msg}");
+        }
+    }
+
+    #[test]
+    fn client_config_error_names_the_key() {
+        use rdkafka::ClientConfig;
+        use rdkafka::consumer::BaseConsumer;
+
+        let err = ClientConfig::new()
+            .set("bootstrap.servers", "localhost:1")
+            .set("auto.offset.reset", "hunter2")
+            .create::<BaseConsumer>()
+            .err()
+            .expect("value is rejected");
+        assert!(
+            redacted_client_error(&err).contains("auto.offset.reset"),
+            "{err}"
+        );
+    }
 
     /// Permanent broker-side conditions must fail the pipeline fast, in both
     /// the pre- and post-startup windows.

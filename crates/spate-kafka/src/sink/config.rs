@@ -28,6 +28,7 @@
 //! source offsets past it. Weaker settings would silently turn
 //! at-least-once into at-most-once.
 
+use crate::error::redacted_client_error;
 use crate::sink::context::SinkContext;
 use crate::sink::encoder::{
     DEFAULT_MAX_MESSAGE_BYTES, KafkaBytesEncoder, KafkaEncoder, KafkaJsonEncoder, MessageEncoder,
@@ -539,7 +540,10 @@ pub fn build(cfg: KafkaSinkConfig) -> Result<KafkaSink, ConfigError> {
         .client_config()
         .create_with_context(SinkContext::new(Arc::clone(&stats_slot)))
         .map_err(|e| {
-            ConfigError::Validation(format!("sink.kafka: producer creation failed: {e}"))
+            ConfigError::Validation(format!(
+                "sink.kafka: producer creation failed: {}",
+                redacted_client_error(&e)
+            ))
         })?;
     let label = format!("{}/{}", cfg.brokers, cfg.topic);
     let endpoint = KafkaEndpoint::new(producer, label.clone());
@@ -550,7 +554,10 @@ pub fn build(cfg: KafkaSinkConfig) -> Result<KafkaSink, ConfigError> {
         .probe_client_config()
         .create_with_context(SinkContext::detached())
         .map_err(|e| {
-            ConfigError::Validation(format!("sink.kafka: probe producer creation failed: {e}"))
+            ConfigError::Validation(format!(
+                "sink.kafka: probe producer creation failed: {}",
+                redacted_client_error(&e)
+            ))
         })?;
     let probe_endpoints = Arc::new(vec![vec![KafkaEndpoint::new(probe_producer, label)]]);
 
@@ -943,6 +950,16 @@ mod tests {
             msg.contains("producer creation failed"),
             "surfaced at startup: {msg}"
         );
+    }
+
+    /// A value librdkafka rejects is absent from the startup error, which
+    /// still names the property.
+    #[test]
+    fn rejected_passthrough_value_is_not_printed() {
+        let body = format!("{}  rdkafka:\n    compression.type: hunter2\n", minimal());
+        let err = build(parse(&body).unwrap()).unwrap_err().to_string();
+        assert!(!err.contains("hunter2"), "{err}");
+        assert!(err.contains("compression.type"), "{err}");
     }
 
     #[test]

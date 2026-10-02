@@ -93,8 +93,11 @@ a registry that shares no protocol version, cipher suite or other handshake
 parameter with the client. The registry client presents no client certificate.
 A registry that requires one refuses the client with an alert such as
 `CertificateRequired`, during the handshake or, under TLS 1.3, after it, and
-that stops the pipeline too. The error names the registry URL, without
-credentials, and the status, the certificate error, the alert or the mismatch.
+that stops the pipeline too. A refusal after the handshake can close the
+connection before the request is sent, and that fetch is transient, so the stop
+can take a few replays of the payload. The error names the registry URL,
+without credentials, and the status with the start of the registry's response,
+the certificate error, the alert or the mismatch.
 The deserializer learns of the rejection from a fetch, so the pipeline stops at
 the first payload whose schema is not cached. Schemas already cached keep
 decoding until then, and a pipeline that receives no payload keeps running.

@@ -486,7 +486,9 @@ fn ci(root: &Path, explain: bool, since: Option<&str>) -> Outcome {
         return match crate::ci::scope_since(root, base)? {
             Scope::Packages(pkgs) => scoped_ci(root, explain, base, &pkgs),
             Scope::Full => {
-                println!("note: the diff reaches shared files; running everything.");
+                println!(
+                    "note: the diff reaches shared files or cannot be read; running everything."
+                );
                 full_ci(root, explain)
             }
         };

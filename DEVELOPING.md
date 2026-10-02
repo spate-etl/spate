@@ -19,7 +19,8 @@ clippy, the tests, doctests, rustdoc and the feature matrix on that set, the
 loom models when `spate-core` is in it, and every `tidy` member. It skips
 `cargo deny`, the fuzz harness and the packages outside the set, which CI still
 runs. A change to a manifest, `Cargo.lock`, `test-support/`, `xtask/`, tooling
-or Rust outside `crates/` runs the full `ci`. Passing `--since` is a pre-push
+or Rust outside `crates/` runs the full `ci`. The root `README.md` counts as a change to
+`spate`, which compiles it as a doctest. Passing `--since` is a pre-push
 check; `cargo xtask ci` stays the pull request bar.
 
 Verify a gate by its **exit code**. Piped `grep` and `tail` chains report the

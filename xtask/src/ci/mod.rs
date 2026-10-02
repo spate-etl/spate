@@ -72,7 +72,6 @@ pub(crate) fn changes(args: &[String]) -> Result<(), String> {
 pub(crate) fn scope_since(root: &Path, base: &str) -> Result<Scope, String> {
     let git = event::GitDiff::new(root, classify::Event::PullRequest);
     let Some(paths) = git.since(base) else {
-        println!("note: no usable diff against {base}.");
         return Ok(Scope::Full);
     };
     Ok(scope::scope(&paths, &graph::Graph::load(root)?))

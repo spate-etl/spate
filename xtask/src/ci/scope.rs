@@ -16,9 +16,12 @@ pub(crate) enum Scope {
 
 /// A path outside `crates/<name>/` that changes Rust, and any manifest, widens
 /// the scope to everything: those files reach packages the dependency graph
-/// does not name.
+/// does not name. The root `README.md` is a doctest of `spate`.
 pub(crate) fn scope(paths: &[String], graph: &Graph) -> Scope {
     let mut pkgs = BTreeSet::new();
+    if paths.iter().any(|p| p == "README.md") {
+        pkgs.extend(graph.test_closure_for("spate"));
+    }
     for path in paths.iter().filter(|p| is_rust_change(p)) {
         if is_manifest(path) {
             return Scope::Full;
@@ -76,14 +79,19 @@ mod tests {
 
     #[test]
     fn documentation_and_changelog_fragments_cover_no_package() {
-        assert!(
-            packages(&[
-                "docs/user-guide/a.md",
-                "changelog.d/x.fixed.md",
-                "README.md"
-            ])
-            .is_empty()
-        );
+        assert!(packages(&["docs/user-guide/a.md", "changelog.d/x.fixed.md"]).is_empty());
+    }
+
+    /// `spate` compiles the root README as a doctest.
+    #[test]
+    fn the_root_readme_covers_spate() {
+        assert!(packages(&["README.md"]).contains("spate"));
+    }
+
+    /// `spate-s3` depends on `spate-json` only as a dev-dependency.
+    #[test]
+    fn a_dev_dependency_edge_reaches_its_dependent() {
+        assert!(packages(&["crates/spate-json/src/lib.rs"]).contains("spate-s3"));
     }
 
     /// The diff widens on a manifest, a lockfile, the shared test crate, tooling

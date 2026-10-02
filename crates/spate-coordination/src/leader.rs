@@ -12,7 +12,7 @@
 //!
 //! The planner itself runs on the blocking pool and is joined by a select
 //! arm in the task loop ([`Task::maybe_start_plan`] starts it,
-//! [`Task::finish_plan`] lands it). A slow enumeration must never stall
+//! [`Task::land_plan`] lands it). A slow enumeration must never stall
 //! heartbeats, watch processing, or command service.
 //!
 //! On a store whose watch is polled, a new leader lists every split and

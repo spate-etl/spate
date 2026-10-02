@@ -3417,12 +3417,13 @@ impl<S: CoordinationStore + Clone> Task<S> {
     ///   tally would otherwise dress unprocessed data up as a green exit.
     /// - **The verdict is rendered against an authoritative listing**, not
     ///   against this worker's watch-fed view and not against
-    ///   `plan.planned`. `planned` is only a lower bound: `finish_plan`
-    ///   seeds split records *before* it recounts and publishes, and both
-    ///   publish-failure paths leave the seeded records behind, so a
-    ///   `Final` plan, which never replans, can name fewer splits than
-    ///   the store holds. Judging a *subset* that happens to be
-    ///   all-complete is how a quarantined split goes unseen.
+    ///   `plan.planned`. `planned` is only a lower bound: `land_plan`'s
+    ///   seeding run writes split records *before* it counts the splits in
+    ///   the store, `finish_plan` publishes after that, and both
+    ///   publish-failure paths leave the seeded records behind, so a `Final`
+    ///   plan, which never replans, can name fewer splits than the store
+    ///   holds. Judging a *subset* that happens to be all-complete is how a
+    ///   quarantined split goes unseen.
     ///
     /// The listing costs one store round trip and is gated behind a local
     /// pre-check, so it runs essentially once per job.

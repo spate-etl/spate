@@ -60,6 +60,7 @@
 
 use crate::config::KafkaSourceConfig;
 use crate::context::{Intent, SourceContext};
+use crate::error::redacted_client_error;
 use crate::lane::KafkaLane;
 use crate::metrics::KafkaStatsMetrics;
 use rdkafka::consumer::{BaseConsumer, Consumer};
@@ -597,7 +598,10 @@ impl Source for KafkaSource {
             .config
             .client_config()
             .create_with_context(SourceContext::default())
-            .map_err(fatal("create consumer"))?;
+            .map_err(|e| SourceError::Client {
+                class: ErrorClass::Fatal,
+                reason: format!("create consumer: {}", redacted_client_error(&e)),
+            })?;
         consumer
             .subscribe(&[&self.config.topic])
             .map_err(fatal("subscribe"))?;

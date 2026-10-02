@@ -14,6 +14,26 @@
 use rdkafka::error::{KafkaError, RDKafkaErrorCode};
 use spate_core::error::{ErrorClass, TLS_REJECTION_ALERTS};
 
+/// Render a client-creation error without the rejected property value.
+///
+/// A [`KafkaError::ClientConfig`] names the property and librdkafka's reason;
+/// the value, and any quotation of it inside the reason, is replaced with
+/// `<redacted>`. Other errors render as their `Display` form.
+pub(crate) fn redacted_client_error(e: &KafkaError) -> String {
+    match e {
+        KafkaError::ClientConfig(_, desc, key, value) if !value.is_empty() => {
+            format!(
+                "Client config error: {} {key}",
+                desc.replace(value.as_str(), "<redacted>")
+            )
+        }
+        KafkaError::ClientConfig(_, desc, key, _) => {
+            format!("Client config error: {desc} {key}")
+        }
+        other => other.to_string(),
+    }
+}
+
 /// Classify a single librdkafka consumer/queue error code.
 ///
 /// `after_startup` gates [`RDKafkaErrorCode::UnknownTopicOrPartition`]:
@@ -99,6 +119,25 @@ pub(crate) fn classify_poll_error(
 mod tests {
     use super::*;
     use rdkafka::error::RDKafkaErrorCode as C;
+
+    /// A consumer rejecting a property value reports the property and omits
+    /// the value, including librdkafka's own quotation of it.
+    #[test]
+    fn client_config_error_omits_the_value() {
+        use rdkafka::ClientConfig;
+        use rdkafka::consumer::BaseConsumer;
+
+        let err = ClientConfig::new()
+            .set("bootstrap.servers", "localhost:1")
+            .set("auto.offset.reset", "hunter2")
+            .create::<BaseConsumer>()
+            .err()
+            .expect("value is rejected");
+        assert!(err.to_string().contains("hunter2"), "premise: {err}");
+        let msg = redacted_client_error(&err);
+        assert!(!msg.contains("hunter2"), "{msg}");
+        assert!(msg.contains("auto.offset.reset"), "{msg}");
+    }
 
     /// Permanent broker-side conditions must fail the pipeline fast, in both
     /// the pre- and post-startup windows.

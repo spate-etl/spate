@@ -16,14 +16,16 @@ use spate_core::error::{ErrorClass, TLS_REJECTION_ALERTS};
 
 /// Render a client-creation error without any rejected property value.
 ///
-/// Config rejections name the property and librdkafka's result code, and
-/// creation failures carry no detail text; neither can quote a value.
+/// A config rejection names the property and librdkafka's result code. A
+/// creation failure reports that librdkafka's detail text is withheld.
 pub(crate) fn redacted_client_error(e: &KafkaError) -> String {
     match e {
         KafkaError::ClientConfig(res, _, key, _) => {
             format!("Client config error: librdkafka rejected the value of {key} ({res:?})")
         }
-        KafkaError::ClientCreation(_) => "Client creation error".to_string(),
+        KafkaError::ClientCreation(_) => {
+            "Client creation error (librdkafka detail withheld)".to_string()
+        }
         other => other.to_string(),
     }
 }

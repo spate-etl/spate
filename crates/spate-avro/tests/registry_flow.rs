@@ -238,10 +238,9 @@ async fn miss_reports_not_ready_then_decodes_after_fetch() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn retriable_registry_errors_are_retried() {
     let stub = StubRegistry::default();
-    // 502/503 are retriable in the registry client, but every transient
-    // failure now leaves the id absent and is retried by the deserializer
-    // replaying the payload (bounded by per-id fetch backoff), never
-    // negatively cached.
+    // A transient failure leaves the id absent, and the deserializer's replay
+    // refetches it (bounded by per-id fetch backoff); it is never negatively
+    // cached.
     stub.script("/schemas/ids/9", 503, "shard warming up", 2);
     stub.script("/schemas/ids/9", 200, &schema_body(SCHEMA_V1), 0);
     let addr = stub.clone().serve().await;
@@ -561,6 +560,217 @@ async fn a_refused_schema_poisons_the_id_rather_than_stalling() {
     );
 }
 
+/// A schema the registry types as other than Avro poisons the id, though its
+/// text also parses as an Avro schema.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_schema_that_is_not_avro_poisons_the_id() {
+    let stub = StubRegistry::default();
+    let body = serde_json::json!({ "schema": r#"{"type":"string"}"#, "schemaType": "JSON" });
+    stub.script("/schemas/ids/78", 200, &body.to_string(), 0);
+    let addr = stub.clone().serve().await;
+    let builder = AvroDeserializerBuilder::from_settings(
+        &settings(addr, Duration::from_secs(30)),
+        &tokio::runtime::Handle::current(),
+    )
+    .unwrap();
+    let mut deser = builder.build_value().expect("apache builder");
+    let payload = confluent_payload(78, 1);
+    let err = tokio::task::spawn_blocking(move || {
+        let mut out = Collected(Vec::new());
+        drive_until_ready(&mut deser, &payload, &mut out)
+    })
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert!(
+        matches!(&err, DeserError::SchemaUnavailable { reason } if reason.contains("JSON")),
+        "{err}"
+    );
+}
+
+/// A pre-warmed subject whose schema the registry types as other than Avro is
+/// not cached, so its id is fetched and poisoned on first use.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn prewarm_skips_a_schema_that_is_not_avro() {
+    let stub = StubRegistry::default();
+    let json =
+        serde_json::json!({ "schema": r#"{"type":"string"}"#, "schemaType": "JSON", "id": 79 })
+            .to_string();
+    stub.script("/subjects/json-value/versions/latest", 200, &json, 0);
+    stub.script("/schemas/ids/79", 200, &json, 0);
+    let addr = stub.clone().serve().await;
+    let mut cfg = settings(addr, Duration::from_secs(30));
+    // Subjects are pre-warmed in order, so a request for the second subject
+    // means the first has been handled. The second answers 404.
+    cfg.prewarm_subjects = vec!["json-value".into(), "sentinel-value".into()];
+    let builder =
+        AvroDeserializerBuilder::from_settings(&cfg, &tokio::runtime::Handle::current()).unwrap();
+    let mut deser = builder.build_value().unwrap();
+    let hits = stub.clone();
+    tokio::task::spawn_blocking(move || {
+        spate_test::wait_until(
+            Duration::from_secs(10),
+            "the pre-warm reaches the second subject",
+            || hits.path_hits("/subjects/sentinel-value/versions/latest") > 0,
+        );
+    })
+    .await
+    .unwrap();
+    // Confluent framing for id 79, then the Avro string "a".
+    let mut payload = vec![0x00];
+    payload.extend_from_slice(&79u32.to_be_bytes());
+    payload.extend_from_slice(&[0x02, b'a']);
+    let result = tokio::task::spawn_blocking(move || {
+        let mut out = Collected(Vec::new());
+        drive_until_ready(&mut deser, &payload, &mut out).map(|()| out.0.len())
+    })
+    .await
+    .unwrap();
+    assert!(
+        matches!(&result, Err(DeserError::SchemaUnavailable { reason }) if reason.contains("JSON")),
+        "{result:?}"
+    );
+}
+
+/// An unknown id's poison reason carries the registry's error body.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unknown_id_names_the_registry_error() {
+    let stub = StubRegistry::default();
+    // Unscripted: the stub answers 404 {"error_code":40403,"message":"Schema not found"}.
+    let addr = stub.clone().serve().await;
+    let builder = AvroDeserializerBuilder::from_settings(
+        &settings(addr, Duration::from_secs(30)),
+        &tokio::runtime::Handle::current(),
+    )
+    .unwrap();
+    let mut deser = builder.build_value().expect("apache builder");
+    let payload = confluent_payload(5, 1);
+    let err = tokio::task::spawn_blocking(move || {
+        let mut out = Collected(Vec::new());
+        drive_until_ready(&mut deser, &payload, &mut out)
+    })
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert!(
+        matches!(&err, DeserError::SchemaUnavailable { reason } if reason.contains("40403")),
+        "{err}"
+    );
+}
+
+/// A `403` on the pre-warm is logged, and the id still decodes from the
+/// by-id fetch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_prewarm_forbidden_is_not_a_rejection() {
+    let stub = StubRegistry::default();
+    stub.script("/subjects/events-value/versions/latest", 403, "{}", 0);
+    stub.script("/schemas/ids/42", 200, &schema_body(SCHEMA_V1), 0);
+    let addr = stub.clone().serve().await;
+    let mut cfg = settings(addr, Duration::from_secs(30));
+    // Pre-warm is sequential and ends on a recorded rejection, so a request
+    // for the second subject means the first was handled and not recorded.
+    cfg.prewarm_subjects = vec!["events-value".into(), "sentinel-value".into()];
+    let builder =
+        AvroDeserializerBuilder::from_settings(&cfg, &tokio::runtime::Handle::current()).unwrap();
+    let mut deser = builder.build_value().unwrap();
+    let hits = stub.clone();
+    tokio::task::spawn_blocking(move || {
+        spate_test::wait_until(
+            Duration::from_secs(10),
+            "the pre-warm reaches the second subject",
+            || hits.path_hits("/subjects/sentinel-value/versions/latest") > 0,
+        );
+    })
+    .await
+    .unwrap();
+    let payload = confluent_payload(42, 1);
+    let rows = tokio::task::spawn_blocking(move || {
+        let mut out = Collected(Vec::new());
+        drive_until_ready(&mut deser, &payload, &mut out).map(|()| out.0.len())
+    })
+    .await
+    .unwrap();
+    assert_eq!(rows.unwrap(), 1);
+}
+
+/// The target and `Authorization` headers of each request a stub received.
+type Seen = Arc<Mutex<Vec<(String, Vec<String>)>>>;
+
+/// Serves `SCHEMA_V1` to every request and records each request's target and
+/// `Authorization` headers.
+async fn serve_recording() -> (std::net::SocketAddr, Seen) {
+    let seen = Seen::default();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let record = Arc::clone(&seen);
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let record = Arc::clone(&record);
+            tokio::spawn(async move {
+                let service = service_fn(move |req: Request<hyper::body::Incoming>| {
+                    let record = Arc::clone(&record);
+                    async move {
+                        let auth = req
+                            .headers()
+                            .get_all(hyper::header::AUTHORIZATION)
+                            .iter()
+                            .map(|v| v.to_str().unwrap().to_owned())
+                            .collect();
+                        let target = req
+                            .uri()
+                            .path_and_query()
+                            .map(ToString::to_string)
+                            .unwrap_or_default();
+                        record.lock().unwrap().push((target, auth));
+                        Ok::<_, std::convert::Infallible>(Response::new(Full::new(Bytes::from(
+                            schema_body(SCHEMA_V1),
+                        ))))
+                    }
+                });
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
+                    .await;
+            });
+        }
+    });
+    (addr, seen)
+}
+
+/// The by-id fetch sends `registry.username`/`password`, or the URL userinfo,
+/// as basic auth.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fetch_sends_basic_auth() {
+    for (userinfo, username, expected) in [
+        ("", Some("svc"), "Basic c3ZjOmh1bnRlcjI="), // svc:hunter2
+        ("urluser:urlsecret@", None, "Basic dXJsdXNlcjp1cmxzZWNyZXQ="), // urluser:urlsecret
+    ] {
+        let (addr, seen) = serve_recording().await;
+        let mut cfg = settings_at(format!("http://{userinfo}{addr}"), Duration::from_secs(30));
+        let registry = cfg.registry.as_mut().unwrap();
+        registry.username = username.map(Into::into);
+        registry.password = username.map(|_| "hunter2".into());
+        let builder =
+            AvroDeserializerBuilder::from_settings(&cfg, &tokio::runtime::Handle::current())
+                .unwrap();
+        let mut deser = builder.build_value().unwrap();
+        let payload = confluent_payload(5, 1);
+        tokio::task::spawn_blocking(move || {
+            let mut out = Collected(Vec::new());
+            drive_until_ready(&mut deser, &payload, &mut out)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            [(
+                "/schemas/ids/5?deleted=true".to_owned(),
+                vec![expected.to_owned()]
+            )]
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Registry rejections that stop the pipeline
 // ---------------------------------------------------------------------------
@@ -607,6 +817,7 @@ async fn an_auth_rejection_is_fatal() {
         let reason = fatal_reason(builder.build_value().unwrap(), confluent_payload(1, 1)).await;
         assert!(reason.contains(&format!("{status}")), "{reason}");
         assert!(reason.contains(&addr.to_string()), "{reason}");
+        assert!(reason.contains("error_code"), "{reason}");
         for secret in ["urlsecret", "hunter2"] {
             assert!(!reason.contains(secret), "{reason}");
         }
@@ -618,7 +829,12 @@ async fn an_auth_rejection_is_fatal() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_prewarm_auth_rejection_is_fatal_at_the_first_miss() {
     let stub = StubRegistry::default();
-    stub.script("/subjects/events-value/versions/latest", 401, "{}", 0);
+    stub.script(
+        "/subjects/events-value/versions/latest",
+        401,
+        r#"{"error_code":40101,"message":"Unauthorized"}"#,
+        0,
+    );
     stub.script("/schemas/ids/42", 503, "{}", 0);
     let addr = stub.serve().await;
     let mut cfg = settings(addr, Duration::from_secs(30));
@@ -627,6 +843,7 @@ async fn a_prewarm_auth_rejection_is_fatal_at_the_first_miss() {
         AvroDeserializerBuilder::from_settings(&cfg, &tokio::runtime::Handle::current()).unwrap();
     let reason = fatal_reason(builder.build_value().unwrap(), confluent_payload(42, 1)).await;
     assert!(reason.contains("401"), "{reason}");
+    assert!(reason.contains("40101"), "{reason}");
 }
 
 /// Once a rejection is recorded, a schema already cached keeps decoding.
@@ -696,6 +913,25 @@ async fn a_rejecting_tls_alert_is_fatal() {
         let reason = fatal_reason(builder.build_value().unwrap(), confluent_payload(1, 1)).await;
         assert!(reason.contains(&format!("{alert:?}")), "{reason}");
     }
+}
+
+/// A TLS 1.3 registry that refuses the client for presenting no certificate,
+/// which it signals after the handshake, is fatal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_client_certificate_is_fatal() {
+    let dir = tempfile::tempdir().unwrap();
+    let (registry, clients) = (
+        spate_test_support::TestCa::new("registry"),
+        spate_test_support::TestCa::new("clients"),
+    );
+    let addr =
+        spate_test_support::serve_tls(registry.server_config(Some(&clients)), |_| async {}).await;
+    let mut cfg = settings_at(format!("https://{addr}"), Duration::from_secs(30));
+    cfg.registry.as_mut().unwrap().tls.root_ca = Some(registry.write(dir.path()));
+    let builder =
+        AvroDeserializerBuilder::from_settings(&cfg, &tokio::runtime::Handle::current()).unwrap();
+    let reason = fatal_reason(builder.build_value().unwrap(), confluent_payload(1, 1)).await;
+    assert!(reason.contains("CertificateRequired"), "{reason}");
 }
 
 // ---------------------------------------------------------------------------

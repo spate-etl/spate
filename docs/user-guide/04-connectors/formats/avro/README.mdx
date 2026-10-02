@@ -58,8 +58,9 @@ deserializer:
 | `schema` | `{ inline }` or `{ path }` | `required` | The writer schema. Required in `raw` and `single_object` modes; rejected in `confluent` mode (writer schemas come from the registry there). |
 
 Mode requirements are validated at construction with explicit messages:
-`confluent` without a `registry`, `raw` without a `schema`, `prewarm_subjects`
-outside `confluent`, and so on all fail fast at startup.
+`confluent` without a `registry`, a `registry.url` that is not an `http://` or
+`https://` URL, `raw` without a `schema`, `prewarm_subjects` outside
+`confluent`, and so on all fail fast at startup.
 
 ## Security (TLS and registry credentials)
 
@@ -89,18 +90,25 @@ An expired or untrusted intermediate certificate counts as a failed
 verification. A TLS alert with which the registry rejects the handshake, such
 as `HandshakeFailure` or `ProtocolVersion`, stops the pipeline too, and so does
 a registry that shares no protocol version, cipher suite or other handshake
-parameter with the client. The error names the registry URL, without
-credentials, and the status, the certificate error, the alert or the mismatch.
+parameter with the client. The registry client presents no client certificate.
+A registry that requires one refuses the client with an alert such as
+`CertificateRequired`, during the handshake or, under TLS 1.3, after it, and
+that stops the pipeline too. A refusal after the handshake can close the
+connection before the request is sent, and that fetch is transient, so the stop
+can take a few fetches of the schema, each after a backoff that starts at
+200 ms and doubles up to 5 s. The error names the registry URL, without
+credentials, and the status with the start of the registry's response, the
+certificate error, the alert or the mismatch.
 The deserializer learns of the rejection from a fetch, so the pipeline stops at
 the first payload whose schema is not cached. Schemas already cached keep
-decoding until then, and a pipeline that receives no payload keeps running. A `401` on a `prewarm_subjects` fetch counts too; a `403`
-there is logged, and the subject's schema is fetched on demand. Any other TLS
-or transport failure, such as an `InternalError` alert or a connection closed
+decoding until then, and a pipeline that receives no payload keeps running.
+A `401` on a `prewarm_subjects` fetch counts too. A `403` there refuses one
+subject, so it is logged and the subject's schema is fetched by id when a
+payload needs it. A `403` on that fetch stops the pipeline. Any other TLS or
+transport failure, such as an `InternalError` alert or a connection closed
 during the handshake, is transient: the batch is held and replayed while it
 lasts, logging `registry fetch failed transiently` and counting
-`spate_deser_not_ready_total`. The registry client presents no client
-certificate. A TLS 1.3 registry that requires one refuses the connection after
-the handshake, and that refusal is transient as well. See
+`spate_deser_not_ready_total`. See
 [Securing connections](../../../03-guides/securing-connections.mdx) for the
 generic model.
 
@@ -184,7 +192,8 @@ configuration; an optional `reader_schema` pins the shape records resolve
 into, using Avro's standard schema-resolution rules: field reordering,
 defaults for missing fields, type promotions. Pin a reader schema to keep a
 struct stable while producers evolve. Registry schemas using schema references
-are not supported and surface as unavailable.
+are not supported and surface as unavailable, and so does a registry schema
+whose type is not `AVRO`, such as `PROTOBUF` or `JSON`.
 
 A reader **field** alias is not applied. A reader field that renames a writer's
 field and lists the old name in `aliases` reports that field missing on every

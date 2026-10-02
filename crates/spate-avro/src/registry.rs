@@ -6,15 +6,12 @@
 //! task fetches, parses, and publishes the schema into the shared cache,
 //! and the driver's blocked-batch retry picks it up.
 //!
-//! `schema_registry_converter` is used strictly as the registry HTTP
-//! client; its decoders never appear on the hot path.
-//!
 //! # Transient, permanent and rejected
 //!
 //! Only a *permanent* verdict about an id is negatively cached: the registry
-//! answering `404` (unknown id/subject/version), a schema that uses
-//! unsupported references, or a schema the parser rejects (`CompiledSchema`
-//! pre-renders the reason). A *transient* outage
+//! answering `404` (unknown id/subject/version), a schema that is not Avro or
+//! uses unsupported references, or a schema the parser rejects
+//! (`CompiledSchema` pre-renders the reason). A *transient* outage
 //! (any other 5xx, `429`, a timeout, a refused/black-holed connection)
 //! leaves the id **absent** so the deserializer's next replay refetches it:
 //! poisoning a transient blip would drop (and ack) perfectly decodable
@@ -22,9 +19,9 @@
 //! the fetcher, keeps those replays from hot-looping the registry.
 //!
 //! A registry that answers `401`/`403`, or that rejects the TLS handshake
-//! ([`tls_rejection!`](spate_core::tls_rejection)), is *rejected*: the reason
-//! is recorded once in the handle's [`Rejection`], and every later cache miss
-//! is fatal.
+//! or the client after it ([`tls_rejection!`](spate_core::tls_rejection)),
+//! is *rejected*: the reason is recorded once in the handle's [`Rejection`],
+//! and every later cache miss is fatal.
 //!
 //! # Concurrency
 //!
@@ -35,21 +32,17 @@
 
 use crate::cache::{CompiledSchema, Lookup, SchemaCache};
 use crate::config::AvroConfigError;
+use reqwest::{StatusCode, Url};
 use rustls::pki_types::CertificateDer;
 use rustls::pki_types::pem::PemObject;
-use rustls::{CertificateError, ClientConfig, RootCertStore};
+use rustls::{AlertDescription, CertificateError, ClientConfig, RootCertStore};
 use rustls_native_certs::CertificateResult;
-use schema_registry_converter::async_impl::schema_registry::{self, SrSettings, SrSettingsBuilder};
-use schema_registry_converter::error::SRCError;
-use schema_registry_converter::schema_registry_common::{SchemaType, SubjectNameStrategy};
+use serde::Deserialize;
 use spate_core::config::redact;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
-use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
-use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
@@ -62,6 +55,11 @@ const FETCH_BACKOFF_MAX: Duration = Duration::from_secs(5);
 /// blocking (a slow id no longer stalls the rest) while keeping registry
 /// load and open-socket count modest.
 const MAX_CONCURRENT_FETCHES: usize = 4;
+/// Bound on the part of an error response's body a [`Failure::Status`] keeps.
+const ERROR_BODY_LIMIT: usize = 256;
+/// Bound on one registry request, from connect to the end of the body. A
+/// fetch holds a slot in [`MAX_CONCURRENT_FETCHES`] until it ends.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Why the registry rejected this client, set at most once.
 pub(crate) type Rejection = Arc<OnceLock<String>>;
@@ -129,37 +127,216 @@ impl RegistryConfig {
     }
 }
 
-/// The registry client, verifying an `https://` registry against the system
-/// trust store and `root_ca`. A TLS rejection ([`tls_rejection!`](spate_core::tls_rejection))
-/// is recorded in `rejection`.
-pub(crate) fn sr_settings(
-    cfg: &RegistryConfig,
-    rejection: &Rejection,
-) -> Result<SrSettings, AvroConfigError> {
-    sr_settings_with(cfg, rejection, rustls_native_certs::load_native_certs)
+/// Where one schema registry is and how to authenticate to it. Requests go
+/// through the client [`http_client`] builds, which this does not hold.
+pub(crate) struct Endpoint {
+    /// The configured URL, userinfo included; reqwest sends the userinfo as
+    /// basic auth.
+    base: Url,
+    basic_auth: Option<(String, Option<String>)>,
+    /// The URL without credentials, for messages.
+    registry: Arc<str>,
 }
 
-fn sr_settings_with(
-    cfg: &RegistryConfig,
-    rejection: &Rejection,
-    system: impl FnOnce() -> CertificateResult,
-) -> Result<SrSettings, AvroConfigError> {
-    let mut builder: SrSettingsBuilder = SrSettings::new_builder(cfg.url.clone());
-    if let Some((user, pass)) = &cfg.basic_auth {
-        builder.set_basic_authorization(user, pass.as_deref());
-    }
-    let layer = RecordRejection {
-        registry: cfg.display_url().into(),
-        rejection: Arc::clone(rejection),
-    };
-    builder
-        .build_with(client_builder(system, cfg.root_ca.as_deref())?.connector_layer(layer))
-        .map_err(|e| AvroConfigError::Registry {
-            detail: match e.cause {
-                Some(cause) => format!("{}: {cause}", e.error),
-                None => e.error,
-            },
+/// The fields of a registry schema response the fetcher reads.
+#[derive(Deserialize)]
+struct RegistrySchema {
+    /// Absent from a by-id response.
+    id: Option<u32>,
+    schema: String,
+    /// `AVRO` when absent.
+    #[serde(rename = "schemaType")]
+    schema_type: Option<String>,
+    references: Option<Vec<serde::de::IgnoredAny>>,
+}
+
+impl RegistrySchema {
+    /// Why spate-avro cannot decode with schema `id`, if it cannot.
+    fn unsupported(&self, id: u32) -> Option<String> {
+        if let Some(kind) = self.schema_type.as_deref().filter(|kind| *kind != "AVRO") {
+            return Some(format!(
+                "schema {id} is a {kind} schema, which spate-avro does not decode"
+            ));
+        }
+        let references = self.references.as_ref().map_or(0, Vec::len);
+        (references > 0).then(|| {
+            format!(
+                "schema {id} uses {references} registry reference(s), which spate-avro does not \
+                 support yet"
+            )
         })
+    }
+}
+
+/// Why a registry request failed.
+#[derive(Debug)]
+enum Failure {
+    /// The registry answered with a status other than success. `body` is the
+    /// start of the response body, at most [`ERROR_BODY_LIMIT`] bytes.
+    Status { status: StatusCode, body: String },
+    /// A [`tls_rejection!`](spate_core::tls_rejection); the reason names the
+    /// registry.
+    Rejected(String),
+    /// Anything else, rendered with its source chain.
+    Transient(String),
+}
+
+impl std::fmt::Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Failure::Status { status, body } if body.is_empty() => {
+                write!(f, "the registry answered {status}")
+            }
+            Failure::Status { status, body } => write!(f, "the registry answered {status}: {body}"),
+            Failure::Rejected(reason) | Failure::Transient(reason) => f.write_str(reason),
+        }
+    }
+}
+
+impl Endpoint {
+    /// The endpoint at `cfg.url`. Fails when the URL is not an `http://` or
+    /// `https://` URL.
+    pub(crate) fn new(cfg: &RegistryConfig) -> Result<Endpoint, AvroConfigError> {
+        // The detail never echoes the URL, which may carry credentials.
+        let base = Url::parse(&cfg.url).map_err(|e| AvroConfigError::Invalid {
+            detail: format!("registry.url is not a URL: {e}"),
+        })?;
+        if !matches!(base.scheme(), "http" | "https") {
+            return Err(AvroConfigError::Invalid {
+                detail: "registry.url must be an http:// or https:// URL".into(),
+            });
+        }
+        Ok(Endpoint {
+            base,
+            basic_auth: cfg.basic_auth.clone(),
+            registry: cfg.display_url().into(),
+        })
+    }
+
+    /// The registry's URL, without credentials.
+    pub(crate) fn registry(&self) -> &str {
+        &self.registry
+    }
+
+    /// `GET /schemas/ids/{id}?deleted=true`: a soft-deleted schema still
+    /// decodes the records written with it.
+    fn schema_url(&self, id: u32) -> Url {
+        let mut url = self.url(&["schemas", "ids", &id.to_string()]);
+        url.set_query(Some("deleted=true"));
+        url
+    }
+
+    /// `GET /subjects/{subject}/versions/latest`, with `subject` encoded as
+    /// one path segment.
+    fn latest_url(&self, subject: &str) -> Url {
+        self.url(&["subjects", subject, "versions", "latest"])
+    }
+
+    /// `segments` appended to the configured URL's path.
+    fn url(&self, segments: &[&str]) -> Url {
+        let mut url = self.base.clone();
+        url.set_query(None);
+        url.set_fragment(None);
+        url.path_segments_mut()
+            .expect("Endpoint::new admits only http(s) URLs")
+            .pop_if_empty()
+            .extend(segments);
+        url
+    }
+
+    async fn get(&self, http: &reqwest::Client, url: Url) -> Result<RegistrySchema, Failure> {
+        let mut request = http.get(url);
+        if let Some((user, password)) = &self.basic_auth {
+            request = request.basic_auth(user, password.as_deref());
+        }
+        let mut response = request.send().await.map_err(|e| self.failure(e))?;
+        let status = response.status();
+        if !status.is_success() {
+            let mut body = Vec::new();
+            while body.len() < ERROR_BODY_LIMIT {
+                match response.chunk().await {
+                    Ok(Some(chunk)) => body.extend_from_slice(&chunk),
+                    _ => break,
+                }
+            }
+            return Err(Failure::Status {
+                status,
+                body: excerpt(&body),
+            });
+        }
+        let body = response.bytes().await.map_err(|e| self.failure(e))?;
+        serde_json::from_slice(&body)
+            .map_err(|e| Failure::Transient(format!("unreadable registry response: {e}")))
+    }
+
+    fn failure(&self, e: reqwest::Error) -> Failure {
+        match spate_core::tls_rejection!(rustls, &e) {
+            Some(tls) => Failure::Rejected(tls_reason(&self.registry, tls)),
+            None => Failure::Transient(chain(&e.without_url())),
+        }
+    }
+}
+
+/// The reason recorded for a TLS rejection by `registry`.
+fn tls_reason(registry: &str, tls: &rustls::Error) -> String {
+    match tls {
+        rustls::Error::InvalidCertificate(cert) => {
+            let hint = match cert {
+                CertificateError::UnknownIssuer => {
+                    "; add the issuing CA to the system trust store or `registry.tls.root_ca`"
+                }
+                _ => "",
+            };
+            format!(
+                "schema registry {registry} presented a certificate the client rejects: \
+                 {cert}{hint}"
+            )
+        }
+        rustls::Error::AlertReceived(AlertDescription::CertificateRequired) => format!(
+            "schema registry {registry} requires a client certificate, which the client does \
+             not present: {tls}"
+        ),
+        _ => format!("the TLS handshake with schema registry {registry} failed: {tls}"),
+    }
+}
+
+/// `body` as trimmed text, cut to at most [`ERROR_BODY_LIMIT`] bytes.
+fn excerpt(body: &[u8]) -> String {
+    let text = String::from_utf8_lossy(body);
+    let text = text.trim();
+    let mut end = text.len().min(ERROR_BODY_LIMIT);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].trim_end().to_owned()
+}
+
+/// `e` and each error in its source chain, joined by `": "`.
+fn chain(e: &(dyn Error + 'static)) -> String {
+    let mut rendered = e.to_string();
+    let mut next = e.source();
+    while let Some(source) = next {
+        rendered.push_str(": ");
+        rendered.push_str(&source.to_string());
+        next = source.source();
+    }
+    rendered
+}
+
+/// The HTTP client for the registry, verifying an `https://` registry
+/// against the system trust store and `root_ca`.
+pub(crate) fn http_client(root_ca: Option<&Path>) -> Result<reqwest::Client, AvroConfigError> {
+    http_client_with(root_ca, rustls_native_certs::load_native_certs)
+}
+
+fn http_client_with(
+    root_ca: Option<&Path>,
+    system: impl FnOnce() -> CertificateResult,
+) -> Result<reqwest::Client, AvroConfigError> {
+    client_builder(system, root_ca)?
+        .timeout(REQUEST_TIMEOUT)
+        .build()
+        .map_err(|e| AvroConfigError::Registry { detail: chain(&e) })
 }
 
 /// The HTTP client builder, trusting the certificates in `root_ca` in
@@ -241,81 +418,6 @@ fn root_store(system: impl FnOnce() -> CertificateResult) -> RootCertStore {
     roots
 }
 
-/// A connector layer that records a TLS rejection in its
-/// [`Rejection`] and passes every result through unchanged.
-///
-/// `schema_registry_converter` renders a request error with `Display`, which
-/// drops the source chain, so the rejection is read here instead.
-#[derive(Clone)]
-struct RecordRejection {
-    registry: Arc<str>,
-    rejection: Rejection,
-}
-
-impl<S> tower_layer::Layer<S> for RecordRejection {
-    type Service = RecordRejectionService<S>;
-
-    fn layer(&self, inner: S) -> Self::Service {
-        RecordRejectionService {
-            inner,
-            layer: self.clone(),
-        }
-    }
-}
-
-#[derive(Clone)]
-struct RecordRejectionService<S> {
-    inner: S,
-    layer: RecordRejection,
-}
-
-type BoxError = Box<dyn Error + Send + Sync>;
-
-impl<S, Req> tower_service::Service<Req> for RecordRejectionService<S>
-where
-    S: tower_service::Service<Req, Error = BoxError>,
-    S::Future: Send + 'static,
-{
-    type Response = S::Response;
-    type Error = BoxError;
-    type Future = Pin<Box<dyn Future<Output = Result<S::Response, BoxError>> + Send>>;
-
-    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), BoxError>> {
-        self.inner.poll_ready(cx)
-    }
-
-    fn call(&mut self, req: Req) -> Self::Future {
-        let connecting = self.inner.call(req);
-        let layer = self.layer.clone();
-        Box::pin(async move {
-            connecting.await.inspect_err(|e| {
-                let reason = match spate_core::tls_rejection!(rustls, e.as_ref()) {
-                    Some(rustls::Error::InvalidCertificate(cert)) => {
-                        let hint = match cert {
-                            CertificateError::UnknownIssuer => {
-                                "; add the issuing CA to the system trust store or \
-                                 `registry.tls.root_ca`"
-                            }
-                            _ => "",
-                        };
-                        format!(
-                            "schema registry {} presented a certificate the client rejects: \
-                             {cert}{hint}",
-                            layer.registry
-                        )
-                    }
-                    Some(tls) => format!(
-                        "the TLS handshake with schema registry {} failed: {tls}",
-                        layer.registry
-                    ),
-                    None => return,
-                };
-                let _ = layer.rejection.set(reason);
-            })
-        })
-    }
-}
-
 fn client_config(roots: RootCertStore) -> ClientConfig {
     // rustls has no process-wide default provider when a build enables both
     // `ring` and `aws-lc-rs`.
@@ -344,8 +446,8 @@ struct Backoff {
 
 /// Spawn the fetcher task on `handle` and return the requester side.
 pub(crate) fn spawn_fetcher(
-    settings: Arc<SrSettings>,
-    registry: Arc<str>,
+    http: reqwest::Client,
+    endpoint: Arc<Endpoint>,
     rejection: Rejection,
     negative_cache_ttl: Duration,
     runtime: &tokio::runtime::Handle,
@@ -414,11 +516,11 @@ pub(crate) fn spawn_fetcher(
                     }
                     in_flight.insert(id);
                     let cache = Arc::clone(&task_cache);
-                    let settings = Arc::clone(&settings);
-                    let registry = Arc::clone(&registry);
+                    let http = http.clone();
+                    let endpoint = Arc::clone(&endpoint);
                     let rejection = Arc::clone(&task_rejection);
                     tasks.spawn(async move {
-                        let outcome = fetch_one(id, &settings, &cache, &registry, &rejection).await;
+                        let outcome = fetch_one(id, &http, &endpoint, &cache, &rejection).await;
                         (id, outcome)
                     });
                 }
@@ -438,22 +540,16 @@ pub(crate) fn spawn_fetcher(
 /// also stops one slow id from monopolizing a fetch slot for minutes.
 async fn fetch_one(
     id: u32,
-    settings: &SrSettings,
+    http: &reqwest::Client,
+    endpoint: &Endpoint,
     cache: &SchemaCache,
-    registry: &str,
     rejection: &Rejection,
 ) -> FetchOutcome {
-    match schema_registry::get_schema_by_id_and_type(id, settings, SchemaType::Avro).await {
+    let registry = endpoint.registry();
+    match endpoint.get(http, endpoint.schema_url(id)).await {
         Ok(registered) => {
-            if !registered.references.is_empty() {
-                cache.insert_failed(
-                    id,
-                    format!(
-                        "schema {id} uses {} registry reference(s), which spate-avro \
-                         does not support yet",
-                        registered.references.len()
-                    ),
-                );
+            if let Some(reason) = registered.unsupported(id) {
+                cache.insert_failed(id, reason);
                 return FetchOutcome::Resolved;
             }
             let compiled = CompiledSchema::compile(id, &registered.schema);
@@ -468,79 +564,92 @@ async fn fetch_one(
             }
             FetchOutcome::Resolved
         }
-        Err(e) if is_permanent(&e) => {
-            // An unknown id (registry 404). Negative-cache it; the deserializer
-            // applies its ErrorPolicy to the poison payload.
-            tracing::warn!(schema_id = id, error = %e, "registry reports schema id unknown");
-            cache.insert_failed(id, format!("registry fetch for schema {id} failed: {e}"));
+        Err(
+            failure @ Failure::Status {
+                status: StatusCode::NOT_FOUND,
+                ..
+            },
+        ) => {
+            // Negative-cache the unknown id; the deserializer applies its
+            // ErrorPolicy to the poison payload.
+            tracing::warn!(schema_id = id, error = %failure, "registry reports schema id unknown");
+            cache.insert_failed(
+                id,
+                format!("registry fetch for schema {id} failed: {failure}"),
+            );
             FetchOutcome::Resolved
         }
-        Err(e) if is_auth_rejection(&e) => {
-            let reason = format!(
-                "schema registry {registry} rejected the fetch of schema {id}: {}",
-                e.error
+        Err(
+            failure @ Failure::Status {
+                status: StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN,
+                ..
+            },
+        ) => {
+            record(
+                rejection,
+                format!("schema registry {registry} refused the fetch of schema {id}: {failure}"),
             );
-            tracing::error!(schema_id = id, %reason, "registry rejected the client");
-            let _ = rejection.set(reason);
             // Leave the id absent: a negative entry would reach the
             // ErrorPolicy, and Skip would drop the payload.
             FetchOutcome::Transient
         }
-        Err(e) => {
-            // Transient outage. Leave the id absent: poisoning it here would
-            // drop (and ack) decodable records for the whole negative TTL. The
-            // next replay refetches, subject to per-id backoff.
-            tracing::warn!(schema_id = id, error = %e, "registry fetch failed transiently; will retry");
+        Err(Failure::Rejected(reason)) => {
+            record(rejection, reason);
+            FetchOutcome::Transient
+        }
+        Err(failure) => {
+            // Leave the id absent: poisoning it here would drop (and ack)
+            // decodable records for the whole negative TTL. The next replay
+            // refetches, subject to per-id backoff.
+            tracing::warn!(schema_id = id, error = %failure, "registry fetch failed transiently; will retry");
             FetchOutcome::Transient
         }
     }
 }
 
-/// Whether a registry error is a *permanent* verdict about the id (a `404`
-/// not-found) rather than a transient outage.
-///
-/// `schema_registry_converter` (a 0.x dependency) does not expose the HTTP
-/// status as a field, only formatting it into the error message
-/// (`"...failed with status 404 Not Found"`), so we match on that. The match
-/// is narrow: anything we cannot positively identify as a `404` is treated as
-/// transient, because the safe failure mode is to refetch (a bounded stall),
-/// never to negatively cache and silently drop valid records.
-fn is_permanent(e: &SRCError) -> bool {
-    e.error.contains("status 404")
-}
-
-/// Whether the registry refused the client's credentials or access (`401`,
-/// `403`). Matched on the message for the reason [`is_permanent`] gives.
-fn is_auth_rejection(e: &SRCError) -> bool {
-    e.error.contains("status 401") || e.error.contains("status 403")
+/// Records `reason` as the client's rejection unless one is already set.
+fn record(rejection: &Rejection, reason: String) {
+    tracing::error!(%reason, "registry rejected the client");
+    let _ = rejection.set(reason);
 }
 
 /// Fetch the latest version of every configured subject into the cache
-/// (startup pre-warm). A `401` is recorded in `rejection`, and any recorded
-/// rejection, a TLS rejection included, ends the pre-warm; any other failure
-/// is logged, and the id is fetched on demand when it first appears in a
-/// payload.
+/// (startup pre-warm). A `401` or a TLS rejection is recorded in
+/// `rejection`, and any recorded rejection ends the pre-warm; any other
+/// failure is logged, and the id is fetched on demand when it first appears
+/// in a payload.
 pub(crate) async fn prewarm(
-    settings: &SrSettings,
+    http: &reqwest::Client,
+    endpoint: &Endpoint,
     subjects: &[String],
     cache: &SchemaCache,
-    registry: &str,
     rejection: &Rejection,
 ) {
+    let registry = endpoint.registry();
     for subject in subjects {
         if rejection.get().is_some() {
             return;
         }
-        let strategy = SubjectNameStrategy::RecordNameStrategy(subject.clone());
-        match schema_registry::get_schema_by_subject(settings, &strategy).await {
-            Ok(registered) if registered.references.is_empty() => {
+        match endpoint.get(http, endpoint.latest_url(subject)).await {
+            Ok(registered) => {
+                let Some(id) = registered.id else {
+                    tracing::warn!(
+                        subject,
+                        "pre-warm skipped: the response carries no schema id"
+                    );
+                    continue;
+                };
+                if let Some(reason) = registered.unsupported(id) {
+                    tracing::warn!(subject, %reason, "pre-warm skipped");
+                    continue;
+                }
                 // Per-backend compile with the parse-panic guard inside (see
                 // `fetch_one`), so one poison schema cannot kill this detached
                 // task mid-list and skip the remaining pre-warm.
-                let compiled = CompiledSchema::compile(registered.id, &registered.schema);
+                let compiled = CompiledSchema::compile(id, &registered.schema);
                 match compiled.unusable_reason() {
                     None => {
-                        tracing::info!(subject, schema_id = registered.id, "pre-warmed schema");
+                        tracing::info!(subject, schema_id = id, "pre-warmed schema");
                         cache.insert_ready(compiled);
                     }
                     Some(reason) => {
@@ -548,18 +657,20 @@ pub(crate) async fn prewarm(
                     }
                 }
             }
-            Ok(_) => {
-                tracing::warn!(subject, "pre-warm skipped: schema references unsupported");
-            }
-            Err(e) if e.error.contains("status 401") => {
-                let reason = format!(
-                    "schema registry {registry} rejected the pre-warm of subject {subject}: {}",
-                    e.error
-                );
-                tracing::error!(subject, %reason, "registry rejected the client");
-                let _ = rejection.set(reason);
-            }
-            Err(e) => tracing::warn!(subject, error = %e, "pre-warm fetch failed"),
+            Err(
+                failure @ Failure::Status {
+                    status: StatusCode::UNAUTHORIZED,
+                    ..
+                },
+            ) => record(
+                rejection,
+                format!(
+                    "schema registry {registry} refused the pre-warm of subject {subject}: \
+                     {failure}"
+                ),
+            ),
+            Err(Failure::Rejected(reason)) => record(rejection, reason),
+            Err(failure) => tracing::warn!(subject, error = %failure, "pre-warm fetch failed"),
         }
     }
 }
@@ -582,10 +693,11 @@ mod tests {
     }
 
     /// Serves `SCHEMA` as every registry response on `127.0.0.1`, over a
-    /// certificate `ca` signed, and returns the `https://` URL.
-    async fn serve(ca: &TestCa) -> String {
+    /// certificate `ca` signed, and returns the `https://` URL. With `clients`
+    /// set, the server requires a client certificate that CA signed.
+    async fn serve(ca: &TestCa, clients: Option<&TestCa>) -> String {
         let body = serde_json::json!({ "schema": SCHEMA }).to_string();
-        let addr = spate_test_support::serve_tls(ca.server_config(None), move |tls| {
+        let addr = spate_test_support::serve_tls(ca.server_config(clients), move |tls| {
             let body = body.clone();
             async move {
                 let respond = hyper::service::service_fn(move |_| {
@@ -606,13 +718,198 @@ mod tests {
     async fn fetch(
         cfg: &RegistryConfig,
         system: Vec<CertificateDer<'static>>,
-    ) -> (Result<String, SRCError>, Rejection) {
-        let rejection = Rejection::default();
-        let settings = sr_settings_with(cfg, &rejection, || native_certs(system)).unwrap();
-        let fetched = schema_registry::get_schema_by_id_and_type(1, &settings, SchemaType::Avro)
+    ) -> Result<String, Failure> {
+        let http = http_client_with(cfg.root_ca.as_deref(), || native_certs(system)).unwrap();
+        let endpoint = Endpoint::new(cfg).unwrap();
+        endpoint
+            .get(&http, endpoint.schema_url(1))
             .await
-            .map(|registered| registered.schema);
-        (fetched, rejection)
+            .map(|registered| registered.schema)
+    }
+
+    /// The reason of a [`Failure::Rejected`].
+    ///
+    /// # Panics
+    ///
+    /// Panics on a success or any other failure.
+    fn rejected(fetched: Result<String, Failure>) -> String {
+        match fetched {
+            Err(Failure::Rejected(reason)) => reason,
+            other => panic!("expected a rejection, got {other:?}"),
+        }
+    }
+
+    /// A registry that accepts the connection and never answers fails the
+    /// fetch as transient once the request timeout elapses.
+    #[tokio::test(start_paused = true)]
+    async fn a_registry_that_never_answers_times_out() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                held.push(stream);
+            }
+        });
+        let start = tokio::time::Instant::now();
+        let fetched = tokio::time::timeout(
+            REQUEST_TIMEOUT * 2,
+            fetch(&config(&format!("http://{addr}"), None), vec![]),
+        )
+        .await
+        .expect("the request timeout ends the fetch");
+        assert!(
+            matches!(&fetched, Err(Failure::Transient(reason)) if reason.contains("timed out")),
+            "{fetched:?}"
+        );
+        assert_eq!(start.elapsed(), REQUEST_TIMEOUT);
+    }
+
+    /// Answers every request with `head` and then `chunks` written in one
+    /// write, and holds the connection open; returns the `http://` URL.
+    async fn serve_raw(head: &'static str, chunks: Vec<u8>, drip: Option<Duration>) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut tcp, _)) = listener.accept().await {
+                let chunks = chunks.clone();
+                tokio::spawn(async move {
+                    let mut request = [0u8; 4096];
+                    let _ = tcp.read(&mut request).await;
+                    let mut out = head.as_bytes().to_vec();
+                    out.extend_from_slice(&chunks);
+                    let _ = tcp.write_all(&out).await;
+                    match drip {
+                        Some(every) => loop {
+                            tokio::time::sleep(every).await;
+                            if tcp.write_all(b"1\r\n \r\n").await.is_err() {
+                                break;
+                            }
+                        },
+                        None => std::future::pending::<()>().await,
+                    }
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    fn chunk(data: &[u8]) -> Vec<u8> {
+        let mut out = format!("{:x}\r\n", data.len()).into_bytes();
+        out.extend_from_slice(data);
+        out.extend_from_slice(b"\r\n");
+        out
+    }
+
+    /// A registry that sends the headers and then drips the body fails the
+    /// fetch once the request timeout elapses.
+    #[tokio::test(start_paused = true)]
+    async fn a_dripping_body_times_out() {
+        let url = serve_raw(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n",
+            chunk(b"{"),
+            Some(REQUEST_TIMEOUT / 3),
+        )
+        .await;
+        // A 1 ms ticker bounds each auto-advance of the paused clock, so I/O
+        // completes before a request timer can fire.
+        tokio::spawn(async {
+            let mut tick = tokio::time::interval(Duration::from_millis(1));
+            loop {
+                tick.tick().await;
+            }
+        });
+        let start = tokio::time::Instant::now();
+        let fetched = tokio::time::timeout(REQUEST_TIMEOUT * 2, fetch(&config(&url, None), vec![]))
+            .await
+            .expect("the request timeout ends the fetch");
+        assert!(
+            matches!(&fetched, Err(Failure::Transient(reason)) if reason.contains("timed out")),
+            "{fetched:?}"
+        );
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed >= REQUEST_TIMEOUT && elapsed < REQUEST_TIMEOUT + Duration::from_secs(1),
+            "{elapsed:?}"
+        );
+    }
+
+    /// An error body that arrives in several chunks and never ends is read
+    /// until [`ERROR_BODY_LIMIT`] bytes have arrived, and no further chunk is
+    /// awaited.
+    #[tokio::test]
+    async fn a_chunked_error_body_is_read_to_the_limit() {
+        let mut chunks = chunk(&[b'a'; 10]);
+        chunks.extend(chunk(&[b'b'; 300]));
+        let url = serve_raw(
+            "HTTP/1.1 500 Internal Server Error\r\nTransfer-Encoding: chunked\r\n\r\n",
+            chunks,
+            None,
+        )
+        .await;
+        let fetched =
+            tokio::time::timeout(Duration::from_secs(10), fetch(&config(&url, None), vec![]))
+                .await
+                .expect("the fetch ends once the limit is read");
+        match fetched {
+            Err(Failure::Status { status, body }) => {
+                assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+                assert_eq!(body.len(), ERROR_BODY_LIMIT, "{body}");
+                assert!(body.starts_with(&"a".repeat(10)), "{body}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// An error body is kept trimmed and cut to [`ERROR_BODY_LIMIT`] bytes on
+    /// a character boundary.
+    #[test]
+    fn an_error_body_excerpt_is_bounded() {
+        assert_eq!(
+            excerpt(b"  {\"error_code\":40403}\n"),
+            r#"{"error_code":40403}"#
+        );
+        let long = format!("a{}", "é".repeat(ERROR_BODY_LIMIT));
+        let cut = excerpt(long.as_bytes());
+        assert_eq!(cut.len(), ERROR_BODY_LIMIT - 1);
+        assert!(cut.chars().skip(1).all(|c| c == 'é'));
+    }
+
+    /// Request paths extend the configured path, a trailing slash included,
+    /// and a subject is one encoded segment.
+    #[test]
+    fn request_urls_extend_the_configured_path() {
+        for base in ["https://sr:8081/registry", "https://sr:8081/registry/"] {
+            let endpoint = Endpoint::new(&config(base, None)).unwrap();
+            assert_eq!(
+                endpoint.schema_url(7).as_str(),
+                "https://sr:8081/registry/schemas/ids/7?deleted=true"
+            );
+            assert_eq!(
+                endpoint.latest_url("a/b c?").as_str(),
+                "https://sr:8081/registry/subjects/a%2Fb%20c%3F/versions/latest"
+            );
+        }
+    }
+
+    /// A URL that does not parse, or whose scheme is not `http` or `https`,
+    /// fails at startup without echoing the URL.
+    #[test]
+    fn an_unusable_url_fails() {
+        for url in [
+            "not a url",
+            "https://user:secret@sr:99999",
+            "localhost:8081",
+            "ftp://user:secret@sr",
+        ] {
+            let err = Endpoint::new(&config(url, None))
+                .err()
+                .expect("the URL is rejected")
+                .to_string();
+            assert!(err.contains("registry.url"), "{err}");
+            assert!(!err.contains("secret"), "{err}");
+        }
     }
 
     /// An empty system store falls back to the Mozilla bundle, and a
@@ -638,8 +935,8 @@ mod tests {
         std::fs::write(&malformed, pem("CERTIFICATE", b"not DER")).unwrap();
         for path in [dir.path().join("missing.pem"), empty, malformed] {
             let cfg = config("https://sr", Some(&path));
-            let err = sr_settings_with(&cfg, &Rejection::default(), CertificateResult::default)
-                .unwrap_err()
+            let err = http_client_with(cfg.root_ca.as_deref(), CertificateResult::default)
+                .expect_err("the root CA is rejected")
                 .to_string();
             assert!(err.contains("registry.tls.root_ca"), "{err}");
             assert!(err.contains(&path.display().to_string()), "{err}");
@@ -652,8 +949,8 @@ mod tests {
     async fn a_registry_signed_by_root_ca_is_trusted() {
         let dir = tempfile::tempdir().unwrap();
         let ca = TestCa::new("private");
-        let url = serve(&ca).await;
-        let (fetched, _) = fetch(&config(&url, Some(&ca.write(dir.path()))), vec![]).await;
+        let url = serve(&ca, None).await;
+        let fetched = fetch(&config(&url, Some(&ca.write(dir.path()))), vec![]).await;
         assert_eq!(fetched.expect("the private CA is trusted"), SCHEMA);
     }
 
@@ -663,36 +960,44 @@ mod tests {
     async fn an_unknown_ca_is_rejected_with_the_root_ca_hint() {
         let dir = tempfile::tempdir().unwrap();
         let (registry, other) = (TestCa::new("registry"), TestCa::new("other"));
-        let url = serve(&registry).await;
-        let (fetched, rejection) =
-            fetch(&config(&url, Some(&other.write(dir.path()))), vec![]).await;
-        fetched.expect_err("an unknown CA is rejected");
-        let reason = rejection.get().expect("the rejection is recorded");
+        let url = serve(&registry, None).await;
+        let reason = rejected(fetch(&config(&url, Some(&other.write(dir.path()))), vec![]).await);
         assert!(reason.contains("registry.tls.root_ca"), "{reason}");
     }
 
-    /// A handshake alert that rejects the client is recorded with its name;
-    /// `decode_error`, which reports a malformed message, is not.
+    /// A handshake alert that rejects the client is a rejection that names
+    /// it; `decode_error`, which reports a malformed message, is transient.
     #[tokio::test]
-    async fn a_rejecting_tls_alert_is_recorded() {
+    async fn a_rejecting_tls_alert_is_a_rejection() {
         use rustls::AlertDescription as A;
-        for (alert, recorded) in [
+        for (alert, is_rejection) in [
             (A::HandshakeFailure, true),
             (A::ProtocolVersion, true),
             (A::DecodeError, false),
         ] {
             let addr = spate_test::tls_alert_server(b"", u8::from(alert));
-            let (fetched, rejection) =
-                fetch(&config(&format!("https://{addr}"), None), vec![]).await;
-            fetched.expect_err("the server answers every handshake with an alert");
-            match rejection.get() {
-                Some(reason) => {
-                    assert!(recorded, "{alert:?} recorded: {reason}");
+            match fetch(&config(&format!("https://{addr}"), None), vec![]).await {
+                Err(Failure::Rejected(reason)) => {
+                    assert!(is_rejection, "{alert:?} rejected: {reason}");
                     assert!(reason.contains(&format!("{alert:?}")), "{reason}");
                 }
-                None => assert!(!recorded, "{alert:?} not recorded"),
+                Err(Failure::Transient(_)) => assert!(!is_rejection, "{alert:?} transient"),
+                other => panic!("{alert:?}: {other:?}"),
             }
         }
+    }
+
+    /// A TLS 1.3 registry that refuses the client for presenting no
+    /// certificate is a rejection, and the reason names `CertificateRequired`.
+    #[tokio::test]
+    async fn a_refused_client_certificate_is_a_rejection() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = TestCa::new("registry");
+        let url = serve(&registry, Some(&TestCa::new("clients"))).await;
+        let reason =
+            rejected(fetch(&config(&url, Some(&registry.write(dir.path()))), vec![]).await);
+        assert!(reason.contains("CertificateRequired"), "{reason}");
+        assert!(reason.contains("requires a client certificate"), "{reason}");
     }
 
     #[cfg(not(any(target_vendor = "apple", windows, target_os = "android")))]
@@ -705,9 +1010,9 @@ mod tests {
         async fn root_ca_is_merged_with_the_system_roots() {
             let dir = tempfile::tempdir().unwrap();
             let (system, extra) = (TestCa::new("system"), TestCa::new("extra"));
-            let url = serve(&system).await;
+            let url = serve(&system, None).await;
             let cfg = config(&url, Some(&extra.write(dir.path())));
-            let (fetched, _) = fetch(&cfg, vec![system.der()]).await;
+            let fetched = fetch(&cfg, vec![system.der()]).await;
             assert_eq!(fetched.expect("the system CA is trusted"), SCHEMA);
         }
 
@@ -717,7 +1022,7 @@ mod tests {
         async fn an_http_registry_redirected_to_https_is_trusted() {
             use tokio::io::{AsyncReadExt, AsyncWriteExt};
             let registry = TestCa::new("registry");
-            let target = serve(&registry).await;
+            let target = serve(&registry, None).await;
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let port = listener.local_addr().unwrap().port();
             tokio::spawn(async move {
@@ -734,7 +1039,7 @@ mod tests {
                 }
             });
             let url = format!("http://127.0.0.1:{port}");
-            let (fetched, _) = fetch(&config(&url, None), vec![registry.der()]).await;
+            let fetched = fetch(&config(&url, None), vec![registry.der()]).await;
             assert_eq!(fetched.expect("the redirect target is trusted"), SCHEMA);
         }
 
@@ -743,11 +1048,10 @@ mod tests {
         #[tokio::test]
         async fn an_https_registry_is_verified_against_the_system_roots() {
             let (registry, other) = (TestCa::new("registry"), TestCa::new("other"));
-            let url = serve(&registry).await;
-            let (fetched, _) = fetch(&config(&url, None), vec![registry.der()]).await;
+            let url = serve(&registry, None).await;
+            let fetched = fetch(&config(&url, None), vec![registry.der()]).await;
             assert_eq!(fetched.expect("the registry's CA is trusted"), SCHEMA);
-            let (fetched, _) = fetch(&config(&url, None), vec![other.der()]).await;
-            fetched.expect_err("an unknown CA is rejected");
+            rejected(fetch(&config(&url, None), vec![other.der()]).await);
         }
     }
 }

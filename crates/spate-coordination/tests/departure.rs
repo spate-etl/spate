@@ -1,7 +1,7 @@
-//! Split commits, failure reports, releases and `StoreCoordinator::depart`
-//! against a store that fails part-way: an outage that breaks the watches, a
-//! store that stops answering, fatal store errors, and writes whose reply is
-//! lost.
+//! Split commits, failure reports, claims, releases and
+//! `StoreCoordinator::depart` against a store that fails part-way: an outage
+//! that breaks the watches, a store that stops answering, fatal store errors,
+//! and writes whose reply is lost.
 
 mod support;
 
@@ -2286,4 +2286,512 @@ fn a_read_back_that_fails_fatally_is_fatal() {
             "commit={commit}: {failed:?}"
         );
     }
+}
+
+/// A started worker named `instance` on `clock`, which must also drive `store`'s
+/// lease expiry, once it holds the one split of `ids`.
+fn claimed_clocked<S: CoordinationStore + Clone>(
+    rt: &tokio::runtime::Runtime,
+    store: S,
+    clock: &Arc<TestClock>,
+    instance: &str,
+    ids: &[&str],
+) -> (StoreCoordinator<S>, Held) {
+    let mut w = StoreCoordinator::with_clock(
+        store,
+        config_for(LEASE, Some(instance)),
+        rt.handle().clone(),
+        None,
+        clock.clone(),
+    )
+    .expect("coordinator");
+    w.start(Box::new(PhasedPlanner::one_final("departure:v1", ids)))
+        .unwrap();
+    let mut held = Held::default();
+    support::drive_clocked(&mut w, clock, &mut held, "claiming the split", |h| {
+        h.splits.len() == 1
+    });
+    (w, held)
+}
+
+/// Fails the next update of the split record `key` Retryable, with nothing
+/// written. The returned flag is true until the fault fires.
+fn refuse_next_update<S>(tap: &support::tap::TapStore<S>, key: &'static str) -> Arc<AtomicBool> {
+    let armed = Arc::new(AtomicBool::new(true));
+    let fires = Arc::clone(&armed);
+    tap.on_write(move |w| {
+        (matches!(w.op, support::tap::Op::Update)
+            && w.ks == Keyspace::Durable
+            && w.key == key
+            && fires.swap(false, Ordering::SeqCst))
+        .then(|| StoreError::Retryable("injected: write refused".into()))
+    });
+    armed
+}
+
+/// A first claim whose record write applied with its reply lost holds the split
+/// at the epoch it wrote and charges no delivery attempt.
+#[test]
+fn a_claim_whose_reply_was_lost_costs_no_attempt() {
+    let rt = runtime();
+    let clock = TestClock::frozen();
+    let fault = FaultStore::with_clock(LEASE, clock.clone());
+    // The seed is a create, so the first update of the record is the claim.
+    arm_ambiguous(&fault, "split.r0");
+
+    let (_a, held) = claimed_clocked(&rt, fault.clone(), &clock, "worker-a", &["r0"]);
+
+    let fired = fault.ambiguous.lock().unwrap().is_empty();
+    let record = fault.record(&rt, "split.r0");
+    let lease = fault.present(&rt, Keyspace::Ephemeral, &["split.r0"]);
+    let epoch = held.splits.get("r0").map(|(epoch, _)| *epoch);
+    assert!(
+        fired
+            && record["attempts"] == 0
+            && record["epoch"] == 1
+            && record["owner"] == "worker-a"
+            && epoch == Some(1)
+            && !lease.is_empty(),
+        "fault fired: {fired}; record {record}; held at {epoch:?}; lease: {lease:?}"
+    );
+}
+
+/// A first claim whose record write failed with nothing written is claimed again
+/// at the same epoch, and the record names the claimant.
+#[test]
+fn a_claim_write_that_did_not_apply_is_not_adopted() {
+    let rt = runtime();
+    let clock = TestClock::frozen();
+    let fault = FaultStore::with_clock(LEASE, clock.clone());
+    let tap = support::tap::TapStore::new(fault.clone());
+    let armed = refuse_next_update(&tap, "split.r0");
+
+    let (_a, held) = claimed_clocked(&rt, tap, &clock, "worker-a", &["r0"]);
+
+    let fired = !armed.load(Ordering::SeqCst);
+    let record = fault.record(&rt, "split.r0");
+    let lease = fault.present(&rt, Keyspace::Ephemeral, &["split.r0"]);
+    let epoch = held.splits.get("r0").map(|(epoch, _)| *epoch);
+    assert!(
+        fired
+            && record["attempts"] == 0
+            && record["epoch"] == 1
+            && record["owner"] == "worker-a"
+            && epoch == Some(1)
+            && !lease.is_empty(),
+        "fault fired: {fired}; record {record}; held at {epoch:?}; lease: {lease:?}"
+    );
+}
+
+/// A worker restarted under the same instance id, whose claim write failed with
+/// nothing written, leaves its predecessor's record and claims the split at the
+/// next epoch.
+#[test]
+fn a_restarts_claim_write_that_did_not_apply_is_not_adopted() {
+    let clock = TestClock::frozen();
+    let fault = FaultStore::with_clock(LEASE, clock.clone());
+    let tap = support::tap::TapStore::new(fault.clone());
+    let first = runtime();
+    let (predecessor, _) = claimed_clocked(&first, tap.clone(), &clock, "worker-a", &["r0"]);
+    support::crash(first, predecessor);
+
+    let rt = runtime();
+    clock.advance(LEASE * 2);
+    let _: Vec<Entry> = rt
+        .block_on(fault.inner.list(Keyspace::Ephemeral, ""))
+        .expect("expire the predecessor's keys");
+    let before = fault.record(&rt, "split.r0");
+    assert!(
+        before["epoch"] == 1 && before["owner"] == "worker-a",
+        "predecessor's record {before}"
+    );
+    let armed = refuse_next_update(&tap, "split.r0");
+
+    let (_a, held) = claimed_clocked(&rt, tap, &clock, "worker-a", &["r0"]);
+
+    let fired = !armed.load(Ordering::SeqCst);
+    let record = fault.record(&rt, "split.r0");
+    let epoch = held.splits.get("r0").map(|(epoch, _)| *epoch);
+    assert!(
+        fired
+            && record["epoch"] == 2
+            && record["owner"] == "worker-a"
+            && record["attempts"] == 1
+            && epoch == Some(2),
+        "fault fired: {fired}; record {record}; held at {epoch:?}"
+    );
+}
+
+/// A claim of a released split whose record write applied with its reply lost
+/// holds the split at the epoch it wrote and charges no delivery attempt.
+#[test]
+fn a_claim_of_a_released_split_whose_reply_was_lost_costs_no_attempt() {
+    let rt = runtime();
+    let store = FaultStore::new(LEASE);
+    let mut a = holding(&rt, &store, config_for(LEASE, Some("worker-a")), &["r0"]);
+    let result = a.depart(&[]);
+    assert!(result.is_ok(), "{result:?}");
+    let before = store.record(&rt, "split.r0");
+    assert!(
+        before["epoch"] == 1 && before["owner"].is_null(),
+        "{before}"
+    );
+    arm_ambiguous(&store, "split.r0");
+
+    let mut b = StoreCoordinator::new(
+        store.clone(),
+        config_for(LEASE, Some("worker-b")),
+        rt.handle().clone(),
+        None,
+    )
+    .expect("coordinator");
+    b.start(Box::new(PhasedPlanner::one_final("departure:v1", &["r0"])))
+        .unwrap();
+    let mut held = Held::default();
+    drive(&mut b, &mut held, "claiming r0", |h| h.splits.len() == 1);
+
+    let fired = store.ambiguous.lock().unwrap().is_empty();
+    let record = store.record(&rt, "split.r0");
+    let epoch = held.splits.get("r0").map(|(epoch, _)| *epoch);
+    assert!(
+        fired
+            && record["attempts"] == 0
+            && record["epoch"] == 2
+            && record["owner"] == "worker-b"
+            && epoch == Some(2),
+        "fault fired: {fired}; record {record}; held at {epoch:?}"
+    );
+}
+
+/// A claim whose record write applied with its reply lost, and whose read-back
+/// fails Fatal, deletes its lease and stops the task.
+#[test]
+fn a_claim_read_back_that_fails_fatally_is_fatal() {
+    let rt = runtime();
+    let clock = TestClock::frozen();
+    let fault = FaultStore::with_clock(LEASE, clock.clone());
+    arm_ambiguous(&fault, "split.r0");
+    fault
+        .fatal
+        .lock()
+        .unwrap()
+        .push((Op::Get, Keyspace::Durable, "split.r0".to_string()));
+    let mut a = StoreCoordinator::with_clock(
+        fault.clone(),
+        config_for(LEASE, Some("worker-a")),
+        rt.handle().clone(),
+        None,
+        clock.clone(),
+    )
+    .expect("coordinator");
+    a.start(Box::new(PhasedPlanner::one_final("departure:v1", &["r0"])))
+        .unwrap();
+
+    let mut held = Held::default();
+    let mut stopped = None;
+    spate_test::wait_until(support::DEADLINE, "the task to stop or hold r0", || {
+        clock.advance(LEASE / 12);
+        match a.poll() {
+            Ok(events) => held.fold(events),
+            Err(e) => stopped = Some(e),
+        }
+        stopped.is_some() || !held.splits.is_empty()
+    });
+
+    let fired =
+        fault.ambiguous.lock().unwrap().is_empty() && fault.fatal.lock().unwrap().is_empty();
+    let gained = !held.splits.is_empty();
+    let lease = fault.present(&rt, Keyspace::Ephemeral, &["split.r0"]);
+    assert!(
+        fired
+            && !gained
+            && lease.is_empty()
+            && stopped.as_ref().is_some_and(|e| {
+                e.kind == CoordinationErrorKind::Fatal
+                    && e.reason.contains("re-reading a claimed record")
+            }),
+        "faults fired: {fired}; gained r0: {gained}; lease: {lease:?}; poll returned {stopped:?}"
+    );
+}
+
+/// A worker named `instance` that reconciles only outside the test.
+fn unreconciled(instance: &str) -> CoordinationConfig {
+    let mut config = config_for(LEASE, Some(instance));
+    config.reconcile_interval = NO_RECONCILE;
+    config
+}
+
+/// The value a [`LateWrite`] lands, computed from the record's current value.
+type Late = Box<dyn FnOnce(&[u8]) -> Vec<u8> + Send>;
+
+/// A [`MemoryStore`] whose first durable update of `key` lands `late` applied to
+/// the record's current value, then fails Retryable with nothing of its own
+/// written.
+#[derive(Clone)]
+struct LateWrite {
+    inner: MemoryStore,
+    key: &'static str,
+    late: Arc<Mutex<Option<Late>>>,
+}
+
+impl LateWrite {
+    fn new(inner: MemoryStore, key: &'static str, late: Late) -> LateWrite {
+        LateWrite {
+            inner,
+            key,
+            late: Arc::new(Mutex::new(Some(late))),
+        }
+    }
+
+    fn fired(&self) -> bool {
+        self.late.lock().unwrap().is_none()
+    }
+}
+
+impl CoordinationStore for LateWrite {
+    fn lease_ttl(&self) -> Duration {
+        self.inner.lease_ttl()
+    }
+
+    async fn create(
+        &self,
+        ks: Keyspace,
+        key: &str,
+        value: Vec<u8>,
+    ) -> Result<CasOutcome, StoreError> {
+        self.inner.create(ks, key, value).await
+    }
+
+    async fn update(
+        &self,
+        ks: Keyspace,
+        key: &str,
+        value: Vec<u8>,
+        expected: Revision,
+    ) -> Result<CasOutcome, StoreError> {
+        if ks == Keyspace::Durable && key == self.key {
+            let late = self.late.lock().unwrap().take();
+            if let Some(late) = late {
+                let entry = self.inner.get(ks, key).await?.expect("record");
+                let landed = self
+                    .inner
+                    .update(ks, key, late(&entry.value), entry.revision)
+                    .await?;
+                assert!(matches!(landed, CasOutcome::Won(_)), "the late write");
+                return Err(StoreError::Retryable("injected: reply lost".into()));
+            }
+        }
+        self.inner.update(ks, key, value, expected).await
+    }
+
+    async fn get(&self, ks: Keyspace, key: &str) -> Result<Option<Entry>, StoreError> {
+        self.inner.get(ks, key).await
+    }
+
+    async fn delete(
+        &self,
+        ks: Keyspace,
+        key: &str,
+        expected: Option<Revision>,
+    ) -> Result<CasOutcome, StoreError> {
+        self.inner.delete(ks, key, expected).await
+    }
+
+    async fn watch(&self, ks: Keyspace, prefix: &str) -> Result<WatchStream, StoreError> {
+        self.inner.watch(ks, prefix).await
+    }
+
+    async fn list(&self, ks: Keyspace, prefix: &str) -> Result<Vec<Entry>, StoreError> {
+        self.inner.list(ks, prefix).await
+    }
+}
+
+/// Starts `worker-a` over `inner`, crashes it once it holds `x`, and returns
+/// the record its claim wrote.
+fn crashed_claim(inner: &MemoryStore, planner: &str) -> Entry {
+    let rt = runtime();
+    let mut a = StoreCoordinator::new(
+        inner.clone(),
+        unreconciled("worker-a"),
+        rt.handle().clone(),
+        None,
+    )
+    .expect("coordinator");
+    a.start(Box::new(PhasedPlanner::one_final(planner, &["x"])))
+        .unwrap();
+    drive(&mut a, &mut Held::default(), "worker-a claiming x", |h| {
+        h.splits.len() == 1
+    });
+    support::crash(rt, a);
+    let reader = runtime();
+    reader
+        .block_on(inner.get(Keyspace::Durable, "split.x"))
+        .unwrap()
+        .expect("record")
+}
+
+/// Replaces the record at `split.x`, read at `current`, with `value`.
+fn rewind(
+    rt: &tokio::runtime::Runtime,
+    inner: &MemoryStore,
+    current: &Entry,
+    value: &serde_json::Value,
+) {
+    let rewound = rt
+        .block_on(inner.update(
+            Keyspace::Durable,
+            "split.x",
+            serde_json::to_vec(value).unwrap(),
+            current.revision,
+        ))
+        .unwrap();
+    assert!(matches!(rewound, CasOutcome::Won(_)));
+}
+
+/// A restarted worker whose view shows the record from before its predecessor's
+/// claim, and whose own claim write fails with nothing written, does not adopt
+/// the predecessor's record and takes the split at the next epoch.
+#[test]
+fn a_restart_with_a_lagging_view_does_not_adopt_its_predecessors_claim() {
+    let inner = support::store();
+    let claimed = crashed_claim(&inner, "lagging-restart:v1");
+
+    let rt = runtime();
+    let mut seed: serde_json::Value = serde_json::from_slice(&claimed.value).unwrap();
+    assert!(
+        seed["epoch"] == 1 && seed["owner"] == "worker-a",
+        "predecessor's record {seed}"
+    );
+    seed["epoch"] = 0.into();
+    seed["owner"] = serde_json::Value::Null;
+    rewind(&rt, &inner, &claimed, &seed);
+
+    // Dated before any write of the restart, which could otherwise share its
+    // millisecond and write a byte-equal record.
+    let mut predecessors: serde_json::Value = serde_json::from_slice(&claimed.value).unwrap();
+    predecessors["written_at_ms"] = (predecessors["written_at_ms"].as_i64().unwrap() - 1).into();
+    let predecessors = serde_json::to_vec(&predecessors).unwrap();
+    let late = LateWrite::new(inner.clone(), "split.x", Box::new(move |_| predecessors));
+    let mut b = StoreCoordinator::new(
+        late.clone(),
+        unreconciled("worker-a"),
+        rt.handle().clone(),
+        None,
+    )
+    .expect("coordinator");
+    b.start(Box::new(PhasedPlanner::one_final(
+        "lagging-restart:v1",
+        &["x"],
+    )))
+    .unwrap();
+    let mut held = Held::default();
+    drive(&mut b, &mut held, "the restart claiming x", |h| {
+        h.splits.len() == 1
+    });
+
+    let fired = late.fired();
+    let record: serde_json::Value = serde_json::from_slice(
+        &rt.block_on(inner.get(Keyspace::Durable, "split.x"))
+            .unwrap()
+            .expect("record")
+            .value,
+    )
+    .unwrap();
+    let epoch = held.splits.get("x").map(|(epoch, _)| *epoch);
+    assert!(
+        fired && epoch == Some(2) && record["epoch"] == 2 && record["attempts"] == 1,
+        "fault fired: {fired}; record {record}; held at {epoch:?}"
+    );
+}
+
+/// A restarted worker whose view lags its predecessor's completing commit, and
+/// whose claim write fails with nothing written, gains nothing.
+#[test]
+fn a_restart_with_a_lagging_view_does_not_gain_a_completed_split() {
+    let inner = support::store();
+    let claimed = crashed_claim(&inner, "lagging-complete:v1");
+
+    let rt = runtime();
+    let mut finished: serde_json::Value = serde_json::from_slice(&claimed.value).unwrap();
+    finished["status"] = "completed".into();
+    finished["completed"] = true.into();
+    finished["watermark"] = 9.into();
+    let mut seed = finished.clone();
+    seed["epoch"] = 0.into();
+    seed["owner"] = serde_json::Value::Null;
+    seed["status"] = "runnable".into();
+    seed["completed"] = false.into();
+    seed["watermark"] = serde_json::Value::Null;
+    rewind(&rt, &inner, &claimed, &seed);
+
+    let finished = serde_json::to_vec(&finished).unwrap();
+    let late = LateWrite::new(inner.clone(), "split.x", Box::new(move |_| finished));
+    let mut b = StoreCoordinator::new(
+        late.clone(),
+        unreconciled("worker-a"),
+        rt.handle().clone(),
+        None,
+    )
+    .expect("coordinator");
+    b.start(Box::new(PhasedPlanner::one_final(
+        "lagging-complete:v1",
+        &["x"],
+    )))
+    .unwrap();
+    let mut held = Held::default();
+    drive(&mut b, &mut held, "the restart settling x", |h| {
+        h.all_complete || !h.splits.is_empty()
+    });
+
+    let fired = late.fired();
+    assert!(
+        fired && held.splits.is_empty(),
+        "fault fired: {fired}; held {:?}",
+        held.splits
+    );
+}
+
+/// A claim whose write fails with nothing written, after a peer's claim at the
+/// same epoch landed unseen, does not adopt the peer's record.
+#[test]
+fn a_claim_write_that_did_not_apply_does_not_adopt_a_peers_claim() {
+    let inner = support::store();
+    let rt = runtime();
+    let late = LateWrite::new(
+        inner.clone(),
+        "split.x",
+        Box::new(|current| {
+            let mut peer: serde_json::Value = serde_json::from_slice(current).unwrap();
+            peer["epoch"] = 1.into();
+            peer["owner"] = "worker-z".into();
+            serde_json::to_vec(&peer).unwrap()
+        }),
+    );
+    let mut b = StoreCoordinator::new(
+        late.clone(),
+        unreconciled("worker-b"),
+        rt.handle().clone(),
+        None,
+    )
+    .expect("coordinator");
+    b.start(Box::new(PhasedPlanner::one_final("peer-claim:v1", &["x"])))
+        .unwrap();
+    let mut held = Held::default();
+    drive(&mut b, &mut held, "worker-b claiming x", |h| {
+        h.splits.len() == 1
+    });
+
+    let fired = late.fired();
+    let record: serde_json::Value = serde_json::from_slice(
+        &rt.block_on(inner.get(Keyspace::Durable, "split.x"))
+            .unwrap()
+            .expect("record")
+            .value,
+    )
+    .unwrap();
+    let epoch = held.splits.get("x").map(|(epoch, _)| *epoch);
+    assert!(
+        fired && record["owner"] == "worker-b" && epoch == Some(2),
+        "fault fired: {fired}; record {record}; held at {epoch:?}"
+    );
 }

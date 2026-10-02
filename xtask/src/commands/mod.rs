@@ -542,6 +542,9 @@ fn scoped_ci(root: &Path, explain: bool, base: &str, pkgs: &BTreeSet<String>) ->
         hack(root, explain, &sel)?;
     }
     tidy_gates(root, explain)?;
+    if explain {
+        return Ok(());
+    }
     println!(
         "scoped ci passed. Not run: cargo deny, spate-fuzz and the packages outside the set. \
          `cargo xtask ci` is the pull request bar."

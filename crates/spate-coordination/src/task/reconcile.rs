@@ -1,5 +1,5 @@
-//! The reconcile backstop and the background record reads that keep the view
-//! current.
+//! The reconcile backstop, the background record reads, and a new leader's
+//! catch-up listing.
 
 use super::{Listed, READ_CONCURRENCY, Reads, ReconcileRun, SinceListing, Task};
 use crate::error::fatal_only;
@@ -267,10 +267,6 @@ impl<S: CoordinationStore + Clone> Task<S> {
             };
         }
     }
-
-    // ------------------------------------------------------------------
-    // The engine step: election → planning → claims → revocations →
-    // terminal.
 
     /// Fold a new leader's listing of split and spec records into the view,
     /// and open planning and publishing.

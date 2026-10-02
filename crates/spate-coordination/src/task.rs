@@ -255,7 +255,8 @@ struct Revoking {
     /// drain. A source cannot be asked to resume intake it has already
     /// stopped, so a drain that never finishes strands the split with
     /// nothing reading it. Already counted
-    /// [`RevocationOutcome::Cancelled`]; it owes no second outcome.
+    /// [`RevocationOutcome::Cancelled`](spate_core::metrics::RevocationOutcome::Cancelled);
+    /// it owes no second outcome.
     cancelled: bool,
 }
 
@@ -769,9 +770,6 @@ impl<S: CoordinationStore + Clone> Task<S> {
             w.wake();
         }
     }
-
-    // ------------------------------------------------------------------
-    // Startup.
 
     async fn step(&mut self) -> Result<(), CoordinationError> {
         self.prune_departed();

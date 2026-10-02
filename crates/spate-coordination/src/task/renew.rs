@@ -1,4 +1,4 @@
-//! The heartbeat: renewal of presence, leadership and owned split leases.
+//! Heartbeat renewal of presence, leadership and owned split leases.
 
 use super::Task;
 use crate::error::{fatal, fatal_only};
@@ -229,7 +229,4 @@ impl<S: CoordinationStore + Clone> Task<S> {
             }
         }
     }
-
-    // ------------------------------------------------------------------
-    // Commands.
 }

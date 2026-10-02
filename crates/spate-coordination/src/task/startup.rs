@@ -1,5 +1,4 @@
-//! Task startup: the store probe, joining the job, announcing presence, and
-//! opening the watches.
+//! Task startup, and the re-establishment of a watch.
 
 use super::Task;
 use crate::error::{fatal, store_error};
@@ -238,9 +237,6 @@ impl<S: CoordinationStore + Clone> Task<S> {
             }
         }
     }
-
-    // ------------------------------------------------------------------
-    // Watch plumbing.
 
     /// (Re-)establish a watch: drain its snapshot into a rebuilt view,
     /// return the live tail. Unbudgeted; retries until the store answers.

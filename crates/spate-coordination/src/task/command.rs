@@ -1,4 +1,4 @@
-//! Serving control-thread commands: commits, completions, failures and
+//! Serving control-thread commands for commits, completions, failures and
 //! releases.
 
 use super::{Command, ReleaseOutcome, Task};

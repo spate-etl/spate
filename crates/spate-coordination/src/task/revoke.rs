@@ -1,4 +1,5 @@
-//! Revocation: asking the source to give a split up, and settling the outcome.
+//! Revoking a split by asking its source to give it up, and settling the
+//! outcome.
 
 use super::{ReleaseOutcome, Revoking, Task};
 use crate::store::CoordinationStore;

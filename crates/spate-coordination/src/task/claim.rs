@@ -376,7 +376,4 @@ impl<S: CoordinationStore + Clone> Task<S> {
             self.emit(CoordinationEvent::Lost { split });
         }
     }
-
-    // ------------------------------------------------------------------
-    // Heartbeat.
 }

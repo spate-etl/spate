@@ -1,5 +1,5 @@
-//! Departure: releasing each owned split and deleting the worker's keys before
-//! the task stops.
+//! Departure, which releases each owned split and deletes the worker's keys
+//! before the task stops.
 
 use super::{ReleaseOutcome, Shortfall, Task};
 use crate::error::fatal_only;
@@ -367,7 +367,4 @@ impl<S: CoordinationStore + Clone> Task<S> {
         }
         Ok(ReleaseOutcome::WriteFailed)
     }
-
-    // ------------------------------------------------------------------
-    // Terminal detection.
 }

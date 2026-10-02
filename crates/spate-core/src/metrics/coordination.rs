@@ -161,7 +161,8 @@ pub enum WriteOutcome {
 pub enum ReplanOutcome {
     /// The plan advanced; new splits were written or finality changed.
     Ok,
-    /// The planner or the plan write failed.
+    /// The run published nothing: the planner, a split write, the recount or
+    /// the plan write failed, or leadership moved during the run.
     Error,
     /// The enumeration produced nothing new.
     Noop,

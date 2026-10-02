@@ -87,7 +87,9 @@ fn a_parting_worker_counts_its_own_undeleted_key() {
             rt.block_on(store.get(Keyspace::Ephemeral, "worker.pu-a"))
                 .unwrap()
                 .is_some(),
-            "pu-a's key expired before its view held it again"
+            "pu-a's key expired before both gauges read 2 (pu-a={:?}, pu-b={:?})",
+            live("pu-a"),
+            live("pu-b"),
         );
         if live("pu-b") == Some(2.0) && live("pu-a") == Some(2.0) {
             break;

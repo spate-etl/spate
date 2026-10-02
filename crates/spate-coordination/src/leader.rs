@@ -487,9 +487,47 @@ impl SeedRun {
         }
     }
 
-    /// Stop the run: no write starts after this, and the run publishes nothing.
+    /// Stop the run: no new split starts after this, and the run publishes nothing.
     pub(crate) fn depose(&self) {
         self.leading.store(false, Ordering::Relaxed);
+    }
+}
+
+/// Shortest gap between the assignment passes that seeded splits trigger.
+const SEED_STEP_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Paces the assignment passes for seeded splits: the first fold steps at
+/// once, and later folds step at most once per [`SEED_STEP_INTERVAL`].
+#[derive(Debug, Default)]
+pub(crate) struct SeedSteps {
+    next: Option<Instant>,
+    pending: bool,
+}
+
+impl SeedSteps {
+    /// Record a fold at `now`; `true` when it should step now.
+    pub(crate) fn folded(&mut self, now: Instant) -> bool {
+        match self.next {
+            Some(next) if now < next => {
+                self.pending = true;
+                false
+            }
+            _ => {
+                self.fired(now);
+                true
+            }
+        }
+    }
+
+    /// When a deferred step is due.
+    pub(crate) fn due(&self) -> Option<Instant> {
+        self.next.filter(|_| self.pending)
+    }
+
+    /// Record a step taken at `now`.
+    pub(crate) fn fired(&mut self, now: Instant) {
+        self.next = Some(now + SEED_STEP_INTERVAL);
+        self.pending = false;
     }
 }
 
@@ -625,7 +663,6 @@ async fn seed_all<S: CoordinationStore>(
                 pacing.won();
                 deadline = bounds.clock.now() + bounds.patience;
                 if let Some(rev) = rev {
-                    // The receiver outlives the run unless the task stopped.
                     let _ = wins.send((job, rev));
                 }
             }
@@ -638,6 +675,8 @@ async fn seed_all<S: CoordinationStore>(
                     tracing::warn!(split = %job.id, record, %error, ?backoff,
                         limit = pacing.limit, "split seeding failed; retrying");
                     paused_until = Some((now + backoff).min(deadline));
+                } else {
+                    pacing.streak = 0;
                 }
                 retry.push_back(job);
             }
@@ -696,6 +735,143 @@ async fn seed<S: CoordinationStore>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::memory::MemoryStore;
+    use crate::store::{Entry, WatchStream};
+    use spate_core::clock::tokio::TestClock;
+    use spate_core::coordination::SplitSpec;
+    use std::sync::atomic::AtomicU64;
+
+    /// Holds each spec create until the test releases permits; the first of
+    /// every four among the first 64 fails with a retryable error.
+    #[derive(Clone)]
+    struct Gated {
+        inner: MemoryStore,
+        calls: Arc<AtomicU64>,
+        in_flight: Arc<AtomicU64>,
+        gate: Arc<tokio::sync::Semaphore>,
+    }
+
+    impl CoordinationStore for Gated {
+        fn lease_ttl(&self) -> Duration {
+            self.inner.lease_ttl()
+        }
+
+        async fn create(
+            &self,
+            ks: Keyspace,
+            key: &str,
+            value: Vec<u8>,
+        ) -> Result<CasOutcome, StoreError> {
+            if key.starts_with("spec.") {
+                let n = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+                self.in_flight.fetch_add(1, Ordering::SeqCst);
+                self.gate.acquire().await.expect("gate").forget();
+                self.in_flight.fetch_sub(1, Ordering::SeqCst);
+                if n <= 64 && n % 4 == 1 {
+                    return Err(StoreError::Retryable("throttled".into()));
+                }
+            }
+            self.inner.create(ks, key, value).await
+        }
+
+        async fn update(
+            &self,
+            ks: Keyspace,
+            key: &str,
+            value: Vec<u8>,
+            expected: Revision,
+        ) -> Result<CasOutcome, StoreError> {
+            self.inner.update(ks, key, value, expected).await
+        }
+
+        async fn get(&self, ks: Keyspace, key: &str) -> Result<Option<Entry>, StoreError> {
+            self.inner.get(ks, key).await
+        }
+
+        async fn delete(
+            &self,
+            ks: Keyspace,
+            key: &str,
+            expected: Option<Revision>,
+        ) -> Result<CasOutcome, StoreError> {
+            self.inner.delete(ks, key, expected).await
+        }
+
+        async fn watch(&self, ks: Keyspace, prefix: &str) -> Result<WatchStream, StoreError> {
+            self.inner.watch(ks, prefix).await
+        }
+
+        async fn list(&self, ks: Keyspace, prefix: &str) -> Result<Vec<Entry>, StoreError> {
+            self.inner.list(ks, prefix).await
+        }
+    }
+
+    /// A burst in which a quarter of the writes are throttled does not
+    /// restore full concurrency after the pause.
+    #[tokio::test]
+    async fn failures_inside_a_pause_break_the_win_streak() {
+        async fn settle() {
+            for _ in 0..1000 {
+                tokio::task::yield_now().await;
+            }
+        }
+        let clock = TestClock::frozen();
+        let store = Gated {
+            inner: MemoryStore::with_clock(Duration::from_secs(10), clock.clone()),
+            calls: Arc::default(),
+            in_flight: Arc::default(),
+            gate: Arc::new(tokio::sync::Semaphore::new(0)),
+        };
+        let jobs: Vec<SeedJob> = (0..200)
+            .map(|i| {
+                let id = SplitId::new(format!("s{i:03}")).expect("id");
+                let spec = SplitSpec::new(id.clone(), Vec::new());
+                SeedJob {
+                    spec: SplitSpecRecord::planned(&spec, 1, 1),
+                    progress: SplitProgressRecord::planned(&id, 1, None),
+                    id,
+                    spec_done: false,
+                }
+            })
+            .collect();
+        let bounds = SeedBounds {
+            clock: clock.clone(),
+            patience: Duration::from_secs(60),
+            leading: Arc::new(AtomicBool::new(true)),
+        };
+        let (wins, mut won) = mpsc::unbounded_channel();
+        let run = tokio::spawn({
+            let store = store.clone();
+            async move {
+                let pacing = Pacing::new(Duration::from_secs(10));
+                seed_all(&store, jobs.into_iter(), &bounds, pacing, &wins)
+                    .await
+                    .is_none()
+            }
+        });
+        settle().await;
+        assert_eq!(store.in_flight.load(Ordering::SeqCst), 64);
+        store.gate.add_permits(64);
+        settle().await;
+        let mut seeded = 0;
+        while won.try_recv().is_ok() {
+            seeded += 1;
+        }
+        assert_eq!(seeded, 48);
+        assert_eq!(
+            store.in_flight.load(Ordering::SeqCst),
+            0,
+            "the run is paused"
+        );
+        clock.advance(Duration::from_millis(100));
+        settle().await;
+        let after = store.in_flight.load(Ordering::SeqCst);
+        assert!(
+            after <= 32,
+            "in flight after one pause over a 25%-throttled burst: {after}"
+        );
+        run.abort();
+    }
 
     /// Pauses double from 100ms to a quarter of `op_timeout`, each halving
     /// the writes in flight down to one, and `limit` wins in a row double
@@ -716,5 +892,40 @@ mod tests {
             pacing.won();
         }
         assert_eq!(pacing.limit, SEED_CONCURRENCY);
+    }
+
+    /// A pause restarts the run of wins that doubles the writes in flight.
+    #[test]
+    fn a_pause_restarts_the_win_streak() {
+        let mut pacing = Pacing::new(Duration::from_secs(10));
+        pacing.pause();
+        for _ in 0..31 {
+            pacing.won();
+        }
+        pacing.pause();
+        assert_eq!(pacing.limit, 16);
+        for _ in 0..15 {
+            pacing.won();
+        }
+        assert_eq!(pacing.limit, 16);
+        pacing.won();
+        assert_eq!(pacing.limit, 32);
+    }
+
+    /// The first fold steps at once; later folds inside the interval defer
+    /// one step to its end, and a quiet interval leaves nothing due.
+    #[test]
+    fn seed_steps_coalesce_within_the_interval() {
+        let t0 = Instant::now();
+        let mut steps = SeedSteps::default();
+        assert!(steps.folded(t0));
+        assert_eq!(steps.due(), None);
+        for ms in [10, 200, 900] {
+            assert!(!steps.folded(t0 + Duration::from_millis(ms)));
+        }
+        assert_eq!(steps.due(), Some(t0 + SEED_STEP_INTERVAL));
+        steps.fired(t0 + SEED_STEP_INTERVAL);
+        assert_eq!(steps.due(), None);
+        assert!(steps.folded(t0 + SEED_STEP_INTERVAL * 2));
     }
 }

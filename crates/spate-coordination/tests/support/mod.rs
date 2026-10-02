@@ -760,8 +760,8 @@ impl CountingStore {
         *self.fail_always.lock().expect("fault") = None;
     }
 
-    /// Fail every `n`th seeding create with a retryable error.
-    pub fn fail_every(&self, n: u64) {
+    /// Fail every progress create but each `n`th with a retryable error.
+    pub fn pass_every(&self, n: u64) {
         *self.fail_every.lock().expect("fault") = (n, 0);
     }
 
@@ -807,10 +807,10 @@ impl CoordinationStore for CountingStore {
             *left = left.saturating_sub(1);
             fail
         };
-        let nth = {
+        let nth = key.starts_with("split.") && {
             let mut every = self.fail_every.lock().expect("fault");
             every.1 += 1;
-            every.0 > 0 && every.1.is_multiple_of(every.0)
+            every.0 > 0 && !every.1.is_multiple_of(every.0)
         };
         let injected = once || always || first || nth;
         if injected {

@@ -106,10 +106,7 @@ impl<S: CoordinationStore + Clone> Task<S> {
                 return fatal_only("re-reading the leader key", &e);
             }
         };
-        let ours = entry.filter(|entry| {
-            serde_json::from_slice::<LeaderVal>(&entry.value)
-                .is_ok_and(|v| v.owner == self.instance && v.nonce == self.nonce)
-        });
+        let ours = entry.filter(|entry| self.holds_leader_val(&entry.value));
         let Some(entry) = ours else {
             tracing::warn!("leadership renewal fenced; demoting");
             self.leadership = None;

@@ -1507,6 +1507,33 @@ fn a_release_leaves_a_peer_lease_in_place() {
     );
 }
 
+/// A peer that takes the leader key between our cached revision and the
+/// departing release's delete keeps the key.
+#[test]
+fn a_release_keeps_a_peers_leader_key() {
+    let rt = runtime();
+    let store = FaultStore::new(LEASE);
+    let mut a = holding(&rt, &store, config_for(LEASE, Some("worker-a")), &["p0"]);
+    let peer = serde_json::to_vec(&serde_json::json!({
+        "schema": 3, "owner": "worker-b", "nonce": "peer-nonce", "generation": 1
+    }))
+    .unwrap();
+    store.peer_takes.lock().unwrap().push((
+        Keyspace::Ephemeral,
+        "leader".to_string(),
+        peer.clone(),
+    ));
+    let result = a.release(&[support::split_id("p0")]);
+
+    let left = rt
+        .block_on(store.inner.get(Keyspace::Ephemeral, "leader"))
+        .unwrap();
+    assert!(
+        left.as_ref().is_some_and(|e| e.value == peer),
+        "release returned {result:?}; the peer's leader key is gone"
+    );
+}
+
 /// A record a same-named later tenancy holds at a higher epoch keeps its
 /// owner when the earlier tenancy releases the split.
 #[test]

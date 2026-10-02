@@ -529,6 +529,9 @@ impl<S: CoordinationStore + Clone> Task<S> {
     // enough to overflow a debug-build worker stack over a real store.
     async fn run_inner(&mut self) -> Result<(), CoordinationError> {
         Box::pin(self.startup()).await?;
+        // Armed before the first step, so an election in that step does not
+        // delay the first renewal of presence and the leader key.
+        let mut heartbeat = self.clock.now() + self.next_heartbeat();
 
         let mut lease_watch = Box::pin(self.rewatch(Keyspace::Ephemeral)).await?;
         let mut state_watch = Box::pin(self.rewatch(Keyspace::Durable)).await?;
@@ -544,7 +547,6 @@ impl<S: CoordinationStore + Clone> Task<S> {
         let mut reads: Option<Reads> = None;
         let mut catch_up: Option<Listing> = None;
 
-        let mut heartbeat = self.clock.now() + self.next_heartbeat();
         // The first reconcile lands anywhere in the first interval, so a
         // fleet started together does not list together.
         let mut reconcile =

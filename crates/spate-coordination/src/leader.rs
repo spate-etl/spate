@@ -21,7 +21,7 @@
 
 use crate::error::{fatal_only, store_error};
 use crate::records::{self, LeaderVal, PlanFinalityRepr, SplitProgressRecord, SplitSpecRecord};
-use crate::store::{CasOutcome, CoordinationStore, Keyspace, Revision, StoreError};
+use crate::store::{CasOutcome, CoordinationStore, Entry, Keyspace, Revision, StoreError};
 use crate::task::Task;
 use futures_util::FutureExt as _;
 use futures_util::StreamExt as _;
@@ -43,6 +43,12 @@ use tokio::time::Instant;
 /// Most splits a plan run seeds concurrently.
 const SEED_CONCURRENCY: usize = 64;
 
+/// Reads of the leader key a demotion makes after its delete loses.
+const DEMOTE_READS: u32 = 3;
+
+/// Pause between those reads, on real time because it paces store I/O.
+const DEMOTE_READ_RETRY: Duration = Duration::from_millis(50);
+
 /// What the blocking-pool planner call returns: the planner handed back,
 /// plus its enumeration result.
 pub(crate) type PlannerOutput = (Box<dyn SplitPlanner>, Result<SplitPlan, CoordinationError>);
@@ -60,6 +66,9 @@ pub(crate) struct PlanRun {
 
 impl<S: CoordinationStore + Clone> Task<S> {
     /// Race for the leadership lease; the winner schedules a plan run.
+    ///
+    /// A failed write reads the key back and leads only if the key holds the
+    /// exact value written.
     pub(crate) async fn try_elect(&mut self) -> Result<(), CoordinationError> {
         let generation = self.plan.as_ref().map_or(0, |(p, _)| p.generation) + 1;
         let val = records::encode_val(&LeaderVal {
@@ -68,32 +77,73 @@ impl<S: CoordinationStore + Clone> Task<S> {
             nonce: self.nonce.clone(),
             generation,
         });
-        match self
+        let won = match self
             .store
-            .create(Keyspace::Ephemeral, records::LEADER_KEY, val)
+            .create(Keyspace::Ephemeral, records::LEADER_KEY, val.clone())
             .await
         {
-            Ok(CasOutcome::Won(rev)) => {
-                tracing::info!(generation, "elected planner leader");
-                self.leadership = Some(rev);
-                self.metrics(|m| m.set_leader(true));
-                // A fresh leader has published nothing yet, whatever this
-                // process's assignment bookkeeping happens to say.
-                self.mark_assignment_dirty();
-                if self.polled.is_some() {
-                    // The watch may never have delivered records written
-                    // before this worker led: list them before planning or
-                    // publishing.
-                    self.caught_up = false;
-                    self.catch_up_due = true;
-                }
-                self.bump_generation(generation).await?;
-                Ok(())
-            }
-            Ok(CasOutcome::Lost) => Ok(()), // someone else won; watch will show them
+            Ok(CasOutcome::Won(rev)) => Some(rev),
+            Ok(CasOutcome::Lost) => None, // someone else won; watch will show them
             Err(e) => {
-                tracing::warn!(error = %e, "election write failed; retrying on observation");
-                fatal_only("writing the leader key", &e)
+                fatal_only("writing the leader key", &e)?;
+                // Bytes equality pins this election's generation. Owner and
+                // nonce alone also match this process's key from an earlier
+                // term, served by a lagging replica.
+                let adopted = self
+                    .read_leader_key()
+                    .await?
+                    .filter(|entry| entry.value == val)
+                    .map(|entry| entry.revision);
+                if adopted.is_some() {
+                    tracing::info!(
+                        generation,
+                        "election write's reply was lost; the leader key is ours"
+                    );
+                } else {
+                    tracing::warn!(error = %e, "election write failed; retrying on observation");
+                }
+                adopted
+            }
+        };
+        let Some(rev) = won else {
+            return Ok(());
+        };
+        tracing::info!(generation, "elected planner leader");
+        self.leadership = Some(rev);
+        self.metrics(|m| m.set_leader(true));
+        // A fresh leader has published nothing yet, whatever this
+        // process's assignment bookkeeping happens to say.
+        self.mark_assignment_dirty();
+        if self.polled.is_some() {
+            // The watch may never have delivered records written
+            // before this worker led: list them before planning or
+            // publishing.
+            self.caught_up = false;
+            self.catch_up_due = true;
+        }
+        self.bump_generation(generation).await?;
+        Ok(())
+    }
+
+    /// Whether `value` is a leader key with this worker's owner and nonce.
+    pub(crate) fn holds_leader_val(&self, value: &[u8]) -> bool {
+        serde_json::from_slice::<LeaderVal>(value)
+            .is_ok_and(|v| v.owner == self.instance && v.nonce == self.nonce)
+    }
+
+    /// Reads the leader key. A retryable read error is logged and reads as
+    /// no key.
+    async fn read_leader_key(&mut self) -> Result<Option<Entry>, CoordinationError> {
+        match self
+            .store
+            .get(Keyspace::Ephemeral, records::LEADER_KEY)
+            .await
+        {
+            Ok(entry) => Ok(entry),
+            Err(e) => {
+                tracing::warn!(error = %e, "re-reading the leader key failed");
+                fatal_only("re-reading the leader key", &e)?;
+                Ok(None)
             }
         }
     }
@@ -163,18 +213,57 @@ impl<S: CoordinationStore + Clone> Task<S> {
     }
 
     /// Give leadership up. Only a fatal store error is returned.
+    ///
+    /// A delete that loses reads the key back, up to [`DEMOTE_READS`] times
+    /// until a read shows it past the revision that lost, and deletes it once
+    /// more while it carries this worker's owner and nonce.
     pub(crate) async fn demote(&mut self) -> Result<(), CoordinationError> {
-        if let Some(rev) = self.leadership.take() {
-            self.metrics(|m| m.set_leader(false));
-            if let Err(e) = self
-                .store
-                .delete(Keyspace::Ephemeral, records::LEADER_KEY, Some(rev))
-                .await
-            {
-                fatal_only("deleting the leader key", &e)?;
+        let Some(rev) = self.leadership.take() else {
+            return Ok(());
+        };
+        self.metrics(|m| m.set_leader(false));
+        match self
+            .store
+            .delete(Keyspace::Ephemeral, records::LEADER_KEY, Some(rev))
+            .await
+        {
+            Ok(CasOutcome::Won(_)) => Ok(()),
+            Ok(CasOutcome::Lost) => {
+                let mut reads = 1;
+                let entry = loop {
+                    let Some(entry) = self.read_leader_key().await? else {
+                        return Ok(());
+                    };
+                    // A replica may answer before it has applied the write
+                    // that won; a key at or behind `rev` is such an answer.
+                    if entry.revision > rev {
+                        break entry;
+                    }
+                    if reads == DEMOTE_READS {
+                        return Ok(());
+                    }
+                    reads += 1;
+                    tokio::time::sleep(DEMOTE_READ_RETRY).await;
+                };
+                if !self.holds_leader_val(&entry.value) {
+                    return Ok(());
+                }
+                // A second `Lost` leaves the key to expire.
+                match self
+                    .store
+                    .delete(
+                        Keyspace::Ephemeral,
+                        records::LEADER_KEY,
+                        Some(entry.revision),
+                    )
+                    .await
+                {
+                    Ok(_) => Ok(()),
+                    Err(e) => fatal_only("deleting the leader key", &e),
+                }
             }
+            Err(e) => fatal_only("deleting the leader key", &e),
         }
-        Ok(())
     }
 
     /// Kick a planner run off onto the blocking pool if one is due. The

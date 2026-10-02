@@ -11,6 +11,18 @@ bar and covers formatting, clippy, the type check, the loom models, the test
 suite, doctests, rustdoc, the feature matrix, licenses and advisories, and
 `cargo xtask tidy`, the repository consistency checks.
 
+`cargo xtask ci --since [REF]` narrows the Rust gates to the packages the diff
+against REF (default `origin/main`) can affect: the changed crates and
+everything that depends on them, over normal and dev edges. The diff covers
+commits, staged and unstaged edits, and untracked files. It runs formatting,
+clippy, the tests, doctests, rustdoc and the feature matrix on that set, the
+loom models when `spate-core` is in it, and every `tidy` member. It skips
+`cargo deny`, the fuzz harness and the packages outside the set, which CI still
+runs. A change to a manifest, `Cargo.lock`, `test-support/`, `xtask/`, tooling
+or Rust outside `crates/` runs the full `ci`. The root `README.md` counts as a
+change to `spate`, which compiles it as a doctest. Passing `--since` is a
+pre-push check; `cargo xtask ci` stays the pull request bar.
+
 Verify a gate by its **exit code**. Piped `grep` and `tail` chains report the
 status of the last command in the pipeline and have masked failures here. No
 command contains a pipe.

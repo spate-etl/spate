@@ -7,6 +7,7 @@ mod fuzz;
 mod hooks;
 mod lint;
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use clap::Subcommand;
@@ -15,10 +16,17 @@ use crate::run::{self, Error, Outcome, Step};
 
 pub(crate) use lint::TidyCheck;
 
+use crate::ci::Scope;
+
 #[derive(Subcommand)]
 pub(crate) enum Command {
     /// Everything a pull request must pass
-    Ci,
+    Ci {
+        /// Run only what the diff against REF can affect (default
+        /// origin/main), leaving the rest to CI. Not the pull request bar.
+        #[arg(long, value_name = "REF", num_args = 0..=1, default_missing_value = "origin/main")]
+        since: Option<String>,
+    },
 
     /// Formatting and clippy together
     Lint,
@@ -259,7 +267,7 @@ pub(crate) enum HooksCommand {
 /// Runs one command.
 pub(crate) fn dispatch(root: &Path, explain: bool, cmd: Command) -> Outcome {
     match cmd {
-        Command::Ci => ci(root, explain),
+        Command::Ci { since } => ci(root, explain, since.as_deref()),
         Command::Lint => lint_group(root, explain),
         Command::Fmt { check } => {
             let mut s = Step::new("cargo", ["fmt", "--all"]);
@@ -269,67 +277,18 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: Command) -> Outcome {
             run::run(root, explain, &s)
         }
         Command::Clippy { no_deny_warnings } => {
-            let mut s = Step::new(
-                "cargo",
-                [
-                    "clippy",
-                    "--workspace",
-                    "--all-targets",
-                    "--all-features",
-                    "--locked",
-                    "--",
-                ],
-            );
-            if !no_deny_warnings {
-                s = s.args(["-D", "warnings"]);
-            }
-            run::run(root, explain, &s)
+            clippy(root, explain, &Select::Workspace, no_deny_warnings)
         }
         Command::Check => run::run(
             root,
             explain,
-            &Step::new(
-                "cargo",
-                ["check", "--workspace", "--all-features", "--locked"],
-            ),
+            &Step::new("cargo", ["check"])
+                .args(Select::Workspace.args())
+                .args(["--all-features", "--locked"]),
         ),
-        Command::Test => run::run(
-            root,
-            explain,
-            &Step::new(
-                "cargo",
-                [
-                    "nextest",
-                    "run",
-                    "--workspace",
-                    "--all-features",
-                    "--locked",
-                ],
-            ),
-        ),
-        Command::Doctest => run::run(
-            root,
-            explain,
-            &Step::new(
-                "cargo",
-                ["test", "--workspace", "--all-features", "--locked", "--doc"],
-            ),
-        ),
-        Command::Doc => run::run(
-            root,
-            explain,
-            &Step::new(
-                "cargo",
-                [
-                    "doc",
-                    "--workspace",
-                    "--no-deps",
-                    "--all-features",
-                    "--locked",
-                ],
-            )
-            .env("RUSTDOCFLAGS", "-D warnings"),
-        ),
+        Command::Test => test(root, explain, &Select::Workspace),
+        Command::Doctest => doctest(root, explain, &Select::Workspace),
+        Command::Doc => doc(root, explain, &Select::Workspace),
         Command::Docsrs { toolchain } => {
             crate::checks::docsrs::run(root, explain, toolchain.nightly())
         }
@@ -365,7 +324,7 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: Command) -> Outcome {
             )
             .env("RUSTFLAGS", "--cfg loom"),
         ),
-        Command::Hack => hack(root, explain),
+        Command::Hack => hack(root, explain, &Select::Workspace),
         Command::Bench { cmd } => bench::dispatch(root, explain, cmd),
         Command::Deny => run::run(
             root,
@@ -522,7 +481,22 @@ fn image_mode(r#ref: bool, pull: bool) -> crate::checks::container_image::Mode {
 }
 
 /// Everything a pull request must pass.
-fn ci(root: &Path, explain: bool) -> Outcome {
+fn ci(root: &Path, explain: bool, since: Option<&str>) -> Outcome {
+    if let Some(base) = since {
+        return match crate::ci::scope_since(root, base)? {
+            Scope::Packages(pkgs) => scoped_ci(root, explain, base, &pkgs),
+            Scope::Full => {
+                println!(
+                    "note: the diff reaches shared files or cannot be read; running everything."
+                );
+                full_ci(root, explain)
+            }
+        };
+    }
+    full_ci(root, explain)
+}
+
+fn full_ci(root: &Path, explain: bool) -> Outcome {
     lint_group(root, explain)?;
     dispatch(root, explain, Command::Check)?;
     // Nothing else in this chain compiles the `--cfg loom` arm.
@@ -532,6 +506,11 @@ fn ci(root: &Path, explain: bool) -> Outcome {
     dispatch(root, explain, Command::Doc)?;
     dispatch(root, explain, Command::Hack)?;
     dispatch(root, explain, Command::Deny)?;
+    tidy_gates(root, explain)
+}
+
+/// The tidy members, then the changelog gate.
+fn tidy_gates(root: &Path, explain: bool) -> Outcome {
     lint::tidy(root, explain, None, false)?;
     // Outside the default set because CI splits it into a job that carries the
     // pull request's fields. On a laptop it orients against the upstream, so
@@ -539,89 +518,170 @@ fn ci(root: &Path, explain: bool) -> Outcome {
     lint::tidy(root, explain, Some(TidyCheck::Changelog), false)
 }
 
+/// The Rust gates over the packages a diff can affect, and every tidy member.
+/// The type check, `cargo deny`, the packages outside the set and the
+/// workspace-wide builds are left to CI.
+fn scoped_ci(root: &Path, explain: bool, base: &str, pkgs: &BTreeSet<String>) -> Outcome {
+    let listed = pkgs.iter().cloned().collect::<Vec<_>>().join(", ");
+    println!(
+        "scoped ci against {base}: {}",
+        if pkgs.is_empty() {
+            "no Rust package affected".to_owned()
+        } else {
+            listed
+        }
+    );
+    if !pkgs.is_empty() {
+        let sel = Select::Packages(pkgs.iter().cloned().collect());
+        dispatch(root, explain, Command::Fmt { check: true })?;
+        clippy(root, explain, &sel, false)?;
+        if pkgs.contains("spate-core") {
+            dispatch(root, explain, Command::Loom)?;
+        }
+        test(root, explain, &sel)?;
+        doctest(root, explain, &sel)?;
+        doc(root, explain, &sel)?;
+        hack(root, explain, &sel)?;
+    }
+    tidy_gates(root, explain)?;
+    if explain {
+        return Ok(());
+    }
+    println!(
+        "scoped ci passed. Not run: cargo deny, spate-fuzz and the packages outside the set. \
+         `cargo xtask ci` is the pull request bar."
+    );
+    Ok(())
+}
+
+/// Which packages a cargo invocation covers.
+enum Select {
+    Workspace,
+    Packages(Vec<String>),
+}
+
+impl Select {
+    fn args(&self) -> Vec<String> {
+        match self {
+            Self::Workspace => vec!["--workspace".to_owned()],
+            Self::Packages(pkgs) => pkgs
+                .iter()
+                .flat_map(|p| ["-p".to_owned(), p.clone()])
+                .collect(),
+        }
+    }
+}
+
 fn lint_group(root: &Path, explain: bool) -> Outcome {
     dispatch(root, explain, Command::Fmt { check: true })?;
-    dispatch(
+    clippy(root, explain, &Select::Workspace, false)
+}
+
+fn clippy(root: &Path, explain: bool, sel: &Select, no_deny_warnings: bool) -> Outcome {
+    let mut s = Step::new("cargo", ["clippy"]).args(sel.args()).args([
+        "--all-targets",
+        "--all-features",
+        "--locked",
+        "--",
+    ]);
+    if !no_deny_warnings {
+        s = s.args(["-D", "warnings"]);
+    }
+    run::run(root, explain, &s)
+}
+
+fn test(root: &Path, explain: bool, sel: &Select) -> Outcome {
+    run::run(
         root,
         explain,
-        Command::Clippy {
-            no_deny_warnings: false,
-        },
+        &Step::new("cargo", ["nextest", "run"])
+            .args(sel.args())
+            .args(["--all-features", "--locked"]),
+    )
+}
+
+fn doctest(root: &Path, explain: bool, sel: &Select) -> Outcome {
+    run::run(
+        root,
+        explain,
+        &Step::new("cargo", ["test"]).args(sel.args()).args([
+            "--all-features",
+            "--locked",
+            "--doc",
+        ]),
+    )
+}
+
+fn doc(root: &Path, explain: bool, sel: &Select) -> Outcome {
+    run::run(
+        root,
+        explain,
+        &Step::new("cargo", ["doc"])
+            .args(sel.args())
+            .args(["--no-deps", "--all-features", "--locked"])
+            .env("RUSTDOCFLAGS", "-D warnings"),
     )
 }
 
 /// The feature matrix, and the test suite on default features.
-fn hack(root: &Path, explain: bool) -> Outcome {
-    run::steps(
-        root,
-        explain,
-        &[
-            // `cargo hack --no-dev-deps` rewrites each Cargo.toml as it runs,
-            // which a locked build refuses. Do not add `--locked`; it fails.
-            // It restores each Cargo.toml only when it is finished, so every
-            // locked step goes after it.
-            Step::new(
-                "cargo",
-                [
-                    "hack",
-                    "check",
-                    "--workspace",
-                    "--each-feature",
-                    "--no-dev-deps",
-                    "--exclude",
-                    "spate-xtask",
-                    "--exclude",
-                    "spate-fuzz",
-                ],
-            ),
-            // Stripping dev-dependencies drops test and bench targets, so the
-            // run above reaches no test target in any crate. These two build
-            // them, on the axes it covers for the library: features off, then
-            // the default set.
-            Step::new(
-                "cargo",
-                [
-                    "check",
-                    "-p",
-                    "spate-coordination",
-                    "--no-default-features",
-                    "--tests",
-                    "--locked",
-                ],
-            ),
-            // The workspace-wide build on default features. spate-fuzz is
-            // excluded because it requires `testing` on spate-s3 and
-            // spate-coordination, which the resolver would unify into every
-            // other crate in the same invocation.
-            Step::new(
-                "cargo",
-                [
-                    "check",
-                    "--workspace",
-                    "--all-targets",
-                    "--locked",
-                    "--exclude",
-                    "spate-fuzz",
-                ],
-            ),
-            // The test suite on default features, which runs the feature-off
-            // arm of tests that `--all-features` skips. spate-fuzz has no
-            // tests and spate-xtask no features.
-            Step::new(
-                "cargo",
-                [
-                    "nextest",
-                    "run",
-                    "--workspace",
-                    "--locked",
-                    "--exclude",
-                    "spate-fuzz",
-                    "--exclude",
-                    "spate-xtask",
-                ],
-            ),
-        ],
-    )
+fn hack(root: &Path, explain: bool, sel: &Select) -> Outcome {
+    // `--exclude` needs `--workspace`, so a package selection already names
+    // what to leave out.
+    let (fuzz, fuzz_and_xtask): (&[&str], &[&str]) = match sel {
+        Select::Workspace => (
+            &["--exclude", "spate-fuzz"],
+            &["--exclude", "spate-xtask", "--exclude", "spate-fuzz"],
+        ),
+        Select::Packages(_) => (&[], &[]),
+    };
+    let mut steps = vec![
+        // `cargo hack --no-dev-deps` rewrites each Cargo.toml as it runs,
+        // which a locked build refuses. Do not add `--locked`; it fails.
+        // It restores each Cargo.toml only when it is finished, so every
+        // locked step goes after it.
+        Step::new("cargo", ["hack", "check"])
+            .args(sel.args())
+            .args(["--each-feature", "--no-dev-deps"])
+            .args(fuzz_and_xtask),
+    ];
+    // Stripping dev-dependencies drops test and bench targets, so the run
+    // above reaches no test target in any crate. These steps build them, on
+    // the axes it covers for the library: features off, then the default set.
+    if match sel {
+        Select::Workspace => true,
+        Select::Packages(pkgs) => pkgs.iter().any(|p| p == "spate-coordination"),
+    } {
+        steps.push(Step::new(
+            "cargo",
+            [
+                "check",
+                "-p",
+                "spate-coordination",
+                "--no-default-features",
+                "--tests",
+                "--locked",
+            ],
+        ));
+    }
+    // The workspace-wide build on default features. spate-fuzz is excluded
+    // because it requires `testing` on spate-s3 and spate-coordination, which
+    // the resolver would unify into every other crate in the same invocation.
+    steps.push(
+        Step::new("cargo", ["check"])
+            .args(sel.args())
+            .args(["--all-targets", "--locked"])
+            .args(fuzz),
+    );
+    // The test suite on default features, which runs the feature-off arm of
+    // tests that `--all-features` skips. spate-fuzz has no tests and
+    // spate-xtask no features.
+    steps.push(
+        Step::new("cargo", ["nextest", "run"])
+            .args(sel.args())
+            .args(["--locked"])
+            .args(fuzz_and_xtask),
+    );
+    run::steps(root, explain, &steps)
 }
 
 #[cfg(test)]

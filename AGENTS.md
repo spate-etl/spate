@@ -32,6 +32,12 @@ cargo xtask clippy
 cargo nextest run -p spate-s3 --all-features --locked   # the crate you touched
 ```
 
+`cargo xtask ci --since` runs the gates over the packages the diff against
+`origin/main` can affect, committed or not, and leaves `cargo deny`, the fuzz
+harness and the rest of the workspace to CI. Use it between edits and before a
+push. A diff that touches a manifest, `Cargo.lock`, `test-support/`, `xtask/`,
+tooling, or Rust outside `crates/` runs everything.
+
 `cargo xtask --help` lists the commands, each with its own `--help`;
 `cargo xtask ci` is what a pull request must pass.
 CI runs the same commands for lint, type check, doctests, the feature matrix,

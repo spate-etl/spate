@@ -56,7 +56,7 @@ fn any_glob(path: &str, patterns: &[&str]) -> bool {
 }
 
 /// The crate a `crates/<name>/...` path belongs to.
-fn crate_of(path: &str) -> Option<&str> {
+pub(super) fn crate_of(path: &str) -> Option<&str> {
     path.strip_prefix("crates/")?.split('/').next()
 }
 
@@ -123,6 +123,11 @@ fn kind_of(path: &str) -> Kind {
         return Kind::Skip;
     }
     Kind::Code
+}
+
+/// Whether a path changes what a Rust build or test sees.
+pub(super) fn is_rust_change(path: &str) -> bool {
+    matches!(kind_of(path), Kind::Code | Kind::CodeAndSite)
 }
 
 /// Files that can change whether `cargo package` succeeds or whether the

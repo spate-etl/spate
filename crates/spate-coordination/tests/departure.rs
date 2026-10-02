@@ -1,6 +1,6 @@
 //! `StoreCoordinator::depart` against a store that fails part-way: an
 //! outage that breaks the watches, a store that stops answering, and fatal
-//! write errors.
+//! store errors.
 
 mod support;
 
@@ -41,7 +41,7 @@ enum Op {
 /// a listed key fails Fatal. Ambiguous: a listed key's next update applies,
 /// then fails Retryable. Peer takes: a listed key is replaced by a peer's
 /// value just before its next delete. Plan lost: the plan record's update
-/// loses its CAS and its read fails Retryable.
+/// loses its CAS.
 #[derive(Clone)]
 struct FaultStore {
     inner: MemoryStore,
@@ -53,7 +53,6 @@ struct FaultStore {
     peer_takes: Arc<Mutex<Vec<PeerTake>>>,
     update_log: Arc<Mutex<Vec<(Keyspace, String)>>>,
     plan_lost: Arc<AtomicBool>,
-    plan_refused: Arc<AtomicU64>,
     refused_watches: Arc<AtomicU64>,
     breakers: Arc<Mutex<Vec<Breaker>>>,
 }
@@ -70,7 +69,6 @@ impl FaultStore {
             peer_takes: Arc::default(),
             update_log: Arc::default(),
             plan_lost: Arc::default(),
-            plan_refused: Arc::default(),
             refused_watches: Arc::default(),
             breakers: Arc::default(),
         }
@@ -202,10 +200,6 @@ impl CoordinationStore for FaultStore {
 
     async fn get(&self, ks: Keyspace, key: &str) -> Result<Option<Entry>, StoreError> {
         self.gate(Op::Get, ks, key).await?;
-        if self.plan_lost(ks, key) {
-            self.plan_refused.fetch_add(1, Ordering::SeqCst);
-            return Err(Self::unreachable());
-        }
         self.inner.get(ks, key).await
     }
 
@@ -428,27 +422,37 @@ fn a_departure_the_store_keeps_failing_reports_it() {
     );
 }
 
-/// A departure whose task already stopped on a Retryable error hands its
-/// split back by direct writes.
+/// A departure whose task already stopped on a store error hands its split
+/// back by direct writes.
 #[test]
-fn a_departure_after_a_retryable_task_death_releases_directly() {
+fn a_departure_after_its_task_stopped_releases_directly() {
     let rt = runtime();
     let store = FaultStore::new(LEASE);
     let mut a = holding(&rt, &store, config_for(LEASE, Some("worker-a")), &["r0"]);
 
-    // A lost generation bump whose plan re-read fails Retryable stops the
-    // task.
+    // A lost generation bump whose plan re-read fails Fatal stops the task.
     store.plan_lost.store(true, Ordering::SeqCst);
+    store
+        .fatal
+        .lock()
+        .unwrap()
+        .push((Op::Get, Keyspace::Durable, "plan".to_string()));
     let _: CasOutcome = rt
         .block_on(store.inner.delete(Keyspace::Ephemeral, "leader", None))
         .unwrap();
     let deadline = Instant::now() + support::DEADLINE;
-    while store.plan_refused.load(Ordering::SeqCst) == 0 {
+    while !store.fatal.lock().unwrap().is_empty() {
         assert!(Instant::now() < deadline, "the worker never re-elected");
         std::thread::sleep(support::POLL_INTERVAL);
     }
     store.latency_ms.store(10, Ordering::SeqCst);
     let result = a.depart(&[]);
+    assert!(
+        result
+            .as_ref()
+            .is_err_and(|e| e.reason.contains("re-reading the plan record")),
+        "{result:?}"
+    );
 
     let record = rt
         .block_on(store.inner.get(Keyspace::Durable, "split.r0"))

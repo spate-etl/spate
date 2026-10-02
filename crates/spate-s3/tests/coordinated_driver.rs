@@ -201,17 +201,12 @@ fn losing_a_split_detaches_it_without_failing_the_pipeline() {
     );
 }
 
-#[test]
-fn a_missing_object_reports_the_split_as_failed() {
-    let dir = tempfile::tempdir().unwrap();
-    let data = dir.path().join("data");
-    fs::create_dir_all(&data).unwrap();
-    fs::write(data.join("real.ndjson"), lines_bytes(&recs("real", 5))).unwrap();
-    // A descriptor naming an object that does not exist: the ranged path
-    // needs an ETag pin, so hand-craft one to route it there. A 404 on a
-    // pinned read is the deleted-after-planning shape.
-    let mut ghost = spec_over(&data, &["real.ndjson"]);
-    let ghost_descriptor = SplitDescriptor::new(vec![spate_s3::DescriptorObject {
+/// A split whose descriptor names an object that does not exist. The ranged
+/// path needs an ETag pin, so the descriptor is hand-crafted to route there:
+/// a 404 on a pinned read is the deleted-after-planning shape.
+fn ghost_spec(data: &Path) -> SplitSpec {
+    let mut ghost = spec_over(data, &["real.ndjson"]);
+    let descriptor = SplitDescriptor::new(vec![spate_s3::DescriptorObject {
         key: data
             .join("ghost.ndjson")
             .to_string_lossy()
@@ -221,8 +216,18 @@ fn a_missing_object_reports_the_split_as_failed() {
         etag: Some("\"gone\"".into()),
         last_modified_ms: 1,
     }]);
-    ghost.descriptor = ghost_descriptor.encode().unwrap();
+    ghost.descriptor = descriptor.encode().unwrap();
     ghost.id = split_id_for([("ghost", Some("\"gone\""))]).unwrap();
+    ghost
+}
+
+#[test]
+fn a_missing_object_reports_the_split_as_failed() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    fs::create_dir_all(&data).unwrap();
+    fs::write(data.join("real.ndjson"), lines_bytes(&recs("real", 5))).unwrap();
+    let ghost = ghost_spec(&data);
     let ghost_id = ghost.id.clone();
 
     let (coordinator, script) = scripted_coordinator();
@@ -241,6 +246,31 @@ fn a_missing_object_reports_the_split_as_failed() {
     );
 
     // The pipeline survives; the coordinator decides what happens next.
+    script.all_complete();
+    let report = l.run.wait_exit(Duration::from_secs(30)).unwrap().unwrap();
+    assert_eq!(report.state, ExitState::Completed);
+}
+
+/// A failure report the coordinator answers `Retryable` is offered again.
+#[test]
+fn a_retryable_failure_report_is_offered_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    fs::create_dir_all(&data).unwrap();
+    fs::write(data.join("real.ndjson"), lines_bytes(&recs("real", 5))).unwrap();
+    let ghost = ghost_spec(&data);
+    let ghost_id = ghost.id.clone();
+
+    let (coordinator, script) = scripted_coordinator();
+    script.fail_next_report(&ghost_id, CoordinationErrorKind::Retryable);
+    script.gain(ghost, 1, None);
+    let l = launch_scripted_coordinator(&config_yaml(&data).build(), coordinator, |_| {});
+
+    wait_until(Duration::from_secs(30), "the report offered again", || {
+        script.failed().len() >= 2
+    });
+    assert!(script.failed().iter().all(|(id, _)| id == &ghost_id));
+
     script.all_complete();
     let report = l.run.wait_exit(Duration::from_secs(30)).unwrap().unwrap();
     assert_eq!(report.state, ExitState::Completed);

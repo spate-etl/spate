@@ -336,9 +336,9 @@ to it no sooner than that.
 | Concern | Location |
 |---|---|
 | The assignment function and its property tests | [`spate-coordination/src/protocol.rs`](repo:crates/spate-coordination/src/protocol.rs) (`desired_assignment`) |
-| Publishing, and the delay window | [`spate-coordination/src/task.rs`](repo:crates/spate-coordination/src/task.rs) (`publish_assignments`, `reserved_splits`) |
-| Reads, the new leader's listing and the verdict marker on a polled store | [`spate-coordination/src/task.rs`](repo:crates/spate-coordination/src/task.rs) (`wanted_reads`, `finish_catch_up`, `write_verdict`) |
-| Worker reconciliation and revocation | [`spate-coordination/src/task.rs`](repo:crates/spate-coordination/src/task.rs) (`reconcile_assignment`, `service_revocations`) |
+| Publishing, and the delay window | [`spate-coordination/src/task/assignment.rs`](repo:crates/spate-coordination/src/task/assignment.rs) (`publish_assignments`, `reserved_splits`) |
+| Reads, the new leader's listing and the verdict marker on a polled store | [`spate-coordination/src/task/reconcile.rs`](repo:crates/spate-coordination/src/task/reconcile.rs) (`wanted_reads`, `finish_catch_up`), [`spate-coordination/src/task/terminal.rs`](repo:crates/spate-coordination/src/task/terminal.rs) (`write_verdict`) |
+| Worker reconciliation and revocation | [`spate-coordination/src/task/assignment.rs`](repo:crates/spate-coordination/src/task/assignment.rs) (`reconcile_assignment`), [`spate-coordination/src/task/revoke.rs`](repo:crates/spate-coordination/src/task/revoke.rs) (`service_revocations`) |
 | The record on the store | [`spate-coordination/src/records.rs`](repo:crates/spate-coordination/src/records.rs) (`AssignmentVal`) |
 | Tuning knobs | [`spate-coordination/src/config.rs`](repo:crates/spate-coordination/src/config.rs) |
 

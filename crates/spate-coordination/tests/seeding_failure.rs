@@ -392,8 +392,7 @@ fn a_deposed_run_stops_before_its_patience_runs_out() {
     });
 }
 
-/// After a retryable failure a run starts at most half its writes until it
-/// wins again.
+/// After a retryable failure a run keeps at most half its writes in flight.
 #[test]
 fn a_pause_halves_the_writes_in_flight() {
     let rt = runtime();
@@ -543,4 +542,129 @@ fn seeded_splits_are_assigned_before_the_run_ends_on_a_polled_store() {
         !h.splits.is_empty()
     });
     assert_eq!(plan(&rt, &counting.inner)["planned"].as_u64(), Some(0));
+}
+
+/// [`QuietPolled`] at a poll interval no test reaches, so no refresh tick steps the loop.
+#[derive(Clone)]
+struct SlowPolled(QuietPolled);
+
+impl CoordinationStore for SlowPolled {
+    fn lease_ttl(&self) -> Duration {
+        self.0.lease_ttl()
+    }
+
+    fn watch_mode(&self) -> WatchMode {
+        WatchMode::Polled {
+            interval: Duration::from_secs(10),
+        }
+    }
+
+    async fn create(
+        &self,
+        ks: Keyspace,
+        key: &str,
+        value: Vec<u8>,
+    ) -> Result<CasOutcome, StoreError> {
+        self.0.create(ks, key, value).await
+    }
+
+    async fn update(
+        &self,
+        ks: Keyspace,
+        key: &str,
+        value: Vec<u8>,
+        expected: Revision,
+    ) -> Result<CasOutcome, StoreError> {
+        self.0.update(ks, key, value, expected).await
+    }
+
+    async fn get(&self, ks: Keyspace, key: &str) -> Result<Option<Entry>, StoreError> {
+        self.0.get(ks, key).await
+    }
+
+    async fn delete(
+        &self,
+        ks: Keyspace,
+        key: &str,
+        expected: Option<Revision>,
+    ) -> Result<CasOutcome, StoreError> {
+        self.0.delete(ks, key, expected).await
+    }
+
+    async fn watch(&self, ks: Keyspace, prefix: &str) -> Result<WatchStream, StoreError> {
+        self.0.watch(ks, prefix).await
+    }
+
+    async fn list(&self, ks: Keyspace, prefix: &str) -> Result<Vec<Entry>, StoreError> {
+        self.0.list(ks, prefix).await
+    }
+}
+
+/// Splits folded inside the step interval after the first fold are assigned once
+/// it passes, with no heartbeat, refresh, reconcile or run end due.
+#[test]
+fn splits_folded_inside_the_step_interval_are_assigned_when_it_passes() {
+    let handle = recorder();
+    let lease = Duration::from_secs(30);
+    let rt = runtime();
+    let clock = TestClock::frozen();
+    let counting = CountingStore::new(MemoryStore::with_clock(lease, clock.clone()));
+    // The first wave's first ten creates fail, so the run pauses and seeds the
+    // rest only once the clock moves past the first fold.
+    counting.fail_first_creates(10);
+    // The run never ends, so no Done step assigns what was folded.
+    counting.fail_create_always("spec.c099");
+    let mut config = support::config_for(lease, Some("solo"));
+    config.max_in_flight = SPLITS as u32;
+    // The first reconcile lands at 0 or at least 3.5 s, never inside the
+    // second this test steps through.
+    config.reconcile_interval = Duration::from_secs(3600);
+    let ids: Vec<String> = (0..SPLITS).map(|i| format!("c{i:03}")).collect();
+    let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+    let labels = ComponentLabels::new("seed-deferred", "seed-deferred", "s3");
+    let mut worker = StoreCoordinator::with_clock(
+        SlowPolled(QuietPolled(counting.clone())),
+        config,
+        rt.handle().clone(),
+        Some(CoordinationMetrics::new(&labels)),
+        clock.clone() as Arc<dyn Clock>,
+    )
+    .expect("coordinator");
+    worker
+        .start(Box::new(PhasedPlanner::one_final("seed-deferred:v1", &ids)))
+        .unwrap();
+    let planned = || {
+        metric_value(
+            &handle.render(),
+            "spate_coordination_splits_planned_total",
+            &[("component", "seed-deferred")],
+        )
+        .unwrap_or(0.0)
+    };
+
+    let mut held = support::Held::default();
+    support::drive(&mut worker, &mut held, "claiming the first fold", |h| {
+        !h.splits.is_empty()
+    });
+    // Ends the first pause: every split but c099 is seeded and folded inside
+    // the interval the first fold opened.
+    clock.advance(Duration::from_millis(100));
+    let deadline = Instant::now() + support::DEADLINE;
+    while planned() < (SPLITS - 1) as f64 {
+        assert!(
+            Instant::now() < deadline,
+            "timed out folding the seeded splits"
+        );
+        std::thread::sleep(support::POLL_INTERVAL);
+        held.fold(worker.poll().expect("poll"));
+    }
+    assert!(
+        held.splits.len() < SPLITS - 1,
+        "a step ran before the interval passed"
+    );
+    // The first fold's interval ends here, and no other timer is due.
+    clock.advance(Duration::from_millis(900));
+    support::drive(&mut worker, &mut held, "claiming every folded split", |h| {
+        h.splits.len() == SPLITS - 1
+    });
 }

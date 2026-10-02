@@ -351,8 +351,7 @@ impl<S: CoordinationStore + Clone> Task<S> {
             None => !leads,
         };
         if deposed {
-            // Whoever leads now plans again; publishing here would lose by
-            // revision and demote that leader if it is this worker.
+            // Whoever leads now plans again.
             tracing::info!("leadership changed while seeding; the run publishes nothing");
             self.metrics(|m| m.replan(ReplanOutcome::Error, started.elapsed()));
             return Ok(());

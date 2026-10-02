@@ -994,6 +994,25 @@ mod tests {
         }
     }
 
+    /// A rejected passthrough value is absent from the consumer-creation
+    /// error.
+    #[test]
+    fn open_omits_a_rejected_passthrough_value() {
+        use spate_core::checkpoint::Checkpointer;
+        let mut config = test_config();
+        config
+            .rdkafka
+            .insert("partition.assignment.strategy".into(), "hunter2".into());
+        let mut source = KafkaSource::new(config);
+        let cp = Checkpointer::new();
+        let msg = source
+            .open(SourceCtx::new(cp.handle()))
+            .expect_err("librdkafka rejects the strategy")
+            .to_string();
+        assert!(msg.contains("create consumer"), "{msg}");
+        assert!(!msg.contains("hunter2"), "{msg}");
+    }
+
     /// Reproduces the assignment bookkeeping of a partial revocation: lanes
     /// for the revoked partitions move from `assignment` into `revoking`.
     fn revoke_lanes(source: &mut KafkaSource, revoked: &[i32]) {

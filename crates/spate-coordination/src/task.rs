@@ -2832,19 +2832,63 @@ impl<S: CoordinationStore + Clone> Task<S> {
         });
         match self
             .store
-            .update(Keyspace::Ephemeral, records::LEADER_KEY, val, rev)
+            .update(Keyspace::Ephemeral, records::LEADER_KEY, val.clone(), rev)
             .await
         {
             Ok(CasOutcome::Won(new_rev)) => {
                 self.leadership = Some(new_rev);
                 Ok(())
             }
-            Ok(CasOutcome::Lost) => {
-                tracing::warn!("leadership renewal fenced; demoting");
-                self.leadership = None;
-                self.metrics(|m| m.set_leader(false));
+            Ok(CasOutcome::Lost) => self.reread_leadership(val).await,
+            Err(e) => {
+                tracing::warn!(error = %e, "leadership renewal failed; next beat retries");
+                fatal_only("renewing leadership", &e)
+            }
+        }
+    }
+
+    /// Settles a lost leadership renewal by reading the leader key back.
+    /// A key that still carries this worker's owner and nonce is adopted and
+    /// renewed with `val` in the same beat; any other key, or none, demotes.
+    async fn reread_leadership(&mut self, val: Vec<u8>) -> Result<(), CoordinationError> {
+        let entry = match self
+            .store
+            .get(Keyspace::Ephemeral, records::LEADER_KEY)
+            .await
+        {
+            Ok(entry) => entry,
+            Err(e) => {
+                tracing::warn!(error = %e, "re-reading the leader key failed; next beat retries");
+                return fatal_only("re-reading the leader key", &e);
+            }
+        };
+        let ours = entry.filter(|entry| {
+            serde_json::from_slice::<LeaderVal>(&entry.value)
+                .is_ok_and(|v| v.owner == self.instance && v.nonce == self.nonce)
+        });
+        let Some(entry) = ours else {
+            tracing::warn!("leadership renewal fenced; demoting");
+            self.leadership = None;
+            self.metrics(|m| m.set_leader(false));
+            return Ok(());
+        };
+        self.leadership = Some(entry.revision);
+        match self
+            .store
+            .update(
+                Keyspace::Ephemeral,
+                records::LEADER_KEY,
+                val,
+                entry.revision,
+            )
+            .await
+        {
+            Ok(CasOutcome::Won(new_rev)) => {
+                self.leadership = Some(new_rev);
                 Ok(())
             }
+            // A read behind the write that won; the next beat reads again.
+            Ok(CasOutcome::Lost) => Ok(()),
             Err(e) => {
                 tracing::warn!(error = %e, "leadership renewal failed; next beat retries");
                 fatal_only("renewing leadership", &e)
@@ -3232,8 +3276,8 @@ impl<S: CoordinationStore + Clone> Task<S> {
                 Err(e) => shortfall.note("writing the verdict marker".into(), &e),
             }
         }
-        // A renewal that applied unseen makes the next one lose its CAS and
-        // give up leadership; the key is then still ours, as observed.
+        // A leader-key write that applied unseen can leave the key ours with
+        // no leadership revision held; `leader_observed` still shows it.
         let observed_own = self
             .leader_observed
             .as_ref()

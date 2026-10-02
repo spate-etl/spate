@@ -937,11 +937,10 @@ fn a_lagging_read_after_an_ambiguous_commit_is_read_again() {
     );
 }
 
-/// After an unseen leadership renewal, the next heartbeat's renewal loses
-/// its CAS and gives up leadership; the departure still deletes the key,
-/// which is still this worker's.
+/// A departure after an unseen leadership renewal and the heartbeat that
+/// follows it deletes the leader key.
 #[test]
-fn a_departure_after_a_self_demoting_renewal_deletes_the_leader_key() {
+fn a_departure_after_an_unseen_renewal_and_the_next_beat_deletes_the_leader_key() {
     let rt = runtime();
     let store = FaultStore::new(LEASE);
     let mut a = holding(&rt, &store, config_for(LEASE, Some("worker-a")), &["d0"]);

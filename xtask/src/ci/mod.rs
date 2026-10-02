@@ -4,10 +4,12 @@ mod classify;
 mod event;
 mod graph;
 mod outputs;
+mod scope;
 
 use std::path::Path;
 
 use event::Diff;
+pub(crate) use scope::Scope;
 
 use crate::repo_root;
 
@@ -63,6 +65,17 @@ pub(crate) fn changes(args: &[String]) -> Result<(), String> {
         write!(f, "{out}").map_err(|e| format!("{path}: {e}"))?;
     }
     Ok(())
+}
+
+/// What a local run needs to cover for the changes since `base`, falling back
+/// to everything when the diff cannot be read.
+pub(crate) fn scope_since(root: &Path, base: &str) -> Result<Scope, String> {
+    let git = event::GitDiff::new(root, classify::Event::PullRequest);
+    let Some(paths) = git.since(base) else {
+        println!("note: no usable diff against {base}.");
+        return Ok(Scope::Full);
+    };
+    Ok(scope::scope(&paths, &graph::Graph::load(root)?))
 }
 
 /// The ClickHouse lanes needing a job beyond the primary one. The lane names

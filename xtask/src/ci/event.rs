@@ -80,7 +80,7 @@ impl<'a> GitDiff<'a> {
     /// a source file moved under `docs/` would read as a docs-only change.
     /// `-z` because `core.quotePath` C-quotes a non-ASCII path, which matches
     /// no pattern.
-    fn name_only(&self, from: &str, to: &str) -> Option<Vec<String>> {
+    fn name_only(&self, revs: &[&str]) -> Option<Vec<String>> {
         let out = Command::new("git")
             .args([
                 "diff",
@@ -89,9 +89,8 @@ impl<'a> GitDiff<'a> {
                 "--name-only",
                 "-z",
                 "--no-renames",
-                from,
-                to,
             ])
+            .args(revs)
             .current_dir(self.root)
             .output()
             .ok()?;
@@ -108,6 +107,31 @@ impl<'a> GitDiff<'a> {
     }
 }
 
+impl GitDiff<'_> {
+    /// Everything that differs from the merge base of `base` and `HEAD`:
+    /// commits, staged and unstaged edits, and untracked files. `None` when
+    /// `base` shares no history with `HEAD`.
+    pub(crate) fn since(&self, base: &str) -> Option<Vec<String>> {
+        let merge_base = self.merge_base(base, "HEAD")?;
+        let mut paths = self.name_only(&[&merge_base])?;
+        let untracked = Command::new("git")
+            .args(["ls-files", "--others", "--exclude-standard", "-z"])
+            .current_dir(self.root)
+            .output()
+            .ok()?;
+        if !untracked.status.success() {
+            return None;
+        }
+        paths.extend(
+            String::from_utf8_lossy(&untracked.stdout)
+                .split('\0')
+                .filter(|p| !p.is_empty())
+                .map(str::to_string),
+        );
+        Some(paths)
+    }
+}
+
 impl Diff for GitDiff<'_> {
     fn changed_paths(&self) -> Option<Vec<String>> {
         match self.event {
@@ -117,14 +141,14 @@ impl Diff for GitDiff<'_> {
             Event::PullRequest => {
                 let (base, head) = (env("BASE_SHA"), env("HEAD_SHA"));
                 let merge_base = self.merge_base(&base, &head)?;
-                self.name_only(&merge_base, &head)
+                self.name_only(&[&merge_base, &head])
             }
             // Through `merge-base` because nothing documents
             // `merge_group.base_sha` as an ancestor of `head_sha`.
             Event::MergeGroup => {
                 let (base, head) = (env("MERGE_BASE_SHA"), env("MERGE_HEAD_SHA"));
                 let merge_base = self.merge_base(&base, &head)?;
-                self.name_only(&merge_base, &head)
+                self.name_only(&[&merge_base, &head])
             }
             Event::ForceAll => None,
         }
@@ -135,7 +159,7 @@ impl Diff for GitDiff<'_> {
         if before.is_empty() || before == ZERO_SHA {
             return None;
         }
-        self.name_only(&before, "HEAD")
+        self.name_only(&[&before, "HEAD"])
     }
 }
 

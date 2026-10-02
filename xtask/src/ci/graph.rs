@@ -218,6 +218,15 @@ impl Graph {
             .collect()
     }
 
+    /// Which packages can a change to `crate_name` break? The transitive
+    /// dependents over dev edges too, `crate_name` included, without the fuzz
+    /// harness, which its own job builds.
+    pub(crate) fn test_closure_for(&self, crate_name: &str) -> BTreeSet<String> {
+        let mut set = closure(&self.container_rdeps, crate_name);
+        set.remove(FUZZ_HARNESS);
+        set
+    }
+
     /// Whose published API can a change to `crate_name` move? Dependents over
     /// normal edges alone, since a dev-dependency reaches no public signature.
     pub(crate) fn semver_closure_for(&self, crate_name: &str) -> BTreeSet<String> {

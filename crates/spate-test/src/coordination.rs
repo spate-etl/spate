@@ -19,6 +19,7 @@ struct State {
     events: Vec<CoordinationEvent>,
     commit_outcomes: HashMap<SplitId, VecDeque<CoordinationErrorKind>>,
     commits: Vec<(SplitId, SplitProgress)>,
+    fail_outcomes: HashMap<SplitId, VecDeque<CoordinationErrorKind>>,
     failed: Vec<(SplitId, String)>,
     released: Vec<SplitId>,
     departed: bool,
@@ -137,7 +138,18 @@ impl CoordinatorScript {
             .map(|(_, p)| p.clone())
     }
 
-    /// Every `fail` report so far, in order.
+    /// Script the outcome of the next `fail` for `split` (repeat to script a
+    /// sequence). Unscripted reports succeed. Every attempt is recorded by
+    /// [`failed`](Self::failed), refused or not.
+    pub fn fail_next_report(&self, split: &SplitId, kind: CoordinationErrorKind) {
+        self.lock()
+            .fail_outcomes
+            .entry(split.clone())
+            .or_default()
+            .push_back(kind);
+    }
+
+    /// Every `fail` report attempt so far, in order.
     #[must_use]
     pub fn failed(&self) -> Vec<(SplitId, String)> {
         self.lock().failed.clone()
@@ -230,11 +242,16 @@ impl SplitCoordinator for ScriptedCoordinator {
     }
 
     fn fail(&mut self, split: &SplitId, reason: &str) -> Result<(), CoordinationError> {
-        self.state
-            .lock()
-            .expect("coordinator script poisoned")
-            .failed
-            .push((split.clone(), reason.to_string()));
+        let mut state = self.state.lock().expect("coordinator script poisoned");
+        state.failed.push((split.clone(), reason.to_string()));
+        if let Some(kinds) = state.fail_outcomes.get_mut(split)
+            && let Some(kind) = kinds.pop_front()
+        {
+            return Err(CoordinationError::new(
+                kind,
+                format!("scripted {kind:?} for split {split}"),
+            ));
+        }
         Ok(())
     }
 

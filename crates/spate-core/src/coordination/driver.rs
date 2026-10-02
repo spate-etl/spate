@@ -423,6 +423,8 @@ impl CoordinationDriver {
             for (split, reason) in std::mem::take(&mut self.pending_poison) {
                 if !self.report_poison(&split, &reason) {
                     self.pending_poison.push((split, reason));
+                } else if let Some(&partition) = self.by_split.get(&split) {
+                    self.retire(source, partition, false);
                 }
             }
 
@@ -520,7 +522,9 @@ impl CoordinationDriver {
 
     /// Report an owned split as poison: consumes a delivery attempt and
     /// hands it back for another worker (or quarantine, at the cap). The
-    /// split's lane is retired through the normal loss path.
+    /// split's lane is retired through the normal loss path. A report the
+    /// coordinator answers `Retryable` is re-offered on each poll, and the
+    /// lane is retired once it is accepted.
     pub fn fail<S: SplitSource>(
         &mut self,
         source: &mut S,
@@ -534,6 +538,24 @@ impl CoordinationDriver {
             Ok(()) => {}
             // Fenced: someone already took it; the retire below still applies.
             Err(e) if e.kind == CoordinationErrorKind::Fenced => {}
+            // Retryable: the split stays held and the report is re-offered
+            // on the next poll; the retire happens once it lands.
+            Err(e) if e.kind == CoordinationErrorKind::Retryable => {
+                tracing::warn!(
+                    split = %split,
+                    error = %e,
+                    "poison report refused; retrying while this instance holds the split"
+                );
+                if !self
+                    .pending_poison
+                    .iter()
+                    .any(|(queued, _)| queued == split)
+                {
+                    self.pending_poison
+                        .push((split.clone(), reason.to_string()));
+                }
+                return Ok(());
+            }
             Err(e) => return Err(as_source_error(e)),
         }
         self.retire(source, partition, false);
@@ -732,6 +754,7 @@ impl CoordinationDriver {
         tenancy.fenced |= fenced;
         self.by_split.remove(&tenancy.split.id);
         let split = tenancy.split.id.clone();
+        self.pending_poison.retain(|(queued, _)| queued != &split);
         if let Some(lane) = tenancy.lane.take() {
             if tenancy.completed || tenancy.handed_off {
                 self.pending_retired.push(lane);
@@ -1805,6 +1828,69 @@ mod tests {
         d.fail(&mut s, &SplitId::new("a").unwrap(), "again")
             .unwrap();
         assert_eq!(script.fails().len(), 1);
+    }
+
+    #[test]
+    fn a_retryable_failure_report_is_retried_until_it_lands() {
+        let script = Script::default();
+        let mut d = driver(&script);
+        let mut s = TestSource::default();
+        script.push(vec![gained("a", 1, None)]);
+        poll(&mut d, &mut s);
+        script.fail_next_report("a", CoordinationErrorKind::Retryable);
+
+        d.fail(&mut s, &SplitId::new("a").unwrap(), "undecodable object")
+            .unwrap();
+        assert_eq!(script.fails().len(), 1);
+        assert!(
+            s.closed.is_empty(),
+            "the split is held until the report lands"
+        );
+
+        let event = poll(&mut d, &mut s);
+        assert_eq!(script.fails().len(), 2);
+        assert_eq!(s.closed, vec!["a"]);
+        assert!(matches!(event, SourceEvent::LanesRevoked { .. }));
+        poll(&mut d, &mut s);
+        assert_eq!(script.fails().len(), 2);
+    }
+
+    #[test]
+    fn a_queued_failure_report_is_dropped_when_the_split_is_lost() {
+        let script = Script::default();
+        let mut d = driver(&script);
+        let mut s = TestSource::default();
+        script.push(vec![gained("a", 1, None)]);
+        poll(&mut d, &mut s);
+        script.fail_next_report("a", CoordinationErrorKind::Retryable);
+        script.fail_next_report("a", CoordinationErrorKind::Retryable);
+        d.fail(&mut s, &SplitId::new("a").unwrap(), "undecodable object")
+            .unwrap();
+
+        // The re-offer is refused again, then the loss arrives.
+        script.push(vec![CoordinationEvent::Lost {
+            split: split("a").id,
+        }]);
+        script.push(vec![gained("a", 2, None)]);
+        poll(&mut d, &mut s);
+        poll(&mut d, &mut s);
+        assert_eq!(script.fails().len(), 2, "a stale report is not re-offered");
+        assert_eq!(d.assignments().len(), 1, "the regained split stays live");
+    }
+
+    #[test]
+    fn a_fatal_failure_report_is_returned() {
+        let script = Script::default();
+        let mut d = driver(&script);
+        let mut s = TestSource::default();
+        script.push(vec![gained("a", 1, None)]);
+        poll(&mut d, &mut s);
+        script.fail_next_report("a", CoordinationErrorKind::Fatal);
+
+        let err = d
+            .fail(&mut s, &SplitId::new("a").unwrap(), "undecodable object")
+            .unwrap_err();
+        assert!(is_fatal(&err), "{err}");
     }
 
     #[test]

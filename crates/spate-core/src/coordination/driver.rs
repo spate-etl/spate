@@ -276,7 +276,7 @@ pub struct CoordinationDriver {
     /// Poison reports the backend refused, with the reason to re-offer.
     /// A gain refused on resume has no tenancy, so until its report lands
     /// nothing else here hands the split back and the backend keeps
-    /// renewing its lease.
+    /// renewing its lease. Loss or quarantine of the split drops its entry.
     pending_poison: Vec<(SplitId, String)>,
     all_complete: bool,
     stalled: Option<(u64, u64)>,
@@ -707,6 +707,7 @@ impl CoordinationDriver {
                 }
             }
             CoordinationEvent::Lost { split } => {
+                self.pending_poison.retain(|(queued, _)| queued != &split);
                 if let Some(&partition) = self.by_split.get(&split) {
                     self.retire(source, partition, false);
                 }
@@ -714,6 +715,7 @@ impl CoordinationDriver {
             }
             CoordinationEvent::Quarantined { split, attempts } => {
                 tracing::warn!(split = %split, attempts, "split quarantined");
+                self.pending_poison.retain(|(queued, _)| queued != &split);
                 if let Some(&partition) = self.by_split.get(&split) {
                     self.retire(source, partition, false);
                 }
@@ -1990,6 +1992,59 @@ mod tests {
         assert_eq!(script.fails().len(), 2);
         poll(&mut d, &mut s);
         assert_eq!(script.fails().len(), 2);
+    }
+
+    /// A queued gain-time report is dropped when its split is lost, so it
+    /// cannot fail the tenancy that regains the split. Regression for #904.
+    #[test]
+    fn stale_rejected_gain_report_does_not_fail_a_regained_split() {
+        let script = Script::default();
+        let mut d = driver(&script);
+        let mut s = rejecting(&["a"]);
+        for _ in 0..3 {
+            script.fail_next_report("a", CoordinationErrorKind::Retryable);
+        }
+        script.push(vec![gained("a", 1, Some(7))]);
+        d.poll_events(&mut s, Duration::ZERO).unwrap_err();
+        s.reject_resume.clear();
+        script.push(vec![CoordinationEvent::Lost {
+            split: split("a").id,
+        }]);
+        script.push(vec![gained("a", 2, Some(7))]);
+        for _ in 0..5 {
+            let _ = d.poll_events(&mut s, Duration::ZERO);
+        }
+        assert_eq!(
+            script.fails().len(),
+            2,
+            "the stale report is not re-offered"
+        );
+        assert_eq!(d.assignments().len(), 1);
+    }
+
+    /// A queued gain-time report is dropped when its split is quarantined.
+    #[test]
+    fn rejected_gain_report_is_dropped_when_the_split_is_quarantined() {
+        let script = Script::default();
+        let mut d = driver(&script);
+        let mut s = rejecting(&["a"]);
+        for _ in 0..3 {
+            script.fail_next_report("a", CoordinationErrorKind::Retryable);
+        }
+        script.push(vec![gained("a", 1, Some(7))]);
+        d.poll_events(&mut s, Duration::ZERO).unwrap_err();
+        script.push(vec![CoordinationEvent::Quarantined {
+            split: split("a").id,
+            attempts: 3,
+        }]);
+        for _ in 0..4 {
+            let _ = d.poll_events(&mut s, Duration::ZERO);
+        }
+        assert_eq!(
+            script.fails().len(),
+            2,
+            "the stale report is not re-offered"
+        );
     }
 
     #[test]

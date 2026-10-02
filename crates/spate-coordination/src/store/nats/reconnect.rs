@@ -58,7 +58,11 @@ impl Rejection {
         };
         let mut reasons = Vec::new();
         let mut rejected = true;
-        for server in pool {
+        for (i, server) in pool.iter().enumerate() {
+            // async-nats records each failure on the first entry for an address.
+            if pool[..i].iter().any(|s| s.addr == server.addr) {
+                continue;
+            }
             let before = baseline
                 .iter()
                 .find(|(addr, _)| *addr == server.addr)
@@ -289,6 +293,53 @@ mod tests {
         assert!(recorded(&rejection).is_none());
         rejection.observe(&[server(1, 2, Some(auth_error()))]);
         assert_eq!(recorded(&rejection).map(|(_, at)| at), Some(2));
+    }
+
+    /// Each server's failures count from its own baseline, and a server that
+    /// joins the pool after the baseline counts from zero.
+    #[test]
+    fn each_server_counts_from_its_own_baseline() {
+        let (rejection, _) = attached(2);
+        rejection.observe(&[server(1, 0, None), server(2, 8, Some(auth_error()))]);
+        rejection.observe(&[
+            server(1, 1, Some(auth_error())),
+            server(2, 8, Some(auth_error())),
+        ]);
+        assert!(recorded(&rejection).is_none());
+        rejection.observe(&[
+            server(1, 1, Some(auth_error())),
+            server(2, 9, Some(auth_error())),
+        ]);
+        assert!(
+            recorded(&rejection).is_some(),
+            "both servers rejected since the baseline"
+        );
+
+        let (rejection, _) = attached(1);
+        let discovered = |failed_attempts, last_error| Server {
+            is_discovered: true,
+            ..server(3, failed_attempts, last_error)
+        };
+        rejection.observe(&[server(1, 0, None)]);
+        rejection.observe(&[server(1, 1, Some(auth_error())), discovered(0, None)]);
+        assert!(recorded(&rejection).is_none());
+        rejection.observe(&[
+            server(1, 1, Some(auth_error())),
+            discovered(1, Some(auth_error())),
+        ]);
+        assert!(
+            recorded(&rejection).is_some(),
+            "a server added after the baseline rejected"
+        );
+    }
+
+    /// A server named twice in the pool counts once.
+    #[test]
+    fn a_server_named_twice_counts_once() {
+        let (rejection, _) = attached(1);
+        rejection.observe(&[server(1, 0, None), server(1, 0, None)]);
+        rejection.observe(&[server(1, 1, Some(auth_error())), server(1, 0, None)]);
+        assert!(recorded(&rejection).is_some());
     }
 
     /// Before `attach`, a rejected pool records nothing.

@@ -835,8 +835,9 @@ mod tests {
         );
     }
 
-    /// An error body that arrives in several chunks and never ends is read up
-    /// to [`ERROR_BODY_LIMIT`] and no further.
+    /// An error body that arrives in several chunks and never ends is read
+    /// until [`ERROR_BODY_LIMIT`] bytes have arrived, and no further chunk is
+    /// awaited.
     #[tokio::test]
     async fn a_chunked_error_body_is_read_to_the_limit() {
         let mut chunks = chunk(&[b'a'; 10]);

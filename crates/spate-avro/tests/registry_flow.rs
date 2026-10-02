@@ -238,10 +238,9 @@ async fn miss_reports_not_ready_then_decodes_after_fetch() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn retriable_registry_errors_are_retried() {
     let stub = StubRegistry::default();
-    // 502/503 are retriable in the registry client, but every transient
-    // failure now leaves the id absent and is retried by the deserializer
-    // replaying the payload (bounded by per-id fetch backoff), never
-    // negatively cached.
+    // A transient failure leaves the id absent, and the deserializer's replay
+    // refetches it (bounded by per-id fetch backoff); it is never negatively
+    // cached.
     stub.script("/schemas/ids/9", 503, "shard warming up", 2);
     stub.script("/schemas/ids/9", 200, &schema_body(SCHEMA_V1), 0);
     let addr = stub.clone().serve().await;
@@ -657,6 +656,41 @@ async fn an_unknown_id_names_the_registry_error() {
         matches!(&err, DeserError::SchemaUnavailable { reason } if reason.contains("40403")),
         "{err}"
     );
+}
+
+/// A `403` on the pre-warm is logged, and the id still decodes from the
+/// by-id fetch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_prewarm_forbidden_is_not_a_rejection() {
+    let stub = StubRegistry::default();
+    stub.script("/subjects/events-value/versions/latest", 403, "{}", 0);
+    stub.script("/schemas/ids/42", 200, &schema_body(SCHEMA_V1), 0);
+    let addr = stub.clone().serve().await;
+    let mut cfg = settings(addr, Duration::from_secs(30));
+    // Pre-warm is sequential and ends on a recorded rejection, so a request
+    // for the second subject means the first was handled and not recorded.
+    cfg.prewarm_subjects = vec!["events-value".into(), "sentinel-value".into()];
+    let builder =
+        AvroDeserializerBuilder::from_settings(&cfg, &tokio::runtime::Handle::current()).unwrap();
+    let mut deser = builder.build_value().unwrap();
+    let hits = stub.clone();
+    tokio::task::spawn_blocking(move || {
+        spate_test::wait_until(
+            Duration::from_secs(10),
+            "the pre-warm reaches the second subject",
+            || hits.path_hits("/subjects/sentinel-value/versions/latest") > 0,
+        );
+    })
+    .await
+    .unwrap();
+    let payload = confluent_payload(42, 1);
+    let rows = tokio::task::spawn_blocking(move || {
+        let mut out = Collected(Vec::new());
+        drive_until_ready(&mut deser, &payload, &mut out).map(|()| out.0.len())
+    })
+    .await
+    .unwrap();
+    assert_eq!(rows.unwrap(), 1);
 }
 
 /// The target and `Authorization` headers of each request a stub received.

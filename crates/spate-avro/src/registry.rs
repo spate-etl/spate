@@ -739,6 +739,32 @@ mod tests {
         }
     }
 
+    /// A registry that accepts the connection and never answers fails the
+    /// fetch as transient once the request timeout elapses.
+    #[tokio::test(start_paused = true)]
+    async fn a_registry_that_never_answers_times_out() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                held.push(stream);
+            }
+        });
+        let start = tokio::time::Instant::now();
+        let fetched = tokio::time::timeout(
+            REQUEST_TIMEOUT * 2,
+            fetch(&config(&format!("http://{addr}"), None), vec![]),
+        )
+        .await
+        .expect("the request timeout ends the fetch");
+        assert!(
+            matches!(&fetched, Err(Failure::Transient(reason)) if reason.contains("timed out")),
+            "{fetched:?}"
+        );
+        assert_eq!(start.elapsed(), REQUEST_TIMEOUT);
+    }
+
     /// An error body is kept trimmed and cut to [`ERROR_BODY_LIMIT`] bytes on
     /// a character boundary.
     #[test]

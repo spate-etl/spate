@@ -67,8 +67,8 @@ pub(crate) struct PlanRun {
 impl<S: CoordinationStore + Clone> Task<S> {
     /// Race for the leadership lease; the winner schedules a plan run.
     ///
-    /// A failed write reads the key back and leads only if the key holds the
-    /// exact value written.
+    /// A write that fails or loses reads the key back and leads only if the
+    /// key holds the exact value written.
     pub(crate) async fn try_elect(&mut self) -> Result<(), CoordinationError> {
         let generation = self.plan.as_ref().map_or(0, |(p, _)| p.generation) + 1;
         let val = records::encode_val(&LeaderVal {
@@ -77,23 +77,25 @@ impl<S: CoordinationStore + Clone> Task<S> {
             nonce: self.nonce.clone(),
             generation,
         });
-        let won = match self
+        let outcome = self
             .store
             .create(Keyspace::Ephemeral, records::LEADER_KEY, val.clone())
-            .await
-        {
+            .await;
+        let won = match outcome {
             Ok(CasOutcome::Won(rev)) => Some(rev),
-            Ok(CasOutcome::Lost) => None, // someone else won; watch will show them
+            Ok(CasOutcome::Lost) => {
+                let adopted = self.adopt_own_leader_key(&val).await?;
+                if adopted.is_some() {
+                    tracing::info!(
+                        generation,
+                        "election create reported lost; the leader key is ours"
+                    );
+                }
+                adopted
+            }
             Err(e) => {
                 fatal_only("writing the leader key", &e)?;
-                // Bytes equality pins this election's generation. Owner and
-                // nonce alone also match this process's key from an earlier
-                // term, served by a lagging replica.
-                let adopted = self
-                    .read_leader_key()
-                    .await?
-                    .filter(|entry| entry.value == val)
-                    .map(|entry| entry.revision);
+                let adopted = self.adopt_own_leader_key(&val).await?;
                 if adopted.is_some() {
                     tracing::info!(
                         generation,
@@ -123,6 +125,22 @@ impl<S: CoordinationStore + Clone> Task<S> {
         }
         self.bump_generation(generation).await?;
         Ok(())
+    }
+
+    /// The revision of the leader key if it holds exactly `val`.
+    ///
+    /// Bytes equality pins this election's generation. Owner and nonce alone
+    /// also match this process's key from an earlier term, served by a lagging
+    /// replica.
+    async fn adopt_own_leader_key(
+        &mut self,
+        val: &[u8],
+    ) -> Result<Option<Revision>, CoordinationError> {
+        Ok(self
+            .read_leader_key()
+            .await?
+            .filter(|entry| entry.value == val)
+            .map(|entry| entry.revision))
     }
 
     /// Whether `value` is a leader key with this worker's owner and nonce.

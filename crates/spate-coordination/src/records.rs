@@ -593,6 +593,58 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
+    /// The portable descriptor allowance fits the largest schema-3 spec envelope.
+    #[test]
+    fn portable_descriptor_fits_the_largest_spec_record() {
+        let id = SplitId::new("a".repeat(128)).unwrap();
+        let record = |descriptor| {
+            SplitSpecRecord::planned(
+                &SplitSpec::new(id.clone(), descriptor).with_weight(u64::MAX),
+                u64::MAX,
+                u64::MAX,
+            )
+        };
+        assert_eq!(record(vec![]).encode().len(), 254);
+        let descriptor: Vec<u8> = (0..=u8::MAX).cycle().take(294_720).collect();
+        let fits = record(descriptor.clone());
+        assert_eq!(fits.encode().len(), 393_214);
+        assert!(fits.encode().len() <= 384 * 1024);
+        assert_eq!(fits.spec().unwrap().descriptor, descriptor);
+        assert_eq!(record(vec![0; 294_721]).encode().len(), 393_218);
+        assert!(record(vec![0; 294_721]).encode().len() > 384 * 1024);
+    }
+
+    /// Cursor capacity includes the JSON-escaped fingerprint and padded base64.
+    #[test]
+    fn planner_cursor_budget_includes_the_escaped_fingerprint() {
+        const CAP: usize = 384 * 1024;
+        let record = |fingerprint: &str, cursor: &[u8]| {
+            let mut record = PlanRecord::new(fingerprint.to_owned());
+            record.generation = u64::MAX;
+            record.finality = PlanFinalityRepr::Final;
+            record.planned = u64::MAX;
+            record.updated_at_ms = i64::MIN;
+            record.planner_state = Some(b64_encode(cursor));
+            record
+        };
+        assert_eq!(record("", &[]).encode().len(), 169);
+        for fingerprint in ["", "job:v1", "\"\\\n\t\u{0000}"] {
+            let envelope = record(fingerprint, &[]).encode().len();
+            let allowance = 3 * ((CAP - envelope) / 4);
+            assert!(record(fingerprint, &vec![0; allowance]).encode().len() <= CAP);
+            assert!(record(fingerprint, &vec![0; allowance + 1]).encode().len() > CAP);
+        }
+        let escaped = "\"\\\n\t\u{0000}";
+        let raw_fingerprint_allowance = 3 * ((CAP - 169 - escaped.len()) / 4);
+        assert!(
+            record(escaped, &vec![0; raw_fingerprint_allowance])
+                .encode()
+                .len()
+                > CAP
+        );
+        assert!(record(&"a".repeat(CAP), &[]).encode().len() > CAP);
+    }
+
     #[test]
     fn split_records_round_trip_and_validate() {
         let spec = SplitSpec::new(

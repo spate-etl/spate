@@ -277,6 +277,18 @@ receive the descriptors and never re-enumerate.
   re-runs the planner on the replan interval; carry a cursor between runs with
   `SplitPlan::with_planner_state` and read it back from `ctx.planner_state`.
 
+Measure each encoded descriptor's raw byte length against the portable budget
+in [`SplitSpec`](https://docs.rs/spate-core/latest/spate_core/coordination/struct.SplitSpec.html).
+The stored spec adds padded-base64 expansion and a JSON envelope, so raw bytes
+alone do not measure the complete stored value. Reduce the metadata carried by
+each split when its descriptor exceeds that allowance.
+
+For a planner cursor, measure the complete plan record with the cursor encoded
+as padded base64 and the full fingerprint escaped as JSON. The
+[`planner_state` contract](https://docs.rs/spate-core/latest/spate_core/coordination/struct.SplitPlan.html#structfield.planner_state)
+explains how the fingerprint reduces available cursor space. Size seed and
+committed progress state against their own records' overhead.
+
 Sizing guidance: roughly uniform-cost splits, tens of MB to ~128 MB (or
 the row-count equivalent). Migrating from a pre-coordination checkpoint:
 attach it with `PlannedSplit::with_seed(progress)`; seeds are

@@ -15,18 +15,29 @@ use crate::split::Packing;
 use object_store::ObjectStore;
 use object_store::path::Path;
 use spate_core::coordination::{
-    CoordinationError, CoordinationErrorKind, PlanContext, PlanFinality, PlannedSplit, SplitPlan,
-    SplitPlanner, SplitSpec,
+    CoordinationError, CoordinationErrorKind, PlanContext, PlanFinality, PlannedSplit, SplitId,
+    SplitPlan, SplitPlanner, SplitSpec,
 };
 use spate_core::error::ErrorClass;
 use std::sync::Arc;
 use tokio::runtime::Handle;
 
-/// Hard ceiling on one split's encoded descriptor. The open-cost floor
-/// keeps real descriptors three orders of magnitude below this; the guard
-/// exists so a future packing change can never silently exceed a backend's
-/// value-size cap (the NATS backend stores at most 512 KiB per value).
-const MAX_DESCRIPTOR_BYTES: usize = 400 * 1024;
+// Reserves padded-base64 expansion and the maximum schema-3 spec envelope.
+const MAX_DESCRIPTOR_BYTES: usize = 294_720;
+
+fn validate_descriptor_size(id: &SplitId, descriptor: &[u8]) -> Result<(), CoordinationError> {
+    if descriptor.len() > MAX_DESCRIPTOR_BYTES {
+        return Err(CoordinationError::new(
+            CoordinationErrorKind::Fatal,
+            format!(
+                "split {id} descriptor is {} raw bytes, above the portable \
+                 {MAX_DESCRIPTOR_BYTES}-byte raw limit",
+                descriptor.len()
+            ),
+        ));
+    }
+    Ok(())
+}
 
 /// Job identity presented by every worker. Derived from configuration
 /// and the framer's resync delimiter only, never from the listing, so all
@@ -156,17 +167,7 @@ impl SplitPlanner for S3Planner {
         for split in packed {
             let id = split.id()?;
             let descriptor = split.descriptor().encode()?;
-            if descriptor.len() > MAX_DESCRIPTOR_BYTES {
-                return Err(CoordinationError::new(
-                    CoordinationErrorKind::Fatal,
-                    format!(
-                        "split {id} descriptor is {} bytes, above the {MAX_DESCRIPTOR_BYTES}-byte \
-                         ceiling; this is a planner bug (the open-cost floor should bound members \
-                         per split), please report it",
-                        descriptor.len()
-                    ),
-                ));
-            }
+            validate_descriptor_size(&id, &descriptor)?;
             splits.push(PlannedSplit::new(
                 SplitSpec::new(id, descriptor).with_weight(split.weight()),
             ));
@@ -226,6 +227,47 @@ mod tests {
             ),
             None,
         )
+    }
+
+    /// The raw descriptor ceiling accepts its boundary and rejects the next byte.
+    /// Regression for #849.
+    #[test]
+    fn descriptor_size_boundary_is_inclusive() {
+        let id = SplitId::new("boundary").unwrap();
+        assert!(validate_descriptor_size(&id, &vec![0; 294_719]).is_ok());
+        assert!(validate_descriptor_size(&id, &vec![0; 294_720]).is_ok());
+        let err = validate_descriptor_size(&id, &vec![0; 294_721]).unwrap_err();
+        assert_eq!(err.kind, CoordinationErrorKind::Fatal);
+        assert!(err.to_string().contains("294721"), "{err}");
+    }
+
+    /// Listed metadata above the portable descriptor budget is rejected.
+    /// Regression for #849.
+    #[test]
+    fn planner_rejects_a_descriptor_above_the_portable_budget() {
+        let rt = runtime();
+        let key = format!("data/{}", "a".repeat(300 * 1024));
+        let store = seeded_store(&[(&key, 1)]);
+        let entries = rt
+            .block_on(list_all(&store, Some(&Path::from("data"))))
+            .unwrap();
+        let packed = crate::split::pack(entries, &packing(64 * MB));
+        assert_eq!(packed.len(), 1);
+        let descriptor = packed[0].descriptor().encode().unwrap();
+        assert!(descriptor.len() > 294_720);
+        assert!(descriptor.len() < 409_600);
+        let id = packed[0].id().unwrap();
+        let mut p = planner(store, rt.handle().clone(), 64 * MB);
+        let err = match p.plan(PlanContext::new(None, 1)) {
+            Ok(_) => panic!("planner accepted a descriptor above the portable budget"),
+            Err(err) => err,
+        };
+        assert_eq!(err.kind, CoordinationErrorKind::Fatal);
+        let message = err.to_string();
+        assert!(message.contains(id.as_str()), "{message}");
+        assert!(message.contains(&descriptor.len().to_string()), "{message}");
+        assert!(message.contains("294720"), "{message}");
+        assert!(message.contains("portable"), "{message}");
     }
 
     #[test]

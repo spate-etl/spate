@@ -26,6 +26,9 @@
 //! rejected on the first connection, are Fatal with an actionable message.
 //! The first connection tries each server once; only a rejected credential
 //! ends it early, so another rejection is Fatal only on the last server tried.
+//! After startup the client reconnects on its own, and store operations are
+//! Fatal once every server has failed since the last successful connect with
+//! a rejection as its latest failure.
 //! No `async-nats` type appears in any public signature (0.x policy: single
 //! pinned minor, internal only).
 //!
@@ -48,6 +51,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+mod reconnect;
 #[cfg(test)]
 mod test_tls;
 mod tls;
@@ -347,6 +351,8 @@ impl NatsConfig {
 }
 
 struct Buckets {
+    client: async_nats::Client,
+    rejection: Arc<reconnect::Rejection>,
     state: kv::Store,
     lease: kv::Store,
     /// Set once the state bucket accepts per-message TTLs.
@@ -404,7 +410,8 @@ impl NatsStore {
     }
 
     async fn buckets(&self) -> Result<&Buckets, StoreError> {
-        self.inner
+        let buckets = self
+            .inner
             .buckets
             .get_or_try_init(|| {
                 connect(
@@ -413,7 +420,9 @@ impl NatsStore {
                     self.inner.lease_ttl,
                 )
             })
-            .await
+            .await?;
+        buckets.rejection.check(&buckets.client)?;
+        Ok(buckets)
     }
 
     /// How long a listing or watch snapshot waits for its next message.
@@ -429,11 +438,12 @@ impl NatsStore {
     }
 }
 
-async fn connect(
+/// A client connected to `servers`, whose reconnects report to `rejection`.
+async fn client(
     config: &NatsConfig,
     servers: &[async_nats::ServerAddr],
-    lease_ttl: Duration,
-) -> Result<Buckets, StoreError> {
+    rejection: &Arc<reconnect::Rejection>,
+) -> Result<async_nats::Client, StoreError> {
     let mut options = async_nats::ConnectOptions::new();
     match &config.credentials {
         NatsCredentials::None => {}
@@ -471,11 +481,26 @@ async fn connect(
     // Passed without `tls` too: a server that requires TLS upgrades a
     // `nats://` connection through it.
     options = options.tls_client_config(tls_config);
+    let observer = Arc::clone(rejection);
+    options = options.reconnect_to_server_callback(move |pool, _| {
+        observer.observe(&pool);
+        std::future::ready(None)
+    });
     let client = options.connect(servers).await.map_err(connect_error)?;
     if fallback && !tls_certain && client.server_info().tls_required {
         warn_mozilla_fallback();
     }
+    rejection.attach(&client);
+    Ok(client)
+}
 
+async fn connect(
+    config: &NatsConfig,
+    servers: &[async_nats::ServerAddr],
+    lease_ttl: Duration,
+) -> Result<Buckets, StoreError> {
+    let rejection = Arc::new(reconnect::Rejection::default());
+    let client = client(config, servers, &rejection).await?;
     let info = client.server_info();
     if !server_at_least(&info.version, MIN_SERVER) {
         return Err(StoreError::Fatal(format!(
@@ -485,7 +510,7 @@ async fn connect(
         )));
     }
 
-    let jetstream = async_nats::jetstream::new(client);
+    let jetstream = async_nats::jetstream::new(client.clone());
     let (state, adopted) = ensure_bucket(
         &jetstream,
         kv::Config {
@@ -524,6 +549,8 @@ async fn connect(
     )
     .await?;
     Ok(Buckets {
+        client,
+        rejection,
         state,
         lease,
         state_marker_ttl,
@@ -1069,7 +1096,7 @@ mod tests {
 
     /// Serves a NATS server on `127.0.0.1` that answers every CONNECT with an
     /// authorization violation, and returns its port.
-    async fn serve_authorization_violation() -> u16 {
+    pub(super) async fn serve_authorization_violation() -> u16 {
         use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();

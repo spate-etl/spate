@@ -23,6 +23,8 @@ use spate_coordination::{
     StoreCoordinator,
 };
 use spate_test_support::container_image;
+use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use support::{Held, PhasedPlanner, crash, drive, drive_pair, runtime, split_id};
 use testcontainers::core::{IntoContainerPort, WaitFor};
@@ -725,4 +727,105 @@ authorization { users: [ { user: spate, password: spate } ] }
         }
         other => panic!("expected Fatal, got {other:?}"),
     }
+}
+
+/// A TCP proxy on `127.0.0.1` that forwards each new connection to the port
+/// `route` last named.
+struct Proxy {
+    port: u16,
+    target: Arc<AtomicU16>,
+    live: Arc<Mutex<Vec<tokio::task::AbortHandle>>>,
+}
+
+impl Proxy {
+    async fn start(target: u16) -> Proxy {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind a local port");
+        let port = listener.local_addr().expect("local address").port();
+        let target = Arc::new(AtomicU16::new(target));
+        let live = Arc::new(Mutex::new(Vec::new()));
+        let (to, conns) = (Arc::clone(&target), Arc::clone(&live));
+        tokio::spawn(async move {
+            while let Ok((mut client, _)) = listener.accept().await {
+                let port = to.load(Ordering::SeqCst);
+                let forward = tokio::spawn(async move {
+                    if let Ok(mut server) =
+                        tokio::net::TcpStream::connect(("127.0.0.1", port)).await
+                    {
+                        let _ = tokio::io::copy_bidirectional(&mut client, &mut server).await;
+                    }
+                });
+                conns.lock().unwrap().push(forward.abort_handle());
+            }
+        });
+        Proxy { port, target, live }
+    }
+
+    /// Sends new connections to `target` and closes every open one.
+    fn route(&self, target: u16) {
+        self.target.store(target, Ordering::SeqCst);
+        for forward in self.live.lock().unwrap().drain(..) {
+            forward.abort();
+        }
+    }
+}
+
+/// A NATS server that accepts only `spate` with `password`.
+fn start_nats_with_password(password: &str) -> (Container<GenericImage>, u16) {
+    let conf = format!(
+        "jetstream: enabled\nauthorization {{ users: [ {{ user: spate, password: {password} }} ] }}\n"
+    );
+    let nats = nats_image(None)
+        .with_copy_to("/etc/nats/auth.conf", conf.into_bytes())
+        .with_cmd(["-c", "/etc/nats/auth.conf"])
+        .start()
+        .expect("start NATS");
+    let port = nats.get_host_port_ipv4(CLIENT_PORT).expect("mapped port");
+    (nats, port)
+}
+
+/// A credential the server rejects on a reconnect after startup fails store
+/// operations with a fatal error, and a later successful reconnect clears it.
+#[test]
+#[ignore = "needs Docker; run explicitly"]
+fn a_credential_rejected_at_reconnect_is_fatal() {
+    let (_accepting, accepting) = start_nats_with_password("spate");
+    let (_rotated, rotated) = start_nats_with_password("rotated");
+    let rt = runtime();
+    rt.block_on(async {
+        let proxy = Proxy::start(accepting).await;
+        let mut config = nats_config(proxy.port, "reconnect");
+        config.credentials = NatsCredentials::UserPassword {
+            username: "spate".into(),
+            password: Secret::new("spate"),
+        };
+        let store = NatsStore::new(config, LEASE).expect("valid config");
+        store
+            .get(Keyspace::Durable, "k")
+            .await
+            .expect("first connection");
+
+        // Each attempt is bounded because a request issued while
+        // disconnected waits for the client's request timeout.
+        let attempt = || tokio::time::timeout(LEASE / 4, store.get(Keyspace::Durable, "k"));
+        proxy.route(rotated);
+        let deadline = Instant::now() + support::DEADLINE;
+        let message = loop {
+            assert!(
+                Instant::now() < deadline,
+                "the rejection never became fatal"
+            );
+            if let Ok(Err(StoreError::Fatal(message))) = attempt().await {
+                break message;
+            }
+        };
+        assert!(message.contains("authorization violation"), "{message}");
+
+        proxy.route(accepting);
+        let deadline = Instant::now() + support::DEADLINE;
+        while !matches!(attempt().await, Ok(Ok(_))) {
+            assert!(Instant::now() < deadline, "the store never recovered");
+        }
+    });
 }

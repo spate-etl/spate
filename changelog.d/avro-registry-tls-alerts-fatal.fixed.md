@@ -7,5 +7,5 @@ handshake parameter. The error names the registry URL and the alert or the
 mismatch. In previous versions these were retried without limit while the batch
 was held. A registry that requires a client certificate stops the pipeline as
 well, including a TLS 1.3 registry that refuses the client after the
-handshake. That refusal can take a few replays of the payload to stop the
-pipeline. Other alerts, such as `internal_error`, stay transient.
+handshake. That refusal can take a few fetches of the schema to stop the
+pipeline, each after a backoff that starts at 200 ms and doubles up to 5 s. Other alerts, such as `internal_error`, stay transient.

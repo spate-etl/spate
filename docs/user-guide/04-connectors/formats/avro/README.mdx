@@ -95,9 +95,10 @@ A registry that requires one refuses the client with an alert such as
 `CertificateRequired`, during the handshake or, under TLS 1.3, after it, and
 that stops the pipeline too. A refusal after the handshake can close the
 connection before the request is sent, and that fetch is transient, so the stop
-can take a few replays of the payload. The error names the registry URL,
-without credentials, and the status with the start of the registry's response,
-the certificate error, the alert or the mismatch.
+can take a few fetches of the schema, each after a backoff that starts at
+200 ms and doubles up to 5 s. The error names the registry URL, without
+credentials, and the status with the start of the registry's response, the
+certificate error, the alert or the mismatch.
 The deserializer learns of the rejection from a fetch, so the pipeline stops at
 the first payload whose schema is not cached. Schemas already cached keep
 decoding until then, and a pipeline that receives no payload keeps running.

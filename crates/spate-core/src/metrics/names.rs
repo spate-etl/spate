@@ -202,7 +202,9 @@ pub const COORDINATION_SPLITS_OWNED: &str = "spate_coordination_splits_owned";
 pub const COORDINATION_SPLITS_COMPLETED: &str = "spate_coordination_splits_completed";
 /// Splits parked in quarantine after exhausting delivery attempts.
 pub const COORDINATION_SPLITS_QUARANTINED: &str = "spate_coordination_splits_quarantined";
-/// Distinct live workers observed, including this instance.
+/// Distinct live workers observed, including this instance; a worker that
+/// has handed back its last split through `SplitCoordinator::release`
+/// counts itself only while its own presence key is in its view.
 pub const COORDINATION_LIVE_WORKERS: &str = "spate_coordination_live_workers";
 /// 1 while this worker holds the planner leadership lease.
 pub const COORDINATION_LEADER: &str = "spate_coordination_leader";

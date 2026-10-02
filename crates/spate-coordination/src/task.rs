@@ -1859,7 +1859,7 @@ impl<S: CoordinationStore + Clone> Task<S> {
             return;
         }
         let members: BTreeSet<String> = peers().cloned().collect();
-        let live = protocol::live_workers(&self.presence, &self.instance);
+        let live = self.live_workers();
         match &self.reported_members {
             None => {
                 if !members.is_empty() {
@@ -1883,12 +1883,21 @@ impl<S: CoordinationStore + Clone> Task<S> {
         self.reported_members = Some(members);
     }
 
+    /// Fleet size as this worker reports it; once parting, it counts itself
+    /// only while its own presence key is in its view.
+    fn live_workers(&self) -> usize {
+        protocol::live_workers(
+            &self.presence,
+            (!self.parting).then_some(self.instance.as_str()),
+        )
+    }
+
     fn update_gauges(&self) {
         self.metrics(|m| {
             m.set_splits_owned(self.owned.len());
             m.set_splits_completed(usize::try_from(self.completed_count).unwrap_or(usize::MAX));
             m.set_splits_quarantined(usize::try_from(self.quarantined_count).unwrap_or(usize::MAX));
-            m.set_live_workers(protocol::live_workers(&self.presence, &self.instance));
+            m.set_live_workers(self.live_workers());
             m.set_leader(self.leadership.is_some());
             m.set_idle(self.owned.is_empty());
             m.set_splits_draining(self.revoking.len());

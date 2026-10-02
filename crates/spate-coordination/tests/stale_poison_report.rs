@@ -124,10 +124,11 @@ impl SplitSource for Source {
     fn close_split(&mut self, _: &SplitId) {}
 }
 
-/// The store loses and regains the split before the driver's next poll, so both
-/// events queue together. Returns the durable record's attempts before and after
-/// the driver polls the batch.
-fn run() -> (u64, u64) {
+/// Returns the durable record's attempts before and after the driver polls the
+/// regained tenancy. With `regain_in_batch` a rejected gain, the loss of its
+/// tenancy and the next regain drain in one batch; otherwise the gain is polled
+/// first and the loss and regain share a later batch.
+fn run(regain_in_batch: bool) -> (u64, u64) {
     let rt = support::runtime();
     let clock = TestClock::frozen();
     let inner = MemoryStore::with_clock(LEASE, clock.clone());
@@ -204,35 +205,54 @@ fn run() -> (u64, u64) {
         Box::new(|| record()["epoch"].as_u64().unwrap() > epoch && !lease_gone()),
     );
 
-    // The store goes unavailable; the driver rejects that gain, its report is refused and queued.
-    refuse.store(true, Ordering::Release);
-    src.reject_next_resume.set(true);
-    assert!(
-        d.poll_events(&mut src, Duration::ZERO).is_err(),
-        "gain rejected"
-    );
-    // Deliver the staged revoke of tenancy 1; the report is re-offered and refused each time.
-    for _ in 0..3 {
-        let _ = d.poll_events(&mut src, Duration::ZERO);
-    }
+    if regain_in_batch {
+        // The lease lapses again and the store regains the split (epoch 3), all before the driver polls.
+        let epoch = record()["epoch"].as_u64().unwrap();
+        let _ = expire_lease();
+        step_until(
+            "regain 3",
+            Box::new(|| record()["epoch"].as_u64().unwrap() > epoch && !lease_gone()),
+        );
+        // The store goes unavailable; the driver rejects the epoch 2 gain and its report is
+        // refused and queued, then the batch's loss ends that tenancy.
+        refuse.store(true, Ordering::Release);
+        src.reject_next_resume.set(true);
+        assert!(
+            d.poll_events(&mut src, Duration::ZERO).is_err(),
+            "gain rejected"
+        );
+        refuse.store(false, Ordering::Release);
+    } else {
+        // The store goes unavailable; the driver rejects that gain, its report is refused and queued.
+        refuse.store(true, Ordering::Release);
+        src.reject_next_resume.set(true);
+        assert!(
+            d.poll_events(&mut src, Duration::ZERO).is_err(),
+            "gain rejected"
+        );
+        // Deliver the staged revoke of tenancy 1; the report is re-offered and refused each time.
+        for _ in 0..3 {
+            let _ = d.poll_events(&mut src, Duration::ZERO);
+        }
 
-    // Still unavailable: the lease lapses again and the store drops the split (Lost is queued).
-    let epoch = record()["epoch"].as_u64().unwrap();
-    let _ = expire_lease();
-    // A refused claim attempt means the task has dropped the split and queued Lost.
-    let seen = refused.load(Ordering::Acquire);
-    let deadline = Instant::now() + DEADLINE;
-    while refused.load(Ordering::Acquire) == seen {
-        assert!(Instant::now() < deadline, "timed out: loss");
-        clock.advance(LEASE / 12);
-        std::thread::sleep(support::POLL_INTERVAL);
+        // Still unavailable: the lease lapses again and the store drops the split (Lost is queued).
+        let epoch = record()["epoch"].as_u64().unwrap();
+        let _ = expire_lease();
+        // A refused claim attempt means the task has dropped the split and queued Lost.
+        let seen = refused.load(Ordering::Acquire);
+        let deadline = Instant::now() + DEADLINE;
+        while refused.load(Ordering::Acquire) == seen {
+            assert!(Instant::now() < deadline, "timed out: loss");
+            clock.advance(LEASE / 12);
+            std::thread::sleep(support::POLL_INTERVAL);
+        }
+        // The store recovers and reclaims the split (epoch + 1).
+        refuse.store(false, Ordering::Release);
+        step_until(
+            "regain 3",
+            Box::new(|| record()["epoch"].as_u64().unwrap() > epoch && !lease_gone()),
+        );
     }
-    // The store recovers and reclaims the split (epoch + 1).
-    refuse.store(false, Ordering::Release);
-    step_until(
-        "regain 3",
-        Box::new(|| record()["epoch"].as_u64().unwrap() > epoch && !lease_gone()),
-    );
 
     let before = record()["attempts"].as_u64().unwrap();
     for _ in 0..4 {
@@ -242,9 +262,22 @@ fn run() -> (u64, u64) {
     (before, after)
 }
 
+/// The loss of a split and its regain drain in one batch; the report queued
+/// before the loss must not fail the regained tenancy.
 #[test]
 fn stale_report_does_not_fail_a_regained_split_in_one_batch() {
-    let (before, after) = run();
+    let (before, after) = run(false);
+    assert_eq!(
+        after, before,
+        "the stale report failed the regained tenancy"
+    );
+}
+
+/// A gain rejected in the batch that also loses and regains its split queues a
+/// report that must not fail the regained tenancy. Regression for #904.
+#[test]
+fn report_queued_by_the_batch_that_loses_its_split_is_dropped() {
+    let (before, after) = run(true);
     assert_eq!(
         after, before,
         "the stale report failed the regained tenancy"

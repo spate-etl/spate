@@ -132,12 +132,10 @@ pub struct LeaseEpoch(pub u64);
 
 /// One unit of leasable work, as the planner enumerated it.
 ///
-/// The descriptor is carried verbatim to whichever worker gains the split,
-/// so workers never re-enumerate the input (one LIST/scan per plan, on the
-/// leader). It is opaque to the framework and to backends; keep it small,
-/// because backends enforce a size cap (the NATS backend uses a fixed
-/// 512 KiB per stored value). Descriptors are written once at planning and never
-/// rewritten by commits, so their size never taxes the commit path.
+/// The opaque descriptor travels to each worker that gains the split and is
+/// written once at planning. The portable complete stored-value budget is
+/// 384 KiB; under the current encoding, descriptors up to 294,720 raw bytes
+/// reserve padded-base64 expansion and the maximum spec record envelope.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct SplitSpec {
@@ -234,6 +232,11 @@ pub struct SplitPlan {
     /// on the next run via [`PlanContext::planner_state`] (e.g. an
     /// object-store listing's start-after key). `None` keeps the previous
     /// cursor.
+    ///
+    /// Its padded-base64 encoding shares the portable 384 KiB complete-value
+    /// budget with the JSON envelope and the full JSON-escaped fingerprint.
+    /// A larger fingerprint leaves less cursor space; there is no unconditional
+    /// raw cursor ceiling.
     pub planner_state: Option<Vec<u8>>,
 }
 

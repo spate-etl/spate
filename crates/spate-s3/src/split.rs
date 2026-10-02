@@ -34,8 +34,8 @@
 //! the output is a pure function of the listing order and objects sharing a
 //! key prefix stay in the same split. Each object costs at least
 //! `target / 16`, an open-cost floor that stops thousands of tiny objects
-//! coalescing into one split, so a split holds at most ~16 members and its
-//! descriptor stays far below backend value-size caps. An object above the
+//! coalescing into one split, so a split holds at most ~16 members. The planner
+//! validates each descriptor against its portable raw byte limit. An object above the
 //! target that [`Packing::delimiter_for`] accepts is cut into byte ranges of
 //! at most the target, one split each; any other object at or above the
 //! target lands alone in its own split.

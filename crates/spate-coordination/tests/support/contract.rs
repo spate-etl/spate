@@ -19,6 +19,7 @@ pub async fn all<S: CoordinationStore>(store: &S, advance: impl AsyncFn(Duration
     delete_contract(store).await;
     create_and_update(store).await;
     revisions_across_delete_and_recreate(store).await;
+    portable_value_boundary(store).await;
     listing(store).await;
     watching(store).await;
     expiry(store, advance).await;
@@ -137,6 +138,54 @@ pub async fn revisions_across_delete_and_recreate<S: CoordinationStore>(store: &
     }
 }
 
+/// Both keyspaces preserve complete portable-sized values across create and update.
+pub async fn portable_value_boundary<S: CoordinationStore>(store: &S) {
+    let initial: Vec<u8> = (0..=u8::MAX).cycle().take(384 * 1024).collect();
+    let updated: Vec<u8> = initial.iter().map(|byte| byte.wrapping_add(1)).collect();
+    for ks in [Keyspace::Durable, Keyspace::Ephemeral] {
+        let r1 = won(
+            store
+                .create(ks, "portable.k", initial.clone())
+                .await
+                .unwrap(),
+            "portable create",
+        );
+        let entry = store
+            .get(ks, "portable.k")
+            .await
+            .unwrap()
+            .expect("live key");
+        assert_eq!(
+            (entry.value, entry.revision),
+            (initial.clone(), r1),
+            "{ks:?}"
+        );
+        let r2 = won(
+            store
+                .update(ks, "portable.k", updated.clone(), r1)
+                .await
+                .unwrap(),
+            "portable update",
+        );
+        assert!(r2 > r1, "{ks:?}");
+        let entry = store
+            .get(ks, "portable.k")
+            .await
+            .unwrap()
+            .expect("updated key");
+        assert_eq!(
+            (entry.value, entry.revision),
+            (updated.clone(), r2),
+            "{ks:?}"
+        );
+        let listed = store.list(ks, "portable.").await.unwrap();
+        assert_eq!(listed.len(), 1, "{ks:?}");
+        assert_eq!(listed[0].key, "portable.k", "{ks:?}");
+        assert_eq!(listed[0].value, updated, "{ks:?}");
+        assert_eq!(listed[0].revision, r2, "{ks:?}");
+    }
+}
+
 /// A listing returns exactly the live keys under its prefix in its own
 /// keyspace, with full values, including a result larger than a megabyte.
 pub async fn listing<S: CoordinationStore>(store: &S) {
@@ -179,7 +228,7 @@ pub async fn listing<S: CoordinationStore>(store: &S) {
         "a deleted key is absent from a listing"
     );
 
-    let big: Vec<u8> = (0..=u8::MAX).cycle().take(300 * 1024).collect();
+    let big: Vec<u8> = (0..=u8::MAX).cycle().take(384 * 1024).collect();
     for i in 0..4 {
         won(
             store

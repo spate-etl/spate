@@ -36,6 +36,10 @@ consistency checks. CI runs the same commands, so one that passes here is what
 runs there. It is necessary and not sufficient: other jobs spell out
 invocations of their own.
 
+`cargo xtask ci --since` runs the Rust gates over the packages your diff can
+affect, which is faster between edits; a change to `spate-core` reaches most of
+the workspace, so it saves little there.
+
 Containers, benchmarks, nextest profiles, fuzzing and the opt-in suites are in
 [`DEVELOPING.md`](DEVELOPING.md).
 

@@ -27,8 +27,12 @@ type Stall = (Arc<TestClock>, Duration);
 enum LeaderCreate {
     /// Applies, then returns an error.
     Lands,
+    /// Applies, then returns `Lost`.
+    LandsAsLost,
     /// Creates the key with this peer's value, then returns an error.
     PeerFirst(Vec<u8>),
+    /// Creates the key with this peer's value, then returns `Lost`.
+    PeerFirstLost(Vec<u8>),
     /// Applies, advances the clock, then returns the outcome.
     Slow(Stall),
     /// Writes nothing and returns an error; the next leader-key read
@@ -139,9 +143,17 @@ impl CoordinationStore for FaultStore {
                 let _ = self.inner.create(ks, key, value).await?;
                 Err(lost())
             }
+            Some(LeaderCreate::LandsAsLost) => {
+                let _ = self.inner.create(ks, key, value).await?;
+                Ok(CasOutcome::Lost)
+            }
             Some(LeaderCreate::PeerFirst(peer)) => {
                 let _ = self.inner.create(ks, key, peer).await?;
                 Err(lost())
+            }
+            Some(LeaderCreate::PeerFirstLost(peer)) => {
+                let _ = self.inner.create(ks, key, peer).await?;
+                Ok(CasOutcome::Lost)
             }
             Some(LeaderCreate::Slow((clock, by))) => {
                 let outcome = self.inner.create(ks, key, value).await;
@@ -807,6 +819,69 @@ fn an_election_whose_reply_was_lost_still_leads() {
         leader_json(&rt, &inner)
     );
     assert_eq!(plan_generation(&rt, &inner), 1);
+}
+
+/// A worker whose election create applied and was reported lost leads and
+/// claims well within the lease of the key it wrote.
+/// Regression for #899.
+#[test]
+fn an_election_reported_lost_over_its_own_key_still_leads() {
+    let rt = runtime();
+    let clock = TestClock::frozen();
+    let inner = MemoryStore::with_clock(support::LEASE, clock.clone());
+    let store = FaultStore::new(inner.clone());
+    *store.leader_create.lock().unwrap() = Some(LeaderCreate::LandsAsLost);
+    let (mut worker, fleet) = solo(&rt, &inner, store.clone(), &clock, &["e0"]);
+    wait_leader_create_fired(&store);
+
+    let mut held = Held::default();
+    for _ in 0..9 {
+        fleet.step(&clock, support::LEASE / 12);
+        held.fold(worker.poll().expect("poll"));
+    }
+    assert_eq!(
+        held.splits.len(),
+        1,
+        "no split claimed 0.75 lease after the election; leader key: {:?}",
+        leader_json(&rt, &inner)
+    );
+    assert_eq!(plan_generation(&rt, &inner), 1);
+}
+
+/// A worker whose election create lost to a peer's key leaves the key to
+/// the peer and the plan generation where it was.
+#[test]
+fn an_election_lost_to_a_peers_key_does_not_lead() {
+    let rt = runtime();
+    let clock = TestClock::frozen();
+    let inner = MemoryStore::with_clock(support::LEASE, clock.clone());
+    let store = FaultStore::new(inner.clone());
+    let peer = serde_json::to_vec(&serde_json::json!({
+        "schema": 3, "owner": "peer", "nonce": "peer-nonce", "generation": 1
+    }))
+    .unwrap();
+    *store.leader_create.lock().unwrap() = Some(LeaderCreate::PeerFirstLost(peer.clone()));
+    let (mut worker, fleet) = solo(&rt, &inner, store.clone(), &clock, &["e0"]);
+    wait_leader_create_fired(&store);
+
+    let mut held = Held::default();
+    for _ in 0..9 {
+        fleet.step(&clock, support::LEASE / 12);
+        held.fold(worker.poll().expect("poll"));
+    }
+    let leader = rt
+        .block_on(inner.get(Keyspace::Ephemeral, "leader"))
+        .unwrap();
+    assert!(
+        leader.as_ref().is_some_and(|e| e.value == peer),
+        "the peer's leader key was replaced: {:?}",
+        leader.map(|e| record_json(&e.value))
+    );
+    assert_eq!(
+        plan_generation(&rt, &inner),
+        0,
+        "the worker led under a peer's key"
+    );
 }
 
 /// A worker whose election write failed under a peer's key leaves the key

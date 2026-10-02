@@ -2,9 +2,9 @@
 //! releases.
 
 use super::{Command, ReleaseOutcome, Task};
-use crate::error::{fatal, fatal_only, store_error};
+use crate::error::{fatal, fatal_only, retryable, store_error};
 use crate::records::{self, SplitProgressRecord, SplitStatus};
-use crate::store::{CasOutcome, CoordinationStore, Keyspace};
+use crate::store::{CasOutcome, CoordinationStore, Keyspace, Revision};
 use spate_core::coordination::{CoordinationError, CoordinationErrorKind, SplitId, SplitProgress};
 use spate_core::metrics::{RevocationOutcome, SplitLossReason, WriteOutcome};
 use tokio::time::Instant;
@@ -69,9 +69,16 @@ impl<S: CoordinationStore + Clone> Task<S> {
 
     /// The fenced commit: one CAS on the durable progress record. The
     /// record is small by schema (the descriptor lives in the immutable
-    /// spec record), so commit cost is independent of descriptor size. A
-    /// lost CAS means a peer owns the split. Nothing was written, the
-    /// caller gets `Fenced`, and the `Lost` event follows.
+    /// spec record), so commit cost is independent of descriptor size.
+    ///
+    /// A lost CAS reads the record back. A newer runnable record of this
+    /// tenancy is written again on top. This tenancy's own completed record
+    /// ends the tenancy as a completing commit does, with no `Lost`. The caller
+    /// gets `Ok` if this commit repeats the completing commit that landed, and
+    /// `Fenced` otherwise. Another writer's record means a peer owns the split:
+    /// nothing was written, the caller gets `Fenced`, and `Lost` follows. A
+    /// read older than the write that won is `Retryable`, a failed read keeps
+    /// its store error's class, and either keeps the split held.
     async fn commit(
         &mut self,
         split: &SplitId,
@@ -84,79 +91,127 @@ impl<S: CoordinationStore + Clone> Task<S> {
                 format!("split {split} is not held by this worker; nothing was written"),
             ));
         }
-        let state = self.splits.get(id).expect("owned splits are in the view");
-        let owned_epoch = state.progress.epoch;
-        if let Some(previous) = state.progress.watermark
-            && progress.watermark < previous
-        {
-            return Err(fatal(format!(
-                "split {split}: watermark would regress {previous} -> {} — this is a \
-                 source bug (watermarks are one past the last acknowledged record and \
-                 never move backwards)",
-                progress.watermark
-            )));
-        }
-        let mut record = state.progress.clone();
-        record.watermark = Some(progress.watermark);
-        record.state = Some(records::b64_encode(&progress.state));
-        record.completed = progress.completed;
-        if progress.completed {
-            record.status = SplitStatus::Completed;
-        }
-        record.written_at_ms = records::now_ms();
-        let expected = state.progress_rev;
+        let owned_epoch = self
+            .splits
+            .get(id)
+            .expect("owned splits are in the view")
+            .progress
+            .epoch;
         let key = records::split_key_str(id);
-        let started = Instant::now();
-        match self
-            .store
-            .update(Keyspace::Durable, &key, record.encode(), expected)
-            .await
-        {
-            Ok(CasOutcome::Won(rev)) => {
-                self.metrics(|m| m.write(WriteOutcome::Ok, started.elapsed()));
-                // A landed commit is the only liveness signal a draining
-                // split gives the task, and what a cancelled revocation's
-                // watchdog is armed against.
-                let now = self.clock.now();
-                if let Some(entry) = self.revoking.get_mut(id) {
-                    entry.last_progress = now;
+        loop {
+            let state = self.splits.get(id).expect("owned splits are in the view");
+            if let Some(previous) = state.progress.watermark
+                && progress.watermark < previous
+            {
+                return Err(fatal(format!(
+                    "split {split}: watermark would regress {previous} -> {} — this is a \
+                     source bug (watermarks are one past the last acknowledged record and \
+                     never move backwards)",
+                    progress.watermark
+                )));
+            }
+            let mut record = state.progress.clone();
+            record.watermark = Some(progress.watermark);
+            record.state = Some(records::b64_encode(&progress.state));
+            record.completed = progress.completed;
+            if progress.completed {
+                record.status = SplitStatus::Completed;
+            }
+            record.written_at_ms = records::now_ms();
+            let expected = state.progress_rev;
+            let started = Instant::now();
+            match self
+                .store
+                .update(Keyspace::Durable, &key, record.encode(), expected)
+                .await
+            {
+                Ok(CasOutcome::Won(rev)) => {
+                    self.metrics(|m| m.write(WriteOutcome::Ok, started.elapsed()));
+                    // A landed commit is the only liveness signal a draining
+                    // split gives the task, and what a cancelled revocation's
+                    // watchdog is armed against.
+                    let now = self.clock.now();
+                    if let Some(entry) = self.revoking.get_mut(id) {
+                        entry.last_progress = now;
+                    }
+                    self.upsert_progress(id, record, rev)?;
+                    if progress.completed {
+                        self.finish_completed(id).await?;
+                    }
+                    return Ok(());
                 }
-                self.upsert_progress(id, record, rev)?;
+                Ok(CasOutcome::Lost) => {
+                    self.metrics(|m| m.write(WriteOutcome::Conflict, started.elapsed()));
+                }
+                Err(e) => {
+                    self.metrics(|m| m.write(WriteOutcome::Error, started.elapsed()));
+                    return Err(store_error(&format!("committing split {split}"), &e));
+                }
+            }
+            let Some((fresh, rev)) = self.reread_record(split, &key, expected).await? else {
+                self.drop_owned(id, SplitLossReason::Fenced);
+                return Err(CoordinationError::new(
+                    CoordinationErrorKind::Fenced,
+                    format!("split {split} is owned by a peer; nothing was written"),
+                ));
+            };
+            let ours = fresh.owner.as_deref() == Some(self.instance.as_str())
+                && fresh.epoch == owned_epoch;
+            if ours
+                && fresh.watermark == Some(progress.watermark)
+                && fresh.completed == progress.completed
+            {
+                // The winning write is this commit, landed with its reply lost.
+                self.upsert_progress(id, fresh, rev)?;
                 if progress.completed {
                     self.finish_completed(id).await?;
                 }
-                Ok(())
+                return Ok(());
             }
-            Ok(CasOutcome::Lost) => {
-                self.metrics(|m| m.write(WriteOutcome::Conflict, started.elapsed()));
-                // Maybe-landed hazard: if the winning write is OUR OWN,
-                // adopt it instead of reporting a false fence.
-                if let Ok(Some(entry)) = self.store.get(Keyspace::Durable, &key).await {
-                    let fresh = SplitProgressRecord::parse(&key, &entry.value, self.fp)?;
-                    if fresh.owner.as_deref() == Some(self.instance.as_str())
-                        && fresh.epoch == owned_epoch
-                        && fresh.watermark == Some(progress.watermark)
-                        && fresh.completed == progress.completed
-                    {
-                        self.upsert_progress(id, fresh, entry.revision)?;
-                        if progress.completed {
-                            self.finish_completed(id).await?;
-                        }
-                        return Ok(());
-                    }
-                    self.upsert_progress(id, fresh, entry.revision)?;
+            let status = fresh.status;
+            self.upsert_progress(id, fresh, rev)?;
+            match status {
+                SplitStatus::Runnable if ours => continue,
+                SplitStatus::Completed if ours => {
+                    self.finish_completed(id).await?;
+                    return Err(CoordinationError::new(
+                        CoordinationErrorKind::Fenced,
+                        format!(
+                            "split {split} was already completed by this worker; nothing was \
+                             written"
+                        ),
+                    ));
                 }
-                self.drop_owned(id, SplitLossReason::Fenced);
-                Err(CoordinationError::new(
-                    CoordinationErrorKind::Fenced,
-                    format!("split {split} is owned by a peer; nothing was written"),
-                ))
+                _ => {}
             }
-            Err(e) => {
-                self.metrics(|m| m.write(WriteOutcome::Error, started.elapsed()));
-                Err(store_error(&format!("committing split {split}"), &e))
-            }
+            self.drop_owned(id, SplitLossReason::Fenced);
+            return Err(CoordinationError::new(
+                CoordinationErrorKind::Fenced,
+                format!("split {split} is owned by a peer; nothing was written"),
+            ));
         }
+    }
+
+    /// The split record and its revision, read back after a CAS at
+    /// `expected` lost; `None` when the record is gone.
+    async fn reread_record(
+        &mut self,
+        split: &SplitId,
+        key: &str,
+        expected: Revision,
+    ) -> Result<Option<(SplitProgressRecord, Revision)>, CoordinationError> {
+        let entry = match self.store.get(Keyspace::Durable, key).await {
+            Ok(Some(entry)) => entry,
+            Ok(None) => return Ok(None),
+            Err(e) => return Err(store_error(&format!("re-reading split {split}"), &e)),
+        };
+        if entry.revision <= expected {
+            return Err(retryable(format!(
+                "split {split}: the record read back is older than the write that won"
+            )));
+        }
+        let fresh = SplitProgressRecord::parse(key, &entry.value, self.fp)?;
+        Ok(Some((fresh, entry.revision)))
     }
 
     /// Terminal commit bookkeeping: hand the lease back, stop tracking.
@@ -174,7 +229,10 @@ impl<S: CoordinationStore + Clone> Task<S> {
 
     /// Explicit failure report: consumes an attempt, ends this tenancy
     /// gracefully-for-the-lease but non-gracefully for the attempt
-    /// accounting, and quarantines at the cap.
+    /// accounting, and quarantines at the cap. A lost CAS on this tenancy's
+    /// own newer runnable record writes the report again on top of it; any
+    /// other record, or a read-back that lags or fails `Retryable`, returns
+    /// `Fenced` and emits `Lost`.
     async fn fail_split(&mut self, split: &SplitId, reason: &str) -> Result<(), CoordinationError> {
         let id = split.as_str();
         let Some(owned) = self.owned.get(id) else {
@@ -185,44 +243,60 @@ impl<S: CoordinationStore + Clone> Task<S> {
         };
         let lease_rev = owned.lease_rev;
         let state = self.splits.get(id).expect("owned splits are in the view");
+        let owned_epoch = state.progress.epoch;
+        let attempts = state.progress.attempts + 1;
+        let quarantining = attempts >= self.config.max_attempts;
         self.metrics(|m| m.failed());
-        let mut record = state.progress.clone();
-        record.attempts += 1;
-        record.owner = None;
-        let quarantining = record.attempts >= self.config.max_attempts;
-        if quarantining {
-            record.status = SplitStatus::Quarantined;
-            record.epoch += 1;
-        }
-        record.written_at_ms = records::now_ms();
-        let attempts = record.attempts;
         tracing::warn!(split = %id, reason, attempts, quarantining, "split failed by the source");
         let key = records::split_key_str(id);
-        let expected = state.progress_rev;
-        match self
-            .store
-            .update(Keyspace::Durable, &key, record.encode(), expected)
-            .await
-        {
-            Ok(CasOutcome::Won(rev)) => {
-                // This tenancy ends by request: no Lost event, no loss
-                // metric. Remove from `owned` before folding the write so
-                // the epoch bump cannot read as a peer's fence.
-                self.owned.remove(id);
-                // A failure mid-revocation leaves an uncommitted tail to replay.
-                self.settle_revocation(id, RevocationOutcome::Forced);
-                self.upsert_progress(id, record, rev)?;
-                self.release_lease_key(id, lease_rev).await?;
-                Ok(())
+        loop {
+            let state = self.splits.get(id).expect("owned splits are in the view");
+            let mut record = state.progress.clone();
+            record.attempts += 1;
+            record.owner = None;
+            if record.attempts >= self.config.max_attempts {
+                record.status = SplitStatus::Quarantined;
+                record.epoch += 1;
             }
-            Ok(CasOutcome::Lost) => {
-                self.drop_owned(id, SplitLossReason::Fenced);
-                Err(CoordinationError::new(
-                    CoordinationErrorKind::Fenced,
-                    format!("split {split} is owned by a peer"),
-                ))
+            record.written_at_ms = records::now_ms();
+            let expected = state.progress_rev;
+            match self
+                .store
+                .update(Keyspace::Durable, &key, record.encode(), expected)
+                .await
+            {
+                Ok(CasOutcome::Won(rev)) => {
+                    // This tenancy ends by request: no Lost event, no loss
+                    // metric. Remove from `owned` before folding the write so
+                    // the epoch bump cannot read as a peer's fence.
+                    self.owned.remove(id);
+                    // A failure mid-revocation leaves an uncommitted tail to replay.
+                    self.settle_revocation(id, RevocationOutcome::Forced);
+                    self.upsert_progress(id, record, rev)?;
+                    self.release_lease_key(id, lease_rev).await?;
+                    return Ok(());
+                }
+                Ok(CasOutcome::Lost) => {}
+                Err(e) => return Err(store_error(&format!("failing split {split}"), &e)),
             }
-            Err(e) => Err(store_error(&format!("failing split {split}"), &e)),
+            let reread = match self.reread_record(split, &key, expected).await {
+                Err(e) if e.kind == CoordinationErrorKind::Retryable => None,
+                reread => reread?,
+            };
+            if let Some((fresh, rev)) = reread {
+                let ours = fresh.owner.as_deref() == Some(self.instance.as_str())
+                    && fresh.epoch == owned_epoch
+                    && fresh.status == SplitStatus::Runnable;
+                self.upsert_progress(id, fresh, rev)?;
+                if ours {
+                    continue;
+                }
+            }
+            self.drop_owned(id, SplitLossReason::Fenced);
+            return Err(CoordinationError::new(
+                CoordinationErrorKind::Fenced,
+                format!("split {split} is owned by a peer"),
+            ));
         }
     }
 

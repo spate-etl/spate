@@ -5,11 +5,13 @@
 //! one around a call, scoped to the calling thread.
 
 use crate::run::poll_until;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 use tracing::Level;
+use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::fmt::writer::MakeWriterExt;
 use tracing_subscriber::fmt::{MakeWriter, TestWriter};
+use tracing_subscriber::layer::SubscriberExt;
 
 /// Everything the subscriber holding it has formatted.
 #[derive(Clone, Debug, Default)]
@@ -100,6 +102,11 @@ pub fn show_logs(level: Level, f: impl FnOnce()) {
     under_subscriber(level, TestWriter::default(), f);
 }
 
+/// A second registered dispatcher, so that tracing-core asks every live
+/// subscriber about a new callsite.
+static BYSTANDER: LazyLock<tracing::Dispatch> =
+    LazyLock::new(|| tracing::Dispatch::new(tracing_subscriber::registry().with(LevelFilter::OFF)));
+
 fn under_subscriber<W>(level: Level, writer: W, f: impl FnOnce())
 where
     W: for<'a> MakeWriter<'a> + Send + Sync + 'static,
@@ -109,6 +116,7 @@ where
         .with_max_level(level)
         .without_time()
         .finish();
+    LazyLock::force(&BYSTANDER);
     tracing::subscriber::with_default(subscriber, f);
 }
 
@@ -134,5 +142,49 @@ mod tests {
         let mut capture = LogCapture::new();
         capture.write_all(b"starting\n").unwrap();
         capture.wait_for_line(Duration::from_millis(20), "ready");
+    }
+
+    fn hit(from: &str) {
+        tracing::warn!(from, "callsite hit");
+    }
+
+    fn warn_enabled() -> bool {
+        tracing::enabled!(Level::WARN)
+    }
+
+    /// An event on the calling thread is captured after a thread with no
+    /// subscriber reached its callsite first. Regression for #838.
+    #[test]
+    fn an_event_is_captured_after_a_bare_thread_reached_its_callsite_first() {
+        let lines = capture_logs(Level::WARN, || {
+            std::thread::spawn(|| hit("other")).join().unwrap();
+            hit("caller");
+        });
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("caller"), "{lines:?}");
+        assert!(!lines[0].contains("other"), "{lines:?}");
+    }
+
+    /// `show_logs` enables a callsite on the calling thread after a thread
+    /// with no subscriber reached it first. Regression for #838.
+    #[test]
+    fn show_logs_enables_a_callsite_a_bare_thread_reached_first() {
+        let mut seen = None;
+        show_logs(Level::WARN, || {
+            assert!(!std::thread::spawn(warn_enabled).join().unwrap());
+            seen = Some(warn_enabled());
+        });
+        assert_eq!(seen, Some(true));
+    }
+
+    /// The bystander dispatcher enables no level.
+    #[test]
+    fn the_bystander_enables_no_level() {
+        use tracing::Subscriber as _;
+        use tracing_subscriber::{Registry, layer::Layered};
+        let s = BYSTANDER
+            .downcast_ref::<Layered<LevelFilter, Registry>>()
+            .expect("bystander type");
+        assert_eq!(s.max_level_hint(), Some(LevelFilter::OFF));
     }
 }

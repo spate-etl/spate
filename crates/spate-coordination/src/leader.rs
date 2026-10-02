@@ -127,11 +127,19 @@ impl<S: CoordinationStore + Clone> Task<S> {
                 Ok(CasOutcome::Lost) => {
                     // Concurrent plan write (old leader's last breath or a
                     // racing successor): re-read and re-judge.
-                    let entry = self
-                        .store
-                        .get(Keyspace::Durable, records::PLAN_KEY)
-                        .await
-                        .map_err(|e| store_error("re-reading the plan record", &e))?;
+                    let entry = match self.store.get(Keyspace::Durable, records::PLAN_KEY).await {
+                        Ok(entry) => entry,
+                        Err(e @ StoreError::Retryable(_)) => {
+                            tracing::warn!(
+                                error = %e,
+                                "re-reading the plan record failed; giving leadership back"
+                            );
+                            // Gives leadership back through the demote below;
+                            // the next election reads the record again.
+                            break;
+                        }
+                        Err(e) => return Err(store_error("re-reading the plan record", &e)),
+                    };
                     let Some(entry) = entry else {
                         return Err(crate::error::fatal(
                             "plan record vanished mid-election; the store prefix was \

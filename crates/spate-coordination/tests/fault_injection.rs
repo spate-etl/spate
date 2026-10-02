@@ -23,6 +23,19 @@ use support::{DEADLINE, Held, PhasedPlanner, TestClock, config, runtime, split_i
 /// The clock a stalled write advances, and by how much.
 type Stall = (Arc<TestClock>, Duration);
 
+/// What [`FaultStore`] does with the next create of the leader key.
+enum LeaderCreate {
+    /// Applies, then returns an error.
+    Lands,
+    /// Creates the key with this peer's value, then returns an error.
+    PeerFirst(Vec<u8>),
+    /// Applies, advances the clock, then returns the outcome.
+    Slow(Stall),
+    /// Writes nothing and returns an error; the next leader-key read
+    /// answers with this entry.
+    StaleRead(Entry),
+}
+
 /// A [`MemoryStore`] with scripted faults on specific writes.
 #[derive(Clone)]
 struct FaultStore {
@@ -64,7 +77,8 @@ struct FaultStore {
     /// Once: the next leader-key read after the maybe-landed write answers
     /// with the key as it stood before that write.
     leader_stale_read: Arc<AtomicBool>,
-    /// The leader key before the maybe-landed write, for `leader_stale_read`.
+    /// The entry `leader_stale_read` serves: the leader key before the
+    /// maybe-landed write, or a [`LeaderCreate::StaleRead`] entry.
     leader_before: Arc<Mutex<Option<Entry>>>,
     /// Once: the next leader-key read fails.
     leader_read_fails: Arc<AtomicBool>,
@@ -73,6 +87,8 @@ struct FaultStore {
     leader_update_after_read_fails: Arc<AtomicBool>,
     /// Armed by the read `leader_update_after_read_fails` waits for.
     leader_update_fail_armed: Arc<AtomicBool>,
+    /// Once: the fault on the next leader-key create.
+    leader_create: Arc<Mutex<Option<LeaderCreate>>>,
 }
 
 impl FaultStore {
@@ -95,6 +111,7 @@ impl FaultStore {
             leader_read_fails: Arc::default(),
             leader_update_after_read_fails: Arc::default(),
             leader_update_fail_armed: Arc::default(),
+            leader_create: Arc::default(),
         }
     }
 }
@@ -110,7 +127,33 @@ impl CoordinationStore for FaultStore {
         key: &str,
         value: Vec<u8>,
     ) -> Result<CasOutcome, StoreError> {
-        self.inner.create(ks, key, value).await
+        let fault = if ks == Keyspace::Ephemeral && key == "leader" {
+            self.leader_create.lock().expect("leader create").take()
+        } else {
+            None
+        };
+        let lost = || StoreError::Retryable("injected: election reply lost".into());
+        match fault {
+            None => self.inner.create(ks, key, value).await,
+            Some(LeaderCreate::Lands) => {
+                let _ = self.inner.create(ks, key, value).await?;
+                Err(lost())
+            }
+            Some(LeaderCreate::PeerFirst(peer)) => {
+                let _ = self.inner.create(ks, key, peer).await?;
+                Err(lost())
+            }
+            Some(LeaderCreate::Slow((clock, by))) => {
+                let outcome = self.inner.create(ks, key, value).await;
+                clock.advance(by);
+                outcome
+            }
+            Some(LeaderCreate::StaleRead(entry)) => {
+                *self.leader_before.lock().expect("before") = Some(entry);
+                self.leader_stale_read.store(true, Ordering::Release);
+                Err(lost())
+            }
+        }
     }
 
     async fn update(
@@ -624,6 +667,251 @@ fn a_leader_whose_renewal_after_the_read_back_fails_keeps_leading() {
                 .store(true, Ordering::Release)
         },
     );
+}
+
+/// A solo worker over `store` on `clock`, planning `ids`, with a fleet over
+/// `inner` that it has joined.
+fn solo(
+    rt: &tokio::runtime::Runtime,
+    inner: &MemoryStore,
+    store: FaultStore,
+    clock: &Arc<TestClock>,
+    ids: &[&str],
+) -> (StoreCoordinator<FaultStore>, support::Fleet) {
+    let mut worker = StoreCoordinator::with_clock(
+        store,
+        config(Some("solo")),
+        rt.handle().clone(),
+        None,
+        clock.clone() as Arc<dyn Clock>,
+    )
+    .expect("coordinator");
+    worker
+        .start(Box::new(PhasedPlanner::one_final("leader-key:v1", ids)))
+        .unwrap();
+    let mut fleet = support::Fleet::new(inner, rt.handle());
+    fleet.join(&worker);
+    (worker, fleet)
+}
+
+/// The leader key's JSON, if the key exists.
+fn leader_json(rt: &tokio::runtime::Runtime, inner: &MemoryStore) -> Option<serde_json::Value> {
+    rt.block_on(inner.get(Keyspace::Ephemeral, "leader"))
+        .unwrap()
+        .map(|e| record_json(&e.value))
+}
+
+/// Waits until the armed leader-key create fault has fired.
+fn wait_leader_create_fired(store: &FaultStore) {
+    spate_test::wait_until(DEADLINE, "the election write", || {
+        store.leader_create.lock().unwrap().is_none()
+    });
+}
+
+/// A solo leader holding `r0`, stepped until a leader-key renewal applies
+/// with its reply lost, then `arm`ed and released from `r0`, its last split.
+fn released_after_unseen_leader_renewal(
+    arm: impl FnOnce(&FaultStore),
+) -> (
+    tokio::runtime::Runtime,
+    MemoryStore,
+    StoreCoordinator<FaultStore>,
+) {
+    let rt = runtime();
+    let clock = TestClock::frozen();
+    let inner = MemoryStore::with_clock(support::LEASE, clock.clone());
+    let store = FaultStore::new(inner.clone());
+    let (mut worker, fleet) = solo(&rt, &inner, store.clone(), &clock, &["r0"]);
+    let mut held = Held::default();
+    support::drive(&mut worker, &mut held, "claiming the split", |h| {
+        h.splits.len() == 1
+    });
+
+    // Step a twelfth of a lease at a time, so no second heartbeat runs
+    // between the fault and the release.
+    store.leader_maybe_land.store(true, Ordering::Release);
+    let deadline = Instant::now() + DEADLINE;
+    while store.leader_maybe_land.load(Ordering::Acquire) {
+        assert!(Instant::now() < deadline, "the fault never fired");
+        fleet.step(&clock, support::LEASE / 12);
+        held.fold(worker.poll().expect("poll"));
+    }
+    arm(&store);
+    worker.release(&[split_id("r0")]).expect("release");
+    (rt, inner, worker)
+}
+
+/// Releasing the last split after a leader renewal that applied with its
+/// reply lost deletes the leader key.
+/// Regression for #886.
+#[test]
+fn a_release_after_an_unseen_leader_renewal_deletes_the_leader_key() {
+    let (rt, inner, _worker) = released_after_unseen_leader_renewal(|_| {});
+    let leader = leader_json(&rt, &inner);
+    assert!(leader.is_none(), "the leader key was left: {leader:?}");
+}
+
+/// A release whose read-back of the leader key answers from before an unseen
+/// renewal deletes the key.
+/// Regression for #886.
+#[test]
+fn a_release_whose_leader_read_lags_leaves_no_leader_key() {
+    let (rt, inner, _worker) = released_after_unseen_leader_renewal(|store| {
+        store.leader_stale_read.store(true, Ordering::Release);
+    });
+    let leader = leader_json(&rt, &inner);
+    assert!(leader.is_none(), "the leader key was left: {leader:?}");
+}
+
+/// A departure deletes a leader key of its own that the release before it
+/// could not read back.
+#[test]
+fn a_departure_deletes_an_own_leader_key_the_release_could_not_read_back() {
+    let (rt, inner, mut worker) = released_after_unseen_leader_renewal(|store| {
+        store.leader_read_fails.store(true, Ordering::Release);
+    });
+    assert!(
+        leader_json(&rt, &inner).is_some(),
+        "the release deleted the leader key without reading it back"
+    );
+    let result = worker.depart(&[]);
+    let leader = leader_json(&rt, &inner);
+    assert!(
+        leader.is_none(),
+        "depart returned {result:?}; the leader key was left: {leader:?}"
+    );
+}
+
+/// A worker whose election write applied with its reply lost leads and
+/// claims well within the lease of the key it wrote.
+/// Regression for #886.
+#[test]
+fn an_election_whose_reply_was_lost_still_leads() {
+    let rt = runtime();
+    let clock = TestClock::frozen();
+    let inner = MemoryStore::with_clock(support::LEASE, clock.clone());
+    let store = FaultStore::new(inner.clone());
+    *store.leader_create.lock().unwrap() = Some(LeaderCreate::Lands);
+    let (mut worker, fleet) = solo(&rt, &inner, store.clone(), &clock, &["e0"]);
+    wait_leader_create_fired(&store);
+
+    let mut held = Held::default();
+    for _ in 0..9 {
+        fleet.step(&clock, support::LEASE / 12);
+        held.fold(worker.poll().expect("poll"));
+    }
+    assert_eq!(
+        held.splits.len(),
+        1,
+        "no split claimed 0.75 lease after the election; leader key: {:?}",
+        leader_json(&rt, &inner)
+    );
+    assert_eq!(plan_generation(&rt, &inner), 1);
+}
+
+/// A worker whose election write failed under a peer's key leaves the key
+/// to the peer and the plan generation where it was.
+#[test]
+fn an_election_that_failed_under_a_peers_key_does_not_lead() {
+    let rt = runtime();
+    let clock = TestClock::frozen();
+    let inner = MemoryStore::with_clock(support::LEASE, clock.clone());
+    let store = FaultStore::new(inner.clone());
+    let peer = serde_json::to_vec(&serde_json::json!({
+        "schema": 3, "owner": "peer", "nonce": "peer-nonce", "generation": 1
+    }))
+    .unwrap();
+    *store.leader_create.lock().unwrap() = Some(LeaderCreate::PeerFirst(peer.clone()));
+    let (mut worker, fleet) = solo(&rt, &inner, store.clone(), &clock, &["e0"]);
+    wait_leader_create_fired(&store);
+
+    let mut held = Held::default();
+    for _ in 0..9 {
+        fleet.step(&clock, support::LEASE / 12);
+        held.fold(worker.poll().expect("poll"));
+    }
+    let leader = rt
+        .block_on(inner.get(Keyspace::Ephemeral, "leader"))
+        .unwrap();
+    assert!(
+        leader.as_ref().is_some_and(|e| e.value == peer),
+        "the peer's leader key was replaced: {:?}",
+        leader.map(|e| record_json(&e.value))
+    );
+    assert_eq!(
+        plan_generation(&rt, &inner),
+        0,
+        "the worker led under a peer's key"
+    );
+}
+
+/// An election whose write failed is not adopted from a read-back that
+/// returns this worker's key from an earlier term.
+#[test]
+fn an_election_read_back_ignores_this_workers_earlier_key() {
+    let rt = runtime();
+    let clock = TestClock::frozen();
+    let inner = MemoryStore::with_clock(support::LEASE, clock.clone());
+    let store = FaultStore::new(inner.clone());
+    let (mut worker, fleet) = solo(&rt, &inner, store.clone(), &clock, &["s0"]);
+    let mut held = Held::default();
+    support::drive(&mut worker, &mut held, "claiming the split", |h| {
+        h.splits.len() == 1
+    });
+    fleet.settle(&clock);
+    assert_eq!(plan_generation(&rt, &inner), 1);
+    let earlier = rt
+        .block_on(inner.get(Keyspace::Ephemeral, "leader"))
+        .unwrap()
+        .expect("leader key");
+
+    *store.leader_create.lock().unwrap() = Some(LeaderCreate::StaleRead(earlier));
+    let _ = rt
+        .block_on(inner.delete(Keyspace::Ephemeral, "leader", None))
+        .unwrap();
+    fleet.settle(&clock);
+
+    assert!(
+        store.leader_create.lock().unwrap().is_none(),
+        "the worker never ran for election again"
+    );
+    let leader = leader_json(&rt, &inner).expect("the worker leads without a leader key");
+    assert_eq!(leader["owner"], "solo");
+    assert_eq!(leader["generation"], 2);
+    assert_eq!(plan_generation(&rt, &inner), 2);
+}
+
+/// A first election that takes most of a lease keeps the presence key and
+/// the leader key, and the worker leads at its first generation throughout.
+/// Regression for #886.
+#[test]
+fn a_slow_first_election_keeps_presence_and_the_leader_key() {
+    let rt = runtime();
+    let clock = TestClock::frozen();
+    let inner = MemoryStore::with_clock(support::LEASE, clock.clone());
+    let store = FaultStore::new(inner.clone());
+    *store.leader_create.lock().unwrap() =
+        Some(LeaderCreate::Slow((clock.clone(), support::LEASE * 9 / 10)));
+    let (mut worker, fleet) = solo(&rt, &inner, store.clone(), &clock, &["w0"]);
+    wait_leader_create_fired(&store);
+    fleet.settle(&clock);
+
+    let mut held = Held::default();
+    for step in 1..=9 {
+        fleet.step(&clock, support::LEASE / 12);
+        held.fold(worker.poll().expect("poll"));
+        let presence = rt
+            .block_on(inner.get(Keyspace::Ephemeral, "worker.solo"))
+            .unwrap();
+        let leader = leader_json(&rt, &inner);
+        let generation = plan_generation(&rt, &inner);
+        assert!(
+            presence.is_some() && leader.as_ref().is_some_and(|l| l["owner"] == "solo"),
+            "step {step}: presence present: {}; leader key: {leader:?}",
+            presence.is_some()
+        );
+        assert_eq!(generation, 1, "step {step}: the worker was elected again");
+    }
 }
 
 /// A dropped assignment publish must be republished, not treated as

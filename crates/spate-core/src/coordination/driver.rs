@@ -425,12 +425,13 @@ impl CoordinationDriver {
             // 4b. Re-offer poison reports the backend refused; a refused
             // report leaves a split held here with no tenancy behind it. A
             // split this batch ends is dropped first: the batch may already
-            // hold its regain, and `fail` carries no epoch.
+            // hold its regain, and `fail` carries no epoch. A report the batch
+            // itself queues is dropped by the arm that ends its split.
             for event in &events {
                 if let CoordinationEvent::Lost { split }
                 | CoordinationEvent::Quarantined { split, .. } = event
                 {
-                    self.pending_poison.retain(|(queued, _)| queued != split);
+                    self.drop_poison_reports(split);
                 }
             }
             for (split, reason) in std::mem::take(&mut self.pending_poison) {
@@ -608,6 +609,11 @@ impl CoordinationDriver {
         }
     }
 
+    /// Drop the queued poison reports for a split this instance no longer holds.
+    fn drop_poison_reports(&mut self, split: &SplitId) {
+        self.pending_poison.retain(|(queued, _)| queued != split);
+    }
+
     /// Offer one poison report to the backend. `false` means the backend
     /// refused it and this instance is still holding the split.
     fn report_poison(&mut self, split: &SplitId, reason: &str) -> bool {
@@ -717,6 +723,7 @@ impl CoordinationDriver {
                 }
             }
             CoordinationEvent::Lost { split } => {
+                self.drop_poison_reports(&split);
                 if let Some(&partition) = self.by_split.get(&split) {
                     self.retire(source, partition, false);
                 }
@@ -724,6 +731,7 @@ impl CoordinationDriver {
             }
             CoordinationEvent::Quarantined { split, attempts } => {
                 tracing::warn!(split = %split, attempts, "split quarantined");
+                self.drop_poison_reports(&split);
                 if let Some(&partition) = self.by_split.get(&split) {
                     self.retire(source, partition, false);
                 }
@@ -2049,6 +2057,35 @@ mod tests {
             },
             gained("a", 2, Some(7)),
         ]);
+        for _ in 0..4 {
+            let _ = d.poll_events(&mut s, Duration::ZERO);
+        }
+        assert_eq!(
+            script.fails().len(),
+            1,
+            "the stale report is not re-offered"
+        );
+        assert_eq!(d.assignments().len(), 1);
+    }
+
+    /// A gain rejected and lost in one batch leaves no queued report to
+    /// outlive its split. Regression for #904.
+    #[test]
+    fn rejected_gain_report_queued_in_the_batch_that_loses_the_split_is_dropped() {
+        let script = Script::default();
+        let mut d = driver(&script);
+        let mut s = rejecting(&["a"]);
+        for _ in 0..3 {
+            script.fail_next_report("a", CoordinationErrorKind::Retryable);
+        }
+        script.push(vec![
+            gained("a", 1, Some(7)),
+            CoordinationEvent::Lost {
+                split: split("a").id,
+            },
+            gained("a", 2, None),
+        ]);
+        let _ = d.poll_events(&mut s, Duration::ZERO);
         for _ in 0..4 {
             let _ = d.poll_events(&mut s, Duration::ZERO);
         }

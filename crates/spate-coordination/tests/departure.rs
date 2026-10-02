@@ -1,6 +1,7 @@
-//! `StoreCoordinator::depart` and `release` against a store that fails
-//! part-way: an outage that breaks the watches, a store that stops
-//! answering, fatal store errors, and writes whose reply is lost.
+//! Split commits, failure reports, releases and `StoreCoordinator::depart`
+//! against a store that fails part-way: an outage that breaks the watches, a
+//! store that stops answering, fatal store errors, and writes whose reply is
+//! lost.
 
 mod support;
 
@@ -10,11 +11,14 @@ use spate_coordination::store::{
     CasOutcome, CoordinationStore, Entry, Keyspace, Revision, StoreError, WatchEvent, WatchMode,
     WatchStream,
 };
-use spate_coordination::{CoordinationConfig, SplitCoordinator, StoreCoordinator};
+use spate_coordination::{
+    CoordinationConfig, CoordinationErrorKind, CoordinationEvent, SplitCoordinator, SplitProgress,
+    StoreCoordinator,
+};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use support::{Held, LEASE, PhasedPlanner, config_for, drive, runtime};
+use support::{Held, LEASE, PhasedPlanner, TestClock, config_for, drive, runtime};
 use tokio::sync::mpsc;
 
 type Breaker = mpsc::UnboundedSender<Result<WatchEvent, StoreError>>;
@@ -63,8 +67,17 @@ struct FaultStore {
 
 impl FaultStore {
     fn new(lease: Duration) -> FaultStore {
+        FaultStore::over(MemoryStore::new(lease))
+    }
+
+    /// Like [`new`](Self::new), with lease expiry on `clock`.
+    fn with_clock(lease: Duration, clock: Arc<TestClock>) -> FaultStore {
+        FaultStore::over(MemoryStore::with_clock(lease, clock))
+    }
+
+    fn over(inner: MemoryStore) -> FaultStore {
         FaultStore {
-            inner: MemoryStore::new(lease),
+            inner,
             down: Arc::default(),
             wedged: Arc::default(),
             latency_ms: Arc::default(),
@@ -294,6 +307,32 @@ fn holding_polled<S: CoordinationStore + Clone>(
         .unwrap();
     let mut held = Held::default();
     drive(&mut w, &mut held, "claiming every split", |h| {
+        h.splits.len() == ids.len()
+    });
+    w
+}
+
+/// Like [`holding_polled`], on `clock`, which must also drive `inner`'s lease
+/// expiry.
+fn holding_polled_clocked<S: CoordinationStore + Clone>(
+    rt: &tokio::runtime::Runtime,
+    inner: S,
+    clock: &Arc<TestClock>,
+    ids: &[&str],
+) -> StoreCoordinator<support::polled::PolledStore<S>> {
+    let store = support::polled::PolledStore::new(inner, LEASE / 10);
+    let mut w = StoreCoordinator::with_clock(
+        store,
+        config_for(LEASE, Some("worker-a")),
+        rt.handle().clone(),
+        None,
+        clock.clone(),
+    )
+    .expect("coordinator");
+    w.start(Box::new(PhasedPlanner::one_final("departure:v1", ids)))
+        .unwrap();
+    let mut held = Held::default();
+    support::drive_clocked(&mut w, clock, &mut held, "claiming every split", |h| {
         h.splits.len() == ids.len()
     });
     w
@@ -1695,4 +1734,556 @@ fn a_hand_back_after_an_unseen_failure_report_ends_the_revocation_forced() {
         (outcome("forced"), outcome("drained").unwrap_or(0.0)),
         (Some(1.0), 0.0)
     );
+}
+
+/// Sets the next update of the split record `key` to apply and lose its reply.
+fn arm_ambiguous(store: &FaultStore, key: &str) {
+    store
+        .ambiguous
+        .lock()
+        .unwrap()
+        .push((Keyspace::Durable, key.to_string()));
+}
+
+/// Whether the events queued for `w` include `Lost` for `id`.
+fn lost_queued(w: &mut impl SplitCoordinator, id: &str) -> bool {
+    w.poll()
+        .expect("poll")
+        .iter()
+        .any(|e| matches!(e, CoordinationEvent::Lost { split } if split.as_str() == id))
+}
+
+/// Whether `result` is an error of `kind`.
+fn is_kind(
+    result: &Result<(), spate_coordination::CoordinationError>,
+    kind: CoordinationErrorKind,
+) -> bool {
+    matches!(result, Err(e) if e.kind == kind)
+}
+
+/// A commit after a commit that applied with its reply lost writes on top of
+/// it and keeps the split.
+#[test]
+fn a_commit_after_an_ambiguous_commit_lands() {
+    let rt = runtime();
+    let clock = TestClock::frozen();
+    let fault = FaultStore::with_clock(LEASE, clock.clone());
+    let mut a = holding_polled_clocked(&rt, fault.clone(), &clock, &["c0"]);
+
+    arm_ambiguous(&fault, "split.c0");
+    let first = a.commit(&support::split_id("c0"), &SplitProgress::new(7, vec![]));
+    assert!(
+        is_kind(&first, CoordinationErrorKind::Retryable),
+        "{first:?}"
+    );
+    let next = a.commit(&support::split_id("c0"), &SplitProgress::new(8, vec![]));
+
+    let record = fault.record(&rt, "split.c0");
+    let lease = fault.present(&rt, Keyspace::Ephemeral, &["split.c0"]);
+    assert!(
+        next.is_ok()
+            && record["watermark"] == 8
+            && record["owner"] == "worker-a"
+            && !lease.is_empty(),
+        "commit returned {next:?}; record {record}; lease: {lease:?}"
+    );
+}
+
+/// A commit whose read-back answers from before the write that won returns
+/// Retryable and keeps the split; the next commit lands.
+#[test]
+fn a_commit_whose_read_back_lags_is_retried() {
+    let rt = runtime();
+    let clock = TestClock::frozen();
+    let fault = FaultStore::with_clock(LEASE, clock.clone());
+    let lagging = LaggingReads::new(fault.clone(), Keyspace::Durable, "split.c0", 1);
+    let mut a = holding_polled_clocked(&rt, lagging.clone(), &clock, &["c0"]);
+
+    arm_ambiguous(&fault, "split.c0");
+    let first = a.commit(&support::split_id("c0"), &SplitProgress::new(7, vec![]));
+    assert!(
+        is_kind(&first, CoordinationErrorKind::Retryable),
+        "{first:?}"
+    );
+    *lagging.stale.lock().unwrap() = 1;
+    let lagged = a.commit(&support::split_id("c0"), &SplitProgress::new(8, vec![]));
+    assert!(
+        is_kind(&lagged, CoordinationErrorKind::Retryable),
+        "{lagged:?}"
+    );
+    assert_eq!(fault.record(&rt, "split.c0")["watermark"], 7);
+
+    let next = a.commit(&support::split_id("c0"), &SplitProgress::new(8, vec![]));
+    let record = fault.record(&rt, "split.c0");
+    assert!(
+        next.is_ok() && record["watermark"] == 8,
+        "commit returned {next:?}; record {record}"
+    );
+}
+
+/// A commit whose read-back fails Retryable returns Retryable and keeps the
+/// split; the next commit lands.
+#[test]
+fn a_commit_whose_read_back_fails_is_retried() {
+    let rt = runtime();
+    let clock = TestClock::frozen();
+    let fault = FaultStore::with_clock(LEASE, clock.clone());
+    let tap = support::tap::TapStore::new(fault.clone());
+    let mut a = holding_polled_clocked(&rt, tap.clone(), &clock, &["c0"]);
+
+    arm_ambiguous(&fault, "split.c0");
+    let first = a.commit(&support::split_id("c0"), &SplitProgress::new(7, vec![]));
+    assert!(
+        is_kind(&first, CoordinationErrorKind::Retryable),
+        "{first:?}"
+    );
+    let armed = Arc::new(AtomicBool::new(true));
+    let fires = Arc::clone(&armed);
+    tap.on_get(move |ks, key| {
+        (ks == Keyspace::Durable && key == "split.c0" && fires.swap(false, Ordering::SeqCst))
+            .then(|| StoreError::Retryable("injected: read failed".into()))
+    });
+    let failed = a.commit(&support::split_id("c0"), &SplitProgress::new(8, vec![]));
+    assert!(
+        is_kind(&failed, CoordinationErrorKind::Retryable) && !armed.load(Ordering::SeqCst),
+        "{failed:?}"
+    );
+
+    let next = a.commit(&support::split_id("c0"), &SplitProgress::new(8, vec![]));
+    let record = fault.record(&rt, "split.c0");
+    assert!(
+        next.is_ok() && record["watermark"] == 8,
+        "commit returned {next:?}; record {record}"
+    );
+}
+
+/// A commit after this tenancy's completing commit applied with its reply
+/// lost returns Fenced, deletes the lease and emits no `Lost`.
+#[test]
+fn a_commit_after_an_ambiguous_completing_commit_ends_the_tenancy() {
+    let rt = runtime();
+    let clock = TestClock::frozen();
+    let fault = FaultStore::with_clock(LEASE, clock.clone());
+    let mut a = holding_polled_clocked(&rt, fault.clone(), &clock, &["c0"]);
+
+    arm_ambiguous(&fault, "split.c0");
+    let first = a.commit(
+        &support::split_id("c0"),
+        &SplitProgress::completed(7, vec![]),
+    );
+    assert!(
+        is_kind(&first, CoordinationErrorKind::Retryable),
+        "{first:?}"
+    );
+    let next = a.commit(&support::split_id("c0"), &SplitProgress::new(8, vec![]));
+
+    let record = fault.record(&rt, "split.c0");
+    let lease = fault.present(&rt, Keyspace::Ephemeral, &["split.c0"]);
+    let lost = lost_queued(&mut a, "c0");
+    assert!(
+        is_kind(&next, CoordinationErrorKind::Fenced)
+            && record["status"] == "completed"
+            && record["watermark"] == 7
+            && !lost
+            && lease.is_empty(),
+        "commit returned {next:?}; record {record}; Lost: {lost}; lease: {lease:?}"
+    );
+}
+
+/// A failure report after a commit that applied with its reply lost ends the
+/// tenancy: one attempt charged, the committed watermark kept, the lease gone
+/// and no `Lost`.
+#[test]
+fn a_failure_report_after_an_ambiguous_commit_hands_the_split_back() {
+    let rt = runtime();
+    let clock = TestClock::frozen();
+    let fault = FaultStore::with_clock(LEASE, clock.clone());
+    let mut a = holding_polled_clocked(&rt, fault.clone(), &clock, &["r0"]);
+
+    arm_ambiguous(&fault, "split.r0");
+    let first = a.commit(&support::split_id("r0"), &SplitProgress::new(7, vec![]));
+    assert!(
+        is_kind(&first, CoordinationErrorKind::Retryable),
+        "{first:?}"
+    );
+    let failed = a.fail(&support::split_id("r0"), "injected");
+
+    // The worker may claim the handed-back split again at a later epoch.
+    let record = fault.record(&rt, "split.r0");
+    let lease_epoch = rt
+        .block_on(fault.inner.get(Keyspace::Ephemeral, "split.r0"))
+        .expect("read the lease")
+        .map(|entry| {
+            let lease: serde_json::Value =
+                serde_json::from_slice(&entry.value).expect("a JSON lease");
+            lease["epoch"].as_u64().expect("a lease epoch")
+        });
+    let lost = lost_queued(&mut a, "r0");
+    let epoch = record["epoch"].as_u64().expect("an epoch");
+    assert!(
+        failed.is_ok()
+            && ((epoch == 1 && record["owner"].is_null()) || epoch >= 2)
+            && record["attempts"] == 1
+            && record["watermark"] == 7
+            && lease_epoch != Some(1)
+            && !lost,
+        "fail returned {failed:?}; record {record}; lease epoch {lease_epoch:?}; Lost: {lost}"
+    );
+}
+
+/// A failure report whose read-back, after a lost CAS, answers from before the
+/// write that won is reported as fenced and emits `Lost`.
+#[test]
+fn a_failure_report_whose_read_back_lags_is_fenced() {
+    let rt = runtime();
+    let clock = TestClock::frozen();
+    let fault = FaultStore::with_clock(LEASE, clock.clone());
+    let lagging = LaggingReads::new(fault.clone(), Keyspace::Durable, "split.c0", 1);
+    let mut a = holding_polled_clocked(&rt, lagging.clone(), &clock, &["c0"]);
+
+    arm_ambiguous(&fault, "split.c0");
+    let first = a.commit(&support::split_id("c0"), &SplitProgress::new(7, vec![]));
+    assert!(
+        is_kind(&first, CoordinationErrorKind::Retryable),
+        "{first:?}"
+    );
+    *lagging.stale.lock().unwrap() = 1;
+    let failed = a.fail(&support::split_id("c0"), "injected");
+
+    let lost = lost_queued(&mut a, "c0");
+    assert!(
+        is_kind(&failed, CoordinationErrorKind::Fenced) && lost,
+        "fail returned {failed:?}; Lost: {lost}"
+    );
+}
+
+/// A failure report whose read-back, after a lost CAS, fails Retryable is
+/// reported as fenced and emits `Lost`.
+#[test]
+fn a_failure_report_whose_read_back_fails_is_fenced() {
+    let rt = runtime();
+    let clock = TestClock::frozen();
+    let fault = FaultStore::with_clock(LEASE, clock.clone());
+    let tap = support::tap::TapStore::new(fault.clone());
+    let mut a = holding_polled_clocked(&rt, tap.clone(), &clock, &["c0"]);
+
+    arm_ambiguous(&fault, "split.c0");
+    let first = a.commit(&support::split_id("c0"), &SplitProgress::new(7, vec![]));
+    assert!(
+        is_kind(&first, CoordinationErrorKind::Retryable),
+        "{first:?}"
+    );
+    let armed = Arc::new(AtomicBool::new(true));
+    let fires = Arc::clone(&armed);
+    tap.on_get(move |ks, key| {
+        (ks == Keyspace::Durable && key == "split.c0" && fires.swap(false, Ordering::SeqCst))
+            .then(|| StoreError::Retryable("injected: read failed".into()))
+    });
+    let failed = a.fail(&support::split_id("c0"), "injected");
+
+    let lost = lost_queued(&mut a, "c0");
+    assert!(
+        is_kind(&failed, CoordinationErrorKind::Fenced) && lost && !armed.load(Ordering::SeqCst),
+        "fail returned {failed:?}; Lost: {lost}"
+    );
+}
+
+/// Rewrites the split record `key` in the inner store through `edit`, as another
+/// writer's update would.
+fn rewrite_record(
+    rt: &tokio::runtime::Runtime,
+    fault: &FaultStore,
+    key: &str,
+    edit: impl FnOnce(&mut serde_json::Value),
+) {
+    let entry = rt
+        .block_on(fault.inner.get(Keyspace::Durable, key))
+        .expect("read the store")
+        .expect("the split record");
+    let mut record: serde_json::Value =
+        serde_json::from_slice(&entry.value).expect("a JSON split record");
+    edit(&mut record);
+    let out = rt
+        .block_on(fault.inner.update(
+            Keyspace::Durable,
+            key,
+            serde_json::to_vec(&record).expect("encode"),
+            entry.revision,
+        ))
+        .expect("write the store");
+    assert!(matches!(out, CasOutcome::Won(_)), "the rewrite lost");
+}
+
+/// A failure report that loses its CAS to a peer's record returns Fenced and
+/// emits `Lost`.
+#[test]
+fn a_failure_report_lost_to_a_peer_is_fenced_and_writes_nothing() {
+    let rt = runtime();
+    let clock = TestClock::frozen();
+    let fault = FaultStore::with_clock(LEASE, clock.clone());
+    let mut a = holding_polled_clocked(&rt, fault.clone(), &clock, &["r0"]);
+    rewrite_record(&rt, &fault, "split.r0", |r| {
+        r["owner"] = "worker-b".into();
+        r["epoch"] = 2.into();
+    });
+
+    let failed = a.fail(&support::split_id("r0"), "injected");
+
+    let record = fault.record(&rt, "split.r0");
+    let lost = lost_queued(&mut a, "r0");
+    assert!(
+        is_kind(&failed, CoordinationErrorKind::Fenced) && lost,
+        "fail returned {failed:?}; record {record}; Lost: {lost}"
+    );
+}
+
+/// A commit or failure report that loses its CAS to a later tenancy of the same
+/// instance id returns Fenced and leaves that tenancy's watermark.
+#[test]
+fn a_write_lost_to_a_later_tenancy_of_the_same_instance_is_fenced() {
+    for fail in [false, true] {
+        let rt = runtime();
+        let clock = TestClock::frozen();
+        let fault = FaultStore::with_clock(LEASE, clock.clone());
+        let mut a = holding_polled_clocked(&rt, fault.clone(), &clock, &["r0"]);
+        rewrite_record(&rt, &fault, "split.r0", |r| {
+            r["epoch"] = 2.into();
+            r["watermark"] = 12.into();
+        });
+
+        let result = if fail {
+            a.fail(&support::split_id("r0"), "injected")
+        } else {
+            a.commit(&support::split_id("r0"), &SplitProgress::new(13, vec![]))
+        };
+
+        let record = fault.record(&rt, "split.r0");
+        assert!(
+            is_kind(&result, CoordinationErrorKind::Fenced) && record["watermark"] == 12,
+            "fail={fail}: returned {result:?}; record {record}"
+        );
+    }
+}
+
+/// A commit that loses its CAS to a peer's record returns Fenced and emits
+/// `Lost`, even when that record holds the committed watermark.
+#[test]
+fn a_commit_lost_to_a_peer_at_the_same_watermark_is_fenced() {
+    let rt = runtime();
+    let clock = TestClock::frozen();
+    let fault = FaultStore::with_clock(LEASE, clock.clone());
+    let mut a = holding_polled_clocked(&rt, fault.clone(), &clock, &["c0"]);
+    rewrite_record(&rt, &fault, "split.c0", |r| {
+        r["owner"] = "worker-b".into();
+        r["epoch"] = 2.into();
+        r["watermark"] = 7.into();
+    });
+
+    let result = a.commit(&support::split_id("c0"), &SplitProgress::new(7, vec![]));
+
+    let lost = lost_queued(&mut a, "c0");
+    assert!(
+        is_kind(&result, CoordinationErrorKind::Fenced) && lost,
+        "commit returned {result:?}; Lost: {lost}"
+    );
+}
+
+/// A failure report after this tenancy's completing commit applied with its
+/// reply lost returns Fenced and leaves the completed record unwritten.
+#[test]
+fn a_failure_report_after_an_ambiguous_completing_commit_leaves_the_record() {
+    let rt = runtime();
+    let clock = TestClock::frozen();
+    let fault = FaultStore::with_clock(LEASE, clock.clone());
+    let mut a = holding_polled_clocked(&rt, fault.clone(), &clock, &["r0"]);
+    arm_ambiguous(&fault, "split.r0");
+    let first = a.commit(
+        &support::split_id("r0"),
+        &SplitProgress::completed(7, vec![]),
+    );
+    assert!(
+        is_kind(&first, CoordinationErrorKind::Retryable),
+        "{first:?}"
+    );
+
+    let failed = a.fail(&support::split_id("r0"), "injected");
+
+    let record = fault.record(&rt, "split.r0");
+    assert!(
+        is_kind(&failed, CoordinationErrorKind::Fenced)
+            && record["status"] == "completed"
+            && record["watermark"] == 7
+            && record["attempts"] == 0
+            && record["owner"] == "worker-a",
+        "fail returned {failed:?}; record {record}"
+    );
+}
+
+/// A commit with a lower watermark than one a lost reply hid returns Fatal and
+/// leaves the stored watermark.
+#[test]
+fn a_regressing_commit_after_an_ambiguous_commit_is_fatal() {
+    let rt = runtime();
+    let clock = TestClock::frozen();
+    let fault = FaultStore::with_clock(LEASE, clock.clone());
+    let mut a = holding_polled_clocked(&rt, fault.clone(), &clock, &["c0"]);
+    arm_ambiguous(&fault, "split.c0");
+    let first = a.commit(&support::split_id("c0"), &SplitProgress::new(7, vec![]));
+    assert!(
+        is_kind(&first, CoordinationErrorKind::Retryable),
+        "{first:?}"
+    );
+
+    let regressed = a.commit(&support::split_id("c0"), &SplitProgress::new(5, vec![]));
+
+    let record = fault.record(&rt, "split.c0");
+    assert!(
+        is_kind(&regressed, CoordinationErrorKind::Fatal) && record["watermark"] == 7,
+        "commit returned {regressed:?}; record {record}"
+    );
+}
+
+/// The same completing commit sent again after its reply was lost is adopted:
+/// the caller gets `Ok` and the lease is released.
+#[test]
+fn a_repeated_completing_commit_after_an_ambiguous_one_is_adopted() {
+    let rt = runtime();
+    let clock = TestClock::frozen();
+    let fault = FaultStore::with_clock(LEASE, clock.clone());
+    let mut a = holding_polled_clocked(&rt, fault.clone(), &clock, &["c0"]);
+    arm_ambiguous(&fault, "split.c0");
+    let first = a.commit(
+        &support::split_id("c0"),
+        &SplitProgress::completed(7, vec![]),
+    );
+    assert!(
+        is_kind(&first, CoordinationErrorKind::Retryable),
+        "{first:?}"
+    );
+
+    let again = a.commit(
+        &support::split_id("c0"),
+        &SplitProgress::completed(7, vec![]),
+    );
+
+    let record = fault.record(&rt, "split.c0");
+    let lease = fault.present(&rt, Keyspace::Ephemeral, &["split.c0"]);
+    assert!(
+        again.is_ok()
+            && record["status"] == "completed"
+            && record["watermark"] == 7
+            && lease.is_empty(),
+        "commit returned {again:?}; record {record}; lease: {lease:?}"
+    );
+}
+
+/// A failure report sent again after one that applied with its reply lost
+/// returns Fenced and charges one attempt.
+#[test]
+fn a_failure_report_sent_again_after_an_ambiguous_one_is_fenced() {
+    let rt = runtime();
+    let clock = TestClock::frozen();
+    let fault = FaultStore::with_clock(LEASE, clock.clone());
+    let mut a = holding_polled_clocked(&rt, fault.clone(), &clock, &["r0"]);
+    arm_ambiguous(&fault, "split.r0");
+    let first = a.fail(&support::split_id("r0"), "injected");
+    assert!(
+        is_kind(&first, CoordinationErrorKind::Retryable),
+        "{first:?}"
+    );
+
+    let second = a.fail(&support::split_id("r0"), "injected");
+
+    let record = fault.record(&rt, "split.r0");
+    assert!(
+        is_kind(&second, CoordinationErrorKind::Fenced) && record["attempts"] == 1,
+        "second {second:?}; record {record}"
+    );
+}
+
+/// A commit after a failure report that applied with its reply lost returns
+/// Fenced and writes nothing.
+#[test]
+fn a_commit_after_an_ambiguous_failure_report_is_fenced() {
+    let rt = runtime();
+    let clock = TestClock::frozen();
+    let fault = FaultStore::with_clock(LEASE, clock.clone());
+    let mut a = holding_polled_clocked(&rt, fault.clone(), &clock, &["r0"]);
+    arm_ambiguous(&fault, "split.r0");
+    let first = a.fail(&support::split_id("r0"), "injected");
+    assert!(
+        is_kind(&first, CoordinationErrorKind::Retryable),
+        "{first:?}"
+    );
+
+    let next = a.commit(&support::split_id("r0"), &SplitProgress::new(9, vec![]));
+
+    let record = fault.record(&rt, "split.r0");
+    assert!(
+        is_kind(&next, CoordinationErrorKind::Fenced) && record["watermark"].is_null(),
+        "commit returned {next:?}; record {record}"
+    );
+}
+
+/// A completing commit after a commit at the same watermark that applied with
+/// its reply lost writes the completion.
+#[test]
+fn a_completing_commit_after_an_ambiguous_commit_at_the_same_watermark_completes() {
+    let rt = runtime();
+    let clock = TestClock::frozen();
+    let fault = FaultStore::with_clock(LEASE, clock.clone());
+    let mut a = holding_polled_clocked(&rt, fault.clone(), &clock, &["c0"]);
+    arm_ambiguous(&fault, "split.c0");
+    let first = a.commit(&support::split_id("c0"), &SplitProgress::new(7, vec![]));
+    assert!(
+        is_kind(&first, CoordinationErrorKind::Retryable),
+        "{first:?}"
+    );
+
+    let next = a.commit(
+        &support::split_id("c0"),
+        &SplitProgress::completed(7, vec![]),
+    );
+
+    let record = fault.record(&rt, "split.c0");
+    assert!(
+        next.is_ok() && record["status"] == "completed" && record["completed"] == true,
+        "commit returned {next:?}; record {record}"
+    );
+}
+
+/// A read-back that fails Fatal after a lost CAS returns Fatal from a commit
+/// and from a failure report.
+#[test]
+fn a_read_back_that_fails_fatally_is_fatal() {
+    for commit in [true, false] {
+        let rt = runtime();
+        let clock = TestClock::frozen();
+        let fault = FaultStore::with_clock(LEASE, clock.clone());
+        let tap = support::tap::TapStore::new(fault.clone());
+        let mut a = holding_polled_clocked(&rt, tap.clone(), &clock, &["c0"]);
+        arm_ambiguous(&fault, "split.c0");
+        let first = a.commit(&support::split_id("c0"), &SplitProgress::new(7, vec![]));
+        assert!(
+            is_kind(&first, CoordinationErrorKind::Retryable),
+            "{first:?}"
+        );
+        let armed = Arc::new(AtomicBool::new(true));
+        let fires = Arc::clone(&armed);
+        tap.on_get(move |ks, key| {
+            (ks == Keyspace::Durable && key == "split.c0" && fires.swap(false, Ordering::SeqCst))
+                .then(|| StoreError::Fatal("injected: read refused".into()))
+        });
+
+        let failed = if commit {
+            a.commit(&support::split_id("c0"), &SplitProgress::new(8, vec![]))
+        } else {
+            a.fail(&support::split_id("c0"), "injected")
+        };
+
+        assert!(
+            is_kind(&failed, CoordinationErrorKind::Fatal) && !armed.load(Ordering::SeqCst),
+            "commit={commit}: {failed:?}"
+        );
+    }
 }

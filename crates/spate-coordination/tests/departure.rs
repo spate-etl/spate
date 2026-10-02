@@ -1,6 +1,6 @@
-//! `StoreCoordinator::depart` against a store that fails part-way: an
-//! outage that breaks the watches, a store that stops answering, and fatal
-//! store errors.
+//! `StoreCoordinator::depart` and `release` against a store that fails
+//! part-way: an outage that breaks the watches, a store that stops
+//! answering, fatal store errors, and writes whose reply is lost.
 
 mod support;
 
@@ -18,6 +18,10 @@ use support::{Held, LEASE, PhasedPlanner, config_for, drive, runtime};
 use tokio::sync::mpsc;
 
 type Breaker = mpsc::UnboundedSender<Result<WatchEvent, StoreError>>;
+
+/// Reconcile first runs at a point in this interval drawn per coordinator, so it
+/// re-reads a split record during a test only if that point falls inside the test.
+const NO_RECONCILE: Duration = Duration::from_secs(600);
 
 /// A key and the peer's value that replaces it.
 type PeerTake = (Keyspace, String, Vec<u8>);
@@ -137,6 +141,15 @@ impl FaultStore {
             .collect()
     }
 
+    /// The split record at `key`, which must exist.
+    fn record(&self, rt: &tokio::runtime::Runtime, key: &str) -> serde_json::Value {
+        let entry = rt
+            .block_on(self.inner.get(Keyspace::Durable, key))
+            .expect("read the store")
+            .expect("the split record");
+        serde_json::from_slice(&entry.value).expect("a JSON split record")
+    }
+
     /// Keys of `ks` that still exist, out of `keys`.
     fn present<'a>(
         &self,
@@ -253,6 +266,30 @@ fn holding(
 ) -> StoreCoordinator<FaultStore> {
     let mut w = StoreCoordinator::new(store.clone(), config, rt.handle().clone(), None)
         .expect("coordinator");
+    w.start(Box::new(PhasedPlanner::one_final("departure:v1", ids)))
+        .unwrap();
+    let mut held = Held::default();
+    drive(&mut w, &mut held, "claiming every split", |h| {
+        h.splits.len() == ids.len()
+    });
+    w
+}
+
+/// A started worker over `inner` behind a polled watch, holding every split
+/// of `ids`.
+fn holding_polled<S: CoordinationStore + Clone>(
+    rt: &tokio::runtime::Runtime,
+    inner: S,
+    ids: &[&str],
+) -> StoreCoordinator<support::polled::PolledStore<S>> {
+    let store = support::polled::PolledStore::new(inner, LEASE / 10);
+    let mut w = StoreCoordinator::new(
+        store,
+        config_for(LEASE, Some("worker-a")),
+        rt.handle().clone(),
+        None,
+    )
+    .expect("coordinator");
     w.start(Box::new(PhasedPlanner::one_final("departure:v1", ids)))
         .unwrap();
     let mut held = Held::default();
@@ -1234,5 +1271,401 @@ fn a_lease_read_that_keeps_lagging_is_reported_at_the_deadline() {
                 .as_ref()
                 .is_err_and(|e| e.to_string().contains("deleting the lease of split l0")),
         "{reads} lagging reads; depart returned {result:?}"
+    );
+}
+
+/// A release after a commit that applied with its reply lost clears the
+/// owner on top of the commit and deletes the lease.
+/// Regression for #865.
+#[test]
+fn a_release_after_an_ambiguous_commit_hands_the_split_back() {
+    let rt = runtime();
+    let fault = FaultStore::new(LEASE);
+    let mut a = holding_polled(&rt, fault.clone(), &["c0", "c1"]);
+
+    fault
+        .ambiguous
+        .lock()
+        .unwrap()
+        .push((Keyspace::Durable, "split.c0".to_string()));
+    let committed = a.commit(
+        &support::split_id("c0"),
+        &spate_coordination::SplitProgress::new(7, vec![]),
+    );
+    assert!(committed.is_err(), "the injected reply loss surfaces");
+    let result = a.release(&[support::split_id("c0"), support::split_id("c1")]);
+
+    let record = fault.record(&rt, "split.c0");
+    let lease = fault.present(&rt, Keyspace::Ephemeral, &["split.c0"]);
+    assert!(
+        result.is_ok() && record["owner"].is_null() && lease.is_empty(),
+        "release returned {result:?}; record {record}; lease left: {lease:?}"
+    );
+    assert_eq!(record["watermark"], 7, "the committed watermark");
+}
+
+/// A release after an ambiguous commit whose read-back keeps answering from
+/// before the commit still deletes the lease.
+/// Regression for #865.
+#[test]
+fn a_release_whose_read_back_keeps_lagging_deletes_the_lease() {
+    let rt = runtime();
+    let fault = FaultStore::new(LEASE);
+    let lagging = LaggingReads::new(fault.clone(), Keyspace::Durable, "split.c0", 1);
+    let mut a = holding_polled(&rt, lagging.clone(), &["c0", "c1"]);
+
+    fault
+        .ambiguous
+        .lock()
+        .unwrap()
+        .push((Keyspace::Durable, "split.c0".to_string()));
+    let committed = a.commit(
+        &support::split_id("c0"),
+        &spate_coordination::SplitProgress::new(7, vec![]),
+    );
+    assert!(committed.is_err(), "the injected reply loss surfaces");
+    *lagging.stale.lock().unwrap() = u64::MAX;
+    let result = a.release(&[support::split_id("c0"), support::split_id("c1")]);
+
+    let lease = fault.present(&rt, Keyspace::Ephemeral, &["split.c0"]);
+    assert!(
+        result.is_ok() && lease.is_empty(),
+        "release returned {result:?}; lease left: {lease:?}"
+    );
+}
+
+/// A release after a failure report that applied with its reply lost, and
+/// did not quarantine the split, deletes the lease.
+/// Regression for #865.
+#[test]
+fn a_release_after_an_ambiguous_failure_report_deletes_the_lease() {
+    let rt = runtime();
+    let fault = FaultStore::new(LEASE);
+    let mut a = holding_polled(&rt, fault.clone(), &["r0", "r1"]);
+
+    fault
+        .ambiguous
+        .lock()
+        .unwrap()
+        .push((Keyspace::Durable, "split.r0".to_string()));
+    let failed = a.fail(&support::split_id("r0"), "injected");
+    assert!(failed.is_err(), "the injected reply loss surfaces");
+    let result = a.release(&[support::split_id("r0"), support::split_id("r1")]);
+
+    let record = fault.record(&rt, "split.r0");
+    let lease = fault.present(&rt, Keyspace::Ephemeral, &["split.r0"]);
+    assert!(
+        result.is_ok() && lease.is_empty() && record["owner"].is_null(),
+        "release returned {result:?}; record {record}; lease left: {lease:?}"
+    );
+    assert_eq!(record["attempts"], 1, "one failure report");
+}
+
+/// A release after this worker's failure report applied with its reply lost
+/// counts neither a release nor a fenced loss; one after a peer's unseen
+/// quarantine counts a fenced loss.
+/// Regression for #865.
+#[test]
+fn a_release_counts_an_unseen_failure_report_apart_from_a_fence() {
+    let handle = spate_core::metrics::install(&spate_core::metrics::MetricsSettings {
+        exporter: spate_core::metrics::Exporter::Prometheus,
+        ..spate_core::metrics::MetricsSettings::default()
+    })
+    .expect("install the exporter");
+    let rt = runtime();
+    let fault = FaultStore::new(LEASE);
+    let labels = spate_core::metrics::ComponentLabels::new("departure", "release-accounting", "s3");
+    let mut config = config_for(LEASE, Some("worker-a"));
+    config.reconcile_interval = NO_RECONCILE;
+    let mut a = StoreCoordinator::new(
+        support::polled::PolledStore::new(fault.clone(), LEASE / 10),
+        config,
+        rt.handle().clone(),
+        Some(spate_core::metrics::CoordinationMetrics::new(&labels)),
+    )
+    .expect("coordinator");
+    let ids = ["r0", "q0", "h0"];
+    a.start(Box::new(PhasedPlanner::one_final("departure:v1", &ids)))
+        .unwrap();
+    let mut held = Held::default();
+    drive(&mut a, &mut held, "claiming every split", |h| {
+        h.splits.len() == 3
+    });
+
+    fault
+        .ambiguous
+        .lock()
+        .unwrap()
+        .push((Keyspace::Durable, "split.r0".to_string()));
+    assert!(a.fail(&support::split_id("r0"), "injected").is_err());
+
+    // A peer quarantines q0, unseen by the poller.
+    let entry = rt
+        .block_on(fault.inner.get(Keyspace::Durable, "split.q0"))
+        .unwrap()
+        .expect("record");
+    let mut record: serde_json::Value = serde_json::from_slice(&entry.value).unwrap();
+    record["epoch"] = (record["epoch"].as_u64().unwrap() + 1).into();
+    record["owner"] = serde_json::Value::Null;
+    record["status"] = "quarantined".into();
+    let won = rt
+        .block_on(fault.inner.update(
+            Keyspace::Durable,
+            "split.q0",
+            serde_json::to_vec(&record).unwrap(),
+            entry.revision,
+        ))
+        .unwrap();
+    assert!(matches!(won, CasOutcome::Won(_)));
+
+    a.release(&ids.map(support::split_id)).expect("release");
+
+    let text = handle.render();
+    let component = [("component", "release-accounting")];
+    let releases = spate_test::metric_sum(&text, "spate_coordination_releases_total", &component);
+    let fenced = spate_test::metric_sum(
+        &text,
+        "spate_coordination_split_losses_total",
+        &[("component", "release-accounting"), ("reason", "fenced")],
+    );
+    assert_eq!(
+        (releases, fenced),
+        (Some(1.0), Some(1.0)),
+        "releases (h0 only) and fenced losses (q0 only)"
+    );
+}
+
+/// A release after a completing commit that applied with its reply lost
+/// leaves the split completed at the committed watermark, with no owner and
+/// no lease.
+/// Regression for #865.
+#[test]
+fn a_release_after_an_ambiguous_completing_commit_hands_the_split_back() {
+    let rt = runtime();
+    let fault = FaultStore::new(LEASE);
+    let mut a = holding_polled(&rt, fault.clone(), &["k0", "k1"]);
+
+    fault
+        .ambiguous
+        .lock()
+        .unwrap()
+        .push((Keyspace::Durable, "split.k0".to_string()));
+    let committed = a.commit(
+        &support::split_id("k0"),
+        &spate_coordination::SplitProgress::completed(9, vec![]),
+    );
+    assert!(committed.is_err(), "the injected reply loss surfaces");
+    let result = a.release(&[support::split_id("k0"), support::split_id("k1")]);
+
+    let record = fault.record(&rt, "split.k0");
+    let lease = fault.present(&rt, Keyspace::Ephemeral, &["split.k0"]);
+    assert!(
+        result.is_ok()
+            && record["owner"].is_null()
+            && record["status"] == "completed"
+            && record["watermark"] == 9
+            && lease.is_empty(),
+        "release returned {result:?}; record {record}; lease left: {lease:?}"
+    );
+}
+
+/// A peer that takes the lease between our cached revision and the
+/// release's delete keeps its lease.
+#[test]
+fn a_release_leaves_a_peer_lease_in_place() {
+    let rt = runtime();
+    let store = FaultStore::new(LEASE);
+    let mut a = holding(
+        &rt,
+        &store,
+        config_for(LEASE, Some("worker-a")),
+        &["t0", "t1"],
+    );
+    let ours = rt
+        .block_on(store.inner.get(Keyspace::Ephemeral, "split.t0"))
+        .unwrap()
+        .expect("our lease");
+    let mut peer: serde_json::Value = serde_json::from_slice(&ours.value).unwrap();
+    peer["owner"] = "worker-b".into();
+    peer["nonce"] = "peer-nonce".into();
+    peer["epoch"] = (peer["epoch"].as_u64().unwrap() + 1).into();
+    let peer = serde_json::to_vec(&peer).unwrap();
+
+    store.peer_takes.lock().unwrap().push((
+        Keyspace::Ephemeral,
+        "split.t0".to_string(),
+        peer.clone(),
+    ));
+    let result = a.release(&[support::split_id("t0"), support::split_id("t1")]);
+
+    let left = rt
+        .block_on(store.inner.get(Keyspace::Ephemeral, "split.t0"))
+        .unwrap();
+    assert!(
+        left.as_ref().is_some_and(|e| e.value == peer),
+        "release returned {result:?}; the peer's lease is gone"
+    );
+}
+
+/// A record a same-named later tenancy holds at a higher epoch keeps its
+/// owner when the earlier tenancy releases the split.
+#[test]
+fn a_release_keeps_a_later_tenancys_owner() {
+    let rt = runtime();
+    let fault = FaultStore::new(LEASE);
+    let mut a = holding_polled(&rt, fault.clone(), &["j0", "j1"]);
+
+    // A restart under the same id claims it again, unseen by the poller.
+    let entry = rt
+        .block_on(fault.inner.get(Keyspace::Durable, "split.j0"))
+        .unwrap()
+        .expect("record");
+    let mut record: serde_json::Value = serde_json::from_slice(&entry.value).unwrap();
+    let epoch = record["epoch"].as_u64().unwrap() + 1;
+    record["epoch"] = epoch.into();
+    let won = rt
+        .block_on(fault.inner.update(
+            Keyspace::Durable,
+            "split.j0",
+            serde_json::to_vec(&record).unwrap(),
+            entry.revision,
+        ))
+        .unwrap();
+    assert!(matches!(won, CasOutcome::Won(_)));
+    let result = a.release(&[support::split_id("j0"), support::split_id("j1")]);
+
+    let after = fault.record(&rt, "split.j0");
+    assert!(
+        after["owner"] == "worker-a" && after["epoch"] == epoch,
+        "release returned {result:?}; record {after}"
+    );
+}
+
+/// A revoked split whose failure report applied with its reply lost, handed
+/// back by `hand_back`. Returns the rendered metrics and whether `Lost` was
+/// emitted for it.
+fn revoked_after_unseen_failure(
+    component: &'static str,
+    hand_back: impl FnOnce(
+        &mut StoreCoordinator<support::polled::PolledStore<FaultStore>>,
+        &spate_coordination::SplitId,
+    ),
+) -> (String, bool) {
+    use spate_core::coordination::CoordinationEvent;
+    let handle = spate_core::metrics::install(&spate_core::metrics::MetricsSettings {
+        exporter: spate_core::metrics::Exporter::Prometheus,
+        ..spate_core::metrics::MetricsSettings::default()
+    })
+    .expect("install the exporter");
+    let rt = runtime();
+    let fault = FaultStore::new(LEASE);
+    let labels = spate_core::metrics::ComponentLabels::new("departure", component, "s3");
+    let ids = ["f0", "f1", "f2", "f3"];
+    let mut a_config = config_for(LEASE, Some("worker-a"));
+    a_config.reconcile_interval = NO_RECONCILE;
+    a_config.drain_deadline = LEASE * 20;
+    let mut a = StoreCoordinator::new(
+        support::polled::PolledStore::new(fault.clone(), LEASE / 10),
+        a_config,
+        rt.handle().clone(),
+        Some(spate_core::metrics::CoordinationMetrics::new(&labels)),
+    )
+    .expect("coordinator");
+    a.start(Box::new(PhasedPlanner::one_final("departure:v1", &ids)))
+        .unwrap();
+    let mut held_a = Held::default();
+    drive(&mut a, &mut held_a, "A claiming everything", |h| {
+        h.splits.len() == 4
+    });
+
+    let b_config = config_for(LEASE, Some("worker-b"));
+    let mut b = StoreCoordinator::new(
+        support::polled::PolledStore::new(fault.clone(), LEASE / 10),
+        b_config,
+        rt.handle().clone(),
+        None,
+    )
+    .expect("coordinator");
+    b.start(Box::new(PhasedPlanner::one_final("departure:v1", &ids)))
+        .unwrap();
+    let mut held_b = Held::default();
+
+    let deadline = Instant::now() + support::DEADLINE;
+    let asked = loop {
+        assert!(Instant::now() < deadline, "no revocation was requested");
+        let mut asked = None;
+        for event in a.poll().unwrap() {
+            if let CoordinationEvent::RevokeRequested { split } = &event {
+                asked = Some(split.clone());
+            }
+            held_a.fold(vec![event]);
+        }
+        held_b.fold(b.poll().unwrap());
+        if let Some(split) = asked {
+            break split;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    };
+
+    fault
+        .ambiguous
+        .lock()
+        .unwrap()
+        .push((Keyspace::Durable, format!("split.{}", asked.as_str())));
+    assert!(
+        a.fail(&asked, "injected").is_err(),
+        "the injected reply loss surfaces"
+    );
+    hand_back(&mut a, &asked);
+
+    let lost = a
+        .poll()
+        .unwrap()
+        .into_iter()
+        .any(|e| matches!(&e, CoordinationEvent::Lost { split } if *split == asked));
+    (handle.render(), lost)
+}
+
+/// A revocation forced after this worker's failure report applied with its
+/// reply lost counts a `revoked` loss and emits `Lost`.
+/// Regression for #865.
+#[test]
+fn a_forced_revocation_after_an_unseen_failure_report_counts_revoked() {
+    let (text, lost) = revoked_after_unseen_failure("forced-after-failure", |a, split| {
+        a.decline_revoke(split).expect("decline");
+    });
+    let losses = |reason| {
+        spate_test::metric_sum(
+            &text,
+            "spate_coordination_split_losses_total",
+            &[("component", "forced-after-failure"), ("reason", reason)],
+        )
+    };
+    assert!(lost, "no Lost event");
+    assert_eq!(
+        (losses("revoked"), losses("fenced").unwrap_or(0.0)),
+        (Some(1.0), 0.0)
+    );
+}
+
+/// A drained hand-back after this worker's failure report applied with its
+/// reply lost ends the revocation as `forced`.
+/// Regression for #865.
+#[test]
+fn a_hand_back_after_an_unseen_failure_report_ends_the_revocation_forced() {
+    let (text, _) = revoked_after_unseen_failure("drained-after-failure", |a, split| {
+        a.release_drained(std::slice::from_ref(split))
+            .expect("release");
+    });
+    let outcome = |outcome| {
+        spate_test::metric_sum(
+            &text,
+            "spate_coordination_revocations_total",
+            &[("component", "drained-after-failure"), ("outcome", outcome)],
+        )
+    };
+    assert_eq!(
+        (outcome("forced"), outcome("drained").unwrap_or(0.0)),
+        (Some(1.0), 0.0)
     );
 }

@@ -291,9 +291,11 @@ enum ReleaseOutcome {
     Released,
     /// The CAS lost: a peer had already taken the split.
     Fenced,
-    /// The write failed; the lease key was dropped best-effort.
+    /// The write failed or its outcome could not be read back; the lease
+    /// key was dropped best-effort.
     WriteFailed,
-    /// Not held (already released, lost, or completed).
+    /// Not held (already released, lost, or completed), or already ended by
+    /// this worker's own failure report.
     Missing,
 }
 
@@ -2418,10 +2420,10 @@ impl<S: CoordinationStore + Clone> Task<S> {
     ///
     /// The release runs before the fence. The release CAS needs the lease
     /// revision, which lives in `owned`, and a fence would take it away.
-    /// The loss is reported exactly once: if the release lost its CAS a
-    /// peer ended this tenancy, `drop_owned` already counted `fenced` and
-    /// emitted `Lost`, and adding a `revoked` on top would count one
-    /// tenancy end twice under two different reasons.
+    /// The loss is reported exactly once: if the release returned `Fenced`,
+    /// `drop_owned` already counted `fenced` and emitted `Lost`, and adding
+    /// a `revoked` on top would count one tenancy end twice under two
+    /// different reasons.
     async fn force_revocation(&mut self, id: &str) -> Result<(), CoordinationError> {
         self.settle_revocation(id, RevocationOutcome::Forced);
         let Ok(split) = SplitId::new(id.to_string()) else {
@@ -2688,7 +2690,10 @@ impl<S: CoordinationStore + Clone> Task<S> {
     }
 
     /// Best-effort removal of a lease key we hold (guarded by revision).
-    /// Only a fatal store error is returned.
+    /// A lost delete reads the key back once and deletes it at the read
+    /// revision while it carries this worker's owner and nonce; a read that
+    /// predates the latest renewal leaves the lease to expire. Only a fatal
+    /// store error is returned.
     async fn release_lease_key(
         &mut self,
         id: &str,
@@ -2696,19 +2701,47 @@ impl<S: CoordinationStore + Clone> Task<S> {
     ) -> Result<(), CoordinationError> {
         let key = records::split_key_str(id);
         self.note_deleted(Keyspace::Ephemeral, &key);
-        if let Err(e) = self
+        let mut reread = None;
+        match self
             .store
             .delete(Keyspace::Ephemeral, &key, Some(lease_rev))
             .await
         {
-            tracing::debug!(split = %id, error = %e, "lease cleanup failed; it will expire");
-            fatal_only("deleting a lease", &e)?;
+            Ok(CasOutcome::Won(_)) => {}
+            Ok(CasOutcome::Lost) => match self.store.get(Keyspace::Ephemeral, &key).await {
+                Ok(Some(entry))
+                    if serde_json::from_slice::<LeaseVal>(&entry.value)
+                        .is_ok_and(|v| v.owner == self.instance && v.nonce == self.nonce) =>
+                {
+                    match self
+                        .store
+                        .delete(Keyspace::Ephemeral, &key, Some(entry.revision))
+                        .await
+                    {
+                        Ok(CasOutcome::Won(_)) => reread = Some(entry.revision),
+                        Ok(CasOutcome::Lost) => {}
+                        Err(e) => {
+                            tracing::debug!(split = %id, error = %e, "lease cleanup failed; it will expire");
+                            fatal_only("deleting a lease", &e)?;
+                        }
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::debug!(split = %id, error = %e, "lease cleanup failed; it will expire");
+                    fatal_only("re-reading a lease", &e)?;
+                }
+            },
+            Err(e) => {
+                tracing::debug!(split = %id, error = %e, "lease cleanup failed; it will expire");
+                fatal_only("deleting a lease", &e)?;
+            }
         }
         if let Some(state) = self.splits.get_mut(id)
             && state
                 .lease
                 .as_ref()
-                .is_some_and(|(_, rev)| *rev == lease_rev)
+                .is_some_and(|(_, rev)| *rev == lease_rev || Some(*rev) == reread)
         {
             state.lease = None;
         }
@@ -3433,6 +3466,13 @@ impl<S: CoordinationStore + Clone> Task<S> {
     /// ended that revocation. Scoping the count to `revoking` keeps a bulk
     /// hand-back from reading as a fleet of revocations, so no `departure`
     /// flag is needed to tell them apart.
+    ///
+    /// A write whose reply was lost may have applied, so a lost CAS reads
+    /// the record back. Still naming this worker at this tenancy's epoch and
+    /// a newer revision, the clear goes again on top of the stored record.
+    /// Cleared at that epoch, this worker's own failure report ended the
+    /// tenancy. A read at or below the lost revision, or a failed read, is
+    /// handled as a failed write; any other record as a fence.
     async fn release_one(&mut self, split: &SplitId) -> Result<ReleaseOutcome, CoordinationError> {
         let id = split.as_str();
         let Some(owned) = self.owned.get(id) else {
@@ -3443,41 +3483,78 @@ impl<S: CoordinationStore + Clone> Task<S> {
             return Ok(ReleaseOutcome::Missing);
         };
         let mut record = state.progress.clone();
-        record.owner = None;
-        record.written_at_ms = records::now_ms();
-        let expected = state.progress_rev;
+        let mut expected = state.progress_rev;
+        let epoch = record.epoch;
         let key = records::split_key_str(id);
-        match self
-            .store
-            .update(Keyspace::Durable, &key, record.encode(), expected)
-            .await
-        {
-            Ok(CasOutcome::Won(rev)) => {
-                self.owned.remove(id);
-                self.upsert_progress(id, record, rev)?;
-                self.release_lease_key(id, lease_rev).await?;
-                // The cooperative outcome: the tail is committed and the
-                // owner cleared, so the next owner replays nothing.
-                self.settle_revocation(id, RevocationOutcome::Drained);
-                Ok(ReleaseOutcome::Released)
+        let unconfirmed = loop {
+            record.owner = None;
+            record.written_at_ms = records::now_ms();
+            match self
+                .store
+                .update(Keyspace::Durable, &key, record.encode(), expected)
+                .await
+            {
+                Ok(CasOutcome::Won(rev)) => {
+                    self.owned.remove(id);
+                    self.upsert_progress(id, record, rev)?;
+                    self.release_lease_key(id, lease_rev).await?;
+                    // The cooperative outcome: the tail is committed and the
+                    // owner cleared, so the next owner replays nothing.
+                    self.settle_revocation(id, RevocationOutcome::Drained);
+                    return Ok(ReleaseOutcome::Released);
+                }
+                Ok(CasOutcome::Lost) => {}
+                Err(e) => {
+                    tracing::warn!(split = %id, error = %e, "release write failed; lease will expire");
+                    break Some(("releasing a split", e));
+                }
             }
-            Ok(CasOutcome::Lost) => {
-                // Fenced: the split is someone else's problem now, which
-                // is what a release wanted. `drop_owned` settles it.
-                self.drop_owned(id, SplitLossReason::Fenced);
-                Ok(ReleaseOutcome::Fenced)
+            let entry = match self.store.get(Keyspace::Durable, &key).await {
+                Ok(Some(entry)) => entry,
+                Ok(None) => {
+                    self.drop_owned(id, SplitLossReason::Fenced);
+                    return Ok(ReleaseOutcome::Fenced);
+                }
+                Err(e) => {
+                    tracing::warn!(split = %id, error = %e, "release read-back failed; the owner stays set");
+                    break Some(("re-reading a released split", e));
+                }
+            };
+            let fresh = SplitProgressRecord::parse(&key, &entry.value, self.fp)?;
+            if fresh.epoch == epoch
+                && fresh.owner.as_deref() == Some(self.instance.as_str())
+                && entry.revision > expected
+            {
+                record = fresh;
+                expected = entry.revision;
+                continue;
             }
-            Err(e) => {
-                tracing::warn!(split = %id, error = %e, "release write failed; lease will expire");
-                // Still drop the lease key best-effort: the attempt
-                // accounting is conservative (counts as non-graceful).
+            if fresh.epoch == epoch && fresh.owner.is_none() {
+                // This worker's failure report ended the tenancy and counted it.
                 self.owned.remove(id);
+                self.upsert_progress(id, fresh, entry.revision)?;
                 self.release_lease_key(id, lease_rev).await?;
                 self.settle_revocation(id, RevocationOutcome::Forced);
-                fatal_only("releasing a split", &e)?;
-                Ok(ReleaseOutcome::WriteFailed)
+                return Ok(ReleaseOutcome::Missing);
             }
+            if entry.revision <= expected {
+                tracing::warn!(split = %id, "release read-back lagged the store; the owner stays set");
+                break None;
+            }
+            // Fenced: the split is someone else's problem now, which
+            // is what a release wanted. `drop_owned` settles it.
+            self.drop_owned(id, SplitLossReason::Fenced);
+            return Ok(ReleaseOutcome::Fenced);
+        };
+        // Still drop the lease key best-effort: the attempt
+        // accounting is conservative (counts as non-graceful).
+        self.owned.remove(id);
+        self.release_lease_key(id, lease_rev).await?;
+        self.settle_revocation(id, RevocationOutcome::Forced);
+        if let Some((doing, e)) = unconfirmed {
+            fatal_only(doing, &e)?;
         }
+        Ok(ReleaseOutcome::WriteFailed)
     }
 
     // ------------------------------------------------------------------

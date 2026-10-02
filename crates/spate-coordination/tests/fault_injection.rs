@@ -14,7 +14,7 @@ use spate_coordination::{
     CoordinationConfig, CoordinationEvent, SplitCoordinator, SplitProgress, StoreCoordinator,
 };
 use spate_core::clock::tokio::Clock;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -35,6 +35,16 @@ struct FaultStore {
     lease_maybe_land: Arc<AtomicBool>,
     /// Split-lease updates that won since the maybe-landed renewal.
     renewals_after_fault: Arc<AtomicU64>,
+    /// The split lease the maybe-landed renewal wrote.
+    lease_fault_key: Arc<Mutex<Option<String>>>,
+    /// Split-lease update calls per key.
+    lease_updates: Arc<Mutex<BTreeMap<String, u64>>>,
+    /// The split lease before the maybe-landed renewal, for
+    /// `lease_stale_read`.
+    lease_before: Arc<Mutex<Option<Entry>>>,
+    /// Once: the next read of the faulted split lease answers with the
+    /// lease as it stood before the maybe-landed renewal.
+    lease_stale_read: Arc<AtomicBool>,
     /// While armed: the next durable split-record write that clears the
     /// owner (a graceful release, or a revocation's final hand-back) is
     /// dropped (Retryable, nothing written), disarming afterward.
@@ -72,6 +82,10 @@ impl FaultStore {
             plan_update_script: Arc::new(Mutex::new(VecDeque::new())),
             lease_maybe_land: Arc::new(AtomicBool::new(false)),
             renewals_after_fault: Arc::new(AtomicU64::new(0)),
+            lease_fault_key: Arc::default(),
+            lease_updates: Arc::default(),
+            lease_before: Arc::default(),
+            lease_stale_read: Arc::default(),
             drop_owner_clear: Arc::new(AtomicBool::new(false)),
             drop_assignment_publish: Arc::new(AtomicBool::new(false)),
             leader_maybe_land: Arc::default(),
@@ -106,6 +120,14 @@ impl CoordinationStore for FaultStore {
         value: Vec<u8>,
         expected: Revision,
     ) -> Result<CasOutcome, StoreError> {
+        if ks == Keyspace::Ephemeral && key.starts_with("split.") {
+            *self
+                .lease_updates
+                .lock()
+                .expect("updates")
+                .entry(key.to_string())
+                .or_default() += 1;
+        }
         if ks == Keyspace::Durable
             && key == "plan"
             && self
@@ -147,8 +169,10 @@ impl CoordinationStore for FaultStore {
         {
             // The write LANDS but the caller sees a failure, the
             // maybe-landed renewal a flaky round-trip produces.
+            *self.lease_before.lock().expect("before") = self.inner.get(ks, key).await?;
             let _ = self.inner.update(ks, key, value, expected).await?;
             self.renewals_after_fault.store(0, Ordering::Release);
+            *self.lease_fault_key.lock().expect("fault key") = Some(key.to_string());
             return Err(StoreError::Retryable(
                 "injected: renewal reply lost after the write landed".into(),
             ));
@@ -185,6 +209,12 @@ impl CoordinationStore for FaultStore {
     }
 
     async fn get(&self, ks: Keyspace, key: &str) -> Result<Option<Entry>, StoreError> {
+        if ks == Keyspace::Ephemeral
+            && self.lease_fault_key.lock().expect("fault key").as_deref() == Some(key)
+            && self.lease_stale_read.swap(false, Ordering::AcqRel)
+        {
+            return Ok(self.lease_before.lock().expect("before").clone());
+        }
         if ks == Keyspace::Ephemeral && key == "leader" {
             if self.leader_read_fails.swap(false, Ordering::AcqRel) {
                 return Err(StoreError::Retryable("injected: leader read failed".into()));
@@ -354,6 +384,125 @@ fn maybe_landed_renewal_is_adopted_not_fenced() {
         "completing after the flake",
         |h| h.all_complete,
     );
+}
+
+/// A solo worker on a frozen clock holding `r0` and `r1`, stepped until a
+/// lease renewal applies with its reply lost, then `act` on that split's id.
+/// With `stale_read`, the first read of the lease after the fault answers
+/// from before the renewal. Returns the lease and the split record after
+/// `act`.
+fn after_unseen_lease_renewal(
+    stale_read: bool,
+    act: impl FnOnce(&mut StoreCoordinator<FaultStore>, &str),
+) -> (Option<String>, serde_json::Value) {
+    let rt = runtime();
+    let clock = TestClock::frozen();
+    let inner = MemoryStore::with_clock(support::LEASE, clock.clone());
+    let store = FaultStore::new(inner.clone());
+    let maybe_land = store.lease_maybe_land.clone();
+    let fault_key = store.lease_fault_key.clone();
+    let updates = store.lease_updates.clone();
+    let stale = store.lease_stale_read.clone();
+    let mut worker = StoreCoordinator::with_clock(
+        store,
+        config(Some("solo")),
+        rt.handle().clone(),
+        None,
+        clock.clone() as Arc<dyn Clock>,
+    )
+    .expect("coordinator");
+    worker
+        .start(Box::new(PhasedPlanner::one_final(
+            "lease-fault:v1",
+            &["r0", "r1"],
+        )))
+        .unwrap();
+    let mut fleet = support::Fleet::new(&inner, rt.handle());
+    fleet.join(&worker);
+    let mut held = Held::default();
+    support::drive(&mut worker, &mut held, "claiming both splits", |h| {
+        h.splits.len() == 2
+    });
+
+    // Step a twelfth of a lease at a time, so no second heartbeat runs
+    // between the fault and `act`.
+    maybe_land.store(true, Ordering::Release);
+    let deadline = Instant::now() + DEADLINE;
+    while maybe_land.load(Ordering::Acquire) {
+        assert!(Instant::now() < deadline, "the fault never fired");
+        fleet.step(&clock, support::LEASE / 12);
+        held.fold(worker.poll().expect("poll"));
+    }
+    let key = fault_key
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the faulted lease");
+    let renewals = updates.lock().unwrap()[&key];
+    stale.store(stale_read, Ordering::Release);
+    act(
+        &mut worker,
+        key.strip_prefix("split.").expect("a split key"),
+    );
+
+    assert_eq!(
+        updates.lock().unwrap()[&key],
+        renewals,
+        "a renewal ran between the fault and the act"
+    );
+    assert!(
+        !stale.load(Ordering::Acquire),
+        "the stale read was not served"
+    );
+    let lease = rt
+        .block_on(inner.get(Keyspace::Ephemeral, &key))
+        .unwrap()
+        .map(|e| String::from_utf8_lossy(&e.value).into_owned());
+    let record = rt
+        .block_on(inner.get(Keyspace::Durable, &key))
+        .unwrap()
+        .expect("split record");
+    (lease, record_json(&record.value))
+}
+
+/// A release right after a lease renewal that applied with its reply lost
+/// deletes that lease.
+/// Regression for #865.
+#[test]
+fn a_release_after_an_unseen_lease_renewal_deletes_the_lease() {
+    let (lease, record) = after_unseen_lease_renewal(false, |worker, _| {
+        worker
+            .release(&[split_id("r0"), split_id("r1")])
+            .expect("release");
+    });
+    assert!(lease.is_none(), "the lease was left: {lease:?}");
+    assert!(record["owner"].is_null());
+}
+
+/// A completing commit right after a lease renewal that applied with its
+/// reply lost deletes that lease.
+/// Regression for #865.
+#[test]
+fn a_completion_after_an_unseen_lease_renewal_deletes_the_lease() {
+    let (lease, _) = after_unseen_lease_renewal(false, |worker, id| {
+        worker
+            .commit(&split_id(id), &SplitProgress::completed(1, vec![]))
+            .expect("complete");
+    });
+    assert!(lease.is_none(), "the lease was left: {lease:?}");
+}
+
+/// A release whose lease read answers from before an unseen renewal leaves
+/// the lease to expire.
+#[test]
+fn a_release_whose_lease_read_lags_the_renewal_leaves_the_lease() {
+    let (lease, record) = after_unseen_lease_renewal(true, |worker, _| {
+        worker
+            .release(&[split_id("r0"), split_id("r1")])
+            .expect("release");
+    });
+    assert!(lease.is_some(), "the lease was deleted");
+    assert!(record["owner"].is_null());
 }
 
 /// A solo leader whose next leader-key renewal applies with its reply lost,

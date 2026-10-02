@@ -765,6 +765,102 @@ mod tests {
         assert_eq!(start.elapsed(), REQUEST_TIMEOUT);
     }
 
+    /// Answers every request with `head` and then `chunks` written in one
+    /// write, and holds the connection open; returns the `http://` URL.
+    async fn serve_raw(head: &'static str, chunks: Vec<u8>, drip: Option<Duration>) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut tcp, _)) = listener.accept().await {
+                let chunks = chunks.clone();
+                tokio::spawn(async move {
+                    let mut request = [0u8; 4096];
+                    let _ = tcp.read(&mut request).await;
+                    let mut out = head.as_bytes().to_vec();
+                    out.extend_from_slice(&chunks);
+                    let _ = tcp.write_all(&out).await;
+                    match drip {
+                        Some(every) => loop {
+                            tokio::time::sleep(every).await;
+                            if tcp.write_all(b"1\r\n \r\n").await.is_err() {
+                                break;
+                            }
+                        },
+                        None => std::future::pending::<()>().await,
+                    }
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    fn chunk(data: &[u8]) -> Vec<u8> {
+        let mut out = format!("{:x}\r\n", data.len()).into_bytes();
+        out.extend_from_slice(data);
+        out.extend_from_slice(b"\r\n");
+        out
+    }
+
+    /// A registry that sends the headers and then drips the body fails the
+    /// fetch once the request timeout elapses.
+    #[tokio::test(start_paused = true)]
+    async fn a_dripping_body_times_out() {
+        let url = serve_raw(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n",
+            chunk(b"{"),
+            Some(REQUEST_TIMEOUT / 3),
+        )
+        .await;
+        // A 1 ms ticker bounds each auto-advance of the paused clock, so I/O
+        // completes before a request timer can fire.
+        tokio::spawn(async {
+            let mut tick = tokio::time::interval(Duration::from_millis(1));
+            loop {
+                tick.tick().await;
+            }
+        });
+        let start = tokio::time::Instant::now();
+        let fetched = tokio::time::timeout(REQUEST_TIMEOUT * 2, fetch(&config(&url, None), vec![]))
+            .await
+            .expect("the request timeout ends the fetch");
+        assert!(
+            matches!(&fetched, Err(Failure::Transient(reason)) if reason.contains("timed out")),
+            "{fetched:?}"
+        );
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed >= REQUEST_TIMEOUT && elapsed < REQUEST_TIMEOUT + Duration::from_secs(1),
+            "{elapsed:?}"
+        );
+    }
+
+    /// An error body that arrives in several chunks and never ends is read up
+    /// to [`ERROR_BODY_LIMIT`] and no further.
+    #[tokio::test]
+    async fn a_chunked_error_body_is_read_to_the_limit() {
+        let mut chunks = chunk(&[b'a'; 10]);
+        chunks.extend(chunk(&[b'b'; 300]));
+        let url = serve_raw(
+            "HTTP/1.1 500 Internal Server Error\r\nTransfer-Encoding: chunked\r\n\r\n",
+            chunks,
+            None,
+        )
+        .await;
+        let fetched =
+            tokio::time::timeout(Duration::from_secs(10), fetch(&config(&url, None), vec![]))
+                .await
+                .expect("the fetch ends once the limit is read");
+        match fetched {
+            Err(Failure::Status { status, body }) => {
+                assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+                assert_eq!(body.len(), ERROR_BODY_LIMIT, "{body}");
+                assert!(body.starts_with(&"a".repeat(10)), "{body}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
     /// An error body is kept trimmed and cut to [`ERROR_BODY_LIMIT`] bytes on
     /// a character boundary.
     #[test]

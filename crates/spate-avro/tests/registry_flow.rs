@@ -817,6 +817,7 @@ async fn an_auth_rejection_is_fatal() {
         let reason = fatal_reason(builder.build_value().unwrap(), confluent_payload(1, 1)).await;
         assert!(reason.contains(&format!("{status}")), "{reason}");
         assert!(reason.contains(&addr.to_string()), "{reason}");
+        assert!(reason.contains("error_code"), "{reason}");
         for secret in ["urlsecret", "hunter2"] {
             assert!(!reason.contains(secret), "{reason}");
         }
@@ -828,7 +829,12 @@ async fn an_auth_rejection_is_fatal() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_prewarm_auth_rejection_is_fatal_at_the_first_miss() {
     let stub = StubRegistry::default();
-    stub.script("/subjects/events-value/versions/latest", 401, "{}", 0);
+    stub.script(
+        "/subjects/events-value/versions/latest",
+        401,
+        r#"{"error_code":40101,"message":"Unauthorized"}"#,
+        0,
+    );
     stub.script("/schemas/ids/42", 503, "{}", 0);
     let addr = stub.serve().await;
     let mut cfg = settings(addr, Duration::from_secs(30));
@@ -837,6 +843,7 @@ async fn a_prewarm_auth_rejection_is_fatal_at_the_first_miss() {
         AvroDeserializerBuilder::from_settings(&cfg, &tokio::runtime::Handle::current()).unwrap();
     let reason = fatal_reason(builder.build_value().unwrap(), confluent_payload(42, 1)).await;
     assert!(reason.contains("401"), "{reason}");
+    assert!(reason.contains("40101"), "{reason}");
 }
 
 /// Once a rejection is recorded, a schema already cached keeps decoding.

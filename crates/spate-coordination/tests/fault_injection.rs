@@ -10,13 +10,18 @@ use spate_coordination::store::memory::MemoryStore;
 use spate_coordination::store::{
     CasOutcome, CoordinationStore, Entry, Keyspace, Revision, StoreError, WatchEvent, WatchStream,
 };
-use spate_coordination::{CoordinationEvent, SplitCoordinator, SplitProgress, StoreCoordinator};
+use spate_coordination::{
+    CoordinationConfig, CoordinationEvent, SplitCoordinator, SplitProgress, StoreCoordinator,
+};
 use spate_core::clock::tokio::Clock;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use support::{DEADLINE, Held, PhasedPlanner, TestClock, config, runtime, split_id};
+
+/// The clock a stalled write advances, and by how much.
+type Stall = (Arc<TestClock>, Duration);
 
 /// A [`MemoryStore`] with scripted faults on specific writes.
 #[derive(Clone)]
@@ -41,6 +46,23 @@ struct FaultStore {
     /// wedged by that alone; the point under test is that the leader
     /// republishes rather than treating the fleet as informed.
     drop_assignment_publish: Arc<AtomicBool>,
+    /// Once: the next leader-key update writes but returns an error.
+    leader_maybe_land: Arc<AtomicBool>,
+    /// When set, the maybe-landed leader write advances this clock by this
+    /// much before it returns, as a reply lost to `op_timeout` does.
+    leader_stall: Arc<Mutex<Option<Stall>>>,
+    /// Once: the next leader-key read after the maybe-landed write answers
+    /// with the key as it stood before that write.
+    leader_stale_read: Arc<AtomicBool>,
+    /// The leader key before the maybe-landed write, for `leader_stale_read`.
+    leader_before: Arc<Mutex<Option<Entry>>>,
+    /// Once: the next leader-key read fails.
+    leader_read_fails: Arc<AtomicBool>,
+    /// Once: after a leader-key read, the next leader-key update fails
+    /// without writing.
+    leader_update_after_read_fails: Arc<AtomicBool>,
+    /// Armed by the read `leader_update_after_read_fails` waits for.
+    leader_update_fail_armed: Arc<AtomicBool>,
 }
 
 impl FaultStore {
@@ -52,6 +74,13 @@ impl FaultStore {
             renewals_after_fault: Arc::new(AtomicU64::new(0)),
             drop_owner_clear: Arc::new(AtomicBool::new(false)),
             drop_assignment_publish: Arc::new(AtomicBool::new(false)),
+            leader_maybe_land: Arc::default(),
+            leader_stall: Arc::default(),
+            leader_stale_read: Arc::default(),
+            leader_before: Arc::default(),
+            leader_read_fails: Arc::default(),
+            leader_update_after_read_fails: Arc::default(),
+            leader_update_fail_armed: Arc::default(),
         }
     }
 }
@@ -124,6 +153,27 @@ impl CoordinationStore for FaultStore {
                 "injected: renewal reply lost after the write landed".into(),
             ));
         }
+        if ks == Keyspace::Ephemeral
+            && key == "leader"
+            && self.leader_update_fail_armed.swap(false, Ordering::AcqRel)
+        {
+            return Err(StoreError::Retryable(
+                "injected: leader update failed".into(),
+            ));
+        }
+        if ks == Keyspace::Ephemeral
+            && key == "leader"
+            && self.leader_maybe_land.swap(false, Ordering::AcqRel)
+        {
+            *self.leader_before.lock().expect("before") = self.inner.get(ks, key).await?;
+            let _ = self.inner.update(ks, key, value, expected).await?;
+            if let Some((clock, by)) = self.leader_stall.lock().expect("stall").clone() {
+                clock.advance(by);
+            }
+            return Err(StoreError::Retryable(
+                "injected: leader renewal reply lost after the write landed".into(),
+            ));
+        }
         let outcome = self.inner.update(ks, key, value, expected).await?;
         if ks == Keyspace::Ephemeral
             && key.starts_with("split.")
@@ -135,6 +185,23 @@ impl CoordinationStore for FaultStore {
     }
 
     async fn get(&self, ks: Keyspace, key: &str) -> Result<Option<Entry>, StoreError> {
+        if ks == Keyspace::Ephemeral && key == "leader" {
+            if self.leader_read_fails.swap(false, Ordering::AcqRel) {
+                return Err(StoreError::Retryable("injected: leader read failed".into()));
+            }
+            if self
+                .leader_update_after_read_fails
+                .swap(false, Ordering::AcqRel)
+            {
+                self.leader_update_fail_armed.store(true, Ordering::Release);
+            }
+            let before = self.leader_before.lock().expect("before").take();
+            if let Some(before) = before
+                && self.leader_stale_read.swap(false, Ordering::AcqRel)
+            {
+                return Ok(Some(before));
+            }
+        }
         self.inner.get(ks, key).await
     }
 
@@ -286,6 +353,127 @@ fn maybe_landed_renewal_is_adopted_not_fenced() {
         &mut held,
         "completing after the flake",
         |h| h.all_complete,
+    );
+}
+
+/// A solo leader whose next leader-key renewal applies with its reply lost,
+/// faulted further by `arm`, then stepped for two leases: asserts that the
+/// plan generation did not move and the leader key still names the worker.
+fn leader_keeps_leading_after(
+    tune: impl FnOnce(&mut CoordinationConfig),
+    arm: impl FnOnce(&FaultStore, &Arc<TestClock>),
+) {
+    let rt = runtime();
+    let clock = TestClock::frozen();
+    let inner = MemoryStore::with_clock(support::LEASE, clock.clone());
+    let store = FaultStore::new(inner.clone());
+    let maybe_land = store.leader_maybe_land.clone();
+    arm(&store, &clock);
+
+    let mut cfg = config(Some("solo"));
+    tune(&mut cfg);
+    let planner = Box::new(PhasedPlanner::one_final("leader-fault:v1", &["r0"]));
+    let mut worker = StoreCoordinator::with_clock(
+        store,
+        cfg,
+        rt.handle().clone(),
+        None,
+        clock.clone() as Arc<dyn Clock>,
+    )
+    .expect("coordinator");
+    worker.start(planner).unwrap();
+    let mut fleet = support::Fleet::new(&inner, rt.handle());
+    fleet.join(&worker);
+    let mut held = Held::default();
+    support::drive(&mut worker, &mut held, "claiming the split", |h| {
+        h.splits.len() == 1
+    });
+    let generation = plan_generation(&rt, &inner);
+
+    let mut pump = || {
+        fleet.settle(&clock);
+        held.fold(worker.poll().expect("poll"));
+    };
+    maybe_land.store(true, Ordering::Release);
+    let renew = support::LEASE / 3;
+    let deadline = Instant::now() + DEADLINE;
+    while maybe_land.load(Ordering::Acquire) {
+        assert!(Instant::now() < deadline, "the fault never fired");
+        clock.advance_stepped(renew, renew / 4, &mut pump);
+    }
+    clock.advance_stepped(support::LEASE * 2, renew / 4, &mut pump);
+
+    assert_eq!(
+        plan_generation(&rt, &inner),
+        generation,
+        "the leader gave up leadership and was re-elected"
+    );
+    let leader = rt
+        .block_on(inner.get(Keyspace::Ephemeral, "leader"))
+        .unwrap()
+        .expect("leader key");
+    assert_eq!(record_json(&leader.value)["owner"], "solo");
+}
+
+fn plan_generation(rt: &tokio::runtime::Runtime, store: &MemoryStore) -> u64 {
+    let plan = rt
+        .block_on(store.get(Keyspace::Durable, "plan"))
+        .unwrap()
+        .expect("plan record");
+    record_json(&plan.value)["generation"].as_u64().unwrap()
+}
+
+/// A leader whose renewal applied with its reply lost keeps leading.
+/// Regression for #865.
+#[test]
+fn a_leader_whose_renewal_applied_unseen_keeps_leading() {
+    leader_keeps_leading_after(|_| {}, |_, _| {});
+}
+
+/// A leader whose renewal reply was lost to `op_timeout`, half a lease after
+/// the write applied, renews before the key expires.
+/// Regression for #865.
+#[test]
+fn a_leader_whose_renewal_reply_timed_out_keeps_leading() {
+    leader_keeps_leading_after(
+        |cfg| cfg.op_timeout = support::LEASE / 2,
+        |store, clock| {
+            *store.leader_stall.lock().unwrap() = Some((clock.clone(), support::LEASE / 2));
+        },
+    );
+}
+
+/// A leader whose read-back after a lost renewal comes from a replica behind
+/// the applied write keeps leading.
+/// Regression for #865.
+#[test]
+fn a_leader_whose_read_back_lags_keeps_leading() {
+    leader_keeps_leading_after(
+        |_| {},
+        |store, _| store.leader_stale_read.store(true, Ordering::Release),
+    );
+}
+
+/// A leader whose read-back after a lost renewal fails keeps leading.
+#[test]
+fn a_leader_whose_read_back_fails_keeps_leading() {
+    leader_keeps_leading_after(
+        |_| {},
+        |store, _| store.leader_read_fails.store(true, Ordering::Release),
+    );
+}
+
+/// A leader whose renewal after the read-back of a lost renewal fails keeps
+/// leading.
+#[test]
+fn a_leader_whose_renewal_after_the_read_back_fails_keeps_leading() {
+    leader_keeps_leading_after(
+        |_| {},
+        |store, _| {
+            store
+                .leader_update_after_read_fails
+                .store(true, Ordering::Release)
+        },
     );
 }
 

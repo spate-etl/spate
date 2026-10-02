@@ -19,9 +19,9 @@ use spate_coordination::{
 };
 use spate_coordination::{PlanFinality, SplitProgress};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
-use support::tap::TapStore;
+use support::tap::{Op, TapStore};
 use support::{
     DEADLINE, Fleet, Held, LEASE, PhasedPlanner, QUIET_ROUNDS, TestClock, config, config_for,
     crash, drive, drive_clocked, runtime, settle_pair_clocked, split_id, store, store_with_clock,
@@ -534,6 +534,128 @@ fn a_stale_leader_put_does_not_depose_the_leader() {
         generation,
         "the leader was deposed and re-elected"
     );
+}
+
+/// A leader whose renewal loses to another worker's leader key leaves that
+/// key in place and stops renewing it.
+#[test]
+fn a_renewal_lost_to_a_peer_leader_demotes() {
+    let rt = runtime();
+    let clock = TestClock::frozen();
+    let inner = store_with_clock(clock.clone());
+    let tap = TapStore::new(inner.clone());
+    let mut w = StoreCoordinator::with_clock(
+        tap.clone(),
+        tuned("worker-a"),
+        rt.handle().clone(),
+        None,
+        clock.clone(),
+    )
+    .expect("coordinator");
+    w.start(Box::new(PhasedPlanner::one_final("peer-leader:v1", &["x"])))
+        .unwrap();
+    let mut held = Held::default();
+    drive_clocked(&mut w, &clock, &mut held, "claiming x", |h| {
+        h.splits.len() == 1
+    });
+    let mut fleet = Fleet::new(&inner, rt.handle());
+    fleet.join(&w);
+    fleet.settle(&clock);
+
+    tap.hide(|ks, key| ks == Keyspace::Ephemeral && key == "leader");
+    let peer = serde_json::to_vec(&serde_json::json!({
+        "schema": 3, "owner": "worker-z", "nonce": "z", "generation": 0
+    }))
+    .unwrap();
+    let leader = ephemeral(&rt, &inner, "leader");
+    let replaced = rt
+        .block_on(inner.update(Keyspace::Ephemeral, "leader", peer.clone(), leader.revision))
+        .unwrap();
+    assert!(matches!(replaced, CasOutcome::Won(_)), "{replaced:?}");
+    let updates = Arc::new(AtomicU64::new(0));
+    let counted = updates.clone();
+    tap.on_write(move |write| {
+        if write.op == Op::Update && write.ks == Keyspace::Ephemeral && write.key == "leader" {
+            counted.fetch_add(1, Ordering::SeqCst);
+        }
+        None
+    });
+    clock.advance_stepped(LEASE * 9 / 10, LEASE / 12, || {
+        fleet.settle(&clock);
+        held.fold(w.poll().expect("poll"));
+    });
+
+    assert_eq!(
+        String::from_utf8_lossy(&ephemeral(&rt, &inner, "leader").value),
+        String::from_utf8_lossy(&peer),
+        "the peer's leader key was overwritten"
+    );
+    assert_eq!(updates.load(Ordering::SeqCst), 1, "leader-key updates");
+}
+
+/// A leader whose renewal loses to a leader key carrying its own instance id
+/// under another run's nonce leaves that key in place and stops renewing it.
+#[test]
+fn a_renewal_lost_to_a_namesake_leader_demotes() {
+    let rt = runtime();
+    let clock = TestClock::frozen();
+    let inner = store_with_clock(clock.clone());
+    let tap = TapStore::new(inner.clone());
+    let mut w = StoreCoordinator::with_clock(
+        tap.clone(),
+        tuned("worker-a"),
+        rt.handle().clone(),
+        None,
+        clock.clone(),
+    )
+    .expect("coordinator");
+    w.start(Box::new(PhasedPlanner::one_final(
+        "namesake-leader:v1",
+        &["x"],
+    )))
+    .unwrap();
+    let mut held = Held::default();
+    drive_clocked(&mut w, &clock, &mut held, "claiming x", |h| {
+        h.splits.len() == 1
+    });
+    let mut fleet = Fleet::new(&inner, rt.handle());
+    fleet.join(&w);
+    fleet.settle(&clock);
+
+    tap.hide(|ks, key| ks == Keyspace::Ephemeral && key == "leader");
+    let namesake = serde_json::to_vec(&serde_json::json!({
+        "schema": 3, "owner": "worker-a", "nonce": "another-run", "generation": 0
+    }))
+    .unwrap();
+    let leader = ephemeral(&rt, &inner, "leader");
+    let replaced = rt
+        .block_on(inner.update(
+            Keyspace::Ephemeral,
+            "leader",
+            namesake.clone(),
+            leader.revision,
+        ))
+        .unwrap();
+    assert!(matches!(replaced, CasOutcome::Won(_)), "{replaced:?}");
+    let updates = Arc::new(AtomicU64::new(0));
+    let counted = updates.clone();
+    tap.on_write(move |write| {
+        if write.op == Op::Update && write.ks == Keyspace::Ephemeral && write.key == "leader" {
+            counted.fetch_add(1, Ordering::SeqCst);
+        }
+        None
+    });
+    clock.advance_stepped(LEASE * 9 / 10, LEASE / 12, || {
+        fleet.settle(&clock);
+        held.fold(w.poll().expect("poll"));
+    });
+
+    assert_eq!(
+        String::from_utf8_lossy(&ephemeral(&rt, &inner, "leader").value),
+        String::from_utf8_lossy(&namesake),
+        "the namesake's leader key was overwritten"
+    );
+    assert_eq!(updates.load(Ordering::SeqCst), 1, "leader-key updates");
 }
 
 /// A stale put and delete of the leader's own presence key, both at or below

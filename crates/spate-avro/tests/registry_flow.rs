@@ -633,6 +633,32 @@ async fn prewarm_skips_a_schema_that_is_not_avro() {
     );
 }
 
+/// An unknown id's poison reason carries the registry's error body.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unknown_id_names_the_registry_error() {
+    let stub = StubRegistry::default();
+    // Unscripted: the stub answers 404 {"error_code":40403,"message":"Schema not found"}.
+    let addr = stub.clone().serve().await;
+    let builder = AvroDeserializerBuilder::from_settings(
+        &settings(addr, Duration::from_secs(30)),
+        &tokio::runtime::Handle::current(),
+    )
+    .unwrap();
+    let mut deser = builder.build_value().expect("apache builder");
+    let payload = confluent_payload(5, 1);
+    let err = tokio::task::spawn_blocking(move || {
+        let mut out = Collected(Vec::new());
+        drive_until_ready(&mut deser, &payload, &mut out)
+    })
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert!(
+        matches!(&err, DeserError::SchemaUnavailable { reason } if reason.contains("40403")),
+        "{err}"
+    );
+}
+
 /// The target and `Authorization` headers of each request a stub received.
 type Seen = Arc<Mutex<Vec<(String, Vec<String>)>>>;
 

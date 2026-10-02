@@ -55,6 +55,8 @@ const FETCH_BACKOFF_MAX: Duration = Duration::from_secs(5);
 /// blocking (a slow id no longer stalls the rest) while keeping registry
 /// load and open-socket count modest.
 const MAX_CONCURRENT_FETCHES: usize = 4;
+/// Bound on the part of an error response's body a [`Failure::Status`] keeps.
+const ERROR_BODY_LIMIT: usize = 256;
 /// Bound on one registry request, from connect to the end of the body. A
 /// fetch holds a slot in [`MAX_CONCURRENT_FETCHES`] until it ends.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -169,8 +171,9 @@ impl RegistrySchema {
 /// Why a registry request failed.
 #[derive(Debug)]
 enum Failure {
-    /// The registry answered with a status other than success.
-    Status(StatusCode),
+    /// The registry answered with a status other than success. `body` is the
+    /// start of the response body, at most [`ERROR_BODY_LIMIT`] bytes.
+    Status { status: StatusCode, body: String },
     /// A [`tls_rejection!`](spate_core::tls_rejection); the reason names the
     /// registry.
     Rejected(String),
@@ -181,7 +184,10 @@ enum Failure {
 impl std::fmt::Display for Failure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Failure::Status(status) => write!(f, "the registry answered {status}"),
+            Failure::Status { status, body } if body.is_empty() => {
+                write!(f, "the registry answered {status}")
+            }
+            Failure::Status { status, body } => write!(f, "the registry answered {status}: {body}"),
             Failure::Rejected(reason) | Failure::Transient(reason) => f.write_str(reason),
         }
     }
@@ -243,10 +249,20 @@ impl Endpoint {
         if let Some((user, password)) = &self.basic_auth {
             request = request.basic_auth(user, password.as_deref());
         }
-        let response = request.send().await.map_err(|e| self.failure(e))?;
+        let mut response = request.send().await.map_err(|e| self.failure(e))?;
         let status = response.status();
         if !status.is_success() {
-            return Err(Failure::Status(status));
+            let mut body = Vec::new();
+            while body.len() < ERROR_BODY_LIMIT {
+                match response.chunk().await {
+                    Ok(Some(chunk)) => body.extend_from_slice(&chunk),
+                    _ => break,
+                }
+            }
+            return Err(Failure::Status {
+                status,
+                body: excerpt(&body),
+            });
         }
         let body = response.bytes().await.map_err(|e| self.failure(e))?;
         serde_json::from_slice(&body)
@@ -282,6 +298,17 @@ fn tls_reason(registry: &str, tls: &rustls::Error) -> String {
         ),
         _ => format!("the TLS handshake with schema registry {registry} failed: {tls}"),
     }
+}
+
+/// `body` as trimmed text, cut to at most [`ERROR_BODY_LIMIT`] bytes.
+fn excerpt(body: &[u8]) -> String {
+    let text = String::from_utf8_lossy(body);
+    let text = text.trim();
+    let mut end = text.len().min(ERROR_BODY_LIMIT);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].trim_end().to_owned()
 }
 
 /// `e` and each error in its source chain, joined by `": "`.
@@ -537,22 +564,30 @@ async fn fetch_one(
             }
             FetchOutcome::Resolved
         }
-        Err(Failure::Status(StatusCode::NOT_FOUND)) => {
+        Err(
+            failure @ Failure::Status {
+                status: StatusCode::NOT_FOUND,
+                ..
+            },
+        ) => {
             // Negative-cache the unknown id; the deserializer applies its
             // ErrorPolicy to the poison payload.
-            tracing::warn!(schema_id = id, "registry reports schema id unknown");
+            tracing::warn!(schema_id = id, error = %failure, "registry reports schema id unknown");
             cache.insert_failed(
                 id,
-                format!(
-                    "registry fetch for schema {id} failed: the registry answered 404 Not Found"
-                ),
+                format!("registry fetch for schema {id} failed: {failure}"),
             );
             FetchOutcome::Resolved
         }
-        Err(Failure::Status(status @ (StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN))) => {
+        Err(
+            failure @ Failure::Status {
+                status: StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN,
+                ..
+            },
+        ) => {
             record(
                 rejection,
-                format!("schema registry {registry} answered {status} to the fetch of schema {id}"),
+                format!("schema registry {registry} refused the fetch of schema {id}: {failure}"),
             );
             // Leave the id absent: a negative entry would reach the
             // ErrorPolicy, and Skip would drop the payload.
@@ -622,11 +657,16 @@ pub(crate) async fn prewarm(
                     }
                 }
             }
-            Err(Failure::Status(status @ StatusCode::UNAUTHORIZED)) => record(
+            Err(
+                failure @ Failure::Status {
+                    status: StatusCode::UNAUTHORIZED,
+                    ..
+                },
+            ) => record(
                 rejection,
                 format!(
-                    "schema registry {registry} answered {status} to the pre-warm of subject \
-                     {subject}"
+                    "schema registry {registry} refused the pre-warm of subject {subject}: \
+                     {failure}"
                 ),
             ),
             Err(Failure::Rejected(reason)) => record(rejection, reason),
@@ -697,6 +737,20 @@ mod tests {
             Err(Failure::Rejected(reason)) => reason,
             other => panic!("expected a rejection, got {other:?}"),
         }
+    }
+
+    /// An error body is kept trimmed and cut to [`ERROR_BODY_LIMIT`] bytes on
+    /// a character boundary.
+    #[test]
+    fn an_error_body_excerpt_is_bounded() {
+        assert_eq!(
+            excerpt(b"  {\"error_code\":40403}\n"),
+            r#"{"error_code":40403}"#
+        );
+        let long = format!("a{}", "é".repeat(ERROR_BODY_LIMIT));
+        let cut = excerpt(long.as_bytes());
+        assert_eq!(cut.len(), ERROR_BODY_LIMIT - 1);
+        assert!(cut.chars().skip(1).all(|c| c == 'é'));
     }
 
     /// Request paths extend the configured path, a trailing slash included,

@@ -525,7 +525,10 @@ async fn connect(
     )
     .await?;
     let state_marker_ttl = Arc::new(AtomicBool::new(true));
-    if let Some(patched) = adopted.and_then(|c| with_message_ttls(c, lease_ttl)) {
+    if let Some(patched) = adopted.and_then(|c| {
+        warn_async_state_persistence(&c);
+        with_message_ttls(c, lease_ttl)
+    }) {
         state_marker_ttl.store(false, Ordering::Release);
         // Off the startup path: a denied update only times out.
         tokio::spawn(enable_message_ttls(
@@ -572,6 +575,18 @@ fn connect_error(e: async_nats::ConnectError) -> StoreError {
         StoreError::Fatal(message)
     } else {
         StoreError::Retryable(message)
+    }
+}
+
+fn warn_async_state_persistence(existing: &stream::Config) {
+    if existing.persist_mode == Some(stream::PersistenceMode::Async) {
+        tracing::warn!(
+            stream = %existing.name,
+            persistence = "async",
+            "the adopted coordination state bucket uses async persistence; acknowledged \
+             writes can be lost despite sync_interval: always; provision production state \
+             buckets with default stream persistence"
+        );
     }
 }
 
@@ -1077,6 +1092,7 @@ mod tests {
         let existing = stream::Config {
             name: "KV_spate_coordination_orders_state".into(),
             description: Some("operator note".into()),
+            persist_mode: Some(stream::PersistenceMode::Async),
             num_replicas: 3,
             max_bytes: 1 << 30,
             ..Default::default()

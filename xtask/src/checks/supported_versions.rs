@@ -15,8 +15,7 @@
 //!
 //! No service or page is named here. A service opts in by listing its pages in
 //! `ci/<service>/DOCS`, one path per line. Lanes listed in
-//! `ci/<service>/UNSUPPORTED` pin a server the software refuses, and back no
-//! claim.
+//! `ci/<service>/UNSUPPORTED` are fixtures that back no claim.
 
 use std::collections::BTreeSet;
 use std::path::Path;

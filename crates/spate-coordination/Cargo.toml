@@ -83,3 +83,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [lints]
 workspace = true
+
+[[test]]
+name = "nats_persistence"
+required-features = ["nats"]

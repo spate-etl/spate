@@ -28,7 +28,7 @@ are testing, so adding either is a change inside `ci/`.
 | [`debian`](debian/README.md) | `trixie` | `spate-kafka`'s `tls_system_ca`, as its client image |
 | [`dynamodb`](dynamodb/README.md) | `stable` | `spate-coordination`'s DynamoDB store |
 | [`kafka`](kafka/README.md) | `stable` | `spate-kafka`, and `spate`'s end-to-end suites |
-| [`nats`](nats/README.md) | `floor`, `below-floor` | `spate-coordination`, `spate-s3`'s `coordinated_nats`, and `spate`'s examples tier |
+| [`nats`](nats/README.md) | `floor`, `below-floor`, `async` | `spate-coordination`, `spate-s3`'s `coordinated_nats`, and `spate`'s examples tier |
 
 A service's own README carries what is specific to it: which release lines it
 has, its vendor's support window, and why those lanes.
@@ -84,7 +84,8 @@ NATS.
 `cargo xtask tidy supported-versions` holds a page listed in `DOCS` to the lanes.
 Every release line its `## Supported` table names, and every image tag its code
 blocks run, must be a line some lane pins. A lane listed in `UNSUPPORTED` pins a
-server the software refuses, such as NATS's `below-floor`, and backs no claim.
+fixture and backs no claim: NATS's `below-floor` is a server the software
+refuses, and `async` runs one test.
 Nothing else reads either file.
 
 ## What CI runs

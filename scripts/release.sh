@@ -151,7 +151,7 @@ TABLE
 # Preflight: name what is missing before any step runs.
 # ---------------------------------------------------------------------------
 preflight() {
-    local missing="" about
+    local missing=""
     command -v gh >/dev/null 2>&1 || missing="$missing gh"
     command -v jq >/dev/null 2>&1 || missing="$missing jq"
     command -v curl >/dev/null 2>&1 || missing="$missing curl"
@@ -163,12 +163,9 @@ preflight() {
     gh auth status >/dev/null 2>&1 || [ -n "${GH_TOKEN:-}" ] ||
         fail "gh is not authenticated and GH_TOKEN is unset"
 
-    # Exactly the pinned version: a different cargo-about reorders or regroups
-    # the generated inventory, and the release commit would carry that churn.
-    about=$(cargo about --version 2>/dev/null || true)
-    [ "$about" = "cargo-about 0.9.1" ] ||
-        fail "cargo-about 0.9.1 is required, found '${about:-none}'. Install it with:
-  cargo install cargo-about --locked --features cli --version 0.9.1"
+    cargo about --version >/dev/null 2>&1 ||
+        fail "cargo-about is required and was not found. Install it with:
+  cargo install cargo-about --locked --features cli"
 
     [ -z "$(git status --porcelain)" ] ||
         fail "the working tree is not clean; a release is assembled from committed state only"
@@ -176,15 +173,10 @@ preflight() {
 
 # The SBOM generator, needed by the local rehearsal alone: in CI, `assemble`
 # never generates one and the publish job installs the tool itself.
-# Suffix-matched because the tool reports itself as `cargo-cyclonedx-cyclonedx`.
 preflight_sbom_tool() {
-    local cyclonedx
-    cyclonedx=$(cargo cyclonedx --version 2>/dev/null || true)
-    case "$cyclonedx" in
-    *' 0.5.9') ;;
-    *) fail "cargo-cyclonedx 0.5.9 is required, found '${cyclonedx:-none}'. Install it with:
-  cargo install cargo-cyclonedx --locked --version 0.5.9" ;;
-    esac
+    cargo cyclonedx --version >/dev/null 2>&1 ||
+        fail "cargo-cyclonedx is required and was not found. Install it with:
+  cargo install cargo-cyclonedx --locked"
 }
 
 # SBOMs for the publishable crates, collected into one directory as

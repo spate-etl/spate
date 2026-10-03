@@ -313,6 +313,11 @@ pub(crate) struct Task<S: CoordinationStore + Clone> {
 
     // Local state.
     owned: BTreeMap<String, OwnedSplit>,
+    /// Leases a release left in place, because its read-back answered from
+    /// before this worker's latest renewal or its delete at the read revision
+    /// failed, by split id with the released tenancy's epoch; each heartbeat
+    /// retries until the key is gone or no longer this tenancy's.
+    owed_leases: BTreeMap<String, u64>,
     /// Lease observations whose durable record has not arrived yet
     /// (snapshot ordering, watch races): attached when the record shows
     /// up, so a held split can never be misread as expired.
@@ -455,6 +460,7 @@ impl<S: CoordinationStore + Clone> Task<S> {
             quarantined_count: 0,
             runnable_count: 0,
             owned: BTreeMap::new(),
+            owed_leases: BTreeMap::new(),
             pending_leases: BTreeMap::new(),
             pending_specs: BTreeMap::new(),
             leadership: None,

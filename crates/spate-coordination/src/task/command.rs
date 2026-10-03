@@ -1,6 +1,7 @@
 //! Serving control-thread commands for commits, completions, failures and
 //! releases.
 
+use super::depart::own_failure_report;
 use super::{Command, ReleaseOutcome, Task};
 use crate::error::{fatal, fatal_only, retryable, store_error};
 use crate::records::{self, SplitProgressRecord, SplitStatus};
@@ -229,9 +230,13 @@ impl<S: CoordinationStore + Clone> Task<S> {
 
     /// Explicit failure report: consumes an attempt, ends this tenancy
     /// gracefully-for-the-lease but non-gracefully for the attempt
-    /// accounting, and quarantines at the cap. A lost CAS on this tenancy's
-    /// own newer runnable record writes the report again on top of it; a
-    /// record this tenancy already completed hands the lease back and returns
+    /// accounting, and quarantines at the cap. When the view, or the record
+    /// read back after a lost CAS, already shows this tenancy's own failure
+    /// report and that report did not quarantine, the tenancy ends as that
+    /// report ended it: the lease is handed back, nothing is written, and the
+    /// call returns `Ok` without `Lost`. A lost CAS on this tenancy's own
+    /// newer runnable record writes the report again on top of it; a record
+    /// this tenancy already completed hands the lease back and returns
     /// `Fenced` without `Lost`. Any other record, or a read-back that lags or
     /// fails `Retryable`, returns `Fenced` and emits `Lost`.
     async fn fail_split(&mut self, split: &SplitId, reason: &str) -> Result<(), CoordinationError> {
@@ -243,11 +248,17 @@ impl<S: CoordinationStore + Clone> Task<S> {
             ));
         };
         let lease_rev = owned.lease_rev;
+        let tenancy_attempts = owned.attempts;
         let state = self.splits.get(id).expect("owned splits are in the view");
         let owned_epoch = state.progress.epoch;
+        let reported = own_failure_report(&state.progress, owned_epoch, tenancy_attempts);
         let attempts = state.progress.attempts + 1;
         let quarantining = attempts >= self.config.max_attempts;
         self.metrics(|m| m.failed());
+        if reported {
+            self.end_after_own_report(id, lease_rev).await?;
+            return Ok(());
+        }
         tracing::warn!(split = %id, reason, attempts, quarantining, "split failed by the source");
         let key = records::split_key_str(id);
         loop {
@@ -287,8 +298,13 @@ impl<S: CoordinationStore + Clone> Task<S> {
             if let Some((fresh, rev)) = reread {
                 let ours = fresh.owner.as_deref() == Some(self.instance.as_str())
                     && fresh.epoch == owned_epoch;
+                let own_report = own_failure_report(&fresh, owned_epoch, tenancy_attempts);
                 let status = fresh.status;
                 self.upsert_progress(id, fresh, rev)?;
+                if own_report {
+                    self.end_after_own_report(id, lease_rev).await?;
+                    return Ok(());
+                }
                 match status {
                     SplitStatus::Runnable if ours => continue,
                     SplitStatus::Completed if ours => {

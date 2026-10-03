@@ -60,7 +60,7 @@ async fn delete_own<S: CoordinationStore>(
 /// Whether `record` is the failure report of the tenancy at `epoch` that
 /// began with `attempts`. A release at that epoch also clears the owner, but
 /// leaves `attempts` as it was.
-fn own_failure_report(record: &SplitProgressRecord, epoch: u64, attempts: u32) -> bool {
+pub(super) fn own_failure_report(record: &SplitProgressRecord, epoch: u64, attempts: u32) -> bool {
     record.epoch == epoch && record.owner.is_none() && record.attempts > attempts
 }
 
@@ -391,7 +391,7 @@ impl<S: CoordinationStore + Clone> Task<S> {
     /// End a tenancy whose own failure report already cleared the owner:
     /// delete the lease and settle a revocation in progress as `Forced`,
     /// writing nothing to the record. Only a fatal store error is returned.
-    async fn end_after_own_report(
+    pub(super) async fn end_after_own_report(
         &mut self,
         id: &str,
         lease_rev: Revision,

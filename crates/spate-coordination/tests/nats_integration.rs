@@ -190,7 +190,6 @@ fn partition_takeover_and_completion_over_real_nats() {
         &SplitProgress::new(7, b"nats-resume".to_vec()),
     )
     .unwrap();
-    // The last successful lease write determines expiry; crash time does not bound the remaining TTL.
     crash(rt_a, a);
     drive(
         &mut b,

@@ -320,8 +320,9 @@ pub async fn watching<S: CoordinationStore>(store: &S) {
 }
 
 /// An ephemeral key expires a lease after its last write: a key rewritten
-/// every quarter lease survives three leases, an untouched one reads as
-/// absent and reaches watchers as a delete.
+/// every quarter lease survives three leases, an untouched one outlives
+/// three quarters of a lease, then reads as absent and reaches watchers as a
+/// delete.
 pub async fn expiry<S: CoordinationStore>(store: &S, advance: impl AsyncFn(Duration)) {
     let ks = Keyspace::Ephemeral;
     let lease = store.lease_ttl();
@@ -336,7 +337,7 @@ pub async fn expiry<S: CoordinationStore>(store: &S, advance: impl AsyncFn(Durat
     let mut watch = store.watch(ks, "ex.").await.unwrap();
     assert_eq!(snapshot(&mut watch, "the expiry snapshot").await.len(), 2);
 
-    for _ in 0..12 {
+    for round in 0..12 {
         advance(lease / 4).await;
         kept = store
             .update(ks, "ex.kept", b"k".to_vec(), kept)
@@ -344,6 +345,12 @@ pub async fn expiry<S: CoordinationStore>(store: &S, advance: impl AsyncFn(Durat
             .unwrap()
             .won()
             .expect("a key rewritten every quarter lease expired");
+        if round == 2 {
+            assert!(
+                store.get(ks, "ex.idle").await.unwrap().is_some(),
+                "an untouched key expired before a lease elapsed"
+            );
+        }
     }
     assert!(
         store.get(ks, "ex.idle").await.unwrap().is_none(),

@@ -84,7 +84,8 @@ NATS.
 `cargo xtask tidy supported-versions` holds a page listed in `DOCS` to the lanes.
 Every release line its `## Supported` table names, and every image tag its code
 blocks run, must be a line some lane pins. A lane listed in `UNSUPPORTED` pins a
-server the software refuses, such as NATS's `below-floor`, and backs no claim.
+fixture and backs no claim: NATS's `below-floor` is a server the software
+refuses, and `async` runs one test.
 Nothing else reads either file.
 
 ## What CI runs

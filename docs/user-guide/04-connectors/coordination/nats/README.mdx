@@ -208,8 +208,8 @@ on a stream with default persistence then waits for an fsync before the server
 acknowledges it. Streams with `persist_mode: async` do not wait for that fsync.
 `spate_coordination_store_op_duration_seconds` shows what that adds to this
 store's operations. The setting is server-wide, so every other stream on those
-servers with default persistence pays the same cost. Once a server runs with it, its `/varz` monitoring
-endpoint reports `jetstream.config.sync_always: true`.
+servers with default persistence pays the same cost. Once a server runs with it,
+its `/varz` monitoring endpoint reports `jetstream.config.sync_always: true`.
 
 ## Supported server versions
 

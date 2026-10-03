@@ -27,5 +27,5 @@ Moving the floor is a maintainer edit to both lanes, to `MIN_SERVER` in
 `crates/spate-coordination/src/store/nats.rs`, and to the supported versions on
 the [NATS store page](../../docs/user-guide/04-connectors/coordination/nats/README.mdx).
 `cargo xtask tidy supported-versions` fails until the page names the new line.
-`below-floor` and `async` are listed in `UNSUPPORTED`, so neither line can pass for
-a supported one.
+`below-floor` and `async` are listed in `UNSUPPORTED`, so neither line can pass
+for a supported one.

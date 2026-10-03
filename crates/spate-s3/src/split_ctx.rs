@@ -39,12 +39,8 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-/// Fetcher→lane channel depth, in chunks. The per-lane read-ahead is the
-/// `prefetch_bytes` window each fetcher buffers in memory (see
-/// [`fetch`](crate::fetch)), so this channel is only a small hand-off
-/// buffer: its chunks are zero-copy views into that one window, not extra
-/// copies. Keeping it shallow bounds peak per-lane read-ahead to ~one
-/// window under sustained backpressure.
+/// Fetcher→lane channel depth, in messages. Queued zero-copy chunks can retain
+/// earlier GET buffers while the fetcher buffers the next window.
 const LANE_HANDOFF_CHUNKS: usize = 4;
 
 /// Sentinel for "the lane has not observed end-of-input yet".

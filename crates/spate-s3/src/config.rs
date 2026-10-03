@@ -101,13 +101,10 @@ pub struct S3SourceConfig {
     /// bounded backfill that completes.
     #[serde(default)]
     pub refresh_listing: bool,
-    /// Per-lane read-ahead budget: the size of each lane's in-memory read
-    /// window. A lane fetches one window at a time as a bounded ranged GET and
-    /// drains it before fetching the next, so peak per-lane *read-ahead* is
-    /// ~one window and total source read-ahead is
-    /// `in-flight splits × prefetch_bytes` (the decoded records a lane holds
-    /// while framing are a separate, smaller budget). An object at or below
-    /// this size is read in a single GET.
+    /// Target GET window size for ETag-pinned reads. Queued chunks retain
+    /// backing windows while a later GET is fetched; decoded records require
+    /// additional memory. Byte-range boundary windows can add `chunk_bytes`
+    /// to this size. Whole-object reads at or below this size use a single GET.
     ///
     /// Keep this modest. A large window is read as one long-held GET, which
     /// works against the connection release this source relies on, and a

@@ -40,6 +40,16 @@ enum LeaderCreate {
     StaleRead(Entry),
 }
 
+/// One split-lease update as [`FaultStore`] received it.
+#[derive(Debug)]
+#[expect(dead_code, reason = "read through `Debug` in assertion messages")]
+struct LeaseUpdate {
+    epoch: Option<u64>,
+    owner: Option<String>,
+    expected: Revision,
+    after_act: bool,
+}
+
 /// A [`MemoryStore`] with scripted faults on specific writes.
 #[derive(Clone)]
 struct FaultStore {
@@ -54,14 +64,24 @@ struct FaultStore {
     renewals_after_fault: Arc<AtomicU64>,
     /// The split lease the maybe-landed renewal wrote.
     lease_fault_key: Arc<Mutex<Option<String>>>,
-    /// Split-lease update calls per key.
-    lease_updates: Arc<Mutex<BTreeMap<String, u64>>>,
+    /// Split-lease update calls per key, in arrival order.
+    lease_updates: Arc<Mutex<BTreeMap<String, Vec<LeaseUpdate>>>>,
+    /// Set once the test's act has returned; stamped on each lease update.
+    act_returned: Arc<AtomicBool>,
     /// The split lease before the maybe-landed renewal, for
-    /// `lease_stale_read`.
+    /// `lease_stale_reads`.
     lease_before: Arc<Mutex<Option<Entry>>>,
-    /// Once: the next read of the faulted split lease answers with the
-    /// lease as it stood before the maybe-landed renewal.
-    lease_stale_read: Arc<AtomicBool>,
+    /// Reads of the faulted split lease still to answer with the lease as
+    /// it stood before the maybe-landed renewal.
+    lease_stale_reads: Arc<Mutex<u64>>,
+    /// Once: the next delete of the faulted split lease at its current
+    /// revision fails without applying.
+    lease_delete_fails: Arc<AtomicBool>,
+    /// Once: the next read of the faulted split lease after the act returns
+    /// fails.
+    lease_settle_read_fails: Arc<AtomicBool>,
+    /// Reads of the faulted split lease after the act returns.
+    lease_reads_after_act: Arc<AtomicU64>,
     /// While armed: the next durable split-record write that clears the
     /// owner (a graceful release, or a revocation's final hand-back) is
     /// dropped (Retryable, nothing written), disarming afterward.
@@ -104,8 +124,12 @@ impl FaultStore {
             renewals_after_fault: Arc::new(AtomicU64::new(0)),
             lease_fault_key: Arc::default(),
             lease_updates: Arc::default(),
+            act_returned: Arc::default(),
             lease_before: Arc::default(),
-            lease_stale_read: Arc::default(),
+            lease_stale_reads: Arc::default(),
+            lease_delete_fails: Arc::default(),
+            lease_settle_read_fails: Arc::default(),
+            lease_reads_after_act: Arc::default(),
             drop_owner_clear: Arc::new(AtomicBool::new(false)),
             drop_assignment_publish: Arc::new(AtomicBool::new(false)),
             leader_maybe_land: Arc::default(),
@@ -176,12 +200,21 @@ impl CoordinationStore for FaultStore {
         expected: Revision,
     ) -> Result<CasOutcome, StoreError> {
         if ks == Keyspace::Ephemeral && key.starts_with("split.") {
-            *self
-                .lease_updates
+            let written = serde_json::from_slice::<serde_json::Value>(&value).ok();
+            let update = LeaseUpdate {
+                epoch: written.as_ref().and_then(|v| v["epoch"].as_u64()),
+                owner: written
+                    .as_ref()
+                    .and_then(|v| v["owner"].as_str().map(String::from)),
+                expected,
+                after_act: self.act_returned.load(Ordering::Acquire),
+            };
+            self.lease_updates
                 .lock()
                 .expect("updates")
                 .entry(key.to_string())
-                .or_default() += 1;
+                .or_default()
+                .push(update);
         }
         if ks == Keyspace::Durable
             && key == "plan"
@@ -266,9 +299,27 @@ impl CoordinationStore for FaultStore {
     async fn get(&self, ks: Keyspace, key: &str) -> Result<Option<Entry>, StoreError> {
         if ks == Keyspace::Ephemeral
             && self.lease_fault_key.lock().expect("fault key").as_deref() == Some(key)
-            && self.lease_stale_read.swap(false, Ordering::AcqRel)
+            && {
+                let mut left = self.lease_stale_reads.lock().expect("stale reads");
+                let serve = *left > 0;
+                *left = left.saturating_sub(1);
+                serve
+            }
         {
             return Ok(self.lease_before.lock().expect("before").clone());
+        }
+        if ks == Keyspace::Ephemeral
+            && self.lease_fault_key.lock().expect("fault key").as_deref() == Some(key)
+            && self.act_returned.load(Ordering::Acquire)
+        {
+            self.lease_reads_after_act.fetch_add(1, Ordering::AcqRel);
+        }
+        if ks == Keyspace::Ephemeral
+            && self.lease_fault_key.lock().expect("fault key").as_deref() == Some(key)
+            && self.act_returned.load(Ordering::Acquire)
+            && self.lease_settle_read_fails.swap(false, Ordering::AcqRel)
+        {
+            return Err(StoreError::Retryable("injected: lease read failed".into()));
         }
         if ks == Keyspace::Ephemeral && key == "leader" {
             if self.leader_read_fails.swap(false, Ordering::AcqRel) {
@@ -296,6 +347,16 @@ impl CoordinationStore for FaultStore {
         key: &str,
         expected: Option<Revision>,
     ) -> Result<CasOutcome, StoreError> {
+        if ks == Keyspace::Ephemeral
+            && self.lease_fault_key.lock().expect("fault key").as_deref() == Some(key)
+            && self.lease_delete_fails.load(Ordering::Acquire)
+            && self.inner.get(ks, key).await?.map(|e| e.revision) == expected
+        {
+            self.lease_delete_fails.store(false, Ordering::Release);
+            return Err(StoreError::Retryable(
+                "injected: lease delete failed".into(),
+            ));
+        }
         self.inner.delete(ks, key, expected).await
     }
 
@@ -442,14 +503,17 @@ fn maybe_landed_renewal_is_adopted_not_fenced() {
 }
 
 /// A solo worker on a frozen clock holding `r0` and `r1`, stepped until a
-/// lease renewal applies with its reply lost, then `act` on that split's id.
-/// With `stale_read`, the first read of the lease after the fault answers
-/// from before the renewal. Returns the lease and the split record after
-/// `act`.
+/// lease renewal applies with its reply lost, then `act` on that split's id,
+/// then stepped for `settle`. The first `stale_reads` reads of the lease
+/// after the fault answer from before the renewal, and `arm` adds further
+/// faults. Returns the lease, the split record and the splits reported lost
+/// while settling.
 fn after_unseen_lease_renewal(
-    stale_read: bool,
+    stale_reads: u64,
+    settle: Duration,
+    arm: impl FnOnce(&FaultStore),
     act: impl FnOnce(&mut StoreCoordinator<FaultStore>, &str),
-) -> (Option<String>, serde_json::Value) {
+) -> (Option<String>, serde_json::Value, Vec<String>) {
     let rt = runtime();
     let clock = TestClock::frozen();
     let inner = MemoryStore::with_clock(support::LEASE, clock.clone());
@@ -457,7 +521,9 @@ fn after_unseen_lease_renewal(
     let maybe_land = store.lease_maybe_land.clone();
     let fault_key = store.lease_fault_key.clone();
     let updates = store.lease_updates.clone();
-    let stale = store.lease_stale_read.clone();
+    let act_returned = store.act_returned.clone();
+    let stale = store.lease_stale_reads.clone();
+    arm(&store);
     let mut worker = StoreCoordinator::with_clock(
         store,
         config(Some("solo")),
@@ -493,22 +559,39 @@ fn after_unseen_lease_renewal(
         .unwrap()
         .clone()
         .expect("the faulted lease");
-    let renewals = updates.lock().unwrap()[&key];
-    stale.store(stale_read, Ordering::Release);
+    let (at_fault, fault_epoch) = {
+        let log = updates.lock().unwrap();
+        let log = &log[&key];
+        (log.len(), log.last().expect("the faulted update").epoch)
+    };
+    *stale.lock().unwrap() = stale_reads;
     act(
         &mut worker,
         key.strip_prefix("split.").expect("a split key"),
     );
+    act_returned.store(true, Ordering::Release);
 
-    assert_eq!(
-        updates.lock().unwrap()[&key],
-        renewals,
-        "a renewal ran between the fault and the act"
-    );
-    assert!(
-        !stale.load(Ordering::Acquire),
-        "the stale read was not served"
-    );
+    // Only a write of the faulted epoch is a renewal; a claim of the
+    // handed-back split writes a later one.
+    {
+        let log = updates.lock().unwrap();
+        let since = &log[&key][at_fault..];
+        assert!(
+            since.iter().all(|u| u.epoch != fault_epoch),
+            "a renewal ran between the fault and the act: {since:?}"
+        );
+    }
+    let mut lost = Vec::new();
+    for _ in 0..settle.as_nanos() / (support::LEASE / 12).as_nanos() {
+        fleet.step(&clock, support::LEASE / 12);
+        for event in worker.poll().expect("poll") {
+            if let CoordinationEvent::Lost { split } = &event {
+                lost.push(split.as_str().to_string());
+            }
+            held.fold(vec![event]);
+        }
+    }
+    assert_eq!(*stale.lock().unwrap(), 0, "the stale reads were not served");
     let lease = rt
         .block_on(inner.get(Keyspace::Ephemeral, &key))
         .unwrap()
@@ -517,7 +600,7 @@ fn after_unseen_lease_renewal(
         .block_on(inner.get(Keyspace::Durable, &key))
         .unwrap()
         .expect("split record");
-    (lease, record_json(&record.value))
+    (lease, record_json(&record.value), lost)
 }
 
 /// A release right after a lease renewal that applied with its reply lost
@@ -525,11 +608,16 @@ fn after_unseen_lease_renewal(
 /// Regression for #865.
 #[test]
 fn a_release_after_an_unseen_lease_renewal_deletes_the_lease() {
-    let (lease, record) = after_unseen_lease_renewal(false, |worker, _| {
-        worker
-            .release(&[split_id("r0"), split_id("r1")])
-            .expect("release");
-    });
+    let (lease, record, _) = after_unseen_lease_renewal(
+        0,
+        Duration::ZERO,
+        |_| {},
+        |worker, _| {
+            worker
+                .release(&[split_id("r0"), split_id("r1")])
+                .expect("release");
+        },
+    );
     assert!(lease.is_none(), "the lease was left: {lease:?}");
     assert!(record["owner"].is_null());
 }
@@ -539,25 +627,182 @@ fn a_release_after_an_unseen_lease_renewal_deletes_the_lease() {
 /// Regression for #865.
 #[test]
 fn a_completion_after_an_unseen_lease_renewal_deletes_the_lease() {
-    let (lease, _) = after_unseen_lease_renewal(false, |worker, id| {
-        worker
-            .commit(&split_id(id), &SplitProgress::completed(1, vec![]))
-            .expect("complete");
-    });
+    let (lease, ..) = after_unseen_lease_renewal(
+        0,
+        Duration::ZERO,
+        |_| {},
+        |worker, id| {
+            worker
+                .commit(&split_id(id), &SplitProgress::completed(1, vec![]))
+                .expect("complete");
+        },
+    );
     assert!(lease.is_none(), "the lease was left: {lease:?}");
 }
 
 /// A release whose lease read answers from before an unseen renewal leaves
-/// the lease to expire.
+/// the lease until the next heartbeat.
 #[test]
-fn a_release_whose_lease_read_lags_the_renewal_leaves_the_lease() {
-    let (lease, record) = after_unseen_lease_renewal(true, |worker, _| {
-        worker
-            .release(&[split_id("r0"), split_id("r1")])
-            .expect("release");
-    });
+fn a_release_whose_lease_read_lags_the_renewal_leaves_the_lease_until_the_next_heartbeat() {
+    let (lease, record, _) = after_unseen_lease_renewal(
+        1,
+        Duration::ZERO,
+        |_| {},
+        |worker, _| {
+            worker
+                .release(&[split_id("r0"), split_id("r1")])
+                .expect("release");
+        },
+    );
     assert!(lease.is_some(), "the lease was deleted");
     assert!(record["owner"].is_null());
+}
+
+/// A release whose lease read answers from before an unseen renewal deletes
+/// the lease on the next heartbeat.
+/// Regression for #886.
+#[test]
+fn a_release_whose_lease_read_lags_deletes_the_lease_on_the_next_heartbeat() {
+    let (lease, record, _) = after_unseen_lease_renewal(
+        1,
+        support::LEASE / 2,
+        |_| {},
+        |worker, _| {
+            worker
+                .release(&[split_id("r0"), split_id("r1")])
+                .expect("release");
+        },
+    );
+    assert!(lease.is_none(), "the lease was left: {lease:?}");
+    assert!(record["owner"].is_null());
+}
+
+/// A release whose lease read lags twice deletes the lease on a later
+/// heartbeat.
+#[test]
+fn a_release_whose_lease_read_lags_twice_deletes_the_lease_on_a_later_heartbeat() {
+    let (lease, record, _) = after_unseen_lease_renewal(
+        2,
+        support::LEASE * 5 / 6,
+        |_| {},
+        |worker, _| {
+            worker
+                .release(&[split_id("r0"), split_id("r1")])
+                .expect("release");
+        },
+    );
+    assert!(lease.is_none(), "the lease was left: {lease:?}");
+    assert!(record["owner"].is_null());
+}
+
+/// A release whose second lease delete fails deletes the lease on the next
+/// heartbeat.
+#[test]
+fn a_release_whose_second_lease_delete_fails_deletes_the_lease_on_the_next_heartbeat() {
+    let (lease, record, _) = after_unseen_lease_renewal(
+        0,
+        support::LEASE / 2,
+        |store| store.lease_delete_fails.store(true, Ordering::Release),
+        |worker, _| {
+            worker
+                .release(&[split_id("r0"), split_id("r1")])
+                .expect("release");
+        },
+    );
+    assert!(lease.is_none(), "the lease was left: {lease:?}");
+    assert!(record["owner"].is_null());
+}
+
+/// A release whose lease read lags, and whose first retry cannot read the
+/// lease, deletes the lease on a later heartbeat.
+#[test]
+fn a_release_whose_owed_lease_read_fails_deletes_the_lease_on_a_later_heartbeat() {
+    let mut read_fails = None;
+    let (lease, record, _) = after_unseen_lease_renewal(
+        1,
+        support::LEASE * 5 / 6,
+        |store| {
+            store.lease_settle_read_fails.store(true, Ordering::Release);
+            read_fails = Some(store.lease_settle_read_fails.clone());
+        },
+        |worker, _| {
+            worker
+                .release(&[split_id("r0"), split_id("r1")])
+                .expect("release");
+        },
+    );
+    assert!(
+        !read_fails.expect("armed").load(Ordering::Acquire),
+        "the failing read was not served"
+    );
+    assert!(lease.is_none(), "the lease was left: {lease:?}");
+    assert!(record["owner"].is_null());
+}
+
+/// A release whose lease read lags, and whose first retry cannot delete the
+/// lease, deletes the lease on a later heartbeat.
+#[test]
+fn a_release_whose_owed_lease_delete_fails_deletes_the_lease_on_a_later_heartbeat() {
+    let mut delete_fails = None;
+    let (lease, record, _) = after_unseen_lease_renewal(
+        1,
+        support::LEASE * 5 / 6,
+        |store| {
+            store.lease_delete_fails.store(true, Ordering::Release);
+            delete_fails = Some(store.lease_delete_fails.clone());
+        },
+        |worker, _| {
+            worker
+                .release(&[split_id("r0"), split_id("r1")])
+                .expect("release");
+        },
+    );
+    assert!(
+        !delete_fails.expect("armed").load(Ordering::Acquire),
+        "the failing delete was not served"
+    );
+    assert!(lease.is_none(), "the lease was left: {lease:?}");
+    assert!(record["owner"].is_null());
+}
+
+/// A failure report whose lease read lags leaves the lease of this worker's
+/// later claim of the split in place.
+#[test]
+fn a_failure_report_whose_lease_read_lags_keeps_the_reclaimed_lease() {
+    let (lease, _, lost) = after_unseen_lease_renewal(
+        1,
+        support::LEASE / 2,
+        |_| {},
+        |worker, id| {
+            worker.fail(&split_id(id), "injected").expect("fail");
+        },
+    );
+    let lease: serde_json::Value =
+        serde_json::from_str(&lease.expect("the re-claimed lease")).expect("lease json");
+    assert_eq!(lease["epoch"], 2, "{lease}");
+    assert_eq!(lease["owner"], "solo", "{lease}");
+    assert!(lost.is_empty(), "splits lost: {lost:?}");
+}
+
+/// A failure report whose lease read lags stops retrying the owed lease once
+/// the split is claimed again: later heartbeats do not read it.
+#[test]
+fn a_failure_report_whose_lease_read_lags_stops_retrying_the_reclaimed_lease() {
+    let reads_over = |settle| {
+        let mut reads = None;
+        after_unseen_lease_renewal(
+            1,
+            settle,
+            |store| reads = Some(store.lease_reads_after_act.clone()),
+            |worker, id| {
+                worker.fail(&split_id(id), "injected").expect("fail");
+            },
+        );
+        reads.expect("armed").load(Ordering::Acquire)
+    };
+    let short = reads_over(support::LEASE / 2);
+    let long = reads_over(support::LEASE * 2);
+    assert_eq!(long, short, "the owed lease was read on later heartbeats");
 }
 
 /// A solo leader whose next leader-key renewal applies with its reply lost,

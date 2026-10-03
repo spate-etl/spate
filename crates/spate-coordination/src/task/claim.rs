@@ -302,8 +302,9 @@ impl<S: CoordinationStore + Clone> Task<S> {
     /// Best-effort removal of a lease key we hold (guarded by revision).
     /// A lost delete reads the key back once and deletes it at the read
     /// revision while it carries this worker's owner and nonce; a read that
-    /// predates the latest renewal leaves the lease to expire. Only a fatal
-    /// store error is returned.
+    /// predates the latest renewal, or a failed delete at the read revision,
+    /// leaves the lease owed to the next heartbeat. Only a fatal store error
+    /// is returned.
     pub(super) async fn release_lease_key(
         &mut self,
         id: &str,
@@ -319,24 +320,27 @@ impl<S: CoordinationStore + Clone> Task<S> {
         {
             Ok(CasOutcome::Won(_)) => {}
             Ok(CasOutcome::Lost) => match self.store.get(Keyspace::Ephemeral, &key).await {
-                Ok(Some(entry))
-                    if serde_json::from_slice::<LeaseVal>(&entry.value)
-                        .is_ok_and(|v| v.owner == self.instance && v.nonce == self.nonce) =>
-                {
-                    match self
-                        .store
-                        .delete(Keyspace::Ephemeral, &key, Some(entry.revision))
-                        .await
-                    {
-                        Ok(CasOutcome::Won(_)) => reread = Some(entry.revision),
-                        Ok(CasOutcome::Lost) => {}
-                        Err(e) => {
-                            tracing::debug!(split = %id, error = %e, "lease cleanup failed; it will expire");
-                            fatal_only("deleting a lease", &e)?;
+                Ok(Some(entry)) => {
+                    if let Some(epoch) = self.own_lease_epoch(&entry.value) {
+                        match self
+                            .store
+                            .delete(Keyspace::Ephemeral, &key, Some(entry.revision))
+                            .await
+                        {
+                            Ok(CasOutcome::Won(_)) => reread = Some(entry.revision),
+                            Ok(CasOutcome::Lost) => {
+                                tracing::debug!(split = %id, "lease read predates the latest renewal; next beat retries");
+                                self.owed_leases.insert(id.to_string(), epoch);
+                            }
+                            Err(e) => {
+                                tracing::debug!(split = %id, error = %e, "lease cleanup failed; next beat retries");
+                                fatal_only("deleting a lease", &e)?;
+                                self.owed_leases.insert(id.to_string(), epoch);
+                            }
                         }
                     }
                 }
-                Ok(_) => {}
+                Ok(None) => {}
                 Err(e) => {
                     tracing::debug!(split = %id, error = %e, "lease cleanup failed; it will expire");
                     fatal_only("re-reading a lease", &e)?;
@@ -354,6 +358,65 @@ impl<S: CoordinationStore + Clone> Task<S> {
                 .is_some_and(|(_, rev)| *rev == lease_rev || Some(*rev) == reread)
         {
             state.lease = None;
+        }
+        Ok(())
+    }
+
+    /// The epoch of a lease value carrying this worker's owner and nonce.
+    fn own_lease_epoch(&self, value: &[u8]) -> Option<u64> {
+        serde_json::from_slice::<LeaseVal>(value)
+            .ok()
+            .filter(|v| v.owner == self.instance && v.nonce == self.nonce)
+            .map(|v| v.epoch)
+    }
+
+    /// Retries each owed lease delete at the revision read, while the key
+    /// still carries this worker's owner, nonce and the owed epoch. Only a
+    /// fatal store error is returned.
+    pub(super) async fn settle_owed_leases(&mut self) -> Result<(), CoordinationError> {
+        let owed: Vec<(String, u64)> = self
+            .owed_leases
+            .iter()
+            .map(|(id, epoch)| (id.clone(), *epoch))
+            .collect();
+        for (id, epoch) in owed {
+            let key = records::split_key_str(&id);
+            let entry = match self.store.get(Keyspace::Ephemeral, &key).await {
+                Ok(entry) => entry,
+                Err(e) => {
+                    tracing::debug!(split = %id, error = %e, "re-reading an owed lease failed; next beat retries");
+                    fatal_only("re-reading an owed lease", &e)?;
+                    continue;
+                }
+            };
+            let Some(entry) = entry.filter(|e| self.own_lease_epoch(&e.value) == Some(epoch))
+            else {
+                self.owed_leases.remove(&id);
+                continue;
+            };
+            self.note_deleted(Keyspace::Ephemeral, &key);
+            match self
+                .store
+                .delete(Keyspace::Ephemeral, &key, Some(entry.revision))
+                .await
+            {
+                Ok(CasOutcome::Won(_)) => {
+                    self.owed_leases.remove(&id);
+                    if let Some(state) = self.splits.get_mut(&id)
+                        && state
+                            .lease
+                            .as_ref()
+                            .is_some_and(|(_, rev)| *rev == entry.revision)
+                    {
+                        state.lease = None;
+                    }
+                }
+                Ok(CasOutcome::Lost) => {}
+                Err(e) => {
+                    tracing::debug!(split = %id, error = %e, "deleting an owed lease failed; next beat retries");
+                    fatal_only("deleting an owed lease", &e)?;
+                }
+            }
         }
         Ok(())
     }

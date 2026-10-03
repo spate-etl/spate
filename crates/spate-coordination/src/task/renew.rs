@@ -22,6 +22,7 @@ impl<S: CoordinationStore + Clone> Task<S> {
         for id in ids {
             self.renew_split(&id).await?;
         }
+        self.settle_owed_leases().await?;
         // Starvation self-fence: any owned split without a successful
         // write for a full lease is dropped. Reads `clock`, the source
         // that stamps `last_ok_write`, so a test fences only what it

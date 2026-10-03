@@ -22,9 +22,14 @@ facade with the `s3` feature.
   record ends and the next begins. `with_framer` is required, and
   [`spate-json`](https://crates.io/crates/spate-json) supplies an
   NDJSON framer.
-- **Backpressure runs through ranged GETs**, so a slow sink holds fewer bytes
-  in memory rather than buffering an entire object. Objects are not read
-  whole.
+- **Backpressure runs through bounded ranged GETs.** For an object with an
+  ETag, the source reads GETs sized by `prefetch_bytes` (8 MiB by default) and
+  buffers each GET in full before handing its chunks on, so a slow sink stalls
+  each read in progress with no request in flight. An object of at most
+  `prefetch_bytes` arrives in one GET and is held in memory whole, unless
+  `split_target_bytes` is set below its size and the object is cut into byte
+  ranges. An object with no ETag is read in one streamed GET, and that
+  response stays open while the sink is slow.
 - Credentials come from the standard environment chain. Nothing is logged that
   could carry one — the config's `Debug` redacts secrets, and there is a test
   that fails if it stops doing so.

@@ -151,7 +151,7 @@ TABLE
 # Preflight: name what is missing before any step runs.
 # ---------------------------------------------------------------------------
 preflight() {
-    local missing="" about
+    local missing=""
     command -v gh >/dev/null 2>&1 || missing="$missing gh"
     command -v jq >/dev/null 2>&1 || missing="$missing jq"
     command -v curl >/dev/null 2>&1 || missing="$missing curl"
@@ -163,8 +163,7 @@ preflight() {
     gh auth status >/dev/null 2>&1 || [ -n "${GH_TOKEN:-}" ] ||
         fail "gh is not authenticated and GH_TOKEN is unset"
 
-    about=$(cargo about --version 2>/dev/null || true)
-    [ -n "$about" ] ||
+    cargo about --version >/dev/null 2>&1 ||
         fail "cargo-about is required and was not found. Install it with:
   cargo install cargo-about --locked --features cli"
 

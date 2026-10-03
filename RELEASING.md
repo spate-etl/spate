@@ -102,8 +102,8 @@ would do next. It needs `gh` authenticated, and `jq`, `curl`, `cargo-about`
 and `cargo-cyclonedx` on the path; the preflight names anything missing. The
 generator versions in CI come from the `taiki-e/install-action` pin, so the
 inventory a local run produces can differ from CI's when the installed
-versions differ. The worktree
-is kept for inspection and the run prints the command that removes it.
+versions differ. The worktree is kept for inspection and the run prints the
+command that removes it.
 
 Read a green dry run as "this assembles and packages". It cannot prove the
 registry's acceptance rules (a verified email address, the rate limits), the

@@ -110,7 +110,8 @@ impl SchemaSource {
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct RegistrySection {
-    /// Base URL of the Confluent-compatible schema registry.
+    /// Base URL of the Confluent-compatible schema registry, without credentials.
+    /// Credential-bearing URLs are rejected when settings are loaded.
     pub url: String,
     /// Basic-auth username (optional).
     #[serde(default)]
@@ -267,12 +268,23 @@ impl AvroDeserializerBuilder {
     /// # Errors
     ///
     /// [`AvroConfigError::SchemaLoad`] for a schema that cannot be loaded,
-    /// [`AvroConfigError::Invalid`] for settings the mode rejects, and
+    /// [`AvroConfigError::Invalid`] for settings the mode rejects or registry URL credentials, and
     /// [`AvroConfigError::Registry`] for a registry client that cannot be built.
     pub fn from_settings(
         settings: &AvroSettings,
         runtime: &tokio::runtime::Handle,
     ) -> Result<Self, AvroConfigError> {
+        if settings.mode == AvroMode::Confluent
+            && settings.registry.as_ref().is_some_and(|registry| {
+                reqwest::Url::parse(&registry.url)
+                    .is_ok_and(|url| !url.username().is_empty() || url.password().is_some())
+            })
+        {
+            return Err(AvroConfigError::Invalid {
+                detail: "registry.url contains credentials; set them in registry.username and registry.password"
+                    .into(),
+            });
+        }
         let reader_schema = settings
             .reader_schema
             .as_ref()
@@ -535,6 +547,132 @@ mod tests {
             .enable_all()
             .build()
             .unwrap()
+    }
+
+    fn assert_credential_error(error: AvroConfigError) {
+        assert!(matches!(error, AvroConfigError::Invalid { .. }), "{error}");
+        for printed in [error.to_string(), format!("{error:?}")] {
+            for field in ["registry.url", "registry.username", "registry.password"] {
+                assert!(printed.contains(field), "{printed}");
+            }
+            for secret in ["urluser", "urlsecret", "configuredsecret", "https://"] {
+                assert!(!printed.contains(secret), "{printed}");
+            }
+        }
+    }
+
+    /// Parsed URL credentials fail during settings load with a redacted migration error.
+    /// Regression for #876.
+    #[test]
+    fn registry_url_credentials_are_rejected_from_settings() {
+        let rt = runtime();
+        for url in [
+            "https://urluser:urlsecret@sr",
+            "https://urluser@sr",
+            "https://:urlsecret@sr",
+            "https://url%75ser:url%73ecret@sr",
+            "https:///urluser:urlsecret@sr",
+            "https://urluser:@sr",
+        ] {
+            if url == "https://urluser:@sr" {
+                let parsed = reqwest::Url::parse(url).unwrap();
+                assert_eq!(parsed.username(), "urluser");
+                assert_eq!(parsed.password(), None);
+            }
+            if url == "https://:urlsecret@sr" {
+                let parsed = reqwest::Url::parse(url).unwrap();
+                assert_eq!(parsed.username(), "");
+                assert_eq!(parsed.password(), Some("urlsecret"));
+            }
+            for configured in [false, true] {
+                let mut registry = RegistrySection::new(url);
+                if configured {
+                    registry.username = Some("svc".into());
+                    registry.password = Some("configuredsecret".into());
+                }
+                let settings = AvroSettings {
+                    registry: Some(registry),
+                    ..AvroSettings::default()
+                };
+                assert_credential_error(
+                    AvroDeserializerBuilder::from_settings(&settings, rt.handle()).unwrap_err(),
+                );
+            }
+        }
+    }
+
+    /// Opaque component loading rejects both URL-only and dual-source credentials.
+    /// Regression for #876.
+    #[test]
+    fn registry_url_credentials_are_rejected_from_component() {
+        let rt = runtime();
+        for fields in ["", ", username: svc, password: configuredsecret"] {
+            let cfg = component(&format!(
+                "registry: {{url: 'https://urluser:urlsecret@sr'{fields}}}"
+            ));
+            assert_credential_error(
+                AvroDeserializerBuilder::from_component(&cfg, rt.handle()).unwrap_err(),
+            );
+        }
+    }
+
+    /// Credential rejection precedes reader-schema loading with prewarm enabled.
+    /// Regression for #876.
+    #[test]
+    fn registry_url_credentials_reject_before_reader_schema() {
+        let rt = runtime();
+        let cfg = component(
+            "registry: {url: 'https://urluser:urlsecret@sr'}\n\
+             reader_schema: {inline: invalid-schema}\nprewarm_subjects: [orders-value]",
+        );
+        assert_credential_error(
+            AvroDeserializerBuilder::from_component(&cfg, rt.handle()).unwrap_err(),
+        );
+    }
+
+    /// Credential rejection precedes TLS/client construction with prewarm enabled.
+    /// Regression for #876.
+    #[test]
+    fn registry_url_credentials_reject_before_tls_client() {
+        let rt = runtime();
+        let cfg = component(
+            "registry: {url: 'https://urluser:urlsecret@sr', \
+             tls: {root_ca: /nonexistent-spate-876/ca.pem}}\n\
+             prewarm_subjects: [orders-value]",
+        );
+        assert_credential_error(
+            AvroDeserializerBuilder::from_component(&cfg, rt.handle()).unwrap_err(),
+        );
+    }
+
+    /// Credential-free parsed URLs accept configured auth and `@` in path/query data.
+    #[test]
+    fn credential_free_registry_urls_are_accepted() {
+        let rt = runtime();
+        for url in [
+            "https://sr",
+            "https://sr/path@data?value=@data",
+            "https://sr/path%40data?value=%40data",
+            "https://:@sr",
+        ] {
+            if url == "https://:@sr" {
+                let parsed = reqwest::Url::parse(url).unwrap();
+                assert_eq!(parsed.username(), "");
+                assert_eq!(parsed.password(), None);
+            }
+            for configured in [false, true] {
+                let mut registry = RegistrySection::new(url);
+                if configured {
+                    registry.username = Some("svc".into());
+                    registry.password = Some("configuredsecret".into());
+                }
+                let settings = AvroSettings {
+                    registry: Some(registry),
+                    ..AvroSettings::default()
+                };
+                AvroDeserializerBuilder::from_settings(&settings, rt.handle()).unwrap();
+            }
+        }
     }
 
     /// `Debug` on the settings hides the registry password and URL userinfo

@@ -34,7 +34,7 @@ deserializer:
   avro:
     mode: confluent                # confluent | raw | single_object
     registry:                      # required for confluent
-      url: ${SCHEMA_REGISTRY_URL}
+      url: https://registry.internal:8081
       username: ${SR_USER}         # optional basic auth
       password: ${SR_PASSWORD}
       tls:
@@ -49,7 +49,7 @@ deserializer:
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `mode` | string | `confluent` | Payload framing: `confluent`, `raw`, or `single_object`. |
-| `registry.url` | string | `required` | Base URL of a Confluent-compatible schema registry. Required in `confluent` mode; rejected in the others. |
+| `registry.url` | string | `required` | Base URL of a Confluent-compatible schema registry. Required in `confluent` mode; rejected in the others. Credentials in the URL are rejected at configuration load. |
 | `registry.username` / `registry.password` | string | `none` | Basic auth (interpolate secrets via `${VAR}`). The password and any userinfo in `registry.url` render `<redacted>` in `Debug` output. |
 | `registry.tls.root_ca` | path | `none` | PEM bundle of root CAs trusted in addition to the system trust store. Requires an `https://` URL. |
 | `prewarm_subjects` | string list | `[]` | Subjects whose latest schemas are fetched at startup (`confluent` mode only). |
@@ -60,7 +60,10 @@ deserializer:
 Mode requirements are validated at construction with explicit messages:
 `confluent` without a `registry`, a `registry.url` that is not an `http://` or
 `https://` URL, `raw` without a `schema`, `prewarm_subjects` outside
-`confluent`, and so on all fail fast at startup.
+`confluent`, and so on all fail fast at startup. Registry URLs with a parsed nonempty
+username or a password fail at configuration load, before schema loading, TLS
+client construction or prewarm. Credentials belong in `registry.username` and
+`registry.password`, including when no separate credentials are supplied.
 
 ## Security (TLS and registry credentials)
 
@@ -82,7 +85,15 @@ builds reject the setting.
 
 `registry.username` and `registry.password` carry basic auth to the schema
 registry. Interpolate them from the environment (`${SR_USER}` / `${SR_PASSWORD}`)
-rather than committing them.
+rather than committing them. The registry URL must omit credentials.
+
+For migration, remove userinfo from `registry.url` and set the separate
+credential fields. Percent-encoded URL credentials become decoded text in
+these fields. Username-only URLs need only `registry.username`. If separate
+credentials are already configured alongside URL credentials, retain the
+separate fields and remove the URL userinfo. Programmatic configurations
+using `RegistrySection::new` follow the same requirement when loaded by
+`AvroDeserializerBuilder::from_settings`.
 
 A registry that answers `401` or `403`, or whose certificate fails
 verification, stops the pipeline whatever the deserializer's `ErrorPolicy`.

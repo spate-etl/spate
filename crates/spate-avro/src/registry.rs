@@ -130,8 +130,7 @@ impl RegistryConfig {
 /// Where one schema registry is and how to authenticate to it. Requests go
 /// through the client [`http_client`] builds, which this does not hold.
 pub(crate) struct Endpoint {
-    /// The configured URL, userinfo included; reqwest sends the userinfo as
-    /// basic auth.
+    /// The configured base URL used for registry requests.
     base: Url,
     basic_auth: Option<(String, Option<String>)>,
     /// The URL without credentials, for messages.

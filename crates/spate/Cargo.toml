@@ -47,6 +47,10 @@ tracing = { workspace = true }
 # recorder is process-global. All #[ignore]d, run with:
 # `cargo test -p spate --all-features -- --ignored --test-threads=1`
 [[test]]
+name = "avro_registry_config"
+required-features = ["avro"]
+
+[[test]]
 name = "e2e_happy"
 required-features = ["kafka", "clickhouse", "avro"]
 

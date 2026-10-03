@@ -723,7 +723,10 @@ async fn serve_recording() -> (std::net::SocketAddr, Seen) {
                             .unwrap_or_default();
                         record.lock().unwrap().push((target, auth));
                         Ok::<_, std::convert::Infallible>(Response::new(Full::new(Bytes::from(
-                            schema_body(SCHEMA_V1),
+                            format!(
+                                r#"{{"id":5,"schema":{}}}"#,
+                                serde_json::to_string(SCHEMA_V1).unwrap()
+                            ),
                         ))))
                     }
                 });
@@ -736,36 +739,73 @@ async fn serve_recording() -> (std::net::SocketAddr, Seen) {
     (addr, seen)
 }
 
-/// The by-id fetch sends `registry.username`/`password`, or the URL userinfo,
-/// as basic auth.
+/// By-id fetches preserve configured basic auth and unauthenticated requests.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_fetch_sends_basic_auth() {
-    for (userinfo, username, expected) in [
-        ("", Some("svc"), "Basic c3ZjOmh1bnRlcjI="), // svc:hunter2
-        ("urluser:urlsecret@", None, "Basic dXJsdXNlcjp1cmxzZWNyZXQ="), // urluser:urlsecret
+    for (username, password, expected) in [
+        (Some("svc"), Some("hunter2"), vec!["Basic c3ZjOmh1bnRlcjI="]),
+        (None, None, vec![]),
+        (Some("svc"), None, vec!["Basic c3ZjOg=="]),
+        (Some(""), Some("hunter2"), vec!["Basic Omh1bnRlcjI="]),
     ] {
         let (addr, seen) = serve_recording().await;
-        let mut cfg = settings_at(format!("http://{userinfo}{addr}"), Duration::from_secs(30));
+        let mut cfg = settings_at(format!("http://{addr}"), Duration::from_secs(30));
         let registry = cfg.registry.as_mut().unwrap();
         registry.username = username.map(Into::into);
-        registry.password = username.map(|_| "hunter2".into());
+        registry.password = password.map(Into::into);
         let builder =
             AvroDeserializerBuilder::from_settings(&cfg, &tokio::runtime::Handle::current())
                 .unwrap();
         let mut deser = builder.build_value().unwrap();
         let payload = confluent_payload(5, 1);
-        tokio::task::spawn_blocking(move || {
+        let records = tokio::task::spawn_blocking(move || {
             let mut out = Collected(Vec::new());
-            drive_until_ready(&mut deser, &payload, &mut out)
+            drive_until_ready(&mut deser, &payload, &mut out).unwrap();
+            out.0
         })
         .await
-        .unwrap()
         .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0],
+            AvroValue::Record(vec![("id".into(), AvroValue::Long(1))])
+        );
         assert_eq!(
             seen.lock().unwrap().as_slice(),
             [(
                 "/schemas/ids/5?deleted=true".to_owned(),
-                vec![expected.to_owned()]
+                expected.into_iter().map(str::to_owned).collect()
+            )]
+        );
+    }
+}
+
+/// Startup prewarm preserves configured basic auth and unauthenticated requests.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_prewarm_sends_basic_auth() {
+    for (username, expected) in [
+        (Some("svc"), vec!["Basic c3ZjOmh1bnRlcjI=".to_owned()]),
+        (None, vec![]),
+    ] {
+        let (addr, seen) = serve_recording().await;
+        let mut cfg = settings_at(format!("http://{addr}"), Duration::from_secs(30));
+        let registry = cfg.registry.as_mut().unwrap();
+        registry.username = username.map(Into::into);
+        registry.password = username.map(|_| "hunter2".into());
+        cfg.prewarm_subjects = vec!["orders-value".into()];
+        let _builder =
+            AvroDeserializerBuilder::from_settings(&cfg, &tokio::runtime::Handle::current())
+                .unwrap();
+        spate_test::wait_until(
+            Duration::from_secs(5),
+            "prewarm request is received",
+            || !seen.lock().unwrap().is_empty(),
+        );
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            [(
+                "/subjects/orders-value/versions/latest".to_owned(),
+                expected
             )]
         );
     }
@@ -804,10 +844,7 @@ async fn an_auth_rejection_is_fatal() {
             0,
         );
         let addr = stub.serve().await;
-        let mut cfg = settings_at(
-            format!("http://urluser:urlsecret@{addr}"),
-            Duration::from_secs(30),
-        );
+        let mut cfg = settings_at(format!("http://{addr}"), Duration::from_secs(30));
         let registry = cfg.registry.as_mut().unwrap();
         registry.username = Some("svc".into());
         registry.password = Some("hunter2".into());
@@ -818,9 +855,7 @@ async fn an_auth_rejection_is_fatal() {
         assert!(reason.contains(&format!("{status}")), "{reason}");
         assert!(reason.contains(&addr.to_string()), "{reason}");
         assert!(reason.contains("error_code"), "{reason}");
-        for secret in ["urlsecret", "hunter2"] {
-            assert!(!reason.contains(secret), "{reason}");
-        }
+        assert!(!reason.contains("hunter2"), "{reason}");
     }
 }
 

@@ -5,7 +5,7 @@
 //! semantics come from the reference implementation, not from this suite's
 //! opinion of the spec.
 //!
-//! The known, documented divergences (strict truncation; the per-datum
+//! The known, documented divergences (the per-datum
 //! collection-item budget; skipped-field content validation; the uniform
 //! acceptance superset) are pinned by their own tests at the bottom.
 
@@ -585,44 +585,131 @@ proptest! {
 // Documented divergences, pinned
 // ---------------------------------------------------------------------------
 
+/// Missing or incomplete union indexes emit no records on every backend.
+/// Regression for #878.
 #[test]
-fn truncated_trailing_option_diverges_by_design() {
-    // apache-avro's decoder maps EOF at a union index to `Union(0, Null)`,
-    // so the two-pass path silently decodes a truncated trailing Option as
-    // None. The single-pass path treats any truncation as Malformed.
-    const SCH: &str = r#"{"type":"record","name":"T","fields":[
-        {"name":"a","type":"long"},
-        {"name":"b","type":["null","long"]}]}"#;
-    #[derive(Debug, serde::Deserialize, PartialEq)]
+fn truncated_trailing_option_is_malformed_on_both_paths() {
+    const SCH: &str = r#"{"type":"record","name":"T","fields":[{"name":"a","type":"long"},{"name":"b","type":["null","long"]}]}"#;
+    #[derive(Debug, serde::Deserialize)]
+    #[expect(dead_code, reason = "deserialization target")]
     struct T {
         a: i64,
         b: Option<i64>,
     }
-    // Only field `a` is present; `b`'s union index is missing entirely.
-    let truncated =
-        to_avro_datum(&Schema::parse_str(r#""long""#).unwrap(), Value::Long(9)).unwrap();
-
     let b = builder(SCH);
-    let (ack, _rx) = AckRef::test_pair();
+    for bytes in [&[18][..], &[18, 128][..]] {
+        let mut value = b.build_value().unwrap();
+        assert_malformed(&mut value, bytes);
+        let mut two = b.build_serde::<T>().unwrap();
+        assert_malformed(&mut two, bytes);
+        let mut single = b.build_serde_datum::<T>().unwrap();
+        assert_malformed(&mut single, bytes);
+    }
+}
 
-    let mut two_pass = Collected::<T>(Vec::new());
-    b.build_serde::<T>()
-        .unwrap()
-        .deserialize(&raw_payload(&truncated), &ack, &mut two_pass)
-        .expect("the two-pass path lenient-decodes the truncation");
-    assert_eq!(two_pass.0[0].payload, T { a: 9, b: None });
-
-    let mut single_pass = Collected::<T>(Vec::new());
-    let err = b
-        .build_serde_datum::<T>()
-        .unwrap()
-        .deserialize(&raw_payload(&truncated), &ack, &mut single_pass)
-        .unwrap_err();
+fn assert_malformed<T: Debug + Send + 'static>(
+    deser: &mut dyn Deserializer<spate_core::deser::Owned<T>>,
+    bytes: &[u8],
+) {
+    let mut out = Collected(Vec::new());
+    let result = deser.deserialize(&raw_payload(bytes), &spate_test::test_ack(), &mut out);
     assert!(
-        matches!(err, spate_core::error::DeserError::Malformed { .. }),
-        "{err}"
+        matches!(result, Err(spate_core::error::DeserError::Malformed { .. })),
+        "result={result:?}, emitted={:?}",
+        out.0
     );
-    assert!(single_pass.0.is_empty());
+    assert!(out.0.is_empty(), "malformed datum emitted {:?}", out.0);
+}
+
+/// String body truncation is malformed with cold and cached readers.
+/// Regression for #878.
+#[test]
+fn value_rejects_truncated_string_body() {
+    const SCH: &str = r#"{"type":"record","name":"R","fields":[{"name":"s","type":"string"}]}"#;
+    for bytes in [&[0x22][..], &[4, b'a'][..]] {
+        for warm in [false, true] {
+            let mut deser = builder(SCH).build_value().unwrap();
+            if warm {
+                let mut out = Collected(Vec::new());
+                deser
+                    .deserialize(&raw_payload(&[2, b'a']), &spate_test::test_ack(), &mut out)
+                    .unwrap();
+                assert_eq!(
+                    out.0[0].payload,
+                    Value::Record(vec![("s".into(), Value::String("a".into()))])
+                );
+            }
+            assert_malformed(&mut deser, bytes);
+        }
+    }
+}
+
+/// A missing trailing boolean is malformed and emits no records.
+/// Regression for #878.
+#[test]
+fn value_rejects_truncated_boolean() {
+    let b = builder(
+        r#"{"type":"record","name":"R","fields":[{"name":"a","type":"long"},{"name":"b","type":"boolean"}]}"#,
+    );
+    assert_malformed(&mut b.build_value().unwrap(), &[18]);
+}
+
+/// Complete datums retain empty strings, booleans, unions and trailing bytes; empty payloads are tombstones.
+#[test]
+fn complete_datums_keep_value_backend_semantics() {
+    for (field, bytes, expected) in [
+        ("\"string\"", vec![0], Value::String(String::new())),
+        ("\"boolean\"", vec![0], Value::Boolean(false)),
+        ("\"boolean\"", vec![1], Value::Boolean(true)),
+        (
+            "[\"null\",\"long\"]",
+            vec![0],
+            Value::Union(0, Box::new(Value::Null)),
+        ),
+        (
+            "[\"null\",\"long\"]",
+            vec![2, 10],
+            Value::Union(1, Box::new(Value::Long(5))),
+        ),
+    ] {
+        let schema =
+            format!(r#"{{"type":"record","name":"R","fields":[{{"name":"b","type":{field}}}]}}"#);
+        let mut deser = builder(&schema).build_value().unwrap();
+        for trailing in [false, true] {
+            let mut datum = bytes.clone();
+            if trailing {
+                datum.push(255);
+            }
+            let mut out = Collected(Vec::new());
+            deser
+                .deserialize(&raw_payload(&datum), &spate_test::test_ack(), &mut out)
+                .unwrap();
+            assert_eq!(
+                out.0.iter().map(|r| r.payload.clone()).collect::<Vec<_>>(),
+                vec![Value::Record(vec![("b".into(), expected.clone())])]
+            );
+        }
+        let mut out = Collected(Vec::new());
+        deser
+            .deserialize(&raw_payload(&[]), &spate_test::test_ack(), &mut out)
+            .unwrap();
+        assert!(out.0.is_empty());
+    }
+}
+
+/// The value backend retains big-decimal logical values.
+#[test]
+fn value_big_decimal_round_trip() {
+    let sch = r#"{"type":"bytes","logicalType":"big-decimal"}"#;
+    let expected = Value::BigDecimal("1234.56".parse().unwrap());
+    let bytes = to_avro_datum(&Schema::parse_str(sch).unwrap(), expected.clone()).unwrap();
+    let mut out = Collected(Vec::new());
+    builder(sch)
+        .build_value()
+        .unwrap()
+        .deserialize(&raw_payload(&bytes), &spate_test::test_ack(), &mut out)
+        .unwrap();
+    assert_eq!(out.0[0].payload, expected);
 }
 
 #[test]

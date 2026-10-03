@@ -15,10 +15,6 @@
 //! `from_value` pair, with these differences (each one is pinned by a test in
 //! this module or in `tests/datum_parity.rs`):
 //!
-//! - **Strict truncation.** `decode_internal` maps EOF to `Value::Null` in
-//!   three places (a truncated boolean, a truncated string body, a truncated
-//!   union index), silently decoding a truncated trailing `Option` field as
-//!   `None`. Here any truncation is an error.
 //! - **Uniform supersets.** `from_value`'s per-method type acceptance is
 //!   uneven (`deserialize_str` rejects an enum value that
 //!   `deserialize_string` accepts; `deserialize_map` refuses a union that

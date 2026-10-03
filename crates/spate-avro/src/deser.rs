@@ -21,6 +21,7 @@ use spate_core::deser::{Deserializer, EmitRecord, Owned};
 use spate_core::error::DeserError;
 use spate_core::record::{RawPayload, Record};
 use std::collections::HashMap;
+use std::io::{self, Read};
 use std::marker::PhantomData;
 use std::sync::Arc;
 
@@ -142,13 +143,44 @@ impl std::fmt::Debug for DecoderCore {
     }
 }
 
+/// Tracks failed exact reads throughout one datum decode.
+struct DatumReader<'a, 'buf> {
+    bytes: &'a mut &'buf [u8],
+    truncated: bool,
+}
+
+impl Read for DatumReader<'_, '_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.bytes.read(buf)
+    }
+
+    fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<()> {
+        let result = self.bytes.read_exact(buf);
+        if result
+            .as_ref()
+            .is_err_and(|e| e.kind() == io::ErrorKind::UnexpectedEof)
+        {
+            self.truncated = true;
+        }
+        result
+    }
+}
+
 /// Decode one datum through a reader.
 fn read_datum(held: &HeldReader, datum: &mut &[u8]) -> Result<AvroValue, DeserError> {
-    held.borrow_reader()
-        .read_value(datum)
-        .map_err(|e| DeserError::Malformed {
-            reason: format!("avro datum decode failed: {e}"),
-        })
+    let mut input = DatumReader {
+        bytes: datum,
+        truncated: false,
+    };
+    let result = held.borrow_reader().read_value(&mut input);
+    if input.truncated {
+        return Err(DeserError::Malformed {
+            reason: "avro datum is truncated".into(),
+        });
+    }
+    result.map_err(|e| DeserError::Malformed {
+        reason: format!("avro datum decode failed: {e}"),
+    })
 }
 
 /// A resolved payload: the writer schema plus the datum slice, which borrows
@@ -681,5 +713,30 @@ mod tests {
             "{err}"
         );
         assert!(out.0.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod datum_reader_tests {
+    use super::*;
+
+    /// EOF remains latched after successful reads; complete boundary reads leave it clear.
+    #[test]
+    fn datum_reader_keeps_eof_latched() {
+        let mut bytes = &[1][..];
+        let mut reader = DatumReader {
+            bytes: &mut bytes,
+            truncated: false,
+        };
+        reader.read_exact(&mut [0]).unwrap();
+        assert!(!reader.truncated);
+        assert_eq!(
+            reader.read_exact(&mut [0]).unwrap_err().kind(),
+            io::ErrorKind::UnexpectedEof
+        );
+        reader.read_exact(&mut []).unwrap();
+        assert!(reader.truncated);
+        assert_eq!(reader.read(&mut []).unwrap(), 0);
+        assert!(reader.truncated);
     }
 }

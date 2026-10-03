@@ -6,7 +6,8 @@ earlier commit whose reply was lost, the worker writes again on top of it. For
 a commit, a read older than the write that won, or one that fails with a
 retryable error, returns a retryable error and the worker keeps the split. For
 a failure report, the same read is reported as fenced and the split as lost, as
-in previous versions. A commit after this worker's own completing commit
+in previous versions, unless the record is this worker's own completed one. The
+lease is then released and no lost split is reported. A commit after this worker's own completing commit
 releases the lease, reports no lost split, and returns success if it repeats
 that completing commit and fenced otherwise. In previous versions, when the
 next commit or failure report ran before the watch delivered the earlier

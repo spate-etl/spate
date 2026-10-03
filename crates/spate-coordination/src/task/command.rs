@@ -230,9 +230,10 @@ impl<S: CoordinationStore + Clone> Task<S> {
     /// Explicit failure report: consumes an attempt, ends this tenancy
     /// gracefully-for-the-lease but non-gracefully for the attempt
     /// accounting, and quarantines at the cap. A lost CAS on this tenancy's
-    /// own newer runnable record writes the report again on top of it; any
-    /// other record, or a read-back that lags or fails `Retryable`, returns
-    /// `Fenced` and emits `Lost`.
+    /// own newer runnable record writes the report again on top of it; a
+    /// record this tenancy already completed hands the lease back and returns
+    /// `Fenced` without `Lost`. Any other record, or a read-back that lags or
+    /// fails `Retryable`, returns `Fenced` and emits `Lost`.
     async fn fail_split(&mut self, split: &SplitId, reason: &str) -> Result<(), CoordinationError> {
         let id = split.as_str();
         let Some(owned) = self.owned.get(id) else {
@@ -285,11 +286,22 @@ impl<S: CoordinationStore + Clone> Task<S> {
             };
             if let Some((fresh, rev)) = reread {
                 let ours = fresh.owner.as_deref() == Some(self.instance.as_str())
-                    && fresh.epoch == owned_epoch
-                    && fresh.status == SplitStatus::Runnable;
+                    && fresh.epoch == owned_epoch;
+                let status = fresh.status;
                 self.upsert_progress(id, fresh, rev)?;
-                if ours {
-                    continue;
+                match status {
+                    SplitStatus::Runnable if ours => continue,
+                    SplitStatus::Completed if ours => {
+                        self.finish_completed(id).await?;
+                        return Err(CoordinationError::new(
+                            CoordinationErrorKind::Fenced,
+                            format!(
+                                "split {split} was already completed by this worker; nothing was \
+                                 written"
+                            ),
+                        ));
+                    }
+                    _ => {}
                 }
             }
             self.drop_owned(id, SplitLossReason::Fenced);

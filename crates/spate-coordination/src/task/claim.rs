@@ -5,7 +5,7 @@ use super::{OwnedSplit, Task};
 use crate::error::fatal_only;
 use crate::protocol::ClaimKind;
 use crate::records::{self, LeaseVal, SplitProgressRecord, SplitStatus};
-use crate::store::{CasOutcome, CoordinationStore, Keyspace, Revision};
+use crate::store::{CasOutcome, CoordinationStore, Keyspace, Revision, StoreError};
 use spate_core::coordination::{CoordinationError, CoordinationEvent, LeaseEpoch, SplitId};
 use spate_core::metrics::{AcquireReason, RevocationOutcome, SplitLossReason, WriteOutcome};
 use tokio::time::Instant;
@@ -107,8 +107,10 @@ impl<S: CoordinationStore + Clone> Task<S> {
 
     /// The progress-record CAS after a won lease. On a lost CAS, adopt a
     /// zombie's late commit (legal, since it was still the owner) and retry
-    /// once. The acquisition metric counts here, on the write that
-    /// transfers ownership, under the caller's reason.
+    /// once. A Retryable write error reads the record back and keeps the
+    /// claim when the record equals the one this claim wrote. The
+    /// acquisition metric counts here, on the write that transfers
+    /// ownership, under the caller's reason.
     async fn record_claim(
         &mut self,
         id: &str,
@@ -197,6 +199,32 @@ impl<S: CoordinationStore + Clone> Task<S> {
                 Err(e) => {
                     tracing::warn!(split = %id, error = %e, "claim record write failed");
                     self.metrics(|m| m.write(WriteOutcome::Error, started.elapsed()));
+                    if matches!(e, StoreError::Retryable(_)) {
+                        match self.store.get(Keyspace::Durable, &key).await {
+                            Ok(Some(entry)) => {
+                                if let Ok(fresh) =
+                                    SplitProgressRecord::parse(&key, &entry.value, self.fp)
+                                    && fresh == record
+                                {
+                                    self.metrics(|m| m.acquired(reason));
+                                    tracing::debug!(split = %id, ?reason, epoch = next_epoch, "split claimed; the claim write's reply was lost");
+                                    let progress = fresh.progress()?;
+                                    self.record_own_write(id, fresh, entry.revision, lease_rev)?;
+                                    self.emit(CoordinationEvent::Gained {
+                                        split,
+                                        epoch: LeaseEpoch(next_epoch),
+                                        progress,
+                                    });
+                                    return Ok(());
+                                }
+                            }
+                            Ok(None) => {}
+                            Err(re) => {
+                                self.release_lease_key(id, lease_rev).await?;
+                                return fatal_only("re-reading a claimed record", &re);
+                            }
+                        }
+                    }
                     self.release_lease_key(id, lease_rev).await?;
                     return fatal_only("writing a claim", &e);
                 }

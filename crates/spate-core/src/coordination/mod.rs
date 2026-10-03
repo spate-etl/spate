@@ -643,15 +643,20 @@ pub trait SplitCoordinator: Send {
     /// Report an owned split as unprocessable *by this tenancy*: consumes
     /// one delivery attempt and releases it for another worker to retry.
     /// At the backend's attempt cap the split is quarantined instead
-    /// ([`CoordinationEvent::Quarantined`]). Use for poison input; a
-    /// transient local problem is better handled by
-    /// [`release`](SplitCoordinator::release), which consumes nothing.
+    /// ([`CoordinationEvent::Quarantined`]). Use for poison input. For a
+    /// transient local problem, [`release`](SplitCoordinator::release)
+    /// consumes no delivery attempts but may permanently leave the fleet
+    /// when the last held split is handed back.
     fn fail(&mut self, split: &SplitId, reason: &str) -> Result<(), CoordinationError>;
 
     /// Voluntarily hand back owned splits so peers claim them without
     /// waiting out a lease. Consumes no delivery attempts. Best-effort and
     /// idempotent; splits not released expire. Shutdown uses
     /// [`depart`](SplitCoordinator::depart).
+    ///
+    /// A backend may treat releasing all held splits as permanent departure
+    /// from the fleet. Check the implementation's contract before using this
+    /// for transient local problems.
     fn release(&mut self, splits: &[SplitId]) -> Result<(), CoordinationError>;
 
     /// Leave the job for good: hand back every held split, and any role or

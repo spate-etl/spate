@@ -2178,26 +2178,130 @@ fn a_repeated_completing_commit_after_an_ambiguous_one_is_adopted() {
 }
 
 /// A failure report sent again after one that applied with its reply lost
-/// returns Fenced and charges one attempt.
+/// ends the tenancy: one attempt charged, the lease deleted and no `Lost`.
+/// Regression for #913.
 #[test]
-fn a_failure_report_sent_again_after_an_ambiguous_one_is_fenced() {
+fn a_failure_report_sent_again_after_an_ambiguous_one_hands_the_split_back() {
     let rt = runtime();
     let clock = TestClock::frozen();
     let fault = FaultStore::with_clock(LEASE, clock.clone());
-    let mut a = holding_polled_clocked(&rt, fault.clone(), &clock, &["r0"]);
+    let tap = support::tap::TapStore::new(fault.clone());
+    let mut a = holding_polled_clocked(&rt, tap.clone(), &clock, &["r0"]);
     arm_ambiguous(&fault, "split.r0");
     let first = a.fail(&support::split_id("r0"), "injected");
     assert!(
         is_kind(&first, CoordinationErrorKind::Retryable),
         "{first:?}"
     );
+    let log = log_lease_writes(&tap, "split.r0");
+    let reads = count_durable_reads(&tap, "split.r0");
 
     let second = a.fail(&support::split_id("r0"), "injected");
 
-    let record = fault.record(&rt, "split.r0");
+    assert_resent_report_ended(&rt, &fault, &mut a, &second, &log);
     assert!(
-        is_kind(&second, CoordinationErrorKind::Fenced) && record["attempts"] == 1,
-        "second {second:?}; record {record}"
+        reads.load(Ordering::SeqCst) > 0,
+        "the second report read the record back"
+    );
+}
+
+/// A failure report sent again after one that applied with its reply lost and
+/// that the worker has since seen writes nothing: one attempt charged, the
+/// split still runnable, the lease deleted and no `Lost`.
+/// Regression for #913.
+#[test]
+fn a_failure_report_sent_again_after_a_seen_ambiguous_one_charges_one_attempt() {
+    let rt = runtime();
+    let clock = TestClock::frozen();
+    let fault = FaultStore::with_clock(LEASE, clock.clone());
+    let tap = support::tap::TapStore::new(fault.clone());
+    let mut cfg = config_for(LEASE, Some("worker-a"));
+    cfg.max_attempts = 2;
+    let mut a =
+        StoreCoordinator::with_clock(tap.clone(), cfg, rt.handle().clone(), None, clock.clone())
+            .expect("coordinator");
+    a.start(Box::new(PhasedPlanner::one_final("departure:v1", &["r0"])))
+        .unwrap();
+    let mut fleet = support::Fleet::new(&fault.inner, rt.handle());
+    fleet.join(&a);
+    let mut held = Held::default();
+    support::drive_clocked(&mut a, &clock, &mut held, "claiming r0", |h| {
+        h.splits.len() == 1
+    });
+    seen_failure_report(&mut a, &fault, &fleet, &clock);
+    let log = log_lease_writes(&tap, "split.r0");
+
+    let second = a.fail(&support::split_id("r0"), "injected");
+
+    assert_resent_report_ended(&rt, &fault, &mut a, &second, &log);
+    let record = fault.record(&rt, "split.r0");
+    assert!(record["status"] == "runnable", "record {record}");
+}
+
+/// Records every write to the ephemeral key `key` that reaches `tap` from now on.
+fn log_lease_writes(
+    tap: &support::tap::TapStore<FaultStore>,
+    key: &'static str,
+) -> Arc<Mutex<Vec<support::tap::Op>>> {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&log);
+    tap.on_write(move |w| {
+        if w.ks == Keyspace::Ephemeral && w.key == key {
+            sink.lock().unwrap().push(w.op);
+        }
+        None
+    });
+    log
+}
+
+/// Counts the durable reads of `key` that reach `tap` from now on.
+fn count_durable_reads(
+    tap: &support::tap::TapStore<FaultStore>,
+    key: &'static str,
+) -> Arc<AtomicU64> {
+    let reads = Arc::new(AtomicU64::new(0));
+    let count = Arc::clone(&reads);
+    tap.on_get(move |ks, k| {
+        if ks == Keyspace::Durable && k == key {
+            count.fetch_add(1, Ordering::SeqCst);
+        }
+        None
+    });
+    reads
+}
+
+/// Asserts that a failure report sent again ended the tenancy of `r0` with one
+/// attempt charged: `Ok`, no `Lost`, and a lease whose first write after the
+/// first report is its delete.
+fn assert_resent_report_ended(
+    rt: &tokio::runtime::Runtime,
+    fault: &FaultStore,
+    a: &mut impl SplitCoordinator,
+    second: &Result<(), spate_coordination::CoordinationError>,
+    log: &Mutex<Vec<support::tap::Op>>,
+) {
+    // The worker may claim the handed-back split again at a later epoch.
+    let record = fault.record(rt, "split.r0");
+    let lease_epoch = rt
+        .block_on(fault.inner.get(Keyspace::Ephemeral, "split.r0"))
+        .expect("read the lease")
+        .map(|entry| {
+            let lease: serde_json::Value =
+                serde_json::from_slice(&entry.value).expect("a JSON lease");
+            lease["epoch"].as_u64().expect("a lease epoch")
+        });
+    let lost = lost_queued(a, "r0");
+    let log = log.lock().unwrap().clone();
+    let epoch = record["epoch"].as_u64().expect("an epoch");
+    assert!(
+        second.is_ok()
+            && record["attempts"] == 1
+            && ((epoch == 1 && record["owner"].is_null()) || epoch >= 2)
+            && lease_epoch != Some(1)
+            && !lost
+            && log.first() == Some(&support::tap::Op::Delete),
+        "second {second:?}; record {record}; lease epoch {lease_epoch:?}; Lost: {lost}; \
+         lease writes {log:?}"
     );
 }
 

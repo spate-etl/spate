@@ -39,6 +39,13 @@ const DEPART_RETRY: Duration = Duration::from_millis(20);
 /// Built with a multi-thread runtime handle (the background task and the
 /// store's I/O live there; a current-thread runtime would deadlock the
 /// blocking replies and is rejected at construction).
+///
+/// After the background task processes every split in a nonempty
+/// [`release`](SplitCoordinator::release) request, an empty owned set
+/// permanently retires this worker from the fleet and stops it claiming work.
+/// Split, role and membership hand-back is best-effort; errors or deferred
+/// commands can prevent completion, and success does not guarantee store
+/// deletion.
 pub struct StoreCoordinator<S: CoordinationStore + Clone> {
     store: S,
     config: CoordinationConfig,

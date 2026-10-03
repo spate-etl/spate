@@ -18,7 +18,7 @@
 //!   isolation.
 //!
 //! Those three frame a payload already resident in memory (a Kafka message).
-//! For a **streaming** source that never holds a whole object in RAM (an
+//! For a **streaming** source that delivers an object in chunks (an
 //! `spate-s3` object, an HTTP body) the connector also owns the byte-stream
 //! framer: [`NdjsonFramer`] is a chunk-fed, bounded
 //! [`RecordFramer`](spate_core::framing::RecordFramer) the source runs to cut the

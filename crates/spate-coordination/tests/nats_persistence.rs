@@ -88,7 +88,6 @@ fn adopted_async_state_bucket_warns() {
         .with_writer(capture.clone())
         .with_max_level(tracing::Level::WARN)
         .without_time()
-        .with_ansi(false)
         .init();
     let (name, tag) = container_image(&["--pull", "nats", "async"]);
     let server = GenericImage::new(name, tag)

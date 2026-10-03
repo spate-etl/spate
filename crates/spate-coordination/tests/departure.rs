@@ -2795,3 +2795,391 @@ fn a_claim_write_that_did_not_apply_does_not_adopt_a_peers_claim() {
         "fault fired: {fired}; record {record}; held at {epoch:?}"
     );
 }
+
+/// Installs the Prometheus exporter once per process and returns its handle.
+fn exporter() -> spate_core::metrics::MetricsHandle {
+    spate_core::metrics::install(&spate_core::metrics::MetricsSettings {
+        exporter: spate_core::metrics::Exporter::Prometheus,
+        ..spate_core::metrics::MetricsSettings::default()
+    })
+    .expect("install the exporter")
+}
+
+/// Starts a metered `worker-a` labelled `component`, holding `r0` and `h0`
+/// over `store` on `clock`, runs `prepare` and `act`, and returns
+/// `releases_total` for `component`. `store` sits over `inner`, whose lease
+/// expiry `clock` drives.
+fn releases_after<S: CoordinationStore + Clone>(
+    store: S,
+    inner: &MemoryStore,
+    clock: &Arc<TestClock>,
+    component: &'static str,
+    prepare: impl FnOnce(&mut StoreCoordinator<S>, &support::Fleet),
+    act: impl FnOnce(&mut StoreCoordinator<S>),
+) -> f64 {
+    let handle = exporter();
+    let rt = runtime();
+    let labels = spate_core::metrics::ComponentLabels::new("departure", component, "s3");
+    let mut a = StoreCoordinator::with_clock(
+        store,
+        config_for(LEASE, Some("worker-a")),
+        rt.handle().clone(),
+        Some(spate_core::metrics::CoordinationMetrics::new(&labels)),
+        clock.clone(),
+    )
+    .expect("coordinator");
+    a.start(Box::new(PhasedPlanner::one_final(
+        "departure:v1",
+        &["r0", "h0"],
+    )))
+    .unwrap();
+    let mut fleet = support::Fleet::new(inner, rt.handle());
+    fleet.join(&a);
+    let mut held = Held::default();
+    support::drive_clocked(&mut a, clock, &mut held, "claiming every split", |h| {
+        h.splits.len() == 2
+    });
+    prepare(&mut a, &fleet);
+    act(&mut a);
+    spate_test::metric_sum(
+        &handle.render(),
+        "spate_coordination_releases_total",
+        &[("component", component)],
+    )
+    .unwrap_or(0.0)
+}
+
+/// Fails `r0` with the report's reply lost, then settles so the worker has
+/// folded the report.
+fn seen_failure_report(
+    a: &mut impl SplitCoordinator,
+    fault: &FaultStore,
+    fleet: &support::Fleet,
+    clock: &TestClock,
+) {
+    fleet.settle(clock);
+    arm_ambiguous(fault, "split.r0");
+    assert!(
+        a.fail(&support::split_id("r0"), "injected").is_err(),
+        "the injected reply loss surfaces"
+    );
+    assert!(
+        fault.ambiguous.lock().unwrap().is_empty(),
+        "the report took the fault"
+    );
+    fleet.settle(clock);
+}
+
+/// The two splits [`releases_after`] holds.
+fn r0_and_h0() -> [spate_coordination::SplitId; 2] {
+    [support::split_id("r0"), support::split_id("h0")]
+}
+
+/// A release after this worker's own failure report, once the worker has
+/// seen the report, counts no release for the reported split and writes
+/// nothing over the report.
+/// Regression for #886.
+#[test]
+fn a_release_after_a_seen_failure_report_counts_no_release() {
+    let rt = runtime();
+    let clock = TestClock::frozen();
+    let fault = FaultStore::with_clock(LEASE, clock.clone());
+    let mut reported_at = 0;
+
+    let releases = releases_after(
+        fault.clone(),
+        &fault.inner,
+        &clock,
+        "release-after-seen-report",
+        |a, fleet| {
+            seen_failure_report(a, &fault, fleet, &clock);
+            reported_at = fault.updates(Keyspace::Durable, "split.r0");
+        },
+        |a| a.release(&r0_and_h0()).expect("release"),
+    );
+
+    let record = fault.record(&rt, "split.r0");
+    let lease = fault.present(&rt, Keyspace::Ephemeral, &["split.r0"]);
+    let updates = fault.updates(Keyspace::Durable, "split.r0") - reported_at;
+    assert!(
+        releases == 1.0
+            && record["epoch"] == 1
+            && record["owner"].is_null()
+            && record["attempts"] == 1
+            && updates == 0
+            && lease.is_empty(),
+        "releases_total {releases} (h0 only); record {record}; \
+         updates of split.r0 since the report: {updates}; lease: {lease:?}"
+    );
+}
+
+/// A departure after this worker's own failure report, once the worker has
+/// seen the report, counts no release for the reported split and writes
+/// nothing over the report.
+/// Regression for #886.
+#[test]
+fn a_departure_after_a_seen_failure_report_counts_no_release() {
+    let rt = runtime();
+    let clock = TestClock::frozen();
+    let fault = FaultStore::with_clock(LEASE, clock.clone());
+    let mut reported_at = 0;
+
+    let releases = releases_after(
+        fault.clone(),
+        &fault.inner,
+        &clock,
+        "depart-after-seen-report",
+        |a, fleet| {
+            seen_failure_report(a, &fault, fleet, &clock);
+            reported_at = fault.updates(Keyspace::Durable, "split.r0");
+        },
+        |a| a.depart(&r0_and_h0()).expect("depart"),
+    );
+
+    let lease = fault.present(&rt, Keyspace::Ephemeral, &["split.r0"]);
+    let updates = fault.updates(Keyspace::Durable, "split.r0") - reported_at;
+    assert!(
+        releases == 1.0 && updates == 0 && lease.is_empty(),
+        "releases_total {releases} (h0 only); \
+         updates of split.r0 since the report: {updates}; lease: {lease:?}"
+    );
+}
+
+/// A departure after this worker's own failure report, which a polled view
+/// has not seen, counts no release for the reported split.
+/// Regression for #886.
+#[test]
+fn a_departure_after_an_unseen_failure_report_counts_no_release() {
+    let rt = runtime();
+    let clock = TestClock::frozen();
+    let fault = FaultStore::with_clock(LEASE, clock.clone());
+
+    let releases = releases_after(
+        support::polled::PolledStore::new(fault.clone(), LEASE / 10),
+        &fault.inner,
+        &clock,
+        "depart-after-unseen-report",
+        |a, _| {
+            arm_ambiguous(&fault, "split.r0");
+            assert!(
+                a.fail(&support::split_id("r0"), "injected").is_err(),
+                "the injected reply loss surfaces"
+            );
+            assert!(
+                fault.ambiguous.lock().unwrap().is_empty(),
+                "the report took the fault"
+            );
+        },
+        |a| a.depart(&r0_and_h0()).expect("depart"),
+    );
+
+    let lease = fault.present(&rt, Keyspace::Ephemeral, &["split.r0"]);
+    assert!(
+        releases == 1.0 && lease.is_empty(),
+        "releases_total {releases} (h0 only); lease: {lease:?}"
+    );
+}
+
+/// A departure whose own owner clear applied with its reply lost, and whose
+/// resend then lost its CAS, still counts the release.
+#[test]
+fn a_departure_whose_owner_clear_reply_was_lost_counts_the_release() {
+    let clock = TestClock::frozen();
+    let fault = FaultStore::with_clock(LEASE, clock.clone());
+    let mut armed_at = 0;
+
+    let releases = releases_after(
+        fault.clone(),
+        &fault.inner,
+        &clock,
+        "depart-owner-clear-lost",
+        |_, fleet| {
+            fleet.settle(&clock);
+            armed_at = fault.updates(Keyspace::Durable, "split.r0");
+            arm_ambiguous(&fault, "split.r0");
+        },
+        |a| a.depart(&r0_and_h0()).expect("depart"),
+    );
+
+    let updates = fault.updates(Keyspace::Durable, "split.r0") - armed_at;
+    assert!(
+        releases == 2.0 && updates == 2,
+        "releases_total {releases}; updates of split.r0 since arming: {updates}"
+    );
+}
+
+/// A departure whose own owner clear applied with its reply lost, in a
+/// tenancy that began after an earlier failure report, counts the release.
+#[test]
+fn a_departure_after_an_earlier_report_whose_owner_clear_reply_was_lost_counts_the_release() {
+    let rt = runtime();
+    let clock = TestClock::frozen();
+    let fault = FaultStore::with_clock(LEASE, clock.clone());
+    let mut armed_at = 0;
+    let mut begun = serde_json::Value::Null;
+
+    let releases = releases_after(
+        fault.clone(),
+        &fault.inner,
+        &clock,
+        "depart-owner-clear-lost-after-report",
+        |a, fleet| {
+            a.fail(&support::split_id("r0"), "injected").expect("fail");
+            let mut held = Held::default();
+            support::drive_clocked(a, &clock, &mut held, "re-claiming r0", |h| {
+                h.splits.get("r0").is_some_and(|(epoch, _)| *epoch == 2)
+            });
+            fleet.settle(&clock);
+            begun = fault.record(&rt, "split.r0");
+            armed_at = fault.updates(Keyspace::Durable, "split.r0");
+            arm_ambiguous(&fault, "split.r0");
+        },
+        |a| a.depart(&r0_and_h0()).expect("depart"),
+    );
+
+    let updates = fault.updates(Keyspace::Durable, "split.r0") - armed_at;
+    assert!(
+        begun["owner"] == "worker-a"
+            && begun["epoch"] == 2
+            && begun["attempts"] == 1
+            && releases == 2.0
+            && updates == 2,
+        "re-claimed record {begun}; releases_total {releases}; \
+         updates of split.r0 since arming: {updates}"
+    );
+}
+
+/// Revokes a split from a metered `worker-a` labelled `component`, fails it
+/// with the report's reply lost, settles so the worker has folded the report,
+/// runs `hand_back` on the revoked split, and returns `revocations_total` for
+/// `forced` and `drained` and the drain durations observed.
+fn revocation_after_seen_report(
+    component: &'static str,
+    hand_back: impl FnOnce(&mut StoreCoordinator<FaultStore>, &spate_coordination::SplitId),
+) -> (f64, f64, f64) {
+    let handle = exporter();
+    let rt = runtime();
+    let clock = TestClock::frozen();
+    let fault = FaultStore::with_clock(LEASE, clock.clone());
+    let ids = ["x0", "x1", "x2", "x3"];
+    let planner = || Box::new(PhasedPlanner::one_final("departure:v1", &ids));
+    let labels = spate_core::metrics::ComponentLabels::new("departure", component, "s3");
+    let mut a = StoreCoordinator::with_clock(
+        fault.clone(),
+        config_for(LEASE, Some("worker-a")),
+        rt.handle().clone(),
+        Some(spate_core::metrics::CoordinationMetrics::new(&labels)),
+        clock.clone(),
+    )
+    .expect("coordinator");
+    a.start(planner()).unwrap();
+    let mut held_a = Held::default();
+    support::drive_clocked(
+        &mut a,
+        &clock,
+        &mut held_a,
+        "worker-a takes the plan",
+        |h| h.splits.len() == ids.len(),
+    );
+    support::commit_held(&mut a, &held_a);
+
+    // worker-b has its own wrapper, so its writes never take worker-a's fault.
+    let rt_b = runtime();
+    let mut b = StoreCoordinator::with_clock(
+        FaultStore::over(fault.inner.clone()),
+        config_for(LEASE, Some("worker-b")),
+        rt_b.handle().clone(),
+        None,
+        clock.clone(),
+    )
+    .expect("coordinator");
+    b.start(planner()).unwrap();
+    let mut held_b = Held::default();
+    let deadline = Instant::now() + support::DEADLINE;
+    let revoked = loop {
+        assert!(
+            Instant::now() < deadline,
+            "the leader never revoked anything from worker-a"
+        );
+        clock.advance(LEASE / 12);
+        std::thread::sleep(support::POLL_INTERVAL);
+        let mut asked = None;
+        for event in a.poll().expect("poll a") {
+            if let CoordinationEvent::RevokeRequested { split } = &event {
+                asked = Some(split.clone());
+            }
+            held_a.fold(vec![event]);
+        }
+        held_b.fold(b.poll().expect("poll b"));
+        if let Some(split) = asked {
+            break split;
+        }
+        support::commit_held(&mut a, &held_a);
+    };
+    let mut fleet = support::Fleet::new(&fault.inner, rt.handle());
+    fleet.join(&a);
+    fleet.join(&b);
+    fleet.settle(&clock);
+    arm_ambiguous(&fault, &format!("split.{}", revoked.as_str()));
+    assert!(
+        a.fail(&revoked, "injected").is_err(),
+        "the injected reply loss surfaces"
+    );
+    assert!(
+        fault.ambiguous.lock().unwrap().is_empty(),
+        "the report took the fault"
+    );
+    fleet.settle(&clock);
+    hand_back(&mut a, &revoked);
+
+    let text = handle.render();
+    let outcome = |o| {
+        spate_test::metric_sum(
+            &text,
+            "spate_coordination_revocations_total",
+            &[("component", component), ("outcome", o)],
+        )
+        .unwrap_or(0.0)
+    };
+    let drains = spate_test::metric_sum(
+        &text,
+        "spate_coordination_drain_duration_seconds_count",
+        &[("component", component)],
+    )
+    .unwrap_or(0.0);
+    (outcome("forced"), outcome("drained"), drains)
+}
+
+/// A drained release of a revoked split after this worker's own failure
+/// report, once the worker has seen the report, ends the revocation forced
+/// and observes no drain duration.
+/// Regression for #886.
+#[test]
+fn a_drained_release_after_a_seen_failure_report_is_forced() {
+    let outcomes = revocation_after_seen_report("drained-after-seen-report", |a, revoked| {
+        a.release_drained(std::slice::from_ref(revoked))
+            .expect("release_drained");
+    });
+    assert_eq!(
+        outcomes,
+        (1.0, 0.0, 0.0),
+        "(revocations forced, revocations drained, drain durations observed)"
+    );
+}
+
+/// A departure holding a revoked split after this worker's own failure
+/// report, once the worker has seen the report, ends that revocation forced.
+/// Regression for #886.
+#[test]
+fn a_departure_after_a_seen_failure_report_ends_its_revocation_forced() {
+    let outcomes =
+        revocation_after_seen_report("depart-after-seen-report-revoked", |a, revoked| {
+            a.depart(std::slice::from_ref(revoked)).expect("depart");
+        });
+    // The departure hands back every held split; other revocations in
+    // progress end drained.
+    assert_eq!(
+        outcomes.0, 1.0,
+        "(revocations forced, revocations drained, drain durations observed) = {outcomes:?}"
+    );
+}

@@ -173,12 +173,16 @@ pub(crate) enum TaskEvent {
 
 /// One split this worker holds. The authoritative record lives once, in
 /// `splits`. This carries only what the view cannot: the lease revision
-/// to CAS renewals against and the self-fence clock.
+/// to CAS renewals against, the self-fence clock, and the record's attempts
+/// at the start of the tenancy.
 struct OwnedSplit {
     lease_rev: Revision,
     /// Last successful lease write, for renewal cadence and the
     /// starvation self-fence.
     last_ok_write: Instant,
+    /// The record's delivery attempts when this tenancy began; a same-epoch
+    /// owner-cleared record with more is this tenancy's own failure report.
+    attempts: u32,
 }
 
 /// One listing's result.

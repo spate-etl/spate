@@ -57,6 +57,13 @@ async fn delete_own<S: CoordinationStore>(
     }
 }
 
+/// Whether `record` is the failure report of the tenancy at `epoch` that
+/// began with `attempts`. A release at that epoch also clears the owner, but
+/// leaves `attempts` as it was.
+fn own_failure_report(record: &SplitProgressRecord, epoch: u64, attempts: u32) -> bool {
+    record.epoch == epoch && record.owner.is_none() && record.attempts > attempts
+}
+
 /// Read `key` after a write at `past` lost its CAS, until the read shows
 /// the key gone or at a later revision. A replica may answer a read before
 /// it has applied the write that won.
@@ -154,7 +161,8 @@ impl<S: CoordinationStore + Clone> Task<S> {
     }
 
     /// Hand back one owned split during a departure: clear its owner, then
-    /// delete its lease. Returns whether the owner was cleared.
+    /// delete its lease. Returns whether this departure handed the split
+    /// back. A tenancy its own failure report already ended is not a release.
     ///
     /// A write whose reply was lost may have applied, so a lost CAS reads
     /// the record back. Cleared at this tenancy's epoch, it is done; still
@@ -170,64 +178,72 @@ impl<S: CoordinationStore + Clone> Task<S> {
             return false;
         };
         let lease_rev = owned.lease_rev;
+        let tenancy_attempts = owned.attempts;
         let mut expected = state.progress_rev;
         let mut record = state.progress.clone();
         let epoch = record.epoch;
         let key = records::split_key_str(id);
         let store = self.store.clone();
 
-        let cleared = loop {
-            if Instant::now() >= deadline {
-                shortfall.undone.push(format!("releasing split {id}"));
-                break None;
-            }
-            record.owner = None;
-            record.written_at_ms = records::now_ms();
-            let value = record.encode();
-            match until_deadline(deadline, || {
-                store.update(Keyspace::Durable, &key, value.clone(), expected)
-            })
-            .await
-            {
-                Ok(CasOutcome::Won(rev)) => break Some((record, rev)),
-                Ok(CasOutcome::Lost) => {
-                    match read_past(&store, deadline, Keyspace::Durable, &key, expected).await {
-                        Ok(Some(entry)) => {
-                            match SplitProgressRecord::parse(&key, &entry.value, self.fp) {
-                                Ok(fresh) if fresh.epoch == epoch && fresh.owner.is_none() => {
-                                    break Some((fresh, entry.revision));
-                                }
-                                Ok(fresh)
-                                    if fresh.epoch == epoch
-                                        && fresh.owner.as_deref()
-                                            == Some(self.instance.as_str()) =>
-                                {
-                                    record = fresh;
-                                    expected = entry.revision;
-                                }
-                                Ok(_) => {
-                                    self.drop_owned(id, SplitLossReason::Fenced);
-                                    return false;
-                                }
-                                Err(e) => {
-                                    shortfall.fatal(e);
-                                    break None;
+        let mut by_report = own_failure_report(&record, epoch, tenancy_attempts);
+        let cleared = if by_report {
+            Some((record, expected))
+        } else {
+            loop {
+                if Instant::now() >= deadline {
+                    shortfall.undone.push(format!("releasing split {id}"));
+                    break None;
+                }
+                record.owner = None;
+                record.written_at_ms = records::now_ms();
+                let value = record.encode();
+                match until_deadline(deadline, || {
+                    store.update(Keyspace::Durable, &key, value.clone(), expected)
+                })
+                .await
+                {
+                    Ok(CasOutcome::Won(rev)) => break Some((record, rev)),
+                    Ok(CasOutcome::Lost) => {
+                        match read_past(&store, deadline, Keyspace::Durable, &key, expected).await {
+                            Ok(Some(entry)) => {
+                                match SplitProgressRecord::parse(&key, &entry.value, self.fp) {
+                                    Ok(fresh) if fresh.epoch == epoch && fresh.owner.is_none() => {
+                                        by_report =
+                                            own_failure_report(&fresh, epoch, tenancy_attempts);
+                                        break Some((fresh, entry.revision));
+                                    }
+                                    Ok(fresh)
+                                        if fresh.epoch == epoch
+                                            && fresh.owner.as_deref()
+                                                == Some(self.instance.as_str()) =>
+                                    {
+                                        record = fresh;
+                                        expected = entry.revision;
+                                    }
+                                    Ok(_) => {
+                                        self.drop_owned(id, SplitLossReason::Fenced);
+                                        return false;
+                                    }
+                                    Err(e) => {
+                                        shortfall.fatal(e);
+                                        break None;
+                                    }
                                 }
                             }
-                        }
-                        Ok(None) => {
-                            self.drop_owned(id, SplitLossReason::Fenced);
-                            return false;
-                        }
-                        Err(e) => {
-                            shortfall.note(format!("reading split {id}"), &e);
-                            break None;
+                            Ok(None) => {
+                                self.drop_owned(id, SplitLossReason::Fenced);
+                                return false;
+                            }
+                            Err(e) => {
+                                shortfall.note(format!("reading split {id}"), &e);
+                                break None;
+                            }
                         }
                     }
-                }
-                Err(e) => {
-                    shortfall.note(format!("releasing split {id}"), &e);
-                    break None;
+                    Err(e) => {
+                        shortfall.note(format!("releasing split {id}"), &e);
+                        break None;
+                    }
                 }
             }
         };
@@ -257,13 +273,13 @@ impl<S: CoordinationStore + Clone> Task<S> {
         }
         self.settle_revocation(
             id,
-            if released {
+            if released && !by_report {
                 RevocationOutcome::Drained
             } else {
                 RevocationOutcome::Forced
             },
         );
-        released
+        released && !by_report
     }
 
     /// Release one held split, reporting how the tenancy ended so
@@ -281,6 +297,9 @@ impl<S: CoordinationStore + Clone> Task<S> {
     /// Cleared at that epoch, this worker's own failure report ended the
     /// tenancy. A read at or below the lost revision, or a failed read, is
     /// handled as a failed write; any other record as a fence.
+    ///
+    /// A record already showing this tenancy's own failure report, seen or
+    /// read back, settles `Forced` and is not a release.
     pub(super) async fn release_one(
         &mut self,
         split: &SplitId,
@@ -290,12 +309,16 @@ impl<S: CoordinationStore + Clone> Task<S> {
             return Ok(ReleaseOutcome::Missing); // released/lost/completed
         };
         let lease_rev = owned.lease_rev;
+        let tenancy_attempts = owned.attempts;
         let Some(state) = self.splits.get(id) else {
             return Ok(ReleaseOutcome::Missing);
         };
         let mut record = state.progress.clone();
         let mut expected = state.progress_rev;
         let epoch = record.epoch;
+        if own_failure_report(&record, epoch, tenancy_attempts) {
+            return self.end_after_own_report(id, lease_rev).await;
+        }
         let key = records::split_key_str(id);
         let unconfirmed = loop {
             record.owner = None;
@@ -309,8 +332,8 @@ impl<S: CoordinationStore + Clone> Task<S> {
                     self.owned.remove(id);
                     self.upsert_progress(id, record, rev)?;
                     self.release_lease_key(id, lease_rev).await?;
-                    // The cooperative outcome: the tail is committed and the
-                    // owner cleared, so the next owner replays nothing.
+                    // The cooperative outcome: the owner is cleared by this
+                    // release, so the next owner resumes from the last commit.
                     self.settle_revocation(id, RevocationOutcome::Drained);
                     return Ok(ReleaseOutcome::Released);
                 }
@@ -342,11 +365,8 @@ impl<S: CoordinationStore + Clone> Task<S> {
             }
             if fresh.epoch == epoch && fresh.owner.is_none() {
                 // This worker's failure report ended the tenancy and counted it.
-                self.owned.remove(id);
                 self.upsert_progress(id, fresh, entry.revision)?;
-                self.release_lease_key(id, lease_rev).await?;
-                self.settle_revocation(id, RevocationOutcome::Forced);
-                return Ok(ReleaseOutcome::Missing);
+                return self.end_after_own_report(id, lease_rev).await;
             }
             if entry.revision <= expected {
                 tracing::warn!(split = %id, "release read-back lagged the store; the owner stays set");
@@ -366,5 +386,19 @@ impl<S: CoordinationStore + Clone> Task<S> {
             fatal_only(doing, &e)?;
         }
         Ok(ReleaseOutcome::WriteFailed)
+    }
+
+    /// End a tenancy whose own failure report already cleared the owner:
+    /// delete the lease and settle a revocation in progress as `Forced`,
+    /// writing nothing to the record. Only a fatal store error is returned.
+    async fn end_after_own_report(
+        &mut self,
+        id: &str,
+        lease_rev: Revision,
+    ) -> Result<ReleaseOutcome, CoordinationError> {
+        self.owned.remove(id);
+        self.release_lease_key(id, lease_rev).await?;
+        self.settle_revocation(id, RevocationOutcome::Forced);
+        Ok(ReleaseOutcome::Missing)
     }
 }

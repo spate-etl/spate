@@ -451,6 +451,7 @@ impl<S: CoordinationStore + Clone> Task<S> {
                 lease_rev,
                 last_ok_write: self.clock.now(),
                 attempts,
+                unconfirmed_since: None,
             },
         );
         Ok(())

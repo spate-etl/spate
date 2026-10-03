@@ -3,7 +3,7 @@
 use super::Task;
 use crate::error::{fatal, fatal_only};
 use crate::records::{self, LeaderVal, LeaseVal};
-use crate::store::{CasOutcome, CoordinationStore, Keyspace};
+use crate::store::{CasOutcome, CoordinationStore, Keyspace, Revision, StoreError};
 use spate_core::coordination::CoordinationError;
 use spate_core::metrics::{SplitLossReason, WriteOutcome};
 use tokio::time::Instant;
@@ -24,11 +24,12 @@ impl<S: CoordinationStore + Clone> Task<S> {
         }
         self.settle_owed_leases().await?;
         // Starvation self-fence: any owned split without a successful
-        // write for a full lease is dropped. Reads `clock`, the source
-        // that stamps `last_ok_write`, so a test fences only what it
-        // advances the clock past, and must step by no more than a
-        // renew-interval while the worker is alive, or it expires the
-        // lease and the renewal that would have saved it at once.
+        // write for a full lease is dropped. An adopted renewal counts from
+        // the first failed renewal since the last confirmed one. Reads
+        // `clock`, the source that stamps `last_ok_write`, so a test fences
+        // only what it advances the clock past, and must step by no more
+        // than a renew-interval while the worker is alive, or it expires
+        // the lease and the renewal that would have saved it at once.
         let now = self.clock.now();
         let starved: Vec<String> = self
             .owned
@@ -164,21 +165,14 @@ impl<S: CoordinationStore + Clone> Task<S> {
         });
         let key = records::split_key_str(id);
         let started = Instant::now();
+        let attempt_at = self.clock.now();
         match self
             .store
-            .update(Keyspace::Ephemeral, &key, val, lease_rev)
+            .update(Keyspace::Ephemeral, &key, val.clone(), lease_rev)
             .await
         {
             Ok(CasOutcome::Won(rev)) => {
-                if let Some(owned) = self.owned.get_mut(id) {
-                    owned.lease_rev = rev;
-                    owned.last_ok_write = self.clock.now();
-                }
-                if let Some(state) = self.splits.get_mut(id)
-                    && let Some((_, lease_rev)) = &mut state.lease
-                {
-                    *lease_rev = rev;
-                }
+                self.confirm_lease(id, rev);
                 Ok(())
             }
             Ok(CasOutcome::Lost) => {
@@ -187,17 +181,45 @@ impl<S: CoordinationStore + Clone> Task<S> {
                     Ok(Some(entry)) => {
                         let lease: LeaseVal = records::parse_val(&key, &entry.value)?;
                         if lease.owner == self.instance && lease.nonce == self.nonce {
+                            // A read at or before the revision the renewal
+                            // lost against is behind the store; the next beat
+                            // renews and reads again.
+                            if entry.revision <= lease_rev {
+                                if let Some(owned) = self.owned.get_mut(id)
+                                    && let Some(since) = owned.unconfirmed_since
+                                {
+                                    owned.last_ok_write = since;
+                                }
+                                return Ok(());
+                            }
                             // Maybe-landed: a previous renewal reported
-                            // an error but wrote. Adopt its revision;
-                            // dropping costs a delivery attempt.
+                            // an error but wrote. Adopt its revision, counted
+                            // from no later than when it was sent, and renew
+                            // on top of it; dropping costs a delivery attempt.
                             if let Some(owned) = self.owned.get_mut(id) {
                                 owned.lease_rev = entry.revision;
-                                owned.last_ok_write = self.clock.now();
+                                owned.last_ok_write = owned
+                                    .unconfirmed_since
+                                    .take()
+                                    .unwrap_or(owned.last_ok_write);
                             }
                             if let Some(state) = self.splits.get_mut(id) {
                                 state.lease = Some((lease, entry.revision));
                             }
-                            return Ok(());
+                            return match self
+                                .store
+                                .update(Keyspace::Ephemeral, &key, val, entry.revision)
+                                .await
+                            {
+                                Ok(CasOutcome::Won(rev)) => {
+                                    self.confirm_lease(id, rev);
+                                    Ok(())
+                                }
+                                // Another write landed after the read; the
+                                // next beat renews and reads again.
+                                Ok(CasOutcome::Lost) => Ok(()),
+                                Err(e) => self.unconfirmed_lease(id, attempt_at, &e),
+                            };
                         }
                         if lease.owner == self.instance && lease.nonce != self.nonce {
                             return Err(fatal(format!(
@@ -221,10 +243,36 @@ impl<S: CoordinationStore + Clone> Task<S> {
                     }
                 }
             }
-            Err(e) => {
-                tracing::warn!(split = %id, error = %e, "lease renewal failed; next beat retries");
-                fatal_only("renewing a lease", &e)
-            }
+            Err(e) => self.unconfirmed_lease(id, attempt_at, &e),
         }
+    }
+
+    /// Records a renewal of `id`'s lease that won at `rev`.
+    fn confirm_lease(&mut self, id: &str, rev: Revision) {
+        if let Some(owned) = self.owned.get_mut(id) {
+            owned.lease_rev = rev;
+            owned.last_ok_write = self.clock.now();
+            owned.unconfirmed_since = None;
+        }
+        if let Some(state) = self.splits.get_mut(id)
+            && let Some((_, lease_rev)) = &mut state.lease
+        {
+            *lease_rev = rev;
+        }
+    }
+
+    /// Records a renewal of `id`'s lease, sent at or after `attempt_at`,
+    /// that failed with `e` and may have applied; a fatal `e` is returned.
+    fn unconfirmed_lease(
+        &mut self,
+        id: &str,
+        attempt_at: Instant,
+        e: &StoreError,
+    ) -> Result<(), CoordinationError> {
+        if let Some(owned) = self.owned.get_mut(id) {
+            owned.unconfirmed_since.get_or_insert(attempt_at);
+        }
+        tracing::warn!(split = %id, error = %e, "lease renewal failed; next beat retries");
+        fatal_only("renewing a lease", e)
     }
 }

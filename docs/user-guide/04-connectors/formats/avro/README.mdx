@@ -181,6 +181,9 @@ same policy once its negative-cache entry expires, so a permanently bad id is
 an error rather than an infinite retry. A registry that rejects the client is
 not a payload error and stops the pipeline under either policy.
 
+A datum decode that attempts to read past the payload returns a malformed
+record error and follows the configured Skip or Fail record error policy.
+
 The unit is the payload. One datum is one record here, so there is no partial
 outcome to reason about. Drops surface in the framework's stage families,
 below.

@@ -1079,3 +1079,86 @@ async fn duration_schema_gates_only_the_datum_path() {
         "{err}"
     );
 }
+
+/// Confluent string truncation is malformed after registry resolution.
+/// Regression for #878.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn confluent_truncated_string_is_malformed() {
+    const SCH: &str = r#"{"type":"record","name":"R","fields":[{"name":"s","type":"string"}]}"#;
+    let stub = StubRegistry::default();
+    stub.script("/schemas/ids/83", 200, &schema_body(SCH), 0);
+    let addr = stub.serve().await;
+    let b = AvroDeserializerBuilder::from_settings(
+        &settings(addr, Duration::from_secs(30)),
+        &tokio::runtime::Handle::current(),
+    )
+    .unwrap();
+    let mut deser = b.build_value().unwrap();
+    tokio::task::spawn_blocking(move || {
+        let frame = |bytes: &[u8]| {
+            let mut p = vec![0, 0, 0, 0, 83];
+            p.extend_from_slice(bytes);
+            p
+        };
+        let mut out = Collected(Vec::new());
+        drive_until_ready(&mut deser, &frame(&[2, b'a']), &mut out).unwrap();
+        assert_eq!(
+            out.0,
+            vec![AvroValue::Record(vec![(
+                "s".into(),
+                AvroValue::String("a".into())
+            )])]
+        );
+        let mut out = Collected(Vec::new());
+        let result = drive_until_ready(&mut deser, &frame(&[0x22]), &mut out);
+        assert!(
+            matches!(result, Err(DeserError::Malformed { .. })),
+            "result={result:?}, emitted={:?}",
+            out.0
+        );
+        assert!(out.0.is_empty());
+    })
+    .await
+    .unwrap();
+}
+
+/// Reader projection preserves malformed writer-field rejection.
+/// Regression for #878.
+#[tokio::test]
+async fn reader_projection_does_not_hide_truncated_writer_string() {
+    let settings = AvroSettings {
+        mode: AvroMode::Raw,
+        schema: Some(spate_avro::SchemaSource::inline(
+            r#"{"type":"record","name":"R","fields":[{"name":"a","type":"long"},{"name":"s","type":"string"}]}"#,
+        )),
+        reader_schema: Some(spate_avro::SchemaSource::inline(
+            r#"{"type":"record","name":"R","fields":[{"name":"a","type":"long"}]}"#,
+        )),
+        ..AvroSettings::default()
+    };
+    let b = AvroDeserializerBuilder::from_settings(&settings, &tokio::runtime::Handle::current())
+        .unwrap();
+    let mut deser = b.build_value().unwrap();
+    let mut out = Collected(Vec::new());
+    deser
+        .deserialize(
+            &raw_payload(&[18, 2, b'a']),
+            &spate_test::test_ack(),
+            &mut out,
+        )
+        .unwrap();
+    assert_eq!(
+        out.0,
+        vec![AvroValue::Record(vec![("a".into(), AvroValue::Long(9))])]
+    );
+    for bytes in [&[18, 34][..], &[18, 4, b'a'][..]] {
+        let mut out = Collected(Vec::new());
+        let result = deser.deserialize(&raw_payload(bytes), &spate_test::test_ack(), &mut out);
+        assert!(
+            matches!(result, Err(DeserError::Malformed { .. })),
+            "result={result:?}, emitted={:?}",
+            out.0
+        );
+        assert!(out.0.is_empty());
+    }
+}

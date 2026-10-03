@@ -432,6 +432,7 @@ impl<S: CoordinationStore + Clone> Task<S> {
         lease_rev: Revision,
     ) -> Result<(), CoordinationError> {
         let epoch = record.epoch;
+        let attempts = record.attempts;
         self.upsert_progress(id, record, rev)?;
         if let Some(state) = self.splits.get_mut(id) {
             state.lease = Some((
@@ -449,6 +450,7 @@ impl<S: CoordinationStore + Clone> Task<S> {
             OwnedSplit {
                 lease_rev,
                 last_ok_write: self.clock.now(),
+                attempts,
             },
         );
         Ok(())

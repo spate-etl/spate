@@ -183,6 +183,9 @@ struct OwnedSplit {
     /// The record's delivery attempts when this tenancy began; a same-epoch
     /// owner-cleared record with more is this tenancy's own failure report.
     attempts: u32,
+    /// Start of the first renewal since the last confirmed one that failed
+    /// with an error; it may have applied.
+    unconfirmed_since: Option<Instant>,
 }
 
 /// One listing's result.

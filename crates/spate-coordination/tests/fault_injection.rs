@@ -18,10 +18,19 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use support::tap::TapStore;
 use support::{DEADLINE, Held, PhasedPlanner, TestClock, config, runtime, split_id};
 
 /// The clock a stalled write advances, and by how much.
 type Stall = (Arc<TestClock>, Duration);
+
+/// A slot of the first reconcile under [`SLOTTED_RECONCILE`].
+const RECONCILE_SLOT: Duration = support::LEASE.saturating_mul(8);
+
+/// A `reconcile_interval` whose first reconcile, at
+/// `protocol::spread(seed, interval)`, falls on a whole multiple of
+/// [`RECONCILE_SLOT`], whatever the seed.
+const SLOTTED_RECONCILE: Duration = RECONCILE_SLOT.saturating_mul(1024);
 
 /// What [`FaultStore`] does with the next create of the leader key.
 enum LeaderCreate {
@@ -82,6 +91,17 @@ struct FaultStore {
     lease_settle_read_fails: Arc<AtomicBool>,
     /// Reads of the faulted split lease after the act returns.
     lease_reads_after_act: Arc<AtomicU64>,
+    /// When set, the maybe-landed renewal advances this clock by this much
+    /// before it returns, as a reply lost to `op_timeout` does.
+    lease_stall: Arc<Mutex<Option<Stall>>>,
+    /// The clock when a stalled maybe-landed renewal wrote.
+    lease_fault_at: Arc<Mutex<Option<tokio::time::Instant>>>,
+    /// While set: the first update of the faulted split lease after the
+    /// maybe-landed renewal passes, and every later one fails with nothing
+    /// written.
+    lease_refuse_after_adopt: Arc<AtomicBool>,
+    /// The outcome of the update `lease_refuse_after_adopt` passed.
+    lease_adopting_cas: Arc<Mutex<Option<Result<CasOutcome, String>>>>,
     /// While armed: the next durable split-record write that clears the
     /// owner (a graceful release, or a revocation's final hand-back) is
     /// dropped (Retryable, nothing written), disarming afterward.
@@ -130,6 +150,10 @@ impl FaultStore {
             lease_delete_fails: Arc::default(),
             lease_settle_read_fails: Arc::default(),
             lease_reads_after_act: Arc::default(),
+            lease_stall: Arc::default(),
+            lease_fault_at: Arc::default(),
+            lease_refuse_after_adopt: Arc::default(),
+            lease_adopting_cas: Arc::default(),
             drop_owner_clear: Arc::new(AtomicBool::new(false)),
             drop_assignment_publish: Arc::new(AtomicBool::new(false)),
             leader_maybe_land: Arc::default(),
@@ -258,9 +282,16 @@ impl CoordinationStore for FaultStore {
             // The write LANDS but the caller sees a failure, the
             // maybe-landed renewal a flaky round-trip produces.
             *self.lease_before.lock().expect("before") = self.inner.get(ks, key).await?;
+            let stall = self.lease_stall.lock().expect("stall").clone();
+            if let Some((clock, _)) = &stall {
+                *self.lease_fault_at.lock().expect("fault at") = Some(clock.now());
+            }
             let _ = self.inner.update(ks, key, value, expected).await?;
             self.renewals_after_fault.store(0, Ordering::Release);
             *self.lease_fault_key.lock().expect("fault key") = Some(key.to_string());
+            if let Some((clock, by)) = stall {
+                clock.advance(by);
+            }
             return Err(StoreError::Retryable(
                 "injected: renewal reply lost after the write landed".into(),
             ));
@@ -285,6 +316,20 @@ impl CoordinationStore for FaultStore {
             return Err(StoreError::Retryable(
                 "injected: leader renewal reply lost after the write landed".into(),
             ));
+        }
+        if ks == Keyspace::Ephemeral
+            && self.lease_refuse_after_adopt.load(Ordering::Acquire)
+            && self.lease_fault_key.lock().expect("fault key").as_deref() == Some(key)
+        {
+            if self.lease_adopting_cas.lock().expect("adopting").is_some() {
+                return Err(StoreError::Retryable(
+                    "injected: lease renewal refused after the adoption".into(),
+                ));
+            }
+            let outcome = self.inner.update(ks, key, value, expected).await;
+            *self.lease_adopting_cas.lock().expect("adopting") =
+                Some(outcome.as_ref().map(|o| *o).map_err(ToString::to_string));
+            return outcome;
         }
         let outcome = self.inner.update(ks, key, value, expected).await?;
         if ks == Keyspace::Ephemeral
@@ -803,6 +848,810 @@ fn a_failure_report_whose_lease_read_lags_stops_retrying_the_reclaimed_lease() {
     let short = reads_over(support::LEASE / 2);
     let long = reads_over(support::LEASE * 2);
     assert_eq!(long, short, "the owed lease was read on later heartbeats");
+}
+
+/// Whether `event` reports `r0` lost.
+fn r0_lost(event: &CoordinationEvent) -> bool {
+    matches!(event, CoordinationEvent::Lost { split } if split.as_str() == "r0")
+}
+
+/// A split whose lease renewal applied with its reply lost to `op_timeout`,
+/// half a lease after the write, stays held.
+/// Regression for #886.
+#[test]
+fn a_lease_renewal_whose_reply_timed_out_keeps_the_split() {
+    let rt = runtime();
+    let clock = TestClock::frozen();
+    let inner = MemoryStore::with_clock(support::LEASE, clock.clone());
+    let store = FaultStore::new(inner.clone());
+    *store.lease_stall.lock().unwrap() = Some((clock.clone(), support::LEASE / 2));
+    let mut cfg = config(Some("solo"));
+    cfg.op_timeout = support::LEASE / 2;
+    let mut worker = StoreCoordinator::with_clock(
+        store.clone(),
+        cfg,
+        rt.handle().clone(),
+        None,
+        clock.clone() as Arc<dyn Clock>,
+    )
+    .expect("coordinator");
+    worker
+        .start(Box::new(PhasedPlanner::one_final(
+            "lease-timeout:v1",
+            &["r0"],
+        )))
+        .unwrap();
+    let mut fleet = support::Fleet::new(&inner, rt.handle());
+    fleet.join(&worker);
+    let mut held = Held::default();
+    support::drive(&mut worker, &mut held, "claiming the split", |h| {
+        h.splits.len() == 1
+    });
+
+    let mut step = || {
+        fleet.step(&clock, support::LEASE / 12);
+        for event in worker.poll().expect("poll") {
+            assert!(
+                !matches!(
+                    event,
+                    CoordinationEvent::Lost { .. } | CoordinationEvent::Quarantined { .. }
+                ),
+                "a renewal whose reply timed out cost the split: {event:?}"
+            );
+            held.fold(vec![event]);
+        }
+    };
+    store.lease_maybe_land.store(true, Ordering::Release);
+    let deadline = Instant::now() + DEADLINE;
+    while store.lease_maybe_land.load(Ordering::Acquire) {
+        assert!(Instant::now() < deadline, "the fault never fired");
+        step();
+    }
+    for _ in 0..24 {
+        step();
+    }
+
+    worker
+        .commit(&split_id("r0"), &SplitProgress::completed(7, vec![]))
+        .expect("the tenancy is intact");
+}
+
+/// A split whose lease renewal applied with its reply lost to `op_timeout`,
+/// and whose every renewal after the adoption fails, self-fences between one
+/// and one and a half leases after the lost write, with the expiry hidden
+/// from the watch.
+/// Regression for #886.
+#[test]
+fn a_self_fence_after_an_adopted_renewal_counts_from_the_lost_write() {
+    let rt = runtime();
+    let clock = TestClock::frozen();
+    let inner = MemoryStore::with_clock(support::LEASE, clock.clone());
+    let store = FaultStore::new(inner.clone());
+    let tap = TapStore::new(store.clone());
+    let mut cfg = config(Some("solo"));
+    cfg.op_timeout = support::LEASE / 2;
+    cfg.reconcile_interval = SLOTTED_RECONCILE;
+    let t_start = clock.now();
+    let listings: Arc<Mutex<Vec<(Keyspace, tokio::time::Instant)>>> = Arc::default();
+    {
+        let (listings, clock) = (listings.clone(), clock.clone());
+        tap.on_list(move |ks, _| {
+            listings.lock().unwrap().push((ks, clock.now()));
+            None
+        });
+    }
+    let mut worker = StoreCoordinator::with_clock(
+        tap.clone(),
+        cfg,
+        rt.handle().clone(),
+        None,
+        clock.clone() as Arc<dyn Clock>,
+    )
+    .expect("coordinator");
+    worker
+        .start(Box::new(PhasedPlanner::one_final("self-fence:v1", &["r0"])))
+        .unwrap();
+    let mut fleet = support::Fleet::new(&inner, rt.handle());
+    fleet.join(&worker);
+    let mut held = Held::default();
+    support::drive_clocked(&mut worker, &clock, &mut held, "claiming r0", |h| {
+        h.splits.len() == 1
+    });
+
+    *store.lease_stall.lock().unwrap() = Some((clock.clone(), support::LEASE / 2));
+    store
+        .lease_refuse_after_adopt
+        .store(true, Ordering::Release);
+    store.lease_maybe_land.store(true, Ordering::Release);
+    // With no listing in the window, the hide stands for a view that lags
+    // the lease's expiry.
+    tap.hide(|ks, key| ks == Keyspace::Ephemeral && key == "split.r0");
+    let deadline = Instant::now() + DEADLINE;
+    let t = loop {
+        assert!(Instant::now() < deadline, "the fault never fired");
+        fleet.step(&clock, support::LEASE / 12);
+        let events = worker.poll().expect("poll");
+        assert!(!events.iter().any(r0_lost), "lost before the fault");
+        if let Some(t) = *store.lease_fault_at.lock().unwrap() {
+            break t;
+        }
+    };
+    let mut first_lost = None;
+    while clock.now() < t + support::LEASE * 3 / 2 {
+        fleet.step(&clock, support::LEASE / 12);
+        let events = worker.poll().expect("poll");
+        if first_lost.is_none() && events.iter().any(r0_lost) {
+            first_lost = Some(clock.now() - t);
+        }
+    }
+
+    assert_eq!(
+        *store.lease_adopting_cas.lock().unwrap(),
+        Some(Ok(CasOutcome::Lost)),
+        "the renewal after the fault did not lose to it"
+    );
+    let late: Vec<_> = listings
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(ks, at)| *ks == Keyspace::Ephemeral && *at >= t)
+        .copied()
+        .collect();
+    assert!(
+        late.is_empty(),
+        "a reconcile listed in the window: {late:?}"
+    );
+    assert!(
+        clock.now() - t_start < RECONCILE_SLOT,
+        "the test ran into a later reconcile slot"
+    );
+    assert!(
+        first_lost.is_some_and(|at| at >= support::LEASE && at <= support::LEASE * 3 / 2),
+        "r0 lost at {first_lost:?} after the lost write"
+    );
+}
+
+/// A renewal that failed with nothing written, then one that applied with its
+/// reply lost and was adopted, with every later renewal failing: the split
+/// self-fences between one and four thirds of a lease after the first failure.
+#[test]
+fn a_self_fence_after_an_adopted_renewal_counts_from_the_first_failed_one() {
+    let rt = runtime();
+    let clock = TestClock::frozen();
+    let inner = MemoryStore::with_clock(support::LEASE, clock.clone());
+    let store = FaultStore::new(inner.clone());
+    let tap = TapStore::new(store.clone());
+    let mut worker = StoreCoordinator::with_clock(
+        tap.clone(),
+        config(Some("solo")),
+        rt.handle().clone(),
+        None,
+        clock.clone() as Arc<dyn Clock>,
+    )
+    .expect("coordinator");
+    worker
+        .start(Box::new(PhasedPlanner::one_final(
+            "first-failed:v1",
+            &["r0"],
+        )))
+        .unwrap();
+    let mut fleet = support::Fleet::new(&inner, rt.handle());
+    fleet.join(&worker);
+    let mut held = Held::default();
+    support::drive_clocked(&mut worker, &clock, &mut held, "claiming r0", |h| {
+        h.splits.len() == 1
+    });
+
+    let first_failed: Arc<Mutex<Option<tokio::time::Instant>>> = Arc::default();
+    {
+        let (first_failed, store, clock) = (first_failed.clone(), store.clone(), clock.clone());
+        tap.on_write(move |w| {
+            if w.op != support::tap::Op::Update || w.key != "split.r0" {
+                return None;
+            }
+            let mut first_failed = first_failed.lock().unwrap();
+            if first_failed.is_some() {
+                return None;
+            }
+            *first_failed = Some(clock.now());
+            store
+                .lease_refuse_after_adopt
+                .store(true, Ordering::Release);
+            store.lease_maybe_land.store(true, Ordering::Release);
+            Some(StoreError::Retryable(
+                "injected: renewal failed unwritten".into(),
+            ))
+        });
+    }
+    let deadline = Instant::now() + DEADLINE;
+    let s = loop {
+        assert!(Instant::now() < deadline, "the refusal never fired");
+        fleet.step(&clock, support::LEASE / 12);
+        assert!(
+            !worker.poll().expect("poll").iter().any(r0_lost),
+            "lost at the refusal"
+        );
+        if let Some(s) = *first_failed.lock().unwrap() {
+            break s;
+        }
+    };
+    let mut first_lost = None;
+    while clock.now() < s + support::LEASE * 2 {
+        fleet.step(&clock, support::LEASE / 12);
+        let events = worker.poll().expect("poll");
+        if first_lost.is_none() && events.iter().any(r0_lost) {
+            first_lost = Some(clock.now() - s);
+        }
+    }
+
+    assert_eq!(
+        *store.lease_adopting_cas.lock().unwrap(),
+        Some(Ok(CasOutcome::Lost)),
+        "the renewal after the fault did not lose to it"
+    );
+    assert!(
+        first_lost.is_some_and(|at| at >= support::LEASE && at < support::LEASE * 4 / 3),
+        "r0 lost at {first_lost:?} after the first failed renewal"
+    );
+}
+
+/// A renewal that failed with nothing written, followed by renewals that won,
+/// does not count toward the self-fence of a renewal adopted later.
+#[test]
+fn a_self_fence_after_an_adopted_renewal_ignores_a_failure_before_a_confirmed_one() {
+    let rt = runtime();
+    let clock = TestClock::frozen();
+    let inner = MemoryStore::with_clock(support::LEASE, clock.clone());
+    let store = FaultStore::new(inner.clone());
+    let tap = TapStore::new(store.clone());
+    let mut worker = StoreCoordinator::with_clock(
+        tap.clone(),
+        config(Some("solo")),
+        rt.handle().clone(),
+        None,
+        clock.clone() as Arc<dyn Clock>,
+    )
+    .expect("coordinator");
+    worker
+        .start(Box::new(PhasedPlanner::one_final("confirmed:v1", &["r0"])))
+        .unwrap();
+    let mut fleet = support::Fleet::new(&inner, rt.handle());
+    fleet.join(&worker);
+    let mut held = Held::default();
+    support::drive_clocked(&mut worker, &clock, &mut held, "claiming r0", |h| {
+        h.splits.len() == 1
+    });
+
+    let refuse = Arc::new(AtomicBool::new(true));
+    {
+        let refuse = refuse.clone();
+        tap.on_write(move |w| {
+            (w.op == support::tap::Op::Update
+                && w.key == "split.r0"
+                && refuse.swap(false, Ordering::AcqRel))
+            .then(|| StoreError::Retryable("injected: renewal failed unwritten".into()))
+        });
+    }
+    let deadline = Instant::now() + DEADLINE;
+    while refuse.load(Ordering::Acquire) {
+        assert!(Instant::now() < deadline, "the refusal never fired");
+        fleet.step(&clock, support::LEASE / 12);
+        assert!(
+            !worker.poll().expect("poll").iter().any(r0_lost),
+            "lost at the refusal"
+        );
+    }
+    for _ in 0..36 {
+        fleet.step(&clock, support::LEASE / 12);
+        assert!(
+            !worker.poll().expect("poll").iter().any(r0_lost),
+            "lost while renewals won"
+        );
+    }
+
+    *store.lease_stall.lock().unwrap() = Some((clock.clone(), Duration::ZERO));
+    store
+        .lease_refuse_after_adopt
+        .store(true, Ordering::Release);
+    store.lease_maybe_land.store(true, Ordering::Release);
+    let deadline = Instant::now() + DEADLINE;
+    let t = loop {
+        assert!(Instant::now() < deadline, "the fault never fired");
+        fleet.step(&clock, support::LEASE / 12);
+        assert!(
+            !worker.poll().expect("poll").iter().any(r0_lost),
+            "lost before the fault"
+        );
+        if let Some(t) = *store.lease_fault_at.lock().unwrap() {
+            break t;
+        }
+    };
+    let mut first_lost = None;
+    while clock.now() < t + support::LEASE * 3 / 2 {
+        fleet.step(&clock, support::LEASE / 12);
+        let events = worker.poll().expect("poll");
+        if first_lost.is_none() && events.iter().any(r0_lost) {
+            first_lost = Some(clock.now() - t);
+        }
+    }
+
+    assert_eq!(
+        *store.lease_adopting_cas.lock().unwrap(),
+        Some(Ok(CasOutcome::Lost)),
+        "the renewal after the fault did not lose to it"
+    );
+    assert!(
+        first_lost.is_some_and(|at| at >= support::LEASE),
+        "r0 lost at {first_lost:?} after the adopted write"
+    );
+}
+
+/// A split whose lease renewal applied with its reply lost, and whose
+/// adopting read answers with the lease as it stood before that renewal,
+/// stays held.
+#[test]
+fn an_adoption_read_behind_the_lost_write_keeps_the_split() {
+    let rt = runtime();
+    let clock = TestClock::frozen();
+    let inner = MemoryStore::with_clock(support::LEASE, clock.clone());
+    let store = FaultStore::new(inner.clone());
+    let mut worker = StoreCoordinator::with_clock(
+        store.clone(),
+        config(Some("solo")),
+        rt.handle().clone(),
+        None,
+        clock.clone() as Arc<dyn Clock>,
+    )
+    .expect("coordinator");
+    worker
+        .start(Box::new(PhasedPlanner::one_final(
+            "read-behind:v1",
+            &["r0"],
+        )))
+        .unwrap();
+    let mut fleet = support::Fleet::new(&inner, rt.handle());
+    fleet.join(&worker);
+    let mut held = Held::default();
+    support::drive_clocked(&mut worker, &clock, &mut held, "claiming r0", |h| {
+        h.splits.len() == 1
+    });
+
+    *store.lease_stale_reads.lock().unwrap() = 1;
+    store.lease_maybe_land.store(true, Ordering::Release);
+    let deadline = Instant::now() + DEADLINE;
+    while store.lease_maybe_land.load(Ordering::Acquire) {
+        assert!(Instant::now() < deadline, "the fault never fired");
+        fleet.step(&clock, support::LEASE / 12);
+        assert!(
+            !worker.poll().expect("poll").iter().any(r0_lost),
+            "lost before the fault"
+        );
+    }
+    for _ in 0..24 {
+        fleet.step(&clock, support::LEASE / 12);
+        assert!(
+            !worker.poll().expect("poll").iter().any(r0_lost),
+            "lost after an adoption read behind the write"
+        );
+    }
+
+    assert_eq!(
+        *store.lease_stale_reads.lock().unwrap(),
+        0,
+        "no adopting read was served the older lease"
+    );
+    worker
+        .commit(&split_id("r0"), &SplitProgress::completed(7, vec![]))
+        .expect("the tenancy is intact");
+}
+
+/// A renewal that applied with its reply lost, an adopting read behind it,
+/// and every later renewal failing or losing: the split is lost between one
+/// and four thirds of a lease after the lost write, with the expiry hidden
+/// from the watch.
+#[test]
+fn an_adoption_read_behind_the_lost_write_keeps_the_self_fence() {
+    let rt = runtime();
+    let clock = TestClock::frozen();
+    let inner = MemoryStore::with_clock(support::LEASE, clock.clone());
+    let store = FaultStore::new(inner.clone());
+    let tap = TapStore::new(store.clone());
+    let mut cfg = config(Some("solo"));
+    cfg.reconcile_interval = SLOTTED_RECONCILE;
+    let mut worker = StoreCoordinator::with_clock(
+        tap.clone(),
+        cfg,
+        rt.handle().clone(),
+        None,
+        clock.clone() as Arc<dyn Clock>,
+    )
+    .expect("coordinator");
+    worker
+        .start(Box::new(PhasedPlanner::one_final(
+            "read-behind-fence:v1",
+            &["r0"],
+        )))
+        .unwrap();
+    let mut fleet = support::Fleet::new(&inner, rt.handle());
+    fleet.join(&worker);
+    let mut held = Held::default();
+    support::drive_clocked(&mut worker, &clock, &mut held, "claiming r0", |h| {
+        h.splits.len() == 1
+    });
+
+    // Lease updates in order: applied with the reply lost (the next read
+    // answers with the lease before it), lost, failed unwritten, lost, then
+    // failed unwritten.
+    let sent: Arc<Mutex<Option<tokio::time::Instant>>> = Arc::default();
+    let reads = Arc::new(AtomicU64::new(0));
+    {
+        let (sent, store, clock) = (sent.clone(), store.clone(), clock.clone());
+        let updates = AtomicU64::new(0);
+        tap.on_write(move |w| {
+            if w.op != support::tap::Op::Update || w.key != "split.r0" {
+                return None;
+            }
+            match updates.fetch_add(1, Ordering::AcqRel) {
+                0 => {
+                    *sent.lock().unwrap() = Some(clock.now());
+                    *store.lease_stale_reads.lock().unwrap() = 1;
+                    store.lease_maybe_land.store(true, Ordering::Release);
+                    None
+                }
+                1 | 3 => None,
+                _ => Some(StoreError::Retryable(
+                    "injected: renewal failed unwritten".into(),
+                )),
+            }
+        });
+        let reads = reads.clone();
+        tap.on_get(move |ks, key| {
+            if ks == Keyspace::Ephemeral && key == "split.r0" {
+                reads.fetch_add(1, Ordering::AcqRel);
+            }
+            None
+        });
+    }
+    tap.hide(|ks, key| ks == Keyspace::Ephemeral && key == "split.r0");
+    let deadline = Instant::now() + DEADLINE;
+    let s = loop {
+        assert!(Instant::now() < deadline, "the fault never fired");
+        fleet.step(&clock, support::LEASE / 12);
+        assert!(
+            !worker.poll().expect("poll").iter().any(r0_lost),
+            "lost before the fault"
+        );
+        if let Some(s) = *sent.lock().unwrap() {
+            break s;
+        }
+    };
+    let mut first_lost = None;
+    while clock.now() < s + support::LEASE * 2 {
+        fleet.step(&clock, support::LEASE / 12);
+        let events = worker.poll().expect("poll");
+        if first_lost.is_none() && events.iter().any(r0_lost) {
+            first_lost = Some(clock.now() - s);
+        }
+    }
+
+    assert_eq!(
+        *store.lease_stale_reads.lock().unwrap(),
+        0,
+        "no adopting read was served the older lease"
+    );
+    assert!(
+        reads.load(Ordering::Acquire) >= 2,
+        "the lease was not read again after the read behind"
+    );
+    assert!(
+        first_lost.is_some_and(|at| at >= support::LEASE && at < support::LEASE * 4 / 3),
+        "r0 lost at {first_lost:?} after the lost write"
+    );
+}
+
+/// A renewal that applied with its reply lost, a failed renewal after it, and
+/// every read of the lease answered with the lease before it: the split
+/// self-fences between one and four thirds of a lease after the lost write,
+/// with the expiry hidden from the watch.
+#[test]
+fn a_lease_read_behind_after_a_failed_renewal_self_fences() {
+    let rt = runtime();
+    let clock = TestClock::frozen();
+    let inner = MemoryStore::with_clock(support::LEASE, clock.clone());
+    let store = FaultStore::new(inner.clone());
+    let tap = TapStore::new(store.clone());
+    let mut cfg = config(Some("solo"));
+    cfg.reconcile_interval = SLOTTED_RECONCILE;
+    let mut worker = StoreCoordinator::with_clock(
+        tap.clone(),
+        cfg,
+        rt.handle().clone(),
+        None,
+        clock.clone() as Arc<dyn Clock>,
+    )
+    .expect("coordinator");
+    worker
+        .start(Box::new(PhasedPlanner::one_final(
+            "read-behind-failed:v1",
+            &["r0"],
+        )))
+        .unwrap();
+    let mut fleet = support::Fleet::new(&inner, rt.handle());
+    fleet.join(&worker);
+    let mut held = Held::default();
+    support::drive_clocked(&mut worker, &clock, &mut held, "claiming r0", |h| {
+        h.splits.len() == 1
+    });
+
+    // Lease updates in order: applied with the reply lost, lost, failed
+    // unwritten, then lost. Every read answers with the lease before the
+    // first.
+    let sent: Arc<Mutex<Option<tokio::time::Instant>>> = Arc::default();
+    let reads = Arc::new(AtomicU64::new(0));
+    {
+        let (sent, store, clock) = (sent.clone(), store.clone(), clock.clone());
+        let updates = AtomicU64::new(0);
+        tap.on_write(move |w| {
+            if w.op != support::tap::Op::Update || w.key != "split.r0" {
+                return None;
+            }
+            match updates.fetch_add(1, Ordering::AcqRel) {
+                0 => {
+                    *sent.lock().unwrap() = Some(clock.now());
+                    *store.lease_stale_reads.lock().unwrap() = u64::MAX;
+                    store.lease_maybe_land.store(true, Ordering::Release);
+                    None
+                }
+                2 => Some(StoreError::Retryable(
+                    "injected: renewal failed unwritten".into(),
+                )),
+                _ => None,
+            }
+        });
+        let reads = reads.clone();
+        tap.on_get(move |ks, key| {
+            if ks == Keyspace::Ephemeral && key == "split.r0" {
+                reads.fetch_add(1, Ordering::AcqRel);
+            }
+            None
+        });
+    }
+    tap.hide(|ks, key| ks == Keyspace::Ephemeral && key == "split.r0");
+    let deadline = Instant::now() + DEADLINE;
+    let s = loop {
+        assert!(Instant::now() < deadline, "the fault never fired");
+        fleet.step(&clock, support::LEASE / 12);
+        assert!(
+            !worker.poll().expect("poll").iter().any(r0_lost),
+            "lost before the fault"
+        );
+        if let Some(s) = *sent.lock().unwrap() {
+            break s;
+        }
+    };
+    let mut first_lost = None;
+    while clock.now() < s + support::LEASE * 2 {
+        fleet.step(&clock, support::LEASE / 12);
+        let events = worker.poll().expect("poll");
+        if first_lost.is_none() && events.iter().any(r0_lost) {
+            first_lost = Some(clock.now() - s);
+        }
+    }
+
+    assert_eq!(
+        u64::MAX - *store.lease_stale_reads.lock().unwrap(),
+        reads.load(Ordering::Acquire),
+        "a read of the lease was not served the lease before the lost write"
+    );
+    assert!(
+        first_lost.is_some_and(|at| at >= support::LEASE && at < support::LEASE * 4 / 3),
+        "r0 lost at {first_lost:?} after the lost write"
+    );
+    assert!(
+        reads.load(Ordering::Acquire) >= 2,
+        "the lease was not read behind after the failed renewal"
+    );
+}
+
+/// A split whose adopting beat's renewal also applied with its reply lost,
+/// then one renewal that failed with nothing written, an adoption, and every
+/// later renewal failing: the split self-fences between one and four thirds
+/// of a lease after the adopting beat's renewal, with the expiry hidden from
+/// the watch.
+#[test]
+fn a_self_fence_after_an_adopted_renewal_counts_from_a_failed_same_beat_one() {
+    let rt = runtime();
+    let clock = TestClock::frozen();
+    let inner = MemoryStore::with_clock(support::LEASE, clock.clone());
+    let store = FaultStore::new(inner.clone());
+    let tap = TapStore::new(store.clone());
+    let mut cfg = config(Some("solo"));
+    cfg.reconcile_interval = SLOTTED_RECONCILE;
+    let mut worker = StoreCoordinator::with_clock(
+        tap.clone(),
+        cfg,
+        rt.handle().clone(),
+        None,
+        clock.clone() as Arc<dyn Clock>,
+    )
+    .expect("coordinator");
+    worker
+        .start(Box::new(PhasedPlanner::one_final("same-beat:v1", &["r0"])))
+        .unwrap();
+    let mut fleet = support::Fleet::new(&inner, rt.handle());
+    fleet.join(&worker);
+    let mut held = Held::default();
+    support::drive_clocked(&mut worker, &clock, &mut held, "claiming r0", |h| {
+        h.splits.len() == 1
+    });
+
+    // Renewals in order: applied with the reply lost, lost, applied with the
+    // reply lost, failed unwritten, lost, then failed unwritten.
+    let sent: Arc<Mutex<Option<tokio::time::Instant>>> = Arc::default();
+    let reads = Arc::new(AtomicU64::new(0));
+    {
+        let (sent, store, clock) = (sent.clone(), store.clone(), clock.clone());
+        let updates = AtomicU64::new(0);
+        tap.on_write(move |w| {
+            if w.op != support::tap::Op::Update || w.key != "split.r0" {
+                return None;
+            }
+            match updates.fetch_add(1, Ordering::AcqRel) {
+                n @ (0 | 2) => {
+                    if n == 2 {
+                        *sent.lock().unwrap() = Some(clock.now());
+                    }
+                    store.lease_maybe_land.store(true, Ordering::Release);
+                    None
+                }
+                1 | 4 => None,
+                _ => Some(StoreError::Retryable(
+                    "injected: renewal failed unwritten".into(),
+                )),
+            }
+        });
+        let reads = reads.clone();
+        tap.on_get(move |ks, key| {
+            if ks == Keyspace::Ephemeral && key == "split.r0" {
+                reads.fetch_add(1, Ordering::AcqRel);
+            }
+            None
+        });
+    }
+    tap.hide(|ks, key| ks == Keyspace::Ephemeral && key == "split.r0");
+    let deadline = Instant::now() + DEADLINE;
+    let s = loop {
+        assert!(Instant::now() < deadline, "the same-beat fault never fired");
+        fleet.step(&clock, support::LEASE / 12);
+        assert!(
+            !worker.poll().expect("poll").iter().any(r0_lost),
+            "lost before the same-beat fault"
+        );
+        if let Some(s) = *sent.lock().unwrap() {
+            break s;
+        }
+    };
+    let mut first_lost = None;
+    while clock.now() < s + support::LEASE * 2 {
+        fleet.step(&clock, support::LEASE / 12);
+        let events = worker.poll().expect("poll");
+        if first_lost.is_none() && events.iter().any(r0_lost) {
+            first_lost = Some(clock.now() - s);
+        }
+    }
+
+    assert_eq!(
+        reads.load(Ordering::Acquire),
+        2,
+        "the worker did not adopt twice"
+    );
+    assert!(
+        first_lost.is_some_and(|at| at >= support::LEASE && at < support::LEASE * 4 / 3),
+        "r0 lost at {first_lost:?} after the same-beat renewal"
+    );
+}
+
+/// A split whose adopting beat's renewal applied with its reply lost to
+/// `op_timeout`, then an adoption, and every later renewal failing: the split
+/// self-fences between one and one and a half leases after that renewal was
+/// sent, with the expiry hidden from the watch.
+#[test]
+fn a_self_fence_after_an_adopted_renewal_counts_from_a_timed_out_same_beat_one() {
+    let rt = runtime();
+    let clock = TestClock::frozen();
+    let inner = MemoryStore::with_clock(support::LEASE, clock.clone());
+    let store = FaultStore::new(inner.clone());
+    let tap = TapStore::new(store.clone());
+    let mut cfg = config(Some("solo"));
+    cfg.reconcile_interval = SLOTTED_RECONCILE;
+    cfg.op_timeout = support::LEASE / 2;
+    let mut worker = StoreCoordinator::with_clock(
+        tap.clone(),
+        cfg,
+        rt.handle().clone(),
+        None,
+        clock.clone() as Arc<dyn Clock>,
+    )
+    .expect("coordinator");
+    worker
+        .start(Box::new(PhasedPlanner::one_final(
+            "timed-out-same-beat:v1",
+            &["r0"],
+        )))
+        .unwrap();
+    let mut fleet = support::Fleet::new(&inner, rt.handle());
+    fleet.join(&worker);
+    let mut held = Held::default();
+    support::drive_clocked(&mut worker, &clock, &mut held, "claiming r0", |h| {
+        h.splits.len() == 1
+    });
+
+    // Renewals in order: applied with the reply lost, lost, applied with the
+    // reply lost to `op_timeout`, lost, then failed unwritten.
+    let sent: Arc<Mutex<Option<tokio::time::Instant>>> = Arc::default();
+    let reads = Arc::new(AtomicU64::new(0));
+    {
+        let (sent, store, clock) = (sent.clone(), store.clone(), clock.clone());
+        let updates = AtomicU64::new(0);
+        tap.on_write(move |w| {
+            if w.op != support::tap::Op::Update || w.key != "split.r0" {
+                return None;
+            }
+            match updates.fetch_add(1, Ordering::AcqRel) {
+                n @ (0 | 2) => {
+                    if n == 2 {
+                        *sent.lock().unwrap() = Some(clock.now());
+                        *store.lease_stall.lock().unwrap() =
+                            Some((clock.clone(), support::LEASE / 2));
+                    }
+                    store.lease_maybe_land.store(true, Ordering::Release);
+                    None
+                }
+                1 | 3 => None,
+                _ => Some(StoreError::Retryable(
+                    "injected: renewal failed unwritten".into(),
+                )),
+            }
+        });
+        let reads = reads.clone();
+        tap.on_get(move |ks, key| {
+            if ks == Keyspace::Ephemeral && key == "split.r0" {
+                reads.fetch_add(1, Ordering::AcqRel);
+            }
+            None
+        });
+    }
+    tap.hide(|ks, key| ks == Keyspace::Ephemeral && key == "split.r0");
+    let deadline = Instant::now() + DEADLINE;
+    let s = loop {
+        assert!(Instant::now() < deadline, "the same-beat fault never fired");
+        fleet.step(&clock, support::LEASE / 12);
+        assert!(
+            !worker.poll().expect("poll").iter().any(r0_lost),
+            "lost before the same-beat fault"
+        );
+        if let Some(s) = *sent.lock().unwrap() {
+            break s;
+        }
+    };
+    let mut first_lost = None;
+    while clock.now() < s + support::LEASE * 2 {
+        fleet.step(&clock, support::LEASE / 12);
+        let events = worker.poll().expect("poll");
+        if first_lost.is_none() && events.iter().any(r0_lost) {
+            first_lost = Some(clock.now() - s);
+        }
+    }
+
+    assert_eq!(
+        reads.load(Ordering::Acquire),
+        2,
+        "the worker did not adopt twice"
+    );
+    assert!(
+        first_lost.is_some_and(|at| at >= support::LEASE && at < support::LEASE * 3 / 2),
+        "r0 lost at {first_lost:?} after the same-beat renewal"
+    );
 }
 
 /// A solo leader whose next leader-key renewal applies with its reply lost,

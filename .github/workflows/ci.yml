@@ -1119,6 +1119,22 @@ jobs:
           name: playwright-report
           path: website/playwright-report
 
+  release-generators:
+    name: Release generators
+    needs: [lint, workflows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          tools: cargo-about,cargo-cyclonedx
+          shared-key: release
+          cache-save: never
+      - run: ./scripts/release.sh check-generators
+
   # The gate. This is the ONLY job that should ever be a required status check.
   ci-gate:
     name: CI gate
@@ -1130,7 +1146,7 @@ jobs:
     # was cancelled, so a run superseded by a newer one for the same commit
     # leaves no lingering `failure` for branch protection to keep blocking on.
     if: ${{ !cancelled() }}
-    needs: [changes, lint, workflows, deny, changelog, semver, semver-baseline, publish-dry-run, minimal-versions, test, doctests, docsrs, features, msrv, containers, clickhouse-versions, site, loom, alloc-assertions, fuzz, perf-warm, perf-counters, perf-report]
+    needs: [changes, lint, workflows, deny, changelog, semver, semver-baseline, publish-dry-run, release-generators, minimal-versions, test, doctests, docsrs, features, msrv, containers, clickhouse-versions, site, loom, alloc-assertions, fuzz, perf-warm, perf-counters, perf-report]
     steps:
       - name: Evaluate dependency results
         env:

@@ -11,6 +11,7 @@
 #   ./scripts/release.sh finish
 #   ./scripts/release.sh publish --dry-run
 #   ./scripts/release.sh dry-run --version X.Y.Z
+#   ./scripts/release.sh check-generators
 #   ./scripts/release.sh --self-test
 #
 # `assemble` builds the single release commit and opens the pull request whose
@@ -151,7 +152,7 @@ TABLE
 # Preflight: name what is missing before any step runs.
 # ---------------------------------------------------------------------------
 preflight() {
-    local missing="" about
+    local missing=""
     command -v gh >/dev/null 2>&1 || missing="$missing gh"
     command -v jq >/dev/null 2>&1 || missing="$missing jq"
     command -v curl >/dev/null 2>&1 || missing="$missing curl"
@@ -163,28 +164,57 @@ preflight() {
     gh auth status >/dev/null 2>&1 || [ -n "${GH_TOKEN:-}" ] ||
         fail "gh is not authenticated and GH_TOKEN is unset"
 
-    # Exactly the pinned version: a different cargo-about reorders or regroups
-    # the generated inventory, and the release commit would carry that churn.
-    about=$(cargo about --version 2>/dev/null || true)
-    [ "$about" = "cargo-about 0.9.1" ] ||
-        fail "cargo-about 0.9.1 is required, found '${about:-none}'. Install it with:
-  cargo install cargo-about --locked --features cli --version 0.9.1"
+    preflight_about_tool
 
     [ -z "$(git status --porcelain)" ] ||
         fail "the working tree is not clean; a release is assembled from committed state only"
 }
 
-# The SBOM generator, needed by the local rehearsal alone: in CI, `assemble`
-# never generates one and the publish job installs the tool itself.
-# Suffix-matched because the tool reports itself as `cargo-cyclonedx-cyclonedx`.
+preflight_about_tool() {
+    local about
+    about=$(cargo about --version 2>/dev/null) && [ -n "$about" ] ||
+        fail "cargo-about is unavailable. Install it with:
+  cargo install cargo-about --locked --features cli"
+    echo "$about"
+}
+
 preflight_sbom_tool() {
     local cyclonedx
-    cyclonedx=$(cargo cyclonedx --version 2>/dev/null || true)
-    case "$cyclonedx" in
-    *' 0.5.9') ;;
-    *) fail "cargo-cyclonedx 0.5.9 is required, found '${cyclonedx:-none}'. Install it with:
-  cargo install cargo-cyclonedx --locked --version 0.5.9" ;;
-    esac
+    cyclonedx=$(cargo cyclonedx --version 2>/dev/null) && [ -n "$cyclonedx" ] ||
+        fail "cargo-cyclonedx is unavailable. Install it with:
+  cargo install cargo-cyclonedx --locked"
+    echo "$cyclonedx"
+}
+
+# Regenerates the inventory and validates release SBOMs in a disposable checkout.
+check_generators() {
+    local sbomdir cleanup version crates crate count=0
+    command -v jq >/dev/null 2>&1 || fail "missing tool: jq"
+    preflight_about_tool
+    preflight_sbom_tool
+    sbomdir=$(mktemp -d)
+    printf -v cleanup 'rm -rf %q' "$sbomdir"
+    # Capture the path before function locals leave scope.
+    # shellcheck disable=SC2064
+    trap "$cleanup" EXIT
+    version=$(workspace_version)
+    crates=$(cargo metadata --locked --no-deps --format-version 1 |
+        jq -er '[.packages[] | select(.publish != []) | .name] | .[]')
+    rm -f THIRD-PARTY.md
+    cargo xtask attribution
+    [ -s THIRD-PARTY.md ] || fail "attribution wrote no nonempty THIRD-PARTY.md"
+    generate_sboms "$version" "$sbomdir"
+    while IFS= read -r crate; do
+        jq -e --arg name "$crate" --arg version "$version" '
+            type == "object" and .bomFormat == "CycloneDX" and
+            .specVersion == "1.5" and .metadata.component.name == $name and
+            .metadata.component.version == $version
+        ' "$sbomdir/$crate-$version.cdx.json" >/dev/null ||
+            fail "invalid release SBOM: $crate-$version.cdx.json"
+        echo "validated $crate-$version.cdx.json"
+        count=$((count + 1))
+    done <<< "$crates"
+    echo "checked $count SBOMs"
 }
 
 # SBOMs for the publishable crates, collected into one directory as
@@ -703,10 +733,13 @@ dry-run)
     [ -n "$version" ] || fail "dry-run needs --version X.Y.Z"
     dry_run "$version"
     ;;
+check-generators)
+    check_generators
+    ;;
 --self-test)
     echo "release.sh: self-test passed"
     ;;
 *)
-    fail "usage: assemble --version X.Y.Z [--dry-run] | prepare [--dry-run] | upload | finish | publish --dry-run | dry-run --version X.Y.Z | --self-test"
+    fail "usage: assemble --version X.Y.Z [--dry-run] | prepare [--dry-run] | upload | finish | publish --dry-run | dry-run --version X.Y.Z | check-generators | --self-test"
     ;;
 esac

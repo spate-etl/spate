@@ -19,3 +19,6 @@ pub(crate) mod site_check;
 pub(crate) mod subject;
 pub(crate) mod supported_versions;
 pub(crate) mod sync_labels;
+
+#[cfg(test)]
+mod release_generators;

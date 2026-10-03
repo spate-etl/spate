@@ -42,6 +42,7 @@ These sit outside `ci`, by cost or by dependency:
 | `cargo xtask bench counted` | Needs Linux and valgrind |
 | `cargo xtask bench gungraun --check` | Proves only that the benches build, not what they count |
 | `cargo xtask bench ab`, `cargo xtask bench arms`, `cargo xtask bench list`, `cargo xtask bench compare` | Wall clock; never a gate |
+| `./scripts/release.sh check-generators` | Needs installed release generators and public-data lookups; runs in a disposable checkout and gates ordinary CI |
 | `cargo xtask attribution` | `THIRD-PARTY.md` is regenerated at release; the nightly tier checks that it still generates |
 | `cargo xtask fuzz build`, `cargo xtask fuzz run` | Needs a nightly toolchain; the nightly tier fuzzes |
 

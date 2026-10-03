@@ -99,8 +99,11 @@ a throwaway git worktree: the real release commit, built for diffing, and
 every pending crate packaged and verify-built, and the SBOMs generated. It
 stops where the registry token would be minted and prints what a real run
 would do next. It needs `gh` authenticated, and `jq`, `curl`, `cargo-about`
-and `cargo-cyclonedx` on the path at the versions `scripts/release.sh` pins;
-the preflight names anything missing, and the version it wants. The worktree
+and `cargo-cyclonedx` runnable on the path; the preflight names anything
+unavailable and prints runnable generator versions. The pinned installer in
+`.github/actions/setup-rust/action.yml` selects CI versions; its upstream
+manifests identify the versions for matching CI locally. Different local
+versions can produce different generated output. The worktree
 is kept for inspection and the run prints the command that removes it.
 
 Read a green dry run as "this assembles and packages". It cannot prove the
@@ -112,8 +115,22 @@ that a previous release exercised; the last runs inside the real publish.
 The same packaging proof also runs continuously: `ci.yml` runs a
 simulated-bump `cargo publish --dry-run` on pushes to `main` that reach a
 manifest, and `scheduled.yml` repeats it nightly, so a packaging problem
-surfaces before release day. `scheduled.yml` also generates `THIRD-PARTY.md`
-nightly, so a generator failure surfaces the same way.
+surfaces before release day.
+
+The required `Release generators` job runs on ordinary pull requests, pushes
+and merge groups. It runs release attribution and SBOM generation with the
+CI-selected tools, then validates the nonempty inventory and each publishable
+crate's CycloneDX 1.5 document, including its component name and version.
+`scheduled.yml` also generates `THIRD-PARTY.md` nightly.
+
+```sh
+./scripts/release.sh check-generators
+```
+
+Run this generator check in a disposable checkout: it rewrites `THIRD-PARTY.md`
+and removes generated workspace SBOM files. It needs `jq` and both generators;
+the existing generation commands may fetch public dependency and license data.
+It requires no release credentials.
 
 ## Judging a release
 

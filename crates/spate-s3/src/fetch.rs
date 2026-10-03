@@ -140,10 +140,9 @@ pub(crate) struct FetcherParams {
     pub(crate) resume_etag: Option<String>,
     /// Upper bound on a single [`ChunkMsg::Chunk`].
     pub(crate) chunk_bytes: usize,
-    /// Upper bound on one bounded ranged GET (the per-lane read-ahead window,
-    /// the source's `prefetch_bytes`). Each window is drained fully into memory
-    /// before any chunk is forwarded, so the S3 connection is released before a
-    /// back-pressured hand-off; see [`stream_object`].
+    /// Target size of a bounded ranged GET (`prefetch_bytes`); byte-range
+    /// boundary windows can add `chunk_bytes`. Each GET is fully buffered and
+    /// its connection released before a backpressured handoff.
     pub(crate) range_bytes: usize,
     pub(crate) tx: mpsc::Sender<ChunkMsg>,
     /// Backpressure pause (set by `Source::pause`): checked between sends.
@@ -360,12 +359,10 @@ async fn stream_object(
 }
 
 /// Pinned read path: walk the object in `range_bytes` windows, each a
-/// short-lived ranged GET **fully buffered before the hand-off**. The
-/// connection is released the moment a window is read, so a paused or
-/// back-pressured lane holds only `range_bytes` of buffered read-ahead and
-/// never an idle body left un-polled past the client's request timeout. The
-/// ETag pin keeps the multi-GET read splice-safe: an overwrite between windows
-/// trips the `if_match` precondition instead of blending versions.
+/// short-lived ranged GET fully buffered before the handoff. The connection
+/// is released when a window is read; queued chunks can retain its backing
+/// buffer while the next GET is fetched. The ETag pin keeps the multi-GET read
+/// splice-safe: an overwrite between windows trips the `if_match` precondition.
 ///
 /// With a `trim`, the windows follow [`RangeTrim::next_window`] and only the
 /// owned bytes are forwarded. A window reaching the range's end may run
@@ -1229,11 +1226,8 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_backpressured_lane_buffers_one_window_and_fetches_no_further() {
-        // 16-byte object, 8-byte windows → two windows. With a capacity-1
-        // channel that nothing drains, the fetcher must read the FIRST window
-        // in full, proving the connection is released before the hand-off,
-        // then block on the send, never starting the second window. That
-        // bounds peak per-lane memory to one window under backpressure.
+        // With ObjectStart filling the undrained capacity-1 channel, the first
+        // GET completes before the blocked first chunk send prevents a second GET.
         let flaky = Arc::new(FlakyStore::new(
             seeded(&[("p/a", b"0123456789abcdef")]).await,
         ));

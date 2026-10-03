@@ -255,7 +255,9 @@ racing to create the plan record warn once each for the losers, back off and
 re-read; a restart can find its own presence key expiring underneath it and
 retry that. Each resolves inside the startup retry budget, and each is fatal
 if it never does. A leader losing leadership to a successor warns
-and demotes, with nothing to retry.
+and demotes. Demotion retries transient leader-key deletion failures within a
+bounded cleanup period. If cleanup cannot finish, the key expires through its
+TTL.
 
 The ones to read name work or the loss of it: a forced release, a self-fence,
 a lease taken from under a live owner. `leadership lease expired` is none of

@@ -43,10 +43,13 @@ use tokio::time::Instant;
 /// Most splits a plan run seeds concurrently.
 const SEED_CONCURRENCY: usize = 64;
 
-/// Reads of the leader key a demotion makes after its delete loses.
+/// Total reconciliation reads allowed during one demotion.
 const DEMOTE_READS: u32 = 3;
 
-/// Pause between those reads, on real time because it paces store I/O.
+/// Total conditional deletion attempts allowed during one demotion.
+const DEMOTE_DELETES: u32 = 3;
+
+/// Pause between cleanup retries, on real time because it paces store I/O.
 const DEMOTE_READ_RETRY: Duration = Duration::from_millis(50);
 
 /// What the blocking-pool planner call returns: the planner handed back,
@@ -230,58 +233,62 @@ impl<S: CoordinationStore + Clone> Task<S> {
         Ok(())
     }
 
-    /// Give leadership up. Only a fatal store error is returned.
-    ///
-    /// A delete that loses reads the key back, up to [`DEMOTE_READS`] times
-    /// until a read shows it past the revision that lost, and deletes it once
-    /// more while it carries this worker's owner and nonce.
+    /// Give leadership up with bounded best-effort conditional deletion within `op_timeout`.
+    /// Only a fatal store error is returned; unfinished cleanup leaves the key to its TTL.
     pub(crate) async fn demote(&mut self) -> Result<(), CoordinationError> {
-        let Some(rev) = self.leadership.take() else {
+        let Some(mut rev) = self.leadership.take() else {
             return Ok(());
         };
         self.metrics(|m| m.set_leader(false));
-        match self
-            .store
-            .delete(Keyspace::Ephemeral, records::LEADER_KEY, Some(rev))
-            .await
-        {
-            Ok(CasOutcome::Won(_)) => Ok(()),
-            Ok(CasOutcome::Lost) => {
-                let mut reads = 1;
-                let entry = loop {
-                    let Some(entry) = self.read_leader_key().await? else {
-                        return Ok(());
-                    };
-                    // A replica may answer before it has applied the write
-                    // that won; a key at or behind `rev` is such an answer.
-                    if entry.revision > rev {
-                        break entry;
-                    }
-                    if reads == DEMOTE_READS {
-                        return Ok(());
-                    }
-                    reads += 1;
-                    tokio::time::sleep(DEMOTE_READ_RETRY).await;
-                };
-                if !self.holds_leader_val(&entry.value) {
-                    return Ok(());
-                }
-                // A second `Lost` leaves the key to expire.
+        let deadline = Instant::now() + self.config.op_timeout;
+        let cleanup = async {
+            let mut reads = 0;
+            for attempt in 0..DEMOTE_DELETES {
                 match self
                     .store
-                    .delete(
-                        Keyspace::Ephemeral,
-                        records::LEADER_KEY,
-                        Some(entry.revision),
-                    )
+                    .delete(Keyspace::Ephemeral, records::LEADER_KEY, Some(rev))
                     .await
                 {
-                    Ok(_) => Ok(()),
-                    Err(e) => fatal_only("deleting the leader key", &e),
+                    Ok(CasOutcome::Won(_)) => return Ok(()),
+                    Ok(CasOutcome::Lost) => {
+                        if attempt + 1 == DEMOTE_DELETES {
+                            return Ok(());
+                        }
+                        loop {
+                            if reads == DEMOTE_READS {
+                                return Ok(());
+                            }
+                            reads += 1;
+                            let Some(entry) = self.read_leader_key().await? else {
+                                return Ok(());
+                            };
+                            // A replica may answer before it has applied the write
+                            // that won; a key at or behind `rev` is such an answer.
+                            if entry.revision > rev {
+                                if !self.holds_leader_val(&entry.value) {
+                                    return Ok(());
+                                }
+                                rev = entry.revision;
+                                break;
+                            }
+                            if reads < DEMOTE_READS {
+                                tokio::time::sleep(DEMOTE_READ_RETRY).await;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        fatal_only("deleting the leader key", &e)?;
+                        if attempt + 1 < DEMOTE_DELETES {
+                            tokio::time::sleep(DEMOTE_READ_RETRY).await;
+                        }
+                    }
                 }
             }
-            Err(e) => fatal_only("deleting the leader key", &e),
-        }
+            Ok(())
+        };
+        tokio::time::timeout_at(deadline, cleanup)
+            .await
+            .unwrap_or(Ok(()))
     }
 
     /// Kick a planner run off onto the blocking pool if one is due. The
@@ -908,6 +915,12 @@ mod tests {
             key: &str,
             expected: Option<Revision>,
         ) -> Result<CasOutcome, StoreError> {
+            if ks == Keyspace::Ephemeral && key == records::LEADER_KEY {
+                if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    return Err(StoreError::Retryable("unapplied delete".into()));
+                }
+                return std::future::pending().await;
+            }
             self.inner.delete(ks, key, expected).await
         }
 
@@ -918,6 +931,68 @@ mod tests {
         async fn list(&self, ks: Keyspace, prefix: &str) -> Result<Vec<Entry>, StoreError> {
             self.inner.list(ks, prefix).await
         }
+    }
+
+    struct UnusedPlanner;
+
+    impl SplitPlanner for UnusedPlanner {
+        fn fingerprint(&self) -> String {
+            "deadline:v1".into()
+        }
+        fn plan(&mut self, _: PlanContext<'_>) -> Result<SplitPlan, CoordinationError> {
+            panic!("demotion does not plan")
+        }
+    }
+
+    /// Demotion completes after its shared budget, before a pending retry's primitive timeout.
+    /// Regression for #912.
+    #[tokio::test(start_paused = true)]
+    async fn demote_pending_retry_shares_one_deadline() {
+        let clock = TestClock::frozen();
+        let store = Gated {
+            inner: MemoryStore::with_clock(Duration::from_secs(10), clock.clone()),
+            calls: Arc::default(),
+            in_flight: Arc::default(),
+            gate: Arc::new(tokio::sync::Semaphore::new(0)),
+        };
+        let budget = Duration::from_millis(200);
+        let metered = crate::store::metered::Metered::new(store.clone(), budget, None);
+        let (_, commands) = mpsc::channel(1);
+        let (events, _) = std::sync::mpsc::channel();
+        let config = crate::CoordinationConfig {
+            op_timeout: budget,
+            ..Default::default()
+        };
+        let mut task = Task::new(
+            metered,
+            config,
+            clock,
+            "deadline:v1".into(),
+            "solo".into(),
+            "nonce".into(),
+            Box::new(UnusedPlanner),
+            None,
+            commands,
+            events,
+            None,
+        );
+        task.leadership = Some(Revision(1));
+        let started = Instant::now();
+        let mut cleanup = Box::pin(task.demote());
+        // Manual polling keeps paused time from advancing to the next timer.
+        assert!(futures_util::poll!(&mut cleanup).is_pending());
+        assert_eq!(store.calls.load(Ordering::SeqCst), 1);
+        tokio::time::advance(Duration::from_millis(50)).await;
+        assert!(futures_util::poll!(&mut cleanup).is_pending());
+        assert_eq!(store.calls.load(Ordering::SeqCst), 2);
+        tokio::time::advance(Duration::from_millis(151)).await;
+        assert_eq!(Instant::now() - started, Duration::from_millis(201));
+        assert!(matches!(
+            futures_util::poll!(&mut cleanup),
+            std::task::Poll::Ready(Ok(()))
+        ));
+        drop(cleanup);
+        assert!(task.leadership.is_none());
     }
 
     /// A burst in which a quarter of the writes are throttled does not

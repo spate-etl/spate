@@ -354,6 +354,39 @@ async fn an_expiry_floor_is_cleared_by_a_later_put() {
     assert_eq!(snapshot(&mut second).await.len(), 1);
 }
 
+/// An expiry floor does not outlive its key: a re-create below it is listed once the key has left the table.
+#[tokio::test(start_paused = true)]
+async fn an_expiry_floor_is_dropped_once_its_key_leaves_the_listing() {
+    let table = FakeTable::new();
+    table.freeze_wall(1_000);
+    let clock = TestClock::frozen();
+    let (a, b, c) = (
+        handle(&table, &clock),
+        handle(&table, &clock),
+        handle(&table, &clock),
+    );
+    let r = won(b.create(E, "k", b"b".to_vec()).await.unwrap());
+    let mut first = a.watch(E, "").await.unwrap();
+    assert_eq!(snapshot(&mut first).await.len(), 1);
+    clock.advance(TTL + Duration::from_millis(1));
+    match next(&mut first).await {
+        WatchEvent::Delete { .. } => {}
+        o => panic!("{o:?}"),
+    }
+    won(b.delete(E, "k", Some(r)).await.unwrap());
+    tokio::time::sleep(Duration::from_secs(3600) + Duration::from_millis(1)).await;
+    table.freeze_wall(500);
+    won(c.create(E, "k", b"c".to_vec()).await.unwrap());
+    let mut gate = table.hold_next_query();
+    let watcher = a.clone();
+    let watching = tokio::spawn(async move { watcher.watch(E, "").await });
+    gate.reached().await;
+    a.get(E, "k").await.unwrap();
+    gate.release();
+    let mut second = watching.await.unwrap().unwrap();
+    assert_eq!(snapshot(&mut second).await.len(), 1);
+}
+
 /// Each conditional write whose first attempt landed, then reported its
 /// condition failed, resolves as won at the revision it wrote.
 #[tokio::test]

@@ -189,7 +189,8 @@ impl<S: CoordinationStore + Clone> Task<S> {
     /// deposed predecessor's pending plan CAS now loses by revision.
     /// Schedules a planner run only while the written record is open.
     /// A bump whose reply was lost is kept when a re-read finds this process
-    /// as the elector at `generation`.
+    /// as the elector at `generation` and a compare-and-set of the read
+    /// record at its revision wins.
     async fn bump_generation(&mut self, generation: u64) -> Result<(), CoordinationError> {
         for _ in 0..3 {
             let Some((plan, rev)) = &self.plan else {
@@ -237,12 +238,32 @@ impl<S: CoordinationStore + Clone> Task<S> {
                     };
                     let plan = records::PlanRecord::parse(&entry.value, &self.fingerprint)?;
                     if plan.generation == generation && self.elected_here(&plan) {
-                        tracing::info!(
-                            generation,
-                            "generation bump's reply was lost; the plan record is ours"
-                        );
-                        self.hold_fence(plan, entry.revision);
-                        return Ok(());
+                        // A lagging replica can serve this process's earlier
+                        // bump after a successor's; only a write at the read
+                        // revision proves the record current.
+                        match self
+                            .store
+                            .update(
+                                Keyspace::Durable,
+                                records::PLAN_KEY,
+                                entry.value.clone(),
+                                entry.revision,
+                            )
+                            .await
+                        {
+                            Ok(CasOutcome::Won(new_rev)) => {
+                                tracing::info!(
+                                    generation,
+                                    "generation bump's reply was lost; the plan record is ours"
+                                );
+                                self.hold_fence(plan, new_rev);
+                                return Ok(());
+                            }
+                            Ok(CasOutcome::Lost) | Err(StoreError::Retryable(_)) => {}
+                            Err(e) => {
+                                return Err(store_error("confirming the plan record", &e));
+                            }
+                        }
                     }
                     self.plan_rev_seen = self.plan_rev_seen.max(entry.revision.0);
                     self.plan = Some((plan, entry.revision));
@@ -1253,4 +1274,5 @@ mod tests {
         assert_eq!(steps.due(), None);
         assert!(steps.folded(t0 + SEED_STEP_INTERVAL * 2));
     }
+
 }

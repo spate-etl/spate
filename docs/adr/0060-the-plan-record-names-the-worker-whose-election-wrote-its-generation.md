@@ -35,13 +35,16 @@ question is how the leader recognises its own bump.
 Chosen option: "The plan record names its elector", because only this process
 writes its `(instance_id, nonce)` pair, so a record at the election's
 generation that names it is this process's bump. A bump whose re-read finds
-such a record holds the fence at that revision. A won reply leaves the same
-state. The record may come from an earlier election of the same process that
-gave leadership back before it read its bump. Any other leader in between had
-to win its own bump and so moved the generation past it, and adopting the
-record skips no leader. A record at the same generation naming another
-owner or another nonce, or naming no elector, demotes as before. The record
-schema stays at 3.
+such a record writes it back with a compare-and-set at the read revision, and
+holds the fence at the revision that write returns. A won reply leaves the
+same state. A replica that lags can serve the re-read after a successor has
+bumped past the record. The write-back then loses, and the leader demotes. The
+record may come from an earlier election of the same process that gave
+leadership back before it read its bump. Any other leader in between had to
+win its own bump and so moved the generation past it, and adopting the record
+skips no leader. A record at the same generation naming another owner or
+another nonce, or naming no elector, demotes as before. The record schema
+stays at 3.
 
 A byte-equal check stops matching once a publish rewrites `updated_at_ms`, and
 a wrong match would leave a deposed leader's pending publish unfenced. A
@@ -53,8 +56,8 @@ compare-and-set as the bump, so it cannot name the bump's writer.
 
 ### Consequences
 
-- Good, because a leader whose bump reply was lost keeps the election, with
-  no extra store operation.
+- Good, because a leader whose bump reply was lost keeps the election.
+  Adopting the record takes one compare-and-set more than a won reply.
 - Good, because this build reads every plan record 0.2 wrote. A record with
   no elector encodes to the same bytes it had in 0.2.
 - Bad, because `PlanRecord` rejects unknown fields, and a 0.2 worker exits
@@ -72,8 +75,11 @@ compare-and-set as the bump, so it cannot name the bump's writer.
 ### Confirmation
 
 `crates/spate-coordination/tests/unseen_generation_bump.rs` pins the
-adoption and each mismatch that demotes: another nonce, another owner, no
-elector, and this process's elector at an earlier generation.
+adoption, its adoption by a later election of the same process, and each
+mismatch that demotes: another nonce, another owner, no elector, and this
+process's elector at an earlier generation.
+`crates/spate-coordination/tests/adopt_stale_reread.rs` pins that a re-read
+from a lagging replica does not hold the fence after a successor's bump.
 `a_plan_record_without_an_elector_reads_as_none` and
 `planner_cursor_budget_includes_the_escaped_fingerprint`
 (`crates/spate-coordination/src/records.rs`) pin the 0.2 layout and the

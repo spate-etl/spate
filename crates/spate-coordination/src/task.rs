@@ -26,7 +26,9 @@ use crate::config::CoordinationConfig;
 use crate::error::{retryable, store_error};
 use crate::leader::{PlanRun, SeedEvent, SeedRun, SeedSteps};
 use crate::protocol::{self, SplitState};
-use crate::records::{self, AssignmentVal, LeaderVal, LeaseVal, PlanRecord, SplitSpecRecord};
+use crate::records::{
+    self, AssignmentVal, LeaderVal, LeaseVal, PlanRecord, SplitProgressRecord, SplitSpecRecord,
+};
 use crate::store::{
     CoordinationStore, Entry, Keyspace, Revision, StoreError, WatchEvent, WatchMode,
 };
@@ -325,6 +327,10 @@ pub(crate) struct Task<S: CoordinationStore + Clone> {
     /// failed, by split id with the released tenancy's epoch; each heartbeat
     /// retries until the key is gone or no longer this tenancy's.
     owed_leases: BTreeMap<String, u64>,
+    /// Quarantining failure reports this worker sent whose outcome it does
+    /// not know, by split id: a record equal to one listed is that report
+    /// applied. A peer's quarantine differs from each in `written_at_ms`.
+    quarantine_reports: BTreeMap<String, Vec<SplitProgressRecord>>,
     /// Lease observations whose durable record has not arrived yet
     /// (snapshot ordering, watch races): attached when the record shows
     /// up, so a held split can never be misread as expired.
@@ -468,6 +474,7 @@ impl<S: CoordinationStore + Clone> Task<S> {
             runnable_count: 0,
             owned: BTreeMap::new(),
             owed_leases: BTreeMap::new(),
+            quarantine_reports: BTreeMap::new(),
             pending_leases: BTreeMap::new(),
             pending_specs: BTreeMap::new(),
             leadership: None,

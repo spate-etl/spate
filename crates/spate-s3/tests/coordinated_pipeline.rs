@@ -163,7 +163,7 @@ fn an_instance_joining_a_finished_job_drains_without_reading() {
     assert_eq!(rw.state, ExitState::Completed);
 
     // Joins after everything is complete: zero splits, must still drain.
-    // The finished worker departed, so the newcomer leads and re-plans once.
+    // The finished worker departed, so the newcomer leads over a final plan.
     let (standby, standby_lists) = launch_instance(&yaml, &store, "standby", |_| {});
     let rs = standby
         .run
@@ -178,8 +178,8 @@ fn an_instance_joining_a_finished_job_drains_without_reading() {
     assert!(captured_rows(&standby.script).is_empty());
     assert_eq!(
         standby_lists.load(Ordering::Relaxed),
-        1,
-        "the new leader lists once"
+        0,
+        "a leader elected over a final plan listed the source"
     );
 }
 

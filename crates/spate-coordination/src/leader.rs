@@ -68,7 +68,8 @@ pub(crate) struct PlanRun {
 }
 
 impl<S: CoordinationStore + Clone> Task<S> {
-    /// Race for the leadership lease; the winner schedules a plan run.
+    /// Race for the leadership lease; the winner fences the plan record and,
+    /// while the plan is open, schedules a plan run.
     ///
     /// A write that fails or loses reads the key back and leads only if the
     /// key holds the exact value written.
@@ -171,6 +172,7 @@ impl<S: CoordinationStore + Clone> Task<S> {
 
     /// The planner fence: CAS the plan record to the new generation. A
     /// deposed predecessor's pending plan CAS now loses by revision.
+    /// Schedules a planner run only while the written record is open.
     async fn bump_generation(&mut self, generation: u64) -> Result<(), CoordinationError> {
         for _ in 0..3 {
             let Some((plan, rev)) = &self.plan else {
@@ -192,7 +194,8 @@ impl<S: CoordinationStore + Clone> Task<S> {
                 Ok(CasOutcome::Won(new_rev)) => {
                     self.plan_rev_seen = self.plan_rev_seen.max(new_rev.0);
                     self.plan = Some((bumped, new_rev));
-                    self.plan_now = true;
+                    // A final plan's splits are all seeded; the election only fences it.
+                    self.plan_now = self.plan_is_open();
                     return Ok(());
                 }
                 Ok(CasOutcome::Lost) => {
@@ -993,6 +996,108 @@ mod tests {
         ));
         drop(cleanup);
         assert!(task.leadership.is_none());
+    }
+
+    /// An election over a final plan bumps the generation and clears a pending
+    /// planner run. Regression for #883.
+    #[tokio::test]
+    async fn election_over_a_final_plan_fences_without_planning() {
+        let clock = TestClock::frozen();
+        let store = MemoryStore::with_clock(Duration::from_secs(10), clock.clone());
+        let mut plan = records::PlanRecord::new("deadline:v1".into());
+        plan.generation = 1;
+        plan.finality = records::PlanFinalityRepr::Final;
+        let CasOutcome::Won(rev) = store
+            .create(Keyspace::Durable, records::PLAN_KEY, plan.encode())
+            .await
+            .expect("seed the plan record")
+        else {
+            panic!("the plan record is new");
+        };
+        let (_, commands) = mpsc::channel(1);
+        let (events, _) = std::sync::mpsc::channel();
+        let mut task = Task::new(
+            store.clone(),
+            crate::CoordinationConfig::default(),
+            clock,
+            "deadline:v1".into(),
+            "solo".into(),
+            uuid::Uuid::new_v4().simple().to_string(),
+            Box::new(UnusedPlanner),
+            None,
+            commands,
+            events,
+            None,
+        );
+        task.plan = Some((plan, rev));
+        task.plan_now = true;
+        task.try_elect().await.expect("election");
+        assert!(task.leadership.is_some(), "the worker must lead");
+        let stored = store
+            .get(Keyspace::Durable, records::PLAN_KEY)
+            .await
+            .expect("read the plan record")
+            .expect("plan record");
+        let stored = records::PlanRecord::parse(&stored.value, "deadline:v1").expect("parse");
+        assert_eq!(stored.generation, 2, "the election must fence the plan");
+        assert_eq!(stored.finality, records::PlanFinalityRepr::Final);
+        assert!(
+            !task.plan_now,
+            "an election over a final plan left a planner run scheduled"
+        );
+    }
+
+    /// A worker whose view still shows the plan open, while the store holds it
+    /// final, schedules no planner run after its election. Regression for #883.
+    #[tokio::test]
+    async fn election_over_a_plan_finalised_since_the_view_runs_no_planner() {
+        let clock = TestClock::frozen();
+        let store = MemoryStore::with_clock(Duration::from_secs(10), clock.clone());
+        let mut open = records::PlanRecord::new("deadline:v1".into());
+        open.generation = 1;
+        let CasOutcome::Won(stale_rev) = store
+            .create(Keyspace::Durable, records::PLAN_KEY, open.encode())
+            .await
+            .expect("seed the plan record")
+        else {
+            panic!("the plan record is new");
+        };
+        let mut finalised = open.clone();
+        finalised.finality = records::PlanFinalityRepr::Final;
+        let CasOutcome::Won(_) = store
+            .update(
+                Keyspace::Durable,
+                records::PLAN_KEY,
+                finalised.encode(),
+                stale_rev,
+            )
+            .await
+            .expect("finalise the plan record")
+        else {
+            panic!("the finalising write holds the current revision");
+        };
+        let (_, commands) = mpsc::channel(1);
+        let (events, _) = std::sync::mpsc::channel();
+        let mut task = Task::new(
+            store.clone(),
+            crate::CoordinationConfig::default(),
+            clock,
+            "deadline:v1".into(),
+            "solo".into(),
+            uuid::Uuid::new_v4().simple().to_string(),
+            Box::new(UnusedPlanner),
+            None,
+            commands,
+            events,
+            None,
+        );
+        task.plan = Some((open, stale_rev));
+        task.try_elect().await.expect("election");
+        assert!(task.leadership.is_some(), "the worker must lead");
+        assert!(
+            !task.plan_now,
+            "a stale open view scheduled a planner run over a final plan"
+        );
     }
 
     /// A burst in which a quarter of the writes are throttled does not

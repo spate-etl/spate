@@ -1,15 +1,22 @@
 //! Leadership and planning under failure: election, generation fencing,
-//! idempotent replanning, and open plans that grow across replan ticks.
+//! idempotent replanning, open plans that grow across replan ticks, and
+//! elections over a final plan, which run no planner.
 
 mod support;
 
 use spate_coordination::store::{CoordinationStore as _, Keyspace};
-use spate_coordination::{PlanFinality, SplitCoordinator, SplitProgress};
+use spate_coordination::{
+    CoordinationError, PlanContext, PlanFinality, SplitCoordinator, SplitPlan, SplitPlanner,
+    SplitProgress,
+};
+use spate_core::clock::tokio::Clock;
+use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::SeqCst;
 use std::time::Instant;
 use support::{
-    CountingStore, Held, LEASE, PhasedPlanner, crash, drive, runtime, split_id, splits, store,
-    worker,
+    CountingStore, Fleet, Held, LEASE, PhasedPlanner, TestClock, crash, drive, runtime, split_id,
+    splits, store, store_with_clock, worker, worker_with_clock,
 };
 
 #[test]
@@ -140,4 +147,99 @@ fn open_plans_grow_across_replan_ticks_until_sealed() {
     let plan: serde_json::Value = serde_json::from_slice(&plan.value).unwrap();
     assert_eq!(plan["planned"].as_u64().unwrap(), 3);
     assert_eq!(plan["finality"], "final");
+}
+
+/// Plans the single split `unfinished` at a fixed finality and counts its runs.
+struct CountedPlanner {
+    calls: Arc<AtomicUsize>,
+    finality: PlanFinality,
+}
+
+impl SplitPlanner for CountedPlanner {
+    fn fingerprint(&self) -> String {
+        "election:v1".into()
+    }
+
+    fn plan(&mut self, _: PlanContext<'_>) -> Result<SplitPlan, CoordinationError> {
+        self.calls.fetch_add(1, SeqCst);
+        Ok(SplitPlan::new(splits(&["unfinished"]), self.finality))
+    }
+}
+
+/// Runs a leader that plans at `finality` and departs, elects a second
+/// worker, and returns the planner runs counted fleet-wide.
+///
+/// The clock stays frozen, so no replan tick fires.
+fn elect_after_departure(finality: PlanFinality) -> usize {
+    let rt = runtime();
+    let clock = TestClock::frozen();
+    let store = store_with_clock(clock.clone());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let planner = || {
+        Box::new(CountedPlanner {
+            calls: calls.clone(),
+            finality,
+        })
+    };
+
+    let mut first = worker_with_clock(
+        &store,
+        rt.handle(),
+        Some("first"),
+        clock.clone() as Arc<dyn Clock>,
+    );
+    first.start(planner()).unwrap();
+    let mut held = Held::default();
+    drive(&mut first, &mut held, "the first worker planning", |h| {
+        h.splits.contains_key("unfinished")
+    });
+    assert_eq!(calls.load(SeqCst), 1);
+    first.depart(&[split_id("unfinished")]).unwrap();
+
+    let mut second = worker_with_clock(
+        &store,
+        rt.handle(),
+        Some("second"),
+        clock.clone() as Arc<dyn Clock>,
+    );
+    second.start(planner()).unwrap();
+    let mut fleet = Fleet::new(&store, rt.handle());
+    fleet.join(&second);
+    let mut held = Held::default();
+    drive(
+        &mut second,
+        &mut held,
+        "the second worker acquiring the departed split",
+        |h| h.splits.contains_key("unfinished"),
+    );
+    fleet.settle(&clock);
+
+    let leader = rt
+        .block_on(store.get(Keyspace::Ephemeral, "leader"))
+        .unwrap()
+        .expect("leader key");
+    let leader: serde_json::Value = serde_json::from_slice(&leader.value).unwrap();
+    assert_eq!(leader["owner"], "second", "the second worker must lead");
+    calls.load(SeqCst)
+}
+
+/// A leader elected over a final plan assigns its splits without running the
+/// planner. Regression for #883.
+#[test]
+fn a_leader_elected_over_a_final_plan_runs_no_planner() {
+    assert_eq!(
+        elect_after_departure(PlanFinality::Final),
+        1,
+        "a leader elected over a final plan ran the planner again"
+    );
+}
+
+/// A leader elected over an open plan runs the planner once more.
+#[test]
+fn a_leader_elected_over_an_open_plan_runs_the_planner() {
+    assert_eq!(
+        elect_after_departure(PlanFinality::Open),
+        2,
+        "a leader elected over an open plan did not run the planner"
+    );
 }

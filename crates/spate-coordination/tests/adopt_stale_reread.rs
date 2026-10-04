@@ -24,6 +24,9 @@ struct Script {
     /// Outcome of the deposed successor's publish, attempted when this
     /// worker first publishes.
     zombie: Option<CasOutcome>,
+    /// Whether the write confirming the stale re-read fails, unapplied.
+    refuse_confirm: bool,
+    confirm_refused: bool,
 }
 
 /// Memory store whose watch never shows the plan record, scripted:
@@ -31,7 +34,8 @@ struct Script {
 /// 2. the first plan get returns Retryable, and meanwhile another leader
 ///    bumps the record one generation further;
 /// 3. the second plan get answers with the worker's own record from step 1
-///    (a lagging replica);
+///    (a lagging replica), and with `refuse_confirm` the write confirming it
+///    returns Retryable unapplied;
 /// 4. on the worker's first publish (finality final), the other, deposed
 ///    leader publishes at the revision its bump won.
 #[derive(Clone)]
@@ -62,6 +66,14 @@ impl CoordinationStore for Scripted {
         }
         let rec: serde_json::Value = serde_json::from_slice(&value).unwrap();
         let step = self.s.lock().unwrap().step;
+        if step == 3 {
+            let mut s = self.s.lock().unwrap();
+            let own = s.own.clone().unwrap();
+            if s.refuse_confirm && expected == own.revision && value == own.value {
+                s.confirm_refused = true;
+                return Err(StoreError::Retryable("injected: confirm failed".into()));
+            }
+        }
         if step == 0 {
             let out = self.inner.update(ks, key, value, expected).await?;
             assert!(matches!(out, CasOutcome::Won(_)));
@@ -134,12 +146,14 @@ impl CoordinationStore for Scripted {
     }
 }
 
-/// A deposed leader's publish at the revision its bump won loses once this
-/// worker leads, though this worker's re-read was served by a lagging replica.
-#[test]
-fn a_stale_own_record_on_reread_does_not_fence() {
+/// Runs one worker through the script; returns the deposed leader's publish
+/// outcome.
+fn zombie_publish(refuse_confirm: bool) -> Option<CasOutcome> {
     let rt = runtime();
-    let s = Arc::new(Mutex::new(Script::default()));
+    let s = Arc::new(Mutex::new(Script {
+        refuse_confirm,
+        ..Script::default()
+    }));
     let st = Scripted {
         inner: store(),
         s: s.clone(),
@@ -153,9 +167,27 @@ fn a_stale_own_record_on_reread_does_not_fence() {
     drive(&mut a, &mut held, "the worker publishing", |_| {
         s.lock().unwrap().zombie.is_some()
     });
-    let zombie = s.lock().unwrap().zombie;
+    let s = s.lock().unwrap();
+    assert_eq!(s.confirm_refused, refuse_confirm, "the confirm fault");
+    s.zombie
+}
+
+/// A deposed leader's publish at the revision its bump won loses once this
+/// worker leads, though this worker's re-read was served by a lagging replica.
+#[test]
+fn a_stale_own_record_on_reread_does_not_fence() {
     assert_eq!(
-        zombie,
+        zombie_publish(false),
+        Some(CasOutcome::Lost),
+        "a deposed leader's publish won while this worker led"
+    );
+}
+
+/// As above, when the write confirming the stale re-read fails retryably.
+#[test]
+fn a_stale_own_record_whose_confirm_fails_does_not_fence() {
+    assert_eq!(
+        zombie_publish(true),
         Some(CasOutcome::Lost),
         "a deposed leader's publish won while this worker led"
     );

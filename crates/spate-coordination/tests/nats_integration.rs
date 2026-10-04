@@ -822,3 +822,55 @@ fn a_credential_rejected_at_reconnect_is_fatal() {
         }
     });
 }
+
+/// A worker configured for a replica count other than an existing bucket's
+/// fails startup with a fatal error naming both counts. Regression for #807.
+#[test]
+#[ignore = "needs Docker; run explicitly"]
+fn an_existing_bucket_with_another_replica_count_is_rejected() {
+    let (_nats, port) = start_nats(None);
+    let rt = runtime();
+    rt.block_on(async {
+        let js = jetstream(port).await;
+        for (bucket, max_age) in [
+            (state_bucket_name("replicas"), Duration::ZERO),
+            ("spate_coordination_replicas_lease".to_string(), LEASE),
+        ] {
+            js.create_key_value(async_nats::jetstream::kv::Config {
+                bucket,
+                history: 1,
+                max_age,
+                limit_markers: Some(LEASE),
+                ..Default::default()
+            })
+            .await
+            .expect("single-replica bucket");
+        }
+    });
+    let mut nats = nats_config(port, "replicas");
+    nats.replicas = 3;
+    let mut w = worker_with(nats, rt.handle(), Some("worker-a"));
+    let planner = Box::new(PhasedPlanner::one_final("nats-replicas:v1", &["r0"]));
+    let error = match w.start(planner) {
+        Err(e) => e,
+        Ok(()) => {
+            let mut error = None;
+            spate_test::wait_until(support::DEADLINE, "the replica mismatch rejection", || {
+                error = w.poll().err();
+                error.is_some()
+            });
+            error.expect("wait_until returned on an error")
+        }
+    };
+    assert_eq!(error.kind, CoordinationErrorKind::Fatal, "{error}");
+    let message = error.to_string();
+    assert!(
+        message.contains("spate_coordination_replicas_state"),
+        "{message}"
+    );
+    assert!(
+        message.contains("exists with replica count 1 "),
+        "{message}"
+    );
+    assert!(message.contains("configured for 3"), "{message}");
+}

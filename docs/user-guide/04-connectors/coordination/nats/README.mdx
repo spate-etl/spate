@@ -57,7 +57,7 @@ The keys of the `nats` body under `coordination.store`. Errors name the key as
 | `job` | string | `required` | Job identity, `[A-Za-z0-9_-]{1,64}`. Suffixes both bucket names. Every worker of one job uses the same value; two different jobs must never share one. |
 | `credentials` | mapping | `none` | Anonymous by default. See [Security](#security-authentication-and-tls). |
 | `tls` | mapping | `none` | TLS material. Its presence requires TLS on every server and rejects a `ws://` server. |
-| `replicas` | integer | `1` | Replication factor for both buckets (1, 3, or 5). 3 or more needs a JetStream cluster. |
+| `replicas` | integer | `1` | Replication factor for both buckets (1, 3, or 5). 3 or more needs a JetStream cluster. A bucket that already exists must have this replica count, or startup fails with a fatal error naming both counts. |
 
 `coordination.lease_duration` is the lease TTL, with a floor of 2s on NATS
 because expiry-marker precision is one second.
@@ -193,6 +193,10 @@ the `nats` body so the buckets survive losing a node. The client learns the othe
 nodes from the first server it reaches, so one reachable entry in `servers` is
 enough. List more than one, or a DNS name that resolves to every node, so the
 first connection survives a node being down.
+
+The worker never changes an existing bucket's replica count. To change it for a
+running job, run `nats kv edit <bucket> --replicas <n>` on both of the job's
+buckets, then set `replicas` to the same value.
 
 Set [`sync_interval`](https://docs.nats.io/reference/config/jetstream/sync_interval)
 in each server's configuration file:

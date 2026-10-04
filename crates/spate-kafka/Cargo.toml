@@ -12,13 +12,14 @@ keywords.workspace = true
 categories.workspace = true
 
 [features]
-tls = ["rdkafka/ssl-vendored"]
+tls = ["rdkafka/ssl-vendored", "dep:openssl-sys"]
 
 [dependencies]
 bytes = { workspace = true }
 bytesize = { workspace = true }
 spate-core = { workspace = true }
 humantime-serde = { workspace = true }
+openssl-sys = { workspace = true, optional = true }
 rdkafka = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

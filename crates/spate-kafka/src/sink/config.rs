@@ -233,10 +233,11 @@ pub struct KafkaSinkConfig {
     /// Raw librdkafka producer properties, applied verbatim after
     /// validation. Sink-owned properties (see [`KafkaSinkConfig`] docs and
     /// the connector guide) are rejected; batching knobs like `linger.ms`
-    /// and `batch.num.messages` may be tuned here. With the `tls` feature, a
-    /// map naming neither `ssl.ca.location` nor `ssl.ca.pem` gets
-    /// `ssl.ca.location: probe` unless `SSL_CERT_FILE` or `SSL_CERT_DIR` is
-    /// set.
+    /// and `batch.num.messages` may be tuned here. With the `tls` feature and
+    /// vendored OpenSSL, a map naming neither `ssl.ca.location` nor
+    /// `ssl.ca.pem` gets `ssl.ca.location: probe` unless `SSL_CERT_FILE` or
+    /// `SSL_CERT_DIR` is set; a build linked against the system OpenSSL keeps
+    /// librdkafka's native CA default.
     #[serde(default)]
     pub rdkafka: BTreeMap<String, String>,
 }
@@ -801,11 +802,12 @@ mod tests {
         }
     }
 
-    /// Both producers of a `tls` build get `probe` when the passthrough names
-    /// no CA and no OpenSSL env override is set, and keep a CA it names.
+    /// Both producers of a vendored-OpenSSL `tls` build get `probe` when the
+    /// passthrough names no CA and no OpenSSL env override is set, and keep a
+    /// CA it names.
     #[cfg(feature = "tls")]
     #[test]
-    fn tls_build_defaults_the_ca_to_the_system_store() {
+    fn tls_build_ca_default_yields_to_env_and_named_ca() {
         let cfg = parse(&minimal()).unwrap();
         for with_statistics in [true, false] {
             let ca = |env| {
@@ -813,7 +815,10 @@ mod tests {
                     .get("ssl.ca.location")
                     .map(str::to_owned)
             };
-            assert_eq!(ca(false).as_deref(), Some("probe"));
+            assert_eq!(
+                ca(false).as_deref(),
+                cfg!(spate_openssl_vendored).then_some("probe")
+            );
             assert_eq!(ca(true), None);
         }
 
@@ -825,6 +830,24 @@ mod tests {
         assert_eq!(
             cfg.client_config_impl(true, false).get("ssl.ca.location"),
             Some("/etc/kafka/ca.pem")
+        );
+    }
+
+    /// The writer and readiness configurations each carry `probe` only in a
+    /// vendored-OpenSSL `tls` build with no CA named and no OpenSSL environment
+    /// override, and keep a named CA as given. Regression for #825.
+    #[test]
+    fn sink_ca_default_reads_the_openssl_environment() {
+        crate::security::tests::assert_ca_cases(
+            "sink::config::tests::sink_ca_default_reads_the_openssl_environment",
+            |rdkafka| {
+                let mut cfg = KafkaSinkConfig::new("localhost:9092", "orders");
+                cfg.rdkafka = rdkafka;
+                vec![
+                    ("writer", cfg.client_config()),
+                    ("readiness", cfg.probe_client_config()),
+                ]
+            },
         );
     }
 

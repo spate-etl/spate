@@ -70,15 +70,22 @@ fn names_openssl_feature(features: &str) -> bool {
     })
 }
 
-/// Set `ssl.ca.location` to `probe` when the passthrough names no CA and
-/// `openssl_env` is false, so the client trusts the system store on every
-/// platform. A no-op without the `tls` feature.
+/// Set `ssl.ca.location` to `probe` in a `tls` build that links vendored
+/// OpenSSL, when the passthrough names no CA and `openssl_env` is false.
+///
+/// A build linked against the system OpenSSL keeps librdkafka's native CA
+/// default.
 pub(crate) fn apply_ca_default(
     cc: &mut rdkafka::ClientConfig,
     rdkafka: &BTreeMap<String, String>,
     openssl_env: bool,
 ) {
-    if let Some(location) = ca_location_default(rdkafka, cfg!(feature = "tls"), openssl_env) {
+    if let Some(location) = ca_location_default(
+        rdkafka,
+        cfg!(feature = "tls"),
+        cfg!(spate_openssl_vendored),
+        openssl_env,
+    ) {
         cc.set("ssl.ca.location", location);
     }
 }
@@ -96,17 +103,110 @@ pub(crate) fn openssl_env_overrides() -> bool {
 fn ca_location_default(
     rdkafka: &BTreeMap<String, String>,
     tls: bool,
+    vendored: bool,
     openssl_env: bool,
 ) -> Option<&'static str> {
     let names_ca = ["ssl.ca.location", "ssl.ca.pem"]
         .iter()
         .any(|k| rdkafka.contains_key(*k));
-    (tls && !names_ca && !openssl_env).then_some("probe")
+    (tls && vendored && !names_ca && !openssl_env).then_some("probe")
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    const CA_CASE: &str = "SPATE_TEST_CA_CASE";
+
+    /// An OpenSSL environment and passthrough, and whether the connector's CA
+    /// default applies to them.
+    struct CaCase {
+        env: &'static [(&'static str, &'static str)],
+        rdkafka: &'static [(&'static str, &'static str)],
+        defaulted: bool,
+    }
+
+    const CA_CASES: &[CaCase] = &[
+        CaCase {
+            env: &[],
+            rdkafka: &[],
+            defaulted: true,
+        },
+        CaCase {
+            env: &[("SSL_CERT_FILE", ""), ("SSL_CERT_DIR", "")],
+            rdkafka: &[],
+            defaulted: true,
+        },
+        CaCase {
+            env: &[("SSL_CERT_FILE", "/etc/kafka/ca.pem")],
+            rdkafka: &[],
+            defaulted: false,
+        },
+        CaCase {
+            env: &[("SSL_CERT_DIR", "/etc/kafka/certs")],
+            rdkafka: &[],
+            defaulted: false,
+        },
+        CaCase {
+            env: &[],
+            rdkafka: &[("ssl.ca.location", "/etc/kafka/ca.pem")],
+            defaulted: false,
+        },
+        CaCase {
+            env: &[],
+            rdkafka: &[("ssl.ca.pem", "-----BEGIN CERTIFICATE-----")],
+            defaulted: false,
+        },
+        CaCase {
+            env: &[],
+            rdkafka: &[("ssl.ca.location", "")],
+            defaulted: false,
+        },
+        CaCase {
+            env: &[],
+            rdkafka: &[("ssl.ca.pem", "")],
+            defaulted: false,
+        },
+    ];
+
+    /// Runs each case in a child process of the test `name` and checks every
+    /// configuration `configs` builds from the case's passthrough: its CA keys
+    /// are kept, and `probe` appears exactly where the default applies in this
+    /// build.
+    pub(crate) fn assert_ca_cases(
+        name: &str,
+        configs: impl Fn(BTreeMap<String, String>) -> Vec<(&'static str, rdkafka::ClientConfig)>,
+    ) {
+        if let Some(index) = std::env::var_os(CA_CASE) {
+            let index: usize = index
+                .to_str()
+                .and_then(|i| i.parse().ok())
+                .expect("case index");
+            let case = &CA_CASES[index];
+            let probe = cfg!(all(feature = "tls", spate_openssl_vendored)) && case.defaulted;
+            for (label, cc) in configs(map(case.rdkafka)) {
+                for key in ["ssl.ca.location", "ssl.ca.pem"] {
+                    let given = case
+                        .rdkafka
+                        .iter()
+                        .find(|(k, _)| *k == key)
+                        .map(|(_, v)| *v);
+                    let expected = given.or((probe && key == "ssl.ca.location").then_some("probe"));
+                    assert_eq!(cc.get(key), expected, "{label} {key}, env {:?}", case.env);
+                }
+            }
+            return;
+        }
+        for (index, case) in CA_CASES.iter().enumerate() {
+            spate_test_support::run_in_child(name, |child| {
+                child
+                    .env_remove("SSL_CERT_FILE")
+                    .env_remove("SSL_CERT_DIR")
+                    .envs(case.env.iter().copied())
+                    .env(CA_CASE, index.to_string())
+            });
+        }
+    }
 
     fn map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
         pairs
@@ -166,20 +266,29 @@ mod tests {
         }
     }
 
-    /// `probe` applies only in a `tls` build whose passthrough names no CA and
-    /// whose environment has no OpenSSL override. Regression for #609.
+    /// `probe` applies only in a `tls` build that links vendored OpenSSL, whose
+    /// passthrough names no CA and whose environment has no OpenSSL override.
+    /// Regression for #609 and #825.
     #[test]
-    fn ca_default_yields_to_a_named_ca_and_the_openssl_env() {
-        let none = map(&[]);
-        assert_eq!(ca_location_default(&none, true, false), Some("probe"));
-        assert_eq!(ca_location_default(&none, false, false), None);
-        assert_eq!(ca_location_default(&none, true, true), None);
-
-        for named in [
-            map(&[("ssl.ca.location", "/etc/kafka/ca.pem")]),
-            map(&[("ssl.ca.pem", "-----BEGIN CERTIFICATE-----")]),
-        ] {
-            assert_eq!(ca_location_default(&named, true, false), None, "{named:?}");
+    fn ca_default_tracks_openssl_provenance() {
+        for tls in [false, true] {
+            for vendored in [false, true] {
+                for openssl_env in [false, true] {
+                    for named in [
+                        map(&[]),
+                        map(&[("ssl.ca.location", "/etc/kafka/ca.pem")]),
+                        map(&[("ssl.ca.pem", "-----BEGIN CERTIFICATE-----")]),
+                    ] {
+                        let expected = (tls && vendored && !openssl_env && named.is_empty())
+                            .then_some("probe");
+                        assert_eq!(
+                            ca_location_default(&named, tls, vendored, openssl_env),
+                            expected,
+                            "tls {tls}, vendored {vendored}, env {openssl_env}, {named:?}"
+                        );
+                    }
+                }
+            }
         }
     }
 

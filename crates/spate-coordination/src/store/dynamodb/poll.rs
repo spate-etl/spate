@@ -112,7 +112,9 @@ struct Poll {
     seen: BTreeMap<String, u64>,
     /// The highest tombstone revision read for each durable key that holds
     /// no delivered revision; a later put must sit above it. A consistent
-    /// read that no longer lists the tombstone drops it.
+    /// read that no longer lists the tombstone drops it. For an ephemeral
+    /// key it holds the revision of an expiry delete sent for a key still
+    /// listed.
     deleted: BTreeMap<String, u64>,
     subscribers: Vec<mpsc::UnboundedSender<Event>>,
 }
@@ -288,7 +290,7 @@ impl Poll {
             if observed.newer_than(&key, s0) {
                 if delivered == Some(item.v) {
                     snapshot.push(entry(&key, &item));
-                } else if subscribing {
+                } else if subscribing && self.deleted.get(&key).is_none_or(|f| item.v > *f) {
                     let live = entry(&key, &item);
                     if delivered.is_none() {
                         send(&mut self.subscribers, &WatchEvent::Put(live.clone()));
@@ -302,6 +304,7 @@ impl Poll {
             if observed.expired(&key, item.v, t0) {
                 if let Some(d) = delivered {
                     let revision = Revision(observed.emit_delete(&key, d, true, t1));
+                    self.deleted.insert(key.clone(), revision.0);
                     send(
                         &mut self.subscribers,
                         &WatchEvent::Delete {
@@ -329,14 +332,17 @@ impl Poll {
                     );
                     send(&mut self.subscribers, &WatchEvent::Put(live.clone()));
                     self.seen.insert(key.clone(), item.v);
+                    self.deleted.remove(&key);
                 }
                 _ => {
                     send(&mut self.subscribers, &WatchEvent::Put(live.clone()));
                     self.seen.insert(key.clone(), item.v);
+                    self.deleted.remove(&key);
                 }
             }
             snapshot.push(live);
         }
+        self.deleted.retain(|k, _| listed.contains(k));
         let vanished: Vec<(String, u64)> = self
             .seen
             .iter()

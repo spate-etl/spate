@@ -7,9 +7,9 @@ covers what is specific to Debian.
 | --- | --- |
 | `trixie` | Debian 13. **Primary**, and the only lane. |
 
-It is a client image. `spate-kafka`'s `tls_system_ca` copies its
-own test binary into it and writes a test CA to the system bundle, so the
-clients read a trust store the test controls.
+It is the client image for the vendored OpenSSL bundle test. `spate-kafka`'s
+`tls_system_ca` copies its own test binary into it and writes a test CA to the
+system bundle, so the clients read a trust store the test controls.
 
 ## Why this line
 

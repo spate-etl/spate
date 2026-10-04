@@ -25,10 +25,11 @@ are testing, so adding either is a change inside `ci/`.
 | Service | Lanes | Suite |
 | --- | --- | --- |
 | [`clickhouse`](clickhouse/README.md) | `lts-previous`, `lts`, `stable` | `spate-clickhouse`, and `spate`'s examples tier |
-| [`debian`](debian/README.md) | `trixie` | `spate-kafka`'s `tls_system_ca`, as its client image |
+| [`debian`](debian/README.md) | `trixie` | `spate-kafka`'s `tls_system_ca`, as its vendored OpenSSL client image |
 | [`dynamodb`](dynamodb/README.md) | `stable` | `spate-coordination`'s DynamoDB store |
 | [`kafka`](kafka/README.md) | `stable` | `spate-kafka`, and `spate`'s end-to-end suites |
 | [`nats`](nats/README.md) | `floor`, `below-floor`, `async` | `spate-coordination`, `spate-s3`'s `coordinated_nats`, and `spate`'s examples tier |
+| [`rust`](rust/README.md) | `stable` | `spate-kafka`'s `tls_system_ca`, as its system OpenSSL builder and client image |
 
 A service's own README carries what is specific to it: which release lines it
 has, its vendor's support window, and why those lanes.
@@ -77,7 +78,7 @@ digest on every run.
 **Exact tags**, the vendor's full release version, so a bump diff names the
 release it moved to: `YY.M.P.B` for ClickHouse, `MAJOR.POINT` for Debian,
 `MAJOR.MINOR.PATCH` for DynamoDB Local and Kafka, `MAJOR.MINOR.PATCH-alpine` for
-NATS.
+NATS, `MAJOR.MINOR.PATCH-bookworm` for Rust.
 
 ## Support claims
 
@@ -101,8 +102,9 @@ lane resolving to the primary lane's image is dropped, and
 
 Dependabot moves the pins, with one `.github/dependabot.yml` entry per policy:
 lanes held on a line share an entry and an `ignore` rule, and a lane that follows
-every release gets its own. Moving a *line* when a vendor's support window shifts
-is a maintainer edit.
+every release gets its own. The `rust` lane shares its entry with
+`examples/docker`, which pins the same image. Moving a *line* when a vendor's
+support window shifts is a maintainer edit.
 
 ## When a lane goes red
 
@@ -112,8 +114,8 @@ The bump usually cannot be fixed inside its own pull request, so:
    its last green pin and no other pull request is blocked.
 2. File the defect as its own issue if none is open.
 3. Add an `ignore` entry to `.github/dependabot.yml` naming the exact versions,
-   with a `Delete this when …` sentence and the issue number. The `rust` entry
-   there is the worked example.
+   with a `Delete this when …` sentence and the issue number. The Rust
+   workspace's `cargo` entry there is the worked example.
 4. Close the bump pull request. The next run proposes the version after the
    ignored one.
 

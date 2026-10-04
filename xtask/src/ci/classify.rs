@@ -227,6 +227,12 @@ pub(crate) fn classify(
                 image_suites.insert("spate-kafka".to_string());
                 out.container_pkgs.extend(image_suites.iter().cloned());
             }
+            // The image `spate-kafka`'s TLS suite builds and runs its system
+            // OpenSSL client in.
+            if glob(path, "ci/rust/*") {
+                image_suites.insert("spate-kafka".to_string());
+                out.container_pkgs.extend(image_suites.iter().cloned());
+            }
             // A dependency, lint or apparatus change moves the whole graph.
             if any_glob(
                 path,
@@ -680,6 +686,31 @@ mod tests {
         };
         let image = vec!["ci/debian/trixie/Dockerfile".to_string()];
         let out = classify(&image, Event::PullRequest, &ctx, &graph(), &[]);
+        assert_eq!(suites(&out), ["spate-kafka"]);
+    }
+
+    /// A builder image bump selects the Kafka suite alone, on a Dependabot
+    /// pull request too, and with the example image in the same bump.
+    #[test]
+    fn a_builder_image_bump_selects_the_kafka_suite_alone() {
+        assert_eq!(
+            suites(&run(&["ci/rust/stable/Dockerfile"])),
+            ["spate-kafka"]
+        );
+
+        let ctx = Context {
+            author: "dependabot[bot]".into(),
+            labels: vec![],
+        };
+        let image = vec!["ci/rust/stable/Dockerfile".to_string()];
+        let out = classify(&image, Event::PullRequest, &ctx, &graph(), &[]);
+        assert_eq!(suites(&out), ["spate-kafka"]);
+
+        let both = vec![
+            "examples/docker/Dockerfile".to_string(),
+            "ci/rust/stable/Dockerfile".to_string(),
+        ];
+        let out = classify(&both, Event::PullRequest, &ctx, &graph(), &[]);
         assert_eq!(suites(&out), ["spate-kafka"]);
     }
 

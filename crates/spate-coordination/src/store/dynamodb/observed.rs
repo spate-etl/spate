@@ -24,6 +24,8 @@ struct Obs {
     seq: u64,
     /// Set when `v` was judged expired and its delete emitted.
     expired: bool,
+    /// The highest floor an own floor raise recorded.
+    floor: u64,
     touched: Instant,
 }
 
@@ -51,6 +53,10 @@ impl Observed {
         self.keys.get(key).map_or(0, |o| o.hw)
     }
 
+    pub(super) fn floor(&self, key: &str) -> u64 {
+        self.keys.get(key).map_or(0, |o| o.floor)
+    }
+
     fn entry(&mut self, key: &str, now: Instant) -> &mut Obs {
         self.keys.entry(key.to_string()).or_insert(Obs {
             v: None,
@@ -58,6 +64,7 @@ impl Observed {
             hw: 0,
             seq: 0,
             expired: false,
+            floor: 0,
             touched: now,
         })
     }
@@ -73,15 +80,23 @@ impl Observed {
             hw: o.hw.max(v),
             seq,
             expired: false,
+            floor: o.floor,
             touched: now,
         };
     }
 
-    /// An own delete removed the key.
-    pub(super) fn own_delete(&mut self, key: &str, now: Instant) {
+    /// Raises the key's recorded floor to at least `floor`.
+    pub(super) fn raise_floor(&mut self, key: &str, floor: u64, now: Instant) {
+        let o = self.entry(key, now);
+        o.floor = o.floor.max(floor);
+    }
+
+    /// An own delete removed the key and left its floor at least `floor`.
+    pub(super) fn own_delete(&mut self, key: &str, floor: u64, now: Instant) {
         self.seq += 1;
         let seq = self.seq;
         let o = self.entry(key, now);
+        o.floor = o.floor.max(floor);
         o.v = None;
         o.seq = seq;
         o.expired = false;

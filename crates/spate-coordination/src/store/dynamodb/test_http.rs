@@ -1096,6 +1096,38 @@ async fn writes_store_the_write_id_and_the_collection_time() {
     );
 }
 
+/// A floor raise sets only `v` and `x`, and only while the stored floor is
+/// absent or lower.
+#[tokio::test]
+async fn a_floor_raise_is_conditional_and_carries_its_collection_time() {
+    let (script, bodies) = recorded("{}");
+    let (url, _) = serve(script).await;
+    let table = table_at(&url);
+    table
+        .write("job#f", "k", Write::Raise { v: 42, x: 9 })
+        .await
+        .unwrap();
+    let bodies = bodies.lock().unwrap();
+    let [raise] = bodies.as_slice() else {
+        panic!("{bodies:?}");
+    };
+    assert_eq!(
+        raise["ConditionExpression"], "attribute_not_exists(#v) OR #v < :v",
+        "{raise}"
+    );
+    assert_eq!(
+        raise["Key"],
+        serde_json::json!({ "pk": { "S": "job#f" }, "sk": { "S": "k" } }),
+        "{raise}"
+    );
+    let (sets, removed) = assigned(raise);
+    let expected = HashMap::from([
+        ("v".to_string(), serde_json::json!({ "N": "42" })),
+        ("x".to_string(), serde_json::json!({ "N": "9" })),
+    ]);
+    assert_eq!((sets, removed), (expected, Vec::new()), "{raise}");
+}
+
 /// A point read is strongly consistent, and a query asks for the
 /// consistency its caller chose.
 #[tokio::test]

@@ -316,6 +316,22 @@ impl FakeTable {
                     x: Some(x),
                 })
             }
+            Write::Raise { v, x } => {
+                if old.as_ref().is_some_and(|o| o.v >= v) {
+                    return Ok(Written::Failed { old });
+                }
+                Some(Item {
+                    v,
+                    x: Some(x),
+                    ..old.clone().unwrap_or(Item {
+                        v,
+                        b: None,
+                        w: None,
+                        tomb: false,
+                        x: None,
+                    })
+                })
+            }
             Write::Remove { expected } => {
                 if let Some(e) = expected
                     && old.as_ref().is_none_or(|o| o.v != e)

@@ -345,6 +345,15 @@ fn update(write: &Write) -> Option<(String, String, ReturnValue, Expr)> {
                 expr,
             )
         }
+        Write::Raise { v, x } => (
+            "SET #v = :v, #x = :x".into(),
+            "attribute_not_exists(#v) OR #v < :v".into(),
+            ReturnValue::None,
+            Expr::default()
+                .names(&["v", "x"])
+                .value(":v", n(*v))
+                .value(":x", n(*x)),
+        ),
         Write::Remove { .. } => return None,
     })
 }

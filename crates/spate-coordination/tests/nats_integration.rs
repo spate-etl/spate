@@ -854,13 +854,12 @@ fn an_existing_bucket_with_another_replica_count_is_rejected() {
     let error = match w.start(planner) {
         Err(e) => e,
         Ok(()) => {
-            let deadline = Instant::now() + support::DEADLINE;
-            loop {
-                assert!(Instant::now() < deadline, "replica mismatch never rejected");
-                if let Err(e) = w.poll() {
-                    break e;
-                }
-            }
+            let mut error = None;
+            spate_test::wait_until(support::DEADLINE, "the replica mismatch rejection", || {
+                error = w.poll().err();
+                error.is_some()
+            });
+            error.expect("wait_until returned on an error")
         }
     };
     assert_eq!(error.kind, CoordinationErrorKind::Fatal, "{error}");

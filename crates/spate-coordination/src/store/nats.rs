@@ -245,7 +245,8 @@ pub struct NatsConfig {
     #[serde(default)]
     pub tls: Option<NatsTls>,
     /// Replication factor for both buckets (1, 3, or 5; 3+ needs a
-    /// JetStream cluster). Default 1.
+    /// JetStream cluster). Default 1. An existing bucket must already have
+    /// this replica count, or connecting fails.
     #[serde(default = "default_replicas")]
     pub replicas: usize,
 }
@@ -642,29 +643,20 @@ fn server_at_least(version: &str, (want_major, want_minor): (u64, u64)) -> bool 
     (major, minor) >= (want_major, want_minor)
 }
 
-/// Create the bucket or adopt an existing one, verifying that the config
-/// that matters (max_age, which IS the lease TTL) matches. Returns an
-/// adopted bucket's stream config.
+/// Create the bucket or adopt an existing one whose settings pass
+/// [`check_adopted`]. Returns an adopted bucket's stream config.
 async fn ensure_bucket(
     jetstream: &async_nats::jetstream::Context,
     config: kv::Config,
 ) -> Result<(kv::Store, Option<stream::Config>), StoreError> {
     let name = config.bucket.clone();
-    let expected_age = config.max_age;
     match jetstream.get_key_value(&name).await {
         Ok(store) => {
             let status = store
                 .status()
                 .await
                 .map_err(|e| StoreError::Retryable(format!("reading bucket {name}: {e}")))?;
-            if status.max_age() != expected_age {
-                return Err(StoreError::Fatal(format!(
-                    "bucket {name} exists with max_age {:?} but this worker is configured \
-                     for {expected_age:?}: lease_duration cannot change mid-job — finish or \
-                     delete the job's buckets first",
-                    status.max_age()
-                )));
-            }
+            check_adopted(&config, &status.info.config)?;
             Ok((store, Some(status.info.config)))
         }
         Err(_) => jetstream
@@ -673,6 +665,29 @@ async fn ensure_bucket(
             .map(|store| (store, None))
             .map_err(|e| StoreError::Retryable(format!("creating bucket {name}: {e}"))),
     }
+}
+
+/// Fatal when an existing bucket's age limit or replica count differs from
+/// `wanted`.
+fn check_adopted(wanted: &kv::Config, existing: &stream::Config) -> Result<(), StoreError> {
+    let name = &wanted.bucket;
+    if existing.max_age != wanted.max_age {
+        return Err(StoreError::Fatal(format!(
+            "bucket {name} exists with max_age {:?} but this worker is configured \
+             for {:?}: lease_duration cannot change mid-job — finish or \
+             delete the job's buckets first",
+            existing.max_age, wanted.max_age
+        )));
+    }
+    if existing.num_replicas != wanted.num_replicas {
+        return Err(StoreError::Fatal(format!(
+            "bucket {name} exists with replica count {} but this worker is configured \
+             for {}: set nats.replicas to {}, or change the bucket's replica count \
+             (nats kv edit {name} --replicas {})",
+            existing.num_replicas, wanted.num_replicas, existing.num_replicas, wanted.num_replicas
+        )));
+    }
+    Ok(())
 }
 
 /// Whether `key` holds a value, read through the stream leader.
@@ -1085,6 +1100,46 @@ mod tests {
             assert!(!err.contains("secret-host"), "{err}");
         }
         with_second("localhost:4223").unwrap();
+    }
+
+    /// Adopting a bucket whose replica count differs from the configured one
+    /// is fatal, and the message names both counts. Regression for #807.
+    #[test]
+    fn adoption_rejects_another_replica_count() {
+        let wanted = kv::Config {
+            bucket: "spate_coordination_orders_lease".into(),
+            max_age: Duration::from_secs(30),
+            num_replicas: 3,
+            ..Default::default()
+        };
+        let existing = stream::Config {
+            name: "KV_spate_coordination_orders_lease".into(),
+            max_age: Duration::from_secs(30),
+            num_replicas: 3,
+            ..Default::default()
+        };
+        check_adopted(&wanted, &existing).expect("matching bucket");
+        for replicas in [1, 5] {
+            let other = stream::Config {
+                num_replicas: replicas,
+                ..existing.clone()
+            };
+            let err = check_adopted(&wanted, &other).unwrap_err();
+            assert!(matches!(err, StoreError::Fatal(_)), "{err}");
+            let err = err.to_string();
+            assert!(
+                err.contains(&format!("exists with replica count {replicas} ")),
+                "{err}"
+            );
+            assert!(err.contains("configured for 3"), "{err}");
+            assert!(err.contains("spate_coordination_orders_lease"), "{err}");
+        }
+        let aged = stream::Config {
+            max_age: Duration::from_secs(10),
+            ..existing
+        };
+        let err = check_adopted(&wanted, &aged).unwrap_err().to_string();
+        assert!(err.contains("max_age"), "{err}");
     }
 
     #[test]

@@ -848,4 +848,122 @@ mod ready_bursts {
             .await;
         assert_eq!(writes, 1, "one assignment write for three joins");
     }
+
+    /// A store whose first durable watch yields one event and an error, both ready, after its snapshot.
+    #[derive(Clone)]
+    struct BreakAfterEvent {
+        memory: MemoryStore,
+        durable_watches: tokio::sync::watch::Sender<usize>,
+    }
+
+    impl CoordinationStore for BreakAfterEvent {
+        fn lease_ttl(&self) -> Duration {
+            self.memory.lease_ttl()
+        }
+        fn watch_mode(&self) -> WatchMode {
+            WatchMode::Push
+        }
+        fn op_timeout(&self) -> Option<Duration> {
+            self.memory.op_timeout()
+        }
+        fn attach_metrics(&self, metrics: &spate_core::metrics::CoordinationMetrics) {
+            self.memory.attach_metrics(metrics);
+        }
+        async fn create(
+            &self,
+            ks: Keyspace,
+            key: &str,
+            value: Vec<u8>,
+        ) -> Result<CasOutcome, StoreError> {
+            self.memory.create(ks, key, value).await
+        }
+        async fn update(
+            &self,
+            ks: Keyspace,
+            key: &str,
+            value: Vec<u8>,
+            expected: Revision,
+        ) -> Result<CasOutcome, StoreError> {
+            self.memory.update(ks, key, value, expected).await
+        }
+        async fn get(&self, ks: Keyspace, key: &str) -> Result<Option<Entry>, StoreError> {
+            self.memory.get(ks, key).await
+        }
+        async fn delete(
+            &self,
+            ks: Keyspace,
+            key: &str,
+            expected: Option<Revision>,
+        ) -> Result<CasOutcome, StoreError> {
+            self.memory.delete(ks, key, expected).await
+        }
+        async fn list(&self, ks: Keyspace, prefix: &str) -> Result<Vec<Entry>, StoreError> {
+            self.memory.list(ks, prefix).await
+        }
+        async fn watch(&self, ks: Keyspace, prefix: &str) -> Result<WatchStream, StoreError> {
+            let mut earlier = 0;
+            if ks == Keyspace::Durable {
+                self.durable_watches.send_modify(|n| {
+                    earlier = *n;
+                    *n += 1;
+                });
+            }
+            if ks != Keyspace::Durable || earlier > 0 {
+                return self.memory.watch(ks, prefix).await;
+            }
+            let mut events: Vec<Result<WatchEvent, StoreError>> = self
+                .memory
+                .list(ks, prefix)
+                .await?
+                .into_iter()
+                .map(|e| Ok(WatchEvent::Put(e)))
+                .collect();
+            events.push(Ok(WatchEvent::SnapshotDone));
+            events.push(Ok(WatchEvent::Put(Entry {
+                key: "unrelated".into(),
+                value: Vec::new(),
+                revision: Revision(1000),
+            })));
+            events.push(Err(StoreError::Retryable("watch broke".into())));
+            Ok(futures_util::stream::iter(events)
+                .chain(futures_util::stream::pending())
+                .boxed())
+        }
+    }
+
+    /// A stream that breaks behind a ready event is watched again.
+    #[tokio::test(start_paused = true)]
+    async fn a_break_met_while_draining_is_watched_again() {
+        let fleet = Fleet::new(1).await;
+        let (durable_watches, mut watches) = tokio::sync::watch::channel(0);
+        let store = BreakAfterEvent {
+            memory: fleet.store.clone(),
+            durable_watches,
+        };
+        let (commands, commands_rx) = mpsc::channel(8);
+        let (events_tx, _events) = std_mpsc::channel();
+        let mut task = Task::new(
+            store,
+            fleet.cfg,
+            fleet.clock,
+            FINGERPRINT.to_string(),
+            "leader".into(),
+            fleet.nonces["leader"].clone(),
+            Box::new(Planner),
+            None,
+            commands_rx,
+            events_tx,
+            None,
+        );
+        task.leadership = Some(fleet.leader_rev);
+        task.plan = Some((fleet.plan, fleet.plan_rev));
+        task.plan_rev_seen = fleet.plan_rev.0;
+        let running = tokio::spawn(async move { task.run_inner().await });
+        tokio::time::timeout(Duration::from_secs(60), watches.wait_for(|n| *n >= 2))
+            .await
+            .expect("the durable watch is established again")
+            .unwrap();
+        drop(commands);
+        running.await.unwrap().unwrap();
+    }
 }

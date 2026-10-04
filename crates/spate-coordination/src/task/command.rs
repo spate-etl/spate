@@ -304,6 +304,7 @@ impl<S: CoordinationStore + Clone> Task<S> {
                     // metric. Remove from `owned` before folding the write so
                     // the epoch bump cannot read as a peer's fence.
                     self.owned.remove(id);
+                    self.quarantine_reports.remove(id);
                     // A failure mid-revocation leaves an uncommitted tail to replay.
                     self.settle_revocation(id, RevocationOutcome::Forced);
                     self.upsert_progress(id, record, rev)?;

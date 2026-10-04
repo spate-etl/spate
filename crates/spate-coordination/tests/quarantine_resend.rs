@@ -32,12 +32,14 @@ enum Fault {
     UpdateRejected,
 }
 
-/// A store that fails the next durable update of one key as armed, and can
-/// answer the next durable read of a key from a stale entry.
+/// A store that fails the next durable update of one key as armed, keeps the
+/// value of the last rejected update, and can answer the next durable read of
+/// a key from a stale entry.
 #[derive(Clone)]
 struct FaultStore {
     inner: TapStore<MemoryStore>,
     armed: Arc<Mutex<Option<(Fault, String)>>>,
+    rejected: Arc<Mutex<Option<Vec<u8>>>>,
     stale: Arc<Mutex<Option<Entry>>>,
 }
 
@@ -46,6 +48,7 @@ impl FaultStore {
         FaultStore {
             inner,
             armed: Arc::default(),
+            rejected: Arc::default(),
             stale: Arc::default(),
         }
     }
@@ -92,6 +95,7 @@ impl CoordinationStore for FaultStore {
         expected: Revision,
     ) -> Result<CasOutcome, StoreError> {
         if self.take(Fault::UpdateRejected, ks, key) {
+            *self.rejected.lock().unwrap() = Some(value);
             return Err(StoreError::Retryable(
                 "fixture: update rejected before apply".into(),
             ));
@@ -655,4 +659,94 @@ fn quarantining_report_resent_after_two_ambiguous_sends() {
         "third={third:?}, record={after}, events={events:?}, lease={lease}"
     );
     assert_eq!(rig.fenced(), 0.0);
+}
+
+/// A rejected quarantining report followed by one applied with its reply lost
+/// is recognised on the next send.
+#[test]
+fn quarantining_report_resent_after_a_rejected_then_applied_send() {
+    let mut rig = Rig::new(
+        "quarantining_report_resent_after_a_rejected_then_applied_send",
+        1,
+    );
+    rig.hide();
+    rig.fail_rejected();
+    std::thread::sleep(Duration::from_millis(2));
+    rig.fail_applied_reply_lost();
+    let third = rig.fail();
+    let events = rig.events();
+    let lease = rig.lease();
+    assert!(
+        third.is_ok() && !lost(&events, "x") && !lease,
+        "third={third:?}, events={events:?}, lease={lease}"
+    );
+    assert_eq!(rig.fenced(), 0.0);
+}
+
+/// A send after an unseen quarantining report was recognised is `Fenced`.
+#[test]
+fn a_report_after_a_recognised_unfolded_resend_is_fenced() {
+    let mut rig = Rig::new("a_report_after_a_recognised_unfolded_resend_is_fenced", 1);
+    rig.hide();
+    rig.fail_applied_reply_lost();
+    let second = rig.fail();
+    assert!(second.is_ok(), "second={second:?}");
+    let third = rig.fail();
+    assert_eq!(
+        kind(&third),
+        Some(CoordinationErrorKind::Fenced),
+        "third={third:?}"
+    );
+}
+
+/// A send after a folded quarantining report was recognised is `Fenced`.
+#[test]
+fn a_report_after_a_recognised_folded_resend_is_fenced() {
+    let mut rig = Rig::new("a_report_after_a_recognised_folded_resend_is_fenced", 1);
+    rig.fail_applied_reply_lost();
+    rig.fleet.settle(&rig.clock);
+    let second = rig.fail();
+    assert!(second.is_ok(), "second={second:?}");
+    let third = rig.fail();
+    assert_eq!(
+        kind(&third),
+        Some(CoordinationErrorKind::Fenced),
+        "third={third:?}"
+    );
+}
+
+/// After a quarantining report wins, a stored record equal to an earlier
+/// rejected send is not recognised as this worker's, so a send is `Fenced`.
+#[test]
+fn a_winning_quarantining_report_forgets_earlier_rejected_sends() {
+    let mut rig = Rig::new(
+        "a_winning_quarantining_report_forgets_earlier_rejected_sends",
+        1,
+    );
+    rig.fail_rejected();
+    let rejected = rig
+        .store
+        .rejected
+        .lock()
+        .unwrap()
+        .take()
+        .expect("the rejected value");
+    let won = rig.fail();
+    assert!(won.is_ok(), "won={won:?}");
+    let entry = rig.entry();
+    let written = rig
+        .rt
+        .block_on(
+            rig.memory
+                .update(Keyspace::Durable, "split.x", rejected, entry.revision),
+        )
+        .unwrap();
+    assert!(matches!(written, CasOutcome::Won(_)));
+    rig.fleet.settle(&rig.clock);
+    let again = rig.fail();
+    assert_eq!(
+        kind(&again),
+        Some(CoordinationErrorKind::Fenced),
+        "again={again:?}"
+    );
 }

@@ -1806,3 +1806,57 @@ async fn a_seeding_burst_leaves_renewals_and_commits_their_retries() {
         );
     }
 }
+
+/// A seeding burst on one store leaves another store in the same process its
+/// seeding retries.
+#[tokio::test]
+async fn a_seeding_burst_leaves_another_stores_seeding_its_retries() {
+    const BURST: usize = 128;
+    let probes = Arc::new(Mutex::new(HashMap::<String, usize>::new()));
+    let seen = probes.clone();
+    let script: Script = Arc::new(move |request: &Request| {
+        let body = &request.body;
+        match request.op.as_str() {
+            "describetable" => Reply::Json(200, ACTIVE_TABLE.into()),
+            "describetimetolive" => ttl_on(),
+            "updateitem" if body["Key"]["sk"]["S"] == "meta" => Reply::Json(200, "{}".into()),
+            "updateitem" if body["Key"]["sk"]["S"] != "spec.other" => {
+                Reply::Json(400, error_body("ProvisionedThroughputExceededException"))
+            }
+            "updateitem" => {
+                let mut probes = seen.lock().unwrap();
+                let n = probes.entry("spec.other".into()).or_default();
+                *n += 1;
+                if *n == 1 {
+                    Reply::Json(400, error_body("ProvisionedThroughputExceededException"))
+                } else {
+                    Reply::Json(200, r#"{"Attributes":{"v":{"N":"1"}}}"#.into())
+                }
+            }
+            _ => not_called(),
+        }
+    });
+    let (url, _) = serve(script).await;
+    let (sdk, settings) = settings(&url, static_credentials());
+    let sdk = sdk.into_builder().region(Region::new("ap-east-2")).build();
+    let first = store_over(SdkTable::new(&sdk, &settings));
+    let second = store_over(SdkTable::new(&sdk, &settings));
+    let creates = (0..BURST).map(|i| {
+        let store = first.clone();
+        async move {
+            store
+                .create(Keyspace::Durable, &format!("spec.s{i}"), b"v".to_vec())
+                .await
+        }
+    });
+    for outcome in futures_util::future::join_all(creates).await {
+        assert!(
+            matches!(outcome, Err(StoreError::Retryable(_))),
+            "{outcome:?}"
+        );
+    }
+    let other = second
+        .create(Keyspace::Durable, "spec.other", b"v".to_vec())
+        .await;
+    assert_eq!(other.unwrap(), CasOutcome::Won(Revision(1)));
+}

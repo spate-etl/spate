@@ -284,9 +284,11 @@ above every revision the worker has seen for the key. Deleting a lease or
 presence key first raises its revision floor to one above the revision it
 removes, and a create checks that floor in the same transaction that writes the
 key, retrying once just above a higher floor. A re-created key therefore lands
-above every revision it held, and a create over a key a delete removed lands
-above the delete every watcher reported for it. A takeover of a lease a watcher
-reported expired can land on that delete's revision.
+above every revision it held. A renewal or takeover lands at least two above
+the revision it replaces. A watcher reports a delete, on expiry or on removal,
+one above the highest revision its worker saw for the key, which for a removal
+is at most the floor it left. A renewal, takeover or re-create therefore lands
+above every delete a watcher reported for the key.
 
 That holds while the table keeps the key's floor and its last item. Time to
 live collects a floor no sooner than a day after the key's last delete, and a

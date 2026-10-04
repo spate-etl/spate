@@ -137,12 +137,13 @@ pub(crate) fn live_workers(presence: &BTreeMap<String, Revision>, member: Option
 /// The passes run in order:
 ///
 /// 1. **Sticky.** Every split whose lease owner is a live member with a
-///    free lane stays with it. Each remaining split then stays with the
-///    first of its `previous` assignee and its progress record's owner that
-///    is a live member with a free lane. A move costs a drain, so the
-///    assignment does not churn for a marginally better balance. The
-///    `previous` assignee keeps a split whose claim the leader has not
-///    observed yet with the member told to claim it.
+///    free lane stays with it, while the split's progress record names that
+///    owner or the lease is a claim ahead of the record. Each remaining
+///    split then stays with the first of its `previous` assignee and its
+///    progress record's owner that is a live member with a free lane. A move
+///    costs a drain, so the assignment does not churn for a marginally
+///    better balance. The `previous` assignee keeps a split whose claim the
+///    leader has not observed yet with the member told to claim it.
 /// 2. **Fill.** Unassigned splits go to the least-loaded member that has
 ///    lane budget, heaviest split first (longest-processing-time greedy).
 /// 3. **Improve.** While some split can move from a heavier member to a
@@ -161,10 +162,11 @@ pub(crate) fn live_workers(presence: &BTreeMap<String, Revision>, member: Option
 /// The result is idempotent: feeding this function's own output back as
 /// `previous` reproduces it exactly, whether each split's ownership in view
 /// matches that output or is absent because its claim has not been observed
-/// yet. Pass 1 restores every placement, pass 2 finds nothing unassigned,
-/// and pass 3 finds no improving move because it already ran to fixpoint. A
-/// steady-state fleet therefore publishes an unchanging assignment and
-/// drains nothing.
+/// yet. A lease from another owner that its progress record has moved past,
+/// or from a released split, does not change the result. Pass 1 restores
+/// every placement, pass 2 finds nothing unassigned, and pass 3 finds no
+/// improving move because it already ran to fixpoint. A steady-state fleet
+/// therefore publishes an unchanging assignment and drains nothing.
 ///
 /// `seed` keys the tie-breaks only (equal loads in pass 2, equal gains in
 /// pass 3). It must be a property of the **job**, not of the leader, or
@@ -220,10 +222,11 @@ pub(crate) fn desired_assignment(
     // which splits an over-capacity owner keeps.
     pool.sort_by_key(|(id, weight, _)| (std::cmp::Reverse(*weight), *id));
 
-    // Pass 1 — sticky. Leased splits go first over the whole pool: in a
-    // single walk, a split kept only by `previous` can take the lane its
-    // lease owner still needs. The record owner covers a split whose owner
-    // died and whose lease has expired but which no worker has reclaimed yet.
+    // Pass 1 — sticky. Splits with a current lease go first over the whole
+    // pool: in a single walk, a split kept only by `previous` can take the
+    // lane its lease owner still needs. The record owner covers a split whose
+    // owner died and whose lease has expired but which no worker has
+    // reclaimed yet.
     //
     // Loads are summed with `saturating_add`: a weight is planner-supplied
     // and unbounded (`spate-s3` reports bytes), and a leader must publish a
@@ -245,7 +248,11 @@ pub(crate) fn desired_assignment(
     };
     let mut rest: Vec<(&str, u64, &SplitState)> = Vec::new();
     for &(id, weight, state) in &pool {
-        let owner = state.lease.as_ref().map(|(lease, _)| lease.owner.as_str());
+        let owner = state
+            .lease
+            .as_ref()
+            .filter(|(lease, _)| lease_is_current(lease, &state.progress))
+            .map(|(lease, _)| lease.owner.as_str());
         match owner.filter(|m| fits(&out, m)) {
             Some(member) => place(&mut out, &mut load, member, id, weight),
             None => rest.push((id, weight, state)),
@@ -331,6 +338,12 @@ pub(crate) fn last_assignees<'a>(
 /// above what greedy needs in practice. If this ever binds, the
 /// local-optimality property test reports it.
 const MAX_IMPROVING_MOVES: usize = 4096;
+
+/// Whether `progress` names `lease`'s owner, at any epoch, or `lease` is a
+/// claim ahead of it.
+fn lease_is_current(lease: &LeaseVal, progress: &SplitProgressRecord) -> bool {
+    lease.epoch > progress.epoch || progress.owner.as_deref() == Some(lease.owner.as_str())
+}
 
 /// The member with the least load that still has lane budget. `hashes`
 /// carries each member name's tie-break hash, precomputed by the caller —
@@ -813,8 +826,9 @@ mod tests {
     /// of splits name an owner or a last assignee that is *not* a live
     /// member. That is the departed-member case, where reassignment has to
     /// happen. `ownership` picks what the view shows of the owner: a lease
-    /// and a record, the record alone (an expired lease), or the lease alone
-    /// (a claim whose record write is not in view yet).
+    /// and a record, the record alone (an expired lease), or the lease alone,
+    /// one epoch ahead of the record (a claim whose record write is not in
+    /// view yet).
     type AssignEntry = (String, u64, Option<u8>, u8, Option<u8>, u8);
 
     fn assignment_entries() -> impl Strategy<Value = Vec<AssignEntry>> {
@@ -851,6 +865,7 @@ mod tests {
 
     fn assignment_input(entries: Vec<AssignEntry>, fleet: usize) -> AssignInput {
         let ms: BTreeSet<String> = (0..fleet).map(|i| format!("w{i}")).collect();
+        let run = uuid::Uuid::new_v4().simple().to_string();
         let mut previous = BTreeMap::new();
         let mut states = Vec::new();
         for (id, weight, owner, ownership, last, status) in entries {
@@ -863,7 +878,7 @@ mod tests {
             let l = owner
                 .as_deref()
                 .filter(|_| ownership != 1)
-                .map(|o| lease(o, "n", 1));
+                .map(|o| lease(o, &run, 1 + u64::from(ownership == 2)));
             let record_owner = owner.as_deref().filter(|_| ownership != 2);
             if let Some(last) = last {
                 previous.insert(id.clone(), format!("w{last}"));
@@ -1255,10 +1270,11 @@ mod tests {
     /// assignee.
     #[test]
     fn a_departed_lease_owner_passes_the_split_to_its_last_assignee() {
+        let run = uuid::Uuid::new_v4().simple().to_string();
         let map = splits(vec![state(
             record("s", SplitStatus::Runnable, None, 1, 0),
             1,
-            Some(lease("gone", "n", 1)),
+            Some(lease("gone", &run, 2)),
         )]);
         let previous: BTreeMap<String, String> =
             [("s".to_string(), "w2".to_string())].into_iter().collect();
@@ -1266,6 +1282,33 @@ mod tests {
         for seed in 0..32 {
             let out = assign_after(&ms, &map, &BTreeSet::new(), &previous, 1, seed);
             assert_eq!(out["w2"], ["s"], "seed {seed}");
+        }
+    }
+
+    /// Pass 1 counts a lease while its progress record names its owner or it
+    /// is a claim ahead of the record. Regression for #824.
+    #[test]
+    fn a_lease_counts_while_its_record_names_its_owner_or_trails_it() {
+        let run = uuid::Uuid::new_v4().simple().to_string();
+        let previous: BTreeMap<String, String> =
+            [("s".to_string(), "w2".to_string())].into_iter().collect();
+        let ms = members(&["w1", "w2"]);
+        let cases = [
+            ("claiming", None, 1, 2, "w1"),
+            ("held", Some("w1"), 1, 1, "w1"),
+            ("released", None, 1, 1, "w2"),
+            ("taken over", Some("w2"), 2, 1, "w2"),
+            ("held by another", Some("w2"), 1, 1, "w2"),
+            ("reclaimed", Some("w1"), 2, 1, "w1"),
+        ];
+        for (case, record_owner, record_epoch, lease_epoch, holder) in cases {
+            let map = splits(vec![state(
+                record("s", SplitStatus::Runnable, record_owner, record_epoch, 0),
+                1,
+                Some(lease("w1", &run, lease_epoch)),
+            )]);
+            let out = assign_after(&ms, &map, &BTreeSet::new(), &previous, 1, 7);
+            assert_eq!(out[holder], ["s"], "{case}");
         }
     }
 
@@ -1387,6 +1430,31 @@ mod tests {
             let next = claimed(&map, &owner_of, |id| seen & (1 << index[id]) != 0);
             let second = assign_after(&ms, &next, &reserved, &owner_of, cap, seed);
             prop_assert_eq!(first, second, "an unseen claim moved a split");
+        }
+
+        /// Invariant 3 — stable while superseded leases linger. Leases the
+        /// progress records have moved past, still in the leader's view,
+        /// move nothing.
+        #[test]
+        fn assignment_is_stable_while_superseded_leases_linger(
+            entries in assignment_entries(),
+            fleet in 1usize..5,
+            cap in 1u32..5,
+            seed in any::<u64>(),
+            reserved in reserved_ids(),
+            shift in 0usize..6,
+        ) {
+            let run = uuid::Uuid::new_v4().simple().to_string();
+            let (map, ms, previous) = assignment_input(entries, fleet);
+            let first = assign_after(&ms, &map, &reserved, &previous, cap, seed);
+            let owner_of = published(&first);
+            let mut next = claimed(&map, &owner_of, |_| true);
+            for (i, st) in next.values_mut().enumerate() {
+                st.progress.epoch = 2;
+                st.lease = Some(lease(&format!("w{}", (i + shift) % 6), &run, 1));
+            }
+            let second = assign_after(&ms, &next, &reserved, &owner_of, cap, seed);
+            prop_assert_eq!(first, second, "a superseded lease moved a split");
         }
 
         /// Invariant 4 — converges to a local optimum: no single split can

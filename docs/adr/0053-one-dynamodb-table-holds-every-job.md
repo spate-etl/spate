@@ -1,5 +1,5 @@
 ---
-description: "One operator-provisioned DynamoDB table holds every job, keyed by job and keyspace, so IAM can scope a job; each keyspace of a job sits on one partition key."
+description: "One operator-provisioned DynamoDB table holds every job, keyed by job and keyspace, so IAM can scope a job. Its partition-key list is superseded by ADR-0057."
 ---
 
 # ADR-0053 — One operator-provisioned table holds every job, keyed by job and keyspace
@@ -7,7 +7,8 @@ description: "One operator-provisioned DynamoDB table holds every job, keyed by 
 - **Status:** accepted
 - **Date:** 2026-09-29
 - **Supersedes:** —
-- **Superseded by:** —
+- **Superseded by:** [ADR-0057](0057-a-deleted-dynamodb-ephemeral-key-leaves-a-revision-floor.md)
+  (partition keys)
 
 ## Context and problem statement
 

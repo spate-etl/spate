@@ -164,6 +164,7 @@ A worker needs these actions on the table:
       "Action": [
         "dynamodb:GetItem",
         "dynamodb:UpdateItem",
+        "dynamodb:ConditionCheckItem",
         "dynamodb:DeleteItem",
         "dynamodb:Query"
       ],
@@ -279,9 +280,23 @@ to one poll interval and its query; the epoch fence on every commit makes that
 overlap safe, as it does on every store.
 
 A lease a worker creates takes its revision from that worker's wall clock, kept
-above every revision the worker has seen for the key. When skew between two
-machines puts a re-created lease below the revision a watcher holds, the
-watcher reports a delete and then the new lease.
+above every revision the worker has seen for the key. Deleting a lease or
+presence key first raises its revision floor to one above the revision it
+removes, and a create checks that floor in the same transaction that writes the
+key, retrying once just above a higher floor. A re-created key therefore lands
+above every revision it held, and a create over a key a delete removed lands
+above the delete every watcher reported for it. A takeover of a lease a watcher
+reported expired can land on that delete's revision.
+
+That holds while the table keeps the key's floor and its last item. Time to
+live collects a floor no sooner than a day after the key's last delete, and a
+lease no sooner than a day after its last write, each by the wall clock of the
+worker that wrote it, so a lagging clock brings collection forward by its lag.
+A lease that time to live collects leaves no floor. Once either is gone, a
+re-create lands at or below the key's last revision only when its creator's
+clock trails the clock that wrote that revision by at least a day, less that
+lag. A watcher holding the higher revision then reports a delete and then the
+new lease.
 
 ## Latency and cost
 
@@ -323,7 +338,7 @@ The terms that dominate cost, for `W` workers with `L` lanes each
 |---|---|
 | Lease poll | `W × ⌈(W × L × 184 B + W × 157 B + 164 B) / 4 KiB⌉ / P` read units per second |
 | Commits | about `W × L / checkpoint interval` write units per second while busy |
-| Split turnover | about 7 write units and 4 read units per completed split |
+| Split turnover | about 10 write units and 4 read units per completed split |
 | Leader reconcile | `⌈S × 452 B / 4 KiB⌉ / reconcile_interval` read units per second |
 
 The lease poll grows with the square of the fleet: at about 100 workers it nears
@@ -335,8 +350,10 @@ records in the
 which also gives modelled totals for 1M to 20M rows per second with the
 assumptions it rests on. At 10M rows per second with 64 MiB splits it models 27
 workers at about 210 write units and 320 read units per second. The revision
-floor each lease delete writes adds one write unit per completed split, and
-that model then comes to about 237 write units per second.
+floor each lease delete writes adds one write unit per completed split, and the
+lease create's transaction three more, since DynamoDB charges two writes for
+each of its two items. That model then comes to about 313 write units per
+second.
 
 ## What an outage does
 

@@ -18,7 +18,7 @@
 //!
 //! | Keyspace  | Key                 | Record        |
 //! |-----------|---------------------|---------------|
-//! | Durable   | `plan`              | [`PlanRecord`]          — fingerprint, generation, finality, planner cursor |
+//! | Durable   | `plan`              | [`PlanRecord`]          — fingerprint, generation and its elector, finality, planner cursor |
 //! | Durable   | `spec.{id}`         | [`SplitSpecRecord`]     — descriptor, weight (immutable) |
 //! | Durable   | `split.{id}`        | [`SplitProgressRecord`] — epoch, status, attempts, progress (the fence) |
 //! | Durable   | `assign.{instance}` | [`AssignmentVal`]       — the leader's desired assignment |
@@ -378,6 +378,10 @@ pub(crate) struct PlanRecord {
     /// Leadership generation: bumped by every newly elected leader before
     /// it plans. The plan record's CAS revision is the leader fence.
     pub(crate) generation: u64,
+    /// The worker whose election wrote `generation`; `None` on a record
+    /// written without one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) elector: Option<Elector>,
     /// Whether the enumeration is final.
     pub(crate) finality: PlanFinalityRepr,
     /// Splits planned (progress records live in the store), recounted from
@@ -395,6 +399,14 @@ pub(crate) struct PlanRecord {
     pub(crate) planner_state: Option<String>,
     /// Advisory wall-clock stamp of the last write.
     pub(crate) updated_at_ms: i64,
+}
+
+/// A worker's identity as the plan record stores it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Elector {
+    pub(crate) owner: String,
+    pub(crate) nonce: String,
 }
 
 /// Serialized form of [`PlanFinality`].
@@ -420,6 +432,7 @@ impl PlanRecord {
             schema: SCHEMA,
             fingerprint,
             generation: 0,
+            elector: None,
             finality: PlanFinalityRepr::Open,
             planned: 0,
             planner_state: None,
@@ -645,6 +658,16 @@ mod tests {
                 > CAP
         );
         assert!(record(&"a".repeat(CAP), &[]).encode().len() > CAP);
+    }
+
+    /// A plan record without an elector parses with none and re-encodes to the
+    /// same bytes.
+    #[test]
+    fn a_plan_record_without_an_elector_reads_as_none() {
+        let bytes = br#"{"schema":3,"fingerprint":"job:v1","generation":4,"finality":"open","planned":2,"planner_state":null,"updated_at_ms":5}"#;
+        let plan = PlanRecord::parse(bytes, "job:v1").unwrap();
+        assert_eq!(plan.elector, None);
+        assert_eq!(plan.encode(), bytes.to_vec());
     }
 
     #[test]

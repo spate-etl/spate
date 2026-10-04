@@ -71,13 +71,14 @@ pub fn encode_progress_record(
     Some(record.encode())
 }
 
-/// Encode the `plan` record a leader publishes. `updated_at_ms` is the
-/// advisory stamp, taken from the caller so the same fields always produce
-/// the same bytes.
+/// Encode the `plan` record a leader publishes, naming `elector` as
+/// `(owner, nonce)`. `updated_at_ms` is the advisory stamp, taken from the
+/// caller so the same fields always produce the same bytes.
 #[must_use]
 pub fn encode_plan_record(
     fingerprint: &str,
     generation: u64,
+    elector: Option<(&str, &str)>,
     is_final: bool,
     planned: u64,
     updated_at_ms: i64,
@@ -85,6 +86,10 @@ pub fn encode_plan_record(
 ) -> Vec<u8> {
     let mut record = PlanRecord::new(fingerprint.to_string());
     record.generation = generation;
+    record.elector = elector.map(|(owner, nonce)| records::Elector {
+        owner: owner.to_string(),
+        nonce: nonce.to_string(),
+    });
     record.finality = if is_final {
         PlanFinalityRepr::Final
     } else {

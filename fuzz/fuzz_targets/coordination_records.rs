@@ -60,6 +60,8 @@ struct Fields {
     quarantined: bool,
     written_at_ms: i64,
     updated_at_ms: i64,
+    /// The plan record's elector, as `(owner, nonce)`.
+    elector: Option<(String, String)>,
     is_final: bool,
     planned: u64,
     planner_state: Option<Vec<u8>>,
@@ -176,6 +178,10 @@ fuzz_target!(|input: Input| {
     let plan = encode_plan_record(
         &fields.fingerprint,
         fields.generation,
+        fields
+            .elector
+            .as_ref()
+            .map(|(owner, nonce)| (owner.as_str(), nonce.as_str())),
         fields.is_final,
         fields.planned,
         fields.updated_at_ms,

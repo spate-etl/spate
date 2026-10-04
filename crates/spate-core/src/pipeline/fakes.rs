@@ -31,9 +31,9 @@ pub(crate) struct SourceLog {
     /// the seam a source publishes consumer lag through; if the handles never
     /// arrive, the lag gauge renders a permanent zero on every pipeline.
     pub(crate) stage_metrics_attached: bool,
-    /// When set, `commit`, `commit_final` and `flush_commits` fail
-    /// retryably, modeling a checkpoint store outage; nothing is recorded as
-    /// committed.
+    /// When set, `commit` and `flush_commits` fail retryably, modeling a
+    /// checkpoint store outage; nothing is recorded as committed.
+    /// `commit_final` fails the same way unless `final_unstored` is set.
     pub(crate) fail_commits: bool,
     /// When set, `commit_final` stores every other position and reports
     /// these partitions as not stored.

@@ -5,7 +5,6 @@ use super::Inner;
 use super::table::{Item, Query};
 use crate::store::{Entry, Keyspace, Revision, StoreError, WatchEvent, WatchStream};
 use futures_util::StreamExt as _;
-use spate_core::metrics::StoreOp;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Weak};
 use tokio::sync::{mpsc, oneshot};
@@ -185,8 +184,8 @@ impl Poll {
         let consistent = self.ks == Keyspace::Ephemeral;
         let started = std::time::Instant::now();
         let read = self.read(inner, consistent).await;
-        if let Some(m) = inner.metrics.get() {
-            m.store_op(StoreOp::Poll, started.elapsed());
+        if let Some(record) = inner.poll_recorder.get() {
+            record(started.elapsed());
         }
         match read {
             Ok(read) => {

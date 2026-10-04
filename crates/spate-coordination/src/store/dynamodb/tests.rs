@@ -879,7 +879,7 @@ fn op_timeout_is_checked_and_forwarded() {
     .expect("a matching op_timeout");
     crate::SplitCoordinator::start(&mut accepted, Box::new(EmptyPlanner)).unwrap();
     assert!(
-        started.inner.metrics.get().is_some(),
+        started.inner.poll_recorder.get().is_some(),
         "start attached no metrics"
     );
     drop(accepted);
@@ -893,7 +893,7 @@ fn op_timeout_is_checked_and_forwarded() {
         "s3",
     );
     metered.attach_metrics(&CoordinationMetrics::new(&labels));
-    assert!(store.inner.metrics.get().is_some());
+    assert!(store.inner.poll_recorder.get().is_some());
 }
 
 /// Construction refuses a malformed table or job name, an empty region, an

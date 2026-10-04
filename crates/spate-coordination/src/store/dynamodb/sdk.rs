@@ -14,7 +14,7 @@ use aws_config::meta::region::RegionProviderChain;
 use aws_config::profile::region::ProfileFileRegionProvider;
 use aws_config::provider_config::ProviderConfig;
 use aws_sdk_dynamodb::Client;
-use aws_sdk_dynamodb::config::retry::RetryConfig;
+use aws_sdk_dynamodb::config::retry::{RetryConfig, RetryPartition};
 use aws_sdk_dynamodb::config::timeout::TimeoutConfig;
 use aws_sdk_dynamodb::config::{
     BehaviorVersion, Region, SharedCredentialsProvider, SharedHttpClient,
@@ -185,6 +185,8 @@ fn push_pem(out: &mut String, der: &[u8]) {
 #[derive(Debug)]
 pub(super) struct SdkTable {
     client: Client,
+    /// The client for [`Table::write_seed`], with an SDK retry quota of its own.
+    seeding: Client,
     table: String,
 }
 
@@ -212,8 +214,12 @@ impl SdkTable {
         if let Some(endpoint) = &settings.endpoint {
             config = config.endpoint_url(endpoint);
         }
+        let seeding = config
+            .clone()
+            .retry_partition(RetryPartition::custom("spate-seeding").build());
         SdkTable {
             client: Client::from_conf(config.build()),
+            seeding: Client::from_conf(seeding.build()),
             table: settings.table.clone(),
         }
     }
@@ -373,10 +379,15 @@ fn failed_against<E>(
 }
 
 impl SdkTable {
-    async fn update_item(&self, pk: &str, sk: &str, write: &Write) -> Result<Written, StoreError> {
+    async fn update_item(
+        &self,
+        client: &Client,
+        pk: &str,
+        sk: &str,
+        write: &Write,
+    ) -> Result<Written, StoreError> {
         let (update, condition, returns, expr) = update(write).expect("an UpdateItem write");
-        let result = self
-            .client
+        let result = client
             .update_item()
             .table_name(&self.table)
             .set_key(Some(key(pk, sk)))
@@ -550,9 +561,18 @@ impl Table for SdkTable {
         Box::pin(async move {
             match write {
                 Write::Remove { expected } => self.delete_item(pk, sk, expected).await,
-                write => self.update_item(pk, sk, &write).await,
+                write => self.update_item(&self.client, pk, sk, &write).await,
             }
         })
+    }
+
+    fn write_seed<'a>(
+        &'a self,
+        pk: &'a str,
+        sk: &'a str,
+        write: Write,
+    ) -> BoxFuture<'a, Result<Written, StoreError>> {
+        Box::pin(async move { self.update_item(&self.seeding, pk, sk, &write).await })
     }
 
     fn create_above<'a>(

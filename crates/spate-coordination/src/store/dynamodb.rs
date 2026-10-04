@@ -172,6 +172,11 @@ pub struct DynamoDbStore {
     inner: Arc<Inner>,
 }
 
+/// Whether a durable create of `key` seeds a split: its spec or progress record.
+fn seeds(key: &str) -> bool {
+    key.starts_with(crate::records::SPEC_PREFIX) || key.starts_with(crate::records::SPLIT_PREFIX)
+}
+
 fn write_id() -> WriteId {
     *uuid::Uuid::new_v4().as_bytes()
 }
@@ -628,7 +633,13 @@ impl CoordinationStore for DynamoDbStore {
             w,
             now_ms: (self.inner.now_ms)(),
         };
-        match table.write(self.inner.pk(ks), key, create).await? {
+        let pk = self.inner.pk(ks);
+        let written = if seeds(key) {
+            table.write_seed(pk, key, create).await?
+        } else {
+            table.write(pk, key, create).await?
+        };
+        match written {
             Written::Ok { v: Some(v) } => Ok(CasOutcome::Won(Revision(v))),
             Written::Ok { v: None } => Err(StoreError::Fatal(format!(
                 "the create of {key} returned no revision"

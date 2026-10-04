@@ -73,6 +73,18 @@ pub(crate) enum Written {
     Failed { old: Option<Item> },
 }
 
+/// The outcome of a [`Table::create_above`].
+#[derive(Clone, Debug)]
+pub(crate) enum Created {
+    Ok,
+    /// The key exists; `old` is the item as it stood.
+    Exists {
+        old: Option<Item>,
+    },
+    /// The key's floor stands at this revision, at or above the new one.
+    Floor(u64),
+}
+
 /// One page of a key-ordered read of a partition.
 #[derive(Clone, Debug)]
 pub(crate) struct Query {
@@ -141,6 +153,22 @@ pub(crate) trait Table: Send + Sync + fmt::Debug {
         sk: &'a str,
         write: Write,
     ) -> BoxFuture<'a, Result<Written, StoreError>>;
+
+    /// Applies `put`, a [`Write::Put`] under [`Cond::Absent`], in one
+    /// transaction that also requires the item under `floor_pk` and `sk` to
+    /// be absent or below the put's revision. A failed key condition is
+    /// reported ahead of a failed floor.
+    ///
+    /// # Panics
+    ///
+    /// When `put` is not a [`Write::Put`].
+    fn create_above<'a>(
+        &'a self,
+        pk: &'a str,
+        floor_pk: &'a str,
+        sk: &'a str,
+        put: Write,
+    ) -> BoxFuture<'a, Result<Created, StoreError>>;
 
     /// A consistent point read.
     fn get<'a>(

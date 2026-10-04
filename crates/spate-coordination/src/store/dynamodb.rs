@@ -16,6 +16,15 @@
 //! - Removing an ephemeral key at revision `R` first raises its floor item
 //!   in `{job}#f` to at least `R + 1`, with `x` a day ahead on the deleting
 //!   handle's wall clock. A delete whose raise fails keeps the key.
+//! - An ephemeral create is one transaction that checks the key's floor item
+//!   is absent or below the new revision, and retries once above a floor it
+//!   meets. A re-created key lands above every revision the key held while
+//!   the table keeps its floor and its last item. Native TTL may collect
+//!   either once its `x`, stamped a day ahead on its writer's clock, has
+//!   passed. After that, a re-create lands at or below the key's last
+//!   revision only on a clock that trails the one that wrote that revision
+//!   by at least a day, less however far the clock that stamped the
+//!   collected item lagged.
 //! - Watches list their prefix every `poll_interval` and report the
 //!   difference, so the store declares [`WatchMode::Polled`].
 //! - Every write carries a random write id, and a failed condition returns
@@ -47,7 +56,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::Duration;
-use table::{Cond, Item, Query, Table, Write, WriteId, Written};
+use table::{Cond, Created, Item, Query, Table, Write, WriteId, Written};
 use tokio::time::Instant;
 
 mod config;
@@ -394,17 +403,36 @@ impl DynamoDbStore {
         let pk = self.inner.pk(Keyspace::Ephemeral);
         let w = write_id();
         let (s0, t0) = self.inner.mark();
-        let base = {
+        let base = || {
             let o = self.inner.observed();
             ((self.inner.now_ms)())
                 .max(o.hw(key) + 1)
                 .max(o.floor(key) + 1)
         };
-        let put = self.ephemeral_put(base, value.clone(), w, Cond::Absent);
-        let old = match table.write(pk, key, put).await? {
-            Written::Ok { .. } => return Ok(self.own_write(key, base)),
-            Written::Failed { old: Some(old) } => old,
-            Written::Failed { old: None } => return Ok(CasOutcome::Lost),
+        let mut v = base();
+        let mut retried = false;
+        let old = loop {
+            let put = self.ephemeral_put(v, value.clone(), w, Cond::Absent);
+            match table
+                .create_above(pk, self.inner.floor_pk(), key, put)
+                .await?
+            {
+                Created::Ok => return Ok(self.own_write(key, v)),
+                Created::Exists { old: Some(old) } => break old,
+                Created::Exists { old: None } => return Ok(CasOutcome::Lost),
+                Created::Floor(floor) => {
+                    self.inner
+                        .observed()
+                        .raise_floor(key, floor, self.inner.clock.now());
+                    if retried {
+                        return Err(StoreError::Retryable(format!(
+                            "the create of {key} met its revision floor {floor} twice"
+                        )));
+                    }
+                    retried = true;
+                    v = base();
+                }
+            }
         };
         if old.w == Some(w) {
             return Ok(self.own_write(key, old.v));

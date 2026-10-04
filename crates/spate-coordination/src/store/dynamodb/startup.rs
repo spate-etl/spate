@@ -6,7 +6,7 @@ use crate::store::StoreError;
 use std::time::Duration;
 
 /// The item layout this store writes; a job written with another is refused.
-pub(super) const LAYOUT: u64 = 1;
+pub(super) const LAYOUT: u64 = 2;
 
 /// Checks the table's shape and TTL, creating the table and enabling TTL
 /// when the config allows, then fixes or compares the job's meta item.

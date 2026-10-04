@@ -3,7 +3,8 @@
 //! faults the store handles.
 
 use super::table::{
-    BoxFuture, Cond, Item, KeyAttr, Meta, Page, Query, Shape, Status, Table, Ttl, Write, Written,
+    BoxFuture, Cond, Created, Item, KeyAttr, Meta, Page, Query, Shape, Status, Table, Ttl, Write,
+    Written,
 };
 use crate::store::StoreError;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -231,6 +232,19 @@ impl FakeTable {
             .and_then(|s| s.cur.clone())
     }
 
+    /// Removes the item under `pk` and `sk` as native TTL does, with no
+    /// write the store sees.
+    #[cfg(test)]
+    pub(crate) fn collect(&self, pk: &str, sk: &str) {
+        if let Some(slot) = self
+            .state()
+            .items
+            .get_mut(&(pk.to_string(), sk.to_string()))
+        {
+            slot.prev = slot.cur.take();
+        }
+    }
+
     #[cfg(test)]
     /// Every Query issued so far.
     pub(crate) fn queries(&self) -> Vec<Query> {
@@ -268,6 +282,64 @@ impl FakeTable {
 
     fn write_now(&self, pk: &str, sk: &str, write: Write) -> Result<Written, StoreError> {
         let mut state = self.call(FakeOp::Write)?;
+        self.apply(&mut state, pk, sk, write)
+    }
+
+    fn create_above_now(
+        &self,
+        pk: &str,
+        floor_pk: &str,
+        sk: &str,
+        put: Write,
+    ) -> Result<Created, StoreError> {
+        let Write::Put { v: base, .. } = put else {
+            panic!("create_above takes a Write::Put");
+        };
+        let mut state = self.call(FakeOp::Write)?;
+        let held = |state: &State, pk: &str| {
+            state
+                .items
+                .get(&(pk.to_string(), sk.to_string()))
+                .and_then(|s| s.cur.clone())
+        };
+        if let Some(old) = held(&state, pk) {
+            return Ok(Created::Exists { old: Some(old) });
+        }
+        if let Some(floor) = held(&state, floor_pk).filter(|f| f.v >= base) {
+            return Ok(Created::Floor(floor.v));
+        }
+        Ok(match self.apply(&mut state, pk, sk, put)? {
+            Written::Ok { .. } => Created::Ok,
+            Written::Failed { old } => Created::Exists { old },
+        })
+    }
+
+    /// Applies the interposed write once its turn has come.
+    fn interposed(&self) -> Result<(), StoreError> {
+        let due = {
+            let mut interpose = self.0.interpose.lock().expect("fake table poisoned");
+            match interpose.as_mut() {
+                Some((0, ..)) => interpose.take(),
+                Some((after, ..)) => {
+                    *after -= 1;
+                    None
+                }
+                None => None,
+            }
+        };
+        if let Some((_, pk, sk, write)) = due {
+            self.write_now(&pk, &sk, write)?;
+        }
+        Ok(())
+    }
+
+    fn apply(
+        &self,
+        state: &mut State,
+        pk: &str,
+        sk: &str,
+        write: Write,
+    ) -> Result<Written, StoreError> {
         let slot = state
             .items
             .entry((pk.to_string(), sk.to_string()))
@@ -413,21 +485,21 @@ impl Table for FakeTable {
         write: Write,
     ) -> BoxFuture<'a, Result<Written, StoreError>> {
         Box::pin(async move {
-            let due = {
-                let mut interpose = self.0.interpose.lock().expect("fake table poisoned");
-                match interpose.as_mut() {
-                    Some((0, ..)) => interpose.take(),
-                    Some((after, ..)) => {
-                        *after -= 1;
-                        None
-                    }
-                    None => None,
-                }
-            };
-            if let Some((_, pk, sk, write)) = due {
-                self.write_now(&pk, &sk, write)?;
-            }
+            self.interposed()?;
             self.write_now(pk, sk, write)
+        })
+    }
+
+    fn create_above<'a>(
+        &'a self,
+        pk: &'a str,
+        floor_pk: &'a str,
+        sk: &'a str,
+        put: Write,
+    ) -> BoxFuture<'a, Result<Created, StoreError>> {
+        Box::pin(async move {
+            self.interposed()?;
+            self.create_above_now(pk, floor_pk, sk, put)
         })
     }
 

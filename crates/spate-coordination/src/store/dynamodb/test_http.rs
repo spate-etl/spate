@@ -1128,6 +1128,156 @@ async fn a_floor_raise_is_conditional_and_carries_its_collection_time() {
     assert_eq!((sets, removed), (expected, Vec::new()), "{raise}");
 }
 
+/// An ephemeral create is one transaction: a check that the floor item is
+/// absent or below the new revision, then the put under its own condition,
+/// both returning the item a failed condition met.
+#[tokio::test]
+async fn a_create_checks_the_floor_in_one_transaction() {
+    let (script, bodies) = recorded("{}");
+    let (url, _) = serve(script).await;
+    let table = table_at(&url);
+    let put = Write::Put {
+        v: 42,
+        b: b"v".to_vec(),
+        w: [7; 16],
+        x: Some(9),
+        cond: Cond::Absent,
+    };
+    let created = table
+        .create_above("job#e", "job#f", "k", put)
+        .await
+        .unwrap();
+    assert!(matches!(created, Created::Ok), "{created:?}");
+    let bodies = bodies.lock().unwrap();
+    let [call] = bodies.as_slice() else {
+        panic!("{bodies:?}");
+    };
+    let key = |pk: &str| serde_json::json!({ "pk": { "S": pk }, "sk": { "S": "k" } });
+    let [check, create] = call["TransactItems"].as_array().expect("items").as_slice() else {
+        panic!("{call}");
+    };
+    let check = &check["ConditionCheck"];
+    assert_eq!(check["Key"], key("job#f"), "{call}");
+    assert_eq!(
+        check["ConditionExpression"], "attribute_not_exists(#v) OR #v < :v",
+        "{call}"
+    );
+    assert_eq!(
+        check["ExpressionAttributeNames"],
+        serde_json::json!({ "#v": "v" })
+    );
+    assert_eq!(
+        check["ExpressionAttributeValues"],
+        serde_json::json!({ ":v": { "N": "42" } })
+    );
+    assert_eq!(check["ReturnValuesOnConditionCheckFailure"], "ALL_OLD");
+    let create = &create["Update"];
+    assert_eq!(create["Key"], key("job#e"), "{call}");
+    assert_eq!(create["ConditionExpression"], "attribute_not_exists(#v)");
+    assert_eq!(create["ReturnValuesOnConditionCheckFailure"], "ALL_OLD");
+    let (sets, removed) = assigned(create);
+    assert_eq!(sets.get("v"), Some(&serde_json::json!({ "N": "42" })));
+    assert_eq!(sets.get("x"), Some(&serde_json::json!({ "N": "9" })));
+    assert!(sets.contains_key("b") && sets.contains_key("w") && removed.is_empty());
+}
+
+/// A cancelled transaction with these reasons, in item order: floor, key.
+fn cancelled(floor: &str, key: &str) -> Reply {
+    Reply::Json(
+        400,
+        format!(
+            r#"{{"__type":"com.amazonaws.dynamodb.v20120810#TransactionCanceledException",
+                "Message":"Transaction cancelled","CancellationReasons":[{floor},{key}]}}"#
+        ),
+    )
+}
+
+/// A store whose `TransactWriteItems` calls `answer` replies to by call
+/// index, and the bodies of those calls.
+async fn creating(
+    answer: impl Fn(usize) -> Reply + Send + Sync + 'static,
+) -> (DynamoDbStore, Arc<Mutex<Vec<serde_json::Value>>>) {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let seen = calls.clone();
+    let script: Script = Arc::new(move |request: &Request| match request.op.as_str() {
+        "describetable" => Reply::Json(200, ACTIVE_TABLE.into()),
+        "describetimetolive" => ttl_on(),
+        "transactwriteitems" => {
+            let mut seen = seen.lock().unwrap();
+            seen.push(request.body.clone());
+            answer(seen.len() - 1)
+        }
+        _ => Reply::Json(200, "{}".into()),
+    });
+    let (url, _) = serve(script).await;
+    (store_over(table_at(&url)), calls)
+}
+
+/// A create cancelled on the floor alone retries once just above the floor
+/// it returned; a failed key condition decides the outcome ahead of the
+/// floor; any other reason is retryable after one call.
+#[tokio::test]
+async fn a_cancelled_create_retries_above_the_floor_it_returned() {
+    const FLOOR: &str = r#"{"Code":"ConditionalCheckFailed","Item":{"v":{"N":"41"}}}"#;
+    const KEY: &str = r#"{"Code":"ConditionalCheckFailed",
+        "Item":{"v":{"N":"7"},"w":{"B":"CQkJCQkJCQkJCQkJCQkJCQ=="}}}"#;
+    const NONE: &str = r#"{"Code":"None"}"#;
+    let (store, calls) = creating(|i| match i {
+        0 => cancelled(FLOOR, NONE),
+        _ => Reply::Json(200, "{}".into()),
+    })
+    .await;
+    let outcome = store.create(Keyspace::Ephemeral, "k", b"v".to_vec()).await;
+    assert_eq!(outcome.unwrap(), CasOutcome::Won(Revision(42)));
+    let base = |call: &serde_json::Value| {
+        call["TransactItems"][0]["ConditionCheck"]["ExpressionAttributeValues"][":v"]["N"].clone()
+    };
+    let bases: Vec<_> = calls.lock().unwrap().iter().map(base).collect();
+    assert_eq!(bases, ["1", "42"]);
+
+    for (floor, key) in [(NONE, KEY), (FLOOR, KEY)] {
+        let (store, calls) = creating(move |_| cancelled(floor, key)).await;
+        let outcome = store.create(Keyspace::Ephemeral, "k", b"v".to_vec()).await;
+        assert_eq!(outcome.unwrap(), CasOutcome::Lost, "{floor} {key}");
+        assert_eq!(calls.lock().unwrap().len(), 1, "{floor} {key}");
+    }
+
+    let (store, calls) = creating(|_| cancelled(NONE, r#"{"Code":"ThrottlingError"}"#)).await;
+    let outcome = store.create(Keyspace::Ephemeral, "k", b"v".to_vec()).await;
+    assert!(
+        matches!(outcome, Err(StoreError::Retryable(_))),
+        "{outcome:?}"
+    );
+    assert_eq!(calls.lock().unwrap().len(), 1);
+}
+
+/// A create that meets a floor on its retry as well returns a retryable error
+/// after two calls, and the next create starts above the second floor.
+#[tokio::test]
+async fn a_create_that_meets_a_floor_twice_is_retryable() {
+    const NONE: &str = r#"{"Code":"None"}"#;
+    let (store, calls) = creating(|i| match i {
+        0 => cancelled(
+            r#"{"Code":"ConditionalCheckFailed","Item":{"v":{"N":"41"}}}"#,
+            NONE,
+        ),
+        1 => cancelled(
+            r#"{"Code":"ConditionalCheckFailed","Item":{"v":{"N":"141"}}}"#,
+            NONE,
+        ),
+        _ => Reply::Json(200, "{}".into()),
+    })
+    .await;
+    let outcome = store.create(Keyspace::Ephemeral, "k", b"v".to_vec()).await;
+    assert!(
+        matches!(outcome, Err(StoreError::Retryable(_))),
+        "{outcome:?}"
+    );
+    assert_eq!(calls.lock().unwrap().len(), 2);
+    let again = store.create(Keyspace::Ephemeral, "k", b"v".to_vec()).await;
+    assert_eq!(again.unwrap(), CasOutcome::Won(Revision(142)));
+}
+
 /// A point read is strongly consistent, and a query asks for the
 /// consistency its caller chose.
 #[tokio::test]

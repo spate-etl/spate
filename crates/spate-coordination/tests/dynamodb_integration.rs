@@ -15,12 +15,14 @@ mod support;
 mod scenarios;
 
 use aws_sdk_dynamodb::config::{BehaviorVersion, Credentials, Region};
+use aws_sdk_dynamodb::operation::transact_write_items::TransactWriteItemsError;
 use aws_sdk_dynamodb::types::{
-    AttributeDefinition, BillingMode, KeySchemaElement, KeyType, LocalSecondaryIndex, Projection,
-    ProjectionType, ScalarAttributeType, TimeToLiveStatus,
+    AttributeDefinition, AttributeValue, BillingMode, ConditionCheck, KeySchemaElement, KeyType,
+    LocalSecondaryIndex, Projection, ProjectionType, ReturnValuesOnConditionCheckFailure,
+    ScalarAttributeType, TimeToLiveStatus, TransactWriteItem, Update,
 };
 use spate_coordination::store::dynamodb::{DynamoDbConfig, DynamoDbStore};
-use spate_coordination::store::{CoordinationStore, Keyspace, StoreError};
+use spate_coordination::store::{CasOutcome, CoordinationStore, Keyspace, StoreError};
 use spate_coordination::{
     CoordinationConfig, DynamoDbCoordinator, SplitCoordinator as _, StoreCoordinator,
 };
@@ -308,6 +310,98 @@ fn a_second_job_on_one_table_is_isolated() {
         }
         let held = a.get(Keyspace::Durable, "split.x").await.unwrap().unwrap();
         assert_eq!(held.value, b"a");
+    });
+}
+
+/// A create lands above a revision floor in the job's floor partition. A
+/// transaction whose floor check and key condition both fail is cancelled
+/// with both reasons and each item they met, and the store's create loses.
+#[test]
+#[ignore = "needs Docker; run explicitly"]
+fn a_create_lands_above_a_floor_on_dynamodb_local() {
+    let (_local, endpoint) = start_local();
+    let rt = runtime();
+    let store = store(&endpoint, "floor");
+    let client = client(&endpoint);
+    let n = |v: u64| AttributeValue::N(v.to_string());
+    let s = |v: &str| AttributeValue::S(v.to_string());
+    let raise = async |v: u64| {
+        client
+            .put_item()
+            .table_name(TABLE)
+            .item("pk", s("floor#f"))
+            .item("sk", s("k"))
+            .item("v", n(v))
+            .send()
+            .await
+            .expect("put the floor");
+    };
+    rt.block_on(async {
+        settled("probe", async || store.get(Keyspace::Durable, "none").await)
+            .await
+            .expect("table ready");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap();
+        let floor = u64::try_from(now.as_millis()).unwrap() + 1_000_000_000;
+        raise(floor).await;
+        let created = store
+            .create(Keyspace::Ephemeral, "k", b"a".to_vec())
+            .await
+            .expect("create")
+            .won()
+            .expect("won");
+        assert!(created.0 > floor, "{created:?} not above floor {floor}");
+
+        let higher = created.0 + 1_000_000_000;
+        raise(higher).await;
+        let check = ConditionCheck::builder()
+            .table_name(TABLE)
+            .key("pk", s("floor#f"))
+            .key("sk", s("k"))
+            .condition_expression("attribute_not_exists(#v) OR #v < :v")
+            .expression_attribute_names("#v", "v")
+            .expression_attribute_values(":v", n(created.0 + 1))
+            .return_values_on_condition_check_failure(ReturnValuesOnConditionCheckFailure::AllOld)
+            .build()
+            .unwrap();
+        let put = Update::builder()
+            .table_name(TABLE)
+            .key("pk", s("floor#e"))
+            .key("sk", s("k"))
+            .update_expression("SET #v = :v")
+            .condition_expression("attribute_not_exists(#v)")
+            .expression_attribute_names("#v", "v")
+            .expression_attribute_values(":v", n(created.0 + 1))
+            .return_values_on_condition_check_failure(ReturnValuesOnConditionCheckFailure::AllOld)
+            .build()
+            .unwrap();
+        let err = client
+            .transact_write_items()
+            .transact_items(TransactWriteItem::builder().condition_check(check).build())
+            .transact_items(TransactWriteItem::builder().update(put).build())
+            .send()
+            .await
+            .expect_err("both conditions fail");
+        let Some(TransactWriteItemsError::TransactionCanceledException(cancelled)) =
+            err.as_service_error()
+        else {
+            panic!("{err:?}");
+        };
+        let met: Vec<_> = cancelled
+            .cancellation_reasons()
+            .iter()
+            .map(|r| (r.code(), r.item().and_then(|i| i.get("v")).cloned()))
+            .collect();
+        assert_eq!(
+            met,
+            [
+                (Some("ConditionalCheckFailed"), Some(n(higher))),
+                (Some("ConditionalCheckFailed"), Some(n(created.0))),
+            ]
+        );
+        let again = store.create(Keyspace::Ephemeral, "k", b"b".to_vec()).await;
+        assert_eq!(again.unwrap(), CasOutcome::Lost);
     });
 }
 

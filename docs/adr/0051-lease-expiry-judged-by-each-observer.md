@@ -1,5 +1,5 @@
 ---
-description: "Each handle may judge lease expiry on its own clock, and the DynamoDB store does; a watching peer sees a dead lease expire within one lease plus two polls."
+description: "Each handle may judge lease expiry on its own clock, and the DynamoDB store does. Its revision consequence is superseded by ADR-0057."
 ---
 
 # ADR-0051 — Lease expiry may be judged by each observer, and the DynamoDB store does so
@@ -7,7 +7,8 @@ description: "Each handle may judge lease expiry on its own clock, and the Dynam
 - **Status:** accepted
 - **Date:** 2026-09-29
 - **Supersedes:** —
-- **Superseded by:** —
+- **Superseded by:** [ADR-0057](0057-a-deleted-dynamodb-ephemeral-key-leaves-a-revision-floor.md)
+  (revision consequence)
 
 ## Context and problem statement
 

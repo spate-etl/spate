@@ -3,8 +3,8 @@
 
 use super::errors::{chain, classify};
 use super::table::{
-    BoxFuture, Cond, Item, KeyAttr, Meta, Page, Query, Shape, Status, Table, Ttl, Write, WriteId,
-    Written,
+    BoxFuture, Cond, Created, Item, KeyAttr, Meta, Page, Query, Shape, Status, Table, Ttl, Write,
+    WriteId, Written,
 };
 use crate::store::StoreError;
 use aws_config::SdkConfig;
@@ -20,12 +20,14 @@ use aws_sdk_dynamodb::config::{
     BehaviorVersion, Region, SharedCredentialsProvider, SharedHttpClient,
 };
 use aws_sdk_dynamodb::error::{ProvideErrorMetadata, SdkError};
+use aws_sdk_dynamodb::operation::transact_write_items::TransactWriteItemsError;
 use aws_sdk_dynamodb::operation::update_item::UpdateItemError;
 use aws_sdk_dynamodb::primitives::Blob;
 use aws_sdk_dynamodb::types::{
-    AttributeDefinition, AttributeValue, BillingMode, KeySchemaElement, KeyType, ReturnValue,
-    ReturnValuesOnConditionCheckFailure, ScalarAttributeType, TableStatus, TimeToLiveSpecification,
-    TimeToLiveStatus,
+    AttributeDefinition, AttributeValue, BillingMode, CancellationReason, ConditionCheck,
+    KeySchemaElement, KeyType, ReturnValue, ReturnValuesOnConditionCheckFailure,
+    ScalarAttributeType, TableStatus, TimeToLiveSpecification, TimeToLiveStatus, TransactWriteItem,
+    Update,
 };
 use aws_smithy_http_client::ConnectorBuilder;
 use aws_smithy_http_client::proxy::ProxyConfig;
@@ -403,6 +405,70 @@ impl SdkTable {
         }
     }
 
+    /// A `TransactWriteItems` of a `ConditionCheck` on the floor item and
+    /// the put's `Update`, both returning the item a failed condition met.
+    async fn transact_create(
+        &self,
+        pk: &str,
+        floor_pk: &str,
+        sk: &str,
+        put: &Write,
+    ) -> Result<Created, StoreError> {
+        let Write::Put { v: base, .. } = put else {
+            panic!("create_above takes a Write::Put");
+        };
+        let (update, condition, _, expr) = update(put).expect("an UpdateItem write");
+        let check = ConditionCheck::builder()
+            .table_name(&self.table)
+            .set_key(Some(key(floor_pk, sk)))
+            .condition_expression("attribute_not_exists(#v) OR #v < :v")
+            .expression_attribute_names("#v", "v")
+            .expression_attribute_values(":v", n(*base))
+            .return_values_on_condition_check_failure(ReturnValuesOnConditionCheckFailure::AllOld)
+            .build()
+            .expect("table, key and condition are set");
+        let create = Update::builder()
+            .table_name(&self.table)
+            .set_key(Some(key(pk, sk)))
+            .update_expression(update)
+            .condition_expression(condition)
+            .set_expression_attribute_names(Some(expr.names))
+            .set_expression_attribute_values(Some(expr.values))
+            .return_values_on_condition_check_failure(ReturnValuesOnConditionCheckFailure::AllOld)
+            .build()
+            .expect("table, key and update are set");
+        let result = self
+            .client
+            .transact_write_items()
+            .transact_items(TransactWriteItem::builder().condition_check(check).build())
+            .transact_items(TransactWriteItem::builder().update(create).build())
+            .send()
+            .await;
+        let e = match result {
+            Ok(_) => return Ok(Created::Ok),
+            Err(e) => e,
+        };
+        if let Some(TransactWriteItemsError::TransactionCanceledException(cancelled)) =
+            e.as_service_error()
+        {
+            let reasons = cancelled.cancellation_reasons();
+            let failed = |i: usize| {
+                reasons
+                    .get(i)
+                    .filter(|r| r.code() == Some("ConditionalCheckFailed"))
+                    .map(CancellationReason::item)
+            };
+            if let Some(old) = failed(1) {
+                let old = old.map(decode).transpose()?;
+                return Ok(Created::Exists { old });
+            }
+            if let Some(Some(floor)) = failed(0) {
+                return Ok(Created::Floor(decode(floor)?.v));
+            }
+        }
+        Err(classify(&format!("TransactWriteItems {sk}"), &e))
+    }
+
     async fn delete_item(
         &self,
         pk: &str,
@@ -487,6 +553,16 @@ impl Table for SdkTable {
                 write => self.update_item(pk, sk, &write).await,
             }
         })
+    }
+
+    fn create_above<'a>(
+        &'a self,
+        pk: &'a str,
+        floor_pk: &'a str,
+        sk: &'a str,
+        put: Write,
+    ) -> BoxFuture<'a, Result<Created, StoreError>> {
+        Box::pin(async move { self.transact_create(pk, floor_pk, sk, &put).await })
     }
 
     fn get<'a>(

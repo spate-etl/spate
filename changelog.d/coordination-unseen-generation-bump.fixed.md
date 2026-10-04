@@ -9,7 +9,7 @@ leader gave the leadership back, and the next election advanced the plan
 generation a second time. No split progress was lost either way.
 
 A worker on 0.2 stops with a fatal error when it reads a plan record this
-version wrote. The error starts with `plan record: not a schema-3 record` and
+version wrote. The error contains `plan record: not a schema-3 record` and
 names the unknown field `elector`. This version reads plan records that 0.2
 wrote.
 

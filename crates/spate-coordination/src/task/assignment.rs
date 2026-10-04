@@ -311,30 +311,35 @@ impl<S: CoordinationStore + Clone> Task<S> {
     /// Adopt an `assign.{instance}` record seen on the durable watch.
     pub(super) fn apply_assignment(&mut self, instance: &str, val: AssignmentVal, rev: Revision) {
         if instance == self.instance {
-            // A deposed leader's late write must not walk us backwards.
+            // A deposed leader's late write is not an instruction, but its
+            // revision is cached so our next publish to the key wins.
             if val.generation < self.assign_generation {
                 tracing::debug!(
                     generation = val.generation,
                     seen = self.assign_generation,
                     "ignoring an assignment from a superseded generation"
                 );
-                return;
+            } else {
+                self.adopt_own_assignment(&val);
             }
-            self.assign_generation = val.generation;
-            let now: BTreeSet<String> = val.splits.iter().cloned().collect();
-            // Start the acquisition clock for newly-named splits, and
-            // stop it for anything no longer expected. Not for one
-            // already held: that reports a drain as a reassignment.
-            for id in now.difference(&self.assigned) {
-                if self.owned.contains_key(id) {
-                    continue;
-                }
-                self.awaiting.insert(id.clone(), Instant::now());
-            }
-            self.awaiting.retain(|id, _| now.contains(id));
-            self.assigned = now;
-            self.assignment_seen = true;
         }
         self.assignments.insert(instance.to_string(), (val, rev));
+    }
+
+    fn adopt_own_assignment(&mut self, val: &AssignmentVal) {
+        self.assign_generation = val.generation;
+        let now: BTreeSet<String> = val.splits.iter().cloned().collect();
+        // Start the acquisition clock for newly-named splits, and
+        // stop it for anything no longer expected. Not for one
+        // already held: that reports a drain as a reassignment.
+        for id in now.difference(&self.assigned) {
+            if self.owned.contains_key(id) {
+                continue;
+            }
+            self.awaiting.insert(id.clone(), Instant::now());
+        }
+        self.awaiting.retain(|id, _| now.contains(id));
+        self.assigned = now;
+        self.assignment_seen = true;
     }
 }

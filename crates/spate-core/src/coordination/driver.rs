@@ -573,11 +573,12 @@ impl CoordinationDriver {
                     "no answer for this commit",
                 ))
             });
+            let cause = answer.as_ref().err().map(ToString::to_string);
             match self.classify(source, partition, &split, answer) {
                 Ok(disposition) => {
                     if matches!(disposition, CommitDisposition::Deferred) {
                         unstored.push(partition);
-                        deferred.push(split);
+                        deferred.push((split, cause.unwrap_or_default()));
                     }
                     self.settle_commit(source, partition, progress, disposition);
                 }
@@ -2914,5 +2915,24 @@ mod tests {
         assert_eq!(watermark(pc), Some(30), "a deferred commit is cached");
         assert!(d.tenancies[&pd].fenced, "a fenced commit fences");
         assert_eq!(s.closed, vec!["b", "d"], "completed and fenced retire");
+    }
+
+    #[test]
+    fn a_fatal_final_answer_is_returned_after_the_later_answers_settle() {
+        let script = Script::default();
+        let mut d = driver(&script);
+        let mut s = TestSource::default();
+        script.push(vec![gained("a", 1, None), gained("b", 1, None)]);
+        poll(&mut d, &mut s);
+        let [pa, pb] = [0, 1].map(|i| s.opened[i].3);
+        script.fail_next_commit("a", CoordinationErrorKind::Fatal);
+        script.fail_next_commit("b", CoordinationErrorKind::Fenced);
+        let result = d.commit_final(&mut s, &[(pa, 10), (pb, 20)]);
+        assert!(result.is_err(), "the fatal answer is returned");
+        assert!(
+            d.tenancies[&pb].fenced,
+            "the later fenced answer still settles"
+        );
+        assert_eq!(s.closed, vec!["b"]);
     }
 }

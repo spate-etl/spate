@@ -65,8 +65,11 @@ coordinated source that forwards `Source::commit_final` can take up to
 `coordination.op_timeout` (10s by default) for the final commit against a
 slow store, and up to `op_timeout` again to close. Where a slow store at
 shutdown is likely, size the gap to at least twice `op_timeout` plus a few
-seconds. At the default that is more than the 5s gap. A coordinated source
-that does not forward it can take up to three times `op_timeout` for each
+seconds. At the default that is more than the 5s gap. That covers a store
+that stops answering once the drain begins. A commit tick or revocation
+already waiting on the store when SIGTERM arrives finishes before the drain
+starts, and can take up to three times `op_timeout` for each held split. A
+coordinated source that does not forward it can take up to three times `op_timeout` for each
 split in turn
 ([Custom sources](../06-extending/custom-source.mdx#3-delegate-the-choreography-coordinationdriver)).
 Keep `op_timeout` above about (2N + 3) times your store's write latency,

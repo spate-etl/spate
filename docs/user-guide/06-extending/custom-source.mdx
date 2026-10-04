@@ -452,8 +452,9 @@ attempt cap instead.
   and a deferred split may replay under its next owner.
 - **`commit_final` forwards to `driver.commit_final`.** The driver then sends
   the final commit of a stop under one `coordination.op_timeout` budget for
-  every split together, and returns the partitions of the splits it did not
-  reach. Without the forward, the final commit waits up to three
+  every split together, and returns the partitions whose commit it did not
+  store, both the splits it did not reach and those the store did not
+  confirm. Without the forward, the final commit waits up to three
   `op_timeout`s for each split in turn.
 - **Your `Drop` calls `driver.release()`.** The driver has no `Drop` of its
   own, so a source that omits this leaves its splits and its place in the job

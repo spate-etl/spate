@@ -9,3 +9,8 @@ turn, so a store that stopped answering at shutdown could hold the stop past
 the grace period. A custom coordinated source gets the same bound when it
 forwards the new `Source::commit_final` to `CoordinationDriver::commit_final`,
 and `CoordinatorScript::final_commits` in `spate-test` shows whether it does.
+
+A final commit that leaves splits uncommitted counts as `error` in
+`spate_checkpoint_commits_total`, and `ExitReport.final_watermarks` does not
+list their new positions. In previous versions both reported that commit as
+successful.

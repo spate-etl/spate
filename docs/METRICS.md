@@ -327,7 +327,7 @@ way to reason about where a flush went, not an identity to compute.
 | Metric | Type | Extra labels | Description |
 |---|---|---|---|
 | `spate_checkpoint_pending_batches` | gauge | `partition` ⚠ | Unacknowledged batches tracked. The unlabeled series is the max across partitions; a labeled series is published for every partition the checkpointer tracks, including one with nothing unacknowledged. A partition that leaves the assignment is zeroed rather than deleted, on the first commit cycle after it goes, for the reason in [Absent, zero, and stale](#absent-zero-and-stale). Select the aggregate with `{partition=""}`. A `sum` over the bare name adds the max to the per-partition counts. Bounded by `checkpoint.max_pending_batches` — a reading above the limit is a defect. |
-| `spate_checkpoint_commits_total` | counter | `outcome` (`ok`\|`error`) | Source commit calls. |
+| `spate_checkpoint_commits_total` | counter | `outcome` (`ok`\|`error`) | Source commit calls. A final commit that leaves a partition unstored counts as `error`. |
 | `spate_checkpoint_commit_duration_seconds` | histogram | | Commit round-trip. |
 | `spate_checkpoint_watermark_age_seconds` | gauge | | Age of the oldest unacknowledged batch — the primary "stuck pipeline" alert signal. |
 

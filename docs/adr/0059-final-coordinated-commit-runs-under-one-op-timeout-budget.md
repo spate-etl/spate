@@ -55,12 +55,15 @@ split.
 
 ### Consequences
 
-- Good, because a coordinated stop over a store that does not answer ends
-  within the drain plus about two `op_timeout`s, one for the final commit and
-  one for the departure, whatever the number of held splits.
-- Good, because a partial final commit is reported per partition:
-  `ExitReport.final_watermarks` holds only the stored positions, and the
-  checkpoint commit counter records the pass as failed.
+- Good, because over a store that stops answering once the drain begins, a
+  coordinated stop ends within the drain plus about two `op_timeout`s, one
+  for the final commit and one for the departure, whatever the number of
+  held splits. A tick or revocation commit already waiting on the store when
+  the stop arrives finishes before the drain starts, at up to three
+  `op_timeout`s per held split.
+- Good, because a partial final commit is reported per partition.
+  `ExitReport.final_watermarks` leaves out a position the final commit
+  deferred, and the checkpoint commit counter records the pass as failed.
 - Bad, because at the 10s default the final commit and the departure together
   can take 20s, more than the default 5s gap between `drain_timeout` and
   `terminationGracePeriodSeconds`. The graceful-shutdown guide's sizing rule

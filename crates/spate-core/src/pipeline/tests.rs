@@ -747,6 +747,11 @@ fn final_pass_calls_commit_final() {
     wait_for("all payloads consumed", Duration::from_secs(5), || {
         h.chain.consumed.load(Ordering::Relaxed) == 20
     });
+    wait_for("a tick commit", Duration::from_secs(5), || {
+        let log = &h.shared.lock().unwrap().log;
+        log.iter()
+            .any(|e| e == "commit-failed" || e == "commit_final")
+    });
     h.script.lock().unwrap().push_back(Script::Drained);
     let report = h.join.join().unwrap().unwrap();
 

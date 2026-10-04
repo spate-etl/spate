@@ -155,7 +155,8 @@ pub(crate) trait Table: Send + Sync + fmt::Debug {
     ) -> BoxFuture<'a, Result<Written, StoreError>>;
 
     /// [`write`](Self::write) for the create of a split's spec or progress
-    /// record, under an SDK retry quota no other call draws on.
+    /// record. The default body calls `write`; an implementor may give it a
+    /// retry quota of its own.
     fn write_seed<'a>(
         &'a self,
         pk: &'a str,

@@ -1704,8 +1704,9 @@ fn an_empty_system_store_warns() {
 }
 
 /// A throttled burst of split-record creates, first on spec records and then
-/// on progress records, leaves a commit and a lease renewal their SDK retry:
-/// each meets one throttle and then wins. Regression for #882.
+/// on progress records, leaves a commit, a lease renewal and an assignment
+/// create their SDK retry: each meets one throttle and then wins. Regression
+/// for #882.
 #[tokio::test]
 async fn a_seeding_burst_leaves_renewals_and_commits_their_retries() {
     const BURST: usize = 128;
@@ -1720,7 +1721,10 @@ async fn a_seeding_burst_leaves_renewals_and_commits_their_retries() {
             "updateitem"
                 if body["UpdateExpression"]
                     .as_str()
-                    .is_some_and(|e| e.contains("if_not_exists")) =>
+                    .is_some_and(|e| e.contains("if_not_exists"))
+                    && !body["Key"]["sk"]["S"]
+                        .as_str()
+                        .is_some_and(|sk| sk.starts_with("assign.")) =>
             {
                 Reply::Json(400, error_body("ProvisionedThroughputExceededException"))
             }
@@ -1735,7 +1739,7 @@ async fn a_seeding_burst_leaves_renewals_and_commits_their_retries() {
                 if *n == 1 {
                     Reply::Json(400, error_body("ProvisionedThroughputExceededException"))
                 } else {
-                    Reply::Json(200, "{}".into())
+                    Reply::Json(200, r#"{"Attributes":{"v":{"N":"1"}}}"#.into())
                 }
             }
             _ => not_called(),
@@ -1786,6 +1790,18 @@ async fn a_seeding_burst_leaves_renewals_and_commits_their_retries() {
         assert_eq!(
             renewal.unwrap(),
             CasOutcome::Won(Revision(7)),
+            "round {round}"
+        );
+        let assignment = store
+            .create(
+                Keyspace::Durable,
+                &format!("assign.w{round}"),
+                b"v".to_vec(),
+            )
+            .await;
+        assert_eq!(
+            assignment.unwrap(),
+            CasOutcome::Won(Revision(1)),
             "round {round}"
         );
     }

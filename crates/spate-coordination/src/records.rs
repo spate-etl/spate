@@ -39,7 +39,9 @@ use std::hash::BuildHasher as _;
 ///
 /// The versions do not interoperate. This pin is checked on the plan record
 /// during startup and on every split and spec record afterwards, and a
-/// mismatch is [`Fatal`] whichever build reads it.
+/// mismatch is [`Fatal`] whichever build reads it. A newer build may add a
+/// field under the same schema. It reads records written without the field,
+/// and an older build at this schema rejects a record that carries it.
 ///
 /// The check fails closed. Ownership transfers on the durable
 /// progress-record CAS regardless of vintage, so a mixed fleet corrupts
@@ -629,7 +631,8 @@ mod tests {
         assert!(record(vec![0; 294_721]).encode().len() > 384 * 1024);
     }
 
-    /// Cursor capacity includes the JSON-escaped fingerprint and padded base64.
+    /// Cursor capacity includes the JSON-escaped fingerprint, the largest elector
+    /// and padded base64.
     #[test]
     fn planner_cursor_budget_includes_the_escaped_fingerprint() {
         const CAP: usize = 384 * 1024;
@@ -640,9 +643,13 @@ mod tests {
             record.planned = u64::MAX;
             record.updated_at_ms = i64::MIN;
             record.planner_state = Some(b64_encode(cursor));
+            record.elector = Some(Elector {
+                owner: "a".repeat(128),
+                nonce: uuid::Uuid::new_v4().simple().to_string(),
+            });
             record
         };
-        assert_eq!(record("", &[]).encode().len(), 169);
+        assert_eq!(record("", &[]).encode().len(), 363);
         for fingerprint in ["", "job:v1", "\"\\\n\t\u{0000}"] {
             let envelope = record(fingerprint, &[]).encode().len();
             let allowance = 3 * ((CAP - envelope) / 4);
@@ -650,7 +657,7 @@ mod tests {
             assert!(record(fingerprint, &vec![0; allowance + 1]).encode().len() > CAP);
         }
         let escaped = "\"\\\n\t\u{0000}";
-        let raw_fingerprint_allowance = 3 * ((CAP - 169 - escaped.len()) / 4);
+        let raw_fingerprint_allowance = 3 * ((CAP - 363 - escaped.len()) / 4);
         assert!(
             record(escaped, &vec![0; raw_fingerprint_allowance])
                 .encode()

@@ -40,6 +40,8 @@ struct ReplyLost<S> {
     refuse_reread: bool,
     reread_refused: Arc<AtomicBool>,
     refusing: Arc<AtomicBool>,
+    /// Leader-key creates, one per election.
+    elections: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl<S: CoordinationStore + Clone> CoordinationStore for ReplyLost<S> {
@@ -61,6 +63,9 @@ impl<S: CoordinationStore + Clone> CoordinationStore for ReplyLost<S> {
         key: &str,
         value: Vec<u8>,
     ) -> Result<CasOutcome, StoreError> {
+        if ks == Keyspace::Ephemeral && key == "leader" {
+            self.elections.fetch_add(1, Ordering::SeqCst);
+        }
         self.inner.create(ks, key, value).await
     }
 
@@ -170,6 +175,7 @@ fn elect_with<S: CoordinationStore + Clone + Send + Sync + 'static>(
         refuse_reread,
         reread_refused: Arc::new(AtomicBool::new(false)),
         refusing: Arc::new(AtomicBool::new(false)),
+        elections: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     };
     let mut worker = StoreCoordinator::with_clock(
         store.clone(),
@@ -195,6 +201,13 @@ fn elect_with<S: CoordinationStore + Clone + Send + Sync + 'static>(
         refuse_reread,
         "the re-read fault"
     );
+    if matches!(lands, Lands::AsSent) {
+        assert_eq!(
+            store.elections.load(Ordering::SeqCst),
+            1 + usize::from(refuse_reread),
+            "elections"
+        );
+    }
     let entry = rt
         .block_on(inner.get(Keyspace::Durable, "plan"))
         .unwrap()

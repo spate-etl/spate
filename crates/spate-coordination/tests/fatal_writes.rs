@@ -7,7 +7,7 @@ mod support;
 use spate_coordination::store::memory::MemoryStore;
 use spate_coordination::store::{Keyspace, StoreError};
 use spate_coordination::{
-    CoordinationErrorKind, SplitCoordinator, SplitProgress, StoreCoordinator,
+    CoordinationErrorKind, LeaseEpoch, SplitCoordinator, SplitProgress, StoreCoordinator,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -58,12 +58,13 @@ fn started(
     w
 }
 
-/// Drive `w` until it holds x, then arm the store's rejection.
-fn claim_then_arm(w: &mut impl SplitCoordinator, armed: &AtomicBool) {
-    drive(w, &mut Held::default(), "claiming x", |h| {
-        h.splits.len() == 1
-    });
+/// Drive `w` until it holds x, then arm the store's rejection. Returns the
+/// epoch x is held at.
+fn claim_then_arm(w: &mut impl SplitCoordinator, armed: &AtomicBool) -> LeaseEpoch {
+    let mut held = Held::default();
+    drive(w, &mut held, "claiming x", |h| h.splits.len() == 1);
     armed.store(true, Ordering::Release);
+    LeaseEpoch(held.splits["x"].0)
 }
 
 /// Poll until the coordinator fails, and assert it failed with the store's
@@ -209,8 +210,8 @@ fn a_rejected_failure_report_stops_the_coordinator() {
     let mut w = rejecting(rt.handle(), &armed, |write| {
         write.op == Op::Update && write.ks == Keyspace::Durable && write.key.starts_with("split.")
     });
-    claim_then_arm(&mut w, &armed);
-    let failed = w.fail(&split_id("x"), "unreadable");
+    let epoch = claim_then_arm(&mut w, &armed);
+    let failed = w.fail(&split_id("x"), epoch, "unreadable");
     assert!(
         failed.is_err_and(|e| e.kind == CoordinationErrorKind::Fatal),
         "the failure report returned no fatal error"

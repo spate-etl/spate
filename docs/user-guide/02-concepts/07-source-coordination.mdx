@@ -86,7 +86,9 @@ reports as unprocessable) consumes a delivery attempt per failed tenancy.
 At the attempt cap it is **quarantined**: parked, visible in the store
 and in `spate_coordination_splits_quarantined`, and never re-offered.
 Graceful releases and revocations, cooperative or forced, consume no
-attempts. Only non-graceful ends are poison evidence.
+attempts. Only non-graceful ends are poison evidence. A report names the
+tenancy it concerns, and a report for a tenancy that has ended uses up no
+attempt.
 
 Quarantine deliberately blocks completion: a bounded job with quarantined
 splits finishes as **stalled**, not complete, so planned-but-unprocessed

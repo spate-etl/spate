@@ -17,8 +17,8 @@ use crate::task::{Command, DepartReply, Task, TaskEvent};
 use spate_core::clock::tokio::{Clock, SystemClock};
 use spate_core::coordination::ControlWaker;
 use spate_core::coordination::{
-    CoordinationError, CoordinationErrorKind, CoordinationEvent, SplitCoordinator, SplitId,
-    SplitPlanner, SplitProgress,
+    CoordinationError, CoordinationErrorKind, CoordinationEvent, LeaseEpoch, SplitCoordinator,
+    SplitId, SplitPlanner, SplitProgress,
 };
 use spate_core::metrics::CoordinationMetrics;
 use std::collections::BTreeMap;
@@ -490,9 +490,15 @@ impl<S: CoordinationStore + Clone> SplitCoordinator for StoreCoordinator<S> {
         result
     }
 
-    fn fail(&mut self, split: &SplitId, reason: &str) -> Result<(), CoordinationError> {
+    fn fail(
+        &mut self,
+        split: &SplitId,
+        epoch: LeaseEpoch,
+        reason: &str,
+    ) -> Result<(), CoordinationError> {
         let result = self.command(|reply| Command::Fail {
             split: split.clone(),
+            epoch,
             reason: reason.to_string(),
             reply,
         });

@@ -6,7 +6,9 @@ use super::{Command, ReleaseOutcome, Task};
 use crate::error::{fatal, fatal_only, retryable, store_error};
 use crate::records::{self, SplitProgressRecord, SplitStatus};
 use crate::store::{CasOutcome, CoordinationStore, Keyspace, Revision};
-use spate_core::coordination::{CoordinationError, CoordinationErrorKind, SplitId, SplitProgress};
+use spate_core::coordination::{
+    CoordinationError, CoordinationErrorKind, LeaseEpoch, SplitId, SplitProgress,
+};
 use spate_core::metrics::{RevocationOutcome, SplitLossReason, WriteOutcome};
 use tokio::time::Instant;
 
@@ -30,9 +32,10 @@ impl<S: CoordinationStore + Clone> Task<S> {
             } => (self.commit(&split, &progress).await, reply),
             Command::Fail {
                 split,
+                epoch,
                 reason,
                 reply,
-            } => (self.fail_split(&split, &reason).await, reply),
+            } => (self.fail_split(&split, epoch, &reason).await, reply),
             Command::Release {
                 splits,
                 departure,
@@ -251,13 +254,22 @@ impl<S: CoordinationStore + Clone> Task<S> {
     /// tenancy already completed hands the lease back and returns `Fenced`
     /// without `Lost`. Any other record, or a read-back that lags or fails
     /// `Retryable`, returns `Fenced` and emits `Lost`.
-    async fn fail_split(&mut self, split: &SplitId, reason: &str) -> Result<(), CoordinationError> {
+    ///
+    /// A report whose `epoch` is not the tenancy this worker owns the split
+    /// under, and is not that tenancy's adopted quarantining report, writes
+    /// nothing, is not counted, and returns `Fenced` without `Lost`.
+    async fn fail_split(
+        &mut self,
+        split: &SplitId,
+        epoch: LeaseEpoch,
+        reason: &str,
+    ) -> Result<(), CoordinationError> {
         let id = split.as_str();
         let Some(owned) = self.owned.get(id) else {
-            let applied = self
-                .splits
-                .get(id)
-                .is_some_and(|state| self.sent_quarantine_report(id, &state.progress));
+            let applied = self.splits.get(id).is_some_and(|state| {
+                self.sent_quarantine_report(id, &state.progress)
+                    && epoch.0.checked_add(1) == Some(state.progress.epoch)
+            });
             if applied {
                 self.metrics(|m| m.failed());
                 self.quarantine_reports.remove(id);
@@ -273,6 +285,12 @@ impl<S: CoordinationStore + Clone> Task<S> {
         let tenancy_attempts = owned.attempts;
         let state = self.splits.get(id).expect("owned splits are in the view");
         let owned_epoch = state.progress.epoch;
+        if epoch.0 != owned_epoch {
+            return Err(CoordinationError::new(
+                CoordinationErrorKind::Fenced,
+                format!("split {split} is held under another tenancy; nothing was written"),
+            ));
+        }
         let reported = own_failure_report(&state.progress, owned_epoch, tenancy_attempts);
         let attempts = state.progress.attempts + 1;
         let quarantining = attempts >= self.config.max_attempts;

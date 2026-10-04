@@ -12,8 +12,8 @@ use spate_coordination::store::{
     WatchStream,
 };
 use spate_coordination::{
-    CoordinationConfig, CoordinationErrorKind, CoordinationEvent, SplitCoordinator, SplitProgress,
-    StoreCoordinator,
+    CoordinationConfig, CoordinationErrorKind, CoordinationEvent, LeaseEpoch, SplitCoordinator,
+    SplitProgress, StoreCoordinator,
 };
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -164,6 +164,11 @@ impl FaultStore {
             .expect("read the store")
             .expect("the split record");
         serde_json::from_slice(&entry.value).expect("a JSON split record")
+    }
+
+    /// The epoch of the split record at `key`, which must exist.
+    fn epoch(&self, rt: &tokio::runtime::Runtime, key: &str) -> LeaseEpoch {
+        LeaseEpoch(self.record(rt, key)["epoch"].as_u64().expect("an epoch"))
     }
 
     /// Keys of `ks` that still exist, out of `keys`.
@@ -1395,14 +1400,18 @@ fn a_release_after_an_ambiguous_failure_report_deletes_the_lease() {
     let rt = runtime();
     let fault = FaultStore::new(LEASE);
     let mut a = holding_polled(&rt, fault.clone(), &["r0", "r1"]);
+    let epoch = fault.epoch(&rt, "split.r0");
 
     fault
         .ambiguous
         .lock()
         .unwrap()
         .push((Keyspace::Durable, "split.r0".to_string()));
-    let failed = a.fail(&support::split_id("r0"), "injected");
-    assert!(failed.is_err(), "the injected reply loss surfaces");
+    let failed = a.fail(&support::split_id("r0"), epoch, "injected");
+    assert!(
+        is_kind(&failed, CoordinationErrorKind::Retryable),
+        "the injected reply loss surfaces: {failed:?}"
+    );
     let result = a.release(&[support::split_id("r0"), support::split_id("r1")]);
 
     let record = fault.record(&rt, "split.r0");
@@ -1450,7 +1459,15 @@ fn a_release_counts_an_unseen_failure_report_apart_from_a_fence() {
         .lock()
         .unwrap()
         .push((Keyspace::Durable, "split.r0".to_string()));
-    assert!(a.fail(&support::split_id("r0"), "injected").is_err());
+    let failed = a.fail(
+        &support::split_id("r0"),
+        LeaseEpoch(held.splits["r0"].0),
+        "injected",
+    );
+    assert!(
+        is_kind(&failed, CoordinationErrorKind::Retryable),
+        "{failed:?}"
+    );
 
     // A peer quarantines q0, unseen by the poller.
     let entry = rt
@@ -1692,9 +1709,14 @@ fn revoked_after_unseen_failure(
         .lock()
         .unwrap()
         .push((Keyspace::Durable, format!("split.{}", asked.as_str())));
+    let failed = a.fail(
+        &asked,
+        LeaseEpoch(held_a.splits[asked.as_str()].0),
+        "injected",
+    );
     assert!(
-        a.fail(&asked, "injected").is_err(),
-        "the injected reply loss surfaces"
+        is_kind(&failed, CoordinationErrorKind::Retryable),
+        "the injected reply loss surfaces: {failed:?}"
     );
     hand_back(&mut a, &asked);
 
@@ -1913,6 +1935,7 @@ fn a_failure_report_after_an_ambiguous_commit_hands_the_split_back() {
     let clock = TestClock::frozen();
     let fault = FaultStore::with_clock(LEASE, clock.clone());
     let mut a = holding_polled_clocked(&rt, fault.clone(), &clock, &["r0"]);
+    let epoch = fault.epoch(&rt, "split.r0");
 
     arm_ambiguous(&fault, "split.r0");
     let first = a.commit(&support::split_id("r0"), &SplitProgress::new(7, vec![]));
@@ -1920,7 +1943,7 @@ fn a_failure_report_after_an_ambiguous_commit_hands_the_split_back() {
         is_kind(&first, CoordinationErrorKind::Retryable),
         "{first:?}"
     );
-    let failed = a.fail(&support::split_id("r0"), "injected");
+    let failed = a.fail(&support::split_id("r0"), epoch, "injected");
 
     // The worker may claim the handed-back split again at a later epoch.
     let record = fault.record(&rt, "split.r0");
@@ -1954,6 +1977,7 @@ fn a_failure_report_whose_read_back_lags_is_fenced() {
     let fault = FaultStore::with_clock(LEASE, clock.clone());
     let lagging = LaggingReads::new(fault.clone(), Keyspace::Durable, "split.c0", 1);
     let mut a = holding_polled_clocked(&rt, lagging.clone(), &clock, &["c0"]);
+    let epoch = fault.epoch(&rt, "split.c0");
 
     arm_ambiguous(&fault, "split.c0");
     let first = a.commit(&support::split_id("c0"), &SplitProgress::new(7, vec![]));
@@ -1962,7 +1986,7 @@ fn a_failure_report_whose_read_back_lags_is_fenced() {
         "{first:?}"
     );
     *lagging.stale.lock().unwrap() = 1;
-    let failed = a.fail(&support::split_id("c0"), "injected");
+    let failed = a.fail(&support::split_id("c0"), epoch, "injected");
 
     let lost = lost_queued(&mut a, "c0");
     assert!(
@@ -1980,6 +2004,7 @@ fn a_failure_report_whose_read_back_fails_is_fenced() {
     let fault = FaultStore::with_clock(LEASE, clock.clone());
     let tap = support::tap::TapStore::new(fault.clone());
     let mut a = holding_polled_clocked(&rt, tap.clone(), &clock, &["c0"]);
+    let epoch = fault.epoch(&rt, "split.c0");
 
     arm_ambiguous(&fault, "split.c0");
     let first = a.commit(&support::split_id("c0"), &SplitProgress::new(7, vec![]));
@@ -1993,7 +2018,7 @@ fn a_failure_report_whose_read_back_fails_is_fenced() {
         (ks == Keyspace::Durable && key == "split.c0" && fires.swap(false, Ordering::SeqCst))
             .then(|| StoreError::Retryable("injected: read failed".into()))
     });
-    let failed = a.fail(&support::split_id("c0"), "injected");
+    let failed = a.fail(&support::split_id("c0"), epoch, "injected");
 
     let lost = lost_queued(&mut a, "c0");
     assert!(
@@ -2036,18 +2061,22 @@ fn a_failure_report_lost_to_a_peer_is_fenced_and_writes_nothing() {
     let clock = TestClock::frozen();
     let fault = FaultStore::with_clock(LEASE, clock.clone());
     let mut a = holding_polled_clocked(&rt, fault.clone(), &clock, &["r0"]);
+    let epoch = fault.epoch(&rt, "split.r0");
     rewrite_record(&rt, &fault, "split.r0", |r| {
         r["owner"] = "worker-b".into();
         r["epoch"] = 2.into();
     });
 
-    let failed = a.fail(&support::split_id("r0"), "injected");
+    let updates = fault.updates(Keyspace::Durable, "split.r0");
+    let failed = a.fail(&support::split_id("r0"), epoch, "injected");
+    // The worker may re-claim the split after the fence, which adds a write.
+    let attempted = fault.updates(Keyspace::Durable, "split.r0") - updates;
 
     let record = fault.record(&rt, "split.r0");
     let lost = lost_queued(&mut a, "r0");
     assert!(
-        is_kind(&failed, CoordinationErrorKind::Fenced) && lost,
-        "fail returned {failed:?}; record {record}; Lost: {lost}"
+        is_kind(&failed, CoordinationErrorKind::Fenced) && lost && attempted >= 1,
+        "fail returned {failed:?}; record {record}; Lost: {lost}; CAS attempts: {attempted}"
     );
 }
 
@@ -2060,21 +2089,26 @@ fn a_write_lost_to_a_later_tenancy_of_the_same_instance_is_fenced() {
         let clock = TestClock::frozen();
         let fault = FaultStore::with_clock(LEASE, clock.clone());
         let mut a = holding_polled_clocked(&rt, fault.clone(), &clock, &["r0"]);
+        let epoch = fault.epoch(&rt, "split.r0");
         rewrite_record(&rt, &fault, "split.r0", |r| {
             r["epoch"] = 2.into();
             r["watermark"] = 12.into();
         });
 
+        let updates = fault.updates(Keyspace::Durable, "split.r0");
         let result = if fail {
-            a.fail(&support::split_id("r0"), "injected")
+            a.fail(&support::split_id("r0"), epoch, "injected")
         } else {
             a.commit(&support::split_id("r0"), &SplitProgress::new(13, vec![]))
         };
-
+        // The worker may re-claim the split after the fence, which adds a write.
+        let attempted = fault.updates(Keyspace::Durable, "split.r0") - updates;
         let record = fault.record(&rt, "split.r0");
         assert!(
-            is_kind(&result, CoordinationErrorKind::Fenced) && record["watermark"] == 12,
-            "fail={fail}: returned {result:?}; record {record}"
+            is_kind(&result, CoordinationErrorKind::Fenced)
+                && record["watermark"] == 12
+                && attempted >= 1,
+            "fail={fail}: returned {result:?}; record {record}; CAS attempts: {attempted}"
         );
     }
 }
@@ -2110,6 +2144,7 @@ fn a_failure_report_after_an_ambiguous_completing_commit_leaves_the_record() {
     let clock = TestClock::frozen();
     let fault = FaultStore::with_clock(LEASE, clock.clone());
     let mut a = holding_polled_clocked(&rt, fault.clone(), &clock, &["r0"]);
+    let epoch = fault.epoch(&rt, "split.r0");
     arm_ambiguous(&fault, "split.r0");
     let first = a.commit(
         &support::split_id("r0"),
@@ -2120,16 +2155,21 @@ fn a_failure_report_after_an_ambiguous_completing_commit_leaves_the_record() {
         "{first:?}"
     );
 
-    let failed = a.fail(&support::split_id("r0"), "injected");
+    let updates = fault.updates(Keyspace::Durable, "split.r0");
+    let failed = a.fail(&support::split_id("r0"), epoch, "injected");
 
     let record = fault.record(&rt, "split.r0");
+    let attempted = fault.updates(Keyspace::Durable, "split.r0") - updates;
+    let lease = fault.present(&rt, Keyspace::Ephemeral, &["split.r0"]);
     assert!(
         is_kind(&failed, CoordinationErrorKind::Fenced)
             && record["status"] == "completed"
             && record["watermark"] == 7
             && record["attempts"] == 0
-            && record["owner"] == "worker-a",
-        "fail returned {failed:?}; record {record}"
+            && record["owner"] == "worker-a"
+            && attempted == 1
+            && lease.is_empty(),
+        "fail returned {failed:?}; record {record}; CAS attempts: {attempted}; lease: {lease:?}"
     );
 }
 
@@ -2201,8 +2241,9 @@ fn a_failure_report_sent_again_after_an_ambiguous_one_hands_the_split_back() {
     let fault = FaultStore::with_clock(LEASE, clock.clone());
     let tap = support::tap::TapStore::new(fault.clone());
     let mut a = holding_polled_clocked(&rt, tap.clone(), &clock, &["r0"]);
+    let epoch = fault.epoch(&rt, "split.r0");
     arm_ambiguous(&fault, "split.r0");
-    let first = a.fail(&support::split_id("r0"), "injected");
+    let first = a.fail(&support::split_id("r0"), epoch, "injected");
     assert!(
         is_kind(&first, CoordinationErrorKind::Retryable),
         "{first:?}"
@@ -2210,7 +2251,7 @@ fn a_failure_report_sent_again_after_an_ambiguous_one_hands_the_split_back() {
     let log = log_lease_writes(&tap, "split.r0");
     let reads = count_durable_reads(&tap, "split.r0");
 
-    let second = a.fail(&support::split_id("r0"), "injected");
+    let second = a.fail(&support::split_id("r0"), epoch, "injected");
 
     assert_resent_report_ended(&rt, &fault, &mut a, &second, &log);
     assert!(
@@ -2242,10 +2283,11 @@ fn a_failure_report_sent_again_after_a_seen_ambiguous_one_charges_one_attempt() 
     support::drive_clocked(&mut a, &clock, &mut held, "claiming r0", |h| {
         h.splits.len() == 1
     });
-    seen_failure_report(&mut a, &fault, &fleet, &clock);
+    let epoch = LeaseEpoch(held.splits["r0"].0);
+    seen_failure_report(&mut a, &fault, &fleet, &clock, epoch);
     let log = log_lease_writes(&tap, "split.r0");
 
-    let second = a.fail(&support::split_id("r0"), "injected");
+    let second = a.fail(&support::split_id("r0"), epoch, "injected");
 
     assert_resent_report_ended(&rt, &fault, &mut a, &second, &log);
     let record = fault.record(&rt, "split.r0");
@@ -2327,8 +2369,9 @@ fn a_commit_after_an_ambiguous_failure_report_is_fenced() {
     let clock = TestClock::frozen();
     let fault = FaultStore::with_clock(LEASE, clock.clone());
     let mut a = holding_polled_clocked(&rt, fault.clone(), &clock, &["r0"]);
+    let epoch = fault.epoch(&rt, "split.r0");
     arm_ambiguous(&fault, "split.r0");
-    let first = a.fail(&support::split_id("r0"), "injected");
+    let first = a.fail(&support::split_id("r0"), epoch, "injected");
     assert!(
         is_kind(&first, CoordinationErrorKind::Retryable),
         "{first:?}"
@@ -2380,6 +2423,7 @@ fn a_read_back_that_fails_fatally_is_fatal() {
         let fault = FaultStore::with_clock(LEASE, clock.clone());
         let tap = support::tap::TapStore::new(fault.clone());
         let mut a = holding_polled_clocked(&rt, tap.clone(), &clock, &["c0"]);
+        let epoch = fault.epoch(&rt, "split.c0");
         arm_ambiguous(&fault, "split.c0");
         let first = a.commit(&support::split_id("c0"), &SplitProgress::new(7, vec![]));
         assert!(
@@ -2396,7 +2440,7 @@ fn a_read_back_that_fails_fatally_is_fatal() {
         let failed = if commit {
             a.commit(&support::split_id("c0"), &SplitProgress::new(8, vec![]))
         } else {
-            a.fail(&support::split_id("c0"), "injected")
+            a.fail(&support::split_id("c0"), epoch, "injected")
         };
 
         assert!(
@@ -2947,7 +2991,7 @@ fn releases_after<S: CoordinationStore + Clone>(
     inner: &MemoryStore,
     clock: &Arc<TestClock>,
     component: &'static str,
-    prepare: impl FnOnce(&mut StoreCoordinator<S>, &support::Fleet),
+    prepare: impl FnOnce(&mut StoreCoordinator<S>, &support::Fleet, LeaseEpoch),
     act: impl FnOnce(&mut StoreCoordinator<S>),
 ) -> f64 {
     let handle = exporter();
@@ -2972,7 +3016,7 @@ fn releases_after<S: CoordinationStore + Clone>(
     support::drive_clocked(&mut a, clock, &mut held, "claiming every split", |h| {
         h.splits.len() == 2
     });
-    prepare(&mut a, &fleet);
+    prepare(&mut a, &fleet, LeaseEpoch(held.splits["r0"].0));
     act(&mut a);
     spate_test::metric_sum(
         &handle.render(),
@@ -2989,12 +3033,14 @@ fn seen_failure_report(
     fault: &FaultStore,
     fleet: &support::Fleet,
     clock: &TestClock,
+    epoch: LeaseEpoch,
 ) {
     fleet.settle(clock);
     arm_ambiguous(fault, "split.r0");
+    let failed = a.fail(&support::split_id("r0"), epoch, "injected");
     assert!(
-        a.fail(&support::split_id("r0"), "injected").is_err(),
-        "the injected reply loss surfaces"
+        is_kind(&failed, CoordinationErrorKind::Retryable),
+        "the injected reply loss surfaces: {failed:?}"
     );
     assert!(
         fault.ambiguous.lock().unwrap().is_empty(),
@@ -3024,8 +3070,8 @@ fn a_release_after_a_seen_failure_report_counts_no_release() {
         &fault.inner,
         &clock,
         "release-after-seen-report",
-        |a, fleet| {
-            seen_failure_report(a, &fault, fleet, &clock);
+        |a, fleet, epoch| {
+            seen_failure_report(a, &fault, fleet, &clock, epoch);
             reported_at = fault.updates(Keyspace::Durable, "split.r0");
         },
         |a| a.release(&r0_and_h0()).expect("release"),
@@ -3062,8 +3108,8 @@ fn a_departure_after_a_seen_failure_report_counts_no_release() {
         &fault.inner,
         &clock,
         "depart-after-seen-report",
-        |a, fleet| {
-            seen_failure_report(a, &fault, fleet, &clock);
+        |a, fleet, epoch| {
+            seen_failure_report(a, &fault, fleet, &clock, epoch);
             reported_at = fault.updates(Keyspace::Durable, "split.r0");
         },
         |a| a.depart(&r0_and_h0()).expect("depart"),
@@ -3092,11 +3138,12 @@ fn a_departure_after_an_unseen_failure_report_counts_no_release() {
         &fault.inner,
         &clock,
         "depart-after-unseen-report",
-        |a, _| {
+        |a, _, epoch| {
             arm_ambiguous(&fault, "split.r0");
+            let failed = a.fail(&support::split_id("r0"), epoch, "injected");
             assert!(
-                a.fail(&support::split_id("r0"), "injected").is_err(),
-                "the injected reply loss surfaces"
+                is_kind(&failed, CoordinationErrorKind::Retryable),
+                "the injected reply loss surfaces: {failed:?}"
             );
             assert!(
                 fault.ambiguous.lock().unwrap().is_empty(),
@@ -3126,7 +3173,7 @@ fn a_departure_whose_owner_clear_reply_was_lost_counts_the_release() {
         &fault.inner,
         &clock,
         "depart-owner-clear-lost",
-        |_, fleet| {
+        |_, fleet, _| {
             fleet.settle(&clock);
             armed_at = fault.updates(Keyspace::Durable, "split.r0");
             arm_ambiguous(&fault, "split.r0");
@@ -3156,8 +3203,9 @@ fn a_departure_after_an_earlier_report_whose_owner_clear_reply_was_lost_counts_t
         &fault.inner,
         &clock,
         "depart-owner-clear-lost-after-report",
-        |a, fleet| {
-            a.fail(&support::split_id("r0"), "injected").expect("fail");
+        |a, fleet, epoch| {
+            a.fail(&support::split_id("r0"), epoch, "injected")
+                .expect("fail");
             let mut held = Held::default();
             support::drive_clocked(a, &clock, &mut held, "re-claiming r0", |h| {
                 h.splits.get("r0").is_some_and(|(epoch, _)| *epoch == 2)
@@ -3253,10 +3301,12 @@ fn revocation_after_seen_report(
     fleet.join(&a);
     fleet.join(&b);
     fleet.settle(&clock);
+    let epoch = LeaseEpoch(held_a.splits[revoked.as_str()].0);
     arm_ambiguous(&fault, &format!("split.{}", revoked.as_str()));
+    let failed = a.fail(&revoked, epoch, "injected");
     assert!(
-        a.fail(&revoked, "injected").is_err(),
-        "the injected reply loss surfaces"
+        is_kind(&failed, CoordinationErrorKind::Retryable),
+        "the injected reply loss surfaces: {failed:?}"
     );
     assert!(
         fault.ambiguous.lock().unwrap().is_empty(),
@@ -3398,10 +3448,11 @@ fn report_with_fault(
     support::drive_clocked(&mut a, &clock, &mut held, "claiming x", |h| {
         h.splits.len() == 1
     });
+    let epoch = LeaseEpoch(held.splits["x"].0);
     held.splits.clear();
 
     let fired = arm(&fault, &tap);
-    a.fail(&support::split_id("x"), "injected").unwrap();
+    a.fail(&support::split_id("x"), epoch, "injected").unwrap();
     let lease_after_report = !fault
         .present(&rt, Keyspace::Ephemeral, &["split.x"])
         .is_empty();
@@ -3579,7 +3630,11 @@ fn a_restart_over_a_reported_splits_leftover_lease_keeps_the_last_attempt() {
     });
     let armed = refuse_next_delete(&tap, "split.x");
     predecessor
-        .fail(&support::split_id("x"), "injected")
+        .fail(
+            &support::split_id("x"),
+            LeaseEpoch(held.splits["x"].0),
+            "injected",
+        )
         .unwrap();
     let fired = !armed.load(Ordering::SeqCst);
     support::crash(first, predecessor);

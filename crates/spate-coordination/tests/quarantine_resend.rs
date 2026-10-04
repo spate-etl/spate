@@ -9,8 +9,8 @@ use spate_coordination::store::{
     WatchStream,
 };
 use spate_coordination::{
-    CoordinationError, CoordinationErrorKind, CoordinationEvent, SplitCoordinator, SplitProgress,
-    StoreCoordinator,
+    CoordinationError, CoordinationErrorKind, CoordinationEvent, LeaseEpoch, SplitCoordinator,
+    SplitProgress, StoreCoordinator,
 };
 use spate_core::clock::tokio::Clock;
 use spate_core::metrics::{ComponentLabels, CoordinationMetrics, MetricsHandle};
@@ -180,6 +180,8 @@ struct Rig {
     worker: StoreCoordinator<FaultStore>,
     fleet: Fleet,
     held: Held,
+    /// The epoch of the last tenancy of `x` seen in `held`.
+    epoch: u64,
 }
 
 impl Rig {
@@ -211,6 +213,7 @@ impl Rig {
             h.splits.contains_key("x")
         });
         fleet.settle(&clock);
+        let epoch = held.splits["x"].0;
         Rig {
             pipeline,
             metrics,
@@ -222,6 +225,7 @@ impl Rig {
             worker,
             fleet,
             held,
+            epoch,
         }
     }
 
@@ -231,8 +235,16 @@ impl Rig {
             .hide(|ks, key| ks == Keyspace::Durable && key == "split.x");
     }
 
+    /// Reports `x` at the epoch it is held at, or at the last one seen.
     fn fail(&mut self) -> Result<(), CoordinationError> {
-        self.worker.fail(&split_id("x"), "poison")
+        if let Some((epoch, _)) = self.held.splits.get("x") {
+            self.epoch = *epoch;
+        }
+        self.fail_at(LeaseEpoch(self.epoch))
+    }
+
+    fn fail_at(&mut self, epoch: LeaseEpoch) -> Result<(), CoordinationError> {
+        self.worker.fail(&split_id("x"), epoch, "poison")
     }
 
     /// Sends a report whose write applies and whose reply is lost.
@@ -645,11 +657,12 @@ fn quarantining_report_resent_during_a_revocation_settles_it_forced() {
     };
 
     let key = format!("split.{}", asked.as_str());
+    let epoch = LeaseEpoch(held_a.splits[asked.as_str()].0);
     fault.arm(Fault::UpdateReply, &key);
-    let first = a.fail(&asked, "poison");
+    let first = a.fail(&asked, epoch, "poison");
     assert_eq!(kind(&first), Some(CoordinationErrorKind::Retryable));
     assert!(!fault.armed(), "the report took the fault");
-    let second = a.fail(&asked, "poison");
+    let second = a.fail(&asked, epoch, "poison");
     let events = a.poll().unwrap();
     let lost = lost(&events, asked.as_str());
     let lease = rt
@@ -790,5 +803,43 @@ fn a_winning_quarantining_report_forgets_earlier_rejected_sends() {
         kind(&again),
         Some(CoordinationErrorKind::Fenced),
         "again={again:?}"
+    );
+}
+
+/// A re-sent quarantining report is adopted only by the tenancy that sent it:
+/// a report for the record's own epoch is `Fenced` with no `Lost`.
+#[test]
+fn a_resent_quarantining_report_for_another_tenancy_is_fenced() {
+    let mut rig = Rig::new(
+        "a_resent_quarantining_report_for_another_tenancy_is_fenced",
+        1,
+    );
+    let e = rig.held.splits["x"].0;
+    rig.fail_applied_reply_lost();
+    rig.fleet.settle(&rig.clock);
+    assert_eq!(rig.record()["epoch"], e + 1);
+    let other = rig.fail_at(LeaseEpoch(e + 1));
+    let events = rig.events();
+    assert_eq!(
+        kind(&other),
+        Some(CoordinationErrorKind::Fenced),
+        "other={other:?}"
+    );
+    assert!(!lost(&events, "x"), "events={events:?}");
+    let own = rig.fail();
+    assert!(own.is_ok(), "own={own:?}");
+    assert!(!rig.lease(), "the adopted report deletes the lease");
+}
+
+/// A report for another tenancy of a held split is not counted as a failure report.
+#[test]
+fn a_report_for_another_tenancy_is_not_counted() {
+    let mut rig = Rig::new("a_report_for_another_tenancy_is_not_counted", 3);
+    let e = rig.held.splits["x"].0;
+    let r = rig.worker.fail(&split_id("x"), LeaseEpoch(e + 1), "poison");
+    assert_eq!(kind(&r), Some(CoordinationErrorKind::Fenced));
+    assert_eq!(
+        rig.metric("spate_coordination_split_failures_total", &[]),
+        0.0
     );
 }

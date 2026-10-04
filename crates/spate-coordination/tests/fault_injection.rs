@@ -11,7 +11,8 @@ use spate_coordination::store::{
     CasOutcome, CoordinationStore, Entry, Keyspace, Revision, StoreError, WatchEvent, WatchStream,
 };
 use spate_coordination::{
-    CoordinationConfig, CoordinationEvent, SplitCoordinator, SplitProgress, StoreCoordinator,
+    CoordinationConfig, CoordinationEvent, LeaseEpoch, SplitCoordinator, SplitProgress,
+    StoreCoordinator,
 };
 use spate_core::clock::tokio::Clock;
 use std::collections::{BTreeMap, VecDeque};
@@ -557,7 +558,7 @@ fn after_unseen_lease_renewal(
     stale_reads: u64,
     settle: Duration,
     arm: impl FnOnce(&FaultStore),
-    act: impl FnOnce(&mut StoreCoordinator<FaultStore>, &str),
+    act: impl FnOnce(&mut StoreCoordinator<FaultStore>, &str, LeaseEpoch),
 ) -> (Option<String>, serde_json::Value, Vec<String>) {
     let rt = runtime();
     let clock = TestClock::frozen();
@@ -610,10 +611,9 @@ fn after_unseen_lease_renewal(
         (log.len(), log.last().expect("the faulted update").epoch)
     };
     *stale.lock().unwrap() = stale_reads;
-    act(
-        &mut worker,
-        key.strip_prefix("split.").expect("a split key"),
-    );
+    let id = key.strip_prefix("split.").expect("a split key");
+    let epoch = LeaseEpoch(held.splits[id].0);
+    act(&mut worker, id, epoch);
     act_returned.store(true, Ordering::Release);
 
     // Only a write of the faulted epoch is a renewal; a claim of the
@@ -657,7 +657,7 @@ fn a_release_after_an_unseen_lease_renewal_deletes_the_lease() {
         0,
         Duration::ZERO,
         |_| {},
-        |worker, _| {
+        |worker, _, _| {
             worker
                 .release(&[split_id("r0"), split_id("r1")])
                 .expect("release");
@@ -676,7 +676,7 @@ fn a_completion_after_an_unseen_lease_renewal_deletes_the_lease() {
         0,
         Duration::ZERO,
         |_| {},
-        |worker, id| {
+        |worker, id, _| {
             worker
                 .commit(&split_id(id), &SplitProgress::completed(1, vec![]))
                 .expect("complete");
@@ -693,7 +693,7 @@ fn a_release_whose_lease_read_lags_the_renewal_leaves_the_lease_until_the_next_h
         1,
         Duration::ZERO,
         |_| {},
-        |worker, _| {
+        |worker, _, _| {
             worker
                 .release(&[split_id("r0"), split_id("r1")])
                 .expect("release");
@@ -712,7 +712,7 @@ fn a_release_whose_lease_read_lags_deletes_the_lease_on_the_next_heartbeat() {
         1,
         support::LEASE / 2,
         |_| {},
-        |worker, _| {
+        |worker, _, _| {
             worker
                 .release(&[split_id("r0"), split_id("r1")])
                 .expect("release");
@@ -730,7 +730,7 @@ fn a_release_whose_lease_read_lags_twice_deletes_the_lease_on_a_later_heartbeat(
         2,
         support::LEASE * 5 / 6,
         |_| {},
-        |worker, _| {
+        |worker, _, _| {
             worker
                 .release(&[split_id("r0"), split_id("r1")])
                 .expect("release");
@@ -748,7 +748,7 @@ fn a_release_whose_second_lease_delete_fails_deletes_the_lease_on_the_next_heart
         0,
         support::LEASE / 2,
         |store| store.lease_delete_fails.store(true, Ordering::Release),
-        |worker, _| {
+        |worker, _, _| {
             worker
                 .release(&[split_id("r0"), split_id("r1")])
                 .expect("release");
@@ -770,7 +770,7 @@ fn a_release_whose_owed_lease_read_fails_deletes_the_lease_on_a_later_heartbeat(
             store.lease_settle_read_fails.store(true, Ordering::Release);
             read_fails = Some(store.lease_settle_read_fails.clone());
         },
-        |worker, _| {
+        |worker, _, _| {
             worker
                 .release(&[split_id("r0"), split_id("r1")])
                 .expect("release");
@@ -796,7 +796,7 @@ fn a_release_whose_owed_lease_delete_fails_deletes_the_lease_on_a_later_heartbea
             store.lease_delete_fails.store(true, Ordering::Release);
             delete_fails = Some(store.lease_delete_fails.clone());
         },
-        |worker, _| {
+        |worker, _, _| {
             worker
                 .release(&[split_id("r0"), split_id("r1")])
                 .expect("release");
@@ -818,8 +818,8 @@ fn a_failure_report_whose_lease_read_lags_keeps_the_reclaimed_lease() {
         1,
         support::LEASE / 2,
         |_| {},
-        |worker, id| {
-            worker.fail(&split_id(id), "injected").expect("fail");
+        |worker, id, epoch| {
+            worker.fail(&split_id(id), epoch, "injected").expect("fail");
         },
     );
     let lease: serde_json::Value =
@@ -839,8 +839,8 @@ fn a_failure_report_whose_lease_read_lags_stops_retrying_the_reclaimed_lease() {
             1,
             settle,
             |store| reads = Some(store.lease_reads_after_act.clone()),
-            |worker, id| {
-                worker.fail(&split_id(id), "injected").expect("fail");
+            |worker, id, epoch| {
+                worker.fail(&split_id(id), epoch, "injected").expect("fail");
             },
         );
         reads.expect("armed").load(Ordering::Acquire)

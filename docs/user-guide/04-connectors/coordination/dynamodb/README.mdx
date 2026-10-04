@@ -146,6 +146,13 @@ the operation timeout and is reported as Retryable. See
 [Securing connections](../../../03-guides/securing-connections.mdx) for the
 generic model.
 
+The SDK also stops retrying while its retry quota is empty, and a burst of
+failed attempts can empty it. The creates that seed a plan's split records draw
+on a quota of their own, so a throttled seeding burst leaves lease renewals and
+commits their retries. Every other call shares one quota with any other
+DynamoDB client in the process that uses the SDK's default retry partition for
+the same region.
+
 ## IAM policy
 
 A worker needs these actions on the table:

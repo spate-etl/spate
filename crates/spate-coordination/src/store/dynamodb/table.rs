@@ -154,6 +154,17 @@ pub(crate) trait Table: Send + Sync + fmt::Debug {
         write: Write,
     ) -> BoxFuture<'a, Result<Written, StoreError>>;
 
+    /// [`write`](Self::write) for the create of a split's spec or progress
+    /// record, under an SDK retry quota no other call draws on.
+    fn write_seed<'a>(
+        &'a self,
+        pk: &'a str,
+        sk: &'a str,
+        write: Write,
+    ) -> BoxFuture<'a, Result<Written, StoreError>> {
+        self.write(pk, sk, write)
+    }
+
     /// Applies `put`, a [`Write::Put`] under [`Cond::Absent`], in one
     /// transaction that also requires the item under `floor_pk` and `sk` to
     /// be absent or below the put's revision. A failed key condition is

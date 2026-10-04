@@ -1702,3 +1702,91 @@ fn an_empty_system_store_warns() {
         "{lines:?}"
     );
 }
+
+/// A throttled burst of split-record creates, first on spec records and then
+/// on progress records, leaves a commit and a lease renewal their SDK retry:
+/// each meets one throttle and then wins. Regression for #882.
+#[tokio::test]
+async fn a_seeding_burst_leaves_renewals_and_commits_their_retries() {
+    const BURST: usize = 128;
+    let probes = Arc::new(Mutex::new(HashMap::<String, usize>::new()));
+    let seen = probes.clone();
+    let script: Script = Arc::new(move |request: &Request| {
+        let body = &request.body;
+        match request.op.as_str() {
+            "describetable" => Reply::Json(200, ACTIVE_TABLE.into()),
+            "describetimetolive" => ttl_on(),
+            "updateitem" if body["Key"]["sk"]["S"] == "meta" => Reply::Json(200, "{}".into()),
+            "updateitem"
+                if body["UpdateExpression"]
+                    .as_str()
+                    .is_some_and(|e| e.contains("if_not_exists")) =>
+            {
+                Reply::Json(400, error_body("ProvisionedThroughputExceededException"))
+            }
+            "updateitem" => {
+                let sk = body["Key"]["sk"]["S"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string();
+                let mut probes = seen.lock().unwrap();
+                let n = probes.entry(sk).or_default();
+                *n += 1;
+                if *n == 1 {
+                    Reply::Json(400, error_body("ProvisionedThroughputExceededException"))
+                } else {
+                    Reply::Json(200, "{}".into())
+                }
+            }
+            _ => not_called(),
+        }
+    });
+    let (url, _) = serve(script).await;
+    // A region of its own: the SDK keys its shared retry quota by region,
+    // process-wide.
+    let (sdk, settings) = settings(&url, static_credentials());
+    let sdk = sdk.into_builder().region(Region::new("eu-south-2")).build();
+    let store = store_over(SdkTable::new(&sdk, &settings));
+    for (round, prefix) in ["spec.", "split."].into_iter().enumerate() {
+        let creates = (0..BURST).map(|i| {
+            let store = store.clone();
+            async move {
+                store
+                    .create(Keyspace::Durable, &format!("{prefix}s{i}"), b"v".to_vec())
+                    .await
+            }
+        });
+        for outcome in futures_util::future::join_all(creates).await {
+            assert!(
+                matches!(outcome, Err(StoreError::Retryable(_))),
+                "{outcome:?}"
+            );
+        }
+        let commit = store
+            .update(
+                Keyspace::Durable,
+                &format!("split.c{round}"),
+                b"v".to_vec(),
+                Revision(5),
+            )
+            .await;
+        assert_eq!(
+            commit.unwrap(),
+            CasOutcome::Won(Revision(6)),
+            "round {round}"
+        );
+        let renewal = store
+            .update(
+                Keyspace::Ephemeral,
+                &format!("split.r{round}"),
+                b"v".to_vec(),
+                Revision(5),
+            )
+            .await;
+        assert_eq!(
+            renewal.unwrap(),
+            CasOutcome::Won(Revision(7)),
+            "round {round}"
+        );
+    }
+}

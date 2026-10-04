@@ -113,8 +113,8 @@ The bump usually cannot be fixed inside its own pull request, so:
    its last green pin and no other pull request is blocked.
 2. File the defect as its own issue if none is open.
 3. Add an `ignore` entry to `.github/dependabot.yml` naming the exact versions,
-   with a `Delete this when …` sentence and the issue number. The `rust` entry
-   there is the worked example.
+   with a `Delete this when …` sentence and the issue number. The Rust
+   workspace's `cargo` entry there is the worked example.
 4. Close the bump pull request. The next run proposes the version after the
    ignored one.
 

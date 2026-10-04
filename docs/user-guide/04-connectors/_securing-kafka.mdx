@@ -40,9 +40,13 @@ OpenSSL the build links:
 
 - **Vendored OpenSSL**, the `kafka-tls` default: the connector sets
   `ssl.ca.location: probe`. On Linux and BSD, librdkafka then loads the first
-  standard CA bundle it finds, such as `/etc/ssl/certs/ca-certificates.crt`,
-  and reads no other location. A CA installed only in a hashed certificate
-  directory is not trusted; set `ssl.ca.location` to that directory.
+  standard CA location it finds, such as `/etc/ssl/certs/ca-certificates.crt`.
+  When that location is a bundle file, librdkafka reads no other, and a CA
+  installed only in a hashed certificate directory is not trusted; set
+  `ssl.ca.location` to that directory. The hashed directory `/etc/ssl/certs`
+  is itself on the probe list. When no standard location exists, librdkafka
+  falls back to the vendored OpenSSL's default verify paths under
+  `/usr/local/ssl`.
 - **System OpenSSL**, built with `OPENSSL_NO_VENDOR=1`: the connector leaves
   the key unset and librdkafka's native default applies. On Linux and BSD that
   is the system OpenSSL's default verify paths, including its hashed

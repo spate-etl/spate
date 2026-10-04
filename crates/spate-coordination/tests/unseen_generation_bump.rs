@@ -2,12 +2,15 @@
 
 mod support;
 
+use futures_util::StreamExt as _;
 use spate_coordination::store::memory::MemoryStore;
 use spate_coordination::store::{
-    CasOutcome, CoordinationStore, Entry, Keyspace, Revision, StoreError, WatchMode, WatchStream,
+    CasOutcome, CoordinationStore, Entry, Keyspace, Revision, StoreError, WatchEvent, WatchMode,
+    WatchStream,
 };
 use spate_coordination::{SplitCoordinator as _, StoreCoordinator};
 use spate_core::clock::tokio::Clock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use support::{Held, LEASE, PhasedPlanner, TestClock, config, runtime};
@@ -32,6 +35,11 @@ enum Lands {
 struct ReplyLost<S> {
     inner: S,
     armed: Arc<Mutex<Option<Lands>>>,
+    /// Whether the armed write also fails the next plan read, and the watch
+    /// hides plan writes.
+    refuse_reread: bool,
+    reread_refused: Arc<AtomicBool>,
+    refusing: Arc<AtomicBool>,
 }
 
 impl<S: CoordinationStore + Clone> CoordinationStore for ReplyLost<S> {
@@ -91,12 +99,17 @@ impl<S: CoordinationStore + Clone> CoordinationStore for ReplyLost<S> {
             matches!(outcome, CasOutcome::Won(_)),
             "the armed write lost"
         );
+        self.refusing.store(self.refuse_reread, Ordering::SeqCst);
         Err(StoreError::Retryable(
             "injected: reply lost after the write applied".into(),
         ))
     }
 
     async fn get(&self, ks: Keyspace, key: &str) -> Result<Option<Entry>, StoreError> {
+        if ks == Keyspace::Durable && key == "plan" && self.refusing.swap(false, Ordering::SeqCst) {
+            self.reread_refused.store(true, Ordering::SeqCst);
+            return Err(StoreError::Retryable("injected: re-read failed".into()));
+        }
         self.inner.get(ks, key).await
     }
 
@@ -110,7 +123,16 @@ impl<S: CoordinationStore + Clone> CoordinationStore for ReplyLost<S> {
     }
 
     async fn watch(&self, ks: Keyspace, prefix: &str) -> Result<WatchStream, StoreError> {
-        self.inner.watch(ks, prefix).await
+        let inner = self.inner.watch(ks, prefix).await?;
+        if !self.refuse_reread {
+            return Ok(inner);
+        }
+        // A watch that showed the bump would move the next election past it.
+        Ok(inner
+            .filter(|e| {
+                std::future::ready(!matches!(e, Ok(WatchEvent::Put(entry)) if entry.key == "plan"))
+            })
+            .boxed())
     }
 
     async fn list(&self, ks: Keyspace, prefix: &str) -> Result<Vec<Entry>, StoreError> {
@@ -129,12 +151,25 @@ fn elect_over<S: CoordinationStore + Clone + Send + Sync + 'static>(
     lands: Lands,
     wrap: impl FnOnce(MemoryStore) -> S,
 ) -> serde_json::Value {
+    elect_with(lands, wrap, false)
+}
+
+/// [`elect_over`]; with `refuse_reread`, the plan read after the armed write
+/// also fails and the watch hides plan writes.
+fn elect_with<S: CoordinationStore + Clone + Send + Sync + 'static>(
+    lands: Lands,
+    wrap: impl FnOnce(MemoryStore) -> S,
+    refuse_reread: bool,
+) -> serde_json::Value {
     let rt = runtime();
     let clock = TestClock::frozen();
     let inner = MemoryStore::with_clock(LEASE, clock.clone());
     let store = ReplyLost {
         inner: wrap(inner.clone()),
         armed: Arc::new(Mutex::new(Some(lands))),
+        refuse_reread,
+        reread_refused: Arc::new(AtomicBool::new(false)),
+        refusing: Arc::new(AtomicBool::new(false)),
     };
     let mut worker = StoreCoordinator::with_clock(
         store.clone(),
@@ -154,6 +189,11 @@ fn elect_over<S: CoordinationStore + Clone + Send + Sync + 'static>(
     assert!(
         store.armed.lock().unwrap().is_none(),
         "the bump took no fault"
+    );
+    assert_eq!(
+        store.reread_refused.load(Ordering::SeqCst),
+        refuse_reread,
+        "the re-read fault"
     );
     let entry = rt
         .block_on(inner.get(Keyspace::Durable, "plan"))
@@ -214,6 +254,17 @@ fn a_bump_at_the_same_generation_without_an_elector_demotes() {
 #[test]
 fn an_own_record_at_an_earlier_generation_is_bumped_past() {
     let plan = elect(Lands::EarlierGeneration);
+    assert_eq!(plan["generation"], 1, "{plan}");
+    assert_eq!(plan["finality"], "final", "{plan}");
+    assert_eq!(plan["elector"]["owner"], "solo", "{plan}");
+}
+
+/// A bump that applied unseen, given back after its re-read failed, is kept
+/// by this process's next election at the same generation, when no watch
+/// event showed it.
+#[test]
+fn an_unseen_bump_given_back_is_kept_by_the_next_election() {
+    let plan = elect_with(Lands::AsSent, |inner| inner, true);
     assert_eq!(plan["generation"], 1, "{plan}");
     assert_eq!(plan["finality"], "final", "{plan}");
     assert_eq!(plan["elector"]["owner"], "solo", "{plan}");

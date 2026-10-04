@@ -1275,4 +1275,104 @@ mod tests {
         assert!(steps.folded(t0 + SEED_STEP_INTERVAL * 2));
     }
 
+    /// Applies the first plan update, then reports it as a retryable error.
+    #[derive(Clone)]
+    struct LoseBumpReply {
+        inner: MemoryStore,
+        armed: Arc<AtomicBool>,
+    }
+
+    impl CoordinationStore for LoseBumpReply {
+        fn lease_ttl(&self) -> Duration {
+            self.inner.lease_ttl()
+        }
+        async fn create(
+            &self,
+            ks: Keyspace,
+            key: &str,
+            value: Vec<u8>,
+        ) -> Result<CasOutcome, StoreError> {
+            self.inner.create(ks, key, value).await
+        }
+        async fn update(
+            &self,
+            ks: Keyspace,
+            key: &str,
+            value: Vec<u8>,
+            expected: Revision,
+        ) -> Result<CasOutcome, StoreError> {
+            let out = self.inner.update(ks, key, value, expected).await?;
+            if key == records::PLAN_KEY && self.armed.swap(false, Ordering::SeqCst) {
+                assert!(matches!(out, CasOutcome::Won(_)));
+                return Err(StoreError::Retryable("reply lost".into()));
+            }
+            Ok(out)
+        }
+        async fn get(&self, ks: Keyspace, key: &str) -> Result<Option<Entry>, StoreError> {
+            self.inner.get(ks, key).await
+        }
+        async fn delete(
+            &self,
+            ks: Keyspace,
+            key: &str,
+            expected: Option<Revision>,
+        ) -> Result<CasOutcome, StoreError> {
+            self.inner.delete(ks, key, expected).await
+        }
+        async fn watch(&self, ks: Keyspace, prefix: &str) -> Result<WatchStream, StoreError> {
+            self.inner.watch(ks, prefix).await
+        }
+        async fn list(&self, ks: Keyspace, prefix: &str) -> Result<Vec<Entry>, StoreError> {
+            self.inner.list(ks, prefix).await
+        }
+    }
+
+    /// An election that adopts its own unseen bump over a final plan leaves
+    /// no planner run scheduled.
+    #[tokio::test]
+    async fn an_adopted_bump_over_a_final_plan_schedules_no_planner() {
+        let clock = TestClock::frozen();
+        let inner = MemoryStore::with_clock(Duration::from_secs(10), clock.clone());
+        let mut plan = records::PlanRecord::new("deadline:v1".into());
+        plan.generation = 1;
+        plan.finality = records::PlanFinalityRepr::Final;
+        let CasOutcome::Won(rev) = inner
+            .create(Keyspace::Durable, records::PLAN_KEY, plan.encode())
+            .await
+            .expect("seed")
+        else {
+            panic!("new");
+        };
+        let store = LoseBumpReply {
+            inner: inner.clone(),
+            armed: Arc::new(AtomicBool::new(true)),
+        };
+        let (_, commands) = mpsc::channel(1);
+        let (events, _) = std::sync::mpsc::channel();
+        let mut task = Task::new(
+            store.clone(),
+            crate::CoordinationConfig::default(),
+            clock,
+            "deadline:v1".into(),
+            "solo".into(),
+            uuid::Uuid::new_v4().simple().to_string(),
+            Box::new(UnusedPlanner),
+            None,
+            commands,
+            events,
+            None,
+        );
+        task.plan = Some((plan, rev));
+        task.plan_now = true;
+        task.try_elect().await.expect("election");
+        assert!(
+            !store.armed.load(Ordering::SeqCst),
+            "the bump took the fault"
+        );
+        assert!(task.leadership.is_some(), "the worker must lead");
+        assert!(
+            !task.plan_now,
+            "an adopted bump over a final plan left a planner run scheduled"
+        );
+    }
 }

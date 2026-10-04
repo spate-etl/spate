@@ -102,8 +102,9 @@ lane resolving to the primary lane's image is dropped, and
 
 Dependabot moves the pins, with one `.github/dependabot.yml` entry per policy:
 lanes held on a line share an entry and an `ignore` rule, and a lane that follows
-every release gets its own. Moving a *line* when a vendor's support window shifts
-is a maintainer edit.
+every release gets its own. The `rust` lane shares its entry with
+`examples/docker`, which pins the same image. Moving a *line* when a vendor's
+support window shifts is a maintainer edit.
 
 ## When a lane goes red
 

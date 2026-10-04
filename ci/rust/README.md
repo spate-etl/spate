@@ -19,5 +19,5 @@ The lane holds the Debian 12 variant, which ships OpenSSL 3.0. Dependabot moves
 the Rust release and keeps the suffix. Moving to another Debian release is a
 maintainer edit.
 
-`examples/docker/Dockerfile` pins the same image under its own Dependabot entry.
-The two pins move independently.
+`examples/docker/Dockerfile` pins the same image. One weekly Dependabot entry
+bumps both in a single pull request.

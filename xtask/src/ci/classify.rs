@@ -690,7 +690,7 @@ mod tests {
     }
 
     /// A builder image bump selects the Kafka suite alone, on a Dependabot
-    /// pull request too.
+    /// pull request too, and with the example image in the same bump.
     #[test]
     fn a_builder_image_bump_selects_the_kafka_suite_alone() {
         assert_eq!(
@@ -704,6 +704,13 @@ mod tests {
         };
         let image = vec!["ci/rust/stable/Dockerfile".to_string()];
         let out = classify(&image, Event::PullRequest, &ctx, &graph(), &[]);
+        assert_eq!(suites(&out), ["spate-kafka"]);
+
+        let both = vec![
+            "examples/docker/Dockerfile".to_string(),
+            "ci/rust/stable/Dockerfile".to_string(),
+        ];
+        let out = classify(&both, Event::PullRequest, &ctx, &graph(), &[]);
         assert_eq!(suites(&out), ["spate-kafka"]);
     }
 

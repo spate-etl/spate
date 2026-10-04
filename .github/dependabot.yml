@@ -171,19 +171,29 @@ updates:
           - "@easyops-cn/*"
         update-types: ["minor", "patch"]
 
-  # ---------------------------------------------- Docker (example image) ----
+  # ------------------------------------------------ Docker (Rust images) ----
+  # `examples/docker` and `ci/rust/stable` pin the same `rust` image, as the
+  # example's builder and as the image `spate-kafka`'s `tls_system_ca` builds
+  # and runs its system OpenSSL client in. The group moves both in one pull
+  # request. Dependabot keeps the `-bookworm` suffix, so a move off Debian 12 is
+  # a maintainer edit.
   - package-ecosystem: docker
-    directory: "/examples/docker"
+    directories:
+      - "/examples/docker"
+      - "/ci/rust/stable"
     schedule:
       interval: weekly
       day: thursday
     open-pull-requests-limit: 3
-    labels: ["dependencies", "area: examples"]
+    labels: ["dependencies", "area: examples", "area: ci"]
     commit-message:
-      prefix: "examples"
+      prefix: "workspace"
     # `default-days` only, as for github-actions above.
     cooldown:
       default-days: 7
+    groups:
+      rust-image:
+        patterns: ["rust"]
 
   # ------------------------------------- Docker (ClickHouse test matrix) ----
   # `ci/clickhouse/<lane>/Dockerfile` pins the server each lane of the version
@@ -313,19 +323,3 @@ updates:
     ignore:
       - dependency-name: "debian"
         update-types: ["version-update:semver-major"]
-
-  # ---------------------------------- Docker (Kafka TLS builder image) ----
-  # `ci/rust/stable/Dockerfile` pins the image `spate-kafka`'s `tls_system_ca`
-  # builds and runs its system OpenSSL client in. Dependabot keeps the
-  # `-bookworm` suffix, so a move off Debian 12 is a maintainer edit.
-  - package-ecosystem: docker
-    directory: "/ci/rust/stable"
-    schedule:
-      interval: monthly
-      day: friday
-    open-pull-requests-limit: 1
-    labels: ["dependencies", "area: ci"]
-    commit-message:
-      prefix: "ci"
-    cooldown:
-      default-days: 7

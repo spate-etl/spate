@@ -9,6 +9,4 @@ lost and its lease left until it expired, or, once the worker had seen the
 first report, was written again and charged a second attempt. That could
 quarantine the split after one failure. When the store's read of the record
 lags the write the report lost to, the repeated report is still reported as
-fenced and the lease expires. A repeated report whose first send quarantined
-the split is still reported as fenced, with the split lost and its lease left
-until it expires.
+fenced and the lease expires.

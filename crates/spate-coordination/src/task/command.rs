@@ -77,9 +77,11 @@ impl<S: CoordinationStore + Clone> Task<S> {
     /// ends the tenancy as a completing commit does, with no `Lost`. The caller
     /// gets `Ok` if this commit repeats the completing commit that landed, and
     /// `Fenced` otherwise. Another writer's record means a peer owns the split:
-    /// nothing was written, the caller gets `Fenced`, and `Lost` follows. A
-    /// read older than the write that won is `Retryable`, a failed read keeps
-    /// its store error's class, and either keeps the split held.
+    /// nothing was written, the caller gets `Fenced`, and `Lost` follows. This
+    /// worker's own quarantining failure report read back here counts as
+    /// another writer's record. A read older than the write that won is
+    /// `Retryable`, a failed read keeps its store error's class, and either
+    /// keeps the split held.
     async fn commit(
         &mut self,
         split: &SplitId,
@@ -156,6 +158,9 @@ impl<S: CoordinationStore + Clone> Task<S> {
                     format!("split {split} is owned by a peer; nothing was written"),
                 ));
             };
+            if self.sent_quarantine_report(id, &fresh) {
+                self.quarantine_reports.remove(id);
+            }
             let ours = fresh.owner.as_deref() == Some(self.instance.as_str())
                 && fresh.epoch == owned_epoch;
             if ours
@@ -230,18 +235,35 @@ impl<S: CoordinationStore + Clone> Task<S> {
 
     /// Explicit failure report: consumes an attempt, ends this tenancy
     /// gracefully-for-the-lease but non-gracefully for the attempt
-    /// accounting, and quarantines at the cap. When the view, or the record
-    /// read back after a lost CAS, already shows this tenancy's own failure
-    /// report and that report did not quarantine, the tenancy ends as that
-    /// report ended it: the lease is handed back, nothing is written, and the
-    /// call returns `Ok` without `Lost`. A lost CAS on this tenancy's own
-    /// newer runnable record writes the report again on top of it; a record
-    /// this tenancy already completed hands the lease back and returns
-    /// `Fenced` without `Lost`. Any other record, or a read-back that lags or
-    /// fails `Retryable`, returns `Fenced` and emits `Lost`.
+    /// accounting, and quarantines at the cap.
+    ///
+    /// A report sent again after an earlier send applied with its reply lost
+    /// writes nothing, returns `Ok` without `Lost`, and ends the tenancy as
+    /// the earlier send ended it. A report that did not quarantine is
+    /// recognised by this tenancy's own failure report in the view or in the
+    /// record read back after a lost CAS. A quarantining report is recognised
+    /// while this worker holds a record it sent equal to the one in the store,
+    /// so a peer's quarantine returns `Fenced` and emits `Lost`. The lease is
+    /// handed back in the call, except that a view which folded a
+    /// quarantining report first owes the delete to the next heartbeat, and
+    /// the re-send attempts it. A lost CAS on this tenancy's own newer
+    /// runnable record writes the report again on top of it; a record this
+    /// tenancy already completed hands the lease back and returns `Fenced`
+    /// without `Lost`. Any other record, or a read-back that lags or fails
+    /// `Retryable`, returns `Fenced` and emits `Lost`.
     async fn fail_split(&mut self, split: &SplitId, reason: &str) -> Result<(), CoordinationError> {
         let id = split.as_str();
         let Some(owned) = self.owned.get(id) else {
+            let applied = self
+                .splits
+                .get(id)
+                .is_some_and(|state| self.sent_quarantine_report(id, &state.progress));
+            if applied {
+                self.metrics(|m| m.failed());
+                self.quarantine_reports.remove(id);
+                self.settle_owed_leases().await?;
+                return Ok(());
+            }
             return Err(CoordinationError::new(
                 CoordinationErrorKind::Fenced,
                 format!("split {split} is not held by this worker"),
@@ -282,6 +304,7 @@ impl<S: CoordinationStore + Clone> Task<S> {
                     // metric. Remove from `owned` before folding the write so
                     // the epoch bump cannot read as a peer's fence.
                     self.owned.remove(id);
+                    self.quarantine_reports.remove(id);
                     // A failure mid-revocation leaves an uncommitted tail to replay.
                     self.settle_revocation(id, RevocationOutcome::Forced);
                     self.upsert_progress(id, record, rev)?;
@@ -289,13 +312,29 @@ impl<S: CoordinationStore + Clone> Task<S> {
                     return Ok(());
                 }
                 Ok(CasOutcome::Lost) => {}
-                Err(e) => return Err(store_error(&format!("failing split {split}"), &e)),
+                Err(e) => {
+                    if record.status == SplitStatus::Quarantined {
+                        let sent = self.quarantine_reports.entry(id.to_string()).or_default();
+                        if !sent.contains(&record) {
+                            sent.push(record);
+                        }
+                    }
+                    return Err(store_error(&format!("failing split {split}"), &e));
+                }
             }
             let reread = match self.reread_record(split, &key, expected).await {
                 Err(e) if e.kind == CoordinationErrorKind::Retryable => None,
                 reread => reread?,
             };
             if let Some((fresh, rev)) = reread {
+                if self.sent_quarantine_report(id, &fresh) {
+                    // Removing `owned` before the fold keeps the epoch bump
+                    // from reading as a peer's fence.
+                    self.end_after_own_report(id, lease_rev).await?;
+                    self.upsert_progress(id, fresh, rev)?;
+                    self.quarantine_reports.remove(id);
+                    return Ok(());
+                }
                 let ours = fresh.owner.as_deref() == Some(self.instance.as_str())
                     && fresh.epoch == owned_epoch;
                 let own_report = own_failure_report(&fresh, owned_epoch, tenancy_attempts);
@@ -326,6 +365,14 @@ impl<S: CoordinationStore + Clone> Task<S> {
                 format!("split {split} is owned by a peer"),
             ));
         }
+    }
+
+    /// Whether `record` equals a quarantining failure report this worker sent
+    /// for `id` without learning its outcome.
+    pub(super) fn sent_quarantine_report(&self, id: &str, record: &SplitProgressRecord) -> bool {
+        self.quarantine_reports
+            .get(id)
+            .is_some_and(|sent| sent.contains(record))
     }
 
     /// Graceful hand-back: clear `owner` on the record (so the next claim

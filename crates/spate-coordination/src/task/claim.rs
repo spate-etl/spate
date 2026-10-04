@@ -462,6 +462,7 @@ impl<S: CoordinationStore + Clone> Task<S> {
         if self.owned.remove(id).is_none() {
             return;
         }
+        self.quarantine_reports.remove(id);
         // A split fenced or starved mid-drain ends that revocation the
         // expensive way: whatever was uncommitted replays.
         self.settle_revocation(id, RevocationOutcome::Forced);

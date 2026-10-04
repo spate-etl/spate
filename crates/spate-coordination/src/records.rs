@@ -145,8 +145,9 @@ pub(crate) fn fingerprint_hash(fingerprint: &str) -> u64 {
     foldhash::fast::FixedState::with_seed(0).hash_one(fingerprint)
 }
 
-/// Milliseconds since the Unix epoch. **Advisory only** (diagnostics);
-/// never compared across machines and never part of any protocol rule.
+/// Milliseconds since the Unix epoch, advisory for diagnostics. A worker
+/// compares a stamp it wrote for equality to recognise its own quarantining
+/// report.
 pub(crate) fn now_ms() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
@@ -264,7 +265,8 @@ pub(crate) struct SplitProgressRecord {
     pub(crate) state: Option<String>,
     /// Terminal flag of the committed progress.
     pub(crate) completed: bool,
-    /// Advisory wall-clock stamp of the last write.
+    /// Wall-clock stamp of the last write, advisory for diagnostics; a worker
+    /// compares it for equality to recognise its own quarantining report.
     pub(crate) written_at_ms: i64,
 }
 

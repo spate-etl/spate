@@ -10,7 +10,7 @@ use crate::records::{
 };
 use crate::store::{CoordinationStore, Entry, Keyspace, Revision, WatchEvent};
 use spate_core::coordination::{CoordinationError, CoordinationEvent, SplitId};
-use spate_core::metrics::SplitLossReason;
+use spate_core::metrics::{RevocationOutcome, SplitLossReason};
 
 impl<S: CoordinationStore + Clone> Task<S> {
     pub(super) fn apply_lease_event(&mut self, event: WatchEvent) -> Result<(), CoordinationError> {
@@ -354,8 +354,16 @@ impl<S: CoordinationStore + Clone> Task<S> {
             && self.owned.contains_key(id)
             && record.epoch > current_epoch
         {
-            // A claimant CASed the record past our tenancy.
-            self.drop_owned(id, SplitLossReason::Fenced);
+            if self.sent_quarantine_report(id, &record) {
+                // This worker's own quarantining report ends the tenancy with
+                // no loss; the next heartbeat deletes the lease.
+                self.owned.remove(id);
+                self.settle_revocation(id, RevocationOutcome::Forced);
+                self.owed_leases.insert(id.to_string(), current_epoch);
+            } else {
+                // A claimant CASed the record past our tenancy.
+                self.drop_owned(id, SplitLossReason::Fenced);
+            }
         }
         if previous_status != Some(record.status) {
             match previous_status {

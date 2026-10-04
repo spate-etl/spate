@@ -84,6 +84,7 @@ sha2 = "0.11"
 # The connector clients below (rdkafka, clickhouse, apache-avro, object_store,
 # async-nats) are internal only, never in public signatures (INV-6).
 rdkafka = "0.39"
+openssl-sys = "0.9"
 # Do not declare the lz4 codec separately. It arrives transitively through this
 # crate's `lz4` feature, which spate-clickhouse enables; declaring it again
 # either widens the client's features for workspace builds only, or puts two

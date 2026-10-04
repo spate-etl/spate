@@ -131,9 +131,10 @@ pub struct KafkaSourceConfig {
     pub statistics_interval: Duration,
     /// Raw librdkafka properties, applied verbatim after validation.
     /// Framework-owned properties (see crate docs) are rejected. With the
-    /// `tls` feature, a map naming neither `ssl.ca.location` nor `ssl.ca.pem`
-    /// gets `ssl.ca.location: probe` unless `SSL_CERT_FILE` or `SSL_CERT_DIR`
-    /// is set.
+    /// `tls` feature and vendored OpenSSL, a map naming neither
+    /// `ssl.ca.location` nor `ssl.ca.pem` gets `ssl.ca.location: probe` unless
+    /// `SSL_CERT_FILE` or `SSL_CERT_DIR` is set; a build linked against the
+    /// system OpenSSL keeps librdkafka's native CA default.
     ///
     /// The framework sets no prefetch cap of its own, so
     /// `queued.min.messages` (default 100000) and
@@ -597,15 +598,15 @@ mod tests {
         drop(consumer);
     }
 
-    /// A `tls` build gets `probe` when the passthrough names no CA and no
-    /// OpenSSL env override is set, and keeps a CA it names.
+    /// A vendored-OpenSSL `tls` build gets `probe` when the passthrough names no
+    /// CA and no OpenSSL env override is set, and keeps a CA it names.
     #[cfg(feature = "tls")]
     #[test]
-    fn tls_build_defaults_the_ca_to_the_system_store() {
+    fn tls_build_ca_default_yields_to_env_and_named_ca() {
         let cfg = KafkaSourceConfig::from_component_config(&section(&minimal())).unwrap();
         assert_eq!(
             cfg.client_config_with(false).get("ssl.ca.location"),
-            Some("probe")
+            cfg!(spate_openssl_vendored).then_some("probe")
         );
         assert_eq!(cfg.client_config_with(true).get("ssl.ca.location"), None);
 
@@ -617,6 +618,21 @@ mod tests {
         assert_eq!(
             cfg.client_config_with(false).get("ssl.ca.location"),
             Some("/etc/kafka/ca.pem")
+        );
+    }
+
+    /// The consumer configuration carries `probe` only in a vendored-OpenSSL
+    /// `tls` build with no CA named and no OpenSSL environment override, and
+    /// keeps a named CA as given. Regression for #825.
+    #[test]
+    fn source_ca_default_reads_the_openssl_environment() {
+        crate::security::tests::assert_ca_cases(
+            "config::tests::source_ca_default_reads_the_openssl_environment",
+            |rdkafka| {
+                let mut cfg = KafkaSourceConfig::new("localhost:9092", "orders", "spate");
+                cfg.rdkafka = rdkafka;
+                vec![("consumer", cfg.client_config())]
+            },
         );
     }
 

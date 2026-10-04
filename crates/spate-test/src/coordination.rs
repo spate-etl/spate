@@ -19,6 +19,7 @@ struct State {
     events: Vec<CoordinationEvent>,
     commit_outcomes: HashMap<SplitId, VecDeque<CoordinationErrorKind>>,
     commits: Vec<(SplitId, SplitProgress)>,
+    final_commits: Vec<Vec<(SplitId, SplitProgress)>>,
     fail_outcomes: HashMap<SplitId, VecDeque<CoordinationErrorKind>>,
     failed: Vec<(SplitId, LeaseEpoch, String)>,
     released: Vec<SplitId>,
@@ -125,6 +126,12 @@ impl CoordinatorScript {
     #[must_use]
     pub fn commits(&self) -> Vec<(SplitId, SplitProgress)> {
         self.lock().commits.clone()
+    }
+
+    /// Each final commit batch the source sent, in order.
+    #[must_use]
+    pub fn final_commits(&self) -> Vec<Vec<(SplitId, SplitProgress)>> {
+        self.lock().final_commits.clone()
     }
 
     /// The last successful commit for `split`, if any.
@@ -242,6 +249,21 @@ impl SplitCoordinator for ScriptedCoordinator {
         Ok(())
     }
 
+    fn commit_final(
+        &mut self,
+        commits: &[(SplitId, SplitProgress)],
+    ) -> Vec<Result<(), CoordinationError>> {
+        self.state
+            .lock()
+            .expect("coordinator script poisoned")
+            .final_commits
+            .push(commits.to_vec());
+        commits
+            .iter()
+            .map(|(split, progress)| self.commit(split, progress))
+            .collect()
+    }
+
     fn fail(
         &mut self,
         split: &SplitId,
@@ -342,5 +364,32 @@ mod tests {
         assert!(!script.departed());
         coordinator.depart(&[]).unwrap();
         assert!(script.departed());
+    }
+
+    #[test]
+    fn final_commits_records_each_batch_and_applies_scripted_outcomes() {
+        let (mut coordinator, script) = scripted_coordinator();
+        let ids: Vec<SplitId> = ["a", "b", "c"]
+            .into_iter()
+            .map(|id| SplitId::new(id).unwrap())
+            .collect();
+        let batch: Vec<(SplitId, SplitProgress)> = ids
+            .iter()
+            .zip(1..)
+            .map(|(id, w)| (id.clone(), SplitProgress::new(w, vec![])))
+            .collect();
+        script.fail_next_commit(&ids[1], CoordinationErrorKind::Retryable);
+
+        let results = coordinator.commit_final(&batch);
+
+        assert_eq!(script.final_commits(), vec![batch.clone()]);
+        assert_eq!(results.len(), 3);
+        assert!(results[0].is_ok());
+        assert_eq!(
+            results[1].as_ref().unwrap_err().kind,
+            CoordinationErrorKind::Retryable
+        );
+        assert!(results[2].is_ok());
+        assert_eq!(script.commits(), vec![batch[0].clone(), batch[2].clone()]);
     }
 }

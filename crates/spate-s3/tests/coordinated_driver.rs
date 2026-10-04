@@ -375,6 +375,43 @@ fn shutdown_releases_splits_still_held() {
     assert_eq!(script.released(), vec![id], "the held split was released");
 }
 
+/// The source sends the final commit of a stop through
+/// `SplitCoordinator::commit_final`, as one batch.
+#[test]
+fn the_final_commit_at_shutdown_goes_out_as_one_batch() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    fs::create_dir_all(&data).unwrap();
+    fs::write(data.join("a.ndjson"), lines_bytes(&recs("a", 20_000))).unwrap();
+    let split = spec_over(&data, &["a.ndjson"]);
+    let id = split.id.clone();
+
+    let (coordinator, script) = scripted_coordinator();
+    script.gain(split, 1, None);
+    let yaml = config_yaml(&data)
+        .checkpoint("60s")
+        .source("prefetch_bytes", "64KiB")
+        .source("chunk_bytes", "16KiB")
+        .section("backpressure: { max_inflight_bytes: 4KiB }")
+        .build();
+    let l = launch_scripted_coordinator(&yaml, coordinator, |sink| {
+        for _ in 0..30 {
+            sink.enqueue_global(WriteOutcome::ok().after(Duration::from_millis(150)));
+        }
+    });
+    wait_until(Duration::from_secs(30), "rows flow", || {
+        !captured_rows(&l.script).is_empty()
+    });
+
+    l.shutdown.trigger();
+    let report = l.run.join().expect("run exits");
+    assert_eq!(report.state, ExitState::Completed, "drain completes");
+    let batches = script.final_commits();
+    assert_eq!(batches.len(), 1, "one final commit batch: {batches:?}");
+    let splits: Vec<_> = batches[0].iter().map(|(s, _)| s.clone()).collect();
+    assert_eq!(splits, vec![id], "the batch holds the held split");
+}
+
 /// A peer taking over a ranged split mid-range delivers exactly the owned
 /// records past the carried watermark. One range starts right after a
 /// delimiter, the other one byte past a delimiter, and both end inside a

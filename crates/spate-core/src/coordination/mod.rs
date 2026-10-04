@@ -642,6 +642,22 @@ pub trait SplitCoordinator: Send {
         progress: &SplitProgress,
     ) -> Result<(), CoordinationError>;
 
+    /// The last commit of a stop: one result per entry, in order, each with
+    /// the meaning of a [`commit`](SplitCoordinator::commit) result.
+    ///
+    /// An implementation over a remote store bounds the batch as a whole and
+    /// answers [`Retryable`](CoordinationErrorKind::Retryable) for the
+    /// entries it did not send. Defaulted to `commit` of each entry in turn.
+    fn commit_final(
+        &mut self,
+        commits: &[(SplitId, SplitProgress)],
+    ) -> Vec<Result<(), CoordinationError>> {
+        commits
+            .iter()
+            .map(|(split, progress)| self.commit(split, progress))
+            .collect()
+    }
+
     /// Report an owned split as unprocessable *by this tenancy*: consumes
     /// one delivery attempt and releases it for another worker to retry.
     /// At the backend's attempt cap the split is quarantined instead

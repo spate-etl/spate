@@ -32,7 +32,13 @@ revocation, one choreography tested constantly by every rebalance:
    that is force-aborted a second later, so this step always terminates.
 4. **Offsets commit.** The controller drains the checkpointer and runs a
    final synchronous commit + `flush_commits`, committing only watermarks
-   that cover durably written data, per the at-least-once invariant.
+   that cover durably written data, per the at-least-once invariant. A
+   coordinated source that forwards `Source::commit_final` to
+   `CoordinationDriver::commit_final`, as the built-in
+   [S3 source](../04-connectors/sources/s3/README.mdx) does, runs this commit
+   under one budget, `coordination.op_timeout`, for all its splits together.
+   Splits it does not reach before the budget ends keep their last committed
+   position, and the next owner may replay records from it.
 5. **The source closes.** A coordinated source departs its job: it hands
    back its splits, its leadership and its membership, so peers take over
    without waiting out a lease. The departure is bounded by
@@ -54,11 +60,21 @@ Keep `drain_timeout` comfortably **below**
 `terminationGracePeriodSeconds`. Steps 1 to 3 run inside the budget; the
 gap has to absorb what follows it: the pool's one-second backstop, the
 final commit (step 4), the source closing (step 5) and process teardown.
-The commit therefore always runs before SIGKILL. The defaults (25s vs 30s)
-encode this; if you raise one, raise the other. A coordinated source's close
-can take up to `coordination.op_timeout` (10s by default) against a slow
-store, which is longer than that gap; size the gap for it where a slow store
-at shutdown is likely.
+The defaults (25s vs 30s) encode this; if you raise one, raise the other. A
+coordinated source that forwards `Source::commit_final` can take up to
+`coordination.op_timeout` (10s by default) for the final commit against a
+slow store, and up to `op_timeout` again to close. Where a slow store at
+shutdown is likely, size the gap to at least twice `op_timeout` plus a few
+seconds. At the default that is more than the 5s gap. A coordinated source
+that does not forward it can take up to three times `op_timeout` for each
+split in turn
+([Custom sources](../06-extending/custom-source.mdx#3-delegate-the-choreography-coordinationdriver)).
+Keep `op_timeout` above about (2N + 3) times your store's write latency,
+where N is the number of splits an instance holds (at most `max_in_flight`).
+Below that, the final commit leaves splits to replay even on a healthy
+store. That figure is derived from the commit and heartbeat path and was not
+measured
+([ADR-0059](../../adr/0059-final-coordinated-commit-runs-under-one-op-timeout-budget.md)).
 :::
 
 ```yaml

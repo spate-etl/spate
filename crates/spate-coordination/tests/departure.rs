@@ -586,6 +586,93 @@ fn a_drop_over_a_wedged_store_returns_within_op_timeout() {
     );
 }
 
+const FINAL_IDS: [&str; 6] = ["c0", "c1", "c2", "c3", "c4", "c5"];
+const FINAL_KEYS: [&str; 6] = [
+    "split.c0", "split.c1", "split.c2", "split.c3", "split.c4", "split.c5",
+];
+
+/// A final commit over a store that stops answering returns within its one
+/// `op_timeout` budget, and nothing past the budget reaches the store.
+#[test]
+fn commit_final_over_a_wedged_store_sends_nothing_after_its_budget() {
+    let rt = runtime();
+    let store = FaultStore::new(LEASE);
+    let config = config_for(LEASE, Some("worker-a"));
+    let budget = config.op_timeout;
+    let mut a = holding(&rt, &store, config, &FINAL_IDS);
+    let before: Vec<(usize, serde_json::Value)> = FINAL_KEYS
+        .iter()
+        .map(|key| {
+            let watermark = store.record(&rt, key)["watermark"].clone();
+            (store.updates(Keyspace::Durable, key), watermark)
+        })
+        .collect();
+
+    store.wedged.store(true, Ordering::SeqCst);
+    let commits: Vec<_> = FINAL_IDS
+        .iter()
+        .map(|id| (support::split_id(id), SplitProgress::new(5, vec![])))
+        .collect();
+    let started = Instant::now();
+    let results = a.commit_final(&commits);
+    let took = started.elapsed();
+    assert!(
+        took < budget * 2,
+        "commit_final took {took:?} against a budget of {budget:?}"
+    );
+    assert_eq!(results.len(), FINAL_IDS.len());
+    let sent = results
+        .iter()
+        .filter(|r| !matches!(r, Err(e) if e.to_string().contains("nothing was sent")))
+        .count();
+    assert!(sent <= 1, "{results:?}");
+
+    // Commands are served in order, so once this commit is answered every
+    // command sent before it has been served.
+    store.wedged.store(false, Ordering::SeqCst);
+    let deadline = Instant::now() + support::DEADLINE;
+    loop {
+        let reply = a.commit(&support::split_id("c0"), &SplitProgress::new(8, vec![]));
+        let timed_out = matches!(&reply, Err(e) if e.kind == CoordinationErrorKind::Retryable
+            && (e.to_string().contains("timed out") || e.to_string().contains("queue is full")));
+        if !timed_out {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the barrier commit never landed");
+    }
+
+    for (key, (updates, watermark)) in FINAL_KEYS.iter().zip(&before).skip(1) {
+        assert_eq!(store.updates(Keyspace::Durable, key), *updates, "{key}");
+        assert_eq!(&store.record(&rt, key)["watermark"], watermark, "{key}");
+    }
+    assert_eq!(store.record(&rt, "split.c0")["watermark"], 8);
+}
+
+/// A final commit over a healthy store lands every split.
+#[test]
+fn commit_final_over_a_healthy_store_lands_every_split() {
+    let rt = runtime();
+    let store = FaultStore::new(LEASE);
+    let mut a = holding(&rt, &store, config_for(LEASE, Some("worker-a")), &FINAL_IDS);
+    let commits: Vec<_> = FINAL_IDS
+        .iter()
+        .zip(10..)
+        .map(|(id, w)| (support::split_id(id), SplitProgress::new(w, vec![])))
+        .collect();
+
+    let results = a.commit_final(&commits);
+
+    assert!(results.iter().all(Result::is_ok), "{results:?}");
+    assert_eq!(results.len(), FINAL_IDS.len());
+    for (key, (_, progress)) in FINAL_KEYS.iter().zip(&commits) {
+        assert_eq!(
+            store.record(&rt, key)["watermark"],
+            progress.watermark,
+            "{key}"
+        );
+    }
+}
+
 /// A release write that applies but loses its reply still leaves no lease
 /// and no owner: the retry loses its CAS, and the record read back shows
 /// the owner already cleared.

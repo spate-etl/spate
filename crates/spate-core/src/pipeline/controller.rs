@@ -184,6 +184,7 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
                 &checkpoint_metrics,
                 &health,
                 None,
+                false,
             );
 
             // A watermark stalled behind a failed batch is permanent; acks
@@ -329,6 +330,7 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
                     &checkpoint_metrics,
                     &health,
                     Some(&chasing),
+                    false,
                 );
                 // Stand down when the unit of work is done, meaning its lane
                 // left the assignment, not because its acks look quiet for an
@@ -403,6 +405,7 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
         &checkpoint_metrics,
         &health,
         None,
+        true,
     );
     let final_flush_failed = if let Err(e) = source.flush_commits() {
         tracing::error!(error = %e, "final commit flush failed; offsets will replay");
@@ -578,9 +581,10 @@ fn harvest(checkpointer: &mut Checkpointer, state: &mut State) {
     }
 }
 
-/// Harvest, publish checkpoint health, and commit what advanced. Failed
-/// commits are retried next tick (positions merge by max, so nothing
-/// regresses).
+/// Harvest, publish checkpoint health, and commit what advanced. A failed
+/// tick commit is retried next tick (positions merge by max, so nothing
+/// regresses). The final pass has no next tick. Positions it does not commit
+/// stay uncommitted and may replay.
 fn commit_cycle<S: Source>(
     source: &mut S,
     checkpointer: &mut Checkpointer,
@@ -588,6 +592,7 @@ fn commit_cycle<S: Source>(
     metrics: &CheckpointMetrics,
     health: &HealthState,
     only: Option<&BTreeSet<PartitionId>>,
+    final_pass: bool,
 ) {
     harvest(checkpointer, state);
 
@@ -636,12 +641,29 @@ fn commit_cycle<S: Source>(
         return;
     }
     let started = Instant::now();
-    match source.commit(&positions) {
-        Ok(()) => {
-            metrics.commit(true, started.elapsed());
+    let result = if final_pass {
+        source.commit_final(&positions)
+    } else {
+        source.commit(&positions).map(|()| Vec::new())
+    };
+    match result {
+        Ok(unstored) => {
+            let unstored: BTreeSet<PartitionId> = unstored
+                .into_iter()
+                .filter(|p| positions.iter().any(|&(q, _)| q == *p))
+                .collect();
+            metrics.commit(unstored.is_empty(), started.elapsed());
             for &(p, o) in &positions {
-                state.pending_commit.remove(&p);
-                state.committed.insert(p, o);
+                if !unstored.contains(&p) {
+                    state.pending_commit.remove(&p);
+                    state.committed.insert(p, o);
+                }
+            }
+            if !unstored.is_empty() {
+                tracing::warn!(
+                    uncommitted = unstored.len(),
+                    "final commit incomplete; uncommitted positions may replay"
+                );
             }
         }
         Err(e) if is_fatal(&e) => {
@@ -650,6 +672,10 @@ fn commit_cycle<S: Source>(
                 component: "source".into(),
                 reason: format!("commit failed fatally: {e}"),
             });
+        }
+        Err(e) if final_pass => {
+            metrics.commit(false, started.elapsed());
+            tracing::warn!(error = %e, "final commit failed; uncommitted positions may replay");
         }
         Err(e) => {
             metrics.commit(false, started.elapsed());
@@ -926,6 +952,7 @@ fn revoke_lanes<S: Source>(
         checkpoint_metrics,
         health,
         None,
+        false,
     );
     if let Err(e) = source.flush_commits() {
         tracing::warn!(error = %e, "flush of stored commits failed during revocation");

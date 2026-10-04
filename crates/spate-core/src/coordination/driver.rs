@@ -524,20 +524,93 @@ impl CoordinationDriver {
         watermarks: &[(PartitionId, i64)],
     ) -> Result<(), SourceError> {
         for &(partition, watermark) in watermarks {
-            let Some(tenancy) = self.tenancies.get(&partition) else {
-                // Pruned tenancy: a drain commit that arrived after its
-                // retirement was fully delivered. Its data replays under
-                // the new owner.
+            let Some(split) = self.commit_target(partition) else {
                 continue;
             };
-            if tenancy.state == TenancyState::Retired || tenancy.fenced || tenancy.completed {
-                continue;
-            }
-            let split = tenancy.split.id.clone();
             let progress = source.encode_commit(&split, watermark)?;
             self.commit_progress(source, partition, &split, progress)?;
         }
         Ok(())
+    }
+
+    /// Coordinated `commit_final` body: the per-split commits of
+    /// [`commit`](CoordinationDriver::commit) sent as one batch through
+    /// [`SplitCoordinator::commit_final`].
+    ///
+    /// Returns the partitions whose commit was deferred; each such split may
+    /// replay under its next owner. A fatal answer is returned after every
+    /// other answer is settled.
+    pub fn commit_final<S: SplitSource>(
+        &mut self,
+        source: &mut S,
+        watermarks: &[(PartitionId, i64)],
+    ) -> Result<Vec<PartitionId>, SourceError> {
+        let mut partitions = Vec::new();
+        let mut batch = Vec::new();
+        for &(partition, watermark) in watermarks {
+            let Some(split) = self.commit_target(partition) else {
+                continue;
+            };
+            let progress = source.encode_commit(&split, watermark)?;
+            let progress = self.strip_drain_completion(partition, &split, progress);
+            partitions.push(partition);
+            batch.push((split, progress));
+        }
+        if batch.is_empty() {
+            return Ok(Vec::new());
+        }
+        let answers = self.coordinator.commit_final(&batch);
+        debug_assert_eq!(answers.len(), batch.len(), "one answer per commit");
+        let mut answers = answers.into_iter();
+        let mut fatal = None;
+        let mut unstored = Vec::new();
+        let mut deferred = Vec::new();
+        for (partition, (split, progress)) in partitions.into_iter().zip(batch) {
+            // A missing answer counts as an unsent commit.
+            let answer = answers.next().unwrap_or_else(|| {
+                Err(CoordinationError::new(
+                    CoordinationErrorKind::Retryable,
+                    "no answer for this commit",
+                ))
+            });
+            match self.classify(source, partition, &split, answer) {
+                Ok(disposition) => {
+                    if matches!(disposition, CommitDisposition::Deferred) {
+                        unstored.push(partition);
+                        deferred.push(split);
+                    }
+                    self.settle_commit(source, partition, progress, disposition);
+                }
+                Err(e) => {
+                    fatal.get_or_insert(e);
+                }
+            }
+        }
+        if let Some(e) = fatal {
+            return Err(e);
+        }
+        if !unstored.is_empty() {
+            tracing::warn!(
+                splits = ?deferred,
+                "final commit left {} split(s) uncommitted; their progress since the last \
+                 durable commit may replay under the next owner",
+                deferred.len()
+            );
+        }
+        Ok(unstored)
+    }
+
+    /// The split a commit for `partition` goes to, or `None` for a pruned,
+    /// retired, fenced or completed tenancy, whose position is not written.
+    fn commit_target(&self, partition: PartitionId) -> Option<SplitId> {
+        // A pruned tenancy is a drain commit that arrived after its
+        // retirement was fully delivered. Its data replays under the new
+        // owner.
+        let tenancy = self.tenancies.get(&partition)?;
+        if tenancy.state == TenancyState::Retired || tenancy.fenced || tenancy.completed {
+            return None;
+        }
+        Some(tenancy.split.id.clone())
     }
 
     /// Report the tenancy of `split` at `epoch` as poison: consumes a
@@ -947,7 +1020,25 @@ impl CoordinationDriver {
         split: &SplitId,
         progress: &SplitProgress,
     ) -> Result<CommitDisposition, SourceError> {
-        match self.coordinator.commit(split, progress) {
+        let answer = self.coordinator.commit(split, progress);
+        if let Err(e) = &answer
+            && e.kind == CoordinationErrorKind::Retryable
+        {
+            tracing::warn!(split = %split, error = %e, "commit deferred; will retry");
+        }
+        self.classify(source, partition, split, answer)
+    }
+
+    /// Sort the backend's answer to one fenced commit into its disposition,
+    /// retiring a fenced tenancy.
+    fn classify<S: SplitSource>(
+        &mut self,
+        source: &mut S,
+        partition: PartitionId,
+        split: &SplitId,
+        answer: Result<(), CoordinationError>,
+    ) -> Result<CommitDisposition, SourceError> {
+        match answer {
             Ok(()) => Ok(CommitDisposition::Durable),
             Err(e) if e.kind == CoordinationErrorKind::Fenced => {
                 // Nothing was written; the split belongs to a peer. Retire
@@ -958,27 +1049,23 @@ impl CoordinationDriver {
                 self.retire(source, partition, true);
                 Ok(CommitDisposition::Fenced)
             }
-            Err(e) if e.kind == CoordinationErrorKind::Retryable => {
-                tracing::warn!(split = %split, error = %e, "commit deferred; will retry");
-                Ok(CommitDisposition::Deferred)
-            }
+            Err(e) if e.kind == CoordinationErrorKind::Retryable => Ok(CommitDisposition::Deferred),
             Err(e) => Err(as_source_error(e)),
         }
     }
 
-    /// Shared fenced-commit path for tick commits and sweep commits.
-    fn commit_progress<S: SplitSource>(
-        &mut self,
-        source: &mut S,
+    /// `progress` with `completed` cleared when the tenancy is draining.
+    fn strip_drain_completion(
+        &self,
         partition: PartitionId,
         split: &SplitId,
         progress: SplitProgress,
-    ) -> Result<(), SourceError> {
+    ) -> SplitProgress {
         // A drain cut can look terminal to the source (every record it
         // emitted is acked). Committing it `completed: true` marks a
         // half-read split permanently done, and its next owner never
         // resumes it: silent data loss.
-        let progress = if progress.completed
+        if progress.completed
             && self
                 .tenancies
                 .get(&partition)
@@ -992,8 +1079,32 @@ impl CoordinationDriver {
             SplitProgress::new(progress.watermark, progress.state)
         } else {
             progress
-        };
-        match self.try_commit(source, partition, split, &progress)? {
+        }
+    }
+
+    /// Shared fenced-commit path for tick commits and sweep commits.
+    fn commit_progress<S: SplitSource>(
+        &mut self,
+        source: &mut S,
+        partition: PartitionId,
+        split: &SplitId,
+        progress: SplitProgress,
+    ) -> Result<(), SourceError> {
+        let progress = self.strip_drain_completion(partition, split, progress);
+        let disposition = self.try_commit(source, partition, split, &progress)?;
+        self.settle_commit(source, partition, progress, disposition);
+        Ok(())
+    }
+
+    /// Fold a live tenancy's commit outcome into its state.
+    fn settle_commit<S: SplitSource>(
+        &mut self,
+        source: &mut S,
+        partition: PartitionId,
+        progress: SplitProgress,
+        disposition: CommitDisposition,
+    ) {
+        match disposition {
             CommitDisposition::Durable => {
                 let tenancy = self.tenancies.get_mut(&partition).expect("live tenancy");
                 let completed = progress.completed;
@@ -1004,7 +1115,7 @@ impl CoordinationDriver {
                     self.retire(source, partition, false);
                 }
             }
-            // Fenced: already retired inside `try_commit`.
+            // Fenced: already retired inside `classify`.
             CommitDisposition::Fenced => {}
             CommitDisposition::Deferred => {
                 // Nothing goes out again on a bare tick, since `commit`
@@ -1018,7 +1129,6 @@ impl CoordinationDriver {
                 tenancy.progress = Some(progress);
             }
         }
-        Ok(())
     }
 
     /// Final fenced commit that ends a cooperative revocation. Same triage as
@@ -1082,7 +1192,7 @@ impl CoordinationDriver {
 }
 
 /// How the backend answered one fenced commit; see
-/// [`CoordinationDriver::try_commit`].
+/// [`CoordinationDriver::classify`].
 enum CommitDisposition {
     /// Durable write. The caller advances its own state.
     Durable,
@@ -2736,5 +2846,73 @@ mod tests {
             !script.commits().last().unwrap().1.completed,
             "the final revocation commit is not terminal either"
         );
+    }
+
+    #[test]
+    fn a_completed_progress_during_a_drain_is_never_terminal_in_the_final_commit() {
+        let script = Script::default();
+        let mut d = driver(&script);
+        let mut s = TestSource {
+            accept_revoke: HashSet::from(["a".to_string()]),
+            ..TestSource::default()
+        };
+        script.push(vec![gained("a", 1, None)]);
+        poll(&mut d, &mut s);
+        let partition = s.opened[0].3;
+        script.push(vec![CoordinationEvent::RevokeRequested {
+            split: SplitId::new("a").unwrap(),
+        }]);
+        assert!(matches!(poll(&mut d, &mut s), SourceEvent::Idle));
+        assert_eq!(s.begin_revoke_calls, ["a"]);
+
+        s.complete_at.insert("a".into(), 42);
+        let unstored = d.commit_final(&mut s, &[(partition, 42)]).unwrap();
+
+        assert!(unstored.is_empty(), "{unstored:?}");
+        let committed = script.commits().last().cloned().expect("the commit landed");
+        assert_eq!(committed.0.as_str(), "a");
+        assert_eq!(committed.1.watermark, 42);
+        assert!(!committed.1.completed, "a drain cut is never terminal");
+        assert!(
+            d.assignments().iter().any(|(id, _)| id.as_str() == "a"),
+            "still owned"
+        );
+        assert!(s.closed.is_empty(), "not retired");
+    }
+
+    #[test]
+    fn commit_final_settles_each_split_and_returns_the_unstored_partitions() {
+        let script = Script::default();
+        let mut d = driver(&script);
+        let mut s = TestSource::default();
+        script.push(vec![
+            gained("a", 1, None),
+            gained("b", 1, None),
+            gained("c", 1, None),
+            gained("d", 1, None),
+        ]);
+        poll(&mut d, &mut s);
+        let [pa, pb, pc, pd] = [0, 1, 2, 3].map(|i| s.opened[i].3);
+        s.complete_at.insert("b".into(), 20);
+        script.fail_next_commit("c", CoordinationErrorKind::Retryable);
+        script.fail_next_commit("d", CoordinationErrorKind::Fenced);
+
+        let unstored = d
+            .commit_final(&mut s, &[(pa, 10), (pb, 20), (pc, 30), (pd, 40)])
+            .unwrap();
+
+        assert_eq!(unstored, vec![pc], "only the deferred split is unstored");
+        let landed: Vec<(String, i64)> = script
+            .commits()
+            .iter()
+            .map(|(id, p)| (id.as_str().to_string(), p.watermark))
+            .collect();
+        assert_eq!(landed, [("a".to_string(), 10), ("b".to_string(), 20)]);
+        let watermark = |p: PartitionId| d.tenancies[&p].progress.as_ref().map(|p| p.watermark);
+        assert_eq!(watermark(pa), Some(10), "a durable commit folds");
+        assert!(d.tenancies[&pb].completed, "a completing commit completes");
+        assert_eq!(watermark(pc), Some(30), "a deferred commit is cached");
+        assert!(d.tenancies[&pd].fenced, "a fenced commit fences");
+        assert_eq!(s.closed, vec!["b", "d"], "completed and fenced retire");
     }
 }

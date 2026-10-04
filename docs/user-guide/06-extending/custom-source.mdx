@@ -93,6 +93,10 @@ them wherever your source resumes from instead.
   durability is per your source's own policy.
 - **`flush_commits`** (default no-op) must synchronously flush stored
   positions; the runtime calls it at shutdown and revocation.
+- **`commit_final`** (defaults to `commit`) receives the last commit of a
+  stop and returns the partitions it still holds and did not store. The
+  runtime counts every other position as committed. Positions it did not
+  store may replay.
 - **`pause`/`resume`** (default no-ops) are the backpressure hooks: stop
   and restart fetching for specific lanes. Sources that can't pause rely on
   bounded-queue pushback alone, but a pausable source keeps memory flat
@@ -444,7 +448,13 @@ attempt cap instead.
   commit, either the next watermark it acks, which merges past the deferred
   one, or the terminal progress `sweep` returns if no watermark follows. The previous
   durable state stays authoritative meanwhile, so a crash before the recommit
-  widens replay rather than losing data.
+  widens replay rather than losing data. At a stop there is no next commit,
+  and a deferred split may replay under its next owner.
+- **`commit_final` forwards to `driver.commit_final`.** The driver then sends
+  the final commit of a stop under one `coordination.op_timeout` budget for
+  every split together, and returns the partitions of the splits it did not
+  reach. Without the forward, the final commit waits up to three
+  `op_timeout`s for each split in turn.
 - **Your `Drop` calls `driver.release()`.** The driver has no `Drop` of its
   own, so a source that omits this leaves its splits and its place in the job
   to expire. The call departs the job whether or not the source holds a
@@ -618,7 +628,9 @@ per-record.
 `spate-test`'s `scripted_coordinator()` drives your driver choreography
 without a store or clock: script gains/losses/quarantines and commit
 outcomes (`Fenced`/`Retryable`/`Fatal`), assert on observed commits,
-failure reports, and releases; `take_planner()` hands back the planner
+failure reports, and releases; `final_commits()` lists each final commit
+batch your source sent, so a test can check the `commit_final` forward;
+`take_planner()` hands back the planner
 your source registered so a test can run it directly and feed its plan
 back through `gain(...)`. For the real protocol end to end, run two
 sources over one shared `MemoryStore` in a test, the pattern of

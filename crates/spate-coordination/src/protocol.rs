@@ -46,13 +46,14 @@ pub(crate) struct SplitState {
 pub(crate) enum ClaimKind {
     /// Never owned (`epoch == 0`).
     Create,
-    /// Gracefully released (`owner` cleared by the releasing worker).
+    /// The record names no owner after a previous tenancy: a graceful
+    /// release or a failure report.
     Released,
-    /// The lease key is still live but held by this worker's own stable
-    /// id under a foreign nonce, which is a restarted predecessor. Reclaim
-    /// fast, without waiting out the lease. (The same observation with OUR
-    /// nonce on a split we do not hold is a live twin, reported as Fatal by
-    /// the task layer.)
+    /// A live lease under this worker's stable id on a record that still
+    /// names an owner, such as a predecessor restarted under this id.
+    /// Reclaimed fast, without waiting out the lease. An own lease on a
+    /// record with no owner is [`Create`](Self::Create) or
+    /// [`Released`](Self::Released).
     Reclaim,
     /// The lease expired with `owner` still set: the owner died.
     Expired,
@@ -403,7 +404,7 @@ fn best_move(
 ///
 /// A split is claimable when its progress record is `runnable`, this
 /// worker does not hold it, and there is no live foreign lease (a live
-/// lease under our own stable id is the fast-reclaim case). A claim also
+/// lease under our own stable id does not block a claim). A claim also
 /// requires the spec record to have been observed, since a `Gained` event
 /// carries the descriptor, while a quarantine does not (it writes only
 /// the progress record).
@@ -422,14 +423,12 @@ pub(crate) fn claim_candidates(
         if state.progress.status != SplitStatus::Runnable || owned(id) {
             continue;
         }
-        let kind = match &state.lease {
-            Some((lease, _)) if lease.owner == instance => ClaimKind::Reclaim,
-            Some(_) => continue, // live foreign lease: not ours to take
-            None => match (&state.progress.owner, state.progress.epoch) {
-                (None, 0) => ClaimKind::Create,
-                (None, _) => ClaimKind::Released,
-                (Some(_), _) => ClaimKind::Expired,
-            },
+        let kind = match (&state.lease, &state.progress.owner, state.progress.epoch) {
+            (Some((lease, _)), _, _) if lease.owner != instance => continue,
+            (Some(_), Some(_), _) => ClaimKind::Reclaim,
+            (None, Some(_), _) => ClaimKind::Expired,
+            (_, None, 0) => ClaimKind::Create,
+            (_, None, _) => ClaimKind::Released,
         };
         let attempts = state.progress.attempts + u32::from(kind.consumes_attempt());
         let action = if kind.consumes_attempt() && attempts >= max_attempts {
@@ -600,6 +599,52 @@ mod tests {
             by_id["fresh-heavily-failed"],
             ClaimAction::Claim(ClaimKind::Released),
             "graceful claims consume no attempt and never quarantine"
+        );
+    }
+
+    /// A live lease under this worker's id is a reclaim, and charges an
+    /// attempt, only while the record names an owner. Regression for #894.
+    #[test]
+    fn an_own_lease_reclaims_only_while_the_record_names_an_owner() {
+        let run = uuid::Uuid::new_v4().simple().to_string();
+        let own = || Some(lease("me", &run, 2));
+        let map = splits(vec![
+            state(
+                record("owned-by-me", SplitStatus::Runnable, Some("me"), 2, 2),
+                1,
+                own(),
+            ),
+            state(
+                record("owned-by-peer", SplitStatus::Runnable, Some("peer"), 2, 2),
+                1,
+                own(),
+            ),
+            state(
+                record("never-owned", SplitStatus::Runnable, None, 0, 2),
+                1,
+                own(),
+            ),
+            state(
+                record("handed-back", SplitStatus::Runnable, None, 2, 2),
+                1,
+                own(),
+            ),
+        ]);
+        let candidates = claim_candidates(&map, |_| false, "me", 3);
+        let by_id: BTreeMap<&str, ClaimAction> =
+            candidates.iter().map(|(id, a)| (id.as_str(), *a)).collect();
+        assert_eq!(
+            by_id["owned-by-me"],
+            ClaimAction::Quarantine(ClaimKind::Reclaim)
+        );
+        assert_eq!(
+            by_id["owned-by-peer"],
+            ClaimAction::Quarantine(ClaimKind::Reclaim)
+        );
+        assert_eq!(by_id["never-owned"], ClaimAction::Claim(ClaimKind::Create));
+        assert_eq!(
+            by_id["handed-back"],
+            ClaimAction::Claim(ClaimKind::Released)
         );
     }
 
@@ -1414,7 +1459,10 @@ mod tests {
                     proptest::option::of("[a-z]{1,4}"),// record owner
                     0u64..5,                           // epoch
                     0u32..6,                           // attempts
-                    proptest::option::of(("[a-z]{1,4}", "[a-z]{1,4}")), // lease owner+nonce
+                    proptest::option::of((
+                        prop_oneof![Just("me".to_string()), "[a-z]{1,4}"],
+                        "[a-z]{1,4}",
+                    )), // lease owner+nonce
                 ),
                 0..24
             ),
@@ -1449,6 +1497,13 @@ mod tests {
                 let kind = match action {
                     ClaimAction::Claim(k) | ClaimAction::Quarantine(k) => k,
                 };
+                if s.progress.owner.is_none() {
+                    prop_assert!(!kind.consumes_attempt(), "{} has no owner to charge for", id);
+                }
+                prop_assert_eq!(
+                    kind == ClaimKind::Reclaim,
+                    s.lease.is_some() && s.progress.owner.is_some()
+                );
                 let would_be = s.progress.attempts + u32::from(kind.consumes_attempt());
                 let expect_quarantine = kind.consumes_attempt() && would_be >= max_attempts;
                 prop_assert_eq!(

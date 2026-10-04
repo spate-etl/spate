@@ -25,6 +25,12 @@
 //!   revision only on a clock that trails the one that wrote that revision
 //!   by at least a day, less however far the clock that stamped the
 //!   collected item lagged.
+//! - An ephemeral renewal or takeover that replaces revision `R` writes
+//!   `R + 2` or above. A watch reports a delete, on expiry or on removal,
+//!   one above the highest revision its handle saw for the key, which for a
+//!   removal is at most the floor it left. While the table keeps the key's
+//!   floor and its last item, a renewal, takeover or re-create lands above
+//!   every delete a watch reported for the key.
 //! - Watches list their prefix every `poll_interval` and report the
 //!   difference, so the store declares [`WatchMode::Polled`].
 //! - Every write carries a random write id, and a failed condition returns
@@ -406,7 +412,7 @@ impl DynamoDbStore {
         let base = || {
             let o = self.inner.observed();
             ((self.inner.now_ms)())
-                .max(o.hw(key) + 1)
+                .max(o.above(key) + 1)
                 .max(o.floor(key) + 1)
         };
         let mut v = base();
@@ -443,8 +449,8 @@ impl DynamoDbStore {
         }
         // One takeover, only at the version observed expired.
         let (s0, _) = self.inner.mark();
-        let hw = self.inner.observed().hw(key);
-        let v = ((self.inner.now_ms)()).max(hw + 1).max(old.v + 1);
+        let above = self.inner.observed().above(key);
+        let v = ((self.inner.now_ms)()).max(above + 1).max(old.v + 2);
         let put = self.ephemeral_put(v, value, w, Cond::VersionIs(old.v));
         match table.write(pk, key, put).await? {
             Written::Ok { .. } => Ok(self.own_write(key, v)),
@@ -648,7 +654,11 @@ impl CoordinationStore for DynamoDbStore {
         }
         let (s0, _) = self.inner.mark();
         let w = write_id();
-        let v = expected.0 + 1;
+        let v = if ephemeral {
+            expected.0 + 2
+        } else {
+            expected.0 + 1
+        };
         let write = if ephemeral {
             self.ephemeral_put(v, value, w, Cond::VersionIs(expected.0))
         } else {

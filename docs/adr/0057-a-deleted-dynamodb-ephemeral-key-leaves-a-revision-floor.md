@@ -1,5 +1,5 @@
 ---
-description: "A deleted DynamoDB lease or presence key leaves a revision floor that every create checks, so a re-created key lands above every revision it held."
+description: "A deleted DynamoDB lease or presence key leaves a revision floor that every create checks. Its watch-delete consequences are superseded by ADR-0058."
 ---
 
 # ADR-0057 — A deleted DynamoDB ephemeral key leaves a revision floor that every create checks
@@ -9,7 +9,8 @@ description: "A deleted DynamoDB lease or presence key leaves a revision floor t
 - **Supersedes:** [ADR-0051](0051-lease-expiry-judged-by-each-observer.md)
   (revision consequence), [ADR-0053](0053-one-dynamodb-table-holds-every-job.md)
   (partition keys)
-- **Superseded by:** —
+- **Superseded by:** [ADR-0058](0058-a-dynamodb-ephemeral-write-leaves-its-predecessors-removal-revision.md)
+  (watch-delete consequences)
 
 ## Context and problem statement
 

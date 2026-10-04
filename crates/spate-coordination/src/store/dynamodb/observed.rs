@@ -18,8 +18,10 @@ struct Obs {
     v: Option<u64>,
     /// When `v` was first observed.
     since: Instant,
-    /// Every revision returned, written or emitted as a delete.
+    /// The highest revision read or written.
     hw: u64,
+    /// The highest revision of a delete any watch of this handle reported.
+    emitted: u64,
     /// Bumped by every own write, emitted delete, and observation that changed `v`.
     seq: u64,
     /// Set when `v` was judged expired and its delete emitted.
@@ -49,8 +51,9 @@ impl Observed {
         self.keys.get(key).is_some_and(|o| o.seq > s0)
     }
 
-    pub(super) fn hw(&self, key: &str) -> u64 {
-        self.keys.get(key).map_or(0, |o| o.hw)
+    /// The highest revision this handle read, wrote or reported as a delete for the key.
+    pub(super) fn above(&self, key: &str) -> u64 {
+        self.keys.get(key).map_or(0, |o| o.hw.max(o.emitted))
     }
 
     pub(super) fn floor(&self, key: &str) -> u64 {
@@ -62,6 +65,7 @@ impl Observed {
             v: None,
             since: now,
             hw: 0,
+            emitted: 0,
             seq: 0,
             expired: false,
             floor: 0,
@@ -78,6 +82,7 @@ impl Observed {
             v: Some(v),
             since: now,
             hw: o.hw.max(v),
+            emitted: o.emitted,
             seq,
             expired: false,
             floor: o.floor,
@@ -139,8 +144,8 @@ impl Observed {
         self.keys.get(key).filter(|o| o.expired).and_then(|o| o.v)
     }
 
-    /// The revision of a delete emitted now: above every revision this
-    /// handle saw for the key and above `delivered`.
+    /// The revision of a delete emitted now: one above `delivered` and every
+    /// revision this handle read or wrote for the key.
     pub(super) fn emit_delete(
         &mut self,
         key: &str,
@@ -152,7 +157,7 @@ impl Observed {
         let seq = self.seq;
         let o = self.entry(key, now);
         let d = o.hw.max(delivered) + 1;
-        o.hw = d;
+        o.emitted = o.emitted.max(d);
         o.seq = seq;
         o.expired = expiry;
         o.touched = now;

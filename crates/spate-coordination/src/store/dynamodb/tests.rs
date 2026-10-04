@@ -269,9 +269,9 @@ async fn a_subscribing_read_delivers_an_own_touched_key_to_existing_subscribers(
     assert!(matches!(next(&mut held).await, WatchEvent::Put(e) if e.revision == created));
 }
 
-/// A key renewed by another handle at the revision of the expiry delete sent for it is in a subscribing read's snapshot.
+/// A key renewed by another handle after its expiry delete is in a subscribing read's snapshot, above that delete.
 #[tokio::test(start_paused = true)]
-async fn a_subscribing_read_lists_a_renewal_at_the_expiry_delete_revision() {
+async fn a_subscribing_read_lists_a_renewal_above_the_expiry_delete() {
     let table = FakeTable::new();
     let clock = TestClock::frozen();
     let (a, b) = (handle(&table, &clock), handle(&table, &clock));
@@ -284,7 +284,10 @@ async fn a_subscribing_read_lists_a_renewal_at_the_expiry_delete_revision() {
         o => panic!("{o:?}"),
     };
     let renewed = won(b.update(E, "k", b"b".to_vec(), r).await.unwrap());
-    assert_eq!(renewed, deleted);
+    assert!(
+        renewed > deleted,
+        "renewed at {renewed:?}, deleted at {deleted:?}"
+    );
     let mut gate = table.hold_next_query();
     let watcher = a.clone();
     let watching = tokio::spawn(async move { watcher.watch(E, "").await });
@@ -499,8 +502,8 @@ async fn a_cleanup_delete_spares_a_newer_incarnation() {
     assert_eq!(table.item("job#e", "k").map(|i| i.v), Some(new.0));
 }
 
-/// An owner's renewal that lands between an observer's expiry judgment and
-/// its takeover stands, and the observer loses.
+/// A concurrent writer's renewal that lands between an observer's expiry
+/// judgment and its takeover stands, and the observer loses.
 #[tokio::test]
 async fn a_takeover_is_conditional_on_the_expired_version() {
     let table = FakeTable::new();
@@ -1034,6 +1037,168 @@ async fn a_recreate_on_a_lagging_clock_lands_above_the_watch_delete() {
     assert!(
         again > deleted && put == again,
         "re-created at {again:?}, reached the watch at {put:?}, after a delete at {deleted:?}"
+    );
+}
+
+/// A lease renewed after a watch sent its expiry delete reaches that watch as
+/// a put above the delete. Regression for #949.
+#[tokio::test(start_paused = true)]
+async fn a_renewal_after_an_expiry_delete_lands_above_it() {
+    let table = FakeTable::new();
+    table.freeze_wall(10_000);
+    let clock = TestClock::frozen();
+    let (a, b) = (handle(&table, &clock), handle(&table, &clock));
+    let r = won(b.create(E, "k", b"b".to_vec()).await.unwrap());
+    let mut watch = a.watch(E, "").await.unwrap();
+    assert_eq!(snapshot(&mut watch).await.len(), 1);
+    clock.advance(TTL + Duration::from_millis(1));
+    let deleted = match next(&mut watch).await {
+        WatchEvent::Delete { revision, .. } => revision,
+        other => panic!("expected the expiry delete, got {other:?}"),
+    };
+    let renewed = won(b.update(E, "k", b"b".to_vec(), r).await.unwrap());
+    match next(&mut watch).await {
+        WatchEvent::Put(e) => assert!(
+            e.revision > deleted,
+            "put at {:?} follows the delete at {deleted:?}; the renewal wrote {renewed:?}",
+            e.revision
+        ),
+        other => panic!("expected the put, got {other:?}"),
+    }
+}
+
+/// A takeover on a lagging clock of a lease a watch already reported expired
+/// reaches that watch as a put above the expiry delete. Regression for #949.
+#[tokio::test(start_paused = true)]
+async fn a_takeover_on_a_lagging_clock_lands_above_the_expiry_delete() {
+    let table = FakeTable::new();
+    let clock = TestClock::frozen();
+    let (w, b, c) = (
+        handle(&table, &clock),
+        handle(&table, &clock),
+        handle(&table, &clock),
+    );
+    table.freeze_wall(10_000);
+    let r = won(b.create(E, "k", b"b".to_vec()).await.unwrap());
+    let mut watch = w.watch(E, "").await.unwrap();
+    assert_eq!(snapshot(&mut watch).await[0].revision, r);
+    assert!(c.get(E, "k").await.unwrap().is_some());
+    clock.advance(TTL + Duration::from_millis(1));
+    let deleted = match next(&mut watch).await {
+        WatchEvent::Delete { revision, .. } => revision,
+        other => panic!("expected the expiry delete, got {other:?}"),
+    };
+    // c's wall clock trails b's.
+    table.freeze_wall(5_000);
+    assert!(c.get(E, "k").await.unwrap().is_none());
+    let taken = won(c.create(E, "k", b"c".to_vec()).await.unwrap());
+    let put = put_without_delete(&mut watch, "k").await;
+    assert!(
+        taken > deleted && put == taken,
+        "taken over at {taken:?}, reached the watch at {put:?}, after an expiry delete at \
+         {deleted:?}"
+    );
+}
+
+/// Two watches of one handle report a removed key below a re-create on a
+/// lagging clock, and both deliver the re-create as a put. Regression for #949.
+#[tokio::test(start_paused = true)]
+async fn two_watches_of_one_handle_report_a_removal_below_a_lagging_recreate() {
+    let table = FakeTable::new();
+    let clock = TestClock::frozen();
+    let (w, b, c) = (
+        handle(&table, &clock),
+        handle(&table, &clock),
+        handle(&table, &clock),
+    );
+    table.freeze_wall(10_000);
+    let r = won(b.create(E, "k", b"b".to_vec()).await.unwrap());
+    let mut all = w.watch(E, "").await.unwrap();
+    let mut ks = w.watch(E, "k").await.unwrap();
+    assert_eq!(snapshot(&mut all).await[0].revision, r);
+    assert_eq!(snapshot(&mut ks).await[0].revision, r);
+    won(b.delete(E, "k", Some(r)).await.unwrap());
+    let mut deletes = Vec::new();
+    for watch in [&mut all, &mut ks] {
+        match next(watch).await {
+            WatchEvent::Delete { revision, .. } => deletes.push(revision),
+            other => panic!("expected the vanish delete, got {other:?}"),
+        }
+    }
+    table.freeze_wall(5_000);
+    let again = won(c.create(E, "k", b"c".to_vec()).await.unwrap());
+    let puts = [
+        put_without_delete(&mut all, "k").await,
+        put_without_delete(&mut ks, "k").await,
+    ];
+    assert!(
+        deletes.iter().all(|d| again > *d) && puts == [again, again],
+        "removed at {r:?}; watches reported deletes at {deletes:?}; re-created at {again:?}, \
+         reached the watches at {puts:?}"
+    );
+}
+
+/// An own create over a key native TTL collected sits above the vanish delete
+/// its watch reported.
+#[tokio::test(start_paused = true)]
+async fn an_own_create_sits_above_a_vanish_delete_of_a_collected_key() {
+    let table = FakeTable::new();
+    let clock = TestClock::frozen();
+    let (w, b) = (handle(&table, &clock), handle(&table, &clock));
+    table.freeze_wall(10_000);
+    let r = won(b.create(E, "k", b"b".to_vec()).await.unwrap());
+    let mut watch = w.watch(E, "").await.unwrap();
+    assert_eq!(snapshot(&mut watch).await[0].revision, r);
+    table.collect("job#e", "k");
+    let deleted = match next(&mut watch).await {
+        WatchEvent::Delete { revision, .. } => revision,
+        other => panic!("expected the vanish delete, got {other:?}"),
+    };
+    assert_eq!(deleted, Revision(r.0 + 1));
+    table.freeze_wall(5_000);
+    let again = won(w.create(E, "k", b"w".to_vec()).await.unwrap());
+    let put = put_without_delete(&mut watch, "k").await;
+    assert!(
+        again > deleted && put == again,
+        "created at {r:?}; vanish delete at {deleted:?}; own create at {again:?}, reached the \
+         watch at {put:?}"
+    );
+}
+
+/// A takeover of a key re-created lower after native TTL collected it lands
+/// above the expiry delete its own watch reported.
+#[tokio::test(start_paused = true)]
+async fn own_takeover_sits_above_its_expiry_delete_after_a_collected_key() {
+    let table = FakeTable::new();
+    let clock = TestClock::frozen();
+    let (w, b, c) = (
+        handle(&table, &clock),
+        handle(&table, &clock),
+        handle(&table, &clock),
+    );
+    table.freeze_wall(10_000);
+    let r = won(b.create(E, "k", b"b".to_vec()).await.unwrap());
+    let mut watch = w.watch(E, "").await.unwrap();
+    assert_eq!(snapshot(&mut watch).await[0].revision, r);
+    table.collect("job#e", "k");
+    let vanished = match next(&mut watch).await {
+        WatchEvent::Delete { revision, .. } => revision,
+        other => panic!("expected the vanish delete, got {other:?}"),
+    };
+    table.freeze_wall(5_000);
+    let low = won(c.create(E, "k", b"c".to_vec()).await.unwrap());
+    assert!(low < vanished);
+    assert_eq!(put_without_delete(&mut watch, "k").await, low);
+    clock.advance(TTL + Duration::from_millis(1));
+    let expired = match next(&mut watch).await {
+        WatchEvent::Delete { revision, .. } => revision,
+        other => panic!("expected the expiry delete, got {other:?}"),
+    };
+    let taken = won(w.create(E, "k", b"w".to_vec()).await.unwrap());
+    let put = put_without_delete(&mut watch, "k").await;
+    assert!(
+        taken > expired && put == taken,
+        "expired {expired:?} taken {taken:?} put {put:?}"
     );
 }
 

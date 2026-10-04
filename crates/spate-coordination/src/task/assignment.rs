@@ -109,8 +109,7 @@ impl<S: CoordinationStore + Clone> Task<S> {
     /// [`protocol::desired_assignment`] is a fixpoint, so
     /// recomputing on a clean fleet would publish nothing; it is skipped
     /// anyway because the recompute itself is an O(members x splits) scan
-    /// and `step` runs on every watch event, which on a commit-heavy fleet
-    /// is every commit.
+    /// and `step` runs after every batch of watch events.
     ///
     /// Publishing is best-effort per instance. A failed or lost write
     /// leaves that instance on its previous assignment, which is stale but

@@ -172,7 +172,7 @@ impl Poll {
                 return;
             }
         };
-        let snapshot = self.apply(inner, read, true);
+        let snapshot = self.apply(inner, read, true, true);
         let (events, receiver) = mpsc::unbounded_channel();
         if reply.send(Ok((snapshot, receiver))).is_ok() {
             self.subscribers.push(events);
@@ -190,7 +190,7 @@ impl Poll {
         }
         match read {
             Ok(read) => {
-                self.apply(inner, read, consistent);
+                self.apply(inner, read, consistent, false);
             }
             Err(StoreError::Fatal(reason)) => {
                 for s in self.subscribers.drain(..) {
@@ -205,10 +205,18 @@ impl Poll {
     }
 
     /// Reports what `read` changed and returns the keys it holds live.
-    fn apply(&mut self, inner: &Inner, read: Read, consistent: bool) -> Vec<Entry> {
+    /// `subscribing` is set for a new subscriber's first read, which lists
+    /// every key it read, including those an own write touched meanwhile.
+    fn apply(
+        &mut self,
+        inner: &Inner,
+        read: Read,
+        consistent: bool,
+        subscribing: bool,
+    ) -> Vec<Entry> {
         match self.ks {
             Keyspace::Durable => self.apply_durable(read.items, consistent),
-            Keyspace::Ephemeral => self.apply_ephemeral(inner, read),
+            Keyspace::Ephemeral => self.apply_ephemeral(inner, read, subscribing),
         }
     }
 
@@ -266,8 +274,9 @@ impl Poll {
     /// Applies the expiry rule under the handle's observation lock, and
     /// sends while holding it, so no own write lands between a decision
     /// and its event. A key an own write or a newer read touched after the
-    /// read began is left to the next poll.
-    fn apply_ephemeral(&mut self, inner: &Inner, read: Read) -> Vec<Entry> {
+    /// read began is left to the next poll, and a subscribing read still
+    /// lists it.
+    fn apply_ephemeral(&mut self, inner: &Inner, read: Read, subscribing: bool) -> Vec<Entry> {
         let Read { s0, t0, items } = read;
         let mut observed = inner.observed();
         let t1 = inner.clock.now();
@@ -279,6 +288,13 @@ impl Poll {
             if observed.newer_than(&key, s0) {
                 if delivered == Some(item.v) {
                     snapshot.push(entry(&key, &item));
+                } else if subscribing {
+                    let live = entry(&key, &item);
+                    if delivered.is_none() {
+                        send(&mut self.subscribers, &WatchEvent::Put(live.clone()));
+                        self.seen.insert(key.clone(), item.v);
+                    }
+                    snapshot.push(live);
                 }
                 continue;
             }

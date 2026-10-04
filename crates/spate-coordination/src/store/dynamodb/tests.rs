@@ -143,6 +143,26 @@ async fn an_expiry_decision_older_than_an_own_renewal_is_dropped() {
     assert_eq!(put_without_delete(&mut watch, "k").await, renewed);
 }
 
+/// A key live throughout a watch's first read is in its snapshot, even
+/// when an own write lands while that read runs.
+#[tokio::test(start_paused = true)]
+async fn a_snapshot_lists_a_key_an_own_write_touched_during_the_read() {
+    let table = FakeTable::new();
+    let clock = TestClock::frozen();
+    let a = handle(&table, &clock);
+    let rev = won(a.create(E, "k", b"a".to_vec()).await.unwrap());
+    let mut gate = table.hold_next_query();
+    let watcher = a.clone();
+    let watching = tokio::spawn(async move { watcher.watch(E, "").await });
+    gate.reached().await;
+    let renewed = won(a.update(E, "k", b"a".to_vec(), rev).await.unwrap());
+    gate.release();
+    let mut watch = watching.await.unwrap().unwrap();
+    let snap = snapshot(&mut watch).await;
+    assert_eq!(snap.len(), 1, "k was live throughout the read: {snap:?}");
+    assert_eq!(put_without_delete(&mut watch, "k").await, renewed);
+}
+
 /// Each conditional write whose first attempt landed, then reported its
 /// condition failed, resolves as won at the revision it wrote.
 #[tokio::test]

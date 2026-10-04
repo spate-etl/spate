@@ -38,7 +38,7 @@ use super::{
 };
 use futures_util::future::BoxFuture;
 use spate_core::clock::tokio::{Clock, SystemClock};
-use spate_core::metrics::CoordinationMetrics;
+use spate_core::metrics::{CoordinationMetrics, StoreOp};
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
@@ -93,7 +93,7 @@ struct Inner {
     table: tokio::sync::OnceCell<Arc<dyn Table>>,
     observed: Mutex<observed::Observed>,
     pollers: Mutex<HashMap<(Keyspace, String), Weak<poll::Poller>>>,
-    metrics: OnceLock<CoordinationMetrics>,
+    poll_recorder: OnceLock<Box<dyn Fn(Duration) + Send + Sync>>,
 }
 
 impl fmt::Debug for Inner {
@@ -173,7 +173,7 @@ impl DynamoDbStore {
                 table: tokio::sync::OnceCell::new(),
                 observed: Mutex::new(observed::Observed::new(lease_ttl)),
                 pollers: Mutex::default(),
-                metrics: OnceLock::new(),
+                poll_recorder: OnceLock::new(),
             }),
         })
     }
@@ -501,7 +501,10 @@ impl CoordinationStore for DynamoDbStore {
     }
 
     fn attach_metrics(&self, metrics: &CoordinationMetrics) {
-        let _ = self.inner.metrics.set(metrics.clone());
+        let _ = self
+            .inner
+            .poll_recorder
+            .set(Box::new(metrics.store_op_recorder(StoreOp::Poll)));
     }
 
     async fn create(

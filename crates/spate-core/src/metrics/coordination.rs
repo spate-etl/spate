@@ -489,6 +489,21 @@ impl CoordinationMetrics {
         self.reconcile_duration.record(d.as_secs_f64());
     }
 
+    /// A recorder for `op`'s round-trip time. It holds no series claim, so it
+    /// can outlive this value.
+    pub fn store_op_recorder(&self, op: StoreOp) -> impl Fn(Duration) + Send + Sync + 'static {
+        let h = match op {
+            StoreOp::Get => &self.store_op_get,
+            StoreOp::Put => &self.store_op_put,
+            StoreOp::Delete => &self.store_op_delete,
+            StoreOp::List => &self.store_op_list,
+            StoreOp::Watch => &self.store_op_watch,
+            StoreOp::Poll => &self.store_op_poll,
+        }
+        .clone();
+        move |d| h.record(d.as_secs_f64())
+    }
+
     /// Record one store primitive's round-trip time.
     pub fn store_op(&self, op: StoreOp, d: Duration) {
         let h = match op {

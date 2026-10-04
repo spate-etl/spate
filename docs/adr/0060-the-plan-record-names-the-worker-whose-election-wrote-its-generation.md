@@ -57,7 +57,9 @@ compare-and-set as the bump, so it cannot name the bump's writer.
 ### Consequences
 
 - Good, because a leader whose bump reply was lost keeps the election.
-  Adopting the record takes one compare-and-set more than a won reply.
+  Adopting the record takes a re-read and a confirming compare-and-set more
+  than a won reply, and a retried bump when the lost reply surfaced as an
+  error.
 - Good, because this build reads every plan record 0.2 wrote. A record with
   no elector encodes to the same bytes it had in 0.2.
 - Bad, because `PlanRecord` rejects unknown fields, and a 0.2 worker exits
@@ -75,11 +77,12 @@ compare-and-set as the bump, so it cannot name the bump's writer.
 ### Confirmation
 
 `crates/spate-coordination/tests/unseen_generation_bump.rs` pins the
-adoption, its adoption by a later election of the same process, and each
-mismatch that demotes: another nonce, another owner, no elector, and this
-process's elector at an earlier generation.
+adoption, its adoption by a later election of the same process, each mismatch
+that demotes (another nonce, another owner, no elector), and that a record
+naming this process at an earlier generation is bumped past.
 `crates/spate-coordination/tests/adopt_stale_reread.rs` pins that a re-read
-from a lagging replica does not hold the fence after a successor's bump.
+from a lagging replica does not hold the fence after a successor's bump,
+whether the confirming write loses or fails.
 `a_plan_record_without_an_elector_reads_as_none` and
 `planner_cursor_budget_includes_the_escaped_fingerprint`
 (`crates/spate-coordination/src/records.rs`) pin the 0.2 layout and the

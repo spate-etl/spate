@@ -29,7 +29,10 @@ pub struct CoordinationConfig {
     /// has expired in the new owner's view too. Default 30s.
     #[serde(with = "humantime_serde")]
     pub lease_duration: Duration,
-    /// Per-store-operation deadline. Default 10s.
+    /// Per-store-operation deadline, and the budget for a graceful departure
+    /// as a whole. A source that forwards `Source::commit_final` to
+    /// `CoordinationDriver::commit_final` also runs its final commit at
+    /// shutdown under this budget, as a whole. Default 10s.
     #[serde(with = "humantime_serde")]
     pub op_timeout: Duration,
     /// Stable identity for fast reclaim after a crash and restart (e.g. the pod

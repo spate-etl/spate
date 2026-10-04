@@ -65,7 +65,9 @@ per-replica configuration:
 - **`terminationGracePeriodSeconds` > drain timeout.** A SIGTERM'd
   replica drains, commits, and hands back its splits, leadership and
   membership on the way out, so peers take the work over without a lease
-  wait; a SIGKILL'd one is covered by lease expiry instead.
+  wait; a SIGKILL'd one is covered by lease expiry instead. For a coordinated
+  source the gap also has to hold the final commit and the departure, and
+  [Graceful shutdown](../03-guides/graceful-shutdown.mdx) gives the sum.
 - Readiness/liveness probes are unchanged (the admin server's endpoints).
 
 Scaling events are *cooperative* rebalances, but the decision is central

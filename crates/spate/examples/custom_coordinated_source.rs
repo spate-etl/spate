@@ -355,11 +355,19 @@ impl Source for LedgerSource {
     fn commit(&mut self, watermarks: &[(PartitionId, i64)]) -> Result<(), SourceError> {
         self.driver.commit(&mut self.ctx, watermarks)
     }
+
+    fn commit_final(
+        &mut self,
+        watermarks: &[(PartitionId, i64)],
+    ) -> Result<Vec<PartitionId>, SourceError> {
+        self.driver.commit_final(&mut self.ctx, watermarks)
+    }
     // flush_commits stays the default no-op: an Ok commit is durable in
     // the store, or deferred after a transient store failure and carried
-    // out on this split's next commit. The previous durable state stays
-    // authoritative until then, so replay can widen and data cannot be
-    // lost.
+    // out on this split's next commit. A final commit returns the partitions
+    // it did not store, and those splits may replay under their next owner.
+    // The previous durable state stays authoritative until then, so replay
+    // can widen and data cannot be lost.
 }
 
 impl Drop for LedgerSource {

@@ -33,7 +33,11 @@ pub(crate) struct SourceLog {
     pub(crate) stage_metrics_attached: bool,
     /// When set, `commit` and `flush_commits` fail retryably, modeling a
     /// checkpoint store outage; nothing is recorded as committed.
+    /// `commit_final` fails the same way unless `final_unstored` is set.
     pub(crate) fail_commits: bool,
+    /// When set, `commit_final` stores every other position and reports
+    /// these partitions as not stored.
+    pub(crate) final_unstored: Option<Vec<PartitionId>>,
     /// Interleaved ordering log shared with the chain fake.
     pub(crate) log: Vec<String>,
 }
@@ -183,6 +187,29 @@ impl Source for FakeSource {
         }
         log.log.push("commit".into());
         Ok(())
+    }
+
+    fn commit_final(
+        &mut self,
+        watermarks: &[(PartitionId, i64)],
+    ) -> Result<Vec<PartitionId>, SourceError> {
+        let mut log = self.shared.lock().unwrap();
+        log.log.push("commit_final".into());
+        let unstored = match log.final_unstored.clone() {
+            Some(unstored) => unstored,
+            None if log.fail_commits => {
+                return Err(SourceError::Client {
+                    class: ErrorClass::Retryable,
+                    reason: "scripted commit failure".into(),
+                });
+            }
+            None => Vec::new(),
+        };
+        for &(p, o) in watermarks.iter().filter(|(p, _)| !unstored.contains(p)) {
+            let slot = log.committed.entry(p).or_insert(o);
+            *slot = (*slot).max(o);
+        }
+        Ok(unstored)
     }
 
     fn flush_commits(&mut self) -> Result<(), SourceError> {

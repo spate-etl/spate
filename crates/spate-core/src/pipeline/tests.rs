@@ -732,6 +732,139 @@ fn drained_with_failing_commit_fails_instead_of_completing() {
     );
 }
 
+/// The last commit of a stop goes through `Source::commit_final`, once, and
+/// the tick commits before it through `commit`.
+#[test]
+fn final_pass_calls_commit_final() {
+    let h = start(|shared, log| FakeChain {
+        shared,
+        log,
+        mode: ChainMode::Ok,
+        batches_seen: 0,
+    });
+    h.shared.lock().unwrap().fail_commits = true;
+    assign_one_lane(&h, &[0..10, 10..20]);
+    wait_for("all payloads consumed", Duration::from_secs(5), || {
+        h.chain.consumed.load(Ordering::Relaxed) == 20
+    });
+    wait_for("a tick commit", Duration::from_secs(5), || {
+        let log = &h.shared.lock().unwrap().log;
+        log.iter()
+            .any(|e| e == "commit-failed" || e == "commit_final")
+    });
+    h.script.lock().unwrap().push_back(Script::Drained);
+    let report = h.join.join().unwrap().unwrap();
+
+    let log = h.shared.lock().unwrap().log.clone();
+    let finals: Vec<usize> = log
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| *e == "commit_final")
+        .map(|(i, _)| i)
+        .collect();
+    let drained = log
+        .iter()
+        .position(|e| e == "drained-delivered")
+        .expect("the drain was delivered");
+    assert_eq!(finals.len(), 1, "one final commit: {log:?}");
+    assert!(finals[0] > drained, "after the drain: {log:?}");
+    assert!(
+        !log.iter().any(|e| e == "commit"),
+        "every tick commit failed: {log:?}"
+    );
+    assert!(report.final_watermarks.is_empty(), "nothing was committed");
+    let ExitState::Failed(failure) = report.state else {
+        panic!("a drained exit with nothing committed must fail");
+    };
+    assert!(
+        failure.reason.contains("did not persist"),
+        "{}",
+        failure.reason
+    );
+}
+
+/// A final commit that stores some partitions counts exactly those as
+/// committed, leaves the rest to the drained-exit backstop, and records a
+/// failed commit.
+#[test]
+fn a_partial_final_commit_commits_the_stored_partitions() {
+    let mut cfg = test_config(1);
+    cfg.metrics.exporter = crate::config::MetricsExporter::Prometheus;
+    let pipeline_name = cfg.pipeline.name.clone();
+    let handle = crate::metrics::install(&crate::metrics::MetricsSettings {
+        exporter: crate::metrics::Exporter::Prometheus,
+        per_partition_detail: cfg.metrics.per_partition_detail,
+        e2e_basis: crate::metrics::E2eBasis::Ingest,
+    })
+    .expect("install the exporter");
+
+    let h = start_with_config(cfg, |shared, log| FakeChain {
+        shared,
+        log,
+        mode: ChainMode::Ok,
+        batches_seen: 0,
+    });
+    {
+        let mut log = h.shared.lock().unwrap();
+        log.fail_commits = true;
+        log.final_unstored = Some(vec![PartitionId(1)]);
+    }
+    h.script.lock().unwrap().push_back(Script::Assign(vec![
+        LaneSpec {
+            id: LaneId(0),
+            partition: PartitionId(0),
+            batches: batches(&[0..10, 10..20]),
+        },
+        LaneSpec {
+            id: LaneId(1),
+            partition: PartitionId(1),
+            batches: batches(&[0..10, 10..20]),
+        },
+    ]));
+    wait_for("all payloads consumed", Duration::from_secs(5), || {
+        h.chain.consumed.load(Ordering::Relaxed) == 40
+    });
+    h.script.lock().unwrap().push_back(Script::Drained);
+    let report = h.join.join().unwrap().unwrap();
+
+    let log = h.shared.lock().unwrap();
+    assert_eq!(
+        report.final_watermarks,
+        vec![(PartitionId(0), log.committed[&PartitionId(0)])]
+    );
+    let ExitState::Failed(failure) = report.state else {
+        panic!("a drained exit with an unstored partition must fail");
+    };
+    assert!(
+        failure.reason.contains("(1 partition(s) uncommitted"),
+        "{}",
+        failure.reason
+    );
+
+    let rendered = handle.render();
+    let failed_ticks = log.log.iter().filter(|e| *e == "commit-failed").count();
+    assert_eq!(
+        commits_counter(&rendered, &pipeline_name, "error"),
+        Some(failed_ticks as f64 + 1.0),
+        "{rendered}"
+    );
+    assert!(
+        commits_counter(&rendered, &pipeline_name, "ok").is_none_or(|n| n == 0.0),
+        "{rendered}"
+    );
+}
+
+/// The `spate_checkpoint_commits_total` value for one pipeline and outcome.
+fn commits_counter(rendered: &str, pipeline_name: &str, outcome: &str) -> Option<f64> {
+    rendered
+        .lines()
+        .filter(|l| l.starts_with(&format!("{}{{", names::CHECKPOINT_COMMITS_TOTAL)))
+        .filter(|l| l.contains(&format!(r#"pipeline="{pipeline_name}""#)))
+        .find(|l| l.contains(&format!(r#"outcome="{outcome}""#)))
+        .and_then(|l| l.rsplit(' ').next())
+        .map(|v| v.parse().expect("a numeric sample"))
+}
+
 #[test]
 fn source_error_classification() {
     let retryable = SourceError::Client {

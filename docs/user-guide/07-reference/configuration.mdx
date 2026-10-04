@@ -276,7 +276,7 @@ coordination:
 | `store` | component | `required` | Single-key mapping selecting the [coordination store](../04-connectors/coordination/README.mdx); its body is documented on the store's page. |
 | `instance_id` | string | `none` | This instance's identity, `[A-Za-z0-9_-]`, 1–128 bytes. Unique per live instance; two live instances sharing one is fatal. A stable value (the pod name) lets an instance restarted after a crash reclaim its own splits. Unset, each run takes a random id. Quote an interpolated value (`"${POD_NAME}"`), so an empty variable fails validation. |
 | `lease_duration` | duration | `30s` | How long a lease outlives its last heartbeat, as the store or each peer measures it; heartbeats run at a third of it. Also the store's lease TTL. Must be at least `2 × op_timeout`. |
-| `op_timeout` | duration | `10s` | Deadline for one store operation, and for a graceful departure as a whole. At least `50ms`. |
+| `op_timeout` | duration | `10s` | Deadline for one store operation, and for a graceful departure as a whole. A coordinated source that [forwards `commit_final`](../06-extending/custom-source.mdx#3-delegate-the-choreography-coordinationdriver) also runs its final commit at shutdown under it, as a whole. At least `50ms`. |
 | `max_in_flight` | integer | `8` | The working set: splits an instance holds and processes at once, and its data-lane count. |
 | `max_attempts` | integer | `4` | Failing tenancies before a split is quarantined. |
 | `replan_interval` | duration | `60s` | How often the leader re-runs an open plan. At least `lease_duration`. Final plans stop replanning. A plan run that seeds no split for this long while its writes fail gives up until the next run. |

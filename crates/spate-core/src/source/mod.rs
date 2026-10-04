@@ -278,6 +278,21 @@ pub trait Source: Send {
     /// source's own policy (e.g. interval auto-commit of stored offsets).
     fn commit(&mut self, watermarks: &[(PartitionId, i64)]) -> Result<(), SourceError>;
 
+    /// The last commit of a stop, which a source committing to a remote
+    /// store may bound as a whole.
+    ///
+    /// `Ok` lists the partitions among `watermarks` that the source still
+    /// holds and did not store; the runtime counts every other position as
+    /// committed, as `commit` does for a partition the source no longer
+    /// holds. `Err` counts none of them as committed, and a fatal error fails
+    /// the run. Positions not stored replay from the last durable ones.
+    fn commit_final(
+        &mut self,
+        watermarks: &[(PartitionId, i64)],
+    ) -> Result<Vec<PartitionId>, SourceError> {
+        self.commit(watermarks).map(|()| Vec::new())
+    }
+
     /// Synchronously flush stored positions (shutdown, revocation).
     fn flush_commits(&mut self) -> Result<(), SourceError> {
         Ok(())

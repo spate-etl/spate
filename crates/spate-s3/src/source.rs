@@ -354,9 +354,22 @@ impl Source for S3Source {
         driver.commit(ctx, watermarks)
     }
 
-    // `flush_commits` keeps the trait's no-op default: an Ok fenced commit
-    // is already store-durable, and a Retryable one is driver-cached and
-    // carried on this split's next commit.
+    fn commit_final(
+        &mut self,
+        watermarks: &[(PartitionId, i64)],
+    ) -> Result<Vec<PartitionId>, SourceError> {
+        let State::Open(open) = &mut self.state else {
+            debug_assert!(watermarks.is_empty(), "watermarks before open");
+            return Ok(Vec::new());
+        };
+        let OpenState { driver, ctx, .. } = open.as_mut();
+        driver.commit_final(ctx, watermarks)
+    }
+
+    // `flush_commits` keeps the trait's no-op default. An Ok commit is
+    // durable in the store. A Retryable tick commit is cached and carried on
+    // this split's next commit. A final commit returns the partitions it did
+    // not store, and those splits may replay under their next owner.
 
     fn pause(&mut self, lanes: &[LaneId]) -> Result<(), SourceError> {
         if let State::Open(open) = &self.state {

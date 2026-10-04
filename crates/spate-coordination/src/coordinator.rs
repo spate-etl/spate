@@ -207,6 +207,26 @@ impl<S: CoordinationStore + Clone> StoreCoordinator<S> {
         CoordinationError::new(kind, reason.to_string())
     }
 
+    /// Drops `split` from the held set when `result` ends its tenancy.
+    fn note_commit(
+        &mut self,
+        split: &SplitId,
+        progress: &SplitProgress,
+        result: &Result<(), CoordinationError>,
+    ) {
+        if let Some(running) = self.running.as_mut() {
+            match result {
+                Ok(()) if progress.completed => {
+                    running.held.remove(split.as_str());
+                }
+                Err(e) if e.kind == CoordinationErrorKind::Fenced => {
+                    running.held.remove(split.as_str());
+                }
+                _ => {}
+            }
+        }
+    }
+
     fn command(
         &mut self,
         build: impl FnOnce(std_mpsc::SyncSender<Result<(), CoordinationError>>) -> Command,
@@ -476,18 +496,42 @@ impl<S: CoordinationStore + Clone> SplitCoordinator for StoreCoordinator<S> {
             progress: progress.clone(),
             reply,
         });
-        if let Some(running) = self.running.as_mut() {
-            match &result {
-                Ok(()) if progress.completed => {
-                    running.held.remove(split.as_str());
-                }
-                Err(e) if e.kind == CoordinationErrorKind::Fenced => {
-                    running.held.remove(split.as_str());
-                }
-                _ => {}
-            }
-        }
+        self.note_commit(split, progress, &result);
         result
+    }
+
+    /// Sends the commits in order under one `op_timeout` for the batch.
+    /// An entry reached after the budget is spent is answered `Retryable`
+    /// without being sent.
+    fn commit_final(
+        &mut self,
+        commits: &[(SplitId, SplitProgress)],
+    ) -> Vec<Result<(), CoordinationError>> {
+        let budget = self.config.op_timeout;
+        let deadline = Instant::now() + budget;
+        let mut results = Vec::with_capacity(commits.len());
+        for (split, progress) in commits {
+            if Instant::now() >= deadline {
+                results.push(Err(CoordinationError::new(
+                    CoordinationErrorKind::Retryable,
+                    format!(
+                        "final commit budget of {budget:?} spent before this split; nothing \
+                         was sent"
+                    ),
+                )));
+                continue;
+            }
+            let result = self
+                .send_until(deadline, budget, |reply| Command::Commit {
+                    split: split.clone(),
+                    progress: progress.clone(),
+                    reply,
+                })
+                .and_then(|reply| reply);
+            self.note_commit(split, progress, &result);
+            results.push(result);
+        }
+        results
     }
 
     fn fail(

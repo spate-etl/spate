@@ -101,7 +101,9 @@ Set `terminationGracePeriodSeconds` comfortably **above**
 kills the pod mid-drain nothing is lost (at-least-once: uncommitted
 offsets replay on the next member), but every SIGKILL turns a clean
 commit into replayed duplicates. Give the drain the time it was
-configured to take.
+configured to take. For a coordinated source the gap also has to hold the
+final commit and the departure, and
+[Graceful shutdown](../03-guides/graceful-shutdown.mdx) gives the sum.
 :::
 
 If a sink is down when the drain deadline hits, unflushed batches are

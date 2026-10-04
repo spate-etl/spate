@@ -97,6 +97,8 @@ How each source is told its assignment changed:
 **Graceful (SIGTERM):** the same drain barrier as a full revocation. Lanes
 stop, chains flush, sinks force-seal and drain in-flight batches under
 `checkpoint.drain_timeout` (default 25s), then a final synchronous commit.
+A coordinated source that forwards `Source::commit_final` bounds that commit
+by `coordination.op_timeout`, and splits it does not reach may replay.
 If a sink is down at the deadline, the remaining batches are abandoned
 loudly (`spate_sink_abandoned_batches_total` plus a log line) and their
 offsets are *not* committed, so they replay on restart. See

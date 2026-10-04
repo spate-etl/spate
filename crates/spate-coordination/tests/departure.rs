@@ -47,7 +47,8 @@ enum Op {
 /// watch. Wedged: every call but `watch` pends. Latency: every such call
 /// first waits that many milliseconds. Fatal: the next listed primitive on
 /// a listed key fails Fatal. Ambiguous: a listed key's next update applies,
-/// then fails Retryable. Peer takes: a listed key is replaced by a peer's
+/// then fails Retryable; `ambiguous_creates` does the same for a create that
+/// wins. Peer takes: a listed key is replaced by a peer's
 /// value just before its next delete. Plan lost: the plan record's update
 /// loses its CAS.
 #[derive(Clone)]
@@ -58,6 +59,7 @@ struct FaultStore {
     latency_ms: Arc<AtomicU64>,
     fatal: Arc<Mutex<Vec<(Op, Keyspace, String)>>>,
     ambiguous: Arc<Mutex<Vec<(Keyspace, String)>>>,
+    ambiguous_creates: Arc<Mutex<Vec<(Keyspace, String)>>>,
     peer_takes: Arc<Mutex<Vec<PeerTake>>>,
     update_log: Arc<Mutex<Vec<(Keyspace, String)>>>,
     plan_lost: Arc<AtomicBool>,
@@ -83,6 +85,7 @@ impl FaultStore {
             latency_ms: Arc::default(),
             fatal: Arc::default(),
             ambiguous: Arc::default(),
+            ambiguous_creates: Arc::default(),
             peer_takes: Arc::default(),
             update_log: Arc::default(),
             plan_lost: Arc::default(),
@@ -197,7 +200,18 @@ impl CoordinationStore for FaultStore {
         value: Vec<u8>,
     ) -> Result<CasOutcome, StoreError> {
         self.gate(Op::Create, ks, key).await?;
-        self.inner.create(ks, key, value).await
+        let outcome = self.inner.create(ks, key, value).await?;
+        if matches!(outcome, CasOutcome::Won(_)) {
+            let mut ambiguous = self.ambiguous_creates.lock().unwrap();
+            if let Some(i) = ambiguous
+                .iter()
+                .position(|(k, name)| *k == ks && name == key)
+            {
+                ambiguous.remove(i);
+                return Err(StoreError::Retryable("injected: reply lost".into()));
+            }
+        }
+        Ok(outcome)
     }
 
     async fn update(
@@ -2433,6 +2447,21 @@ fn refuse_next_update<S>(tap: &support::tap::TapStore<S>, key: &'static str) -> 
     armed
 }
 
+/// Fails the next delete of the lease `key` Retryable, with nothing deleted.
+/// The returned flag is true until the fault fires.
+fn refuse_next_delete<S>(tap: &support::tap::TapStore<S>, key: &'static str) -> Arc<AtomicBool> {
+    let armed = Arc::new(AtomicBool::new(true));
+    let fires = Arc::clone(&armed);
+    tap.on_write(move |w| {
+        (matches!(w.op, support::tap::Op::Delete)
+            && w.ks == Keyspace::Ephemeral
+            && w.key == key
+            && fires.swap(false, Ordering::SeqCst))
+        .then(|| StoreError::Retryable("injected: delete refused".into()))
+    });
+    armed
+}
+
 /// A first claim whose record write applied with its reply lost holds the split
 /// at the epoch it wrote and charges no delivery attempt.
 #[test]
@@ -3285,5 +3314,303 @@ fn a_departure_after_a_seen_failure_report_ends_its_revocation_forced() {
     assert_eq!(
         outcomes.0, 1.0,
         "(revocations forced, revocations drained, drain durations observed) = {outcomes:?}"
+    );
+}
+
+/// `reason`'s count on `spate_coordination_acquisitions_total` for `component`.
+fn acquisitions(handle: &spate_core::metrics::MetricsHandle, component: &str, reason: &str) -> f64 {
+    spate_test::metric_sum(
+        &handle.render(),
+        "spate_coordination_acquisitions_total",
+        &[("component", component), ("reason", reason)],
+    )
+    .unwrap_or(0.0)
+}
+
+/// A metered worker named `worker-a` and labelled `component`, over `store`,
+/// whose lease expiry `clock` drives.
+fn metered_clocked<S: CoordinationStore + Clone>(
+    rt: &tokio::runtime::Runtime,
+    store: S,
+    clock: &Arc<TestClock>,
+    component: &'static str,
+    config: CoordinationConfig,
+    ids: &[&str],
+) -> StoreCoordinator<S> {
+    let labels = spate_core::metrics::ComponentLabels::new("departure", component, "s3");
+    let mut w = StoreCoordinator::with_clock(
+        store,
+        config,
+        rt.handle().clone(),
+        Some(spate_core::metrics::CoordinationMetrics::new(&labels)),
+        clock.clone(),
+    )
+    .expect("coordinator");
+    w.start(Box::new(PhasedPlanner::one_final("departure:v1", ids)))
+        .unwrap();
+    w
+}
+
+/// Advances `clock` half a lease in steps, settling `fleet` and folding `w`'s
+/// events into `held` after each.
+fn run_half_a_lease(
+    w: &mut impl SplitCoordinator,
+    clock: &TestClock,
+    fleet: &support::Fleet,
+    held: &mut Held,
+) {
+    clock.advance_stepped(LEASE / 2, LEASE / 24, || {
+        fleet.settle(clock);
+        held.fold(w.poll().expect("poll"));
+    });
+}
+
+/// What a worker with two delivery attempts left behind after failing `x`
+/// once with a fault armed and running half a lease.
+struct AfterReport {
+    fired: bool,
+    lease_after_report: bool,
+    held: Held,
+    record: serde_json::Value,
+    reassigned: f64,
+    reclaimed: f64,
+}
+
+/// Fails `x` once on a metered `worker-a` with `max_attempts: 2`, with the
+/// fault `arm` sets up, then runs half a lease. `arm` returns whether its fault
+/// has fired.
+fn report_with_fault(
+    component: &'static str,
+    arm: impl FnOnce(&FaultStore, &support::tap::TapStore<FaultStore>) -> Box<dyn Fn() -> bool>,
+) -> AfterReport {
+    let handle = exporter();
+    let rt = runtime();
+    let clock = TestClock::frozen();
+    let fault = FaultStore::with_clock(LEASE, clock.clone());
+    let tap = support::tap::TapStore::new(fault.clone());
+    let mut config = config_for(LEASE, Some("worker-a"));
+    config.max_attempts = 2;
+    config.reconcile_interval = LEASE / 12;
+    let mut a = metered_clocked(&rt, tap.clone(), &clock, component, config, &["x"]);
+    let mut fleet = support::Fleet::new(&fault.inner, rt.handle());
+    fleet.join(&a);
+    let mut held = Held::default();
+    support::drive_clocked(&mut a, &clock, &mut held, "claiming x", |h| {
+        h.splits.len() == 1
+    });
+    held.splits.clear();
+
+    let fired = arm(&fault, &tap);
+    a.fail(&support::split_id("x"), "injected").unwrap();
+    let lease_after_report = !fault
+        .present(&rt, Keyspace::Ephemeral, &["split.x"])
+        .is_empty();
+    run_half_a_lease(&mut a, &clock, &fleet, &mut held);
+
+    AfterReport {
+        fired: fired(),
+        lease_after_report,
+        held,
+        record: fault.record(&rt, "split.x"),
+        reassigned: acquisitions(&handle, component, "reassigned"),
+        reclaimed: acquisitions(&handle, component, "reclaimed"),
+    }
+}
+
+/// Asserts that `run` claimed `x` again on its last attempt as a reassignment.
+fn assert_last_attempt_claimed(run: &AfterReport) {
+    let epoch = run.held.splits.get("x").map(|(epoch, _)| *epoch);
+    let record = &run.record;
+    assert!(
+        run.fired
+            && run.held.quarantined.is_empty()
+            && epoch == Some(2)
+            && record["attempts"] == 1
+            && record["epoch"] == 2
+            && record["status"] == "runnable"
+            && record["owner"] == "worker-a"
+            && run.reassigned == 1.0
+            && run.reclaimed == 0.0,
+        "fault fired: {}; quarantined {:?}; held at {epoch:?}; record {record}; \
+         reassigned {}; reclaimed {}",
+        run.fired,
+        run.held.quarantined,
+        run.reassigned,
+        run.reclaimed
+    );
+}
+
+/// A failure report followed by a claim whose lease create applied with its
+/// reply lost claims the split on its last attempt, counted as reassigned.
+/// Regression for #894.
+#[test]
+fn a_lost_lease_create_reply_after_a_failure_report_keeps_the_last_attempt() {
+    let run = report_with_fault("lost-create-after-report", |fault, _| {
+        fault
+            .ambiguous_creates
+            .lock()
+            .unwrap()
+            .push((Keyspace::Ephemeral, "split.x".to_string()));
+        let fault = fault.clone();
+        Box::new(move || fault.ambiguous_creates.lock().unwrap().is_empty())
+    });
+    assert_last_attempt_claimed(&run);
+}
+
+/// A failure report whose lease delete fails claims the split on its last
+/// attempt, counted as reassigned. Regression for #894.
+#[test]
+fn a_failed_lease_delete_after_a_failure_report_keeps_the_last_attempt() {
+    let run = report_with_fault("failed-delete-after-report", |_, tap| {
+        let armed = refuse_next_delete(tap, "split.x");
+        Box::new(move || !armed.load(Ordering::SeqCst))
+    });
+    assert!(run.lease_after_report, "the report deleted the lease");
+    assert_last_attempt_claimed(&run);
+}
+
+/// A first claim whose lease create applied with its reply lost holds the split
+/// with `max_attempts: 1` and counts as a create. Regression for #894.
+#[test]
+fn a_lost_lease_create_reply_on_a_first_claim_does_not_quarantine_at_one_attempt() {
+    let component = "lost-create-first-claim";
+    let handle = exporter();
+    let rt = runtime();
+    let clock = TestClock::frozen();
+    let fault = FaultStore::with_clock(LEASE, clock.clone());
+    fault
+        .ambiguous_creates
+        .lock()
+        .unwrap()
+        .push((Keyspace::Ephemeral, "split.x".to_string()));
+    let mut config = config_for(LEASE, Some("worker-a"));
+    config.max_attempts = 1;
+    let mut a = metered_clocked(&rt, fault.clone(), &clock, component, config, &["x"]);
+    let mut fleet = support::Fleet::new(&fault.inner, rt.handle());
+    fleet.join(&a);
+    let mut held = Held::default();
+
+    run_half_a_lease(&mut a, &clock, &fleet, &mut held);
+
+    let fired = fault.ambiguous_creates.lock().unwrap().is_empty();
+    let record = fault.record(&rt, "split.x");
+    let epoch = held.splits.get("x").map(|(epoch, _)| *epoch);
+    let created = acquisitions(&handle, component, "create");
+    assert!(
+        fired
+            && held.quarantined.is_empty()
+            && epoch == Some(1)
+            && record["attempts"] == 0
+            && record["epoch"] == 1
+            && record["owner"] == "worker-a"
+            && created == 1.0,
+        "fault fired: {fired}; quarantined {:?}; held at {epoch:?}; record {record}; \
+         created {created}",
+        held.quarantined
+    );
+}
+
+/// A worker restarted under its predecessor's id while the predecessor's lease
+/// is live reclaims the split, charges one attempt and counts it as reclaimed.
+#[test]
+fn a_restart_inside_the_lease_reclaims_and_charges_one_attempt() {
+    let component = "restart-inside-lease";
+    let handle = exporter();
+    let clock = TestClock::frozen();
+    let fault = FaultStore::with_clock(LEASE, clock.clone());
+    let first = runtime();
+    let (predecessor, _) = claimed_clocked(&first, fault.clone(), &clock, "worker-a", &["r0"]);
+    support::crash(first, predecessor);
+
+    let rt = runtime();
+    let mut a = metered_clocked(
+        &rt,
+        fault.clone(),
+        &clock,
+        component,
+        config_for(LEASE, Some("worker-a")),
+        &["r0"],
+    );
+    let mut fleet = support::Fleet::new(&fault.inner, rt.handle());
+    fleet.join(&a);
+    let mut held = Held::default();
+    run_half_a_lease(&mut a, &clock, &fleet, &mut held);
+
+    let record = fault.record(&rt, "split.r0");
+    let epoch = held.splits.get("r0").map(|(epoch, _)| *epoch);
+    let reclaimed = acquisitions(&handle, component, "reclaimed");
+    assert!(
+        epoch == Some(2)
+            && record["attempts"] == 1
+            && record["epoch"] == 2
+            && record["owner"] == "worker-a"
+            && reclaimed == 1.0,
+        "held at {epoch:?}; record {record}; reclaimed {reclaimed}"
+    );
+}
+
+/// A worker restarted under its predecessor's id, after a failure report that
+/// cleared the owner but left the lease, claims the split on its last attempt,
+/// counted as reassigned. Regression for #894.
+#[test]
+fn a_restart_over_a_reported_splits_leftover_lease_keeps_the_last_attempt() {
+    let component = "restart-over-reported-lease";
+    let handle = exporter();
+    let clock = TestClock::frozen();
+    let fault = FaultStore::with_clock(LEASE, clock.clone());
+    let tap = support::tap::TapStore::new(fault.clone());
+    let first = runtime();
+    let mut config = config_for(LEASE, Some("worker-a"));
+    config.max_attempts = 2;
+    let mut predecessor = StoreCoordinator::with_clock(
+        tap.clone(),
+        config.clone(),
+        first.handle().clone(),
+        None,
+        clock.clone(),
+    )
+    .expect("coordinator");
+    predecessor
+        .start(Box::new(PhasedPlanner::one_final("departure:v1", &["x"])))
+        .unwrap();
+    let mut held = Held::default();
+    support::drive_clocked(&mut predecessor, &clock, &mut held, "claiming x", |h| {
+        h.splits.len() == 1
+    });
+    let armed = refuse_next_delete(&tap, "split.x");
+    predecessor
+        .fail(&support::split_id("x"), "injected")
+        .unwrap();
+    let fired = !armed.load(Ordering::SeqCst);
+    support::crash(first, predecessor);
+    let probe = runtime();
+    let before = fault.record(&probe, "split.x");
+    let lease_left = !fault
+        .present(&probe, Keyspace::Ephemeral, &["split.x"])
+        .is_empty();
+    assert!(
+        fired && lease_left && before["owner"].is_null() && before["attempts"] == 1,
+        "setup: fired {fired}; lease left {lease_left}; record {before}"
+    );
+
+    let rt = runtime();
+    let mut a = metered_clocked(&rt, fault.clone(), &clock, component, config, &["x"]);
+    let mut fleet = support::Fleet::new(&fault.inner, rt.handle());
+    fleet.join(&a);
+    let mut held = Held::default();
+    run_half_a_lease(&mut a, &clock, &fleet, &mut held);
+
+    let record = fault.record(&rt, "split.x");
+    let epoch = held.splits.get("x").map(|(epoch, _)| *epoch);
+    let reassigned = acquisitions(&handle, component, "reassigned");
+    assert!(
+        held.quarantined.is_empty()
+            && epoch == Some(2)
+            && record["attempts"] == 1
+            && record["status"] == "runnable"
+            && record["owner"] == "worker-a"
+            && reassigned == 1.0,
+        "quarantined {:?}; held at {epoch:?}; record {record}; reassigned {reassigned}",
+        held.quarantined
     );
 }

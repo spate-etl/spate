@@ -11,8 +11,9 @@ use spate_core::metrics::{AcquireReason, RevocationOutcome, SplitLossReason, Wri
 use tokio::time::Instant;
 
 impl<S: CoordinationStore + Clone> Task<S> {
-    /// The two-key claim: lease first (create, or CAS-update for a fast
-    /// reclaim), then the progress-record CAS that transfers ownership.
+    /// The two-key claim: lease first (create, or CAS-update of a live lease
+    /// under this worker's id), then the progress-record CAS that transfers
+    /// ownership.
     pub(super) async fn try_claim(
         &mut self,
         id: &str,
@@ -62,8 +63,8 @@ impl<S: CoordinationStore + Clone> Task<S> {
             epoch: next_epoch,
         });
         let started = Instant::now();
-        let lease_outcome = match (kind, &state.lease) {
-            (ClaimKind::Reclaim, Some((_, rev))) => {
+        let lease_outcome = match &state.lease {
+            Some((lease, rev)) if lease.owner == self.instance => {
                 self.store
                     .update(Keyspace::Ephemeral, &lease_key, lease_val, *rev)
                     .await

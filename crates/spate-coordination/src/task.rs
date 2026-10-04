@@ -58,6 +58,8 @@ mod renew;
 mod revoke;
 mod startup;
 mod terminal;
+#[cfg(test)]
+mod tests;
 mod watch;
 
 /// Control-thread → task requests. Replies go over a rendezvous-sized

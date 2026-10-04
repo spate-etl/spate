@@ -118,11 +118,15 @@ page.
 3. **Stable under unchanged input.** Feeding the function's own output back
    as the last published assignment reproduces it exactly, while each
    split's claim in the leader's view matches that output or is absent; the
-   assignment is a fixpoint. A steady-state fleet therefore publishes
-   nothing and drains nothing, and a claim on its way to the leader moves
-   nothing. — `assignment_is_stable_under_unchanged_input`,
+   assignment is a fixpoint. A lease from another owner that the split's
+   progress record has moved past, or from a released split, is not a claim.
+   A steady-state fleet therefore publishes nothing and drains nothing, and
+   neither a claim on its way to the leader nor a lease whose deletion has
+   not reached it moves anything. —
+   `assignment_is_stable_under_unchanged_input`,
    `assignment_is_stable_under_unchanged_ownership`,
-   `assignment_is_stable_before_its_claims_are_seen`
+   `assignment_is_stable_before_its_claims_are_seen`,
+   `assignment_is_stable_while_superseded_leases_linger`
 4. **Locally optimal.** No single split can move to a member with lane
    budget and reduce imbalance. — `assignment_admits_no_improving_move`
 5. **Total over the claimable pool.** Every assignable split is assigned
@@ -159,17 +163,22 @@ known at planning time and cost nothing to collect.
 
 The passes:
 
-1. **Sticky** — every split whose lease owner is a live member with a
-   free lane stays with it. Each remaining split then stays with the first
-   of these that is a live member with a free lane: the member the last
-   published assignment named for it, and the owner on its progress record.
-   Leased splits go first, so a split waiting for its claim cannot take a
-   lane its lease owner still holds. A move costs a drain, so an assignment
-   that churns for a marginally better balance is worse than one that does
-   not. The last published assignment covers the time between an
-   assignment and its claim reaching the leader's view: a store round trip,
-   or up to about two poll intervals on a store whose watch is polled, and
-   one more for each poll that reads data a recent write has not reached.
+1. **Sticky** — every split whose lease owner is a live member with a free
+   lane stays with it. A lease counts while the split's progress record
+   names the lease's owner, or while the lease is a claim ahead of the
+   record. Leases and records reach the leader on separate watches, so a
+   record can show another owner's later claim or a release while the lease
+   it replaced is still in view, and that lease holds no lane. Each
+   remaining split then stays with the first of these that is a live member
+   with a free lane: the member the last published assignment named for it,
+   and the owner on its progress record. Leased splits go first, so a split
+   waiting for its claim cannot take a lane its lease owner still holds. A
+   move costs a drain, so an assignment that churns for a marginally better
+   balance is worse than one that does not. The last published assignment
+   covers the time between an assignment and its claim reaching the leader's
+   view: a store round trip, or up to about two poll intervals on a store
+   whose watch is polled, and one more for each poll that reads data a
+   recent write has not reached.
 2. **Fill** — unassigned splits go to the least-loaded member with lane
    budget, heaviest split first (longest-processing-time greedy).
 3. **Improve** — while a split can move from a heavier member to a lighter

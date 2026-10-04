@@ -313,3 +313,19 @@ updates:
     ignore:
       - dependency-name: "debian"
         update-types: ["version-update:semver-major"]
+
+  # ---------------------------------- Docker (Kafka TLS builder image) ----
+  # `ci/rust/stable/Dockerfile` pins the image `spate-kafka`'s `tls_system_ca`
+  # builds and runs its system OpenSSL client in. Dependabot keeps the
+  # `-bookworm` suffix, so a move off Debian 12 is a maintainer edit.
+  - package-ecosystem: docker
+    directory: "/ci/rust/stable"
+    schedule:
+      interval: monthly
+      day: friday
+    open-pull-requests-limit: 1
+    labels: ["dependencies", "area: ci"]
+    commit-message:
+      prefix: "ci"
+    cooldown:
+      default-days: 7

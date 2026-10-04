@@ -464,6 +464,47 @@ fn a_commit_after_a_lost_quarantining_report_is_fenced_with_lost() {
     );
 }
 
+/// A release that reads back this worker's own applied quarantining report is
+/// `Ok`, counts `fenced` with `Lost` and leaves the lease.
+#[test]
+fn a_release_after_an_unseen_quarantining_report_is_fenced_and_leaves_the_lease() {
+    let mut rig = Rig::new(
+        "a_release_after_an_unseen_quarantining_report_is_fenced_and_leaves_the_lease",
+        1,
+    );
+    rig.hide();
+    rig.fail_applied_reply_lost();
+    let released = rig.worker.release(&[split_id("x")]);
+    let events = rig.events();
+    let lease = rig.lease();
+    assert!(
+        released.is_ok() && lost(&events, "x") && lease,
+        "release={released:?}, events={events:?}, lease={lease}"
+    );
+    assert_eq!(rig.fenced(), 1.0);
+}
+
+/// A release after a folded quarantining report is `Ok` with no `Lost` and no
+/// `fenced`, and leaves the lease.
+#[test]
+fn a_release_after_a_folded_quarantining_report_leaves_the_lease() {
+    let mut rig = Rig::new(
+        "a_release_after_a_folded_quarantining_report_leaves_the_lease",
+        1,
+    );
+    rig.fail_applied_reply_lost();
+    rig.fleet.settle(&rig.clock);
+    let mut events = rig.events();
+    let released = rig.worker.release(&[split_id("x")]);
+    events.extend(rig.events());
+    let lease = rig.lease();
+    assert!(
+        released.is_ok() && !lost(&events, "x") && lease,
+        "release={released:?}, events={events:?}, lease={lease}"
+    );
+    assert_eq!(rig.fenced(), 0.0);
+}
+
 /// A quarantining report whose read-back lags is `Fenced` with `Lost`, and
 /// forgets every record it sent, so a later re-send is `Fenced` too.
 #[test]
@@ -492,6 +533,7 @@ fn a_quarantining_report_whose_read_back_lags_is_fenced_and_forgets_every_record
             && record["attempts"] == 1,
         "third={third:?}, events={events:?}, lease={lease}, record={record}"
     );
+    rig.held.fold(events);
 
     rig.tap.inject(Keyspace::Durable, WatchEvent::Put(e1));
     support::drive(

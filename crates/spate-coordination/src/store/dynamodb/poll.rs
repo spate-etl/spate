@@ -208,7 +208,8 @@ impl Poll {
 
     /// Reports what `read` changed and returns the keys it holds live.
     /// `subscribing` is set for a new subscriber's first read, which lists
-    /// every key it read, including those an own write touched meanwhile.
+    /// every key it read, including those an own write touched meanwhile,
+    /// except a lease already deleted for expiry.
     fn apply(
         &mut self,
         inner: &Inner,
@@ -277,7 +278,7 @@ impl Poll {
     /// sends while holding it, so no own write lands between a decision
     /// and its event. A key an own write or a newer read touched after the
     /// read began is left to the next poll, and a subscribing read still
-    /// lists it.
+    /// lists it unless an expiry delete already covers it.
     fn apply_ephemeral(&mut self, inner: &Inner, read: Read, subscribing: bool) -> Vec<Entry> {
         let Read { s0, t0, items } = read;
         let mut observed = inner.observed();
@@ -290,7 +291,10 @@ impl Poll {
             if observed.newer_than(&key, s0) {
                 if delivered == Some(item.v) {
                     snapshot.push(entry(&key, &item));
-                } else if subscribing && self.deleted.get(&key).is_none_or(|f| item.v > *f) {
+                } else if subscribing
+                    && self.deleted.get(&key).is_none_or(|f| item.v >= *f)
+                    && observed.expired_version(&key) != Some(item.v)
+                {
                     let live = entry(&key, &item);
                     if delivered.is_none() {
                         send(&mut self.subscribers, &WatchEvent::Put(live.clone()));

@@ -263,6 +263,97 @@ async fn a_subscribing_read_delivers_an_own_touched_key_to_existing_subscribers(
     assert!(matches!(next(&mut held).await, WatchEvent::Put(e) if e.revision == created));
 }
 
+/// A key renewed by another handle at the revision of the expiry delete sent for it is in a subscribing read's snapshot.
+#[tokio::test(start_paused = true)]
+async fn a_subscribing_read_lists_a_renewal_at_the_expiry_delete_revision() {
+    let table = FakeTable::new();
+    let clock = TestClock::frozen();
+    let (a, b) = (handle(&table, &clock), handle(&table, &clock));
+    let r = won(b.create(E, "k", b"b".to_vec()).await.unwrap());
+    let mut first = a.watch(E, "").await.unwrap();
+    assert_eq!(snapshot(&mut first).await.len(), 1);
+    clock.advance(TTL + Duration::from_millis(1));
+    let deleted = match next(&mut first).await {
+        WatchEvent::Delete { revision, .. } => revision,
+        o => panic!("{o:?}"),
+    };
+    let renewed = won(b.update(E, "k", b"b".to_vec(), r).await.unwrap());
+    assert_eq!(renewed, deleted);
+    let mut gate = table.hold_next_query();
+    let watcher = a.clone();
+    let watching = tokio::spawn(async move { watcher.watch(E, "").await });
+    gate.reached().await;
+    won(a.update(E, "k", b"a".to_vec(), renewed).await.unwrap());
+    gate.release();
+    let mut second = watching.await.unwrap().unwrap();
+    let snap = snapshot(&mut second).await;
+    assert_eq!(snap.len(), 1, "k live throughout read: {snap:?}");
+}
+
+/// A subscribing read does not list a lease that another poller of the handle deleted for expiry while the read ran.
+#[tokio::test(start_paused = true)]
+async fn a_subscribing_read_skips_a_lease_another_poller_expired() {
+    let table = FakeTable::new();
+    let clock = TestClock::frozen();
+    let a = handle(&table, &clock);
+    won(a.create(E, "k", b"a".to_vec()).await.unwrap());
+    let mut first = a.watch(E, "").await.unwrap();
+    assert_eq!(snapshot(&mut first).await.len(), 1);
+    clock.advance(TTL + Duration::from_millis(1));
+    let mut gate = table.hold_next_query();
+    let watcher = a.clone();
+    let watching = tokio::spawn(async move { watcher.watch(E, "k").await });
+    gate.reached().await;
+    let deleted = match next(&mut first).await {
+        WatchEvent::Delete { revision, .. } => revision,
+        o => panic!("{o:?}"),
+    };
+    gate.release();
+    let mut second = watching.await.unwrap().unwrap();
+    let snap = snapshot(&mut second).await;
+    assert!(
+        snap.is_empty(),
+        "expired lease listed after delete {deleted:?}: {snap:?}"
+    );
+}
+
+/// A put at a higher revision clears the expiry floor, so a later re-create below it is listed.
+#[tokio::test(start_paused = true)]
+async fn an_expiry_floor_is_cleared_by_a_later_put() {
+    let table = FakeTable::new();
+    table.freeze_wall(1_000);
+    let clock = TestClock::frozen();
+    let (a, b, c) = (
+        handle(&table, &clock),
+        handle(&table, &clock),
+        handle(&table, &clock),
+    );
+    let r = won(b.create(E, "k", b"b".to_vec()).await.unwrap());
+    let mut first = a.watch(E, "").await.unwrap();
+    assert_eq!(snapshot(&mut first).await.len(), 1);
+    clock.advance(TTL + Duration::from_millis(1));
+    match next(&mut first).await {
+        WatchEvent::Delete { .. } => {}
+        o => panic!("{o:?}"),
+    }
+    won(b.delete(E, "k", Some(r)).await.unwrap());
+    table.freeze_wall(500);
+    let low = won(c.create(E, "k", b"c".to_vec()).await.unwrap());
+    match next(&mut first).await {
+        WatchEvent::Put(e) => assert_eq!(e.revision, low),
+        o => panic!("{o:?}"),
+    }
+    won(c.update(E, "k", b"c".to_vec(), low).await.unwrap());
+    let mut gate = table.hold_next_query();
+    let watcher = a.clone();
+    let watching = tokio::spawn(async move { watcher.watch(E, "").await });
+    gate.reached().await;
+    a.get(E, "k").await.unwrap();
+    gate.release();
+    let mut second = watching.await.unwrap().unwrap();
+    assert_eq!(snapshot(&mut second).await.len(), 1);
+}
+
 /// Each conditional write whose first attempt landed, then reported its
 /// condition failed, resolves as won at the revision it wrote.
 #[tokio::test]

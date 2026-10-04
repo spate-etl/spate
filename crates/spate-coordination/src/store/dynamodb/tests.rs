@@ -1,9 +1,12 @@
 use super::fake::good_shape;
-use super::table::{Cond, KeyAttr, Meta, Shape, Status, Ttl, Write};
+use super::table::{
+    BoxFuture as TableFuture, Cond, KeyAttr, Meta, Page, Shape, Status, Ttl, Write,
+};
 use super::*;
 use crate::store::WatchEvent;
 use futures_util::{FutureExt as _, StreamExt as _};
 use spate_core::clock::tokio::TestClock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const TTL: Duration = Duration::from_millis(1500);
 const POLL: Duration = Duration::from_millis(150);
@@ -515,6 +518,407 @@ async fn a_takeover_is_conditional_on_the_expired_version() {
         CasOutcome::Lost
     );
     assert_eq!(table.item("job#e", "k").map(|i| i.w), Some(Some([7; 16])));
+}
+
+/// A [`FakeTable`] that records the partition of every write, and can fail
+/// the next floor write, renew a key before each removal, or hold the next
+/// removal's reply past the op timeout once it has landed.
+#[derive(Debug)]
+struct Wrapped {
+    table: FakeTable,
+    pks: Mutex<Vec<String>>,
+    fail_floor: AtomicBool,
+    /// How many removals still get a renewal of their key first.
+    renewals: Mutex<usize>,
+    stall_after_remove: AtomicBool,
+}
+
+impl Wrapped {
+    fn new() -> Arc<Wrapped> {
+        Arc::new(Wrapped {
+            table: FakeTable::new(),
+            pks: Mutex::default(),
+            fail_floor: AtomicBool::new(false),
+            renewals: Mutex::new(0),
+            stall_after_remove: AtomicBool::new(false),
+        })
+    }
+
+    fn writes(&self) -> Vec<String> {
+        self.pks.lock().unwrap().clone()
+    }
+
+    fn take_renewal(&self) -> bool {
+        let mut left = self.renewals.lock().unwrap();
+        let due = *left > 0;
+        *left = left.saturating_sub(1);
+        due
+    }
+
+    async fn renew(&self, pk: &str, sk: &str) {
+        let Some(old) = self.table.item(pk, sk) else {
+            return;
+        };
+        let renewal = Write::Put {
+            v: old.v + 1,
+            b: old.b.unwrap_or_default(),
+            w: write_id(),
+            x: old.x,
+            cond: Cond::VersionIs(old.v),
+        };
+        self.table.write(pk, sk, renewal).await.unwrap();
+    }
+}
+
+impl Table for Wrapped {
+    fn write<'a>(
+        &'a self,
+        pk: &'a str,
+        sk: &'a str,
+        write: Write,
+    ) -> TableFuture<'a, Result<Written, StoreError>> {
+        Box::pin(async move {
+            self.pks.lock().unwrap().push(pk.to_string());
+            if pk.ends_with("#f") && self.fail_floor.swap(false, Ordering::SeqCst) {
+                return Err(StoreError::Retryable("injected floor failure".into()));
+            }
+            let stall = matches!(write, Write::Remove { .. })
+                && self.stall_after_remove.swap(false, Ordering::SeqCst);
+            if matches!(write, Write::Remove { .. }) && self.take_renewal() {
+                self.renew(pk, sk).await;
+            }
+            let out = self.table.write(pk, sk, write).await;
+            if stall {
+                tokio::time::sleep(OP_TIMEOUT * 10).await;
+            }
+            out
+        })
+    }
+
+    fn get<'a>(
+        &'a self,
+        pk: &'a str,
+        sk: &'a str,
+    ) -> TableFuture<'a, Result<Option<Item>, StoreError>> {
+        self.table.get(pk, sk)
+    }
+
+    fn query(&self, query: Query) -> TableFuture<'_, Result<Page, StoreError>> {
+        self.table.query(query)
+    }
+
+    fn put_meta<'a>(
+        &'a self,
+        pk: &'a str,
+        meta: Meta,
+    ) -> TableFuture<'a, Result<Option<Meta>, StoreError>> {
+        self.table.put_meta(pk, meta)
+    }
+
+    fn describe(&self) -> TableFuture<'_, Result<Option<Shape>, StoreError>> {
+        self.table.describe()
+    }
+
+    fn create_table(&self) -> TableFuture<'_, Result<(), StoreError>> {
+        self.table.create_table()
+    }
+
+    fn describe_ttl(&self) -> TableFuture<'_, Result<Ttl, StoreError>> {
+        self.table.describe_ttl()
+    }
+
+    fn enable_ttl(&self) -> TableFuture<'_, Result<(), StoreError>> {
+        self.table.enable_ttl()
+    }
+}
+
+fn handle_over(wrapped: &Arc<Wrapped>, clock: &Arc<TestClock>) -> DynamoDbStore {
+    let wall = wrapped.table.clone();
+    let connector = Arc::clone(wrapped);
+    DynamoDbStore::build(
+        config(),
+        TTL,
+        OP_TIMEOUT,
+        clock.clone(),
+        Box::new(move || wall.now_ms()),
+        Box::new(move || {
+            let table: Arc<dyn Table> = connector.clone();
+            Box::pin(async move { Ok(table) })
+        }),
+    )
+    .expect("store")
+}
+
+/// A guarded delete raises the key's floor to one above the revision it
+/// removes, collectable a day later, before it removes the key.
+#[tokio::test]
+async fn a_delete_raises_the_floor_before_removing_the_key() {
+    let wrapped = Wrapped::new();
+    wrapped.table.freeze_wall(1_000_000);
+    let a = handle_over(&wrapped, &TestClock::frozen());
+    let rev = won(a.create(E, "k", b"a".to_vec()).await.unwrap());
+    let before = wrapped.writes().len();
+    won(a.delete(E, "k", Some(rev)).await.unwrap());
+    assert_eq!(wrapped.writes()[before..], ["job#f", "job#e"]);
+    let floor = wrapped.table.item("job#f", "k").expect("a floor item");
+    assert_eq!((floor.v, floor.x), (rev.0 + 1, Some(1_000 + 86_400)));
+    assert!(wrapped.table.item("job#e", "k").is_none());
+}
+
+/// A delete whose floor raise fails leaves the key in place: a guarded
+/// delete returns the error, and a delete at a version judged expired wins.
+#[tokio::test(start_paused = true)]
+async fn a_failed_floor_raise_keeps_the_key() {
+    let wrapped = Wrapped::new();
+    let clock = TestClock::frozen();
+    let (a, b) = (
+        handle(&wrapped.table, &clock),
+        handle_over(&wrapped, &clock),
+    );
+    let rev = won(a.create(E, "k", b"a".to_vec()).await.unwrap());
+    wrapped.fail_floor.store(true, Ordering::SeqCst);
+    let guarded = b.delete(E, "k", Some(rev)).await;
+    assert!(
+        matches!(guarded, Err(StoreError::Retryable(_))),
+        "{guarded:?}"
+    );
+    assert!(wrapped.table.item("job#e", "k").is_some(), "guarded");
+
+    let mut watch = b.watch(E, "").await.unwrap();
+    assert_eq!(snapshot(&mut watch).await.len(), 1);
+    clock.advance(TTL);
+    assert!(matches!(next(&mut watch).await, WatchEvent::Delete { .. }));
+    wrapped.fail_floor.store(true, Ordering::SeqCst);
+    assert_eq!(
+        b.delete(E, "k", Some(rev)).await.unwrap(),
+        CasOutcome::Won(Revision(0))
+    );
+    assert!(wrapped.table.item("job#e", "k").is_some(), "expired");
+}
+
+/// A delete at the version this handle judged expired raises the floor to
+/// one above it.
+#[tokio::test(start_paused = true)]
+async fn deleting_an_expired_key_raises_its_floor() {
+    let table = FakeTable::new();
+    let clock = TestClock::frozen();
+    let (a, b) = (handle(&table, &clock), handle(&table, &clock));
+    let rev = won(a.create(E, "k", b"a".to_vec()).await.unwrap());
+    let mut watch = b.watch(E, "").await.unwrap();
+    assert_eq!(snapshot(&mut watch).await.len(), 1);
+    clock.advance(TTL);
+    assert!(matches!(next(&mut watch).await, WatchEvent::Delete { .. }));
+    won(b.delete(E, "k", Some(rev)).await.unwrap());
+    assert_eq!(table.item("job#f", "k").map(|i| i.v), Some(rev.0 + 1));
+    assert!(table.item("job#e", "k").is_none());
+}
+
+/// An unguarded delete raises the floor to one above the revision it
+/// removes.
+#[tokio::test]
+async fn an_unguarded_delete_raises_the_floor_to_the_revision_it_removes() {
+    let table = FakeTable::new();
+    let a = handle(&table, &TestClock::frozen());
+    let mut rev = won(a.create(E, "k", b"a".to_vec()).await.unwrap());
+    for _ in 0..2 {
+        rev = won(a.update(E, "k", b"a".to_vec(), rev).await.unwrap());
+    }
+    won(a.delete(E, "k", None).await.unwrap());
+    assert_eq!(table.item("job#f", "k").map(|i| i.v), Some(rev.0 + 1));
+    assert!(table.item("job#e", "k").is_none());
+}
+
+/// An unguarded delete that loses its removal to a renewal reads the key
+/// again and removes the renewed revision; after three lost rounds it
+/// returns a retryable error and the key stays.
+#[tokio::test]
+async fn an_unguarded_delete_retries_a_lost_round_then_gives_up() {
+    let wrapped = Wrapped::new();
+    let table = &wrapped.table;
+    let a = handle_over(&wrapped, &TestClock::frozen());
+    let rev = won(a.create(E, "k", b"a".to_vec()).await.unwrap());
+    let renewal = Write::Put {
+        v: rev.0 + 1,
+        b: b"a".to_vec(),
+        w: write_id(),
+        x: None,
+        cond: Cond::VersionIs(rev.0),
+    };
+    table.interpose(1, "job#e", "k", renewal);
+    won(a.delete(E, "k", None).await.unwrap());
+    assert_eq!(table.item("job#f", "k").map(|i| i.v), Some(rev.0 + 2));
+    assert!(table.item("job#e", "k").is_none());
+
+    won(a.create(E, "k", b"a".to_vec()).await.unwrap());
+    *wrapped.renewals.lock().unwrap() = 100;
+    let reads = table.count(FakeOp::Get);
+    let given_up = a.delete(E, "k", None).await;
+    assert!(
+        matches!(given_up, Err(StoreError::Retryable(_))),
+        "{given_up:?}"
+    );
+    assert_eq!(table.count(FakeOp::Get) - reads, 3, "rounds");
+    assert!(table.item("job#e", "k").is_some());
+}
+
+/// A delete at a revision below the key's floor leaves the floor where it
+/// stands.
+#[tokio::test]
+async fn a_floor_never_falls() {
+    let table = FakeTable::new();
+    table.freeze_wall(2_000);
+    let clock = TestClock::frozen();
+    let (a, b) = (handle(&table, &clock), handle(&table, &clock));
+    let rev = won(a.create(E, "k", b"a".to_vec()).await.unwrap());
+    won(a.delete(E, "k", Some(rev)).await.unwrap());
+    won(b.delete(E, "k", Some(Revision(1_000))).await.unwrap());
+    assert_eq!(table.item("job#f", "k").map(|i| i.v), Some(2_001));
+}
+
+/// An own re-create on a lagging wall lands above the floor its own delete
+/// left, in one write call.
+#[tokio::test(start_paused = true)]
+async fn an_own_recreate_clears_the_floor_in_one_call() {
+    let table = FakeTable::new();
+    let w = handle(&table, &TestClock::frozen());
+    table.freeze_wall(10_000);
+    let r = won(w.create(E, "k", b"w".to_vec()).await.unwrap());
+    won(w.delete(E, "k", Some(r)).await.unwrap());
+    table.freeze_wall(5_000);
+    let before = table.count(FakeOp::Write);
+    let again = won(w.create(E, "k", b"w".to_vec()).await.unwrap());
+    assert_eq!(table.count(FakeOp::Write) - before, 1);
+    assert!(again.0 > r.0 + 1, "{again:?} not above floor {}", r.0 + 1);
+}
+
+/// An own re-create on a lagging wall lands above the floor an own
+/// unguarded delete left.
+#[tokio::test(start_paused = true)]
+async fn an_own_recreate_clears_an_unguarded_delete_floor() {
+    let table = FakeTable::new();
+    let w = handle(&table, &TestClock::frozen());
+    table.freeze_wall(10_000);
+    won(w.create(E, "k", b"w".to_vec()).await.unwrap());
+    won(w.delete(E, "k", None).await.unwrap());
+    let floor = table.item("job#f", "k").expect("floor").v;
+    table.freeze_wall(5_000);
+    let again = won(w.create(E, "k", b"w".to_vec()).await.unwrap());
+    assert!(again.0 > floor, "{again:?} not above floor {floor}");
+}
+
+/// A later own delete that finds the key absent leaves the in-memory floor
+/// where an earlier own delete put it.
+#[tokio::test(start_paused = true)]
+async fn an_absent_unguarded_delete_keeps_the_own_floor() {
+    let table = FakeTable::new();
+    let w = handle(&table, &TestClock::frozen());
+    table.freeze_wall(10_000);
+    let r = won(w.create(E, "k", b"w".to_vec()).await.unwrap());
+    won(w.delete(E, "k", Some(r)).await.unwrap());
+    won(w.delete(E, "k", None).await.unwrap());
+    let floor = table.item("job#f", "k").expect("floor").v;
+    table.freeze_wall(5_000);
+    let again = won(w.create(E, "k", b"w".to_vec()).await.unwrap());
+    assert!(again.0 > floor, "{again:?} not above floor {floor}");
+}
+
+/// Creates `k` at 10_000, then runs a delete whose removal lands but whose
+/// reply outlives `OP_TIMEOUT`; returns the handle and the created revision.
+async fn delete_cut_after_its_removal(
+    wrapped: &Arc<Wrapped>,
+    guarded: bool,
+) -> (DynamoDbStore, Revision) {
+    let a = handle_over(wrapped, &TestClock::frozen());
+    wrapped.table.freeze_wall(10_000);
+    let r = won(a.create(E, "k", b"a".to_vec()).await.unwrap());
+    wrapped.stall_after_remove.store(true, Ordering::SeqCst);
+    let expected = guarded.then_some(r);
+    let cut = tokio::time::timeout(OP_TIMEOUT, a.delete(E, "k", expected)).await;
+    assert!(
+        cut.is_err(),
+        "the delete was not cut by the timeout: {cut:?}"
+    );
+    assert!(
+        wrapped.table.item("job#e", "k").is_none(),
+        "the removal did not land"
+    );
+    let floor = wrapped.table.item("job#f", "k").expect("a floor item").v;
+    assert_eq!(floor, r.0 + 1);
+    (a, r)
+}
+
+/// An unguarded delete cut short after its removal landed, then retried:
+/// the own re-create lands above the floor.
+#[tokio::test(start_paused = true)]
+async fn a_cut_unguarded_delete_then_a_retry_keeps_the_own_floor() {
+    let wrapped = Wrapped::new();
+    let (a, r) = delete_cut_after_its_removal(&wrapped, false).await;
+    won(a.delete(E, "k", None).await.unwrap());
+    wrapped.table.freeze_wall(5_000);
+    let again = won(a.create(E, "k", b"a".to_vec()).await.unwrap());
+    assert!(again.0 > r.0 + 1, "{again:?} not above floor {}", r.0 + 1);
+}
+
+/// An unguarded delete cut short after its removal landed, with no retry:
+/// the own re-create lands above the floor.
+#[tokio::test(start_paused = true)]
+async fn a_cut_unguarded_delete_keeps_the_own_floor() {
+    let wrapped = Wrapped::new();
+    let (a, r) = delete_cut_after_its_removal(&wrapped, false).await;
+    wrapped.table.freeze_wall(5_000);
+    let again = won(a.create(E, "k", b"a".to_vec()).await.unwrap());
+    assert!(again.0 > r.0 + 1, "{again:?} not above floor {}", r.0 + 1);
+}
+
+/// A guarded delete cut short after its removal landed, with no retry: the
+/// own re-create lands above the floor.
+#[tokio::test(start_paused = true)]
+async fn a_cut_guarded_delete_keeps_the_own_floor() {
+    let wrapped = Wrapped::new();
+    let (a, r) = delete_cut_after_its_removal(&wrapped, true).await;
+    wrapped.table.freeze_wall(5_000);
+    let again = won(a.create(E, "k", b"a".to_vec()).await.unwrap());
+    assert!(again.0 > r.0 + 1, "{again:?} not above floor {}", r.0 + 1);
+}
+
+/// A guarded delete cut short after its removal landed, then retried
+/// guarded: the own re-create lands above the floor.
+#[tokio::test(start_paused = true)]
+async fn a_cut_guarded_delete_then_a_retry_keeps_the_own_floor() {
+    let wrapped = Wrapped::new();
+    let (a, r) = delete_cut_after_its_removal(&wrapped, true).await;
+    won(a.delete(E, "k", Some(r)).await.unwrap());
+    wrapped.table.freeze_wall(5_000);
+    let again = won(a.create(E, "k", b"a".to_vec()).await.unwrap());
+    assert!(again.0 > r.0 + 1, "{again:?} not above floor {}", r.0 + 1);
+}
+
+/// A handle that deletes a key it watches reports the delete at or below
+/// the key's floor, so a re-create at the floor plus one reaches its watch
+/// as a later put.
+#[tokio::test(start_paused = true)]
+async fn the_deleters_own_watch_reports_its_delete_at_the_floor() {
+    let table = FakeTable::new();
+    let clock = TestClock::frozen();
+    let (w, c) = (handle(&table, &clock), handle(&table, &clock));
+    table.freeze_wall(10_000);
+    let r = won(w.create(E, "k", b"w".to_vec()).await.unwrap());
+    let mut watch = w.watch(E, "").await.unwrap();
+    assert_eq!(snapshot(&mut watch).await.len(), 1);
+    won(w.delete(E, "k", Some(r)).await.unwrap());
+    let floor = Revision(r.0 + 1);
+    let deleted = match next(&mut watch).await {
+        WatchEvent::Delete { revision, .. } => revision,
+        other => panic!("expected the vanish delete, got {other:?}"),
+    };
+    table.freeze_wall(floor.0 + 1);
+    let recreated = won(c.create(E, "k", b"c".to_vec()).await.unwrap());
+    let put = put_without_delete(&mut watch, "k").await;
+    assert!(
+        deleted <= floor && put > deleted,
+        "own watch delete {deleted:?} vs floor {floor:?}; re-create {recreated:?} reached the \
+         watch at {put:?}"
+    );
 }
 
 /// Polls that fail while the clock passes a lease judge no expiry: the

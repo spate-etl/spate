@@ -1,8 +1,9 @@
 //! A [`CoordinationStore`] over one DynamoDB table.
 //!
-//! Each job owns three partitions of the table: `{job}#d` holds the durable
-//! keyspace, `{job}#e` the ephemeral one, and `{job}#m` the settings the
-//! job was started with. The record key is the sort key.
+//! Each job owns four partitions of the table: `{job}#d` holds the durable
+//! keyspace, `{job}#e` the ephemeral one, `{job}#f` the revision floors of
+//! deleted ephemeral keys, and `{job}#m` the settings the job was started
+//! with. The record key is the sort key.
 //!
 //! - Durable revisions come from the table and strictly increase across
 //!   delete and re-create: a delete leaves a tombstone one revision up,
@@ -12,6 +13,9 @@
 //!   handle first read its current revision still returns that revision.
 //!   Every ephemeral write stamps `x` a day ahead, so native TTL collects
 //!   items nothing renews; that stamp plays no part in expiry.
+//! - Removing an ephemeral key at revision `R` first raises its floor item
+//!   in `{job}#f` to at least `R + 1`, with `x` a day ahead on the deleting
+//!   handle's wall clock. A delete whose raise fails keeps the key.
 //! - Watches list their prefix every `poll_interval` and report the
 //!   difference, so the store declares [`WatchMode::Polled`].
 //! - Every write carries a random write id, and a failed condition returns
@@ -72,6 +76,10 @@ const MAX_VALUE_BYTES: usize = 384 * 1024;
 /// How long after its last write native TTL may collect an ephemeral item.
 const EPHEMERAL_COLLECT_S: u64 = 86_400;
 
+/// How many removals an unguarded ephemeral delete loses to concurrent
+/// writes before it returns Retryable.
+const UNGUARDED_ROUNDS: usize = 3;
+
 /// How long native TTL keeps a durable tombstone.
 const TOMBSTONE_KEEP_S: u64 = 7 * 86_400;
 
@@ -85,7 +93,8 @@ struct Inner {
     clock: Arc<dyn Clock>,
     /// Wall time in epoch milliseconds.
     now_ms: Box<dyn Fn() -> u64 + Send + Sync>,
-    pks: [String; 3],
+    /// The durable, ephemeral, meta and floor partition keys.
+    pks: [String; 4],
     connect: Connect,
     /// The table as connected, before the startup checks pass.
     connected: Mutex<Option<Arc<dyn Table>>>,
@@ -118,6 +127,10 @@ impl Inner {
             Keyspace::Durable => &self.pks[0],
             Keyspace::Ephemeral => &self.pks[1],
         }
+    }
+
+    fn floor_pk(&self) -> &str {
+        &self.pks[3]
     }
 
     fn connected(&self) -> MutexGuard<'_, Option<Arc<dyn Table>>> {
@@ -159,7 +172,12 @@ impl DynamoDbStore {
     ) -> Result<DynamoDbStore, StoreError> {
         config.validate(lease_ttl)?;
         let job = &config.job;
-        let pks = [format!("{job}#d"), format!("{job}#e"), format!("{job}#m")];
+        let pks = [
+            format!("{job}#d"),
+            format!("{job}#e"),
+            format!("{job}#m"),
+            format!("{job}#f"),
+        ];
         Ok(DynamoDbStore {
             inner: Arc::new(Inner {
                 config,
@@ -376,7 +394,12 @@ impl DynamoDbStore {
         let pk = self.inner.pk(Keyspace::Ephemeral);
         let w = write_id();
         let (s0, t0) = self.inner.mark();
-        let base = ((self.inner.now_ms)()).max(self.inner.observed().hw(key) + 1);
+        let base = {
+            let o = self.inner.observed();
+            ((self.inner.now_ms)())
+                .max(o.hw(key) + 1)
+                .max(o.floor(key) + 1)
+        };
         let put = self.ephemeral_put(base, value.clone(), w, Cond::Absent);
         let old = match table.write(pk, key, put).await? {
             Written::Ok { .. } => return Ok(self.own_write(key, base)),
@@ -411,27 +434,25 @@ impl DynamoDbStore {
         expected: Option<Revision>,
     ) -> Result<CasOutcome, StoreError> {
         let table = self.table().await?;
-        let pk = self.inner.pk(Keyspace::Ephemeral);
         let expired = self.inner.observed().expired_version(key);
         if let Some(v) = expired {
             // Gone as this handle judges it; at the expired version the
             // item is removed too, and the outcome of that changes nothing.
             if expected == Some(Revision(v))
-                && let Ok(Written::Ok { .. }) = table
-                    .write(pk, key, Write::Remove { expected: Some(v) })
-                    .await
+                && let Ok(Written::Ok { .. }) = self.raise_then_remove(&**table, key, v).await
             {
                 self.inner
                     .observed()
-                    .own_delete(key, self.inner.clock.now());
+                    .own_delete(key, v + 1, self.inner.clock.now());
             }
             return Ok(CasOutcome::Won(Revision(0)));
         }
-        let (s0, t0) = self.inner.mark();
-        let remove = Write::Remove {
-            expected: expected.map(|r| r.0),
+        let Some(Revision(e)) = expected else {
+            return self.delete_unguarded(&**table, key).await;
         };
-        if let Written::Failed { old: Some(old) } = table.write(pk, key, remove).await? {
+        let (s0, t0) = self.inner.mark();
+        if let Written::Failed { old: Some(old) } = self.raise_then_remove(&**table, key, e).await?
+        {
             self.observe(key, Some(&old), s0);
             return Ok(if self.expired(key, old.v, t0) {
                 CasOutcome::Won(Revision(0))
@@ -441,8 +462,57 @@ impl DynamoDbStore {
         }
         self.inner
             .observed()
-            .own_delete(key, self.inner.clock.now());
+            .own_delete(key, e + 1, self.inner.clock.now());
         Ok(CasOutcome::Won(Revision(0)))
+    }
+
+    /// Removes `key` at whatever revision a consistent read finds, raising
+    /// its floor first; Retryable after [`UNGUARDED_ROUNDS`] removals lost
+    /// to a concurrent write.
+    async fn delete_unguarded(
+        &self,
+        table: &dyn Table,
+        key: &str,
+    ) -> Result<CasOutcome, StoreError> {
+        let pk = self.inner.pk(Keyspace::Ephemeral);
+        for _ in 0..UNGUARDED_ROUNDS {
+            let floor = match table.get(pk, key).await? {
+                None => 0,
+                Some(item) => match self.raise_then_remove(table, key, item.v).await? {
+                    Written::Failed { old: Some(_) } => continue,
+                    _ => item.v + 1,
+                },
+            };
+            self.inner
+                .observed()
+                .own_delete(key, floor, self.inner.clock.now());
+            return Ok(CasOutcome::Won(Revision(0)));
+        }
+        Err(StoreError::Retryable(format!(
+            "the delete of {key} lost {UNGUARDED_ROUNDS} rounds to concurrent writes"
+        )))
+    }
+
+    /// Raises the floor of `key` to `v + 1`, then removes the item at `v`.
+    /// A raise that returns an error removes nothing.
+    async fn raise_then_remove(
+        &self,
+        table: &dyn Table,
+        key: &str,
+        v: u64,
+    ) -> Result<Written, StoreError> {
+        let raise = Write::Raise {
+            v: v + 1,
+            x: self.inner.now_s() + EPHEMERAL_COLLECT_S,
+        };
+        table.write(self.inner.floor_pk(), key, raise).await?;
+        self.inner
+            .observed()
+            .raise_floor(key, v + 1, self.inner.clock.now());
+        let remove = Write::Remove { expected: Some(v) };
+        table
+            .write(self.inner.pk(Keyspace::Ephemeral), key, remove)
+            .await
     }
 
     async fn read_all(

@@ -60,6 +60,8 @@ pub(crate) enum Write {
     },
     /// Removes the item, only at `expected` when given.
     Remove { expected: Option<u64> },
+    /// Sets `v` and `x` while the item is absent or holds a lower `v`.
+    Raise { v: u64, x: u64 },
 }
 
 /// A write's outcome.

@@ -2039,11 +2039,14 @@ fn an_election_read_back_ignores_this_workers_earlier_key() {
         .block_on(inner.delete(Keyspace::Ephemeral, "leader", None))
         .unwrap();
     fleet.settle(&clock);
-
     assert!(
         store.leader_create.lock().unwrap().is_none(),
         "the worker never ran for election again"
     );
+    // The failed election runs again at the worker's next step, which the
+    // markers of this settle drive.
+    fleet.settle(&clock);
+
     let leader = leader_json(&rt, &inner).expect("the worker leads without a leader key");
     assert_eq!(leader["owner"], "solo");
     assert_eq!(leader["generation"], 2);

@@ -254,10 +254,10 @@ pub(crate) fn settled(n: usize, weights: Weights) -> Vec<ObservedSplit> {
 /// The claim-scan pool for a worker whose peers are all busy: every split it
 /// does not hold is under a live foreign lease.
 ///
-/// The scan a worker with lane budget to spare pays on every watch event that
-/// reaches it, and gets nothing back for: a live foreign lease is the cheapest
-/// rejection there is. The [`OWNED`] splits this worker holds are leased to
-/// *it*, so they are rejected one branch earlier still.
+/// The scan a worker with lane budget to spare pays on every step, and gets
+/// nothing back for: a live foreign lease is the cheapest rejection there is.
+/// The [`OWNED`] splits this worker holds are leased to *it*, so they are
+/// rejected one branch earlier still.
 pub(crate) fn leased(n: usize) -> Vec<ObservedSplit> {
     (0..n)
         .map(|i| {

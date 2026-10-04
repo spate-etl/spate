@@ -30,7 +30,7 @@ use crate::records::{
     self, AssignmentVal, LeaderVal, LeaseVal, PlanRecord, SplitProgressRecord, SplitSpecRecord,
 };
 use crate::store::{
-    CoordinationStore, Entry, Keyspace, Revision, StoreError, WatchEvent, WatchMode,
+    CoordinationStore, Entry, Keyspace, Revision, StoreError, WatchEvent, WatchMode, WatchStream,
 };
 use futures_util::FutureExt as _;
 use futures_util::StreamExt as _;
@@ -204,6 +204,42 @@ pub(crate) type Reads = BoxFuture<'static, Vec<(String, Result<Option<Entry>, St
 
 /// Point reads one read run keeps in flight at once.
 const READ_CONCURRENCY: usize = 64;
+
+/// Events a watch arm applies from its stream, after the one that woke it,
+/// before it runs `step`.
+const DRAIN_BOUND: usize = 256;
+
+/// Why [`drain_ready`] stopped.
+#[derive(Debug)]
+enum Drained {
+    /// The stream had nothing more ready.
+    Idle,
+    /// The bound was reached.
+    Bound,
+    /// The stream yielded an error.
+    Broken(StoreError),
+    /// The stream ended.
+    Ended,
+}
+
+/// Apply the events `stream` holds ready, without waiting, up to `bound`.
+fn drain_ready(
+    stream: &mut WatchStream,
+    bound: usize,
+    mut apply: impl FnMut(WatchEvent) -> Result<(), CoordinationError>,
+) -> Result<Drained, CoordinationError> {
+    for _ in 0..bound {
+        // Outside the coop budget: a tokio channel reports `Pending` with
+        // events still queued once the task poll's budget runs out.
+        match tokio::task::unconstrained(stream.next()).now_or_never() {
+            Some(Some(Ok(event))) => apply(event)?,
+            Some(Some(Err(e))) => return Ok(Drained::Broken(e)),
+            Some(None) => return Ok(Drained::Ended),
+            None => return Ok(Drained::Idle),
+        }
+    }
+    Ok(Drained::Bound)
+}
 
 /// A reconcile whose listings are in flight, and the view's revisions when
 /// they began.
@@ -379,9 +415,8 @@ pub(crate) struct Task<S: CoordinationStore + Clone> {
     awaiting: BTreeMap<String, Instant>,
     /// Set when the leader's assignment inputs moved (membership, split
     /// status, specs, or a grace window elapsing). `desired_assignment` is
-    /// a full recompute over every split, and `step` runs on every watch
-    /// event, so recomputing unconditionally made a commit-heavy fleet pay
-    /// an O(members x splits) scan per commit. Cleared by the publish.
+    /// a full recompute over every split, so a step that skips it on a clean
+    /// view saves an O(members x splits) scan. Cleared by the publish.
     assign_dirty: bool,
     /// Leader side only: instances whose presence key vanished, and when.
     /// Splits that still name them as owner are withheld from assignment
@@ -641,39 +676,13 @@ impl<S: CoordinationStore + Clone> Task<S> {
                     Box::pin(self.step()).await?;
                 }
                 event = lease_watch.next() => {
-                    match event {
-                        Some(Ok(event)) => {
-                            if let WatchEvent::Put(Entry { revision, .. })
-                            | WatchEvent::Delete { revision, .. } = &event
-                            {
-                                self.probe_applied(Keyspace::Ephemeral, *revision);
-                            }
-                            self.apply_lease_event(event)?;
-                        }
-                        Some(Err(e)) => {
-                            tracing::warn!(error = %e, "lease watch broke; re-watching");
-                            lease_watch = Box::pin(self.rewatch(Keyspace::Ephemeral)).await?;
-                        }
-                        None => lease_watch = Box::pin(self.rewatch(Keyspace::Ephemeral)).await?,
-                    }
+                    Box::pin(self.apply_watched(Keyspace::Ephemeral, event, &mut lease_watch))
+                        .await?;
                     Box::pin(self.step()).await?;
                 }
                 event = state_watch.next() => {
-                    match event {
-                        Some(Ok(event)) => {
-                            if let WatchEvent::Put(Entry { revision, .. })
-                            | WatchEvent::Delete { revision, .. } = &event
-                            {
-                                self.probe_applied(Keyspace::Durable, *revision);
-                            }
-                            self.apply_state_event(event)?;
-                        }
-                        Some(Err(e)) => {
-                            tracing::warn!(error = %e, "state watch broke; re-watching");
-                            state_watch = Box::pin(self.rewatch(Keyspace::Durable)).await?;
-                        }
-                        None => state_watch = Box::pin(self.rewatch(Keyspace::Durable)).await?,
-                    }
+                    Box::pin(self.apply_watched(Keyspace::Durable, event, &mut state_watch))
+                        .await?;
                     Box::pin(self.step()).await?;
                 }
                 () = self.clock.sleep_until(heartbeat) => {
@@ -768,6 +777,55 @@ impl<S: CoordinationStore + Clone> Task<S> {
         }
     }
 
+    /// Apply `item` from the `ks` watch and every event `watch` holds ready,
+    /// up to [`DRAIN_BOUND`], and re-watch `ks` if the stream broke or ended.
+    ///
+    /// Events applied before a break stay applied; the new watch's snapshot
+    /// rebuilds the view over them.
+    async fn apply_watched(
+        &mut self,
+        ks: Keyspace,
+        item: Option<Result<WatchEvent, StoreError>>,
+        watch: &mut WatchStream,
+    ) -> Result<(), CoordinationError> {
+        let stop = match item {
+            Some(Ok(event)) => {
+                self.apply_watch_event(ks, event)?;
+                drain_ready(watch, DRAIN_BOUND, |event| {
+                    self.apply_watch_event(ks, event)
+                })?
+            }
+            Some(Err(e)) => Drained::Broken(e),
+            None => Drained::Ended,
+        };
+        match stop {
+            Drained::Idle | Drained::Bound => return Ok(()),
+            Drained::Broken(e) => match ks {
+                Keyspace::Ephemeral => tracing::warn!(error = %e, "lease watch broke; re-watching"),
+                Keyspace::Durable => tracing::warn!(error = %e, "state watch broke; re-watching"),
+            },
+            Drained::Ended => {}
+        }
+        *watch = Box::pin(self.rewatch(ks)).await?;
+        Ok(())
+    }
+
+    fn apply_watch_event(
+        &mut self,
+        ks: Keyspace,
+        event: WatchEvent,
+    ) -> Result<(), CoordinationError> {
+        if let WatchEvent::Put(Entry { revision, .. }) | WatchEvent::Delete { revision, .. } =
+            &event
+        {
+            self.probe_applied(ks, *revision);
+        }
+        match ks {
+            Keyspace::Ephemeral => self.apply_lease_event(event),
+            Keyspace::Durable => self.apply_state_event(event),
+        }
+    }
+
     fn next_heartbeat(&self) -> Duration {
         protocol::jitter(self.seed, self.round, self.config.renew_interval())
     }
@@ -836,7 +894,6 @@ impl<S: CoordinationStore + Clone> Task<S> {
     /// logs nothing, and one that starts into a running fleet says so once
     /// rather than once per peer.
     fn observe_membership(&mut self) {
-        // This runs on every step, which is every watch event.
         let peers = || self.presence.keys().filter(|i| **i != self.instance);
         if let Some(reported) = &self.reported_members
             && peers().eq(reported.iter())

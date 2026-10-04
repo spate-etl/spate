@@ -9,10 +9,10 @@
 //! - `leased_pool` — every split this worker does not hold is under a live
 //!   foreign lease. Nothing is claimable, so the walk runs in full, nothing
 //!   is materialised and the sort is handed an empty vector. This is the
-//!   scan a worker with lane budget to spare pays on every watch event that
-//!   reaches it and gets nothing back for, the common case on a fleet whose
-//!   peers are all busy. Its cost is the walk and the membership probe
-//!   against what this worker already holds, and nothing else.
+//!   scan a worker with lane budget to spare pays on every step and gets
+//!   nothing back for, the common case on a fleet whose peers are all busy.
+//!   Its cost is the walk and the membership probe against what this worker
+//!   already holds, and nothing else.
 //! - `unclaimed_pool` — a freshly published plan: nothing owned, nothing
 //!   leased, every split a `Create`. The whole pool survives to the sort,
 //!   which is handed input already in kind-and-id order, since the state is

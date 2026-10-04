@@ -7,7 +7,9 @@ use spate_coordination::store::memory::MemoryStore;
 use spate_coordination::store::{
     CasOutcome, CoordinationStore, Entry, Keyspace, Revision, StoreError, WatchMode, WatchStream,
 };
-use spate_coordination::{CoordinationEvent, SplitCoordinator, SplitProgress, StoreCoordinator};
+use spate_coordination::{
+    CoordinationEvent, LeaseEpoch, SplitCoordinator, SplitProgress, StoreCoordinator,
+};
 use spate_core::clock::tokio::Clock;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -135,6 +137,7 @@ fn a_failure_report_after_an_unseen_completing_commit_hands_back_the_lease() {
         h.splits.len() == 1
     });
 
+    let epoch = LeaseEpoch(held.splits["r0"].0);
     lossy.arm(Keyspace::Durable, "split.r0");
     let commit = worker.commit(&split_id("r0"), &SplitProgress::completed(5, Vec::new()));
     assert!(
@@ -143,7 +146,7 @@ fn a_failure_report_after_an_unseen_completing_commit_hands_back_the_lease() {
     );
     assert!(!lossy.armed(), "the commit took the fault");
 
-    let report = worker.fail(&split_id("r0"), "poison");
+    let report = worker.fail(&split_id("r0"), epoch, "poison");
     let entry = rt
         .block_on(inner.get(Keyspace::Durable, "split.r0"))
         .unwrap()

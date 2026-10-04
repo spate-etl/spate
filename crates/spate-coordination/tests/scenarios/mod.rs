@@ -13,7 +13,7 @@ use crate::support::{
     commit_held, consent_to_revocations, crash, drive, drive_pair, runtime, split_id,
 };
 use spate_coordination::store::{CasOutcome, CoordinationStore, Keyspace};
-use spate_coordination::{CoordinationErrorKind, SplitCoordinator, SplitProgress};
+use spate_coordination::{CoordinationErrorKind, LeaseEpoch, SplitCoordinator, SplitProgress};
 use std::time::Instant;
 
 /// One `#[test]` per scenario, each calling it with `$backend`. Tokens after
@@ -406,7 +406,9 @@ pub fn poison_splits_quarantine_and_stall_instead_of_false_success(backend: &imp
     while held.quarantined.is_empty() {
         assert!(Instant::now() < deadline, "quarantine never happened");
         if held.splits.contains_key("bad") {
-            a.fail(&split_id("bad"), "undecodable descriptor").unwrap();
+            let epoch = LeaseEpoch(held.splits["bad"].0);
+            a.fail(&split_id("bad"), epoch, "undecodable descriptor")
+                .unwrap();
             held.splits.remove("bad");
             failures += 1;
         }

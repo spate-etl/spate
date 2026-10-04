@@ -38,7 +38,7 @@ use futures_util::future::BoxFuture;
 use spate_core::clock::tokio::Clock;
 use spate_core::coordination::ControlWaker;
 use spate_core::coordination::{
-    CoordinationError, CoordinationErrorKind, CoordinationEvent, SplitId, SplitPlanner,
+    CoordinationError, CoordinationErrorKind, CoordinationEvent, LeaseEpoch, SplitId, SplitPlanner,
     SplitProgress,
 };
 use spate_core::metrics::CoordinationMetrics;
@@ -71,6 +71,7 @@ pub(crate) enum Command {
     },
     Fail {
         split: SplitId,
+        epoch: LeaseEpoch,
         reason: String,
         reply: std_mpsc::SyncSender<Result<(), CoordinationError>>,
     },

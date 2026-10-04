@@ -20,7 +20,7 @@ struct State {
     commit_outcomes: HashMap<SplitId, VecDeque<CoordinationErrorKind>>,
     commits: Vec<(SplitId, SplitProgress)>,
     fail_outcomes: HashMap<SplitId, VecDeque<CoordinationErrorKind>>,
-    failed: Vec<(SplitId, String)>,
+    failed: Vec<(SplitId, LeaseEpoch, String)>,
     released: Vec<SplitId>,
     departed: bool,
     planner: Option<Box<dyn SplitPlanner>>,
@@ -149,9 +149,10 @@ impl CoordinatorScript {
             .push_back(kind);
     }
 
-    /// Every `fail` report attempt so far, in order.
+    /// Every `fail` report attempt so far, in order, with the epoch of the
+    /// tenancy it reported.
     #[must_use]
-    pub fn failed(&self) -> Vec<(SplitId, String)> {
+    pub fn failed(&self) -> Vec<(SplitId, LeaseEpoch, String)> {
         self.lock().failed.clone()
     }
 
@@ -241,9 +242,16 @@ impl SplitCoordinator for ScriptedCoordinator {
         Ok(())
     }
 
-    fn fail(&mut self, split: &SplitId, reason: &str) -> Result<(), CoordinationError> {
+    fn fail(
+        &mut self,
+        split: &SplitId,
+        epoch: LeaseEpoch,
+        reason: &str,
+    ) -> Result<(), CoordinationError> {
         let mut state = self.state.lock().expect("coordinator script poisoned");
-        state.failed.push((split.clone(), reason.to_string()));
+        state
+            .failed
+            .push((split.clone(), epoch, reason.to_string()));
         if let Some(kinds) = state.fail_outcomes.get_mut(split)
             && let Some(kind) = kinds.pop_front()
         {
@@ -326,8 +334,9 @@ mod tests {
         assert_eq!(script.commits().len(), 1);
         assert_eq!(script.last_commit(&id).unwrap().watermark, 5);
 
-        coordinator.fail(&id, "poison").unwrap();
-        assert_eq!(script.failed()[0].1, "poison");
+        coordinator.fail(&id, LeaseEpoch(1), "poison").unwrap();
+        assert_eq!(script.failed()[0].1, LeaseEpoch(1));
+        assert_eq!(script.failed()[0].2, "poison");
         coordinator.release(std::slice::from_ref(&id)).unwrap();
         assert_eq!(script.released(), vec![id]);
         assert!(!script.departed());

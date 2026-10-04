@@ -255,6 +255,15 @@ struct Tenancy {
     handed_off: bool,
 }
 
+/// A poison report waiting to be re-offered to the backend.
+#[derive(Debug)]
+struct QueuedReport {
+    split: SplitId,
+    /// The tenancy the report concerns.
+    epoch: LeaseEpoch,
+    reason: String,
+}
+
 /// Source-side coordination choreography, embedded by a coordinated
 /// source; see the [module docs](self) for the protocol it implements.
 pub struct CoordinationDriver {
@@ -273,11 +282,11 @@ pub struct CoordinationDriver {
     /// Tenancies gained but not yet materialized: their lanes go out in
     /// the next [`SourceEvent::LanesAdded`].
     pending_open: Vec<PartitionId>,
-    /// Poison reports the backend refused, with the reason to re-offer.
+    /// Poison reports the backend refused, to re-offer.
     /// A gain refused on resume has no tenancy, so until its report lands
     /// nothing else here hands the split back and the backend keeps
     /// renewing its lease. Loss or quarantine of the split drops its entry.
-    pending_poison: Vec<(SplitId, String)>,
+    pending_poison: Vec<QueuedReport>,
     all_complete: bool,
     stalled: Option<(u64, u64)>,
     stall_drains: bool,
@@ -424,9 +433,9 @@ impl CoordinationDriver {
 
             // 4b. Re-offer poison reports the backend refused; a refused
             // report leaves a split held here with no tenancy behind it. A
-            // split this batch ends is dropped first: the batch may already
-            // hold its regain, and `fail` carries no epoch. A report the batch
-            // itself queues is dropped by the arm that ends its split.
+            // split this batch ends is dropped first, which saves the backend
+            // a report it would fence. A report that lands is fenced by its
+            // epoch and retires only the tenancy at that epoch.
             for event in &events {
                 if let CoordinationEvent::Lost { split }
                 | CoordinationEvent::Quarantined { split, .. } = event
@@ -434,10 +443,10 @@ impl CoordinationDriver {
                     self.drop_poison_reports(split);
                 }
             }
-            for (split, reason) in std::mem::take(&mut self.pending_poison) {
-                if !self.report_poison(&split, &reason) {
-                    self.pending_poison.push((split, reason));
-                } else if let Some(&partition) = self.by_split.get(&split) {
+            for report in std::mem::take(&mut self.pending_poison) {
+                if !self.report_poison(&report.split, report.epoch, &report.reason) {
+                    self.pending_poison.push(report);
+                } else if let Some(partition) = self.tenancy_at(&report.split, report.epoch) {
                     self.retire(source, partition, false);
                 }
             }
@@ -531,23 +540,36 @@ impl CoordinationDriver {
         Ok(())
     }
 
-    /// Report an owned split as poison: consumes a delivery attempt and
-    /// hands it back for another worker (or quarantine, at the cap). The
-    /// split's lane is retired through the normal loss path. A report the
-    /// coordinator answers `Retryable` is re-offered on each poll, and the
-    /// lane is retired once it is accepted.
+    /// Report the tenancy of `split` at `epoch` as poison: consumes a
+    /// delivery attempt and hands the split back for another worker (or
+    /// quarantine, at the cap). The tenancy's lane is retired through the
+    /// normal loss path. A report the coordinator answers `Retryable` is
+    /// re-offered on each poll, and the lane is retired once it is accepted.
+    /// A report for a tenancy this instance no longer holds is dropped.
     pub fn fail<S: SplitSource>(
         &mut self,
         source: &mut S,
         split: &SplitId,
+        epoch: LeaseEpoch,
         reason: &str,
     ) -> Result<(), SourceError> {
-        let Some(&partition) = self.by_split.get(split) else {
-            return Ok(()); // already lost, nothing to report
+        let Some(partition) = self.tenancy_at(split, epoch) else {
+            let held_epoch = self
+                .by_split
+                .get(split)
+                .and_then(|p| self.tenancies.get(p))
+                .map(|t| t.epoch.0);
+            tracing::debug!(
+                split = %split,
+                reported_epoch = epoch.0,
+                held_epoch,
+                "dropping a failure report for a tenancy this instance does not hold"
+            );
+            return Ok(());
         };
-        match self.coordinator.fail(split, reason) {
+        match self.coordinator.fail(split, epoch, reason) {
             Ok(()) => {}
-            // Fenced: someone already took it; the retire below still applies.
+            // Fenced: the reported tenancy has ended; the retire below still applies.
             Err(e) if e.kind == CoordinationErrorKind::Fenced => {}
             // Retryable: the split stays held and the report is re-offered
             // on the next poll; the retire happens once it lands.
@@ -560,10 +582,13 @@ impl CoordinationDriver {
                 if !self
                     .pending_poison
                     .iter()
-                    .any(|(queued, _)| queued == split)
+                    .any(|queued| &queued.split == split && queued.epoch == epoch)
                 {
-                    self.pending_poison
-                        .push((split.clone(), reason.to_string()));
+                    self.pending_poison.push(QueuedReport {
+                        split: split.clone(),
+                        epoch,
+                        reason: reason.to_string(),
+                    });
                 }
                 return Ok(());
             }
@@ -602,24 +627,39 @@ impl CoordinationDriver {
     /// tenancy to retire. The rejection is what the caller returns, so a
     /// report the backend refuses is queued for retry rather than put in
     /// its place.
-    fn report_rejected_gain(&mut self, split: &SplitId, rejection: &SourceError) {
+    fn report_rejected_gain(
+        &mut self,
+        split: &SplitId,
+        epoch: LeaseEpoch,
+        rejection: &SourceError,
+    ) {
         let reason = format!("carried progress rejected on resume: {rejection}");
-        if !self.report_poison(split, &reason) {
-            self.pending_poison.push((split.clone(), reason));
+        if !self.report_poison(split, epoch, &reason) {
+            self.pending_poison.push(QueuedReport {
+                split: split.clone(),
+                epoch,
+                reason,
+            });
         }
     }
 
     /// Drop the queued poison reports for a split this instance no longer holds.
     fn drop_poison_reports(&mut self, split: &SplitId) {
-        self.pending_poison.retain(|(queued, _)| queued != split);
+        self.pending_poison.retain(|queued| &queued.split != split);
+    }
+
+    /// The live tenancy of `split`, if it is the one at `epoch`.
+    fn tenancy_at(&self, split: &SplitId, epoch: LeaseEpoch) -> Option<PartitionId> {
+        let &partition = self.by_split.get(split)?;
+        (self.tenancies.get(&partition)?.epoch == epoch).then_some(partition)
     }
 
     /// Offer one poison report to the backend. `false` means the backend
     /// refused it and this instance is still holding the split.
-    fn report_poison(&mut self, split: &SplitId, reason: &str) -> bool {
-        match self.coordinator.fail(split, reason) {
+    fn report_poison(&mut self, split: &SplitId, epoch: LeaseEpoch, reason: &str) -> bool {
+        match self.coordinator.fail(split, epoch, reason) {
             Ok(()) => true,
-            // Fenced: someone already took it, so it is already back.
+            // Fenced: the reported tenancy has ended.
             Err(e) if e.kind == CoordinationErrorKind::Fenced => true,
             Err(e) => {
                 tracing::warn!(
@@ -655,7 +695,7 @@ impl CoordinationDriver {
                     // Report before the rejection leaves: no tenancy was
                     // recorded, so nothing else here releases the split and
                     // the backend keeps renewing its lease.
-                    self.report_rejected_gain(&split.id, &e);
+                    self.report_rejected_gain(&split.id, epoch, &e);
                     return Err(e);
                 }
                 let partition = PartitionId(self.next_partition);
@@ -772,7 +812,7 @@ impl CoordinationDriver {
         tenancy.fenced |= fenced;
         self.by_split.remove(&tenancy.split.id);
         let split = tenancy.split.id.clone();
-        self.pending_poison.retain(|(queued, _)| queued != &split);
+        self.pending_poison.retain(|queued| queued.split != split);
         if let Some(lane) = tenancy.lane.take() {
             if tenancy.completed || tenancy.handed_off {
                 self.pending_retired.push(lane);
@@ -1092,7 +1132,7 @@ mod tests {
         fail_outcomes: HashMap<String, VecDeque<CoordinationErrorKind>>,
         /// Every `fail` call, including the ones `fail_outcomes` refuses;
         /// the attempt is what a test asserts the driver made.
-        fails: Vec<(SplitId, String)>,
+        fails: Vec<(SplitId, LeaseEpoch, String)>,
         released: Vec<SplitId>,
         /// The held set `depart` was called with, if it was.
         departed: Option<Vec<SplitId>>,
@@ -1160,7 +1200,7 @@ mod tests {
             self.0.lock().unwrap().declined.clone()
         }
 
-        fn fails(&self) -> Vec<(SplitId, String)> {
+        fn fails(&self) -> Vec<(SplitId, LeaseEpoch, String)> {
             self.0.lock().unwrap().fails.clone()
         }
 
@@ -1202,9 +1242,14 @@ mod tests {
             Ok(())
         }
 
-        fn fail(&mut self, split: &SplitId, reason: &str) -> Result<(), CoordinationError> {
+        fn fail(
+            &mut self,
+            split: &SplitId,
+            epoch: LeaseEpoch,
+            reason: &str,
+        ) -> Result<(), CoordinationError> {
             let mut s = self.0.0.lock().unwrap();
-            s.fails.push((split.clone(), reason.to_string()));
+            s.fails.push((split.clone(), epoch, reason.to_string()));
             if let Some(kinds) = s.fail_outcomes.get_mut(split.as_str())
                 && let Some(kind) = kinds.pop_front()
             {
@@ -1836,14 +1881,19 @@ mod tests {
         script.push(vec![gained("a", 1, None)]);
         poll(&mut d, &mut s);
 
-        d.fail(&mut s, &SplitId::new("a").unwrap(), "undecodable object")
-            .unwrap();
+        d.fail(
+            &mut s,
+            &SplitId::new("a").unwrap(),
+            LeaseEpoch(1),
+            "undecodable object",
+        )
+        .unwrap();
         assert_eq!(script.fails().len(), 1);
         assert_eq!(s.closed, vec!["a"]);
         let event = poll(&mut d, &mut s);
         assert!(matches!(event, SourceEvent::LanesRevoked { .. }));
         // Failing a split we no longer hold is a quiet no-op.
-        d.fail(&mut s, &SplitId::new("a").unwrap(), "again")
+        d.fail(&mut s, &SplitId::new("a").unwrap(), LeaseEpoch(1), "again")
             .unwrap();
         assert_eq!(script.fails().len(), 1);
     }
@@ -1853,12 +1903,17 @@ mod tests {
         let script = Script::default();
         let mut d = driver(&script);
         let mut s = TestSource::default();
-        script.push(vec![gained("a", 1, None)]);
+        script.push(vec![gained("a", 4, None)]);
         poll(&mut d, &mut s);
         script.fail_next_report("a", CoordinationErrorKind::Retryable);
 
-        d.fail(&mut s, &SplitId::new("a").unwrap(), "undecodable object")
-            .unwrap();
+        d.fail(
+            &mut s,
+            &SplitId::new("a").unwrap(),
+            LeaseEpoch(4),
+            "undecodable object",
+        )
+        .unwrap();
         assert_eq!(script.fails().len(), 1);
         assert!(
             s.closed.is_empty(),
@@ -1867,6 +1922,11 @@ mod tests {
 
         let event = poll(&mut d, &mut s);
         assert_eq!(script.fails().len(), 2);
+        assert_eq!(
+            script.fails()[1].1,
+            LeaseEpoch(4),
+            "the re-offer keeps the epoch"
+        );
         assert_eq!(s.closed, vec!["a"]);
         assert!(matches!(event, SourceEvent::LanesRevoked { .. }));
         poll(&mut d, &mut s);
@@ -1881,8 +1941,13 @@ mod tests {
         script.push(vec![gained("a", 1, None)]);
         poll(&mut d, &mut s);
         script.fail_next_report("a", CoordinationErrorKind::Retryable);
-        d.fail(&mut s, &SplitId::new("a").unwrap(), "undecodable object")
-            .unwrap();
+        d.fail(
+            &mut s,
+            &SplitId::new("a").unwrap(),
+            LeaseEpoch(1),
+            "undecodable object",
+        )
+        .unwrap();
 
         // The loss is drained before the next re-offer.
         script.push(vec![CoordinationEvent::Lost {
@@ -1905,7 +1970,12 @@ mod tests {
         script.fail_next_report("a", CoordinationErrorKind::Fatal);
 
         let err = d
-            .fail(&mut s, &SplitId::new("a").unwrap(), "undecodable object")
+            .fail(
+                &mut s,
+                &SplitId::new("a").unwrap(),
+                LeaseEpoch(1),
+                "undecodable object",
+            )
             .unwrap_err();
         assert!(is_fatal(&err), "{err}");
     }
@@ -1950,7 +2020,7 @@ mod tests {
         let fails = script.fails();
         assert_eq!(fails.len(), 1);
         assert_eq!(fails[0].0.as_str(), "a");
-        assert!(fails[0].1.contains("resume drift on a"), "{}", fails[0].1);
+        assert!(fails[0].2.contains("resume drift on a"), "{}", fails[0].2);
     }
 
     #[test]
@@ -1997,7 +2067,7 @@ mod tests {
         let mut d = driver(&script);
         let mut s = rejecting(&["a"]);
         script.fail_next_report("a", CoordinationErrorKind::Retryable);
-        script.push(vec![gained("a", 1, Some(7))]);
+        script.push(vec![gained("a", 3, Some(7))]);
         d.poll_events(&mut s, Duration::ZERO).unwrap_err();
         assert_eq!(script.fails().len(), 1);
 
@@ -2006,7 +2076,70 @@ mod tests {
         poll(&mut d, &mut s);
         assert_eq!(script.fails().len(), 2);
         poll(&mut d, &mut s);
-        assert_eq!(script.fails().len(), 2);
+        let fails = script.fails();
+        assert_eq!(fails.len(), 2);
+        assert!(
+            fails.iter().all(|(_, epoch, _)| *epoch == LeaseEpoch(3)),
+            "{fails:?}"
+        );
+    }
+
+    /// A rejected gain's report that is fenced after the split was regained
+    /// with no `Lost` leaves the regained tenancy live. Regression for #909.
+    #[test]
+    fn a_fenced_report_for_a_rejected_gain_keeps_the_tenancy_regained_without_a_loss() {
+        let script = Script::default();
+        let mut d = driver(&script);
+        let mut s = rejecting(&["a"]);
+        // The first report applies with its reply lost, the re-offer in the
+        // poll that drains the regain is refused, and the next one is fenced.
+        script.fail_next_report("a", CoordinationErrorKind::Retryable);
+        script.fail_next_report("a", CoordinationErrorKind::Retryable);
+        script.fail_next_report("a", CoordinationErrorKind::Fenced);
+        script.push(vec![gained("a", 1, Some(7))]);
+        d.poll_events(&mut s, Duration::ZERO).unwrap_err();
+        s.reject_resume.clear();
+        script.push(vec![gained("a", 2, Some(7))]);
+        for _ in 0..4 {
+            let _ = d.poll_events(&mut s, Duration::ZERO);
+        }
+        assert_eq!(script.fails().len(), 3);
+        assert_eq!(script.fails()[2].1, LeaseEpoch(1));
+        assert_eq!(
+            d.assignments().len(),
+            1,
+            "the tenancy at epoch 2 stays live"
+        );
+    }
+
+    /// A report for an earlier tenancy of a split sends nothing and leaves
+    /// the current tenancy assigned and its fetchers attached.
+    #[test]
+    fn fail_for_an_earlier_tenancy_leaves_the_current_one_live() {
+        let script = Script::default();
+        let mut d = driver(&script);
+        let mut s = TestSource::default();
+        script.push(vec![gained("a", 1, None)]);
+        poll(&mut d, &mut s);
+        script.push(vec![CoordinationEvent::Lost {
+            split: split("a").id,
+        }]);
+        poll(&mut d, &mut s);
+        script.push(vec![gained("a", 2, None)]);
+        poll(&mut d, &mut s);
+        let closed = s.closed.clone();
+        assert_eq!(closed, vec!["a"]);
+
+        d.fail(
+            &mut s,
+            &SplitId::new("a").unwrap(),
+            LeaseEpoch(1),
+            "undecodable object",
+        )
+        .unwrap();
+        assert!(script.fails().is_empty(), "{:?}", script.fails());
+        assert_eq!(s.closed, closed);
+        assert_eq!(d.assignments().len(), 1);
     }
 
     /// A queued gain-time report is dropped when its split is lost, so it

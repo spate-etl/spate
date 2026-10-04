@@ -420,11 +420,13 @@ pub enum CoordinationEvent {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum CoordinationErrorKind {
-    /// The fenced write lost, so this instance no longer owns the split and
-    /// **nothing was written**. This is not a pipeline error; callers
-    /// intercept it and treat the split as lost (the matching
-    /// [`CoordinationEvent::Lost`] follows from
-    /// [`poll`](SplitCoordinator::poll)).
+    /// The tenancy the write was made under has ended, so **nothing was
+    /// written**. This is not a pipeline error; callers intercept it and
+    /// treat that tenancy as lost. A [`CoordinationEvent::Lost`] may follow
+    /// from [`poll`](SplitCoordinator::poll). A
+    /// [`commit`](SplitCoordinator::commit) on a split this instance no
+    /// longer holds, or a [`fail`](SplitCoordinator::fail) for a tenancy it
+    /// no longer holds under that epoch, gets none.
     Fenced,
     /// Transient backend failure; the operation may succeed if retried.
     /// Backends keep renewing owned leases through caller-visible
@@ -555,7 +557,7 @@ pub trait SplitPlanner: Send {
 ///         Ok(())
 ///     }
 ///
-///     fn fail(&mut self, _s: &SplitId, _r: &str) -> Result<(), CoordinationError> {
+///     fn fail(&mut self, _s: &SplitId, _e: LeaseEpoch, _r: &str) -> Result<(), CoordinationError> {
 ///         Ok(())
 ///     }
 ///
@@ -647,7 +649,22 @@ pub trait SplitCoordinator: Send {
     /// transient local problem, [`release`](SplitCoordinator::release)
     /// consumes no delivery attempts but may permanently leave the fleet
     /// when the last held split is handed back.
-    fn fail(&mut self, split: &SplitId, reason: &str) -> Result<(), CoordinationError>;
+    ///
+    /// `epoch` names the tenancy being reported: the epoch of the
+    /// [`Gained`](CoordinationEvent::Gained) event that started it. A backend
+    /// compares it with the epoch it holds the split under. On a mismatch,
+    /// including a split this instance no longer holds, it returns
+    /// [`Fenced`](CoordinationErrorKind::Fenced), writes nothing, uses up no
+    /// attempt and emits no [`Lost`](CoordinationEvent::Lost). The one
+    /// exception is a re-send of an ended tenancy's own report that already
+    /// applied with its reply lost: it returns `Ok`, writes nothing more, and
+    /// counts as a report, as the first send would have.
+    fn fail(
+        &mut self,
+        split: &SplitId,
+        epoch: LeaseEpoch,
+        reason: &str,
+    ) -> Result<(), CoordinationError>;
 
     /// Voluntarily hand back owned splits so peers claim them without
     /// waiting out a lease. Consumes no delivery attempts. Best-effort and
@@ -790,7 +807,12 @@ mod tests {
             ))
         }
 
-        fn fail(&mut self, _split: &SplitId, _reason: &str) -> Result<(), CoordinationError> {
+        fn fail(
+            &mut self,
+            _split: &SplitId,
+            _epoch: LeaseEpoch,
+            _reason: &str,
+        ) -> Result<(), CoordinationError> {
             Ok(())
         }
 

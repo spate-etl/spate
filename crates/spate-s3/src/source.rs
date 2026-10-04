@@ -340,7 +340,7 @@ impl Source for S3Source {
                 detail = %report.reason,
                 "object-level failure; handing the split back to the coordinator"
             );
-            driver.fail(ctx, &report.split, &report.reason)?;
+            driver.fail(ctx, &report.split, report.epoch, &report.reason)?;
         }
         driver.poll_events(ctx, timeout)
     }

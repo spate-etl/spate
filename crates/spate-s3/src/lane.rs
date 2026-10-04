@@ -28,7 +28,7 @@ use crate::metrics::S3Metrics;
 use crate::offset::{MAX_RECORD_INDEX, Position};
 use crate::split_ctx::{PoisonKind, PoisonReport, SplitTracker};
 use spate_core::checkpoint::{AckIssuer, AckRef};
-use spate_core::coordination::{ControlWaker, SplitId};
+use spate_core::coordination::{ControlWaker, LeaseEpoch, SplitId};
 use spate_core::error::{ErrorClass, SourceError};
 use spate_core::record::{PartitionId, RawPayload};
 use spate_core::source::{LaneId, PayloadBatch, SourceLane};
@@ -76,6 +76,8 @@ pub struct S3Lane {
     held: Vec<HeldRecord>,
     /// The split this lane reads; names the work in poison reports.
     split: SplitId,
+    /// The epoch of the tenancy this lane reads under; poison reports carry it.
+    epoch: LeaseEpoch,
     /// Carries the terminal watermark to the control plane at the
     /// end-of-input decision.
     tracker: Arc<SplitTracker>,
@@ -124,6 +126,7 @@ impl S3Lane {
         make_framer: FramerFactory,
         resume: Option<Position>,
         split: SplitId,
+        epoch: LeaseEpoch,
         tracker: Arc<SplitTracker>,
         poison_tx: std::sync::mpsc::Sender<PoisonReport>,
         waker: ControlWaker,
@@ -147,6 +150,7 @@ impl S3Lane {
             pending_end: false,
             held: Vec::new(),
             split,
+            epoch,
             tracker,
             poison_tx,
             waker,
@@ -177,6 +181,7 @@ impl S3Lane {
         // The receiver disappearing (shutdown) makes the report moot.
         let _ = self.poison_tx.send(PoisonReport {
             split: self.split.clone(),
+            epoch: self.epoch,
             kind,
             reason,
         });
@@ -593,6 +598,7 @@ mod tests {
             Arc::new(|| Box::new(TestLineFramer::new(1 << 20))),
             resume,
             SplitId::new("s3-test").unwrap(),
+            LeaseEpoch(1),
             Arc::clone(&tracker),
             poison_tx,
             ControlWaker::inert(),

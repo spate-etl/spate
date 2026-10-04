@@ -1604,6 +1604,7 @@ mod tests {
                 record: resume,
             }),
             SplitId::new("s3-test").unwrap(),
+            spate_core::coordination::LeaseEpoch(1),
             Arc::clone(&tracker),
             poison_tx,
             spate_core::coordination::ControlWaker::inert(),

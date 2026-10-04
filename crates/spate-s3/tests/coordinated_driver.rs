@@ -6,7 +6,7 @@
 
 mod support;
 
-use spate_core::coordination::{CoordinationErrorKind, SplitProgress, SplitSpec};
+use spate_core::coordination::{CoordinationErrorKind, LeaseEpoch, SplitProgress, SplitSpec};
 use spate_core::framing::RecordFramer;
 use spate_core::pipeline::ExitState;
 use spate_s3::{SplitDescriptor, split_id_for};
@@ -231,7 +231,7 @@ fn a_missing_object_reports_the_split_as_failed() {
     let ghost_id = ghost.id.clone();
 
     let (coordinator, script) = scripted_coordinator();
-    script.gain(ghost, 1, None);
+    script.gain(ghost, 4, None);
     let l = launch_scripted_coordinator(&config_yaml(&data).build(), coordinator, |_| {});
 
     wait_until(Duration::from_secs(30), "failure reported", || {
@@ -239,10 +239,11 @@ fn a_missing_object_reports_the_split_as_failed() {
     });
     let failed = script.failed();
     assert_eq!(failed[0].0, ghost_id);
+    assert_eq!(failed[0].1, LeaseEpoch(4), "the report names the tenancy");
     assert!(
-        failed[0].1.contains("ghost"),
+        failed[0].2.contains("ghost"),
         "the report names the object: {}",
-        failed[0].1
+        failed[0].2
     );
 
     // The pipeline survives; the coordinator decides what happens next.
@@ -269,7 +270,7 @@ fn a_retryable_failure_report_is_offered_again() {
     wait_until(Duration::from_secs(30), "the report offered again", || {
         script.failed().len() >= 2
     });
-    assert!(script.failed().iter().all(|(id, _)| id == &ghost_id));
+    assert!(script.failed().iter().all(|(id, _, _)| id == &ghost_id));
 
     script.all_complete();
     let report = l.run.wait_exit(Duration::from_secs(30)).unwrap().unwrap();
@@ -495,7 +496,7 @@ fn an_oversized_record_fails_only_the_range_that_owns_it() {
     let failed = script.failed();
     assert_eq!(failed.len(), 1, "{failed:?}");
     assert_eq!(failed[0].0, oversized_id);
-    assert!(failed[0].1.contains("max_record_bytes"), "{}", failed[0].1);
+    assert!(failed[0].2.contains("max_record_bytes"), "{}", failed[0].2);
     assert_eq!(captured_rows(&l.script), lines[5..].to_vec());
 }
 

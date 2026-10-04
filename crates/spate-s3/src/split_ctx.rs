@@ -30,7 +30,7 @@ use crate::split::SplitDescriptor;
 use serde::{Deserialize, Serialize};
 use spate_core::checkpoint::AckIssuer;
 use spate_core::coordination::driver::{SplitOpening, SplitSource};
-use spate_core::coordination::{SplitId, SplitProgress, SplitSpec};
+use spate_core::coordination::{LeaseEpoch, SplitId, SplitProgress, SplitSpec};
 use spate_core::error::{ErrorClass, SourceError};
 use spate_core::source::LaneId;
 use std::collections::BTreeMap;
@@ -135,6 +135,8 @@ impl PoisonKind {
 pub(crate) struct PoisonReport {
     /// The split the lane was reading.
     pub(crate) split: SplitId,
+    /// The epoch of the tenancy the lane was opened under.
+    pub(crate) epoch: LeaseEpoch,
     /// Failure classification (bounded; drives the failure metric).
     pub(crate) kind: PoisonKind,
     /// Human-readable cause, naming the object.
@@ -425,6 +427,7 @@ impl SplitSource for SplitCtx {
             Arc::clone(&self.make_framer),
             resume,
             split.clone(),
+            opening.epoch,
             Arc::clone(&tracker),
             self.poison_tx.clone(),
             opening.waker.clone(),

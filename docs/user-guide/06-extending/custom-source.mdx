@@ -467,15 +467,18 @@ and the `take_finishing` → `CommitReady` end-of-input chase; `AllComplete` →
 Build the driver with `CoordinationDriver::new(...).stall_drains(true)`
 (a consuming builder, applied at construction) to turn it into a
 drain-with-warning. Report a poison split you cannot process with
-`driver.fail(&mut ctx, &split, "reason")`: it consumes a delivery attempt
-and hands the split back (quarantine happens at the attempt cap).
+`driver.fail(&mut ctx, &split, epoch, "reason")`: it consumes a delivery
+attempt and hands the split back (quarantine happens at the attempt cap).
+`epoch` is the `SplitOpening::epoch` of the lane that found the poison. A
+report for a tenancy that has since ended is dropped.
 
 **Poison travels a side channel, never a lane error.** A lane `poll`
 error is terminal for the whole pipeline, and `fail` needs `&mut self` on
 the source, which a lane, polled on a pipeline thread, does not have. So
 an object-level failure (a deleted or corrupt input) must not surface as
 a poll error: the lane sends a report over a channel (`std::sync::mpsc`
-works; the lane goes quiescent, returning empty polls), and the source
+works; the lane goes quiescent, returning empty polls), carrying the epoch
+the lane was opened under, and the source
 drains that channel at the top of `poll_events`, calling `driver.fail`
 for each report before delegating to `driver.poll_events`. Worked reference:
 [`spate-s3`](repo:crates/spate-s3)'s lane/context pair.

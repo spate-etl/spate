@@ -1,5 +1,5 @@
 ---
-description: "A DynamoDB lease renewal or takeover of revision R writes R + 2 or above, so a later put never ties a delete a watch reported for the key."
+description: "A DynamoDB lease renewal or takeover of R writes R + 2 or above, so a later put lands above a reported delete while the table keeps the key's floor and item."
 ---
 
 # ADR-0058 — A DynamoDB ephemeral write leaves its predecessor's removal revision free
@@ -87,7 +87,8 @@ In `crates/spate-coordination/src/store/dynamodb/tests.rs`,
 `a_renewal_after_an_expiry_delete_lands_above_it`,
 `a_takeover_on_a_lagging_clock_lands_above_the_expiry_delete`,
 `two_watches_of_one_handle_report_a_removal_below_a_lagging_recreate`,
-`an_own_create_sits_above_a_vanish_delete_of_a_collected_key` and
+`an_own_create_sits_above_a_vanish_delete_of_a_collected_key`,
+`own_takeover_sits_above_its_expiry_delete_after_a_collected_key` and
 `a_subscribing_read_lists_a_renewal_above_the_expiry_delete` pin the rule over
 the in-memory table.
 

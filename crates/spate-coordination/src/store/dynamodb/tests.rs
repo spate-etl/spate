@@ -1139,7 +1139,7 @@ async fn two_watches_of_one_handle_report_a_removal_below_a_lagging_recreate() {
 }
 
 /// An own create over a key native TTL collected sits above the vanish delete
-/// its watch reported. Regression for #949.
+/// its watch reported.
 #[tokio::test(start_paused = true)]
 async fn an_own_create_sits_above_a_vanish_delete_of_a_collected_key() {
     let table = FakeTable::new();
@@ -1162,6 +1162,43 @@ async fn an_own_create_sits_above_a_vanish_delete_of_a_collected_key() {
         again > deleted && put == again,
         "created at {r:?}; vanish delete at {deleted:?}; own create at {again:?}, reached the \
          watch at {put:?}"
+    );
+}
+
+/// A takeover of a key re-created lower after native TTL collected it lands
+/// above the expiry delete its own watch reported.
+#[tokio::test(start_paused = true)]
+async fn own_takeover_sits_above_its_expiry_delete_after_a_collected_key() {
+    let table = FakeTable::new();
+    let clock = TestClock::frozen();
+    let (w, b, c) = (
+        handle(&table, &clock),
+        handle(&table, &clock),
+        handle(&table, &clock),
+    );
+    table.freeze_wall(10_000);
+    let r = won(b.create(E, "k", b"b".to_vec()).await.unwrap());
+    let mut watch = w.watch(E, "").await.unwrap();
+    assert_eq!(snapshot(&mut watch).await[0].revision, r);
+    table.collect("job#e", "k");
+    let vanished = match next(&mut watch).await {
+        WatchEvent::Delete { revision, .. } => revision,
+        other => panic!("expected the vanish delete, got {other:?}"),
+    };
+    table.freeze_wall(5_000);
+    let low = won(c.create(E, "k", b"c".to_vec()).await.unwrap());
+    assert!(low < vanished);
+    assert_eq!(put_without_delete(&mut watch, "k").await, low);
+    clock.advance(TTL + Duration::from_millis(1));
+    let expired = match next(&mut watch).await {
+        WatchEvent::Delete { revision, .. } => revision,
+        other => panic!("expected the expiry delete, got {other:?}"),
+    };
+    let taken = won(w.create(E, "k", b"w".to_vec()).await.unwrap());
+    let put = put_without_delete(&mut watch, "k").await;
+    assert!(
+        taken > expired && put == taken,
+        "expired {expired:?} taken {taken:?} put {put:?}"
     );
 }
 

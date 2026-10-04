@@ -849,11 +849,12 @@ mod ready_bursts {
         assert_eq!(writes, 1, "one assignment write for three joins");
     }
 
-    /// A store whose first durable watch yields one event and an error, both ready, after its snapshot.
+    /// A store whose first durable watch yields one event after its snapshot, then an error or, with `ends`, the stream's end, all ready.
     #[derive(Clone)]
     struct BreakAfterEvent {
         memory: MemoryStore,
         durable_watches: tokio::sync::watch::Sender<usize>,
+        ends: bool,
     }
 
     impl CoordinationStore for BreakAfterEvent {
@@ -924,6 +925,21 @@ mod ready_bursts {
                 value: Vec::new(),
                 revision: Revision(1000),
             })));
+            if self.ends {
+                let mut events = std::collections::VecDeque::from(events);
+                let mut ended = false;
+                return Ok(futures_util::stream::poll_fn(move |_| {
+                    if let Some(e) = events.pop_front() {
+                        return std::task::Poll::Ready(Some(e));
+                    }
+                    if ended {
+                        return std::task::Poll::Pending;
+                    }
+                    ended = true;
+                    std::task::Poll::Ready(None)
+                })
+                .boxed());
+            }
             events.push(Err(StoreError::Retryable("watch broke".into())));
             Ok(futures_util::stream::iter(events)
                 .chain(futures_util::stream::pending())
@@ -939,6 +955,44 @@ mod ready_bursts {
         let store = BreakAfterEvent {
             memory: fleet.store.clone(),
             durable_watches,
+            ends: false,
+        };
+        let (commands, commands_rx) = mpsc::channel(8);
+        let (events_tx, _events) = std_mpsc::channel();
+        let mut task = Task::new(
+            store,
+            fleet.cfg,
+            fleet.clock,
+            FINGERPRINT.to_string(),
+            "leader".into(),
+            fleet.nonces["leader"].clone(),
+            Box::new(Planner),
+            None,
+            commands_rx,
+            events_tx,
+            None,
+        );
+        task.leadership = Some(fleet.leader_rev);
+        task.plan = Some((fleet.plan, fleet.plan_rev));
+        task.plan_rev_seen = fleet.plan_rev.0;
+        let running = tokio::spawn(async move { task.run_inner().await });
+        tokio::time::timeout(Duration::from_secs(60), watches.wait_for(|n| *n >= 2))
+            .await
+            .expect("the durable watch is established again")
+            .unwrap();
+        drop(commands);
+        running.await.unwrap().unwrap();
+    }
+
+    /// A stream that ends behind a ready event is watched again.
+    #[tokio::test(start_paused = true)]
+    async fn an_end_met_while_draining_is_watched_again() {
+        let fleet = Fleet::new(1).await;
+        let (durable_watches, mut watches) = tokio::sync::watch::channel(0);
+        let store = BreakAfterEvent {
+            memory: fleet.store.clone(),
+            durable_watches,
+            ends: true,
         };
         let (commands, commands_rx) = mpsc::channel(8);
         let (events_tx, _events) = std_mpsc::channel();

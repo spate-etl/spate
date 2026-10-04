@@ -2,7 +2,7 @@ use super::fake::good_shape;
 use super::table::{Cond, KeyAttr, Meta, Shape, Status, Ttl, Write};
 use super::*;
 use crate::store::WatchEvent;
-use futures_util::StreamExt as _;
+use futures_util::{FutureExt as _, StreamExt as _};
 use spate_core::clock::tokio::TestClock;
 
 const TTL: Duration = Duration::from_millis(1500);
@@ -141,6 +141,250 @@ async fn an_expiry_decision_older_than_an_own_renewal_is_dropped() {
     let renewed = won(a.update(E, "k", b"a".to_vec(), first).await.unwrap());
     gate.release();
     assert_eq!(put_without_delete(&mut watch, "k").await, renewed);
+}
+
+/// A key live throughout a watch's first read is in its snapshot, even
+/// when an own write lands while that read runs.
+#[tokio::test(start_paused = true)]
+async fn a_snapshot_lists_a_key_an_own_write_touched_during_the_read() {
+    let table = FakeTable::new();
+    let clock = TestClock::frozen();
+    let a = handle(&table, &clock);
+    let rev = won(a.create(E, "k", b"a".to_vec()).await.unwrap());
+    let mut gate = table.hold_next_query();
+    let watcher = a.clone();
+    let watching = tokio::spawn(async move { watcher.watch(E, "").await });
+    gate.reached().await;
+    let renewed = won(a.update(E, "k", b"a".to_vec(), rev).await.unwrap());
+    gate.release();
+    let mut watch = watching.await.unwrap().unwrap();
+    let snap = snapshot(&mut watch).await;
+    assert_eq!(snap.len(), 1, "k was live throughout the read: {snap:?}");
+    assert_eq!(put_without_delete(&mut watch, "k").await, renewed);
+}
+
+/// A key an own write deleted while the first read ran is in the snapshot,
+/// and the subscriber then receives its delete.
+#[tokio::test(start_paused = true)]
+async fn a_snapshot_key_deleted_by_an_own_write_during_the_read_is_deleted_for_the_subscriber() {
+    let table = FakeTable::new();
+    let clock = TestClock::frozen();
+    let a = handle(&table, &clock);
+    let rev = won(a.create(E, "k", b"a".to_vec()).await.unwrap());
+    let mut gate = table.hold_next_query();
+    let watcher = a.clone();
+    let watching = tokio::spawn(async move { watcher.watch(E, "").await });
+    gate.reached().await;
+    won(a.delete(E, "k", Some(rev)).await.unwrap());
+    gate.release();
+    let mut watch = watching.await.unwrap().unwrap();
+    assert_eq!(snapshot(&mut watch).await.len(), 1);
+    match next(&mut watch).await {
+        WatchEvent::Delete { key, revision } => {
+            assert_eq!(key, "k");
+            assert!(revision > rev);
+        }
+        other => panic!("expected the delete, got {other:?}"),
+    }
+}
+
+/// A subscribing read that lists a lease already deleted for expiry sends
+/// no put below that delete to the existing subscribers.
+#[tokio::test(start_paused = true)]
+async fn a_subscribing_read_sends_no_put_below_an_expiry_delete() {
+    let table = FakeTable::new();
+    let clock = TestClock::frozen();
+    let a = handle(&table, &clock);
+    won(a.create(E, "k", b"a".to_vec()).await.unwrap());
+    let mut first = a.watch(E, "").await.unwrap();
+    assert_eq!(snapshot(&mut first).await.len(), 1);
+    clock.advance(TTL + Duration::from_millis(1));
+    let deleted = match next(&mut first).await {
+        WatchEvent::Delete { revision, .. } => revision,
+        other => panic!("expected the expiry delete, got {other:?}"),
+    };
+    let mut gate = table.hold_next_query();
+    let watcher = a.clone();
+    let watching = tokio::spawn(async move { watcher.watch(E, "").await });
+    gate.reached().await;
+    let renewed = won(a.create(E, "k", b"a".to_vec()).await.unwrap());
+    gate.release();
+    let _second = watching.await.unwrap().unwrap();
+    match next(&mut first).await {
+        WatchEvent::Put(e) => assert!(e.revision == renewed && renewed > deleted, "{e:?}"),
+        other => panic!("expected the renewed put, got {other:?}"),
+    }
+}
+
+/// A subscribing read leaves a key an existing subscriber already holds
+/// to the next poll.
+#[tokio::test(start_paused = true)]
+async fn a_subscribing_read_sends_no_put_for_a_delivered_key() {
+    let table = FakeTable::new();
+    let clock = TestClock::frozen();
+    let (a, b) = (handle(&table, &clock), handle(&table, &clock));
+    let first = won(b.create(E, "k", b"b".to_vec()).await.unwrap());
+    let mut held = a.watch(E, "").await.unwrap();
+    assert_eq!(snapshot(&mut held).await.len(), 1);
+    let second = won(b.update(E, "k", b"b".to_vec(), first).await.unwrap());
+    let mut gate = table.hold_next_query();
+    let watcher = a.clone();
+    let watching = tokio::spawn(async move { watcher.watch(E, "").await });
+    gate.reached().await;
+    won(a.update(E, "k", b"a".to_vec(), second).await.unwrap());
+    gate.release();
+    let _second = watching.await.unwrap().unwrap();
+    assert!(held.next().now_or_never().is_none());
+}
+
+/// An existing subscriber receives a key the subscribing read caught and an
+/// own write touched, even when the key's revision is unchanged.
+#[tokio::test(start_paused = true)]
+async fn a_subscribing_read_delivers_an_own_touched_key_to_existing_subscribers() {
+    let table = FakeTable::new();
+    let clock = TestClock::frozen();
+    let (a, b) = (handle(&table, &clock), handle(&table, &clock));
+    let mut held = a.watch(E, "").await.unwrap();
+    assert!(snapshot(&mut held).await.is_empty());
+    let created = won(b.create(E, "k", b"b".to_vec()).await.unwrap());
+    let mut gate = table.hold_next_query();
+    let watcher = a.clone();
+    let watching = tokio::spawn(async move { watcher.watch(E, "").await });
+    gate.reached().await;
+    assert!(
+        a.create(E, "k", b"a".to_vec())
+            .await
+            .unwrap()
+            .won()
+            .is_none()
+    );
+    gate.release();
+    let _second = watching.await.unwrap().unwrap();
+    assert!(matches!(next(&mut held).await, WatchEvent::Put(e) if e.revision == created));
+}
+
+/// A key renewed by another handle at the revision of the expiry delete sent for it is in a subscribing read's snapshot.
+#[tokio::test(start_paused = true)]
+async fn a_subscribing_read_lists_a_renewal_at_the_expiry_delete_revision() {
+    let table = FakeTable::new();
+    let clock = TestClock::frozen();
+    let (a, b) = (handle(&table, &clock), handle(&table, &clock));
+    let r = won(b.create(E, "k", b"b".to_vec()).await.unwrap());
+    let mut first = a.watch(E, "").await.unwrap();
+    assert_eq!(snapshot(&mut first).await.len(), 1);
+    clock.advance(TTL + Duration::from_millis(1));
+    let deleted = match next(&mut first).await {
+        WatchEvent::Delete { revision, .. } => revision,
+        o => panic!("{o:?}"),
+    };
+    let renewed = won(b.update(E, "k", b"b".to_vec(), r).await.unwrap());
+    assert_eq!(renewed, deleted);
+    let mut gate = table.hold_next_query();
+    let watcher = a.clone();
+    let watching = tokio::spawn(async move { watcher.watch(E, "").await });
+    gate.reached().await;
+    won(a.update(E, "k", b"a".to_vec(), renewed).await.unwrap());
+    gate.release();
+    let mut second = watching.await.unwrap().unwrap();
+    let snap = snapshot(&mut second).await;
+    assert_eq!(snap.len(), 1, "k live throughout read: {snap:?}");
+}
+
+/// A subscribing read does not list a lease that another poller of the handle deleted for expiry while the read ran.
+#[tokio::test(start_paused = true)]
+async fn a_subscribing_read_skips_a_lease_another_poller_expired() {
+    let table = FakeTable::new();
+    let clock = TestClock::frozen();
+    let a = handle(&table, &clock);
+    won(a.create(E, "k", b"a".to_vec()).await.unwrap());
+    let mut first = a.watch(E, "").await.unwrap();
+    assert_eq!(snapshot(&mut first).await.len(), 1);
+    clock.advance(TTL + Duration::from_millis(1));
+    let mut gate = table.hold_next_query();
+    let watcher = a.clone();
+    let watching = tokio::spawn(async move { watcher.watch(E, "k").await });
+    gate.reached().await;
+    let deleted = match next(&mut first).await {
+        WatchEvent::Delete { revision, .. } => revision,
+        o => panic!("{o:?}"),
+    };
+    gate.release();
+    let mut second = watching.await.unwrap().unwrap();
+    let snap = snapshot(&mut second).await;
+    assert!(
+        snap.is_empty(),
+        "expired lease listed after delete {deleted:?}: {snap:?}"
+    );
+}
+
+/// A put at a higher revision clears the expiry floor, so a later re-create below it is listed.
+#[tokio::test(start_paused = true)]
+async fn an_expiry_floor_is_cleared_by_a_later_put() {
+    let table = FakeTable::new();
+    table.freeze_wall(1_000);
+    let clock = TestClock::frozen();
+    let (a, b, c) = (
+        handle(&table, &clock),
+        handle(&table, &clock),
+        handle(&table, &clock),
+    );
+    let r = won(b.create(E, "k", b"b".to_vec()).await.unwrap());
+    let mut first = a.watch(E, "").await.unwrap();
+    assert_eq!(snapshot(&mut first).await.len(), 1);
+    clock.advance(TTL + Duration::from_millis(1));
+    match next(&mut first).await {
+        WatchEvent::Delete { .. } => {}
+        o => panic!("{o:?}"),
+    }
+    won(b.delete(E, "k", Some(r)).await.unwrap());
+    table.freeze_wall(500);
+    let low = won(c.create(E, "k", b"c".to_vec()).await.unwrap());
+    match next(&mut first).await {
+        WatchEvent::Put(e) => assert_eq!(e.revision, low),
+        o => panic!("{o:?}"),
+    }
+    won(c.update(E, "k", b"c".to_vec(), low).await.unwrap());
+    let mut gate = table.hold_next_query();
+    let watcher = a.clone();
+    let watching = tokio::spawn(async move { watcher.watch(E, "").await });
+    gate.reached().await;
+    a.get(E, "k").await.unwrap();
+    gate.release();
+    let mut second = watching.await.unwrap().unwrap();
+    assert_eq!(snapshot(&mut second).await.len(), 1);
+}
+
+/// An expiry floor does not outlive its key: a re-create below it is listed once the key has left the table.
+#[tokio::test(start_paused = true)]
+async fn an_expiry_floor_is_dropped_once_its_key_leaves_the_listing() {
+    let table = FakeTable::new();
+    table.freeze_wall(1_000);
+    let clock = TestClock::frozen();
+    let (a, b, c) = (
+        handle(&table, &clock),
+        handle(&table, &clock),
+        handle(&table, &clock),
+    );
+    let r = won(b.create(E, "k", b"b".to_vec()).await.unwrap());
+    let mut first = a.watch(E, "").await.unwrap();
+    assert_eq!(snapshot(&mut first).await.len(), 1);
+    clock.advance(TTL + Duration::from_millis(1));
+    match next(&mut first).await {
+        WatchEvent::Delete { .. } => {}
+        o => panic!("{o:?}"),
+    }
+    won(b.delete(E, "k", Some(r)).await.unwrap());
+    tokio::time::sleep(Duration::from_secs(3600) + Duration::from_millis(1)).await;
+    table.freeze_wall(500);
+    won(c.create(E, "k", b"c".to_vec()).await.unwrap());
+    let mut gate = table.hold_next_query();
+    let watcher = a.clone();
+    let watching = tokio::spawn(async move { watcher.watch(E, "").await });
+    gate.reached().await;
+    a.get(E, "k").await.unwrap();
+    gate.release();
+    let mut second = watching.await.unwrap().unwrap();
+    assert_eq!(snapshot(&mut second).await.len(), 1);
 }
 
 /// Each conditional write whose first attempt landed, then reported its

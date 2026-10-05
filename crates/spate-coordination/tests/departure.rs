@@ -3792,6 +3792,38 @@ fn a_restart_over_a_reported_splits_leftover_lease_keeps_the_last_attempt() {
     );
 }
 
+/// A task still mid-poll when `support::crash` begins has finished before
+/// `crash` returns. Regression for #967.
+#[test]
+fn a_crashed_workers_mid_poll_task_ends_before_crash_returns() {
+    let clock = TestClock::frozen();
+    let rt = runtime();
+    let (worker, _) = claimed_clocked(&rt, support::store(), &clock, "worker-a", &["r0"]);
+    let crashed = Arc::new(AtomicBool::new(false));
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let (saw_tx, saw_rx) = std::sync::mpsc::channel();
+    // Holds its worker thread inside one poll until shutdown drops the task below.
+    rt.spawn({
+        let crashed = crashed.clone();
+        async move {
+            entered_tx.send(()).unwrap();
+            let _ = release_rx.recv();
+            saw_tx.send(crashed.load(Ordering::SeqCst)).unwrap();
+        }
+    });
+    rt.spawn(async move {
+        let _release = release_tx;
+        std::future::pending::<()>().await;
+    });
+    entered_rx.recv().unwrap();
+
+    support::crash(rt, worker);
+    crashed.store(true, Ordering::SeqCst);
+    let ran_after_crash = saw_rx.recv().unwrap();
+    assert!(!ran_after_crash, "the task ran on after crash returned");
+}
+
 /// Leases long enough that no renewal runs during a stop test; `op_timeout`
 /// is two seconds, so a command waits up to six.
 const STOP_LEASE: Duration = Duration::from_secs(15);

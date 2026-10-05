@@ -1359,6 +1359,75 @@ async fn a_fresh_observer_expires_a_stale_lease_one_ttl_after_its_first_read() {
     assert!(b.get(E, "k").await.unwrap().is_none(), "one TTL on");
 }
 
+/// A watch times a lease's expiry from when its first read of the version
+/// returned, so a first read that took half a TTL leaves the lease live until
+/// just inside one TTL after that read returned.
+#[tokio::test(start_paused = true)]
+async fn a_slow_first_read_defers_expiry_to_one_ttl_after_it_returned() {
+    let table = FakeTable::new();
+    table.freeze_wall(1_000);
+    let clock = TestClock::frozen();
+    let (a, b) = (handle(&table, &clock), handle(&table, &clock));
+    let mut watch = b.watch(E, "").await.unwrap();
+    assert!(snapshot(&mut watch).await.is_empty());
+    let rev = won(a.create(E, "k", b"a".to_vec()).await.unwrap());
+    let mut gate = table.hold_next_query();
+    gate.reached().await;
+    clock.advance(TTL / 2);
+    gate.release();
+    assert!(matches!(next(&mut watch).await, WatchEvent::Put(e) if e.revision == rev));
+    clock.advance(TTL - Duration::from_millis(1));
+    let queries = table.count(FakeOp::Query);
+    tokio::time::timeout(TTL * 20, async {
+        while table.count(FakeOp::Query) < queries + 2 {
+            tokio::time::sleep(POLL).await;
+        }
+    })
+    .await
+    .expect("two polls just inside one TTL after the first read returned");
+    let renewed = won(a.update(E, "k", b"a".to_vec(), rev).await.unwrap());
+    assert_eq!(put_without_delete(&mut watch, "k").await, renewed);
+}
+
+/// A watch whose first read of a lease took half a TTL reports it expired
+/// once one TTL has passed since that read returned.
+#[tokio::test(start_paused = true)]
+async fn a_slow_first_read_expires_the_lease_one_ttl_after_it_returned() {
+    let table = FakeTable::new();
+    table.freeze_wall(1_000);
+    let clock = TestClock::frozen();
+    let (a, b) = (handle(&table, &clock), handle(&table, &clock));
+    let mut watch = b.watch(E, "").await.unwrap();
+    assert!(snapshot(&mut watch).await.is_empty());
+    let rev = won(a.create(E, "k", b"a".to_vec()).await.unwrap());
+    let mut gate = table.hold_next_query();
+    gate.reached().await;
+    clock.advance(TTL / 2);
+    gate.release();
+    assert!(matches!(next(&mut watch).await, WatchEvent::Put(e) if e.revision == rev));
+    clock.advance(TTL);
+    assert!(matches!(next(&mut watch).await, WatchEvent::Delete { key, .. } if key == "k"));
+}
+
+/// A watch judges expiry from when a poll read began, so a read that began
+/// inside one TTL of the first read and returned after it expires nothing.
+#[tokio::test(start_paused = true)]
+async fn a_read_begun_inside_one_ttl_expires_nothing() {
+    let table = FakeTable::new();
+    let clock = TestClock::frozen();
+    let (a, b) = (handle(&table, &clock), handle(&table, &clock));
+    let rev = won(a.create(E, "k", b"a".to_vec()).await.unwrap());
+    let mut watch = b.watch(E, "").await.unwrap();
+    assert_eq!(snapshot(&mut watch).await.len(), 1);
+    clock.advance(TTL - Duration::from_millis(1));
+    let mut gate = table.hold_next_query();
+    gate.reached().await;
+    let renewed = won(a.update(E, "k", b"a".to_vec(), rev).await.unwrap());
+    clock.advance(TTL / 2);
+    gate.release();
+    assert_eq!(put_without_delete(&mut watch, "k").await, renewed);
+}
+
 /// An eventually consistent durable poll that returns an older revision or
 /// omits a new key reports neither.
 #[tokio::test(start_paused = true)]
@@ -1380,6 +1449,42 @@ async fn a_durable_ec_poll_emits_no_delete_on_absence_or_older_put() {
     match next(&mut watch).await {
         WatchEvent::Put(entry) => assert_eq!(entry.key, "d.c"),
         other => panic!("expected d.c's put, got {other:?}"),
+    }
+}
+
+/// An eventually consistent durable poll that returns the tombstone below a
+/// re-create the watch delivered reports no delete.
+#[tokio::test(start_paused = true)]
+async fn a_durable_ec_poll_emits_no_delete_for_a_tombstone_below_a_recreate() {
+    let table = FakeTable::new();
+    table.freeze_wall(1_000);
+    let a = handle(&table, &TestClock::frozen());
+    let first = won(a.create(D, "d.a", b"1".to_vec()).await.unwrap());
+    let mut watch = a.watch(D, "d.").await.unwrap();
+    assert_eq!(snapshot(&mut watch).await.len(), 1);
+    let tomb = won(a.delete(D, "d.a", Some(first)).await.unwrap());
+    assert!(
+        matches!(next(&mut watch).await, WatchEvent::Delete { revision, .. } if revision == tomb)
+    );
+    let again = won(a.create(D, "d.a", b"2".to_vec()).await.unwrap());
+    assert!(matches!(next(&mut watch).await, WatchEvent::Put(e) if e.revision == again));
+    table.set_stale_reads(true);
+    let queries = table.count(FakeOp::Query);
+    tokio::time::timeout(TTL * 20, async {
+        while table.count(FakeOp::Query) < queries + 3 {
+            tokio::time::sleep(POLL).await;
+        }
+    })
+    .await
+    .expect("three stale polls");
+    table.set_stale_reads(false);
+    won(a.create(D, "d.z", b"z".to_vec()).await.unwrap());
+    match next(&mut watch).await {
+        WatchEvent::Put(e) => assert_eq!(e.key, "d.z"),
+        other => panic!(
+            "expected d.z's put after stale reads of tombstone {tomb:?} below {again:?}, \
+             got {other:?}"
+        ),
     }
 }
 

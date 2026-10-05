@@ -21,6 +21,7 @@ use spate_core::coordination::{
     SplitId, SplitPlanner, SplitProgress,
 };
 use spate_core::metrics::CoordinationMetrics;
+use spate_core::source::StopSignal;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::mpsc as std_mpsc;
@@ -33,6 +34,17 @@ const COMMAND_DEPTH: usize = 64;
 
 /// Pause before re-sending a `Depart` the task refused.
 const DEPART_RETRY: Duration = Duration::from_millis(20);
+
+/// How often a handle command's wait checks the run's stop.
+const STOP_POLL: Duration = Duration::from_millis(10);
+
+/// The `Retryable` answer to a handle command the run's stop cut short.
+fn stopping_error(outcome: &str) -> CoordinationError {
+    CoordinationError::new(
+        CoordinationErrorKind::Retryable,
+        format!("the run is stopping; {outcome}"),
+    )
+}
 
 /// A [`SplitCoordinator`] over any [`CoordinationStore`].
 ///
@@ -59,6 +71,7 @@ pub struct StoreCoordinator<S: CoordinationStore + Clone> {
     /// Set by the driver before `start`; handed to the task so every
     /// queued event also wakes the driver's park.
     waker: Option<ControlWaker>,
+    stop: StopSignal,
     #[cfg(feature = "testing")]
     probe: Arc<crate::loop_probe::LoopProbe>,
 }
@@ -176,6 +189,7 @@ impl<S: CoordinationStore + Clone> StoreCoordinator<S> {
             running: None,
             failed: None,
             waker: None,
+            stop: StopSignal::default(),
             #[cfg(feature = "testing")]
             probe: Arc::default(),
         })
@@ -227,12 +241,16 @@ impl<S: CoordinationStore + Clone> StoreCoordinator<S> {
         }
     }
 
+    /// Send a command and wait up to three `op_timeout`s for its reply. While
+    /// the run's stop is set nothing is sent, and a wait for a reply ends within
+    /// [`STOP_POLL`] of the stop with the command possibly still to land.
     fn command(
         &mut self,
         build: impl FnOnce(std_mpsc::SyncSender<Result<(), CoordinationError>>) -> Command,
     ) -> Result<(), CoordinationError> {
         let budget = self.config.op_timeout * 3;
-        self.send_until(Instant::now() + budget, budget, build)?
+        let stop = self.stop.clone();
+        self.send_until_stop(Instant::now() + budget, budget, Some(&stop), build)?
     }
 
     /// Send a command and wait for its reply until `deadline_at`. `Err`
@@ -244,7 +262,22 @@ impl<S: CoordinationStore + Clone> StoreCoordinator<S> {
         budget: Duration,
         build: impl FnOnce(std_mpsc::SyncSender<R>) -> Command,
     ) -> Result<R, CoordinationError> {
+        self.send_until_stop(deadline_at, budget, None, build)
+    }
+
+    /// [`send_until`](Self::send_until) that also gives up once `stop` is set.
+    fn send_until_stop<R>(
+        &mut self,
+        deadline_at: Instant,
+        budget: Duration,
+        stop: Option<&StopSignal>,
+        build: impl FnOnce(std_mpsc::SyncSender<R>) -> Command,
+    ) -> Result<R, CoordinationError> {
+        let stopping = || stop.is_some_and(StopSignal::is_set);
         self.check_failed()?;
+        if stopping() {
+            return Err(stopping_error("nothing was sent"));
+        }
         let Some(running) = &self.running else {
             return Err(fatal("coordinator used before start"));
         };
@@ -274,9 +307,24 @@ impl<S: CoordinationStore + Clone> StoreCoordinator<S> {
             }
         }
         // The reply is awaited synchronously with a deadline; a wedged
-        // store surfaces as Retryable, not a hung pipeline.
-        let remaining = deadline_at.saturating_duration_since(Instant::now());
-        match reply_rx.recv_timeout(remaining) {
+        // store surfaces as Retryable, not a hung pipeline. With a stop the
+        // wait runs in `STOP_POLL` slices so the stop is seen promptly.
+        let reply = loop {
+            let remaining = deadline_at.saturating_duration_since(Instant::now());
+            let slice = match stop {
+                Some(_) => remaining.min(STOP_POLL),
+                None => remaining,
+            };
+            match reply_rx.recv_timeout(slice) {
+                Err(std_mpsc::RecvTimeoutError::Timeout) if slice < remaining => {
+                    if stopping() {
+                        return Err(stopping_error("this command may still land"));
+                    }
+                }
+                other => break other,
+            }
+        };
+        match reply {
             Ok(reply) => Ok(reply),
             Err(std_mpsc::RecvTimeoutError::Timeout) => Err(CoordinationError::new(
                 CoordinationErrorKind::Retryable,
@@ -447,6 +495,10 @@ impl<S: CoordinationStore + Clone> SplitCoordinator for StoreCoordinator<S> {
 
     fn set_waker(&mut self, waker: ControlWaker) {
         self.waker = Some(waker);
+    }
+
+    fn set_stop(&mut self, stop: StopSignal) {
+        self.stop = stop;
     }
 
     fn poll(&mut self) -> Result<Vec<CoordinationEvent>, CoordinationError> {

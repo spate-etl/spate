@@ -294,6 +294,7 @@ pub struct CoordinationDriver {
     next_partition: u32,
     /// Lane ids are minted once per tenancy and never reused.
     next_lane: u32,
+    stop: crate::source::StopSignal,
 }
 
 impl fmt::Debug for CoordinationDriver {
@@ -333,6 +334,7 @@ impl CoordinationDriver {
             started: false,
             next_partition: 0,
             next_lane: 0,
+            stop: crate::source::StopSignal::default(),
         }
     }
 
@@ -358,6 +360,13 @@ impl CoordinationDriver {
         self.coordinator.start(planner).map_err(as_source_error)?;
         self.started = true;
         Ok(SourceEvent::LanesAssigned(Vec::new()))
+    }
+
+    /// Hand the run's stop to this driver and its coordinator. Call from
+    /// `Source::open` with [`SourceCtx::stop`](crate::source::SourceCtx::stop).
+    pub fn set_stop(&mut self, stop: crate::source::StopSignal) {
+        self.coordinator.set_stop(stop.clone());
+        self.stop = stop;
     }
 
     /// Coordinated `poll_events` body: surfaces at most one controller
@@ -519,15 +528,21 @@ impl CoordinationDriver {
     /// Coordinated `commit` body: per-split fenced commits keyed by the
     /// tenancy partition ids the driver minted.
     ///
-    /// Returns a retryable error when a split's commit was deferred; the
-    /// runtime then keeps every position of the call pending.
+    /// Returns a retryable error when a split's commit was deferred or the
+    /// stop began before every split was sent; the runtime then keeps every
+    /// position of the call pending.
     pub fn commit<S: SplitSource>(
         &mut self,
         source: &mut S,
         watermarks: &[(PartitionId, i64)],
     ) -> Result<(), SourceError> {
         let mut deferred = 0usize;
-        for &(partition, watermark) in watermarks {
+        let mut unsent = 0usize;
+        for (i, &(partition, watermark)) in watermarks.iter().enumerate() {
+            if self.stop.is_set() {
+                unsent = watermarks.len() - i;
+                break;
+            }
             let Some(split) = self.commit_target(partition) else {
                 continue;
             };
@@ -538,10 +553,13 @@ impl CoordinationDriver {
                 deferred += 1;
             }
         }
-        if deferred > 0 {
+        if deferred > 0 || unsent > 0 {
             return Err(SourceError::Client {
                 class: ErrorClass::Retryable,
-                reason: format!("{deferred} split commit(s) deferred; the positions stay pending"),
+                reason: format!(
+                    "{deferred} split commit(s) deferred and {unsent} not sent because the stop \
+                     began; the positions stay pending"
+                ),
             });
         }
         Ok(())
@@ -1271,6 +1289,10 @@ mod tests {
         waker: Option<ControlWaker>,
         /// `poll` calls so far, counted after each drain.
         polls: usize,
+        /// The signal `set_stop` handed over.
+        stop: Option<crate::source::StopSignal>,
+        /// A split whose commit sets this flag before it is answered.
+        stop_on_commit: Option<(String, Arc<std::sync::atomic::AtomicBool>)>,
     }
 
     #[derive(Clone, Default)]
@@ -1332,6 +1354,14 @@ mod tests {
         fn polls(&self) -> usize {
             self.0.lock().unwrap().polls
         }
+
+        fn stop(&self) -> Option<crate::source::StopSignal> {
+            self.0.lock().unwrap().stop.clone()
+        }
+
+        fn stop_on_commit(&self, split: &str, flag: &Arc<std::sync::atomic::AtomicBool>) {
+            self.0.lock().unwrap().stop_on_commit = Some((split.to_string(), Arc::clone(flag)));
+        }
     }
 
     struct ScriptedCoordinator(Script);
@@ -1346,6 +1376,10 @@ mod tests {
             self.0.0.lock().unwrap().waker = Some(waker);
         }
 
+        fn set_stop(&mut self, stop: crate::source::StopSignal) {
+            self.0.0.lock().unwrap().stop = Some(stop);
+        }
+
         fn poll(&mut self) -> Result<Vec<CoordinationEvent>, CoordinationError> {
             let mut s = self.0.0.lock().unwrap();
             s.polls += 1;
@@ -1358,6 +1392,11 @@ mod tests {
             progress: &SplitProgress,
         ) -> Result<(), CoordinationError> {
             let mut s = self.0.0.lock().unwrap();
+            if let Some((target, flag)) = &s.stop_on_commit
+                && target == split.as_str()
+            {
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
             if let Some(kinds) = s.commit_outcomes.get_mut(split.as_str())
                 && let Some(kind) = kinds.pop_front()
             {
@@ -1979,6 +2018,94 @@ mod tests {
             .map(|(split, _)| split)
             .collect();
         assert_eq!(sent, vec![SplitId::new("b").unwrap()]);
+    }
+
+    /// A stop that begins during a commit stops the driver sending the
+    /// remaining splits, and the commit fails retryably.
+    #[test]
+    fn a_stop_during_a_commit_sends_no_later_split() {
+        let script = Script::default();
+        let mut d = driver(&script);
+        let mut s = TestSource::default();
+        let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        d.set_stop(crate::source::StopSignal::new(Arc::clone(&flag)));
+        script.push(vec![gained("a", 1, None), gained("b", 1, None)]);
+        poll(&mut d, &mut s);
+        let pa = s.opened[0].3;
+        let pb = s.opened[1].3;
+        script.stop_on_commit("a", &flag);
+
+        let result = d.commit(&mut s, &[(pa, 10), (pb, 20)]);
+
+        assert!(
+            matches!(
+                &result,
+                Err(SourceError::Client {
+                    class: ErrorClass::Retryable,
+                    ..
+                })
+            ),
+            "{result:?}"
+        );
+        let sent: Vec<_> = script
+            .commits()
+            .into_iter()
+            .map(|(split, _)| split)
+            .collect();
+        assert_eq!(sent, vec![SplitId::new("a").unwrap()]);
+    }
+
+    /// The final commit sends every split while the stop is set.
+    #[test]
+    fn commit_final_sends_every_split_while_the_stop_is_set() {
+        let script = Script::default();
+        let mut d = driver(&script);
+        let mut s = TestSource::default();
+        d.set_stop(crate::source::StopSignal::new(Arc::new(
+            std::sync::atomic::AtomicBool::new(true),
+        )));
+        script.push(vec![gained("a", 1, None), gained("b", 1, None)]);
+        poll(&mut d, &mut s);
+        let pa = s.opened[0].3;
+        let pb = s.opened[1].3;
+
+        let unstored = d.commit_final(&mut s, &[(pa, 10), (pb, 20)]).unwrap();
+
+        assert!(unstored.is_empty(), "{unstored:?}");
+        assert_eq!(script.commits().len(), 2);
+    }
+
+    /// `set_stop` hands the signal to the coordinator.
+    #[test]
+    fn set_stop_reaches_the_coordinator() {
+        let script = Script::default();
+        let mut d = driver(&script);
+        let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        d.set_stop(crate::source::StopSignal::new(Arc::clone(&flag)));
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(script.stop().is_some_and(|stop| stop.is_set()));
+    }
+
+    /// A poison report the coordinator refuses while the stop is set leaves
+    /// the tenancy live and the report queued for the next poll.
+    #[test]
+    fn a_report_refused_at_the_stop_stays_queued() {
+        let script = Script::default();
+        let mut d = driver(&script);
+        let mut s = TestSource::default();
+        d.set_stop(crate::source::StopSignal::new(Arc::new(
+            std::sync::atomic::AtomicBool::new(true),
+        )));
+        script.push(vec![gained("a", 1, None)]);
+        poll(&mut d, &mut s);
+        script.fail_next_report("a", CoordinationErrorKind::Retryable);
+
+        d.fail(&mut s, &SplitId::new("a").unwrap(), LeaseEpoch(1), "poison")
+            .unwrap();
+        assert_eq!(d.assignments().len(), 1, "the tenancy stays live");
+
+        poll(&mut d, &mut s);
+        assert_eq!(script.fails().len(), 2, "the report is offered again");
     }
 
     #[test]

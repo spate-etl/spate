@@ -15,6 +15,7 @@ use spate_coordination::{
     CoordinationConfig, CoordinationErrorKind, CoordinationEvent, LeaseEpoch, SplitCoordinator,
     SplitProgress, StoreCoordinator,
 };
+use spate_core::source::StopSignal;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -65,6 +66,15 @@ struct FaultStore {
     plan_lost: Arc<AtomicBool>,
     refused_watches: Arc<AtomicU64>,
     breakers: Arc<Mutex<Vec<Breaker>>>,
+    hold: Arc<Mutex<Option<Hold>>>,
+}
+
+/// One durable update of `key` that sets `stop` on arrival and waits for
+/// `release` before it reaches the store.
+struct Hold {
+    key: String,
+    stop: Arc<AtomicBool>,
+    release: Arc<tokio::sync::Notify>,
 }
 
 impl FaultStore {
@@ -91,6 +101,7 @@ impl FaultStore {
             plan_lost: Arc::default(),
             refused_watches: Arc::default(),
             breakers: Arc::default(),
+            hold: Arc::default(),
         }
     }
 
@@ -171,6 +182,18 @@ impl FaultStore {
         LeaseEpoch(self.record(rt, key)["epoch"].as_u64().expect("an epoch"))
     }
 
+    /// Hold the next durable update of `key` until the returned notify fires,
+    /// setting `stop` once the update arrives.
+    fn hold(&self, key: &str, stop: &Arc<AtomicBool>) -> Arc<tokio::sync::Notify> {
+        let release = Arc::new(tokio::sync::Notify::new());
+        *self.hold.lock().unwrap() = Some(Hold {
+            key: key.to_string(),
+            stop: Arc::clone(stop),
+            release: Arc::clone(&release),
+        });
+        release
+    }
+
     /// Keys of `ks` that still exist, out of `keys`.
     fn present<'a>(
         &self,
@@ -226,6 +249,18 @@ impl CoordinationStore for FaultStore {
         value: Vec<u8>,
         expected: Revision,
     ) -> Result<CasOutcome, StoreError> {
+        let held = {
+            let mut hold = self.hold.lock().unwrap();
+            if ks == Keyspace::Durable && hold.as_ref().is_some_and(|h| h.key == key) {
+                hold.take()
+            } else {
+                None
+            }
+        };
+        if let Some(hold) = held {
+            hold.stop.store(true, Ordering::SeqCst);
+            hold.release.notified().await;
+        }
         self.gate(Op::Update, ks, key).await?;
         self.update_log.lock().unwrap().push((ks, key.to_string()));
         if self.plan_lost(ks, key) {
@@ -3755,4 +3790,294 @@ fn a_restart_over_a_reported_splits_leftover_lease_keeps_the_last_attempt() {
         "quarantined {:?}; held at {epoch:?}; record {record}; reassigned {reassigned}",
         held.quarantined
     );
+}
+
+/// Leases long enough that no renewal runs during a stop test; `op_timeout`
+/// is two seconds, so a command waits up to six.
+const STOP_LEASE: Duration = Duration::from_secs(15);
+
+/// A stopping worker holding `c0` and `c1` under `config`, with its stop flag
+/// clear.
+fn stopping_worker_with(
+    rt: &tokio::runtime::Runtime,
+    store: &FaultStore,
+    config: CoordinationConfig,
+) -> (StoreCoordinator<FaultStore>, Arc<AtomicBool>) {
+    let mut a = holding(rt, store, config, &["c0", "c1"]);
+    let flag = Arc::new(AtomicBool::new(false));
+    a.set_stop(StopSignal::new(Arc::clone(&flag)));
+    (a, flag)
+}
+
+fn stopping_worker(
+    rt: &tokio::runtime::Runtime,
+    store: &FaultStore,
+) -> (StoreCoordinator<FaultStore>, Arc<AtomicBool>) {
+    stopping_worker_with(rt, store, config_for(STOP_LEASE, Some("worker-a")))
+}
+
+/// Commit `split` until it is answered, so every command sent before it has
+/// been served.
+fn barrier(a: &mut StoreCoordinator<FaultStore>, split: &str) {
+    let deadline = Instant::now() + support::DEADLINE;
+    while a
+        .commit(&support::split_id(split), &SplitProgress::new(1, vec![]))
+        .is_err_and(|e| e.kind == CoordinationErrorKind::Retryable)
+    {
+        assert!(Instant::now() < deadline, "the barrier commit never landed");
+    }
+}
+
+fn is_stopping(r: &Result<(), spate_coordination::CoordinationError>, outcome: &str) -> bool {
+    matches!(r, Err(e) if e.kind == CoordinationErrorKind::Retryable
+        && e.to_string().contains(&format!("the run is stopping; {outcome}")))
+}
+
+/// A stop that begins while a commit waits on the store ends the wait with a
+/// `Retryable` answer naming the stop. Regression for #962.
+#[test]
+fn a_stop_cancels_a_commit_waiting_on_the_store() {
+    let rt = runtime();
+    let store = FaultStore::new(STOP_LEASE);
+    let (mut a, flag) = stopping_worker(&rt, &store);
+    let release = store.hold("split.c0", &flag);
+
+    let started = Instant::now();
+    let r = a.commit(&support::split_id("c0"), &SplitProgress::new(5, vec![]));
+    let took = started.elapsed();
+
+    assert!(is_stopping(&r, "this command may still land"), "{r:?}");
+    assert!(took < Duration::from_secs(1), "took {took:?}");
+    release.notify_one();
+}
+
+/// A commit made while the stop is set reaches no store.
+#[test]
+fn a_commit_at_the_stop_sends_nothing() {
+    let rt = runtime();
+    let store = FaultStore::new(STOP_LEASE);
+    let (mut a, flag) = stopping_worker(&rt, &store);
+    let before = store.updates(Keyspace::Durable, "split.c0");
+    let watermark = store.record(&rt, "split.c0")["watermark"].clone();
+
+    flag.store(true, Ordering::SeqCst);
+    let r = a.commit(&support::split_id("c0"), &SplitProgress::new(5, vec![]));
+    flag.store(false, Ordering::SeqCst);
+    barrier(&mut a, "c1");
+
+    assert!(is_stopping(&r, "nothing was sent"), "{r:?}");
+    assert_eq!(store.updates(Keyspace::Durable, "split.c0"), before);
+    assert_eq!(store.record(&rt, "split.c0")["watermark"], watermark);
+}
+
+/// A commit cut short by the stop and landing afterwards is served before the
+/// final commit, which ignores the stop and stores the same watermark again.
+#[test]
+fn a_commit_cut_short_by_the_stop_lands_before_the_final_commit() {
+    let rt = runtime();
+    let store = FaultStore::new(STOP_LEASE);
+    let (mut a, flag) = stopping_worker(&rt, &store);
+    let release = store.hold("split.c0", &flag);
+    let before = store.updates(Keyspace::Durable, "split.c0");
+
+    let r = a.commit(&support::split_id("c0"), &SplitProgress::new(5, vec![]));
+    assert!(is_stopping(&r, "this command may still land"), "{r:?}");
+    release.notify_one();
+    let results = a.commit_final(&[
+        (support::split_id("c0"), SplitProgress::new(5, vec![])),
+        (support::split_id("c1"), SplitProgress::new(9, vec![])),
+    ]);
+
+    assert!(results.iter().all(Result::is_ok), "{results:?}");
+    assert_eq!(store.record(&rt, "split.c0")["watermark"], 5);
+    assert_eq!(store.record(&rt, "split.c1")["watermark"], 9);
+    assert_eq!(store.updates(Keyspace::Durable, "split.c0"), before + 2);
+}
+
+/// A completing commit cut short by the stop that lands afterwards ends the
+/// tenancy: the final commit for that split is `Fenced` and the store keeps
+/// the completed record.
+#[test]
+fn a_completing_commit_cut_short_by_the_stop_fences_the_final_commit() {
+    let rt = runtime();
+    let store = FaultStore::new(STOP_LEASE);
+    let (mut a, flag) = stopping_worker(&rt, &store);
+    let release = store.hold("split.c0", &flag);
+
+    let r = a.commit(
+        &support::split_id("c0"),
+        &SplitProgress::completed(5, vec![]),
+    );
+    assert!(is_stopping(&r, "this command may still land"), "{r:?}");
+    release.notify_one();
+    let results = a.commit_final(&[(support::split_id("c0"), SplitProgress::new(5, vec![]))]);
+
+    assert!(
+        matches!(&results[..], [Err(e)] if e.kind == CoordinationErrorKind::Fenced),
+        "{results:?}"
+    );
+    let record = store.record(&rt, "split.c0");
+    assert_eq!(record["watermark"], 5);
+    assert_eq!(record["completed"], true);
+}
+
+/// A failure report made while the stop is set writes nothing and consumes no
+/// delivery attempt; the departure hands the split back.
+#[test]
+fn a_failure_report_at_the_stop_sends_nothing() {
+    let rt = runtime();
+    let store = FaultStore::new(STOP_LEASE);
+    let (mut a, flag) = stopping_worker(&rt, &store);
+    let epoch = store.epoch(&rt, "split.c0");
+    let before = store.updates(Keyspace::Durable, "split.c0");
+    let attempts = store.record(&rt, "split.c0")["attempts"].clone();
+
+    flag.store(true, Ordering::SeqCst);
+    let r = a.fail(&support::split_id("c0"), epoch, "poison");
+    flag.store(false, Ordering::SeqCst);
+    barrier(&mut a, "c1");
+
+    assert!(is_stopping(&r, "nothing was sent"), "{r:?}");
+    assert_eq!(store.updates(Keyspace::Durable, "split.c0"), before);
+    a.depart(&[]).unwrap();
+    assert!(store.owned(&rt, &["split.c0", "split.c1"]).is_empty());
+    assert_eq!(store.record(&rt, "split.c0")["attempts"], attempts);
+}
+
+/// A failure report cut short by the stop that lands afterwards consumes the
+/// last attempt and quarantines the split, so the final commit for it is
+/// `Fenced`.
+#[test]
+fn a_quarantining_failure_report_cut_short_by_the_stop_fences_the_final_commit() {
+    let rt = runtime();
+    let store = FaultStore::new(STOP_LEASE);
+    let mut config = config_for(STOP_LEASE, Some("worker-a"));
+    config.max_attempts = 1;
+    let (mut a, flag) = stopping_worker_with(&rt, &store, config);
+    let epoch = store.epoch(&rt, "split.c0");
+    let attempts = store.record(&rt, "split.c0")["attempts"].as_u64().unwrap();
+    let release = store.hold("split.c0", &flag);
+
+    let r = a.fail(&support::split_id("c0"), epoch, "poison");
+    assert!(is_stopping(&r, "this command may still land"), "{r:?}");
+    release.notify_one();
+    let results = a.commit_final(&[(support::split_id("c0"), SplitProgress::new(5, vec![]))]);
+
+    assert!(
+        matches!(&results[..], [Err(e)] if e.kind == CoordinationErrorKind::Fenced),
+        "{results:?}"
+    );
+    let record = store.record(&rt, "split.c0");
+    assert_eq!(record["attempts"], attempts + 1, "{record}");
+    assert_eq!(record["status"], "quarantined", "{record}");
+}
+
+/// A failure report cut short by the stop that lands afterwards, with attempts
+/// left, lets this worker claim the split again; the final commit then stores
+/// the old tenancy's watermark on the new claim.
+#[test]
+fn a_split_reclaimed_after_a_cut_short_failure_report_takes_the_final_commit() {
+    let rt = runtime();
+    let store = FaultStore::new(STOP_LEASE);
+    let (mut a, flag) = stopping_worker(&rt, &store);
+    let epoch = store.epoch(&rt, "split.c0");
+    let attempts = store.record(&rt, "split.c0")["attempts"].as_u64().unwrap();
+    let release = store.hold("split.c0", &flag);
+
+    let r = a.fail(&support::split_id("c0"), epoch, "poison");
+    assert!(is_stopping(&r, "this command may still land"), "{r:?}");
+    release.notify_one();
+    spate_test::wait_until(support::DEADLINE, "worker-a to claim c0 again", || {
+        let record = store.record(&rt, "split.c0");
+        record["owner"] == "worker-a" && record["epoch"].as_u64() > Some(epoch.0)
+    });
+    let results = a.commit_final(&[(support::split_id("c0"), SplitProgress::new(5, vec![]))]);
+
+    assert!(results.iter().all(Result::is_ok), "{results:?}");
+    let record = store.record(&rt, "split.c0");
+    assert_eq!(record["watermark"], 5, "{record}");
+    assert_eq!(record["attempts"], attempts + 1, "{record}");
+}
+
+/// A drain release made while the stop is set sends nothing: the split keeps
+/// its record until the departure hands it back.
+#[test]
+fn a_drain_release_at_the_stop_sends_nothing() {
+    let rt = runtime();
+    let store = FaultStore::new(STOP_LEASE);
+    let (mut a, flag) = stopping_worker(&rt, &store);
+    let before = store.updates(Keyspace::Durable, "split.c0");
+    let epoch = store.epoch(&rt, "split.c0");
+
+    flag.store(true, Ordering::SeqCst);
+    let released = a.release_drained(&[support::split_id("c0")]);
+    flag.store(false, Ordering::SeqCst);
+    barrier(&mut a, "c1");
+
+    assert!(released.is_ok(), "{released:?}");
+    assert_eq!(store.updates(Keyspace::Durable, "split.c0"), before);
+    assert_eq!(store.epoch(&rt, "split.c0"), epoch);
+    a.depart(&[]).unwrap();
+    assert!(store.owned(&rt, &["split.c0", "split.c1"]).is_empty());
+}
+
+/// A revocation decline made while the stop is set sends nothing, so the
+/// revocation stays pending and this worker keeps the split.
+#[test]
+fn a_decline_at_the_stop_leaves_the_revocation_pending() {
+    use spate_core::coordination::CoordinationEvent;
+    let rt = runtime();
+    let store = FaultStore::new(LEASE);
+    let ids = ["v0", "v1", "v2", "v3"];
+    let mut config = config_for(LEASE, Some("worker-a"));
+    config.reconcile_interval = NO_RECONCILE;
+    config.drain_deadline = LEASE * 20;
+    let mut a = holding(&rt, &store, config, &ids);
+    let flag = Arc::new(AtomicBool::new(false));
+    a.set_stop(StopSignal::new(Arc::clone(&flag)));
+    let mut b = StoreCoordinator::new(
+        store.clone(),
+        config_for(LEASE, Some("worker-b")),
+        rt.handle().clone(),
+        None,
+    )
+    .expect("coordinator");
+    b.start(Box::new(PhasedPlanner::one_final("departure:v1", &ids)))
+        .unwrap();
+    let mut held_b = Held::default();
+    let deadline = Instant::now() + support::DEADLINE;
+    let revoked = loop {
+        assert!(Instant::now() < deadline, "no revocation was requested");
+        let asked = a.poll().unwrap().into_iter().find_map(|event| match event {
+            CoordinationEvent::RevokeRequested { split } => Some(split),
+            _ => None,
+        });
+        held_b.fold(b.poll().unwrap());
+        if let Some(split) = asked {
+            break split;
+        }
+        std::thread::sleep(support::POLL_INTERVAL);
+    };
+    let key = format!("split.{}", revoked.as_str());
+    let other = ids
+        .into_iter()
+        .find(|id| *id != revoked.as_str())
+        .expect("another split");
+    let epoch = store.epoch(&rt, &key);
+
+    flag.store(true, Ordering::SeqCst);
+    let declined = a.decline_revoke(&revoked);
+    flag.store(false, Ordering::SeqCst);
+    barrier(&mut a, other);
+
+    assert!(declined.is_ok(), "{declined:?}");
+    let record = store.record(&rt, &key);
+    assert_eq!(record["owner"], "worker-a", "{record}");
+    assert_eq!(store.epoch(&rt, &key), epoch);
+    let lost = a
+        .poll()
+        .unwrap()
+        .into_iter()
+        .any(|e| matches!(&e, CoordinationEvent::Lost { split } if *split == revoked));
+    assert!(!lost, "the revocation was forced");
 }

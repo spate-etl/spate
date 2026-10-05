@@ -122,8 +122,10 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
 
     // Open the source with an issuer handle. A failure here is fatal
     // before any thread has data.
+    let stop = crate::source::StopSignal::new(Arc::clone(&shutdown));
     if let Err(e) = source.open(
         SourceCtx::new(checkpointer.handle())
+            .with_stop(stop.clone())
             .with_meter(source_meter)
             .with_stage_metrics(Some(Arc::clone(&source_metrics)))
             .with_partition_detail(per_partition_detail),
@@ -349,6 +351,8 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
     // and main joins them without a timeout, so without this store a chain
     // failure elsewhere leaves a blocked driver spinning forever.
     shutdown.store(true, Ordering::Relaxed);
+    // The drain's commits, the final one included, run with the signal clear.
+    stop.close();
     pipeline_metrics.set_state(if state.failure.is_some() {
         PipelineState::Failed
     } else {

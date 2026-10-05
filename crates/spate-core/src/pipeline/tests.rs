@@ -174,6 +174,35 @@ fn happy_path_consumes_and_commits() {
     assert!(log.flush_commits >= 1, "shutdown must flush commits");
 }
 
+/// A tick commit that fails because the stop began during it leaves its
+/// positions pending, and the final commit, run with the stop signal clear,
+/// stores and reports them.
+#[test]
+fn a_tick_commit_cut_by_the_stop_goes_out_in_the_final_commit() {
+    let h = start(|shared, log| FakeChain {
+        shared,
+        log,
+        mode: ChainMode::Ok,
+        batches_seen: 0,
+    });
+    h.shared.lock().unwrap().trigger_in_commit = Some(h.shutdown.clone());
+    // One batch, so the first position committed is the last one.
+    assign_one_lane(&h, std::slice::from_ref(&(0..10)));
+    let report = h.join.join().unwrap().unwrap();
+
+    assert_eq!(report.state, ExitState::Completed);
+    assert_eq!(report.final_watermarks, vec![(PartitionId(0), 10)]);
+    let log = h.shared.lock().unwrap();
+    assert_eq!(log.stopped_commits, vec![vec![(PartitionId(0), 10)]]);
+    assert!(
+        !log.log.iter().any(|entry| entry == "commit"),
+        "{:?}",
+        log.log
+    );
+    assert_eq!(log.final_saw_stop, Some(false));
+    assert_eq!(log.committed.get(&PartitionId(0)), Some(&10));
+}
+
 /// Revocation stops the lane's consumption and commits every consumed offset
 /// from the revocation drain. Regression for #664.
 #[test]

@@ -338,6 +338,8 @@ impl Source for LedgerSource {
     type Lane = LedgerLane;
 
     fn open(&mut self, ctx: SourceCtx) -> Result<(), SourceError> {
+        // Lets a stop end a commit that waits on an unresponsive store.
+        self.driver.set_stop(ctx.stop.clone());
         self.ctx.issuer = Some(ctx.issuer);
         Ok(())
     }

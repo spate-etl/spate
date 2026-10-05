@@ -288,6 +288,7 @@ impl Poll {
             listed.insert(key.clone());
             let delivered = self.seen.get(&key).copied();
             if observed.newer_than(&key, s0) {
+                observed.saw(&key, item.v, t1);
                 if delivered == Some(item.v) {
                     snapshot.push(entry(&key, &item));
                 } else if subscribing

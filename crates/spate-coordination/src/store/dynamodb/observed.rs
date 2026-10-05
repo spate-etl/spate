@@ -109,18 +109,18 @@ impl Observed {
     }
 
     /// A consistent read that began at sequence `s0` and returned at `t1`
-    /// found the key at `v`, or absent. Ignored when a newer write or read
-    /// of the key landed after the read began.
+    /// found the key at `v`, or absent. When a newer write or read of the
+    /// key landed after the read began, only `v` is recorded as read.
     pub(super) fn observe(&mut self, key: &str, v: Option<u64>, s0: u64, t1: Instant) {
+        if let Some(v) = v {
+            self.saw(key, v, t1);
+        }
         if self.newer_than(key, s0) {
             return;
         }
         let next = self.seq + 1;
         let o = self.entry(key, t1);
         o.touched = t1;
-        if let Some(v) = v {
-            o.hw = o.hw.max(v);
-        }
         if o.v != v {
             o.v = v;
             o.since = t1;
@@ -142,6 +142,12 @@ impl Observed {
     /// The version already judged expired, if the key holds one.
     pub(super) fn expired_version(&self, key: &str) -> Option<u64> {
         self.keys.get(key).filter(|o| o.expired).and_then(|o| o.v)
+    }
+
+    /// A read returned the key at `v`.
+    pub(super) fn saw(&mut self, key: &str, v: u64, now: Instant) {
+        let o = self.entry(key, now);
+        o.hw = o.hw.max(v);
     }
 
     /// The revision of a delete emitted now: one above `delivered` and every

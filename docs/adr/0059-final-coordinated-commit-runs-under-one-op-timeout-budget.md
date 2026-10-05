@@ -62,8 +62,10 @@ split.
   the stop arrives finishes before the drain starts, at up to three
   `op_timeout`s per held split.
 - Good, because a partial final commit is reported per partition.
-  `ExitReport.final_watermarks` leaves out a position the final commit
-  deferred, and the checkpoint commit counter records the pass as failed.
+  `ExitReport.final_watermarks` lists a position only once the store has
+  stored it, apart from a partition the source no longer holds; a tick commit
+  the store defers leaves its positions to a later commit. The checkpoint
+  commit counter records a deferred pass as failed.
 - Bad, because at the 10s default the final commit and the departure together
   can take 20s, more than the default 5s gap between `drain_timeout` and
   `terminationGracePeriodSeconds`. The graceful-shutdown guide's sizing rule

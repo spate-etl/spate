@@ -518,17 +518,31 @@ impl CoordinationDriver {
 
     /// Coordinated `commit` body: per-split fenced commits keyed by the
     /// tenancy partition ids the driver minted.
+    ///
+    /// Returns a retryable error when a split's commit was deferred; the
+    /// runtime then keeps every position of the call pending.
     pub fn commit<S: SplitSource>(
         &mut self,
         source: &mut S,
         watermarks: &[(PartitionId, i64)],
     ) -> Result<(), SourceError> {
+        let mut deferred = 0usize;
         for &(partition, watermark) in watermarks {
             let Some(split) = self.commit_target(partition) else {
                 continue;
             };
             let progress = source.encode_commit(&split, watermark)?;
-            self.commit_progress(source, partition, &split, progress)?;
+            if self.commit_progress(source, partition, &split, progress)?
+                == CommitDisposition::Deferred
+            {
+                deferred += 1;
+            }
+        }
+        if deferred > 0 {
+            return Err(SourceError::Client {
+                class: ErrorClass::Retryable,
+                reason: format!("{deferred} split commit(s) deferred; the positions stay pending"),
+            });
         }
         Ok(())
     }
@@ -971,7 +985,7 @@ impl CoordinationDriver {
         for partition in candidates {
             let split = self.tenancies[&partition].split.id.clone();
             if let Some(progress) = source.sweep(&split)? {
-                self.commit_progress(source, partition, &split, progress)?;
+                let _ = self.commit_progress(source, partition, &split, progress)?;
             }
         }
         Ok(())
@@ -1090,11 +1104,11 @@ impl CoordinationDriver {
         partition: PartitionId,
         split: &SplitId,
         progress: SplitProgress,
-    ) -> Result<(), SourceError> {
+    ) -> Result<CommitDisposition, SourceError> {
         let progress = self.strip_drain_completion(partition, split, progress);
         let disposition = self.try_commit(source, partition, split, &progress)?;
         self.settle_commit(source, partition, progress, disposition);
-        Ok(())
+        Ok(disposition)
     }
 
     /// Fold a live tenancy's commit outcome into its state.
@@ -1119,13 +1133,12 @@ impl CoordinationDriver {
             // Fenced: already retired inside `classify`.
             CommitDisposition::Fenced => {}
             CommitDisposition::Deferred => {
-                // Nothing goes out again on a bare tick, since `commit`
-                // issues only the watermarks it is handed. This progress
-                // rides the split's next commit, which merges past it, or
-                // the terminal progress `sweep` returns if no watermark
-                // follows. The resume cache still advances: the watermark
-                // is acked (sink-durable), so respawning past it cannot
-                // lose data.
+                // A deferred tick commit fails the whole `commit`, so the
+                // runtime resends its positions on the next tick or in the
+                // final commit; a deferred sweep's progress rides the
+                // split's next commit. The resume cache still advances: the
+                // watermark is acked (sink-durable), so respawning past it
+                // cannot lose data.
                 let tenancy = self.tenancies.get_mut(&partition).expect("live tenancy");
                 tenancy.progress = Some(progress);
             }
@@ -1194,6 +1207,7 @@ impl CoordinationDriver {
 
 /// How the backend answered one fenced commit; see
 /// [`CoordinationDriver::classify`].
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum CommitDisposition {
     /// Durable write. The caller advances its own state.
     Durable,
@@ -1900,8 +1914,28 @@ mod tests {
         let partition = s.opened[0].3;
 
         script.fail_next_commit("a", CoordinationErrorKind::Retryable);
-        d.commit(&mut s, &[(partition, 10)]).unwrap();
+        let err = d
+            .commit(&mut s, &[(partition, 10)])
+            .expect_err("a deferred split fails the commit");
+        assert!(
+            matches!(
+                &err,
+                SourceError::Client {
+                    class: ErrorClass::Retryable,
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
         assert!(script.commits().is_empty(), "deferred, not written");
+        assert_eq!(
+            d.tenancies[&partition]
+                .progress
+                .as_ref()
+                .map(|p| p.watermark),
+            Some(10),
+            "the resume cache holds the deferred progress"
+        );
 
         // A bare tick re-issues nothing: the driver commits the watermarks
         // it is handed and no others.
@@ -1912,6 +1946,39 @@ mod tests {
         d.commit(&mut s, &[(partition, 12)]).unwrap();
         assert_eq!(script.commits().len(), 1);
         assert_eq!(script.commits()[0].1.watermark, 12);
+    }
+
+    /// A deferred split fails the commit after the later splits of the same
+    /// commit are sent. Regression for #962.
+    #[test]
+    fn a_deferred_split_fails_the_commit_after_every_split_is_sent() {
+        let script = Script::default();
+        let mut d = driver(&script);
+        let mut s = TestSource::default();
+        script.push(vec![gained("a", 1, None), gained("b", 1, None)]);
+        poll(&mut d, &mut s);
+        let pa = s.opened[0].3;
+        let pb = s.opened[1].3;
+
+        script.fail_next_commit("a", CoordinationErrorKind::Retryable);
+        let result = d.commit(&mut s, &[(pa, 10), (pb, 20)]);
+
+        assert!(
+            matches!(
+                &result,
+                Err(SourceError::Client {
+                    class: ErrorClass::Retryable,
+                    ..
+                })
+            ),
+            "{result:?}"
+        );
+        let sent: Vec<_> = script
+            .commits()
+            .into_iter()
+            .map(|(split, _)| split)
+            .collect();
+        assert_eq!(sent, vec![SplitId::new("b").unwrap()]);
     }
 
     #[test]

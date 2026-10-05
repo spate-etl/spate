@@ -153,6 +153,21 @@ impl<S: CoordinationStore + Clone> Task<S> {
             .is_ok_and(|v| v.owner == self.instance && v.nonce == self.nonce)
     }
 
+    /// This process's identity as the plan record stores it.
+    fn elector(&self) -> records::Elector {
+        records::Elector {
+            owner: self.instance.clone(),
+            nonce: self.nonce.clone(),
+        }
+    }
+
+    /// Whether `plan` names this process as its elector.
+    fn elected_here(&self, plan: &records::PlanRecord) -> bool {
+        plan.elector
+            .as_ref()
+            .is_some_and(|e| e.owner == self.instance && e.nonce == self.nonce)
+    }
+
     /// Reads the leader key. A retryable read error is logged and reads as
     /// no key.
     async fn read_leader_key(&mut self) -> Result<Option<Entry>, CoordinationError> {
@@ -173,6 +188,9 @@ impl<S: CoordinationStore + Clone> Task<S> {
     /// The planner fence: CAS the plan record to the new generation. A
     /// deposed predecessor's pending plan CAS now loses by revision.
     /// Schedules a planner run only while the written record is open.
+    /// A bump whose reply was lost is kept when a re-read finds this process
+    /// as the elector at `generation` and a compare-and-set of the read
+    /// record at its revision wins.
     async fn bump_generation(&mut self, generation: u64) -> Result<(), CoordinationError> {
         for _ in 0..3 {
             let Some((plan, rev)) = &self.plan else {
@@ -185,6 +203,7 @@ impl<S: CoordinationStore + Clone> Task<S> {
             }
             let mut bumped = plan.clone();
             bumped.generation = generation;
+            bumped.elector = Some(self.elector());
             bumped.updated_at_ms = records::now_ms();
             match self
                 .store
@@ -192,10 +211,7 @@ impl<S: CoordinationStore + Clone> Task<S> {
                 .await
             {
                 Ok(CasOutcome::Won(new_rev)) => {
-                    self.plan_rev_seen = self.plan_rev_seen.max(new_rev.0);
-                    self.plan = Some((bumped, new_rev));
-                    // A final plan's splits are all seeded; the election only fences it.
-                    self.plan_now = self.plan_is_open();
+                    self.hold_fence(bumped, new_rev);
                     return Ok(());
                 }
                 Ok(CasOutcome::Lost) => {
@@ -221,6 +237,34 @@ impl<S: CoordinationStore + Clone> Task<S> {
                         ));
                     };
                     let plan = records::PlanRecord::parse(&entry.value, &self.fingerprint)?;
+                    if plan.generation == generation && self.elected_here(&plan) {
+                        // A lagging replica can serve this process's earlier
+                        // bump after a successor's; only a write at the read
+                        // revision proves the record current.
+                        match self
+                            .store
+                            .update(
+                                Keyspace::Durable,
+                                records::PLAN_KEY,
+                                entry.value.clone(),
+                                entry.revision,
+                            )
+                            .await
+                        {
+                            Ok(CasOutcome::Won(new_rev)) => {
+                                tracing::info!(
+                                    generation,
+                                    "generation bump's reply was lost; the plan record is ours"
+                                );
+                                self.hold_fence(plan, new_rev);
+                                return Ok(());
+                            }
+                            Ok(CasOutcome::Lost) | Err(StoreError::Retryable(_)) => {}
+                            Err(e) => {
+                                return Err(store_error("confirming the plan record", &e));
+                            }
+                        }
+                    }
                     self.plan_rev_seen = self.plan_rev_seen.max(entry.revision.0);
                     self.plan = Some((plan, entry.revision));
                 }
@@ -234,6 +278,14 @@ impl<S: CoordinationStore + Clone> Task<S> {
         // than plan without a fence.
         self.demote().await?;
         Ok(())
+    }
+
+    /// Caches `plan` at `rev` as this leadership's fenced plan record.
+    fn hold_fence(&mut self, plan: records::PlanRecord, rev: Revision) {
+        self.plan_rev_seen = self.plan_rev_seen.max(rev.0);
+        self.plan = Some((plan, rev));
+        // A final plan's splits are all seeded; the election only fences it.
+        self.plan_now = self.plan_is_open();
     }
 
     /// Give leadership up with bounded best-effort conditional deletion within `op_timeout`.
@@ -1221,5 +1273,106 @@ mod tests {
         steps.fired(t0 + SEED_STEP_INTERVAL);
         assert_eq!(steps.due(), None);
         assert!(steps.folded(t0 + SEED_STEP_INTERVAL * 2));
+    }
+
+    /// Applies the first plan update, then reports it as a retryable error.
+    #[derive(Clone)]
+    struct LoseBumpReply {
+        inner: MemoryStore,
+        armed: Arc<AtomicBool>,
+    }
+
+    impl CoordinationStore for LoseBumpReply {
+        fn lease_ttl(&self) -> Duration {
+            self.inner.lease_ttl()
+        }
+        async fn create(
+            &self,
+            ks: Keyspace,
+            key: &str,
+            value: Vec<u8>,
+        ) -> Result<CasOutcome, StoreError> {
+            self.inner.create(ks, key, value).await
+        }
+        async fn update(
+            &self,
+            ks: Keyspace,
+            key: &str,
+            value: Vec<u8>,
+            expected: Revision,
+        ) -> Result<CasOutcome, StoreError> {
+            let out = self.inner.update(ks, key, value, expected).await?;
+            if key == records::PLAN_KEY && self.armed.swap(false, Ordering::SeqCst) {
+                assert!(matches!(out, CasOutcome::Won(_)));
+                return Err(StoreError::Retryable("reply lost".into()));
+            }
+            Ok(out)
+        }
+        async fn get(&self, ks: Keyspace, key: &str) -> Result<Option<Entry>, StoreError> {
+            self.inner.get(ks, key).await
+        }
+        async fn delete(
+            &self,
+            ks: Keyspace,
+            key: &str,
+            expected: Option<Revision>,
+        ) -> Result<CasOutcome, StoreError> {
+            self.inner.delete(ks, key, expected).await
+        }
+        async fn watch(&self, ks: Keyspace, prefix: &str) -> Result<WatchStream, StoreError> {
+            self.inner.watch(ks, prefix).await
+        }
+        async fn list(&self, ks: Keyspace, prefix: &str) -> Result<Vec<Entry>, StoreError> {
+            self.inner.list(ks, prefix).await
+        }
+    }
+
+    /// An election that adopts its own unseen bump over a final plan leaves
+    /// no planner run scheduled.
+    #[tokio::test]
+    async fn an_adopted_bump_over_a_final_plan_schedules_no_planner() {
+        let clock = TestClock::frozen();
+        let inner = MemoryStore::with_clock(Duration::from_secs(10), clock.clone());
+        let mut plan = records::PlanRecord::new("deadline:v1".into());
+        plan.generation = 1;
+        plan.finality = records::PlanFinalityRepr::Final;
+        let CasOutcome::Won(rev) = inner
+            .create(Keyspace::Durable, records::PLAN_KEY, plan.encode())
+            .await
+            .expect("seed")
+        else {
+            panic!("new");
+        };
+        let store = LoseBumpReply {
+            inner: inner.clone(),
+            armed: Arc::new(AtomicBool::new(true)),
+        };
+        let (_, commands) = mpsc::channel(1);
+        let (events, _) = std::sync::mpsc::channel();
+        let mut task = Task::new(
+            store.clone(),
+            crate::CoordinationConfig::default(),
+            clock,
+            "deadline:v1".into(),
+            "solo".into(),
+            uuid::Uuid::new_v4().simple().to_string(),
+            Box::new(UnusedPlanner),
+            None,
+            commands,
+            events,
+            None,
+        );
+        task.plan = Some((plan, rev));
+        task.plan_now = true;
+        task.try_elect().await.expect("election");
+        assert!(
+            !store.armed.load(Ordering::SeqCst),
+            "the bump took the fault"
+        );
+        assert!(task.leadership.is_some(), "the worker must lead");
+        assert!(
+            !task.plan_now,
+            "an adopted bump over a final plan left a planner run scheduled"
+        );
     }
 }

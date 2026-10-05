@@ -288,7 +288,8 @@ alone do not measure the complete stored value. Reduce the metadata carried by
 each split when its descriptor exceeds that allowance.
 
 For a planner cursor, measure the complete plan record with the cursor encoded
-as padded base64 and the full fingerprint escaped as JSON. The
+as padded base64 and the full fingerprint escaped as JSON. The record also
+names the worker that last won leadership. That name takes up to 194 bytes. The
 [`planner_state` contract](https://docs.rs/spate-core/latest/spate_core/coordination/struct.SplitPlan.html#structfield.planner_state)
 explains how the fingerprint reduces available cursor space. Size seed and
 committed progress state against their own records' overhead.

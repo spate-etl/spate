@@ -45,10 +45,12 @@ Deployment carries a narrow set of guarantees:
   with it each run the whole job.
 - **Every live replica has a distinct `instance_id`.** Two live processes
   sharing one is detected and fatal.
-- **Every replica reads the store at the same record schema.** A worker that
-  finds a record it cannot read as this build's schema exits fatally. The
-  remedy is a fresh job name, which leaves the committed per-split progress
-  behind and re-runs a bounded job from the beginning.
+- **Every replica runs a build that reads the records the others write.** At
+  one record schema, a newer build reads the records an older build wrote, and
+  the older build may fail to read the newer one's. A worker that finds a
+  record it cannot read exits fatally. The remedy is a fresh job name, which
+  leaves the committed per-split progress behind and re-runs a bounded job from
+  the beginning.
 
 ## Kubernetes
 

@@ -18,7 +18,7 @@
 //!
 //! | Keyspace  | Key                 | Record        |
 //! |-----------|---------------------|---------------|
-//! | Durable   | `plan`              | [`PlanRecord`]          — fingerprint, generation, finality, planner cursor |
+//! | Durable   | `plan`              | [`PlanRecord`]          — fingerprint, generation and its elector, finality, planner cursor |
 //! | Durable   | `spec.{id}`         | [`SplitSpecRecord`]     — descriptor, weight (immutable) |
 //! | Durable   | `split.{id}`        | [`SplitProgressRecord`] — epoch, status, attempts, progress (the fence) |
 //! | Durable   | `assign.{instance}` | [`AssignmentVal`]       — the leader's desired assignment |
@@ -39,7 +39,9 @@ use std::hash::BuildHasher as _;
 ///
 /// The versions do not interoperate. This pin is checked on the plan record
 /// during startup and on every split and spec record afterwards, and a
-/// mismatch is [`Fatal`] whichever build reads it.
+/// mismatch is [`Fatal`] whichever build reads it. A newer build may add a
+/// field under the same schema. It reads records written without the field,
+/// and an older build at this schema rejects a record that carries it.
 ///
 /// The check fails closed. Ownership transfers on the durable
 /// progress-record CAS regardless of vintage, so a mixed fleet corrupts
@@ -378,6 +380,10 @@ pub(crate) struct PlanRecord {
     /// Leadership generation: bumped by every newly elected leader before
     /// it plans. The plan record's CAS revision is the leader fence.
     pub(crate) generation: u64,
+    /// The worker whose election wrote `generation`; `None` on a record
+    /// written without one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) elector: Option<Elector>,
     /// Whether the enumeration is final.
     pub(crate) finality: PlanFinalityRepr,
     /// Splits planned (progress records live in the store), recounted from
@@ -395,6 +401,14 @@ pub(crate) struct PlanRecord {
     pub(crate) planner_state: Option<String>,
     /// Advisory wall-clock stamp of the last write.
     pub(crate) updated_at_ms: i64,
+}
+
+/// A worker's identity as the plan record stores it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Elector {
+    pub(crate) owner: String,
+    pub(crate) nonce: String,
 }
 
 /// Serialized form of [`PlanFinality`].
@@ -420,6 +434,7 @@ impl PlanRecord {
             schema: SCHEMA,
             fingerprint,
             generation: 0,
+            elector: None,
             finality: PlanFinalityRepr::Open,
             planned: 0,
             planner_state: None,
@@ -616,7 +631,8 @@ mod tests {
         assert!(record(vec![0; 294_721]).encode().len() > 384 * 1024);
     }
 
-    /// Cursor capacity includes the JSON-escaped fingerprint and padded base64.
+    /// Cursor capacity includes the JSON-escaped fingerprint, the largest elector
+    /// and padded base64.
     #[test]
     fn planner_cursor_budget_includes_the_escaped_fingerprint() {
         const CAP: usize = 384 * 1024;
@@ -627,9 +643,13 @@ mod tests {
             record.planned = u64::MAX;
             record.updated_at_ms = i64::MIN;
             record.planner_state = Some(b64_encode(cursor));
+            record.elector = Some(Elector {
+                owner: "a".repeat(128),
+                nonce: uuid::Uuid::new_v4().simple().to_string(),
+            });
             record
         };
-        assert_eq!(record("", &[]).encode().len(), 169);
+        assert_eq!(record("", &[]).encode().len(), 363);
         for fingerprint in ["", "job:v1", "\"\\\n\t\u{0000}"] {
             let envelope = record(fingerprint, &[]).encode().len();
             let allowance = 3 * ((CAP - envelope) / 4);
@@ -637,7 +657,7 @@ mod tests {
             assert!(record(fingerprint, &vec![0; allowance + 1]).encode().len() > CAP);
         }
         let escaped = "\"\\\n\t\u{0000}";
-        let raw_fingerprint_allowance = 3 * ((CAP - 169 - escaped.len()) / 4);
+        let raw_fingerprint_allowance = 3 * ((CAP - 363 - escaped.len()) / 4);
         assert!(
             record(escaped, &vec![0; raw_fingerprint_allowance])
                 .encode()
@@ -645,6 +665,16 @@ mod tests {
                 > CAP
         );
         assert!(record(&"a".repeat(CAP), &[]).encode().len() > CAP);
+    }
+
+    /// A plan record without an elector parses with none and re-encodes to the
+    /// same bytes.
+    #[test]
+    fn a_plan_record_without_an_elector_reads_as_none() {
+        let bytes = br#"{"schema":3,"fingerprint":"job:v1","generation":4,"finality":"open","planned":2,"planner_state":null,"updated_at_ms":5}"#;
+        let plan = PlanRecord::parse(bytes, "job:v1").unwrap();
+        assert_eq!(plan.elector, None);
+        assert_eq!(plan.encode(), bytes.to_vec());
     }
 
     #[test]

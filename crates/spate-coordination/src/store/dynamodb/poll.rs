@@ -2,11 +2,12 @@
 //! difference, one poller per handle, keyspace and prefix.
 
 use super::Inner;
+use super::observed::Observed;
 use super::table::{Item, Query};
 use crate::store::{Entry, Keyspace, Revision, StoreError, WatchEvent, WatchStream};
 use futures_util::StreamExt as _;
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 
@@ -78,6 +79,7 @@ async fn run(
         return;
     };
     let mut poll = Poll {
+        inner: inner.clone(),
         ks,
         prefix,
         seen: BTreeMap::new(),
@@ -105,6 +107,7 @@ async fn run(
 }
 
 struct Poll {
+    inner: Weak<Inner>,
     ks: Keyspace,
     prefix: String,
     /// The revision last delivered for each key.
@@ -118,10 +121,69 @@ struct Poll {
     subscribers: Vec<mpsc::UnboundedSender<Event>>,
 }
 
-struct Read {
-    s0: u64,
+struct Read<'a> {
     t0: Instant,
     items: Vec<(String, Item)>,
+    reading: Reading<'a>,
+}
+
+/// A poll read registered in the handle's record from its start until it is
+/// applied or dropped, so eviction keeps the keys it may still judge.
+struct Reading<'a> {
+    observed: &'a Mutex<Observed>,
+    s0: u64,
+    done: bool,
+}
+
+impl<'a> Reading<'a> {
+    fn start(inner: &'a Inner) -> Reading<'a> {
+        let s0 = inner.observed().begin_read();
+        Reading {
+            observed: &inner.observed,
+            s0,
+            done: false,
+        }
+    }
+
+    /// Ends the registration under a lock the caller already holds.
+    fn finish(mut self, observed: &mut Observed) {
+        observed.end_read(self.s0);
+        self.done = true;
+    }
+}
+
+impl Drop for Reading<'_> {
+    fn drop(&mut self) {
+        if !self.done {
+            unpoisoned(self.observed).end_read(self.s0);
+        }
+    }
+}
+
+/// Locks `observed` even when poisoned, for a drop that may run while a
+/// panic unwinds.
+fn unpoisoned(observed: &Mutex<Observed>) -> MutexGuard<'_, Observed> {
+    observed.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Records `v` as delivered for an ephemeral key. The key stays held in
+/// `observed` while it is in `seen`.
+fn deliver(
+    seen: &mut BTreeMap<String, u64>,
+    observed: &mut Observed,
+    key: &str,
+    v: u64,
+    now: Instant,
+) {
+    if seen.insert(key.to_string(), v).is_none() {
+        observed.hold(key, now);
+    }
+}
+
+fn forget(seen: &mut BTreeMap<String, u64>, observed: &mut Observed, key: &str) {
+    if seen.remove(key).is_some() {
+        observed.release(key);
+    }
 }
 
 fn send(subscribers: &mut Vec<mpsc::UnboundedSender<Event>>, event: &WatchEvent) {
@@ -137,12 +199,13 @@ fn entry(key: &str, item: &Item) -> Entry {
 }
 
 impl Poll {
-    async fn read(&self, inner: &Inner, consistent: bool) -> Result<Read, StoreError> {
+    async fn read<'a>(&self, inner: &'a Inner, consistent: bool) -> Result<Read<'a>, StoreError> {
         let table = inner
             .table
             .get()
             .expect("a watch starts after the table is ready");
-        let (s0, t0) = inner.mark();
+        let reading = Reading::start(inner);
+        let t0 = inner.clock.now();
         let mut items = Vec::new();
         let mut start = None;
         loop {
@@ -158,7 +221,7 @@ impl Poll {
             items.extend(page.items);
             match page.next {
                 Some(next) => start = Some(next),
-                None => return Ok(Read { s0, t0, items }),
+                None => return Ok(Read { t0, items, reading }),
             }
         }
     }
@@ -212,7 +275,7 @@ impl Poll {
     fn apply(
         &mut self,
         inner: &Inner,
-        read: Read,
+        read: Read<'_>,
         consistent: bool,
         subscribing: bool,
     ) -> Vec<Entry> {
@@ -278,9 +341,11 @@ impl Poll {
     /// and its event. A key an own write or a newer read touched after the
     /// read began is left to the next poll, and a subscribing read still
     /// lists it unless an expiry delete already covers it.
-    fn apply_ephemeral(&mut self, inner: &Inner, read: Read, subscribing: bool) -> Vec<Entry> {
-        let Read { s0, t0, items } = read;
+    fn apply_ephemeral(&mut self, inner: &Inner, read: Read<'_>, subscribing: bool) -> Vec<Entry> {
+        let Read { t0, items, reading } = read;
+        let s0 = reading.s0;
         let mut observed = inner.observed();
+        reading.finish(&mut observed);
         let t1 = inner.clock.now();
         let mut listed = BTreeSet::new();
         let mut snapshot = Vec::new();
@@ -288,6 +353,7 @@ impl Poll {
             listed.insert(key.clone());
             let delivered = self.seen.get(&key).copied();
             if observed.newer_than(&key, s0) {
+                observed.saw(&key, item.v, t1);
                 if delivered == Some(item.v) {
                     snapshot.push(entry(&key, &item));
                 } else if subscribing
@@ -297,7 +363,7 @@ impl Poll {
                     let live = entry(&key, &item);
                     if delivered.is_none() {
                         send(&mut self.subscribers, &WatchEvent::Put(live.clone()));
-                        self.seen.insert(key.clone(), item.v);
+                        deliver(&mut self.seen, &mut observed, &key, item.v, t1);
                     }
                     snapshot.push(live);
                 }
@@ -315,7 +381,7 @@ impl Poll {
                             revision,
                         },
                     );
-                    self.seen.remove(&key);
+                    forget(&mut self.seen, &mut observed, &key);
                 }
                 continue;
             }
@@ -334,12 +400,12 @@ impl Poll {
                         },
                     );
                     send(&mut self.subscribers, &WatchEvent::Put(live.clone()));
-                    self.seen.insert(key.clone(), item.v);
+                    deliver(&mut self.seen, &mut observed, &key, item.v, t1);
                     self.deleted.remove(&key);
                 }
                 _ => {
                     send(&mut self.subscribers, &WatchEvent::Put(live.clone()));
-                    self.seen.insert(key.clone(), item.v);
+                    deliver(&mut self.seen, &mut observed, &key, item.v, t1);
                     self.deleted.remove(&key);
                 }
             }
@@ -365,9 +431,22 @@ impl Poll {
                     revision,
                 },
             );
-            self.seen.remove(&key);
+            forget(&mut self.seen, &mut observed, &key);
         }
         snapshot
+    }
+}
+
+impl Drop for Poll {
+    fn drop(&mut self) {
+        if self.ks == Keyspace::Ephemeral
+            && let Some(inner) = self.inner.upgrade()
+        {
+            let mut observed = unpoisoned(&inner.observed);
+            for key in self.seen.keys() {
+                observed.release(key);
+            }
+        }
     }
 }
 
@@ -393,6 +472,7 @@ mod tests {
     fn a_floor_never_falls_to_an_older_tombstone() {
         let (events, mut received) = mpsc::unbounded_channel();
         let mut poll = Poll {
+            inner: Weak::new(),
             ks: Keyspace::Durable,
             prefix: "assign.".to_string(),
             seen: BTreeMap::new(),

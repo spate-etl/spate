@@ -1,5 +1,5 @@
 ---
-description: "A DynamoDB lease renewal or takeover of R writes R + 2 or above, so a later put lands above a reported delete while the table keeps the key's floor and item."
+description: "A DynamoDB lease renewal or takeover of R writes R + 2 or above, so a put lands above a reported delete until TTL collects. ADR-0061 supersedes one part."
 ---
 
 # ADR-0058 — A DynamoDB ephemeral write leaves its predecessor's removal revision free
@@ -8,7 +8,8 @@ description: "A DynamoDB lease renewal or takeover of R writes R + 2 or above, s
 - **Date:** 2026-10-04
 - **Supersedes:** [ADR-0057](0057-a-deleted-dynamodb-ephemeral-key-leaves-a-revision-floor.md)
   (watch-delete consequences)
-- **Superseded by:** —
+- **Superseded by:** [ADR-0061](0061-a-watch-delete-orders-above-what-its-handle-has-seen.md)
+  (the #959 consequence)
 
 ## Context and problem statement
 

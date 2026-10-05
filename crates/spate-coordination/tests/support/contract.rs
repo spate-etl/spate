@@ -15,10 +15,11 @@ const EVENT_DEADLINE: Duration = Duration::from_secs(10);
 
 /// Every check below, in order. `advance` moves the store's clock forward:
 /// a test clock for an in-process store, a real sleep for a server.
-pub async fn all<S: CoordinationStore>(store: &S, advance: impl AsyncFn(Duration)) {
+pub async fn all<S: CoordinationStore + Clone>(store: &S, advance: impl AsyncFn(Duration)) {
     delete_contract(store).await;
     create_and_update(store).await;
     revisions_across_delete_and_recreate(store).await;
+    delete_above_a_clones_write(store).await;
     portable_value_boundary(store).await;
     listing(store).await;
     watching(store).await;
@@ -91,9 +92,48 @@ pub async fn create_and_update<S: CoordinationStore>(store: &S) {
     }
 }
 
-/// A key's revisions strictly increase across its whole history: a watch's
-/// delete sits above the last put it reported, and a re-created key above
-/// the delete.
+/// A watch's delete sits above a revision a clone of its handle wrote, whether
+/// or not the watch delivered that revision.
+pub async fn delete_above_a_clones_write<S: CoordinationStore + Clone>(store: &S) {
+    for ks in [Keyspace::Durable, Keyspace::Ephemeral] {
+        let mut watch = store.watch(ks, "cw.").await.unwrap();
+        assert!(snapshot(&mut watch, "empty prefix").await.is_empty());
+        let r1 = won(
+            store.create(ks, "cw.k", b"a".to_vec()).await.unwrap(),
+            "create",
+        );
+        match next_event(&mut watch, "the put of cw.k").await {
+            WatchEvent::Put(entry) if entry.revision == r1 => {}
+            other => panic!("{ks:?}: unexpected event {other:?}"),
+        }
+        let r2 = won(
+            store
+                .clone()
+                .update(ks, "cw.k", b"b".to_vec(), r1)
+                .await
+                .unwrap(),
+            "update through a clone",
+        );
+        assert!(matches!(
+            store.delete(ks, "cw.k", Some(r2)).await.unwrap(),
+            CasOutcome::Won(_)
+        ));
+        let deleted = loop {
+            match next_event(&mut watch, "the delete of cw.k").await {
+                WatchEvent::Put(entry) if entry.revision <= r2 => {}
+                WatchEvent::Delete { key, revision } if key == "cw.k" => break revision,
+                other => panic!("{ks:?}: unexpected event {other:?}"),
+            }
+        };
+        assert!(
+            deleted > r2,
+            "{ks:?}: delete revision {deleted:?} not above the clone's write {r2:?}"
+        );
+    }
+}
+
+/// A watch's delete sits above the last put it reported, and a re-created
+/// key above the delete.
 pub async fn revisions_across_delete_and_recreate<S: CoordinationStore>(store: &S) {
     for ks in [Keyspace::Durable, Keyspace::Ephemeral] {
         let mut watch = store.watch(ks, "rc.").await.unwrap();

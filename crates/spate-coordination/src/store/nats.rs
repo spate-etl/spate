@@ -720,6 +720,30 @@ fn holds_value(headers: &async_nats::HeaderMap) -> bool {
             .is_none_or(|op| op.as_str() == "PUT")
 }
 
+/// Applies one delivered message for `key` to a listing. A value replaces the
+/// key's entry, so a key delivered twice keeps its later message; a marker
+/// drops the key.
+fn fold_listed(
+    live: &mut BTreeMap<String, Entry>,
+    key: &str,
+    headers: Option<&async_nats::HeaderMap>,
+    value: &[u8],
+    revision: u64,
+) {
+    if headers.is_none_or(holds_value) {
+        live.insert(
+            key.to_string(),
+            Entry {
+                key: key.to_string(),
+                value: value.to_vec(),
+                revision: Revision(revision),
+            },
+        );
+    } else {
+        live.remove(key);
+    }
+}
+
 /// The next item of a listing or watch snapshot, or Retryable when none
 /// arrives within `bound`. Such a stream ends only on a delivered message
 /// that reports nothing pending, so messages that expire before delivery
@@ -952,8 +976,6 @@ impl CoordinationStore for NatsStore {
             .await
             .map_err(|e| StoreError::Retryable(format!("listing {filter}: {e}")))?;
         let stall = self.stall_bound();
-        // A key written again while the listing runs is delivered again;
-        // the later message replaces the earlier one.
         let mut live = BTreeMap::new();
         while let Some(message) = next_within(&mut messages, stall, "listing").await? {
             let message =
@@ -965,18 +987,13 @@ impl CoordinationStore for NatsStore {
             if let Some(key) = message.subject.strip_prefix(store.prefix.as_str())
                 && key.starts_with(prefix)
             {
-                if message.headers.as_ref().is_none_or(holds_value) {
-                    live.insert(
-                        key.to_string(),
-                        Entry {
-                            key: key.to_string(),
-                            value: message.payload.to_vec(),
-                            revision: Revision(revision),
-                        },
-                    );
-                } else {
-                    live.remove(key);
-                }
+                fold_listed(
+                    &mut live,
+                    key,
+                    message.headers.as_ref(),
+                    &message.payload,
+                    revision,
+                );
             }
             if pending == 0 {
                 return Ok(live.into_values().collect());
@@ -991,6 +1008,54 @@ impl CoordinationStore for NatsStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn headers(pairs: &[(&str, &str)]) -> async_nats::HeaderMap {
+        let mut headers = async_nats::HeaderMap::new();
+        for (name, value) in pairs {
+            headers.insert(*name, *value);
+        }
+        headers
+    }
+
+    /// A listing keeps each key's latest value and drops a key whose later
+    /// message is any marker the server writes into a bucket, including a
+    /// MaxAge limit marker, which carries no `KV-Operation`.
+    #[test]
+    fn a_listing_folds_values_and_markers() {
+        let markers = [
+            headers(&[("KV-Operation", "DEL")]),
+            headers(&[("KV-Operation", "PURGE"), ("Nats-TTL", "2s")]),
+            headers(&[
+                ("Nats-Marker-Reason", "MaxAge"),
+                ("Nats-TTL", "2s"),
+                ("Nats-Rollup", "sub"),
+            ]),
+            headers(&[("Nats-Marker-Reason", "Remove")]),
+        ];
+        for marker in &markers {
+            let mut live = BTreeMap::new();
+            fold_listed(&mut live, "k", None, b"v", 1);
+            fold_listed(&mut live, "k", Some(marker), b"", 2);
+            assert!(live.is_empty(), "{marker:?}");
+        }
+        let mut live = BTreeMap::new();
+        fold_listed(&mut live, "k", None, b"old", 1);
+        fold_listed(
+            &mut live,
+            "k",
+            Some(&headers(&[("KV-Operation", "PUT")])),
+            b"new",
+            3,
+        );
+        assert_eq!(
+            live.into_values().collect::<Vec<_>>(),
+            [Entry {
+                key: "k".to_string(),
+                value: b"new".to_vec(),
+                revision: Revision(3),
+            }]
+        );
+    }
 
     /// Both spellings parse from YAML text: the single-key map and the tagged
     /// form.

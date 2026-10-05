@@ -381,6 +381,43 @@ fn a_listing_whose_undelivered_tail_expires_ends() {
     });
 }
 
+/// A listing under a dot-terminated prefix filters its consumer to that prefix.
+#[test]
+#[ignore = "needs Docker; run explicitly"]
+fn a_listing_filters_its_consumer_to_the_prefix() {
+    let (_nats, port) = start_nats(None);
+    let rt = runtime();
+    rt.block_on(async {
+        let store = NatsStore::new(nats_config(port, "list-filter"), LEASE).expect("store");
+        for key in ["split.a", "spec.a"] {
+            store
+                .create(Keyspace::Durable, key, b"a".to_vec())
+                .await
+                .expect("create")
+                .won()
+                .expect("created");
+        }
+        store.list(Keyspace::Durable, "split.").await.expect("list");
+        let js = jetstream(port).await;
+        let stream = js
+            .get_stream("KV_spate_coordination_list-filter_state")
+            .await
+            .expect("stream");
+        let mut consumers = stream.consumers();
+        let mut filters = Vec::new();
+        while let Some(info) = consumers.next().await {
+            let info = info.expect("consumer info");
+            if info.config.description.as_deref() == Some("spate listing") {
+                filters.push(info.config.filter_subject);
+            }
+        }
+        assert_eq!(
+            filters,
+            ["$KV.spate_coordination_list-filter_state.split.>"]
+        );
+    });
+}
+
 /// A watch snapshot whose undelivered messages expire ends, with
 /// `SnapshotDone` or as Retryable. Regression for #661.
 #[test]
@@ -795,6 +832,7 @@ async fn trickle(
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     let mut buf = vec![0; (bytes_per_sec / 10).max(1)];
     let mut tick = tokio::time::interval(Duration::from_millis(100));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tick.tick().await;
         let n = from.read(&mut buf).await?;

@@ -124,8 +124,11 @@ pub enum WatchEvent {
     Delete {
         /// The key, relative to the keyspace.
         key: String,
-        /// Revision of the deletion itself, strictly greater than every
-        /// revision the key held before it. Deletes and puts for one key
+        /// Revision of the deletion itself. It is above every revision the
+        /// key held before the deletion that this handle, or a clone of it,
+        /// returned from a create, update, read or listing, or that a watch
+        /// of it delivered. It can sit at or below a revision another handle
+        /// wrote that this handle never saw. Deletes and puts for one key
         /// are only ordered through these revisions: a consumer that
         /// rewrote the key must ignore a delete whose revision is below
         /// its own write's (the stale echo of an older deletion).

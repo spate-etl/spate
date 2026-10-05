@@ -553,13 +553,19 @@ impl CoordinationDriver {
                 deferred += 1;
             }
         }
-        if deferred > 0 || unsent > 0 {
+        if unsent > 0 {
             return Err(SourceError::Client {
                 class: ErrorClass::Retryable,
                 reason: format!(
                     "{deferred} split commit(s) deferred and {unsent} not sent because the stop \
                      began; the positions stay pending"
                 ),
+            });
+        }
+        if deferred > 0 {
+            return Err(SourceError::Client {
+                class: ErrorClass::Retryable,
+                reason: format!("{deferred} split commit(s) deferred; the positions stay pending"),
             });
         }
         Ok(())

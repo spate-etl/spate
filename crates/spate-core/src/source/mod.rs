@@ -143,7 +143,7 @@ pub enum SourceEvent<L> {
 }
 
 /// The run's stop as a source's control plane sees it. It is set from the
-/// moment the stop begins until the runtime starts the final commit.
+/// moment the stop begins until the drain begins, before the final commit.
 ///
 /// A clone reads the same state. The default is never set.
 #[derive(Clone, Debug, Default)]
@@ -165,7 +165,7 @@ impl StopSignal {
         })))
     }
 
-    /// Whether the stop has begun and the final commit has not.
+    /// Whether the stop has begun and the drain has not.
     #[must_use]
     pub fn is_set(&self) -> bool {
         self.0

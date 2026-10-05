@@ -1,5 +1,5 @@
-**A stop ends coordination waits on an unresponsive store** (`spate-core`,
-`spate-coordination`, `spate-s3`)
+**Breaking:** **A stop ends coordination waits on an unresponsive store**
+(`spate-core`, `spate-coordination`, `spate-s3`)
 
 When a stop begins, the S3 source stops waiting on the coordination store and
 the drain starts. A commit tick or revocation commit that is waiting gives up,
@@ -21,8 +21,9 @@ defers the commit of any split. The runtime keeps every position of that commit
 pending and sends it again on the next tick or in the final commit. Each such
 tick counts as `error` in `spate_checkpoint_commits_total`, and
 `ExitReport.final_watermarks` lists a deferred position only after a later
-commit stores it. In previous versions the commit returned `Ok`, the tick
-counted as `ok`, and the exit report could list a position whose commit the
-store had deferred. A test that scripts a `Retryable` commit answer through
-`spate-test`'s scripted coordinator now sees that error from the driver's
-`commit`.
+commit stores it, apart from a partition the source no longer holds. In
+previous versions the commit returned `Ok`, the tick counted as `ok`, and the
+exit report could list a position whose commit the store had deferred. An
+alert on the `error` outcome of that counter sees a store outage. A test that
+scripts a `Retryable` commit answer through `spate-test`'s scripted coordinator
+now sees that error from the driver's `commit`.

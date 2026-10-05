@@ -450,7 +450,7 @@ attempt cap instead.
   each split in turn. A `SplitCoordinator` that wraps another forwards
   `set_stop`; the trait's default ignores it.
 - **`flush_commits` stays the default no-op.** A commit that returns `Ok` is
-  durable in the store. When the store defers a split's commit after a
+  durable in the store for every partition the source still holds. When the store defers a split's commit after a
   transient failure, `driver.commit` still sends the other splits and then
   returns a retryable error, so the runtime keeps every position of that
   commit and sends it again on the next tick or in the final commit. The

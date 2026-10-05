@@ -291,6 +291,9 @@ impl<S: CoordinationStore + Clone> StoreCoordinator<S> {
             match commands.try_send(command) {
                 Ok(()) => break,
                 Err(mpsc::error::TrySendError::Full(returned)) => {
+                    if stopping() {
+                        return Err(stopping_error("nothing was sent"));
+                    }
                     if Instant::now() >= deadline_at {
                         return Err(CoordinationError::new(
                             CoordinationErrorKind::Retryable,
@@ -785,5 +788,73 @@ impl<S: CoordinationStore + Clone> Drop for StoreCoordinator<S> {
                 self.release_direct(&held, self.config.op_timeout);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::memory::MemoryStore;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// A command waiting for room in a full command queue gives up once the
+    /// stop is set, and sends nothing.
+    #[test]
+    fn a_command_waiting_on_a_full_queue_gives_up_at_the_stop() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let config = CoordinationConfig {
+            op_timeout: Duration::from_secs(1),
+            lease_duration: Duration::from_secs(3),
+            drain_deadline: Duration::from_secs(3),
+            ..CoordinationConfig::default()
+        };
+        let store = MemoryStore::new(config.lease_duration);
+        let mut c = StoreCoordinator::new(store, config, rt.handle().clone(), None).unwrap();
+        // A task that never serves its queue stands for one stuck on the store.
+        let (tx, rx) = mpsc::channel(COMMAND_DEPTH);
+        let (_events_tx, events) = std_mpsc::channel();
+        let task = rt.spawn(async move {
+            let _rx = rx;
+            std::future::pending::<()>().await;
+        });
+        let split = SplitId::new("x".to_string()).unwrap();
+        for _ in 0..COMMAND_DEPTH {
+            let (reply, _) = std_mpsc::sync_channel(1);
+            tx.try_send(Command::Commit {
+                split: split.clone(),
+                progress: SplitProgress::new(1, vec![]),
+                reply,
+            })
+            .ok()
+            .unwrap();
+        }
+        c.running = Some(Running {
+            commands: tx,
+            events,
+            task,
+            held: BTreeMap::new(),
+        });
+        let flag = Arc::new(AtomicBool::new(false));
+        c.set_stop(StopSignal::new(Arc::clone(&flag)));
+        // Meant to land while `commit` waits for room; landing earlier, the
+        // check before sending gives the same answer.
+        let setter = {
+            let flag = Arc::clone(&flag);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(200));
+                flag.store(true, Ordering::SeqCst);
+            })
+        };
+        let e = c
+            .commit(&split, &SplitProgress::new(2, vec![]))
+            .expect_err("a full queue takes nothing");
+        setter.join().unwrap();
+        c.running = None;
+        assert_eq!(e.kind, CoordinationErrorKind::Retryable);
+        assert_eq!(e.reason, "the run is stopping; nothing was sent");
     }
 }

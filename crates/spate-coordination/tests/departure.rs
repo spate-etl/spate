@@ -3816,11 +3816,15 @@ fn a_crashed_workers_mid_poll_task_ends_before_crash_returns() {
         let _release = release_tx;
         std::future::pending::<()>().await;
     });
-    entered_rx.recv().unwrap();
+    entered_rx
+        .recv_timeout(support::DEADLINE)
+        .expect("the held task to start");
 
     support::crash(rt, worker);
     crashed.store(true, Ordering::SeqCst);
-    let ran_after_crash = saw_rx.recv().unwrap();
+    let ran_after_crash = saw_rx
+        .recv_timeout(support::DEADLINE)
+        .expect("the held task to report");
     assert!(!ran_after_crash, "the task ran on after crash returned");
 }
 

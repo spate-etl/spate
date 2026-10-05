@@ -12,11 +12,12 @@
 //! # Contract notes for implementors
 //!
 //! - Operations on one handle must be safe to run concurrently.
-//! - [`Revision`]s are store-assigned and **strictly increase per key**
-//!   across its write history (bucket-wide sequences satisfy this). While
-//!   any handle can reach the store, an acknowledged write is never rolled
-//!   back and its revision is never reused, including across a server
-//!   crash or failover.
+//! - [`Revision`]s are store-assigned. The revisions a key's writes return
+//!   **strictly increase** across its write history (bucket-wide sequences
+//!   satisfy this); a watch delete's revision follows the rule on
+//!   [`WatchEvent::Delete`]. While any handle can reach the store, an
+//!   acknowledged write is never rolled back and its revision is never
+//!   reused, including across a server crash or failover.
 //! - `update` on an [`Ephemeral`](Keyspace::Ephemeral) key re-arms its
 //!   TTL; expiry surfaces to watchers as [`WatchEvent::Delete`]. A store
 //!   may judge expiry on its own clock, or each handle may judge it on its
@@ -75,9 +76,10 @@ pub enum WatchMode {
     },
 }
 
-/// Store-assigned version token, strictly increasing per key —
-/// content-independent, so it carries none of the ABA hazards a
-/// content-hash token would.
+/// Store-assigned version token. The revisions a key's writes return
+/// strictly increase, and a watch delete's revision follows the rule on
+/// [`WatchEvent::Delete`]. Content-independent, so it carries none of the
+/// ABA hazards a content-hash token would.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Revision(pub u64);
 
@@ -128,10 +130,14 @@ pub enum WatchEvent {
         /// key held before the deletion that this handle, or a clone of it,
         /// returned from a create, update, read or listing, or that a watch
         /// of it delivered. It can sit at or below a revision another handle
-        /// wrote that this handle never saw. Deletes and puts for one key
-        /// are only ordered through these revisions: a consumer that
-        /// rewrote the key must ignore a delete whose revision is below
-        /// its own write's (the stale echo of an older deletion).
+        /// wrote that this handle never saw. On the DynamoDB store, once
+        /// native TTL collects the key's revision floor or its last item,
+        /// the re-create exception in the `store::dynamodb` docs applies,
+        /// and a delete can sit at or below a revision this handle returned
+        /// before then. Deletes and puts for one key are only ordered
+        /// through these revisions: a consumer that rewrote the key must
+        /// ignore a delete whose revision is below its own write's (the
+        /// stale echo of an older deletion).
         revision: Revision,
     },
     /// The initial snapshot is fully delivered; everything after is live.

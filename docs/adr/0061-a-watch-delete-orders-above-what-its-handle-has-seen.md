@@ -6,7 +6,8 @@ description: "A watch delete orders above every revision of the key its own hand
 
 - **Status:** accepted
 - **Date:** 2026-10-05
-- **Supersedes:** —
+- **Supersedes:** [ADR-0058](0058-a-dynamodb-ephemeral-write-leaves-its-predecessors-removal-revision.md)
+  (the #959 consequence)
 - **Superseded by:** —
 
 ## Context and problem statement
@@ -54,10 +55,10 @@ that may still list the key is in flight. The memory and NATS stores draw
 delete revisions from one sequence per keyspace and still meet the stronger
 order.
 
-The floor read costs one consistent read per vanished key per poller per
-handle. The floor expires a day after the delete, so the contract would still
-need an exception. The stream-scoped rule leaves the coordinator's comparisons
-with own writes, listings and earlier streams without a contract. A polled test
+The floor read costs one consistent read per vanished key per poller per handle.
+The floor expires a day after the delete, so it leaves the same exception as the
+chosen option. The stream-scoped rule leaves the coordinator's comparisons with
+own writes, listings and earlier streams without a contract. A polled test
 double that ordered deletes only above what it delivered lost deletes this way
 (#805).
 
@@ -72,6 +73,11 @@ double that ordered deletes only above what it delivered lost deletes this way
   ADR-0058 declined.
 - Neutral, because the memory and NATS stores still meet the stronger order,
   and a custom store that met it needs no change.
+- Neutral, because once native TTL collects a key's floor or its last item, the
+  exception in
+  [ADR-0057](0057-a-deleted-dynamodb-ephemeral-key-leaves-a-revision-floor.md)
+  still applies, and a DynamoDB watch can report a delete at or below a
+  revision its handle returned before then.
 
 ### Confirmation
 
@@ -89,8 +95,13 @@ the conformance suite, and the three `a_polled_delete_*` tests in
 `a_snapshot_overtaken_by_an_own_write_still_orders_another_watchs_delete`,
 `a_key_a_watch_holds_outlives_failed_polls_with_what_its_handle_saw`,
 `a_poll_read_spanning_two_ttls_still_orders_the_delete`,
-`a_gone_key_no_watch_holds_is_evicted` and
-`a_failed_poll_read_stops_holding_back_eviction` pin the DynamoDB store.
+`a_gone_key_no_watch_holds_is_evicted`,
+`a_failed_poll_read_stops_holding_back_eviction`,
+`an_overtaken_get_during_a_spanning_poll_read_still_orders_the_delete`,
+`a_key_a_second_watch_holds_outlives_the_first_dropping`,
+`a_renewed_gone_key_is_evicted`,
+`a_key_an_overtaken_snapshot_delivered_stays_held` and
+`eviction_judges_against_the_oldest_read_in_flight` pin the DynamoDB store.
 
 ## More information
 

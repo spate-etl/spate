@@ -2269,3 +2269,144 @@ async fn a_failed_poll_read_stops_holding_back_eviction() {
     let observed = a.inner.observed();
     assert!(!observed.tracks("j"), "{observed:?}");
 }
+
+/// A poll read in flight keeps a key whose high-water an overtaken `get`
+/// raised after the read began, so the watch it starts reports the vanish
+/// delete above that `get`'s revision. Regression for #959.
+#[tokio::test(start_paused = true)]
+async fn an_overtaken_get_during_a_spanning_poll_read_still_orders_the_delete() {
+    let wrapped = Wrapped::new();
+    wrapped.table.freeze_wall(10_000);
+    let clock = TestClock::frozen();
+    let (a, b) = (handle_over(&wrapped, &clock), handle_over(&wrapped, &clock));
+    let mut evictor = a.watch(E, "x").await.unwrap();
+    assert!(snapshot(&mut evictor).await.is_empty());
+    let r = won(b.create(E, "k", b"b".to_vec()).await.unwrap());
+    assert_eq!(a.get(E, "k").await.unwrap().unwrap().revision, r);
+    // An overtaken get: it starts now and reads only once released.
+    wrapped.hold_read.store(true, Ordering::SeqCst);
+    let reader = a.clone();
+    let reading = tokio::spawn(async move { reader.get(E, "k").await });
+    wrapped.read_held.notified().await;
+    won(b.delete(E, "k", Some(r)).await.unwrap());
+    assert!(a.get(E, "k").await.unwrap().is_none());
+    let stale = won(b.create(E, "k", b"b".to_vec()).await.unwrap());
+    // A poll read that lists `stale`, then stays in flight.
+    let mut gate = wrapped.table.hold_next_query();
+    let watcher = a.clone();
+    let watching = tokio::spawn(async move { watcher.watch(E, "").await });
+    gate.reached().await;
+    let theirs = won(b.update(E, "k", b"b".to_vec(), stale).await.unwrap());
+    wrapped.release_read.notify_one();
+    let read = reading.await.unwrap().unwrap().expect("k").revision;
+    assert_eq!(read, theirs);
+    won(b.delete(E, "k", Some(theirs)).await.unwrap());
+    clock.advance(TTL * 2 + Duration::from_millis(1));
+    tokio::time::sleep(POLL * 3).await;
+    gate.release();
+    let mut watch = watching.await.unwrap().unwrap();
+    assert_eq!(snapshot(&mut watch).await[0].revision, stale);
+    let deleted = delete_of(&mut watch, "k", theirs).await;
+    assert!(
+        deleted > read,
+        "delete {deleted:?}; handle read {read:?} before the removal (stale {stale:?})"
+    );
+}
+
+/// A key a second watch of the handle still holds keeps its record through
+/// failed polls after the first watch on it drops. Regression for #959.
+#[tokio::test(start_paused = true)]
+async fn a_key_a_second_watch_holds_outlives_the_first_dropping() {
+    let wrapped = Wrapped::new();
+    let (clock, a, b, mut watch, r) = watching_k(&wrapped).await;
+    let mut on_k = a.watch(E, "k").await.unwrap();
+    assert_eq!(snapshot(&mut on_k).await.len(), 1);
+    drop(on_k);
+    tokio::time::sleep(POLL * 2).await;
+    wrapped.fail_query.store(true, Ordering::SeqCst);
+    let own = won(a.update(E, "k", b"a".to_vec(), r).await.unwrap());
+    let theirs = won(b.update(E, "k", b"b".to_vec(), own).await.unwrap());
+    assert_eq!(a.get(E, "k").await.unwrap().unwrap().revision, theirs);
+    won(b.delete(E, "k", Some(theirs)).await.unwrap());
+    assert!(a.get(E, "k").await.unwrap().is_none());
+    clock.advance(TTL * 2 + Duration::from_millis(1));
+    tokio::time::sleep(POLL * 3).await;
+    wrapped.fail_query.store(false, Ordering::SeqCst);
+    let deleted = delete_of(&mut watch, "k", r).await;
+    assert!(
+        deleted > theirs,
+        "delete {deleted:?}; handle read {theirs:?}"
+    );
+}
+
+/// A key a watch delivered twice is evicted two TTLs after the watch
+/// reported its delete.
+#[tokio::test(start_paused = true)]
+async fn a_renewed_gone_key_is_evicted() {
+    let table = FakeTable::new();
+    table.freeze_wall(10_000);
+    let clock = TestClock::frozen();
+    let (a, b) = (handle(&table, &clock), handle(&table, &clock));
+    let k = won(b.create(E, "k", b"b".to_vec()).await.unwrap());
+    let mut on_k = a.watch(E, "k").await.unwrap();
+    assert_eq!(snapshot(&mut on_k).await.len(), 1);
+    let renewed = won(b.update(E, "k", b"c".to_vec(), k).await.unwrap());
+    match next(&mut on_k).await {
+        WatchEvent::Put(e) => assert_eq!(e.revision, renewed),
+        other => panic!("{other:?}"),
+    }
+    won(b.delete(E, "k", Some(renewed)).await.unwrap());
+    delete_of(&mut on_k, "k", renewed).await;
+    clock.advance(TTL * 2 + Duration::from_millis(1));
+    tokio::time::sleep(POLL * 3).await;
+    let observed = a.inner.observed();
+    assert!(!observed.tracks("k"), "{observed:?}");
+}
+
+/// A key only a new watch's overtaken first read delivered stays held
+/// through two TTLs of failed polls. Regression for #959.
+#[tokio::test(start_paused = true)]
+async fn a_key_an_overtaken_snapshot_delivered_stays_held() {
+    let wrapped = Wrapped::new();
+    wrapped.table.freeze_wall(10_000);
+    let clock = TestClock::frozen();
+    let (a, b) = (handle_over(&wrapped, &clock), handle_over(&wrapped, &clock));
+    let mut evictor = a.watch(E, "x").await.unwrap();
+    assert!(snapshot(&mut evictor).await.is_empty());
+    let r = won(b.create(E, "k", b"b".to_vec()).await.unwrap());
+    wrapped.hold_read.store(true, Ordering::SeqCst);
+    let watcher = a.clone();
+    let watching = tokio::spawn(async move { watcher.watch(E, "k").await });
+    wrapped.read_held.notified().await;
+    let own = won(a.update(E, "k", b"a".to_vec(), r).await.unwrap());
+    let theirs = won(b.update(E, "k", b"b".to_vec(), own).await.unwrap());
+    wrapped.release_read.notify_one();
+    let mut watch = watching.await.unwrap().unwrap();
+    assert_eq!(snapshot(&mut watch).await[0].revision, theirs);
+    wrapped.fail_query.store(true, Ordering::SeqCst);
+    let later = won(b.update(E, "k", b"b".to_vec(), theirs).await.unwrap());
+    assert_eq!(a.get(E, "k").await.unwrap().unwrap().revision, later);
+    won(b.delete(E, "k", Some(later)).await.unwrap());
+    assert!(a.get(E, "k").await.unwrap().is_none());
+    clock.advance(TTL * 2 + Duration::from_millis(1));
+    tokio::time::sleep(POLL * 3).await;
+    wrapped.fail_query.store(false, Ordering::SeqCst);
+    let deleted = delete_of(&mut watch, "k", theirs).await;
+    assert!(deleted > later, "delete {deleted:?}; handle read {later:?}");
+}
+
+/// Eviction keeps a key whose sequence lies after the oldest poll read in
+/// flight, while a newer read is also in flight.
+#[tokio::test(start_paused = true)]
+async fn eviction_judges_against_the_oldest_read_in_flight() {
+    let mut observed = super::observed::Observed::new(TTL);
+    let t = tokio::time::Instant::now();
+    let older = observed.begin_read();
+    observed.own_write("k", 5, t);
+    let s = observed.seq();
+    observed.observe("k", None, s, t);
+    let newer = observed.begin_read();
+    assert!(newer > older);
+    observed.evict(t + TTL * 2 + Duration::from_millis(1));
+    assert!(observed.tracks("k"), "{observed:?}");
+}

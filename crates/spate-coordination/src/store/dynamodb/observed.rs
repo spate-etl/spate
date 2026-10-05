@@ -22,6 +22,8 @@ struct Obs {
     since: Instant,
     /// The highest revision read or written.
     hw: u64,
+    /// The sequence taken when a read last raised `hw`.
+    raised: u64,
     /// The highest revision of a delete any watch of this handle reported.
     emitted: u64,
     /// Bumped by every own write, emitted delete, and observation that changed `v`.
@@ -30,7 +32,7 @@ struct Obs {
     expired: bool,
     /// The highest floor an own floor raise recorded.
     floor: u64,
-    /// How many watches of this handle hold a delivered revision of the key.
+    /// How many watch pollers of this handle hold a delivered revision of the key.
     held: u32,
     touched: Instant,
 }
@@ -87,6 +89,7 @@ impl Observed {
             v: None,
             since: now,
             hw: 0,
+            raised: 0,
             emitted: 0,
             seq: 0,
             expired: false,
@@ -105,6 +108,7 @@ impl Observed {
             v: Some(v),
             since: now,
             hw: o.hw.max(v),
+            raised: o.raised,
             emitted: o.emitted,
             seq,
             expired: false,
@@ -170,11 +174,16 @@ impl Observed {
 
     /// A read returned the key at `v`.
     pub(super) fn saw(&mut self, key: &str, v: u64, now: Instant) {
+        let next = self.seq + 1;
         let o = self.entry(key, now);
-        o.hw = o.hw.max(v);
+        if v > o.hw {
+            o.hw = v;
+            o.raised = next;
+            self.seq = next;
+        }
     }
 
-    /// A watch delivered the key and holds it until [`release`](Self::release).
+    /// A watch poller delivered the key and holds it until [`release`](Self::release).
     pub(super) fn hold(&mut self, key: &str, now: Instant) {
         self.entry(key, now).held += 1;
     }
@@ -217,7 +226,7 @@ impl Observed {
         let oldest = self.reading.keys().next().copied();
         self.keys.retain(|_, o| {
             o.held > 0
-                || oldest.is_some_and(|s0| o.seq > s0)
+                || oldest.is_some_and(|s0| o.seq.max(o.raised) > s0)
                 || !((o.v.is_none() || o.expired) && now >= o.touched + idle)
         });
     }

@@ -3792,6 +3792,65 @@ fn a_restart_over_a_reported_splits_leftover_lease_keeps_the_last_attempt() {
     );
 }
 
+/// A task still mid-poll when `support::crash` begins has finished, and every
+/// thread of its runtime has exited, before `crash` returns. Regression for #967.
+#[test]
+fn a_crashed_workers_mid_poll_task_ends_before_crash_returns() {
+    let clock = TestClock::frozen();
+    let started = Arc::new(AtomicU64::new(0));
+    let stopped = Arc::new(AtomicU64::new(0));
+    // `support::runtime()` with thread hooks; the test needs its two workers.
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .on_thread_start({
+            let started = started.clone();
+            move || {
+                started.fetch_add(1, Ordering::SeqCst);
+            }
+        })
+        .on_thread_stop({
+            let stopped = stopped.clone();
+            move || {
+                stopped.fetch_add(1, Ordering::SeqCst);
+            }
+        })
+        .build()
+        .expect("test runtime");
+    let (worker, _) = claimed_clocked(&rt, support::store(), &clock, "worker-a", &["r0"]);
+    let crashed = Arc::new(AtomicBool::new(false));
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let (saw_tx, saw_rx) = std::sync::mpsc::channel();
+    // Holds its worker thread inside one poll until shutdown drops the task below.
+    rt.spawn({
+        let crashed = crashed.clone();
+        async move {
+            entered_tx.send(()).unwrap();
+            let _ = release_rx.recv();
+            saw_tx.send(crashed.load(Ordering::SeqCst)).unwrap();
+        }
+    });
+    rt.spawn(async move {
+        let _release = release_tx;
+        std::future::pending::<()>().await;
+    });
+    entered_rx
+        .recv_timeout(support::DEADLINE)
+        .expect("the held task to start");
+
+    support::crash(rt, worker);
+    let live = started.load(Ordering::SeqCst) - stopped.load(Ordering::SeqCst);
+    crashed.store(true, Ordering::SeqCst);
+    let ran_after_crash = saw_rx
+        .recv_timeout(support::DEADLINE)
+        .expect("the held task to report");
+    assert!(
+        live == 0 && !ran_after_crash,
+        "after crash returned: {live} runtime threads live; held task ran on {ran_after_crash}"
+    );
+}
+
 /// Leases long enough that no renewal runs during a stop test; `op_timeout`
 /// is two seconds, so a command waits up to six.
 const STOP_LEASE: Duration = Duration::from_secs(15);

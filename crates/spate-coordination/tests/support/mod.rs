@@ -693,9 +693,16 @@ pub const QUIET_ROUNDS: usize = 4;
 /// Simulate a crash: the worker's runtime is torn down (its task dies
 /// mid-heartbeat) and the handle is forgotten so no drop-time release
 /// runs. Its leases must expire like a real dead process's.
+///
+/// Returns once every runtime thread has exited, so the worker writes nothing
+/// afterwards. Panics when called from an async context.
 pub fn crash<C: SplitCoordinator + 'static>(runtime: tokio::runtime::Runtime, coordinator: C) {
-    runtime.shutdown_background();
+    // Forget first: if the drop below panics, an unforgotten coordinator's
+    // own drop runs `block_on` during the unwind and aborts the process.
     std::mem::forget(coordinator);
+    // Dropping waits for the threads; `shutdown_background` and
+    // `shutdown_timeout` return while a task may still be mid-poll.
+    drop(runtime);
 }
 
 /// Seeding traffic a [`CountingStore`] observed.

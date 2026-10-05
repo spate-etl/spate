@@ -919,7 +919,7 @@ fn a_lease_renewal_whose_reply_timed_out_keeps_the_split() {
 /// A split whose lease renewal applied with its reply lost to `op_timeout`,
 /// and whose every renewal after the adoption fails, self-fences between one
 /// and one and a half leases after the lost write, with the expiry hidden
-/// from the watch.
+/// from the watch. The bound assumes a renewal confirmed before the fault.
 /// Regression for #886.
 #[test]
 fn a_self_fence_after_an_adopted_renewal_counts_from_the_lost_write() {
@@ -962,7 +962,19 @@ fn a_self_fence_after_an_adopted_renewal_counts_from_the_lost_write() {
     store
         .lease_refuse_after_adopt
         .store(true, Ordering::Release);
-    store.lease_maybe_land.store(true, Ordering::Release);
+    {
+        let (store, updates) = (store.clone(), AtomicU64::new(0));
+        tap.on_write(move |w| {
+            if w.op == support::tap::Op::Update
+                && w.ks == Keyspace::Ephemeral
+                && w.key == "split.r0"
+                && updates.fetch_add(1, Ordering::AcqRel) == 1
+            {
+                store.lease_maybe_land.store(true, Ordering::Release);
+            }
+            None
+        });
+    }
     // With no listing in the window, the hide stands for a view that lags
     // the lease's expiry.
     tap.hide(|ks, key| ks == Keyspace::Ephemeral && key == "split.r0");
@@ -1014,6 +1026,7 @@ fn a_self_fence_after_an_adopted_renewal_counts_from_the_lost_write() {
 /// A renewal that failed with nothing written, then one that applied with its
 /// reply lost and was adopted, with every later renewal failing: the split
 /// self-fences between one and four thirds of a lease after the first failure.
+/// The bound assumes a renewal confirmed before the first failure.
 #[test]
 fn a_self_fence_after_an_adopted_renewal_counts_from_the_first_failed_one() {
     let rt = runtime();
@@ -1045,8 +1058,13 @@ fn a_self_fence_after_an_adopted_renewal_counts_from_the_first_failed_one() {
     let first_failed: Arc<Mutex<Option<tokio::time::Instant>>> = Arc::default();
     {
         let (first_failed, store, clock) = (first_failed.clone(), store.clone(), clock.clone());
+        let updates = AtomicU64::new(0);
         tap.on_write(move |w| {
-            if w.op != support::tap::Op::Update || w.key != "split.r0" {
+            if w.op != support::tap::Op::Update
+                || w.ks != Keyspace::Ephemeral
+                || w.key != "split.r0"
+                || updates.fetch_add(1, Ordering::AcqRel) == 0
+            {
                 return None;
             }
             let mut first_failed = first_failed.lock().unwrap();
@@ -1096,7 +1114,8 @@ fn a_self_fence_after_an_adopted_renewal_counts_from_the_first_failed_one() {
 }
 
 /// A renewal that failed with nothing written, followed by renewals that won,
-/// does not count toward the self-fence of a renewal adopted later.
+/// does not count toward the self-fence of a renewal adopted later. It assumes
+/// a renewal confirmed before the failure, so the renewals after it win.
 #[test]
 fn a_self_fence_after_an_adopted_renewal_ignores_a_failure_before_a_confirmed_one() {
     let rt = runtime();
@@ -1124,10 +1143,12 @@ fn a_self_fence_after_an_adopted_renewal_ignores_a_failure_before_a_confirmed_on
 
     let refuse = Arc::new(AtomicBool::new(true));
     {
-        let refuse = refuse.clone();
+        let (refuse, updates) = (refuse.clone(), AtomicU64::new(0));
         tap.on_write(move |w| {
             (w.op == support::tap::Op::Update
+                && w.ks == Keyspace::Ephemeral
                 && w.key == "split.r0"
+                && updates.fetch_add(1, Ordering::AcqRel) == 1
                 && refuse.swap(false, Ordering::AcqRel))
             .then(|| StoreError::Retryable("injected: renewal failed unwritten".into()))
         });

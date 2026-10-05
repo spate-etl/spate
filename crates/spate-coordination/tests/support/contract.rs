@@ -258,6 +258,19 @@ pub async fn listing<S: CoordinationStore>(store: &S) {
         keys(store.list(Keyspace::Ephemeral, "ls.").await.unwrap()),
         ["ls.e"]
     );
+    assert_eq!(
+        keys(store.list(Keyspace::Durable, "ls.a").await.unwrap()),
+        ["ls.a"],
+        "a prefix ending mid-token"
+    );
+    assert!(
+        store
+            .list(Keyspace::Durable, "none.")
+            .await
+            .unwrap()
+            .is_empty(),
+        "a prefix with no live key"
+    );
     assert!(matches!(
         store.delete(Keyspace::Durable, "ls.a", None).await.unwrap(),
         CasOutcome::Won(_)

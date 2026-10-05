@@ -1,7 +1,7 @@
 //! What one handle has observed of each ephemeral key, and the expiry rule
 //! judged from it on the handle's own clock.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 use tokio::time::Instant;
 
@@ -10,6 +10,8 @@ pub(super) struct Observed {
     ttl: Duration,
     seq: u64,
     keys: HashMap<String, Obs>,
+    /// The start sequence of each poll read in flight, with its count.
+    reading: BTreeMap<u64, usize>,
 }
 
 #[derive(Debug)]
@@ -28,6 +30,8 @@ struct Obs {
     expired: bool,
     /// The highest floor an own floor raise recorded.
     floor: u64,
+    /// How many watches of this handle hold a delivered revision of the key.
+    held: u32,
     touched: Instant,
 }
 
@@ -37,12 +41,30 @@ impl Observed {
             ttl,
             seq: 0,
             keys: HashMap::new(),
+            reading: BTreeMap::new(),
         }
     }
 
     /// The sequence a read takes before it starts.
     pub(super) fn seq(&self) -> u64 {
         self.seq
+    }
+
+    /// Registers a poll read starting now and returns its start sequence.
+    /// Keys the read may judge stay recorded until
+    /// [`end_read`](Self::end_read).
+    pub(super) fn begin_read(&mut self) -> u64 {
+        *self.reading.entry(self.seq).or_default() += 1;
+        self.seq
+    }
+
+    pub(super) fn end_read(&mut self, s0: u64) {
+        if let Some(n) = self.reading.get_mut(&s0) {
+            *n -= 1;
+            if *n == 0 {
+                self.reading.remove(&s0);
+            }
+        }
     }
 
     /// Whether an own write or delete, an emitted delete, or a read that
@@ -69,6 +91,7 @@ impl Observed {
             seq: 0,
             expired: false,
             floor: 0,
+            held: 0,
             touched: now,
         })
     }
@@ -86,6 +109,7 @@ impl Observed {
             seq,
             expired: false,
             floor: o.floor,
+            held: o.held,
             touched: now,
         };
     }
@@ -150,6 +174,17 @@ impl Observed {
         o.hw = o.hw.max(v);
     }
 
+    /// A watch delivered the key and holds it until [`release`](Self::release).
+    pub(super) fn hold(&mut self, key: &str, now: Instant) {
+        self.entry(key, now).held += 1;
+    }
+
+    pub(super) fn release(&mut self, key: &str) {
+        if let Some(o) = self.keys.get_mut(key) {
+            o.held = o.held.saturating_sub(1);
+        }
+    }
+
     /// The revision of a delete emitted now: one above `delivered` and every
     /// revision this handle read or wrote for the key.
     pub(super) fn emit_delete(
@@ -170,10 +205,20 @@ impl Observed {
         d
     }
 
-    /// Drops keys that are gone or expired and untouched for two TTLs.
+    #[cfg(test)]
+    pub(super) fn tracks(&self, key: &str) -> bool {
+        self.keys.contains_key(key)
+    }
+
+    /// Drops keys that are gone or expired and untouched for two TTLs,
+    /// unless a watch holds them or a poll read in flight may judge them.
     pub(super) fn evict(&mut self, now: Instant) {
         let idle = self.ttl * 2;
-        self.keys
-            .retain(|_, o| !((o.v.is_none() || o.expired) && now >= o.touched + idle));
+        let oldest = self.reading.keys().next().copied();
+        self.keys.retain(|_, o| {
+            o.held > 0
+                || oldest.is_some_and(|s0| o.seq > s0)
+                || !((o.v.is_none() || o.expired) && now >= o.touched + idle)
+        });
     }
 }

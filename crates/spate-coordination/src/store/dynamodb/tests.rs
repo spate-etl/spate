@@ -532,7 +532,7 @@ async fn a_takeover_is_conditional_on_the_expired_version() {
 /// the next floor write, renew a key before each removal, hold the next
 /// removal's reply past the op timeout once it has landed, fail the create
 /// that follows a floor answer, hold the reply of the next create that
-/// lands, or hold the next get or query before it reads.
+/// lands, hold the next get or query before it reads, or fail every query.
 #[derive(Debug)]
 struct Wrapped {
     table: FakeTable,
@@ -547,6 +547,7 @@ struct Wrapped {
     created: Notify,
     release_created: Notify,
     hold_read: AtomicBool,
+    fail_query: AtomicBool,
     read_held: Notify,
     release_read: Notify,
 }
@@ -565,6 +566,7 @@ impl Wrapped {
             created: Notify::new(),
             release_created: Notify::new(),
             hold_read: AtomicBool::new(false),
+            fail_query: AtomicBool::new(false),
             read_held: Notify::new(),
             release_read: Notify::new(),
         })
@@ -664,6 +666,9 @@ impl Table for Wrapped {
 
     fn query(&self, query: Query) -> TableFuture<'_, Result<Page, StoreError>> {
         Box::pin(async move {
+            if self.fail_query.load(Ordering::SeqCst) {
+                return Err(StoreError::Retryable("injected query failure".into()));
+            }
             if self.hold_read.swap(false, Ordering::SeqCst) {
                 self.read_held.notify_one();
                 self.release_read.notified().await;
@@ -2156,4 +2161,111 @@ async fn a_snapshot_overtaken_by_an_own_write_still_orders_another_watchs_delete
         deleted > delivered,
         "delete {deleted:?}; the handle delivered {delivered:?}"
     );
+}
+
+/// A key a watch still holds keeps what its handle wrote and read through
+/// two TTLs of failed polls, so the vanish delete sits above both.
+/// Regression for #959.
+#[tokio::test(start_paused = true)]
+async fn a_key_a_watch_holds_outlives_failed_polls_with_what_its_handle_saw() {
+    let wrapped = Wrapped::new();
+    let (clock, a, b, mut watch, r) = watching_k(&wrapped).await;
+    wrapped.fail_query.store(true, Ordering::SeqCst);
+    let own = won(a.update(E, "k", b"a".to_vec(), r).await.unwrap());
+    let theirs = won(b.update(E, "k", b"b".to_vec(), own).await.unwrap());
+    assert_eq!(a.get(E, "k").await.unwrap().unwrap().revision, theirs);
+    won(b.delete(E, "k", Some(theirs)).await.unwrap());
+    assert!(a.get(E, "k").await.unwrap().is_none());
+    clock.advance(TTL * 2 + Duration::from_millis(1));
+    tokio::time::sleep(POLL * 3).await;
+    wrapped.fail_query.store(false, Ordering::SeqCst);
+    let deleted = delete_of(&mut watch, "k", r).await;
+    assert!(
+        deleted > theirs,
+        "delete {deleted:?}; handle read {theirs:?} before the removal"
+    );
+}
+
+/// A gone key is evicted two TTLs after a watch reported its delete, or
+/// after the watch that held it dropped.
+#[tokio::test(start_paused = true)]
+async fn a_gone_key_no_watch_holds_is_evicted() {
+    let table = FakeTable::new();
+    table.freeze_wall(10_000);
+    let clock = TestClock::frozen();
+    let (a, b) = (handle(&table, &clock), handle(&table, &clock));
+    let mut evictor = a.watch(E, "x").await.unwrap();
+    assert!(snapshot(&mut evictor).await.is_empty());
+    let j = won(b.create(E, "j", b"b".to_vec()).await.unwrap());
+    let k = won(b.create(E, "k", b"b".to_vec()).await.unwrap());
+    let mut on_j = a.watch(E, "j").await.unwrap();
+    let mut on_k = a.watch(E, "k").await.unwrap();
+    assert_eq!(snapshot(&mut on_j).await.len(), 1);
+    assert_eq!(snapshot(&mut on_k).await.len(), 1);
+    won(b.delete(E, "k", Some(k)).await.unwrap());
+    delete_of(&mut on_k, "k", k).await;
+    drop(on_j);
+    won(b.delete(E, "j", Some(j)).await.unwrap());
+    assert!(a.get(E, "j").await.unwrap().is_none());
+    clock.advance(TTL * 2 + Duration::from_millis(1));
+    tokio::time::sleep(POLL * 3).await;
+    let observed = a.inner.observed();
+    assert!(
+        !observed.tracks("j") && !observed.tracks("k"),
+        "{observed:?}"
+    );
+}
+
+/// A poll read in flight while another poller evicts keeps the keys it may
+/// still judge, so the watch it starts reports a vanish delete above a
+/// revision its handle read before the removal. Regression for #959.
+#[tokio::test(start_paused = true)]
+async fn a_poll_read_spanning_two_ttls_still_orders_the_delete() {
+    let table = FakeTable::new();
+    table.freeze_wall(10_000);
+    let clock = TestClock::frozen();
+    let (a, b) = (handle(&table, &clock), handle(&table, &clock));
+    let mut evictor = a.watch(E, "x").await.unwrap();
+    assert!(snapshot(&mut evictor).await.is_empty());
+    let r = won(b.create(E, "k", b"b".to_vec()).await.unwrap());
+    let mut gate = table.hold_next_query();
+    let watcher = a.clone();
+    let watching = tokio::spawn(async move { watcher.watch(E, "").await });
+    gate.reached().await;
+    let theirs = won(b.update(E, "k", b"b".to_vec(), r).await.unwrap());
+    assert_eq!(a.get(E, "k").await.unwrap().unwrap().revision, theirs);
+    won(b.delete(E, "k", Some(theirs)).await.unwrap());
+    assert!(a.get(E, "k").await.unwrap().is_none());
+    clock.advance(TTL * 2 + Duration::from_millis(1));
+    tokio::time::sleep(POLL * 3).await;
+    gate.release();
+    let mut watch = watching.await.unwrap().unwrap();
+    snapshot(&mut watch).await;
+    let deleted = delete_of(&mut watch, "k", theirs).await;
+    assert!(
+        deleted > theirs,
+        "delete {deleted:?}; handle read {theirs:?} before the removal"
+    );
+}
+
+/// A poll read that failed no longer keeps keys from eviction.
+#[tokio::test(start_paused = true)]
+async fn a_failed_poll_read_stops_holding_back_eviction() {
+    let wrapped = Wrapped::new();
+    wrapped.table.freeze_wall(10_000);
+    let clock = TestClock::frozen();
+    let (a, b) = (handle_over(&wrapped, &clock), handle_over(&wrapped, &clock));
+    let mut evictor = a.watch(E, "x").await.unwrap();
+    assert!(snapshot(&mut evictor).await.is_empty());
+    wrapped.fail_query.store(true, Ordering::SeqCst);
+    tokio::time::sleep(POLL * 2).await;
+    wrapped.fail_query.store(false, Ordering::SeqCst);
+    let j = won(b.create(E, "j", b"b".to_vec()).await.unwrap());
+    assert_eq!(a.get(E, "j").await.unwrap().unwrap().revision, j);
+    won(b.delete(E, "j", Some(j)).await.unwrap());
+    assert!(a.get(E, "j").await.unwrap().is_none());
+    clock.advance(TTL * 2 + Duration::from_millis(1));
+    tokio::time::sleep(POLL * 3).await;
+    let observed = a.inner.observed();
+    assert!(!observed.tracks("j"), "{observed:?}");
 }

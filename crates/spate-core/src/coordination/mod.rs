@@ -618,6 +618,15 @@ pub trait SplitCoordinator: Send {
     /// whenever a later `poll` would return something.
     fn set_waker(&mut self, waker: ControlWaker);
 
+    /// Hand the backend the run's stop. While it is set, a command waiting on
+    /// the store may return [`Retryable`](CoordinationErrorKind::Retryable)
+    /// early and still land afterwards; [`commit_final`](Self::commit_final)
+    /// ignores it. A coordinator that wraps another forwards it. The default
+    /// ignores it.
+    fn set_stop(&mut self, stop: crate::source::StopSignal) {
+        let _ = stop;
+    }
+
     /// Ownership and job-state changes since the last call. **Must not
     /// block**; return whatever is pending, including nothing. The driver
     /// parks on the [`ControlWaker`] instead.

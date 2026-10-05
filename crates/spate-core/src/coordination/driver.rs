@@ -294,6 +294,7 @@ pub struct CoordinationDriver {
     next_partition: u32,
     /// Lane ids are minted once per tenancy and never reused.
     next_lane: u32,
+    stop: crate::source::StopSignal,
 }
 
 impl fmt::Debug for CoordinationDriver {
@@ -333,6 +334,7 @@ impl CoordinationDriver {
             started: false,
             next_partition: 0,
             next_lane: 0,
+            stop: crate::source::StopSignal::default(),
         }
     }
 
@@ -358,6 +360,13 @@ impl CoordinationDriver {
         self.coordinator.start(planner).map_err(as_source_error)?;
         self.started = true;
         Ok(SourceEvent::LanesAssigned(Vec::new()))
+    }
+
+    /// Hand the run's stop to this driver and its coordinator. Call from
+    /// `Source::open` with [`SourceCtx::stop`](crate::source::SourceCtx::stop).
+    pub fn set_stop(&mut self, stop: crate::source::StopSignal) {
+        self.coordinator.set_stop(stop.clone());
+        self.stop = stop;
     }
 
     /// Coordinated `poll_events` body: surfaces at most one controller
@@ -518,17 +527,51 @@ impl CoordinationDriver {
 
     /// Coordinated `commit` body: per-split fenced commits keyed by the
     /// tenancy partition ids the driver minted.
+    ///
+    /// Returns a retryable error when a split's commit was deferred or the
+    /// stop began before every split was sent; the runtime then keeps every
+    /// position of the call pending.
     pub fn commit<S: SplitSource>(
         &mut self,
         source: &mut S,
         watermarks: &[(PartitionId, i64)],
     ) -> Result<(), SourceError> {
-        for &(partition, watermark) in watermarks {
+        let mut deferred = 0usize;
+        let mut unsent = 0usize;
+        for (i, &(partition, watermark)) in watermarks.iter().enumerate() {
+            if self.stop.is_set() {
+                unsent = watermarks.len() - i;
+                break;
+            }
             let Some(split) = self.commit_target(partition) else {
                 continue;
             };
             let progress = source.encode_commit(&split, watermark)?;
-            self.commit_progress(source, partition, &split, progress)?;
+            if self.commit_progress(source, partition, &split, progress)?
+                == CommitDisposition::Deferred
+            {
+                deferred += 1;
+            }
+        }
+        if unsent > 0 || (deferred > 0 && self.stop.is_set()) {
+            let not_sent = if unsent > 0 {
+                format!(" and {unsent} not sent")
+            } else {
+                String::new()
+            };
+            return Err(SourceError::Client {
+                class: ErrorClass::Retryable,
+                reason: format!(
+                    "{deferred} split commit(s) deferred{not_sent} because the stop began; the \
+                     positions stay pending"
+                ),
+            });
+        }
+        if deferred > 0 {
+            return Err(SourceError::Client {
+                class: ErrorClass::Retryable,
+                reason: format!("{deferred} split commit(s) deferred; the positions stay pending"),
+            });
         }
         Ok(())
     }
@@ -971,7 +1014,7 @@ impl CoordinationDriver {
         for partition in candidates {
             let split = self.tenancies[&partition].split.id.clone();
             if let Some(progress) = source.sweep(&split)? {
-                self.commit_progress(source, partition, &split, progress)?;
+                let _ = self.commit_progress(source, partition, &split, progress)?;
             }
         }
         Ok(())
@@ -1090,11 +1133,11 @@ impl CoordinationDriver {
         partition: PartitionId,
         split: &SplitId,
         progress: SplitProgress,
-    ) -> Result<(), SourceError> {
+    ) -> Result<CommitDisposition, SourceError> {
         let progress = self.strip_drain_completion(partition, split, progress);
         let disposition = self.try_commit(source, partition, split, &progress)?;
         self.settle_commit(source, partition, progress, disposition);
-        Ok(())
+        Ok(disposition)
     }
 
     /// Fold a live tenancy's commit outcome into its state.
@@ -1119,13 +1162,12 @@ impl CoordinationDriver {
             // Fenced: already retired inside `classify`.
             CommitDisposition::Fenced => {}
             CommitDisposition::Deferred => {
-                // Nothing goes out again on a bare tick, since `commit`
-                // issues only the watermarks it is handed. This progress
-                // rides the split's next commit, which merges past it, or
-                // the terminal progress `sweep` returns if no watermark
-                // follows. The resume cache still advances: the watermark
-                // is acked (sink-durable), so respawning past it cannot
-                // lose data.
+                // A deferred tick commit fails the whole `commit`, so the
+                // runtime resends its positions on the next tick or in the
+                // final commit; a deferred sweep's progress rides the
+                // split's next commit. The resume cache still advances: the
+                // watermark is acked (sink-durable), so respawning past it
+                // cannot lose data.
                 let tenancy = self.tenancies.get_mut(&partition).expect("live tenancy");
                 tenancy.progress = Some(progress);
             }
@@ -1194,6 +1236,7 @@ impl CoordinationDriver {
 
 /// How the backend answered one fenced commit; see
 /// [`CoordinationDriver::classify`].
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum CommitDisposition {
     /// Durable write. The caller advances its own state.
     Durable,
@@ -1257,6 +1300,10 @@ mod tests {
         waker: Option<ControlWaker>,
         /// `poll` calls so far, counted after each drain.
         polls: usize,
+        /// The signal `set_stop` handed over.
+        stop: Option<crate::source::StopSignal>,
+        /// A split whose commit sets this flag before it is answered.
+        stop_on_commit: Option<(String, Arc<std::sync::atomic::AtomicBool>)>,
     }
 
     #[derive(Clone, Default)]
@@ -1318,6 +1365,14 @@ mod tests {
         fn polls(&self) -> usize {
             self.0.lock().unwrap().polls
         }
+
+        fn stop(&self) -> Option<crate::source::StopSignal> {
+            self.0.lock().unwrap().stop.clone()
+        }
+
+        fn stop_on_commit(&self, split: &str, flag: &Arc<std::sync::atomic::AtomicBool>) {
+            self.0.lock().unwrap().stop_on_commit = Some((split.to_string(), Arc::clone(flag)));
+        }
     }
 
     struct ScriptedCoordinator(Script);
@@ -1332,6 +1387,10 @@ mod tests {
             self.0.0.lock().unwrap().waker = Some(waker);
         }
 
+        fn set_stop(&mut self, stop: crate::source::StopSignal) {
+            self.0.0.lock().unwrap().stop = Some(stop);
+        }
+
         fn poll(&mut self) -> Result<Vec<CoordinationEvent>, CoordinationError> {
             let mut s = self.0.0.lock().unwrap();
             s.polls += 1;
@@ -1344,6 +1403,11 @@ mod tests {
             progress: &SplitProgress,
         ) -> Result<(), CoordinationError> {
             let mut s = self.0.0.lock().unwrap();
+            if let Some((target, flag)) = &s.stop_on_commit
+                && target == split.as_str()
+            {
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
             if let Some(kinds) = s.commit_outcomes.get_mut(split.as_str())
                 && let Some(kind) = kinds.pop_front()
             {
@@ -1900,8 +1964,28 @@ mod tests {
         let partition = s.opened[0].3;
 
         script.fail_next_commit("a", CoordinationErrorKind::Retryable);
-        d.commit(&mut s, &[(partition, 10)]).unwrap();
+        let err = d
+            .commit(&mut s, &[(partition, 10)])
+            .expect_err("a deferred split fails the commit");
+        assert!(
+            matches!(
+                &err,
+                SourceError::Client {
+                    class: ErrorClass::Retryable,
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
         assert!(script.commits().is_empty(), "deferred, not written");
+        assert_eq!(
+            d.tenancies[&partition]
+                .progress
+                .as_ref()
+                .map(|p| p.watermark),
+            Some(10),
+            "the resume cache holds the deferred progress"
+        );
 
         // A bare tick re-issues nothing: the driver commits the watermarks
         // it is handed and no others.
@@ -1912,6 +1996,127 @@ mod tests {
         d.commit(&mut s, &[(partition, 12)]).unwrap();
         assert_eq!(script.commits().len(), 1);
         assert_eq!(script.commits()[0].1.watermark, 12);
+    }
+
+    /// A deferred split fails the commit after the later splits of the same
+    /// commit are sent. Regression for #962.
+    #[test]
+    fn a_deferred_split_fails_the_commit_after_every_split_is_sent() {
+        let script = Script::default();
+        let mut d = driver(&script);
+        let mut s = TestSource::default();
+        script.push(vec![gained("a", 1, None), gained("b", 1, None)]);
+        poll(&mut d, &mut s);
+        let pa = s.opened[0].3;
+        let pb = s.opened[1].3;
+
+        script.fail_next_commit("a", CoordinationErrorKind::Retryable);
+        let result = d.commit(&mut s, &[(pa, 10), (pb, 20)]);
+
+        assert!(
+            matches!(
+                &result,
+                Err(SourceError::Client {
+                    class: ErrorClass::Retryable,
+                    ..
+                })
+            ),
+            "{result:?}"
+        );
+        let sent: Vec<_> = script
+            .commits()
+            .into_iter()
+            .map(|(split, _)| split)
+            .collect();
+        assert_eq!(sent, vec![SplitId::new("b").unwrap()]);
+    }
+
+    /// A stop that begins during a commit stops the driver sending the
+    /// remaining splits, and the commit fails retryably.
+    #[test]
+    fn a_stop_during_a_commit_sends_no_later_split() {
+        let script = Script::default();
+        let mut d = driver(&script);
+        let mut s = TestSource::default();
+        let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        d.set_stop(crate::source::StopSignal::new(Arc::clone(&flag)));
+        script.push(vec![gained("a", 1, None), gained("b", 1, None)]);
+        poll(&mut d, &mut s);
+        let pa = s.opened[0].3;
+        let pb = s.opened[1].3;
+        script.stop_on_commit("a", &flag);
+
+        let result = d.commit(&mut s, &[(pa, 10), (pb, 20)]);
+
+        assert!(
+            matches!(
+                &result,
+                Err(SourceError::Client {
+                    class: ErrorClass::Retryable,
+                    ..
+                })
+            ),
+            "{result:?}"
+        );
+        let sent: Vec<_> = script
+            .commits()
+            .into_iter()
+            .map(|(split, _)| split)
+            .collect();
+        assert_eq!(sent, vec![SplitId::new("a").unwrap()]);
+    }
+
+    /// The final commit sends every split while the stop is set.
+    #[test]
+    fn commit_final_sends_every_split_while_the_stop_is_set() {
+        let script = Script::default();
+        let mut d = driver(&script);
+        let mut s = TestSource::default();
+        d.set_stop(crate::source::StopSignal::new(Arc::new(
+            std::sync::atomic::AtomicBool::new(true),
+        )));
+        script.push(vec![gained("a", 1, None), gained("b", 1, None)]);
+        poll(&mut d, &mut s);
+        let pa = s.opened[0].3;
+        let pb = s.opened[1].3;
+
+        let unstored = d.commit_final(&mut s, &[(pa, 10), (pb, 20)]).unwrap();
+
+        assert!(unstored.is_empty(), "{unstored:?}");
+        assert_eq!(script.commits().len(), 2);
+    }
+
+    /// `set_stop` hands the signal to the coordinator.
+    #[test]
+    fn set_stop_reaches_the_coordinator() {
+        let script = Script::default();
+        let mut d = driver(&script);
+        let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        d.set_stop(crate::source::StopSignal::new(Arc::clone(&flag)));
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(script.stop().is_some_and(|stop| stop.is_set()));
+    }
+
+    /// A poison report the coordinator refuses while the stop is set leaves
+    /// the tenancy live and the report queued for the next poll.
+    #[test]
+    fn a_report_refused_at_the_stop_stays_queued() {
+        let script = Script::default();
+        let mut d = driver(&script);
+        let mut s = TestSource::default();
+        d.set_stop(crate::source::StopSignal::new(Arc::new(
+            std::sync::atomic::AtomicBool::new(true),
+        )));
+        script.push(vec![gained("a", 1, None)]);
+        poll(&mut d, &mut s);
+        script.fail_next_report("a", CoordinationErrorKind::Retryable);
+
+        d.fail(&mut s, &SplitId::new("a").unwrap(), LeaseEpoch(1), "poison")
+            .unwrap();
+        assert_eq!(d.assignments().len(), 1, "the tenancy stays live");
+
+        poll(&mut d, &mut s);
+        assert_eq!(script.fails().len(), 2, "the report is offered again");
     }
 
     #[test]
@@ -2934,5 +3139,32 @@ mod tests {
             "the later fenced answer still settles"
         );
         assert_eq!(s.closed, vec!["b"]);
+    }
+
+    /// A commit's error names the stop when the stop cut a split's commit
+    /// short, and not when the store deferred it with no stop begun.
+    #[test]
+    fn a_commit_error_names_the_stop_only_when_the_stop_began() {
+        let script = Script::default();
+        let mut d = driver(&script);
+        let mut s = TestSource::default();
+        let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        d.set_stop(crate::source::StopSignal::new(Arc::clone(&flag)));
+        script.push(vec![gained("a", 1, None)]);
+        poll(&mut d, &mut s);
+        let pa = s.opened[0].3;
+
+        script.fail_next_commit("a", CoordinationErrorKind::Retryable);
+        let deferred = d.commit(&mut s, &[(pa, 10)]).expect_err("deferred");
+        assert!(!deferred.to_string().contains("stop"), "{deferred}");
+
+        // A store backend answers a wait the stop cut short as retryable.
+        script.stop_on_commit("a", &flag);
+        script.fail_next_commit("a", CoordinationErrorKind::Retryable);
+        let cut_short = d.commit(&mut s, &[(pa, 10)]).expect_err("cut short");
+        assert!(
+            cut_short.to_string().contains("the stop began"),
+            "{cut_short}"
+        );
     }
 }

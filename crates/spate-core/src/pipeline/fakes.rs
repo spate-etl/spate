@@ -40,6 +40,14 @@ pub(crate) struct SourceLog {
     pub(crate) final_unstored: Option<Vec<PartitionId>>,
     /// Interleaved ordering log shared with the chain fake.
     pub(crate) log: Vec<String>,
+    /// Taken and triggered by the next `commit` with a position, modeling a
+    /// stop that arrives while a tick commit waits on its store.
+    pub(crate) trigger_in_commit: Option<crate::pipeline::runtime::ShutdownHandle>,
+    /// The positions of each `commit` that saw the stop signal set and failed
+    /// retryably, as a coordinated source does.
+    pub(crate) stopped_commits: Vec<Vec<(PartitionId, i64)>>,
+    /// Whether the stop signal read set when `commit_final` ran.
+    pub(crate) final_saw_stop: Option<bool>,
 }
 
 pub(crate) enum Script {
@@ -73,6 +81,7 @@ pub(crate) struct FakeSource {
     shared: SharedLog,
     script: SharedScript,
     issuer: Option<AckIssuer>,
+    stop: crate::source::StopSignal,
 }
 
 impl FakeSource {
@@ -84,6 +93,7 @@ impl FakeSource {
                 shared: Arc::clone(&shared),
                 script: Arc::clone(&script),
                 issuer: None,
+                stop: crate::source::StopSignal::default(),
             },
             shared,
             script,
@@ -114,6 +124,7 @@ impl Source for FakeSource {
             m.set_partition_lag(PartitionId(0), FAKE_SOURCE_LAG);
         }
         self.issuer = Some(ctx.issuer);
+        self.stop = ctx.stop;
         Ok(())
     }
 
@@ -174,6 +185,16 @@ impl Source for FakeSource {
 
     fn commit(&mut self, watermarks: &[(PartitionId, i64)]) -> Result<(), SourceError> {
         let mut log = self.shared.lock().unwrap();
+        if let Some(trigger) = log.trigger_in_commit.take() {
+            trigger.trigger();
+        }
+        if self.stop.is_set() {
+            log.stopped_commits.push(watermarks.to_vec());
+            return Err(SourceError::Client {
+                class: ErrorClass::Retryable,
+                reason: "the stop began during this commit".into(),
+            });
+        }
         if log.fail_commits {
             log.log.push("commit-failed".into());
             return Err(SourceError::Client {
@@ -195,6 +216,7 @@ impl Source for FakeSource {
     ) -> Result<Vec<PartitionId>, SourceError> {
         let mut log = self.shared.lock().unwrap();
         log.log.push("commit_final".into());
+        log.final_saw_stop = Some(self.stop.is_set());
         let unstored = match log.final_unstored.clone() {
             Some(unstored) => unstored,
             None if log.fail_commits => {

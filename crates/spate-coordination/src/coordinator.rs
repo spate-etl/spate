@@ -21,6 +21,7 @@ use spate_core::coordination::{
     SplitId, SplitPlanner, SplitProgress,
 };
 use spate_core::metrics::CoordinationMetrics;
+use spate_core::source::StopSignal;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::mpsc as std_mpsc;
@@ -33,6 +34,17 @@ const COMMAND_DEPTH: usize = 64;
 
 /// Pause before re-sending a `Depart` the task refused.
 const DEPART_RETRY: Duration = Duration::from_millis(20);
+
+/// How often a handle command's wait checks the run's stop.
+const STOP_POLL: Duration = Duration::from_millis(10);
+
+/// The `Retryable` answer to a handle command the run's stop cut short.
+fn stopping_error(outcome: &str) -> CoordinationError {
+    CoordinationError::new(
+        CoordinationErrorKind::Retryable,
+        format!("the run is stopping; {outcome}"),
+    )
+}
 
 /// A [`SplitCoordinator`] over any [`CoordinationStore`].
 ///
@@ -59,6 +71,7 @@ pub struct StoreCoordinator<S: CoordinationStore + Clone> {
     /// Set by the driver before `start`; handed to the task so every
     /// queued event also wakes the driver's park.
     waker: Option<ControlWaker>,
+    stop: StopSignal,
     #[cfg(feature = "testing")]
     probe: Arc<crate::loop_probe::LoopProbe>,
 }
@@ -176,6 +189,7 @@ impl<S: CoordinationStore + Clone> StoreCoordinator<S> {
             running: None,
             failed: None,
             waker: None,
+            stop: StopSignal::default(),
             #[cfg(feature = "testing")]
             probe: Arc::default(),
         })
@@ -227,12 +241,16 @@ impl<S: CoordinationStore + Clone> StoreCoordinator<S> {
         }
     }
 
+    /// Send a command and wait up to three `op_timeout`s for its reply. While
+    /// the run's stop is set nothing is sent, and a wait for a reply ends within
+    /// [`STOP_POLL`] of the stop with the command possibly still to land.
     fn command(
         &mut self,
         build: impl FnOnce(std_mpsc::SyncSender<Result<(), CoordinationError>>) -> Command,
     ) -> Result<(), CoordinationError> {
         let budget = self.config.op_timeout * 3;
-        self.send_until(Instant::now() + budget, budget, build)?
+        let stop = self.stop.clone();
+        self.send_until_stop(Instant::now() + budget, budget, Some(&stop), build)?
     }
 
     /// Send a command and wait for its reply until `deadline_at`. `Err`
@@ -244,7 +262,22 @@ impl<S: CoordinationStore + Clone> StoreCoordinator<S> {
         budget: Duration,
         build: impl FnOnce(std_mpsc::SyncSender<R>) -> Command,
     ) -> Result<R, CoordinationError> {
+        self.send_until_stop(deadline_at, budget, None, build)
+    }
+
+    /// [`send_until`](Self::send_until) that also gives up once `stop` is set.
+    fn send_until_stop<R>(
+        &mut self,
+        deadline_at: Instant,
+        budget: Duration,
+        stop: Option<&StopSignal>,
+        build: impl FnOnce(std_mpsc::SyncSender<R>) -> Command,
+    ) -> Result<R, CoordinationError> {
+        let stopping = || stop.is_some_and(StopSignal::is_set);
         self.check_failed()?;
+        if stopping() {
+            return Err(stopping_error("nothing was sent"));
+        }
         let Some(running) = &self.running else {
             return Err(fatal("coordinator used before start"));
         };
@@ -258,6 +291,9 @@ impl<S: CoordinationStore + Clone> StoreCoordinator<S> {
             match commands.try_send(command) {
                 Ok(()) => break,
                 Err(mpsc::error::TrySendError::Full(returned)) => {
+                    if stopping() {
+                        return Err(stopping_error("nothing was sent"));
+                    }
                     if Instant::now() >= deadline_at {
                         return Err(CoordinationError::new(
                             CoordinationErrorKind::Retryable,
@@ -274,9 +310,24 @@ impl<S: CoordinationStore + Clone> StoreCoordinator<S> {
             }
         }
         // The reply is awaited synchronously with a deadline; a wedged
-        // store surfaces as Retryable, not a hung pipeline.
-        let remaining = deadline_at.saturating_duration_since(Instant::now());
-        match reply_rx.recv_timeout(remaining) {
+        // store surfaces as Retryable, not a hung pipeline. With a stop the
+        // wait runs in `STOP_POLL` slices so the stop is seen promptly.
+        let reply = loop {
+            let remaining = deadline_at.saturating_duration_since(Instant::now());
+            let slice = match stop {
+                Some(_) => remaining.min(STOP_POLL),
+                None => remaining,
+            };
+            match reply_rx.recv_timeout(slice) {
+                Err(std_mpsc::RecvTimeoutError::Timeout) if slice < remaining => {
+                    if stopping() {
+                        return Err(stopping_error("this command may still land"));
+                    }
+                }
+                other => break other,
+            }
+        };
+        match reply {
             Ok(reply) => Ok(reply),
             Err(std_mpsc::RecvTimeoutError::Timeout) => Err(CoordinationError::new(
                 CoordinationErrorKind::Retryable,
@@ -447,6 +498,10 @@ impl<S: CoordinationStore + Clone> SplitCoordinator for StoreCoordinator<S> {
 
     fn set_waker(&mut self, waker: ControlWaker) {
         self.waker = Some(waker);
+    }
+
+    fn set_stop(&mut self, stop: StopSignal) {
+        self.stop = stop;
     }
 
     fn poll(&mut self) -> Result<Vec<CoordinationEvent>, CoordinationError> {
@@ -733,5 +788,73 @@ impl<S: CoordinationStore + Clone> Drop for StoreCoordinator<S> {
                 self.release_direct(&held, self.config.op_timeout);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::memory::MemoryStore;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// A command waiting for room in a full command queue gives up once the
+    /// stop is set, and sends nothing.
+    #[test]
+    fn a_command_waiting_on_a_full_queue_gives_up_at_the_stop() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let config = CoordinationConfig {
+            op_timeout: Duration::from_secs(1),
+            lease_duration: Duration::from_secs(3),
+            drain_deadline: Duration::from_secs(3),
+            ..CoordinationConfig::default()
+        };
+        let store = MemoryStore::new(config.lease_duration);
+        let mut c = StoreCoordinator::new(store, config, rt.handle().clone(), None).unwrap();
+        // A task that never serves its queue stands for one stuck on the store.
+        let (tx, rx) = mpsc::channel(COMMAND_DEPTH);
+        let (_events_tx, events) = std_mpsc::channel();
+        let task = rt.spawn(async move {
+            let _rx = rx;
+            std::future::pending::<()>().await;
+        });
+        let split = SplitId::new("x".to_string()).unwrap();
+        for _ in 0..COMMAND_DEPTH {
+            let (reply, _) = std_mpsc::sync_channel(1);
+            tx.try_send(Command::Commit {
+                split: split.clone(),
+                progress: SplitProgress::new(1, vec![]),
+                reply,
+            })
+            .ok()
+            .unwrap();
+        }
+        c.running = Some(Running {
+            commands: tx,
+            events,
+            task,
+            held: BTreeMap::new(),
+        });
+        let flag = Arc::new(AtomicBool::new(false));
+        c.set_stop(StopSignal::new(Arc::clone(&flag)));
+        // Meant to land while `commit` waits for room; landing earlier, the
+        // check before sending gives the same answer.
+        let setter = {
+            let flag = Arc::clone(&flag);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(200));
+                flag.store(true, Ordering::SeqCst);
+            })
+        };
+        let e = c
+            .commit(&split, &SplitProgress::new(2, vec![]))
+            .expect_err("a full queue takes nothing");
+        setter.join().unwrap();
+        c.running = None;
+        assert_eq!(e.kind, CoordinationErrorKind::Retryable);
+        assert_eq!(e.reason, "the run is stopping; nothing was sent");
     }
 }

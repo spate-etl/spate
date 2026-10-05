@@ -443,14 +443,20 @@ attempt cap instead.
   `SourceEvent::LanesAssigned(vec![])`. It bumps the controller's assignment
   epoch and marks the pipeline running while the claims race, and the splits
   then arrive additively as `SourceEvent::LanesAdded`.
+- **`open` passes `ctx.stop` to `driver.set_stop`.** Once the stop begins, a
+  commit, failure report or revocation reply waiting on the store returns
+  within 10 ms. `driver.commit` then sends no further split and returns a
+  retryable error, so the final commit carries those positions. Without the
+  call, a commit under way at the stop waits up to three `op_timeout`s for
+  each split in turn. A `SplitCoordinator` that wraps another forwards
+  `set_stop`; the trait's default ignores it.
 - **`flush_commits` stays the default no-op.** A commit that returns `Ok` is
-  either durable in the store or deferred after a transient store failure. A
-  deferred one does not go out again on a bare tick: it rides that split's next
-  commit, either the next watermark it acks, which merges past the deferred
-  one, or the terminal progress `sweep` returns if no watermark follows. The previous
-  durable state stays authoritative meanwhile, so a crash before the recommit
-  widens replay rather than losing data. At a stop there is no next commit,
-  and a deferred split may replay under its next owner.
+  durable in the store for every partition the source still holds. When the store defers a split's commit after a
+  transient failure, `driver.commit` still sends the other splits and then
+  returns a retryable error, so the runtime keeps every position of that
+  commit and sends it again on the next tick or in the final commit. The
+  previous durable state stays authoritative meanwhile, so a crash before the
+  resend widens replay without losing data.
 - **`commit_final` forwards to `driver.commit_final`.** The driver then sends
   the final commit of a stop under one `coordination.op_timeout` budget for
   every split together, and returns the partitions whose commit it did not
@@ -472,7 +478,9 @@ with the drain barrier, while a split that reached its terminal commit and
 one whose drain completed both leave barrier-less through
 `LanesRetired` (in either case a landed commit already proved nothing is in
 flight); fenced-commit triage (`Fenced` → quarantine the tenancy, surface
-the loss; `Retryable` → defer to the split's next commit); completion sweeps
+the loss; `Retryable` → a tick commit fails retryably and keeps its
+positions pending, and a sweep or drain commit retries on the next poll);
+completion sweeps
 and the `take_finishing` → `CommitReady` end-of-input chase; `AllComplete` →
 `Drained`. A **stalled** job
 (quarantined splits blocking completion) is a fatal error by default.

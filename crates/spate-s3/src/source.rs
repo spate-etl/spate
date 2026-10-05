@@ -306,8 +306,10 @@ impl Source for S3Source {
             RETRY_BASE,
             metrics,
         );
+        let mut driver = CoordinationDriver::new(coordinator);
+        driver.set_stop(ctx.stop.clone());
         self.state = State::Open(Box::new(OpenState {
-            driver: CoordinationDriver::new(coordinator),
+            driver,
             ctx: split_ctx,
             planner: Some(planner),
         }));

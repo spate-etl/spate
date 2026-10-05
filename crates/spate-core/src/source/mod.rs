@@ -23,6 +23,7 @@ use crate::framing::FramingContract;
 use crate::metrics::{Meter, SourceMetrics};
 use crate::record::{PartitionId, RawPayload};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 /// Identifier of one source lane within an assignment (dense,
@@ -141,6 +142,45 @@ pub enum SourceEvent<L> {
     Drained,
 }
 
+/// The run's stop as a source's control plane sees it. It is set from the
+/// moment the stop begins until the drain begins, before the final commit.
+///
+/// A clone reads the same state. The default is never set.
+#[derive(Clone, Debug, Default)]
+pub struct StopSignal(Option<Arc<StopState>>);
+
+#[derive(Debug)]
+struct StopState {
+    flag: Arc<AtomicBool>,
+    open: AtomicBool,
+}
+
+impl StopSignal {
+    /// A signal that is set while `flag` is.
+    #[must_use]
+    pub fn new(flag: Arc<AtomicBool>) -> Self {
+        StopSignal(Some(Arc::new(StopState {
+            flag,
+            open: AtomicBool::new(true),
+        })))
+    }
+
+    /// Whether the stop has begun and the drain has not.
+    #[must_use]
+    pub fn is_set(&self) -> bool {
+        self.0
+            .as_ref()
+            .is_some_and(|s| s.open.load(Ordering::Acquire) && s.flag.load(Ordering::Relaxed))
+    }
+
+    /// Clear the signal for good, in every clone.
+    pub(crate) fn close(&self) {
+        if let Some(s) = &self.0 {
+            s.open.store(false, Ordering::Release);
+        }
+    }
+}
+
 /// Everything a source receives at [`Source::open`].
 #[derive(Debug)]
 #[non_exhaustive]
@@ -177,6 +217,9 @@ pub struct SourceCtx {
     /// `spate_source_lag_records`; consumer lag has no aggregate series to fall
     /// back to, so it always publishes per partition.
     pub per_partition_detail: bool,
+    /// The run's stop. A coordinated source passes it to
+    /// [`CoordinationDriver::set_stop`](crate::coordination::driver::CoordinationDriver::set_stop).
+    pub stop: StopSignal,
 }
 
 impl SourceCtx {
@@ -190,6 +233,7 @@ impl SourceCtx {
             meter: None,
             stage_metrics: None,
             per_partition_detail: false,
+            stop: StopSignal::default(),
         }
     }
 
@@ -207,6 +251,13 @@ impl SourceCtx {
     #[must_use]
     pub fn with_stage_metrics(mut self, metrics: Option<Arc<SourceMetrics>>) -> Self {
         self.stage_metrics = metrics;
+        self
+    }
+
+    /// Attach the run's stop. Called by the runtime.
+    #[must_use]
+    pub fn with_stop(mut self, stop: StopSignal) -> Self {
+        self.stop = stop;
         self
     }
 
@@ -314,8 +365,32 @@ pub trait Source: Send {
 
 #[cfg(test)]
 mod tests {
-    use super::SourceCtx;
+    use super::{SourceCtx, StopSignal};
     use crate::checkpoint::Checkpointer;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// A default signal never reads set.
+    #[test]
+    fn a_default_stop_signal_is_never_set() {
+        let stop = StopSignal::default();
+        assert!(!stop.is_set());
+        stop.close();
+        assert!(!stop.is_set());
+    }
+
+    /// A signal reads its flag until it is closed, and every clone agrees.
+    #[test]
+    fn a_stop_signal_follows_its_flag_until_closed() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let stop = StopSignal::new(Arc::clone(&flag));
+        let clone = stop.clone();
+        assert!(!stop.is_set() && !clone.is_set());
+        flag.store(true, Ordering::Relaxed);
+        assert!(stop.is_set() && clone.is_set());
+        stop.close();
+        assert!(!stop.is_set() && !clone.is_set());
+    }
 
     #[test]
     fn source_ctx_partition_detail_defaults_off_and_round_trips() {

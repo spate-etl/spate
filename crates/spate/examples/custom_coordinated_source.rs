@@ -338,6 +338,8 @@ impl Source for LedgerSource {
     type Lane = LedgerLane;
 
     fn open(&mut self, ctx: SourceCtx) -> Result<(), SourceError> {
+        // Lets a stop end a commit that waits on an unresponsive store.
+        self.driver.set_stop(ctx.stop.clone());
         self.ctx.issuer = Some(ctx.issuer);
         Ok(())
     }
@@ -363,11 +365,11 @@ impl Source for LedgerSource {
         self.driver.commit_final(&mut self.ctx, watermarks)
     }
     // flush_commits stays the default no-op: an Ok commit is durable in
-    // the store, or deferred after a transient store failure and carried
-    // out on this split's next commit. A final commit returns the partitions
-    // it did not store, and those splits may replay under their next owner.
-    // The previous durable state stays authoritative until then, so replay
-    // can widen and data cannot be lost.
+    // the store for every partition the source still holds, and a deferred
+    // commit returns a retryable error that keeps its positions pending. A
+    // final commit returns the partitions it did not store, and those splits
+    // may replay under their next owner. The previous durable state stays
+    // authoritative until then, so replay can widen and data cannot be lost.
 }
 
 impl Drop for LedgerSource {

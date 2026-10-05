@@ -19,7 +19,11 @@ revocation, one choreography tested constantly by every rebalance:
 
 1. **Lanes stop.** The controller stops event polling and tells every
    driver thread to shut down. Each driver stops polling its lanes and
-   drops them, so no new data enters the pipeline.
+   drops them, so no new data enters the pipeline. A coordinated source
+   that passes the stop to its driver, as the built-in sources do, also
+   stops waiting on its coordination store. A commit, failure report or
+   revocation reply already waiting returns at once, and the positions of a
+   commit the stop cuts short go out in the final commit in step 4.
 2. **Chains flush.** Each driver flushes its operator chain: parked chunks
    and partial buffers are pushed to the shard queues, then the chain (and
    with it that thread's `ShardQueues` clone) is dropped as the thread
@@ -65,12 +69,15 @@ coordinated source that forwards `Source::commit_final` can take up to
 `coordination.op_timeout` (10s by default) for the final commit against a
 slow store, and up to `op_timeout` again to close. Where a slow store at
 shutdown is likely, size the gap to at least twice `op_timeout` plus a few
-seconds. At the default that is more than the 5s gap. This sizing covers a
-store that stops answering once the drain begins. A commit tick or revocation
-already waiting on the store when SIGTERM arrives finishes before the drain
-starts, and can take up to three times `op_timeout` for each held split. A
-coordinated source that does not forward `Source::commit_final` can take up
-to three times `op_timeout` for each split in turn
+seconds. At the default that is more than the 5s gap. The same sizing holds
+when the store stopped answering before SIGTERM, because the stop ends any
+wait on the store already under way. A coordinated source that does not
+forward `Source::commit_final` can take up to three times `op_timeout` for
+each split in turn at the final commit. One whose `open` does not pass
+`SourceCtx::stop` to `CoordinationDriver::set_stop` can wait as long for a
+commit already under way at SIGTERM, and one whose coordinator ignores
+`SplitCoordinator::set_stop` can wait up to three times `op_timeout` for the
+one command under way
 ([Custom sources](../06-extending/custom-source.mdx#3-delegate-the-choreography-coordinationdriver)).
 Keep `op_timeout` above about (2N + 3) times your store's write latency,
 where N is the number of splits an instance holds (at most `max_in_flight`).

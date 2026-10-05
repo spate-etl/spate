@@ -12,12 +12,13 @@
 //! # Contract notes for implementors
 //!
 //! - Operations on one handle must be safe to run concurrently.
-//! - [`Revision`]s are store-assigned. The revisions a key's writes return
-//!   **strictly increase** across its write history (bucket-wide sequences
-//!   satisfy this); a watch delete's revision follows the rule on
-//!   [`WatchEvent::Delete`]. While any handle can reach the store, an
+//! - [`Revision`]s are store-assigned. Outside the DynamoDB re-create
+//!   exception in the `store::dynamodb` docs, the revisions a key's writes
+//!   return **strictly increase** across its write history (bucket-wide
+//!   sequences satisfy this), and while any handle can reach the store, an
 //!   acknowledged write is never rolled back and its revision is never
-//!   reused, including across a server crash or failover.
+//!   reused, including across a server crash or failover. A watch delete's
+//!   revision follows the rule on [`WatchEvent::Delete`].
 //! - `update` on an [`Ephemeral`](Keyspace::Ephemeral) key re-arms its
 //!   TTL; expiry surfaces to watchers as [`WatchEvent::Delete`]. A store
 //!   may judge expiry on its own clock, or each handle may judge it on its
@@ -77,8 +78,9 @@ pub enum WatchMode {
 }
 
 /// Store-assigned version token. The revisions a key's writes return
-/// strictly increase, and a watch delete's revision follows the rule on
-/// [`WatchEvent::Delete`]. Content-independent, so it carries none of the
+/// strictly increase outside the DynamoDB re-create exception in the
+/// `store::dynamodb` docs, and a watch delete's revision follows the rule
+/// on [`WatchEvent::Delete`]. Content-independent, so it carries none of the
 /// ABA hazards a content-hash token would.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Revision(pub u64);

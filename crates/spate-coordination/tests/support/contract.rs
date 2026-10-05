@@ -132,9 +132,8 @@ pub async fn delete_above_a_clones_write<S: CoordinationStore + Clone>(store: &S
     }
 }
 
-/// A key's revisions strictly increase across its whole history: a watch's
-/// delete sits above the last put it reported, and a re-created key above
-/// the delete.
+/// A watch's delete sits above the last put it reported, and a re-created
+/// key above the delete.
 pub async fn revisions_across_delete_and_recreate<S: CoordinationStore>(store: &S) {
     for ks in [Keyspace::Durable, Keyspace::Ephemeral] {
         let mut watch = store.watch(ks, "rc.").await.unwrap();

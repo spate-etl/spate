@@ -1114,8 +1114,8 @@ fn a_self_fence_after_an_adopted_renewal_counts_from_the_first_failed_one() {
 }
 
 /// A renewal that failed with nothing written, followed by renewals that won,
-/// does not count toward the self-fence of a renewal adopted later. The bound
-/// assumes a renewal confirmed before the failure.
+/// does not count toward the self-fence of a renewal adopted later. It assumes
+/// a renewal confirmed before the failure, so the renewals after it win.
 #[test]
 fn a_self_fence_after_an_adopted_renewal_ignores_a_failure_before_a_confirmed_one() {
     let rt = runtime();

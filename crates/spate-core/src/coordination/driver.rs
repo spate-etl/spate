@@ -553,12 +553,17 @@ impl CoordinationDriver {
                 deferred += 1;
             }
         }
-        if unsent > 0 {
+        if unsent > 0 || (deferred > 0 && self.stop.is_set()) {
+            let not_sent = if unsent > 0 {
+                format!(" and {unsent} not sent")
+            } else {
+                String::new()
+            };
             return Err(SourceError::Client {
                 class: ErrorClass::Retryable,
                 reason: format!(
-                    "{deferred} split commit(s) deferred and {unsent} not sent because the stop \
-                     began; the positions stay pending"
+                    "{deferred} split commit(s) deferred{not_sent} because the stop began; the \
+                     positions stay pending"
                 ),
             });
         }
@@ -3134,5 +3139,32 @@ mod tests {
             "the later fenced answer still settles"
         );
         assert_eq!(s.closed, vec!["b"]);
+    }
+
+    /// A commit's error names the stop when the stop cut a split's commit
+    /// short, and not when the store deferred it with no stop begun.
+    #[test]
+    fn a_commit_error_names_the_stop_only_when_the_stop_began() {
+        let script = Script::default();
+        let mut d = driver(&script);
+        let mut s = TestSource::default();
+        let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        d.set_stop(crate::source::StopSignal::new(Arc::clone(&flag)));
+        script.push(vec![gained("a", 1, None)]);
+        poll(&mut d, &mut s);
+        let pa = s.opened[0].3;
+
+        script.fail_next_commit("a", CoordinationErrorKind::Retryable);
+        let deferred = d.commit(&mut s, &[(pa, 10)]).expect_err("deferred");
+        assert!(!deferred.to_string().contains("stop"), "{deferred}");
+
+        // A store backend answers a wait the stop cut short as retryable.
+        script.stop_on_commit("a", &flag);
+        script.fail_next_commit("a", CoordinationErrorKind::Retryable);
+        let cut_short = d.commit(&mut s, &[(pa, 10)]).expect_err("cut short");
+        assert!(
+            cut_short.to_string().contains("the stop began"),
+            "{cut_short}"
+        );
     }
 }

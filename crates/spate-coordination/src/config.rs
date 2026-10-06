@@ -175,9 +175,11 @@ impl CoordinationConfig {
         Ok(())
     }
 
-    /// Renewal cadence: a third of the lease, so three renewal
-    /// opportunities fit in every lease and two may be lost before it
-    /// expires.
+    /// Renewal cadence: a third of the lease. Every heartbeat renews every
+    /// held lease, and the next is armed 0.8 to 1.2 renew intervals after it
+    /// finishes, so a lease survives one failed renewal when the worker's store
+    /// calls from that lease's last successful renewal to its retry, the failed
+    /// call included, take under a fifth of the lease in total.
     #[must_use]
     pub fn renew_interval(&self) -> Duration {
         self.lease_duration / 3

@@ -361,7 +361,8 @@ assumptions it rests on. At 10M rows per second with 64 MiB splits it models 27
 workers at about 210 write units and 320 read units per second. The revision
 floor each lease delete writes adds one write unit per completed split, and the
 lease create's transaction three more, since DynamoDB charges two writes for
-each of its two items. That model then comes to about 313 write units per
+each of its two items. Lease renewals add about 16 more, one write unit per held
+split at each heartbeat. That model then comes to about 329 write units per
 second.
 
 ## What an outage does

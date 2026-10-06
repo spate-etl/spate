@@ -143,14 +143,6 @@ impl<S: CoordinationStore + Clone> Task<S> {
         let Some(owned) = self.owned.get(id) else {
             return Ok(());
         };
-        // Cadence gate: skip if we renewed within the last interval. Read
-        // from `clock`, the same source that stamps `last_ok_write`.
-        // Under a frozen test clock nothing renews until the test
-        // advances; `TestClock::advance_stepped` gives a live worker its
-        // renewal inside every step.
-        if self.clock.now().duration_since(owned.last_ok_write) < self.config.renew_interval() {
-            return Ok(());
-        }
         let lease_rev = owned.lease_rev;
         let epoch = self
             .splits

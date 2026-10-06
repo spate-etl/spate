@@ -96,8 +96,7 @@ use metrics_exporter_prometheus::{BuildError, Matcher, PrometheusBuilder, Promet
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-/// Buckets for `*_duration_seconds` histograms and
-/// `spate_e2e_latency_seconds` (1 ms .. 60 s, roughly exponential).
+/// Second-scale buckets, 1 ms .. 60 s, roughly exponential.
 pub const DURATION_SECONDS_BUCKETS: &[f64] = &[
     0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0,
 ];
@@ -267,6 +266,7 @@ fn configured_builder() -> Result<PrometheusBuilder, BuildError> {
             Matcher::Suffix("_duration_seconds".into()),
             DURATION_SECONDS_BUCKETS,
         )?
+        // Second-scale families whose names the suffix matcher misses.
         .set_buckets_for_metric(
             Matcher::Full(names::E2E_LATENCY_SECONDS.into()),
             DURATION_SECONDS_BUCKETS,
@@ -276,6 +276,10 @@ fn configured_builder() -> Result<PrometheusBuilder, BuildError> {
         // second-scale buckets as every other coordination timing.
         .set_buckets_for_metric(
             Matcher::Full(names::COORDINATION_ASSIGNMENT_LATENCY_SECONDS.into()),
+            DURATION_SECONDS_BUCKETS,
+        )?
+        .set_buckets_for_metric(
+            Matcher::Full(names::COORDINATION_SPLIT_LEASE_HEADROOM_SECONDS.into()),
             DURATION_SECONDS_BUCKETS,
         )?
         .set_buckets_for_metric(
@@ -958,6 +962,34 @@ mod tests {
                 "state `{other}` should read 0:\n{rendered}"
             );
         }
+    }
+
+    /// Pins that every declared histogram renders with configured buckets,
+    /// and that the split-lease headroom handle records into its bucket grid.
+    #[test]
+    fn every_histogram_renders_buckets() {
+        let rendered = render_local(|| {
+            for name in names::HISTOGRAMS {
+                metrics::histogram!(*name).record(0.5);
+            }
+            CoordinationMetrics::new(&labels("every_histogram"))
+                .split_lease_headroom(Duration::from_millis(400));
+        });
+        for name in names::HISTOGRAMS {
+            assert!(
+                rendered.contains(&format!("{name}_bucket{{")),
+                "`{name}` renders without buckets:\n{rendered}"
+            );
+        }
+        let series = r#"spate_coordination_split_lease_headroom_seconds_bucket{pipeline="orders",component="every_histogram",component_type="kafka""#;
+        assert!(
+            rendered.contains(&format!(r#"{series},le="0.5"}} 1"#)),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(&format!(r#"{series},le="0.25"}} 0"#)),
+            "{rendered}"
+        );
     }
 
     #[test]

@@ -364,6 +364,7 @@ that code passed one. They fire alongside the source's own
 | `spate_coordination_store_op_duration_seconds` | histogram | `op` (`get`\|`put`\|`delete`\|`list`\|`watch`\|`poll`) | Store primitive round-trips — the NATS latency view. |
 | `spate_coordination_drain_duration_seconds` | histogram | | One cooperative drain, on the **releasing** worker: revocation requested to the release landing — stopping intake at a safe boundary, committing the drained tail, giving the split up. Only drains that end a revocation cooperatively are observed; a forced release is a *failed* drain and is counted as `revocations_total{outcome="forced"}` instead, so `drain_deadline` never shows up as a spike in this distribution. A drain whose revocation was `cancelled` is not observed either — when it lands it is no longer ending a revocation, so timing it would mix "how long a revocation takes" with "how long a withdrawn one took to unwind". Read it against `drain_deadline`: a p99 creeping toward it means forced revocations are imminent. |
 | `spate_coordination_assignment_latency_seconds` | histogram | | One assignment wait, on the **gaining** worker: a split appearing in this worker's assignment to this worker holding its lease. This is time-to-balance as an operator experiences it — how long work the leader had already decided this worker should be doing sat undone. It spans whatever stood in the way, including the previous owner's drain, rather than flattering itself by timing only the final claim. |
+| `spate_coordination_split_lease_headroom_seconds` | histogram | | Time left before this worker's starvation self-fence, observed on the owning worker each time a split-lease renewal is confirmed. It is measured on this worker's clock and can be longer or shorter than the lease the store still grants. 0 means the renewal was confirmed a full lease or more after the last confirmed write. When a renewal whose reply was lost turns out to have written, the value is measured from the first failed renewal, as `starved` counts. Leadership and presence renewals are not included. |
 
 ### The coordination latencies do not compose
 
@@ -424,10 +425,11 @@ publishes no lag), but a new connector must not.
 
 ## Histogram buckets
 
-Configured on the exporter by name-suffix matchers (override in the `metrics`
-config section):
+Configured on the exporter, by name suffix or full name:
 
-- `*_duration_seconds` / `spate_e2e_latency_seconds`: exponential
+- `*_duration_seconds`, `spate_e2e_latency_seconds`,
+  `spate_coordination_assignment_latency_seconds` and
+  `spate_coordination_split_lease_headroom_seconds`: exponential
   `0.001 .. 60` (1ms, 2.5ms, 5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms,
   1s, 2.5s, 5s, 10s, 30s, 60s).
 - `spate_sink_batch_rows`: powers of 4 from `64` to `1_048_576`.
@@ -478,6 +480,11 @@ config section):
   replica set, not the server. Keep a flush-duration alert too if you have a
   commit-lag SLO, since that is the family the watermark waits on, but do not
   read it as sink latency.
+- `increase(spate_coordination_split_lease_headroom_seconds_bucket{le="2.5"}[15m]) > 0`
+  at the default 30s lease — a worker came within 2.5s of self-fencing a
+  split, on its own clock. Use a bucket boundary from
+  [Histogram buckets](#histogram-buckets) at or below the margin you want;
+  any other `le` matches no series.
 Each connector adds alerts over its own families; those live in the
 connector's `## Metrics` section, indexed under
 [Connector families](#connector-families).

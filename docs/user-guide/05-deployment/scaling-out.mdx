@@ -221,7 +221,9 @@ all on the worker giving the split up; `drained` is replay-free, a rising
 health and `drain_deadline`, and `cancelled` is the leader taking a move
 back, worth chasing only if it is sustained, which means membership is
 flapping faster than a drain takes), `split_losses_total`
-(`fenced`/`starved`/`revoked`), `splits_quarantined` for poison, and
+(`fenced`/`starved`/`revoked`), `split_lease_headroom_seconds` for how close
+renewals come to the self-fence before `starved` counts, `splits_quarantined`
+for poison, and
 store-op latency histograms for the round-trips to the store.
 
 Time to balance reads from two separate families, one per side:

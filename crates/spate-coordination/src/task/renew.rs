@@ -248,11 +248,24 @@ impl<S: CoordinationStore + Clone> Task<S> {
     }
 
     /// Records a renewal of `id`'s lease that won at `rev`.
+    ///
+    /// Observes the lease left, measured from the `last_ok_write` the
+    /// starvation self-fence reads.
     fn confirm_lease(&mut self, id: &str, rev: Revision) {
+        let now = self.clock.now();
+        let mut headroom = None;
         if let Some(owned) = self.owned.get_mut(id) {
+            headroom = Some(
+                self.config
+                    .lease_duration
+                    .saturating_sub(now.duration_since(owned.last_ok_write)),
+            );
             owned.lease_rev = rev;
-            owned.last_ok_write = self.clock.now();
+            owned.last_ok_write = now;
             owned.unconfirmed_since = None;
+        }
+        if let Some(headroom) = headroom {
+            self.metrics(|m| m.split_lease_headroom(headroom));
         }
         if let Some(state) = self.splits.get_mut(id)
             && let Some((_, lease_rev)) = &mut state.lease

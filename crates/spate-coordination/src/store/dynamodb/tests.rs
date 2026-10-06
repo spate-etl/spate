@@ -41,6 +41,13 @@ async fn next(watch: &mut WatchStream) -> WatchEvent {
         .expect("a watch event, not an error")
 }
 
+/// Waits for a held call to reach the table, under the bound `next` uses.
+async fn reached(gate: &mut QueryGate) {
+    tokio::time::timeout(TTL * 20, gate.reached())
+        .await
+        .expect("the held call reached the table");
+}
+
 async fn snapshot(watch: &mut WatchStream) -> Vec<Entry> {
     let mut entries = Vec::new();
     loop {
@@ -1423,6 +1430,150 @@ async fn a_read_begun_inside_one_ttl_expires_nothing() {
     let mut gate = table.hold_next_query();
     gate.reached().await;
     let renewed = won(a.update(E, "k", b"a".to_vec(), rev).await.unwrap());
+    clock.advance(TTL / 2);
+    gate.release();
+    assert_eq!(put_without_delete(&mut watch, "k").await, renewed);
+}
+
+/// A get judges expiry from when its read began, so a get that began inside
+/// one TTL of the first read and returned after it keeps the lease.
+#[tokio::test(start_paused = true)]
+async fn a_get_begun_inside_one_ttl_keeps_the_lease() {
+    let table = FakeTable::new();
+    let clock = TestClock::frozen();
+    let (a, b) = (handle(&table, &clock), handle(&table, &clock));
+    won(a.create(E, "k", b"a".to_vec()).await.unwrap());
+    assert!(b.get(E, "k").await.unwrap().is_some());
+    clock.advance(TTL - Duration::from_millis(1));
+    let mut gate = table.hold_next(FakeOp::Get);
+    let (got, ()) = tokio::join!(b.get(E, "k"), async {
+        reached(&mut gate).await;
+        clock.advance(TTL / 2);
+        gate.release();
+    });
+    assert!(
+        got.unwrap().is_some(),
+        "judged expired at the read's return"
+    );
+}
+
+/// A create that meets a live lease judges it from when the create began,
+/// so a create begun inside one TTL of the first read takes nothing over.
+#[tokio::test(start_paused = true)]
+async fn a_create_begun_inside_one_ttl_takes_no_lease_over() {
+    let table = FakeTable::new();
+    let clock = TestClock::frozen();
+    let (a, b) = (handle(&table, &clock), handle(&table, &clock));
+    let rev = won(a.create(E, "k", b"a".to_vec()).await.unwrap());
+    assert!(b.get(E, "k").await.unwrap().is_some());
+    clock.advance(TTL - Duration::from_millis(1));
+    let mut gate = table.hold_next(FakeOp::Write);
+    let (created, ()) = tokio::join!(b.create(E, "k", b"b".to_vec()), async {
+        reached(&mut gate).await;
+        clock.advance(TTL / 2);
+        gate.release();
+    });
+    assert_eq!(created.unwrap(), CasOutcome::Lost);
+    assert_eq!(table.item("job#e", "k").map(|i| i.v), Some(rev.0));
+}
+
+/// A guarded delete judges the lease it fails against from when its removal
+/// began, so a delete whose removal began inside one TTL of the first read loses.
+#[tokio::test(start_paused = true)]
+async fn a_guarded_delete_begun_inside_one_ttl_keeps_the_lease() {
+    let table = FakeTable::new();
+    let clock = TestClock::frozen();
+    let (a, b) = (handle(&table, &clock), handle(&table, &clock));
+    let rev = won(a.create(E, "k", b"a".to_vec()).await.unwrap());
+    assert!(b.get(E, "k").await.unwrap().is_some());
+    clock.advance(TTL - Duration::from_millis(1));
+    let mut g1 = table.hold_next(FakeOp::Write);
+    let stale = Some(Revision(rev.0 - 1));
+    let (deleted, ()) = tokio::join!(b.delete(E, "k", stale), async {
+        reached(&mut g1).await;
+        let mut g2 = table.hold_next(FakeOp::Write);
+        g1.release();
+        reached(&mut g2).await;
+        clock.advance(TTL / 2);
+        g2.release();
+    });
+    assert_eq!(deleted.unwrap(), CasOutcome::Lost);
+    assert_eq!(table.item("job#e", "k").map(|i| i.v), Some(rev.0));
+}
+
+/// A handle times its own renewal's lease from when the write returned, so a
+/// renewal whose reply took half a TTL keeps the lease one TTL past the reply.
+#[tokio::test(start_paused = true)]
+async fn a_slow_own_renewal_keeps_the_lease_one_ttl_after_its_reply() {
+    let table = FakeTable::new();
+    let clock = TestClock::frozen();
+    let a = handle(&table, &clock);
+    let rev = won(a.create(E, "k", b"a".to_vec()).await.unwrap());
+    let mut gate = table.hold_next(FakeOp::Write);
+    let (renewed, ()) = tokio::join!(a.update(E, "k", b"a".to_vec(), rev), async {
+        reached(&mut gate).await;
+        clock.advance(TTL / 2);
+        gate.release();
+    });
+    won(renewed.unwrap());
+    clock.advance(TTL - Duration::from_millis(1));
+    assert!(
+        a.get(E, "k").await.unwrap().is_some(),
+        "judged from the send instant"
+    );
+}
+
+/// A list judges expiry from when its read began, so a list that began
+/// inside one TTL of the first read and returned after it keeps the lease.
+#[tokio::test(start_paused = true)]
+async fn a_list_begun_inside_one_ttl_keeps_the_lease() {
+    let table = FakeTable::new();
+    let clock = TestClock::frozen();
+    let (a, b) = (handle(&table, &clock), handle(&table, &clock));
+    let rev = won(a.create(E, "k", b"a".to_vec()).await.unwrap());
+    assert_eq!(b.list(E, "").await.unwrap().len(), 1);
+    clock.advance(TTL - Duration::from_millis(1));
+    let mut gate = table.hold_next_query();
+    let (listed, ()) = tokio::join!(b.list(E, ""), async {
+        reached(&mut gate).await;
+        won(a.update(E, "k", b"a".to_vec(), rev).await.unwrap());
+        clock.advance(TTL / 2);
+        gate.release();
+    });
+    assert_eq!(listed.unwrap().len(), 1);
+}
+
+/// A list times a lease's expiry from its first read of the version, so a
+/// lease no one renews drops out one TTL after the first list.
+#[tokio::test(start_paused = true)]
+async fn a_list_expires_a_stale_lease_one_ttl_after_its_first_list() {
+    let table = FakeTable::new();
+    let clock = TestClock::frozen();
+    let (a, b) = (handle(&table, &clock), handle(&table, &clock));
+    won(a.create(E, "k", b"a".to_vec()).await.unwrap());
+    assert_eq!(b.list(E, "").await.unwrap().len(), 1, "at the first list");
+    clock.advance(TTL - Duration::from_millis(1));
+    assert_eq!(b.list(E, "").await.unwrap().len(), 1, "inside one TTL");
+    clock.advance(Duration::from_millis(1));
+    assert!(b.list(E, "").await.unwrap().is_empty(), "one TTL on");
+}
+
+/// A watch judges a paged read from when its first page began, so a read that
+/// began inside one TTL and returned after it expires nothing.
+#[tokio::test(start_paused = true)]
+async fn a_paged_read_begun_inside_one_ttl_expires_nothing() {
+    let table = FakeTable::new();
+    table.set_page_bytes(300);
+    let clock = TestClock::frozen();
+    let (a, b) = (handle(&table, &clock), handle(&table, &clock));
+    let rev = won(a.create(E, "k", vec![0; 200]).await.unwrap());
+    won(a.create(E, "m", vec![0; 200]).await.unwrap());
+    let mut watch = b.watch(E, "").await.unwrap();
+    assert_eq!(snapshot(&mut watch).await.len(), 2);
+    clock.advance(TTL - Duration::from_millis(1));
+    let mut gate = table.hold_next_query();
+    reached(&mut gate).await;
+    let renewed = won(a.update(E, "k", vec![0; 200], rev).await.unwrap());
     clock.advance(TTL / 2);
     gate.release();
     assert_eq!(put_without_delete(&mut watch, "k").await, renewed);

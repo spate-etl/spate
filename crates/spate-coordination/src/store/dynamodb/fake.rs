@@ -19,7 +19,7 @@ const MAX_ITEM_BYTES: usize = 400 * 1024;
 /// DynamoDB's Query page limit.
 const PAGE_BYTES: usize = 1024 * 1024;
 
-/// One kind of call, for counts and injected failures.
+/// One kind of call, for counts, injected failures and holds.
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum FakeOp {
@@ -56,8 +56,8 @@ struct Fake {
     page_bytes: AtomicUsize,
     stale_reads: AtomicBool,
     land_then_fail: AtomicBool,
-    /// The next Query to read waits for this to turn true before returning.
-    hold: Mutex<Option<watch::Receiver<bool>>>,
+    /// The next held call of this op waits for this to turn true before returning.
+    hold: Mutex<Option<(FakeOp, watch::Receiver<bool>)>>,
     held: watch::Sender<usize>,
     /// Frozen wall time in epoch milliseconds; zero reads the system clock.
     wall_ms: AtomicU64,
@@ -71,7 +71,7 @@ struct Fake {
 #[derive(Clone, Debug)]
 pub struct FakeTable(Arc<Fake>);
 
-/// Releases the Query a [`FakeTable::hold_next_query`] holds.
+/// Releases the call a [`FakeTable::hold_next`] holds.
 #[doc(hidden)]
 #[derive(Debug)]
 pub struct QueryGate {
@@ -81,7 +81,7 @@ pub struct QueryGate {
 }
 
 impl QueryGate {
-    /// Waits until the held Query has read the table.
+    /// Waits until the held call has touched the table.
     pub async fn reached(&mut self) {
         let before = self.before;
         let _ = self.held.wait_for(|n| *n > before).await;
@@ -211,14 +211,34 @@ impl FakeTable {
 
     /// Holds the next Query after it reads the table, until released.
     pub fn hold_next_query(&self) -> QueryGate {
+        self.hold_next(FakeOp::Query)
+    }
+
+    /// Holds the next `get`, `query`, `write` or `create_above` call of kind
+    /// `op` once the table has answered it, until released; a call that returns
+    /// an error is not held, and a later hold replaces one not yet reached.
+    pub fn hold_next(&self, op: FakeOp) -> QueryGate {
         let (release, rx) = watch::channel(false);
-        *self.0.hold.lock().expect("fake table poisoned") = Some(rx);
+        *self.0.hold.lock().expect("fake table poisoned") = Some((op, rx));
         let held = self.0.held.subscribe();
         let before = *held.borrow();
         QueryGate {
             release,
             held,
             before,
+        }
+    }
+
+    async fn pause(&self, op: FakeOp) {
+        let hold = self
+            .0
+            .hold
+            .lock()
+            .expect("fake table poisoned")
+            .take_if(|(o, _)| *o == op);
+        if let Some((_, mut release)) = hold {
+            self.0.held.send_modify(|n| *n += 1);
+            let _ = release.wait_for(|r| *r).await;
         }
     }
 
@@ -486,7 +506,9 @@ impl Table for FakeTable {
     ) -> BoxFuture<'a, Result<Written, StoreError>> {
         Box::pin(async move {
             self.interposed()?;
-            self.write_now(pk, sk, write)
+            let written = self.write_now(pk, sk, write)?;
+            self.pause(FakeOp::Write).await;
+            Ok(written)
         })
     }
 
@@ -499,7 +521,9 @@ impl Table for FakeTable {
     ) -> BoxFuture<'a, Result<Created, StoreError>> {
         Box::pin(async move {
             self.interposed()?;
-            self.create_above_now(pk, floor_pk, sk, put)
+            let created = self.create_above_now(pk, floor_pk, sk, put)?;
+            self.pause(FakeOp::Write).await;
+            Ok(created)
         })
     }
 
@@ -509,22 +533,20 @@ impl Table for FakeTable {
         sk: &'a str,
     ) -> BoxFuture<'a, Result<Option<Item>, StoreError>> {
         Box::pin(async move {
-            let state = self.call(FakeOp::Get)?;
-            Ok(state
+            let item = self
+                .call(FakeOp::Get)?
                 .items
                 .get(&(pk.to_string(), sk.to_string()))
-                .and_then(|s| s.cur.clone()))
+                .and_then(|s| s.cur.clone());
+            self.pause(FakeOp::Get).await;
+            Ok(item)
         })
     }
 
     fn query(&self, query: Query) -> BoxFuture<'_, Result<Page, StoreError>> {
         Box::pin(async move {
             let page = self.read_page(&query)?;
-            let hold = self.0.hold.lock().expect("fake table poisoned").take();
-            if let Some(mut release) = hold {
-                self.0.held.send_modify(|n| *n += 1);
-                let _ = release.wait_for(|r| *r).await;
-            }
+            self.pause(FakeOp::Query).await;
             Ok(page)
         })
     }

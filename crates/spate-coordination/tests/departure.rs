@@ -1947,6 +1947,42 @@ fn a_commit_after_an_ambiguous_commit_lands() {
     );
 }
 
+/// A commit at the same watermark with new state, after a commit that applied
+/// with its reply lost, returns `Ok` and stores its own state.
+/// Regression for #910.
+#[test]
+fn a_commit_with_new_state_after_an_ambiguous_commit_at_the_same_watermark_lands() {
+    let rt = runtime();
+    let clock = TestClock::frozen();
+    let fault = FaultStore::with_clock(LEASE, clock.clone());
+    let mut a = holding_polled_clocked(&rt, fault.clone(), &clock, &["c0"]);
+
+    arm_ambiguous(&fault, "split.c0");
+    let first = a.commit(
+        &support::split_id("c0"),
+        &SplitProgress::new(7, b"s1".to_vec()),
+    );
+    assert!(
+        is_kind(&first, CoordinationErrorKind::Retryable),
+        "{first:?}"
+    );
+    let next = a.commit(
+        &support::split_id("c0"),
+        &SplitProgress::new(7, b"s2".to_vec()),
+    );
+
+    let record = fault.record(&rt, "split.c0");
+    let lease = fault.present(&rt, Keyspace::Ephemeral, &["split.c0"]);
+    assert!(
+        next.is_ok()
+            && record["state"] == "czI="
+            && record["watermark"] == 7
+            && record["owner"] == "worker-a"
+            && !lease.is_empty(),
+        "commit returned {next:?}; record {record}; lease: {lease:?}"
+    );
+}
+
 /// A commit whose read-back answers from before the write that won returns
 /// Retryable and keeps the split; the next commit lands.
 #[test]
@@ -2319,8 +2355,8 @@ fn a_regressing_commit_after_an_ambiguous_commit_is_fatal() {
     );
 }
 
-/// The same completing commit sent again after its reply was lost is adopted:
-/// the caller gets `Ok` and the lease is released.
+/// The same completing commit sent again after its reply was lost is adopted
+/// without a write on top: the caller gets `Ok` and the lease is released.
 #[test]
 fn a_repeated_completing_commit_after_an_ambiguous_one_is_adopted() {
     let rt = runtime();
@@ -2336,20 +2372,182 @@ fn a_repeated_completing_commit_after_an_ambiguous_one_is_adopted() {
         is_kind(&first, CoordinationErrorKind::Retryable),
         "{first:?}"
     );
+    let before = fault.updates(Keyspace::Durable, "split.c0");
 
     let again = a.commit(
         &support::split_id("c0"),
         &SplitProgress::completed(7, vec![]),
     );
 
+    let updates = fault.updates(Keyspace::Durable, "split.c0") - before;
     let record = fault.record(&rt, "split.c0");
     let lease = fault.present(&rt, Keyspace::Ephemeral, &["split.c0"]);
     assert!(
         again.is_ok()
+            && updates == 1
             && record["status"] == "completed"
             && record["watermark"] == 7
             && lease.is_empty(),
-        "commit returned {again:?}; record {record}; lease: {lease:?}"
+        "commit returned {again:?} after {updates} updates; record {record}; lease: {lease:?}"
+    );
+}
+
+/// A completing commit with new state, after a completing commit at the same
+/// watermark that applied with its reply lost, is written on top: `Ok`, the
+/// lease deleted and no `Lost`.
+/// Regression for #910.
+#[test]
+fn a_completing_commit_with_new_state_after_an_ambiguous_one_lands() {
+    let rt = runtime();
+    let clock = TestClock::frozen();
+    let fault = FaultStore::with_clock(LEASE, clock.clone());
+    let mut a = holding_polled_clocked(&rt, fault.clone(), &clock, &["c0"]);
+    arm_ambiguous(&fault, "split.c0");
+    let first = a.commit(
+        &support::split_id("c0"),
+        &SplitProgress::completed(7, b"s1".to_vec()),
+    );
+    assert!(
+        is_kind(&first, CoordinationErrorKind::Retryable),
+        "{first:?}"
+    );
+
+    let next = a.commit(
+        &support::split_id("c0"),
+        &SplitProgress::completed(7, b"s2".to_vec()),
+    );
+
+    let record = fault.record(&rt, "split.c0");
+    let lease = fault.present(&rt, Keyspace::Ephemeral, &["split.c0"]);
+    let lost = lost_queued(&mut a, "c0");
+    assert!(
+        next.is_ok()
+            && record["status"] == "completed"
+            && record["state"] == "czI="
+            && record["watermark"] == 7
+            && lease.is_empty()
+            && !lost,
+        "commit returned {next:?}; record {record}; Lost: {lost}; lease: {lease:?}"
+    );
+}
+
+/// A commit that does not complete, at the watermark of this tenancy's
+/// completing commit that applied with its reply lost, returns Fenced, keeps
+/// the completed record, deletes the lease and emits no `Lost`.
+#[test]
+fn a_commit_at_the_landed_watermark_after_an_ambiguous_completing_commit_is_fenced() {
+    let rt = runtime();
+    let clock = TestClock::frozen();
+    let fault = FaultStore::with_clock(LEASE, clock.clone());
+    let mut a = holding_polled_clocked(&rt, fault.clone(), &clock, &["c0"]);
+    arm_ambiguous(&fault, "split.c0");
+    let first = a.commit(
+        &support::split_id("c0"),
+        &SplitProgress::completed(7, b"s1".to_vec()),
+    );
+    assert!(
+        is_kind(&first, CoordinationErrorKind::Retryable),
+        "{first:?}"
+    );
+
+    let next = a.commit(
+        &support::split_id("c0"),
+        &SplitProgress::new(7, b"s2".to_vec()),
+    );
+
+    let record = fault.record(&rt, "split.c0");
+    let lease = fault.present(&rt, Keyspace::Ephemeral, &["split.c0"]);
+    let lost = lost_queued(&mut a, "c0");
+    assert!(
+        is_kind(&next, CoordinationErrorKind::Fenced)
+            && record["status"] == "completed"
+            && record["state"] == "czE="
+            && lease.is_empty()
+            && !lost,
+        "commit returned {next:?}; record {record}; Lost: {lost}; lease: {lease:?}"
+    );
+}
+
+/// A completing commit at a new watermark, after this tenancy's completing
+/// commit applied with its reply lost, returns Fenced, keeps the completed
+/// record, deletes the lease and emits no `Lost`.
+#[test]
+fn a_completing_commit_at_a_new_watermark_after_an_ambiguous_one_is_fenced() {
+    let rt = runtime();
+    let clock = TestClock::frozen();
+    let fault = FaultStore::with_clock(LEASE, clock.clone());
+    let mut a = holding_polled_clocked(&rt, fault.clone(), &clock, &["c0"]);
+    arm_ambiguous(&fault, "split.c0");
+    let first = a.commit(
+        &support::split_id("c0"),
+        &SplitProgress::completed(7, b"s1".to_vec()),
+    );
+    assert!(
+        is_kind(&first, CoordinationErrorKind::Retryable),
+        "{first:?}"
+    );
+
+    let next = a.commit(
+        &support::split_id("c0"),
+        &SplitProgress::completed(8, b"s2".to_vec()),
+    );
+
+    let record = fault.record(&rt, "split.c0");
+    let lease = fault.present(&rt, Keyspace::Ephemeral, &["split.c0"]);
+    let lost = lost_queued(&mut a, "c0");
+    assert!(
+        is_kind(&next, CoordinationErrorKind::Fenced)
+            && record["watermark"] == 7
+            && record["state"] == "czE="
+            && lease.is_empty()
+            && !lost,
+        "commit returned {next:?}; record {record}; Lost: {lost}; lease: {lease:?}"
+    );
+}
+
+/// A completing commit at the watermark of a peer's unseen completed record
+/// returns Fenced, emits `Lost` and leaves the peer's record unchanged.
+#[test]
+fn a_completing_commit_at_a_peers_completed_watermark_is_fenced() {
+    let rt = runtime();
+    let clock = TestClock::frozen();
+    let fault = FaultStore::with_clock(LEASE, clock.clone());
+    let mut a = holding_polled_clocked(&rt, fault.clone(), &clock, &["c0"]);
+    let ours = rt
+        .block_on(fault.inner.get(Keyspace::Durable, "split.c0"))
+        .unwrap()
+        .expect("split record");
+    let mut peer: serde_json::Value = serde_json::from_slice(&ours.value).unwrap();
+    peer["owner"] = "worker-b".into();
+    peer["epoch"] = (peer["epoch"].as_u64().unwrap() + 1).into();
+    peer["watermark"] = 7.into();
+    peer["state"] = "cGVlcg==".into();
+    peer["completed"] = true.into();
+    peer["status"] = "completed".into();
+    let peer = serde_json::to_vec(&peer).unwrap();
+    let won = rt
+        .block_on(
+            fault
+                .inner
+                .update(Keyspace::Durable, "split.c0", peer.clone(), ours.revision),
+        )
+        .unwrap();
+    assert!(matches!(won, CasOutcome::Won(_)), "{won:?}");
+
+    let next = a.commit(
+        &support::split_id("c0"),
+        &SplitProgress::completed(7, b"s2".to_vec()),
+    );
+
+    let left = rt
+        .block_on(fault.inner.get(Keyspace::Durable, "split.c0"))
+        .unwrap()
+        .expect("split record");
+    let lost = lost_queued(&mut a, "c0");
+    assert!(
+        is_kind(&next, CoordinationErrorKind::Fenced) && left.value == peer && lost,
+        "commit returned {next:?}; record {}; Lost: {lost}",
+        String::from_utf8_lossy(&left.value)
     );
 }
 

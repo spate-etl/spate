@@ -182,8 +182,7 @@ pub(crate) enum TaskEvent {
 /// at the start of the tenancy.
 struct OwnedSplit {
     lease_rev: Revision,
-    /// Last successful lease write, for renewal cadence and the
-    /// starvation self-fence.
+    /// Last successful lease write, for the starvation self-fence.
     last_ok_write: Instant,
     /// The record's delivery attempts when this tenancy began; a same-epoch
     /// owner-cleared record with more is this tenancy's own failure report.
@@ -313,9 +312,9 @@ pub(crate) struct Task<S: CoordinationStore + Clone> {
     pub(crate) config: CoordinationConfig,
     /// Time source for every deadline in the control loop, covering lease
     /// expiry and the starvation self-fence, the heartbeat/reconcile/replan
-    /// cadence, the grace window, the drain deadline, and the renewal
-    /// cadence gate. `SystemClock` in production; in tests an injected
-    /// clock the test advances, so no transition fires on scheduler jitter.
+    /// cadence, the grace window, and the drain deadline. `SystemClock` in
+    /// production; in tests an injected clock the test advances, so no
+    /// transition fires on scheduler jitter.
     /// Anything anchored to it must also be *read* through it. Commands are
     /// served on a clock-independent arm, so a test can drive a coordinator
     /// whose clock is not moving.

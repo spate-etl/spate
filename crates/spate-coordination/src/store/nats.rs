@@ -40,11 +40,13 @@
 use super::{
     CasOutcome, CoordinationStore, Entry, Keyspace, Revision, StoreError, WatchEvent, WatchStream,
 };
+use async_nats::jetstream::consumer::{DeliverPolicy, ReplayPolicy, push};
 use async_nats::jetstream::stream::LastRawMessageErrorKind;
 use async_nats::jetstream::{kv, stream};
 use futures_util::StreamExt as _;
 use serde::Deserialize;
 use spate_core::config::redact;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -701,17 +703,44 @@ async fn live_on_leader(bucket: &kv::Store, key: &str) -> Result<bool, StoreErro
         .get_last_raw_message_by_subject(&subject)
         .await
     {
-        // Every marker carries one of these headers.
-        Ok(message) => Ok(message
-            .headers
-            .get(async_nats::header::NATS_MARKER_REASON)
-            .is_none()
-            && message
-                .headers
-                .get("KV-Operation")
-                .is_none_or(|op| op.as_str() == "PUT")),
+        Ok(message) => Ok(holds_value(&message.headers)),
         Err(e) if e.kind() == LastRawMessageErrorKind::NoMessageFound => Ok(false),
         Err(e) => Err(StoreError::Retryable(format!("read {key}: {e}"))),
+    }
+}
+
+/// Whether a message with `headers` holds a value. Every marker carries
+/// `Nats-Marker-Reason` or a `KV-Operation` other than `PUT`.
+fn holds_value(headers: &async_nats::HeaderMap) -> bool {
+    headers
+        .get(async_nats::header::NATS_MARKER_REASON)
+        .is_none()
+        && headers
+            .get("KV-Operation")
+            .is_none_or(|op| op.as_str() == "PUT")
+}
+
+/// Applies one delivered message for `key` to a listing. A value replaces the
+/// key's entry, so a key delivered twice keeps its later message; a marker
+/// drops the key.
+fn fold_listed(
+    live: &mut BTreeMap<String, Entry>,
+    key: &str,
+    headers: Option<&async_nats::HeaderMap>,
+    value: &[u8],
+    revision: u64,
+) {
+    if headers.is_none_or(holds_value) {
+        live.insert(
+            key.to_string(),
+            Entry {
+                key: key.to_string(),
+                value: value.to_vec(),
+                revision: Revision(revision),
+            },
+        );
+    } else {
+        live.remove(key);
     }
 }
 
@@ -919,35 +948,114 @@ impl CoordinationStore for NatsStore {
     }
 
     async fn list(&self, ks: Keyspace, prefix: &str) -> Result<Vec<Entry>, StoreError> {
-        // `keys()` is the authoritative live-key view (markers excluded);
-        // point-read each one. The listing backs the reconcile pass. A
-        // key it omits is treated as DEAD by the protocol, so this must
-        // never underreport. N+1 round trips are fine at reconcile
-        // cadence over a working set of keys.
+        // One pass over the last message of each subject under the filter.
         let buckets = self.buckets().await?;
         let store = self.bucket(buckets, ks);
-        let mut keys = store
-            .keys()
+        let filter = match prefix {
+            p if p.is_empty() || p.ends_with('.') => format!("{p}>"),
+            _ => ">".to_string(),
+        };
+        let consumer = store
+            .stream
+            .create_consumer(push::OrderedConfig {
+                deliver_subject: buckets.client.new_inbox(),
+                description: Some("spate listing".to_string()),
+                filter_subject: format!("{}{filter}", store.prefix),
+                deliver_policy: DeliverPolicy::LastPerSubject,
+                replay_policy: ReplayPolicy::Instant,
+                ..Default::default()
+            })
             .await
-            .map_err(|e| StoreError::Retryable(format!("listing keys: {e}")))?;
+            .map_err(|e| StoreError::Retryable(format!("listing {filter}: {e}")))?;
+        // An empty filter delivers nothing, so no message reports the end.
+        if consumer.cached_info().num_pending == 0 {
+            return Ok(Vec::new());
+        }
+        let mut messages = consumer
+            .messages()
+            .await
+            .map_err(|e| StoreError::Retryable(format!("listing {filter}: {e}")))?;
         let stall = self.stall_bound();
-        let mut out = Vec::new();
-        while let Some(key) = next_within(&mut keys, stall, "listing keys").await? {
-            let key = key.map_err(|e| StoreError::Retryable(format!("listing keys: {e}")))?;
-            if !key.starts_with(prefix) {
-                continue;
+        let mut live = BTreeMap::new();
+        while let Some(message) = next_within(&mut messages, stall, "listing").await? {
+            let message =
+                message.map_err(|e| StoreError::Retryable(format!("listing {filter}: {e}")))?;
+            let info = message
+                .info()
+                .map_err(|e| StoreError::Retryable(format!("listing {filter}: {e}")))?;
+            let (pending, revision) = (info.pending, info.stream_sequence);
+            if let Some(key) = message.subject.strip_prefix(store.prefix.as_str())
+                && key.starts_with(prefix)
+            {
+                fold_listed(
+                    &mut live,
+                    key,
+                    message.headers.as_ref(),
+                    &message.payload,
+                    revision,
+                );
             }
-            if let Some(entry) = self.get(ks, &key).await? {
-                out.push(entry);
+            if pending == 0 {
+                return Ok(live.into_values().collect());
             }
         }
-        Ok(out)
+        Err(StoreError::Retryable(format!(
+            "listing {filter} ended early"
+        )))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn headers(pairs: &[(&str, &str)]) -> async_nats::HeaderMap {
+        let mut headers = async_nats::HeaderMap::new();
+        for (name, value) in pairs {
+            headers.insert(*name, *value);
+        }
+        headers
+    }
+
+    /// A listing keeps each key's latest value and drops a key whose later
+    /// message is any marker the server writes into a bucket, including a
+    /// MaxAge limit marker, which carries no `KV-Operation`.
+    #[test]
+    fn a_listing_folds_values_and_markers() {
+        let markers = [
+            headers(&[("KV-Operation", "DEL")]),
+            headers(&[("KV-Operation", "PURGE"), ("Nats-TTL", "2s")]),
+            headers(&[
+                ("Nats-Marker-Reason", "MaxAge"),
+                ("Nats-TTL", "2s"),
+                ("Nats-Rollup", "sub"),
+            ]),
+            headers(&[("Nats-Marker-Reason", "Remove")]),
+        ];
+        for marker in &markers {
+            let mut live = BTreeMap::new();
+            fold_listed(&mut live, "k", None, b"v", 1);
+            fold_listed(&mut live, "k", Some(marker), b"", 2);
+            assert!(live.is_empty(), "{marker:?}");
+        }
+        let mut live = BTreeMap::new();
+        fold_listed(&mut live, "k", None, b"old", 1);
+        fold_listed(
+            &mut live,
+            "k",
+            Some(&headers(&[("KV-Operation", "PUT")])),
+            b"new",
+            3,
+        );
+        assert_eq!(
+            live.into_values().collect::<Vec<_>>(),
+            [Entry {
+                key: "k".to_string(),
+                value: b"new".to_vec(),
+                revision: Revision(3),
+            }]
+        );
+    }
 
     /// Both spellings parse from YAML text: the single-key map and the tagged
     /// form.

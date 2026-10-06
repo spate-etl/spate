@@ -16,8 +16,8 @@ use std::time::{Duration, Instant};
 /// time because it bounds store I/O.
 ///
 /// `list` is metered but **not** deadline-bounded: its duration grows
-/// with the number of live keys (the NATS backend point-reads each one),
-/// so a fixed per-op deadline would starve reconciliation on large jobs.
+/// with the number of live keys, so a fixed per-op deadline would starve
+/// reconciliation on large jobs.
 /// A dead store still fails it fast through the client's own transport
 /// errors; a slow-but-alive one is paced by the reconcile interval.
 #[derive(Clone)]

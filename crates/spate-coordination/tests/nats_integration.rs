@@ -367,9 +367,10 @@ fn a_listing_whose_undelivered_tail_expires_ends() {
     let (_nats, port) = start_nats(None);
     let rt = runtime();
     rt.block_on(async {
-        let store = NatsStore::new(nats_config(port, "stall-list"), LEASE).expect("store");
+        // Delivering the listing through the proxy takes several leases.
+        let proxy = Proxy::throttled(port, 256 * 1024).await;
+        let store = NatsStore::new(nats_config(proxy.port, "stall-list"), LEASE).expect("store");
         fill_lease_bucket(&store, port, "stall-list").await;
-        // One point read per key keeps the listing busy past the lease.
         let listed =
             tokio::time::timeout(Duration::from_secs(60), store.list(Keyspace::Ephemeral, ""))
                 .await
@@ -377,6 +378,43 @@ fn a_listing_whose_undelivered_tail_expires_ends() {
         if let Err(e) = listed {
             assert!(matches!(e, StoreError::Retryable(_)), "{e}");
         }
+    });
+}
+
+/// A listing under a dot-terminated prefix filters its consumer to that prefix.
+#[test]
+#[ignore = "needs Docker; run explicitly"]
+fn a_listing_filters_its_consumer_to_the_prefix() {
+    let (_nats, port) = start_nats(None);
+    let rt = runtime();
+    rt.block_on(async {
+        let store = NatsStore::new(nats_config(port, "list-filter"), LEASE).expect("store");
+        for key in ["split.a", "spec.a"] {
+            store
+                .create(Keyspace::Durable, key, b"a".to_vec())
+                .await
+                .expect("create")
+                .won()
+                .expect("created");
+        }
+        store.list(Keyspace::Durable, "split.").await.expect("list");
+        let js = jetstream(port).await;
+        let stream = js
+            .get_stream("KV_spate_coordination_list-filter_state")
+            .await
+            .expect("stream");
+        let mut consumers = stream.consumers();
+        let mut filters = Vec::new();
+        while let Some(info) = consumers.next().await {
+            let info = info.expect("consumer info");
+            if info.config.description.as_deref() == Some("spate listing") {
+                filters.push(info.config.filter_subject);
+            }
+        }
+        assert_eq!(
+            filters,
+            ["$KV.spate_coordination_list-filter_state.split.>"]
+        );
     });
 }
 
@@ -732,6 +770,15 @@ struct Proxy {
 
 impl Proxy {
     async fn start(target: u16) -> Proxy {
+        Proxy::spawn(target, None).await
+    }
+
+    /// Forwards server-to-client bytes at no more than `bytes_per_sec`.
+    async fn throttled(target: u16, bytes_per_sec: usize) -> Proxy {
+        Proxy::spawn(target, Some(bytes_per_sec)).await
+    }
+
+    async fn spawn(target: u16, rate: Option<usize>) -> Proxy {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind a local port");
@@ -743,10 +790,22 @@ impl Proxy {
             while let Ok((mut client, _)) = listener.accept().await {
                 let port = to.load(Ordering::SeqCst);
                 let forward = tokio::spawn(async move {
-                    if let Ok(mut server) =
-                        tokio::net::TcpStream::connect(("127.0.0.1", port)).await
-                    {
-                        let _ = tokio::io::copy_bidirectional(&mut client, &mut server).await;
+                    let Ok(mut server) = tokio::net::TcpStream::connect(("127.0.0.1", port)).await
+                    else {
+                        return;
+                    };
+                    match rate {
+                        None => {
+                            let _ = tokio::io::copy_bidirectional(&mut client, &mut server).await;
+                        }
+                        Some(rate) => {
+                            let (mut client_rx, mut client_tx) = client.split();
+                            let (mut server_rx, mut server_tx) = server.split();
+                            let _ = tokio::join!(
+                                tokio::io::copy(&mut client_rx, &mut server_tx),
+                                trickle(&mut server_rx, &mut client_tx, rate),
+                            );
+                        }
                     }
                 });
                 conns.lock().unwrap().push(forward.abort_handle());
@@ -761,6 +820,26 @@ impl Proxy {
         for forward in self.live.lock().unwrap().drain(..) {
             forward.abort();
         }
+    }
+}
+
+/// Copies `from` to `to` in tenth-of-a-second slices of `bytes_per_sec`.
+async fn trickle(
+    from: &mut (impl tokio::io::AsyncRead + Unpin),
+    to: &mut (impl tokio::io::AsyncWrite + Unpin),
+    bytes_per_sec: usize,
+) -> std::io::Result<()> {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let mut buf = vec![0; (bytes_per_sec / 10).max(1)];
+    let mut tick = tokio::time::interval(Duration::from_millis(100));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tick.tick().await;
+        let n = from.read(&mut buf).await?;
+        if n == 0 {
+            return Ok(());
+        }
+        to.write_all(&buf[..n]).await?;
     }
 }
 

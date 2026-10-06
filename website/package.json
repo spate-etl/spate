@@ -40,7 +40,7 @@
     "@docusaurus/tsconfig": "^3.10.1",
     "@docusaurus/types": "^3.10.1",
     "@playwright/test": "^1.63.0",
-    "smol-toml": "^1.8.0",
+    "smol-toml": "^1.9.0",
     "typescript": "~5.9.3"
   },
   "overrides": {

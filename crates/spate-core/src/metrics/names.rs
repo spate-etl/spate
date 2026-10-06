@@ -233,6 +233,11 @@ pub const COORDINATION_DRAIN_DURATION_SECONDS: &str = "spate_coordination_drain_
 /// this worker's assignment to this worker holding its lease.
 pub const COORDINATION_ASSIGNMENT_LATENCY_SECONDS: &str =
     "spate_coordination_assignment_latency_seconds";
+/// Time left before the owning worker's starvation self-fence when a
+/// split-lease renewal is confirmed, on that worker's clock. 0 when none was
+/// left.
+pub const COORDINATION_SPLIT_LEASE_HEADROOM_SECONDS: &str =
+    "spate_coordination_split_lease_headroom_seconds";
 /// Splits this worker is currently draining away under revocation,
 /// including a drain whose revocation was cancelled and which is still
 /// winding down. This is the drain count rather than the revocation count.
@@ -353,6 +358,7 @@ pub const HISTOGRAMS: &[&str] = &[
     COORDINATION_STORE_OP_DURATION_SECONDS,
     COORDINATION_DRAIN_DURATION_SECONDS,
     COORDINATION_ASSIGNMENT_LATENCY_SECONDS,
+    COORDINATION_SPLIT_LEASE_HEADROOM_SECONDS,
     E2E_LATENCY_SECONDS,
 ];
 

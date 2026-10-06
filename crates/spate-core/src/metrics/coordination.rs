@@ -232,6 +232,7 @@ pub struct CoordinationMetrics {
     store_op_poll: Histogram,
     drain_duration: Histogram,
     assignment_latency: Histogram,
+    split_lease_headroom: Histogram,
     /// Shared so `Clone` hands out co-owners rather than duplicate claimants.
     /// The series is released when the last clone drops.
     _claim: Option<Arc<SeriesClaim>>,
@@ -338,6 +339,8 @@ impl CoordinationMetrics {
             store_op_poll: store_op("poll"),
             drain_duration: labels.histogram(names::COORDINATION_DRAIN_DURATION_SECONDS),
             assignment_latency: labels.histogram(names::COORDINATION_ASSIGNMENT_LATENCY_SECONDS),
+            split_lease_headroom: labels
+                .histogram(names::COORDINATION_SPLIT_LEASE_HEADROOM_SECONDS),
             _claim: claim,
         }
     }
@@ -427,6 +430,15 @@ impl CoordinationMetrics {
     /// owner's drain, rather than timing only the final claim.
     pub fn assignment_latency(&self, d: Duration) {
         self.assignment_latency.record(d.as_secs_f64());
+    }
+
+    /// Record the time left before this worker's starvation self-fence, on
+    /// its own clock, when a renewal of one of its split leases is confirmed.
+    ///
+    /// 0 means the renewal was confirmed a full lease or more after the
+    /// previous confirmed write.
+    pub fn split_lease_headroom(&self, headroom: Duration) {
+        self.split_lease_headroom.record(headroom.as_secs_f64());
     }
 
     /// Set the number of splits this worker is currently draining away

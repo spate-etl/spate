@@ -42,6 +42,10 @@ enum Fault {
     },
     /// Report an error without calling the inner store.
     FailUnwritten,
+    /// Apply the write, then advance the clock by `post` before replying.
+    WinAfter {
+        post: Duration,
+    },
 }
 
 type Log = Arc<Mutex<Vec<(String, Instant, Outcome)>>>;
@@ -115,6 +119,16 @@ impl CoordinationStore for FaultyStore {
                     Outcome::LandedError,
                     Err(StoreError::Retryable("renewal landed, reply lost".into())),
                 )
+            }
+            Fault::WinAfter { post } => {
+                let result = self.inner.update(ks, key, value, expected).await;
+                self.clock.advance(post);
+                let outcome = match &result {
+                    Ok(CasOutcome::Won(_)) => Outcome::Won,
+                    Ok(CasOutcome::Lost) => Outcome::Lost,
+                    Err(_) => Outcome::Error,
+                };
+                (outcome, result)
             }
             Fault::None => {
                 let result = self.inner.update(ks, key, value, expected).await;
@@ -336,6 +350,26 @@ fn a_direct_renewal_records_the_lease_left_at_confirmation() {
     let want: f64 = expected.iter().sum();
     assert!((sum - want).abs() < 1e-6, "sum {sum}, want {want}");
     assert_eq!(le_1, 3.0);
+}
+
+/// Pins that a direct renewal measures at the reply, one store round trip
+/// after the update was sent.
+#[test]
+fn a_direct_renewal_measures_at_the_reply() {
+    let mut rig = Rig::new("reply");
+    let t_p = rig.next_win();
+    let before = rig.render();
+    let from = rig.log_len();
+    let post = Duration::from_millis(10);
+    *rig.store.fault.lock().unwrap() = Fault::WinAfter { post };
+    let entries = rig.step_until("a slow win", from, |e| {
+        e.iter().any(|(_, o)| *o == Outcome::Won)
+    });
+    let t_sent = entries.iter().find(|(_, o)| *o == Outcome::Won).unwrap().0;
+    let (count, sum, _) = rig.delta(&before, "1");
+    assert_eq!(count, 1.0);
+    let want = secs(LEASE) - secs(t_sent.duration_since(t_p) + post);
+    assert!((sum - want).abs() < 1e-6, "sum {sum}, want {want}");
 }
 
 /// Pins that a renewal adopted after a lost reply records `LEASE` less the

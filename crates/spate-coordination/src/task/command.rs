@@ -75,16 +75,18 @@ impl<S: CoordinationStore + Clone> Task<S> {
     /// record is small by schema (the descriptor lives in the immutable
     /// spec record), so commit cost is independent of descriptor size.
     ///
-    /// A lost CAS reads the record back. A newer runnable record of this
-    /// tenancy is written again on top. This tenancy's own completed record
-    /// ends the tenancy as a completing commit does, with no `Lost`. The caller
-    /// gets `Ok` if this commit repeats the completing commit that landed, and
-    /// `Fenced` otherwise. Another writer's record means a peer owns the split:
-    /// nothing was written, the caller gets `Fenced`, and `Lost` follows. This
-    /// worker's own quarantining failure report read back here counts as
-    /// another writer's record. A read older than the write that won is
-    /// `Retryable`, a failed read keeps its store error's class, and either
-    /// keeps the split held.
+    /// A lost CAS reads the record back. A record of this tenancy that already
+    /// carries this commit's watermark, state and completion is this commit,
+    /// landed with its reply lost, and the caller gets `Ok`. Otherwise a newer
+    /// runnable record of this tenancy is written again on top. This tenancy's
+    /// own completed record ends the tenancy as a completing commit does, with
+    /// no `Lost`. The caller gets `Ok`, with its own state stored, if this
+    /// commit completes at the watermark that landed, and `Fenced` otherwise.
+    /// Another writer's record means a peer owns the split: nothing was
+    /// written, the caller gets `Fenced`, and `Lost` follows. This worker's own
+    /// quarantining failure report read back here counts as another writer's
+    /// record. A read older than the write that won is `Retryable`, a failed
+    /// read keeps its store error's class, and either keeps the split held.
     async fn commit(
         &mut self,
         split: &SplitId,
@@ -168,6 +170,7 @@ impl<S: CoordinationStore + Clone> Task<S> {
                 && fresh.epoch == owned_epoch;
             if ours
                 && fresh.watermark == Some(progress.watermark)
+                && fresh.state == record.state
                 && fresh.completed == progress.completed
             {
                 // The winning write is this commit, landed with its reply lost.
@@ -178,9 +181,11 @@ impl<S: CoordinationStore + Clone> Task<S> {
                 return Ok(());
             }
             let status = fresh.status;
+            let landed_here = fresh.watermark == Some(progress.watermark);
             self.upsert_progress(id, fresh, rev)?;
             match status {
                 SplitStatus::Runnable if ours => continue,
+                SplitStatus::Completed if ours && progress.completed && landed_here => continue,
                 SplitStatus::Completed if ours => {
                     self.finish_completed(id).await?;
                     return Err(CoordinationError::new(

@@ -9,9 +9,11 @@ a failure report, the same read is reported as fenced and the split as lost, as
 in previous versions, unless the record is this worker's own completed one. The
 lease is then released, no lost split is reported, and the report is fenced
 without naming a peer. A commit after this worker's own completing commit
-releases the lease, reports no lost split, and returns success if it repeats
-that completing commit and fenced otherwise. In previous versions, when the next
-commit or failure report ran before the watch delivered the earlier commit, it
-was reported as fenced, and the split was claimed again at a new epoch, which
-used up a delivery attempt. On a store whose watch is polled, split records do
+releases the lease, reports no lost split, and returns success if it completes
+at the same watermark, with its own state stored, and fenced otherwise. In
+previous versions, when the next commit or failure report ran before the watch
+delivered the earlier commit, it was reported as fenced, and the split was
+claimed again at a new epoch, which used up a delivery attempt. A commit with
+the same watermark and completion as the earlier one was the exception and
+returned success. On a store whose watch is polled, split records do
 not arrive on the watch, and these cases are covered the same way.

@@ -63,6 +63,31 @@ fn parse_seed(text: &str) -> Option<u64> {
     }
 }
 
+/// The nextest run of every ignored `spate-faults` test matching `filter`,
+/// with the seed and run root in the scenarios' environment.
+fn nextest(seed: &str, runs: &Path, filter: Option<&str>) -> Step<'static> {
+    Step::new(
+        "cargo",
+        [
+            "nextest",
+            "run",
+            "--profile",
+            "faults",
+            "-p",
+            "spate-faults",
+            "--locked",
+            "--run-ignored",
+            "ignored-only",
+            "--ignore-default-filter",
+            "--test-threads",
+            "1",
+        ],
+    )
+    .args(filter)
+    .env("SPATE_FAULT_SEED", seed)
+    .env("SPATE_FAULT_RUN_DIR", runs.display().to_string())
+}
+
 /// Runs the scenarios matching `filter` under `seed`, or under a seed drawn
 /// from the clock, and writes `target/fault-runs/summary.json`.
 pub(crate) fn fault_test(
@@ -82,26 +107,7 @@ pub(crate) fn fault_test(
     let seed = format!("0x{seed:016x}");
     println!("fault-test seed {seed}");
     let runs = root.join(RUNS);
-    let step = Step::new(
-        "cargo",
-        [
-            "nextest",
-            "run",
-            "--profile",
-            "faults",
-            "-p",
-            "spate-faults",
-            "--locked",
-            "--run-ignored",
-            "ignored-only",
-            "--ignore-default-filter",
-            "--test-threads",
-            "1",
-        ],
-    )
-    .args(filter)
-    .env("SPATE_FAULT_SEED", seed.clone())
-    .env("SPATE_FAULT_RUN_DIR", runs.display().to_string());
+    let step = nextest(&seed, &runs, filter);
     if explain {
         return run::run(root, explain, &step);
     }
@@ -224,6 +230,17 @@ mod tests {
                 .map(|o| (o.scenario.as_str(), o.kind))
                 .collect::<Vec<_>>(),
             [("a", Kind::Pass), ("b", Kind::Violation)]
+        );
+    }
+
+    /// The scenarios read their seed from `SPATE_FAULT_SEED`.
+    #[test]
+    fn nextest_passes_the_seed_in_spate_fault_seed() {
+        let step = nextest("0x00000000000000ff", Path::new("runs"), None);
+        assert!(
+            step.env
+                .iter()
+                .any(|(k, v)| *k == "SPATE_FAULT_SEED" && v == "0x00000000000000ff")
         );
     }
 

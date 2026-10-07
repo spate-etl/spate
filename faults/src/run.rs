@@ -298,7 +298,7 @@ impl Run<'_> {
     ) -> Outcome {
         let spec = self.spec;
         let replay = format!(
-            "{SEED_VAR}=0x{:016x} cargo xtask fault-test {}",
+            "cargo xtask fault-test --seed 0x{:016x} {}",
             self.seed, spec.name
         );
         let outcome = Outcome {
@@ -378,7 +378,7 @@ fn generate(rng: &mut SplitMix64) -> (Vec<GeneratedObject>, Vec<(String, Vec<u8>
     for o in 0..OBJECTS {
         let key = format!("data/o{o:03}.ndjson");
         let target = match o {
-            0 => rng.in_range(MIN_OBJECT, MIB - 1),
+            0 => rng.in_range(MIN_OBJECT, MIB - 510),
             1 => rng.in_range(MIB + 1, MAX_OBJECT),
             _ => rng.in_range(MIN_OBJECT, MAX_OBJECT),
         };
@@ -462,6 +462,64 @@ mod tests {
                 assert!(line.starts_with(prefix.as_bytes()), "{}", record.id);
             }
         }
+    }
+
+    /// For several seeds, the first object lies below 1 MiB and the second above it.
+    #[test]
+    fn data_set_spans_one_mib_across_seeds() {
+        for seed in (0..8).chain([1399]) {
+            let (_, objects) = generate(&mut SplitMix64::for_scenario(
+                seed,
+                "nats_no_faults_writes_no_duplicates",
+            ));
+            let sizes = (objects[0].1.len() as u64, objects[1].1.len() as u64);
+            assert!(sizes.0 < MIB && sizes.1 > MIB, "seed {seed}: {sizes:?}");
+        }
+    }
+
+    /// A passing run keeps only `outcome.json`, and its replay command passes
+    /// the seed through `--seed`.
+    #[test]
+    fn a_passing_run_keeps_its_outcome_and_replays_its_seed() {
+        let dir = std::env::temp_dir().join(format!("spate-faults-finish-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("w0-1.ndjson"), "").unwrap();
+        let spec = Spec {
+            name: "s",
+            instances: 1,
+            worker: Path::new("w"),
+            sink_delay_ms: 0,
+            fault_free: true,
+        };
+        let run = Run {
+            spec: &spec,
+            seed: 0xff,
+            dir: dir.clone(),
+        };
+        let outcome = run.finish(
+            Stage::Oracle,
+            Kind::Pass,
+            String::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let left: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(
+            outcome.replay,
+            "cargo xtask fault-test --seed 0x00000000000000ff s"
+        );
+        assert_eq!(left, ["outcome.json"]);
+    }
+
+    /// The seed variable is the one `cargo xtask fault-test` sets.
+    #[test]
+    fn seed_variable_matches_xtask() {
+        assert_eq!(SEED_VAR, "SPATE_FAULT_SEED");
     }
 
     /// A record written twice, by one process or two, fails the fault-free

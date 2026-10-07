@@ -273,10 +273,17 @@ fn journal_write_failure_is_harness() {
         ..Run::ordinary()
     };
     assert_eq!(run.kind(), Kind::Harness);
-    assert_eq!(
-        run.violation(found(Check::RecordMissing)).kind(),
-        Kind::Harness
-    );
+    for check in [Check::RecordMissing, Check::AheadOfRows, Check::TwoOwners] {
+        let with = Run {
+            worker_exits: vec![exit(0), exit(3)],
+            ..Run::ordinary()
+        };
+        assert_eq!(
+            with.violation(found(check)).kind(),
+            Kind::Harness,
+            "{check:?}"
+        );
+    }
 }
 
 /// A property-3 or property-5 violation stays a violation through a container

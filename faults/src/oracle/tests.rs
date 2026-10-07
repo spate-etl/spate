@@ -55,10 +55,12 @@ fn after(ordinal: u32, record: u64) -> Option<i64> {
     encode_position(ordinal, record + 1)
 }
 
-/// A journal under construction.
+/// A journal under construction. Each line is stamped one millisecond after
+/// the last unless [`Proc::at`] moves the clock.
 struct Proc {
     journal: ProcessJournal,
     calls: u64,
+    clock: u64,
 }
 
 impl Proc {
@@ -70,11 +72,18 @@ impl Proc {
                 lines: Vec::new(),
             },
             calls: 0,
+            clock: 0,
         }
     }
 
+    /// Stamps the next line at `t_ms`.
+    fn at(&mut self, t_ms: u64) {
+        self.clock = t_ms;
+    }
+
     fn push(&mut self, event: Event) {
-        let t_ms = self.journal.lines.len() as u64;
+        let t_ms = self.clock;
+        self.clock += 1;
         self.journal.lines.push(Line { t_ms, event });
     }
 
@@ -113,8 +122,13 @@ impl Proc {
 
     /// A write at `expected` that lands at `expected + 1`.
     fn write(&mut self, key: &str, expected: u64, value: &Progress) {
+        self.landed(key, expected, expected + 1, value);
+    }
+
+    /// A write at `expected` that lands at `rev`.
+    fn landed(&mut self, key: &str, expected: u64, rev: u64, value: &Progress) {
         let call = self.send(key, expected, value);
-        self.done(call, key, Reply::Won(expected + 1));
+        self.done(call, key, Reply::Won(rev));
     }
 
     fn me(&self) -> Option<&str> {
@@ -153,6 +167,7 @@ struct Fixture {
     processes: Vec<ProcessJournal>,
     finals: Vec<(String, u64, Progress)>,
     verdict: bool,
+    faults: Vec<Line>,
 }
 
 impl Fixture {
@@ -213,7 +228,40 @@ impl Fixture {
             processes: Vec::new(),
             finals: Vec::new(),
             verdict: true,
+            faults: Vec::new(),
         }
+    }
+
+    /// The tuning the fault runs use on the fixture's store.
+    fn timing(&self) -> Timing {
+        match self.store {
+            StoreKind::Nats => Timing {
+                lease_ms: 2_000,
+                drain_deadline_ms: 5_000,
+                op_timeout_ms: 500,
+                poll_interval_ms: 0,
+            },
+            StoreKind::DynamoDb => Timing {
+                lease_ms: 3_000,
+                drain_deadline_ms: 5_000,
+                op_timeout_ms: 1_000,
+                poll_interval_ms: 500,
+            },
+        }
+    }
+
+    /// Property 2's bound after a fault window, written out from
+    /// [`Fixture::timing`]: two leases, the drain deadline, two store
+    /// timeouts, two poll intervals and two seconds.
+    fn slack(&self) -> u64 {
+        match self.store {
+            StoreKind::Nats => 2 * 2_000 + 5_000 + 2 * 500 + 2_000,
+            StoreKind::DynamoDb => 2 * 3_000 + 5_000 + 2 * 1_000 + 2 * 500 + 2_000,
+        }
+    }
+
+    fn fault(&mut self, t_ms: u64, event: Event) {
+        self.faults.push(Line { t_ms, event });
     }
 
     fn sweep(&self) -> Vec<SweptEntry> {
@@ -257,6 +305,8 @@ impl Fixture {
             generated: &self.generated,
             processes: &self.processes,
             sweep: &sweep,
+            faults: &self.faults,
+            timing: self.timing(),
         })
         .unwrap()
     }
@@ -614,6 +664,8 @@ fn oracle_rejects_a_negative_watermark() {
         generated: &fixture.generated,
         processes: &fixture.processes,
         sweep: &sweep,
+        faults: &fixture.faults,
+        timing: fixture.timing(),
     });
     assert!(result.is_err(), "{result:?}");
 }
@@ -742,4 +794,833 @@ fn p3_does_not_attribute_a_commit_to_a_losing_claim() {
     w1.done(call, "split.s1", Reply::Lost);
     fixture.processes.push(w1.journal);
     assert_eq!(fixture.check(), Vec::new());
+}
+
+const STORES: [StoreKind; 2] = [StoreKind::Nats, StoreKind::DynamoDb];
+
+/// Revisions one key moves through: consecutive on DynamoDB, which counts
+/// per item, and spaced on NATS, whose stream sequence every key shares.
+fn revs(store: StoreKind) -> [u64; 6] {
+    match store {
+        StoreKind::DynamoDb => [1, 2, 3, 4, 5, 6],
+        StoreKind::Nats => [7, 11, 18, 24, 31, 40],
+    }
+}
+
+fn kill(instance: &str, pid: u32) -> Event {
+    Event::Kill {
+        instance: instance.to_owned(),
+        pid,
+    }
+}
+
+fn proxy_fault(fault: &str) -> Event {
+    Event::ProxyFault {
+        instance: "w0".to_owned(),
+        pid: 100,
+        fault: fault.to_owned(),
+        key: Some("split.s0".to_owned()),
+    }
+}
+
+/// How [`Handover::build`] passes `split.s0` from `w0` (pid 100), which has
+/// written its records up to `o002-r000000`, to a later tenant that replays
+/// from `w0`'s committed watermark.
+struct Handover {
+    store: StoreKind,
+    /// The later tenant's instance and pid.
+    to: (&'static str, u32),
+    /// The time of the later tenant's claim `send`.
+    claim_at: u64,
+    /// The claim spends a delivery attempt.
+    raised: bool,
+    /// `w0` releases the split before the claim.
+    release: bool,
+    /// The watermark `w0` commits.
+    committed: Option<i64>,
+    /// The records the later tenant writes.
+    rows: Vec<String>,
+}
+
+impl Handover {
+    fn new(store: StoreKind) -> Handover {
+        Handover {
+            store,
+            to: ("w1", 101),
+            claim_at: 3_000,
+            raised: true,
+            release: false,
+            committed: after(0, 0),
+            rows: vec![id(0, 1), id(2, 0), id(2, 1)],
+        }
+    }
+
+    fn build(&self) -> Fixture {
+        let key = "split.s0";
+        let r = revs(self.store);
+        let mut fixture = Fixture::empty();
+        fixture.store = self.store;
+        let mut w0 = Proc::new("w0", 100);
+        let s1 = w0.deliver(
+            "split.s1",
+            &[id(1, 0), id(1, 1)],
+            1,
+            after(0, 0),
+            after(0, 1),
+        );
+        let s2 = w0.deliver(
+            "split.s2",
+            &[id(1, 2), id(1, 3)],
+            1,
+            after(0, 0),
+            after(0, 1),
+        );
+        w0.seen(key, r[0], &value(0, None, None, false));
+        w0.landed(key, r[0], r[1], &value(1, w0.me(), None, false));
+        w0.rows(&[id(0, 0), id(0, 1)]);
+        let committed = value(1, w0.me(), self.committed, false);
+        w0.landed(key, r[1], r[2], &committed);
+        w0.rows(&[id(2, 0)]);
+        let mut prev = (r[2], committed);
+        let mut next = 3;
+        if self.release {
+            let released = value(1, None, self.committed, false);
+            w0.landed(key, r[2], r[3], &released);
+            prev = (r[3], released);
+            next = 4;
+        }
+        let (instance, pid) = self.to;
+        let mut b = Proc::new(instance, pid);
+        b.at(self.claim_at - 1);
+        b.seen(key, prev.0, &prev.1);
+        let mut claimed = value(2, Some(instance), self.committed, false);
+        claimed.attempts = prev.1.attempts + u32::from(self.raised);
+        b.landed(key, prev.0, r[next], &claimed);
+        b.rows(&self.rows);
+        let mut completed = value(2, Some(instance), after(1, 1), true);
+        completed.attempts = claimed.attempts;
+        b.landed(key, r[next], r[next + 1], &completed);
+        fixture.processes = vec![w0.journal, b.journal];
+        fixture.finals = vec![
+            (key.to_owned(), r[next + 1], completed),
+            ("split.s1".to_owned(), 4, s1),
+            ("split.s2".to_owned(), 4, s2),
+        ];
+        fixture
+    }
+}
+
+/// The property-2 violations, each as its key and detail.
+fn unexplained(fixture: &Fixture) -> Vec<(Option<String>, String)> {
+    fixture
+        .check()
+        .into_iter()
+        .filter(|v| v.check.property() == 2)
+        .map(|v| {
+            assert_eq!(v.check, Check::UnexplainedDuplicate);
+            (v.key, v.detail)
+        })
+        .collect()
+}
+
+/// Asserts one unexplained-duplicate violation on `split.s0` that names
+/// exactly the ids in `named` among `o000-r000001`, `o002-r000000` and
+/// `o002-r000001`.
+#[track_caller]
+fn assert_flags(fixture: &Fixture, named: &[String], case: &str) {
+    let found = unexplained(fixture);
+    assert_eq!(found.len(), 1, "{case} on {:?}: {found:?}", fixture.store);
+    let (key, detail) = &found[0];
+    assert_eq!(key.as_deref(), Some("split.s0"), "{case}");
+    for candidate in [id(0, 1), id(2, 0), id(2, 1)] {
+        assert_eq!(
+            detail.contains(&candidate),
+            named.contains(&candidate),
+            "{case} on {:?}, {candidate}: {detail}",
+            fixture.store
+        );
+    }
+}
+
+#[track_caller]
+fn assert_clean(fixture: &Fixture, case: &str) {
+    assert_eq!(fixture.check(), Vec::new(), "{case} on {:?}", fixture.store);
+}
+
+/// A replay of the records the previous tenant wrote above its watermark,
+/// after a kill on that tenant, is explained, the last record it wrote
+/// included.
+#[test]
+fn p2_accepts_a_duplicate_of_the_last_record_written() {
+    for store in STORES {
+        let mut fixture = Handover::new(store).build();
+        fixture.fault(1_000, kill("w0", 100));
+        assert_clean(&fixture, "kill before the claim");
+    }
+}
+
+/// A duplicate with no fault on the previous tenant is flagged.
+#[test]
+fn p2_flags_a_duplicate_with_no_fault_before_it() {
+    for store in STORES {
+        let fixture = Handover::new(store).build();
+        assert_flags(&fixture, &[id(0, 1), id(2, 0)], "no fault");
+    }
+}
+
+/// A fault logged after the claim does not explain the claim's replay; one
+/// logged at the claim's own millisecond does.
+#[test]
+fn p2_flags_a_duplicate_whose_only_fault_comes_after_the_claim() {
+    for store in STORES {
+        let handover = Handover::new(store);
+        let mut fixture = handover.build();
+        fixture.fault(handover.claim_at + 1, kill("w0", 100));
+        assert_flags(&fixture, &[id(0, 1), id(2, 0)], "kill after the claim");
+        let mut fixture = handover.build();
+        fixture.fault(handover.claim_at, kill("w0", 100));
+        assert_clean(&fixture, "kill at the claim");
+    }
+}
+
+/// A DynamoDB proxy fault and an `err_after_land` line on the previous tenant
+/// each explain a replay as faults of no duration; a `pass` or `delay` answer
+/// does not.
+#[test]
+fn p2_accepts_a_duplicate_after_a_zero_length_logged_fault() {
+    for store in STORES {
+        let handover = Handover::new(store);
+        let before = handover.claim_at - 100;
+        let mut fixture = handover.build();
+        fixture.fault(before, proxy_fault("throttle"));
+        assert_clean(&fixture, "proxy fault");
+
+        let mut fixture = handover.build();
+        fixture.processes[0].lines.push(Line {
+            t_ms: before,
+            event: Event::ErrAfterLand {
+                key: "split.s0".to_owned(),
+                rev: revs(store)[2],
+            },
+        });
+        assert_clean(&fixture, "err_after_land");
+
+        for benign in ["pass", "delay(50ms)"] {
+            let mut fixture = handover.build();
+            fixture.fault(before, proxy_fault(benign));
+            assert_flags(&fixture, &[id(0, 1), id(2, 0)], benign);
+        }
+    }
+}
+
+/// A duplicate below the watermark the claim replaced is flagged.
+#[test]
+fn p2_flags_a_duplicate_below_the_replaced_watermark() {
+    for store in STORES {
+        let mut handover = Handover::new(store);
+        handover.committed = after(0, 1);
+        let mut fixture = handover.build();
+        fixture.fault(1_000, kill("w0", 100));
+        assert_flags(&fixture, &[id(0, 1)], "below the replaced watermark");
+    }
+}
+
+/// A duplicate above the last record the previous tenant wrote is flagged.
+#[test]
+fn p2_flags_a_duplicate_above_the_previous_tenancys_highest_write() {
+    for store in STORES {
+        let mut handover = Handover::new(store);
+        handover.rows.push(id(2, 1));
+        let mut fixture = handover.build();
+        fixture.fault(1_000, kill("w0", 100));
+        assert_flags(&fixture, &[id(2, 1)], "above the highest write");
+    }
+}
+
+/// A claim after the previous tenant's release replays with no fault and
+/// no attempt spent.
+#[test]
+fn p2_accepts_a_replay_after_a_forced_release() {
+    for store in STORES {
+        let mut handover = Handover::new(store);
+        handover.release = true;
+        handover.raised = false;
+        assert_clean(&handover.build(), "release");
+    }
+}
+
+/// A claim that took over an owned split without spending an attempt does
+/// not explain a replay, even inside a fault's window.
+#[test]
+fn p2_flags_a_duplicate_after_a_claim_that_did_not_raise_attempts() {
+    for store in STORES {
+        let mut handover = Handover::new(store);
+        handover.raised = false;
+        let mut fixture = handover.build();
+        fixture.fault(1_000, kill("w0", 100));
+        assert_flags(&fixture, &[id(0, 1), id(2, 0)], "no attempt spent");
+    }
+}
+
+/// After a kill, the window runs from the replacement's start, here a
+/// replacement under the same instance id that wins a claim race against a
+/// peer.
+#[test]
+fn p2_anchors_the_window_at_the_replacement_start() {
+    for store in STORES {
+        let tuned = Fixture {
+            store,
+            ..Fixture::empty()
+        };
+        let (lease, slack) = (tuned.timing().lease_ms, tuned.slack());
+        let started = 1_000 + lease;
+        for (claim_at, explained) in [(1_000 + slack + 500, true), (started + slack + 1, false)] {
+            let mut handover = Handover::new(store);
+            handover.to = ("w0", 102);
+            handover.claim_at = claim_at;
+            let mut fixture = handover.build();
+            let mut peer = Proc::new("w1", 101);
+            peer.at(claim_at);
+            let r = revs(store);
+            peer.seen("split.s0", r[2], &value(1, Some("w0"), after(0, 0), false));
+            let mut lost = value(2, peer.me(), after(0, 0), false);
+            lost.attempts = 1;
+            let call = peer.send("split.s0", r[2], &lost);
+            peer.done(call, "split.s0", Reply::Lost);
+            fixture.processes.push(peer.journal);
+            fixture.fault(1_000, kill("w0", 100));
+            fixture.fault(
+                started,
+                Event::Respawn {
+                    instance: "w0".to_owned(),
+                    pid: 102,
+                },
+            );
+            if explained {
+                assert_clean(&fixture, "claim within the replacement's window");
+            } else {
+                assert_flags(&fixture, &[id(0, 1), id(2, 0)], "claim after the window");
+            }
+        }
+    }
+}
+
+/// A SIGSTOP's window runs from its end.
+#[test]
+fn p2_extends_the_window_by_the_fault_duration() {
+    for store in STORES {
+        let tuned = Fixture {
+            store,
+            ..Fixture::empty()
+        };
+        let (lease, slack) = (tuned.timing().lease_ms, tuned.slack());
+        let end = 1_000 + 2 * lease;
+        for (claim_at, explained) in [(end + slack, true), (end + slack + 1, false)] {
+            let mut handover = Handover::new(store);
+            handover.claim_at = claim_at;
+            let mut fixture = handover.build();
+            fixture.fault(
+                1_000,
+                Event::Sigstop {
+                    instance: "w0".to_owned(),
+                    pid: 100,
+                    duration_ms: 2 * lease,
+                },
+            );
+            if explained {
+                assert_clean(&fixture, "claim within the stop's window");
+            } else {
+                assert_flags(&fixture, &[id(0, 1), id(2, 0)], "claim after the window");
+            }
+        }
+    }
+}
+
+/// A `stop` line in the previous tenant's journal opens a window that the
+/// harness's next `sigcont` for its pid closes.
+#[test]
+fn p2_accepts_a_duplicate_during_a_self_raised_stop() {
+    for store in STORES {
+        let tuned = Fixture {
+            store,
+            ..Fixture::empty()
+        };
+        let (lease, slack) = (tuned.timing().lease_ms, tuned.slack());
+        let resumed = 1_000 + lease * 5 / 4;
+        for (claim_at, explained) in [
+            (1_000 + lease, true),
+            (resumed + slack, true),
+            (resumed + slack + 1, false),
+        ] {
+            let mut handover = Handover::new(store);
+            handover.claim_at = claim_at;
+            let mut fixture = handover.build();
+            fixture.processes[0].lines.push(Line {
+                t_ms: 1_000,
+                event: Event::Stop {
+                    key: "split.s0".to_owned(),
+                    expected: revs(store)[2],
+                    epoch: 1,
+                },
+            });
+            fixture.fault(
+                resumed,
+                Event::Sigcont {
+                    instance: "w0".to_owned(),
+                    pid: 100,
+                },
+            );
+            if explained {
+                assert_clean(&fixture, "claim during or after the stop");
+            } else {
+                assert_flags(&fixture, &[id(0, 1), id(2, 0)], "claim after the window");
+            }
+        }
+    }
+}
+
+/// Splits `s0` and `s2` delivered by `w3` (pid 103), for fixtures whose story
+/// is on `s1`.
+fn others(fixture: &mut Fixture) -> (Progress, Progress) {
+    let mut w3 = Proc::new("w3", 103);
+    let s0 = w3.deliver(
+        "split.s0",
+        &[id(0, 0), id(0, 1), id(2, 0), id(2, 1)],
+        2,
+        after(0, 1),
+        after(1, 1),
+    );
+    let s2 = w3.deliver(
+        "split.s2",
+        &[id(1, 2), id(1, 3)],
+        1,
+        after(0, 0),
+        after(0, 1),
+    );
+    fixture.processes.push(w3.journal);
+    (s0, s2)
+}
+
+/// `w0` (pid 100) claims `split.s1` and commits its first record, and `w1`
+/// (pid 101) claims it at epoch 2. `w0` then loses a commit of its second
+/// record under epoch 1, reads `w1`'s claim, and re-sends the commit, which
+/// lands. Returns the fixture and the stale commit's revision.
+fn stale_commit(store: StoreKind) -> (Fixture, u64) {
+    let key = "split.s1";
+    let r = revs(store);
+    let mut fixture = Fixture::empty();
+    fixture.store = store;
+    let (s0, s2) = others(&mut fixture);
+    let mut w0 = Proc::new("w0", 100);
+    w0.seen(key, r[0], &value(0, None, None, false));
+    w0.landed(key, r[0], r[1], &value(1, w0.me(), None, false));
+    w0.rows(&[id(1, 0)]);
+    let committed = value(1, w0.me(), after(0, 0), false);
+    w0.landed(key, r[1], r[2], &committed);
+    w0.rows(&[id(1, 1)]);
+    let mut w1 = Proc::new("w1", 101);
+    w1.seen(key, r[2], &committed);
+    let mut claimed = value(2, w1.me(), after(0, 0), false);
+    claimed.attempts = 1;
+    w1.landed(key, r[2], r[3], &claimed);
+    let stale = value(1, w0.me(), after(0, 1), false);
+    let call = w0.send(key, r[2], &stale);
+    w0.done(call, key, Reply::Lost);
+    w0.seen(key, r[3], &claimed);
+    w0.landed(key, r[3], r[4], &stale);
+    fixture.processes.extend([w0.journal, w1.journal]);
+    fixture.finals = vec![
+        ("split.s0".to_owned(), 4, s0),
+        (key.to_owned(), r[4], stale),
+        ("split.s2".to_owned(), 4, s2),
+    ];
+    (fixture, r[4])
+}
+
+/// A violation as its check, key, revision and writer pid.
+type Found = (Check, Option<String>, Option<u64>, Option<u32>);
+
+/// The property-5 violations.
+fn epochs(fixture: &Fixture) -> Vec<Found> {
+    fixture
+        .check()
+        .into_iter()
+        .filter(|v| v.check.property() == 5)
+        .map(|v| (v.check, v.key, v.rev, v.pid))
+        .collect()
+}
+
+fn stale_found(rev: u64) -> Vec<Found> {
+    let key = Some("split.s1".to_owned());
+    vec![
+        (Check::EpochRegressed, key.clone(), Some(rev), Some(100)),
+        (Check::StaleEpochCommit, key, Some(rev), Some(100)),
+    ]
+}
+
+/// A commit under epoch 1 that lands above a claim at epoch 2 regresses the
+/// epoch and moves the watermark under a stale epoch, both attributed to its
+/// writer.
+#[test]
+fn p5_flags_a_stale_epoch_above_a_newer_claim() {
+    for store in STORES {
+        let (fixture, rev) = stale_commit(store);
+        assert_eq!(epochs(&fixture), stale_found(rev), "{store:?}");
+    }
+}
+
+/// A claim known only from a `seen` line orders the values after it.
+#[test]
+fn p5_counts_seen_entries_not_only_won_writes() {
+    for store in STORES {
+        let (mut fixture, rev) = stale_commit(store);
+        let w1 = fixture
+            .processes
+            .iter_mut()
+            .find(|p| p.instance == "w1")
+            .unwrap();
+        for line in &mut w1.lines {
+            if let Event::Done { reply, .. } = &mut line.event {
+                *reply = Reply::Cancelled;
+            }
+        }
+        assert_eq!(epochs(&fixture), stale_found(rev), "{store:?}");
+    }
+}
+
+/// A late `seen` of an older revision does not regress the epoch.
+#[test]
+fn p5_orders_by_revision_not_journal_time() {
+    let mut fixture = Fixture::clean();
+    let mut w2 = Proc::new("w2", 102);
+    w2.at(9_000);
+    w2.seen("split.s1", 1, &value(0, None, None, false));
+    fixture.processes.push(w2.journal);
+    assert_eq!(fixture.check(), Vec::new());
+}
+
+/// A second owner at an epoch another owner holds is flagged against its
+/// writer.
+#[test]
+fn p5_flags_two_owners_in_one_epoch() {
+    for store in STORES {
+        let key = "split.s1";
+        let r = revs(store);
+        let mut fixture = Fixture::empty();
+        fixture.store = store;
+        let (s0, s2) = others(&mut fixture);
+        let mut w0 = Proc::new("w0", 100);
+        w0.seen(key, r[0], &value(0, None, None, false));
+        w0.landed(key, r[0], r[1], &value(1, w0.me(), None, false));
+        let mut w1 = Proc::new("w1", 101);
+        w1.seen(key, r[1], &value(1, Some("w0"), None, false));
+        let mut first = value(2, w1.me(), None, false);
+        first.attempts = 1;
+        w1.landed(key, r[1], r[2], &first);
+        let mut w2 = Proc::new("w2", 102);
+        w2.seen(key, r[2], &first);
+        let mut second = value(2, w2.me(), None, false);
+        second.attempts = 2;
+        w2.landed(key, r[2], r[3], &second);
+        fixture
+            .processes
+            .extend([w0.journal, w1.journal, w2.journal]);
+        fixture.finals = vec![
+            ("split.s0".to_owned(), 4, s0),
+            (key.to_owned(), r[3], second),
+            ("split.s2".to_owned(), 4, s2),
+        ];
+        assert_eq!(
+            epochs(&fixture),
+            vec![(
+                Check::TwoOwners,
+                Some(key.to_owned()),
+                Some(r[3]),
+                Some(102)
+            )],
+            "{store:?}"
+        );
+    }
+}
+
+/// A release that clears the owner within an epoch is no second owner.
+#[test]
+fn p5_ignores_an_ownerless_value_in_an_epoch() {
+    for store in STORES {
+        let key = "split.s1";
+        let r = revs(store);
+        let mut fixture = Fixture::empty();
+        fixture.store = store;
+        let (s0, s2) = others(&mut fixture);
+        let mut w0 = Proc::new("w0", 100);
+        w0.seen(key, r[0], &value(0, None, None, false));
+        w0.landed(key, r[0], r[1], &value(1, w0.me(), None, false));
+        w0.rows(&[id(1, 0)]);
+        w0.landed(key, r[1], r[2], &value(1, w0.me(), after(0, 0), false));
+        let released = value(1, None, after(0, 0), false);
+        w0.landed(key, r[2], r[3], &released);
+        let mut w1 = Proc::new("w1", 101);
+        w1.seen(key, r[3], &released);
+        w1.landed(key, r[3], r[4], &value(2, w1.me(), after(0, 0), false));
+        w1.rows(&[id(1, 1)]);
+        let completed = value(2, w1.me(), after(0, 1), true);
+        w1.landed(key, r[4], r[5], &completed);
+        fixture.processes.extend([w0.journal, w1.journal]);
+        fixture.finals = vec![
+            ("split.s0".to_owned(), 4, s0),
+            (key.to_owned(), r[5], completed),
+            ("split.s2".to_owned(), 4, s2),
+        ];
+        assert_clean(&fixture, "release then claim");
+    }
+}
+
+/// Epochs are ordered per key on a NATS stream sequence, where one key's
+/// later epoch can sit at a lower revision than another key's first value.
+#[test]
+fn p5_keys_revisions_per_split() {
+    let mut fixture = Fixture::empty();
+    fixture.store = StoreKind::Nats;
+    let mut w0 = Proc::new("w0", 100);
+    let mut w1 = Proc::new("w1", 101);
+    let s0 = "split.s0";
+    w0.seen(s0, 3, &value(0, None, None, false));
+    w0.landed(s0, 3, 4, &value(1, w0.me(), None, false));
+    w0.rows(&[id(0, 0), id(0, 1)]);
+    w0.landed(s0, 4, 5, &value(1, w0.me(), after(0, 1), false));
+    let released = value(1, None, after(0, 1), false);
+    w0.landed(s0, 5, 6, &released);
+    w1.seen(s0, 6, &released);
+    w1.landed(s0, 6, 7, &value(2, w1.me(), after(0, 1), false));
+    w1.rows(&[id(2, 0), id(2, 1)]);
+    let s0_done = value(2, w1.me(), after(1, 1), true);
+    w1.landed(s0, 7, 8, &s0_done);
+    let s1 = "split.s1";
+    w0.seen(s1, 9, &value(0, None, None, false));
+    w0.landed(s1, 9, 10, &value(1, w0.me(), None, false));
+    w0.rows(&[id(1, 0), id(1, 1)]);
+    let s1_done = value(1, w0.me(), after(0, 1), true);
+    w0.landed(s1, 10, 11, &s1_done);
+    let s2 = "split.s2";
+    w1.seen(s2, 12, &value(0, None, None, false));
+    w1.landed(s2, 12, 13, &value(1, w1.me(), None, false));
+    w1.rows(&[id(1, 2), id(1, 3)]);
+    let s2_done = value(1, w1.me(), after(0, 1), true);
+    w1.landed(s2, 13, 14, &s2_done);
+    fixture.processes.extend([w0.journal, w1.journal]);
+    fixture.finals = vec![
+        (s0.to_owned(), 8, s0_done),
+        (s1.to_owned(), 11, s1_done),
+        (s2.to_owned(), 14, s2_done),
+    ];
+    assert_eq!(fixture.check(), Vec::new());
+}
+
+/// A watermark moved under an epoch no claim reached is flagged.
+#[test]
+fn p5_flags_a_commit_under_an_epoch_no_claim_reached() {
+    for store in STORES {
+        let key = "split.s1";
+        let r = revs(store);
+        let mut fixture = Fixture::empty();
+        fixture.store = store;
+        let (s0, s2) = others(&mut fixture);
+        let mut w0 = Proc::new("w0", 100);
+        w0.seen(key, r[0], &value(0, None, None, false));
+        w0.landed(key, r[0], r[1], &value(1, w0.me(), None, false));
+        w0.rows(&[id(1, 0), id(1, 1)]);
+        let completed = value(2, w0.me(), after(0, 1), true);
+        w0.landed(key, r[1], r[2], &completed);
+        fixture.processes.push(w0.journal);
+        fixture.finals = vec![
+            ("split.s0".to_owned(), 4, s0),
+            (key.to_owned(), r[2], completed),
+            ("split.s2".to_owned(), 4, s2),
+        ];
+        assert_eq!(
+            epochs(&fixture),
+            vec![(
+                Check::StaleEpochCommit,
+                Some(key.to_owned()),
+                Some(r[2]),
+                Some(100)
+            )],
+            "{store:?}"
+        );
+    }
+}
+
+/// Two journals that report different values at one revision below the
+/// swept one are flagged whichever journal comes first.
+#[test]
+fn p5_flags_two_values_at_one_revision_in_either_journal_order() {
+    let mut fixture = Fixture::clean();
+    let mut w1 = Proc::new("w1", 101);
+    w1.seen("split.s1", 2, &value(1, Some("w0"), None, false));
+    let mut w2 = Proc::new("w2", 102);
+    w2.seen("split.s1", 2, &value(2, Some("w2"), None, false));
+    fixture.processes.extend([w1.journal, w2.journal]);
+    let conflicts = |fixture: &Fixture| -> Vec<Violation> {
+        fixture
+            .check()
+            .into_iter()
+            .filter(|v| v.check == Check::ValueConflict)
+            .collect()
+    };
+    let forward = conflicts(&fixture);
+    fixture.processes.reverse();
+    let backward = conflicts(&fixture);
+    assert_eq!(forward.len(), 1, "{forward:?}");
+    assert_eq!(
+        (forward[0].key.as_deref(), forward[0].rev),
+        (Some("split.s1"), Some(2))
+    );
+    assert_eq!(forward, backward);
+}
+
+/// A kill on one pid explains no takeover from that instance's replacement.
+#[test]
+fn p2_flags_a_takeover_from_an_unfaulted_replacement() {
+    for store in STORES {
+        let key = "split.s0";
+        let r = revs(store);
+        let tuned = Fixture {
+            store,
+            ..Fixture::empty()
+        };
+        let lease = tuned.timing().lease_ms;
+        let mut fixture = Fixture::empty();
+        fixture.store = store;
+        let mut w0 = Proc::new("w0", 100);
+        let s1 = w0.deliver(
+            "split.s1",
+            &[id(1, 0), id(1, 1)],
+            1,
+            after(0, 0),
+            after(0, 1),
+        );
+        let s2 = w0.deliver(
+            "split.s2",
+            &[id(1, 2), id(1, 3)],
+            1,
+            after(0, 0),
+            after(0, 1),
+        );
+        w0.seen(key, r[0], &value(0, None, None, false));
+        w0.landed(key, r[0], r[1], &value(1, w0.me(), None, false));
+        w0.rows(&[id(0, 0), id(0, 1)]);
+        let committed = value(1, w0.me(), after(0, 0), false);
+        w0.landed(key, r[1], r[2], &committed);
+        let started = 1_000 + lease;
+        let mut b = Proc::new("w0", 102);
+        b.at(started + 100);
+        b.seen(key, r[2], &committed);
+        let mut reclaimed = value(2, b.me(), after(0, 0), false);
+        reclaimed.attempts = 1;
+        b.landed(key, r[2], r[3], &reclaimed);
+        b.rows(&[id(0, 1), id(2, 0)]);
+        let mut w1 = Proc::new("w1", 101);
+        w1.at(started + 2_000);
+        w1.seen(key, r[3], &reclaimed);
+        let mut claimed = value(3, w1.me(), after(0, 0), false);
+        claimed.attempts = 2;
+        w1.landed(key, r[3], r[4], &claimed);
+        w1.rows(&[id(0, 1), id(2, 0), id(2, 1)]);
+        let mut completed = value(3, w1.me(), after(1, 1), true);
+        completed.attempts = 2;
+        w1.landed(key, r[4], r[5], &completed);
+        fixture.processes = vec![w0.journal, b.journal, w1.journal];
+        fixture.finals = vec![
+            (key.to_owned(), r[5], completed),
+            ("split.s1".to_owned(), 4, s1),
+            ("split.s2".to_owned(), 4, s2),
+        ];
+        fixture.fault(1_000, kill("w0", 100));
+        fixture.fault(
+            started,
+            Event::Respawn {
+                instance: "w0".to_owned(),
+                pid: 102,
+            },
+        );
+        assert_flags(
+            &fixture,
+            &[id(2, 0)],
+            "takeover from an unfaulted replacement",
+        );
+    }
+}
+
+/// After a second kill of an instance, the window runs from the replacement
+/// that follows that kill.
+#[test]
+fn p2_anchors_a_second_kill_at_its_own_replacement() {
+    for store in STORES {
+        let key = "split.s0";
+        let r = revs(store);
+        let tuned = Fixture {
+            store,
+            ..Fixture::empty()
+        };
+        let (lease, slack) = (tuned.timing().lease_ms, tuned.slack());
+        let mut fixture = Fixture::empty();
+        fixture.store = store;
+        let mut w0 = Proc::new("w0", 100);
+        let s1 = w0.deliver(
+            "split.s1",
+            &[id(1, 0), id(1, 1)],
+            1,
+            after(0, 0),
+            after(0, 1),
+        );
+        let s2 = w0.deliver(
+            "split.s2",
+            &[id(1, 2), id(1, 3)],
+            1,
+            after(0, 0),
+            after(0, 1),
+        );
+        w0.seen(key, r[0], &value(0, None, None, false));
+        w0.landed(key, r[0], r[1], &value(1, w0.me(), None, false));
+        w0.rows(&[id(0, 0), id(0, 1)]);
+        let committed = value(1, w0.me(), after(0, 0), false);
+        w0.landed(key, r[1], r[2], &committed);
+        let first = 1_000 + lease;
+        let mut b = Proc::new("w0", 102);
+        b.at(first + 100);
+        b.seen(key, r[2], &committed);
+        let mut reclaimed = value(2, b.me(), after(0, 0), false);
+        reclaimed.attempts = 1;
+        b.landed(key, r[2], r[3], &reclaimed);
+        b.rows(&[id(0, 1), id(2, 0)]);
+        let second_kill = first + 1_000;
+        let second = second_kill + lease;
+        let mut c = Proc::new("w0", 103);
+        c.at(second_kill + slack + 500);
+        c.seen(key, r[3], &reclaimed);
+        let mut claimed = value(3, c.me(), after(0, 0), false);
+        claimed.attempts = 2;
+        c.landed(key, r[3], r[4], &claimed);
+        c.rows(&[id(0, 1), id(2, 0), id(2, 1)]);
+        let mut completed = value(3, c.me(), after(1, 1), true);
+        completed.attempts = 2;
+        c.landed(key, r[4], r[5], &completed);
+        fixture.processes = vec![w0.journal, b.journal, c.journal];
+        fixture.finals = vec![
+            (key.to_owned(), r[5], completed),
+            ("split.s1".to_owned(), 4, s1),
+            ("split.s2".to_owned(), 4, s2),
+        ];
+        let respawn = |instance: &str, pid: u32| Event::Respawn {
+            instance: instance.to_owned(),
+            pid,
+        };
+        fixture.fault(1_000, kill("w0", 100));
+        fixture.fault(first, respawn("w0", 102));
+        fixture.fault(second_kill, kill("w0", 102));
+        fixture.fault(second_kill + 50, kill("w3", 104));
+        fixture.fault(second_kill + 100, respawn("w3", 105));
+        fixture.fault(second, respawn("w0", 103));
+        assert_clean(&fixture, "claim within the second replacement's window");
+    }
 }

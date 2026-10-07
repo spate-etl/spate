@@ -671,8 +671,8 @@ fn hack(root: &Path, explain: bool, sel: &Select) -> Outcome {
         ));
     }
     // The workspace-wide build on default features. spate-fuzz is excluded
-    // because it requires `testing` on spate-s3 and spate-coordination, which
-    // the resolver would unify into every other crate in the same invocation.
+    // because the `fuzz` CI job builds it under nightly with libFuzzer
+    // instrumentation.
     steps.push(
         Step::new("cargo", ["check"])
             .args(sel.args())

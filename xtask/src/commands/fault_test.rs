@@ -233,7 +233,7 @@ mod tests {
         );
     }
 
-    /// The scenarios read their seed from `SPATE_FAULT_SEED`.
+    /// The nextest step carries the seed in `SPATE_FAULT_SEED`.
     #[test]
     fn nextest_passes_the_seed_in_spate_fault_seed() {
         let step = nextest("0x00000000000000ff", Path::new("runs"), None);
@@ -242,6 +242,21 @@ mod tests {
                 .iter()
                 .any(|(k, v)| *k == "SPATE_FAULT_SEED" && v == "0x00000000000000ff")
         );
+    }
+
+    /// The step runs only the ignored `spate-faults` tests, under the `faults`
+    /// profile, narrowed by the filter.
+    #[test]
+    fn nextest_runs_the_ignored_fault_scenarios() {
+        let step = nextest("0x1", Path::new("runs"), Some("nats"));
+        for pair in [
+            ["--profile", "faults"],
+            ["-p", "spate-faults"],
+            ["--run-ignored", "ignored-only"],
+        ] {
+            assert!(step.args.windows(2).any(|w| w == pair), "{pair:?}");
+        }
+        assert_eq!(step.args.last().map(String::as_str), Some("nats"));
     }
 
     /// A seed reads the same in decimal and in `0x` hex.

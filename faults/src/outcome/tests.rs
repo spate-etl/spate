@@ -284,6 +284,12 @@ fn journal_write_failure_is_harness() {
             "{check:?}"
         );
     }
+    let caught = Run {
+        worker_exits: vec![exit(0), exit(3)],
+        ..Run::stopped(true)
+    }
+    .violation(regressed());
+    assert_eq!(caught.kind(), Kind::Harness);
 }
 
 /// A property-3 or property-5 violation stays a violation through a container

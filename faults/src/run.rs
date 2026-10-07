@@ -347,11 +347,17 @@ impl Run<'_> {
     }
 }
 
-/// The run seed from [`SEED_VAR`], or one drawn from the clock and printed.
 fn run_seed() -> u64 {
-    match std::env::var(SEED_VAR) {
-        Ok(text) => seed::parse(&text).unwrap_or_else(|| panic!("{SEED_VAR}={text} is not a seed")),
-        Err(_) => {
+    seed_from(|name| std::env::var(name).ok())
+}
+
+/// The run seed from [`SEED_VAR`], or one drawn from the clock and printed.
+fn seed_from(var: impl Fn(&str) -> Option<String>) -> u64 {
+    match var(SEED_VAR) {
+        Some(text) => {
+            seed::parse(&text).unwrap_or_else(|| panic!("{SEED_VAR}={text} is not a seed"))
+        }
+        None => {
             let seed = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |d| d.as_nanos() as u64);
@@ -520,6 +526,13 @@ mod tests {
     #[test]
     fn seed_variable_matches_xtask() {
         assert_eq!(SEED_VAR, "SPATE_FAULT_SEED");
+    }
+
+    /// The run seed is read from `SPATE_FAULT_SEED`.
+    #[test]
+    fn run_seed_reads_spate_fault_seed() {
+        let seed = seed_from(|name| (name == "SPATE_FAULT_SEED").then(|| "0xff".to_owned()));
+        assert_eq!(seed, 0xff);
     }
 
     /// A record written twice, by one process or two, fails the fault-free

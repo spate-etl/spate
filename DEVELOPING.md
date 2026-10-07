@@ -140,11 +140,11 @@ config, journal and stderr, and an `outcome.json`; a passing scenario keeps only
 the outcome. An outcome is `pass`, `violation` (the oracle found a delivery
 violation), `worker` (a worker failed while every check held), `expectation`
 (the scenario's own assertion failed) or `harness` (setup, a journal write or a
-container failed). The command writes `target/fault-runs/summary.json` and exits
-1 on any `violation`, `worker` or `expectation` outcome, 3 when only `harness`
-outcomes failed, or nextest failed with no failing outcome, such as a build error
-or a run the oracle could not judge, and 0 otherwise. A failure message carries the command that replays its
-seed.
+final store read failed). The command writes `target/fault-runs/summary.json`
+and exits 1 on any `violation`, `worker` or `expectation` outcome, 3 when only
+`harness` outcomes failed, or nextest failed with no failing outcome, such as a
+build error or a run the oracle could not judge, and 0 otherwise. A failure
+message carries the command that replays its seed.
 
 **On macOS every freshly linked binary stalls for tens of seconds at 0% CPU on
 its first exec** while Gatekeeper scans it. Across this workspace that alone

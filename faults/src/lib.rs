@@ -3,8 +3,9 @@
 //! delivery contract against their journals and the store's final state.
 //!
 //! This crate provides the journal format, the classification of `split.*`
-//! writes, the seeded generator, the outcome kinds a run reports and the
-//! delivery oracle.
+//! writes, the seeded generator, the outcome kinds a run reports, the
+//! delivery oracle, and the coordination store and sink that journal a
+//! worker's traffic.
 //!
 //! # Delivery properties
 //!
@@ -35,8 +36,13 @@
 //!   that moves the watermark carries the highest epoch at a lower revision.
 //!   Every observation of one revision of a key holds the same value.
 
+// The journal adapters report what they cannot journal on stderr.
+#![allow(clippy::print_stderr)]
+
 pub mod classify;
 pub mod journal;
 pub mod oracle;
 pub mod outcome;
 pub mod seed;
+pub mod sink;
+pub mod store;

@@ -4571,11 +4571,17 @@ name = "spate-faults"
 version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
+ "bytes",
+ "futures-util",
  "serde",
  "serde_json",
+ "spate-coordination",
+ "spate-core",
  "spate-s3",
+ "spate-test",
  "spate-test-support",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]

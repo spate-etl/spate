@@ -44,6 +44,7 @@ These sit outside `ci`, by cost or by dependency:
 | `cargo xtask bench ab`, `cargo xtask bench arms`, `cargo xtask bench list`, `cargo xtask bench compare` | Wall clock; never a gate |
 | `cargo xtask attribution` | `THIRD-PARTY.md` is regenerated at release; the nightly tier checks that it still generates |
 | `cargo xtask fuzz build`, `cargo xtask fuzz run` | Needs a nightly toolchain; the nightly tier fuzzes |
+| `cargo xtask fault-test` | Needs Docker; runs worker processes for minutes |
 
 Three commands omit `--locked`, which everything else passes because CI does.
 `cargo hack --no-dev-deps` rewrites each `Cargo.toml` as it runs and a locked
@@ -90,6 +91,9 @@ The profiles in `.config/nextest.toml`:
 - **`docker`** — warns at 120 seconds and **never terminates**: a cold image pull
   can exceed any figure worth setting, and a SIGKILL reports as a timeout
   indistinguishable from a hang. One retry, JUnit report.
+- **`faults`** — what `cargo xtask fault-test` runs. Warns at 300 seconds and
+  never terminates, with no retry, so a failing seed is never reported as
+  flaky. JUnit report.
 
 Container-backed tests use testcontainers and are `#[ignore]`d, so a normal run
 skips them. `cargo xtask integration-test` is what selects them.
@@ -116,6 +120,30 @@ cargo nextest run --profile docker -p spate --all-features --locked \
 `--all-features` turns on `spate-kafka/tls`, which compiles OpenSSL from source.
 When you are not touching the TLS surface, replace it with the features the
 `e2e_examples` stanza in `crates/spate/Cargo.toml` requires.
+
+The fault scenarios in `faults/` run coordinated S3 workers as separate
+processes against SeaweedFS and a coordination store, and judge what each worker
+journalled, and the store's final state, against five delivery properties. The
+`docker` profile's `default-filter` holds them back too, and one command runs
+them:
+
+```sh
+cargo xtask fault-test [--seed N] [FILTER]
+```
+
+It prints the seed first, drawing one from the clock when `--seed` is absent,
+and passes it to every scenario. A seed fixes the data set and any fault
+schedule. It does not fix the interleaving. The operating system's scheduling
+and real time decide which split a worker holds when something happens. Each
+scenario writes a directory under `target/fault-runs/` holding every worker's
+config, journal and stderr, and an `outcome.json`; a passing scenario keeps only
+the outcome. An outcome is `pass`, `violation` (the oracle found a delivery
+violation), `worker` (a worker failed while every check held), `expectation`
+(the scenario's own assertion failed) or `harness` (a container or Docker
+failed). The command writes `target/fault-runs/summary.json` and exits 1 on any
+`violation`, `worker` or `expectation` outcome, 3 when only `harness` outcomes
+failed, and 0 otherwise. A failure message carries the command that replays its
+seed.
 
 **On macOS every freshly linked binary stalls for tens of seconds at 0% CPU on
 its first exec** while Gatekeeper scans it. Across this workspace that alone

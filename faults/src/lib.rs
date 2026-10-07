@@ -5,8 +5,8 @@
 //! This crate provides the journal format, the classification of `split.*`
 //! writes, the seeded generator, the outcome kinds a run reports, the
 //! delivery oracle, the `spate-faults-worker` binary with the store and sink
-//! that journal its traffic, the guard that owns worker processes, and the
-//! SeaweedFS gateway that holds a run's data set.
+//! that journal its traffic, and the harness that runs worker processes and
+//! judges them.
 //!
 //! # Delivery properties
 //!
@@ -37,7 +37,7 @@
 //!   that moves the watermark carries the highest epoch at a lower revision.
 //!   Every observation of one revision of a key holds the same value.
 
-// Workers report on stderr, which `Workers::spawn` sends to a file per
+// Workers and the harness report on stderr, which the harness keeps per
 // process.
 #![allow(clippy::print_stderr)]
 
@@ -45,6 +45,8 @@ pub mod classify;
 pub mod journal;
 pub mod oracle;
 pub mod outcome;
+#[cfg(unix)]
+pub mod run;
 pub mod seaweed;
 pub mod seed;
 pub mod sink;

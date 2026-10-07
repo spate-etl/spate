@@ -3,6 +3,7 @@
 
 mod bench;
 mod docs;
+mod fault_test;
 mod fuzz;
 mod hooks;
 mod lint;
@@ -65,6 +66,16 @@ pub(crate) enum Command {
 
     /// Container-backed suites (needs Docker; lanes per ci/README.md)
     IntegrationTest,
+
+    /// Seeded multi-process fault scenarios in faults/ (needs Docker)
+    FaultTest {
+        /// Run seed, in decimal or 0x hex; drawn from the clock when absent
+        #[arg(long, value_name = "SEED")]
+        seed: Option<String>,
+        /// Run only the scenarios whose names contain FILTER
+        #[arg(value_name = "FILTER")]
+        filter: Option<String>,
+    },
 
     /// Loom concurrency models for the checkpoint and backpressure primitives
     Loom,
@@ -312,6 +323,9 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: Command) -> Outcome {
                     ],
                 ),
             )
+        }
+        Command::FaultTest { seed, filter } => {
+            fault_test::fault_test(root, explain, seed.as_deref(), filter.as_deref())
         }
         // `--lib` matters: the models are unit tests inside the crate, and a
         // `--test` run builds integration targets the cfg leaves empty.

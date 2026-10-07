@@ -44,9 +44,29 @@ impl SplitMix64 {
     }
 }
 
+/// Parses a run seed written in decimal or as `0x`-prefixed hex.
+#[must_use]
+pub fn parse(text: &str) -> Option<u64> {
+    let text = text.trim();
+    match text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+        Some(hex) => u64::from_str_radix(hex, 16).ok(),
+        None => text.parse().ok(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A seed reads the same in decimal and in `0x` hex.
+    #[test]
+    fn seed_parses_decimal_and_hex() {
+        assert_eq!(parse("255"), Some(255));
+        assert_eq!(parse("0xff"), Some(255));
+        assert_eq!(parse("0XFF"), Some(255));
+        assert_eq!(parse("ff"), None);
+        assert_eq!(parse(""), None);
+    }
 
     /// The stream matches the reference SplitMix64 outputs for seed 1234567,
     /// and a scenario's stream depends on its name.

@@ -25,13 +25,22 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 [profile.docker]
 # The example container tier is opt-in. `scheduled.yml` selects it back with an
 # explicit `-E 'binary(e2e_examples)' --ignore-default-filter`.
-default-filter = 'not binary(e2e_examples)'
+# The fault scenarios run only through `cargo xtask fault-test`.
+default-filter = 'not binary(e2e_examples) and not package(spate-faults)'
 slow-timeout = { period = "120s" }
 # One retry, for container-start latency that belongs to the docker daemon
 # rather than to the code under test. A retried test surfaces as a flaky
 # annotation through the JUnit report below, so a repeat is visible rather than
 # silently green. Delete this line once a retry arrives with a cause attached.
 retries = 1
+
+# The seeded fault scenarios, run by `cargo xtask fault-test`. No retry, so a
+# failing seed is never reported as flaky, and no termination, since a run
+# takes minutes.
+[profile.faults]
+fail-fast = false
+retries = 0
+slow-timeout = { period = "300s" }
 
 [profile.ci]
 slow-timeout = { period = "60s", terminate-after = 4 }
@@ -42,4 +51,7 @@ status-level = "fail"
 path = "junit.xml"
 
 [profile.docker.junit]
+path = "junit.xml"
+
+[profile.faults.junit]
 path = "junit.xml"

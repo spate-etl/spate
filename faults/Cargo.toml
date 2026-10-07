@@ -25,7 +25,7 @@ spate-s3 = { workspace = true, features = ["testing"] }
 spate-test = { workspace = true }
 spate-test-support = { workspace = true }
 testcontainers = { workspace = true, features = ["blocking"] }
-tokio = { workspace = true, features = ["macros", "rt", "time"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 url = { workspace = true }
 
 [dev-dependencies]

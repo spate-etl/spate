@@ -15,7 +15,7 @@ pub enum Kind {
     Worker,
     /// The scenario's own assertion failed.
     Expectation,
-    /// Infrastructure failed: setup, or a container outage.
+    /// Infrastructure failed: setup, a journal write, or a container outage.
     Harness,
 }
 
@@ -141,6 +141,12 @@ impl WorkerExit {
     fn failed(&self) -> bool {
         !self.scheduled && self.code != Some(0)
     }
+
+    /// The worker exited 3, the status a worker exits with when a journal
+    /// line cannot be written.
+    fn journal_failed(&self) -> bool {
+        !self.scheduled && self.code == Some(3)
+    }
 }
 
 /// One container health poll.
@@ -249,8 +255,9 @@ pub struct Evidence<'a> {
 
 /// Picks the outcome kind and its message. The first rule that applies wins.
 ///
-/// 1. Harness: setup failed, or a container was down and the run fails by a
-///    later rule, unless the run has a property 3 or 5 violation outside a
+/// 1. Harness: setup failed, or a worker exited 3 because it could not write
+///    its journal. A container outage also makes a run that fails by a later
+///    rule harness, unless the run has a property 3 or 5 violation outside a
 ///    broken-fence scenario.
 /// 2. Violation: a stopped split was not reassigned.
 /// 3. Expectation: an assertion failed, the stop never fired, a lost reply was
@@ -265,6 +272,18 @@ pub struct Evidence<'a> {
 pub fn classify(e: &Evidence<'_>) -> (Kind, String) {
     if let Some(failure) = e.setup_failure {
         return (Kind::Harness, format!("setup failed: {failure}"));
+    }
+    let unjournalled: Vec<String> = e
+        .worker_exits
+        .iter()
+        .filter(|w| w.journal_failed())
+        .map(|w| format!("{} (pid {})", w.instance, w.pid))
+        .collect();
+    if !unjournalled.is_empty() {
+        return (
+            Kind::Harness,
+            format!("journal write failed: {}", unjournalled.join("; ")),
+        );
     }
     let (kind, message) = classify_run(e);
     if kind == Kind::Pass {

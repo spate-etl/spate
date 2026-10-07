@@ -264,6 +264,21 @@ fn worker_exit_with_healthy_containers_is_worker() {
     assert_eq!(scheduled.kind(), Kind::Pass);
 }
 
+/// A worker that exited 3, unable to write its journal, is a harness failure,
+/// even beside a violation the incomplete journal could explain.
+#[test]
+fn journal_write_failure_is_harness() {
+    let run = Run {
+        worker_exits: vec![exit(0), exit(3)],
+        ..Run::ordinary()
+    };
+    assert_eq!(run.kind(), Kind::Harness);
+    assert_eq!(
+        run.violation(found(Check::RecordMissing)).kind(),
+        Kind::Harness
+    );
+}
+
 /// A property-3 or property-5 violation stays a violation through a container
 /// outage outside a broken-fence scenario; every other failure during an
 /// outage is infrastructure.

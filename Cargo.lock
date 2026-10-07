@@ -4567,6 +4567,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "spate-faults"
+version = "0.2.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "spate-test-support",
+ "tempfile",
+]
+
+[[package]]
 name = "spate-fuzz"
 version = "0.2.0"
 dependencies = [

@@ -141,6 +141,7 @@ pub(crate) fn is_manifest(path: &str) -> bool {
             "Cargo.lock",
             "crates/*/Cargo.toml",
             "bench/Cargo.toml",
+            "faults/Cargo.toml",
             "fuzz/Cargo.toml",
             "test-support/Cargo.toml",
             "xtask/Cargo.toml",
@@ -630,6 +631,11 @@ mod tests {
         assert!(out.manifests);
         assert!(out.fuzz);
         assert!(out.rust);
+    }
+
+    #[test]
+    fn the_faults_manifest_is_a_manifest() {
+        assert!(run(&["faults/Cargo.toml"]).manifests);
     }
 
     #[test]

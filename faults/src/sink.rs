@@ -18,8 +18,9 @@ const BATCH_ROWS: u64 = 1_000;
 const LINGER: Duration = Duration::from_millis(100);
 
 /// A one-shard sink whose write appends a `rows` line naming each record's
-/// id and returns `Ok` only after the line is written. It seals a batch at
-/// 1,000 rows or after 100 ms, so a run's commits interleave with its writes.
+/// id and returns `Ok` only after the line is written. It exits the process
+/// with status 3 when the line cannot be written. It seals a batch at 1,000
+/// rows or after 100 ms, so a run's commits interleave with its writes.
 ///
 /// Rows are expected as `spate_test::TestEncoder` frames of JSON records
 /// carrying their id in `k`.
@@ -82,7 +83,8 @@ impl ShardWriter for JournalWriter {
             if !delay.is_zero() {
                 tokio::time::sleep(delay).await;
             }
-            journal.append(Event::Rows { ids }).map_err(fatal)
+            crate::store::record(&journal, Event::Rows { ids });
+            Ok(())
         }
     }
 }
@@ -172,5 +174,46 @@ mod tests {
         };
         assert!(writer.write_batch(&(), &batch).now_or_never().is_none());
         assert!(crate::journal::read(&path).unwrap().is_empty());
+    }
+
+    /// A write whose `rows` line cannot be written exits the process with
+    /// status 3.
+    #[test]
+    fn write_exits_3_when_the_line_cannot_be_written() {
+        const CHILD: &str = "SPATE_FAULTS_SINK_EXIT_CHILD";
+        if let Some(path) = std::env::var_os(CHILD) {
+            let journal = Arc::new(Journal::open(std::path::Path::new(&path)).unwrap());
+            let writer = JournalWriter {
+                journal,
+                delay: Duration::ZERO,
+            };
+            let row = r#"{"k":"o000-r000000"}"#;
+            let mut frame = u32::try_from(row.len()).unwrap().to_le_bytes().to_vec();
+            frame.extend_from_slice(row.as_bytes());
+            let batch = SealedBatch {
+                frames: vec![Bytes::from(frame)],
+                rows: 1,
+                bytes: 0,
+                dedup_token: String::new(),
+            };
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let _ = rt.block_on(writer.write_batch(&(), &batch));
+            std::process::exit(0);
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let status = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("trap '' XFSZ; ulimit -f 0; exec \"$0\" --exact sink::tests::write_exits_3_when_the_line_cannot_be_written")
+            .arg(std::env::current_exe().unwrap())
+            .env(CHILD, dir.path().join("w0-1.ndjson"))
+            // The file-size limit also fails libtest's own output when it goes to a regular file.
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert_eq!(status.code(), Some(3));
     }
 }

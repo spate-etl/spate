@@ -15,15 +15,22 @@ workspace = true
 [dependencies]
 base64 = { workspace = true }
 futures-util = { workspace = true }
+object_store = { workspace = true, features = ["aws"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
-spate-coordination = { workspace = true }
+spate-coordination = { workspace = true, features = ["nats"] }
 spate-core = { workspace = true }
+spate-json = { workspace = true }
 spate-s3 = { workspace = true, features = ["testing"] }
 spate-test = { workspace = true }
 spate-test-support = { workspace = true }
+testcontainers = { workspace = true, features = ["blocking"] }
 tokio = { workspace = true, features = ["macros", "rt", "time"] }
+url = { workspace = true }
 
 [dev-dependencies]
 bytes = { workspace = true }
 tempfile = { workspace = true }
+
+[target.'cfg(unix)'.dev-dependencies]
+libc = { workspace = true }

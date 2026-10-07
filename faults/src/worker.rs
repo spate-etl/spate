@@ -1,0 +1,249 @@
+//! A worker process's configuration, and the coordinated S3 pipeline it runs.
+
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
+use spate_coordination::store::nats::{NatsConfig, NatsStore};
+use spate_coordination::{CoordinationConfig, StoreCoordinator};
+use spate_core::config::PipelineConfig;
+use spate_core::ops::chain_owned;
+use spate_core::pipeline::{ExitState, Pipeline, RuntimeOptions};
+use spate_core::sink::KeyHashRouter;
+use spate_json::NdjsonFramer;
+use spate_s3::S3Source;
+use spate_test::{BytesPassthrough, TestEncoder};
+
+use crate::journal::Journal;
+use crate::oracle::Timing;
+use crate::sink::JournalSink;
+use crate::store::JournalStore;
+
+/// Upper bound on one generated record line.
+const MAX_RECORD_BYTES: usize = 64 * 1024;
+
+/// Everything one worker process reads at start, as JSON.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerConfig {
+    /// Instance id, shared by a process and its replacements.
+    pub instance: String,
+    /// The journal this process appends to.
+    pub journal: PathBuf,
+    /// The coordination store.
+    pub store: StoreConfig,
+    /// The S3 gateway holding the data set under `data/`.
+    pub s3: S3Config,
+    /// Coordinator tuning.
+    pub tuning: Tuning,
+    /// How long the sink holds each write before journalling it.
+    pub sink_delay_ms: u64,
+}
+
+/// The coordination store a worker connects to.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StoreConfig {
+    /// NATS JetStream.
+    Nats {
+        /// Server URL.
+        server: String,
+        /// Job identity, shared by every worker of the run.
+        job: String,
+    },
+}
+
+/// An S3 gateway that accepts unsigned requests over plain HTTP.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct S3Config {
+    /// Endpoint URL.
+    pub endpoint: String,
+    /// Bucket name.
+    pub bucket: String,
+}
+
+/// The coordinator settings a run gives every worker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Tuning {
+    /// Split lease duration.
+    pub lease_ms: u64,
+    /// Per-call store timeout.
+    pub op_timeout_ms: u64,
+    /// Reconcile interval.
+    pub reconcile_ms: u64,
+    /// Replan interval.
+    pub replan_ms: u64,
+    /// Cooperative drain deadline.
+    pub drain_deadline_ms: u64,
+    /// Delivery attempts before a split is quarantined.
+    pub max_attempts: u32,
+}
+
+impl Tuning {
+    /// The tuning for NATS workers. `max_attempts` sits far above any number
+    /// of faults a schedule lands on one split, so a correct run never
+    /// quarantines.
+    #[must_use]
+    pub fn nats() -> Tuning {
+        Tuning {
+            lease_ms: 2_000,
+            op_timeout_ms: 500,
+            reconcile_ms: 500,
+            replan_ms: 2_000,
+            drain_deadline_ms: 5_000,
+            max_attempts: 1_000,
+        }
+    }
+
+    /// The coordinator config for `instance`, with no rebalance delay.
+    #[must_use]
+    pub fn coordination(&self, instance: &str) -> CoordinationConfig {
+        let mut config = CoordinationConfig::default();
+        config.instance_id = Some(instance.to_owned());
+        config.lease_duration = Duration::from_millis(self.lease_ms);
+        config.op_timeout = Duration::from_millis(self.op_timeout_ms);
+        config.reconcile_interval = Duration::from_millis(self.reconcile_ms);
+        config.replan_interval = Duration::from_millis(self.replan_ms);
+        config.drain_deadline = Duration::from_millis(self.drain_deadline_ms);
+        config.rebalance_delay = Duration::ZERO;
+        config.max_attempts = self.max_attempts;
+        config
+    }
+
+    /// The oracle's view of this tuning on a push store.
+    #[must_use]
+    pub fn timing(&self) -> Timing {
+        Timing {
+            lease_ms: self.lease_ms,
+            drain_deadline_ms: self.drain_deadline_ms,
+            op_timeout_ms: self.op_timeout_ms,
+            poll_interval_ms: 0,
+        }
+    }
+}
+
+/// The NATS store that `store` names, configured with no I/O.
+///
+/// # Errors
+///
+/// Fails on an invalid server URL or job.
+pub fn nats_store(store: &StoreConfig, tuning: &Tuning) -> Result<NatsStore, String> {
+    let StoreConfig::Nats { server, job } = store;
+    NatsStore::new(
+        NatsConfig::new(vec![server.clone()], job.clone()),
+        Duration::from_millis(tuning.lease_ms),
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// Runs the worker's pipeline until it exits.
+///
+/// # Errors
+///
+/// Fails when the pipeline cannot be built or exits in any state but
+/// [`ExitState::Completed`].
+pub fn run(config: &WorkerConfig) -> Result<(), String> {
+    let journal = Arc::new(Journal::open(&config.journal).map_err(|e| e.to_string())?);
+    let yaml = pipeline_yaml(config);
+    let pipeline_config = PipelineConfig::from_str(&yaml).map_err(|e| e.to_string())?;
+    let pipeline = Pipeline::from_config(pipeline_config).map_err(|e| e.to_string())?;
+    let io = pipeline.io_handle();
+    let store = JournalStore::new(
+        nats_store(&config.store, &config.tuning)?,
+        Arc::clone(&journal),
+    );
+    let coordinator = StoreCoordinator::new(
+        store,
+        config.tuning.coordination(&config.instance),
+        io.clone(),
+        None,
+    )
+    .map_err(|e| e.to_string())?;
+    let source = S3Source::from_component_config(&pipeline.config().source, io)
+        .map_err(|e| e.to_string())?
+        .with_framer(|| Box::new(NdjsonFramer::new(MAX_RECORD_BYTES)))
+        .with_coordinator(Box::new(coordinator));
+    let sink = JournalSink::new(journal, Duration::from_millis(config.sink_delay_ms));
+    let runtime = pipeline
+        .sink(sink)
+        .map_err(|e| e.to_string())?
+        .chains(|ctx| {
+            let chunk = ctx.chunk();
+            chain_owned::<Vec<u8>, _>(BytesPassthrough)
+                .sink(TestEncoder, KeyHashRouter, chunk, ctx.queues, ctx.budget)
+                .build()
+        })
+        .runtime_options(RuntimeOptions {
+            handle_signals: false,
+            ..RuntimeOptions::default()
+        })
+        .into_runtime(source)
+        .map_err(|e| e.to_string())?;
+    let report = runtime.run().map_err(|e| e.to_string())?;
+    match report.state {
+        ExitState::Completed => Ok(()),
+        state => Err(format!("the pipeline exited {state:?}")),
+    }
+}
+
+fn pipeline_yaml(config: &WorkerConfig) -> String {
+    format!(
+        "pipeline: {{ name: faults-{instance}, threads: 2 }}
+admin: {{ listen: none }}
+checkpoint: {{ interval: 100ms }}
+metrics: {{ exporter: none }}
+source:
+  s3:
+    url: \"s3://{bucket}/data/\"
+    split_target_bytes: 1MiB
+    store:
+      endpoint: \"{endpoint}\"
+      allow_http: \"true\"
+      skip_signature: \"true\"
+      region: \"us-east-1\"
+sink: {{ journal: {{}} }}
+",
+        instance = config.instance,
+        bucket = config.s3.bucket,
+        endpoint = config.s3.endpoint,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The NATS tuning passes the coordinator's checks and assembles a worker
+    /// pipeline without I/O.
+    #[test]
+    fn nats_worker_assembles_without_io() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = WorkerConfig {
+            instance: "w0".to_owned(),
+            journal: dir.path().join("w0.ndjson"),
+            store: StoreConfig::Nats {
+                server: "nats://127.0.0.1:1".to_owned(),
+                job: "job".to_owned(),
+            },
+            s3: S3Config {
+                endpoint: "http://127.0.0.1:1".to_owned(),
+                bucket: "b".to_owned(),
+            },
+            tuning: Tuning::nats(),
+            sink_delay_ms: 0,
+        };
+        let pipeline =
+            Pipeline::from_config(PipelineConfig::from_str(&pipeline_yaml(&config)).unwrap())
+                .unwrap();
+        let journal = Arc::new(Journal::open(&config.journal).unwrap());
+        let store = JournalStore::new(nats_store(&config.store, &config.tuning).unwrap(), journal);
+        StoreCoordinator::new(
+            store,
+            config.tuning.coordination(&config.instance),
+            pipeline.io_handle(),
+            None,
+        )
+        .unwrap();
+        S3Source::from_component_config(&pipeline.config().source, pipeline.io_handle()).unwrap();
+    }
+}

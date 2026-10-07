@@ -259,6 +259,18 @@ mod tests {
         assert_eq!(step.args.last().map(String::as_str), Some("nats"));
     }
 
+    /// The scenarios run one at a time, so no scenario's workers share the
+    /// host's cores with another's.
+    #[test]
+    fn nextest_runs_one_scenario_at_a_time() {
+        let step = nextest("0x1", Path::new("runs"), None);
+        assert!(
+            step.args.windows(2).any(|w| w == ["--test-threads", "1"]),
+            "{:?}",
+            step.args
+        );
+    }
+
     /// A seed reads the same in decimal and in `0x` hex.
     #[test]
     fn seeds_parse_in_decimal_and_hex() {

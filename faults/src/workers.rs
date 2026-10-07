@@ -17,6 +17,8 @@ struct Worker {
     instance: String,
     child: Child,
     exit: Option<ExitStatus>,
+    /// The harness killed it.
+    scheduled: bool,
 }
 
 /// Owns every worker process. On drop it kills and reaps each one still
@@ -59,6 +61,7 @@ impl Workers {
             instance: instance.to_owned(),
             child,
             exit: None,
+            scheduled: false,
         });
         Ok(pid)
     }
@@ -78,6 +81,42 @@ impl Workers {
             all &= worker.exit.is_some();
         }
         Ok(all)
+    }
+
+    /// The pid of `instance`'s latest process, when it is still running.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the child's status cannot be read.
+    pub fn live(&mut self, instance: &str) -> std::io::Result<Option<u32>> {
+        let Some(worker) = self.workers.iter_mut().rfind(|w| w.instance == instance) else {
+            return Ok(None);
+        };
+        if worker.exit.is_none() {
+            worker.exit = worker.child.try_wait()?;
+        }
+        Ok(worker.exit.is_none().then(|| worker.child.id()))
+    }
+
+    /// Sends SIGKILL to `instance`'s latest process and reaps it, recording
+    /// the exit as scheduled. Does nothing when that process has exited.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the signal cannot be sent or the child cannot be reaped.
+    pub fn kill(&mut self, instance: &str) -> std::io::Result<()> {
+        if self.live(instance)?.is_none() {
+            return Ok(());
+        }
+        let worker = self
+            .workers
+            .iter_mut()
+            .rfind(|w| w.instance == instance)
+            .expect("a live worker");
+        worker.child.kill()?;
+        worker.exit = Some(worker.child.wait()?);
+        worker.scheduled = true;
+        Ok(())
     }
 
     /// Waits up to `deadline` for every worker to exit and returns whether
@@ -110,7 +149,7 @@ impl Workers {
                 pid: w.child.id(),
                 code: w.exit.and_then(|s| s.code()),
                 signal: w.exit.and_then(|s| s.signal()),
-                scheduled: false,
+                scheduled: w.scheduled,
             })
             .collect()
     }
@@ -203,6 +242,30 @@ mod tests {
         assert!(!workers.wait(Duration::from_secs(30)).unwrap());
         let exit = &workers.exits()[0];
         assert_eq!((exit.code, exit.signal), (None, Some(libc::SIGKILL)));
+    }
+
+    /// A kill ends the instance's latest process, reaps it and records the
+    /// exit as scheduled; an earlier process of the instance is left alone.
+    #[test]
+    fn kill_ends_the_latest_process_as_scheduled() {
+        let mut workers = Workers::default();
+        let first = sleeper(&mut workers);
+        let second = sleeper(&mut workers);
+        assert_eq!(
+            workers.live("w0").unwrap(),
+            Some(u32::try_from(second).unwrap())
+        );
+        workers.kill("w0").unwrap();
+        assert_eq!(workers.live("w0").unwrap(), None);
+        // SAFETY: `kill` takes no pointers; signal 0 only checks the pid.
+        assert_eq!(unsafe { libc::kill(first, 0) }, 0, "the first still runs");
+        let exits = workers.exits();
+        assert_eq!(
+            (exits[1].signal, exits[1].scheduled),
+            (Some(libc::SIGKILL), true)
+        );
+        assert!(!exits[0].scheduled);
+        workers.kill("w9").unwrap();
     }
 
     /// A worker's environment carries `NO_PROXY` covering the loopback address.

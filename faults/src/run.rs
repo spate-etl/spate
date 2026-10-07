@@ -1,12 +1,14 @@
 //! The fault-run harness: generates a seeded data set, starts the containers
-//! and the worker processes, sweeps the store's final state, and judges the
-//! run with the oracle.
+//! and the worker processes, kills and replaces workers on the seeded
+//! schedule, sweeps the store's final state, and judges the run with the
+//! oracle.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use spate_coordination::store::nats::NatsStore;
@@ -16,11 +18,15 @@ use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::runners::SyncRunner;
 use testcontainers::{Container, GenericImage, ImageExt};
 
-use crate::journal;
+use crate::health::{self, Target};
+use crate::journal::{self, Event, Journal, Reply};
 use crate::oracle::{
     self, GeneratedObject, GeneratedRecord, Inputs, ProcessJournal, StoreKind, SweptEntry,
 };
-use crate::outcome::{self, Evidence, Kind, LostReplies, Outcome, Scenario, Stage, Violation};
+use crate::outcome::{
+    self, Evidence, FaultFired, Kind, LostReplies, Outcome, Scenario, Stage, Violation,
+};
+use crate::schedule::{Action, Schedule};
 use crate::seaweed::Gateway;
 use crate::seed::{self, SplitMix64};
 use crate::worker::{S3Config, StoreConfig, Tuning, WorkerConfig, nats_store};
@@ -44,6 +50,12 @@ const SETUP_DEADLINE: Duration = Duration::from_secs(60);
 const STORE_CALL: Duration = Duration::from_secs(10);
 /// How long the workers may run before the harness kills them.
 const RUN_DEADLINE: Duration = Duration::from_secs(300);
+/// How often the harness checks the workers between scheduled steps.
+const POLL: Duration = Duration::from_millis(50);
+/// How often each container's health is polled.
+const HEALTH_INTERVAL: Duration = Duration::from_secs(1);
+/// Cap on one health probe.
+const PROBE: Duration = Duration::from_secs(2);
 
 /// One scenario over NATS.
 #[derive(Clone, Copy, Debug)]
@@ -57,14 +69,15 @@ pub struct Spec<'a> {
     /// How long each sink write is held.
     pub sink_delay_ms: u64,
     /// The scenario injects no faults, so a record written twice fails its
-    /// expectation.
+    /// expectation. Otherwise the seed draws a kill schedule.
     pub fault_free: bool,
 }
 
 /// Runs `spec` and returns its outcome when every check held.
 ///
 /// The run directory, `<run root>/<scenario>-<seed>`, keeps each worker's
-/// config, journal and stderr, and `outcome.json`. A passing run keeps only
+/// config, journal and stderr, the harness's `faults.ndjson` and
+/// `health.ndjson`, and `outcome.json`. A passing run keeps only
 /// `outcome.json`.
 ///
 /// # Panics
@@ -76,10 +89,25 @@ pub fn run(spec: &Spec<'_>) -> Outcome {
     let dir = run_root().join(format!("{}-{seed:016x}", spec.name));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("create {}: {e}", dir.display()));
-    let run = Run { spec, seed, dir };
     let mut rng = SplitMix64::for_scenario(seed, spec.name);
     let (generated, objects) = generate(&mut rng);
     let tuning = Tuning::nats();
+    let schedule = if spec.fault_free {
+        Schedule::default()
+    } else {
+        Schedule::draw(&mut rng, spec.instances, tuning.lease_ms)
+    };
+    eprintln!(
+        "fault-run schedule for {}:\n{}",
+        spec.name,
+        schedule.render()
+    );
+    let run = Run {
+        spec,
+        seed,
+        dir,
+        schedule,
+    };
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -95,16 +123,26 @@ pub fn run(spec: &Spec<'_>) -> Outcome {
 
     let mut workers = Workers::default();
     let mut processes = Vec::new();
-    for i in 0..spec.instances {
-        let instance = format!("w{i}");
-        match run.spawn(&mut workers, &env, &instance, &tuning) {
-            Ok(process) => processes.push(process),
-            Err(failure) => return run.harness(Stage::Setup, &failure),
-        }
-    }
-    let timed_out = workers
-        .wait(RUN_DEADLINE)
-        .unwrap_or_else(|e| panic!("read worker status: {e}"));
+    let faults_path = run.dir.join("faults.ndjson");
+    let targets = env.health_targets(&rt);
+    let (driven, polls) = std::thread::scope(|s| {
+        // Inside the scope, so a panic while driving drops `stop` and the
+        // poller ends instead of holding the scope open.
+        let (stop, stopped) = mpsc::channel::<()>();
+        let (targets, path) = (&targets, run.dir.join("health.ndjson"));
+        let poller = s.spawn(move || health::watch(targets, &path, HEALTH_INTERVAL, &stopped));
+        let driven = run.drive(&mut workers, &mut processes, &env, &tuning, &faults_path);
+        drop(stop);
+        (driven, poller.join().expect("the health poller panicked"))
+    });
+    let (timed_out, fired) = match driven {
+        Ok(driven) => driven,
+        Err(failure) => return run.harness(Stage::Running, &failure),
+    };
+    let polls = match polls {
+        Ok(polls) => polls,
+        Err(e) => return run.harness(Stage::Running, &format!("health.ndjson: {e}")),
+    };
     let exits = workers.exits();
     drop(workers);
 
@@ -125,20 +163,29 @@ pub fn run(spec: &Spec<'_>) -> Outcome {
             pid,
         })
         .collect();
+    let faults = if faults_path.exists() {
+        journal::read(&faults_path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", faults_path.display()))
+    } else {
+        Vec::new()
+    };
     let violations = oracle::check(&Inputs {
         store: StoreKind::Nats,
         generated: &generated,
         processes: &journals,
         sweep: &sweep,
-        faults: &[],
+        faults: &faults,
         timing: tuning.timing(),
     })
     .unwrap_or_else(|e| panic!("the oracle could not judge the run: {e}"));
-    let expectations = if spec.fault_free {
+    let mut expectations = if spec.fault_free {
         duplicates(&journals)
     } else {
         Vec::new()
     };
+    if spec.instances > 1 && !claims_overlap(&journals) {
+        expectations.push("no two processes held splits at overlapping times".to_owned());
+    }
     let (kind, message) = outcome::classify(&Evidence {
         setup_failure: None,
         scenario: &Scenario::Ordinary,
@@ -147,18 +194,52 @@ pub fn run(spec: &Spec<'_>) -> Outcome {
         violations: &violations,
         expectations: &expectations,
         lost_replies: &LostReplies::default(),
-        health: &[],
+        health: &polls,
     });
-    run.finish(Stage::Oracle, kind, message, violations, expectations)
+    run.finish(
+        Stage::Oracle,
+        kind,
+        message,
+        violations,
+        expectations,
+        fired,
+    )
 }
 
 /// The containers a run needs, and the harness's own store handle, which
 /// crosses no fault.
 struct Env {
     gateway: Gateway,
-    _nats: Container<GenericImage>,
+    nats: Container<GenericImage>,
     nats_port: u16,
     direct: NatsStore,
+}
+
+impl Env {
+    /// Each container, probed over the harness's own connections.
+    fn health_targets<'a>(&'a self, rt: &'a tokio::runtime::Runtime) -> Vec<Target<'a>> {
+        vec![
+            Target {
+                container: "nats",
+                running: Box::new(|| self.nats.is_running().map_err(|e| e.to_string())),
+                reach: Box::new(move || {
+                    match rt.block_on(async {
+                        tokio::time::timeout(PROBE, self.direct.get(Keyspace::Durable, "plan"))
+                            .await
+                    }) {
+                        Ok(Ok(_)) => Ok(()),
+                        Ok(Err(e)) => Err(e.to_string()),
+                        Err(_) => Err(format!("no answer within {PROBE:?}")),
+                    }
+                }),
+            },
+            Target {
+                container: "seaweedfs",
+                running: Box::new(|| self.gateway.is_running()),
+                reach: Box::new(move || self.gateway.probe(rt, PROBE)),
+            },
+        ]
+    }
 }
 
 fn setup(
@@ -197,7 +278,7 @@ fn setup(
     }
     Ok(Env {
         gateway,
-        _nats: nats,
+        nats,
         nats_port,
         direct,
     })
@@ -234,22 +315,119 @@ struct Run<'a> {
     spec: &'a Spec<'a>,
     seed: u64,
     dir: PathBuf,
+    schedule: Schedule,
 }
 
 impl Run<'_> {
-    /// Writes a worker's config and starts it, returning its instance, pid
-    /// and journal path.
+    /// Starts the workers and applies the schedule, then waits for them until
+    /// [`RUN_DEADLINE`] from their start. Returns whether one was still
+    /// running at the deadline, and each kill drawn.
+    fn drive(
+        &self,
+        workers: &mut Workers,
+        processes: &mut Vec<(String, u32, PathBuf)>,
+        env: &Env,
+        tuning: &Tuning,
+        faults_path: &Path,
+    ) -> Result<(bool, Vec<FaultFired>), String> {
+        let faults =
+            Journal::open(faults_path).map_err(|e| format!("{}: {e}", faults_path.display()))?;
+        let log = |event| {
+            faults
+                .append(event)
+                .map_err(|e| format!("{}: {e}", faults_path.display()))
+        };
+        let start = Instant::now();
+        let until = start + RUN_DEADLINE;
+        let mut incarnations = vec![1; self.spec.instances as usize];
+        for i in 0..self.spec.instances {
+            processes.push(self.spawn(workers, env, i, 1, tuning)?);
+        }
+        let status = |e: std::io::Error| format!("read worker status: {e}");
+        let mut fired = Vec::new();
+        let mut down: Vec<u32> = Vec::new();
+        // Set once the deadline passes or every worker has exited with no
+        // replacement due; later kills are recorded as not fired.
+        let mut over = false;
+        for action in self.schedule.actions() {
+            let due = start + Duration::from_millis(action.at_ms());
+            while !over {
+                let now = Instant::now();
+                over = now >= until || (down.is_empty() && workers.try_wait().map_err(status)?);
+                if now >= due {
+                    break;
+                }
+                std::thread::sleep(POLL.min(due - now));
+            }
+            match action {
+                Action::Kill { at_ms, instance } => {
+                    let name = format!("w{instance}");
+                    let live = if over {
+                        None
+                    } else {
+                        workers.live(&name).map_err(status)?
+                    };
+                    if let Some(pid) = live {
+                        log(Event::Kill {
+                            instance: name.clone(),
+                            pid,
+                        })?;
+                        workers
+                            .kill(&name)
+                            .map_err(|e| format!("kill {name}: {e}"))?;
+                        down.push(instance);
+                    }
+                    fired.push(FaultFired {
+                        incarnation: format!("{name}-{}", incarnations[instance as usize]),
+                        fault: format!("kill at {at_ms} ms"),
+                        fired: live.is_some(),
+                    });
+                }
+                Action::Respawn { instance, .. } => {
+                    let Some(at) = down.iter().position(|i| *i == instance) else {
+                        continue;
+                    };
+                    if over {
+                        continue;
+                    }
+                    down.remove(at);
+                    incarnations[instance as usize] += 1;
+                    let process = self.spawn(
+                        workers,
+                        env,
+                        instance,
+                        incarnations[instance as usize],
+                        tuning,
+                    )?;
+                    log(Event::Respawn {
+                        instance: process.0.clone(),
+                        pid: process.1,
+                    })?;
+                    processes.push(process);
+                }
+            }
+        }
+        let timed_out = workers
+            .wait(until.saturating_duration_since(Instant::now()))
+            .map_err(status)?;
+        Ok((timed_out, fired))
+    }
+
+    /// Writes the config of `instance`'s `incarnation` and starts it,
+    /// returning its instance id, pid and journal path.
     fn spawn(
         &self,
         workers: &mut Workers,
         env: &Env,
-        instance: &str,
+        instance: u32,
+        incarnation: u32,
         tuning: &Tuning,
     ) -> Result<(String, u32, PathBuf), String> {
-        let name = format!("{instance}-1");
+        let instance = format!("w{instance}");
+        let name = format!("{instance}-{incarnation}");
         let journal = self.dir.join(format!("{name}.ndjson"));
         let config = WorkerConfig {
-            instance: instance.to_owned(),
+            instance: instance.clone(),
             journal: journal.clone(),
             store: nats_config(env.nats_port),
             s3: S3Config {
@@ -267,13 +445,13 @@ impl Run<'_> {
             File::create(&stderr_path).map_err(|e| format!("{}: {e}", stderr_path.display()))?;
         let pid = workers
             .spawn(
-                instance,
+                &instance,
                 self.spec.worker,
                 &[OsStr::new(&config_path)],
                 stderr,
             )
             .map_err(|e| format!("start {}: {e}", self.spec.worker.display()))?;
-        Ok((instance.to_owned(), pid, journal))
+        Ok((instance, pid, journal))
     }
 
     fn harness(&self, stage: Stage, failure: &str) -> Outcome {
@@ -281,6 +459,7 @@ impl Run<'_> {
             stage,
             Kind::Harness,
             failure.to_owned(),
+            Vec::new(),
             Vec::new(),
             Vec::new(),
         )
@@ -295,6 +474,7 @@ impl Run<'_> {
         message: String,
         violations: Vec<Violation>,
         expectations: Vec<String>,
+        faults_fired: Vec<FaultFired>,
     ) -> Outcome {
         let spec = self.spec;
         let replay = format!(
@@ -312,7 +492,7 @@ impl Run<'_> {
             message,
             violations,
             expectations,
-            faults_fired: Vec::new(),
+            faults_fired,
         };
         let path = self.dir.join("outcome.json");
         let json = serde_json::to_vec_pretty(&outcome).expect("outcome serializes");
@@ -322,7 +502,7 @@ impl Run<'_> {
             return outcome;
         }
         panic!(
-            "{} {}\nscenario {} on {}, {} instances, seed 0x{:016x}\nreplay: {}\nrun directory: {}",
+            "{} {}\nscenario {} on {}, {} instances, seed 0x{:016x}\nreplay: {}\nschedule:\n{}run directory: {}",
             kind.panic_prefix(),
             outcome.message,
             outcome.scenario,
@@ -330,6 +510,7 @@ impl Run<'_> {
             outcome.instances,
             outcome.seed,
             outcome.replay,
+            self.schedule.render(),
             self.dir.display()
         );
     }
@@ -437,6 +618,40 @@ fn duplicates(journals: &[ProcessJournal]) -> Vec<String> {
     }
 }
 
+/// Whether two processes landed writes as a split's owner at overlapping
+/// times, each process spanning its first to its last such write.
+fn claims_overlap(journals: &[ProcessJournal]) -> bool {
+    let spans: Vec<(u64, u64)> = journals
+        .iter()
+        .filter_map(|j| {
+            let mut owned = HashSet::new();
+            let mut span: Option<(u64, u64)> = None;
+            for line in &j.lines {
+                match &line.event {
+                    Event::Send { call, value, .. }
+                        if value.owner.as_deref() == Some(j.instance.as_str()) =>
+                    {
+                        owned.insert(*call);
+                    }
+                    Event::Done {
+                        call,
+                        reply: Reply::Won(_),
+                        ..
+                    } if owned.contains(call) => {
+                        span = Some((span.map_or(line.t_ms, |s| s.0), line.t_ms));
+                    }
+                    _ => {}
+                }
+            }
+            span
+        })
+        .collect();
+    spans
+        .iter()
+        .enumerate()
+        .any(|(i, a)| spans[i + 1..].iter().any(|b| a.0 <= b.1 && b.0 <= a.1))
+}
+
 fn panic_text(panic: &(dyn std::any::Any + Send)) -> String {
     panic
         .downcast_ref::<String>()
@@ -502,11 +717,13 @@ mod tests {
             spec: &spec,
             seed: 0xff,
             dir: dir.clone(),
+            schedule: Schedule::default(),
         };
         let outcome = run.finish(
             Stage::Oracle,
             Kind::Pass,
             String::new(),
+            Vec::new(),
             Vec::new(),
             Vec::new(),
         );
@@ -533,6 +750,63 @@ mod tests {
     fn run_seed_reads_spate_fault_seed() {
         let seed = seed_from(|name| (name == "SPATE_FAULT_SEED").then(|| "0xff".to_owned()));
         assert_eq!(seed, 0xff);
+    }
+
+    /// Claims overlap when two processes each landed a write as owner between
+    /// the other's first and last such write; lost writes and writes owned by
+    /// another instance do not count.
+    #[test]
+    fn claims_overlap_needs_two_owners_landing_at_once() {
+        use crate::journal::{Progress, Status, WriteOp};
+        let write = |instance: &str, call, t_ms, owner: &str, reply| {
+            let value = Progress {
+                schema: journal::SCHEMA,
+                epoch: 1,
+                owner: Some(owner.to_owned()),
+                watermark: None,
+                completed: false,
+                status: Status::Runnable,
+                attempts: 0,
+            };
+            let key = format!("split.{instance}");
+            [
+                Line {
+                    t_ms,
+                    event: Event::Send {
+                        call,
+                        op: WriteOp::Update,
+                        key: key.clone(),
+                        expected: Some(1),
+                        value,
+                    },
+                },
+                Line {
+                    t_ms,
+                    event: Event::Done { call, key, reply },
+                },
+            ]
+        };
+        let process = |instance: &str, pid, writes: Vec<[Line; 2]>| ProcessJournal {
+            instance: instance.to_owned(),
+            pid,
+            lines: writes.into_iter().flatten().collect(),
+        };
+        let a = process(
+            "w0",
+            1,
+            vec![
+                write("w0", 1, 10, "w0", Reply::Won(2)),
+                write("w0", 2, 30, "w0", Reply::Won(3)),
+            ],
+        );
+        let during = process("w1", 2, vec![write("w1", 1, 20, "w1", Reply::Won(2))]);
+        let after = process("w1", 3, vec![write("w1", 1, 40, "w1", Reply::Won(2))]);
+        let lost = process("w1", 4, vec![write("w1", 1, 20, "w1", Reply::Lost)]);
+        let foreign = process("w1", 5, vec![write("w1", 1, 20, "w0", Reply::Won(2))]);
+        assert!(claims_overlap(&[a.clone(), during]));
+        assert!(!claims_overlap(&[a.clone(), after]));
+        assert!(!claims_overlap(&[a.clone(), lost]));
+        assert!(!claims_overlap(&[a, foreign]));
     }
 
     /// A record written twice, by one process or two, fails the fault-free

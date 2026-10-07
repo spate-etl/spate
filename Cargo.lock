@@ -4570,8 +4570,10 @@ dependencies = [
 name = "spate-faults"
 version = "0.2.0"
 dependencies = [
+ "base64 0.22.1",
  "serde",
  "serde_json",
+ "spate-s3",
  "spate-test-support",
  "tempfile",
 ]

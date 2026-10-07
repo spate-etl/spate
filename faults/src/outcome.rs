@@ -54,7 +54,8 @@ pub enum Check {
     RecordUnknown,
     /// A record arrived twice with no fault or replay to explain it.
     UnexplainedDuplicate,
-    /// A commit moved the watermark past rows its process had not written.
+    /// A landed value moved the watermark past rows its sender had not written,
+    /// completed below a record of its split, or has no journalled sender.
     AheadOfRows,
     /// A split completed more than once.
     CompletedTwice,

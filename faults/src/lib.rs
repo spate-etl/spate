@@ -13,6 +13,15 @@
 //!
 //! - **1. Every record arrives.** The set of ids the sinks wrote equals the
 //!   set of generated ids.
+//! - **2. Duplicates appear only inside a fault or replay window.** Each
+//!   record written more than once lies in the replay range of some claim: at
+//!   or above the watermark the claim replaced, and at or below the last
+//!   record of the split that the previous tenant's process wrote. The claim
+//!   either followed that process's release, or spent an attempt and was sent
+//!   no earlier than the start of a fault window on that process and no later
+//!   than two leases, the drain deadline, two store timeouts, two poll
+//!   intervals and two seconds after the window's end or the replacement's
+//!   start, whichever is later.
 //! - **3. No committed position runs ahead of durable rows.** Every process
 //!   that sent a landed value moving a split's watermark from W0 to W had
 //!   written each record of the split in `[W0, W)` before that `send`. A value
@@ -21,6 +30,10 @@
 //! - **4. No split completes twice or goes missing.** One landed value per
 //!   split sets `completed`, the split ends `Completed`, the swept descriptors
 //!   partition the generated records, and a DynamoDB store holds a verdict.
+//! - **5. No two owners commit on one split.** Per key in revision order, the
+//!   epoch never falls, each epoch has at most one owner, and every value
+//!   that moves the watermark carries the highest epoch at a lower revision.
+//!   Every observation of one revision of a key holds the same value.
 
 pub mod classify;
 pub mod journal;

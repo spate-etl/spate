@@ -75,8 +75,10 @@ pub enum Check {
     EpochRegressed,
     /// Two owners hold one epoch.
     TwoOwners,
-    /// A watermark moved under an epoch below the highest already seen.
+    /// A watermark moved under an epoch other than the highest already seen.
     StaleEpochCommit,
+    /// Two observations of one revision of a key hold different values.
+    ValueConflict,
 }
 
 impl Check {
@@ -94,7 +96,10 @@ impl Check {
             | Check::RecordInTwoSplits
             | Check::VerdictMissing
             | Check::StoppedSplitNotReassigned => 4,
-            Check::EpochRegressed | Check::TwoOwners | Check::StaleEpochCommit => 5,
+            Check::EpochRegressed
+            | Check::TwoOwners
+            | Check::StaleEpochCommit
+            | Check::ValueConflict => 5,
         }
     }
 }

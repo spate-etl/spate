@@ -630,7 +630,14 @@ fn hack(root: &Path, explain: bool, sel: &Select) -> Outcome {
     let (fuzz, fuzz_and_xtask): (&[&str], &[&str]) = match sel {
         Select::Workspace => (
             &["--exclude", "spate-fuzz"],
-            &["--exclude", "spate-xtask", "--exclude", "spate-fuzz"],
+            &[
+                "--exclude",
+                "spate-xtask",
+                "--exclude",
+                "spate-fuzz",
+                "--exclude",
+                "spate-faults",
+            ],
         ),
         Select::Packages(_) => (&[], &[]),
     };
@@ -673,8 +680,8 @@ fn hack(root: &Path, explain: bool, sel: &Select) -> Outcome {
             .args(fuzz),
     );
     // The test suite on default features, which runs the feature-off arm of
-    // tests that `--all-features` skips. spate-fuzz has no tests and
-    // spate-xtask no features.
+    // tests that `--all-features` skips. spate-fuzz has no tests, and
+    // spate-faults and spate-xtask have no features.
     steps.push(
         Step::new("cargo", ["nextest", "run"])
             .args(sel.args())

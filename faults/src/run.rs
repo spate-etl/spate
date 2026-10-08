@@ -198,6 +198,9 @@ pub fn run(spec: &Spec<'_>) -> Outcome {
     if spec.instances > 1 && !claims_overlap(&journals) {
         expectations.push("no two processes held splits at overlapping times".to_owned());
     }
+    if !timed_out {
+        expectations.extend(unreplaced_aborts(&journals));
+    }
     let lost_replies = expect::lost_replies(&journals, run.schedule.lost_reply().is_some());
     let (kind, message) = outcome::classify(&Evidence {
         setup_failure: None,
@@ -756,6 +759,27 @@ fn claims_overlap(journals: &[ProcessJournal]) -> bool {
         .any(|(i, a)| spans[i + 1..].iter().any(|b| a.0 <= b.1 && b.0 <= a.1))
 }
 
+/// A failed expectation for each process, of `journals` in start order, that
+/// journalled an `abort` line and has no later process under its instance id.
+fn unreplaced_aborts(journals: &[ProcessJournal]) -> Vec<String> {
+    journals
+        .iter()
+        .enumerate()
+        .filter(|(at, j)| {
+            j.lines
+                .iter()
+                .any(|l| matches!(l.event, Event::Abort { .. }))
+                && !journals[at + 1..].iter().any(|r| r.instance == j.instance)
+        })
+        .map(|(_, j)| {
+            format!(
+                "{} (pid {}) aborted on its plan and was never replaced",
+                j.instance, j.pid
+            )
+        })
+        .collect()
+}
+
 /// When an ended process that carried `plan` is replaced: one respawn delay
 /// after `now_ms` when it ended on SIGABRT and `journalled` finds its `abort`
 /// line, and never otherwise.
@@ -1045,6 +1069,49 @@ mod tests {
                 instance: 0,
                 respawn_at_ms: 5_100
             })
+        );
+    }
+
+    /// A process with an `abort` line and no later process under its
+    /// instance id fails the expectation; a replaced one does not, nor does a
+    /// process with no `abort` line.
+    #[test]
+    fn an_aborted_process_without_a_replacement_fails_the_expectation() {
+        use crate::classify::WriteKind;
+        use crate::journal::AbortPoint;
+        let journal = |instance: &str, pid, aborted: bool| ProcessJournal {
+            instance: instance.to_owned(),
+            pid,
+            lines: if aborted {
+                vec![Line {
+                    t_ms: 1,
+                    event: Event::Abort {
+                        key: "split.a".to_owned(),
+                        kind: WriteKind::Claim,
+                        n: 1,
+                        at: AbortPoint::Before,
+                    },
+                }]
+            } else {
+                Vec::new()
+            },
+        };
+        let replaced = [
+            journal("w0", 1, true),
+            journal("w1", 2, false),
+            journal("w0", 3, false),
+        ];
+        assert_eq!(unreplaced_aborts(&replaced), Vec::<String>::new());
+        assert_eq!(
+            unreplaced_aborts(&[
+                journal("w0", 3, false),
+                journal("w0", 1, true),
+                journal("w1", 2, true)
+            ]),
+            [
+                "w0 (pid 1) aborted on its plan and was never replaced",
+                "w1 (pid 2) aborted on its plan and was never replaced",
+            ]
         );
     }
 

@@ -3,6 +3,7 @@
 
 mod bench;
 mod docs;
+mod fault_report;
 mod fault_test;
 mod fuzz;
 mod hooks;
@@ -75,6 +76,8 @@ pub(crate) enum Command {
         /// Run only the scenarios whose names contain FILTER
         #[arg(value_name = "FILTER")]
         filter: Option<String>,
+        #[command(subcommand)]
+        cmd: Option<fault_report::FaultTestCommand>,
     },
 
     /// Loom concurrency models for the checkpoint and backpressure primitives
@@ -324,9 +327,12 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: Command) -> Outcome {
                 ),
             )
         }
-        Command::FaultTest { seed, filter } => {
-            fault_test::fault_test(root, explain, seed.as_deref(), filter.as_deref())
-        }
+        Command::FaultTest { cmd: Some(cmd), .. } => fault_report::dispatch(root, explain, cmd),
+        Command::FaultTest {
+            seed,
+            filter,
+            cmd: None,
+        } => fault_test::fault_test(root, explain, seed.as_deref(), filter.as_deref()),
         // `--lib` matters: the models are unit tests inside the crate, and a
         // `--test` run builds integration targets the cfg leaves empty.
         Command::Loom => run::run(

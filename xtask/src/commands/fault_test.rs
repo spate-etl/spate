@@ -14,7 +14,7 @@ const RUNS: &str = "target/fault-runs";
 /// The kinds a scenario's `outcome.json` reports.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum Kind {
+pub(super) enum Kind {
     Pass,
     Violation,
     Worker,
@@ -22,23 +22,26 @@ enum Kind {
     Harness,
 }
 
-/// The fields of a scenario's `outcome.json` the summary carries.
+/// The fields of a scenario's `outcome.json` the summary carries, and the
+/// name of the run directory that holds it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-struct ScenarioOutcome {
-    scenario: String,
-    kind: Kind,
-    message: String,
-    replay: String,
+pub(super) struct ScenarioOutcome {
+    pub(super) scenario: String,
+    pub(super) kind: Kind,
+    pub(super) message: String,
+    pub(super) replay: String,
+    #[serde(default)]
+    pub(super) dir: String,
 }
 
 /// What `summary.json` holds.
-#[derive(Debug, Serialize)]
-struct Summary {
-    seed: String,
+#[derive(Debug, Serialize, Deserialize)]
+pub(super) struct Summary {
+    pub(super) seed: String,
     /// nextest exited 0.
-    tests_passed: bool,
-    outcomes: Vec<ScenarioOutcome>,
-    exit_code: i32,
+    pub(super) tests_passed: bool,
+    pub(super) outcomes: Vec<ScenarioOutcome>,
+    pub(super) exit_code: i32,
 }
 
 /// 1 when any scenario found a violation, a worker failure or a failed
@@ -151,8 +154,9 @@ fn read_outcomes(runs: &Path) -> Result<Vec<ScenarioOutcome>, Error> {
         let Ok(bytes) = std::fs::read(&path) else {
             continue;
         };
-        let outcome: ScenarioOutcome = serde_json::from_slice(&bytes)
+        let mut outcome: ScenarioOutcome = serde_json::from_slice(&bytes)
             .map_err(|e| Error::msg(format!("{}: {e}", path.display())))?;
+        outcome.dir = dir.file_name().to_string_lossy().into_owned();
         outcomes.push(outcome);
     }
     outcomes.sort_by(|a, b| a.scenario.cmp(&b.scenario));
@@ -169,6 +173,7 @@ mod tests {
             kind,
             message: String::new(),
             replay: String::new(),
+            dir: String::new(),
         }
     }
 
@@ -200,8 +205,9 @@ mod tests {
         assert_eq!(exit_code(false, &[outcome("a", Kind::Pass)]), 3);
     }
 
-    /// The summary reads each run directory's `outcome.json`, ignoring
-    /// directories without one and fields it does not carry.
+    /// The summary reads each run directory's `outcome.json` and names the
+    /// directory, ignoring directories without one and fields it does not
+    /// carry.
     #[test]
     fn outcomes_are_read_from_each_run_directory() {
         let runs = std::env::temp_dir().join(format!("xtask-fault-runs-{}", std::process::id()));
@@ -231,6 +237,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             [("a", Kind::Pass), ("b", Kind::Violation)]
         );
+        assert_eq!(outcomes[1].dir, "b-1");
     }
 
     /// The nextest step carries the seed in `SPATE_FAULT_SEED`.

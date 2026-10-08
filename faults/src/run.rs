@@ -478,6 +478,9 @@ impl Run<'_> {
                                 .kill(&name)
                                 .map_err(|e| format!("kill {name}: {e}"))?;
                             timeline.respawn(instance, respawn_at_ms);
+                            // This replacement also stands in for an abort that
+                            // ended the process after the `live` read.
+                            judged[instance as usize] = true;
                         }
                         fired.push(FaultFired {
                             incarnation: format!("{name}-{}", incarnations[instance as usize]),

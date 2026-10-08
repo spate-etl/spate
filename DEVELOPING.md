@@ -138,18 +138,18 @@ start under the same instance id. It does not fix the interleaving. The
 operating system's scheduling and real time decide which split a worker holds
 when something happens. Each scenario writes a directory under
 `target/fault-runs/` holding every worker's config, journal and stderr, the
-faults the harness injected in `faults.ndjson`, a once-a-second poll of each
-container in `health.ndjson`, and an `outcome.json`; a passing scenario keeps
-only the outcome. An outcome is `pass`, `violation` (the oracle found a
-delivery violation), `worker` (a worker failed while every check held),
-`expectation` (the scenario's own assertion failed) or `harness` (setup, a
-journal write or a final store read failed, or a container stopped answering
-during a failed run with no property 3 or 5 violation). The command writes
-`target/fault-runs/summary.json` and exits 1 on any `violation`, `worker` or
-`expectation` outcome, 3 when only `harness` outcomes failed, or nextest failed
-with no failing outcome, such as a build error or a run the oracle could not
-judge, and 0 otherwise. A failure message carries the command that replays its
-seed and the schedule it drew.
+faults the harness injected in `faults.ndjson`, polls of each container in
+turn, a second apart between rounds, in `health.ndjson`, and an
+`outcome.json`; a passing scenario keeps only the outcome. An outcome is `pass`,
+`violation` (the oracle found a delivery violation), `worker` (a worker failed
+while every check held), `expectation` (the scenario's own assertion failed) or
+`harness` (setup, a journal write or a final store read failed, or a container
+stopped answering during a failed run with no property 3 or 5 violation). The
+command writes `target/fault-runs/summary.json` and exits 1 on any `violation`,
+`worker` or `expectation` outcome, 3 when only `harness` outcomes failed, or
+nextest failed with no failing outcome, such as a build error or a run the
+oracle could not judge, and 0 otherwise. A failure message carries the command
+that replays its seed and the schedule it drew.
 
 **On macOS every freshly linked binary stalls for tens of seconds at 0% CPU on
 its first exec** while Gatekeeper scans it. Across this workspace that alone

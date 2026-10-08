@@ -98,7 +98,7 @@ impl Schedule {
                 instance: kill.instance,
             });
         }
-        actions.sort_by_key(|a| (a.at_ms(), matches!(a, Action::Kill { .. })));
+        actions.sort_by_key(|a| (a.at_ms(), matches!(a, Action::Respawn { .. })));
         actions
     }
 
@@ -210,6 +210,31 @@ mod tests {
                 },
                 Action::Respawn {
                     at_ms: 1_500,
+                    instance: 0
+                },
+            ]
+        );
+    }
+
+    /// A kill drawn with a zero respawn delay comes before its respawn.
+    #[test]
+    fn a_zero_delay_respawn_follows_its_kill() {
+        let schedule = Schedule {
+            kills: vec![Kill {
+                at_ms: 1_000,
+                instance: 0,
+                respawn_after_ms: 0,
+            }],
+        };
+        assert_eq!(
+            schedule.actions(),
+            [
+                Action::Kill {
+                    at_ms: 1_000,
+                    instance: 0
+                },
+                Action::Respawn {
+                    at_ms: 1_000,
                     instance: 0
                 },
             ]

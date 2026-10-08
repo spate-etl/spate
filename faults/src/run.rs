@@ -321,7 +321,7 @@ struct Run<'a> {
 impl Run<'_> {
     /// Starts the workers and applies the schedule, then waits for them until
     /// [`RUN_DEADLINE`] from their start. Returns whether one was still
-    /// running at the deadline, and each kill drawn.
+    /// running at the deadline, and each kill [`Schedule::actions`] keeps.
     fn drive(
         &self,
         workers: &mut Workers,

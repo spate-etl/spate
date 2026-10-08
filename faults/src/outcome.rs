@@ -414,18 +414,18 @@ pub struct Outcome {
     pub violations: Vec<Violation>,
     /// The scenario assertions that failed.
     pub expectations: Vec<String>,
-    /// Each in-process fault drawn.
+    /// Each fault applied to a process incarnation.
     pub faults_fired: Vec<FaultFired>,
 }
 
-/// An in-process fault drawn for one process incarnation.
+/// A fault applied to one process incarnation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FaultFired {
     /// Instance id and incarnation, as `<instance>-<n>`.
     pub incarnation: String,
     /// The fault drawn.
     pub fault: String,
-    /// Whether the process reached it.
+    /// Whether its target was live when it fell.
     pub fired: bool,
 }
 

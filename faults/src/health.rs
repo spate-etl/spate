@@ -1,6 +1,6 @@
-//! The container health poller: while workers run, it checks each container
-//! once a second over a connection that crosses no injected fault, and writes
-//! each poll to `health.ndjson`.
+//! The container health poller: while workers run, it checks each container in
+//! turn, a second apart between rounds, over a connection that crosses no
+//! injected fault, and writes each poll to `health.ndjson`.
 
 use std::fs::File;
 use std::io::{self, Write as _};
@@ -48,8 +48,9 @@ impl Target<'_> {
     }
 }
 
-/// Polls every target each `interval` until `stop` receives or disconnects,
-/// appending each poll to `path` as one JSON line, and returns the polls.
+/// Polls every target in turn, `interval` apart between rounds, until `stop`
+/// receives or disconnects, appending each poll to `path` as one JSON line, and
+/// returns the polls.
 ///
 /// # Errors
 ///

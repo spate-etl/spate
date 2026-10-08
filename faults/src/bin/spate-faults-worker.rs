@@ -1,6 +1,8 @@
 //! One fault-run worker: reads the JSON config named by its only argument,
 //! runs the coordinated pipeline, and exits 0 when it completes, 3 when a
 //! journal line cannot be written, and 2 otherwise, with the reason on stderr.
+//! A worker whose config carries an abort plan ends on SIGABRT when the plan
+//! fires.
 
 #![allow(clippy::print_stderr)]
 

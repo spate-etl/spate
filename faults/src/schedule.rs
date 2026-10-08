@@ -131,28 +131,36 @@ impl Schedule {
     /// while its instance waits for a replacement is dropped with its respawn.
     #[must_use]
     pub fn actions(&self) -> Vec<Action> {
-        let mut kills = self.kills.clone();
-        kills.sort_by_key(|k| (k.at_ms, k.instance));
-        let mut down_until: Vec<(u32, u64)> = Vec::new();
         let mut actions = Vec::new();
-        for kill in kills {
-            let respawn_at = kill.at_ms + kill.respawn_after_ms;
-            match down_until.iter_mut().find(|(i, _)| *i == kill.instance) {
-                Some((_, until)) if kill.at_ms <= *until => continue,
-                Some((_, until)) => *until = respawn_at,
-                None => down_until.push((kill.instance, respawn_at)),
-            }
+        for kill in self.rendered_kills() {
             actions.push(Action::Kill {
                 at_ms: kill.at_ms,
                 instance: kill.instance,
             });
             actions.push(Action::Respawn {
-                at_ms: respawn_at,
+                at_ms: kill.at_ms + kill.respawn_after_ms,
                 instance: kill.instance,
             });
         }
         actions.sort_by_key(|a| (a.at_ms(), matches!(a, Action::Respawn { .. })));
         actions
+    }
+
+    /// The kills [`Schedule::actions`] keeps, in time order.
+    fn rendered_kills(&self) -> Vec<Kill> {
+        let mut kills = self.kills.clone();
+        kills.sort_by_key(|k| (k.at_ms, k.instance));
+        let mut down_until: Vec<(u32, u64)> = Vec::new();
+        kills.retain(|kill| {
+            let respawn_at = kill.at_ms + kill.respawn_after_ms;
+            match down_until.iter_mut().find(|(i, _)| *i == kill.instance) {
+                Some((_, until)) if kill.at_ms <= *until => return false,
+                Some((_, until)) => *until = respawn_at,
+                None => down_until.push((kill.instance, respawn_at)),
+            }
+            true
+        });
+        kills
     }
 
     /// One line per step and per in-process fault, as a failure message
@@ -231,7 +239,7 @@ fn pick(rng: &mut SplitMix64, len: usize) -> usize {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Step {
     /// SIGKILL the instance's live process. When one was live, the harness
-    /// schedules its replacement with [`Timeline::respawn_killed`] at
+    /// schedules its replacement with [`Timeline::respawn`] at
     /// `respawn_at_ms`.
     Kill {
         /// When the schedule drew it.
@@ -250,13 +258,13 @@ pub enum Step {
     },
 }
 
-/// A schedule applied on real time: its kills, the respawns kills and aborts
-/// cause, and kills held while the harness says so.
+/// A schedule applied on real time: the kills it renders, the respawns kills
+/// and aborts cause, and kills held while the harness says so.
 ///
 /// With nothing held and every kill firing, it hands out the steps of
-/// [`Schedule::actions`] in the same order. A kill due while its instance
-/// waits for the replacement of a killed process is dropped; one due while
-/// it waits after an abort is handed out.
+/// [`Schedule::actions`] in the same order. Every rendered kill is handed out
+/// or returned by [`Timeline::drain_kills`], including one due while its
+/// instance waits for a replacement, and no other kill is.
 #[derive(Debug, Default)]
 pub struct Timeline {
     pending: Vec<Pending>,
@@ -268,17 +276,15 @@ struct Pending {
     respawn_after_ms: u64,
     /// The kill was due and held.
     held: bool,
-    /// The respawn replaces a killed process.
-    after_kill: bool,
 }
 
 impl Timeline {
-    /// The timeline of `schedule`'s kills.
+    /// The timeline of the kills `schedule` renders.
     #[must_use]
     pub fn new(schedule: &Schedule) -> Timeline {
         let pending = schedule
-            .kills
-            .iter()
+            .rendered_kills()
+            .into_iter()
             .map(|k| Pending {
                 action: Action::Kill {
                     at_ms: k.at_ms,
@@ -286,28 +292,17 @@ impl Timeline {
                 },
                 respawn_after_ms: k.respawn_after_ms,
                 held: false,
-                after_kill: false,
             })
             .collect();
         Timeline { pending }
     }
 
-    /// Schedules a replacement for `instance`'s killed process at `at_ms`.
-    pub fn respawn_killed(&mut self, instance: u32, at_ms: u64) {
-        self.push_respawn(instance, at_ms, true);
-    }
-
-    /// Schedules a replacement for `instance`'s aborted process at `at_ms`.
-    pub fn respawn_aborted(&mut self, instance: u32, at_ms: u64) {
-        self.push_respawn(instance, at_ms, false);
-    }
-
-    fn push_respawn(&mut self, instance: u32, at_ms: u64, after_kill: bool) {
+    /// Schedules a replacement for `instance`'s ended process at `at_ms`.
+    pub fn respawn(&mut self, instance: u32, at_ms: u64) {
         self.pending.push(Pending {
             action: Action::Respawn { at_ms, instance },
             respawn_after_ms: 0,
             held: false,
-            after_kill,
         });
     }
 
@@ -331,7 +326,6 @@ impl Timeline {
             let (Action::Kill { instance, .. } | Action::Respawn { instance, .. }) = a;
             (a.at_ms(), matches!(a, Action::Respawn { .. }), instance)
         });
-        let mut dropped = Vec::new();
         let mut step = None;
         for i in due {
             let (action, respawn_after_ms, was_held) = {
@@ -342,14 +336,6 @@ impl Timeline {
                 Action::Respawn { at_ms, instance } => {
                     step = Some((i, Step::Respawn { at_ms, instance }));
                     break;
-                }
-                Action::Kill { instance, .. }
-                    if self.pending.iter().any(|q| {
-                        q.after_kill
-                            && matches!(q.action, Action::Respawn { instance: j, .. } if j == instance)
-                    }) =>
-                {
-                    dropped.push(i);
                 }
                 Action::Kill { at_ms, instance } => {
                     if held(instance) {
@@ -369,14 +355,9 @@ impl Timeline {
                 }
             }
         }
-        if let Some((i, _)) = step {
-            dropped.push(i);
-        }
-        dropped.sort_unstable();
-        for i in dropped.into_iter().rev() {
-            self.pending.remove(i);
-        }
-        step.map(|(_, s)| s)
+        let (i, step) = step?;
+        self.pending.remove(i);
+        Some(step)
     }
 
     /// Removes every pending step and returns the kills among them.
@@ -616,7 +597,7 @@ mod tests {
                         instance,
                         respawn_at_ms,
                     } => {
-                        timeline.respawn_killed(instance, respawn_at_ms);
+                        timeline.respawn(instance, respawn_at_ms);
                         Action::Kill { at_ms, instance }
                     }
                     Step::Respawn { at_ms, instance } => Action::Respawn { at_ms, instance },
@@ -626,23 +607,20 @@ mod tests {
         }
     }
 
-    /// A kill due while its instance waits for the replacement of an aborted
-    /// process is handed out, so the harness records it; one due while the
-    /// instance waits after a kill is dropped.
+    /// A rendered kill due while its instance waits for a replacement is
+    /// handed out, so the harness records it.
     #[test]
-    fn a_kill_while_its_instance_awaits_an_abort_replacement_is_handed_out() {
-        let kill = |at_ms, instance| Kill {
-            at_ms,
-            instance,
-            respawn_after_ms: 0,
-        };
+    fn a_kill_while_its_instance_awaits_a_replacement_is_handed_out() {
         let schedule = Schedule {
-            kills: vec![kill(2_000, 0), kill(2_000, 1)],
+            kills: vec![Kill {
+                at_ms: 2_000,
+                instance: 0,
+                respawn_after_ms: 0,
+            }],
             ..Schedule::default()
         };
         let mut timeline = Timeline::new(&schedule);
-        timeline.respawn_aborted(0, 3_000);
-        timeline.respawn_killed(1, 3_000);
+        timeline.respawn(0, 3_000);
         assert_eq!(
             timeline.next(2_000, |_| false),
             Some(Step::Kill {
@@ -653,5 +631,51 @@ mod tests {
         );
         assert_eq!(timeline.next(2_000, |_| false), None);
         assert!(timeline.awaiting_respawn());
+    }
+
+    /// A kill the schedule omits, due on an instance's replacement after an
+    /// abort, is never handed out.
+    #[test]
+    fn a_kill_the_schedule_omits_is_never_handed_out() {
+        let schedule = Schedule {
+            kills: vec![
+                Kill {
+                    at_ms: 2_000,
+                    instance: 1,
+                    respawn_after_ms: 500,
+                },
+                Kill {
+                    at_ms: 2_100,
+                    instance: 1,
+                    respawn_after_ms: 0,
+                },
+            ],
+            ..Schedule::default()
+        };
+        assert!(!schedule.render().contains("2100 ms: kill w1"));
+        let mut timeline = Timeline::new(&schedule);
+        timeline.respawn(1, 2_050);
+        let mut live = false;
+        let mut fired = Vec::new();
+        for now in [2_000, 2_050, 2_100] {
+            while let Some(step) = timeline.next(now, |_| false) {
+                match step {
+                    Step::Kill {
+                        at_ms,
+                        instance,
+                        respawn_at_ms,
+                    } => {
+                        if live {
+                            timeline.respawn(instance, respawn_at_ms);
+                        }
+                        fired.push((at_ms, live));
+                        live = false;
+                    }
+                    Step::Respawn { .. } => live = true,
+                }
+            }
+        }
+        assert_eq!(fired, [(2_000, false)]);
+        assert!(timeline.drain_kills().is_empty());
     }
 }

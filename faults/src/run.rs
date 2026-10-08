@@ -436,7 +436,7 @@ impl Run<'_> {
                 if let Some(at_ms) = abort_respawn(plan, workers.signal(&name), journalled, now_ms)
                 {
                     workers.mark_scheduled(&name);
-                    timeline.respawn_aborted(i, at_ms);
+                    timeline.respawn(i, at_ms);
                 }
             }
             if now >= until {
@@ -470,7 +470,7 @@ impl Run<'_> {
                             workers
                                 .kill(&name)
                                 .map_err(|e| format!("kill {name}: {e}"))?;
-                            timeline.respawn_killed(instance, respawn_at_ms);
+                            timeline.respawn(instance, respawn_at_ms);
                         }
                         fired.push(FaultFired {
                             incarnation: format!("{name}-{}", incarnations[instance as usize]),
@@ -1070,6 +1070,63 @@ mod tests {
                 respawn_at_ms: 5_100
             })
         );
+    }
+
+    /// Two kills the schedule renders on the lost-reply process, both due
+    /// before its `err_after_land` line, are each handed out or drained.
+    #[test]
+    fn held_kill_swallows_no_rendered_kill() {
+        use crate::schedule::Kill;
+        use crate::store::AbortPlan;
+        let schedule = Schedule {
+            kills: vec![
+                Kill {
+                    at_ms: 1_000,
+                    instance: 0,
+                    respawn_after_ms: 100,
+                },
+                Kill {
+                    at_ms: 1_500,
+                    instance: 0,
+                    respawn_after_ms: 100,
+                },
+            ],
+            in_process: vec![InProcess {
+                instance: 0,
+                plan: AbortPlan {
+                    kind: crate::classify::WriteKind::Commit,
+                    n: 1,
+                    mode: AbortMode::ErrAfterLand,
+                },
+                respawn_after_ms: 0,
+            }],
+        };
+        let rendered = schedule.render();
+        assert!(rendered.contains("1500 ms: kill w0"));
+        let mut timeline = Timeline::new(&schedule);
+        let mut handed = Vec::new();
+        // The err_after_land line appears at 5 s: until then both kills are held.
+        for now in (0..=20_000).step_by(50) {
+            let seen = now >= 5_000;
+            while let Some(step) = timeline.next(now, |i| kill_held(&schedule, i, 1, seen)) {
+                if let Step::Kill {
+                    instance,
+                    respawn_at_ms,
+                    ..
+                } = step
+                {
+                    timeline.respawn(instance, respawn_at_ms);
+                }
+                handed.push(step);
+            }
+        }
+        let left = timeline.drain_kills();
+        let kills = handed
+            .iter()
+            .filter(|s| matches!(s, Step::Kill { .. }))
+            .count()
+            + left.len();
+        assert_eq!(kills, 2, "every rendered kill is handed out or drained");
     }
 
     /// A process with an `abort` line and no later process under its

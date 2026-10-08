@@ -405,3 +405,37 @@ fn caught_broken_fence_with_a_failed_assertion_is_expectation() {
     };
     assert_eq!(lost.kind(), Kind::Expectation);
 }
+
+/// `outcome.json` carries each violation's property number beside its check,
+/// and reads back without it.
+#[test]
+fn outcome_json_numbers_each_violation_with_its_property() {
+    let outcome = Outcome {
+        scenario: "s".to_owned(),
+        store: "nats".to_owned(),
+        instances: 1,
+        seed: 1,
+        replay: String::new(),
+        stage: Stage::Oracle,
+        kind: Kind::Violation,
+        message: String::new(),
+        violations: vec![found(Check::RecordMissing), found(Check::TwoOwners)],
+        expectations: Vec::new(),
+        faults_fired: Vec::new(),
+    };
+    let json: serde_json::Value = serde_json::to_value(&outcome).unwrap();
+    let numbered: Vec<(&str, u64)> = json["violations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| {
+            (
+                v["check"].as_str().unwrap(),
+                v["property"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(numbered, [("RecordMissing", 1), ("TwoOwners", 5)]);
+    let back: Outcome = serde_json::from_value(json).unwrap();
+    assert_eq!(back, outcome);
+}

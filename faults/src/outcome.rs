@@ -410,12 +410,27 @@ pub struct Outcome {
     pub kind: Kind,
     /// What [`classify`] reported.
     pub message: String,
-    /// The violations found.
+    /// The violations found. Each is written with a `property` field holding
+    /// [`Check::property`], which reading ignores.
+    #[serde(serialize_with = "with_property")]
     pub violations: Vec<Violation>,
     /// The scenario assertions that failed.
     pub expectations: Vec<String>,
     /// Each fault applied to a process incarnation.
     pub faults_fired: Vec<FaultFired>,
+}
+
+fn with_property<S: serde::Serializer>(violations: &[Violation], s: S) -> Result<S::Ok, S::Error> {
+    #[derive(Serialize)]
+    struct Numbered<'a> {
+        property: u8,
+        #[serde(flatten)]
+        violation: &'a Violation,
+    }
+    s.collect_seq(violations.iter().map(|violation| Numbered {
+        property: violation.check.property(),
+        violation,
+    }))
 }
 
 /// A fault applied to one process incarnation.

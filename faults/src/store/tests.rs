@@ -705,3 +705,48 @@ async fn claim_fallback_after_a_timed_out_read_back_is_a_recovery() {
     assert_eq!(judged.lines, 1);
     assert_eq!(judged.unexplained, Vec::<String>::new());
 }
+
+/// An `After` plan does not abort on a write that loses its CAS.
+#[tokio::test]
+async fn an_after_plan_ignores_a_lost_write() {
+    let (journalled, _dir, path) = journalled(MemoryStore::new(LEASE));
+    let peer = journalled.clone();
+    let journal = Arc::clone(&journalled.journal);
+    let classifier = Arc::clone(&journalled.classifier);
+    let store = AbortAt::new(
+        journalled,
+        plan(WriteKind::Commit, 1, AbortMode::After),
+        journal,
+        classifier,
+    );
+    let claimed = store
+        .create(Keyspace::Durable, "split.a", record_at(1, Some("w0"), None))
+        .await
+        .unwrap()
+        .won()
+        .unwrap();
+    peer.update(
+        Keyspace::Durable,
+        "split.a",
+        record_at(1, Some("w0"), Some(5)),
+        claimed,
+    )
+    .await
+    .unwrap()
+    .won()
+    .unwrap();
+    let stale = store
+        .update(
+            Keyspace::Durable,
+            "split.a",
+            record_at(1, Some("w0"), Some(10)),
+            claimed,
+        )
+        .await;
+    assert!(matches!(stale, Ok(CasOutcome::Lost)), "{stale:?}");
+    assert!(
+        !events(&path)
+            .iter()
+            .any(|e| matches!(e, Event::Abort { .. }))
+    );
+}

@@ -573,4 +573,27 @@ mod tests {
         ]);
         assert_eq!(judge(events).unexplained, Vec::<String>::new());
     }
+
+    fn completed(epoch: u64, watermark: i64) -> Progress {
+        let mut v = value(epoch, Some("w0"), Some(watermark));
+        v.completed = true;
+        v.status = Status::Completed;
+        v
+    }
+
+    /// A lost completion reply, a retry from the pre-fault revision that
+    /// loses, and a read of the landed completion is a recovery.
+    #[test]
+    fn completion_evidence_accepts_lost_then_adoption() {
+        let events = vec![
+            seen(6, value(2, Some("w0"), None), Source::Get),
+            send(1, 6, completed(2, 10)),
+            done(1, Reply::Won(7)),
+            lost_reply(7),
+            send(2, 6, completed(2, 10)),
+            done(2, Reply::Lost),
+            seen(7, completed(2, 10), Source::Get),
+        ];
+        assert_eq!(judge(events).unexplained, Vec::<String>::new());
+    }
 }

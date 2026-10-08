@@ -1296,4 +1296,28 @@ mod tests {
             None
         );
     }
+
+    /// `journal_holds` finds an event only in a journal that holds it.
+    #[test]
+    fn journal_holds_finds_only_a_journalled_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("w1-1.ndjson");
+        assert!(!journal_holds(&path, "abort"));
+        let journal = Journal::open(&path).unwrap();
+        journal
+            .append(Event::ReadFailed {
+                key: "split.abort".to_owned(),
+            })
+            .unwrap();
+        assert!(!journal_holds(&path, "abort"));
+        journal
+            .append(Event::Abort {
+                key: "split.a".to_owned(),
+                kind: crate::classify::WriteKind::Commit,
+                n: 1,
+                at: crate::journal::AbortPoint::Before,
+            })
+            .unwrap();
+        assert!(journal_holds(&path, "abort"));
+    }
 }

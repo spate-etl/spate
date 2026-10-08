@@ -441,3 +441,115 @@ async fn a_failed_split_read_is_journalled() {
         }]
     );
 }
+
+/// An ephemeral `split.*` update through `AbortAt` counts as a renewal.
+#[tokio::test]
+async fn an_ephemeral_split_update_counts_as_a_renewal() {
+    let (journalled, _dir, _path) = journalled(MemoryStore::new(LEASE));
+    let journal = Arc::clone(&journalled.journal);
+    let classifier = Arc::clone(&journalled.classifier);
+    let plan = plan(WriteKind::Renew, 1, AbortMode::ErrAfterLand);
+    let store = AbortAt::new(journalled, plan, journal, classifier);
+    let lease = store
+        .create(Keyspace::Ephemeral, "split.a", b"lease".to_vec())
+        .await
+        .unwrap()
+        .won()
+        .unwrap();
+    let renewed = store
+        .update(Keyspace::Ephemeral, "split.a", b"lease".to_vec(), lease)
+        .await;
+    assert!(
+        matches!(renewed, Err(StoreError::Retryable(_))),
+        "{renewed:?}"
+    );
+}
+
+const ABORT_CHILD: &str = "SPATE_FAULTS_ABORT_CHILD";
+
+/// In a child process: claims `split.a` and sends one commit through an
+/// `AbortAt` carrying a commit plan in `mode`.
+fn abort_child(mode: &str, path: &std::path::Path) {
+    let mode = match mode {
+        "before" => AbortMode::Before,
+        _ => AbortMode::After,
+    };
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let journal = Arc::new(Journal::open(path).unwrap());
+        let classifier = Arc::new(Classifier::new("w0"));
+        let inner = JournalStore::new(
+            MemoryStore::new(LEASE),
+            Arc::clone(&journal),
+            Arc::clone(&classifier),
+        );
+        let store = AbortAt::new(inner, plan(WriteKind::Commit, 1, mode), journal, classifier);
+        let claimed = store
+            .create(Keyspace::Durable, "split.a", record_at(1, Some("w0"), None))
+            .await
+            .unwrap()
+            .won()
+            .unwrap();
+        let _ = store
+            .update(
+                Keyspace::Durable,
+                "split.a",
+                record_at(1, Some("w0"), Some(10)),
+                claimed,
+            )
+            .await;
+    });
+}
+
+/// A `Before` plan aborts the process before its write is sent and an `After`
+/// plan once it lands, each with its `abort` line in the journal.
+#[cfg(unix)]
+#[test]
+fn abort_plans_end_the_process_on_sigabrt() {
+    use std::os::unix::process::ExitStatusExt as _;
+    if let Ok(mode) = std::env::var(ABORT_CHILD) {
+        abort_child(
+            &mode,
+            std::path::Path::new(&std::env::var("SPATE_FAULTS_ABORT_JOURNAL").unwrap()),
+        );
+        return;
+    }
+    for (mode, at) in [("before", AbortPoint::Before), ("after", AbortPoint::After)] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("w0-1.ndjson");
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "store::tests::abort_plans_end_the_process_on_sigabrt",
+                "--nocapture",
+            ])
+            .env(ABORT_CHILD, mode)
+            .env("SPATE_FAULTS_ABORT_JOURNAL", &path)
+            .status()
+            .unwrap();
+        assert_eq!(status.signal(), Some(libc::SIGABRT), "{mode}: {status:?}");
+        let events = events(&path);
+        let sends = events
+            .iter()
+            .filter(|e| matches!(e, Event::Send { .. }))
+            .count();
+        assert_eq!(
+            sends,
+            if at == AbortPoint::Before { 1 } else { 2 },
+            "{mode}: {events:?}"
+        );
+        assert_eq!(
+            events.last(),
+            Some(&Event::Abort {
+                key: "split.a".to_owned(),
+                kind: WriteKind::Commit,
+                n: 1,
+                at,
+            }),
+            "{mode}"
+        );
+    }
+}

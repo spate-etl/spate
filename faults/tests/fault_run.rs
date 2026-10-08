@@ -22,3 +22,32 @@ fn nats_no_faults_writes_no_duplicates() {
         fault_free: true,
     });
 }
+
+/// One NATS worker, killed and replaced on the seeded schedule, delivers every
+/// record under the five properties.
+#[test]
+#[ignore = "requires Docker"]
+fn nats_one_instance() {
+    run::run(&Spec {
+        name: "nats_one_instance",
+        instances: 1,
+        worker: Path::new(WORKER),
+        sink_delay_ms: 600,
+        fault_free: false,
+    });
+}
+
+/// Three NATS workers, killed and replaced on the seeded schedule, deliver
+/// every record under the five properties, while two of them land writes as
+/// split owners at overlapping times.
+#[test]
+#[ignore = "requires Docker"]
+fn nats_three_instances() {
+    run::run(&Spec {
+        name: "nats_three_instances",
+        instances: 3,
+        worker: Path::new(WORKER),
+        sink_delay_ms: 600,
+        fault_free: false,
+    });
+}

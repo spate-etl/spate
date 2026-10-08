@@ -20,7 +20,7 @@ const BUCKET_DEADLINE: Duration = Duration::from_secs(60);
 
 /// A running gateway with one bucket.
 pub struct Gateway {
-    _container: Container<GenericImage>,
+    container: Container<GenericImage>,
     /// The mapped S3 port on the loopback address.
     pub port: u16,
     /// The bucket.
@@ -78,7 +78,7 @@ impl Gateway {
         )
         .map_err(|e| e.to_string())?;
         Ok(Gateway {
-            _container: container,
+            container,
             port,
             bucket: bucket.to_owned(),
             client: Arc::from(client),
@@ -89,6 +89,31 @@ impl Gateway {
     #[must_use]
     pub fn endpoint(&self) -> String {
         format!("http://127.0.0.1:{}", self.port)
+    }
+
+    /// Whether Docker reports the container running.
+    ///
+    /// # Errors
+    ///
+    /// Fails when Docker cannot be asked.
+    pub fn is_running(&self) -> Result<bool, String> {
+        self.container.is_running().map_err(|e| e.to_string())
+    }
+
+    /// Lists the bucket's first object, failing when no answer comes within
+    /// `cap`.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the list fails or does not answer in time.
+    pub fn probe(&self, rt: &tokio::runtime::Runtime, cap: Duration) -> Result<(), String> {
+        let first =
+            rt.block_on(async { tokio::time::timeout(cap, self.client.list(None).next()).await });
+        match first {
+            Ok(Some(Err(e))) => Err(e.to_string()),
+            Ok(_) => Ok(()),
+            Err(_) => Err(format!("no answer within {cap:?}")),
+        }
     }
 
     /// Writes each `(key, body)` object.

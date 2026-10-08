@@ -368,7 +368,8 @@ impl fmt::Display for JournalError {
 
 impl std::error::Error for JournalError {}
 
-fn now_ms() -> u64 {
+/// Milliseconds since the Unix epoch, as journal lines carry them.
+pub(crate) fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))

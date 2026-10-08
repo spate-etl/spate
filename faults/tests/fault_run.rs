@@ -38,7 +38,8 @@ fn nats_one_instance() {
 }
 
 /// Three NATS workers, killed and replaced on the seeded schedule, deliver
-/// every record under the five properties while holding splits at once.
+/// every record under the five properties, while two of them land writes as
+/// split owners at overlapping times.
 #[test]
 #[ignore = "requires Docker"]
 fn nats_three_instances() {

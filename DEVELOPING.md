@@ -149,7 +149,7 @@ command writes `target/fault-runs/summary.json` and exits 1 on any `violation`,
 `worker` or `expectation` outcome, 3 when only `harness` outcomes failed, or
 nextest failed with no failing outcome, such as a build error or a run the
 oracle could not judge, and 0 otherwise. A failure message carries the command
-that replays its seed and the schedule it drew.
+that replays its seed and the schedule it applies.
 
 **On macOS every freshly linked binary stalls for tens of seconds at 0% CPU on
 its first exec** while Gatekeeper scans it. Across this workspace that alone

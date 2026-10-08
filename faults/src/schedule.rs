@@ -240,4 +240,37 @@ mod tests {
             ]
         );
     }
+
+    /// Kills are judged in time order, whatever order they were drawn in, and
+    /// a kill due when its instance's replacement starts is dropped.
+    #[test]
+    fn kills_are_dropped_in_time_order() {
+        let schedule = Schedule {
+            kills: vec![
+                Kill {
+                    at_ms: 1_500,
+                    instance: 0,
+                    respawn_after_ms: 0,
+                },
+                Kill {
+                    at_ms: 1_000,
+                    instance: 0,
+                    respawn_after_ms: 500,
+                },
+            ],
+        };
+        assert_eq!(
+            schedule.actions(),
+            [
+                Action::Kill {
+                    at_ms: 1_000,
+                    instance: 0
+                },
+                Action::Respawn {
+                    at_ms: 1_500,
+                    instance: 0
+                },
+            ]
+        );
+    }
 }

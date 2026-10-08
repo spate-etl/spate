@@ -511,6 +511,15 @@ fn abort_child(mode: &str, path: &std::path::Path) {
 fn abort_plans_end_the_process_on_sigabrt() {
     use std::os::unix::process::ExitStatusExt as _;
     if let Ok(mode) = std::env::var(ABORT_CHILD) {
+        // The child's abort writes no core file.
+        let no_core = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: `setrlimit` reads one valid `rlimit` and changes only this
+        // process's limit.
+        let set = unsafe { libc::setrlimit(libc::RLIMIT_CORE, &raw const no_core) };
+        assert_eq!(set, 0);
         abort_child(
             &mode,
             std::path::Path::new(&std::env::var("SPATE_FAULTS_ABORT_JOURNAL").unwrap()),

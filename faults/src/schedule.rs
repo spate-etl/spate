@@ -34,7 +34,7 @@ pub enum Action {
         /// Instance index.
         instance: u32,
     },
-    /// Start a replacement for the instance's killed process.
+    /// Start a replacement for the instance's ended process.
     Respawn {
         /// When the step is due.
         at_ms: u64,

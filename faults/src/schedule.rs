@@ -1,8 +1,11 @@
-//! The seeded fault schedule a run applies to its worker processes.
+//! The seeded fault schedule a run applies to its worker processes, and the
+//! timeline that applies it on real time.
 
 use std::fmt::Write as _;
 
+use crate::classify::WriteKind;
 use crate::seed::SplitMix64;
+use crate::store::{AbortMode, AbortPlan};
 
 /// Earliest kill, from the start of the running stage.
 const KILL_FROM_MS: u64 = 1_000;
@@ -50,28 +53,78 @@ impl Action {
     }
 }
 
-/// The kills drawn for one run.
+/// The in-process fault one instance's first process carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InProcess {
+    /// Instance index, `w<index>`.
+    pub instance: u32,
+    /// The fault.
+    pub plan: AbortPlan,
+    /// How long after an abort the replacement starts, at most one lease.
+    pub respawn_after_ms: u64,
+}
+
+/// The faults drawn for one run.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Schedule {
     /// Kills in the order drawn.
     pub kills: Vec<Kill>,
+    /// In-process faults, at most one per instance.
+    pub in_process: Vec<InProcess>,
 }
 
 impl Schedule {
     /// Draws between one and `instances + 1` kills over the first six
     /// seconds of the running stage, each with a replacement within `lease_ms`.
+    /// Then one instance's first process gets an `ErrAfterLand` plan, and
+    /// each other instance's first process an abort before or after a write.
     #[must_use]
     pub fn draw(rng: &mut SplitMix64, instances: u32, lease_ms: u64) -> Schedule {
         let count = rng.in_range(1, u64::from(instances) + 1);
+        let instance = |rng: &mut SplitMix64| {
+            u32::try_from(rng.in_range(0, u64::from(instances) - 1))
+                .expect("an instance index fits in u32")
+        };
         let kills = (0..count)
             .map(|_| Kill {
                 at_ms: rng.in_range(KILL_FROM_MS, KILL_UNTIL_MS),
-                instance: u32::try_from(rng.in_range(0, u64::from(instances) - 1))
-                    .expect("an instance index fits in u32"),
+                instance: instance(rng),
                 respawn_after_ms: rng.in_range(0, lease_ms),
             })
             .collect();
-        Schedule { kills }
+        let lost = instance(rng);
+        let mut in_process = vec![InProcess {
+            instance: lost,
+            plan: draw_err_after_land(rng),
+            respawn_after_ms: 0,
+        }];
+        for i in (0..instances).filter(|i| *i != lost) {
+            in_process.push(InProcess {
+                instance: i,
+                plan: draw_abort(rng),
+                respawn_after_ms: rng.in_range(0, lease_ms),
+            });
+        }
+        Schedule { kills, in_process }
+    }
+
+    /// The plan `instance`'s `incarnation` carries: only a first process
+    /// carries one.
+    #[must_use]
+    pub fn plan_for(&self, instance: u32, incarnation: u32) -> Option<&InProcess> {
+        if incarnation != 1 {
+            return None;
+        }
+        self.in_process.iter().find(|p| p.instance == instance)
+    }
+
+    /// The instance whose first process carries the `ErrAfterLand` plan.
+    #[must_use]
+    pub fn lost_reply(&self) -> Option<u32> {
+        self.in_process
+            .iter()
+            .find(|p| p.plan.mode == AbortMode::ErrAfterLand)
+            .map(|p| p.instance)
     }
 
     /// The steps in time order, each kill followed by its respawn. A kill due
@@ -102,10 +155,21 @@ impl Schedule {
         actions
     }
 
-    /// One line per step, as a failure message shows it.
+    /// One line per step and per in-process fault, as a failure message
+    /// shows it.
     #[must_use]
     pub fn render(&self) -> String {
         let mut text = String::new();
+        for p in &self.in_process {
+            let _ = match p.plan.mode {
+                AbortMode::ErrAfterLand => writeln!(text, "w{}-1: {}", p.instance, p.plan),
+                AbortMode::Before | AbortMode::After => writeln!(
+                    text,
+                    "w{}-1: {}, respawn {} ms later",
+                    p.instance, p.plan, p.respawn_after_ms
+                ),
+            };
+        }
         for action in self.actions() {
             let _ = match action {
                 Action::Kill { at_ms, instance } => writeln!(text, "{at_ms} ms: kill w{instance}"),
@@ -115,6 +179,216 @@ impl Schedule {
             };
         }
         text
+    }
+}
+
+/// Kinds an `ErrAfterLand` is drawn on: the durable writes whose recovery the
+/// journal can show. A renewal is ephemeral, so it is never drawn.
+const LOST_REPLY_KINDS: [WriteKind; 3] = [WriteKind::Claim, WriteKind::Commit, WriteKind::Complete];
+/// Kinds an abort is drawn on.
+const ABORT_KINDS: [WriteKind; 4] = [
+    WriteKind::Claim,
+    WriteKind::Commit,
+    WriteKind::Complete,
+    WriteKind::Renew,
+];
+
+/// An `ErrAfterLand` plan at a write every worker that holds a split reaches.
+fn draw_err_after_land(rng: &mut SplitMix64) -> AbortPlan {
+    let kind = LOST_REPLY_KINDS[pick(rng, LOST_REPLY_KINDS.len())];
+    let n = if kind == WriteKind::Commit {
+        rng.in_range(1, 2)
+    } else {
+        1
+    };
+    AbortPlan {
+        kind,
+        n: u32::try_from(n).expect("small"),
+        mode: AbortMode::ErrAfterLand,
+    }
+}
+
+/// An abort before or after one of the first three writes of a kind.
+fn draw_abort(rng: &mut SplitMix64) -> AbortPlan {
+    let kind = ABORT_KINDS[pick(rng, ABORT_KINDS.len())];
+    let mode = if rng.next_u64().is_multiple_of(2) {
+        AbortMode::Before
+    } else {
+        AbortMode::After
+    };
+    AbortPlan {
+        kind,
+        n: u32::try_from(rng.in_range(1, 3)).expect("small"),
+        mode,
+    }
+}
+
+fn pick(rng: &mut SplitMix64, len: usize) -> usize {
+    usize::try_from(rng.in_range(0, len as u64 - 1)).expect("an index fits in usize")
+}
+
+/// A step [`Timeline::next`] hands the harness.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Step {
+    /// SIGKILL the instance's live process. When one was live, the harness
+    /// schedules its replacement with [`Timeline::respawn_killed`] at
+    /// `respawn_at_ms`.
+    Kill {
+        /// When the schedule drew it.
+        at_ms: u64,
+        /// Instance index.
+        instance: u32,
+        /// One respawn delay after the kill was released.
+        respawn_at_ms: u64,
+    },
+    /// Start a replacement for the instance's ended process.
+    Respawn {
+        /// When the step is due.
+        at_ms: u64,
+        /// Instance index.
+        instance: u32,
+    },
+}
+
+/// A schedule applied on real time: its kills, the respawns kills and aborts
+/// cause, and kills held while the harness says so.
+///
+/// With nothing held and every kill firing, it hands out the steps of
+/// [`Schedule::actions`] in the same order. A kill due while its instance
+/// waits for the replacement of a killed process is dropped; one due while
+/// it waits after an abort is handed out.
+#[derive(Debug, Default)]
+pub struct Timeline {
+    pending: Vec<Pending>,
+}
+
+#[derive(Debug)]
+struct Pending {
+    action: Action,
+    respawn_after_ms: u64,
+    /// The kill was due and held.
+    held: bool,
+    /// The respawn replaces a killed process.
+    after_kill: bool,
+}
+
+impl Timeline {
+    /// The timeline of `schedule`'s kills.
+    #[must_use]
+    pub fn new(schedule: &Schedule) -> Timeline {
+        let pending = schedule
+            .kills
+            .iter()
+            .map(|k| Pending {
+                action: Action::Kill {
+                    at_ms: k.at_ms,
+                    instance: k.instance,
+                },
+                respawn_after_ms: k.respawn_after_ms,
+                held: false,
+                after_kill: false,
+            })
+            .collect();
+        Timeline { pending }
+    }
+
+    /// Schedules a replacement for `instance`'s killed process at `at_ms`.
+    pub fn respawn_killed(&mut self, instance: u32, at_ms: u64) {
+        self.push_respawn(instance, at_ms, true);
+    }
+
+    /// Schedules a replacement for `instance`'s aborted process at `at_ms`.
+    pub fn respawn_aborted(&mut self, instance: u32, at_ms: u64) {
+        self.push_respawn(instance, at_ms, false);
+    }
+
+    fn push_respawn(&mut self, instance: u32, at_ms: u64, after_kill: bool) {
+        self.pending.push(Pending {
+            action: Action::Respawn { at_ms, instance },
+            respawn_after_ms: 0,
+            held: false,
+            after_kill,
+        });
+    }
+
+    /// Whether some instance waits for a replacement.
+    #[must_use]
+    pub fn awaiting_respawn(&self) -> bool {
+        self.pending
+            .iter()
+            .any(|p| matches!(p.action, Action::Respawn { .. }))
+    }
+
+    /// The earliest step due by `now_ms`, kills before respawns due at the
+    /// same time. A kill for which `held` returns true stays pending, and once
+    /// released its replacement waits one respawn delay from `now_ms`.
+    pub fn next(&mut self, now_ms: u64, mut held: impl FnMut(u32) -> bool) -> Option<Step> {
+        let mut due: Vec<usize> = (0..self.pending.len())
+            .filter(|&i| self.pending[i].action.at_ms() <= now_ms)
+            .collect();
+        due.sort_by_key(|&i| {
+            let a = self.pending[i].action;
+            let (Action::Kill { instance, .. } | Action::Respawn { instance, .. }) = a;
+            (a.at_ms(), matches!(a, Action::Respawn { .. }), instance)
+        });
+        let mut dropped = Vec::new();
+        let mut step = None;
+        for i in due {
+            let (action, respawn_after_ms, was_held) = {
+                let p = &self.pending[i];
+                (p.action, p.respawn_after_ms, p.held)
+            };
+            match action {
+                Action::Respawn { at_ms, instance } => {
+                    step = Some((i, Step::Respawn { at_ms, instance }));
+                    break;
+                }
+                Action::Kill { instance, .. }
+                    if self.pending.iter().any(|q| {
+                        q.after_kill
+                            && matches!(q.action, Action::Respawn { instance: j, .. } if j == instance)
+                    }) =>
+                {
+                    dropped.push(i);
+                }
+                Action::Kill { at_ms, instance } => {
+                    if held(instance) {
+                        self.pending[i].held = true;
+                        continue;
+                    }
+                    let from = if was_held { now_ms } else { at_ms };
+                    step = Some((
+                        i,
+                        Step::Kill {
+                            at_ms,
+                            instance,
+                            respawn_at_ms: from + respawn_after_ms,
+                        },
+                    ));
+                    break;
+                }
+            }
+        }
+        if let Some((i, _)) = step {
+            dropped.push(i);
+        }
+        dropped.sort_unstable();
+        for i in dropped.into_iter().rev() {
+            self.pending.remove(i);
+        }
+        step.map(|(_, s)| s)
+    }
+
+    /// Removes every pending step and returns the kills among them.
+    pub fn drain_kills(&mut self) -> Vec<Action> {
+        let mut kills: Vec<Action> = self
+            .pending
+            .drain(..)
+            .map(|p| p.action)
+            .filter(|a| matches!(a, Action::Kill { .. }))
+            .collect();
+        kills.sort_by_key(|a| a.at_ms());
+        kills
     }
 }
 
@@ -192,6 +466,7 @@ mod tests {
         };
         let schedule = Schedule {
             kills: vec![kill(1_000, 0, 500), kill(1_200, 0, 0), kill(1_200, 1, 100)],
+            ..Schedule::default()
         };
         assert_eq!(
             schedule.actions(),
@@ -225,6 +500,7 @@ mod tests {
                 instance: 0,
                 respawn_after_ms: 0,
             }],
+            ..Schedule::default()
         };
         assert_eq!(
             schedule.actions(),
@@ -258,6 +534,7 @@ mod tests {
                     respawn_after_ms: 500,
                 },
             ],
+            ..Schedule::default()
         };
         assert_eq!(
             schedule.actions(),
@@ -272,5 +549,109 @@ mod tests {
                 },
             ]
         );
+    }
+
+    /// Across seeds and instance counts, each run draws one `ErrAfterLand`
+    /// plan, on a claim, commit or completion and never on a renewal, and an
+    /// abort before or after a write on every other instance.
+    #[test]
+    fn err_after_land_is_never_drawn_on_renew() {
+        let mut lost_kinds = std::collections::BTreeSet::new();
+        let mut abort_kinds = std::collections::BTreeSet::new();
+        for instances in [1, 3] {
+            for seed in 0..300 {
+                let schedule = Schedule::draw(&mut SplitMix64::new(seed), instances, LEASE);
+                let lost: Vec<_> = schedule
+                    .in_process
+                    .iter()
+                    .filter(|p| p.plan.mode == AbortMode::ErrAfterLand)
+                    .collect();
+                assert_eq!(lost.len(), 1, "seed {seed}");
+                assert!(LOST_REPLY_KINDS.contains(&lost[0].plan.kind));
+                lost_kinds.insert(format!("{:?}", lost[0].plan.kind));
+                let mut covered: Vec<u32> =
+                    schedule.in_process.iter().map(|p| p.instance).collect();
+                covered.sort_unstable();
+                assert_eq!(covered, (0..instances).collect::<Vec<_>>());
+                for p in schedule
+                    .in_process
+                    .iter()
+                    .filter(|p| p.instance != lost[0].instance)
+                {
+                    assert!(matches!(p.plan.mode, AbortMode::Before | AbortMode::After));
+                    assert!((1..=3).contains(&p.plan.n) && p.respawn_after_ms <= LEASE);
+                    abort_kinds.insert(format!("{:?}", p.plan.kind));
+                }
+            }
+        }
+        assert_eq!(lost_kinds.len(), 3, "{lost_kinds:?}");
+        assert!(abort_kinds.contains("Renew"), "{abort_kinds:?}");
+    }
+
+    /// Only an instance's first process carries its plan; every replacement
+    /// starts with none.
+    #[test]
+    fn replacement_config_drops_abort_and_err_after_land_plans() {
+        let schedule = Schedule::draw(&mut SplitMix64::new(3), 3, LEASE);
+        for instance in 0..3 {
+            assert!(schedule.plan_for(instance, 1).is_some());
+            for incarnation in 2..5 {
+                assert_eq!(schedule.plan_for(instance, incarnation), None);
+            }
+        }
+    }
+
+    /// With nothing held and every kill firing, the timeline hands out the
+    /// rendered actions in order.
+    #[test]
+    fn a_timeline_with_nothing_held_applies_the_rendered_actions() {
+        for seed in 0..200 {
+            let schedule = Schedule::draw(&mut SplitMix64::new(seed), 3, LEASE);
+            let mut timeline = Timeline::new(&schedule);
+            let mut applied = Vec::new();
+            while let Some(step) = timeline.next(u64::MAX, |_| false) {
+                applied.push(match step {
+                    Step::Kill {
+                        at_ms,
+                        instance,
+                        respawn_at_ms,
+                    } => {
+                        timeline.respawn_killed(instance, respawn_at_ms);
+                        Action::Kill { at_ms, instance }
+                    }
+                    Step::Respawn { at_ms, instance } => Action::Respawn { at_ms, instance },
+                });
+            }
+            assert_eq!(applied, schedule.actions(), "seed {seed}");
+        }
+    }
+
+    /// A kill due while its instance waits for the replacement of an aborted
+    /// process is handed out, so the harness records it; one due while the
+    /// instance waits after a kill is dropped.
+    #[test]
+    fn a_kill_while_its_instance_awaits_an_abort_replacement_is_handed_out() {
+        let kill = |at_ms, instance| Kill {
+            at_ms,
+            instance,
+            respawn_after_ms: 0,
+        };
+        let schedule = Schedule {
+            kills: vec![kill(2_000, 0), kill(2_000, 1)],
+            ..Schedule::default()
+        };
+        let mut timeline = Timeline::new(&schedule);
+        timeline.respawn_aborted(0, 3_000);
+        timeline.respawn_killed(1, 3_000);
+        assert_eq!(
+            timeline.next(2_000, |_| false),
+            Some(Step::Kill {
+                at_ms: 2_000,
+                instance: 0,
+                respawn_at_ms: 2_000
+            })
+        );
+        assert_eq!(timeline.next(2_000, |_| false), None);
+        assert!(timeline.awaiting_respawn());
     }
 }

@@ -9,9 +9,13 @@ use crate::journal::{Line, Status};
 const LEASE: Duration = Duration::from_secs(2);
 
 fn record_bytes(epoch: u64, owner: Option<&str>) -> Vec<u8> {
+    record_at(epoch, owner, None)
+}
+
+fn record_at(epoch: u64, owner: Option<&str>, watermark: Option<i64>) -> Vec<u8> {
     serde_json::json!({
         "schema": 3, "id": "a", "fp": 1, "epoch": epoch, "status": "runnable",
-        "owner": owner, "attempts": 0, "watermark": null, "state": null,
+        "owner": owner, "attempts": 0, "watermark": watermark, "state": null,
         "completed": false, "written_at_ms": 5,
     })
     .to_string()
@@ -95,7 +99,11 @@ fn journalled<S>(inner: S) -> (JournalStore<S>, tempfile::TempDir, std::path::Pa
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("w0-1.ndjson");
     let journal = Arc::new(Journal::open(&path).unwrap());
-    (JournalStore::new(inner, journal), dir, path)
+    (
+        JournalStore::new(inner, journal, Arc::new(Classifier::new("w0"))),
+        dir,
+        path,
+    )
 }
 
 fn events(path: &std::path::Path) -> Vec<Event> {
@@ -160,18 +168,166 @@ async fn journal_store_writes_cancelled_on_drop() {
     );
 }
 
-/// The wrapper reports the inner store's lease, watch mode and
+/// Both wrappers report the inner store's lease, watch mode and
 /// `op_timeout`, which the coordinator checks against its config.
 #[test]
 fn wrappers_forward_op_timeout_and_watch_mode() {
     let (store, _dir, _path) = journalled(Hang(MemoryStore::new(LEASE)));
-    assert_eq!(store.lease_ttl(), LEASE);
-    assert_eq!(store.op_timeout(), Some(Duration::from_millis(700)));
-    assert_eq!(
-        store.watch_mode(),
-        WatchMode::Polled {
-            interval: Duration::from_millis(300)
+    let journal = Arc::clone(&store.journal);
+    let classifier = Arc::clone(&store.classifier);
+    let plan = plan(WriteKind::Commit, 1, AbortMode::Before);
+    let aborting = AbortAt::new(store.clone(), plan, journal, classifier);
+    for (lease, op_timeout, watch) in [
+        (store.lease_ttl(), store.op_timeout(), store.watch_mode()),
+        (
+            aborting.lease_ttl(),
+            aborting.op_timeout(),
+            aborting.watch_mode(),
+        ),
+    ] {
+        assert_eq!(lease, LEASE);
+        assert_eq!(op_timeout, Some(Duration::from_millis(700)));
+        assert_eq!(
+            watch,
+            WatchMode::Polled {
+                interval: Duration::from_millis(300)
+            }
+        );
+    }
+}
+
+fn plan(kind: WriteKind, n: u32, mode: AbortMode) -> AbortPlan {
+    AbortPlan { kind, n, mode }
+}
+
+/// A plan counts only writes of its kind: a `Before` plan fires at the `n`th
+/// such write and no other, and a plan that waits for a landed write is armed
+/// from the `n`th on until it fires, once.
+#[test]
+fn abort_at_counts_only_its_kind() {
+    let kinds = [
+        Some(WriteKind::Quarantine),
+        Some(WriteKind::Claim),
+        Some(WriteKind::Complete),
+        Some(WriteKind::Commit),
+        Some(WriteKind::Release),
+        Some(WriteKind::FailReport),
+        Some(WriteKind::Renew),
+        None,
+    ];
+    let armed = |trigger: &Trigger, rounds| {
+        let mut armed = Vec::new();
+        for round in 0..rounds {
+            for kind in kinds {
+                if let Some(n) = trigger.arm(kind) {
+                    armed.push((round, kind, n));
+                }
+            }
         }
+        armed
+    };
+    let before = Trigger::new(plan(WriteKind::Commit, 2, AbortMode::Before));
+    assert_eq!(armed(&before, 4), [(1, Some(WriteKind::Commit), 2)]);
+
+    let after = Trigger::new(plan(WriteKind::Renew, 2, AbortMode::After));
+    assert_eq!(
+        armed(&after, 3),
+        [
+            (1, Some(WriteKind::Renew), 2),
+            (2, Some(WriteKind::Renew), 3)
+        ]
+    );
+    assert!(after.fire());
+    assert!(!after.fire(), "a plan fires once");
+    assert_eq!(armed(&after, 2), []);
+}
+
+/// A lost-reply plan on a commit also counts completions, so a process whose
+/// splits each finish in one write reaches it; an abort on a commit does not.
+#[test]
+fn err_after_land_on_commit_counts_a_completion() {
+    let complete = Some(WriteKind::Complete);
+    let lost = Trigger::new(plan(WriteKind::Commit, 2, AbortMode::ErrAfterLand));
+    assert_eq!(lost.arm(complete), None);
+    assert_eq!(lost.arm(Some(WriteKind::Commit)), Some(2));
+    assert_eq!(lost.arm(complete), Some(3));
+    let abort = Trigger::new(plan(WriteKind::Commit, 1, AbortMode::After));
+    assert_eq!(abort.arm(complete), None);
+}
+
+/// An `ErrAfterLand` commit lands in the store and is journalled `won`, then
+/// its caller gets a retryable error after the `err_after_land` line; the next
+/// commit is forwarded untouched.
+#[tokio::test]
+async fn err_after_land_forwards_then_returns_retryable() {
+    let (journalled, _dir, path) = journalled(MemoryStore::new(LEASE));
+    let journal = Arc::clone(&journalled.journal);
+    let classifier = Arc::clone(&journalled.classifier);
+    let plan = plan(WriteKind::Commit, 1, AbortMode::ErrAfterLand);
+    let store = AbortAt::new(journalled, plan, journal, classifier);
+    let claimed = store
+        .create(Keyspace::Durable, "split.a", record_at(1, Some("w0"), None))
+        .await
+        .unwrap()
+        .won()
+        .unwrap();
+
+    let lost = store
+        .update(
+            Keyspace::Durable,
+            "split.a",
+            record_at(1, Some("w0"), Some(10)),
+            claimed,
+        )
+        .await;
+    assert!(matches!(lost, Err(StoreError::Retryable(_))), "{lost:?}");
+    let landed = store
+        .inner
+        .inner
+        .get(Keyspace::Durable, "split.a")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        Progress::parse(&landed.value).unwrap().watermark,
+        Some(10),
+        "the write landed"
+    );
+    let next = store
+        .update(
+            Keyspace::Durable,
+            "split.a",
+            record_at(1, Some("w0"), Some(20)),
+            landed.revision,
+        )
+        .await
+        .unwrap();
+    assert!(next.won().is_some());
+
+    let tail: Vec<Event> = events(&path).into_iter().skip(2).take(3).collect();
+    assert_eq!(
+        tail,
+        [
+            Event::Send {
+                call: 2,
+                op: WriteOp::Update,
+                key: "split.a".to_owned(),
+                expected: Some(claimed.0),
+                value: Progress {
+                    watermark: Some(10),
+                    ..progress(1, Some("w0"))
+                },
+            },
+            Event::Done {
+                call: 2,
+                key: "split.a".to_owned(),
+                reply: Reply::Won(landed.revision.0),
+            },
+            Event::ErrAfterLand {
+                key: "split.a".to_owned(),
+                rev: landed.revision.0,
+            },
+        ]
     );
 }
 

@@ -1,7 +1,7 @@
 //! The fault-run harness: generates a seeded data set, starts the containers
 //! and the worker processes, kills and replaces workers on the seeded
-//! schedule, sweeps the store's final state, and judges the run with the
-//! oracle.
+//! schedule, replaces workers that abort on their in-process fault, sweeps the
+//! store's final state, and judges the run with the oracle.
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
@@ -11,25 +11,26 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use spate_coordination::store::dynamodb::DynamoDbStore;
 use spate_coordination::store::nats::NatsStore;
-use spate_coordination::store::{CoordinationStore as _, Keyspace};
+use spate_coordination::store::{CoordinationStore as _, Entry, Keyspace, StoreError};
 use spate_test_support::container_image;
 use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::runners::SyncRunner;
 use testcontainers::{Container, GenericImage, ImageExt};
 
+use crate::expect;
 use crate::health::{self, Target};
 use crate::journal::{self, Event, Journal, Reply};
 use crate::oracle::{
     self, GeneratedObject, GeneratedRecord, Inputs, ProcessJournal, StoreKind, SweptEntry,
 };
-use crate::outcome::{
-    self, Evidence, FaultFired, Kind, LostReplies, Outcome, Scenario, Stage, Violation,
-};
-use crate::schedule::{Action, Schedule};
+use crate::outcome::{self, Evidence, FaultFired, Kind, Outcome, Scenario, Stage, Violation};
+use crate::schedule::{Action, InProcess, Schedule, Step, Timeline};
 use crate::seaweed::Gateway;
 use crate::seed::{self, SplitMix64};
-use crate::worker::{S3Config, StoreConfig, Tuning, WorkerConfig, nats_store};
+use crate::store::AbortMode;
+use crate::worker::{S3Config, StoreConfig, Tuning, WorkerConfig, dynamodb_store, nats_store};
 use crate::workers::Workers;
 
 /// Environment variable holding the run seed, in decimal or `0x` hex.
@@ -43,7 +44,9 @@ const MIN_OBJECT: u64 = 48 * 1024;
 const MAX_OBJECT: u64 = 5 * MIB / 2;
 const BUCKET: &str = "spate-faults";
 const JOB: &str = "faults";
+const TABLE: &str = "spate-faults";
 const NATS_CLIENT_PORT: u16 = 4222;
+const DYNAMODB_PORT: u16 = 8000;
 /// Cap on starting the containers and creating the store.
 const SETUP_DEADLINE: Duration = Duration::from_secs(60);
 /// Cap on one store call the harness makes directly.
@@ -57,11 +60,13 @@ const HEALTH_INTERVAL: Duration = Duration::from_secs(1);
 /// Cap on one health probe.
 const PROBE: Duration = Duration::from_secs(2);
 
-/// One scenario over NATS.
+/// One scenario.
 #[derive(Clone, Copy, Debug)]
 pub struct Spec<'a> {
     /// Scenario name; also the test's name.
     pub name: &'a str,
+    /// The coordination store.
+    pub store: StoreKind,
     /// Worker processes running at once.
     pub instances: u32,
     /// The worker binary.
@@ -69,7 +74,8 @@ pub struct Spec<'a> {
     /// How long each sink write is held.
     pub sink_delay_ms: u64,
     /// The scenario injects no faults, so a record written twice fails its
-    /// expectation. Otherwise the seed draws a kill schedule.
+    /// expectation. Otherwise the seed draws a kill schedule and in-process
+    /// faults.
     pub fault_free: bool,
 }
 
@@ -91,7 +97,10 @@ pub fn run(spec: &Spec<'_>) -> Outcome {
     fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("create {}: {e}", dir.display()));
     let mut rng = SplitMix64::for_scenario(seed, spec.name);
     let (generated, objects) = generate(&mut rng);
-    let tuning = Tuning::nats();
+    let tuning = match spec.store {
+        StoreKind::Nats => Tuning::nats(),
+        StoreKind::DynamoDb => Tuning::dynamodb(),
+    };
     let schedule = if spec.fault_free {
         Schedule::default()
     } else {
@@ -114,7 +123,9 @@ pub fn run(spec: &Spec<'_>) -> Outcome {
         .build()
         .expect("harness runtime");
 
-    let setup = catch_unwind(AssertUnwindSafe(|| setup(&rt, &tuning, objects)));
+    let setup = catch_unwind(AssertUnwindSafe(|| {
+        setup(&rt, spec.store, &tuning, objects)
+    }));
     let env = match setup {
         Ok(Ok(env)) => env,
         Ok(Err(failure)) => return run.harness(Stage::Setup, &failure),
@@ -135,7 +146,7 @@ pub fn run(spec: &Spec<'_>) -> Outcome {
         drop(stop);
         (driven, poller.join().expect("the health poller panicked"))
     });
-    let (timed_out, fired) = match driven {
+    let (timed_out, mut fired) = match driven {
         Ok(driven) => driven,
         Err(failure) => return run.harness(Stage::Running, &failure),
     };
@@ -150,6 +161,7 @@ pub fn run(spec: &Spec<'_>) -> Outcome {
         Ok(sweep) => sweep,
         Err(failure) => return run.harness(Stage::Running, &failure),
     };
+    fired.extend(in_process_fired(&run.schedule, &processes));
     let journals: Vec<ProcessJournal> = processes
         .into_iter()
         .map(|(instance, pid, path)| ProcessJournal {
@@ -170,7 +182,7 @@ pub fn run(spec: &Spec<'_>) -> Outcome {
         Vec::new()
     };
     let violations = oracle::check(&Inputs {
-        store: StoreKind::Nats,
+        store: spec.store,
         generated: &generated,
         processes: &journals,
         sweep: &sweep,
@@ -186,6 +198,7 @@ pub fn run(spec: &Spec<'_>) -> Outcome {
     if spec.instances > 1 && !claims_overlap(&journals) {
         expectations.push("no two processes held splits at overlapping times".to_owned());
     }
+    let lost_replies = expect::lost_replies(&journals, run.schedule.lost_reply().is_some());
     let (kind, message) = outcome::classify(&Evidence {
         setup_failure: None,
         scenario: &Scenario::Ordinary,
@@ -193,7 +206,7 @@ pub fn run(spec: &Spec<'_>) -> Outcome {
         timed_out,
         violations: &violations,
         expectations: &expectations,
-        lost_replies: &LostReplies::default(),
+        lost_replies: &lost_replies,
         health: &polls,
     });
     run.finish(
@@ -206,13 +219,36 @@ pub fn run(spec: &Spec<'_>) -> Outcome {
     )
 }
 
-/// The containers a run needs, and the harness's own store handle, which
-/// crosses no fault.
+/// The containers a run needs, the store config workers get, and the
+/// harness's own store handle, which crosses no fault.
 struct Env {
     gateway: Gateway,
-    nats: Container<GenericImage>,
-    nats_port: u16,
-    direct: NatsStore,
+    store: Container<GenericImage>,
+    store_name: &'static str,
+    store_config: StoreConfig,
+    direct: Direct,
+}
+
+/// The harness's own handle on either store.
+enum Direct {
+    Nats(NatsStore),
+    DynamoDb(DynamoDbStore),
+}
+
+impl Direct {
+    async fn get(&self, key: &str) -> Result<Option<Entry>, StoreError> {
+        match self {
+            Direct::Nats(s) => s.get(Keyspace::Durable, key).await,
+            Direct::DynamoDb(s) => s.get(Keyspace::Durable, key).await,
+        }
+    }
+
+    async fn list(&self, prefix: &str) -> Result<Vec<Entry>, StoreError> {
+        match self {
+            Direct::Nats(s) => s.list(Keyspace::Durable, prefix).await,
+            Direct::DynamoDb(s) => s.list(Keyspace::Durable, prefix).await,
+        }
+    }
 }
 
 impl Env {
@@ -220,12 +256,11 @@ impl Env {
     fn health_targets<'a>(&'a self, rt: &'a tokio::runtime::Runtime) -> Vec<Target<'a>> {
         vec![
             Target {
-                container: "nats",
-                running: Box::new(|| self.nats.is_running().map_err(|e| e.to_string())),
+                container: self.store_name,
+                running: Box::new(|| self.store.is_running().map_err(|e| e.to_string())),
                 reach: Box::new(move || {
                     match rt.block_on(async {
-                        tokio::time::timeout(PROBE, self.direct.get(Keyspace::Durable, "plan"))
-                            .await
+                        tokio::time::timeout(PROBE, self.direct.get("plan")).await
                     }) {
                         Ok(Ok(_)) => Ok(()),
                         Ok(Err(e)) => Err(e.to_string()),
@@ -244,28 +279,58 @@ impl Env {
 
 fn setup(
     rt: &tokio::runtime::Runtime,
+    kind: StoreKind,
     tuning: &Tuning,
     objects: Vec<(String, Vec<u8>)>,
 ) -> Result<Env, String> {
     let gateway = Gateway::start(BUCKET)?;
     gateway.put_all(rt, objects)?;
-    let (image, tag) = container_image(&["--pull", "nats"]);
-    let nats = GenericImage::new(image, tag)
-        .with_exposed_port(NATS_CLIENT_PORT.tcp())
-        .with_wait_for(WaitFor::message_on_stderr("Server is ready"))
-        .with_cmd(["-js"])
-        .start()
-        .map_err(|e| format!("start NATS: {e}"))?;
-    let nats_port = nats
-        .get_host_port_ipv4(NATS_CLIENT_PORT)
-        .map_err(|e| format!("NATS port: {e}"))?;
-    let direct = nats_store(&nats_config(nats_port), tuning)?;
-    // The first call creates the buckets with the workers' parameters.
+    let _runtime = rt.enter();
+    let (store, store_name, store_config, direct) = match kind {
+        StoreKind::Nats => {
+            let (image, tag) = container_image(&["--pull", "nats"]);
+            let nats = GenericImage::new(image, tag)
+                .with_exposed_port(NATS_CLIENT_PORT.tcp())
+                .with_wait_for(WaitFor::message_on_stderr("Server is ready"))
+                .with_cmd(["-js"])
+                .start()
+                .map_err(|e| format!("start NATS: {e}"))?;
+            let port = nats
+                .get_host_port_ipv4(NATS_CLIENT_PORT)
+                .map_err(|e| format!("NATS port: {e}"))?;
+            let config = StoreConfig::Nats {
+                server: format!("nats://127.0.0.1:{port}"),
+                job: JOB.to_owned(),
+            };
+            let direct = Direct::Nats(nats_store(&config, tuning)?);
+            (nats, "nats", config, direct)
+        }
+        StoreKind::DynamoDb => {
+            let (image, tag) = container_image(&["--pull", "dynamodb"]);
+            let local = GenericImage::new(image, tag)
+                .with_exposed_port(DYNAMODB_PORT.tcp())
+                .with_wait_for(WaitFor::message_on_stdout("Initializing DynamoDB Local"))
+                .with_cmd(["-jar", "DynamoDBLocal.jar", "-inMemory"])
+                .start()
+                .map_err(|e| format!("start DynamoDB Local: {e}"))?;
+            let port = local
+                .get_host_port_ipv4(DYNAMODB_PORT)
+                .map_err(|e| format!("DynamoDB Local port: {e}"))?;
+            let config = StoreConfig::DynamoDb {
+                endpoint: format!("http://127.0.0.1:{port}"),
+                table: TABLE.to_owned(),
+                job: JOB.to_owned(),
+            };
+            let direct = Direct::DynamoDb(dynamodb_store(&config, tuning)?);
+            (local, "dynamodb", config, direct)
+        }
+    };
+    // The first call creates the NATS buckets or the DynamoDB table with the
+    // workers' parameters.
     let until = Instant::now() + SETUP_DEADLINE;
     loop {
-        let ready = rt.block_on(async {
-            tokio::time::timeout(STORE_CALL, direct.get(Keyspace::Durable, "plan")).await
-        });
+        let ready =
+            rt.block_on(async { tokio::time::timeout(STORE_CALL, direct.get("plan")).await });
         match ready {
             Ok(Ok(_)) => break,
             failure if Instant::now() >= until => {
@@ -278,27 +343,19 @@ fn setup(
     }
     Ok(Env {
         gateway,
-        nats,
-        nats_port,
+        store,
+        store_name,
+        store_config,
         direct,
     })
 }
 
-fn nats_config(port: u16) -> StoreConfig {
-    StoreConfig::Nats {
-        server: format!("nats://127.0.0.1:{port}"),
-        job: JOB.to_owned(),
-    }
-}
-
 /// The durable `spec.`, `split.`, `plan` and `verdict` entries.
-fn sweep(rt: &tokio::runtime::Runtime, store: &NatsStore) -> Result<Vec<SweptEntry>, String> {
+fn sweep(rt: &tokio::runtime::Runtime, store: &Direct) -> Result<Vec<SweptEntry>, String> {
     let mut sweep = Vec::new();
     for prefix in ["spec.", "split.", "plan", "verdict"] {
         let entries = rt
-            .block_on(async {
-                tokio::time::timeout(STORE_CALL, store.list(Keyspace::Durable, prefix)).await
-            })
+            .block_on(async { tokio::time::timeout(STORE_CALL, store.list(prefix)).await })
             .map_err(|_| format!("the sweep of {prefix} timed out"))?
             .map_err(|e| format!("the sweep of {prefix} failed: {e}"))?;
         sweep.extend(entries.into_iter().map(|e| SweptEntry {
@@ -319,9 +376,12 @@ struct Run<'a> {
 }
 
 impl Run<'_> {
-    /// Starts the workers and applies the schedule, then waits for them until
-    /// [`RUN_DEADLINE`] from their start. Returns whether one was still
-    /// running at the deadline, and each kill [`Schedule::actions`] keeps.
+    /// Starts the workers and applies the schedule on real time until every
+    /// worker has exited with no replacement due, or [`RUN_DEADLINE`] from
+    /// their start passes. A worker that aborts on its plan is replaced after
+    /// the plan's delay, and a kill due on the `ErrAfterLand` process waits for
+    /// its `err_after_land` line. Returns whether one was still running at the
+    /// deadline, and each kill the timeline handed out or left pending.
     fn drive(
         &self,
         workers: &mut Workers,
@@ -337,80 +397,115 @@ impl Run<'_> {
                 .append(event)
                 .map_err(|e| format!("{}: {e}", faults_path.display()))
         };
+        let instances = self.spec.instances as usize;
         let start = Instant::now();
         let until = start + RUN_DEADLINE;
-        let mut incarnations = vec![1; self.spec.instances as usize];
+        let mut incarnations = vec![1; instances];
         for i in 0..self.spec.instances {
             processes.push(self.spawn(workers, env, i, 1, tuning)?);
         }
         let status = |e: std::io::Error| format!("read worker status: {e}");
+        let mut timeline = Timeline::new(&self.schedule);
         let mut fired = Vec::new();
-        let mut down: Vec<u32> = Vec::new();
-        // Set once the deadline passes or every worker has exited with no
-        // replacement due; later kills are recorded as not fired.
-        let mut over = false;
-        for action in self.schedule.actions() {
-            let due = start + Duration::from_millis(action.at_ms());
-            while !over {
-                let now = Instant::now();
-                over = now >= until || (down.is_empty() && workers.try_wait().map_err(status)?);
-                if now >= due {
-                    break;
+        // Per instance: its current process's abort was judged, and its
+        // `err_after_land` line was seen.
+        let mut judged = vec![false; instances];
+        let mut line_seen = vec![false; instances];
+        let timed_out = loop {
+            let now = Instant::now();
+            let now_ms = millis(now - start);
+            let all_exited = workers.try_wait().map_err(status)?;
+            for i in 0..self.spec.instances {
+                let at = i as usize;
+                if judged[at] {
+                    continue;
                 }
-                std::thread::sleep(POLL.min(due - now));
+                let Some(plan) = self.schedule.plan_for(i, incarnations[at]) else {
+                    continue;
+                };
+                let name = format!("w{i}");
+                if workers.live(&name).map_err(status)?.is_some() {
+                    continue;
+                }
+                judged[at] = true;
+                let journal = self.journal_path(i, incarnations[at]);
+                let journalled = || journal_holds(&journal, "abort");
+                if let Some(at_ms) = abort_respawn(plan, workers.signal(&name), journalled, now_ms)
+                {
+                    workers.mark_scheduled(&name);
+                    timeline.respawn_aborted(i, at_ms);
+                }
             }
-            match action {
-                Action::Kill { at_ms, instance } => {
-                    let name = format!("w{instance}");
-                    let live = if over {
-                        None
-                    } else {
-                        workers.live(&name).map_err(status)?
-                    };
-                    if let Some(pid) = live {
-                        log(Event::Kill {
-                            instance: name.clone(),
-                            pid,
-                        })?;
-                        workers
-                            .kill(&name)
-                            .map_err(|e| format!("kill {name}: {e}"))?;
-                        down.push(instance);
-                    }
-                    fired.push(FaultFired {
-                        incarnation: format!("{name}-{}", incarnations[instance as usize]),
-                        fault: format!("kill at {at_ms} ms"),
-                        fired: live.is_some(),
-                    });
+            if now >= until {
+                break !workers.try_wait().map_err(status)?;
+            }
+            if all_exited && !timeline.awaiting_respawn() {
+                break false;
+            }
+            while let Some(step) = timeline.next(now_ms, |i| {
+                let at = i as usize;
+                if !kill_held(&self.schedule, i, incarnations[at], line_seen[at]) {
+                    return false;
                 }
-                Action::Respawn { instance, .. } => {
-                    let Some(at) = down.iter().position(|i| *i == instance) else {
-                        continue;
-                    };
-                    if over {
-                        continue;
-                    }
-                    down.remove(at);
-                    incarnations[instance as usize] += 1;
-                    let process = self.spawn(
-                        workers,
-                        env,
+                line_seen[at] =
+                    journal_holds(&self.journal_path(i, incarnations[at]), "err_after_land");
+                !line_seen[at]
+            }) {
+                match step {
+                    Step::Kill {
+                        at_ms,
                         instance,
-                        incarnations[instance as usize],
-                        tuning,
-                    )?;
-                    log(Event::Respawn {
-                        instance: process.0.clone(),
-                        pid: process.1,
-                    })?;
-                    processes.push(process);
+                        respawn_at_ms,
+                    } => {
+                        let name = format!("w{instance}");
+                        let live = workers.live(&name).map_err(status)?;
+                        if let Some(pid) = live {
+                            log(Event::Kill {
+                                instance: name.clone(),
+                                pid,
+                            })?;
+                            workers
+                                .kill(&name)
+                                .map_err(|e| format!("kill {name}: {e}"))?;
+                            timeline.respawn_killed(instance, respawn_at_ms);
+                        }
+                        fired.push(FaultFired {
+                            incarnation: format!("{name}-{}", incarnations[instance as usize]),
+                            fault: format!("kill at {at_ms} ms"),
+                            fired: live.is_some(),
+                        });
+                    }
+                    Step::Respawn { instance, .. } => {
+                        let at = instance as usize;
+                        incarnations[at] += 1;
+                        judged[at] = false;
+                        let process =
+                            self.spawn(workers, env, instance, incarnations[at], tuning)?;
+                        log(Event::Respawn {
+                            instance: process.0.clone(),
+                            pid: process.1,
+                        })?;
+                        processes.push(process);
+                    }
                 }
+            }
+            std::thread::sleep(POLL);
+        };
+        for kill in timeline.drain_kills() {
+            if let Action::Kill { at_ms, instance } = kill {
+                fired.push(FaultFired {
+                    incarnation: format!("w{instance}-{}", incarnations[instance as usize]),
+                    fault: format!("kill at {at_ms} ms"),
+                    fired: false,
+                });
             }
         }
-        let timed_out = workers
-            .wait(until.saturating_duration_since(Instant::now()))
-            .map_err(status)?;
         Ok((timed_out, fired))
+    }
+
+    /// The journal of `instance`'s `incarnation`.
+    fn journal_path(&self, instance: u32, incarnation: u32) -> PathBuf {
+        self.dir.join(format!("w{instance}-{incarnation}.ndjson"))
     }
 
     /// Writes the config of `instance`'s `incarnation` and starts it,
@@ -423,19 +518,24 @@ impl Run<'_> {
         incarnation: u32,
         tuning: &Tuning,
     ) -> Result<(String, u32, PathBuf), String> {
+        let journal = self.journal_path(instance, incarnation);
+        let abort = self
+            .schedule
+            .plan_for(instance, incarnation)
+            .map(|p| p.plan);
         let instance = format!("w{instance}");
         let name = format!("{instance}-{incarnation}");
-        let journal = self.dir.join(format!("{name}.ndjson"));
         let config = WorkerConfig {
             instance: instance.clone(),
             journal: journal.clone(),
-            store: nats_config(env.nats_port),
+            store: env.store_config.clone(),
             s3: S3Config {
                 endpoint: env.gateway.endpoint(),
                 bucket: env.gateway.bucket.clone(),
             },
             tuning: *tuning,
             sink_delay_ms: self.spec.sink_delay_ms,
+            abort,
         };
         let config_path = self.dir.join(format!("{name}.json"));
         let json = serde_json::to_vec_pretty(&config).map_err(|e| e.to_string())?;
@@ -483,7 +583,11 @@ impl Run<'_> {
         );
         let outcome = Outcome {
             scenario: spec.name.to_owned(),
-            store: "nats".to_owned(),
+            store: match spec.store {
+                StoreKind::Nats => "nats",
+                StoreKind::DynamoDb => "dynamodb",
+            }
+            .to_owned(),
             instances: spec.instances,
             seed: self.seed,
             replay,
@@ -652,6 +756,66 @@ fn claims_overlap(journals: &[ProcessJournal]) -> bool {
         .any(|(i, a)| spans[i + 1..].iter().any(|b| a.0 <= b.1 && b.0 <= a.1))
 }
 
+/// When an ended process that carried `plan` is replaced: one respawn delay
+/// after `now_ms` when it ended on SIGABRT and `journalled` finds its `abort`
+/// line, and never otherwise.
+fn abort_respawn(
+    plan: &InProcess,
+    signal: Option<i32>,
+    journalled: impl FnOnce() -> bool,
+    now_ms: u64,
+) -> Option<u64> {
+    let aborts = matches!(plan.plan.mode, AbortMode::Before | AbortMode::After);
+    (aborts && signal == Some(libc::SIGABRT) && journalled())
+        .then(|| now_ms + plan.respawn_after_ms)
+}
+
+/// Whether the `instance`'s `incarnation` must not be killed yet: it carries
+/// the `ErrAfterLand` plan and its `err_after_land` line has not been seen.
+fn kill_held(schedule: &Schedule, instance: u32, incarnation: u32, line_seen: bool) -> bool {
+    !line_seen
+        && schedule
+            .plan_for(instance, incarnation)
+            .is_some_and(|p| p.plan.mode == AbortMode::ErrAfterLand)
+}
+
+/// Whether the journal at `path` holds a line of event `ev`.
+fn journal_holds(path: &Path, ev: &str) -> bool {
+    std::fs::read(path).is_ok_and(|bytes| {
+        let needle = format!(r#""ev":"{ev}""#);
+        bytes.windows(needle.len()).any(|w| w == needle.as_bytes())
+    })
+}
+
+/// Each in-process fault the schedule drew, and whether its process
+/// journalled it: an `abort` line for an abort, an `err_after_land` line for
+/// a lost reply.
+fn in_process_fired(schedule: &Schedule, processes: &[(String, u32, PathBuf)]) -> Vec<FaultFired> {
+    schedule
+        .in_process
+        .iter()
+        .map(|p| {
+            let incarnation = format!("w{}-1", p.instance);
+            let ev = match p.plan.mode {
+                AbortMode::ErrAfterLand => "err_after_land",
+                AbortMode::Before | AbortMode::After => "abort",
+            };
+            let fired = processes.iter().any(|(_, _, path)| {
+                path.file_stem() == Some(OsStr::new(&incarnation)) && journal_holds(path, ev)
+            });
+            FaultFired {
+                incarnation,
+                fault: p.plan.to_string(),
+                fired,
+            }
+        })
+        .collect()
+}
+
+fn millis(d: Duration) -> u64 {
+    u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
+}
+
 fn panic_text(panic: &(dyn std::any::Any + Send)) -> String {
     panic
         .downcast_ref::<String>()
@@ -708,6 +872,7 @@ mod tests {
         fs::write(dir.join("w0-1.ndjson"), "").unwrap();
         let spec = Spec {
             name: "s",
+            store: StoreKind::Nats,
             instances: 1,
             worker: Path::new("w"),
             sink_delay_ms: 0,
@@ -827,6 +992,90 @@ mod tests {
         assert_eq!(
             duplicates(&[journal(1, &["b", "a", "b"]), journal(2, &["a"])]),
             ["a fault-free run wrote 2 records more than once, first a"]
+        );
+    }
+
+    /// A kill due on the process carrying the `ErrAfterLand` plan waits until
+    /// its journal holds the `err_after_land` line, and its replacement waits
+    /// one respawn delay from then; kills on other processes fall on time.
+    #[test]
+    fn err_after_land_incarnation_is_killed_only_after_its_line() {
+        use crate::schedule::Kill;
+        use crate::store::AbortPlan;
+        let lost = InProcess {
+            instance: 0,
+            plan: AbortPlan {
+                kind: crate::classify::WriteKind::Commit,
+                n: 1,
+                mode: AbortMode::ErrAfterLand,
+            },
+            respawn_after_ms: 0,
+        };
+        let kill = |at_ms, instance| Kill {
+            at_ms,
+            instance,
+            respawn_after_ms: 100,
+        };
+        let schedule = Schedule {
+            kills: vec![kill(1_000, 0), kill(1_000, 1)],
+            in_process: vec![lost],
+        };
+        assert!(kill_held(&schedule, 0, 1, false));
+        assert!(!kill_held(&schedule, 0, 1, true), "the line was seen");
+        assert!(!kill_held(&schedule, 0, 2, false), "a replacement");
+        assert!(!kill_held(&schedule, 1, 1, false), "another instance");
+
+        let mut timeline = Timeline::new(&schedule);
+        let schedule = &schedule;
+        let held = |seen: bool| move |i| kill_held(schedule, i, 1, seen);
+        assert_eq!(
+            timeline.next(1_000, held(false)),
+            Some(Step::Kill {
+                at_ms: 1_000,
+                instance: 1,
+                respawn_at_ms: 1_100
+            })
+        );
+        assert_eq!(timeline.next(1_000, held(false)), None);
+        assert_eq!(timeline.next(4_000, held(false)), None);
+        assert_eq!(
+            timeline.next(5_000, held(true)),
+            Some(Step::Kill {
+                at_ms: 1_000,
+                instance: 0,
+                respawn_at_ms: 5_100
+            })
+        );
+    }
+
+    /// A process that ends on SIGABRT with its plan's `abort` line is replaced
+    /// one respawn delay later; one killed, one with no line, and the
+    /// `ErrAfterLand` process are not.
+    #[test]
+    fn every_abort_is_followed_by_a_respawn() {
+        use crate::store::AbortPlan;
+        let with = |mode| InProcess {
+            instance: 1,
+            plan: AbortPlan {
+                kind: crate::classify::WriteKind::Claim,
+                n: 2,
+                mode,
+            },
+            respawn_after_ms: 700,
+        };
+        let abort = Some(libc::SIGABRT);
+        for mode in [AbortMode::Before, AbortMode::After] {
+            assert_eq!(abort_respawn(&with(mode), abort, || true, 50), Some(750));
+            assert_eq!(abort_respawn(&with(mode), abort, || false, 50), None);
+            assert_eq!(
+                abort_respawn(&with(mode), Some(libc::SIGKILL), || true, 50),
+                None
+            );
+            assert_eq!(abort_respawn(&with(mode), None, || true, 50), None);
+        }
+        assert_eq!(
+            abort_respawn(&with(AbortMode::ErrAfterLand), abort, || true, 50),
+            None
         );
     }
 }

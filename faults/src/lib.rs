@@ -5,8 +5,10 @@
 //! This crate provides the journal format, the classification of `split.*`
 //! writes, the seeded generator, the outcome kinds a run reports, the
 //! delivery oracle, the `spate-faults-worker` binary with the store and sink
-//! that journal its traffic, the seeded kill schedule, the container health
-//! poller, and the harness that runs worker processes and judges them.
+//! that journal its traffic and the store wrapper that injects in-process
+//! faults, the seeded fault schedule, the lost-reply evidence check, the
+//! container health poller, and the harness that runs worker processes and
+//! judges them.
 //!
 //! # Delivery properties
 //!
@@ -42,6 +44,7 @@
 #![allow(clippy::print_stderr)]
 
 pub mod classify;
+pub mod expect;
 pub mod health;
 pub mod journal;
 pub mod oracle;

@@ -553,3 +553,155 @@ fn abort_plans_end_the_process_on_sigabrt() {
         );
     }
 }
+
+/// A store whose first `get` never completes, over a [`MemoryStore`].
+#[derive(Clone)]
+struct SlowFirstGet(MemoryStore, Arc<AtomicBool>);
+
+impl CoordinationStore for SlowFirstGet {
+    fn lease_ttl(&self) -> Duration {
+        LEASE
+    }
+    fn watch_mode(&self) -> WatchMode {
+        self.0.watch_mode()
+    }
+    fn op_timeout(&self) -> Option<Duration> {
+        None
+    }
+    async fn create(
+        &self,
+        ks: Keyspace,
+        key: &str,
+        value: Vec<u8>,
+    ) -> Result<CasOutcome, StoreError> {
+        self.0.create(ks, key, value).await
+    }
+    async fn update(
+        &self,
+        ks: Keyspace,
+        key: &str,
+        value: Vec<u8>,
+        expected: Revision,
+    ) -> Result<CasOutcome, StoreError> {
+        self.0.update(ks, key, value, expected).await
+    }
+    async fn get(&self, ks: Keyspace, key: &str) -> Result<Option<Entry>, StoreError> {
+        if !self.1.swap(true, Ordering::SeqCst) {
+            std::future::pending::<()>().await;
+        }
+        self.0.get(ks, key).await
+    }
+    async fn delete(
+        &self,
+        ks: Keyspace,
+        key: &str,
+        expected: Option<Revision>,
+    ) -> Result<CasOutcome, StoreError> {
+        self.0.delete(ks, key, expected).await
+    }
+    async fn watch(&self, ks: Keyspace, prefix: &str) -> Result<WatchStream, StoreError> {
+        self.0.watch(ks, prefix).await
+    }
+    async fn list(&self, ks: Keyspace, prefix: &str) -> Result<Vec<Entry>, StoreError> {
+        self.0.list(ks, prefix).await
+    }
+}
+
+/// A `get` dropped at the coordinator's `op_timeout` is journalled as a failed read.
+#[tokio::test]
+async fn a_get_dropped_at_op_timeout_is_journalled_as_read_failed() {
+    let (store, _dir, path) = journalled(SlowFirstGet(
+        MemoryStore::new(LEASE),
+        Arc::new(AtomicBool::new(false)),
+    ));
+    let read = tokio::time::timeout(
+        Duration::from_millis(50),
+        store.get(Keyspace::Durable, "split.a"),
+    )
+    .await;
+    assert!(read.is_err(), "the get timed out");
+    assert_eq!(
+        events(&path),
+        [Event::ReadFailed {
+            key: "split.a".to_owned()
+        }]
+    );
+}
+
+/// The coordinator's claim fallback after a lost claim reply whose read-back
+/// times out at `op_timeout` passes the lost-reply check.
+#[tokio::test]
+async fn claim_fallback_after_a_timed_out_read_back_is_a_recovery() {
+    let (journalled, _dir, path) = journalled(SlowFirstGet(
+        MemoryStore::new(LEASE),
+        Arc::new(AtomicBool::new(false)),
+    ));
+    let journal = Arc::clone(&journalled.journal);
+    let classifier = Arc::clone(&journalled.classifier);
+    let store = AbortAt::new(
+        journalled,
+        plan(WriteKind::Claim, 1, AbortMode::ErrAfterLand),
+        journal,
+        classifier,
+    );
+    // The leader's unowned record.
+    let unowned = store
+        .create(Keyspace::Durable, "split.a", record_bytes(1, None))
+        .await
+        .unwrap()
+        .won()
+        .unwrap();
+    // The claim lands; its reply is lost.
+    let lost = store
+        .update(
+            Keyspace::Durable,
+            "split.a",
+            record_bytes(2, Some("w0")),
+            unowned,
+        )
+        .await;
+    assert!(matches!(lost, Err(StoreError::Retryable(_))), "{lost:?}");
+    // The read-back, bounded as Metered bounds it, times out.
+    let readback = tokio::time::timeout(
+        Duration::from_millis(50),
+        store.get(Keyspace::Durable, "split.a"),
+    )
+    .await;
+    assert!(readback.is_err());
+    // The coordinator releases the lease and claims again from its stale view.
+    let again = store
+        .update(
+            Keyspace::Durable,
+            "split.a",
+            record_bytes(2, Some("w0")),
+            unowned,
+        )
+        .await
+        .unwrap();
+    assert!(again.won().is_none(), "the stale claim loses");
+    let fresh = store
+        .get(Keyspace::Durable, "split.a")
+        .await
+        .unwrap()
+        .unwrap();
+    let won = store
+        .update(
+            Keyspace::Durable,
+            "split.a",
+            record_bytes(3, Some("w0")),
+            fresh.revision,
+        )
+        .await
+        .unwrap();
+    assert!(won.won().is_some());
+
+    let lines = crate::journal::read(&path).unwrap();
+    let journal = crate::oracle::ProcessJournal {
+        instance: "w0".to_owned(),
+        pid: 1,
+        lines,
+    };
+    let judged = crate::expect::lost_replies(&[journal], true);
+    assert_eq!(judged.lines, 1);
+    assert_eq!(judged.unexplained, Vec::<String>::new());
+}

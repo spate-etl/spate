@@ -22,8 +22,10 @@ const SPLIT_PREFIX: &str = "split.";
 /// Forwards every call to `S` and journals the durable `split.*` traffic.
 ///
 /// A write's `send` line is appended before the call and its `done` line
-/// after it, and a failed `get` appends `read_failed`. A call dropped before it returns, as at an `op_timeout`, still
-/// appends `done: cancelled`; a SIGKILL leaves the `send` without a `done`.
+/// after it; a write dropped before it returns, as at an `op_timeout`, still
+/// appends `done: cancelled`, and a SIGKILL leaves the `send` without a `done`.
+/// A `get` of a split that fails or is dropped before it returns appends
+/// `read_failed`.
 /// Every value journalled as `seen` or landed by a `won` write is also taught
 /// to the classifier.
 #[derive(Clone, Debug)]
@@ -154,6 +156,28 @@ impl Drop for Pending<'_> {
     }
 }
 
+/// Appends `read_failed` for its key unless the read returned `Ok`.
+struct ReadGuard<'a> {
+    journal: &'a Journal,
+    key: Option<&'a str>,
+    ok: bool,
+}
+
+impl Drop for ReadGuard<'_> {
+    fn drop(&mut self) {
+        if !self.ok
+            && let Some(key) = self.key
+        {
+            record(
+                self.journal,
+                Event::ReadFailed {
+                    key: key.to_owned(),
+                },
+            );
+        }
+    }
+}
+
 /// Appends `event`, or exits the process with status 3 when the journal
 /// cannot be written.
 pub fn record(journal: &Journal, event: Event) {
@@ -210,20 +234,14 @@ impl<S: CoordinationStore + Clone> CoordinationStore for JournalStore<S> {
     }
 
     async fn get(&self, ks: Keyspace, key: &str) -> Result<Option<Entry>, StoreError> {
-        let entry = match self.inner.get(ks, key).await {
-            Ok(entry) => entry,
-            Err(e) => {
-                if ks == Keyspace::Durable && key.starts_with(SPLIT_PREFIX) {
-                    record(
-                        &self.journal,
-                        Event::ReadFailed {
-                            key: key.to_owned(),
-                        },
-                    );
-                }
-                return Err(e);
-            }
+        let mut guard = ReadGuard {
+            journal: &self.journal,
+            key: (ks == Keyspace::Durable && key.starts_with(SPLIT_PREFIX)).then_some(key),
+            ok: false,
         };
+        let entry = self.inner.get(ks, key).await?;
+        guard.ok = true;
+        drop(guard);
         if ks == Keyspace::Durable
             && let Some(entry) = &entry
         {

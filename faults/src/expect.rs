@@ -19,8 +19,10 @@ use crate::outcome::LostReplies;
 /// commit or completion reply, its first later write on the key that wins or
 /// loses keeps the landed epoch, and either loses with the landed value read
 /// back, or wins from the landed revision after the landed value was read. A
-/// process that writes nothing more on the key that wins or loses has let the
-/// split go.
+/// write in between with no `won` or `lost` reply may have landed, so a read
+/// of its value at a higher revision counts as the landed value at that
+/// revision. A process that writes nothing more on the key that wins or loses
+/// has let the split go.
 #[must_use]
 pub fn lost_replies(journals: &[ProcessJournal], drawn: bool) -> LostReplies {
     let mut out = LostReplies {
@@ -97,17 +99,33 @@ fn recovered(journal: &ProcessJournal, at: usize, key: &str, rev: u64) -> Result
         .iter()
         .find(|w| matches!(w.reply, Some(Reply::Won(_) | Reply::Lost)))
     {
+        // Values sent by earlier writes with no `won` or `lost` reply, any of
+        // which may have landed.
+        let unreplied: Vec<&Progress> = later
+            .iter()
+            .filter(|w| w.index < next.index)
+            .map(|w| w.value)
+            .collect();
+        let adopted = |from: usize, to: usize, at: Option<u64>| {
+            lines[from..to].iter().any(|l| {
+                matches!(&l.event, Event::Seen { key: k, rev: r, value, .. }
+                    if k == key
+                        && at.is_none_or(|a| a == *r)
+                        && ((*r == rev && value == landed.value)
+                            || (*r > rev && unreplied.contains(&value))))
+            })
+        };
         match next.reply {
             Some(Reply::Lost)
                 if next.value.epoch == landed.value.epoch
-                    && seen_landed(next.index, lines.len()) =>
+                    && adopted(next.index, lines.len(), None) =>
             {
                 return Ok(());
             }
             Some(Reply::Won(_))
-                if next.expected == Some(rev)
+                if next.expected.is_some()
                     && next.value.epoch == landed.value.epoch
-                    && seen_landed(landed_done, next.index) =>
+                    && adopted(landed_done, next.index, next.expected) =>
             {
                 return Ok(());
             }
@@ -467,5 +485,55 @@ mod tests {
         ]);
         assert_eq!(judge(events).unexplained.len(), 1);
         assert_eq!(judge(vec![lost_reply(7)]).unexplained.len(), 1);
+    }
+
+    /// A retry from the landed revision that landed with its reply cancelled
+    /// at `op_timeout`, then a commit from the retry's revision, is a recovery.
+    #[test]
+    fn commit_evidence_accepts_a_cancelled_landed_retry_then_a_win() {
+        let mut events = commit_lost();
+        events.extend([
+            seen(7, value(2, Some("w0"), Some(10)), Source::Watch),
+            send(2, 7, value(2, Some("w0"), Some(20))),
+            done(2, Reply::Cancelled),
+            seen(8, value(2, Some("w0"), Some(20)), Source::Watch),
+            send(3, 8, value(2, Some("w0"), Some(30))),
+            done(3, Reply::Won(9)),
+        ]);
+        assert_eq!(judge(events).unexplained, Vec::<String>::new());
+    }
+
+    /// A retry from the landed revision that landed with its reply cancelled,
+    /// then a retry that loses and reads the cancelled retry's value back, is
+    /// a recovery.
+    #[test]
+    fn commit_evidence_accepts_a_cancelled_landed_retry_then_lost_read_back() {
+        let mut events = commit_lost();
+        events.extend([
+            seen(7, value(2, Some("w0"), Some(10)), Source::Watch),
+            send(2, 7, value(2, Some("w0"), Some(20))),
+            done(2, Reply::Cancelled),
+            send(3, 7, value(2, Some("w0"), Some(20))),
+            done(3, Reply::Lost),
+            seen(8, value(2, Some("w0"), Some(20)), Source::Get),
+        ]);
+        assert_eq!(judge(events).unexplained, Vec::<String>::new());
+    }
+
+    /// A retry from the landed revision that landed with its reply answered
+    /// `retryable`, then a retry that loses and reads the landed retry's value
+    /// back, is a recovery.
+    #[test]
+    fn commit_evidence_accepts_a_retryable_landed_retry_then_lost_read_back() {
+        let mut events = commit_lost();
+        events.extend([
+            seen(7, value(2, Some("w0"), Some(10)), Source::Watch),
+            send(2, 7, value(2, Some("w0"), Some(20))),
+            done(2, Reply::Err("retryable".to_owned())),
+            send(3, 7, value(2, Some("w0"), Some(20))),
+            done(3, Reply::Lost),
+            seen(8, value(2, Some("w0"), Some(20)), Source::Get),
+        ]);
+        assert_eq!(judge(events).unexplained, Vec::<String>::new());
     }
 }

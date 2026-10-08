@@ -12,12 +12,15 @@ use crate::outcome::LostReplies;
 /// Judges every `err_after_land` line in `journals`; `drawn` says the
 /// schedule drew an `ErrAfterLand` plan.
 ///
-/// After a lost claim reply the process reads the landed claim back and sends
-/// no second claim from the revision the first one replaced. After a lost
-/// commit or completion reply its next write on the key either loses and the
-/// landed value is read back, or is sent from the landed revision after the
-/// landed value was read, and wins. Either way, a process that writes nothing
-/// more on the key that wins or loses has let the split go.
+/// After a lost claim reply the process reads the landed claim back, or a
+/// read of the key fails and it claims the split again. A claim sent again
+/// from the replaced revision, or from the landed one at a higher epoch, with
+/// no failed read of the key before it, is not a recovery. After a lost
+/// commit or completion reply, its first later write on the key that wins or
+/// loses keeps the landed epoch, and either loses with the landed value read
+/// back, or wins from the landed revision after the landed value was read. A
+/// process that writes nothing more on the key that wins or loses has let the
+/// split go.
 #[must_use]
 pub fn lost_replies(journals: &[ProcessJournal], drawn: bool) -> LostReplies {
     let mut out = LostReplies {
@@ -75,17 +78,36 @@ fn recovered(journal: &ProcessJournal, at: usize, key: &str, rev: u64) -> Result
     let later: Vec<&Write<'_>> = writes.iter().filter(|w| w.index > at).collect();
 
     if kind == Some(WriteKind::Claim) {
-        if later.iter().any(|w| w.expected == landed.expected) {
-            return Err("a second claim was sent from the revision the first replaced".to_owned());
+        let read_failed = |to: usize| {
+            lines[landed_done..to]
+                .iter()
+                .any(|l| matches!(&l.event, Event::ReadFailed { key: k } if k == key))
+        };
+        let reclaim = |w: &Write<'_>| {
+            w.expected == landed.expected
+                || (w.expected == Some(rev) && w.value.epoch > landed.value.epoch)
+        };
+        if later.iter().any(|w| reclaim(w) && !read_failed(w.index)) {
+            return Err("the split was claimed again with no failed read of it before".to_owned());
         }
         if seen_landed(landed_done, lines.len()) {
             return Ok(());
         }
-    } else if let Some(next) = later.first() {
+    } else if let Some(next) = later
+        .iter()
+        .find(|w| matches!(w.reply, Some(Reply::Won(_) | Reply::Lost)))
+    {
         match next.reply {
-            Some(Reply::Lost) if seen_landed(next.index, lines.len()) => return Ok(()),
+            Some(Reply::Lost)
+                if next.value.epoch == landed.value.epoch
+                    && seen_landed(next.index, lines.len()) =>
+            {
+                return Ok(());
+            }
             Some(Reply::Won(_))
-                if next.expected == Some(rev) && seen_landed(landed_done, next.index) =>
+                if next.expected == Some(rev)
+                    && next.value.epoch == landed.value.epoch
+                    && seen_landed(landed_done, next.index) =>
             {
                 return Ok(());
             }
@@ -236,6 +258,12 @@ mod tests {
         }
     }
 
+    fn read_failed() -> Event {
+        Event::ReadFailed {
+            key: KEY.to_owned(),
+        }
+    }
+
     fn judge(events: Vec<Event>) -> LostReplies {
         let lines = events
             .into_iter()
@@ -302,6 +330,36 @@ mod tests {
         assert_eq!(judge(events).unexplained.len(), 1);
     }
 
+    /// A lost claim reply whose read-back failed: the process claims again
+    /// from its view and loses, reads the landed claim, then claims from it.
+    #[test]
+    fn claim_evidence_accepts_a_reclaim_after_a_failed_readback() {
+        let mut events = claim_lost();
+        events.extend([
+            read_failed(),
+            send(2, 5, value(2, Some("w0"), None)),
+            done(2, Reply::Lost),
+            seen(6, value(2, Some("w0"), None), Source::Get),
+            send(3, 6, value(3, Some("w0"), None)),
+            done(3, Reply::Won(7)),
+        ]);
+        assert_eq!(judge(events).unexplained, Vec::<String>::new());
+    }
+
+    /// A claim from the landed claim's revision at a higher epoch, after the
+    /// watch delivered the landed claim and with no failed read, is not a
+    /// recovery.
+    #[test]
+    fn claim_evidence_rejects_a_reclaim_from_the_landed_claim_without_a_failed_read() {
+        let mut events = claim_lost();
+        events.extend([
+            seen(6, value(2, Some("w0"), None), Source::Watch),
+            send(2, 6, value(3, Some("w0"), None)),
+            done(2, Reply::Won(7)),
+        ]);
+        assert_eq!(judge(events).unexplained.len(), 1);
+    }
+
     /// The watch echo of the landed commit, then a commit from the landed
     /// revision that wins, is a recovery.
     #[test]
@@ -326,6 +384,51 @@ mod tests {
             seen(7, value(2, Some("w0"), Some(10)), Source::Get),
         ]);
         assert!(judge(events).unexplained.is_empty());
+    }
+
+    /// A commit retry that fails retryable, then loses, then wins from the
+    /// landed commit after reading it, is a recovery.
+    #[test]
+    fn commit_evidence_accepts_a_retryable_retry_then_adoption() {
+        let mut events = commit_lost();
+        events.extend([
+            send(2, 6, value(2, Some("w0"), Some(20))),
+            done(2, Reply::Err("retryable".to_owned())),
+            send(3, 6, value(2, Some("w0"), Some(20))),
+            done(3, Reply::Lost),
+            seen(7, value(2, Some("w0"), Some(10)), Source::Get),
+            send(4, 7, value(2, Some("w0"), Some(20))),
+            done(4, Reply::Won(8)),
+        ]);
+        assert_eq!(judge(events).unexplained, Vec::<String>::new());
+    }
+
+    /// A lost commit reply answered by dropping the tenancy and claiming the
+    /// split again is not a recovery of the landed commit.
+    #[test]
+    fn commit_evidence_rejects_a_reclaim_after_the_lost_reply() {
+        let mut events = commit_lost();
+        events.extend([
+            send(2, 6, value(3, Some("w0"), None)),
+            done(2, Reply::Lost),
+            seen(7, value(2, Some("w0"), Some(10)), Source::Get),
+            send(3, 7, value(3, Some("w0"), Some(10))),
+            done(3, Reply::Won(8)),
+        ]);
+        assert_eq!(judge(events).unexplained.len(), 1);
+    }
+
+    /// A claim from the landed commit's revision at a higher epoch that wins,
+    /// after a read of the landed commit, is not a recovery of it.
+    #[test]
+    fn commit_evidence_rejects_a_reclaim_from_the_landed_commit() {
+        let mut events = commit_lost();
+        events.extend([
+            seen(7, value(2, Some("w0"), Some(10)), Source::Watch),
+            send(2, 7, value(3, Some("w0"), Some(10))),
+            done(2, Reply::Won(8)),
+        ]);
+        assert_eq!(judge(events).unexplained.len(), 1);
     }
 
     /// A later commit from the pre-fault revision that wins is not a

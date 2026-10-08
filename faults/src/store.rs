@@ -22,7 +22,7 @@ const SPLIT_PREFIX: &str = "split.";
 /// Forwards every call to `S` and journals the durable `split.*` traffic.
 ///
 /// A write's `send` line is appended before the call and its `done` line
-/// after it. A call dropped before it returns, as at an `op_timeout`, still
+/// after it, and a failed `get` appends `read_failed`. A call dropped before it returns, as at an `op_timeout`, still
 /// appends `done: cancelled`; a SIGKILL leaves the `send` without a `done`.
 /// Every value journalled as `seen` or landed by a `won` write is also taught
 /// to the classifier.
@@ -210,7 +210,20 @@ impl<S: CoordinationStore + Clone> CoordinationStore for JournalStore<S> {
     }
 
     async fn get(&self, ks: Keyspace, key: &str) -> Result<Option<Entry>, StoreError> {
-        let entry = self.inner.get(ks, key).await?;
+        let entry = match self.inner.get(ks, key).await {
+            Ok(entry) => entry,
+            Err(e) => {
+                if ks == Keyspace::Durable && key.starts_with(SPLIT_PREFIX) {
+                    record(
+                        &self.journal,
+                        Event::ReadFailed {
+                            key: key.to_owned(),
+                        },
+                    );
+                }
+                return Err(e);
+            }
+        };
         if ks == Keyspace::Durable
             && let Some(entry) = &entry
         {

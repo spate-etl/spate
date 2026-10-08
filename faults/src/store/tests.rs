@@ -34,8 +34,8 @@ fn progress(epoch: u64, owner: Option<&str>) -> Progress {
     }
 }
 
-/// A store whose updates never complete, with a polled watch and an
-/// `op_timeout`, over a [`MemoryStore`].
+/// A store whose updates never complete and whose reads fail, with a polled
+/// watch and an `op_timeout`, over a [`MemoryStore`].
 #[derive(Clone)]
 struct Hang(MemoryStore);
 
@@ -73,8 +73,8 @@ impl CoordinationStore for Hang {
         std::future::pending().await
     }
 
-    async fn get(&self, ks: Keyspace, key: &str) -> Result<Option<Entry>, StoreError> {
-        self.0.get(ks, key).await
+    async fn get(&self, _ks: Keyspace, _key: &str) -> Result<Option<Entry>, StoreError> {
+        Err(StoreError::Retryable("read failed".to_owned()))
     }
 
     async fn delete(
@@ -419,5 +419,25 @@ fn done_carries_lost_and_the_error_class() {
             Reply::Err("retryable".to_owned()),
             Reply::Err("fatal".to_owned()),
         ]
+    );
+}
+
+/// A failed `get` of a durable `split.*` key is journalled as `read_failed`;
+/// a failed read of another key or of the ephemeral keyspace is not.
+#[tokio::test]
+async fn a_failed_split_read_is_journalled() {
+    let (store, _dir, path) = journalled(Hang(MemoryStore::new(LEASE)));
+    for (ks, key) in [
+        (Keyspace::Durable, "split.a"),
+        (Keyspace::Durable, "plan"),
+        (Keyspace::Ephemeral, "split.a"),
+    ] {
+        assert!(store.get(ks, key).await.is_err(), "{key}");
+    }
+    assert_eq!(
+        events(&path),
+        [Event::ReadFailed {
+            key: "split.a".to_owned()
+        }]
     );
 }

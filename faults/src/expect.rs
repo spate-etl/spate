@@ -45,6 +45,22 @@ pub fn lost_replies(journals: &[ProcessJournal], drawn: bool) -> LostReplies {
     out
 }
 
+/// Whether `journal` holds an `err_after_land` line and shows the landed
+/// write recovered after each one.
+#[must_use]
+pub fn recovery_shown(journal: &ProcessJournal) -> bool {
+    let mut lost = journal
+        .lines
+        .iter()
+        .enumerate()
+        .filter_map(|(at, line)| match &line.event {
+            Event::ErrAfterLand { key, rev } => Some((at, key, *rev)),
+            _ => None,
+        })
+        .peekable();
+    lost.peek().is_some() && lost.all(|(at, key, rev)| recovered(journal, at, key, rev) == Ok(true))
+}
+
 /// A `send` line on one key, with its reply when the journal holds one.
 struct Write<'a> {
     index: usize,
@@ -53,7 +69,9 @@ struct Write<'a> {
     reply: Option<&'a Reply>,
 }
 
-fn recovered(journal: &ProcessJournal, at: usize, key: &str, rev: u64) -> Result<(), String> {
+/// `Ok(true)` when the journal shows the landed write recovered, `Ok(false)`
+/// when the split left the process.
+fn recovered(journal: &ProcessJournal, at: usize, key: &str, rev: u64) -> Result<bool, String> {
     let lines = &journal.lines;
     let landed_done = lines[..at]
         .iter()
@@ -93,7 +111,7 @@ fn recovered(journal: &ProcessJournal, at: usize, key: &str, rev: u64) -> Result
             return Err("the split was claimed again with no failed read of it before".to_owned());
         }
         if seen_landed(landed_done, lines.len()) {
-            return Ok(());
+            return Ok(true);
         }
     } else if let Some(next) = later
         .iter()
@@ -120,14 +138,14 @@ fn recovered(journal: &ProcessJournal, at: usize, key: &str, rev: u64) -> Result
                 if next.value.epoch == landed.value.epoch
                     && adopted(next.index, lines.len(), None) =>
             {
-                return Ok(());
+                return Ok(true);
             }
             Some(Reply::Won(_))
                 if next.expected.is_some()
                     && next.value.epoch == landed.value.epoch
                     && adopted(landed_done, next.index, next.expected) =>
             {
-                return Ok(());
+                return Ok(true);
             }
             _ => {}
         }
@@ -136,7 +154,7 @@ fn recovered(journal: &ProcessJournal, at: usize, key: &str, rev: u64) -> Result
         .iter()
         .all(|w| !matches!(w.reply, Some(Reply::Won(_) | Reply::Lost)))
     {
-        return Ok(());
+        return Ok(false);
     }
     Err("no recovery of the landed write follows it".to_owned())
 }
@@ -282,18 +300,21 @@ mod tests {
         }
     }
 
-    fn judge(events: Vec<Event>) -> LostReplies {
+    fn journal(events: Vec<Event>) -> ProcessJournal {
         let lines = events
             .into_iter()
             .zip(1..)
             .map(|(event, t_ms)| Line { t_ms, event })
             .collect();
-        let journal = ProcessJournal {
+        ProcessJournal {
             instance: "w0".to_owned(),
             pid: 7,
             lines,
-        };
-        lost_replies(&[journal], true)
+        }
+    }
+
+    fn judge(events: Vec<Event>) -> LostReplies {
+        lost_replies(&[journal(events)], true)
     }
 
     /// The claim at rev 6 over the unowned value at rev 5, its `won` reply
@@ -485,6 +506,22 @@ mod tests {
         ]);
         assert_eq!(judge(events).unexplained.len(), 1);
         assert_eq!(judge(vec![lost_reply(7)]).unexplained.len(), 1);
+    }
+
+    /// A lost commit reply counts as recovered only once the losing retry's
+    /// read-back of the landed commit is journalled.
+    #[test]
+    fn recovery_is_shown_only_after_the_read_back() {
+        let mut events = commit_lost();
+        assert!(!recovery_shown(&journal(events.clone())));
+        events.extend([
+            send(2, 6, value(2, Some("w0"), Some(20))),
+            done(2, Reply::Lost),
+        ]);
+        assert!(!recovery_shown(&journal(events.clone())));
+        events.push(seen(7, value(2, Some("w0"), Some(10)), Source::Get));
+        assert!(recovery_shown(&journal(events)));
+        assert!(!recovery_shown(&journal(Vec::new())));
     }
 
     /// A retry from the landed revision that landed with its reply cancelled

@@ -382,8 +382,9 @@ impl Run<'_> {
     /// Starts the workers and applies the schedule on real time until every
     /// worker has exited with no replacement due, or [`RUN_DEADLINE`] from
     /// their start passes. A worker that aborts on its plan is replaced after
-    /// the plan's delay, and a kill due on the `ErrAfterLand` process waits for
-    /// its `err_after_land` line. Returns whether one was still running at the
+    /// the plan's delay, and a kill due on the `ErrAfterLand` process waits
+    /// until its journal shows the lost reply recovered, or one lease past its
+    /// `err_after_land` line. Returns whether one was still running at the
     /// deadline, and each kill the timeline handed out or left pending.
     fn drive(
         &self,
@@ -410,10 +411,11 @@ impl Run<'_> {
         let status = |e: std::io::Error| format!("read worker status: {e}");
         let mut timeline = Timeline::new(&self.schedule);
         let mut fired = Vec::new();
-        // Per instance: its current process's abort was judged, and its
-        // `err_after_land` line was seen.
+        // Per instance: its current process's abort was judged, when its
+        // `err_after_land` line was first seen, and its held kill was released.
         let mut judged = vec![false; instances];
-        let mut line_seen = vec![false; instances];
+        let mut line_at: Vec<Option<u64>> = vec![None; instances];
+        let mut released = vec![false; instances];
         let timed_out = loop {
             let now = Instant::now();
             let now_ms = millis(now - start);
@@ -447,12 +449,17 @@ impl Run<'_> {
             }
             while let Some(step) = timeline.next(now_ms, |i| {
                 let at = i as usize;
-                if !kill_held(&self.schedule, i, incarnations[at], line_seen[at]) {
+                if !kill_held(&self.schedule, i, incarnations[at], released[at]) {
                     return false;
                 }
-                line_seen[at] =
-                    journal_holds(&self.journal_path(i, incarnations[at]), "err_after_land");
-                !line_seen[at]
+                let path = self.journal_path(i, incarnations[at]);
+                if line_at[at].is_none() && journal_holds(&path, "err_after_land") {
+                    line_at[at] = Some(now_ms);
+                }
+                released[at] = hold_released(line_at[at], now_ms, tuning.lease_ms, || {
+                    recovery_journalled(&path, &format!("w{i}"))
+                });
+                !released[at]
             }) {
                 match step {
                     Step::Kill {
@@ -795,12 +802,36 @@ fn abort_respawn(
 }
 
 /// Whether the `instance`'s `incarnation` must not be killed yet: it carries
-/// the `ErrAfterLand` plan and its `err_after_land` line has not been seen.
-fn kill_held(schedule: &Schedule, instance: u32, incarnation: u32, line_seen: bool) -> bool {
-    !line_seen
+/// the `ErrAfterLand` plan and its hold has not been released.
+fn kill_held(schedule: &Schedule, instance: u32, incarnation: u32, released: bool) -> bool {
+    !released
         && schedule
             .plan_for(instance, incarnation)
             .is_some_and(|p| p.plan.mode == AbortMode::ErrAfterLand)
+}
+
+/// Whether a kill held for the lost-reply process may go: one lease has
+/// passed since its `err_after_land` line was seen at `line_at_ms`, or
+/// `recovered` says its journal shows the landed write recovered.
+fn hold_released(
+    line_at_ms: Option<u64>,
+    now_ms: u64,
+    lease_ms: u64,
+    recovered: impl FnOnce() -> bool,
+) -> bool {
+    line_at_ms.is_some_and(|at| now_ms >= at.saturating_add(lease_ms) || recovered())
+}
+
+/// Whether the journal `instance` writes at `path` shows the landed write
+/// recovered after each lost reply.
+fn recovery_journalled(path: &Path, instance: &str) -> bool {
+    journal::read(path).is_ok_and(|lines| {
+        expect::recovery_shown(&ProcessJournal {
+            instance: instance.to_owned(),
+            pid: 0,
+            lines,
+        })
+    })
 }
 
 /// Whether the journal at `path` holds a line of event `ev`.
@@ -1020,10 +1051,10 @@ mod tests {
     }
 
     /// A kill due on the process carrying the `ErrAfterLand` plan waits until
-    /// its journal holds the `err_after_land` line, and its replacement waits
-    /// one respawn delay from then; kills on other processes fall on time.
+    /// its hold is released, and its replacement waits one respawn delay from
+    /// then; kills on other processes fall on time.
     #[test]
-    fn err_after_land_incarnation_is_killed_only_after_its_line() {
+    fn err_after_land_incarnation_is_killed_only_after_its_release() {
         use crate::schedule::Kill;
         use crate::store::AbortPlan;
         let lost = InProcess {
@@ -1045,13 +1076,13 @@ mod tests {
             in_process: vec![lost],
         };
         assert!(kill_held(&schedule, 0, 1, false));
-        assert!(!kill_held(&schedule, 0, 1, true), "the line was seen");
+        assert!(!kill_held(&schedule, 0, 1, true), "the hold was released");
         assert!(!kill_held(&schedule, 0, 2, false), "a replacement");
         assert!(!kill_held(&schedule, 1, 1, false), "another instance");
 
         let mut timeline = Timeline::new(&schedule);
         let schedule = &schedule;
-        let held = |seen: bool| move |i| kill_held(schedule, i, 1, seen);
+        let held = |released: bool| move |i| kill_held(schedule, i, 1, released);
         assert_eq!(
             timeline.next(1_000, held(false)),
             Some(Step::Kill {
@@ -1072,8 +1103,68 @@ mod tests {
         );
     }
 
+    /// A kill held for the lost-reply process stays held past its
+    /// `err_after_land` line until its journal shows the landed write
+    /// recovered, or one lease has passed since the line.
+    #[test]
+    fn held_kill_waits_for_the_recovery_or_one_lease() {
+        assert!(!hold_released(None, 10_000, 2_000, || true), "no line yet");
+        assert!(!hold_released(Some(1_000), 1_050, 2_000, || false));
+        assert!(hold_released(Some(1_000), 1_050, 2_000, || true));
+        assert!(hold_released(Some(1_000), 3_000, 2_000, || false));
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("w0-1.ndjson");
+        let journal = Journal::open(&path).unwrap();
+        let value = |watermark| crate::journal::Progress {
+            schema: crate::journal::SCHEMA,
+            epoch: 2,
+            owner: Some("w0".to_owned()),
+            watermark,
+            completed: false,
+            status: crate::journal::Status::Runnable,
+            attempts: 0,
+        };
+        let send = |call, expected, watermark| Event::Send {
+            call,
+            op: crate::journal::WriteOp::Update,
+            key: "split.a".to_owned(),
+            expected: Some(expected),
+            value: value(watermark),
+        };
+        let done = |call, reply| Event::Done {
+            call,
+            key: "split.a".to_owned(),
+            reply,
+        };
+        let seen = |rev, watermark, from| Event::Seen {
+            key: "split.a".to_owned(),
+            rev,
+            value: value(watermark),
+            from,
+        };
+        for event in [
+            seen(6, None, crate::journal::Source::Get),
+            send(1, 6, Some(10)),
+            done(1, Reply::Won(7)),
+            Event::ErrAfterLand {
+                key: "split.a".to_owned(),
+                rev: 7,
+            },
+            send(2, 6, Some(10)),
+            done(2, Reply::Lost),
+        ] {
+            journal.append(event).unwrap();
+        }
+        assert!(!recovery_journalled(&path, "w0"), "no read-back yet");
+        journal
+            .append(seen(7, Some(10), crate::journal::Source::Get))
+            .unwrap();
+        assert!(recovery_journalled(&path, "w0"));
+    }
+
     /// Two kills the schedule renders on the lost-reply process, both due
-    /// before its `err_after_land` line, are each handed out or drained.
+    /// before its hold is released, are each handed out or drained.
     #[test]
     fn held_kill_swallows_no_rendered_kill() {
         use crate::schedule::Kill;
@@ -1105,10 +1196,10 @@ mod tests {
         assert!(rendered.contains("1500 ms: kill w0"));
         let mut timeline = Timeline::new(&schedule);
         let mut handed = Vec::new();
-        // The err_after_land line appears at 5 s: until then both kills are held.
+        // The hold is released at 5 s: until then both kills are held.
         for now in (0..=20_000).step_by(50) {
-            let seen = now >= 5_000;
-            while let Some(step) = timeline.next(now, |i| kill_held(&schedule, i, 1, seen)) {
+            let released = now >= 5_000;
+            while let Some(step) = timeline.next(now, |i| kill_held(&schedule, i, 1, released)) {
                 if let Step::Kill {
                     instance,
                     respawn_at_ms,

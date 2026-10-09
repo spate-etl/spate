@@ -143,6 +143,28 @@ impl Toxiproxy {
         self.api
     }
 
+    /// Whether Docker reports the container running.
+    ///
+    /// # Errors
+    ///
+    /// Fails when Docker cannot be asked.
+    pub fn is_running(&self) -> Result<bool, String> {
+        self.container.is_running().map_err(|e| e.to_string())
+    }
+
+    /// Asks the API for its version.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the API does not answer `200` within five seconds.
+    pub fn probe(&self) -> Result<(), String> {
+        match http(self.api, "GET", "/version") {
+            Ok((200, _)) => Ok(()),
+            Ok((status, reply)) => Err(format!("Toxiproxy GET /version: {status} {reply}")),
+            Err(e) => Err(format!("Toxiproxy GET /version: {e}")),
+        }
+    }
+
     /// Creates the enabled proxy `name`, listening on container port `listen`
     /// and forwarding to `upstream` as `host:port`, and returns the host
     /// address clients connect to. Toxiproxy resolves `upstream` on each

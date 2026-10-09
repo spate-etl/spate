@@ -16,8 +16,9 @@ use crate::worker::Tuning;
 
 /// Earliest window, from the start of the running stage.
 const FROM_MS: u64 = 1_000;
-/// Latest window, from the start of the running stage.
-const UNTIL_MS: u64 = 10_000;
+/// Latest window, from the start of the running stage. A later window can
+/// fall due after a short run's workers have all finished.
+const UNTIL_MS: u64 = 5_000;
 /// Longest ordinary latency on a NATS link, below its store timeout.
 const NATS_MAX_LATENCY_MS: u64 = 300;
 /// Longest ordinary latency on a DynamoDB link. With the fault proxy's
@@ -32,7 +33,7 @@ pub(super) enum LinkKind {
     /// Holds everything the worker sends until the window closes, then
     /// delivers it on the same connection.
     HealNearExpiry { latency_ms: u64 },
-    /// Drops everything both ways, and resets the connection on heal.
+    /// Drops everything both ways, and closes the connection on heal.
     Blackhole,
     /// Closes open connections, and closes each new one once accepted.
     Refuse,
@@ -86,14 +87,16 @@ pub(super) struct Window {
     pub(super) duration_ms: u64,
 }
 
-/// Draws between one and `instances + 1` windows over the first ten seconds
-/// of the running stage. Ordinary latency lasts half a lease to a lease;
+/// Draws between one and `instances + 1` windows due one to five seconds
+/// into the running stage. Ordinary latency lasts half a lease to a lease;
 /// heal-near-expiry, blackhole and refuse windows last a lease give or take
-/// one store timeout; `limit_data` is drawn on NATS only.
+/// one store timeout; `limit_data` is drawn on NATS only. With more than one
+/// instance, none is drawn on `lost`, whose first process never takes one.
 pub(super) fn draw(
     rng: &mut SplitMix64,
     store: StoreKind,
     instances: u32,
+    lost: Option<u32>,
     tuning: &Tuning,
 ) -> Vec<Window> {
     let (lease, op) = (tuning.lease_ms, tuning.op_timeout_ms);
@@ -104,8 +107,15 @@ pub(super) fn draw(
     (0..rng.in_range(1, u64::from(instances) + 1))
         .map(|_| {
             let at_ms = rng.in_range(FROM_MS, UNTIL_MS);
-            let instance = u32::try_from(rng.in_range(0, u64::from(instances) - 1))
-                .expect("an instance index fits in u32");
+            let instance = match lost.filter(|_| instances > 1) {
+                Some(lost) => {
+                    let i = u32::try_from(rng.in_range(0, u64::from(instances) - 2))
+                        .expect("an instance index fits in u32");
+                    if i < lost { i } else { i + 1 }
+                }
+                None => u32::try_from(rng.in_range(0, u64::from(instances) - 1))
+                    .expect("an instance index fits in u32"),
+            };
             let short = rng.in_range(lease / 2, lease);
             let near_lease = rng.in_range(lease - op, lease + op);
             let (kind, duration_ms) = match rng.in_range(0, kinds - 1) {
@@ -140,26 +150,34 @@ pub(super) fn draw(
         .collect()
 }
 
-/// Opens a `kind` window on `proxy`.
-pub(super) fn open(toxiproxy: &Toxiproxy, proxy: &str, kind: LinkKind) -> Result<(), String> {
-    if kind == LinkKind::Refuse {
-        return toxiproxy.set_enabled(proxy, false);
-    }
-    for (name, stream, toxic) in kind.toxics() {
-        toxiproxy.add_toxic(proxy, name, stream, toxic)?;
-    }
-    Ok(())
+/// Opens and closes windows on a worker process's proxy.
+pub(super) trait Control {
+    /// Opens a `kind` window on `proxy`.
+    fn open(&self, proxy: &str, kind: LinkKind) -> Result<(), String>;
+    /// Closes the `kind` window [`Control::open`] opened on `proxy`.
+    fn close(&self, proxy: &str, kind: LinkKind) -> Result<(), String>;
 }
 
-/// Closes the `kind` window [`open`] opened on `proxy`.
-pub(super) fn close(toxiproxy: &Toxiproxy, proxy: &str, kind: LinkKind) -> Result<(), String> {
-    if kind == LinkKind::Refuse {
-        return toxiproxy.set_enabled(proxy, true);
+impl Control for Toxiproxy {
+    fn open(&self, proxy: &str, kind: LinkKind) -> Result<(), String> {
+        if kind == LinkKind::Refuse {
+            return self.set_enabled(proxy, false);
+        }
+        for (name, stream, toxic) in kind.toxics() {
+            self.add_toxic(proxy, name, stream, toxic)?;
+        }
+        Ok(())
     }
-    for (name, _, _) in kind.toxics() {
-        toxiproxy.remove_toxic(proxy, name)?;
+
+    fn close(&self, proxy: &str, kind: LinkKind) -> Result<(), String> {
+        if kind == LinkKind::Refuse {
+            return self.set_enabled(proxy, true);
+        }
+        for (name, _, _) in kind.toxics() {
+            self.remove_toxic(proxy, name)?;
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 /// The `faults_fired` entry for `window` on the process `proxy` serves.
@@ -275,6 +293,37 @@ impl<'a> Links<'a> {
         Some((window, proxy))
     }
 
+    /// Closes every window due to close by `now_ms`, then opens every window
+    /// [`Links::next_open`] releases, each after `log` journals its `toxic`
+    /// line against the pid in `live`, and returns the opened windows'
+    /// `faults_fired` entries.
+    pub(super) fn step(
+        &mut self,
+        control: &impl Control,
+        now_ms: u64,
+        incarnations: &[u32],
+        live: &[Option<u32>],
+        log: impl Fn(Event) -> Result<(), String>,
+    ) -> Result<Vec<FaultFired>, String> {
+        while let Some((window, proxy)) = self.next_close(now_ms) {
+            control.close(&proxy, window.kind)?;
+        }
+        let mut fired = Vec::new();
+        while let Some((window, proxy, pid)) =
+            self.next_open(now_ms, incarnations, |i| live[i as usize])
+        {
+            log(Event::Toxic {
+                instance: format!("w{}", window.instance),
+                pid,
+                toxic: window.kind.to_string(),
+                duration_ms: window.duration_ms,
+            })?;
+            control.open(&proxy, window.kind)?;
+            fired.push(self::fired(&window, proxy, true));
+        }
+        Ok(fired)
+    }
+
     /// The windows never opened, in drawn order.
     pub(super) fn rest(self) -> Vec<Window> {
         self.pending
@@ -283,6 +332,8 @@ impl<'a> Links<'a> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
     use crate::run::proxy::MAX_DELAY_MS;
 
@@ -304,7 +355,13 @@ mod tests {
         let read_timeout = tuning.op_timeout_ms / 4;
         let (mut latencies, mut heals) = (0, 0);
         for seed in 0..500 {
-            for w in draw(&mut SplitMix64::new(seed), StoreKind::DynamoDb, 3, &tuning) {
+            for w in draw(
+                &mut SplitMix64::new(seed),
+                StoreKind::DynamoDb,
+                3,
+                None,
+                &tuning,
+            ) {
                 match w.kind {
                     LinkKind::Latency { latency_ms } => {
                         assert!(latency_ms + MAX_DELAY_MS <= 200, "seed {seed}: {w:?}");
@@ -333,8 +390,12 @@ mod tests {
         ] {
             let (lease, op) = (tuning.lease_ms, tuning.op_timeout_ms);
             let mut drawn = std::collections::HashSet::new();
+            let (mut counts, mut instances) = (BTreeSet::new(), BTreeSet::new());
             for seed in 0..500 {
-                for w in draw(&mut SplitMix64::new(seed), store, 3, &tuning) {
+                let windows = draw(&mut SplitMix64::new(seed), store, 3, None, &tuning);
+                counts.insert(windows.len());
+                for w in windows {
+                    instances.insert(w.instance);
                     assert!((FROM_MS..=UNTIL_MS).contains(&w.at_ms), "{w:?}");
                     assert!(w.instance < 3, "{w:?}");
                     let near = (lease - op..=lease + op).contains(&w.duration_ms);
@@ -356,6 +417,27 @@ mod tests {
                 }
             }
             assert_eq!(drawn.len(), kinds, "{store:?}");
+            assert_eq!(counts, BTreeSet::from([1, 2, 3, 4]), "{store:?}");
+            assert_eq!(instances, BTreeSet::from([0, 1, 2]), "{store:?}");
+        }
+    }
+
+    /// No seed draws a window due after 5 s into the running stage, for
+    /// either store and instance count.
+    #[test]
+    fn windows_fall_due_within_five_seconds() {
+        for (store, tuning) in [
+            (StoreKind::Nats, Tuning::nats()),
+            (StoreKind::DynamoDb, Tuning::dynamodb()),
+        ] {
+            for (instances, lost) in [(1, None), (1, Some(0)), (3, None), (3, Some(1))] {
+                for seed in 0..1000 {
+                    let mut rng = SplitMix64::new(seed);
+                    for w in draw(&mut rng, store, instances, lost, &tuning) {
+                        assert!(w.at_ms <= 5_000, "seed {seed}: {w:?}");
+                    }
+                }
+            }
         }
     }
 
@@ -455,6 +537,78 @@ mod tests {
         assert_eq!(unexercised(false, &[kill]), None);
     }
 
+    /// What [`Links::step`] did, in order.
+    #[derive(Debug, PartialEq)]
+    enum Call {
+        Log(Event),
+        Open(String, LinkKind),
+        Close(String, LinkKind),
+    }
+
+    #[derive(Default)]
+    struct Fake(std::cell::RefCell<Vec<Call>>);
+
+    impl Control for Fake {
+        fn open(&self, proxy: &str, kind: LinkKind) -> Result<(), String> {
+            self.0.borrow_mut().push(Call::Open(proxy.to_owned(), kind));
+            Ok(())
+        }
+
+        fn close(&self, proxy: &str, kind: LinkKind) -> Result<(), String> {
+            self.0
+                .borrow_mut()
+                .push(Call::Close(proxy.to_owned(), kind));
+            Ok(())
+        }
+    }
+
+    /// A window's `toxic` line carries its own instance's pid and precedes the
+    /// open on that instance's current proxy, and each window closes once its
+    /// duration has passed.
+    #[test]
+    fn a_step_journals_each_window_before_opening_it_and_closes_it_when_due() {
+        let latency = LinkKind::Latency { latency_ms: 40 };
+        let windows = [
+            window(1_000, 0, 500),
+            Window {
+                kind: latency,
+                ..window(1_000, 1, 300)
+            },
+        ];
+        let schedule = Schedule::default();
+        let mut links = Links::new(&schedule, &windows);
+        let fake = Fake::default();
+        let log = |event| {
+            fake.0.borrow_mut().push(Call::Log(event));
+            Ok(())
+        };
+        let (incarnations, live) = ([2, 1], [Some(10), Some(11)]);
+        let fired = links.step(&fake, 1_000, &incarnations, &live, log);
+        assert_eq!(fired.map(|f| f.len()), Ok(2));
+        links.step(&fake, 1_299, &incarnations, &live, log).unwrap();
+        links.step(&fake, 1_300, &incarnations, &live, log).unwrap();
+        links.step(&fake, 1_500, &incarnations, &live, log).unwrap();
+        let toxic = |instance: &str, pid, toxic: &str, duration_ms| {
+            Call::Log(Event::Toxic {
+                instance: instance.to_owned(),
+                pid,
+                toxic: toxic.to_owned(),
+                duration_ms,
+            })
+        };
+        assert_eq!(
+            fake.0.into_inner(),
+            [
+                toxic("w0", 10, "blackhole", 500),
+                Call::Open("w0-2".to_owned(), LinkKind::Blackhole),
+                toxic("w1", 11, "latency(40ms)", 300),
+                Call::Open("w1-1".to_owned(), latency),
+                Call::Close("w1-1".to_owned(), latency),
+                Call::Close("w0-2".to_owned(), LinkKind::Blackhole),
+            ]
+        );
+    }
+
     /// Each proxy takes the next listen port, and none is handed out past
     /// the last.
     #[test]
@@ -467,5 +621,36 @@ mod tests {
             links.proxy(2, 1).unwrap();
         }
         assert!(links.proxy(2, 2).is_err());
+    }
+
+    /// With more than one instance no window is drawn on the instance whose
+    /// first process carries the lost reply; with one, every window is on it.
+    #[test]
+    fn windows_skip_the_lost_reply_instance_of_a_three_instance_run() {
+        let tuning = Tuning::nats();
+        let mut hit = BTreeSet::new();
+        for seed in 0..500 {
+            for lost in 0..3 {
+                for w in draw(
+                    &mut SplitMix64::new(seed),
+                    StoreKind::Nats,
+                    3,
+                    Some(lost),
+                    &tuning,
+                ) {
+                    assert_ne!(w.instance, lost, "seed {seed}: {w:?}");
+                    hit.insert((lost, w.instance));
+                }
+            }
+            let one = draw(
+                &mut SplitMix64::new(seed),
+                StoreKind::Nats,
+                1,
+                Some(0),
+                &tuning,
+            );
+            assert!(one.iter().all(|w| w.instance == 0), "seed {seed}: {one:?}");
+        }
+        assert_eq!(hit.len(), 6, "{hit:?}");
     }
 }

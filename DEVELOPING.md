@@ -173,12 +173,13 @@ worker's link are latency below the store timeout, which on DynamoDB stays
 within the SDK's read timeout together with the fault proxy's longest delay; a
 heal-near-expiry window that holds what the worker sends for about a lease and
 delivers it on the same connection when it closes; a blackhole that drops both
-directions for about a lease and resets the connection when it closes; a refuse
+directions for about a lease and then closes the connection; a refuse
 window that disables the proxy, so the worker's open connections close and each
 new one is accepted and then closed; and on NATS a `limit_data` window that
 closes each connection once a few kilobytes have reached the worker. A window
 waits while its worker has another window open or no live process, and while
-the worker is the one handed an error for a landed write. `faults.ndjson`
+the worker is the one handed an error for a landed write. With more than one
+worker, no window is drawn on that one. `faults.ndjson`
 records each window as a `toxic` line, and the oracle counts it as a fault
 lasting the window. A run that draws windows and opens none is `expectation`.
 `dynamodb_drop_after_land_then_pass_wins` drives one store through the proxy

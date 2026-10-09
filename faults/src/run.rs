@@ -139,7 +139,13 @@ pub fn run(spec: &Spec<'_>) -> Outcome {
     let proxy_seed = (spec.store == StoreKind::DynamoDb && spec.faults == Faults::Schedule)
         .then(|| rng.next_u64());
     let links = if spec.faults == Faults::Schedule {
-        link::draw(&mut rng, spec.store, spec.instances, &tuning)
+        link::draw(
+            &mut rng,
+            spec.store,
+            spec.instances,
+            schedule.lost_reply(),
+            &tuning,
+        )
     } else {
         Vec::new()
     };
@@ -326,7 +332,7 @@ impl Direct {
 impl Env {
     /// Each container, probed over the harness's own connections.
     fn health_targets<'a>(&'a self, rt: &'a tokio::runtime::Runtime) -> Vec<Target<'a>> {
-        vec![
+        let mut targets = vec![
             Target {
                 container: self.store_name,
                 running: Box::new(|| self.store.is_running().map_err(|e| e.to_string())),
@@ -346,7 +352,15 @@ impl Env {
                 running: Box::new(|| self.gateway.is_running()),
                 reach: Box::new(move || self.gateway.probe(rt, PROBE)),
             },
-        ]
+        ];
+        if let Some((toxiproxy, _)) = &self.link {
+            targets.push(Target {
+                container: "toxiproxy",
+                running: Box::new(|| toxiproxy.is_running()),
+                reach: Box::new(|| toxiproxy.probe()),
+            });
+        }
+        targets
     }
 }
 
@@ -487,6 +501,28 @@ where
             }
             _ => std::thread::sleep(Duration::from_millis(200)),
         }
+    }
+}
+
+/// Where a worker process sends its store calls.
+#[derive(Debug, PartialEq, Eq)]
+enum Route {
+    Direct,
+    Through(SocketAddr),
+    FaultProxy { seed: u64, upstream: SocketAddr },
+}
+
+/// A worker's route: a fault proxy when the run has a proxy seed, forwarding
+/// to Toxiproxy at `linked` when the run has one and to `dynamodb` otherwise;
+/// without a seed, Toxiproxy at `linked` or the store directly.
+fn route(
+    linked: Option<SocketAddr>,
+    dynamodb: Option<SocketAddr>,
+    proxy_seed: Option<u64>,
+) -> Route {
+    match (proxy_seed, linked.or(dynamodb)) {
+        (Some(seed), Some(upstream)) => Route::FaultProxy { seed, upstream },
+        _ => linked.map_or(Route::Direct, Route::Through),
     }
 }
 
@@ -715,25 +751,11 @@ impl Run<'_> {
                 fired.push(stop_fired(&stop, incarnations[at], pid.is_some()));
             }
             if let Some((toxiproxy, _)) = &env.link {
-                while let Some((window, proxy)) = links.next_close(now_ms) {
-                    link::close(toxiproxy, &proxy, window.kind)?;
-                }
                 let mut live = vec![None; instances];
                 for (i, pid) in live.iter_mut().enumerate() {
                     *pid = workers.live(&format!("w{i}")).map_err(status)?;
                 }
-                while let Some((window, proxy, pid)) =
-                    links.next_open(now_ms, &incarnations, |i| live[i as usize])
-                {
-                    log(Event::Toxic {
-                        instance: format!("w{}", window.instance),
-                        pid,
-                        toxic: window.kind.to_string(),
-                        duration_ms: window.duration_ms,
-                    })?;
-                    link::open(toxiproxy, &proxy, window.kind)?;
-                    fired.push(link::fired(&window, proxy, true));
-                }
+                fired.extend(links.step(toxiproxy, now_ms, &incarnations, &live, log)?);
             }
             std::thread::sleep(POLL);
         };
@@ -814,14 +836,13 @@ impl Run<'_> {
             }
             None => None,
         };
-        let (Some(seed), Some(upstream)) = (self.proxy_seed, linked.or(env.dynamodb)) else {
-            return match linked {
-                Some(addr) => {
-                    let store = through(&env.store_config, addr);
-                    self.spawn_on(workers, env, store, instance, incarnation, tuning)
-                }
-                None => self.spawn(workers, env, instance, incarnation, tuning),
-            };
+        let (seed, upstream) = match route(linked, env.dynamodb, self.proxy_seed) {
+            Route::Direct => return self.spawn(workers, env, instance, incarnation, tuning),
+            Route::Through(addr) => {
+                let store = through(&env.store_config, addr);
+                return self.spawn_on(workers, env, store, instance, incarnation, tuning);
+            }
+            Route::FaultProxy { seed, upstream } => (seed, upstream),
         };
         let script = proxy::ProxyScript::new(seed, &self.schedule, instance, incarnation);
         let pid = Arc::new(OnceLock::new());
@@ -1337,6 +1358,24 @@ mod tests {
     use super::*;
     use crate::journal::{Event, Line};
 
+    /// A run with link windows polls Toxiproxy beside the store and
+    /// SeaweedFS, and one without polls only those two.
+    #[test]
+    #[ignore = "requires Docker"]
+    fn a_linked_run_polls_toxiproxy() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        for (linked, expected) in [
+            (true, &["nats", "seaweedfs", "toxiproxy"][..]),
+            (false, &["nats", "seaweedfs"][..]),
+        ] {
+            let env = setup(&rt, StoreKind::Nats, &Tuning::nats(), Vec::new(), linked).unwrap();
+            let polls: Vec<_> = env.health_targets(&rt).iter().map(Target::poll).collect();
+            let names: Vec<_> = polls.iter().map(|p| p.container.as_str()).collect();
+            assert_eq!(names, expected);
+            assert!(polls.iter().all(|p| p.ok), "{polls:?}");
+        }
+    }
+
     fn stop(at_ms: u64, instance: u32, duration_ms: u64) -> Stop {
         Stop {
             at_ms,
@@ -1420,6 +1459,33 @@ mod tests {
             "cargo xtask fault-test --seed 0x00000000000000ff s"
         );
         assert_eq!(left, ["outcome.json"]);
+    }
+
+    /// A linked worker reaches its store through Toxiproxy, behind its fault
+    /// proxy when the run has a proxy seed.
+    #[test]
+    fn linked_workers_reach_the_store_through_toxiproxy() {
+        let toxiproxy = SocketAddr::from(([127, 0, 0, 1], 21_000));
+        let local = SocketAddr::from(([127, 0, 0, 1], 8_000));
+        assert_eq!(
+            route(Some(toxiproxy), Some(local), Some(7)),
+            Route::FaultProxy {
+                seed: 7,
+                upstream: toxiproxy
+            }
+        );
+        assert_eq!(
+            route(Some(toxiproxy), None, None),
+            Route::Through(toxiproxy)
+        );
+        assert_eq!(
+            route(None, Some(local), Some(7)),
+            Route::FaultProxy {
+                seed: 7,
+                upstream: local
+            }
+        );
+        assert_eq!(route(None, Some(local), None), Route::Direct);
     }
 
     /// A worker's store config reaches either store at the given address,

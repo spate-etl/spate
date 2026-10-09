@@ -175,7 +175,7 @@ title, or comments `Still failing` on the open issue that already has it:
 | `delivery` | any `violation` | `[delivery] The weekly fault run found a delivery violation` |
 | `worker` | any `worker` | `[bug] A weekly fault run worker failed with no delivery violation` |
 | `expectation` | any `expectation` | `[bug] A weekly fault scenario did not meet its own expectation` |
-| `harness` | only `harness`, or no outcome at all | `[bug] The weekly fault run hit an infrastructure failure` |
+| `harness` | only `harness`, or no failing outcome | `[bug] The weekly fault run hit an infrastructure failure` |
 
 `delivery` follows the delivery-correctness form and carries the
 `delivery-correctness` label; the other three follow the bug form. Every issue

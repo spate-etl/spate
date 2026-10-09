@@ -623,9 +623,8 @@ impl<S: CoordinationStore + Clone> CoordinationStore for BrokenFence<S> {
         value: Vec<u8>,
         expected: Revision,
     ) -> Result<CasOutcome, StoreError> {
-        // Boxed, so this layer adds a pointer to the caller's future and not
-        // the inner futures, which overflow the I/O thread's stack in debug
-        // builds.
+        // Each inner future is boxed. Held inline, they overflow the I/O
+        // thread's stack in debug builds.
         if ks != Keyspace::Durable || !self.fence.take(key) {
             return Box::pin(self.inner.update(ks, key, value, expected)).await;
         }
@@ -681,7 +680,7 @@ fn raise_stop() {
 /// Forwards every call to `S`, and stops the process at the write its
 /// [`StopPlan`] names, before that write is sent.
 ///
-/// The stop runs when the `update` future is built, not when it is polled.
+/// The stop runs when the `update` future is built, before anything polls it.
 /// Under the coordinator's per-call timeout, which starts on the first poll,
 /// the resumed write therefore gets a whole `op_timeout`. Before stopping it
 /// appends a `stop` line and arms its [`Fence`], when it has one.

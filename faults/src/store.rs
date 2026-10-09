@@ -1,40 +1,48 @@
-//! The coordination-store wrapper a worker runs under: it journals every
+//! The coordination-store wrappers a worker runs under: one journals every
 //! durable `split.*` write with its reply and every durable `split.*` entry
-//! it reads.
+//! it reads, and one injects an in-process fault at a chosen write.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
 use futures_util::StreamExt as _;
+use serde::{Deserialize, Serialize};
 use spate_coordination::store::{
     CasOutcome, CoordinationStore, Entry, Keyspace, Revision, StoreError, WatchEvent, WatchMode,
     WatchStream,
 };
 use spate_core::metrics::CoordinationMetrics;
 
-use crate::journal::{Event, Journal, Progress, Reply, Source, WriteOp};
+use crate::classify::{Classifier, WriteKind, classify_ephemeral};
+use crate::journal::{AbortPoint, Event, Journal, Progress, Reply, Source, WriteOp};
 
 const SPLIT_PREFIX: &str = "split.";
 
 /// Forwards every call to `S` and journals the durable `split.*` traffic.
 ///
 /// A write's `send` line is appended before the call and its `done` line
-/// after it. A call dropped before it returns, as at an `op_timeout`, still
-/// appends `done: cancelled`; a SIGKILL leaves the `send` without a `done`.
+/// after it; a write dropped before it returns, as at an `op_timeout`, still
+/// appends `done: cancelled`, and a SIGKILL leaves the `send` without a `done`.
+/// A `get` of a split that fails or is dropped before it returns appends
+/// `read_failed`.
+/// Every value journalled as `seen` or landed by a `won` write is also taught
+/// to the classifier.
 #[derive(Clone, Debug)]
 pub struct JournalStore<S> {
     inner: S,
     journal: Arc<Journal>,
+    classifier: Arc<Classifier>,
     calls: Arc<AtomicU64>,
 }
 
 impl<S> JournalStore<S> {
-    /// Wraps `inner`, appending to `journal`.
-    pub fn new(inner: S, journal: Arc<Journal>) -> JournalStore<S> {
+    /// Wraps `inner`, appending to `journal` and teaching `classifier`.
+    pub fn new(inner: S, journal: Arc<Journal>, classifier: Arc<Classifier>) -> JournalStore<S> {
         JournalStore {
             inner,
             journal,
+            classifier,
             calls: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -44,15 +52,19 @@ impl<S> JournalStore<S> {
             return;
         }
         match Progress::parse(&entry.value) {
-            Ok(value) => record(
-                &self.journal,
-                Event::Seen {
-                    key: entry.key.clone(),
-                    rev: entry.revision.0,
-                    value,
-                    from,
-                },
-            ),
+            Ok(value) => {
+                self.classifier
+                    .learn(&entry.key, entry.revision.0, value.clone());
+                record(
+                    &self.journal,
+                    Event::Seen {
+                        key: entry.key.clone(),
+                        rev: entry.revision.0,
+                        value,
+                        from,
+                    },
+                );
+            }
             Err(e) => eprintln!("not journalled: {} at {}: {e}", entry.key, entry.revision.0),
         }
     }
@@ -85,13 +97,15 @@ impl<S> JournalStore<S> {
                 op,
                 key: key.to_owned(),
                 expected,
-                value,
+                value: value.clone(),
             },
         );
         Some(Pending {
             journal: &self.journal,
+            classifier: &self.classifier,
             call,
             key: key.to_owned(),
+            value,
             done: false,
         })
     }
@@ -100,15 +114,20 @@ impl<S> JournalStore<S> {
 /// Appends `done: cancelled` for its call unless [`Pending::finish`] ran.
 struct Pending<'a> {
     journal: &'a Journal,
+    classifier: &'a Classifier,
     call: u64,
     key: String,
+    value: Progress,
     done: bool,
 }
 
 impl Pending<'_> {
     fn finish(mut self, result: &Result<CasOutcome, StoreError>) {
         let reply = match result {
-            Ok(CasOutcome::Won(rev)) => Reply::Won(rev.0),
+            Ok(CasOutcome::Won(rev)) => {
+                self.classifier.learn(&self.key, rev.0, self.value.clone());
+                Reply::Won(rev.0)
+            }
             Ok(CasOutcome::Lost) => Reply::Lost,
             Err(StoreError::Retryable(_)) => Reply::Err("retryable".to_owned()),
             Err(_) => Reply::Err("fatal".to_owned()),
@@ -133,6 +152,28 @@ impl Drop for Pending<'_> {
     fn drop(&mut self) {
         if !self.done {
             self.append(Reply::Cancelled);
+        }
+    }
+}
+
+/// Appends `read_failed` for its key unless the read returned `Ok`.
+struct ReadGuard<'a> {
+    journal: &'a Journal,
+    key: Option<&'a str>,
+    ok: bool,
+}
+
+impl Drop for ReadGuard<'_> {
+    fn drop(&mut self) {
+        if !self.ok
+            && let Some(key) = self.key
+        {
+            record(
+                self.journal,
+                Event::ReadFailed {
+                    key: key.to_owned(),
+                },
+            );
         }
     }
 }
@@ -193,7 +234,14 @@ impl<S: CoordinationStore + Clone> CoordinationStore for JournalStore<S> {
     }
 
     async fn get(&self, ks: Keyspace, key: &str) -> Result<Option<Entry>, StoreError> {
+        let mut guard = ReadGuard {
+            journal: &self.journal,
+            key: (ks == Keyspace::Durable && key.starts_with(SPLIT_PREFIX)).then_some(key),
+            ok: false,
+        };
         let entry = self.inner.get(ks, key).await?;
+        guard.ok = true;
+        drop(guard);
         if ks == Keyspace::Durable
             && let Some(entry) = &entry
         {
@@ -234,6 +282,238 @@ impl<S: CoordinationStore + Clone> CoordinationStore for JournalStore<S> {
             }
         }
         Ok(entries)
+    }
+}
+
+/// What an [`AbortAt`] does at its write.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AbortMode {
+    /// Aborts the process before sending the `n`th write.
+    Before,
+    /// Aborts the process once a write from the `n`th on lands.
+    After,
+    /// Once a write from the `n`th on lands, hands its caller
+    /// [`StoreError::Retryable`] in place of the `Won` reply.
+    ErrAfterLand,
+}
+
+/// An in-process fault at the `n`th write of one kind, counting from 1. An
+/// [`AbortMode::ErrAfterLand`] plan on [`WriteKind::Commit`] also counts a
+/// [`WriteKind::Complete`], so a process whose splits each finish in one
+/// write still reaches it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AbortPlan {
+    /// The kind of write counted.
+    pub kind: WriteKind,
+    /// The write's ordinal among writes of `kind`.
+    pub n: u32,
+    /// What happens there.
+    pub mode: AbortMode,
+}
+
+impl AbortPlan {
+    fn counts(&self, kind: Option<WriteKind>) -> bool {
+        let Some(kind) = kind else {
+            return false;
+        };
+        kind == self.kind
+            || (self.mode == AbortMode::ErrAfterLand
+                && self.kind == WriteKind::Commit
+                && kind == WriteKind::Complete)
+    }
+}
+
+impl std::fmt::Display for AbortPlan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mode = match self.mode {
+            AbortMode::Before => "abort before",
+            AbortMode::After => "abort after",
+            AbortMode::ErrAfterLand => "err_after_land on",
+        };
+        write!(f, "{mode} {:?} {}", self.kind, self.n)
+    }
+}
+
+/// Counts one process's writes of the plan's kind and decides when it fires.
+/// It fires at most once.
+#[derive(Debug)]
+struct Trigger {
+    plan: AbortPlan,
+    count: AtomicU32,
+    fired: AtomicBool,
+}
+
+impl Trigger {
+    fn new(plan: AbortPlan) -> Trigger {
+        Trigger {
+            plan,
+            count: AtomicU32::new(0),
+            fired: AtomicBool::new(false),
+        }
+    }
+
+    /// Counts a write of `kind`, and returns its ordinal when the plan may
+    /// fire on it: at the `n`th for [`AbortMode::Before`], and from the `n`th
+    /// on, until it fires, for the modes that wait for a landed write.
+    fn arm(&self, kind: Option<WriteKind>) -> Option<u32> {
+        if !self.plan.counts(kind) || self.fired.load(Ordering::SeqCst) {
+            return None;
+        }
+        let n = self.count.fetch_add(1, Ordering::SeqCst) + 1;
+        let armed = match self.plan.mode {
+            AbortMode::Before => n == self.plan.n,
+            AbortMode::After | AbortMode::ErrAfterLand => n >= self.plan.n,
+        };
+        armed.then_some(n)
+    }
+
+    /// Marks the plan fired, and returns whether this call did it.
+    fn fire(&self) -> bool {
+        !self.fired.swap(true, Ordering::SeqCst)
+    }
+}
+
+/// Forwards every call to `S` and applies one [`AbortPlan`] to the updates
+/// it classifies through the shared [`Classifier`].
+///
+/// A durable `split.*` update is classified against the value at its expected
+/// revision, and an ephemeral `split.*` update is a [`WriteKind::Renew`]. An
+/// abort appends its `abort` line first and an `ErrAfterLand` its
+/// `err_after_land` line, so it sits outside the [`JournalStore`] whose
+/// classifier it reads.
+#[derive(Clone, Debug)]
+pub struct AbortAt<S> {
+    inner: S,
+    journal: Arc<Journal>,
+    classifier: Arc<Classifier>,
+    trigger: Arc<Trigger>,
+}
+
+impl<S> AbortAt<S> {
+    /// Wraps `inner`, applying `plan`.
+    pub fn new(
+        inner: S,
+        plan: AbortPlan,
+        journal: Arc<Journal>,
+        classifier: Arc<Classifier>,
+    ) -> AbortAt<S> {
+        AbortAt {
+            inner,
+            journal,
+            classifier,
+            trigger: Arc::new(Trigger::new(plan)),
+        }
+    }
+
+    fn kind(&self, ks: Keyspace, key: &str, value: &[u8], expected: Revision) -> Option<WriteKind> {
+        match ks {
+            Keyspace::Durable if key.starts_with(SPLIT_PREFIX) => {
+                let next = Progress::parse(value).ok()?;
+                self.classifier.classify(key, expected.0, &next)
+            }
+            Keyspace::Ephemeral => classify_ephemeral(key),
+            Keyspace::Durable => None,
+        }
+    }
+
+    fn abort(&self, key: &str, n: u32, at: AbortPoint) -> ! {
+        record(
+            &self.journal,
+            Event::Abort {
+                key: key.to_owned(),
+                kind: self.trigger.plan.kind,
+                n,
+                at,
+            },
+        );
+        std::process::abort()
+    }
+}
+
+impl<S: CoordinationStore + Clone> CoordinationStore for AbortAt<S> {
+    fn lease_ttl(&self) -> Duration {
+        self.inner.lease_ttl()
+    }
+
+    fn watch_mode(&self) -> WatchMode {
+        self.inner.watch_mode()
+    }
+
+    fn op_timeout(&self) -> Option<Duration> {
+        self.inner.op_timeout()
+    }
+
+    fn attach_metrics(&self, metrics: &CoordinationMetrics) {
+        self.inner.attach_metrics(metrics);
+    }
+
+    async fn create(
+        &self,
+        ks: Keyspace,
+        key: &str,
+        value: Vec<u8>,
+    ) -> Result<CasOutcome, StoreError> {
+        self.inner.create(ks, key, value).await
+    }
+
+    async fn update(
+        &self,
+        ks: Keyspace,
+        key: &str,
+        value: Vec<u8>,
+        expected: Revision,
+    ) -> Result<CasOutcome, StoreError> {
+        let Some(n) = self.trigger.arm(self.kind(ks, key, &value, expected)) else {
+            return self.inner.update(ks, key, value, expected).await;
+        };
+        if self.trigger.plan.mode == AbortMode::Before && self.trigger.fire() {
+            self.abort(key, n, AbortPoint::Before);
+        }
+        let result = self.inner.update(ks, key, value, expected).await;
+        let Ok(CasOutcome::Won(rev)) = result else {
+            return result;
+        };
+        if !self.trigger.fire() {
+            return result;
+        }
+        match self.trigger.plan.mode {
+            AbortMode::Before => result,
+            AbortMode::After => self.abort(key, n, AbortPoint::After),
+            AbortMode::ErrAfterLand => {
+                record(
+                    &self.journal,
+                    Event::ErrAfterLand {
+                        key: key.to_owned(),
+                        rev: rev.0,
+                    },
+                );
+                Err(StoreError::Retryable(
+                    "injected: the write landed and its reply was lost".to_owned(),
+                ))
+            }
+        }
+    }
+
+    async fn get(&self, ks: Keyspace, key: &str) -> Result<Option<Entry>, StoreError> {
+        self.inner.get(ks, key).await
+    }
+
+    async fn delete(
+        &self,
+        ks: Keyspace,
+        key: &str,
+        expected: Option<Revision>,
+    ) -> Result<CasOutcome, StoreError> {
+        self.inner.delete(ks, key, expected).await
+    }
+
+    async fn watch(&self, ks: Keyspace, prefix: &str) -> Result<WatchStream, StoreError> {
+        self.inner.watch(ks, prefix).await
+    }
+
+    async fn list(&self, ks: Keyspace, prefix: &str) -> Result<Vec<Entry>, StoreError> {
+        self.inner.list(ks, prefix).await
     }
 }
 

@@ -157,6 +157,12 @@ pub enum Event {
         /// The call that returned it.
         from: Source,
     },
+    /// A `get` of a durable `split.*` key returned an error or was dropped
+    /// before it returned.
+    ReadFailed {
+        /// Store key.
+        key: String,
+    },
     /// The process is about to abort on an injected fault.
     Abort {
         /// Store key of the write the abort is tied to.

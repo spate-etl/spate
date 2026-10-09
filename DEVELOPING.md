@@ -122,10 +122,10 @@ When you are not touching the TLS surface, replace it with the features the
 `e2e_examples` stanza in `crates/spate/Cargo.toml` requires.
 
 The fault scenarios in `faults/` run coordinated S3 workers as separate
-processes against SeaweedFS and a coordination store, and judge what each worker
-journalled, and the store's final state, against five delivery properties. The
-`docker` profile's `default-filter` holds them back too, and one command runs
-them:
+processes against SeaweedFS and NATS or DynamoDB Local, and judge what each
+worker journalled, and the store's final state, against five delivery
+properties. The `docker` profile's `default-filter` holds them back too, and one
+command runs them:
 
 ```sh
 cargo xtask fault-test [--seed N] [FILTER]
@@ -133,23 +133,35 @@ cargo xtask fault-test [--seed N] [FILTER]
 
 It prints the seed first, drawing one from the clock when `--seed` is absent,
 and passes it to every scenario. A seed fixes the data set and the fault
-schedule: which worker is killed when, and how long its replacement waits to
-start under the same instance id. It does not fix the interleaving. The
-operating system's scheduling and real time decide which split a worker holds
-when something happens. Each scenario writes a directory under
-`target/fault-runs/` holding every worker's config, journal and stderr, the
-faults the harness injected in `faults.ndjson`, polls of each container in
-turn, a second apart between rounds, in `health.ndjson`, and an
+schedule: which worker is killed when, how long its replacement waits to start
+under the same instance id, which worker aborts before or after which of its
+writes, and which one is handed an error for a write that landed. It does not
+fix the interleaving. The operating system's scheduling and real time decide
+which split a worker holds when something happens. Each scenario writes a
+directory under `target/fault-runs/` holding every worker's config, journal and
+stderr, the faults the harness injected in `faults.ndjson`, polls of each
+container in turn, a second apart between rounds, in `health.ndjson`, and an
 `outcome.json`; a passing scenario keeps only the outcome. An outcome is `pass`,
 `violation` (the oracle found a delivery violation), `worker` (a worker failed
 while every check held), `expectation` (the scenario's own assertion failed) or
 `harness` (setup, a journal write or a final store read failed, or a container
-stopped answering during a failed run with no property 3 or 5 violation). The
-command writes `target/fault-runs/summary.json` and exits 1 on any `violation`,
-`worker` or `expectation` outcome, 3 when only `harness` outcomes failed, or
-nextest failed with no failing outcome, such as a build error or a run the
-oracle could not judge, and 0 otherwise. A failure message carries the command
-that replays its seed and the schedule it applies.
+stopped answering during a failed run with no property 3 or 5 violation). A
+worker handed an error for a landed write must show in its journal that it
+recovered the write or let the split go, or the outcome is `expectation`. A
+retry with no `won` or `lost` reply may have landed as well, and a read of its
+value counts as a read of the landed write. A kill the schedule draws for that
+worker waits until its journal shows the recovery, or one lease from the first
+poll at which the kill is due and the journal holds its `err_after_land` line.
+Every failed or timed-out `get` of a split is journalled, and after a lost claim
+reply the worker may claim the split again only once such a read has failed. A
+worker that aborts on its plan must be replaced under its instance id, or the
+outcome is `expectation`; a run that ends with workers still running at its
+deadline skips this check and is `worker`. The command writes
+`target/fault-runs/summary.json` and exits 1 on any `violation`, `worker` or
+`expectation` outcome, 3 when only `harness` outcomes failed, or nextest failed
+with no failing outcome, such as a build error or a run the oracle could not
+judge, and 0 otherwise. A failure message carries the command that replays its
+seed and the schedule it applies.
 
 **On macOS every freshly linked binary stalls for tens of seconds at 0% CPU on
 its first exec** while Gatekeeper scans it. Across this workspace that alone

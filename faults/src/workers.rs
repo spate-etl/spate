@@ -119,6 +119,24 @@ impl Workers {
         Ok(())
     }
 
+    /// The signal that ended `instance`'s latest process, as of the last
+    /// status read.
+    #[must_use]
+    pub fn signal(&self, instance: &str) -> Option<i32> {
+        self.workers
+            .iter()
+            .rfind(|w| w.instance == instance)
+            .and_then(|w| w.exit)
+            .and_then(|s| s.signal())
+    }
+
+    /// Records `instance`'s latest process as ended by the schedule.
+    pub fn mark_scheduled(&mut self, instance: &str) {
+        if let Some(worker) = self.workers.iter_mut().rfind(|w| w.instance == instance) {
+            worker.scheduled = true;
+        }
+    }
+
     /// Waits up to `deadline` for every worker to exit and returns whether
     /// one was still running at the deadline. It never kills a worker.
     ///

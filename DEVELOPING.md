@@ -134,8 +134,9 @@ cargo xtask fault-test [--seed N] [FILTER]
 It prints the seed first, drawing one from the clock when `--seed` is absent,
 and passes it to every scenario. A seed fixes the data set and the fault
 schedule: which worker is killed when, how long its replacement waits to start
-under the same instance id, which worker aborts before or after which of its
-writes, and which one is handed an error for a write that landed. It does not
+under the same instance id, which worker is stopped with SIGSTOP when and for
+how long, which worker aborts before or after which of its writes, and which
+one is handed an error for a write that landed. It does not
 fix the interleaving. The operating system's scheduling and real time decide
 which split a worker holds when something happens. Each scenario writes a
 directory under `target/fault-runs/` holding every worker's config, journal and
@@ -151,7 +152,8 @@ recovered the write or let the split go, or the outcome is `expectation`. A
 retry with no `won` or `lost` reply may have landed as well, and a read of its
 value counts as a read of the landed write. A kill the schedule draws for that
 worker waits until its journal shows the recovery, or one lease from the first
-poll at which the kill is due and the journal holds its `err_after_land` line.
+poll at which the kill is due and the journal holds its `err_after_land` line,
+and a stop drawn for it is skipped.
 Every failed or timed-out `get` of a split is journalled, and after a lost claim
 reply the worker may claim the split again only once such a read has failed. A
 worker that aborts on its plan must be replaced under its instance id, or the

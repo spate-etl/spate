@@ -1,5 +1,5 @@
 //! The seeded fault schedule a run applies to its worker processes, and the
-//! timeline that applies it on real time.
+//! timeline that applies its kills on real time.
 
 use std::fmt::Write as _;
 
@@ -22,6 +22,17 @@ pub struct Kill {
     pub instance: u32,
     /// How long after the kill the replacement starts, at most one lease.
     pub respawn_after_ms: u64,
+}
+
+/// A SIGSTOP of one instance's live process, and the SIGCONT that ends it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Stop {
+    /// When the stop is due, from the start of the running stage.
+    pub at_ms: u64,
+    /// Instance index, `w<index>`.
+    pub instance: u32,
+    /// How long the process stays stopped, from half a lease to two.
+    pub duration_ms: u64,
 }
 
 /// The instance whose first process stops itself in a stopped-writer run.
@@ -74,6 +85,8 @@ pub struct Schedule {
     pub kills: Vec<Kill>,
     /// In-process faults, at most one per instance.
     pub in_process: Vec<InProcess>,
+    /// External stops in the order drawn.
+    pub stops: Vec<Stop>,
     /// The write at which [`SLEEPER`]'s first process stops itself.
     pub stop_at: Option<StopPlan>,
 }
@@ -83,6 +96,8 @@ impl Schedule {
     /// seconds of the running stage, each with a replacement within `lease_ms`.
     /// Then one instance's first process gets an `ErrAfterLand` plan, and
     /// each other instance's first process an abort before or after a write.
+    /// Last come between one and `instances` stops over the same six seconds,
+    /// each from half a lease to two leases long.
     #[must_use]
     pub fn draw(rng: &mut SplitMix64, instances: u32, lease_ms: u64) -> Schedule {
         let count = rng.in_range(1, u64::from(instances) + 1);
@@ -110,9 +125,17 @@ impl Schedule {
                 respawn_after_ms: rng.in_range(0, lease_ms),
             });
         }
+        let stops = (0..rng.in_range(1, u64::from(instances)))
+            .map(|_| Stop {
+                at_ms: rng.in_range(KILL_FROM_MS, KILL_UNTIL_MS),
+                instance: instance(rng),
+                duration_ms: rng.in_range(lease_ms / 2, 2 * lease_ms),
+            })
+            .collect();
         Schedule {
             kills,
             in_process,
+            stops,
             stop_at: None,
         }
     }
@@ -218,6 +241,13 @@ impl Schedule {
                     writeln!(text, "{at_ms} ms: respawn w{instance}")
                 }
             };
+        }
+        for stop in &self.stops {
+            let _ = writeln!(
+                text,
+                "{} ms: stop w{} for {} ms",
+                stop.at_ms, stop.instance, stop.duration_ms
+            );
         }
         text
     }
@@ -620,6 +650,23 @@ mod tests {
         for incarnation in 2..5 {
             assert_eq!(stopped.stop_for(SLEEPER, incarnation), None);
         }
+    }
+
+    /// Across seeds, a run draws between one stop and one per instance,
+    /// inside the kill window, each from half a lease to two leases long.
+    #[test]
+    fn stops_stay_inside_their_bounds() {
+        let mut counts = std::collections::BTreeSet::new();
+        for seed in 0..200 {
+            let schedule = Schedule::draw(&mut SplitMix64::new(seed), 3, LEASE);
+            counts.insert(schedule.stops.len());
+            for stop in &schedule.stops {
+                assert!((KILL_FROM_MS..=KILL_UNTIL_MS).contains(&stop.at_ms));
+                assert!((LEASE / 2..=2 * LEASE).contains(&stop.duration_ms));
+                assert!(stop.instance < 3);
+            }
+        }
+        assert_eq!(counts.into_iter().collect::<Vec<_>>(), [1, 2, 3]);
     }
 
     /// Across seeds, a stopped-writer run stops at one of the first three

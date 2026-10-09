@@ -28,7 +28,7 @@ use crate::oracle::{
 use crate::outcome::{
     self, Check, Evidence, FaultFired, Kind, Outcome, Scenario, Stage, StopSeen, Violation,
 };
-use crate::schedule::{Action, InProcess, SLEEPER, Schedule, Step, Timeline};
+use crate::schedule::{Action, InProcess, SLEEPER, Schedule, Step, Stop, Timeline};
 use crate::seaweed::Gateway;
 use crate::seed::{self, SplitMix64};
 use crate::store::AbortMode;
@@ -88,7 +88,7 @@ pub struct Spec<'a> {
 pub enum Faults {
     /// Nothing, so a record written twice fails its expectation.
     None,
-    /// The seeded schedule of kills and in-process faults.
+    /// The seeded schedule of kills, stops and in-process faults.
     Schedule,
     /// Two workers. The second, started once the first leads, stops itself
     /// inside a seeded commit and is resumed after a lease, once the first
@@ -437,8 +437,9 @@ impl Run<'_> {
     /// the plan's delay, and a kill due on the `ErrAfterLand` process waits
     /// until its journal shows the lost reply recovered, or one lease from the
     /// first poll at which the kill is due and the journal holds its
-    /// `err_after_land` line. Returns whether one was still running at the
-    /// deadline, and each kill the timeline handed out or left pending.
+    /// `err_after_land` line. A stop due on the `ErrAfterLand` process, on a
+    /// stopped process or on none is skipped. Returns whether one was still
+    /// running at the deadline, and each kill and stop the schedule drew.
     fn drive(
         &self,
         workers: &mut Workers,
@@ -463,6 +464,11 @@ impl Run<'_> {
         }
         let status = |e: std::io::Error| format!("read worker status: {e}");
         let mut timeline = Timeline::new(&self.schedule);
+        let mut stops = self.schedule.stops.clone();
+        stops.sort_by_key(|s| (s.at_ms, s.instance));
+        stops.reverse();
+        // Stopped processes: instance, pid and when each is resumed.
+        let mut resumes: Vec<(u32, u32, u64)> = Vec::new();
         let mut fired = Vec::new();
         // Per instance: its current process's abort was judged, when its
         // `err_after_land` line was first seen, and its held kill was released.
@@ -555,8 +561,43 @@ impl Run<'_> {
                     }
                 }
             }
+            while let Some(&(instance, pid, _)) = resumes.iter().find(|r| r.2 <= now_ms) {
+                resumes.retain(|r| r.1 != pid);
+                let name = format!("w{instance}");
+                if workers.resume(&name, pid).map_err(status)? {
+                    log(Event::Sigcont {
+                        instance: name,
+                        pid,
+                    })?;
+                }
+            }
+            while stops.last().is_some_and(|s| s.at_ms <= now_ms) {
+                let stop = stops.pop().expect("a due stop");
+                let at = stop.instance as usize;
+                let name = format!("w{}", stop.instance);
+                let pid = if stop_allowed(&self.schedule, stop.instance, incarnations[at])
+                    && !resumes.iter().any(|r| r.0 == stop.instance)
+                {
+                    workers.stop(&name, STOP_CONFIRM).map_err(status)?
+                } else {
+                    None
+                };
+                if let Some(pid) = pid {
+                    log(Event::Sigstop {
+                        instance: name.clone(),
+                        pid,
+                        duration_ms: stop.duration_ms,
+                    })?;
+                    resumes.push((stop.instance, pid, now_ms + stop.duration_ms));
+                }
+                fired.push(stop_fired(&stop, incarnations[at], pid.is_some()));
+            }
             std::thread::sleep(POLL);
         };
+        for stop in stops.iter().rev() {
+            let incarnation = incarnations[stop.instance as usize];
+            fired.push(stop_fired(stop, incarnation, false));
+        }
         for kill in timeline.drain_kills() {
             if let Action::Kill { at_ms, instance } = kill {
                 fired.push(FaultFired {
@@ -872,6 +913,22 @@ fn kill_held(schedule: &Schedule, instance: u32, incarnation: u32, released: boo
             .is_some_and(|p| p.plan.mode == AbortMode::ErrAfterLand)
 }
 
+/// Whether an external stop may fall on `instance`'s `incarnation`: never
+/// on the one carrying the `ErrAfterLand` plan.
+fn stop_allowed(schedule: &Schedule, instance: u32, incarnation: u32) -> bool {
+    schedule
+        .plan_for(instance, incarnation)
+        .is_none_or(|p| p.plan.mode != AbortMode::ErrAfterLand)
+}
+
+fn stop_fired(stop: &Stop, incarnation: u32, fired: bool) -> FaultFired {
+    FaultFired {
+        incarnation: format!("w{}-{incarnation}", stop.instance),
+        fault: format!("stop at {} ms for {} ms", stop.at_ms, stop.duration_ms),
+        fired,
+    }
+}
+
 /// The stopped-writer violation when the peer never claimed the stopped
 /// split during the stop.
 fn not_reassigned(stopped: &stopped::Stopped) -> Option<Violation> {
@@ -1156,11 +1213,12 @@ mod tests {
         );
     }
 
-    /// A kill due on the process carrying the `ErrAfterLand` plan waits until
-    /// its hold is released, and its replacement waits one respawn delay from
-    /// then; kills on other processes fall on time.
+    /// No stop falls on the process carrying the `ErrAfterLand` plan, and a
+    /// kill due on it waits until its hold is released, its replacement one
+    /// respawn delay from then; stops and kills on other processes fall on
+    /// time.
     #[test]
-    fn err_after_land_incarnation_is_killed_only_after_its_release() {
+    fn err_after_land_incarnation_is_never_stopped_and_killed_only_after_its_release() {
         use crate::schedule::Kill;
         use crate::store::AbortPlan;
         let lost = InProcess {
@@ -1186,6 +1244,9 @@ mod tests {
         assert!(!kill_held(&schedule, 0, 1, true), "the hold was released");
         assert!(!kill_held(&schedule, 0, 2, false), "a replacement");
         assert!(!kill_held(&schedule, 1, 1, false), "another instance");
+        assert!(!stop_allowed(&schedule, 0, 1));
+        assert!(stop_allowed(&schedule, 0, 2), "a replacement");
+        assert!(stop_allowed(&schedule, 1, 1), "another instance");
 
         let mut timeline = Timeline::new(&schedule);
         let schedule = &schedule;

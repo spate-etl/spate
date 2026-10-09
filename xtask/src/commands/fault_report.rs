@@ -56,6 +56,7 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: FaultTestCommand) -> Out
         features: fs::read_to_string(root.join("faults/Cargo.toml"))
             .map_err(|e| Error::msg(format!("faults/Cargo.toml: {e}")))
             .and_then(|text| features(&text))?,
+        seed: None,
     };
     for route in report(&root.join(summary), &root.join(out_dir), &context)? {
         println!("{}", route.name());
@@ -135,6 +136,10 @@ fn report(summary_path: &Path, out_dir: &Path, context: &Context) -> Result<Vec<
     };
     let runs_root = summary_path.parent().unwrap_or(Path::new("."));
     let routes = routes(summary.as_ref());
+    let context = Context {
+        seed: summary.as_ref().map(|s| s.seed.clone()),
+        ..context.clone()
+    };
     fs::create_dir_all(out_dir).map_err(|e| Error::msg(format!("{}: {e}", out_dir.display())))?;
     for route in &routes {
         let runs = summary
@@ -143,7 +148,7 @@ fn report(summary_path: &Path, out_dir: &Path, context: &Context) -> Result<Vec<
             .filter(|o| o.kind == route.kind())
             .map(|o| RunDir::load(runs_root, o))
             .collect::<Result<Vec<_>, _>>()?;
-        let body = render(*route, context, &runs);
+        let body = render(*route, &context, &runs);
         for (ext, text) in [("md", body.as_str()), ("title", route.title())] {
             let path = out_dir.join(format!("{}.{ext}", route.name()));
             fs::write(&path, text).map_err(|e| Error::msg(format!("{}: {e}", path.display())))?;
@@ -161,6 +166,8 @@ struct Context {
     toolchain: String,
     /// The features `spate-faults` enables on the crates it runs.
     features: String,
+    /// The summary's seed; `None` when the run wrote no `summary.json`.
+    seed: Option<String>,
 }
 
 /// `GITHUB_SHA`, or the checked-out commit off a runner.
@@ -438,8 +445,15 @@ fn render(route: Route, context: &Context, runs: &[RunDir]) -> String {
         Route::Delivery => delivery(context, runs),
         Route::Worker | Route::Expectation | Route::Harness => bug(route, context, runs),
     };
-    let replays: Vec<&str> = runs.iter().map(|r| r.outcome.replay.as_str()).collect();
-    section(&mut body, "Replay", Some("sh"), &replays.join("\n"));
+    let replay = match (runs, &context.seed) {
+        ([], Some(seed)) => format!("cargo xtask fault-test --seed {seed}"),
+        _ => runs
+            .iter()
+            .map(|r| r.outcome.replay.as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+    };
+    section(&mut body, "Replay", Some("sh"), &replay);
     let mut artifacts = String::from(
         "The run's `fault-junit` artifact holds the junit report, and `fault-runs` \
          holds each failed scenario's run directory: worker configs, journals and \
@@ -721,10 +735,19 @@ fn bug(route: Route, context: &Context, runs: &[RunDir]) -> String {
                 }
             }
         }
-        None => what.push_str(
-            "The fault run failed before any scenario wrote an outcome, or wrote no \
-             `summary.json`. The run log has the cause.\n",
-        ),
+        None => match &context.seed {
+            Some(seed) => {
+                let _ = writeln!(
+                    what,
+                    "nextest failed under seed {seed} and no scenario left a failing outcome. \
+                     The run log names the scenarios whose test failed."
+                );
+            }
+            None => what.push_str(
+                "The fault run wrote no `summary.json`. The run log has its seed and the \
+                 cause.\n",
+            ),
+        },
     }
     if route == Route::Harness {
         what.push_str(

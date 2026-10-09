@@ -86,6 +86,7 @@ fn context() -> Context {
         sha: "0123abcd".to_owned(),
         toolchain: "rustc 1.97.0, Linux x86_64".to_owned(),
         features: "spate-s3: testing".to_owned(),
+        seed: None,
     }
 }
 
@@ -377,17 +378,52 @@ fn worker_expectation_and_harness_bodies_follow_the_bug_form() {
     assert_eq!(answer(&worker, "Where").trim(), WHERE_COORDINATION);
 }
 
-/// The harness body for a run with no outcome says so and still renders
-/// every field.
+/// The harness body for a run that wrote no `summary.json` says so, leaves
+/// the seed to the run log and still renders every field.
 #[test]
-fn a_harness_body_without_a_run_renders_every_field() {
+fn a_harness_body_without_a_summary_renders_every_field() {
     let body = render(Route::Harness, &context(), &[]);
     let form = form_fields(&form_file("2-bug.yml"));
     let mut expected: Vec<&str> = form.iter().map(|f| f.label.as_str()).collect();
     expected.extend(["Replay", "Artifacts"]);
     assert_eq!(headings(&body), expected);
-    assert!(answer(&body, "What happened").contains("before any scenario wrote an outcome"));
-    assert!(answer(&body, "What happened").contains("Rerun the job"));
+    let what = answer(&body, "What happened");
+    assert!(what.contains("wrote no `summary.json`"), "{what}");
+    assert!(what.contains("The run log has its seed"), "{what}");
+    assert!(what.contains("Rerun the job"), "{what}");
+    assert_eq!(answer(&body, "Replay").trim(), "_No response_");
+}
+
+/// A harness body for a failed nextest run with no failing outcome names the
+/// summary's seed and replays it.
+#[test]
+fn runless_harness_body_names_the_seed() {
+    let dir = std::env::temp_dir().join(format!("arb-fault-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    let runs = dir.join("runs");
+    let out = dir.join("out");
+    fs::create_dir_all(&runs).unwrap();
+    let mut s = summary(&[Kind::Pass], false);
+    s.seed = "0x1234abcd5678ef00".to_owned();
+    s.exit_code = 3;
+    fs::write(runs.join("summary.json"), serde_json::to_vec(&s).unwrap()).unwrap();
+    let routes = report(&runs.join("summary.json"), &out, &context()).unwrap();
+    let body = fs::read_to_string(out.join("harness.md")).unwrap();
+    fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(routes, [Route::Harness]);
+    let what = answer(&body, "What happened");
+    assert!(
+        what.contains("nextest failed under seed 0x1234abcd5678ef00"),
+        "{what}"
+    );
+    assert!(
+        what.contains("no scenario left a failing outcome"),
+        "{what}"
+    );
+    assert_eq!(
+        answer(&body, "Replay").trim(),
+        "```sh\ncargo xtask fault-test --seed 0x1234abcd5678ef00\n```"
+    );
 }
 
 /// The What broke answer is the option for the lowest-numbered property

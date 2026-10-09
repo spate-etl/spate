@@ -136,7 +136,8 @@ and passes it to every scenario. A seed fixes the data set and the fault
 schedule: which worker is killed when, how long its replacement waits to start
 under the same instance id, which worker is stopped with SIGSTOP when and for
 how long, which worker aborts before or after which of its writes, which one
-is handed an error for a write that landed, and on DynamoDB how each worker's
+is handed an error for a write that landed, when each window on a worker's
+store link is due and how long it lasts, and on DynamoDB how each worker's
 fault proxy answers each of its calls by number. It does not
 fix the interleaving. The operating system's scheduling and real time decide
 which split a worker holds when something happens. Each scenario writes a
@@ -164,6 +165,22 @@ proxy that forwards every call. `faults.ndjson` records each answer but a plain
 forward as a `proxy_fault` line, and the oracle counts every one but a delay as
 a fault of no duration. A run with proxies whose `faults.ndjson` holds no
 `proxy_fault` line is `expectation`.
+In those two scenarios, and in `nats_one_instance` and
+`nats_three_instances`, each worker process reaches the store through a
+Toxiproxy proxy of its own, on a Docker network the run creates for the store
+and Toxiproxy. On DynamoDB the fault proxy forwards to it. The windows on a
+worker's link are latency below the store timeout, which on DynamoDB stays
+within the SDK's read timeout together with the fault proxy's longest delay; a
+heal-near-expiry window that holds what the worker sends for about a lease and
+delivers it on the same connection when it closes; a blackhole that drops both
+directions for about a lease and resets the connection when it closes; a refuse
+window that disables the proxy, so the worker's open connections close and each
+new one is accepted and then closed; and on NATS a `limit_data` window that
+closes each connection once a few kilobytes have reached the worker. A window
+waits while its worker has another window open or no live process, and while
+the worker is the one handed an error for a landed write. `faults.ndjson`
+records each window as a `toxic` line, and the oracle counts it as a fault
+lasting the window. A run that draws windows and opens none is `expectation`.
 `dynamodb_drop_after_land_then_pass_wins` drives one store through the proxy
 against DynamoDB Local: an update whose first reply is dropped must return
 `Won` on the SDK's retry, and one whose every reply is dropped `Retryable`.

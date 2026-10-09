@@ -16,10 +16,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use spate_coordination::store::dynamodb::DynamoDbStore;
 use spate_coordination::store::nats::NatsStore;
 use spate_coordination::store::{CoordinationStore as _, Entry, Keyspace, StoreError};
-use spate_test_support::{DynamoDbFaultProxy, container_image};
+use spate_test_support::{DynamoDbFaultProxy, Toxiproxy, container_image};
 use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::runners::SyncRunner;
-use testcontainers::{Container, GenericImage, ImageExt};
+use testcontainers::{Container, ContainerRequest, GenericImage, ImageExt};
 
 use crate::expect;
 use crate::health::{self, Target};
@@ -66,6 +66,7 @@ const PROBE: Duration = Duration::from_secs(2);
 /// Cap on a stopped worker reporting stopped.
 const STOP_CONFIRM: Duration = Duration::from_secs(5);
 
+mod link;
 mod proxy;
 mod stopped;
 
@@ -135,20 +136,22 @@ pub fn run(spec: &Spec<'_>) -> Outcome {
         Faults::Schedule => Schedule::draw(&mut rng, spec.instances, tuning.lease_ms),
         Faults::StoppedWriter { .. } => Schedule::stopped_writer(&mut rng),
     };
-    eprintln!(
-        "fault-run schedule for {}:\n{}",
-        spec.name,
-        schedule.render()
-    );
     let proxy_seed = (spec.store == StoreKind::DynamoDb && spec.faults == Faults::Schedule)
         .then(|| rng.next_u64());
+    let links = if spec.faults == Faults::Schedule {
+        link::draw(&mut rng, spec.store, spec.instances, &tuning)
+    } else {
+        Vec::new()
+    };
     let run = Run {
         spec,
         seed,
         dir,
         schedule,
         proxy_seed,
+        links,
     };
+    eprintln!("fault-run schedule for {}:\n{}", spec.name, run.render());
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -156,7 +159,7 @@ pub fn run(spec: &Spec<'_>) -> Outcome {
         .expect("harness runtime");
 
     let setup = catch_unwind(AssertUnwindSafe(|| {
-        setup(&rt, spec.store, &tuning, objects)
+        setup(&rt, spec.store, &tuning, objects, !run.links.is_empty())
     }));
     let env = match setup {
         Ok(Ok(env)) => env,
@@ -261,6 +264,7 @@ pub fn run(spec: &Spec<'_>) -> Outcome {
         expectations.extend(unreplaced_aborts(&journals));
     }
     expectations.extend(proxy::unexercised(run.proxy_seed.is_some(), &faults));
+    expectations.extend(link::unexercised(!run.links.is_empty(), &faults));
     let lost_replies = expect::lost_replies(&journals, run.schedule.lost_reply().is_some());
     let (kind, message) = outcome::classify(&Evidence {
         setup_failure: None,
@@ -286,6 +290,9 @@ pub fn run(spec: &Spec<'_>) -> Outcome {
 /// harness's own store handle, which crosses no fault.
 struct Env {
     gateway: Gateway,
+    /// Toxiproxy and the store's address on the run's network, when workers
+    /// reach the store through it.
+    link: Option<(Toxiproxy, String)>,
     store: Container<GenericImage>,
     store_name: &'static str,
     store_config: StoreConfig,
@@ -343,22 +350,32 @@ impl Env {
     }
 }
 
+/// Starts the containers and creates the store. With `linked`, the store
+/// joins a network of the run's own, with Toxiproxy beside it.
 fn setup(
     rt: &tokio::runtime::Runtime,
     kind: StoreKind,
     tuning: &Tuning,
     objects: Vec<(String, Vec<u8>)>,
+    linked: bool,
 ) -> Result<Env, String> {
     let gateway = Gateway::start(BUCKET)?;
     gateway.put_all(rt, objects)?;
     let _runtime = rt.enter();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let network = format!("spate-faults-{}-{nanos}", std::process::id());
+    let on = linked.then(|| (network.as_str(), format!("{network}-store")));
+    let on = on.as_ref().map(|(n, c)| (*n, c.as_str()));
     let (store, store_name, store_config, direct, dynamodb) = match kind {
         StoreKind::Nats => {
             let (image, tag) = container_image(&["--pull", "nats"]);
             let nats = GenericImage::new(image, tag)
                 .with_exposed_port(NATS_CLIENT_PORT.tcp())
                 .with_wait_for(WaitFor::message_on_stderr("Server is ready"))
-                .with_cmd(["-js"])
+                .with_cmd(["-js"]);
+            let nats = joined(nats, on)
                 .start()
                 .map_err(|e| format!("start NATS: {e}"))?;
             let port = nats
@@ -372,7 +389,7 @@ fn setup(
             (nats, "nats", config, direct, None)
         }
         StoreKind::DynamoDb => {
-            let (local, config, direct, addr) = dynamodb_local(tuning)?;
+            let (local, config, direct, addr) = dynamodb_local(tuning, on)?;
             (
                 local,
                 "dynamodb",
@@ -385,8 +402,19 @@ fn setup(
     // The first call creates the NATS buckets or the DynamoDB table with the
     // workers' parameters.
     await_ready(rt, || direct.get(Keyspace::Durable, "plan"))?;
+    let link = match on {
+        Some((network, name)) => {
+            let port = match kind {
+                StoreKind::Nats => NATS_CLIENT_PORT,
+                StoreKind::DynamoDb => DYNAMODB_PORT,
+            };
+            Some((Toxiproxy::start(network)?, format!("{name}:{port}")))
+        }
+        None => None,
+    };
     Ok(Env {
         gateway,
+        link,
         store,
         store_name,
         store_config,
@@ -395,10 +423,23 @@ fn setup(
     })
 }
 
-/// Starts DynamoDB Local, and returns it with the store config workers get,
-/// the harness's own store handle and its address. Needs a runtime context.
+/// `request` on `on`'s network under its container name, when given.
+fn joined(
+    request: ContainerRequest<GenericImage>,
+    on: Option<(&str, &str)>,
+) -> ContainerRequest<GenericImage> {
+    match on {
+        Some((network, name)) => request.with_network(network).with_container_name(name),
+        None => request,
+    }
+}
+
+/// Starts DynamoDB Local, on `on`'s network under its container name when
+/// given, and returns it with the store config workers get, the harness's
+/// own store handle and its address. Needs a runtime context.
 fn dynamodb_local(
     tuning: &Tuning,
+    on: Option<(&str, &str)>,
 ) -> Result<
     (
         Container<GenericImage>,
@@ -412,7 +453,8 @@ fn dynamodb_local(
     let local = GenericImage::new(image, tag)
         .with_exposed_port(DYNAMODB_PORT.tcp())
         .with_wait_for(WaitFor::message_on_stdout("Initializing DynamoDB Local"))
-        .with_cmd(["-jar", "DynamoDBLocal.jar", "-inMemory"])
+        .with_cmd(["-jar", "DynamoDBLocal.jar", "-inMemory"]);
+    let local = joined(local, on)
         .start()
         .map_err(|e| format!("start DynamoDB Local: {e}"))?;
     let port = local
@@ -448,7 +490,7 @@ where
     }
 }
 
-/// `store` with its DynamoDB endpoint at `addr`; a NATS store unchanged.
+/// `store` with its DynamoDB endpoint or NATS server at `addr`.
 fn through(store: &StoreConfig, addr: SocketAddr) -> StoreConfig {
     match store {
         StoreConfig::DynamoDb { table, job, .. } => StoreConfig::DynamoDb {
@@ -456,7 +498,10 @@ fn through(store: &StoreConfig, addr: SocketAddr) -> StoreConfig {
             table: table.clone(),
             job: job.clone(),
         },
-        StoreConfig::Nats { .. } => store.clone(),
+        StoreConfig::Nats { job, .. } => StoreConfig::Nats {
+            server: format!("nats://{addr}"),
+            job: job.clone(),
+        },
     }
 }
 
@@ -486,6 +531,8 @@ struct Run<'a> {
     /// The seed of the DynamoDB proxy scripts, when the run puts a fault
     /// proxy in front of each worker.
     proxy_seed: Option<u64>,
+    /// The Toxiproxy windows on the workers' store links.
+    links: Vec<link::Window>,
 }
 
 impl Run<'_> {
@@ -496,9 +543,10 @@ impl Run<'_> {
     /// until its journal shows the lost reply recovered, or one lease from the
     /// first poll at which the kill is due and the journal holds its
     /// `err_after_land` line. A stop due on the `ErrAfterLand` process, on a
-    /// stopped process or on none is skipped. Returns whether one was still
-    /// running at the deadline, and each kill and stop the schedule drew. A
-    /// proxy fault that could not be journalled fails the run once it ends.
+    /// stopped process or on none is skipped. Link windows open as
+    /// [`link::Links`] releases them. Returns whether one was still running
+    /// at the deadline, and each kill, stop and window the run drew. A proxy
+    /// fault that could not be journalled fails the run once it ends.
     fn drive(
         &self,
         workers: &mut Workers,
@@ -517,6 +565,7 @@ impl Run<'_> {
                 .append(event)
                 .map_err(|e| format!("{}: {e}", faults_path.display()))
         };
+        let mut links = link::Links::new(&self.schedule, &self.links);
         let instances = self.spec.instances as usize;
         let start = Instant::now();
         let until = start + RUN_DEADLINE;
@@ -531,6 +580,7 @@ impl Run<'_> {
                 &mut proxies,
                 &faults,
                 &unjournalled,
+                &mut links,
             )?);
         }
         let status = |e: std::io::Error| format!("read worker status: {e}");
@@ -627,6 +677,7 @@ impl Run<'_> {
                             &mut proxies,
                             &faults,
                             &unjournalled,
+                            &mut links,
                         )?;
                         log(Event::Respawn {
                             instance: process.0.clone(),
@@ -663,8 +714,36 @@ impl Run<'_> {
                 }
                 fired.push(stop_fired(&stop, incarnations[at], pid.is_some()));
             }
+            if let Some((toxiproxy, _)) = &env.link {
+                while let Some((window, proxy)) = links.next_close(now_ms) {
+                    link::close(toxiproxy, &proxy, window.kind)?;
+                }
+                let mut live = vec![None; instances];
+                for (i, pid) in live.iter_mut().enumerate() {
+                    *pid = workers.live(&format!("w{i}")).map_err(status)?;
+                }
+                while let Some((window, proxy, pid)) =
+                    links.next_open(now_ms, &incarnations, |i| live[i as usize])
+                {
+                    log(Event::Toxic {
+                        instance: format!("w{}", window.instance),
+                        pid,
+                        toxic: window.kind.to_string(),
+                        duration_ms: window.duration_ms,
+                    })?;
+                    link::open(toxiproxy, &proxy, window.kind)?;
+                    fired.push(link::fired(&window, proxy, true));
+                }
+            }
             std::thread::sleep(POLL);
         };
+        for window in links.rest() {
+            let proxy = format!(
+                "w{}-{}",
+                window.instance, incarnations[window.instance as usize]
+            );
+            fired.push(link::fired(&window, proxy, false));
+        }
         for stop in stops.rest() {
             let incarnation = incarnations[stop.instance as usize];
             fired.push(stop_fired(&stop, incarnation, false));
@@ -710,10 +789,11 @@ impl Run<'_> {
     }
 
     /// Starts `instance`'s `incarnation` as [`Run::spawn`] does, behind a
-    /// DynamoDB fault proxy of its own when the run has a proxy seed. Each
-    /// answer but `pass` is journalled to `faults` against the process, and
-    /// one that cannot be is answered `pass` with the failure kept in
-    /// `unjournalled`.
+    /// Toxiproxy proxy of its own when the run has link windows, and in front
+    /// of that a DynamoDB fault proxy of its own when the run has a proxy
+    /// seed. Each answer but `pass` is journalled to `faults` against the
+    /// process, and one that cannot be is answered `pass` with the failure
+    /// kept in `unjournalled`.
     #[allow(clippy::too_many_arguments)]
     fn spawn_proxied(
         &self,
@@ -725,9 +805,23 @@ impl Run<'_> {
         proxies: &mut Vec<DynamoDbFaultProxy>,
         faults: &Arc<Journal>,
         unjournalled: &Arc<OnceLock<String>>,
+        links: &mut link::Links<'_>,
     ) -> Result<(String, u32, PathBuf), String> {
-        let (Some(seed), Some(upstream)) = (self.proxy_seed, env.dynamodb) else {
-            return self.spawn(workers, env, instance, incarnation, tuning);
+        let linked = match &env.link {
+            Some((toxiproxy, store)) => {
+                let (name, listen) = links.proxy(instance, incarnation)?;
+                Some(toxiproxy.create_proxy(&name, listen, store)?)
+            }
+            None => None,
+        };
+        let (Some(seed), Some(upstream)) = (self.proxy_seed, linked.or(env.dynamodb)) else {
+            return match linked {
+                Some(addr) => {
+                    let store = through(&env.store_config, addr);
+                    self.spawn_on(workers, env, store, instance, incarnation, tuning)
+                }
+                None => self.spawn(workers, env, instance, incarnation, tuning),
+            };
         };
         let script = proxy::ProxyScript::new(seed, &self.schedule, instance, incarnation);
         let pid = Arc::new(OnceLock::new());
@@ -861,9 +955,14 @@ impl Run<'_> {
             outcome.instances,
             outcome.seed,
             outcome.replay,
-            self.schedule.render(),
+            self.render(),
             self.dir.display()
         );
+    }
+
+    /// The schedule and the link windows, one line each.
+    fn render(&self) -> String {
+        self.schedule.render() + &link::render(&self.links)
     }
 
     /// Removes every file in the run directory but `keep`.
@@ -1301,6 +1400,7 @@ mod tests {
             dir: dir.clone(),
             schedule: Schedule::default(),
             proxy_seed: None,
+            links: Vec::new(),
         };
         let outcome = run.finish(
             Stage::Oracle,
@@ -1320,6 +1420,37 @@ mod tests {
             "cargo xtask fault-test --seed 0x00000000000000ff s"
         );
         assert_eq!(left, ["outcome.json"]);
+    }
+
+    /// A worker's store config reaches either store at the given address,
+    /// keeping its job and table.
+    #[test]
+    fn through_points_either_store_at_the_address() {
+        let addr = SocketAddr::from(([127, 0, 0, 1], 21_000));
+        let nats = StoreConfig::Nats {
+            server: "nats://127.0.0.1:4222".to_owned(),
+            job: JOB.to_owned(),
+        };
+        let dynamodb = StoreConfig::DynamoDb {
+            endpoint: "http://127.0.0.1:8000".to_owned(),
+            table: TABLE.to_owned(),
+            job: JOB.to_owned(),
+        };
+        assert_eq!(
+            through(&nats, addr),
+            StoreConfig::Nats {
+                server: "nats://127.0.0.1:21000".to_owned(),
+                job: JOB.to_owned(),
+            }
+        );
+        assert_eq!(
+            through(&dynamodb, addr),
+            StoreConfig::DynamoDb {
+                endpoint: "http://127.0.0.1:21000".to_owned(),
+                table: TABLE.to_owned(),
+                job: JOB.to_owned(),
+            }
+        );
     }
 
     /// The seed variable is the one `cargo xtask fault-test` sets.

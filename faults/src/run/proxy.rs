@@ -185,6 +185,7 @@ pub fn drop_after_land_then_pass_wins(name: &str) -> Outcome {
         dir,
         schedule: Schedule::default(),
         proxy_seed: None,
+        links: Vec::new(),
     };
     let tuning = Tuning::dynamodb();
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -195,7 +196,7 @@ pub fn drop_after_land_then_pass_wins(name: &str) -> Outcome {
     let retried_attempts = Arc::new(AtomicU32::new(0));
     let setup = catch_unwind(AssertUnwindSafe(|| -> Result<_, String> {
         let _runtime = rt.enter();
-        let (local, config, direct, upstream) = dynamodb_local(&tuning)?;
+        let (local, config, direct, upstream) = dynamodb_local(&tuning, None)?;
         await_ready(&rt, || direct.get(Keyspace::Durable, "plan"))?;
         let attempts = Arc::clone(&retried_attempts);
         let proxy = DynamoDbFaultProxy::start(upstream, move |call| drop_script(call, &attempts))
@@ -358,13 +359,37 @@ mod tests {
     }
 
     /// Across seeds, the process carrying the `ErrAfterLand` plan answers
-    /// every call `pass`, and every other process draws faults.
+    /// every call `pass` and opens no Toxiproxy window, and every other
+    /// process draws faults and opens its windows.
     #[test]
     fn err_after_land_incarnations_draw_no_link_faults() {
+        use super::super::link::{LinkKind, Links, Window};
         for instances in [1, 3] {
             for seed in 0..50 {
                 let schedule = Schedule::draw(&mut SplitMix64::new(seed), instances, LEASE);
                 let lost = schedule.lost_reply().expect("a lost reply is drawn");
+                let windows: Vec<Window> = (0..instances)
+                    .map(|instance| Window {
+                        at_ms: 1_000,
+                        instance,
+                        kind: LinkKind::Blackhole,
+                        duration_ms: 100,
+                    })
+                    .collect();
+                let mut links = Links::new(&schedule, &windows);
+                let mut incarnations = vec![1; instances as usize];
+                let mut opened = Vec::new();
+                while let Some((_, proxy, _)) = links.next_open(1_000, &incarnations, |_| Some(7)) {
+                    opened.push(proxy);
+                }
+                let others: Vec<String> = (0..instances)
+                    .filter(|i| *i != lost)
+                    .map(|i| format!("w{i}-1"))
+                    .collect();
+                assert_eq!(opened, others, "seed {seed}");
+                incarnations[lost as usize] = 2;
+                let replaced = links.next_open(1_000, &incarnations, |_| Some(7));
+                assert_eq!(replaced.map(|o| o.1), Some(format!("w{lost}-2")));
                 for instance in 0..instances {
                     for incarnation in 1..=3 {
                         let script = ProxyScript::new(seed, &schedule, instance, incarnation);

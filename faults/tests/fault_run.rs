@@ -55,15 +55,17 @@ fn nats_no_faults_writes_no_duplicates() {
 /// one lost reply, delivers every record under the five properties and
 /// recovers the landed write. It is also stopped on some seeds: a stop is
 /// skipped while the first process, which carries the lost reply, is live.
+/// Its replacement's store link is slowed, cut or refused in seeded windows.
 #[test]
 #[ignore = "requires Docker"]
 fn nats_one_instance() {
     faulted("nats_one_instance", StoreKind::Nats, 1);
 }
 
-/// Three NATS workers under seeded kills, stops, one lost reply and aborts
-/// before or after a write deliver every record under the five properties,
-/// while two of them land writes as split owners at overlapping times.
+/// Three NATS workers under seeded kills, stops, link windows, one lost reply
+/// and aborts before or after a write deliver every record under the five
+/// properties, while two of them land writes as split owners at overlapping
+/// times.
 #[test]
 #[ignore = "requires Docker"]
 fn nats_three_instances() {
@@ -84,16 +86,17 @@ fn dynamodb_no_faults_writes_no_duplicates() {
 /// one lost reply, delivers every record under the five properties and
 /// recovers the landed write. It is also stopped on some seeds: a stop is
 /// skipped while the first process, which carries the lost reply, is live.
+/// Its replacement's store link is slowed, cut or refused in seeded windows.
 #[test]
 #[ignore = "requires Docker"]
 fn dynamodb_one_instance() {
     faulted("dynamodb_one_instance", StoreKind::DynamoDb, 1);
 }
 
-/// Three DynamoDB workers under seeded kills, stops, one lost reply and
-/// aborts before or after a write deliver every record under the five
-/// properties, while two of them land writes as split owners at overlapping
-/// times.
+/// Three DynamoDB workers under seeded kills, stops, link windows, one lost
+/// reply and aborts before or after a write deliver every record under the
+/// five properties, while two of them land writes as split owners at
+/// overlapping times.
 #[test]
 #[ignore = "requires Docker"]
 fn dynamodb_three_instances() {

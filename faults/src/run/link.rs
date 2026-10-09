@@ -609,6 +609,31 @@ mod tests {
         );
     }
 
+    /// A window due on an instance whose open window closes in the same step
+    /// opens in that step and is reported fired; one still waiting is left for
+    /// [`Links::rest`].
+    #[test]
+    fn a_step_closes_before_it_opens_and_leaves_the_rest() {
+        let windows = [
+            window(1_000, 0, 500),
+            window(1_200, 0, 100),
+            window(1_300, 0, 100),
+        ];
+        let schedule = Schedule::default();
+        let mut links = Links::new(&schedule, &windows);
+        let fake = Fake::default();
+        let (incarnations, live) = ([1], [Some(10)]);
+        links
+            .step(&fake, 1_000, &incarnations, &live, |_| Ok(()))
+            .unwrap();
+        let fired = links.step(&fake, 1_500, &incarnations, &live, |_| Ok(()));
+        assert_eq!(
+            fired,
+            Ok(vec![self::fired(&windows[1], "w0-1".to_owned(), true)])
+        );
+        assert_eq!(links.rest(), [windows[2]]);
+    }
+
     /// Each proxy takes the next listen port, and none is handed out past
     /// the last.
     #[test]

@@ -156,7 +156,8 @@ impl Toxiproxy {
     ///
     /// # Errors
     ///
-    /// Fails when the API does not answer `200` within five seconds.
+    /// Fails when the API does not answer `200`, with connecting, writing and
+    /// reading each timing out after five seconds.
     pub fn probe(&self) -> Result<(), String> {
         match http(self.api, "GET", "/version") {
             Ok((200, _)) => Ok(()),

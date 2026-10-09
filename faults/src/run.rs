@@ -138,17 +138,7 @@ pub fn run(spec: &Spec<'_>) -> Outcome {
     };
     let proxy_seed = (spec.store == StoreKind::DynamoDb && spec.faults == Faults::Schedule)
         .then(|| rng.next_u64());
-    let links = if spec.faults == Faults::Schedule {
-        link::draw(
-            &mut rng,
-            spec.store,
-            spec.instances,
-            schedule.lost_reply(),
-            &tuning,
-        )
-    } else {
-        Vec::new()
-    };
+    let links = link_windows(&mut rng, spec, &schedule, &tuning);
     let run = Run {
         spec,
         seed,
@@ -504,6 +494,27 @@ where
     }
 }
 
+/// The link windows of `spec`'s run. Only a seeded-schedule run draws any, and
+/// with more than one instance none falls on the instance carrying
+/// `schedule`'s lost reply.
+fn link_windows(
+    rng: &mut SplitMix64,
+    spec: &Spec<'_>,
+    schedule: &Schedule,
+    tuning: &Tuning,
+) -> Vec<link::Window> {
+    if spec.faults != Faults::Schedule {
+        return Vec::new();
+    }
+    link::draw(
+        rng,
+        spec.store,
+        spec.instances,
+        schedule.lost_reply(),
+        tuning,
+    )
+}
+
 /// Where a worker process sends its store calls.
 #[derive(Debug, PartialEq, Eq)]
 enum Route {
@@ -523,6 +534,18 @@ fn route(
     match (proxy_seed, linked.or(dynamodb)) {
         (Some(seed), Some(upstream)) => Route::FaultProxy { seed, upstream },
         _ => linked.map_or(Route::Direct, Route::Through),
+    }
+}
+
+impl Route {
+    /// The store config a worker on this route connects with; `None` for a
+    /// fault proxy, whose address is known once it starts.
+    fn store(&self, store: &StoreConfig) -> Option<StoreConfig> {
+        match self {
+            Route::Direct => Some(store.clone()),
+            Route::Through(addr) => Some(through(store, *addr)),
+            Route::FaultProxy { .. } => None,
+        }
     }
 }
 
@@ -836,13 +859,12 @@ impl Run<'_> {
             }
             None => None,
         };
-        let (seed, upstream) = match route(linked, env.dynamodb, self.proxy_seed) {
-            Route::Direct => return self.spawn(workers, env, instance, incarnation, tuning),
-            Route::Through(addr) => {
-                let store = through(&env.store_config, addr);
-                return self.spawn_on(workers, env, store, instance, incarnation, tuning);
-            }
-            Route::FaultProxy { seed, upstream } => (seed, upstream),
+        let route = route(linked, env.dynamodb, self.proxy_seed);
+        let Route::FaultProxy { seed, upstream } = route else {
+            let store = route
+                .store(&env.store_config)
+                .expect("a route without a fault proxy");
+            return self.spawn_on(workers, env, store, instance, incarnation, tuning);
         };
         let script = proxy::ProxyScript::new(seed, &self.schedule, instance, incarnation);
         let pid = Arc::new(OnceLock::new());
@@ -1404,6 +1426,31 @@ mod tests {
         }
     }
 
+    /// A three-instance run draws no window on the instance carrying its
+    /// lost reply.
+    #[test]
+    fn a_run_draws_no_window_on_its_lost_reply_instance() {
+        let tuning = Tuning::nats();
+        let spec = Spec {
+            name: "nats_three_instances",
+            store: StoreKind::Nats,
+            instances: 3,
+            worker: Path::new("worker"),
+            sink_delay_ms: 0,
+            faults: Faults::Schedule,
+        };
+        for seed in 0..100 {
+            let mut rng = SplitMix64::new(seed);
+            let schedule = Schedule::draw(&mut rng, spec.instances, tuning.lease_ms);
+            let lost = schedule.lost_reply();
+            let windows = link_windows(&mut rng, &spec, &schedule, &tuning);
+            assert!(
+                windows.iter().all(|w| Some(w.instance) != lost),
+                "seed {seed}: lost {lost:?}, {windows:?}"
+            );
+        }
+    }
+
     /// For several seeds, the first object lies below 1 MiB and the second above it.
     #[test]
     fn data_set_spans_one_mib_across_seeds() {
@@ -1486,6 +1533,27 @@ mod tests {
             }
         );
         assert_eq!(route(None, Some(local), None), Route::Direct);
+    }
+
+    /// A worker routed through Toxiproxy connects to Toxiproxy's address, and
+    /// one routed directly keeps the store's.
+    #[test]
+    fn a_routed_worker_connects_to_its_route() {
+        let toxiproxy = SocketAddr::from(([127, 0, 0, 1], 21_000));
+        let nats = StoreConfig::Nats {
+            server: "nats://127.0.0.1:4222".to_owned(),
+            job: JOB.to_owned(),
+        };
+        assert_eq!(
+            Route::Through(toxiproxy).store(&nats),
+            Some(through(&nats, toxiproxy))
+        );
+        assert_eq!(Route::Direct.store(&nats), Some(nats.clone()));
+        let proxied = Route::FaultProxy {
+            seed: 7,
+            upstream: toxiproxy,
+        };
+        assert_eq!(proxied.store(&nats), None);
     }
 
     /// A worker's store config reaches either store at the given address,

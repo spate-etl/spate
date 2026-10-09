@@ -237,7 +237,7 @@ pub enum Event {
         instance: String,
         /// That instance's pid.
         pid: u32,
-        /// The toxic, as Toxiproxy names it.
+        /// The window's kind, such as `blackhole` or `latency(120ms)`.
         toxic: String,
         /// Length of the window.
         duration_ms: u64,

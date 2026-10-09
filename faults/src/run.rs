@@ -383,7 +383,8 @@ impl Run<'_> {
     /// worker has exited with no replacement due, or [`RUN_DEADLINE`] from
     /// their start passes. A worker that aborts on its plan is replaced after
     /// the plan's delay, and a kill due on the `ErrAfterLand` process waits
-    /// until its journal shows the lost reply recovered, or one lease past its
+    /// until its journal shows the lost reply recovered, or one lease from the
+    /// first poll at which the kill is due and the journal holds its
     /// `err_after_land` line. Returns whether one was still running at the
     /// deadline, and each kill the timeline handed out or left pending.
     fn drive(

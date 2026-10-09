@@ -150,7 +150,8 @@ worker handed an error for a landed write must show in its journal that it
 recovered the write or let the split go, or the outcome is `expectation`. A
 retry with no `won` or `lost` reply may have landed as well, and a read of its
 value counts as a read of the landed write. A kill the schedule draws for that
-worker waits until its journal shows the recovery, or one lease after the error.
+worker waits until its journal shows the recovery, or one lease from the first
+poll at which the kill is due and the journal holds its `err_after_land` line.
 Every failed or timed-out `get` of a split is journalled, and after a lost claim
 reply the worker may claim the split again only once such a read has failed. A
 worker that aborts on its plan must be replaced under its instance id, or the

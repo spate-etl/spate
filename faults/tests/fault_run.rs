@@ -51,9 +51,10 @@ fn nats_no_faults_writes_no_duplicates() {
     fault_free("nats_no_faults_writes_no_duplicates", StoreKind::Nats);
 }
 
-/// One NATS worker, killed, stopped and replaced on the seeded schedule and
-/// handed one lost reply, delivers every record under the five properties
-/// and recovers the landed write.
+/// One NATS worker, killed and replaced on the seeded schedule and handed
+/// one lost reply, delivers every record under the five properties and
+/// recovers the landed write. It is also stopped on some seeds: a stop is
+/// skipped while the first process, which carries the lost reply, is live.
 #[test]
 #[ignore = "requires Docker"]
 fn nats_one_instance() {
@@ -79,9 +80,10 @@ fn dynamodb_no_faults_writes_no_duplicates() {
     );
 }
 
-/// One DynamoDB worker, killed, stopped and replaced on the seeded schedule
-/// and handed one lost reply, delivers every record under the five properties
-/// and recovers the landed write.
+/// One DynamoDB worker, killed and replaced on the seeded schedule and handed
+/// one lost reply, delivers every record under the five properties and
+/// recovers the landed write. It is also stopped on some seeds: a stop is
+/// skipped while the first process, which carries the lost reply, is live.
 #[test]
 #[ignore = "requires Docker"]
 fn dynamodb_one_instance() {

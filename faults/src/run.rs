@@ -496,7 +496,8 @@ impl Run<'_> {
     /// first poll at which the kill is due and the journal holds its
     /// `err_after_land` line. A stop due on the `ErrAfterLand` process, on a
     /// stopped process or on none is skipped. Returns whether one was still
-    /// running at the deadline, and each kill and stop the schedule drew.
+    /// running at the deadline, and each kill and stop the schedule drew. A
+    /// proxy fault that could not be journalled fails the run once it ends.
     fn drive(
         &self,
         workers: &mut Workers,
@@ -509,6 +510,7 @@ impl Run<'_> {
             Journal::open(faults_path).map_err(|e| format!("{}: {e}", faults_path.display()))?,
         );
         let mut proxies = Vec::new();
+        let unjournalled = Arc::new(OnceLock::new());
         let log = |event| {
             faults
                 .append(event)
@@ -527,6 +529,7 @@ impl Run<'_> {
                 tuning,
                 &mut proxies,
                 &faults,
+                &unjournalled,
             )?);
         }
         let status = |e: std::io::Error| format!("read worker status: {e}");
@@ -622,6 +625,7 @@ impl Run<'_> {
                             tuning,
                             &mut proxies,
                             &faults,
+                            &unjournalled,
                         )?;
                         log(Event::Respawn {
                             instance: process.0.clone(),
@@ -673,6 +677,9 @@ impl Run<'_> {
                 });
             }
         }
+        if let Some(failure) = unjournalled.get() {
+            return Err(failure.clone());
+        }
         Ok((timed_out, fired))
     }
 
@@ -703,7 +710,9 @@ impl Run<'_> {
 
     /// Starts `instance`'s `incarnation` as [`Run::spawn`] does, behind a
     /// DynamoDB fault proxy of its own when the run has a proxy seed. Each
-    /// answer but `pass` is journalled to `faults` against the process.
+    /// answer but `pass` is journalled to `faults` against the process, and
+    /// one that cannot be is answered `pass` with the failure kept in
+    /// `unjournalled`.
     #[allow(clippy::too_many_arguments)]
     fn spawn_proxied(
         &self,
@@ -714,17 +723,20 @@ impl Run<'_> {
         tuning: &Tuning,
         proxies: &mut Vec<DynamoDbFaultProxy>,
         faults: &Arc<Journal>,
+        unjournalled: &Arc<OnceLock<String>>,
     ) -> Result<(String, u32, PathBuf), String> {
         let (Some(seed), Some(upstream)) = (self.proxy_seed, env.dynamodb) else {
             return self.spawn(workers, env, instance, incarnation, tuning);
         };
         let script = proxy::ProxyScript::new(seed, &self.schedule, instance, incarnation);
         let pid = Arc::new(OnceLock::new());
+        let faults = Arc::clone(faults);
         let answer = proxy::logged(
             script,
             format!("w{instance}"),
             Arc::clone(&pid),
-            Arc::clone(faults),
+            move |event| faults.append(event),
+            Arc::clone(unjournalled),
         );
         let proxy = DynamoDbFaultProxy::start(upstream, answer)
             .map_err(|e| format!("start the fault proxy for w{instance}: {e}"))?;

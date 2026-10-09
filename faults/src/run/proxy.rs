@@ -2,6 +2,7 @@
 //! and the scenario that drives a DynamoDB store through dropped replies.
 
 use std::collections::BTreeMap;
+use std::io;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -17,7 +18,7 @@ use super::{
     Faults, Run, STORE_CALL, Spec, await_ready, dynamodb_local, panic_text, run_root, run_seed,
     through,
 };
-use crate::journal::{Event, Journal, Line};
+use crate::journal::{Event, Line};
 use crate::oracle::StoreKind;
 use crate::outcome::{self, Evidence, FaultFired, LostReplies, Outcome, Scenario, Stage};
 use crate::schedule::Schedule;
@@ -89,28 +90,35 @@ pub(super) fn link_faults(schedule: &Schedule, instance: u32, incarnation: u32) 
         .is_none_or(|p| p.plan.mode != AbortMode::ErrAfterLand)
 }
 
-/// `script` with each answer other than `pass` appended to `faults` as a
-/// `proxy_fault` line against `instance` and the pid `pid` will hold.
+/// `script` with each answer other than `pass` handed to `append` as a
+/// `proxy_fault` event against `instance` and the pid `pid` will hold. A call
+/// whose event `append` fails to write is answered `pass`, and the first such
+/// failure is kept in `failed`.
 pub(super) fn logged(
     script: ProxyScript,
     instance: String,
     pid: Arc<OnceLock<u32>>,
-    faults: Arc<Journal>,
+    append: impl Fn(Event) -> io::Result<()> + Send + Sync + 'static,
+    failed: Arc<OnceLock<String>>,
 ) -> impl Fn(&Call) -> Fault + Send + Sync + 'static {
     move |call| {
         let fault = script.decide(call);
-        if fault != Fault::Pass {
-            let event = Event::ProxyFault {
-                instance: instance.clone(),
-                pid: *pid.wait(),
-                fault: fault.to_string(),
-                key: call.key.as_ref().map(|(_, sk)| sk.clone()),
-            };
-            if let Err(e) = faults.append(event) {
-                eprintln!("fault-run: a proxy fault was not journalled: {e}");
+        if fault == Fault::Pass {
+            return fault;
+        }
+        let event = Event::ProxyFault {
+            instance: instance.clone(),
+            pid: *pid.wait(),
+            fault: fault.to_string(),
+            key: call.key.as_ref().map(|(_, sk)| sk.clone()),
+        };
+        match append(event) {
+            Ok(()) => fault,
+            Err(e) => {
+                let _ = failed.set(format!("a {fault} proxy fault was not journalled: {e}"));
+                Fault::Pass
             }
         }
-        fault
     }
 }
 
@@ -304,7 +312,7 @@ fn judge(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::journal::Event;
+    use crate::journal::{Event, Journal};
 
     const LEASE: u64 = 3_000;
 
@@ -408,7 +416,14 @@ mod tests {
         let pid = Arc::new(OnceLock::new());
         pid.set(42).unwrap();
         let script = ProxyScript::new(3, &Schedule::default(), 1, 2);
-        let answer = logged(script.clone(), "w1".to_owned(), pid, journal);
+        let failed = Arc::new(OnceLock::new());
+        let answer = logged(
+            script.clone(),
+            "w1".to_owned(),
+            pid,
+            move |event| journal.append(event),
+            Arc::clone(&failed),
+        );
         let calls: Vec<Call> = (0..300).map(|seq| call(seq, true)).collect();
         let answers: Vec<Fault> = calls.iter().map(&answer).collect();
         let lines = crate::journal::read(&path).unwrap();
@@ -437,6 +452,32 @@ mod tests {
             .collect();
         assert!(!expected.is_empty());
         assert_eq!(logged, expected);
+        assert_eq!(failed.get(), None);
+    }
+
+    /// A fault whose `proxy_fault` line cannot be written is answered `pass`,
+    /// and the failure is kept for the run to report.
+    #[test]
+    fn an_unjournalled_proxy_fault_is_not_applied() {
+        let pid = Arc::new(OnceLock::new());
+        pid.set(42).unwrap();
+        let failed = Arc::new(OnceLock::new());
+        let script = ProxyScript::new(3, &Schedule::default(), 1, 2);
+        let answer = logged(
+            script.clone(),
+            "w1".to_owned(),
+            pid,
+            |_| Err(io::Error::other("disk full")),
+            Arc::clone(&failed),
+        );
+        let calls: Vec<Call> = (0..300).map(|seq| call(seq, true)).collect();
+        assert!(calls.iter().any(|c| script.decide(c) != Fault::Pass));
+        assert!(calls.iter().all(|c| answer(c) == Fault::Pass));
+        let failure = failed.get().expect("the failure is kept");
+        assert!(
+            failure.ends_with("was not journalled: disk full"),
+            "{failure}"
+        );
     }
 
     /// Fired proxy faults are counted per process and kind, whatever their

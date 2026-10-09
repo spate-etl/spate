@@ -28,8 +28,9 @@ impl<S: CoordinationStore + Clone> Task<S> {
             Command::Commit {
                 split,
                 progress,
+                epoch,
                 reply,
-            } => (self.commit(&split, &progress).await, reply),
+            } => (self.commit(&split, &progress, epoch).await, reply),
             Command::Fail {
                 split,
                 epoch,
@@ -87,10 +88,13 @@ impl<S: CoordinationStore + Clone> Task<S> {
     /// quarantining failure report read back here counts as another writer's
     /// record. A read older than the write that won is `Retryable`, a failed
     /// read keeps its store error's class, and either keeps the split held.
+    /// A commit stamped with any epoch other than the owned one is `Fenced`
+    /// before any write, with no `Lost`, and the current tenancy stays held.
     async fn commit(
         &mut self,
         split: &SplitId,
         progress: &SplitProgress,
+        epoch: Option<LeaseEpoch>,
     ) -> Result<(), CoordinationError> {
         let id = split.as_str();
         if !self.owned.contains_key(id) {
@@ -105,6 +109,12 @@ impl<S: CoordinationStore + Clone> Task<S> {
             .expect("owned splits are in the view")
             .progress
             .epoch;
+        if epoch != Some(LeaseEpoch(owned_epoch)) {
+            return Err(CoordinationError::new(
+                CoordinationErrorKind::Fenced,
+                format!("split {split} is held under another tenancy; nothing was written"),
+            ));
+        }
         let key = records::split_key_str(id);
         loop {
             let state = self.splits.get(id).expect("owned splits are in the view");

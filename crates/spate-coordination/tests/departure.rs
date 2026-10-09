@@ -4230,10 +4230,12 @@ fn a_quarantining_failure_report_cut_short_by_the_stop_fences_the_final_commit()
 }
 
 /// A failure report cut short by the stop that lands afterwards, with attempts
-/// left, lets this worker claim the split again; the final commit then stores
-/// the old tenancy's watermark on the new claim.
+/// left, lets this worker claim the split again; a final commit made before the
+/// new claim is polled is `Fenced` and writes nothing, as is one made with no
+/// tenancy on record, and one made after the claim is polled lands. Regression
+/// for #1014.
 #[test]
-fn a_split_reclaimed_after_a_cut_short_failure_report_takes_the_final_commit() {
+fn a_final_commit_after_a_cut_short_failure_report_and_a_claim_again_is_fenced() {
     let rt = runtime();
     let store = FaultStore::new(STOP_LEASE);
     let (mut a, flag) = stopping_worker(&rt, &store);
@@ -4248,12 +4250,116 @@ fn a_split_reclaimed_after_a_cut_short_failure_report_takes_the_final_commit() {
         let record = store.record(&rt, "split.c0");
         record["owner"] == "worker-a" && record["epoch"].as_u64() > Some(epoch.0)
     });
+    let claimed = store.record(&rt, "split.c0");
+    let results = a.commit_final(&[(support::split_id("c0"), SplitProgress::new(5, vec![]))]);
+
+    assert!(
+        matches!(&results[..], [Err(e)] if e.kind == CoordinationErrorKind::Fenced),
+        "{results:?}"
+    );
+    let record = store.record(&rt, "split.c0");
+    assert_eq!(record["watermark"], claimed["watermark"], "{record}");
+    assert_eq!(record["owner"], "worker-a", "{record}");
+    assert_eq!(record["epoch"], claimed["epoch"], "{record}");
+    assert_eq!(record["attempts"], attempts + 1, "{record}");
+
+    let updates = store.updates(Keyspace::Durable, "split.c0");
+    let results = a.commit_final(&[(support::split_id("c0"), SplitProgress::new(5, vec![]))]);
+    assert!(
+        matches!(&results[..], [Err(e)] if e.kind == CoordinationErrorKind::Fenced),
+        "{results:?}"
+    );
+    assert_eq!(store.updates(Keyspace::Durable, "split.c0"), updates);
+
+    let mut events = Vec::new();
+    spate_test::wait_until(
+        support::DEADLINE,
+        "the new claim of c0 to be polled",
+        || {
+            events.extend(a.poll().expect("poll"));
+            events.iter().any(|e| {
+                matches!(e, CoordinationEvent::Gained { split, epoch: e, .. }
+                if split.id.as_str() == "c0" && e.0 > epoch.0)
+            })
+        },
+    );
+    let results = a.commit_final(&[(support::split_id("c0"), SplitProgress::new(5, vec![]))]);
+    assert!(results.iter().all(Result::is_ok), "{results:?}");
+    assert_eq!(store.record(&rt, "split.c0")["watermark"], 5);
+}
+
+/// A claim again after a failure report cut short by the stop, polled before
+/// the final commit with no `Lost` between, moves the commit to the new tenancy
+/// and the commit lands.
+#[test]
+fn a_final_commit_after_a_claim_again_is_polled_lands() {
+    let rt = runtime();
+    let store = FaultStore::new(STOP_LEASE);
+    let (mut a, flag) = stopping_worker(&rt, &store);
+    let epoch = store.epoch(&rt, "split.c0");
+    let release = store.hold("split.c0", &flag);
+
+    let r = a.fail(&support::split_id("c0"), epoch, "poison");
+    assert!(is_stopping(&r, "this command may still land"), "{r:?}");
+    release.notify_one();
+    let mut events = Vec::new();
+    spate_test::wait_until(
+        support::DEADLINE,
+        "the new claim of c0 to be polled",
+        || {
+            events.extend(a.poll().expect("poll"));
+            events.iter().any(|e| {
+                matches!(e, CoordinationEvent::Gained { split, epoch: e, .. }
+                if split.id.as_str() == "c0" && e.0 > epoch.0)
+            })
+        },
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, CoordinationEvent::Lost { split } if split.as_str() == "c0")),
+        "{events:?}"
+    );
     let results = a.commit_final(&[(support::split_id("c0"), SplitProgress::new(5, vec![]))]);
 
     assert!(results.iter().all(Result::is_ok), "{results:?}");
-    let record = store.record(&rt, "split.c0");
-    assert_eq!(record["watermark"], 5, "{record}");
-    assert_eq!(record["attempts"], attempts + 1, "{record}");
+    assert_eq!(store.record(&rt, "split.c0")["watermark"], 5);
+}
+
+/// A final commit batch carries each split's own tenancy: with `c0` claimed
+/// again at a later epoch and `c1` still at its first, both commits land.
+#[test]
+fn a_final_commit_batch_stamps_each_split_with_its_own_tenancy() {
+    let rt = runtime();
+    let store = FaultStore::new(STOP_LEASE);
+    let (mut a, flag) = stopping_worker(&rt, &store);
+    let epoch = store.epoch(&rt, "split.c0");
+    let release = store.hold("split.c0", &flag);
+
+    let r = a.fail(&support::split_id("c0"), epoch, "poison");
+    assert!(is_stopping(&r, "this command may still land"), "{r:?}");
+    release.notify_one();
+    let mut events = Vec::new();
+    spate_test::wait_until(
+        support::DEADLINE,
+        "the new claim of c0 to be polled",
+        || {
+            events.extend(a.poll().expect("poll"));
+            events.iter().any(|e| {
+                matches!(e, CoordinationEvent::Gained { split, epoch: e, .. }
+                if split.id.as_str() == "c0" && e.0 > epoch.0)
+            })
+        },
+    );
+    assert_ne!(store.epoch(&rt, "split.c1"), store.epoch(&rt, "split.c0"));
+    let results = a.commit_final(&[
+        (support::split_id("c1"), SplitProgress::new(3, vec![])),
+        (support::split_id("c0"), SplitProgress::new(5, vec![])),
+    ]);
+
+    assert!(results.iter().all(Result::is_ok), "{results:?}");
+    assert_eq!(store.record(&rt, "split.c1")["watermark"], 3);
+    assert_eq!(store.record(&rt, "split.c0")["watermark"], 5);
 }
 
 /// A drain release made while the stop is set sends nothing: the split keeps

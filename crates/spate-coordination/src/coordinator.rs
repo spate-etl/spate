@@ -58,6 +58,12 @@ fn stopping_error(outcome: &str) -> CoordinationError {
 /// Split, role and membership hand-back is best-effort; errors or deferred
 /// commands can prevent completion, and success does not guarantee store
 /// deletion.
+///
+/// A commit belongs to the tenancy of the latest `Gained` that `poll` returned
+/// for the split. Once that tenancy has ended, the commit returns `Fenced` and
+/// writes nothing, even if this worker has claimed the split again. The
+/// rejection emits no `Lost` and leaves the current tenancy held. A `Lost` that
+/// ended the earlier tenancy can still arrive on a later `poll`.
 pub struct StoreCoordinator<S: CoordinationStore + Clone> {
     store: S,
     config: CoordinationConfig,
@@ -83,7 +89,8 @@ struct Running {
     /// Splits observed Gained (with their tenancy epoch) minus
     /// Lost/completed. This is the release set the direct teardown
     /// fallback works from. The epoch pins the tenancy: a direct release must
-    /// never clear a record a same-named restart has since reclaimed.
+    /// never clear a record a same-named restart has since reclaimed. It is
+    /// also the tenancy each commit is stamped with.
     held: BTreeMap<String, u64>,
 }
 
@@ -219,6 +226,15 @@ impl<S: CoordinationStore + Clone> StoreCoordinator<S> {
     fn fail_from(&mut self, kind: CoordinationErrorKind, reason: &str) -> CoordinationError {
         self.failed = Some((kind, reason.to_string()));
         CoordinationError::new(kind, reason.to_string())
+    }
+
+    /// The tenancy a commit for `split` is stamped with.
+    fn held_epoch(&self, split: &SplitId) -> Option<LeaseEpoch> {
+        self.running
+            .as_ref()
+            .and_then(|r| r.held.get(split.as_str()))
+            .copied()
+            .map(LeaseEpoch)
     }
 
     /// Drops `split` from the held set when `result` ends its tenancy.
@@ -546,9 +562,11 @@ impl<S: CoordinationStore + Clone> SplitCoordinator for StoreCoordinator<S> {
         split: &SplitId,
         progress: &SplitProgress,
     ) -> Result<(), CoordinationError> {
+        let epoch = self.held_epoch(split);
         let result = self.command(|reply| Command::Commit {
             split: split.clone(),
             progress: progress.clone(),
+            epoch,
             reply,
         });
         self.note_commit(split, progress, &result);
@@ -576,10 +594,12 @@ impl<S: CoordinationStore + Clone> SplitCoordinator for StoreCoordinator<S> {
                 )));
                 continue;
             }
+            let epoch = self.held_epoch(split);
             let result = self
                 .send_until(deadline, budget, |reply| Command::Commit {
                     split: split.clone(),
                     progress: progress.clone(),
+                    epoch,
                     reply,
                 })
                 .and_then(|reply| reply);
@@ -827,6 +847,7 @@ mod tests {
             tx.try_send(Command::Commit {
                 split: split.clone(),
                 progress: SplitProgress::new(1, vec![]),
+                epoch: None,
                 reply,
             })
             .ok()
@@ -856,5 +877,174 @@ mod tests {
         c.running = None;
         assert_eq!(e.kind, CoordinationErrorKind::Retryable);
         assert_eq!(e.reason, "the run is stopping; nothing was sent");
+    }
+
+    const STALE_LEASE: Duration = Duration::from_millis(1500);
+    const STALE_FP: &str = "stale-commit:v1";
+
+    struct OneFinal;
+
+    impl SplitPlanner for OneFinal {
+        fn fingerprint(&self) -> String {
+            STALE_FP.into()
+        }
+
+        fn plan(
+            &mut self,
+            _: spate_core::coordination::PlanContext<'_>,
+        ) -> Result<spate_core::coordination::SplitPlan, CoordinationError> {
+            use spate_core::coordination::{PlanFinality, PlannedSplit, SplitPlan, SplitSpec};
+            let spec = SplitSpec::new(SplitId::new("r0").unwrap(), b"descriptor:r0".to_vec());
+            Ok(SplitPlan::new(
+                vec![PlannedSplit::new(spec)],
+                PlanFinality::Final,
+            ))
+        }
+    }
+
+    fn poll_until(
+        c: &mut StoreCoordinator<MemoryStore>,
+        clock: &spate_core::clock::tokio::TestClock,
+        seen: &mut Vec<CoordinationEvent>,
+        what: &str,
+        done: impl Fn(&[CoordinationEvent]) -> bool,
+    ) {
+        spate_test::wait_until(Duration::from_secs(20), what, || {
+            if done(seen) {
+                return true;
+            }
+            clock.advance(STALE_LEASE / 12);
+            seen.extend(c.poll().expect("poll"));
+            done(seen)
+        });
+    }
+
+    fn gained_epoch(seen: &[CoordinationEvent]) -> Option<u64> {
+        seen.iter().rev().find_map(|e| match e {
+            CoordinationEvent::Gained { split, epoch, .. } if split.id.as_str() == "r0" => {
+                Some(epoch.0)
+            }
+            _ => None,
+        })
+    }
+
+    /// A commit queued under a tenancy that ended writes nothing and emits no
+    /// `Lost` when the task serves it after claiming the split again, and the new
+    /// tenancy's commits land. Regression for #1014.
+    #[test]
+    fn a_commit_queued_under_an_ended_tenancy_is_fenced_in_the_next() {
+        use spate_core::clock::tokio::TestClock;
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let clock = TestClock::frozen();
+        let store = MemoryStore::with_clock(STALE_LEASE, clock.clone());
+        let config = CoordinationConfig {
+            lease_duration: STALE_LEASE,
+            op_timeout: STALE_LEASE * 2 / 15,
+            instance_id: Some("solo".into()),
+            replan_interval: STALE_LEASE,
+            reconcile_interval: STALE_LEASE / 5,
+            drain_deadline: STALE_LEASE / 2,
+            rebalance_delay: Duration::ZERO,
+            ..CoordinationConfig::default()
+        };
+        let mut c = StoreCoordinator::with_clock(
+            store.clone(),
+            config,
+            rt.handle().clone(),
+            None,
+            clock.clone(),
+        )
+        .unwrap();
+        c.start(Box::new(OneFinal)).unwrap();
+        let (proxy_tx, mut proxy_rx) = mpsc::channel(COMMAND_DEPTH);
+        let task_tx = std::mem::replace(&mut c.running.as_mut().unwrap().commands, proxy_tx);
+        let flag = Arc::new(AtomicBool::new(false));
+        c.set_stop(StopSignal::new(Arc::clone(&flag)));
+        let r0 = SplitId::new("r0").unwrap();
+        let key = records::split_key_str("r0");
+
+        let mut seen = Vec::new();
+        poll_until(&mut c, &clock, &mut seen, "claim r0", |s| {
+            gained_epoch(s).is_some()
+        });
+        let e1 = gained_epoch(&seen).unwrap();
+        assert!(
+            seen.iter()
+                .any(|e| matches!(e, CoordinationEvent::Gained { progress: None, .. })),
+            "{seen:?}"
+        );
+
+        let (queued, r) = std::thread::scope(|s| {
+            let h = s.spawn(|| c.commit(&r0, &SplitProgress::new(1024, vec![])));
+            let cmd = proxy_rx
+                .blocking_recv()
+                .expect("the commit reaches the proxy");
+            flag.store(true, Ordering::SeqCst);
+            (cmd, h.join().unwrap())
+        });
+        flag.store(false, Ordering::SeqCst);
+        assert!(
+            matches!(&r, Err(e) if e.kind == CoordinationErrorKind::Retryable
+                && e.reason.contains("this command may still land")),
+            "{r:?}"
+        );
+
+        let deleted = rt.block_on(store.delete(Keyspace::Ephemeral, &key, None));
+        assert!(
+            matches!(deleted, Ok(crate::store::CasOutcome::Won(_))),
+            "{deleted:?}"
+        );
+        let mut after = Vec::new();
+        poll_until(&mut c, &clock, &mut after, "lose and reclaim r0", |s| {
+            gained_epoch(s).is_some_and(|e| e > e1)
+        });
+        let lost_at = after
+            .iter()
+            .position(|e| matches!(e, CoordinationEvent::Lost { split } if split.as_str() == "r0"));
+        let gained_at = after.iter().position(|e| {
+            matches!(e, CoordinationEvent::Gained { split, progress: None, .. }
+                if split.id.as_str() == "r0")
+        });
+        assert!(
+            matches!((lost_at, gained_at), (Some(l), Some(g)) if l < g),
+            "{after:?}"
+        );
+        let e2 = gained_epoch(&after).unwrap();
+
+        assert!(task_tx.blocking_send(queued).is_ok(), "task alive");
+
+        let forward =
+            |c: &mut StoreCoordinator<MemoryStore>, w: i64, rx: &mut mpsc::Receiver<Command>| {
+                std::thread::scope(|s| {
+                    let h = s.spawn(|| c.commit(&r0, &SplitProgress::new(w, vec![])));
+                    let cmd = rx.blocking_recv().expect("the commit reaches the proxy");
+                    assert!(task_tx.blocking_send(cmd).is_ok(), "task alive");
+                    h.join().unwrap()
+                })
+            };
+        let r = forward(&mut c, 512, &mut proxy_rx);
+        assert!(r.is_ok(), "{r:?}");
+
+        let entry = rt
+            .block_on(store.get(Keyspace::Durable, &key))
+            .unwrap()
+            .unwrap();
+        let record =
+            SplitProgressRecord::parse(&key, &entry.value, records::fingerprint_hash(STALE_FP))
+                .unwrap();
+        assert_eq!((record.epoch, record.watermark), (e2, Some(512)));
+        let more = c.poll().unwrap();
+        assert!(
+            !more
+                .iter()
+                .any(|e| matches!(e, CoordinationEvent::Lost { .. })),
+            "{more:?}"
+        );
+        let r = forward(&mut c, 1024, &mut proxy_rx);
+        assert!(r.is_ok(), "{r:?}");
     }
 }

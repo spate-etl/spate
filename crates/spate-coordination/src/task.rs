@@ -69,6 +69,9 @@ pub(crate) enum Command {
     Commit {
         split: SplitId,
         progress: SplitProgress,
+        /// The tenancy the commit was made under, from the latest `Gained` the
+        /// handle returned for the split; `None` when the handle holds none.
+        epoch: Option<LeaseEpoch>,
         reply: std_mpsc::SyncSender<Result<(), CoordinationError>>,
     },
     Fail {

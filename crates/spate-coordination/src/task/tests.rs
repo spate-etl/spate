@@ -1021,3 +1021,58 @@ mod ready_bursts {
         running.await.unwrap().unwrap();
     }
 }
+
+/// A rewrite of an own-id lease from another process is fatal on a split's
+/// last attempt and ignored below it; the first sighting is never fatal.
+#[tokio::test]
+async fn a_lease_write_under_this_id_on_a_last_attempt_is_fatal() {
+    let clock = TestClock::frozen();
+    let cfg = CoordinationConfig {
+        max_attempts: 2,
+        ..CoordinationConfig::default()
+    };
+    let store = MemoryStore::with_clock(cfg.lease_duration, clock.clone());
+    let fp = records::fingerprint_hash(FINGERPRINT);
+    let (_commands, commands_rx) = mpsc::channel(8);
+    let (events_tx, _events) = std_mpsc::channel();
+    let mut task = Task::new(
+        store,
+        cfg,
+        clock,
+        FINGERPRINT.to_string(),
+        "w1".into(),
+        uuid::Uuid::new_v4().simple().to_string(),
+        Box::new(Planner),
+        None,
+        commands_rx,
+        events_tx,
+        None,
+    );
+    let twin = uuid::Uuid::new_v4().simple().to_string();
+    let put = |id: &str, revision: u64| Entry {
+        key: records::split_key_str(id),
+        value: lease_val("w1", &twin, 1),
+        revision: Revision(revision),
+    };
+    for (id, attempts) in [("last", 1), ("spare", 0)] {
+        let mut progress = SplitProgressRecord::planned(&SplitId::new(id).unwrap(), fp, None);
+        progress.owner = Some("w1".to_string());
+        progress.epoch = 1;
+        progress.attempts = attempts;
+        task.apply_state_put(&Entry {
+            key: records::split_key_str(id),
+            value: progress.encode(),
+            revision: Revision(1),
+        })
+        .unwrap();
+    }
+
+    task.apply_lease_put(&put("last", 1)).unwrap();
+    let err = task.apply_lease_put(&put("last", 2)).unwrap_err();
+    assert!(
+        err.kind == CoordinationErrorKind::Fatal && err.reason.contains("share instance_id"),
+        "{err:?}"
+    );
+    task.apply_lease_put(&put("spare", 1)).unwrap();
+    task.apply_lease_put(&put("spare", 2)).unwrap();
+}

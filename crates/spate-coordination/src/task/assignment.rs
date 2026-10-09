@@ -36,6 +36,7 @@ impl<S: CoordinationStore + Clone> Task<S> {
                 &self.splits,
                 |id| self.owned.contains_key(id),
                 &self.instance,
+                &self.nonce,
                 self.config.max_attempts,
             );
             for (id, action) in candidates {

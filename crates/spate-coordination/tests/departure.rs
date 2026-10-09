@@ -3920,6 +3920,158 @@ fn a_restart_inside_the_lease_reclaims_and_charges_one_attempt() {
     );
 }
 
+/// A second live worker under the same id, over a split on its last attempt,
+/// stops on the shared id and leaves the split runnable under the first.
+#[test]
+fn a_twin_over_a_split_on_its_last_attempt_stops_on_the_shared_id() {
+    let clock = TestClock::frozen();
+    let fault = FaultStore::with_clock(LEASE, clock.clone());
+    let mut config = config_for(LEASE, Some("worker-a"));
+    config.max_attempts = 1;
+    let rt = runtime();
+    let mut first = StoreCoordinator::with_clock(
+        fault.clone(),
+        config.clone(),
+        rt.handle().clone(),
+        None,
+        clock.clone(),
+    )
+    .expect("coordinator");
+    first
+        .start(Box::new(PhasedPlanner::one_final("departure:v1", &["r0"])))
+        .unwrap();
+    let mut held = Held::default();
+    support::drive_clocked(&mut first, &clock, &mut held, "claiming r0", |h| {
+        h.splits.len() == 1
+    });
+    let mut solo = support::Fleet::new(&fault.inner, rt.handle());
+    solo.join(&first);
+    solo.settle(&clock);
+
+    let twin_rt = runtime();
+    let mut twin = StoreCoordinator::with_clock(
+        fault.clone(),
+        config,
+        twin_rt.handle().clone(),
+        None,
+        clock.clone(),
+    )
+    .expect("coordinator");
+    twin.start(Box::new(PhasedPlanner::one_final("departure:v1", &["r0"])))
+        .unwrap();
+    let mut both = support::Fleet::new(&fault.inner, rt.handle());
+    both.join(&first);
+    both.join(&twin);
+    both.settle(&clock);
+
+    let record = fault.record(&rt, "split.r0");
+    assert!(
+        record["status"] == "runnable" && record["owner"] == "worker-a" && record["attempts"] == 0,
+        "record after the twin's first step: {record}"
+    );
+
+    clock.advance_stepped(LEASE / 2, LEASE / 24, || {
+        solo.settle(&clock);
+        held.fold(first.poll().expect("poll the first worker"));
+    });
+    let mut stopped = None;
+    spate_test::wait_until(support::DEADLINE, "the twin to stop", || {
+        match twin.poll() {
+            Ok(_) => false,
+            Err(e) => {
+                stopped = Some(e);
+                true
+            }
+        }
+    });
+
+    let after = fault.record(&rt, "split.r0");
+    assert!(
+        stopped.as_ref().is_some_and(|e| {
+            e.kind == CoordinationErrorKind::Fatal && e.reason.contains("share instance_id")
+        }) && after == record
+            && held.splits.contains_key("r0"),
+        "twin returned {stopped:?}; record {after}; first holds {:?}",
+        held.splits.keys().collect::<Vec<_>>()
+    );
+}
+
+/// A started `worker-a` with `max_attempts: 1` on `rt`, restarted after a
+/// crashed predecessor that held `r0`, in a one-member fleet.
+fn last_attempt_successor(
+    rt: &tokio::runtime::Runtime,
+    fault: &FaultStore,
+    clock: &Arc<TestClock>,
+) -> (StoreCoordinator<FaultStore>, support::Fleet) {
+    let first = runtime();
+    let (predecessor, _) = claimed_clocked(&first, fault.clone(), clock, "worker-a", &["r0"]);
+    support::crash(first, predecessor);
+    let mut config = config_for(LEASE, Some("worker-a"));
+    config.max_attempts = 1;
+    let mut a = StoreCoordinator::with_clock(
+        fault.clone(),
+        config,
+        rt.handle().clone(),
+        None,
+        clock.clone(),
+    )
+    .expect("coordinator");
+    a.start(Box::new(PhasedPlanner::one_final("departure:v1", &["r0"])))
+        .unwrap();
+    let mut fleet = support::Fleet::new(&fault.inner, rt.handle());
+    fleet.join(&a);
+    (a, fleet)
+}
+
+fn assert_quarantined_on_expiry(rt: &tokio::runtime::Runtime, fault: &FaultStore, held: &Held) {
+    let record = fault.record(rt, "split.r0");
+    assert!(
+        record["status"] == "quarantined"
+            && record["attempts"] == 1
+            && record["owner"].is_null()
+            && held.quarantined.iter().any(|(id, _)| id == "r0"),
+        "record {record}; quarantined {:?}",
+        held.quarantined
+    );
+}
+
+/// A worker restarted after a crash on a split's last attempt quarantines it
+/// once the predecessor's lease expires, with no error.
+#[test]
+fn a_restart_on_a_splits_last_attempt_quarantines_once_the_lease_expires() {
+    let clock = TestClock::frozen();
+    let fault = FaultStore::with_clock(LEASE, clock.clone());
+    let rt = runtime();
+    let (mut a, fleet) = last_attempt_successor(&rt, &fault, &clock);
+    let mut held = Held::default();
+    run_half_a_lease(&mut a, &clock, &fleet, &mut held);
+    let record = fault.record(&rt, "split.r0");
+    assert!(
+        record["status"] == "runnable" && held.quarantined.is_empty(),
+        "record inside the predecessor's lease: {record}"
+    );
+    run_half_a_lease(&mut a, &clock, &fleet, &mut held);
+    run_half_a_lease(&mut a, &clock, &fleet, &mut held);
+    assert_quarantined_on_expiry(&rt, &fault, &held);
+}
+
+/// As the restart control, with every watch broken and re-established inside
+/// the predecessor's lease: the rewatch replay of that lease is not a twin.
+#[test]
+fn a_rewatch_during_a_last_attempt_restart_still_quarantines_on_expiry() {
+    let clock = TestClock::frozen();
+    let fault = FaultStore::with_clock(LEASE, clock.clone());
+    let rt = runtime();
+    let (mut a, fleet) = last_attempt_successor(&rt, &fault, &clock);
+    let mut held = Held::default();
+    run_half_a_lease(&mut a, &clock, &fleet, &mut held);
+    fault.go_down();
+    fault.down.store(false, Ordering::SeqCst);
+    run_half_a_lease(&mut a, &clock, &fleet, &mut held);
+    run_half_a_lease(&mut a, &clock, &fleet, &mut held);
+    assert_quarantined_on_expiry(&rt, &fault, &held);
+}
+
 /// A worker restarted under its predecessor's id, after a failure report that
 /// cleared the owner but left the lease, claims the split on its last attempt,
 /// counted as reassigned. Regression for #894.

@@ -44,6 +44,9 @@ use crate::store::Revision;
 use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet};
 
+/// The nonce `snapshot` stamps on every lease.
+const BENCH_NONCE: &str = "bench";
+
 /// A value this crate hands back for the caller to hold but not inspect.
 ///
 /// The observed store state is a map of a private type, and a bench has to
@@ -143,7 +146,7 @@ pub fn snapshot(observed: Vec<ObservedSplit>) -> Opaque {
                             LeaseVal {
                                 schema: SCHEMA,
                                 owner,
-                                nonce: "bench".to_string(),
+                                nonce: BENCH_NONCE.to_string(),
                                 epoch,
                             },
                             Revision(1),
@@ -217,8 +220,13 @@ pub fn scan_claims(
     max_attempts: u32,
 ) -> (Opaque, ClaimCensus) {
     let splits = downcast(snapshot);
-    let candidates =
-        protocol::claim_candidates(splits, |id| owned.contains(id), instance, max_attempts);
+    let candidates = protocol::claim_candidates(
+        splits,
+        |id| owned.contains(id),
+        instance,
+        BENCH_NONCE,
+        max_attempts,
+    );
     let mut census: ClaimCensus = [0; 5];
     for (_, action) in &candidates {
         let slot = match action {

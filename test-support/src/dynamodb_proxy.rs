@@ -88,8 +88,8 @@ impl fmt::Debug for DynamoDbFaultProxy {
 
 impl DynamoDbFaultProxy {
     /// Listens on a free loopback port and serves each connection on its own
-    /// thread over one connection to `upstream`, asking `script` how to
-    /// answer every request.
+    /// thread, asking `script` how to answer every request and forwarding
+    /// each request it forwards on a new connection to `upstream`.
     ///
     /// Requests and replies must carry `Content-Length`. A connection whose
     /// upstream exchange fails is closed without a reply.
@@ -233,7 +233,6 @@ fn serve(
 ) -> io::Result<()> {
     let mut requests = BufReader::new(client.try_clone()?);
     let mut client = client;
-    let mut link: Option<(TcpStream, BufReader<TcpStream>)> = None;
     while let Some(request) = Message::read(&mut requests)? {
         let fault = script(&request.call(seq.fetch_add(1, Ordering::SeqCst)));
         let reply = match fault {
@@ -244,7 +243,7 @@ fn serve(
                 if let Fault::Delay(d) = fault {
                     std::thread::sleep(d);
                 }
-                let landed = match forward(&mut link, upstream, &request.raw) {
+                let landed = match forward(upstream, &request.raw) {
                     Ok(reply) => reply,
                     Err(e) => {
                         let _ = client.shutdown(Shutdown::Both);
@@ -263,31 +262,16 @@ fn serve(
     Ok(())
 }
 
-/// Sends `request` over the upstream connection in `link`, opening it when
-/// absent, and returns the reply's raw bytes. A failed exchange drops the
-/// connection.
-fn forward(
-    link: &mut Option<(TcpStream, BufReader<TcpStream>)>,
-    upstream: SocketAddr,
-    request: &[u8],
-) -> io::Result<Vec<u8>> {
-    if link.is_none() {
-        let stream = TcpStream::connect(upstream)?;
-        let reader = BufReader::new(stream.try_clone()?);
-        *link = Some((stream, reader));
-    }
-    let (stream, reader) = link.as_mut().expect("opened above");
-    let reply = stream
-        .write_all(request)
-        .and_then(|()| Message::read(reader))
-        .and_then(|m| m.ok_or_else(|| io::ErrorKind::UnexpectedEof.into()));
-    match reply {
-        Ok(message) => Ok(message.raw),
-        Err(e) => {
-            *link = None;
-            Err(e)
-        }
-    }
+/// Sends `request` to `upstream` on a new connection and returns the reply's
+/// raw bytes. A connection kept between calls could be one the upstream has
+/// closed while idle, which loses the next call with no reply.
+fn forward(upstream: SocketAddr, request: &[u8]) -> io::Result<Vec<u8>> {
+    let mut stream = TcpStream::connect(upstream)?;
+    let mut reader = BufReader::new(stream.try_clone()?);
+    stream.write_all(request)?;
+    Message::read(&mut reader)?
+        .map(|message| message.raw)
+        .ok_or_else(|| io::ErrorKind::UnexpectedEof.into())
 }
 
 /// A DynamoDB JSON error reply with `status` and error type `code`.
@@ -523,6 +507,31 @@ mod tests {
         }
         for _ in 0..3 {
             received.recv_timeout(Duration::from_secs(5)).unwrap();
+        }
+    }
+
+    /// A pass after the upstream closed its connection is forwarded on a new
+    /// one, and its reply reaches the client.
+    #[test]
+    fn pass_reconnects_after_the_upstream_closes() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                if let Ok(Some(_)) = Message::read(&mut reader) {
+                    stream.write_all(REPLY.as_bytes()).unwrap();
+                }
+            }
+        });
+        let proxy = DynamoDbFaultProxy::start(addr, |_| Fault::Pass).unwrap();
+        let mut stream = connect(&proxy);
+        for attempt in 1..=2 {
+            assert_eq!(
+                exchange(&mut stream, &request("GetItem", attempt, UPDATE)),
+                REPLY.as_bytes()
+            );
         }
     }
 

@@ -361,16 +361,17 @@ mod tests {
                 "ProvisionedThroughputExceededException",
             ),
         ] {
-            let (proxy, received) = proxy(move |_| fault);
-            let reply = String::from_utf8(exchange(
-                &mut connect(&proxy),
-                &request("UpdateItem", 1, UPDATE),
-            ))
-            .unwrap();
+            let (proxy, received) =
+                proxy(move |call| if call.seq == 0 { fault } else { Fault::Pass });
+            let mut stream = connect(&proxy);
+            let reply = String::from_utf8(exchange(&mut stream, &request("UpdateItem", 1, UPDATE)))
+                .unwrap();
             assert!(reply.starts_with("HTTP/1.1 400 "), "{reply}");
             assert!(reply.contains(&format!("#{code}\"")), "{reply}");
-            drop(proxy);
-            assert!(received.try_recv().is_err(), "{fault} forwarded the call");
+            let next = request("UpdateItem", 2, UPDATE);
+            assert_eq!(exchange(&mut stream, &next), REPLY.as_bytes());
+            let (first, _) = received.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert_eq!(first, next.into_bytes(), "{fault} forwarded the call");
         }
     }
 
@@ -418,16 +419,23 @@ mod tests {
     fn server_error_draws_only_retried_statuses() {
         let drawn: std::collections::BTreeSet<_> = (0..64).map(retried_status).collect();
         assert_eq!(drawn.into_iter().collect::<Vec<_>>(), [500, 502, 503, 504]);
-        let (proxy, received) = proxy(|_| Fault::ServerError(503));
-        let reply = String::from_utf8(exchange(
-            &mut connect(&proxy),
-            &request("GetItem", 1, UPDATE),
-        ))
-        .unwrap();
+        let (proxy, received) = proxy(|call| {
+            if call.seq == 0 {
+                Fault::ServerError(503)
+            } else {
+                Fault::Pass
+            }
+        });
+        let mut stream = connect(&proxy);
+        let reply =
+            String::from_utf8(exchange(&mut stream, &request("GetItem", 1, UPDATE))).unwrap();
         assert!(reply.starts_with("HTTP/1.1 503 "), "{reply}");
-        drop(proxy);
-        assert!(
-            received.try_recv().is_err(),
+        let next = request("GetItem", 2, UPDATE);
+        assert_eq!(exchange(&mut stream, &next), REPLY.as_bytes());
+        let (first, _) = received.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(
+            first,
+            next.into_bytes(),
             "a server error forwarded the call"
         );
     }

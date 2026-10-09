@@ -135,8 +135,9 @@ It prints the seed first, drawing one from the clock when `--seed` is absent,
 and passes it to every scenario. A seed fixes the data set and the fault
 schedule: which worker is killed when, how long its replacement waits to start
 under the same instance id, which worker is stopped with SIGSTOP when and for
-how long, which worker aborts before or after which of its writes, and which
-one is handed an error for a write that landed. It does not
+how long, which worker aborts before or after which of its writes, which one
+is handed an error for a write that landed, and on DynamoDB how each worker's
+fault proxy answers each of its calls by number. It does not
 fix the interleaving. The operating system's scheduling and real time decide
 which split a worker holds when something happens. Each scenario writes a
 directory under `target/fault-runs/` holding every worker's config, journal and
@@ -154,6 +155,18 @@ value counts as a read of the landed write. A kill the schedule draws for that
 worker waits until its journal shows the recovery, or one lease from the first
 poll at which the kill is due and the journal holds its `err_after_land` line,
 and a stop drawn for it is skipped.
+In `dynamodb_one_instance` and `dynamodb_three_instances` each worker reaches
+the store through an HTTP proxy of its own, which throttles calls, answers them
+with a 5xx status the SDK retries, delays them by up to 100 ms, or forwards a
+durable split update and then replaces its reply with a 5xx or closes the
+connection without one. The worker handed an error for a landed write gets a
+proxy that forwards every call. `faults.ndjson` records each answer but a plain
+forward as a `proxy_fault` line, and the oracle counts every one but a delay as
+a fault of no duration. A run with proxies whose `faults.ndjson` holds no
+`proxy_fault` line is `expectation`.
+`dynamodb_drop_after_land_then_pass_wins` drives one store through the proxy
+against DynamoDB Local: an update whose first reply is dropped must return
+`Won` on the SDK's retry, and one whose every reply is dropped `Retryable`.
 Every failed or timed-out `get` of a split is journalled, and after a lost claim
 reply the worker may claim the split again only once such a read has failed. A
 worker that aborts on its plan must be replaced under its instance id, or the

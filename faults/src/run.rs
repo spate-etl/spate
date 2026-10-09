@@ -1426,8 +1426,9 @@ mod tests {
         }
     }
 
-    /// A three-instance run draws no window on the instance carrying its
-    /// lost reply.
+    /// A three-instance seeded-schedule run draws windows, none on the
+    /// instance carrying its lost reply, and a run without the seeded
+    /// schedule draws none.
     #[test]
     fn a_run_draws_no_window_on_its_lost_reply_instance() {
         let tuning = Tuning::nats();
@@ -1445,9 +1446,14 @@ mod tests {
             let lost = schedule.lost_reply();
             let windows = link_windows(&mut rng, &spec, &schedule, &tuning);
             assert!(
-                windows.iter().all(|w| Some(w.instance) != lost),
+                !windows.is_empty() && windows.iter().all(|w| Some(w.instance) != lost),
                 "seed {seed}: lost {lost:?}, {windows:?}"
             );
+            let control = Spec {
+                faults: Faults::None,
+                ..spec
+            };
+            assert_eq!(link_windows(&mut rng, &control, &schedule, &tuning), []);
         }
     }
 

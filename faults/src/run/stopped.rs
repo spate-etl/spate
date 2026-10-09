@@ -98,14 +98,13 @@ impl Run<'_> {
                 "{name} (pid {pid}) journalled its stop and did not report stopped"
             ));
         }
-        let mut claimed = false;
-        loop {
-            claimed = claimed || peer_claimed(env, rt, &key, epoch);
-            if resume_now(stop_ms, claimed, journal::now_ms(), tuning.lease_ms) {
-                break;
-            }
-            std::thread::sleep(POLL);
-        }
+        let claimed = await_release(
+            stop_ms,
+            tuning.lease_ms,
+            || peer_claimed(env, rt, &key, epoch),
+            journal::now_ms,
+            || std::thread::sleep(POLL),
+        );
         if workers.resume(&name, pid).map_err(status)? {
             faults
                 .append(Event::Sigcont {
@@ -219,6 +218,26 @@ fn resume_now(stop_ms: u64, claimed: bool, now_ms: u64, lease_ms: u64) -> bool {
     release_due(stop_ms, claimed, now_ms, lease_ms) || now_ms >= stop_ms + 4 * lease_ms
 }
 
+/// Polls `claim` until [`resume_now`] holds at `now`, calling `sleep`
+/// between polls, and returns whether a claim was seen. A claim, once seen,
+/// is not polled again.
+fn await_release(
+    stop_ms: u64,
+    lease_ms: u64,
+    mut claim: impl FnMut() -> bool,
+    mut now: impl FnMut() -> u64,
+    mut sleep: impl FnMut(),
+) -> bool {
+    let mut claimed = false;
+    loop {
+        claimed = claimed || claim();
+        if resume_now(stop_ms, claimed, now(), lease_ms) {
+            return claimed;
+        }
+        sleep();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -244,5 +263,39 @@ mod tests {
         assert!(resume_now(stop, false, stop + 4 * lease, lease));
         assert!(!resume_now(stop, true, stop + lease + 249, lease));
         assert!(resume_now(stop, true, stop + lease + 250, lease));
+    }
+
+    /// Releases the stopped process at `stop + steps * 50` ms on a clock that
+    /// advances 50 ms per sleep, with the peer's claim first seen at
+    /// `claim_at`; returns whether a claim was reported and the release time.
+    fn release(stop: u64, lease: u64, claim_at: Option<u64>) -> (bool, u64) {
+        let now = std::cell::Cell::new(stop);
+        let claimed = await_release(
+            stop,
+            lease,
+            || claim_at.is_some_and(|at| now.get() >= at),
+            || now.get(),
+            || {
+                assert!(now.get() < stop + 10 * lease, "no release by ten leases");
+                now.set(now.get() + 50);
+            },
+        );
+        (claimed, now.get())
+    }
+
+    /// With a peer that never claims, the release comes at exactly four
+    /// leases and reports no claim; with a claim, at a lease plus the margin.
+    #[test]
+    fn release_comes_at_four_leases_without_a_claim_and_reports_it() {
+        let (stop, lease) = (10_000, 2_000);
+        assert_eq!(release(stop, lease, None), (false, stop + 4 * lease));
+        assert_eq!(
+            release(stop, lease, Some(stop + 100)),
+            (true, stop + lease + RELEASE_MARGIN_MS)
+        );
+        assert_eq!(
+            release(stop, lease, Some(stop + 3 * lease)),
+            (true, stop + 3 * lease)
+        );
     }
 }

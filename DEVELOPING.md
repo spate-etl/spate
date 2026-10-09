@@ -156,7 +156,15 @@ Every failed or timed-out `get` of a split is journalled, and after a lost claim
 reply the worker may claim the split again only once such a read has failed. A
 worker that aborts on its plan must be replaced under its instance id, or the
 outcome is `expectation`; a run that ends with workers still running at its
-deadline skips this check and is `worker`. The command writes
+deadline skips this check and is `worker`. The stopped-writer scenarios run two
+workers, each with a working set above the run's split count. The second starts
+once the first leads, stops itself with SIGSTOP inside one of its first three
+commits, and is continued once the first has claimed the split at a higher epoch
+and a lease and a quarter second have passed since the stop. If the claim does
+not come within four leases, the outcome is `violation`. With the fence intact every property must hold. The broken-fence
+scenarios re-send the stopped commit at the current revision after it loses its
+CAS, and pass only when the oracle reports the stale epoch at that write's
+revision against the stopped worker. The command writes
 `target/fault-runs/summary.json` and exits 1 on any `violation`, `worker` or
 `expectation` outcome, 3 when only `harness` outcomes failed, or nextest failed
 with no failing outcome, such as a build error or a run the oracle could not

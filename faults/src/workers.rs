@@ -119,6 +119,68 @@ impl Workers {
         Ok(())
     }
 
+    /// Sends SIGSTOP to `instance`'s latest process and waits up to
+    /// `confirm` for it to report stopped. Returns its pid once it has, and
+    /// `None` when that process has exited.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the signal cannot be sent, the child's status cannot be
+    /// read, or the stop is not confirmed in time.
+    pub fn stop(&mut self, instance: &str, confirm: Duration) -> std::io::Result<Option<u32>> {
+        let Some(pid) = self.live(instance)? else {
+            return Ok(None);
+        };
+        signal(pid, libc::SIGSTOP)?;
+        if self.confirm_stopped(instance, confirm)? {
+            return Ok(Some(pid));
+        }
+        if self.live(instance)?.is_none() {
+            return Ok(None);
+        }
+        Err(std::io::Error::other(format!(
+            "{instance} (pid {pid}) did not report stopped within {confirm:?}"
+        )))
+    }
+
+    /// Waits up to `deadline` for `instance`'s latest process to report
+    /// stopped, and returns whether it did. An exited process never does, and
+    /// stays waitable.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the child's status cannot be read.
+    pub fn confirm_stopped(&mut self, instance: &str, deadline: Duration) -> std::io::Result<bool> {
+        let until = Instant::now() + deadline;
+        loop {
+            let Some(pid) = self.live(instance)? else {
+                return Ok(false);
+            };
+            if stopped(pid) {
+                return Ok(true);
+            }
+            if Instant::now() >= until {
+                return Ok(false);
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Sends SIGCONT to `instance`'s latest process when it is `pid` and has
+    /// not exited, and returns whether it did.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the signal cannot be sent or the child's status cannot be
+    /// read.
+    pub fn resume(&mut self, instance: &str, pid: u32) -> std::io::Result<bool> {
+        if self.live(instance)? != Some(pid) {
+            return Ok(false);
+        }
+        signal(pid, libc::SIGCONT)?;
+        Ok(true)
+    }
+
     /// The signal that ended `instance`'s latest process, as of the last
     /// status read.
     #[must_use]
@@ -171,6 +233,35 @@ impl Workers {
             })
             .collect()
     }
+}
+
+fn signal(pid: u32, signal: libc::c_int) -> std::io::Result<()> {
+    let pid = libc::pid_t::try_from(pid).map_err(std::io::Error::other)?;
+    // SAFETY: `kill` takes no pointers; `pid` is an unreaped child.
+    if unsafe { libc::kill(pid, signal) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+/// Whether the unreaped child `pid` is stopped.
+pub(crate) fn stopped(pid: u32) -> bool {
+    // SAFETY: `siginfo_t` is plain data, valid when zeroed.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    // `WNOWAIT` leaves the child waitable, so `Child::try_wait` still reads
+    // its exit. Do not replace this with `waitpid(WUNTRACED)`, which reaps a
+    // child that has exited.
+    // SAFETY: `info` is a valid, writable `siginfo_t`.
+    let r = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            pid,
+            &raw mut info,
+            libc::WSTOPPED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    r == 0 && info.si_code == libc::CLD_STOPPED
 }
 
 impl Drop for Workers {
@@ -284,6 +375,59 @@ mod tests {
         );
         assert!(!exits[0].scheduled);
         workers.kill("w9").unwrap();
+    }
+
+    /// A running child is not reported stopped, a stop returns once the
+    /// child is stopped, and a resume goes only to the pid it names; a child
+    /// that has exited reports no stop and keeps its exit status for
+    /// `try_wait`.
+    #[test]
+    fn stop_confirm_leaves_an_exited_child_waitable() {
+        let mut workers = Workers::default();
+        let pid = sleeper(&mut workers);
+        let pid = u32::try_from(pid).unwrap();
+        let confirm = Duration::from_secs(10);
+        assert!(!workers.confirm_stopped("w0", POLL).unwrap(), "running");
+        assert_eq!(workers.stop("w0", confirm).unwrap(), Some(pid));
+        assert!(stopped(pid), "stopped when `stop` returns");
+        assert!(workers.resume("w0", pid).unwrap());
+        assert!(!workers.resume("w0", pid + 1).unwrap(), "another pid");
+
+        let dir = tempfile::tempdir().unwrap();
+        let stderr = File::create(dir.path().join("w1-1.stderr")).unwrap();
+        let exited = workers
+            .spawn(
+                "w1",
+                Path::new("sh"),
+                &["-c".as_ref(), "exit 7".as_ref()],
+                stderr,
+            )
+            .unwrap();
+        let until = Instant::now() + Duration::from_secs(30);
+        while !exited_unreaped(exited) {
+            assert!(Instant::now() < until, "the child never exited");
+            std::thread::sleep(POLL);
+        }
+        assert!(!stopped(exited));
+        workers.try_wait().unwrap();
+        assert_eq!(workers.exits()[1].code, Some(7));
+        assert!(!workers.confirm_stopped("w1", Duration::ZERO).unwrap());
+    }
+
+    /// Whether the child `pid` has exited, leaving it unreaped.
+    fn exited_unreaped(pid: u32) -> bool {
+        // SAFETY: `siginfo_t` is plain data, valid when zeroed.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        // SAFETY: `info` is a valid, writable `siginfo_t`.
+        let r = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid,
+                &raw mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        };
+        r == 0 && info.si_code == libc::CLD_EXITED
     }
 
     /// A worker's environment carries `NO_PROXY` covering the loopback address.

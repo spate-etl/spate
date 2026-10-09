@@ -168,7 +168,7 @@ async fn journal_store_writes_cancelled_on_drop() {
     );
 }
 
-/// Both wrappers report the inner store's lease, watch mode and
+/// Every wrapper reports the inner store's lease, watch mode and
 /// `op_timeout`, which the coordinator checks against its config.
 #[test]
 fn wrappers_forward_op_timeout_and_watch_mode() {
@@ -176,13 +176,27 @@ fn wrappers_forward_op_timeout_and_watch_mode() {
     let journal = Arc::clone(&store.journal);
     let classifier = Arc::clone(&store.classifier);
     let plan = plan(WriteKind::Commit, 1, AbortMode::Before);
-    let aborting = AbortAt::new(store.clone(), plan, journal, classifier);
+    let aborting = AbortAt::new(
+        store.clone(),
+        plan,
+        Arc::clone(&journal),
+        Arc::clone(&classifier),
+    );
+    let fence = Arc::new(Fence::default());
+    let broken = BrokenFence::new(store.clone(), Arc::clone(&fence));
+    let stopping = StopAt::new(store.clone(), None, Some(fence), journal, classifier);
     for (lease, op_timeout, watch) in [
         (store.lease_ttl(), store.op_timeout(), store.watch_mode()),
         (
             aborting.lease_ttl(),
             aborting.op_timeout(),
             aborting.watch_mode(),
+        ),
+        (broken.lease_ttl(), broken.op_timeout(), broken.watch_mode()),
+        (
+            stopping.lease_ttl(),
+            stopping.op_timeout(),
+            stopping.watch_mode(),
         ),
     ] {
         assert_eq!(lease, LEASE);
@@ -758,4 +772,343 @@ async fn an_after_plan_ignores_a_lost_write() {
             .iter()
             .any(|e| matches!(e, Event::Abort { .. }))
     );
+}
+
+/// A [`StopAt`] over a journalled [`MemoryStore`] holding a claimed
+/// `split.a`, stopping at `plan` through `stop`, with a [`BrokenFence`]
+/// below it that it arms when `broken`.
+async fn stopping(
+    plan: StopPlan,
+    stop: fn(),
+    broken: bool,
+) -> (
+    StopAt<BrokenFence<JournalStore<MemoryStore>>>,
+    Revision,
+    tempfile::TempDir,
+    std::path::PathBuf,
+) {
+    let (journalled, dir, path) = journalled(MemoryStore::new(LEASE));
+    let journal = Arc::clone(&journalled.journal);
+    let classifier = Arc::clone(&journalled.classifier);
+    let fence = Arc::new(Fence::default());
+    let mut store = StopAt::new(
+        BrokenFence::new(journalled, Arc::clone(&fence)),
+        Some(plan),
+        broken.then_some(fence),
+        journal,
+        classifier,
+    );
+    store.stop = stop;
+    let claimed = store
+        .create(Keyspace::Durable, "split.a", record_at(1, Some("w0"), None))
+        .await
+        .unwrap()
+        .won()
+        .unwrap();
+    (store, claimed, dir, path)
+}
+
+static HOOK_STOPS: AtomicU32 = AtomicU32::new(0);
+
+fn count_hook_stop() {
+    HOOK_STOPS.fetch_add(1, Ordering::SeqCst);
+}
+
+/// The stop runs, after its `stop` line and with the fence armed for the
+/// commit's key, when the stopped commit's `update` future is built, before
+/// anything polls it; the commit is sent only once the future is polled.
+#[tokio::test]
+async fn stop_at_hook_runs_at_construction_not_poll() {
+    let plan = StopPlan {
+        kind: WriteKind::Commit,
+        n: 1,
+    };
+    let (store, claimed, _dir, path) = stopping(plan, count_hook_stop, true).await;
+    let update = store.update(
+        Keyspace::Durable,
+        "split.a",
+        record_at(1, Some("w0"), Some(10)),
+        claimed,
+    );
+    assert_eq!(
+        HOOK_STOPS.load(Ordering::SeqCst),
+        1,
+        "stopped at construction"
+    );
+    assert!(store.inner.fence.take("split.a"), "the fence was armed");
+    assert_eq!(
+        events(&path).last(),
+        Some(&Event::Stop {
+            key: "split.a".to_owned(),
+            expected: claimed.0,
+            epoch: 1,
+        })
+    );
+    assert!(update.await.unwrap().won().is_some());
+    assert!(matches!(
+        events(&path).as_slice(),
+        [
+            ..,
+            Event::Stop { .. },
+            Event::Send { .. },
+            Event::Done { .. }
+        ]
+    ));
+}
+
+static COUNTED_STOPS: AtomicU32 = AtomicU32::new(0);
+
+fn count_counted_stop() {
+    COUNTED_STOPS.fetch_add(1, Ordering::SeqCst);
+}
+
+/// A plan on commits counts commits and completions only, and stops once,
+/// at its `n`th.
+#[tokio::test]
+async fn stop_at_counts_commits_and_completions_and_stops_once() {
+    let plan = StopPlan {
+        kind: WriteKind::Commit,
+        n: 2,
+    };
+    let (store, claimed, _dir, _path) = stopping(plan, count_counted_stop, false).await;
+    let renew = store
+        .update(
+            Keyspace::Ephemeral,
+            "split.a",
+            record_at(1, Some("w0"), None),
+            Revision(1),
+        )
+        .await;
+    drop(renew);
+    assert_eq!(COUNTED_STOPS.load(Ordering::SeqCst), 0, "a renewal");
+    let mut rev = claimed;
+    let complete = serde_json::json!({
+        "schema": 3, "id": "a", "fp": 1, "epoch": 2, "status": "runnable",
+        "owner": "w0", "attempts": 0, "watermark": 20, "state": null,
+        "completed": true, "written_at_ms": 5,
+    })
+    .to_string()
+    .into_bytes();
+    // A claim, a commit, the completion that is the second counted write,
+    // and a later commit.
+    for (i, (value, stops)) in [
+        (record_at(2, Some("w0"), None), 0),
+        (record_at(2, Some("w0"), Some(10)), 0),
+        (complete, 1),
+        (record_at(2, Some("w0"), Some(30)), 1),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        rev = store
+            .update(Keyspace::Durable, "split.a", value, rev)
+            .await
+            .unwrap()
+            .won()
+            .unwrap();
+        assert_eq!(COUNTED_STOPS.load(Ordering::SeqCst), stops, "write {i}");
+    }
+}
+
+fn no_stop() {}
+
+/// A fence armed for `split.a` re-sends a commit there that lost its CAS at
+/// the current revision, where it lands; a lost commit on another key while
+/// it is armed, or with no fence armed, comes back `Lost`.
+#[tokio::test]
+async fn broken_fence_resends_only_on_its_armed_key() {
+    let plan = StopPlan {
+        kind: WriteKind::Commit,
+        n: 99,
+    };
+    for broken in [true, false] {
+        let (store, claimed, _dir, path) = stopping(plan, no_stop, broken).await;
+        if broken {
+            store.inner.fence.arm("split.a");
+        }
+        let other = store
+            .create(Keyspace::Durable, "split.b", record_at(1, Some("w0"), None))
+            .await
+            .unwrap()
+            .won()
+            .unwrap();
+        let inner = &store.inner.inner;
+        let peer_a = inner
+            .update(
+                Keyspace::Durable,
+                "split.a",
+                record_at(2, Some("w1"), None),
+                claimed,
+            )
+            .await
+            .unwrap()
+            .won()
+            .unwrap();
+        inner
+            .update(
+                Keyspace::Durable,
+                "split.b",
+                record_at(2, Some("w1"), None),
+                other,
+            )
+            .await
+            .unwrap()
+            .won()
+            .unwrap();
+
+        let stale = |key| {
+            store.update(
+                Keyspace::Durable,
+                key,
+                record_at(1, Some("w0"), Some(10)),
+                if key == "split.a" { claimed } else { other },
+            )
+        };
+        let b = stale("split.b").await.unwrap();
+        let a = stale("split.a").await.unwrap();
+        assert_eq!(b, CasOutcome::Lost, "an unarmed key");
+        if !broken {
+            assert_eq!(a, CasOutcome::Lost, "no fence armed");
+            continue;
+        }
+        let Some(rev) = a.won() else {
+            panic!("the re-send landed: {a:?}")
+        };
+        assert!(rev > peer_a);
+        let landed = inner
+            .get(Keyspace::Durable, "split.a")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(Progress::parse(&landed.value).unwrap().epoch, 1);
+        assert!(events(&path).iter().any(|e| matches!(
+            e,
+            Event::Send { key, expected: Some(x), .. } if key == "split.a" && *x == peer_a.0
+        )));
+        let again = store
+            .update(
+                Keyspace::Durable,
+                "split.a",
+                record_at(1, Some("w0"), Some(20)),
+                claimed,
+            )
+            .await
+            .unwrap();
+        assert_eq!(again, CasOutcome::Lost, "the fence fires once");
+    }
+}
+
+const STOP_CHILD: &str = "SPATE_FAULTS_STOP_CHILD";
+
+/// In a child process with the real stop: claims `split.a` and sends one
+/// commit through a [`StopAt`] that stops at it.
+fn stop_child(path: &std::path::Path) {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let journal = Arc::new(Journal::open(path).unwrap());
+        let classifier = Arc::new(Classifier::new("w0"));
+        let inner = JournalStore::new(
+            MemoryStore::new(LEASE),
+            Arc::clone(&journal),
+            Arc::clone(&classifier),
+        );
+        let plan = StopPlan {
+            kind: WriteKind::Commit,
+            n: 1,
+        };
+        let store = StopAt::new(inner, Some(plan), None, journal, classifier);
+        let claimed = store
+            .create(Keyspace::Durable, "split.a", record_at(1, Some("w0"), None))
+            .await
+            .unwrap()
+            .won()
+            .unwrap();
+        let won = store
+            .update(
+                Keyspace::Durable,
+                "split.a",
+                record_at(1, Some("w0"), Some(10)),
+                claimed,
+            )
+            .await
+            .unwrap();
+        assert!(won.won().is_some());
+    });
+}
+
+/// The stop halts the whole process after its `stop` line and before the
+/// commit is sent, and the commit lands once the process is continued.
+#[cfg(unix)]
+#[test]
+fn stop_at_stops_the_process_before_sending() {
+    if let Some(path) = std::env::var_os(STOP_CHILD) {
+        stop_child(std::path::Path::new(&path));
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("w0-1.ndjson");
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "store::tests::stop_at_stops_the_process_before_sending",
+            "--nocapture",
+        ])
+        .env(STOP_CHILD, &path)
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let until = std::time::Instant::now() + Duration::from_secs(60);
+    while !crate::workers::stopped(child.id()) {
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "the child exited unstopped"
+        );
+        assert!(std::time::Instant::now() < until, "the child never stopped");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let stopped = events(&path);
+    assert!(
+        matches!(stopped.as_slice(), [.., Event::Stop { .. }]),
+        "{stopped:?}"
+    );
+    let pid = libc::pid_t::try_from(child.id()).unwrap();
+    // SAFETY: `kill` takes no pointers; `pid` is our unreaped child.
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGCONT) }, 0);
+    let status = child.wait().unwrap();
+    assert!(status.success(), "{status:?}");
+    assert!(matches!(
+        events(&path).as_slice(),
+        [
+            ..,
+            Event::Stop { .. },
+            Event::Send { .. },
+            Event::Done {
+                reply: Reply::Won(_),
+                ..
+            }
+        ]
+    ));
+}
+
+/// An armed fence passes an ephemeral update of its key through untouched
+/// and stays armed for the durable one.
+#[tokio::test]
+async fn broken_fence_leaves_ephemeral_updates_alone() {
+    let fence = Arc::new(Fence::default());
+    let store = BrokenFence::new(MemoryStore::new(LEASE), Arc::clone(&fence));
+    fence.arm("split.a");
+    let renew = store
+        .update(
+            Keyspace::Ephemeral,
+            "split.a",
+            b"lease".to_vec(),
+            Revision(7),
+        )
+        .await;
+    assert!(!matches!(renew, Ok(CasOutcome::Won(_))), "{renew:?}");
+    assert!(fence.take("split.a"), "still armed");
 }

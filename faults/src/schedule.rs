@@ -5,7 +5,7 @@ use std::fmt::Write as _;
 
 use crate::classify::WriteKind;
 use crate::seed::SplitMix64;
-use crate::store::{AbortMode, AbortPlan};
+use crate::store::{AbortMode, AbortPlan, StopPlan};
 
 /// Earliest kill, from the start of the running stage.
 const KILL_FROM_MS: u64 = 1_000;
@@ -23,6 +23,9 @@ pub struct Kill {
     /// How long after the kill the replacement starts, at most one lease.
     pub respawn_after_ms: u64,
 }
+
+/// The instance whose first process stops itself in a stopped-writer run.
+pub const SLEEPER: u32 = 1;
 
 /// One step of a schedule, due `at_ms` after the start of the running stage.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -71,6 +74,8 @@ pub struct Schedule {
     pub kills: Vec<Kill>,
     /// In-process faults, at most one per instance.
     pub in_process: Vec<InProcess>,
+    /// The write at which [`SLEEPER`]'s first process stops itself.
+    pub stop_at: Option<StopPlan>,
 }
 
 impl Schedule {
@@ -105,7 +110,32 @@ impl Schedule {
                 respawn_after_ms: rng.in_range(0, lease_ms),
             });
         }
-        Schedule { kills, in_process }
+        Schedule {
+            kills,
+            in_process,
+            stop_at: None,
+        }
+    }
+
+    /// A stopped-writer schedule: [`SLEEPER`]'s first process stops itself at
+    /// one of its first three commits, and nothing else is injected.
+    #[must_use]
+    pub fn stopped_writer(rng: &mut SplitMix64) -> Schedule {
+        Schedule {
+            stop_at: Some(StopPlan {
+                kind: WriteKind::Commit,
+                n: u32::try_from(rng.in_range(1, 3)).expect("small"),
+            }),
+            ..Schedule::default()
+        }
+    }
+
+    /// The stop plan `instance`'s `incarnation` carries: only [`SLEEPER`]'s
+    /// first process carries one.
+    #[must_use]
+    pub fn stop_for(&self, instance: u32, incarnation: u32) -> Option<StopPlan> {
+        self.stop_at
+            .filter(|_| instance == SLEEPER && incarnation == 1)
     }
 
     /// The plan `instance`'s `incarnation` carries: only a first process
@@ -168,6 +198,9 @@ impl Schedule {
     #[must_use]
     pub fn render(&self) -> String {
         let mut text = String::new();
+        if let Some(plan) = self.stop_at {
+            let _ = writeln!(text, "w{SLEEPER}-1: {plan}");
+        }
         for p in &self.in_process {
             let _ = match p.plan.mode {
                 AbortMode::ErrAfterLand => writeln!(text, "w{}-1: {}", p.instance, p.plan),
@@ -569,10 +602,11 @@ mod tests {
         assert!(abort_kinds.contains("Renew"), "{abort_kinds:?}");
     }
 
-    /// Only an instance's first process carries its plan; every replacement
-    /// starts with none.
+    /// Only an instance's first process carries its plan, and only the
+    /// sleeper's first process its stop plan; every replacement starts with
+    /// neither.
     #[test]
-    fn replacement_config_drops_abort_and_err_after_land_plans() {
+    fn replacement_config_drops_abort_err_after_land_and_stop_plans() {
         let schedule = Schedule::draw(&mut SplitMix64::new(3), 3, LEASE);
         for instance in 0..3 {
             assert!(schedule.plan_for(instance, 1).is_some());
@@ -580,6 +614,27 @@ mod tests {
                 assert_eq!(schedule.plan_for(instance, incarnation), None);
             }
         }
+        let stopped = Schedule::stopped_writer(&mut SplitMix64::new(3));
+        assert!(stopped.stop_for(SLEEPER, 1).is_some());
+        assert_eq!(stopped.stop_for(0, 1), None, "the peer");
+        for incarnation in 2..5 {
+            assert_eq!(stopped.stop_for(SLEEPER, incarnation), None);
+        }
+    }
+
+    /// Across seeds, a stopped-writer run stops at one of the first three
+    /// commits, and each of the three is drawn.
+    #[test]
+    fn a_stopped_writer_stops_at_one_of_its_first_three_commits() {
+        let mut ns = std::collections::BTreeSet::new();
+        for seed in 0..200 {
+            let plan = Schedule::stopped_writer(&mut SplitMix64::new(seed))
+                .stop_at
+                .unwrap();
+            assert_eq!(plan.kind, WriteKind::Commit);
+            ns.insert(plan.n);
+        }
+        assert_eq!(ns.into_iter().collect::<Vec<_>>(), [1, 2, 3]);
     }
 
     /// With nothing held and every kill firing, the timeline hands out the

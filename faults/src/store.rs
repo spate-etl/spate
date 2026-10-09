@@ -1,6 +1,7 @@
 //! The coordination-store wrappers a worker runs under: one journals every
 //! durable `split.*` write with its reply and every durable `split.*` entry
-//! it reads, and one injects an in-process fault at a chosen write.
+//! it reads, one injects an in-process fault at a chosen write, one stops the
+//! process at a chosen commit, and one re-sends a commit that lost its CAS.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -514,6 +515,307 @@ impl<S: CoordinationStore + Clone> CoordinationStore for AbortAt<S> {
 
     async fn list(&self, ks: Keyspace, prefix: &str) -> Result<Vec<Entry>, StoreError> {
         self.inner.list(ks, prefix).await
+    }
+}
+
+/// The write at which a worker stops itself: the `n`th of `kind`, counting
+/// from 1. A plan on [`WriteKind::Commit`] also counts a
+/// [`WriteKind::Complete`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StopPlan {
+    /// The kind of write counted.
+    pub kind: WriteKind,
+    /// The write's ordinal among writes of `kind`.
+    pub n: u32,
+}
+
+impl StopPlan {
+    fn counts(self, kind: Option<WriteKind>) -> bool {
+        kind == Some(self.kind)
+            || (self.kind == WriteKind::Commit && kind == Some(WriteKind::Complete))
+    }
+}
+
+impl std::fmt::Display for StopPlan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "stop at {:?} {}", self.kind, self.n)
+    }
+}
+
+/// The durable key whose next lost update a [`BrokenFence`] re-sends.
+#[derive(Debug, Default)]
+pub struct Fence {
+    armed: std::sync::Mutex<Option<String>>,
+}
+
+impl Fence {
+    fn arm(&self, key: &str) {
+        *self.lock() = Some(key.to_owned());
+    }
+
+    /// Disarms the fence and returns whether it was armed for `key`.
+    fn take(&self, key: &str) -> bool {
+        let mut armed = self.lock();
+        if armed.as_deref() == Some(key) {
+            *armed = None;
+            return true;
+        }
+        false
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<String>> {
+        self.armed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// How many times a [`BrokenFence`] re-sends a lost update.
+const RESENDS: u32 = 8;
+
+/// Forwards every call to `S`, except that a durable update on the key its
+/// [`Fence`] is armed for, once it loses its CAS, is read back and re-sent
+/// unchanged at the current revision until it lands, up to eight times.
+/// The fence fires once.
+#[derive(Clone, Debug)]
+pub struct BrokenFence<S> {
+    inner: S,
+    fence: Arc<Fence>,
+}
+
+impl<S> BrokenFence<S> {
+    /// Wraps `inner`, re-sending on the key `fence` is armed for.
+    pub fn new(inner: S, fence: Arc<Fence>) -> BrokenFence<S> {
+        BrokenFence { inner, fence }
+    }
+}
+
+impl<S: CoordinationStore + Clone> CoordinationStore for BrokenFence<S> {
+    fn lease_ttl(&self) -> Duration {
+        self.inner.lease_ttl()
+    }
+
+    fn watch_mode(&self) -> WatchMode {
+        self.inner.watch_mode()
+    }
+
+    fn op_timeout(&self) -> Option<Duration> {
+        self.inner.op_timeout()
+    }
+
+    fn attach_metrics(&self, metrics: &CoordinationMetrics) {
+        self.inner.attach_metrics(metrics);
+    }
+
+    async fn create(
+        &self,
+        ks: Keyspace,
+        key: &str,
+        value: Vec<u8>,
+    ) -> Result<CasOutcome, StoreError> {
+        self.inner.create(ks, key, value).await
+    }
+
+    async fn update(
+        &self,
+        ks: Keyspace,
+        key: &str,
+        value: Vec<u8>,
+        expected: Revision,
+    ) -> Result<CasOutcome, StoreError> {
+        // Boxed, so this layer adds a pointer to the caller's future and not
+        // the inner futures, which overflow the I/O thread's stack in debug
+        // builds.
+        if ks != Keyspace::Durable || !self.fence.take(key) {
+            return Box::pin(self.inner.update(ks, key, value, expected)).await;
+        }
+        let mut result = Box::pin(self.inner.update(ks, key, value.clone(), expected)).await;
+        for _ in 0..RESENDS {
+            if !matches!(result, Ok(CasOutcome::Lost)) {
+                break;
+            }
+            let Some(current) = Box::pin(self.inner.get(ks, key)).await? else {
+                break;
+            };
+            result = Box::pin(self.inner.update(ks, key, value.clone(), current.revision)).await;
+        }
+        result
+    }
+
+    async fn get(&self, ks: Keyspace, key: &str) -> Result<Option<Entry>, StoreError> {
+        self.inner.get(ks, key).await
+    }
+
+    async fn delete(
+        &self,
+        ks: Keyspace,
+        key: &str,
+        expected: Option<Revision>,
+    ) -> Result<CasOutcome, StoreError> {
+        self.inner.delete(ks, key, expected).await
+    }
+
+    async fn watch(&self, ks: Keyspace, prefix: &str) -> Result<WatchStream, StoreError> {
+        self.inner.watch(ks, prefix).await
+    }
+
+    async fn list(&self, ks: Keyspace, prefix: &str) -> Result<Vec<Entry>, StoreError> {
+        self.inner.list(ks, prefix).await
+    }
+}
+
+/// Stops the whole process with SIGSTOP, from the calling thread.
+fn raise_stop() {
+    #[cfg(unix)]
+    // Thread-directed, so the calling thread stops before it runs anything
+    // more. Do not change this to `kill(getpid(), SIGSTOP)`: a
+    // process-directed stop can let this thread run on briefly first.
+    // SAFETY: `raise` takes no pointers.
+    unsafe {
+        libc::raise(libc::SIGSTOP);
+    }
+    #[cfg(not(unix))]
+    unimplemented!("stopping a worker needs SIGSTOP");
+}
+
+/// Forwards every call to `S`, and stops the process at the write its
+/// [`StopPlan`] names, before that write is sent.
+///
+/// The stop runs when the `update` future is built, not when it is polled.
+/// Under the coordinator's per-call timeout, which starts on the first poll,
+/// the resumed write therefore gets a whole `op_timeout`. Before stopping it
+/// appends a `stop` line and arms its [`Fence`], when it has one.
+#[derive(Clone, Debug)]
+pub struct StopAt<S> {
+    inner: S,
+    plan: Option<StopPlan>,
+    fence: Option<Arc<Fence>>,
+    journal: Arc<Journal>,
+    classifier: Arc<Classifier>,
+    count: Arc<AtomicU32>,
+    stop: fn(),
+}
+
+impl<S> StopAt<S> {
+    /// Wraps `inner`, stopping at `plan` when there is one and arming
+    /// `fence` there.
+    pub fn new(
+        inner: S,
+        plan: Option<StopPlan>,
+        fence: Option<Arc<Fence>>,
+        journal: Arc<Journal>,
+        classifier: Arc<Classifier>,
+    ) -> StopAt<S> {
+        StopAt {
+            inner,
+            plan,
+            fence,
+            journal,
+            classifier,
+            count: Arc::new(AtomicU32::new(0)),
+            stop: raise_stop,
+        }
+    }
+
+    /// Counts a write the plan counts, and returns its epoch when it is the
+    /// one to stop at.
+    fn due(&self, ks: Keyspace, key: &str, value: &[u8], expected: Revision) -> Option<u64> {
+        let plan = self.plan?;
+        if ks != Keyspace::Durable || !key.starts_with(SPLIT_PREFIX) {
+            return None;
+        }
+        let next = Progress::parse(value).ok()?;
+        if !plan.counts(self.classifier.classify(key, expected.0, &next)) {
+            return None;
+        }
+        let n = self.count.fetch_add(1, Ordering::SeqCst) + 1;
+        (n == plan.n).then_some(next.epoch)
+    }
+}
+
+impl<S: CoordinationStore + Clone> CoordinationStore for StopAt<S> {
+    fn lease_ttl(&self) -> Duration {
+        self.inner.lease_ttl()
+    }
+
+    fn watch_mode(&self) -> WatchMode {
+        self.inner.watch_mode()
+    }
+
+    fn op_timeout(&self) -> Option<Duration> {
+        self.inner.op_timeout()
+    }
+
+    fn attach_metrics(&self, metrics: &CoordinationMetrics) {
+        self.inner.attach_metrics(metrics);
+    }
+
+    fn create(
+        &self,
+        ks: Keyspace,
+        key: &str,
+        value: Vec<u8>,
+    ) -> impl Future<Output = Result<CasOutcome, StoreError>> + Send {
+        self.inner.create(ks, key, value)
+    }
+
+    // Not an `async fn`: the stop must happen before the caller's timeout
+    // exists, which a body that runs on the first poll would not do.
+    fn update(
+        &self,
+        ks: Keyspace,
+        key: &str,
+        value: Vec<u8>,
+        expected: Revision,
+    ) -> impl Future<Output = Result<CasOutcome, StoreError>> + Send {
+        if let Some(epoch) = self.due(ks, key, &value, expected) {
+            record(
+                &self.journal,
+                Event::Stop {
+                    key: key.to_owned(),
+                    expected: expected.0,
+                    epoch,
+                },
+            );
+            if let Some(fence) = &self.fence {
+                fence.arm(key);
+            }
+            (self.stop)();
+        }
+        self.inner.update(ks, key, value, expected)
+    }
+
+    fn get(
+        &self,
+        ks: Keyspace,
+        key: &str,
+    ) -> impl Future<Output = Result<Option<Entry>, StoreError>> + Send {
+        self.inner.get(ks, key)
+    }
+
+    fn delete(
+        &self,
+        ks: Keyspace,
+        key: &str,
+        expected: Option<Revision>,
+    ) -> impl Future<Output = Result<CasOutcome, StoreError>> + Send {
+        self.inner.delete(ks, key, expected)
+    }
+
+    fn watch(
+        &self,
+        ks: Keyspace,
+        prefix: &str,
+    ) -> impl Future<Output = Result<WatchStream, StoreError>> + Send {
+        self.inner.watch(ks, prefix)
+    }
+
+    fn list(
+        &self,
+        ks: Keyspace,
+        prefix: &str,
+    ) -> impl Future<Output = Result<Vec<Entry>, StoreError>> + Send {
+        self.inner.list(ks, prefix)
     }
 }
 

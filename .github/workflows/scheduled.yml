@@ -930,7 +930,8 @@ jobs:
 
       - id: run
         name: Run the fault scenarios
-        # Below the job's, so a hung run fails this step and files `harness`.
+        # Below the job's, so a hung run fails this step and the report step
+        # files the outcomes already on disk.
         timeout-minutes: 100
         run: cargo xtask fault-test
 

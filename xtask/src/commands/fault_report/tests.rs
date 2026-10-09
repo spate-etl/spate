@@ -87,6 +87,7 @@ fn context() -> Context {
         toolchain: "rustc 1.97.0, Linux x86_64".to_owned(),
         features: "spate-s3: testing".to_owned(),
         seed: None,
+        summary_written: false,
     }
 }
 
@@ -158,6 +159,10 @@ fn summary(kinds: &[Kind], tests_passed: bool) -> Summary {
     }
 }
 
+fn routes_of(summary: &Summary) -> Vec<Route> {
+    routes(summary.tests_passed, &summary.outcomes)
+}
+
 fn headings(body: &str) -> Vec<&str> {
     body.lines()
         .filter_map(|l| l.strip_prefix("### "))
@@ -187,34 +192,29 @@ fn report_prints_a_route_per_kind_and_harness_only_alone() {
         false,
     );
     assert_eq!(
-        routes(Some(&all)),
+        routes_of(&all),
         [Route::Delivery, Route::Worker, Route::Expectation]
     );
     assert_eq!(
-        routes(Some(&summary(&[Kind::Worker, Kind::Harness], false))),
+        routes_of(&summary(&[Kind::Worker, Kind::Harness], false)),
         [Route::Worker]
     );
     assert_eq!(
-        routes(Some(&summary(&[Kind::Expectation], false))),
+        routes_of(&summary(&[Kind::Expectation], false)),
         [Route::Expectation]
     );
     assert_eq!(
-        routes(Some(&summary(&[Kind::Pass, Kind::Harness], false))),
+        routes_of(&summary(&[Kind::Pass, Kind::Harness], false)),
         [Route::Harness]
     );
-    assert_eq!(routes(Some(&summary(&[Kind::Pass], true))), []);
+    assert_eq!(routes_of(&summary(&[Kind::Pass], true)), []);
 }
 
-/// A failed nextest run that left no failing outcome, or no summary, files
-/// under `harness`.
+/// A failed nextest run that left no failing outcome files under `harness`.
 #[test]
 fn a_run_with_no_failing_outcome_files_under_harness() {
-    assert_eq!(routes(Some(&summary(&[], false))), [Route::Harness]);
-    assert_eq!(
-        routes(Some(&summary(&[Kind::Pass], false))),
-        [Route::Harness]
-    );
-    assert_eq!(routes(None), [Route::Harness]);
+    assert_eq!(routes_of(&summary(&[], false)), [Route::Harness]);
+    assert_eq!(routes_of(&summary(&[Kind::Pass], false)), [Route::Harness]);
 }
 
 /// The renderer's delivery fields are the delivery form's fields, with the
@@ -709,4 +709,79 @@ fn report_writes_a_body_and_title_per_route() {
     assert_eq!(routes, [Route::Harness]);
     assert!(out.join("harness.md").exists());
     fs::remove_dir_all(&dir).unwrap();
+}
+
+/// With no `summary.json`, a `violation` outcome already on disk files under
+/// `delivery`.
+#[test]
+fn a_summaryless_run_files_an_earlier_violation_as_delivery() {
+    let dir = std::env::temp_dir().join(format!("xtask-fault-summaryless-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    let runs = dir.join("runs");
+    let out = dir.join("out");
+    let run = runs.join("dynamodb_three_instances-0000000000000001");
+    fs::create_dir_all(&run).unwrap();
+    fs::write(
+        run.join("outcome.json"),
+        r#"{"scenario":"dynamodb_three_instances","store":"dynamodb","instances":3,"seed":1,"replay":"r","stage":"oracle","kind":"violation","message":"P1 RecordMissing","violations":[{"property":1,"check":"RecordMissing","key":null,"rev":null,"instance":null,"pid":null,"detail":"d"}],"expectations":[],"faults_fired":[]}"#,
+    )
+    .unwrap();
+    let routes = report(&runs.join("summary.json"), &out, &context()).unwrap();
+    let harness = fs::read_to_string(out.join("harness.md")).unwrap_or_default();
+    fs::remove_dir_all(&dir).unwrap();
+    assert!(
+        routes.contains(&Route::Delivery),
+        "routes={routes:?} rerun={}",
+        harness.contains("Rerun the job")
+    );
+}
+
+/// With no `summary.json`, a runs root that is empty or holds an
+/// `outcome.json` that does not parse files `harness` and leaves the seed to
+/// the run log; a passing outcome on disk names its seed and replays it.
+#[test]
+fn a_summaryless_run_with_no_failing_outcome_files_harness() {
+    let dir = std::env::temp_dir().join(format!(
+        "xtask-fault-summaryless-harness-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    let report_on = |name: &str, outcome: Option<&str>| {
+        let runs = dir.join(name).join("runs");
+        let out = dir.join(name).join("out");
+        if let Some(outcome) = outcome {
+            let run = runs.join("s-00000000000000ff");
+            fs::create_dir_all(&run).unwrap();
+            fs::write(run.join("outcome.json"), outcome).unwrap();
+        }
+        let routes = report(&runs.join("summary.json"), &out, &context()).unwrap();
+        (routes, fs::read_to_string(out.join("harness.md")).unwrap())
+    };
+    let empty = report_on("empty", None);
+    let malformed = report_on("malformed", Some("{\"scenario\":"));
+    let passed = report_on(
+        "passed",
+        Some(r#"{"scenario":"s","seed":255,"replay":"r","kind":"pass","message":"ok"}"#),
+    );
+    fs::remove_dir_all(&dir).unwrap();
+    for (routes, body) in [&empty, &malformed] {
+        assert_eq!(routes, &[Route::Harness]);
+        let what = answer(body, "What happened");
+        assert!(
+            what.contains("wrote no `summary.json`. The run log has its seed"),
+            "{what}"
+        );
+        assert_eq!(answer(body, "Replay").trim(), "_No response_");
+    }
+    let (routes, body) = passed;
+    assert_eq!(routes, [Route::Harness]);
+    let what = answer(&body, "What happened");
+    assert!(
+        what.contains("wrote no `summary.json`, and no scenario under seed 0x00000000000000ff"),
+        "{what}"
+    );
+    assert_eq!(
+        answer(&body, "Replay").trim(),
+        "```sh\ncargo xtask fault-test --seed 0x00000000000000ff\n```"
+    );
 }

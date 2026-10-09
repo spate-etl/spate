@@ -144,7 +144,7 @@ pub(crate) fn fault_test(
 }
 
 /// Every `<run>/outcome.json` under `runs`, ordered by scenario.
-fn read_outcomes(runs: &Path) -> Result<Vec<ScenarioOutcome>, Error> {
+pub(super) fn read_outcomes(runs: &Path) -> Result<Vec<ScenarioOutcome>, Error> {
     let Ok(dirs) = std::fs::read_dir(runs) else {
         return Ok(Vec::new());
     };

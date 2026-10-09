@@ -179,8 +179,10 @@ title, or comments `Still failing` on the open issue that already has it:
 
 `delivery` follows the delivery-correctness form and carries the
 `delivery-correctness` label; the other three follow the bug form. Every issue
-is typed Bug. Its body names the seed and the replay command, or, when the run
-wrote no `summary.json`, points to the run log for the seed.
+is typed Bug. Its body names the seed and the replay command. A run that
+wrote no `summary.json`, such as one the step timeout stopped, is routed from
+the `outcome.json` files already on disk as a failed nextest run, and its
+body takes the seed from them or points to the run log for it.
 
 **On macOS every freshly linked binary stalls for tens of seconds at 0% CPU on
 its first exec** while Gatekeeper scans it. Across this workspace that alone

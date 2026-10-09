@@ -11,7 +11,7 @@ use std::process::Command;
 use clap::Subcommand;
 use serde::Deserialize;
 
-use super::fault_test::{Kind, ScenarioOutcome, Summary};
+use super::fault_test::{Kind, ScenarioOutcome, Summary, read_outcomes};
 use crate::run::{Error, Outcome};
 
 #[derive(Subcommand)]
@@ -19,7 +19,8 @@ pub(crate) enum FaultTestCommand {
     /// Write an issue body and title per failure route of a run, and print
     /// the routes, one per line
     Report {
-        /// The run's summary; a missing file reports an infrastructure failure
+        /// The run's summary; without it the run directories beside it are
+        /// reported as a failed nextest run
         #[arg(
             long,
             value_name = "PATH",
@@ -57,6 +58,7 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: FaultTestCommand) -> Out
             .map_err(|e| Error::msg(format!("faults/Cargo.toml: {e}")))
             .and_then(|text| features(&text))?,
         seed: None,
+        summary_written: false,
     };
     for route in report(&root.join(summary), &root.join(out_dir), &context)? {
         println!("{}", route.name());
@@ -105,18 +107,15 @@ impl Route {
 }
 
 /// One route per failing outcome kind present, with `harness` only when no
-/// other route applies. A failed nextest run with no failing outcome, or no
-/// summary at all, is `harness`.
-fn routes(summary: Option<&Summary>) -> Vec<Route> {
-    let Some(summary) = summary else {
-        return vec![Route::Harness];
-    };
-    let present = |route: Route| summary.outcomes.iter().any(|o| o.kind == route.kind());
+/// other route applies. A failed nextest run with no failing outcome is
+/// `harness`.
+fn routes(tests_passed: bool, outcomes: &[ScenarioOutcome]) -> Vec<Route> {
+    let present = |route: Route| outcomes.iter().any(|o| o.kind == route.kind());
     let mut routes: Vec<Route> = [Route::Delivery, Route::Worker, Route::Expectation]
         .into_iter()
         .filter(|r| present(*r))
         .collect();
-    if routes.is_empty() && (present(Route::Harness) || !summary.tests_passed) {
+    if routes.is_empty() && (present(Route::Harness) || !tests_passed) {
         routes.push(Route::Harness);
     }
     routes
@@ -125,6 +124,10 @@ fn routes(summary: Option<&Summary>) -> Vec<Route> {
 /// Writes `<route>.md` and `<route>.title` under `out_dir` for each route of
 /// the run `summary` describes, and returns the routes. Run directories are
 /// read from beside `summary`.
+///
+/// With no `summary.json`, the outcomes on disk are routed as a failed
+/// nextest run under the seed they carry; an `outcome.json` that does not
+/// parse leaves none, which files `harness`.
 fn report(summary_path: &Path, out_dir: &Path, context: &Context) -> Result<Vec<Route>, Error> {
     let summary: Option<Summary> = match fs::read(summary_path) {
         Ok(bytes) => Some(
@@ -135,16 +138,25 @@ fn report(summary_path: &Path, out_dir: &Path, context: &Context) -> Result<Vec<
         Err(e) => return Err(Error::msg(format!("{}: {e}", summary_path.display()))),
     };
     let runs_root = summary_path.parent().unwrap_or(Path::new("."));
-    let routes = routes(summary.as_ref());
+    let summary_written = summary.is_some();
+    let (tests_passed, outcomes, seed) = match summary {
+        Some(s) => (s.tests_passed, s.outcomes, Some(s.seed)),
+        None => {
+            let outcomes = read_outcomes(runs_root).unwrap_or_default();
+            let seed = outcomes.first().and_then(|o| run_seed(runs_root, o));
+            (false, outcomes, seed)
+        }
+    };
+    let routes = routes(tests_passed, &outcomes);
     let context = Context {
-        seed: summary.as_ref().map(|s| s.seed.clone()),
+        seed,
+        summary_written,
         ..context.clone()
     };
     fs::create_dir_all(out_dir).map_err(|e| Error::msg(format!("{}: {e}", out_dir.display())))?;
     for route in &routes {
-        let runs = summary
+        let runs = outcomes
             .iter()
-            .flat_map(|s| &s.outcomes)
             .filter(|o| o.kind == route.kind())
             .map(|o| RunDir::load(runs_root, o))
             .collect::<Result<Vec<_>, _>>()?;
@@ -157,6 +169,14 @@ fn report(summary_path: &Path, out_dir: &Path, context: &Context) -> Result<Vec<
     Ok(routes)
 }
 
+/// The run seed an outcome's `outcome.json` carries, as `summary.json`
+/// writes it.
+fn run_seed(runs_root: &Path, entry: &ScenarioOutcome) -> Option<String> {
+    let bytes = fs::read(runs_root.join(&entry.dir).join("outcome.json")).ok()?;
+    let outcome: RunOutcome = serde_json::from_slice(&bytes).ok()?;
+    Some(format!("0x{:016x}", outcome.seed))
+}
+
 /// What every body states about the run as a whole.
 #[derive(Debug, Clone)]
 struct Context {
@@ -166,8 +186,10 @@ struct Context {
     toolchain: String,
     /// The features `spate-faults` enables on the crates it runs.
     features: String,
-    /// The summary's seed; `None` when the run wrote no `summary.json`.
+    /// The run seed, from the summary or else from an outcome on disk.
     seed: Option<String>,
+    /// The run wrote `summary.json`.
+    summary_written: bool,
 }
 
 /// `GITHUB_SHA`, or the checked-out commit off a runner.
@@ -737,15 +759,22 @@ fn bug(route: Route, context: &Context, runs: &[RunDir]) -> String {
                 }
             }
         }
-        None => match &context.seed {
-            Some(seed) => {
+        None => match (&context.seed, context.summary_written) {
+            (Some(seed), true) => {
                 let _ = writeln!(
                     what,
                     "nextest failed under seed {seed} and no scenario left a failing outcome. \
                      The run log names the scenarios whose test failed."
                 );
             }
-            None => what.push_str(
+            (Some(seed), false) => {
+                let _ = writeln!(
+                    what,
+                    "The fault run wrote no `summary.json`, and no scenario under seed {seed} \
+                     left a failing outcome. The run log has the cause."
+                );
+            }
+            (None, _) => what.push_str(
                 "The fault run wrote no `summary.json`. The run log has its seed and the \
                  cause.\n",
             ),

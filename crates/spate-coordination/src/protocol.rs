@@ -51,9 +51,10 @@ pub(crate) enum ClaimKind {
     Released,
     /// A live lease under this worker's stable id on a record that still
     /// names an owner, such as a predecessor restarted under this id.
-    /// Reclaimed fast, without waiting out the lease. An own lease on a
-    /// record with no owner is [`Create`](Self::Create) or
-    /// [`Released`](Self::Released).
+    /// Reclaimed fast, without waiting out the lease, except on the split's
+    /// last attempt when another process wrote the lease
+    /// ([`awaits_lease_expiry`]). An own lease on a record with no owner is
+    /// [`Create`](Self::Create) or [`Released`](Self::Released).
     Reclaim,
     /// The lease expired with `owner` still set: the owner died.
     Expired,
@@ -416,8 +417,9 @@ fn best_move(
 /// function validates eligibility and nothing more.
 ///
 /// A split is claimable when its progress record is `runnable`, this
-/// worker does not hold it, and there is no live foreign lease (a live
-/// lease under our own stable id does not block a claim). A claim also
+/// worker does not hold it, and there is no live foreign lease. A live
+/// lease under our own stable id does not block a claim, unless
+/// [`awaits_lease_expiry`] holds for the split. A claim also
 /// requires the spec record to have been observed, since a `Gained` event
 /// carries the descriptor, while a quarantine does not (it writes only
 /// the progress record).
@@ -429,11 +431,15 @@ pub(crate) fn claim_candidates(
     splits: &BTreeMap<String, SplitState>,
     owned: impl Fn(&str) -> bool,
     instance: &str,
+    run: &str,
     max_attempts: u32,
 ) -> Vec<(String, ClaimAction)> {
     let mut out: Vec<(String, ClaimAction)> = Vec::new();
     for (id, state) in splits {
         if state.progress.status != SplitStatus::Runnable || owned(id) {
+            continue;
+        }
+        if awaits_lease_expiry(state, instance, run, max_attempts) {
             continue;
         }
         let kind = match (&state.lease, &state.progress.owner, state.progress.epoch) {
@@ -455,6 +461,24 @@ pub(crate) fn claim_candidates(
     }
     out.sort_by(|a, b| kind_of(a).cmp(&kind_of(b)).then_with(|| a.0.cmp(&b.0)));
     out
+}
+
+/// Whether a reclaim would quarantine this split while its lease under
+/// `instance` carries a nonce other than this process's `run`. That process
+/// may be alive, so the worker leaves the split to the lease's expiry.
+pub(crate) fn awaits_lease_expiry(
+    state: &SplitState,
+    instance: &str,
+    run: &str,
+    max_attempts: u32,
+) -> bool {
+    state.progress.status == SplitStatus::Runnable
+        && state.progress.owner.is_some()
+        && state.progress.attempts + 1 >= max_attempts
+        && state
+            .lease
+            .as_ref()
+            .is_some_and(|(lease, _)| lease.owner == instance && lease.nonce != run)
 }
 
 fn kind_of(entry: &(String, ClaimAction)) -> ClaimKind {
@@ -567,7 +591,7 @@ mod tests {
                 None,
             ),
         ]);
-        let candidates = claim_candidates(&map, |_| false, "me", 4);
+        let candidates = claim_candidates(&map, |_| false, "me", "own-run", 4);
         let kinds: Vec<(&str, ClaimAction)> = candidates
             .iter()
             .map(|(id, action)| (id.as_str(), *action))
@@ -600,7 +624,7 @@ mod tests {
                 None,
             ),
         ]);
-        let candidates = claim_candidates(&map, |_| false, "me", 3);
+        let candidates = claim_candidates(&map, |_| false, "me", "own-run", 3);
         let by_id: BTreeMap<&str, ClaimAction> =
             candidates.iter().map(|(id, a)| (id.as_str(), *a)).collect();
         assert_eq!(
@@ -643,7 +667,7 @@ mod tests {
                 own(),
             ),
         ]);
-        let candidates = claim_candidates(&map, |_| false, "me", 3);
+        let candidates = claim_candidates(&map, |_| false, "me", &run, 3);
         let by_id: BTreeMap<&str, ClaimAction> =
             candidates.iter().map(|(id, a)| (id.as_str(), *a)).collect();
         assert_eq!(
@@ -658,6 +682,49 @@ mod tests {
         assert_eq!(
             by_id["handed-back"],
             ClaimAction::Claim(ClaimKind::Released)
+        );
+    }
+
+    /// On a split's last attempt an own-id lease from another process is left
+    /// to expire; our own nonce, a split below the cap and an expired lease
+    /// classify as before.
+    #[test]
+    fn an_own_id_lease_from_another_process_is_left_to_expire_on_the_last_attempt() {
+        let map = splits(vec![
+            state(
+                record("twin-at-cap", SplitStatus::Runnable, Some("me"), 2, 2),
+                1,
+                Some(lease("me", "other", 2)),
+            ),
+            state(
+                record("own-at-cap", SplitStatus::Runnable, Some("me"), 2, 2),
+                1,
+                Some(lease("me", "own-run", 2)),
+            ),
+            state(
+                record("twin-below", SplitStatus::Runnable, Some("me"), 2, 1),
+                1,
+                Some(lease("me", "other", 2)),
+            ),
+            state(
+                record("expired-at-cap", SplitStatus::Runnable, Some("me"), 2, 2),
+                1,
+                None,
+            ),
+        ]);
+        let by_id: BTreeMap<String, ClaimAction> =
+            claim_candidates(&map, |_| false, "me", "own-run", 3)
+                .into_iter()
+                .collect();
+        assert!(!by_id.contains_key("twin-at-cap"), "{by_id:?}");
+        assert_eq!(
+            by_id["own-at-cap"],
+            ClaimAction::Quarantine(ClaimKind::Reclaim)
+        );
+        assert_eq!(by_id["twin-below"], ClaimAction::Claim(ClaimKind::Reclaim));
+        assert_eq!(
+            by_id["expired-at-cap"],
+            ClaimAction::Quarantine(ClaimKind::Expired)
         );
     }
 
@@ -678,7 +745,7 @@ mod tests {
         for state in map.values_mut() {
             state.spec = None;
         }
-        let candidates = claim_candidates(&map, |_| false, "me", 4);
+        let candidates = claim_candidates(&map, |_| false, "me", "own-run", 4);
         assert_eq!(
             candidates,
             vec![(
@@ -712,7 +779,7 @@ mod tests {
                 None,
             ),
         ]);
-        let ids: Vec<String> = claim_candidates(&map, |_| false, "me", 4)
+        let ids: Vec<String> = claim_candidates(&map, |_| false, "me", "own-run", 4)
             .into_iter()
             .map(|(id, _)| id)
             .collect();
@@ -736,7 +803,7 @@ mod tests {
                 None,
             ),
         ]);
-        let swapped_ids: Vec<String> = claim_candidates(&swapped, |_| false, "me", 4)
+        let swapped_ids: Vec<String> = claim_candidates(&swapped, |_| false, "me", "own-run", 4)
             .into_iter()
             .map(|(id, _)| id)
             .collect();
@@ -1529,7 +1596,7 @@ mod tests {
                     0u32..6,                           // attempts
                     proptest::option::of((
                         prop_oneof![Just("me".to_string()), "[a-z]{1,4}"],
-                        "[a-z]{1,4}",
+                        prop_oneof![Just("mine".to_string()), "[a-z]{1,4}"],
                     )), // lease owner+nonce
                 ),
                 0..24
@@ -1537,6 +1604,7 @@ mod tests {
             max_attempts in 1u32..5,
         ) {
             let me = "me";
+            let own = "mine";
             let map: BTreeMap<String, SplitState> = entries
                 .into_iter()
                 .map(|(id, status, owner, epoch, attempts, lease_parts)| {
@@ -1554,7 +1622,7 @@ mod tests {
                 .collect();
             let owned: BTreeSet<String> = map.keys().take(2).cloned().collect();
             for (id, action) in
-                claim_candidates(&map, |id| owned.contains(id), me, max_attempts)
+                claim_candidates(&map, |id| owned.contains(id), me, own, max_attempts)
             {
                 let s = &map[&id];
                 prop_assert_eq!(s.progress.status, SplitStatus::Runnable);
@@ -1578,6 +1646,61 @@ mod tests {
                     matches!(action, ClaimAction::Quarantine(_)),
                     expect_quarantine
                 );
+            }
+        }
+
+        /// Every eligible split is returned, and no other, against an oracle
+        /// written independently of `awaits_lease_expiry`.
+        #[test]
+        fn claim_candidates_are_exactly_the_eligible_splits(
+            entries in proptest::collection::vec(
+                (
+                    "[a-z0-9]{1,8}",
+                    0u8..3,
+                    proptest::option::of("[a-z]{1,4}"),
+                    0u64..5,
+                    0u32..6,
+                    proptest::option::of((
+                        prop_oneof![Just("me".to_string()), "[a-z]{1,4}"],
+                        prop_oneof![Just("mine".to_string()), "[a-z]{1,4}"],
+                    )),
+                ),
+                0..24
+            ),
+            max_attempts in 1u32..5,
+        ) {
+            let me = "me";
+            let own = "mine";
+            let map: BTreeMap<String, SplitState> = entries
+                .into_iter()
+                .map(|(id, status, owner, epoch, attempts, lease_parts)| {
+                    let status = match status {
+                        0 => SplitStatus::Runnable,
+                        1 => SplitStatus::Completed,
+                        _ => SplitStatus::Quarantined,
+                    };
+                    let l = lease_parts.map(|(o, n)| lease(&o, &n, epoch));
+                    (
+                        id.clone(),
+                        state(record(&id, status, owner.as_deref(), epoch, attempts), 1, l),
+                    )
+                })
+                .collect();
+            let owned: BTreeSet<String> = map.keys().take(2).cloned().collect();
+            let got: BTreeMap<String, ClaimAction> =
+                claim_candidates(&map, |id| owned.contains(id), me, own, max_attempts)
+                    .into_iter()
+                    .collect();
+            for (id, s) in &map {
+                let foreign = s.lease.as_ref().is_some_and(|(l, _)| l.owner != me);
+                let waits = s.progress.owner.is_some()
+                    && s.progress.attempts + 1 >= max_attempts
+                    && s.lease.as_ref().is_some_and(|(l, _)| l.owner == me && l.nonce != own);
+                let eligible = s.progress.status == SplitStatus::Runnable
+                    && !owned.contains(id)
+                    && !foreign
+                    && !waits;
+                prop_assert_eq!(got.contains_key(id), eligible, "{} membership", id);
             }
         }
 

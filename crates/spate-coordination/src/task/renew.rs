@@ -1,7 +1,7 @@
 //! Heartbeat renewal of presence, leadership and owned split leases.
 
 use super::Task;
-use crate::error::{fatal, fatal_only};
+use crate::error::fatal_only;
 use crate::records::{self, LeaderVal, LeaseVal};
 use crate::store::{CasOutcome, CoordinationStore, Keyspace, Revision, StoreError};
 use spate_core::coordination::CoordinationError;
@@ -214,11 +214,8 @@ impl<S: CoordinationStore + Clone> Task<S> {
                             };
                         }
                         if lease.owner == self.instance && lease.nonce != self.nonce {
-                            return Err(fatal(format!(
-                                "two live workers share instance_id {:?} (foreign nonce on \
-                                 our lease for split {id}); instance ids must be unique per \
-                                 live worker — use the pod name, not a constant",
-                                self.instance
+                            return Err(self.shared_instance_id(&format!(
+                                "foreign nonce on our lease for split {id}"
                             )));
                         }
                         // A thief CASed our lease: surrender.

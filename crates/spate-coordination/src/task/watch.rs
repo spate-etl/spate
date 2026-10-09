@@ -3,7 +3,7 @@
 
 use super::Task;
 use crate::error::fatal;
-use crate::protocol::SplitState;
+use crate::protocol::{self, SplitState};
 use crate::records::{
     self, AssignmentVal, LeaderVal, LeaseVal, PlanRecord, SplitProgressRecord, SplitSpecRecord,
     SplitStatus, WorkerVal,
@@ -22,6 +22,15 @@ impl<S: CoordinationStore + Clone> Task<S> {
             }
             WatchEvent::SnapshotDone => Ok(()),
         }
+    }
+
+    /// The fatal error for a second live worker under this instance id.
+    pub(super) fn shared_instance_id(&self, detail: &str) -> CoordinationError {
+        fatal(format!(
+            "two live workers share instance_id {:?} ({detail}); instance ids must be unique \
+             per live worker — use the pod name, not a constant",
+            self.instance
+        ))
     }
 
     pub(super) fn apply_lease_put(&mut self, entry: &Entry) -> Result<(), CoordinationError> {
@@ -104,16 +113,32 @@ impl<S: CoordinationStore + Clone> Task<S> {
                 // heartbeat echoes match our nonce; anything else fenced us.
                 if lease.nonce != self.nonce {
                     if lease.owner == self.instance {
-                        return Err(fatal(format!(
-                            "two live workers share instance_id {:?} (foreign nonce on our \
-                             lease for split {id}); instance ids must be unique per live \
-                             worker — use the pod name, not a constant",
-                            self.instance
+                        return Err(self.shared_instance_id(&format!(
+                            "foreign nonce on our lease for split {id}"
                         )));
                     }
                     tracing::warn!(split = %id, thief = %lease.owner, "lease taken; split lost");
                     self.drop_owned(id, SplitLossReason::Fenced);
                 }
+            }
+            // Judged on the view before this put: a first sighting, including
+            // a rewatch replay of a crashed predecessor's lease, never matches.
+            if !self.owned.contains_key(id)
+                && lease.owner == self.instance
+                && lease.nonce != self.nonce
+                && self.splits.get(id).is_some_and(|state| {
+                    protocol::awaits_lease_expiry(
+                        state,
+                        &self.instance,
+                        &self.nonce,
+                        self.config.max_attempts,
+                    )
+                })
+            {
+                return Err(self.shared_instance_id(&format!(
+                    "another process wrote its lease under this id on split {id}, which has \
+                     one delivery attempt left"
+                )));
             }
             match self.splits.get_mut(id) {
                 Some(state) => {

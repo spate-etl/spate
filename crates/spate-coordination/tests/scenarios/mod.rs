@@ -27,6 +27,8 @@ macro_rules! multi_worker_scenarios {
             a_departure_leaves_nothing_to_expire
             stable_instance_id_reclaims_fast_after_a_restart
             live_twins_sharing_an_instance_id_are_fatal
+            live_twins_over_a_split_on_its_last_attempt_are_fatal
+            a_restart_on_a_splits_last_attempt_quarantines_it
             a_fenced_zombie_commit_writes_nothing
             poison_splits_quarantine_and_stall_instead_of_false_success
             all_complete_reaches_a_late_standby_that_never_owned_anything
@@ -346,6 +348,93 @@ pub fn live_twins_sharing_an_instance_id_are_fatal(backend: &impl Backend) {
     assert_eq!(error.kind, CoordinationErrorKind::Fatal);
     assert!(error.to_string().contains("instance_id"), "{error}");
     assert!(error.to_string().contains("pod-1"), "{error}");
+}
+
+/// Twins sharing an `instance_id` over a split on its last attempt stop on
+/// the shared-id fatal and leave the split runnable under the holder.
+pub fn live_twins_over_a_split_on_its_last_attempt_are_fatal(backend: &impl Backend) {
+    let store = backend.store();
+    let rt = runtime();
+    let planner = || Box::new(PhasedPlanner::one_final("twin-cap:v1", &["m0"]));
+
+    let mut first = backend.worker_with(rt.handle(), Some("pod-1"), |c| c.max_attempts = 1);
+    first.start(planner()).unwrap();
+    let mut held_first = Held::default();
+    drive(&mut first, &mut held_first, "first twin claiming", |h| {
+        h.splits.len() == 1
+    });
+
+    let mut second = backend.worker_with(rt.handle(), Some("pod-1"), |c| c.max_attempts = 1);
+    second.start(planner()).unwrap();
+    let mut held_second = Held::default();
+
+    let deadline = Instant::now() + DEADLINE;
+    let error = 'outer: loop {
+        assert!(
+            Instant::now() < deadline,
+            "neither twin reported the shared instance_id; first {:?} second {:?} quarantined {:?}",
+            held_first.splits.keys().collect::<Vec<_>>(),
+            held_second.splits.keys().collect::<Vec<_>>(),
+            held_second.quarantined,
+        );
+        for (twin, held) in [
+            (&mut first, &mut held_first),
+            (&mut second, &mut held_second),
+        ] {
+            match twin.poll() {
+                Ok(events) => held.fold(events),
+                Err(e) => break 'outer e,
+            }
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    };
+    assert_eq!(error.kind, CoordinationErrorKind::Fatal, "{error}");
+    assert!(error.to_string().contains("share instance_id"), "{error}");
+    assert!(
+        error.to_string().contains("one delivery attempt left"),
+        "{error}"
+    );
+    assert_eq!(
+        held_first.splits.keys().collect::<Vec<_>>(),
+        ["m0"],
+        "the holder keeps m0"
+    );
+    let record = rt
+        .block_on(store.get(Keyspace::Durable, "split.m0"))
+        .unwrap()
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&record.value).unwrap();
+    assert_eq!(json["status"], "runnable", "{json}");
+    assert_eq!(json["owner"], "pod-1", "{json}");
+    assert_eq!(json["attempts"], 0, "{json}");
+}
+
+/// A restart under a crashed predecessor's id on a split's last attempt
+/// quarantines the split without an error.
+pub fn a_restart_on_a_splits_last_attempt_quarantines_it(backend: &impl Backend) {
+    let rt = runtime();
+    let planner = || Box::new(PhasedPlanner::one_final("restart-cap:v1", &["m0"]));
+
+    let rt_old = runtime();
+    let mut old = backend.worker(rt_old.handle(), Some("pod-1"));
+    old.start(planner()).unwrap();
+    let mut held_old = Held::default();
+    drive(&mut old, &mut held_old, "predecessor claiming", |h| {
+        h.splits.len() == 1
+    });
+    crash(rt_old, old);
+
+    let mut new = backend.worker_with(rt.handle(), Some("pod-1"), |c| c.max_attempts = 1);
+    new.start(planner()).unwrap();
+    let mut held_new = Held::default();
+    drive(
+        &mut new,
+        &mut held_new,
+        "restart quarantining its split",
+        |h| !h.quarantined.is_empty(),
+    );
+    assert_eq!(held_new.quarantined, vec![("m0".to_string(), 1)]);
+    assert!(held_new.splits.is_empty());
 }
 
 pub fn a_fenced_zombie_commit_writes_nothing(backend: &impl Backend) {

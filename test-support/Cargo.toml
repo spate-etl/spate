@@ -13,6 +13,8 @@ repository.workspace = true
 workspace = true
 
 [features]
+# `DynamoDbFaultProxy`.
+dynamodb-proxy = ["dep:serde_json"]
 # `TestCa`, `native_certs` and `serve_tls`.
 tls = [
     "dep:base64",
@@ -28,6 +30,7 @@ base64 = { workspace = true, optional = true }
 rcgen = { workspace = true, optional = true }
 rustls = { workspace = true, optional = true }
 rustls-native-certs = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = ["io-util", "net", "rt"] }
 tokio-rustls = { workspace = true, optional = true }
 

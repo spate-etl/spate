@@ -6,15 +6,17 @@
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs::{self, File};
+use std::future::Future;
+use std::net::SocketAddr;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::{Arc, OnceLock, mpsc};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use spate_coordination::store::dynamodb::DynamoDbStore;
 use spate_coordination::store::nats::NatsStore;
 use spate_coordination::store::{CoordinationStore as _, Entry, Keyspace, StoreError};
-use spate_test_support::container_image;
+use spate_test_support::{DynamoDbFaultProxy, container_image};
 use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::runners::SyncRunner;
 use testcontainers::{Container, GenericImage, ImageExt};
@@ -64,7 +66,10 @@ const PROBE: Duration = Duration::from_secs(2);
 /// Cap on a stopped worker reporting stopped.
 const STOP_CONFIRM: Duration = Duration::from_secs(5);
 
+mod proxy;
 mod stopped;
+
+pub use proxy::drop_after_land_then_pass_wins;
 
 /// One scenario.
 #[derive(Clone, Copy, Debug)]
@@ -135,11 +140,14 @@ pub fn run(spec: &Spec<'_>) -> Outcome {
         spec.name,
         schedule.render()
     );
+    let proxy_seed = (spec.store == StoreKind::DynamoDb && spec.faults == Faults::Schedule)
+        .then(|| rng.next_u64());
     let run = Run {
         spec,
         seed,
         dir,
         schedule,
+        proxy_seed,
     };
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -198,6 +206,13 @@ pub fn run(spec: &Spec<'_>) -> Outcome {
         Err(failure) => return run.harness(Stage::Running, &failure),
     };
     fired.extend(in_process_fired(&run.schedule, &processes));
+    let faults = if faults_path.exists() {
+        journal::read(&faults_path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", faults_path.display()))
+    } else {
+        Vec::new()
+    };
+    fired.extend(proxy::fired(&faults, &processes));
     let journals: Vec<ProcessJournal> = processes
         .into_iter()
         .map(|(instance, pid, path)| ProcessJournal {
@@ -211,12 +226,6 @@ pub fn run(spec: &Spec<'_>) -> Outcome {
             pid,
         })
         .collect();
-    let faults = if faults_path.exists() {
-        journal::read(&faults_path)
-            .unwrap_or_else(|e| panic!("read {}: {e}", faults_path.display()))
-    } else {
-        Vec::new()
-    };
     let mut violations = oracle::check(&Inputs {
         store: spec.store,
         generated: &generated,
@@ -280,6 +289,8 @@ struct Env {
     store_name: &'static str,
     store_config: StoreConfig,
     direct: Direct,
+    /// DynamoDB Local's address, which a worker's fault proxy forwards to.
+    dynamodb: Option<SocketAddr>,
 }
 
 /// The harness's own handle on either store.
@@ -340,7 +351,7 @@ fn setup(
     let gateway = Gateway::start(BUCKET)?;
     gateway.put_all(rt, objects)?;
     let _runtime = rt.enter();
-    let (store, store_name, store_config, direct) = match kind {
+    let (store, store_name, store_config, direct, dynamodb) = match kind {
         StoreKind::Nats => {
             let (image, tag) = container_image(&["--pull", "nats"]);
             let nats = GenericImage::new(image, tag)
@@ -357,37 +368,75 @@ fn setup(
                 job: JOB.to_owned(),
             };
             let direct = Direct::Nats(nats_store(&config, tuning)?);
-            (nats, "nats", config, direct)
+            (nats, "nats", config, direct, None)
         }
         StoreKind::DynamoDb => {
-            let (image, tag) = container_image(&["--pull", "dynamodb"]);
-            let local = GenericImage::new(image, tag)
-                .with_exposed_port(DYNAMODB_PORT.tcp())
-                .with_wait_for(WaitFor::message_on_stdout("Initializing DynamoDB Local"))
-                .with_cmd(["-jar", "DynamoDBLocal.jar", "-inMemory"])
-                .start()
-                .map_err(|e| format!("start DynamoDB Local: {e}"))?;
-            let port = local
-                .get_host_port_ipv4(DYNAMODB_PORT)
-                .map_err(|e| format!("DynamoDB Local port: {e}"))?;
-            let config = StoreConfig::DynamoDb {
-                endpoint: format!("http://127.0.0.1:{port}"),
-                table: TABLE.to_owned(),
-                job: JOB.to_owned(),
-            };
-            let direct = Direct::DynamoDb(dynamodb_store(&config, tuning)?);
-            (local, "dynamodb", config, direct)
+            let (local, config, direct, addr) = dynamodb_local(tuning)?;
+            (
+                local,
+                "dynamodb",
+                config,
+                Direct::DynamoDb(direct),
+                Some(addr),
+            )
         }
     };
     // The first call creates the NATS buckets or the DynamoDB table with the
     // workers' parameters.
+    await_ready(rt, || direct.get(Keyspace::Durable, "plan"))?;
+    Ok(Env {
+        gateway,
+        store,
+        store_name,
+        store_config,
+        direct,
+        dynamodb,
+    })
+}
+
+/// Starts DynamoDB Local, and returns it with the store config workers get,
+/// the harness's own store handle and its address. Needs a runtime context.
+fn dynamodb_local(
+    tuning: &Tuning,
+) -> Result<
+    (
+        Container<GenericImage>,
+        StoreConfig,
+        DynamoDbStore,
+        SocketAddr,
+    ),
+    String,
+> {
+    let (image, tag) = container_image(&["--pull", "dynamodb"]);
+    let local = GenericImage::new(image, tag)
+        .with_exposed_port(DYNAMODB_PORT.tcp())
+        .with_wait_for(WaitFor::message_on_stdout("Initializing DynamoDB Local"))
+        .with_cmd(["-jar", "DynamoDBLocal.jar", "-inMemory"])
+        .start()
+        .map_err(|e| format!("start DynamoDB Local: {e}"))?;
+    let port = local
+        .get_host_port_ipv4(DYNAMODB_PORT)
+        .map_err(|e| format!("DynamoDB Local port: {e}"))?;
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let config = StoreConfig::DynamoDb {
+        endpoint: format!("http://{addr}"),
+        table: TABLE.to_owned(),
+        job: JOB.to_owned(),
+    };
+    let direct = dynamodb_store(&config, tuning)?;
+    Ok((local, config, direct, addr))
+}
+
+/// Retries `get` until it returns `Ok`, for at most [`SETUP_DEADLINE`].
+fn await_ready<F>(rt: &tokio::runtime::Runtime, get: impl Fn() -> F) -> Result<(), String>
+where
+    F: Future<Output = Result<Option<Entry>, StoreError>>,
+{
     let until = Instant::now() + SETUP_DEADLINE;
     loop {
-        let ready = rt.block_on(async {
-            tokio::time::timeout(STORE_CALL, direct.get(Keyspace::Durable, "plan")).await
-        });
+        let ready = rt.block_on(async { tokio::time::timeout(STORE_CALL, get()).await });
         match ready {
-            Ok(Ok(_)) => break,
+            Ok(Ok(_)) => return Ok(()),
             failure if Instant::now() >= until => {
                 return Err(format!(
                     "the store was not ready within a minute: {failure:?}"
@@ -396,13 +445,18 @@ fn setup(
             _ => std::thread::sleep(Duration::from_millis(200)),
         }
     }
-    Ok(Env {
-        gateway,
-        store,
-        store_name,
-        store_config,
-        direct,
-    })
+}
+
+/// `store` with its DynamoDB endpoint at `addr`; a NATS store unchanged.
+fn through(store: &StoreConfig, addr: SocketAddr) -> StoreConfig {
+    match store {
+        StoreConfig::DynamoDb { table, job, .. } => StoreConfig::DynamoDb {
+            endpoint: format!("http://{addr}"),
+            table: table.clone(),
+            job: job.clone(),
+        },
+        StoreConfig::Nats { .. } => store.clone(),
+    }
 }
 
 /// The durable `spec.`, `split.`, `plan` and `verdict` entries.
@@ -428,6 +482,9 @@ struct Run<'a> {
     seed: u64,
     dir: PathBuf,
     schedule: Schedule,
+    /// The seed of the DynamoDB proxy scripts, when the run puts a fault
+    /// proxy in front of each worker.
+    proxy_seed: Option<u64>,
 }
 
 impl Run<'_> {
@@ -448,8 +505,10 @@ impl Run<'_> {
         tuning: &Tuning,
         faults_path: &Path,
     ) -> Result<(bool, Vec<FaultFired>), String> {
-        let faults =
-            Journal::open(faults_path).map_err(|e| format!("{}: {e}", faults_path.display()))?;
+        let faults = Arc::new(
+            Journal::open(faults_path).map_err(|e| format!("{}: {e}", faults_path.display()))?,
+        );
+        let mut proxies = Vec::new();
         let log = |event| {
             faults
                 .append(event)
@@ -460,7 +519,15 @@ impl Run<'_> {
         let until = start + RUN_DEADLINE;
         let mut incarnations = vec![1; instances];
         for i in 0..self.spec.instances {
-            processes.push(self.spawn(workers, env, i, 1, tuning)?);
+            processes.push(self.spawn_proxied(
+                workers,
+                env,
+                i,
+                1,
+                tuning,
+                &mut proxies,
+                &faults,
+            )?);
         }
         let status = |e: std::io::Error| format!("read worker status: {e}");
         let mut timeline = Timeline::new(&self.schedule);
@@ -547,8 +614,15 @@ impl Run<'_> {
                         let at = instance as usize;
                         incarnations[at] += 1;
                         judged[at] = false;
-                        let process =
-                            self.spawn(workers, env, instance, incarnations[at], tuning)?;
+                        let process = self.spawn_proxied(
+                            workers,
+                            env,
+                            instance,
+                            incarnations[at],
+                            tuning,
+                            &mut proxies,
+                            &faults,
+                        )?;
                         log(Event::Respawn {
                             instance: process.0.clone(),
                             pid: process.1,
@@ -617,6 +691,61 @@ impl Run<'_> {
         incarnation: u32,
         tuning: &Tuning,
     ) -> Result<(String, u32, PathBuf), String> {
+        self.spawn_on(
+            workers,
+            env,
+            env.store_config.clone(),
+            instance,
+            incarnation,
+            tuning,
+        )
+    }
+
+    /// Starts `instance`'s `incarnation` as [`Run::spawn`] does, behind a
+    /// DynamoDB fault proxy of its own when the run has a proxy seed. Each
+    /// answer but `pass` is journalled to `faults` against the process.
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_proxied(
+        &self,
+        workers: &mut Workers,
+        env: &Env,
+        instance: u32,
+        incarnation: u32,
+        tuning: &Tuning,
+        proxies: &mut Vec<DynamoDbFaultProxy>,
+        faults: &Arc<Journal>,
+    ) -> Result<(String, u32, PathBuf), String> {
+        let (Some(seed), Some(upstream)) = (self.proxy_seed, env.dynamodb) else {
+            return self.spawn(workers, env, instance, incarnation, tuning);
+        };
+        let script = proxy::ProxyScript::new(seed, &self.schedule, instance, incarnation);
+        let pid = Arc::new(OnceLock::new());
+        let answer = proxy::logged(
+            script,
+            format!("w{instance}"),
+            Arc::clone(&pid),
+            Arc::clone(faults),
+        );
+        let proxy = DynamoDbFaultProxy::start(upstream, answer)
+            .map_err(|e| format!("start the fault proxy for w{instance}: {e}"))?;
+        let store = through(&env.store_config, proxy.addr());
+        let process = self.spawn_on(workers, env, store, instance, incarnation, tuning)?;
+        let _ = pid.set(process.1);
+        proxies.push(proxy);
+        Ok(process)
+    }
+
+    /// Writes the config of `instance`'s `incarnation`, connecting to
+    /// `store`, and starts it.
+    fn spawn_on(
+        &self,
+        workers: &mut Workers,
+        env: &Env,
+        store: StoreConfig,
+        instance: u32,
+        incarnation: u32,
+        tuning: &Tuning,
+    ) -> Result<(String, u32, PathBuf), String> {
         let journal = self.journal_path(instance, incarnation);
         let abort = self
             .schedule
@@ -628,7 +757,7 @@ impl Run<'_> {
         let config = WorkerConfig {
             instance: instance.clone(),
             journal: journal.clone(),
-            store: env.store_config.clone(),
+            store,
             s3: S3Config {
                 endpoint: env.gateway.endpoint(),
                 bucket: env.gateway.bucket.clone(),
@@ -1158,6 +1287,7 @@ mod tests {
             seed: 0xff,
             dir: dir.clone(),
             schedule: Schedule::default(),
+            proxy_seed: None,
         };
         let outcome = run.finish(
             Stage::Oracle,

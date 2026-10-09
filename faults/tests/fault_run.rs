@@ -143,3 +143,12 @@ fn dynamodb_broken_fence_fails_the_run() {
         true,
     );
 }
+
+/// A DynamoDB update whose first reply the fault proxy drops after it lands
+/// resolves `Won` on the SDK's retry, and one whose every reply is dropped
+/// returns `Retryable`; both values land.
+#[test]
+#[ignore = "requires Docker"]
+fn dynamodb_drop_after_land_then_pass_wins() {
+    run::drop_after_land_then_pass_wins("dynamodb_drop_after_land_then_pass_wins");
+}

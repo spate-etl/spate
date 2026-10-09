@@ -192,8 +192,11 @@ impl Toxiproxy {
         remove_toxic(self.api, proxy, name)
     }
 
-    /// Enables or disables `proxy`. A disabled proxy closes its connections
-    /// and refuses new ones.
+    /// Enables or disables `proxy`. A disabled proxy closes its open
+    /// connections and stops listening. With Docker's default port forwarding,
+    /// a new connection to the address [`Toxiproxy::create_proxy`] returns is
+    /// still accepted and then closed, so the client sees a reset or an end of
+    /// stream.
     ///
     /// # Errors
     ///
@@ -246,7 +249,12 @@ fn remove_toxic(api: SocketAddr, proxy: &str, name: &str) -> Result<(), String> 
 
 fn set_enabled(api: SocketAddr, proxy: &str, enabled: bool) -> Result<(), String> {
     let body = json!({ "enabled": enabled });
-    call(api, "POST", &format!("/proxies/{proxy}"), &body.to_string())
+    call(
+        api,
+        "PATCH",
+        &format!("/proxies/{proxy}"),
+        &body.to_string(),
+    )
 }
 
 /// Sends one API request and fails on any status outside 2xx, with the body.
@@ -326,6 +334,17 @@ mod tests {
                 }),
             ),
             (
+                Toxic::Timeout(Duration::from_millis(1500)),
+                Stream::Upstream,
+                json!({
+                    "name": "t",
+                    "type": "timeout",
+                    "stream": "upstream",
+                    "toxicity": 1,
+                    "attributes": { "timeout": 1500 },
+                }),
+            ),
+            (
                 Toxic::LimitData(4096),
                 Stream::Upstream,
                 json!({
@@ -354,13 +373,13 @@ mod tests {
         assert_eq!(request.body, "");
     }
 
-    /// Disabling a proxy posts `enabled: false` to the proxy's path.
+    /// Disabling a proxy is a `PATCH` of its path with `enabled: false`.
     #[test]
-    fn set_enabled_posts_the_flag() {
+    fn set_enabled_patches_the_flag() {
         let (addr, server) = serve_once(OK);
         set_enabled(addr, "nats-0", false).unwrap();
         let request = server.join().unwrap();
-        assert_eq!(request.line, "POST /proxies/nats-0 HTTP/1.1");
+        assert_eq!(request.line, "PATCH /proxies/nats-0 HTTP/1.1");
         assert_eq!(json_of(&request.body), json!({ "enabled": false }));
     }
 

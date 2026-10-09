@@ -23,3 +23,5 @@ so there is no `DOCS` file. The one lane follows the newest release.
 `cargo xtask ci-changes` maps this directory to no container suite. The fault
 runs are not part of the `containers` job, so the weekly fault run is the first
 to boot a bumped image.
+Before merging a bump pull request, run `cargo xtask fault-test toxiproxy` on
+its branch to boot the new image.

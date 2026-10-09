@@ -278,6 +278,21 @@ updates:
     cooldown:
       default-days: 7
 
+  # -------------------------------------------------- Docker (Toxiproxy) ----
+  # `ci/toxiproxy/stable/Dockerfile` pins the proxy the fault runs boot. No
+  # `ignore`, so it follows every release.
+  - package-ecosystem: docker
+    directory: "/ci/toxiproxy/stable"
+    schedule:
+      interval: monthly
+      day: friday
+    open-pull-requests-limit: 1
+    labels: ["dependencies", "area: ci"]
+    commit-message:
+      prefix: "ci"
+    cooldown:
+      default-days: 7
+
   # ------------------------------------------- Docker (NATS test server) ----
   # `ci/nats/floor` pins the server the NATS container suites boot, and
   # `ci/nats/below-floor` the older one a single test expects the store to

@@ -464,10 +464,7 @@ impl Run<'_> {
         }
         let status = |e: std::io::Error| format!("read worker status: {e}");
         let mut timeline = Timeline::new(&self.schedule);
-        let mut stops = self.schedule.stops.clone();
-        stops.sort_by_key(|s| (s.at_ms, s.instance));
-        stops.reverse();
-        let mut resumes = Resumes::default();
+        let mut stops = StopQueue::new(&self.schedule);
         let mut fired = Vec::new();
         // Per instance: its current process's abort was judged, when its
         // `err_after_land` line was first seen, and its held kill was released.
@@ -535,7 +532,6 @@ impl Run<'_> {
                             workers
                                 .kill(&name)
                                 .map_err(|e| format!("kill {name}: {e}"))?;
-                            resumes.killed(pid);
                             timeline.respawn(instance, respawn_at_ms);
                             // This replacement also stands in for an abort that
                             // ended the process after the `live` read.
@@ -561,7 +557,7 @@ impl Run<'_> {
                     }
                 }
             }
-            while let Some((instance, pid)) = resumes.due(now_ms) {
+            while let Some((instance, pid)) = stops.resume(now_ms) {
                 let name = format!("w{instance}");
                 if workers.resume(&name, pid).map_err(status)? {
                     log(Event::Sigcont {
@@ -570,11 +566,10 @@ impl Run<'_> {
                     })?;
                 }
             }
-            while stops.last().is_some_and(|s| s.at_ms <= now_ms) {
-                let stop = stops.pop().expect("a due stop");
+            while let Some((stop, allowed)) = stops.next(now_ms, &incarnations) {
                 let at = stop.instance as usize;
                 let name = format!("w{}", stop.instance);
-                let pid = if stop_allowed(&self.schedule, stop.instance, &incarnations, &resumes) {
+                let pid = if allowed {
                     workers.stop(&name, STOP_CONFIRM).map_err(status)?
                 } else {
                     None
@@ -585,15 +580,15 @@ impl Run<'_> {
                         pid,
                         duration_ms: stop.duration_ms,
                     })?;
-                    resumes.push(stop.instance, pid, now_ms + stop.duration_ms);
+                    stops.stopped(&stop, pid, now_ms, &incarnations);
                 }
                 fired.push(stop_fired(&stop, incarnations[at], pid.is_some()));
             }
             std::thread::sleep(POLL);
         };
-        for stop in stops.iter().rev() {
+        for stop in stops.rest() {
             let incarnation = incarnations[stop.instance as usize];
-            fired.push(stop_fired(stop, incarnation, false));
+            fired.push(stop_fired(&stop, incarnation, false));
         }
         for kill in timeline.drain_kills() {
             if let Action::Kill { at_ms, instance } = kill {
@@ -910,45 +905,68 @@ fn kill_held(schedule: &Schedule, instance: u32, incarnation: u32, released: boo
             .is_some_and(|p| p.plan.mode == AbortMode::ErrAfterLand)
 }
 
-/// Whether an external stop may fall on `instance`'s live process, the
-/// incarnation `incarnations` holds for it: never on the one carrying the
-/// `ErrAfterLand` plan, nor while `resumes` holds a stopped process of the
-/// instance.
-fn stop_allowed(
-    schedule: &Schedule,
-    instance: u32,
-    incarnations: &[u32],
-    resumes: &Resumes,
-) -> bool {
-    schedule
-        .plan_for(instance, incarnations[instance as usize])
-        .is_none_or(|p| p.plan.mode != AbortMode::ErrAfterLand)
-        && !resumes.holds(instance)
+/// A run's external stops, handed out in drawn order, and the stopped
+/// processes awaiting SIGCONT. A process is its instance and incarnation.
+#[derive(Debug)]
+struct StopQueue<'a> {
+    schedule: &'a Schedule,
+    /// Stops not yet handed out, latest first.
+    pending: Vec<Stop>,
+    /// Stopped processes as instance, incarnation, pid and resume time.
+    stopped: Vec<(u32, u32, u32, u64)>,
 }
 
-/// Stopped processes awaiting SIGCONT, as instance, pid and resume time.
-#[derive(Debug, Default)]
-struct Resumes(Vec<(u32, u32, u64)>);
-
-impl Resumes {
-    fn push(&mut self, instance: u32, pid: u32, at_ms: u64) {
-        self.0.push((instance, pid, at_ms));
+impl<'a> StopQueue<'a> {
+    fn new(schedule: &'a Schedule) -> StopQueue<'a> {
+        let mut pending = schedule.stops.clone();
+        pending.sort_by_key(|s| (s.at_ms, s.instance));
+        pending.reverse();
+        StopQueue {
+            schedule,
+            pending,
+            stopped: Vec::new(),
+        }
     }
 
-    /// Removes a resume due by `now_ms` and returns its instance and pid.
-    fn due(&mut self, now_ms: u64) -> Option<(u32, u32)> {
-        let at = self.0.iter().position(|r| r.2 <= now_ms)?;
-        let (instance, pid, _) = self.0.remove(at);
+    /// Removes the next stop due by `now_ms`, with whether it may fall on
+    /// its instance's process in `incarnations`: never on the one carrying
+    /// the `ErrAfterLand` plan, nor on one already stopped.
+    fn next(&mut self, now_ms: u64, incarnations: &[u32]) -> Option<(Stop, bool)> {
+        if self.pending.last()?.at_ms > now_ms {
+            return None;
+        }
+        let stop = self.pending.pop()?;
+        let incarnation = incarnations[stop.instance as usize];
+        let allowed = self
+            .schedule
+            .plan_for(stop.instance, incarnation)
+            .is_none_or(|p| p.plan.mode != AbortMode::ErrAfterLand)
+            && !self
+                .stopped
+                .iter()
+                .any(|s| s.0 == stop.instance && s.1 == incarnation);
+        Some((stop, allowed))
+    }
+
+    /// Records `stop` as applied at `now_ms` to `pid`, its instance's process
+    /// in `incarnations`, and resumes it `stop.duration_ms` later.
+    fn stopped(&mut self, stop: &Stop, pid: u32, now_ms: u64, incarnations: &[u32]) {
+        let incarnation = incarnations[stop.instance as usize];
+        self.stopped
+            .push((stop.instance, incarnation, pid, now_ms + stop.duration_ms));
+    }
+
+    /// Removes a resume due by `now_ms` and returns its instance and pid,
+    /// whose process may since have been killed or replaced.
+    fn resume(&mut self, now_ms: u64) -> Option<(u32, u32)> {
+        let at = self.stopped.iter().position(|s| s.3 <= now_ms)?;
+        let (instance, _, pid, _) = self.stopped.remove(at);
         Some((instance, pid))
     }
 
-    /// Drops the resume of `pid`, whose process was killed.
-    fn killed(&mut self, pid: u32) {
-        self.0.retain(|r| r.1 != pid);
-    }
-
-    fn holds(&self, instance: u32) -> bool {
-        self.0.iter().any(|r| r.0 == instance)
+    /// The stops never handed out, in drawn order.
+    fn rest(self) -> impl Iterator<Item = Stop> {
+        self.pending.into_iter().rev()
     }
 }
 
@@ -1077,6 +1095,14 @@ fn panic_text(panic: &(dyn std::any::Any + Send)) -> String {
 mod tests {
     use super::*;
     use crate::journal::{Event, Line};
+
+    fn stop(at_ms: u64, instance: u32, duration_ms: u64) -> Stop {
+        Stop {
+            at_ms,
+            instance,
+            duration_ms,
+        }
+    }
 
     /// The data set is a function of the seed, its first object lies below
     /// 1 MiB and its second above, and each record's offset is where its line
@@ -1275,12 +1301,22 @@ mod tests {
         assert!(!kill_held(&schedule, 0, 1, true), "the hold was released");
         assert!(!kill_held(&schedule, 0, 2, false), "a replacement");
         assert!(!kill_held(&schedule, 1, 1, false), "another instance");
-        let none = Resumes::default();
-        assert!(!stop_allowed(&schedule, 0, &[1, 1], &none));
-        assert!(stop_allowed(&schedule, 0, &[2, 1], &none), "a replacement");
-        assert!(
-            stop_allowed(&schedule, 1, &[1, 1], &none),
+        let stops = Schedule {
+            stops: vec![stop(500, 0, 500), stop(500, 1, 500)],
+            ..schedule.clone()
+        };
+        let mut queue = StopQueue::new(&stops);
+        assert_eq!(queue.next(500, &[1, 1]), Some((stop(500, 0, 500), false)));
+        assert_eq!(
+            queue.next(500, &[1, 1]),
+            Some((stop(500, 1, 500), true)),
             "another instance"
+        );
+        let mut queue = StopQueue::new(&stops);
+        assert_eq!(
+            queue.next(500, &[2, 1]),
+            Some((stop(500, 0, 500), true)),
+            "a replacement"
         );
 
         let mut timeline = Timeline::new(&schedule);
@@ -1424,32 +1460,82 @@ mod tests {
         assert_eq!(kills, 2, "every rendered kill is handed out or drained");
     }
 
-    /// A stop falls on an instance only while it has no stopped process, and
-    /// again once that process is resumed or killed; a killed process gets no
-    /// resume.
+    /// Due stops are handed out in drawn order, `(at_ms, instance)`, and the
+    /// ones never due are left in that order.
     #[test]
-    fn a_stop_skips_an_instance_with_a_stopped_process() {
-        let schedule = Schedule::default();
-        let mut resumes = Resumes::default();
-        assert!(stop_allowed(&schedule, 1, &[1, 1], &resumes));
-        resumes.push(1, 42, 5_000);
-        assert!(!stop_allowed(&schedule, 1, &[1, 1], &resumes), "stopped");
-        assert!(
-            stop_allowed(&schedule, 0, &[1, 1], &resumes),
+    fn stop_queue_hands_out_due_stops_in_order_and_keeps_the_rest() {
+        let schedule = Schedule {
+            stops: vec![
+                stop(3_000, 1, 500),
+                stop(1_000, 1, 500),
+                stop(9_000, 0, 500),
+                stop(1_000, 0, 500),
+                stop(8_000, 1, 500),
+            ],
+            ..Schedule::default()
+        };
+        let mut queue = StopQueue::new(&schedule);
+        let mut handed = Vec::new();
+        for now in (0..=5_000).step_by(50) {
+            while let Some((stop, allowed)) = queue.next(now, &[1, 1]) {
+                assert!(allowed);
+                handed.push((now, stop));
+            }
+        }
+        assert_eq!(
+            handed,
+            [
+                (1_000, stop(1_000, 0, 500)),
+                (1_000, stop(1_000, 1, 500)),
+                (3_000, stop(3_000, 1, 500)),
+            ]
+        );
+        assert_eq!(
+            queue.rest().collect::<Vec<_>>(),
+            [stop(8_000, 1, 500), stop(9_000, 0, 500)]
+        );
+    }
+
+    /// A stopped process is resumed its stop's duration after the stop, once,
+    /// and holds off another stop of the same process until then; a
+    /// replacement process is not held by its predecessor's stop.
+    #[test]
+    fn a_stop_resumes_after_its_duration_and_holds_its_process() {
+        let schedule = Schedule {
+            stops: vec![
+                stop(1_000, 1, 1_500),
+                stop(2_000, 1, 500),
+                stop(2_000, 0, 500),
+                stop(3_000, 1, 2_000),
+                stop(4_000, 1, 500),
+            ],
+            ..Schedule::default()
+        };
+        let mut queue = StopQueue::new(&schedule);
+        let (first, allowed) = queue.next(1_000, &[1, 1]).unwrap();
+        assert!(allowed);
+        queue.stopped(&first, 42, 1_000, &[1, 1]);
+        assert_eq!(queue.resume(2_499), None);
+        assert_eq!(
+            queue.next(2_000, &[1, 1]),
+            Some((stop(2_000, 0, 500), true)),
             "another instance"
         );
-        assert_eq!(resumes.due(4_999), None);
-        assert_eq!(resumes.due(5_000), Some((1, 42)));
-        assert_eq!(resumes.due(5_000), None, "resumed once");
-        assert!(stop_allowed(&schedule, 1, &[1, 1], &resumes), "resumed");
-
-        resumes.push(1, 43, 9_000);
-        resumes.killed(43);
-        assert!(
-            stop_allowed(&schedule, 1, &[1, 2], &resumes),
-            "the killed process's replacement"
+        assert_eq!(
+            queue.next(2_000, &[1, 1]),
+            Some((stop(2_000, 1, 500), false)),
+            "stopped"
         );
-        assert_eq!(resumes.due(9_000), None, "killed");
+        assert_eq!(queue.resume(2_500), Some((1, 42)));
+        assert_eq!(queue.resume(2_500), None, "resumed once");
+        let (third, allowed) = queue.next(3_000, &[1, 1]).unwrap();
+        assert!(allowed, "resumed");
+        queue.stopped(&third, 43, 3_000, &[1, 1]);
+        assert_eq!(
+            queue.next(4_000, &[1, 2]),
+            Some((stop(4_000, 1, 500), true)),
+            "the stopped process's replacement"
+        );
     }
 
     /// A process with an `abort` line and no later process under its

@@ -24,6 +24,8 @@ tls = [
     "dep:tokio",
     "dep:tokio-rustls",
 ]
+# `Toxiproxy`.
+toxiproxy = ["dep:serde_json", "dep:testcontainers"]
 
 [dependencies]
 base64 = { workspace = true, optional = true }
@@ -31,6 +33,7 @@ rcgen = { workspace = true, optional = true }
 rustls = { workspace = true, optional = true }
 rustls-native-certs = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
+testcontainers = { workspace = true, optional = true, features = ["blocking"] }
 tokio = { workspace = true, optional = true, features = ["io-util", "net", "rt"] }
 tokio-rustls = { workspace = true, optional = true }
 

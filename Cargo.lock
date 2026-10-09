@@ -4710,6 +4710,7 @@ dependencies = [
  "rustls-native-certs",
  "serde_json",
  "tempfile",
+ "testcontainers",
  "tokio",
  "tokio-rustls",
 ]

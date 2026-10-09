@@ -47,8 +47,9 @@ pub enum Toxic {
     /// Holds each chunk this long before passing it on, with no jitter.
     /// Removing it passes held data on at once.
     Latency(Duration),
-    /// Drops everything sent and closes the connection after this long, or
-    /// never when zero. Removing it closes the connection.
+    /// Drops everything sent on its stream. Each dropped chunk restarts the
+    /// timer, and the connection closes when it runs out, or never when zero.
+    /// Removing it closes the connection.
     Timeout(Duration),
     /// Closes the connection once this many bytes have passed.
     LimitData(u64),
@@ -373,14 +374,16 @@ mod tests {
         assert_eq!(request.body, "");
     }
 
-    /// Disabling a proxy is a `PATCH` of its path with `enabled: false`.
+    /// Enabling or disabling a proxy is a `PATCH` of its path with the flag.
     #[test]
     fn set_enabled_patches_the_flag() {
-        let (addr, server) = serve_once(OK);
-        set_enabled(addr, "nats-0", false).unwrap();
-        let request = server.join().unwrap();
-        assert_eq!(request.line, "PATCH /proxies/nats-0 HTTP/1.1");
-        assert_eq!(json_of(&request.body), json!({ "enabled": false }));
+        for enabled in [false, true] {
+            let (addr, server) = serve_once(OK);
+            set_enabled(addr, "nats-0", enabled).unwrap();
+            let request = server.join().unwrap();
+            assert_eq!(request.line, "PATCH /proxies/nats-0 HTTP/1.1");
+            assert_eq!(json_of(&request.body), json!({ "enabled": enabled }));
+        }
     }
 
     /// A status outside 2xx is an error carrying the status and the reply.

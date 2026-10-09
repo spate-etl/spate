@@ -486,6 +486,24 @@ fn record_unknown_alone_is_not_sure_and_beside_a_missing_record_is_lost() {
     }
 }
 
+/// With a summary seed and failing runs, Replay is each run's own replay command.
+#[test]
+fn replay_with_a_summary_seed_is_each_runs_own() {
+    let context = Context {
+        seed: Some("0x00000000000000ff".to_owned()),
+        ..context()
+    };
+    let body = render(
+        Route::Delivery,
+        &context,
+        &[run("s", vec![violation(1, "RecordMissing")])],
+    );
+    assert_eq!(
+        answer(&body, "Replay").trim(),
+        "```sh\ncargo xtask fault-test --seed 0x00000000000000ff s\n```"
+    );
+}
+
 /// How you know lists each violation with its property, key, revision,
 /// writer and pid, then the other failing scenarios.
 #[test]

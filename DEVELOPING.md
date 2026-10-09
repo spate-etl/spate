@@ -44,7 +44,7 @@ These sit outside `ci`, by cost or by dependency:
 | `cargo xtask bench ab`, `cargo xtask bench arms`, `cargo xtask bench list`, `cargo xtask bench compare` | Wall clock; never a gate |
 | `cargo xtask attribution` | `THIRD-PARTY.md` is regenerated at release; the nightly tier checks that it still generates |
 | `cargo xtask fuzz build`, `cargo xtask fuzz run` | Needs a nightly toolchain; the nightly tier fuzzes |
-| `cargo xtask fault-test` | Needs Docker; runs worker processes for minutes |
+| `cargo xtask fault-test` | Needs Docker; runs worker processes for minutes; the weekly tier runs it |
 
 Three commands omit `--locked`, which everything else passes because CI does.
 `cargo hack --no-dev-deps` rewrites each `Cargo.toml` as it runs and a locked
@@ -162,6 +162,27 @@ deadline skips this check and is `worker`. The command writes
 with no failing outcome, such as a build error or a run the oracle could not
 judge, and 0 otherwise. A failure message carries the command that replays its
 seed and the schedule it applies.
+
+The weekly scheduled tier runs `cargo xtask fault-test` under a seed drawn from
+the clock, and uploads the junit report as `fault-junit` and
+`target/fault-runs/` as `fault-runs`. When the run fails,
+`cargo xtask fault-test report` writes one issue body per route, laid out as
+the issue form the route files under, and the job files each under a fixed
+title, or comments `Still failing` on the open issue that already has it:
+
+| Route | Filed when | Title |
+| --- | --- | --- |
+| `delivery` | any `violation` | `[delivery] The weekly fault run found a delivery violation` |
+| `worker` | any `worker` | `[bug] A weekly fault run worker failed with no delivery violation` |
+| `expectation` | any `expectation` | `[bug] A weekly fault scenario did not meet its own expectation` |
+| `harness` | only `harness`, or no failing outcome | `[bug] The weekly fault run hit an infrastructure failure` |
+
+`delivery` follows the delivery-correctness form and carries the
+`delivery-correctness` label; the other three follow the bug form. Every issue
+is typed Bug. Its body names the seed and the replay command. A run that
+wrote no `summary.json`, such as one the step timeout stopped, is routed from
+the `outcome.json` files already on disk as a failed nextest run, and its
+body takes the seed from them or points to the run log for it.
 
 **On macOS every freshly linked binary stalls for tens of seconds at 0% CPU on
 its first exec** while Gatekeeper scans it. Across this workspace that alone

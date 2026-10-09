@@ -901,10 +901,97 @@ jobs:
             exit 1
           fi
 
+  fault-test:
+    name: Fault scenarios
+    runs-on: ubuntu-latest
+    needs: plan
+    if: needs.plan.outputs.weekly == 'true'
+    # Each scenario runs its workers for minutes, one scenario at a time.
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      checks: write
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          tools: nextest
+          shared-key: faults
+
+      # Apart from the run, so a build failure files no issue.
+      - name: Build the fault scenarios and xtask
+        run: |
+          set -euo pipefail
+          cargo nextest run --profile faults -p spate-faults --locked --no-run
+          cargo build -p spate-xtask --locked
+
+      - id: run
+        name: Run the fault scenarios
+        # Below the job's, so a hung run fails this step and the report step
+        # files the outcomes already on disk.
+        timeout-minutes: 100
+        run: cargo xtask fault-test
+
+      - name: Publish fault scenario test report
+        uses: mikepenz/action-junit-report@a9170d5795813c01ab4901ffb045b52bab4ab09d # v6.5.0
+        if: always()
+        with:
+          report_paths: target/nextest/faults/junit.xml
+          check_name: Fault scenario results
+          detailed_summary: true
+          include_passed: false
+          fail_on_failure: false
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: fault-junit
+          path: target/nextest/faults/junit.xml
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: fault-runs
+          path: target/fault-runs/
+          if-no-files-found: warn
+
+      # Gated on the run step, not `failure()`: a checkout, setup or build
+      # failure would file an issue asserting the scenarios failed.
+      - name: Report the failure as issues
+        if: failure() && steps.run.conclusion == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          out=target/fault-report
+          cargo xtask fault-test report --summary target/fault-runs/summary.json \
+            --run-url "$RUN_URL" --out-dir "$out" >"$out.routes"
+          while IFS= read -r route; do
+            title=$(<"$out/$route.title")
+            matches=$(gh issue list --state open --search "$title in:title" --json number,title)
+            existing=$(jq -r --arg t "$title" 'map(select(.title == $t)) | .[0].number // empty' <<<"$matches")
+            if [ -n "$existing" ]; then
+              gh issue comment "$existing" --body "Still failing: ${RUN_URL}"
+              continue
+            fi
+            # `gh issue create` applies `--type` after creating the issue, so a
+            # refused type would fail the step with the URL unprinted. Both are
+            # set afterwards, and a refusal leaves the issue for a person to fix.
+            url=$(gh issue create --title "$title" --body-file "$out/$route.md")
+            gh issue edit "$url" --type Bug ||
+              echo "::warning::Could not set the type on $url; set it to Bug by hand."
+            if [ "$route" = delivery ]; then
+              gh issue edit "$url" --add-label delivery-correctness ||
+                echo "::warning::Could not add delivery-correctness to $url; add it by hand."
+            fi
+          done <"$out.routes"
+
   # ===========================================================================
   # Catch-all failure reporting. `attribution`, `advisories`, `fuzz`,
-  # `minimal-versions`, `publish-dry-run` and `beta` file their own issues and
-  # are absent from `needs` below so they are not reported twice.
+  # `minimal-versions`, `publish-dry-run`, `beta` and `fault-test` file their
+  # own issues and are absent from `needs` below so they are not reported twice.
   # ===========================================================================
   report:
     name: Report scheduled failures

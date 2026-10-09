@@ -21,7 +21,7 @@ use crate::classify::Classifier;
 use crate::journal::Journal;
 use crate::oracle::Timing;
 use crate::sink::JournalSink;
-use crate::store::{AbortAt, AbortPlan, JournalStore};
+use crate::store::{AbortAt, AbortPlan, BrokenFence, Fence, JournalStore, StopAt, StopPlan};
 
 /// Upper bound on one generated record line.
 const MAX_RECORD_BYTES: usize = 64 * 1024;
@@ -44,6 +44,13 @@ pub struct WorkerConfig {
     /// The in-process fault this process injects, if any.
     #[serde(default)]
     pub abort: Option<AbortPlan>,
+    /// The write at which this process stops itself, if any.
+    #[serde(default)]
+    pub stop_at: Option<StopPlan>,
+    /// The stopped write, once it loses its CAS, is re-sent at the current
+    /// revision.
+    #[serde(default)]
+    pub broken_fence: bool,
 }
 
 /// The coordination store a worker connects to.
@@ -96,6 +103,8 @@ pub struct Tuning {
     /// Interval between two listings of a watched prefix on a polled store;
     /// 0 on a push store.
     pub poll_ms: u64,
+    /// Working-set bound per worker.
+    pub max_in_flight: u32,
 }
 
 impl Tuning {
@@ -112,6 +121,7 @@ impl Tuning {
             drain_deadline_ms: 5_000,
             max_attempts: 1_000,
             poll_ms: 0,
+            max_in_flight: 8,
         }
     }
 
@@ -140,6 +150,7 @@ impl Tuning {
         config.drain_deadline = Duration::from_millis(self.drain_deadline_ms);
         config.rebalance_delay = Duration::ZERO;
         config.max_attempts = self.max_attempts;
+        config.max_in_flight = self.max_in_flight;
         config
     }
 
@@ -222,16 +233,49 @@ fn run_on<S: CoordinationStore + Clone>(config: &WorkerConfig, store: S) -> Resu
     let pipeline_config = PipelineConfig::from_str(&yaml).map_err(|e| e.to_string())?;
     let pipeline = Pipeline::from_config(pipeline_config).map_err(|e| e.to_string())?;
     let classifier = Arc::new(Classifier::new(config.instance.clone()));
-    let store = JournalStore::new(store, Arc::clone(&journal), Arc::clone(&classifier));
+    let (stop_at, broken_fence) = (config.stop_at, config.broken_fence);
     match config.abort {
-        Some(plan) => run_pipeline(
-            config,
-            pipeline,
-            AbortAt::new(store, plan, Arc::clone(&journal), classifier),
-            journal,
-        ),
-        None => run_pipeline(config, pipeline, store, journal),
+        Some(plan) => {
+            let store = layered(
+                store,
+                stop_at,
+                broken_fence,
+                &journal,
+                &classifier,
+                |store| AbortAt::new(store, plan, Arc::clone(&journal), Arc::clone(&classifier)),
+            );
+            run_pipeline(config, pipeline, store, journal)
+        }
+        None => {
+            let store = layered(store, stop_at, broken_fence, &journal, &classifier, |s| s);
+            run_pipeline(config, pipeline, store, journal)
+        }
     }
+}
+
+/// `store` under a worker's wrappers, innermost first: [`JournalStore`], the
+/// layer `middle` adds, [`BrokenFence`] and [`StopAt`]. [`StopAt`] stops at
+/// `stop_at`, and arms the fence there only when `broken_fence` is set.
+///
+/// The journal sits below [`BrokenFence`] so that each re-send is journalled
+/// as its own `send`.
+pub(crate) fn layered<S, M>(
+    store: S,
+    stop_at: Option<StopPlan>,
+    broken_fence: bool,
+    journal: &Arc<Journal>,
+    classifier: &Arc<Classifier>,
+    middle: impl FnOnce(JournalStore<S>) -> M,
+) -> StopAt<BrokenFence<M>> {
+    let store = JournalStore::new(store, Arc::clone(journal), Arc::clone(classifier));
+    let fence = Arc::new(Fence::default());
+    StopAt::new(
+        BrokenFence::new(middle(store), Arc::clone(&fence)),
+        stop_at,
+        broken_fence.then_some(fence),
+        Arc::clone(journal),
+        Arc::clone(classifier),
+    )
 }
 
 fn run_pipeline<S: CoordinationStore + Clone>(
@@ -315,6 +359,8 @@ mod tests {
             tuning,
             sink_delay_ms: 0,
             abort: None,
+            stop_at: None,
+            broken_fence: false,
         };
         let pipeline =
             Pipeline::from_config(PipelineConfig::from_str(&pipeline_yaml(&config)).unwrap())

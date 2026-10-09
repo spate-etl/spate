@@ -1,5 +1,5 @@
 //! The fault-run harness: generates a seeded data set, starts the containers
-//! and the worker processes, kills and replaces workers on the seeded
+//! and the worker processes, kills, stops and replaces workers on the seeded
 //! schedule, replaces workers that abort on their in-process fault, sweeps the
 //! store's final state, and judges the run with the oracle.
 
@@ -25,8 +25,10 @@ use crate::journal::{self, Event, Journal, Reply};
 use crate::oracle::{
     self, GeneratedObject, GeneratedRecord, Inputs, ProcessJournal, StoreKind, SweptEntry,
 };
-use crate::outcome::{self, Evidence, FaultFired, Kind, Outcome, Scenario, Stage, Violation};
-use crate::schedule::{Action, InProcess, Schedule, Step, Timeline};
+use crate::outcome::{
+    self, Check, Evidence, FaultFired, Kind, Outcome, Scenario, Stage, StopSeen, Violation,
+};
+use crate::schedule::{Action, InProcess, SLEEPER, Schedule, Step, Stop, Timeline};
 use crate::seaweed::Gateway;
 use crate::seed::{self, SplitMix64};
 use crate::store::AbortMode;
@@ -59,6 +61,10 @@ const POLL: Duration = Duration::from_millis(50);
 const HEALTH_INTERVAL: Duration = Duration::from_secs(1);
 /// Cap on one health probe.
 const PROBE: Duration = Duration::from_secs(2);
+/// Cap on a stopped worker reporting stopped.
+const STOP_CONFIRM: Duration = Duration::from_secs(5);
+
+mod stopped;
 
 /// One scenario.
 #[derive(Clone, Copy, Debug)]
@@ -73,10 +79,25 @@ pub struct Spec<'a> {
     pub worker: &'a Path,
     /// How long each sink write is held.
     pub sink_delay_ms: u64,
-    /// The scenario injects no faults, so a record written twice fails its
-    /// expectation. Otherwise the seed draws a kill schedule and in-process
-    /// faults.
-    pub fault_free: bool,
+    /// What the run injects.
+    pub faults: Faults,
+}
+
+/// What a scenario injects.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Faults {
+    /// Nothing, so a record written twice fails its expectation.
+    None,
+    /// The seeded schedule of kills, stops and in-process faults.
+    Schedule,
+    /// Two workers. The second, started once the first leads, stops itself
+    /// inside a seeded commit and is resumed after a lease, once the first
+    /// has claimed the split. With `broken_fence` the resumed commit is
+    /// re-sent after it loses its CAS, and the oracle must catch it.
+    StoppedWriter {
+        /// The stopped worker re-sends its lost commit.
+        broken_fence: bool,
+    },
 }
 
 /// Runs `spec` and returns its outcome when every check held.
@@ -97,14 +118,17 @@ pub fn run(spec: &Spec<'_>) -> Outcome {
     fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("create {}: {e}", dir.display()));
     let mut rng = SplitMix64::for_scenario(seed, spec.name);
     let (generated, objects) = generate(&mut rng);
-    let tuning = match spec.store {
+    let mut tuning = match spec.store {
         StoreKind::Nats => Tuning::nats(),
         StoreKind::DynamoDb => Tuning::dynamodb(),
     };
-    let schedule = if spec.fault_free {
-        Schedule::default()
-    } else {
-        Schedule::draw(&mut rng, spec.instances, tuning.lease_ms)
+    if let Faults::StoppedWriter { .. } = spec.faults {
+        tuning.max_in_flight = stopped::WORKING_SET;
+    }
+    let schedule = match spec.faults {
+        Faults::None => Schedule::default(),
+        Faults::Schedule => Schedule::draw(&mut rng, spec.instances, tuning.lease_ms),
+        Faults::StoppedWriter { .. } => Schedule::stopped_writer(&mut rng),
     };
     eprintln!(
         "fault-run schedule for {}:\n{}",
@@ -142,11 +166,23 @@ pub fn run(spec: &Spec<'_>) -> Outcome {
         let (stop, stopped) = mpsc::channel::<()>();
         let (targets, path) = (&targets, run.dir.join("health.ndjson"));
         let poller = s.spawn(move || health::watch(targets, &path, HEALTH_INTERVAL, &stopped));
-        let driven = run.drive(&mut workers, &mut processes, &env, &tuning, &faults_path);
+        let driven = match spec.faults {
+            Faults::StoppedWriter { .. } => run.drive_stopped(
+                &mut workers,
+                &mut processes,
+                &env,
+                &rt,
+                &tuning,
+                &faults_path,
+            ),
+            Faults::None | Faults::Schedule => run
+                .drive(&mut workers, &mut processes, &env, &tuning, &faults_path)
+                .map(|(timed_out, fired)| (timed_out, fired, None)),
+        };
         drop(stop);
         (driven, poller.join().expect("the health poller panicked"))
     });
-    let (timed_out, mut fired) = match driven {
+    let (timed_out, mut fired, stopped) = match driven {
         Ok(driven) => driven,
         Err(failure) => return run.harness(Stage::Running, &failure),
     };
@@ -181,7 +217,7 @@ pub fn run(spec: &Spec<'_>) -> Outcome {
     } else {
         Vec::new()
     };
-    let violations = oracle::check(&Inputs {
+    let mut violations = oracle::check(&Inputs {
         store: spec.store,
         generated: &generated,
         processes: &journals,
@@ -190,12 +226,26 @@ pub fn run(spec: &Spec<'_>) -> Outcome {
         timing: tuning.timing(),
     })
     .unwrap_or_else(|e| panic!("the oracle could not judge the run: {e}"));
-    let mut expectations = if spec.fault_free {
+    let scenario = match spec.faults {
+        Faults::StoppedWriter { broken_fence } => {
+            violations.extend(stopped.as_ref().and_then(not_reassigned));
+            Scenario::StoppedWriter {
+                broken_fence,
+                stop: stopped.map(|s| StopSeen {
+                    resend_rev: resend_rev(&journals, &s),
+                    key: s.key,
+                    pid: s.pid,
+                }),
+            }
+        }
+        Faults::None | Faults::Schedule => Scenario::Ordinary,
+    };
+    let mut expectations = if spec.faults == Faults::None {
         duplicates(&journals)
     } else {
         Vec::new()
     };
-    if spec.instances > 1 && !claims_overlap(&journals) {
+    if spec.instances > 1 && scenario == Scenario::Ordinary && !claims_overlap(&journals) {
         expectations.push("no two processes held splits at overlapping times".to_owned());
     }
     if !timed_out {
@@ -204,7 +254,7 @@ pub fn run(spec: &Spec<'_>) -> Outcome {
     let lost_replies = expect::lost_replies(&journals, run.schedule.lost_reply().is_some());
     let (kind, message) = outcome::classify(&Evidence {
         setup_failure: None,
-        scenario: &Scenario::Ordinary,
+        scenario: &scenario,
         worker_exits: &exits,
         timed_out,
         violations: &violations,
@@ -239,10 +289,10 @@ enum Direct {
 }
 
 impl Direct {
-    async fn get(&self, key: &str) -> Result<Option<Entry>, StoreError> {
+    async fn get(&self, ks: Keyspace, key: &str) -> Result<Option<Entry>, StoreError> {
         match self {
-            Direct::Nats(s) => s.get(Keyspace::Durable, key).await,
-            Direct::DynamoDb(s) => s.get(Keyspace::Durable, key).await,
+            Direct::Nats(s) => s.get(ks, key).await,
+            Direct::DynamoDb(s) => s.get(ks, key).await,
         }
     }
 
@@ -263,7 +313,8 @@ impl Env {
                 running: Box::new(|| self.store.is_running().map_err(|e| e.to_string())),
                 reach: Box::new(move || {
                     match rt.block_on(async {
-                        tokio::time::timeout(PROBE, self.direct.get("plan")).await
+                        tokio::time::timeout(PROBE, self.direct.get(Keyspace::Durable, "plan"))
+                            .await
                     }) {
                         Ok(Ok(_)) => Ok(()),
                         Ok(Err(e)) => Err(e.to_string()),
@@ -332,8 +383,9 @@ fn setup(
     // workers' parameters.
     let until = Instant::now() + SETUP_DEADLINE;
     loop {
-        let ready =
-            rt.block_on(async { tokio::time::timeout(STORE_CALL, direct.get("plan")).await });
+        let ready = rt.block_on(async {
+            tokio::time::timeout(STORE_CALL, direct.get(Keyspace::Durable, "plan")).await
+        });
         match ready {
             Ok(Ok(_)) => break,
             failure if Instant::now() >= until => {
@@ -385,8 +437,9 @@ impl Run<'_> {
     /// the plan's delay, and a kill due on the `ErrAfterLand` process waits
     /// until its journal shows the lost reply recovered, or one lease from the
     /// first poll at which the kill is due and the journal holds its
-    /// `err_after_land` line. Returns whether one was still running at the
-    /// deadline, and each kill the timeline handed out or left pending.
+    /// `err_after_land` line. A stop due on the `ErrAfterLand` process, on a
+    /// stopped process or on none is skipped. Returns whether one was still
+    /// running at the deadline, and each kill and stop the schedule drew.
     fn drive(
         &self,
         workers: &mut Workers,
@@ -411,6 +464,7 @@ impl Run<'_> {
         }
         let status = |e: std::io::Error| format!("read worker status: {e}");
         let mut timeline = Timeline::new(&self.schedule);
+        let mut stops = StopQueue::new(&self.schedule);
         let mut fired = Vec::new();
         // Per instance: its current process's abort was judged, when its
         // `err_after_land` line was first seen, and its held kill was released.
@@ -503,8 +557,39 @@ impl Run<'_> {
                     }
                 }
             }
+            while let Some((instance, pid)) = stops.resume(now_ms) {
+                let name = format!("w{instance}");
+                if workers.resume(&name, pid).map_err(status)? {
+                    log(Event::Sigcont {
+                        instance: name,
+                        pid,
+                    })?;
+                }
+            }
+            while let Some((stop, allowed)) = stops.next(now_ms, &incarnations) {
+                let at = stop.instance as usize;
+                let name = format!("w{}", stop.instance);
+                let pid = if allowed {
+                    workers.stop(&name, STOP_CONFIRM).map_err(status)?
+                } else {
+                    None
+                };
+                if let Some(pid) = pid {
+                    log(Event::Sigstop {
+                        instance: name.clone(),
+                        pid,
+                        duration_ms: stop.duration_ms,
+                    })?;
+                    stops.stopped(&stop, pid, now_ms, &incarnations);
+                }
+                fired.push(stop_fired(&stop, incarnations[at], pid.is_some()));
+            }
             std::thread::sleep(POLL);
         };
+        for stop in stops.rest() {
+            let incarnation = incarnations[stop.instance as usize];
+            fired.push(stop_fired(&stop, incarnation, false));
+        }
         for kill in timeline.drain_kills() {
             if let Action::Kill { at_ms, instance } = kill {
                 fired.push(FaultFired {
@@ -537,6 +622,7 @@ impl Run<'_> {
             .schedule
             .plan_for(instance, incarnation)
             .map(|p| p.plan);
+        let index = instance;
         let instance = format!("w{instance}");
         let name = format!("{instance}-{incarnation}");
         let config = WorkerConfig {
@@ -550,6 +636,11 @@ impl Run<'_> {
             tuning: *tuning,
             sink_delay_ms: self.spec.sink_delay_ms,
             abort,
+            stop_at: self.schedule.stop_for(index, incarnation),
+            broken_fence: matches!(
+                self.spec.faults,
+                Faults::StoppedWriter { broken_fence: true }
+            ),
         };
         let config_path = self.dir.join(format!("{name}.json"));
         let json = serde_json::to_vec_pretty(&config).map_err(|e| e.to_string())?;
@@ -814,6 +905,123 @@ fn kill_held(schedule: &Schedule, instance: u32, incarnation: u32, released: boo
             .is_some_and(|p| p.plan.mode == AbortMode::ErrAfterLand)
 }
 
+/// A run's external stops, handed out in drawn order, and the stopped
+/// processes awaiting SIGCONT. A process is its instance and incarnation.
+#[derive(Debug)]
+struct StopQueue<'a> {
+    schedule: &'a Schedule,
+    /// Stops not yet handed out, latest first.
+    pending: Vec<Stop>,
+    /// Stopped processes as instance, incarnation, pid and resume time.
+    stopped: Vec<(u32, u32, u32, u64)>,
+}
+
+impl<'a> StopQueue<'a> {
+    fn new(schedule: &'a Schedule) -> StopQueue<'a> {
+        let mut pending = schedule.stops.clone();
+        pending.sort_by_key(|s| (s.at_ms, s.instance));
+        pending.reverse();
+        StopQueue {
+            schedule,
+            pending,
+            stopped: Vec::new(),
+        }
+    }
+
+    /// Removes the next stop due by `now_ms`, with whether it may fall on
+    /// its instance's process in `incarnations`: never on the one carrying
+    /// the `ErrAfterLand` plan, nor on one already stopped.
+    fn next(&mut self, now_ms: u64, incarnations: &[u32]) -> Option<(Stop, bool)> {
+        if self.pending.last()?.at_ms > now_ms {
+            return None;
+        }
+        let stop = self.pending.pop()?;
+        let incarnation = incarnations[stop.instance as usize];
+        let allowed = self
+            .schedule
+            .plan_for(stop.instance, incarnation)
+            .is_none_or(|p| p.plan.mode != AbortMode::ErrAfterLand)
+            && !self
+                .stopped
+                .iter()
+                .any(|s| s.0 == stop.instance && s.1 == incarnation);
+        Some((stop, allowed))
+    }
+
+    /// Records `stop` as applied at `now_ms` to `pid`, its instance's process
+    /// in `incarnations`, and schedules its resume `stop.duration_ms` later.
+    fn stopped(&mut self, stop: &Stop, pid: u32, now_ms: u64, incarnations: &[u32]) {
+        let incarnation = incarnations[stop.instance as usize];
+        self.stopped
+            .push((stop.instance, incarnation, pid, now_ms + stop.duration_ms));
+    }
+
+    /// Removes a resume due by `now_ms` and returns its instance and pid,
+    /// whose process may since have been killed or replaced.
+    fn resume(&mut self, now_ms: u64) -> Option<(u32, u32)> {
+        let at = self.stopped.iter().position(|s| s.3 <= now_ms)?;
+        let (instance, _, pid, _) = self.stopped.remove(at);
+        Some((instance, pid))
+    }
+
+    /// The stops never handed out, in drawn order.
+    fn rest(self) -> impl Iterator<Item = Stop> {
+        self.pending.into_iter().rev()
+    }
+}
+
+fn stop_fired(stop: &Stop, incarnation: u32, fired: bool) -> FaultFired {
+    FaultFired {
+        incarnation: format!("w{}-{incarnation}", stop.instance),
+        fault: format!("stop at {} ms for {} ms", stop.at_ms, stop.duration_ms),
+        fired,
+    }
+}
+
+/// The stopped-writer violation when the peer never claimed the stopped
+/// split during the stop.
+fn not_reassigned(stopped: &stopped::Stopped) -> Option<Violation> {
+    (!stopped.reassigned).then(|| Violation {
+        check: Check::StoppedSplitNotReassigned,
+        key: Some(stopped.key.clone()),
+        rev: None,
+        instance: Some(format!("w{SLEEPER}")),
+        pid: Some(stopped.pid),
+        detail: "the peer did not claim the stopped split within four leases of the stop"
+            .to_owned(),
+    })
+}
+
+/// The revision at which the stopped process's commit landed after its
+/// stop, from a revision other than the one it was stopped at.
+fn resend_rev(journals: &[ProcessJournal], stopped: &stopped::Stopped) -> Option<u64> {
+    let journal = journals.iter().find(|j| j.pid == stopped.pid)?;
+    let after = journal
+        .lines
+        .iter()
+        .skip_while(|l| !matches!(&l.event, Event::Stop { key, .. } if *key == stopped.key));
+    let mut resends = HashSet::new();
+    for line in after {
+        match &line.event {
+            Event::Send {
+                call,
+                key,
+                expected,
+                ..
+            } if *key == stopped.key && *expected != Some(stopped.expected) => {
+                resends.insert(*call);
+            }
+            Event::Done {
+                call,
+                reply: Reply::Won(rev),
+                ..
+            } if resends.contains(call) => return Some(*rev),
+            _ => {}
+        }
+    }
+    None
+}
+
 /// Whether a kill held for the lost-reply process may go: one lease has
 /// passed since its `err_after_land` line was seen at `line_at_ms`, or
 /// `recovered` says its journal shows the landed write recovered.
@@ -888,6 +1096,14 @@ mod tests {
     use super::*;
     use crate::journal::{Event, Line};
 
+    fn stop(at_ms: u64, instance: u32, duration_ms: u64) -> Stop {
+        Stop {
+            at_ms,
+            instance,
+            duration_ms,
+        }
+    }
+
     /// The data set is a function of the seed, its first object lies below
     /// 1 MiB and its second above, and each record's offset is where its line
     /// starts.
@@ -935,7 +1151,7 @@ mod tests {
             instances: 1,
             worker: Path::new("w"),
             sink_delay_ms: 0,
-            fault_free: true,
+            faults: Faults::None,
         };
         let run = Run {
             spec: &spec,
@@ -1054,11 +1270,12 @@ mod tests {
         );
     }
 
-    /// A kill due on the process carrying the `ErrAfterLand` plan waits until
-    /// its hold is released, and its replacement waits one respawn delay from
-    /// then; kills on other processes fall on time.
+    /// No stop falls on the process carrying the `ErrAfterLand` plan, and a
+    /// kill due on it waits until its hold is released, its replacement one
+    /// respawn delay from then; stops and kills on other processes fall on
+    /// time.
     #[test]
-    fn err_after_land_incarnation_is_killed_only_after_its_release() {
+    fn err_after_land_incarnation_is_never_stopped_and_killed_only_after_its_release() {
         use crate::schedule::Kill;
         use crate::store::AbortPlan;
         let lost = InProcess {
@@ -1078,11 +1295,29 @@ mod tests {
         let schedule = Schedule {
             kills: vec![kill(1_000, 0), kill(1_000, 1)],
             in_process: vec![lost],
+            ..Schedule::default()
         };
         assert!(kill_held(&schedule, 0, 1, false));
         assert!(!kill_held(&schedule, 0, 1, true), "the hold was released");
         assert!(!kill_held(&schedule, 0, 2, false), "a replacement");
         assert!(!kill_held(&schedule, 1, 1, false), "another instance");
+        let stops = Schedule {
+            stops: vec![stop(500, 0, 500), stop(500, 1, 500)],
+            ..schedule.clone()
+        };
+        let mut queue = StopQueue::new(&stops);
+        assert_eq!(queue.next(500, &[1, 1]), Some((stop(500, 0, 500), false)));
+        assert_eq!(
+            queue.next(500, &[1, 1]),
+            Some((stop(500, 1, 500), true)),
+            "another instance"
+        );
+        let mut queue = StopQueue::new(&stops);
+        assert_eq!(
+            queue.next(500, &[2, 1]),
+            Some((stop(500, 0, 500), true)),
+            "a replacement"
+        );
 
         let mut timeline = Timeline::new(&schedule);
         let schedule = &schedule;
@@ -1195,6 +1430,7 @@ mod tests {
                 },
                 respawn_after_ms: 0,
             }],
+            ..Schedule::default()
         };
         let rendered = schedule.render();
         assert!(rendered.contains("1500 ms: kill w0"));
@@ -1222,6 +1458,84 @@ mod tests {
             .count()
             + left.len();
         assert_eq!(kills, 2, "every rendered kill is handed out or drained");
+    }
+
+    /// Due stops are handed out in drawn order, `(at_ms, instance)`, and the
+    /// ones never due are left in that order.
+    #[test]
+    fn stop_queue_hands_out_due_stops_in_order_and_keeps_the_rest() {
+        let schedule = Schedule {
+            stops: vec![
+                stop(3_000, 1, 500),
+                stop(1_000, 1, 500),
+                stop(9_000, 0, 500),
+                stop(1_000, 0, 500),
+                stop(8_000, 1, 500),
+            ],
+            ..Schedule::default()
+        };
+        let mut queue = StopQueue::new(&schedule);
+        let mut handed = Vec::new();
+        for now in (0..=5_000).step_by(50) {
+            while let Some((stop, allowed)) = queue.next(now, &[1, 1]) {
+                assert!(allowed);
+                handed.push((now, stop));
+            }
+        }
+        assert_eq!(
+            handed,
+            [
+                (1_000, stop(1_000, 0, 500)),
+                (1_000, stop(1_000, 1, 500)),
+                (3_000, stop(3_000, 1, 500)),
+            ]
+        );
+        assert_eq!(
+            queue.rest().collect::<Vec<_>>(),
+            [stop(8_000, 1, 500), stop(9_000, 0, 500)]
+        );
+    }
+
+    /// A stopped process is resumed its stop's duration after the stop, once,
+    /// and holds off another stop of the same process until then; a
+    /// replacement process is not held by its predecessor's stop.
+    #[test]
+    fn a_stop_resumes_after_its_duration_and_holds_its_process() {
+        let schedule = Schedule {
+            stops: vec![
+                stop(1_000, 1, 1_500),
+                stop(2_000, 1, 500),
+                stop(2_000, 0, 500),
+                stop(3_000, 1, 2_000),
+                stop(4_000, 1, 500),
+            ],
+            ..Schedule::default()
+        };
+        let mut queue = StopQueue::new(&schedule);
+        let (first, allowed) = queue.next(1_000, &[1, 1]).unwrap();
+        assert!(allowed);
+        queue.stopped(&first, 42, 1_000, &[1, 1]);
+        assert_eq!(queue.resume(2_499), None);
+        assert_eq!(
+            queue.next(2_000, &[1, 1]),
+            Some((stop(2_000, 0, 500), true)),
+            "another instance"
+        );
+        assert_eq!(
+            queue.next(2_000, &[1, 1]),
+            Some((stop(2_000, 1, 500), false)),
+            "stopped"
+        );
+        assert_eq!(queue.resume(2_500), Some((1, 42)));
+        assert_eq!(queue.resume(2_500), None, "resumed once");
+        let (third, allowed) = queue.next(3_000, &[1, 1]).unwrap();
+        assert!(allowed, "resumed");
+        queue.stopped(&third, 43, 3_000, &[1, 1]);
+        assert_eq!(
+            queue.next(4_000, &[1, 2]),
+            Some((stop(4_000, 1, 500), true)),
+            "the stopped process's replacement"
+        );
     }
 
     /// A process with an `abort` line and no later process under its
@@ -1320,5 +1634,104 @@ mod tests {
             })
             .unwrap();
         assert!(journal_holds(&path, "abort"));
+    }
+
+    /// The re-send's revision is the first win on the stopped key after the
+    /// stop line, sent from a revision other than the one the stopped commit
+    /// replaced; a win from that revision or on another key does not count.
+    #[test]
+    fn resend_rev_is_the_first_win_from_another_revision_after_the_stop() {
+        use crate::journal::{Progress, Status, WriteOp};
+        let value = Progress {
+            schema: journal::SCHEMA,
+            epoch: 1,
+            owner: Some("w1".to_owned()),
+            watermark: Some(10),
+            completed: false,
+            status: Status::Runnable,
+            attempts: 0,
+        };
+        let line = |event| Line { t_ms: 1, event };
+        let send = |call, key: &str, expected| {
+            line(Event::Send {
+                call,
+                op: WriteOp::Update,
+                key: key.to_owned(),
+                expected: Some(expected),
+                value: value.clone(),
+            })
+        };
+        let done = |call, key: &str, reply| {
+            line(Event::Done {
+                call,
+                key: key.to_owned(),
+                reply,
+            })
+        };
+        let stopped = stopped::Stopped {
+            key: "split.a".to_owned(),
+            expected: 4,
+            pid: 9,
+            reassigned: true,
+        };
+        let journal = |lines| ProcessJournal {
+            instance: "w1".to_owned(),
+            pid: 9,
+            lines,
+        };
+        let before = journal(vec![
+            send(1, "split.a", 2),
+            done(1, "split.a", Reply::Won(3)),
+            line(Event::Stop {
+                key: "split.a".to_owned(),
+                expected: 4,
+                epoch: 1,
+            }),
+            send(2, "split.a", 4),
+            done(2, "split.a", Reply::Lost),
+            send(3, "split.b", 5),
+            done(3, "split.b", Reply::Won(9)),
+            send(4, "split.a", 5),
+            done(4, "split.a", Reply::Won(6)),
+        ]);
+        assert_eq!(resend_rev(&[before], &stopped), Some(6));
+        let fenced = journal(vec![
+            line(Event::Stop {
+                key: "split.a".to_owned(),
+                expected: 4,
+                epoch: 1,
+            }),
+            send(2, "split.a", 4),
+            done(2, "split.a", Reply::Won(5)),
+        ]);
+        assert_eq!(resend_rev(&[fenced], &stopped), None);
+    }
+
+    /// A stop the peer never claimed during is a property-4 violation
+    /// against the stopped process; a claimed one is none.
+    #[test]
+    fn a_stop_the_peer_never_claimed_is_a_property_4_violation() {
+        let stopped = |reassigned| stopped::Stopped {
+            key: "split.a".to_owned(),
+            expected: 4,
+            pid: 9,
+            reassigned,
+        };
+        assert_eq!(not_reassigned(&stopped(true)), None);
+        let violation = not_reassigned(&stopped(false)).unwrap();
+        assert_eq!(
+            (
+                violation.check,
+                violation.check.property(),
+                violation.key.as_deref(),
+                violation.pid
+            ),
+            (
+                Check::StoppedSplitNotReassigned,
+                4,
+                Some("split.a"),
+                Some(9)
+            )
+        );
     }
 }

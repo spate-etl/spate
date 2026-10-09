@@ -134,8 +134,9 @@ cargo xtask fault-test [--seed N] [FILTER]
 It prints the seed first, drawing one from the clock when `--seed` is absent,
 and passes it to every scenario. A seed fixes the data set and the fault
 schedule: which worker is killed when, how long its replacement waits to start
-under the same instance id, which worker aborts before or after which of its
-writes, and which one is handed an error for a write that landed. It does not
+under the same instance id, which worker is stopped with SIGSTOP when and for
+how long, which worker aborts before or after which of its writes, and which
+one is handed an error for a write that landed. It does not
 fix the interleaving. The operating system's scheduling and real time decide
 which split a worker holds when something happens. Each scenario writes a
 directory under `target/fault-runs/` holding every worker's config, journal and
@@ -151,12 +152,21 @@ recovered the write or let the split go, or the outcome is `expectation`. A
 retry with no `won` or `lost` reply may have landed as well, and a read of its
 value counts as a read of the landed write. A kill the schedule draws for that
 worker waits until its journal shows the recovery, or one lease from the first
-poll at which the kill is due and the journal holds its `err_after_land` line.
+poll at which the kill is due and the journal holds its `err_after_land` line,
+and a stop drawn for it is skipped.
 Every failed or timed-out `get` of a split is journalled, and after a lost claim
 reply the worker may claim the split again only once such a read has failed. A
 worker that aborts on its plan must be replaced under its instance id, or the
 outcome is `expectation`; a run that ends with workers still running at its
-deadline skips this check and is `worker`. The command writes
+deadline skips this check and is `worker`. The stopped-writer scenarios run two
+workers, each with a working set above the run's split count. The second starts
+once the first leads, stops itself with SIGSTOP inside one of its first three
+commits, and is continued once the first has claimed the split at a higher epoch
+and a lease and a quarter second have passed since the stop. If the claim does
+not come within four leases, the outcome is `violation`. With the fence intact every property must hold. The broken-fence
+scenarios re-send the stopped commit at the current revision after it loses its
+CAS, and pass only when the oracle reports the stale epoch at that write's
+revision against the stopped worker. The command writes
 `target/fault-runs/summary.json` and exits 1 on any `violation`, `worker` or
 `expectation` outcome, 3 when only `harness` outcomes failed, or nextest failed
 with no failing outcome, such as a build error or a run the oracle could not

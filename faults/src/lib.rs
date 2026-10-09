@@ -5,8 +5,9 @@
 //! This crate provides the journal format, the classification of `split.*`
 //! writes, the seeded generator, the outcome kinds a run reports, the
 //! delivery oracle, the `spate-faults-worker` binary with the store and sink
-//! that journal its traffic and the store wrapper that injects in-process
-//! faults, the seeded fault schedule, the lost-reply evidence check, the
+//! that journal its traffic, the store wrappers that inject in-process
+//! faults, stop the process inside a commit and re-send a commit that lost its
+//! CAS, the seeded fault schedule, the lost-reply evidence check, the
 //! container health poller, and the harness that runs worker processes and
 //! judges them.
 //!

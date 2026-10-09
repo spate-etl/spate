@@ -535,6 +535,7 @@ impl Run<'_> {
                             workers
                                 .kill(&name)
                                 .map_err(|e| format!("kill {name}: {e}"))?;
+                            resumes.killed(pid);
                             timeline.respawn(instance, respawn_at_ms);
                             // This replacement also stands in for an abort that
                             // ended the process after the `live` read.
@@ -939,6 +940,11 @@ impl Resumes {
         let at = self.0.iter().position(|r| r.2 <= now_ms)?;
         let (instance, pid, _) = self.0.remove(at);
         Some((instance, pid))
+    }
+
+    /// Drops the resume of `pid`, whose process was killed.
+    fn killed(&mut self, pid: u32) {
+        self.0.retain(|r| r.1 != pid);
     }
 
     fn holds(&self, instance: u32) -> bool {
@@ -1419,7 +1425,8 @@ mod tests {
     }
 
     /// A stop falls on an instance only while it has no stopped process, and
-    /// again once that process is resumed.
+    /// again once that process is resumed or killed; a killed process gets no
+    /// resume.
     #[test]
     fn a_stop_skips_an_instance_with_a_stopped_process() {
         let schedule = Schedule::default();
@@ -1435,6 +1442,14 @@ mod tests {
         assert_eq!(resumes.due(5_000), Some((1, 42)));
         assert_eq!(resumes.due(5_000), None, "resumed once");
         assert!(stop_allowed(&schedule, 1, &[1, 1], &resumes), "resumed");
+
+        resumes.push(1, 43, 9_000);
+        resumes.killed(43);
+        assert!(
+            stop_allowed(&schedule, 1, &[1, 2], &resumes),
+            "the killed process's replacement"
+        );
+        assert_eq!(resumes.due(9_000), None, "killed");
     }
 
     /// A process with an `abort` line and no later process under its

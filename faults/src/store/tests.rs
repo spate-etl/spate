@@ -998,6 +998,77 @@ async fn broken_fence_resends_only_on_its_armed_key() {
     }
 }
 
+/// Through the worker's own layering, a stopped commit that loses its CAS is
+/// re-sent with a `send` line at the peer's revision when `broken_fence` is
+/// set, and comes back `Lost` after its one `send` when it is not.
+#[tokio::test]
+async fn worker_layering_journals_the_resend_only_with_a_broken_fence() {
+    let plan = StopPlan {
+        kind: WriteKind::Commit,
+        n: 1,
+    };
+    for broken in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("w0-1.ndjson");
+        let journal = Arc::new(Journal::open(&path).unwrap());
+        let classifier = Arc::new(Classifier::new("w0"));
+        let peer = MemoryStore::new(LEASE);
+        let mut store = crate::worker::layered(
+            peer.clone(),
+            Some(plan),
+            broken,
+            &journal,
+            &classifier,
+            |s| s,
+        );
+        store.stop = no_stop;
+        let claimed = store
+            .create(Keyspace::Durable, "split.a", record_at(1, Some("w0"), None))
+            .await
+            .unwrap()
+            .won()
+            .unwrap();
+        let moved = peer
+            .update(
+                Keyspace::Durable,
+                "split.a",
+                record_at(2, Some("w1"), None),
+                claimed,
+            )
+            .await
+            .unwrap()
+            .won()
+            .unwrap();
+        let stale = store
+            .update(
+                Keyspace::Durable,
+                "split.a",
+                record_at(1, Some("w0"), Some(10)),
+                claimed,
+            )
+            .await
+            .unwrap();
+        let sends: Vec<Option<u64>> = events(&path)
+            .into_iter()
+            .filter_map(|e| match e {
+                Event::Send {
+                    op: WriteOp::Update,
+                    expected,
+                    ..
+                } => Some(expected),
+                _ => None,
+            })
+            .collect();
+        if broken {
+            assert!(stale.won().is_some(), "the re-send landed: {stale:?}");
+            assert_eq!(sends, [Some(claimed.0), Some(moved.0)]);
+        } else {
+            assert_eq!(stale, CasOutcome::Lost);
+            assert_eq!(sends, [Some(claimed.0)]);
+        }
+    }
+}
+
 const STOP_CHILD: &str = "SPATE_FAULTS_STOP_CHILD";
 
 /// In a child process with the real stop: claims `split.a` and sends one

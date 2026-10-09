@@ -233,35 +233,48 @@ fn run_on<S: CoordinationStore + Clone>(config: &WorkerConfig, store: S) -> Resu
     let pipeline_config = PipelineConfig::from_str(&yaml).map_err(|e| e.to_string())?;
     let pipeline = Pipeline::from_config(pipeline_config).map_err(|e| e.to_string())?;
     let classifier = Arc::new(Classifier::new(config.instance.clone()));
-    let store = JournalStore::new(store, Arc::clone(&journal), Arc::clone(&classifier));
+    let (stop_at, broken_fence) = (config.stop_at, config.broken_fence);
     match config.abort {
         Some(plan) => {
-            let store = AbortAt::new(store, plan, Arc::clone(&journal), Arc::clone(&classifier));
-            let store = stopping(config, store, &journal, classifier);
+            let store = layered(
+                store,
+                stop_at,
+                broken_fence,
+                &journal,
+                &classifier,
+                |store| AbortAt::new(store, plan, Arc::clone(&journal), Arc::clone(&classifier)),
+            );
             run_pipeline(config, pipeline, store, journal)
         }
         None => {
-            let store = stopping(config, store, &journal, classifier);
+            let store = layered(store, stop_at, broken_fence, &journal, &classifier, |s| s);
             run_pipeline(config, pipeline, store, journal)
         }
     }
 }
 
-/// `store` under [`StopAt`] and [`BrokenFence`], which forward every call
-/// unless the config carries a stop plan and a broken fence.
-fn stopping<S>(
-    config: &WorkerConfig,
+/// `store` under a worker's wrappers, innermost first: [`JournalStore`], the
+/// layer `middle` adds, [`BrokenFence`] and [`StopAt`]. [`StopAt`] stops at
+/// `stop_at`, and arms the fence there only when `broken_fence` is set.
+///
+/// The journal sits below [`BrokenFence`] so that each re-send is journalled
+/// as its own `send`.
+pub(crate) fn layered<S, M>(
     store: S,
+    stop_at: Option<StopPlan>,
+    broken_fence: bool,
     journal: &Arc<Journal>,
-    classifier: Arc<Classifier>,
-) -> StopAt<BrokenFence<S>> {
+    classifier: &Arc<Classifier>,
+    middle: impl FnOnce(JournalStore<S>) -> M,
+) -> StopAt<BrokenFence<M>> {
+    let store = JournalStore::new(store, Arc::clone(journal), Arc::clone(classifier));
     let fence = Arc::new(Fence::default());
     StopAt::new(
-        BrokenFence::new(store, Arc::clone(&fence)),
-        config.stop_at,
-        config.broken_fence.then_some(fence),
+        BrokenFence::new(middle(store), Arc::clone(&fence)),
+        stop_at,
+        broken_fence.then_some(fence),
         Arc::clone(journal),
-        classifier,
+        Arc::clone(classifier),
     )
 }
 

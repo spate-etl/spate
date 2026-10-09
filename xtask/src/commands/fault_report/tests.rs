@@ -468,6 +468,15 @@ fn what_broke_follows_the_lowest_violated_property() {
     ));
 }
 
+/// A property 1 violation of only `RecordUnknown` is not answered as lost.
+#[test]
+fn record_unknown_is_not_answered_as_lost() {
+    let r = run("s", vec![violation(1, "RecordUnknown")]);
+    let body = render(Route::Delivery, &context(), &[r]);
+    let a = answer(&body, "What broke");
+    assert!(!a.starts_with(LOST), "RecordUnknown answered as lost: {a}");
+}
+
 /// How you know lists each violation with its property, key, revision,
 /// writer and pid, then the other failing scenarios.
 #[test]

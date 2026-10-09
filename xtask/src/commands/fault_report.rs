@@ -505,7 +505,7 @@ fn delivery(context: &Context, runs: &[RunDir]) -> String {
     let first = runs.first();
     let violations = first.map_or(&[][..], |r| &r.outcome.violations[..]);
     let properties: BTreeSet<u8> = violations.iter().map(|v| v.property).collect();
-    let mut guarantee = what_broke(&properties).to_owned();
+    let mut guarantee = what_broke(violations).to_owned();
     if !properties.is_empty() {
         let named: Vec<String> = properties
             .iter()
@@ -558,10 +558,12 @@ fn delivery(context: &Context, runs: &[RunDir]) -> String {
     )
 }
 
-/// The dropdown option for the lowest-numbered property violated.
-fn what_broke(properties: &BTreeSet<u8>) -> &'static str {
-    match properties.first() {
-        Some(1) => LOST,
+/// The dropdown option for the lowest-numbered property violated. Property 1
+/// answers as lost only for a `RecordMissing`; a `RecordUnknown` alone is
+/// `NOT_SURE`.
+fn what_broke(violations: &[Violation]) -> &'static str {
+    match violations.iter().map(|v| v.property).min() {
+        Some(1) if violations.iter().any(|v| v.check == "RecordMissing") => LOST,
         Some(2) => DUPLICATES,
         Some(3) => AHEAD,
         _ => NOT_SURE,

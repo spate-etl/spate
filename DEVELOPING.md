@@ -161,7 +161,8 @@ SDK retries, delays them by up to 100 ms, or forwards a durable split update and
 then replaces its reply with a 5xx or closes the connection without one. The
 worker handed an error for a landed write gets a proxy that forwards every call.
 `faults.ndjson` records each answer but a plain forward as a `proxy_fault` line,
-and the oracle counts every one but a delay as a fault of no duration.
+and the oracle counts every one but a delay as a fault of no duration. A run
+with proxies whose `faults.ndjson` holds no `proxy_fault` line is `expectation`.
 `dynamodb_drop_after_land_then_pass_wins` drives one store through the proxy
 against DynamoDB Local: an update whose first reply is dropped must return
 `Won` on the SDK's retry, and one whose every reply is dropped `Retryable`.

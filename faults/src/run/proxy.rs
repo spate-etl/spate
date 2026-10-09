@@ -122,6 +122,15 @@ pub(super) fn logged(
     }
 }
 
+/// The failed expectation of a run that put fault proxies in front of its
+/// workers when `faults` holds no `proxy_fault` line.
+pub(super) fn unexercised(proxied: bool, faults: &[Line]) -> Option<String> {
+    let fired = faults
+        .iter()
+        .any(|line| matches!(line.event, Event::ProxyFault { .. }));
+    (proxied && !fired).then(|| "fault not exercised: no proxy_fault line".to_owned())
+}
+
 /// One entry per process and proxy fault kind in `faults`, naming how often
 /// it fired. `processes` maps each pid to its journal, named after its
 /// incarnation.
@@ -512,6 +521,34 @@ mod tests {
             failure.ends_with("was not journalled: disk full"),
             "{failure}"
         );
+    }
+
+    /// A proxied run with no `proxy_fault` line fails its expectation; one
+    /// with a line, or a run with no proxies, does not.
+    #[test]
+    fn a_proxied_run_without_a_proxy_fault_is_not_exercised() {
+        let kill = Line {
+            t_ms: 1,
+            event: Event::Kill {
+                instance: "w0".to_owned(),
+                pid: 10,
+            },
+        };
+        let proxied = Line {
+            t_ms: 2,
+            event: Event::ProxyFault {
+                instance: "w0".to_owned(),
+                pid: 10,
+                fault: "throttle".to_owned(),
+                key: None,
+            },
+        };
+        assert_eq!(
+            unexercised(true, std::slice::from_ref(&kill)).as_deref(),
+            Some("fault not exercised: no proxy_fault line")
+        );
+        assert_eq!(unexercised(true, &[kill.clone(), proxied]), None);
+        assert_eq!(unexercised(false, &[kill]), None);
     }
 
     /// Fired proxy faults are counted per process and kind, whatever their

@@ -260,6 +260,7 @@ pub fn run(spec: &Spec<'_>) -> Outcome {
     if !timed_out {
         expectations.extend(unreplaced_aborts(&journals));
     }
+    expectations.extend(proxy::unexercised(run.proxy_seed.is_some(), &faults));
     let lost_replies = expect::lost_replies(&journals, run.schedule.lost_reply().is_some());
     let (kind, message) = outcome::classify(&Evidence {
         setup_failure: None,

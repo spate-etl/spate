@@ -671,8 +671,8 @@ fn developing_md_names_every_title() {
 }
 
 /// `report` writes a body and a title per route from the run directories
-/// beside the summary, leaving out empty stderr files, and reports a missing
-/// summary as `harness`.
+/// beside the summary, leaving out empty stderr files, and reports an absent
+/// runs root as `harness`.
 #[test]
 fn report_writes_a_body_and_title_per_route() {
     let dir = std::env::temp_dir().join(format!("xtask-fault-report-{}", std::process::id()));

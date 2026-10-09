@@ -403,11 +403,9 @@ mod tests {
                 stderr,
             )
             .unwrap();
-        let until = Instant::now() + Duration::from_secs(30);
-        while !exited_unreaped(exited) {
-            assert!(Instant::now() < until, "the child never exited");
-            std::thread::sleep(POLL);
-        }
+        spate_test::wait_until(Duration::from_secs(30), "the child exited", || {
+            exited_unreaped(exited)
+        });
         assert!(!stopped(exited));
         workers.try_wait().unwrap();
         assert_eq!(workers.exits()[1].code, Some(7));

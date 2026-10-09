@@ -1132,15 +1132,13 @@ fn stop_at_stops_the_process_before_sending() {
         .stdout(std::process::Stdio::null())
         .spawn()
         .unwrap();
-    let until = std::time::Instant::now() + Duration::from_secs(60);
-    while !crate::workers::stopped(child.id()) {
+    spate_test::wait_until(Duration::from_secs(60), "the child stopped", || {
         assert!(
             child.try_wait().unwrap().is_none(),
             "the child exited unstopped"
         );
-        assert!(std::time::Instant::now() < until, "the child never stopped");
-        std::thread::sleep(Duration::from_millis(10));
-    }
+        crate::workers::stopped(child.id())
+    });
     let stopped = events(&path);
     assert!(
         matches!(stopped.as_slice(), [.., Event::Stop { .. }]),

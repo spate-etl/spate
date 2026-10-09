@@ -542,7 +542,8 @@ impl std::fmt::Display for StopPlan {
     }
 }
 
-/// The durable key whose next lost update a [`BrokenFence`] re-sends.
+/// The durable key whose next update a [`BrokenFence`] re-sends, if that
+/// update loses its CAS.
 #[derive(Debug, Default)]
 pub struct Fence {
     armed: std::sync::Mutex<Option<String>>,
@@ -573,10 +574,10 @@ impl Fence {
 /// How many times a [`BrokenFence`] re-sends a lost update.
 const RESENDS: u32 = 8;
 
-/// Forwards every call to `S`, except that a durable update on the key its
-/// [`Fence`] is armed for, once it loses its CAS, is read back and re-sent
-/// unchanged at the current revision until it lands, up to eight times.
-/// The fence fires once.
+/// Forwards every call to `S`, except that the next durable update on the
+/// key its [`Fence`] is armed for, if it loses its CAS, is read back and
+/// re-sent unchanged at the current revision until it lands, up to eight
+/// times.
 #[derive(Clone, Debug)]
 pub struct BrokenFence<S> {
     inner: S,

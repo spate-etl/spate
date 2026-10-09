@@ -98,12 +98,10 @@ impl Run<'_> {
                 "{name} (pid {pid}) journalled its stop and did not report stopped"
             ));
         }
-        let cap = stop_ms + 4 * tuning.lease_ms;
         let mut claimed = false;
         loop {
             claimed = claimed || peer_claimed(env, rt, &key, epoch);
-            let now = journal::now_ms();
-            if release_due(stop_ms, claimed, now, tuning.lease_ms) || now >= cap {
+            if resume_now(stop_ms, claimed, journal::now_ms(), tuning.lease_ms) {
                 break;
             }
             std::thread::sleep(POLL);
@@ -215,6 +213,12 @@ fn release_due(stop_ms: u64, claimed: bool, now_ms: u64, lease_ms: u64) -> bool 
     claimed && now_ms >= stop_ms + lease_ms + RELEASE_MARGIN_MS
 }
 
+/// Whether the stopped process is resumed at `now_ms`: its release is due,
+/// or four leases have passed since the stop at `stop_ms`.
+fn resume_now(stop_ms: u64, claimed: bool, now_ms: u64, lease_ms: u64) -> bool {
+    release_due(stop_ms, claimed, now_ms, lease_ms) || now_ms >= stop_ms + 4 * lease_ms
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -229,5 +233,16 @@ mod tests {
         assert!(!release_due(stop, true, stop + lease + 249, lease));
         assert!(release_due(stop, true, stop + lease + 250, lease));
         assert!(!release_due(stop, false, stop + 4 * lease, lease));
+    }
+
+    /// With no claim seen, the stopped process is resumed four leases after
+    /// the stop; with a claim, once its release is due.
+    #[test]
+    fn resume_comes_at_four_leases_without_a_claim() {
+        let (stop, lease) = (10_000, 2_000);
+        assert!(!resume_now(stop, false, stop + 4 * lease - 1, lease));
+        assert!(resume_now(stop, false, stop + 4 * lease, lease));
+        assert!(!resume_now(stop, true, stop + lease + 249, lease));
+        assert!(resume_now(stop, true, stop + lease + 250, lease));
     }
 }

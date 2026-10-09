@@ -468,13 +468,22 @@ fn what_broke_follows_the_lowest_violated_property() {
     ));
 }
 
-/// A property 1 violation of only `RecordUnknown` is not answered as lost.
+/// Property 1 answers as lost when any of its violations is a `RecordMissing`,
+/// and as not sure when every one is a `RecordUnknown`.
 #[test]
-fn record_unknown_is_not_answered_as_lost() {
-    let r = run("s", vec![violation(1, "RecordUnknown")]);
-    let body = render(Route::Delivery, &context(), &[r]);
-    let a = answer(&body, "What broke");
-    assert!(!a.starts_with(LOST), "RecordUnknown answered as lost: {a}");
+fn record_unknown_alone_is_not_sure_and_beside_a_missing_record_is_lost() {
+    let cases = [
+        (vec![violation(1, "RecordUnknown")], NOT_SURE),
+        (
+            vec![violation(1, "RecordUnknown"), violation(1, "RecordMissing")],
+            LOST,
+        ),
+    ];
+    for (violations, option) in cases {
+        let body = render(Route::Delivery, &context(), &[run("s", violations)]);
+        let what = answer(&body, "What broke");
+        assert!(what.starts_with(option), "{what}");
+    }
 }
 
 /// How you know lists each violation with its property, key, revision,

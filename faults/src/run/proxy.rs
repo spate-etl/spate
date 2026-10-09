@@ -392,6 +392,40 @@ mod tests {
         assert_eq!(kinds.len(), 7, "{kinds:?}");
     }
 
+    /// Only a durable `split.*` update draws a fault after it lands, and it
+    /// draws a fault or a delay more often than any other keyed call.
+    #[test]
+    fn after_land_faults_fall_only_on_durable_split_updates() {
+        let script = ProxyScript::new(7, &Schedule::default(), 0, 1);
+        let keyed = |op: &str, pk: &str, sk: &str, seq| Call {
+            op: op.to_owned(),
+            seq,
+            key: Some((pk.to_owned(), sk.to_owned())),
+            attempt: 1,
+        };
+        let drawn = |op, pk, sk| {
+            (0..2_000)
+                .map(|seq| script.decide(&keyed(op, pk, sk, seq)))
+                .collect::<Vec<_>>()
+        };
+        let split = drawn("UpdateItem", "faults#d", "split.a");
+        let faulted = |answers: &[Fault]| answers.iter().filter(|f| **f != Fault::Pass).count();
+        for (op, pk, sk) in [
+            ("UpdateItem", "faults#e", "split.a"),
+            ("UpdateItem", "faults#d", "plan"),
+            ("GetItem", "faults#d", "split.a"),
+        ] {
+            let other = drawn(op, pk, sk);
+            assert!(
+                !other
+                    .iter()
+                    .any(|f| matches!(f, Fault::ErrorAfterLand(_) | Fault::DropAfterLand)),
+                "after-land fault on {op} {pk}/{sk}"
+            );
+            assert!(faulted(&split) > faulted(&other), "{op} {pk}/{sk}");
+        }
+    }
+
     /// The same seed and call replay the same answer.
     #[test]
     fn proxy_answers_replay_from_the_seed() {

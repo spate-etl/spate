@@ -949,7 +949,7 @@ impl<'a> StopQueue<'a> {
     }
 
     /// Records `stop` as applied at `now_ms` to `pid`, its instance's process
-    /// in `incarnations`, and resumes it `stop.duration_ms` later.
+    /// in `incarnations`, and schedules its resume `stop.duration_ms` later.
     fn stopped(&mut self, stop: &Stop, pid: u32, now_ms: u64, incarnations: &[u32]) {
         let incarnation = incarnations[stop.instance as usize];
         self.stopped

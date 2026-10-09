@@ -298,4 +298,26 @@ mod tests {
             (true, stop + 3 * lease)
         );
     }
+
+    /// A claim seen once holds until the release and is not polled again.
+    #[test]
+    fn a_seen_claim_is_kept_and_not_polled_again() {
+        let (stop, lease) = (10_000, 2_000);
+        let now = std::cell::Cell::new(stop);
+        let mut polls = 0;
+        let claimed = await_release(
+            stop,
+            lease,
+            || {
+                polls += 1;
+                polls == 1
+            },
+            || now.get(),
+            || now.set(now.get() + 50),
+        );
+        assert_eq!(
+            (claimed, now.get(), polls),
+            (true, stop + lease + RELEASE_MARGIN_MS, 1)
+        );
+    }
 }

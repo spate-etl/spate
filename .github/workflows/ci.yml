@@ -317,8 +317,8 @@ jobs:
   # committed locally and never pushed.
   #
   # Push to `main` only: a `pull_request` run executes the pull request's own
-  # copy of this workflow. The job holds no credential and no environment;
-  # `--dry-run` stops before the upload request. Skipped on the release push,
+  # copy of this workflow. The job holds no credential and no environment, and
+  # runs the release's own packaging step. Skipped on the release push,
   # where the publish runs this for real.
   publish-dry-run:
     name: Publish dry run
@@ -342,19 +342,19 @@ jobs:
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml)
           next="${version%.*}.$(( ${version##*.} + 1 ))"
           cargo xtask release version bump "$next"
-          # The dry run refuses a dirty worktree.
+          # Packaging refuses a dirty worktree.
           git config user.name 'spate-release[bot]'
           git config user.email 'spate-release[bot]@users.noreply.github.com'
           git commit --all --quiet --message "workspace: simulate the release bump to $next"
 
-      # The dry run cannot see these: it packages a crate with no description
+      # Packaging cannot see these: it packages a crate with no description
       # or license with a warning and exit 0, while the upload rejects it
       # (cargo issue 14249).
       - name: Prove the upload metadata is present
         run: cargo xtask release version check-metadata
 
       - name: Prove every crate packages
-        run: cargo publish --workspace --locked --dry-run
+        run: cargo xtask release package
 
   # Catches a floor mismatch this diff introduces, before merge.
   minimal-versions:

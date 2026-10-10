@@ -5,7 +5,7 @@ mod io;
 mod sequence;
 pub(crate) mod version;
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use clap::Subcommand;
 
@@ -56,7 +56,7 @@ pub(crate) enum ReleaseCommand {
         expected_sha: Option<String>,
         /// The provenance bundle from the attestation step
         #[arg(long, env = "BUNDLE_PATH", value_name = "PATH")]
-        bundle: Option<PathBuf>,
+        bundle: Option<String>,
     },
     /// The whole release in a throwaway worktree, nothing pushed or uploaded
     DryRun {
@@ -93,18 +93,14 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: ReleaseCommand) -> Outco
     match cmd {
         ReleaseCommand::Version { .. } => Ok(()),
         ReleaseCommand::Assemble { version, dry_run } => {
+            if !dry_run {
+                require_env(&["GH_TOKEN", "GITHUB_REPOSITORY"], "assemble")?;
+            }
             preflight(root, false)?;
             if dry_run {
                 // The release commit is real even in a rehearsal, so it is made
                 // only on a detached head, as `dry-run`'s worktree has.
-                if run::complete(
-                    root,
-                    &Step::new("git", ["symbolic-ref", "-q", "HEAD"]),
-                    Streams::Discard,
-                )?
-                .code
-                    == 0
-                {
+                if !head_is_detached(root)? {
                     return Err(Error::msg(
                         "assemble --dry-run commits the release, so it runs on a detached head;\n  \
                          use `cargo xtask release dry-run`, which makes one in a throwaway worktree",
@@ -122,7 +118,6 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: ReleaseCommand) -> Outco
                 println!("release: dry run; nothing was pushed and no pull request was changed.");
                 Ok(())
             } else {
-                require_env(&["GH_TOKEN", "GITHUB_REPOSITORY"], "assemble")?;
                 sequence::assemble(&host, &version)
             }
         }
@@ -168,11 +163,20 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: ReleaseCommand) -> Outco
                 &host,
                 version,
                 &expected_sha,
-                bundle.as_deref().filter(|p| !p.as_os_str().is_empty()),
+                bundle.as_deref().filter(|p| !p.is_empty()).map(Path::new),
             )
         }
         ReleaseCommand::DryRun { version, keep } => dry_run(root, &version, keep),
     }
+}
+
+fn head_is_detached(root: &Path) -> Result<bool, Error> {
+    let attached = run::complete(
+        root,
+        &Step::new("git", ["symbolic-ref", "-q", "HEAD"]),
+        Streams::Discard,
+    )?;
+    Ok(attached.code != 0)
 }
 
 /// Fails naming the first of `keys` that is unset or empty.
@@ -288,6 +292,9 @@ fn dry_run(root: &Path, version: &str, keep: bool) -> Outcome {
         &Step::new("git", ["worktree", "add", "--detach", &tree_arg, "HEAD"]),
     )?;
     println!("release: dry run in {tree_arg}");
+    // The `xtask` binary bakes in its checkout's path, so the worktree's build
+    // must not land in a target directory the main checkout shares.
+    let target = tree.join("target").to_string_lossy().into_owned();
 
     let outcome = run::run(
         root,
@@ -303,6 +310,7 @@ fn dry_run(root: &Path, version: &str, keep: bool) -> Outcome {
                 "--dry-run",
             ],
         )
+        .env("CARGO_TARGET_DIR", target.clone())
         .dir(&tree_arg),
     )
     .and_then(|()| {
@@ -311,6 +319,7 @@ fn dry_run(root: &Path, version: &str, keep: bool) -> Outcome {
             false,
             &Step::new("cargo", ["xtask", "release", "prepare", "--dry-run"])
                 .env("EXPECTED_SHA", "")
+                .env("CARGO_TARGET_DIR", target)
                 .dir(&tree_arg),
         )
     });
@@ -338,4 +347,34 @@ fn dry_run(root: &Path, version: &str, keep: bool) -> Outcome {
         );
     }
     outcome
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::checks::scratch::Scratch;
+
+    fn git(root: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .current_dir(root)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+
+    /// A checked-out branch is an attached head, and `checkout --detach` is not.
+    #[test]
+    fn a_branch_checkout_is_not_a_detached_head() {
+        let scratch = Scratch::new("spate-xtask-detached").unwrap();
+        let root = scratch.dir();
+        git(root, &["init", "-q"]);
+        git(root, &["commit", "-q", "--allow-empty", "-m", "x"]);
+        assert!(!head_is_detached(root).unwrap());
+        git(root, &["checkout", "-q", "--detach"]);
+        assert!(head_is_detached(root).unwrap());
+    }
 }

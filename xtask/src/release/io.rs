@@ -329,10 +329,7 @@ impl Forge for Gh<'_> {
             "--json",
             "number,headRefName,isCrossRepository",
         ])?;
-        Ok(parse_pulls(&raw)?
-            .into_iter()
-            .find(|p| !p.cross_repository && p.head == head)
-            .map(|p| p.number))
+        head_pull(&raw, head)
     }
 
     fn create_pull(
@@ -448,6 +445,15 @@ pub(crate) fn parse_pulls(raw: &str) -> Result<Vec<Pull>, Error> {
         .collect())
 }
 
+/// The pull request in a `gh pr list` listing from `head` in this repository.
+/// A fork's branch of the same name is never it.
+pub(crate) fn head_pull(raw: &str, head: &str) -> Result<Option<u64>, Error> {
+    Ok(parse_pulls(raw)?
+        .into_iter()
+        .find(|p| !p.cross_repository && p.head == head)
+        .map(|p| p.number))
+}
+
 /// The trailing number of the URL `gh pr create` prints.
 pub(crate) fn pull_number(out: &str) -> Option<u64> {
     let last = out.trim_end().lines().last()?;
@@ -470,11 +476,7 @@ pub(crate) struct CratesIo<'a> {
 impl Registry for CratesIo<'_> {
     fn index(&self, krate: &str) -> Result<Index, Error> {
         let (code, body) = fetch_index(self.root, krate)?;
-        Ok(match code.as_str() {
-            "200" => Index::Found(index_entries(&body)?),
-            "404" => Index::Missing,
-            _ => Index::Status(code),
-        })
+        index_reply(code, &body)
     }
 
     fn trustpub_sha(&self, krate: &str, version: Version) -> Result<String, Error> {
@@ -491,6 +493,16 @@ impl Registry for CratesIo<'_> {
             .unwrap_or("null")
             .to_owned())
     }
+}
+
+/// The index answer a status code and body make. A 200 whose body does not
+/// parse is an error.
+pub(crate) fn index_reply(code: String, body: &str) -> Result<Index, Error> {
+    Ok(match code.as_str() {
+        "200" => Index::Found(index_entries(body)?),
+        "404" => Index::Missing,
+        _ => Index::Status(code),
+    })
 }
 
 /// The entries of a sparse-index file, one JSON object per line.
@@ -916,6 +928,63 @@ mod tests {
                 cross_repository: true
             }]
         );
+    }
+
+    /// A 200 is read as entries and must parse; 404 is a missing crate; any
+    /// other code is kept.
+    #[test]
+    fn the_index_reply_follows_the_status() {
+        assert_eq!(
+            index_reply("200".into(), r#"{"vers":"0.2.0","cksum":"bb"}"#).unwrap(),
+            Index::Found(vec![IndexEntry {
+                vers: "0.2.0".into(),
+                cksum: "bb".into()
+            }])
+        );
+        assert!(index_reply("200".into(), "err\n").is_err());
+        assert_eq!(index_reply("404".into(), "").unwrap(), Index::Missing);
+        assert_eq!(
+            index_reply("403".into(), "").unwrap(),
+            Index::Status("403".into())
+        );
+    }
+
+    /// Only this repository's pull request from the branch is reused, never a
+    /// fork's branch of the same name.
+    #[test]
+    fn a_forks_branch_is_never_the_release_pull_request() {
+        let raw = r#"[
+            {"number":3,"headRefName":"release/v0.3.0","isCrossRepository":true},
+            {"number":4,"headRefName":"release/v0.3.0-rc","isCrossRepository":false}
+        ]"#;
+        assert_eq!(head_pull(raw, "release/v0.3.0").unwrap(), None);
+        let raw = r#"[
+            {"number":3,"headRefName":"release/v0.3.0","isCrossRepository":true},
+            {"number":5,"headRefName":"release/v0.3.0","isCrossRepository":false}
+        ]"#;
+        assert_eq!(head_pull(raw, "release/v0.3.0").unwrap(), Some(5));
+    }
+
+    /// A remote that cannot be reached makes the tag lookup fail.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreachable_origin_is_not_an_absent_tag() {
+        let scratch = Scratch::new("spate-xtask-remote-tag").unwrap();
+        let root = scratch.dir();
+        for args in [
+            &["init", "-q"][..],
+            &["remote", "add", "origin", "/nonexistent/spate.git"],
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(root)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        assert!(ProcessGit { root }.remote_tag("v0.3.0").is_err());
     }
 
     /// Each excluded crate becomes one `--exclude` pair.

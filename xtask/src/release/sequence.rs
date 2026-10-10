@@ -493,14 +493,23 @@ pub(crate) fn finish(
 }
 
 /// The index's cksum for one version. The index is CDN-fronted and the runner
-/// primed its cache before the upload, so a missing entry is retried as lag.
+/// primed its cache before the upload, so a missing entry is retried as lag;
+/// any status other than 200 or 404 fails at once.
 fn served_cksum(host: &Host<'_>, name: &str, version: Version) -> Result<String, Error> {
     let v = version.to_string();
     for attempt in 1..=LAG_ATTEMPTS {
-        if let Index::Found(entries) = host.registry.index(name)?
-            && let Some(entry) = entries.iter().find(|e| e.vers == v && !e.cksum.is_empty())
-        {
-            return Ok(entry.cksum.clone());
+        match host.registry.index(name)? {
+            Index::Found(entries) => {
+                if let Some(entry) = entries.iter().find(|e| e.vers == v && !e.cksum.is_empty()) {
+                    return Ok(entry.cksum.clone());
+                }
+            }
+            Index::Missing => {}
+            Index::Status(code) => {
+                return Err(Error::msg(format!(
+                    "the index answered {code} for {name}; the served bytes cannot be checked"
+                )));
+            }
         }
         println!("attempt {attempt}: the index has no entry for {name} {version} yet; waiting 30s");
         (host.pause)(LAG_INTERVAL);

@@ -127,18 +127,21 @@ impl Drop for Shim {
 const CURL: &str = r#"#!/bin/sh
 for a in "$@"; do printf '%s\0' "$a" >>"$SPATE_LOG.curl"; done
 printf '\n' >>"$SPATE_LOG.curl"
-last=
-for a in "$@"; do last=$a; done
+last= out= prev=
+for a in "$@"; do
+  [ "$prev" = "-o" ] && out=$a
+  prev=$a last=$a
+done
 crate=${last##*/}
 if [ -f "$SPATE_FIX/curl.$crate.fail" ]; then
   printf 'curl: (6) Could not resolve host\n' >&2
   exit 6
 fi
-if [ -f "$SPATE_FIX/curl.$crate.body" ]; then cat "$SPATE_FIX/curl.$crate.body"; fi
+if [ -f "$SPATE_FIX/curl.$crate.body" ]; then cat "$SPATE_FIX/curl.$crate.body" >"$out"; fi
 if [ -f "$SPATE_FIX/curl.$crate.code" ]; then
-  printf '\n%s' "$(cat "$SPATE_FIX/curl.$crate.code")"
+  cat "$SPATE_FIX/curl.$crate.code"
 else
-  printf '\n200'
+  printf '200'
 fi
 "#;
 
@@ -464,8 +467,15 @@ fn the_children_carry_the_arguments_the_gate_depends_on() {
         &[],
     );
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let mut curl = shim.calls("curl");
+    // The body file is a fresh scratch path on every run.
+    for call in &mut curl {
+        if let Some(i) = call.iter().position(|a| a == "-o") {
+            call[i + 1] = "<body>".to_owned();
+        }
+    }
     assert_eq!(
-        shim.calls("curl"),
+        curl,
         [[
             "-sS",
             "--retry",
@@ -473,7 +483,9 @@ fn the_children_carry_the_arguments_the_gate_depends_on() {
             "--max-time",
             "30",
             "-w",
-            r"\n%{http_code}",
+            "%{http_code}",
+            "-o",
+            "<body>",
             "-H",
             "User-Agent: spate-release (github.com/spate-etl/spate)",
             "https://index.crates.io/sp/at/spate-core",

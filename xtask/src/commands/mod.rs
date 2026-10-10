@@ -968,6 +968,42 @@ mod tests {
         assert_eq!(super::image_mode(false, true), Mode::Pull);
     }
 
+    /// `release.yml` passes `BUNDLE_PATH` empty when nothing was packaged, as on
+    /// a resumed run.
+    #[test]
+    fn finish_parses_an_empty_bundle_path() {
+        let parsed = Cli::try_parse_from([
+            "cargo xtask",
+            "release",
+            "finish",
+            "--version",
+            "0.3.0",
+            "--expected-sha",
+            "abc",
+            "--bundle",
+            "",
+        ]);
+        assert!(parsed.is_ok(), "{}", parsed.err().unwrap());
+    }
+
+    /// A pending count that is not a non-negative integer is refused before
+    /// anything uploads.
+    #[test]
+    fn upload_refuses_a_pending_count_that_is_not_a_number() {
+        for bad in ["abc", "-1"] {
+            assert!(
+                Cli::try_parse_from([
+                    "cargo xtask",
+                    "release",
+                    "upload",
+                    &format!("--pending={bad}")
+                ])
+                .is_err(),
+                "{bad}"
+            );
+        }
+    }
+
     #[test]
     fn every_check_is_reachable_from_tidy() {
         let listed = super::lint::ALL;

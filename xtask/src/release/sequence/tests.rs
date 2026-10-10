@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use super::*;
 use crate::release::io::{
-    Forge, Git, Index, IndexEntry, Package, Pull, Registry, Resolution, Workspace,
+    DryForge, DryGit, Forge, Git, Index, IndexEntry, Package, Pull, Registry, Resolution, Workspace,
 };
 
 const SHA: &str = "1111111111111111111111111111111111111111";
@@ -114,6 +114,8 @@ struct FakeForge<'a> {
     refuse_bundle: bool,
     /// The one write that fails: `close`, `create`, `merge` or `upload`.
     fails: Option<&'static str>,
+    /// Pull request listings refused, as on a clone with no default repository.
+    reads_fail: bool,
     create_release_failures: RefCell<u32>,
 }
 
@@ -139,9 +141,15 @@ impl<'a> FakeForge<'a> {
 
 impl Forge for FakeForge<'_> {
     fn open_pulls(&self) -> Result<Vec<Pull>, Error> {
+        if self.reads_fail {
+            return Err(fail("list"));
+        }
         Ok(self.pulls.clone())
     }
     fn pull_for_head(&self, head: &str) -> Result<Option<u64>, Error> {
+        if self.reads_fail {
+            return Err(fail("list"));
+        }
         Ok(self
             .pulls
             .iter()
@@ -748,6 +756,7 @@ fn finish_tags_releases_and_deploys() {
             "dispatch docs".to_owned(),
         ]
     );
+    assert_eq!(pauses.of(API_INTERVAL), CRATES.len());
 }
 
 /// A tag push that reaches origin and then reports failure stops the run, and
@@ -787,6 +796,12 @@ fn a_tag_push_that_fails_after_landing_resumes() {
         .filter(|e| e.starts_with("tag "))
         .count();
     assert_eq!(tags, 1, "{:?}", log.entries());
+    let pushes = log
+        .entries()
+        .iter()
+        .filter(|e| e.starts_with("push refs/tags/"))
+        .count();
+    assert_eq!(pushes, 1, "{:?}", log.entries());
     assert!(log.has("release v0.3.0"));
 }
 
@@ -896,7 +911,7 @@ fn finish_gives_up_on_a_release_that_never_resolves() {
     let git = FakeGit::new(&log);
     let forge = FakeForge::new(&log);
     let (registry, workspace) = published(&log);
-    *workspace.resolve_failures.borrow_mut() = LAG_ATTEMPTS;
+    *workspace.resolve_failures.borrow_mut() = 5;
     let pauses = Pauses::default();
     let err = finish(
         &host!(&git, &forge, &registry, &workspace, pauses),
@@ -906,7 +921,100 @@ fn finish_gives_up_on_a_release_that_never_resolves() {
     )
     .unwrap_err();
     assert!(err.message.contains("cannot resolve"), "{}", err.message);
+    assert_eq!(pauses.of(LAG_INTERVAL), 5);
     assert!(!log.has("tag"));
+}
+
+/// An index that never serves the version stops `finish` after the full wait,
+/// before tagging.
+#[test]
+fn finish_gives_up_on_an_index_that_never_serves() {
+    let log = Log::default();
+    let git = FakeGit::new(&log);
+    let forge = FakeForge::new(&log);
+    let (registry, workspace) = published(&log);
+    registry.lag.borrow_mut().insert("spate-kafka".into(), 5);
+    let pauses = Pauses::default();
+    let err = finish(
+        &host!(&git, &forge, &registry, &workspace, pauses),
+        v("0.3.0"),
+        SHA,
+        None,
+    )
+    .unwrap_err();
+    assert!(err.message.contains("never served"), "{}", err.message);
+    assert_eq!(pauses.of(LAG_INTERVAL), 5);
+    assert!(!log.has("tag"));
+}
+
+/// An index status other than 200 or 404 stops `finish` at once and names the
+/// code.
+#[test]
+fn finish_stops_on_an_index_status() {
+    let log = Log::default();
+    let git = FakeGit::new(&log);
+    let forge = FakeForge::new(&log);
+    let (mut registry, workspace) = published(&log);
+    registry.status = Some("403".into());
+    let pauses = Pauses::default();
+    let err = finish(
+        &host!(&git, &forge, &registry, &workspace, pauses),
+        v("0.3.0"),
+        SHA,
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(pauses.of(LAG_INTERVAL), 0, "a 403 is waited out as lag");
+    assert!(err.message.contains("403"), "{}", err.message);
+    assert!(!log.has("tag"));
+}
+
+/// A rehearsed `assemble` commits and makes no push, close, pull request or
+/// auto-merge, whether the forge's listings answer or are refused.
+#[test]
+fn a_dry_assemble_writes_nothing_outside_the_tree() {
+    for reads_fail in [false, true] {
+        let log = Log::default();
+        let git = FakeGit::new(&log);
+        let mut forge = FakeForge::new(&log);
+        forge.reads_fail = reads_fail;
+        forge.pulls = vec![
+            Pull {
+                number: 1,
+                head: "release/v0.2.9".into(),
+                cross_repository: false,
+            },
+            Pull {
+                number: 7,
+                head: "release/v0.3.0".into(),
+                cross_repository: false,
+            },
+        ];
+        let registry = FakeRegistry::default();
+        let mut workspace = FakeWorkspace::new(&log, &CRATES);
+        workspace.version = v("0.2.0");
+        let pauses = Pauses::default();
+        let (git, forge) = (DryGit(&git), DryForge(&forge));
+        assemble(&host!(&git, &forge, &registry, &workspace, pauses), "0.3.0").unwrap();
+        assert_eq!(
+            log.entries(),
+            ["generate 0.3.0", "commit release: v0.3.0"],
+            "reads_fail={reads_fail}"
+        );
+    }
+}
+
+/// A rehearsal's git passes the commit through and never tags or pushes.
+#[test]
+fn a_dry_git_never_tags_or_pushes() {
+    let log = Log::default();
+    let git = FakeGit::new(&log);
+    let dry = DryGit(&git);
+    dry.tag("v0.3.0", SHA).unwrap();
+    dry.push("refs/tags/v0.3.0", false).unwrap();
+    dry.push("HEAD:refs/heads/release/v0.3.0", true).unwrap();
+    dry.commit_all("release: v0.3.0", "").unwrap();
+    assert_eq!(log.entries(), ["commit release: v0.3.0"]);
 }
 
 /// A release created moments after its tag is retried once.

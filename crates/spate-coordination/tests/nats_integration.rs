@@ -1219,7 +1219,7 @@ fn a_listing_rereads_a_key_its_consumer_delivered_as_a_marker() {
     });
 }
 
-/// A listing whose leader read of an undelivered key fails is Retryable.
+/// A listing whose leader read of a deleted key fails is Retryable.
 #[test]
 #[ignore = "needs Docker; run explicitly"]
 fn a_listing_whose_leader_read_fails_is_retryable() {

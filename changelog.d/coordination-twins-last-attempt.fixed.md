@@ -5,8 +5,9 @@ shared-instance-id fatal error when the split they meet on has one delivery
 attempt left. In previous versions the second worker quarantined the split and
 the first dropped it, and neither reported an error, so a bounded job could end
 stalled on a healthy split. The split now stays runnable while the worker that
-holds it is running. A worker restarted under its
-predecessor's `instance_id` now quarantines a split on its last attempt only
-after the predecessor's lease expires, as the store or the worker measures it.
-In previous versions it quarantined the split at once. Splits with attempts
-left are reclaimed at once, as before.
+holds it is running. On NATS, a worker whose lease-watch snapshot omits the
+holder's lease can still quarantine the split without an error. A worker
+restarted under its predecessor's `instance_id` now quarantines a split on its
+last attempt only after the predecessor's lease expires, as the store or the
+worker measures it. In previous versions it quarantined the split at once.
+Splits with attempts left are reclaimed at once, as before.

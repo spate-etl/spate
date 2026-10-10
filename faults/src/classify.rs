@@ -1,5 +1,6 @@
 //! Names what a `split.*` write does from the value it replaces, and a
-//! leader's writes to `plan`, `split.*` and `assign.*` from their key.
+//! leader's writes to the leader key, `plan`, `split.*` and `assign.*` from
+//! their key.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -35,6 +36,10 @@ pub enum WriteKind {
     /// The first [`WriteKind::Plan`] write a process sends after its first
     /// [`WriteKind::Seed`]. Only a stop plan names it.
     Publish,
+    /// Creates the ephemeral leader key.
+    Elect,
+    /// Re-arms the ephemeral leader key.
+    LeaderRenew,
 }
 
 /// Classifies a durable update by `me` from `prev`, the value at its expected
@@ -75,12 +80,16 @@ pub fn classify_ephemeral(key: &str) -> Option<WriteKind> {
     key.starts_with("split.").then_some(WriteKind::Renew)
 }
 
-/// Classifies a leader's write of `key` by its key and call: a durable `plan`
-/// update, `split.*` create or `assign.*` write. `None` for anything else.
+/// Classifies a leader's write of `key` by its key and call: the ephemeral
+/// leader key's create or update, or a durable `plan` update, `split.*` create
+/// or `assign.*` write. `None` for anything else.
 #[must_use]
 pub fn classify_leader(ephemeral: bool, op: WriteOp, key: &str) -> Option<WriteKind> {
     if ephemeral {
-        return None;
+        return (key == "leader").then_some(match op {
+            WriteOp::Create => WriteKind::Elect,
+            WriteOp::Update => WriteKind::LeaderRenew,
+        });
     }
     match op {
         _ if key.starts_with("assign.") => Some(WriteKind::Assign),
@@ -198,9 +207,10 @@ mod tests {
         assert_eq!(classify_ephemeral("worker.w0"), None);
     }
 
-    /// A durable `plan` update, `split.*` create and `assign.*` create or
-    /// update are leader writes; the startup `plan` create, `spec.*`, `verdict`,
-    /// `_probe.*`, `split.*` updates and ephemeral writes are not.
+    /// The leader key's create and update, a durable `plan` update, `split.*`
+    /// create and `assign.*` create or update are leader writes; the startup
+    /// `plan` create, `spec.*`, `verdict`, `_probe.*`, `split.*` updates and
+    /// other ephemeral writes are not.
     #[test]
     fn classifies_leader_writes_by_key_and_call() {
         use WriteOp::{Create, Update};
@@ -215,6 +225,15 @@ mod tests {
         assert_eq!(k(Create, "_probe.w0"), None);
         assert_eq!(k(Update, "_probe.w0"), None);
         assert_eq!(k(Update, "split.a"), None);
+        assert_eq!(
+            classify_leader(true, Create, "leader"),
+            Some(WriteKind::Elect)
+        );
+        assert_eq!(
+            classify_leader(true, Update, "leader"),
+            Some(WriteKind::LeaderRenew)
+        );
+        assert_eq!(k(Create, "leader"), None);
         assert_eq!(classify_leader(true, Create, "split.a"), None);
         assert_eq!(classify_leader(true, Update, "assign.w0"), None);
     }

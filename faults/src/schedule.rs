@@ -357,12 +357,19 @@ impl Schedule {
 /// Kinds an `ErrAfterLand` is drawn on: the durable writes whose recovery the
 /// journal can show. A renewal is ephemeral, so it is never drawn.
 const LOST_REPLY_KINDS: [WriteKind; 3] = [WriteKind::Claim, WriteKind::Commit, WriteKind::Complete];
-/// Kinds an abort is drawn on.
-const ABORT_KINDS: [WriteKind; 4] = [
+/// The `split.*` kinds an abort is drawn on, three draws in four.
+const SPLIT_ABORT_KINDS: [WriteKind; 4] = [
     WriteKind::Claim,
     WriteKind::Commit,
     WriteKind::Complete,
     WriteKind::Renew,
+];
+/// The leader kinds an abort is drawn on, one draw in four.
+const LEADER_ABORT_KINDS: [WriteKind; 4] = [
+    WriteKind::Elect,
+    WriteKind::LeaderRenew,
+    WriteKind::Plan,
+    WriteKind::Assign,
 ];
 
 /// An `ErrAfterLand` plan at a write every worker that holds a split reaches.
@@ -380,9 +387,16 @@ fn draw_err_after_land(rng: &mut SplitMix64) -> AbortPlan {
     }
 }
 
-/// An abort before or after one of the first three writes of a kind.
+/// An abort before or after one of the first three writes of a kind, drawn
+/// from [`LEADER_ABORT_KINDS`] one time in four and from
+/// [`SPLIT_ABORT_KINDS`] otherwise.
 fn draw_abort(rng: &mut SplitMix64) -> AbortPlan {
-    let kind = ABORT_KINDS[pick(rng, ABORT_KINDS.len())];
+    let kinds = if rng.in_range(0, 3) == 0 {
+        LEADER_ABORT_KINDS
+    } else {
+        SPLIT_ABORT_KINDS
+    };
+    let kind = kinds[pick(rng, kinds.len())];
     let mode = if rng.next_u64().is_multiple_of(2) {
         AbortMode::Before
     } else {
@@ -731,6 +745,37 @@ mod tests {
         }
         assert_eq!(lost_kinds.len(), 3, "{lost_kinds:?}");
         assert!(abort_kinds.contains("Renew"), "{abort_kinds:?}");
+    }
+
+    /// Over 4000 seeds, an abort lands on a leader write in about one draw in
+    /// four and on a `split.*` write in the rest, and every kind is drawn.
+    #[test]
+    fn aborts_take_split_kinds_three_times_in_four() {
+        let leader = [
+            WriteKind::Elect,
+            WriteKind::LeaderRenew,
+            WriteKind::Plan,
+            WriteKind::Assign,
+        ];
+        let split = [
+            WriteKind::Claim,
+            WriteKind::Commit,
+            WriteKind::Complete,
+            WriteKind::Renew,
+        ];
+        let mut drawn = std::collections::BTreeMap::new();
+        for seed in 0..4_000 {
+            let kind = draw_abort(&mut SplitMix64::new(seed)).kind;
+            assert!(
+                leader.contains(&kind) || split.contains(&kind),
+                "seed {seed}: {kind:?}"
+            );
+            *drawn.entry(format!("{kind:?}")).or_insert(0_u32) += 1;
+        }
+        let leads: u32 = leader.iter().map(|k| drawn[&format!("{k:?}")]).sum();
+        let share = f64::from(leads) / 4_000.0;
+        assert!((0.22..=0.28).contains(&share), "{share}: {drawn:?}");
+        assert_eq!(drawn.len(), 8, "{drawn:?}");
     }
 
     /// Only an instance's first process carries its plan, and only the

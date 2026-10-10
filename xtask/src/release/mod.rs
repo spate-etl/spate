@@ -257,13 +257,17 @@ fn require_gh(root: &Path, min: (u64, u64, u64)) -> Outcome {
     let out = run::capture(root, &Step::new("gh", ["--version"]))?;
     let found = gh_version(&out)
         .ok_or_else(|| Error::msg(format!("cannot read a version from `gh --version`: {out}")))?;
-    if found < min {
+    if !gh_at_least(found, min) {
         return Err(Error::msg(format!(
             "gh {}.{}.{} matches --signer-workflow as a prefix; {}.{}.{} or later is required",
             found.0, found.1, found.2, min.0, min.1, min.2
         )));
     }
     Ok(())
+}
+
+fn gh_at_least(found: (u64, u64, u64), min: (u64, u64, u64)) -> bool {
+    found >= min
 }
 
 /// The version on the first line of `gh --version`, `gh version X.Y.Z (date)`.
@@ -451,5 +455,13 @@ mod tests {
         );
         assert!(gh_version("gh version 2.89.0 (2026-03-01)").unwrap() < (2, 102, 0));
         assert_eq!(gh_version("garbage"), None);
+    }
+
+    /// 2.102.0 is the first `gh` accepted for verification.
+    #[test]
+    fn gh_from_2_102_0_matches_the_signer_exactly() {
+        assert!(gh_at_least((2, 102, 0), GH_EXACT_SIGNER));
+        assert!(gh_at_least((3, 0, 0), GH_EXACT_SIGNER));
+        assert!(!gh_at_least((2, 101, 9), GH_EXACT_SIGNER));
     }
 }

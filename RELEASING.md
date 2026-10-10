@@ -76,10 +76,11 @@ metadata the dry run cannot check is checked explicitly.
 Then it packages, in the reusable
 [`release-build.yml`](.github/workflows/release-build.yml). Every pending crate
 is packaged and verify-built with no credential in the job, and staged with one
-CycloneDX SBOM per crate and a `SHA256SUMS` over both. One SLSA provenance
-attestation covers every staged `.crate` and `SHA256SUMS`, and each `.crate`
-gets an SBOM attestation of its own. Both are signed by `release-build.yml`'s
-identity, not the caller's. The job builds without a cache.
+CycloneDX SBOM per crate and a `SHA256SUMS` over both. The job builds without a
+cache. Separate jobs, which run no repository code, then attest what it staged.
+One SLSA provenance attestation covers every staged `.crate` and `SHA256SUMS`,
+and each `.crate` gets an SBOM attestation of its own. Both are signed by
+`release-build.yml`'s identity, not the caller's.
 
 The publish job then checks, still with no credential:
 
@@ -109,12 +110,12 @@ are live, so the install snippets are true the moment the site serves them.
 cargo xtask release dry-run --version 0.3.0
 ```
 
-This runs the same `assemble` and the credential-free half of the publish in
-a throwaway git worktree: the real release commit, and every pending crate
-packaged and verify-built, and the SBOMs generated. `assemble` runs its pull
+This runs the same `assemble` and the publish up to staging in a throwaway git
+worktree. That covers the real release commit, every pending crate packaged
+and verify-built, and the SBOMs and `SHA256SUMS` staged. `assemble` runs its pull
 request step against the real open pull requests and prints each push, close,
-open and auto-merge instead of making it. The run stops where the registry
-token would be minted and prints what a real run would do next. It needs `gh`
+open and auto-merge instead of making it. The run stops before attesting
+and prints what a real run would do next. It needs `gh`
 authenticated, and `curl`, `cargo-about` and `cargo-cyclonedx` on the path;
 the preflight names anything missing. The generator versions in CI come from
 the `taiki-e/install-action` pin, so the inventory a local run produces can
@@ -126,7 +127,9 @@ Read a green dry run as "this assembles and packages". It cannot prove the
 registry's acceptance rules (a verified email address, the rate limits), the
 OIDC exchange, the environment's branch policy, or the consumer smoke test,
 which needs the version to actually exist. The first three are configuration
-that a previous release exercised; the last runs inside the real publish.
+that a previous release exercised; the last runs inside the real publish. It
+does not attest or verify; only a real release signs with
+`release-build.yml`'s identity.
 
 The same packaging proof also runs continuously: `ci.yml` runs a
 simulated-bump `cargo publish --dry-run` on pushes to `main` that reach a
@@ -179,8 +182,8 @@ log:
 | `SHA256SUMS` | SLSA provenance |
 
 Because the signer is a reusable workflow, the caller cannot alter how the
-attested artifacts or their provenance are produced, which is what SLSA Build
-Level 3 asks. The upload's own packaging is held to those bytes before the
+attested artifacts or their provenance are produced, and the job that runs the
+build holds no signing token. That is what SLSA Build Level 3 asks. The upload's own packaging is held to those bytes before the
 token exists, and the registry's cksum to them after.
 A consumer verifies a crate the registry serves against that workflow, and
 pins the branch it ran from:
@@ -204,7 +207,9 @@ skips the attestation lookup; the Sigstore trust root is still fetched unless
 
 The SBOMs (CycloneDX 1.5) are generated from the release commit's
 `Cargo.lock` with `SOURCE_DATE_EPOCH` set to the commit time, so each one
-describes exactly the tree that was published and regenerates byte for byte.
+describes exactly the tree that was published. Each `bom-ref` carries the
+absolute checkout path, so a regenerated SBOM matches byte for byte only from
+the same path.
 They, `SHA256SUMS` and the joined attestation bundle land among the release
 assets, and the bundle is what OpenSSF Scorecard's Signed-Releases check reads,
 by its `.intoto.jsonl` suffix.
@@ -212,11 +217,11 @@ by its `.intoto.jsonl` suffix.
 The release is one commit, and the cksum check ties the attested bytes to
 what the registry serves. The sha256 in the sparse index is the served
 `.crate`'s checksum, and the publish fails when it differs from a file the run
-attested. On a resumed run the check covers only what that run packaged.
-The first attempt that attested crates supplies the release's `SHA256SUMS`
-and bundle, and a later attempt never replaces them; crates published by an
-earlier attempt were checked, and attested, by the attempt that uploaded them,
-and the store keeps every attestation even when a bundle asset is lost.
+attested. A build stages only while no crate of the version is published, and
+a rebuild after that stages and uploads nothing. Every publish attempt
+therefore reads a set that covers every crate, whether it is a re-run of the
+failed jobs or of all jobs. The check, `SHA256SUMS` and the bundle cover every
+crate, and the store keeps every attestation even when a bundle asset is lost.
 
 `actions/attest`, `actions/upload-artifact` and `actions/download-artifact`,
 and anything they call internally, have to be on the organisation's Actions

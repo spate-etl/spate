@@ -41,15 +41,18 @@ the attestations are checked.
 ## Decision outcome
 
 Chosen option: "a reusable workflow packages and attests", because the
-signing identity is then `release-build.yml` rather than the caller, which
-is the isolation SLSA Build Level 3 asks for, and every artifact a consumer
-downloads carries an attestation checkable with `gh attestation verify
---signer-workflow`.
+signing identity is then `release-build.yml` rather than the caller, and every
+artifact a consumer downloads carries an attestation checkable with `gh
+attestation verify --signer-workflow`. The job that packages holds no OIDC
+token, since every dependency's build script runs there; the attestations are
+made by separate jobs that run no repository code. Together that is the
+isolation SLSA Build Level 3 asks for.
 
 The SBOM goes into each attestation as the predicate, with predicate type
 `https://cyclonedx.org/bom`, rather than through `actions/attest`'s
 `sbom-path`. The SBOMs are generated with `SOURCE_DATE_EPOCH` so they
-regenerate byte for byte, which leaves out `serialNumber`, and the action's
+regenerate byte for byte from the same checkout path, which leaves out
+`serialNumber`, and the action's
 CycloneDX detection requires one. The resulting predicate type is the same.
 
 The registry upload stays in `release.yml`, because crates.io's Trusted
@@ -72,7 +75,9 @@ restored into the build the provenance describes.
   release commit.
 - Good, because the publish fails before any credential exists when an
   artifact does not match its checksum or its attestations.
-- Bad, because the release runs in two jobs plus one SBOM job per pending
+- Good, because a rebuild after part of the release landed stages nothing, so
+  every publish attempt reads the first build's set, which covers every crate.
+- Bad, because the release runs in three jobs plus one SBOM job per pending
   crate, and the crates pass between them as workflow artifacts.
 - Bad, because `gh` before 2.102.0 matches `--signer-workflow` as a prefix
   (`cli/cli` `pkg/cmd/attestation/verify/policy.go`), so a consumer on an

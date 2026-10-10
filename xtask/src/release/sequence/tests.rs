@@ -199,6 +199,9 @@ impl Forge for FakeForge<'_> {
                 return Err(fail("upload bundle"));
             }
             self.check("upload")?;
+            if !clobber && self.assets.borrow().contains(&name) {
+                return Err(fail("asset exists"));
+            }
             self.log(format!("upload {tag} {name} clobber={clobber}"));
             self.assets.borrow_mut().push(name);
         }
@@ -1277,10 +1280,91 @@ fn upload_needs_a_token_and_a_staged_crate() {
     assert!(log.entries().is_empty());
 }
 
+/// An index status other than 200 or 404 stops the upload before it publishes.
+#[test]
+fn upload_stops_on_an_index_status() {
+    let log = Log::default();
+    let git = FakeGit::new(&log);
+    let forge = FakeForge::new(&log);
+    let pauses = Pauses::default();
+    let staged = artifacts(true);
+    let mut registry = FakeRegistry::with(&CRATES);
+    registry.status = Some("403".into());
+    let workspace = FakeWorkspace::new(&log, &CRATES);
+    let err = upload(
+        &host!(&git, &forge, &registry, &workspace, pauses),
+        true,
+        staged.dir(),
+    )
+    .unwrap_err();
+    assert!(err.message.contains("403"), "{}", err.message);
+    assert!(log.entries().is_empty());
+}
+
+/// A crate the index does not hold at all is still to publish, so it must be
+/// staged.
+#[test]
+fn a_crate_missing_from_the_index_is_pending() {
+    let log = Log::default();
+    let git = FakeGit::new(&log);
+    let forge = FakeForge::new(&log);
+    let pauses = Pauses::default();
+    let staged = artifacts(true);
+    std::fs::remove_file(staged.join("spate-0.3.0.crate")).unwrap();
+    let registry = FakeRegistry::with(&["spate-core", "spate-kafka"]);
+    let workspace = FakeWorkspace::new(&log, &CRATES);
+    let err = upload(
+        &host!(&git, &forge, &registry, &workspace, pauses),
+        true,
+        staged.dir(),
+    )
+    .unwrap_err();
+    assert!(
+        err.message.contains("spate 0.3.0 not staged"),
+        "{}",
+        err.message
+    );
+}
+
+/// A later attempt keeps the release's existing `SHA256SUMS` and bundle.
+#[test]
+fn finish_keeps_an_earlier_attempts_pair() {
+    let log = Log::default();
+    let git = FakeGit::new(&log);
+    git.remote.borrow_mut().insert("v0.3.0".into(), SHA.into());
+    let forge = FakeForge::new(&log);
+    *forge.release.borrow_mut() = true;
+    forge
+        .assets
+        .borrow_mut()
+        .extend([SUMS.to_owned(), "spate-v0.3.0.intoto.jsonl".to_owned()]);
+    let (registry, workspace) = published(&log);
+    let staged = artifacts(true);
+    let pauses = Pauses::default();
+    finish(
+        &host!(&git, &forge, &registry, &workspace, pauses),
+        v("0.3.0"),
+        SHA,
+        staged.dir(),
+    )
+    .unwrap();
+    assert!(
+        !log.has(&format!("upload v0.3.0 {SUMS} clobber=true")),
+        "{:?}",
+        log.entries()
+    );
+    assert!(
+        !log.has("upload v0.3.0 spate-v0.3.0.intoto.jsonl clobber=true"),
+        "{:?}",
+        log.entries()
+    );
+    assert!(log.has("dispatch docs"));
+}
+
 /// `prepare`'s outputs are appended to the file, after whatever it held, with
 /// the pending crates as a JSON list for a job matrix.
 #[test]
-fn the_outputs_append_four_keys() {
+fn the_outputs_append_five_keys() {
     let scratch = Scratch::new("spate-xtask-release-outputs").unwrap();
     let path = scratch.join("output");
     std::fs::write(&path, "earlier=1\n").unwrap();
@@ -1292,7 +1376,7 @@ fn the_outputs_append_four_keys() {
     append_outputs(&path, &prepared).unwrap();
     assert_eq!(
         std::fs::read_to_string(&path).unwrap(),
-        "earlier=1\nversion=0.3.0\nexcludes=spate-core spate-kafka\npending=1\ncrates=[\"spate\"]\n"
+        "earlier=1\nversion=0.3.0\nexcludes=spate-core spate-kafka\npending=1\ncrates=[\"spate\"]\nstaged=false\n"
     );
 }
 
@@ -1382,11 +1466,11 @@ fn stage_collects_crates_sboms_and_their_sums() {
     let forge = FakeForge::new(&log);
     let registry = FakeRegistry::with(&CRATES);
     let workspace = FakeWorkspace::new(&log, &CRATES);
-    workspace.package(&["spate-core".to_owned()]).unwrap();
+    workspace.package(&[]).unwrap();
     let prepared = Prepared {
         version: v("0.3.0"),
-        pending: vec!["spate-kafka".into(), "spate".into()],
-        excludes: vec!["spate-core".into()],
+        pending: CRATES.iter().map(|c| (*c).to_owned()).collect(),
+        excludes: vec![],
     };
     let out = Scratch::new("spate-xtask-release-stage").unwrap();
     let pauses = Pauses::default();
@@ -1404,11 +1488,39 @@ fn stage_collects_crates_sboms_and_their_sums() {
             "spate-0.3.0.cdx.json",
             "spate-0.3.0.crate",
             "spate-core-0.3.0.cdx.json",
+            "spate-core-0.3.0.crate",
             "spate-kafka-0.3.0.cdx.json",
             "spate-kafka-0.3.0.crate",
         ]
     );
     assert_eq!(sums[1].1, digest("sum-spate"));
+}
+
+/// A build after part of the version landed stages nothing, so the publish
+/// reads the first build's set.
+#[test]
+fn stage_writes_nothing_once_a_crate_is_published() {
+    let log = Log::default();
+    let git = FakeGit::new(&log);
+    let forge = FakeForge::new(&log);
+    let registry = FakeRegistry::with(&CRATES);
+    let workspace = FakeWorkspace::new(&log, &CRATES);
+    workspace.package(&["spate-core".to_owned()]).unwrap();
+    let prepared = Prepared {
+        version: v("0.3.0"),
+        pending: vec!["spate-kafka".into(), "spate".into()],
+        excludes: vec!["spate-core".into()],
+    };
+    let out = Scratch::new("spate-xtask-release-stage-resumed").unwrap();
+    let dir = out.join("release");
+    let pauses = Pauses::default();
+    stage(
+        &host!(&git, &forge, &registry, &workspace, pauses),
+        &prepared,
+        &dir,
+    )
+    .unwrap();
+    assert!(!dir.exists());
 }
 
 /// A pending crate this run did not package cannot be staged.

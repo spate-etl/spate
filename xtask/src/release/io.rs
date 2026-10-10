@@ -446,24 +446,36 @@ impl Forge for Gh<'_> {
         predicate_type: &str,
         commit: &str,
     ) -> Outcome {
-        let repo = signer_workflow
-            .splitn(3, '/')
-            .take(2)
-            .collect::<Vec<_>>()
-            .join("/");
         run::quiet(
             self.root,
             false,
-            &Step::new("gh", ["attestation", "verify"])
-                .arg(file.to_string_lossy())
-                .args(["--repo", &repo, "--signer-workflow"])
-                .arg(format!("{signer_workflow}@refs/heads/main"))
-                .args(["--source-ref", "refs/heads/main", "--source-digest", commit])
-                .arg("--deny-self-hosted-runners")
-                .args(["--predicate-type", predicate_type, "--bundle"])
-                .arg(bundle.to_string_lossy()),
+            &attestation_step(file, bundle, signer_workflow, predicate_type, commit),
         )
     }
+}
+
+/// `gh attestation verify` pinned to `signer_workflow` on `main`, to `commit`,
+/// and to hosted runners, with the repository read from the workflow path.
+fn attestation_step<'a>(
+    file: &Path,
+    bundle: &Path,
+    signer_workflow: &str,
+    predicate_type: &str,
+    commit: &str,
+) -> Step<'a> {
+    let repo = signer_workflow
+        .splitn(3, '/')
+        .take(2)
+        .collect::<Vec<_>>()
+        .join("/");
+    Step::new("gh", ["attestation", "verify"])
+        .arg(file.to_string_lossy())
+        .args(["--repo", &repo, "--signer-workflow"])
+        .arg(format!("{signer_workflow}@refs/heads/main"))
+        .args(["--source-ref", "refs/heads/main", "--source-digest", commit])
+        .arg("--deny-self-hosted-runners")
+        .args(["--predicate-type", predicate_type, "--bundle"])
+        .arg(bundle.to_string_lossy())
 }
 
 /// The rows of `gh pr list --json number,headRefName,isCrossRepository`.
@@ -934,6 +946,34 @@ impl Forge for DryForge<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The verification is pinned to the signer's main ref, the release commit
+    /// and hosted runners.
+    #[test]
+    fn attestation_verify_pins_signer_ref_commit_and_runner() {
+        let step = attestation_step(
+            Path::new("a.crate"),
+            Path::new("b.jsonl"),
+            "spate-etl/spate/.github/workflows/release-build.yml",
+            "https://slsa.dev/provenance/v1",
+            "abc123",
+        );
+        let a = &step.args;
+        let pair = |k: &str| a.iter().position(|x| x == k).map(|i| a[i + 1].as_str());
+        assert_eq!(pair("--repo"), Some("spate-etl/spate"));
+        assert_eq!(
+            pair("--signer-workflow"),
+            Some("spate-etl/spate/.github/workflows/release-build.yml@refs/heads/main")
+        );
+        assert_eq!(pair("--source-ref"), Some("refs/heads/main"));
+        assert_eq!(pair("--source-digest"), Some("abc123"));
+        assert!(a.iter().any(|x| x == "--deny-self-hosted-runners"));
+        assert_eq!(
+            pair("--predicate-type"),
+            Some("https://slsa.dev/provenance/v1")
+        );
+        assert_eq!(pair("--bundle"), Some("b.jsonl"));
+    }
 
     /// The commit an `ls-remote` listing names: the peeled line of an annotated
     /// tag, the plain line of a lightweight one, none for an absent tag.

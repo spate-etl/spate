@@ -174,6 +174,14 @@ pub(crate) struct Prepared {
     pub(crate) excludes: Vec<String>,
 }
 
+impl Prepared {
+    /// Whether `stage` writes anything: only before any crate of the version
+    /// is published, so every staged set covers the whole release.
+    pub(crate) fn stages(&self) -> bool {
+        self.excludes.is_empty()
+    }
+}
+
 /// Verifies the release commit, selects the crates still to publish, and
 /// packages and verify-builds them, all before any credential exists.
 pub(crate) fn prepare(host: &Host<'_>, expected_sha: Option<&str>) -> Result<Prepared, Error> {
@@ -293,15 +301,17 @@ pub(crate) fn write_outputs(prepared: &Prepared) -> Outcome {
     }
 }
 
-/// Appends `version=`, `excludes=` and `pending=` lines to `path`.
+/// Appends `version=`, `excludes=`, `pending=`, `crates=` and `staged=` lines
+/// to `path`.
 fn append_outputs(path: &Path, prepared: &Prepared) -> Outcome {
     let lines = format!(
-        "version={}\nexcludes={}\npending={}\ncrates={}\n",
+        "version={}\nexcludes={}\npending={}\ncrates={}\nstaged={}\n",
         prepared.version,
         prepared.excludes.join(" "),
         prepared.pending.len(),
         serde_json::to_string(&prepared.pending)
-            .map_err(|e| Error::msg(format!("GITHUB_OUTPUT: {e}")))?
+            .map_err(|e| Error::msg(format!("GITHUB_OUTPUT: {e}")))?,
+        prepared.stages()
     );
     use std::io::Write;
     std::fs::OpenOptions::new()
@@ -317,9 +327,19 @@ pub(crate) const SUMS: &str = "SHA256SUMS";
 
 /// Collects what a release attests into `out`: each packaged `.crate`, one
 /// SBOM per publishable crate, and a `SHA256SUMS` over both.
+///
+/// Writes nothing once part of the version is published. The publish then
+/// reads the set the first build staged, which covers every crate.
 pub(crate) fn stage(host: &Host<'_>, prepared: &Prepared, out: &Path) -> Outcome {
-    group("Stage the artifacts to attest");
     let version = prepared.version;
+    if !prepared.stages() {
+        println!(
+            "release: part of {version} is already published, so this build stages nothing;\n  \
+             the publish uses the artifacts the first build staged"
+        );
+        return Ok(());
+    }
+    group("Stage the artifacts to attest");
     std::fs::create_dir_all(out).map_err(|e| Error::msg(format!("{}: {e}", out.display())))?;
     // Everything in `out` is listed and attested, so it starts empty.
     if std::fs::read_dir(out)
@@ -517,7 +537,7 @@ pub(crate) fn verify_artifacts(
 
     group("This checkout packages the attested bytes");
     // The upload packages again from this checkout, so its bytes are compared
-    // here, before any token exists, rather than only after the publish.
+    // before any token exists.
     host.workspace.package_unverified(&excludes)?;
     for name in &pending {
         let file = host.workspace.crate_file(name, version).ok_or_else(|| {
@@ -602,8 +622,8 @@ fn require_staged(pending: &[String], version: Version, dir: &Path) -> Outcome {
         return Ok(());
     }
     Err(Error::msg(format!(
-        "{} {version} not staged in {}, so no attestation covers it; re-run all jobs\n  \
-         so the build packages and attests it",
+        "{} {version} not staged in {}, so no attestation covers it; these are not\n  \
+         the artifacts the run's first build staged",
         missing.join(" "),
         dir.display()
     )))
@@ -642,8 +662,7 @@ pub(crate) fn finish(
 
     group("The registry serves the bytes this run attested");
     // The index's cksum is the sha256 of the served `.crate`, and it must equal
-    // the staged file the attestations cover. Only crates packaged in this run
-    // were staged.
+    // the staged file the attestations cover.
     let mut checked = 0;
     for package in &packages {
         let name = &package.name;
@@ -663,7 +682,7 @@ pub(crate) fn finish(
         checked += 1;
     }
     if checked == 0 {
-        println!("nothing was packaged in this run; nothing to compare.");
+        println!("no crate is staged; nothing to compare.");
     }
     endgroup();
 
@@ -700,10 +719,8 @@ pub(crate) fn finish(
     endgroup();
 
     group("SBOMs, checksums and attestations on the release");
-    // `--clobber` for the SBOMs, whose generation is byte-stable, and for the
-    // checksum list, so a resumed run completes the set. Not for the bundle:
-    // attempts only shrink the pending set, so the first bundle covers the
-    // most crates.
+    // `--clobber` for the SBOMs, whose generation in CI is byte-stable, so a
+    // resumed run completes the set.
     let mut files: Vec<PathBuf> = std::fs::read_dir(artifacts)
         .map_err(|e| Error::msg(format!("{}: {e}", artifacts.display())))?
         .filter_map(Result::ok)
@@ -712,9 +729,9 @@ pub(crate) fn finish(
         .collect();
     files.sort();
     host.forge.upload(&tag, &files, true)?;
-    // The checksum list and the bundle are attested only by a run that staged
-    // a crate, and the first such run's pair stays: an upload refused because
-    // the asset exists is checked against the asset list below.
+    // Every attempt stages the same set, so an upload refused because an
+    // earlier attempt's asset exists keeps an identical file; the asset list
+    // below is the check.
     let scratch = Scratch::new("spate-release-assets")?;
     let bundle = scratch.join(&format!("spate-{tag}.intoto.jsonl"));
     if checked > 0 {

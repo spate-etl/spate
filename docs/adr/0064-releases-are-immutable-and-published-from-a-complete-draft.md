@@ -52,8 +52,7 @@ and immutable is never edited, so a resumed run only checks it.
 - Good, because an asset that failed to upload stops the run while the
   release is still a draft, where a re-run can complete it.
 - Bad, because a release published with an asset missing cannot be repaired;
-  only a new version can. The completeness check before publishing is what
-  stands between a failed upload and that outcome.
+  only a new version can. `finish` checks the asset set before it publishes.
 - Bad, because immutability is a repository setting that this repository's
   files cannot hold, so `finish` fails until it is turned on.
 

@@ -440,17 +440,12 @@ impl Forge for Gh<'_> {
         let out = command
             .output()
             .map_err(|e| Error::msg(format!("gh release view: {e}")))?;
-        if out.status.success() {
-            return release_state(&String::from_utf8_lossy(&out.stdout));
-        }
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        if stderr.contains("release not found") {
-            return Ok(ReleaseState::Missing);
-        }
-        Err(Error::msg(format!(
-            "gh release view {tag} failed: {}",
-            stderr.trim()
-        )))
+        release_view(
+            tag,
+            out.status.success(),
+            &String::from_utf8_lossy(&out.stdout),
+            &String::from_utf8_lossy(&out.stderr),
+        )
     }
 
     fn create_release(&self, tag: &str, notes: &str) -> Outcome {
@@ -477,21 +472,7 @@ impl Forge for Gh<'_> {
     }
 
     fn assets(&self, tag: &str) -> Result<Vec<String>, Error> {
-        // An upload broken partway leaves an asset by that name in another
-        // state, which publishing would lock in.
-        Ok(self
-            .capture(&[
-                "release",
-                "view",
-                tag,
-                "--json",
-                "assets",
-                "--jq",
-                ".assets[] | select(.state == \"uploaded\") | .name",
-            ])?
-            .lines()
-            .map(str::to_owned)
-            .collect())
+        uploaded_assets(&self.capture(&["release", "view", tag, "--json", "assets"])?)
     }
 
     fn dispatch_docs(&self) -> Outcome {
@@ -549,6 +530,49 @@ fn attestation_step<'a>(
                 .map(|b| vec!["--bundle".to_owned(), b.to_string_lossy().into_owned()])
                 .unwrap_or_default(),
         )
+}
+
+/// The state a `gh release view --json isDraft,isImmutable` run reports: gh's
+/// `release not found` reads as `Missing`, and any other failure is an error.
+pub(crate) fn release_view(
+    tag: &str,
+    ok: bool,
+    stdout: &str,
+    stderr: &str,
+) -> Result<ReleaseState, Error> {
+    if ok {
+        return release_state(stdout);
+    }
+    if stderr.contains("release not found") {
+        return Ok(ReleaseState::Missing);
+    }
+    Err(Error::msg(format!(
+        "gh release view {tag} failed: {}",
+        stderr.trim()
+    )))
+}
+
+/// The names of the assets in `gh release view --json assets` whose upload
+/// completed. An upload broken partway leaves an asset by that name in another
+/// state, which publishing would lock in.
+pub(crate) fn uploaded_assets(raw: &str) -> Result<Vec<String>, Error> {
+    #[derive(Deserialize)]
+    struct View {
+        assets: Vec<Asset>,
+    }
+    #[derive(Deserialize)]
+    struct Asset {
+        name: String,
+        state: String,
+    }
+    let view: View = serde_json::from_str(raw)
+        .map_err(|e| Error::msg(format!("gh release view --json assets: {e}")))?;
+    Ok(view
+        .assets
+        .into_iter()
+        .filter(|a| a.state == "uploaded")
+        .map(|a| a.name)
+        .collect())
 }
 
 /// The state `gh release view --json isDraft,isImmutable` reports.
@@ -1111,6 +1135,44 @@ mod tests {
             gh.publish_step("v0.3.0").args,
             ["release", "edit", "v0.3.0", "--draft=false"]
         );
+    }
+
+    /// Only gh's `release not found` reads as a missing release; any other
+    /// failure stays an error.
+    #[test]
+    fn only_release_not_found_reads_as_missing() {
+        assert_eq!(
+            release_view("v0.3.0", false, "", "release not found\n").unwrap(),
+            ReleaseState::Missing
+        );
+        let err = release_view("v0.3.0", false, "", "HTTP 502: Bad Gateway\n").unwrap_err();
+        assert_eq!(
+            err.message,
+            "gh release view v0.3.0 failed: HTTP 502: Bad Gateway"
+        );
+        assert_eq!(
+            release_view(
+                "v0.3.0",
+                true,
+                r#"{"isDraft":true,"isImmutable":false}"#,
+                ""
+            )
+            .unwrap(),
+            ReleaseState::Draft
+        );
+    }
+
+    /// An asset whose upload did not complete is not listed.
+    #[test]
+    fn only_uploaded_assets_are_listed() {
+        let raw = r#"{"assets":[
+            {"name":"spate-0.3.0.cdx.json","state":"uploaded","size":10},
+            {"name":"SHA256SUMS","state":"starter","size":0},
+            {"name":"spate-v0.3.0.intoto.jsonl","state":"open","size":0}
+        ]}"#;
+        assert_eq!(uploaded_assets(raw).unwrap(), ["spate-0.3.0.cdx.json"]);
+        assert!(uploaded_assets(r#"{"assets":[]}"#).unwrap().is_empty());
+        assert!(uploaded_assets("not json").is_err());
     }
 
     /// Without a bundle the attestation is read from GitHub's attestation store.

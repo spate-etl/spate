@@ -827,8 +827,9 @@ fn attach_assets(host: &Host<'_>, tag: &str, artifacts: &Path, attested: bool) -
 /// The error for a release published mutable, naming the steps that replace it.
 fn mutable_release(tag: &str) -> Error {
     Error::msg(format!(
-        "the {tag} release is published but not immutable, and a published release\n  \
-         never becomes immutable. Turn on immutable releases in the repository\n  \
+        "the {tag} release is published but not immutable. It becomes immutable only\n  \
+         if republished, and whether that signs a release attestation is unverified,\n  \
+         so replace it. Turn on immutable releases in the repository\n  \
          settings, delete the release and keep its tag (`gh release delete {tag}`,\n  \
          without --cleanup-tag), then re-run the failed jobs. Confirm first that\n  \
          `gh release view {tag} --json isImmutable` reads false: an immutable\n  \
@@ -893,25 +894,26 @@ pub(crate) fn build_signer(repo: &str) -> String {
 }
 
 /// Judges a published release from what anyone can read, without trusting the
-/// run that made it. Runs from a checkout at `version`, whose members are the
+/// run that made it. Runs from a checkout of the tag, whose members are the
 /// crates it checks.
 pub(crate) fn verify(host: &Host<'_>, version: Version, repo: &str) -> Outcome {
     let tag = format!("v{version}");
-    let checkout = host.workspace.version()?;
-    if checkout != version {
-        return Err(Error::msg(format!(
-            "this checkout is at {checkout}; verify {tag} from a checkout of {tag}"
-        )));
-    }
-    let packages = host.workspace.publishable()?;
 
     group("The tag");
     let commit = host
         .git
         .remote_tag(&tag)?
         .ok_or_else(|| Error::msg(format!("{tag} is not tagged in {repo}")))?;
-    println!("{tag} names {commit}.");
+    let head = host.git.short_head()?;
+    if !commit.starts_with(&head) {
+        return Err(Error::msg(format!(
+            "this checkout is at {head}, but {tag} names {commit}; verify {tag} from a\n  \
+             checkout of {tag}"
+        )));
+    }
+    println!("{tag} names {commit}, the checked-out commit.");
     endgroup();
+    let packages = host.workspace.publishable()?;
 
     group("Every crate came from the tagged commit");
     for package in &packages {

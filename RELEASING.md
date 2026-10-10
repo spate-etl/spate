@@ -279,9 +279,10 @@ rather than on each release:
 - **Immutable releases**, turned on in the repository's settings. `finish`
   refuses a release GitHub does not report as immutable. The setting applies
   only to releases published after it is turned on. A release published
-  mutable stays mutable: turn the setting on, delete the release with
-  `gh release delete vX.Y.Z` without `--cleanup-tag`, and re-run the failed
-  jobs. Check first that `gh release view vX.Y.Z --json isImmutable` reads
+  mutable becomes immutable only if republished, and whether that signs a
+  release attestation is unverified, so the recovery replaces it: turn the
+  setting on, delete the release with `gh release delete vX.Y.Z` without
+  `--cleanup-tag`, and re-run the failed jobs. Check first that `gh release view vX.Y.Z --json isImmutable` reads
   false, because deleting an immutable release retires its tag for good.
 - **A tag ruleset on `v*`** restricting creation, update and deletion, with
   the `spate-release` App as the only bypass actor. Between the tag push and

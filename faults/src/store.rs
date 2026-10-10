@@ -32,8 +32,8 @@ const SPLIT_PREFIX: &str = "split.";
 /// appends `done: cancelled`, and a SIGKILL leaves the `send` without a `done`.
 /// A `get` of a split that fails or is dropped before it returns appends
 /// `read_failed`.
-/// Every value journalled as `seen` or landed by a `won` write is also taught
-/// to the classifier.
+/// Every `split.*` value journalled as `seen` or landed by a `won` write is
+/// also taught to the classifier.
 #[derive(Clone, Debug)]
 pub struct JournalStore<S> {
     inner: S,

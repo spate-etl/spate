@@ -850,6 +850,76 @@ mod tests {
         assert!(!recovery_shown(&journal(renewed)));
     }
 
+    /// An `assign.*` write whose reply was lost, with no later write on the
+    /// key and no read of the landed value, has let the assignment go.
+    #[test]
+    fn assign_with_no_later_write_is_let_go() {
+        for expected in [None, Some(4)] {
+            let lost = leader_lost("assign.w0", expected);
+            assert_eq!(
+                judge(lost).unexplained,
+                Vec::<String>::new(),
+                "{expected:?}"
+            );
+        }
+    }
+
+    /// A write from the landed revision whose reply was dropped, then a write
+    /// that loses and a read of the dropped write's value at a higher
+    /// revision, recovers the landed write.
+    #[test]
+    fn leader_evidence_accepts_an_unreplied_retry_read_back() {
+        let mut events = leader_lost("assign.w0", Some(4));
+        events.extend([
+            leader_seen("assign.w0", 5, 10, Source::Watch),
+            leader_send(2, "assign.w0", Some(5), 11),
+            leader_done(2, "assign.w0", Reply::Cancelled),
+            leader_send(3, "assign.w0", Some(5), 12),
+            leader_done(3, "assign.w0", Reply::Lost),
+            leader_seen("assign.w0", 6, 11, Source::Get),
+        ]);
+        assert!(recovery_shown(&journal(events)));
+    }
+
+    /// A read of the landed value before a retry that loses is no recovery:
+    /// the read must follow the losing write.
+    #[test]
+    fn leader_evidence_needs_the_read_after_the_lost_write() {
+        let mut events = leader_lost("assign.w0", Some(4));
+        events.extend([
+            leader_seen("assign.w0", 5, 10, Source::Watch),
+            leader_send(2, "assign.w0", Some(4), 10),
+            leader_done(2, "assign.w0", Reply::Lost),
+        ]);
+        assert_eq!(judge(events).unexplained.len(), 1);
+    }
+
+    /// A read of a later write's digest whose own reply was `lost` is no
+    /// recovery.
+    #[test]
+    fn leader_evidence_rejects_the_losing_writes_digest() {
+        let mut events = leader_lost("assign.w0", Some(4));
+        events.extend([
+            leader_send(2, "assign.w0", Some(4), 12),
+            leader_done(2, "assign.w0", Reply::Lost),
+            leader_seen("assign.w0", 6, 12, Source::Get),
+        ]);
+        assert_eq!(judge(events).unexplained.len(), 1);
+    }
+
+    /// A create that wins after the landed value was read is no write from
+    /// the landed revision.
+    #[test]
+    fn leader_evidence_rejects_a_create_after_the_read() {
+        let mut events = leader_lost("assign.w0", Some(4));
+        events.extend([
+            leader_seen("assign.w0", 5, 10, Source::Watch),
+            leader_send(2, "assign.w0", None, 11),
+            leader_done(2, "assign.w0", Reply::Won(6)),
+        ]);
+        assert_eq!(judge(events).unexplained.len(), 1);
+    }
+
     fn completed(epoch: u64, watermark: i64) -> Progress {
         let mut v = value(epoch, Some("w0"), Some(watermark));
         v.completed = true;

@@ -2470,6 +2470,36 @@ mod tests {
         );
     }
 
+    /// `killed_sent` reads the journal at its path: a `leader_send` on the
+    /// leader key with the read digest counts, the digest on another key or
+    /// an unreadable journal does not.
+    #[test]
+    fn killed_sent_reads_the_killed_journal() {
+        let dir = tempfile::tempdir().unwrap();
+        let held = LeaderAtKill::Held {
+            owner: "w0".to_owned(),
+            generation: 1,
+            digest: 7,
+        };
+        let write = |name: &str, key: &str| {
+            let path = dir.path().join(name);
+            let journal = Journal::open(&path).unwrap();
+            journal
+                .append(Event::LeaderSend {
+                    call: 1,
+                    op: crate::journal::WriteOp::Create,
+                    key: key.to_owned(),
+                    expected: None,
+                    digest: 7,
+                })
+                .unwrap();
+            path
+        };
+        assert!(killed_sent(&write("a.ndjson", "leader"), &held));
+        assert!(!killed_sent(&write("b.ndjson", "plan"), &held));
+        assert!(!killed_sent(&dir.path().join("missing.ndjson"), &held));
+    }
+
     /// Each `Unread` kill line of a scheduled-fault run is an expectation;
     /// `Held` and `Vacant` lines, and any line outside such a run, are not.
     #[test]

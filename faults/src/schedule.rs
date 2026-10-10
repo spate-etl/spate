@@ -803,6 +803,36 @@ mod tests {
         assert_eq!(drawn.len(), 7, "{drawn:?}");
     }
 
+    /// Over 4000 one-instance seeds, the lost-reply draws take exactly the
+    /// ordinals each kind allows.
+    #[test]
+    fn one_instance_lost_replies_draw_every_ordinal() {
+        let mut drawn = std::collections::BTreeSet::new();
+        for seed in 0..4_000 {
+            let schedule = Schedule::draw(&mut SplitMix64::new(seed), 1, LEASE);
+            let plan = schedule.plan_for(0, 1).expect("one lost reply").plan;
+            drawn.insert((format!("{:?}", plan.kind), plan.n));
+        }
+        let expected: std::collections::BTreeSet<(String, u32)> = [
+            ("Claim", 1),
+            ("Commit", 1),
+            ("Commit", 2),
+            ("Complete", 1),
+            ("Elect", 1),
+            ("LeaderRenew", 1),
+            ("LeaderRenew", 2),
+            ("LeaderRenew", 3),
+            ("Plan", 1),
+            ("Plan", 2),
+            ("Assign", 1),
+            ("Assign", 2),
+        ]
+        .into_iter()
+        .map(|(kind, n)| (kind.to_owned(), n))
+        .collect();
+        assert_eq!(drawn, expected);
+    }
+
     /// Over 4000 seeds, an abort lands on a leader write in about one draw in
     /// four and on a `split.*` write in the rest, and every kind is drawn.
     #[test]

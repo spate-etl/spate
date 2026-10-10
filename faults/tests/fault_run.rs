@@ -45,7 +45,7 @@ fn stopped_writer(name: &str, store: StoreKind, broken_fence: bool) {
 }
 
 fn leader_killed(name: &str, store: StoreKind) {
-    run::run(&Spec {
+    let outcome = run::run(&Spec {
         name,
         store,
         instances: 3,
@@ -53,6 +53,16 @@ fn leader_killed(name: &str, store: StoreKind) {
         sink_delay_ms: 600,
         faults: Faults::LeaderKilled,
     });
+    let kills: Vec<&str> = outcome
+        .faults_fired
+        .iter()
+        .map(|f| f.fault.as_str())
+        .filter(|f| f.starts_with("kill at "))
+        .collect();
+    assert!(
+        !kills.is_empty() && kills.iter().all(|f| f.contains("(killed the leader, ")),
+        "{kills:?}"
+    );
 }
 
 fn deposed_leader(name: &str, store: StoreKind, broken_fence: bool) {
@@ -171,7 +181,8 @@ fn dynamodb_broken_fence_fails_the_run() {
 
 /// Three NATS workers whose leader is killed at a seeded stage of its work
 /// deliver every record under the five properties, and another worker takes
-/// the leader key within four leases of the kill.
+/// the leader key within four leases of the kill. The kill's fault entry
+/// reads "killed the leader".
 #[test]
 #[ignore = "requires Docker"]
 fn nats_leader_killed() {
@@ -180,7 +191,8 @@ fn nats_leader_killed() {
 
 /// Three DynamoDB workers whose leader is killed at a seeded stage of its
 /// work deliver every record under the five properties, and another worker
-/// takes the leader key within four leases of the kill.
+/// takes the leader key within four leases of the kill. The kill's fault
+/// entry reads "killed the leader".
 #[test]
 #[ignore = "requires Docker"]
 fn dynamodb_leader_killed() {

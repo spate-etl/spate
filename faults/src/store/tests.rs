@@ -400,34 +400,67 @@ async fn err_after_land_forwards_then_returns_retryable() {
 }
 
 /// Durable `split.*` entries from a `get`, a `list` and a watch are
-/// journalled as `seen`. Writes to other keys or to the ephemeral keyspace,
-/// and reads of them, are not journalled, even with a progress record as the
-/// value.
+/// journalled as `seen`. Writes and reads of the ephemeral leader key and the
+/// durable `plan` and `assign.*` keys are journalled by digest, numbered in
+/// one call sequence with `split.*` sends. Other keys, and ephemeral
+/// `split.*` traffic, are not journalled.
 #[tokio::test]
-async fn journals_durable_split_traffic_only() {
+async fn journals_leader_key_plan_and_assign_traffic() {
     let (store, _dir, path) = journalled(MemoryStore::new(LEASE));
+    let leader = br#"{"owner":"w0","nonce":"n"}"#.to_vec();
+    let assign = br#"{"splits":["a"]}"#.to_vec();
+    let plan = br#"{"planned":1}"#.to_vec();
+    let digest = spate_test_support::fnv1a;
     let split = store
-        .inner
         .create(Keyspace::Durable, "split.a", record_bytes(1, None))
         .await
         .unwrap()
         .won()
         .unwrap();
-    let _ = store
-        .create(Keyspace::Durable, "plan", record_bytes(1, None))
+    let elected = store
+        .create(Keyspace::Ephemeral, "leader", leader.clone())
         .await
+        .unwrap()
+        .won()
+        .unwrap();
+    let assigned = store
+        .create(Keyspace::Durable, "assign.w0", assign.clone())
+        .await
+        .unwrap()
+        .won()
+        .unwrap();
+    let opened = store
+        .inner
+        .create(Keyspace::Durable, "plan", b"{}".to_vec())
+        .await
+        .unwrap()
+        .won()
+        .unwrap();
+    let published = store
+        .update(Keyspace::Durable, "plan", plan.clone(), opened)
+        .await
+        .unwrap()
+        .won()
         .unwrap();
     let _ = store
         .create(Keyspace::Ephemeral, "split.a", record_bytes(1, None))
         .await
         .unwrap();
+    let _ = store
+        .create(Keyspace::Durable, "verdict", b"{}".to_vec())
+        .await
+        .unwrap();
+    let _ = store
+        .create(Keyspace::Ephemeral, "plan", b"{}".to_vec())
+        .await
+        .unwrap();
 
     let _ = store.get(Keyspace::Durable, "split.a").await.unwrap();
-    let _ = store.get(Keyspace::Durable, "plan").await.unwrap();
+    let _ = store.get(Keyspace::Ephemeral, "leader").await.unwrap();
     let _ = store.get(Keyspace::Ephemeral, "split.a").await.unwrap();
     let _ = store.list(Keyspace::Durable, "").await.unwrap();
-    let _ = store.list(Keyspace::Ephemeral, "").await.unwrap();
-    let mut watch = store.watch(Keyspace::Durable, "").await.unwrap();
+    let _ = store.list(Keyspace::Ephemeral, "split.").await.unwrap();
+    let mut watch = store.watch(Keyspace::Durable, "split.").await.unwrap();
     while let Some(event) = watch.next().await {
         if matches!(event, Ok(WatchEvent::SnapshotDone)) {
             break;
@@ -440,15 +473,72 @@ async fn journals_durable_split_traffic_only() {
         }
     }
 
+    let won = |call, rev: Revision| Event::Done {
+        call,
+        key: match call {
+            1 => "split.a",
+            2 => "leader",
+            3 => "assign.w0",
+            _ => "plan",
+        }
+        .to_owned(),
+        reply: Reply::Won(rev.0),
+    };
     let seen = |from| Event::Seen {
         key: "split.a".to_owned(),
         rev: split.0,
         value: progress(1, None),
         from,
     };
+    let leader_seen = |key: &str, rev: Revision, bytes: &[u8], from| Event::LeaderSeen {
+        key: key.to_owned(),
+        rev: rev.0,
+        digest: digest(bytes),
+        from,
+    };
     assert_eq!(
         events(&path),
-        [seen(Source::Get), seen(Source::List), seen(Source::Watch)]
+        [
+            Event::Send {
+                call: 1,
+                op: WriteOp::Create,
+                key: "split.a".to_owned(),
+                expected: None,
+                value: progress(1, None),
+            },
+            won(1, split),
+            Event::LeaderSend {
+                call: 2,
+                op: WriteOp::Create,
+                key: "leader".to_owned(),
+                expected: None,
+                digest: digest(&leader),
+            },
+            won(2, elected),
+            Event::LeaderSend {
+                call: 3,
+                op: WriteOp::Create,
+                key: "assign.w0".to_owned(),
+                expected: None,
+                digest: digest(&assign),
+            },
+            won(3, assigned),
+            Event::LeaderSend {
+                call: 4,
+                op: WriteOp::Update,
+                key: "plan".to_owned(),
+                expected: Some(opened.0),
+                digest: digest(&plan),
+            },
+            won(4, published),
+            seen(Source::Get),
+            leader_seen("leader", elected, &leader, Source::Get),
+            leader_seen("assign.w0", assigned, &assign, Source::List),
+            leader_seen("plan", published, &plan, Source::List),
+            seen(Source::List),
+            seen(Source::Watch),
+            leader_seen("leader", elected, &leader, Source::Watch),
+        ]
     );
 }
 
@@ -587,13 +677,31 @@ async fn abort_at_create_err_after_land_forwards_then_returns_retryable() {
         .create(Keyspace::Ephemeral, "leader", b"w1".to_vec())
         .await
         .unwrap();
-    assert!(next.won().is_some(), "{next:?}");
+    let next = next.won().expect("the next create won");
+    let send = |call, value: &[u8]| Event::LeaderSend {
+        call,
+        op: WriteOp::Create,
+        key: "leader".to_owned(),
+        expected: None,
+        digest: spate_test_support::fnv1a(value),
+    };
+    let won = |call, rev: Revision| Event::Done {
+        call,
+        key: "leader".to_owned(),
+        reply: Reply::Won(rev.0),
+    };
     assert_eq!(
         events(&path),
-        [Event::ErrAfterLand {
-            key: "leader".to_owned(),
-            rev: landed.revision.0,
-        }]
+        [
+            send(1, b"w0"),
+            won(1, landed.revision),
+            Event::ErrAfterLand {
+                key: "leader".to_owned(),
+                rev: landed.revision.0,
+            },
+            send(2, b"w1"),
+            won(2, next),
+        ]
     );
 }
 
@@ -661,8 +769,12 @@ fn abort_at_fires_on_a_leader_create() {
             .status()
             .unwrap();
         assert_eq!(status.signal(), Some(libc::SIGABRT), "{mode}: {status:?}");
+        let aborts: Vec<Event> = events(&path)
+            .into_iter()
+            .filter(|e| matches!(e, Event::Abort { .. }))
+            .collect();
         assert_eq!(
-            events(&path),
+            aborts,
             [Event::Abort {
                 key: "leader".to_owned(),
                 kind: WriteKind::Elect,

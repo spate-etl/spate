@@ -139,7 +139,8 @@ pub struct Schedule {
 impl Schedule {
     /// Draws between one and `instances + 1` kills over the first six
     /// seconds of the running stage, each with a replacement within `lease_ms`.
-    /// Then one instance's first process gets an `ErrAfterLand` plan, and
+    /// Then one instance's first process gets an `ErrAfterLand` plan, on a
+    /// leader write one time in four when it is the only instance, and
     /// each other instance's first process an abort before or after a write.
     /// Last come between one and `instances` stops over the same six seconds,
     /// each from half a lease to two leases long.
@@ -160,7 +161,7 @@ impl Schedule {
         let lost = instance(rng);
         let mut in_process = vec![InProcess {
             instance: lost,
-            plan: draw_err_after_land(rng),
+            plan: draw_err_after_land(rng, instances),
             respawn_after_ms: 0,
         }];
         for i in (0..instances).filter(|i| *i != lost) {
@@ -354,9 +355,18 @@ impl Schedule {
     }
 }
 
-/// Kinds an `ErrAfterLand` is drawn on: the durable writes whose recovery the
-/// journal can show. A renewal is ephemeral, so it is never drawn.
+/// The `split.*` kinds an `ErrAfterLand` is drawn on: the durable writes whose
+/// recovery the journal can show. A `split.*` lease renewal is ephemeral, so
+/// it is never drawn.
 const LOST_REPLY_KINDS: [WriteKind; 3] = [WriteKind::Claim, WriteKind::Commit, WriteKind::Complete];
+/// The leader kinds an `ErrAfterLand` is drawn on in a one-instance run, one
+/// draw in four.
+const LEADER_LOST_REPLY_KINDS: [WriteKind; 4] = [
+    WriteKind::Elect,
+    WriteKind::Plan,
+    WriteKind::Assign,
+    WriteKind::LeaderRenew,
+];
 /// The `split.*` kinds an abort is drawn on, three draws in four.
 const SPLIT_ABORT_KINDS: [WriteKind; 4] = [
     WriteKind::Claim,
@@ -372,13 +382,19 @@ const LEADER_ABORT_KINDS: [WriteKind; 4] = [
     WriteKind::Assign,
 ];
 
-/// An `ErrAfterLand` plan at a write every worker that holds a split reaches.
-fn draw_err_after_land(rng: &mut SplitMix64) -> AbortPlan {
-    let kind = LOST_REPLY_KINDS[pick(rng, LOST_REPLY_KINDS.len())];
-    let n = if kind == WriteKind::Commit {
-        rng.in_range(1, 2)
+/// An `ErrAfterLand` plan at a write every worker that holds a split reaches,
+/// or with one instance, at a write its leader reaches one time in four.
+fn draw_err_after_land(rng: &mut SplitMix64, instances: u32) -> AbortPlan {
+    let kinds: &[WriteKind] = if instances == 1 && rng.in_range(0, 3) == 0 {
+        &LEADER_LOST_REPLY_KINDS
     } else {
-        1
+        &LOST_REPLY_KINDS
+    };
+    let kind = kinds[pick(rng, kinds.len())];
+    let n = match kind {
+        WriteKind::Commit | WriteKind::Plan | WriteKind::Assign => rng.in_range(1, 2),
+        WriteKind::LeaderRenew => rng.in_range(1, 3),
+        _ => 1,
     };
     AbortPlan {
         kind,
@@ -711,8 +727,9 @@ mod tests {
     }
 
     /// Across seeds and instance counts, each run draws one `ErrAfterLand`
-    /// plan, on a claim, commit or completion and never on a renewal, and an
-    /// abort before or after a write on every other instance.
+    /// plan, on a claim, commit or completion, or in a one-instance run on a
+    /// leader write, and never on a split lease renewal, and an abort before
+    /// or after a write on every other instance.
     #[test]
     fn err_after_land_is_never_drawn_on_renew() {
         let mut lost_kinds = std::collections::BTreeSet::new();
@@ -726,7 +743,13 @@ mod tests {
                     .filter(|p| p.plan.mode == AbortMode::ErrAfterLand)
                     .collect();
                 assert_eq!(lost.len(), 1, "seed {seed}");
-                assert!(LOST_REPLY_KINDS.contains(&lost[0].plan.kind));
+                let kind = lost[0].plan.kind;
+                assert_ne!(kind, WriteKind::Renew, "seed {seed}");
+                assert!(
+                    LOST_REPLY_KINDS.contains(&kind)
+                        || (instances == 1 && LEADER_LOST_REPLY_KINDS.contains(&kind)),
+                    "seed {seed}: {kind:?}"
+                );
                 lost_kinds.insert(format!("{:?}", lost[0].plan.kind));
                 let mut covered: Vec<u32> =
                     schedule.in_process.iter().map(|p| p.instance).collect();
@@ -743,8 +766,71 @@ mod tests {
                 }
             }
         }
-        assert_eq!(lost_kinds.len(), 3, "{lost_kinds:?}");
+        assert_eq!(lost_kinds.len(), 7, "{lost_kinds:?}");
         assert!(abort_kinds.contains("Renew"), "{abort_kinds:?}");
+    }
+
+    /// A three-instance run draws its lost reply on a `split.*` write, whose
+    /// instance need never lead.
+    #[test]
+    fn three_instance_runs_draw_no_leader_lost_reply() {
+        for seed in 0..2_000 {
+            let schedule = Schedule::draw(&mut SplitMix64::new(seed), 3, LEASE);
+            let lost = schedule.lost_reply().expect("one lost reply");
+            let kind = schedule.plan_for(lost, 1).expect("its plan").plan.kind;
+            assert!(LOST_REPLY_KINDS.contains(&kind), "seed {seed}: {kind:?}");
+        }
+    }
+
+    /// Over 4000 seeds, a one-instance run loses the reply to a leader write
+    /// in about one run in four and to a `split.*` write in the rest, and
+    /// every kind is drawn.
+    #[test]
+    fn one_instance_lost_replies_take_split_kinds_three_times_in_four() {
+        let mut drawn = std::collections::BTreeMap::new();
+        for seed in 0..4_000 {
+            let schedule = Schedule::draw(&mut SplitMix64::new(seed), 1, LEASE);
+            let plan = schedule.plan_for(0, 1).expect("one lost reply").plan;
+            assert_eq!(plan.mode, AbortMode::ErrAfterLand);
+            *drawn.entry(format!("{:?}", plan.kind)).or_insert(0_u32) += 1;
+        }
+        let leads: u32 = LEADER_LOST_REPLY_KINDS
+            .iter()
+            .map(|k| drawn.get(&format!("{k:?}")).copied().unwrap_or(0))
+            .sum();
+        let share = f64::from(leads) / 4_000.0;
+        assert!((0.22..=0.28).contains(&share), "{share}: {drawn:?}");
+        assert_eq!(drawn.len(), 7, "{drawn:?}");
+    }
+
+    /// Over 4000 one-instance seeds, the lost-reply draws take exactly the
+    /// ordinals each kind allows.
+    #[test]
+    fn one_instance_lost_replies_draw_every_ordinal() {
+        let mut drawn = std::collections::BTreeSet::new();
+        for seed in 0..4_000 {
+            let schedule = Schedule::draw(&mut SplitMix64::new(seed), 1, LEASE);
+            let plan = schedule.plan_for(0, 1).expect("one lost reply").plan;
+            drawn.insert((format!("{:?}", plan.kind), plan.n));
+        }
+        let expected: std::collections::BTreeSet<(String, u32)> = [
+            ("Claim", 1),
+            ("Commit", 1),
+            ("Commit", 2),
+            ("Complete", 1),
+            ("Elect", 1),
+            ("LeaderRenew", 1),
+            ("LeaderRenew", 2),
+            ("LeaderRenew", 3),
+            ("Plan", 1),
+            ("Plan", 2),
+            ("Assign", 1),
+            ("Assign", 2),
+        ]
+        .into_iter()
+        .map(|(kind, n)| (kind.to_owned(), n))
+        .collect();
+        assert_eq!(drawn, expected);
     }
 
     /// Over 4000 seeds, an abort lands on a leader write in about one draw in

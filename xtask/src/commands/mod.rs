@@ -151,7 +151,7 @@ pub(crate) enum Command {
     /// The release sequence
     Release {
         #[command(subcommand)]
-        cmd: ReleaseCommand,
+        cmd: crate::release::ReleaseCommand,
     },
 
     /// Decide which CI jobs a change needs
@@ -199,38 +199,6 @@ pub(crate) struct ImageArgs {
     service: Option<String>,
     #[arg(value_name = "LANE")]
     lane: Option<String>,
-}
-
-#[derive(Subcommand)]
-pub(crate) enum ReleaseCommand {
-    /// The workspace version and the literals that carry it
-    Version {
-        #[command(subcommand)]
-        cmd: crate::release::version::VersionCommand,
-    },
-    /// Build the release commit and open the pull request
-    Assemble {
-        #[arg(long, value_name = "X.Y.Z")]
-        version: String,
-        #[arg(long)]
-        dry_run: bool,
-    },
-    /// The credential-free half of the publish
-    Prepare {
-        #[arg(long)]
-        dry_run: bool,
-    },
-    /// Upload the artifacts, after the registry token is minted
-    Upload,
-    /// Close the release out, after the app token is minted
-    Finish,
-    /// The publish up to the point a token would be minted
-    Publish,
-    /// The whole release locally, nothing pushed or uploaded
-    DryRun {
-        #[arg(long, value_name = "X.Y.Z")]
-        version: String,
-    },
 }
 
 #[derive(Subcommand)]
@@ -368,30 +336,7 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: Command) -> Outcome {
         Command::Fuzz { cmd } => fuzz::dispatch(root, explain, cmd),
         Command::SiteCheck => crate::checks::site_check::check(root, explain),
         Command::Docs { serve } => docs::dispatch(root, explain, serve),
-        Command::Release { cmd } => {
-            let s = match &cmd {
-                ReleaseCommand::Version { cmd } => {
-                    return crate::release::version::dispatch(root, explain, cmd);
-                }
-                ReleaseCommand::Assemble { version, dry_run } => {
-                    let s = Step::new("./scripts/release.sh", ["assemble", "--version", version]);
-                    if *dry_run { s.arg("--dry-run") } else { s }
-                }
-                ReleaseCommand::Prepare { dry_run } => {
-                    let s = Step::new("./scripts/release.sh", ["prepare"]);
-                    if *dry_run { s.arg("--dry-run") } else { s }
-                }
-                ReleaseCommand::Upload => Step::new("./scripts/release.sh", ["upload"]),
-                ReleaseCommand::Finish => Step::new("./scripts/release.sh", ["finish"]),
-                ReleaseCommand::Publish => {
-                    Step::new("./scripts/release.sh", ["publish", "--dry-run"])
-                }
-                ReleaseCommand::DryRun { version } => {
-                    Step::new("./scripts/release.sh", ["dry-run", "--version", version])
-                }
-            };
-            run::run(root, explain, &s)
-        }
+        Command::Release { cmd } => crate::release::dispatch(root, explain, cmd),
         Command::CiChanges { classify_paths } => {
             if explain {
                 println!("(classifies the current event in process)");
@@ -1021,6 +966,42 @@ mod tests {
         assert_eq!(super::image_mode(false, false), Mode::Tagged);
         assert_eq!(super::image_mode(true, false), Mode::Reference);
         assert_eq!(super::image_mode(false, true), Mode::Pull);
+    }
+
+    /// `release.yml` passes `BUNDLE_PATH` empty when nothing was packaged, as on
+    /// a resumed run.
+    #[test]
+    fn finish_parses_an_empty_bundle_path() {
+        let parsed = Cli::try_parse_from([
+            "cargo xtask",
+            "release",
+            "finish",
+            "--version",
+            "0.3.0",
+            "--expected-sha",
+            "abc",
+            "--bundle",
+            "",
+        ]);
+        assert!(parsed.is_ok(), "{}", parsed.err().unwrap());
+    }
+
+    /// A pending count that is not a non-negative integer is refused before
+    /// anything uploads.
+    #[test]
+    fn upload_refuses_a_pending_count_that_is_not_a_number() {
+        for bad in ["abc", "-1"] {
+            assert!(
+                Cli::try_parse_from([
+                    "cargo xtask",
+                    "release",
+                    "upload",
+                    &format!("--pending={bad}")
+                ])
+                .is_err(),
+                "{bad}"
+            );
+        }
     }
 
     #[test]

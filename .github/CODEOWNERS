@@ -41,7 +41,6 @@
 # Release surface: what gets published, under which version, and by which
 # credential. A change here can publish something, so it belongs on this list
 # for the same reason the workflows do.
-/scripts/release.sh     @MarcusKainth
 /xtask/src/release/     @MarcusKainth
 /RELEASING.md           @MarcusKainth
 

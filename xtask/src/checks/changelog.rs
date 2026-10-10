@@ -722,14 +722,19 @@ pub(crate) fn notes(root: &Path, explain: bool, version: &str) -> Outcome {
         println!("(prints the ## [{version}] section of {CHANGELOG})");
         return Ok(());
     }
+    print!("{}", notes_text(root, version)?);
+    Ok(())
+}
+
+/// One version's section, without its heading.
+pub(crate) fn notes_text(root: &Path, version: &str) -> Result<String, Error> {
     let path = root.join(CHANGELOG);
     if !path.is_file() {
         return Err(Error::msg(format!("{CHANGELOG} not found")));
     }
     let text =
         std::fs::read_to_string(&path).map_err(|e| Error::msg(format!("{CHANGELOG}: {e}")))?;
-    print!("{}", section_notes(&text, version, CHANGELOG)?);
-    Ok(())
+    section_notes(&text, version, CHANGELOG)
 }
 
 // ---------------------------------------------------------------------------

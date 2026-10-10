@@ -21,13 +21,14 @@ use std::path::Path;
 
 use serde_json::Value;
 
+use crate::checks::scratch::Scratch;
 use crate::run::{self, Completed, Error, Outcome, Step, Streams};
 
 /// The prefix on every line this check writes for itself.
 const TOOL: &str = "semver-checks";
 
 /// The agent the sparse index sees.
-const UA: &str = "spate-release (github.com/spate-etl/spate)";
+pub(crate) const UA: &str = "spate-release (github.com/spate-etl/spate)";
 
 /// The tool's verdict for a run.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -51,7 +52,7 @@ fn classify_exit(code: i32) -> Verdict {
 /// A crate's path in the sparse index. The scheme keys on name length, and the
 /// short arms keep a future short name from probing a URL that answers 404 for
 /// the wrong reason.
-fn index_path(name: &str) -> String {
+pub(crate) fn index_path(name: &str) -> String {
     let chars: Vec<char> = name.chars().collect();
     let slice = |from: usize, len: usize| -> String { chars.iter().skip(from).take(len).collect() };
     match chars.len() {
@@ -101,14 +102,6 @@ fn version_field(entry: &Value) -> String {
         Some(other) => other.to_string(),
         None => "null".to_owned(),
     }
-}
-
-/// The body and status code `curl -w '\n%{http_code}'` produces, split at the
-/// last newline once the trailing newlines a command substitution drops are
-/// gone.
-fn split_reply(raw: &str) -> (&str, &str) {
-    let reply = raw.trim_end_matches('\n');
-    reply.rsplit_once('\n').unwrap_or((reply, reply))
 }
 
 /// The workspace version, from the root manifest's own `version` key. Several
@@ -277,7 +270,23 @@ fn attribute(
 ///
 /// Only 200 and 404 are answers. A transport failure fails the run before it
 /// can claim anything.
-fn fetch_index(root: &Path, name: &str) -> Result<(String, String), Error> {
+pub(crate) fn fetch_index(root: &Path, name: &str) -> Result<(String, String), Error> {
+    fetch(
+        root,
+        &format!("https://index.crates.io/{}", index_path(name)),
+    )
+    .map_err(|_| {
+        Error::msg(format!(
+            "the index request for {name} failed outright; the check cannot evaluate"
+        ))
+    })
+}
+
+/// The status code and body of a GET. The body goes through a file, which curl
+/// truncates before each retry, so only the last attempt's body is read.
+fn fetch(root: &Path, url: &str) -> Result<(String, String), Error> {
+    let scratch = Scratch::new("spate-index")?;
+    let out = scratch.join("body");
     let step = Step::new(
         "curl",
         [
@@ -287,19 +296,22 @@ fn fetch_index(root: &Path, name: &str) -> Result<(String, String), Error> {
             "--max-time",
             "30",
             "-w",
-            r"\n%{http_code}",
-            "-H",
+            "%{http_code}",
+            "-o",
         ],
     )
+    .arg(out.to_string_lossy())
+    .arg("-H")
     .arg(format!("User-Agent: {UA}"))
-    .arg(format!("https://index.crates.io/{}", index_path(name)));
-    let raw = run::capture(root, &step).map_err(|_| {
-        Error::msg(format!(
-            "the index request for {name} failed outright; the check cannot evaluate"
-        ))
-    })?;
-    let (body, code) = split_reply(&raw);
-    Ok((code.to_owned(), body.to_owned()))
+    .arg(url);
+    let code = run::capture(root, &step)?;
+    // curl creates no file for an empty body.
+    let body = match std::fs::read_to_string(&out) {
+        Ok(body) => body,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(Error::msg(format!("{}: {e}", out.display()))),
+    };
+    Ok((code.trim().to_owned(), body))
 }
 
 /// Compares the tree against what is published.

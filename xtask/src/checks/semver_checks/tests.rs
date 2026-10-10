@@ -147,28 +147,50 @@ fn an_entry_that_is_not_an_object_is_an_error() {
 
 // ── The curl reply ─────────────────────────────────────────────────────
 
+/// Serves one canned HTTP reply per connection, in order, on a loopback port.
+fn serve(replies: &'static [(&'static str, &'static str)]) -> String {
+    use std::io::{BufRead, BufReader, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/index", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for (status, body) in replies {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            while reader.read_line(&mut line).unwrap() > 2 {
+                line.clear();
+            }
+            write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+        }
+    });
+    url
+}
+
+/// A 5xx that curl retries leaves only the final attempt's body.
 #[test]
-fn the_status_code_is_the_tail_of_the_reply() {
+fn a_retried_reply_reads_only_the_last_body() {
+    let url = serve(&[
+        ("503 Service Unavailable", "err\n"),
+        ("200 OK", "{\"vers\":\"0.2.0\"}\n"),
+    ]);
+    let (code, body) = fetch(Path::new("."), &url).unwrap();
+    assert_eq!(code, "200");
+    assert_eq!(body, "{\"vers\":\"0.2.0\"}\n");
+}
+
+/// A 404 is an answer, with its code, and no transport failure.
+#[test]
+fn a_missing_entry_answers_404() {
+    let url = serve(&[("404 Not Found", "")]);
     assert_eq!(
-        split_reply("{\"vers\":\"1\"}\n200"),
-        ("{\"vers\":\"1\"}", "200")
+        fetch(Path::new("."), &url).unwrap(),
+        ("404".to_owned(), String::new())
     );
-    assert_eq!(split_reply("\n404"), ("", "404"));
-    assert_eq!(split_reply("a\nb\n500"), ("a\nb", "500"));
-}
-
-/// A command substitution drops trailing newlines before the split, so a body
-/// ending in one still yields its own code.
-#[test]
-fn trailing_newlines_are_dropped_before_the_split() {
-    assert_eq!(split_reply("body\n200\n\n"), ("body", "200"));
-}
-
-/// A reply carrying no newline at all leaves the whole string in both halves,
-/// which no status code matches.
-#[test]
-fn a_reply_with_no_newline_is_neither_a_body_nor_a_code() {
-    assert_eq!(split_reply("mangled"), ("mangled", "mangled"));
 }
 
 // ── The workspace version ──────────────────────────────────────────────

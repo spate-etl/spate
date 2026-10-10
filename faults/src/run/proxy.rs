@@ -322,7 +322,7 @@ fn judge(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::journal::{Event, Journal};
+    use crate::journal::{Event, Journal, LeaderAtKill};
 
     const LEASE: u64 = 3_000;
 
@@ -557,6 +557,7 @@ mod tests {
             event: Event::Kill {
                 instance: "w0".to_owned(),
                 pid: 10,
+                leader: LeaderAtKill::Unread,
             },
         };
         let proxied = Line {

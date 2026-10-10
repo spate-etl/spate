@@ -549,7 +549,7 @@ fn windows(process: &ProcessJournal, faults: &[Line], end_of_run: u64) -> Vec<Wi
                 );
                 let kill = || {
                     after().find(
-                        |l| matches!(&l.event, Event::Kill { instance, pid } if mine(instance, *pid)),
+                        |l| matches!(&l.event, Event::Kill { instance, pid, .. } if mine(instance, *pid)),
                     )
                 };
                 let end = sigcont.or_else(kill).map_or(end_of_run, |l| l.t_ms);
@@ -561,7 +561,7 @@ fn windows(process: &ProcessJournal, faults: &[Line], end_of_run: u64) -> Vec<Wi
     for line in faults {
         let t = line.t_ms;
         match &line.event {
-            Event::Kill { instance, pid } if mine(instance, *pid) => raw.push((t, t, true)),
+            Event::Kill { instance, pid, .. } if mine(instance, *pid) => raw.push((t, t, true)),
             Event::Sigstop {
                 instance,
                 pid,

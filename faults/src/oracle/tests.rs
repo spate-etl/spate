@@ -2,7 +2,7 @@ use spate_s3::fuzz_seams::encode_position;
 use spate_s3::{DescriptorObject, SplitRange};
 
 use super::*;
-use crate::journal::{SCHEMA, Source, WriteOp};
+use crate::journal::{LeaderAtKill, SCHEMA, Source, WriteOp};
 
 const A: &str = "data/o000.ndjson";
 const B: &str = "data/o001.ndjson";
@@ -811,6 +811,7 @@ fn kill(instance: &str, pid: u32) -> Event {
     Event::Kill {
         instance: instance.to_owned(),
         pid,
+        leader: LeaderAtKill::Unread,
     }
 }
 

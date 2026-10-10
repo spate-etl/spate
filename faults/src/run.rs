@@ -23,7 +23,7 @@ use testcontainers::{Container, ContainerRequest, GenericImage, ImageExt};
 
 use crate::expect;
 use crate::health::{self, Target};
-use crate::journal::{self, Event, Journal, Reply};
+use crate::journal::{self, Event, Journal, LeaderAtKill, Line, Reply};
 use crate::oracle::{
     self, GeneratedObject, GeneratedRecord, Inputs, ProcessJournal, StoreKind, SweptEntry,
 };
@@ -183,7 +183,14 @@ pub fn run(spec: &Spec<'_>) -> Outcome {
                 &faults_path,
             ),
             Faults::None | Faults::Schedule => run
-                .drive(&mut workers, &mut processes, &env, &tuning, &faults_path)
+                .drive(
+                    &mut workers,
+                    &mut processes,
+                    &env,
+                    &rt,
+                    &tuning,
+                    &faults_path,
+                )
                 .map(|(timed_out, fired)| (timed_out, fired, None)),
         };
         drop(stop);
@@ -261,6 +268,7 @@ pub fn run(spec: &Spec<'_>) -> Outcome {
     }
     expectations.extend(proxy::unexercised(run.proxy_seed.is_some(), &faults));
     expectations.extend(link::unexercised(!run.links.is_empty(), &faults));
+    expectations.extend(unread_leader_kills(spec.faults, &faults));
     let lost_replies = expect::lost_replies(&journals, run.schedule.lost_reply().is_some());
     let (kind, message) = outcome::classify(&Evidence {
         setup_failure: None,
@@ -604,13 +612,15 @@ impl Run<'_> {
     /// `err_after_land` line. A stop due on the `ErrAfterLand` process, on a
     /// stopped process or on none is skipped. Link windows open as
     /// [`link::Links`] releases them. Returns whether one was still running
-    /// at the deadline, and each kill, stop and window the run drew. A proxy
+    /// at the deadline, and each kill, stop and window the run drew. Each
+    /// kill's line records what the leader key held just before it. A proxy
     /// fault that could not be journalled fails the run once it ends.
     fn drive(
         &self,
         workers: &mut Workers,
         processes: &mut Vec<(String, u32, PathBuf)>,
         env: &Env,
+        rt: &tokio::runtime::Runtime,
         tuning: &Tuning,
         faults_path: &Path,
     ) -> Result<(bool, Vec<FaultFired>), String> {
@@ -704,10 +714,15 @@ impl Run<'_> {
                     } => {
                         let name = format!("w{instance}");
                         let live = workers.live(&name).map_err(status)?;
+                        let leader = match live {
+                            Some(_) => read_leader(rt, &env.direct),
+                            None => LeaderAtKill::Unread,
+                        };
                         if let Some(pid) = live {
                             log(Event::Kill {
                                 instance: name.clone(),
                                 pid,
+                                leader: leader.clone(),
                             })?;
                             workers
                                 .kill(&name)
@@ -719,7 +734,7 @@ impl Run<'_> {
                         }
                         fired.push(FaultFired {
                             incarnation: format!("{name}-{}", incarnations[instance as usize]),
-                            fault: format!("kill at {at_ms} ms"),
+                            fault: kill_fault_text(at_ms, &leader),
                             fired: live.is_some(),
                         });
                     }
@@ -797,7 +812,7 @@ impl Run<'_> {
             if let Action::Kill { at_ms, instance } = kill {
                 fired.push(FaultFired {
                     incarnation: format!("w{instance}-{}", incarnations[instance as usize]),
-                    fault: format!("kill at {at_ms} ms"),
+                    fault: kill_fault_text(at_ms, &LeaderAtKill::Unread),
                     fired: false,
                 });
             }
@@ -1306,6 +1321,71 @@ fn resend_rev(journals: &[ProcessJournal], stopped: &stopped::Stopped) -> Option
     None
 }
 
+/// What the leader key holds, read through `direct` under [`PROBE`].
+fn read_leader(rt: &tokio::runtime::Runtime, direct: &Direct) -> LeaderAtKill {
+    leader_from(
+        rt.block_on(async {
+            tokio::time::timeout(PROBE, direct.get(Keyspace::Ephemeral, "leader")).await
+        })
+        .ok(),
+    )
+}
+
+/// The label for a leader read that returned `read`, or `None` when it timed out.
+fn leader_from(read: Option<Result<Option<Entry>, StoreError>>) -> LeaderAtKill {
+    /// The leader record's fields the label reads.
+    #[derive(serde::Deserialize)]
+    struct Record {
+        owner: String,
+        generation: u64,
+    }
+    match read {
+        Some(Ok(None)) => LeaderAtKill::Vacant,
+        Some(Ok(Some(entry))) => {
+            serde_json::from_slice::<Record>(&entry.value).map_or(LeaderAtKill::Unread, |r| {
+                LeaderAtKill::Held {
+                    owner: r.owner,
+                    generation: r.generation,
+                    digest: spate_test_support::fnv1a(&entry.value),
+                }
+            })
+        }
+        Some(Err(_)) | None => LeaderAtKill::Unread,
+    }
+}
+
+/// The fault-list text of a kill at `at_ms`, naming the leader key's owner
+/// when the read found one.
+fn kill_fault_text(at_ms: u64, leader: &LeaderAtKill) -> String {
+    match leader {
+        LeaderAtKill::Held {
+            owner, generation, ..
+        } => format!("kill at {at_ms} ms (leader key named {owner}, generation {generation})"),
+        LeaderAtKill::Vacant | LeaderAtKill::Unread => format!("kill at {at_ms} ms"),
+    }
+}
+
+/// One expectation per `kill` line in `faults` whose leader read failed, in
+/// a [`Faults::Schedule`] run.
+fn unread_leader_kills(kind: Faults, faults: &[Line]) -> Vec<String> {
+    if kind != Faults::Schedule {
+        return Vec::new();
+    }
+    faults
+        .iter()
+        .filter_map(|line| match &line.event {
+            Event::Kill {
+                instance,
+                pid,
+                leader: LeaderAtKill::Unread,
+            } => Some(format!(
+                "leader key unread before the kill of {instance} (pid {pid})"
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Whether a kill held for the lost-reply process may go: one lease has
 /// passed since its `err_after_land` line was seen at `line_at_ms`, or
 /// `recovered` says its journal shows the landed write recovered.
@@ -1378,7 +1458,7 @@ fn panic_text(panic: &(dyn std::any::Any + Send)) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::journal::{Event, Line};
+    use crate::journal::{Event, LeaderAtKill, Line};
 
     /// A run with link windows polls Toxiproxy beside the store and
     /// SeaweedFS, and one without polls only those two.
@@ -2147,5 +2227,97 @@ mod tests {
                 Some(9)
             )
         );
+    }
+
+    /// A kill under a `Held` read names the key's owner and generation, and
+    /// a `Vacant` or `Unread` read renders a plain kill.
+    #[test]
+    fn kill_fault_text_names_the_key_owner() {
+        let held = LeaderAtKill::Held {
+            owner: "w2".to_owned(),
+            generation: 3,
+            digest: 9,
+        };
+        assert_eq!(
+            kill_fault_text(1500, &held),
+            "kill at 1500 ms (leader key named w2, generation 3)"
+        );
+        assert_eq!(
+            kill_fault_text(1500, &LeaderAtKill::Vacant),
+            "kill at 1500 ms"
+        );
+        assert_eq!(
+            kill_fault_text(1500, &LeaderAtKill::Unread),
+            "kill at 1500 ms"
+        );
+    }
+
+    /// Each `Unread` kill line of a scheduled-fault run is an expectation;
+    /// `Held` and `Vacant` lines, and any line outside such a run, are not.
+    #[test]
+    fn an_unread_leader_before_a_kill_is_an_expectation() {
+        let kill = |pid, leader| Line {
+            t_ms: 1,
+            event: Event::Kill {
+                instance: "w1".to_owned(),
+                pid,
+                leader,
+            },
+        };
+        let lines = [
+            kill(10, LeaderAtKill::Unread),
+            kill(11, LeaderAtKill::Vacant),
+            kill(
+                12,
+                LeaderAtKill::Held {
+                    owner: "w0".to_owned(),
+                    generation: 1,
+                    digest: 5,
+                },
+            ),
+            kill(13, LeaderAtKill::Unread),
+        ];
+        assert_eq!(
+            unread_leader_kills(Faults::Schedule, &lines),
+            [
+                "leader key unread before the kill of w1 (pid 10)",
+                "leader key unread before the kill of w1 (pid 13)",
+            ]
+        );
+        assert_eq!(
+            unread_leader_kills(Faults::None, &lines),
+            Vec::<String>::new()
+        );
+    }
+
+    /// A leader record decodes to its owner, generation and digest; an absent
+    /// key is `Vacant`; bytes that do not parse, a store error and a timeout
+    /// are `Unread`.
+    #[test]
+    fn a_leader_read_is_labelled_by_what_it_returned() {
+        let entry = |value: &[u8]| Entry {
+            key: "leader".to_owned(),
+            value: value.to_vec(),
+            revision: spate_coordination::store::Revision(1),
+        };
+        let record = br#"{"schema":1,"owner":"w2","nonce":"n","generation":3}"#;
+        assert_eq!(
+            leader_from(Some(Ok(Some(entry(record))))),
+            LeaderAtKill::Held {
+                owner: "w2".to_owned(),
+                generation: 3,
+                digest: spate_test_support::fnv1a(record),
+            }
+        );
+        assert_eq!(leader_from(Some(Ok(None))), LeaderAtKill::Vacant);
+        assert_eq!(
+            leader_from(Some(Ok(Some(entry(b"{\"owner\":7}"))))),
+            LeaderAtKill::Unread
+        );
+        assert_eq!(
+            leader_from(Some(Err(StoreError::Retryable("down".to_owned())))),
+            LeaderAtKill::Unread
+        );
+        assert_eq!(leader_from(None), LeaderAtKill::Unread);
     }
 }

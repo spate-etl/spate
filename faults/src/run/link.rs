@@ -335,6 +335,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
+    use crate::journal::LeaderAtKill;
     use crate::run::proxy::MAX_DELAY_MS;
 
     fn window(at_ms: u64, instance: u32, duration_ms: u64) -> Window {
@@ -527,6 +528,7 @@ mod tests {
             event: Event::Kill {
                 instance: "w0".to_owned(),
                 pid: 10,
+                leader: LeaderAtKill::Unread,
             },
         };
         assert_eq!(

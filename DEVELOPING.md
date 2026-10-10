@@ -155,7 +155,11 @@ retry with no `won` or `lost` reply may have landed as well, and a read of its
 value counts as a read of the landed write. A kill the schedule draws for that
 worker waits until its journal shows the recovery, or one lease from the first
 poll at which the kill is due and the journal holds its `err_after_land` line,
-and a stop drawn for it is skipped.
+and a stop drawn for it is skipped. Before each scheduled kill the harness reads
+the leader key through its own store handle. The `kill` line records the
+instance the key named, its generation and a digest of its bytes, and the
+kill's entry under `faults_fired` in `outcome.json` names that instance. A
+scheduled kill whose read fails or times out makes the outcome `expectation`.
 In `dynamodb_one_instance` and `dynamodb_three_instances` each worker reaches
 the store through an HTTP proxy of its own, which throttles calls, answers them
 with a 5xx status the SDK retries, delays them by up to 100 ms, or forwards a

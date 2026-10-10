@@ -47,6 +47,10 @@ struct FakeGit<'a> {
     /// A push that reaches origin and then reports failure.
     push_lands_then_fails: bool,
     push_fails: bool,
+    /// Tags are signed, so a tag already on origin is verified before use.
+    signs: bool,
+    /// The tag on origin carries no valid signature.
+    unsigned: bool,
 }
 
 impl<'a> FakeGit<'a> {
@@ -59,6 +63,8 @@ impl<'a> FakeGit<'a> {
             remote: RefCell::default(),
             push_lands_then_fails: false,
             push_fails: false,
+            signs: false,
+            unsigned: false,
         }
     }
 }
@@ -87,6 +93,19 @@ impl Git for FakeGit<'_> {
         self.log.push(format!("tag {name} {commit}"));
         Ok(())
     }
+    fn verify_tag(&self, name: &str, repo: &str, commit: &str) -> Outcome {
+        if self.unsigned {
+            return Err(fail("verify tag"));
+        }
+        if self.remote.borrow().get(name).map(String::as_str) != Some(commit) {
+            return Err(fail("tag names another commit"));
+        }
+        self.log.push(format!("verify tag {name} in {repo}"));
+        Ok(())
+    }
+    fn signs(&self) -> bool {
+        self.signs
+    }
     fn push(&self, refspec: &str, force: bool) -> Outcome {
         if self.push_fails {
             return Err(fail("push"));
@@ -108,8 +127,19 @@ impl Git for FakeGit<'_> {
 struct FakeForge<'a> {
     log: Option<&'a Log>,
     pulls: Vec<Pull>,
-    release: RefCell<bool>,
+    /// `None` until a release exists.
+    release: RefCell<Option<ReleaseState>>,
+    /// The repository publishes mutable releases.
+    mutable: bool,
+    /// The state a release reads as after publishing, where it is not the
+    /// published one.
+    after_publish: Option<ReleaseState>,
+    /// `verify_release` calls that fail before one passes.
+    verify_release_failures: RefCell<u32>,
     assets: RefCell<Vec<String>>,
+    /// Assets an upload left broken: listed by name, so an upload without
+    /// `--clobber` is refused, but never reported as uploaded.
+    broken: RefCell<Vec<String>>,
     /// Asset uploads refused, as an immutable or already-carrying release does.
     refuse_bundle: bool,
     /// The one write that fails: `close`, `create`, `merge` or `upload`.
@@ -119,6 +149,8 @@ struct FakeForge<'a> {
     /// A file whose attestation does not verify.
     unattested: Option<String>,
     create_release_failures: RefCell<u32>,
+    /// The first create lands and then reports failure.
+    create_lands_then_fails: RefCell<bool>,
 }
 
 impl<'a> FakeForge<'a> {
@@ -179,8 +211,27 @@ impl Forge for FakeForge<'_> {
         self.log(format!("auto-merge #{number}"));
         Ok(())
     }
-    fn release_exists(&self, _tag: &str) -> Result<bool, Error> {
-        Ok(*self.release.borrow())
+    fn release_state(&self, _tag: &str) -> Result<ReleaseState, Error> {
+        Ok(self.release.borrow().unwrap_or(ReleaseState::Missing))
+    }
+    fn publish_release(&self, tag: &str) -> Outcome {
+        self.log(format!("publish {tag}"));
+        *self.release.borrow_mut() = Some(self.after_publish.unwrap_or(ReleaseState::Published {
+            immutable: !self.mutable,
+        }));
+        Ok(())
+    }
+    fn verify_release(&self, tag: &str) -> Outcome {
+        if *self.release.borrow() != Some(ReleaseState::Published { immutable: true }) {
+            return Err(fail("verify release"));
+        }
+        let mut left = self.verify_release_failures.borrow_mut();
+        if *left > 0 {
+            *left -= 1;
+            return Err(fail("verify release before the attestation"));
+        }
+        self.log(format!("verify release {tag}"));
+        Ok(())
     }
     fn create_release(&self, tag: &str, _notes: &str) -> Outcome {
         let mut left = self.create_release_failures.borrow_mut();
@@ -188,8 +239,11 @@ impl Forge for FakeForge<'_> {
             *left -= 1;
             return Err(fail("create release"));
         }
-        self.log(format!("release {tag}"));
-        *self.release.borrow_mut() = true;
+        self.log(format!("draft {tag}"));
+        *self.release.borrow_mut() = Some(ReleaseState::Draft);
+        if self.create_lands_then_fails.replace(false) {
+            return Err(fail("create after landing"));
+        }
         Ok(())
     }
     fn upload(&self, tag: &str, files: &[PathBuf], clobber: bool) -> Outcome {
@@ -199,11 +253,19 @@ impl Forge for FakeForge<'_> {
                 return Err(fail("upload bundle"));
             }
             self.check("upload")?;
-            if !clobber && self.assets.borrow().contains(&name) {
+            if *self.release.borrow() != Some(ReleaseState::Draft) {
+                return Err(fail("upload to a release that is not a draft"));
+            }
+            let held = self.assets.borrow().contains(&name) || self.broken.borrow().contains(&name);
+            if !clobber && held {
                 return Err(fail("asset exists"));
             }
             self.log(format!("upload {tag} {name} clobber={clobber}"));
-            self.assets.borrow_mut().push(name);
+            self.broken.borrow_mut().retain(|b| *b != name);
+            let mut assets = self.assets.borrow_mut();
+            if !assets.contains(&name) {
+                assets.push(name);
+            }
         }
         Ok(())
     }
@@ -217,7 +279,7 @@ impl Forge for FakeForge<'_> {
     fn verify_attestation(
         &self,
         file: &Path,
-        _bundle: &Path,
+        _bundle: Option<&Path>,
         signer_workflow: &str,
         predicate_type: &str,
         commit: &str,
@@ -250,6 +312,8 @@ struct FakeRegistry {
     /// Index reads per crate that still answer without the newest version.
     lag: RefCell<BTreeMap<String, u32>>,
     status: Option<String>,
+    /// Downloads serve bytes other than the ones the index lists.
+    download_differs: bool,
 }
 
 impl FakeRegistry {
@@ -299,6 +363,17 @@ impl Registry for FakeRegistry {
                 })
                 .collect(),
         ))
+    }
+
+    fn download(&self, krate: &str, version: Version, dir: &Path) -> Result<PathBuf, Error> {
+        let file = dir.join(format!("{krate}-{version}.crate"));
+        let body = if self.download_differs {
+            format!("other-{krate}")
+        } else {
+            format!("sum-{krate}")
+        };
+        std::fs::write(&file, body).unwrap();
+        Ok(file)
     }
 
     fn trustpub_sha(&self, krate: &str, version: Version) -> Result<String, Error> {
@@ -821,6 +896,7 @@ fn finish_tags_releases_and_deploys() {
         v("0.3.0"),
         SHA,
         staged.dir(),
+        "spate-etl/spate",
     )
     .unwrap();
     assert_eq!(
@@ -828,12 +904,14 @@ fn finish_tags_releases_and_deploys() {
         [
             format!("tag v0.3.0 {SHA}"),
             "push refs/tags/v0.3.0 force=false".to_owned(),
-            "release v0.3.0".to_owned(),
+            "draft v0.3.0".to_owned(),
             "upload v0.3.0 spate-0.3.0.cdx.json clobber=true".to_owned(),
             "upload v0.3.0 spate-core-0.3.0.cdx.json clobber=true".to_owned(),
             "upload v0.3.0 spate-kafka-0.3.0.cdx.json clobber=true".to_owned(),
-            "upload v0.3.0 SHA256SUMS clobber=false".to_owned(),
-            "upload v0.3.0 spate-v0.3.0.intoto.jsonl clobber=false".to_owned(),
+            "upload v0.3.0 SHA256SUMS clobber=true".to_owned(),
+            "upload v0.3.0 spate-v0.3.0.intoto.jsonl clobber=true".to_owned(),
+            "publish v0.3.0".to_owned(),
+            "verify release v0.3.0".to_owned(),
             "dispatch docs".to_owned(),
         ]
     );
@@ -857,11 +935,12 @@ fn a_tag_push_that_fails_after_landing_resumes() {
             &host!(&git, &forge, &registry, &workspace, pauses),
             v("0.3.0"),
             SHA,
-            staged.dir()
+            staged.dir(),
+            "spate-etl/spate"
         )
         .is_err()
     );
-    assert!(!log.has("release"));
+    assert!(!log.has("draft"));
 
     git.push_lands_then_fails = false;
     finish(
@@ -869,6 +948,7 @@ fn a_tag_push_that_fails_after_landing_resumes() {
         v("0.3.0"),
         SHA,
         staged.dir(),
+        "spate-etl/spate",
     )
     .unwrap();
     let tags = log
@@ -883,7 +963,7 @@ fn a_tag_push_that_fails_after_landing_resumes() {
         .filter(|e| e.starts_with("push refs/tags/"))
         .count();
     assert_eq!(pushes, 1, "{:?}", log.entries());
-    assert!(log.has("release v0.3.0"));
+    assert!(log.has("draft v0.3.0"));
 }
 
 /// A tag on origin naming another commit is never moved.
@@ -902,6 +982,7 @@ fn finish_refuses_a_tag_on_another_commit() {
         v("0.3.0"),
         SHA,
         artifacts(false).dir(),
+        "spate-etl/spate",
     )
     .unwrap_err();
     assert!(err.message.contains("points at"), "{}", err.message);
@@ -931,6 +1012,7 @@ fn finish_refuses_a_foreign_commit_or_foreign_bytes() {
         v("0.3.0"),
         SHA,
         artifacts(false).dir(),
+        "spate-etl/spate",
     )
     .unwrap_err();
     assert!(err.message.contains("trustpub sha"), "{}", err.message);
@@ -949,6 +1031,7 @@ fn finish_refuses_a_foreign_commit_or_foreign_bytes() {
         v("0.3.0"),
         SHA,
         artifacts(false).dir(),
+        "spate-etl/spate",
     )
     .unwrap_err();
     assert!(
@@ -976,6 +1059,7 @@ fn finish_waits_out_registry_lag() {
         v("0.3.0"),
         SHA,
         staged.dir(),
+        "spate-etl/spate",
     )
     .unwrap();
     assert_eq!(
@@ -999,6 +1083,7 @@ fn finish_gives_up_on_a_release_that_never_resolves() {
         v("0.3.0"),
         SHA,
         artifacts(false).dir(),
+        "spate-etl/spate",
     )
     .unwrap_err();
     assert!(err.message.contains("cannot resolve"), "{}", err.message);
@@ -1021,6 +1106,7 @@ fn finish_gives_up_on_an_index_that_never_serves() {
         v("0.3.0"),
         SHA,
         artifacts(false).dir(),
+        "spate-etl/spate",
     )
     .unwrap_err();
     assert!(err.message.contains("never served"), "{}", err.message);
@@ -1043,6 +1129,7 @@ fn finish_stops_on_an_index_status() {
         v("0.3.0"),
         SHA,
         artifacts(false).dir(),
+        "spate-etl/spate",
     )
     .unwrap_err();
     assert_eq!(pauses.of(LAG_INTERVAL), 0, "a 403 is waited out as lag");
@@ -1113,14 +1200,16 @@ fn finish_retries_the_release_once() {
         v("0.3.0"),
         SHA,
         staged.dir(),
+        "spate-etl/spate",
     )
     .unwrap();
-    assert!(log.has("release v0.3.0"));
+    assert!(log.has("draft v0.3.0"));
     assert_eq!(pauses.of(Duration::from_secs(10)), 1);
 }
 
 /// A release with no provenance bundle among its assets fails with the
-/// recovery steps, and a release already carrying one keeps it.
+/// recovery steps, and a refused bundle upload stops the run before the
+/// publish.
 #[test]
 fn finish_requires_a_provenance_bundle() {
     let log = Log::default();
@@ -1133,6 +1222,7 @@ fn finish_requires_a_provenance_bundle() {
         v("0.3.0"),
         SHA,
         artifacts(false).dir(),
+        "spate-etl/spate",
     )
     .unwrap_err();
     assert!(
@@ -1148,13 +1238,16 @@ fn finish_requires_a_provenance_bundle() {
         .borrow_mut()
         .push("spate-v0.3.0-provenance.intoto.jsonl".into());
     let staged = artifacts(true);
-    finish(
+    let err = finish(
         &host!(&git, &forge, &registry, &workspace, pauses),
         v("0.3.0"),
         SHA,
         staged.dir(),
+        "spate-etl/spate",
     )
-    .unwrap();
+    .unwrap_err();
+    assert_eq!(err.message, "injected: upload bundle");
+    assert!(!log.has("publish"), "{:?}", log.entries());
 }
 
 /// A trailing space after the version is not a release subject.
@@ -1333,7 +1426,7 @@ fn finish_keeps_an_earlier_attempts_pair() {
     let git = FakeGit::new(&log);
     git.remote.borrow_mut().insert("v0.3.0".into(), SHA.into());
     let forge = FakeForge::new(&log);
-    *forge.release.borrow_mut() = true;
+    *forge.release.borrow_mut() = Some(ReleaseState::Draft);
     forge
         .assets
         .borrow_mut()
@@ -1346,15 +1439,16 @@ fn finish_keeps_an_earlier_attempts_pair() {
         v("0.3.0"),
         SHA,
         staged.dir(),
+        "spate-etl/spate",
     )
     .unwrap();
     assert!(
-        !log.has(&format!("upload v0.3.0 {SUMS} clobber=true")),
+        !log.has(&format!("upload v0.3.0 {SUMS}")),
         "{:?}",
         log.entries()
     );
     assert!(
-        !log.has("upload v0.3.0 spate-v0.3.0.intoto.jsonl clobber=true"),
+        !log.has("upload v0.3.0 spate-v0.3.0.intoto.jsonl"),
         "{:?}",
         log.entries()
     );
@@ -1396,7 +1490,8 @@ fn a_tag_push_that_never_landed_is_retried() {
             &host!(&git, &forge, &registry, &workspace, pauses),
             v("0.3.0"),
             SHA,
-            staged.dir()
+            staged.dir(),
+            "spate-etl/spate"
         )
         .is_err()
     );
@@ -1406,6 +1501,7 @@ fn a_tag_push_that_never_landed_is_retried() {
         v("0.3.0"),
         SHA,
         staged.dir(),
+        "spate-etl/spate",
     )
     .unwrap();
     let tags = log
@@ -1424,7 +1520,7 @@ fn finish_completes_an_existing_release_and_stops_on_a_failed_upload() {
     let git = FakeGit::new(&log);
     git.remote.borrow_mut().insert("v0.3.0".into(), SHA.into());
     let forge = FakeForge::new(&log);
-    *forge.release.borrow_mut() = true;
+    *forge.release.borrow_mut() = Some(ReleaseState::Draft);
     let (registry, workspace) = published(&log);
     let staged = artifacts(true);
     let pauses = Pauses::default();
@@ -1433,10 +1529,11 @@ fn finish_completes_an_existing_release_and_stops_on_a_failed_upload() {
         v("0.3.0"),
         SHA,
         staged.dir(),
+        "spate-etl/spate",
     )
     .unwrap();
     assert!(
-        !log.has("release ") && !log.has("tag "),
+        !log.has("draft ") && !log.has("tag "),
         "{:?}",
         log.entries()
     );
@@ -1450,6 +1547,7 @@ fn finish_completes_an_existing_release_and_stops_on_a_failed_upload() {
         v("0.3.0"),
         SHA,
         staged.dir(),
+        "spate-etl/spate",
     );
     assert!(err.is_err());
     assert!(!log.has("dispatch docs"));
@@ -1688,7 +1786,7 @@ fn finish_without_staged_crates_keeps_the_attested_assets() {
     let git = FakeGit::new(&log);
     git.remote.borrow_mut().insert("v0.3.0".into(), SHA.into());
     let forge = FakeForge::new(&log);
-    *forge.release.borrow_mut() = true;
+    *forge.release.borrow_mut() = Some(ReleaseState::Draft);
     let (registry, workspace) = published(&log);
     let staged = artifacts(false);
     for c in CRATES {
@@ -1700,9 +1798,10 @@ fn finish_without_staged_crates_keeps_the_attested_assets() {
         v("0.3.0"),
         SHA,
         staged.dir(),
+        "spate-etl/spate",
     )
     .unwrap_err();
-    assert!(err.message.contains("no SHA256SUMS"), "{}", err.message);
+    assert!(err.message.contains("lacks SHA256SUMS"), "{}", err.message);
     assert!(
         !log.has(&format!("upload v0.3.0 {SUMS}")),
         "{:?}",
@@ -1718,6 +1817,7 @@ fn finish_without_staged_crates_keeps_the_attested_assets() {
         v("0.3.0"),
         SHA,
         staged.dir(),
+        "spate-etl/spate",
     )
     .unwrap();
     assert!(
@@ -1784,5 +1884,473 @@ fn bundles_join_into_one_file() {
         join_bundles(dir.dir(), &out).unwrap(),
         2,
         "the output is not read back in"
+    );
+}
+
+/// A repository that publishes mutable releases fails `finish` after the
+/// publish, naming the setting.
+#[test]
+fn finish_requires_an_immutable_release() {
+    let log = Log::default();
+    let git = FakeGit::new(&log);
+    let mut forge = FakeForge::new(&log);
+    forge.mutable = true;
+    let (registry, workspace) = published(&log);
+    let staged = artifacts(true);
+    let pauses = Pauses::default();
+    let err = finish(
+        &host!(&git, &forge, &registry, &workspace, pauses),
+        v("0.3.0"),
+        SHA,
+        staged.dir(),
+        "spate-etl/spate",
+    )
+    .unwrap_err();
+    assert!(err.message.contains("not immutable"), "{}", err.message);
+    assert!(!log.has("dispatch docs"));
+}
+
+/// An already published immutable release is never edited: no upload and no
+/// publish, only the check that it is complete and its attestation verifies.
+#[test]
+fn finish_leaves_a_published_immutable_release_alone() {
+    let log = Log::default();
+    let git = FakeGit::new(&log);
+    git.remote.borrow_mut().insert("v0.3.0".into(), SHA.into());
+    let forge = FakeForge::new(&log);
+    *forge.release.borrow_mut() = Some(ReleaseState::Published { immutable: true });
+    forge.assets.borrow_mut().extend(
+        CRATES
+            .iter()
+            .map(|c| format!("{c}-0.3.0.cdx.json"))
+            .chain([SUMS.to_owned(), "spate-v0.3.0.intoto.jsonl".to_owned()]),
+    );
+    let (registry, workspace) = published(&log);
+    let staged = artifacts(true);
+    let pauses = Pauses::default();
+    finish(
+        &host!(&git, &forge, &registry, &workspace, pauses),
+        v("0.3.0"),
+        SHA,
+        staged.dir(),
+        "spate-etl/spate",
+    )
+    .unwrap();
+    assert_eq!(log.entries(), ["verify release v0.3.0", "dispatch docs"]);
+}
+
+/// A draft missing an SBOM is never published.
+#[test]
+fn finish_publishes_only_a_complete_draft() {
+    let log = Log::default();
+    let git = FakeGit::new(&log);
+    let forge = FakeForge::new(&log);
+    let (registry, workspace) = published(&log);
+    let staged = artifacts(true);
+    std::fs::remove_file(staged.join("spate-kafka-0.3.0.cdx.json")).unwrap();
+    let pauses = Pauses::default();
+    let err = finish(
+        &host!(&git, &forge, &registry, &workspace, pauses),
+        v("0.3.0"),
+        SHA,
+        staged.dir(),
+        "spate-etl/spate",
+    )
+    .unwrap_err();
+    assert!(
+        err.message.contains("lacks spate-kafka-0.3.0.cdx.json"),
+        "{}",
+        err.message
+    );
+    assert!(!log.has("publish"));
+}
+
+/// A finished release: tagged on `SHA`, every crate published from it, and an
+/// immutable release carrying every asset.
+fn released(log: &Log) -> (FakeGit<'_>, FakeForge<'_>) {
+    let git = FakeGit::new(log);
+    git.remote.borrow_mut().insert("v0.3.0".into(), SHA.into());
+    let forge = FakeForge::new(log);
+    *forge.release.borrow_mut() = Some(ReleaseState::Published { immutable: true });
+    forge.assets.borrow_mut().extend(
+        CRATES
+            .iter()
+            .map(|c| format!("{c}-0.3.0.cdx.json"))
+            .chain([SUMS.to_owned(), "spate-v0.3.0.intoto.jsonl".to_owned()]),
+    );
+    (git, forge)
+}
+
+/// `verify` checks the tag signature, each crate's origin and attestations
+/// against the tagged commit, and the release's immutability and assets.
+#[test]
+fn verify_judges_a_finished_release() {
+    let log = Log::default();
+    let (git, forge) = released(&log);
+    let (registry, workspace) = published(&log);
+    let pauses = Pauses::default();
+    verify(
+        &host!(&git, &forge, &registry, &workspace, pauses),
+        v("0.3.0"),
+        "spate-etl/spate",
+    )
+    .unwrap();
+    let signer = "spate-etl/spate/.github/workflows/release-build.yml";
+    let mut want = vec!["verify tag v0.3.0 in spate-etl/spate".to_owned()];
+    for c in CRATES {
+        want.push(format!("verify provenance {c}-0.3.0.crate by {signer}"));
+        want.push(format!("verify sbom {c}-0.3.0.crate by {signer}"));
+    }
+    want.push("verify release v0.3.0".to_owned());
+    assert_eq!(log.entries(), want);
+}
+
+/// An unsigned tag, a crate from another commit, an unattested crate and a
+/// mutable release each fail `verify`.
+#[test]
+fn verify_refuses_each_broken_link() {
+    let pauses = Pauses::default();
+    let run = |git: &FakeGit<'_>,
+               forge: &FakeForge<'_>,
+               registry: &FakeRegistry,
+               workspace: &FakeWorkspace<'_>| {
+        verify(
+            &host!(git, forge, registry, workspace, pauses),
+            v("0.3.0"),
+            "spate-etl/spate",
+        )
+    };
+
+    let log = Log::default();
+    let (mut git, forge) = released(&log);
+    let (registry, workspace) = published(&log);
+    git.unsigned = true;
+    let err = run(&git, &forge, &registry, &workspace).unwrap_err();
+    assert_eq!(err.message, "injected: verify tag");
+
+    let log = Log::default();
+    let (git, forge) = released(&log);
+    let (registry, workspace) = published(&log);
+    registry
+        .crates
+        .borrow_mut()
+        .get_mut("spate")
+        .unwrap()
+        .last_mut()
+        .unwrap()
+        .2 = OTHER.into();
+    let err = run(&git, &forge, &registry, &workspace).unwrap_err();
+    assert!(err.message.contains("not the tagged"), "{}", err.message);
+
+    let log = Log::default();
+    let (git, mut forge) = released(&log);
+    let (registry, workspace) = published(&log);
+    forge.unattested = Some("spate-core-0.3.0.crate".into());
+    let err = run(&git, &forge, &registry, &workspace).unwrap_err();
+    assert_eq!(err.message, "injected: verify");
+
+    let log = Log::default();
+    let (git, forge) = released(&log);
+    let (registry, workspace) = published(&log);
+    *forge.release.borrow_mut() = Some(ReleaseState::Published { immutable: false });
+    let err = run(&git, &forge, &registry, &workspace).unwrap_err();
+    assert!(
+        err.message.contains("not published and immutable"),
+        "{}",
+        err.message
+    );
+}
+
+/// `gh release view --json isDraft,isImmutable` maps onto the published
+/// states, and a view without `isImmutable` is an error.
+#[test]
+fn the_release_view_reads_as_a_state() {
+    use crate::release::io::release_state;
+    assert_eq!(
+        release_state(r#"{"isDraft":true,"isImmutable":false}"#).unwrap(),
+        ReleaseState::Draft
+    );
+    assert_eq!(
+        release_state(r#"{"isDraft":false,"isImmutable":true}"#).unwrap(),
+        ReleaseState::Published { immutable: true }
+    );
+    assert_eq!(
+        release_state(r#"{"isDraft":false,"isImmutable":false}"#).unwrap(),
+        ReleaseState::Published { immutable: false }
+    );
+    assert!(release_state(r#"{"isDraft":false}"#).is_err());
+}
+
+/// A release already published mutable stops `finish` before any upload, with
+/// the recovery in the message.
+#[test]
+fn finish_refuses_a_published_mutable_release_before_any_upload() {
+    let log = Log::default();
+    let git = FakeGit::new(&log);
+    git.remote.borrow_mut().insert("v0.3.0".into(), SHA.into());
+    let forge = FakeForge::new(&log);
+    *forge.release.borrow_mut() = Some(ReleaseState::Published { immutable: false });
+    let (registry, workspace) = published(&log);
+    let staged = artifacts(true);
+    let pauses = Pauses::default();
+    let err = finish(
+        &host!(&git, &forge, &registry, &workspace, pauses),
+        v("0.3.0"),
+        SHA,
+        staged.dir(),
+        "spate-etl/spate",
+    )
+    .unwrap_err();
+    assert!(
+        err.message.contains("gh release delete v0.3.0")
+            && err.message.contains("without --cleanup-tag"),
+        "{}",
+        err.message
+    );
+    assert!(!log.has("upload"), "{:?}", log.entries());
+}
+
+/// A release that does not read as published after the publish stops
+/// `finish` with its own message, before the docs deploy.
+#[test]
+fn finish_stops_when_the_release_reads_back_unpublished() {
+    for state in [ReleaseState::Draft, ReleaseState::Missing] {
+        let log = Log::default();
+        let git = FakeGit::new(&log);
+        let mut forge = FakeForge::new(&log);
+        forge.after_publish = Some(state);
+        let (registry, workspace) = published(&log);
+        let staged = artifacts(true);
+        let pauses = Pauses::default();
+        let err = finish(
+            &host!(&git, &forge, &registry, &workspace, pauses),
+            v("0.3.0"),
+            SHA,
+            staged.dir(),
+            "spate-etl/spate",
+        )
+        .unwrap_err();
+        assert!(
+            err.message
+                .contains(&format!("reads as {state:?} after publishing")),
+            "{}",
+            err.message
+        );
+        assert!(!log.has("dispatch docs"));
+    }
+}
+
+/// A release attestation that does not verify straight after the publish is
+/// checked once more after a pause.
+#[test]
+fn finish_verifies_the_release_again_after_a_pause() {
+    let log = Log::default();
+    let git = FakeGit::new(&log);
+    let forge = FakeForge::new(&log);
+    *forge.verify_release_failures.borrow_mut() = 1;
+    let (registry, workspace) = published(&log);
+    let staged = artifacts(true);
+    let pauses = Pauses::default();
+    finish(
+        &host!(&git, &forge, &registry, &workspace, pauses),
+        v("0.3.0"),
+        SHA,
+        staged.dir(),
+        "spate-etl/spate",
+    )
+    .unwrap();
+    assert_eq!(pauses.of(Duration::from_secs(10)), 1);
+    assert!(log.has("verify release v0.3.0"));
+    assert!(log.has("dispatch docs"));
+}
+
+/// With signing on, a tag already on origin is verified before the release
+/// uses it, and one without a valid signature stops `finish`.
+#[test]
+fn finish_with_signing_verifies_a_tag_already_on_origin() {
+    let log = Log::default();
+    let mut git = FakeGit::new(&log);
+    git.signs = true;
+    git.remote.borrow_mut().insert("v0.3.0".into(), SHA.into());
+    let forge = FakeForge::new(&log);
+    let (registry, workspace) = published(&log);
+    let staged = artifacts(true);
+    let pauses = Pauses::default();
+    finish(
+        &host!(&git, &forge, &registry, &workspace, pauses),
+        v("0.3.0"),
+        SHA,
+        staged.dir(),
+        "spate-etl/spate",
+    )
+    .unwrap();
+    assert!(
+        log.has("verify tag v0.3.0 in spate-etl/spate"),
+        "{:?}",
+        log.entries()
+    );
+
+    let log = Log::default();
+    let mut git = FakeGit::new(&log);
+    git.signs = true;
+    git.unsigned = true;
+    git.remote.borrow_mut().insert("v0.3.0".into(), SHA.into());
+    let forge = FakeForge::new(&log);
+    let (registry, workspace) = published(&log);
+    let err = finish(
+        &host!(&git, &forge, &registry, &workspace, pauses),
+        v("0.3.0"),
+        SHA,
+        staged.dir(),
+        "spate-etl/spate",
+    )
+    .unwrap_err();
+    assert_eq!(err.message, "injected: verify tag");
+    assert!(!log.has("draft"), "{:?}", log.entries());
+}
+
+/// `verify` runs only from a checkout at the version it verifies.
+#[test]
+fn verify_refuses_a_checkout_at_another_version() {
+    let log = Log::default();
+    let (git, forge) = released(&log);
+    let (registry, mut workspace) = published(&log);
+    workspace.version = v("0.2.0");
+    let pauses = Pauses::default();
+    let err = verify(
+        &host!(&git, &forge, &registry, &workspace, pauses),
+        v("0.3.0"),
+        "spate-etl/spate",
+    )
+    .unwrap_err();
+    assert!(
+        err.message.contains("this checkout is at 0.2.0"),
+        "{}",
+        err.message
+    );
+}
+
+/// A downloaded `.crate` whose sha256 differs from the index cksum fails
+/// `verify`.
+#[test]
+fn verify_refuses_a_download_the_index_does_not_list() {
+    let log = Log::default();
+    let (git, forge) = released(&log);
+    let (mut registry, workspace) = published(&log);
+    registry.download_differs = true;
+    let pauses = Pauses::default();
+    let err = verify(
+        &host!(&git, &forge, &registry, &workspace, pauses),
+        v("0.3.0"),
+        "spate-etl/spate",
+    )
+    .unwrap_err();
+    assert!(err.message.contains("the download is"), "{}", err.message);
+}
+
+/// A checksum list an earlier upload left broken is replaced, so a re-run
+/// completes the draft.
+#[test]
+fn finish_replaces_an_asset_an_upload_left_broken() {
+    let log = Log::default();
+    let git = FakeGit::new(&log);
+    git.remote.borrow_mut().insert("v0.3.0".into(), SHA.into());
+    let forge = FakeForge::new(&log);
+    *forge.release.borrow_mut() = Some(ReleaseState::Draft);
+    forge.broken.borrow_mut().push(SUMS.to_owned());
+    let (registry, workspace) = published(&log);
+    let staged = artifacts(true);
+    let pauses = Pauses::default();
+    finish(
+        &host!(&git, &forge, &registry, &workspace, pauses),
+        v("0.3.0"),
+        SHA,
+        staged.dir(),
+        "spate-etl/spate",
+    )
+    .unwrap();
+    assert!(
+        log.has(&format!("upload v0.3.0 {SUMS} clobber=true")),
+        "{:?}",
+        log.entries()
+    );
+    assert!(log.has("publish v0.3.0"));
+}
+
+/// A published immutable release missing an asset fails with a message that
+/// says the gap is permanent.
+#[test]
+fn finish_reports_a_gap_in_a_locked_release_as_permanent() {
+    let log = Log::default();
+    let (git, forge) = released(&log);
+    forge.assets.borrow_mut().retain(|a| a != SUMS);
+    let (registry, workspace) = published(&log);
+    let staged = artifacts(true);
+    let pauses = Pauses::default();
+    let err = finish(
+        &host!(&git, &forge, &registry, &workspace, pauses),
+        v("0.3.0"),
+        SHA,
+        staged.dir(),
+        "spate-etl/spate",
+    )
+    .unwrap_err();
+    assert!(
+        err.message.contains("lacks SHA256SUMS")
+            && err.message.contains("only a new version can carry them"),
+        "{}",
+        err.message
+    );
+    assert!(!log.has("upload"), "{:?}", log.entries());
+}
+
+/// A create that lands and then reports failure is not repeated: the state is
+/// read again first.
+#[test]
+fn finish_does_not_create_a_release_that_landed() {
+    let log = Log::default();
+    let git = FakeGit::new(&log);
+    let forge = FakeForge::new(&log);
+    *forge.create_lands_then_fails.borrow_mut() = true;
+    let (registry, workspace) = published(&log);
+    let staged = artifacts(true);
+    let pauses = Pauses::default();
+    finish(
+        &host!(&git, &forge, &registry, &workspace, pauses),
+        v("0.3.0"),
+        SHA,
+        staged.dir(),
+        "spate-etl/spate",
+    )
+    .unwrap();
+    let drafts = log
+        .entries()
+        .iter()
+        .filter(|e| e.starts_with("draft "))
+        .count();
+    assert_eq!(drafts, 1, "{:?}", log.entries());
+}
+
+/// `verify` fails on a release missing an SBOM.
+#[test]
+fn verify_refuses_a_release_missing_an_asset() {
+    let log = Log::default();
+    let (git, forge) = released(&log);
+    forge
+        .assets
+        .borrow_mut()
+        .retain(|a| a != "spate-kafka-0.3.0.cdx.json");
+    let (registry, workspace) = published(&log);
+    let pauses = Pauses::default();
+    let err = verify(
+        &host!(&git, &forge, &registry, &workspace, pauses),
+        v("0.3.0"),
+        "spate-etl/spate",
+    )
+    .unwrap_err();
+    assert!(
+        err.message.contains("lacks spate-kafka-0.3.0.cdx.json"),
+        "{}",
+        err.message
     );
 }

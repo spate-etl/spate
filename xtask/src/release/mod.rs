@@ -72,6 +72,17 @@ pub(crate) enum ReleaseCommand {
         /// The staged artifacts and their attestation bundles
         #[arg(long, value_name = "DIR")]
         artifacts: PathBuf,
+        /// Sign the tag keylessly with gitsign, as the workflow's identity
+        #[arg(long)]
+        sign_tag: bool,
+    },
+    /// Judge a published release from the registry, the attestations and GitHub
+    Verify {
+        #[arg(value_name = "X.Y.Z")]
+        version: String,
+        /// The repository, as OWNER/NAME
+        #[arg(long, env = "GITHUB_REPOSITORY", default_value = "spate-etl/spate")]
+        repo: String,
     },
     /// The whole release in a throwaway worktree, nothing pushed or uploaded
     DryRun {
@@ -92,8 +103,24 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: ReleaseCommand) -> Outco
         return Ok(());
     }
 
-    let git = ProcessGit { root };
-    let forge = Gh { root };
+    let sign = matches!(cmd, ReleaseCommand::Finish { sign_tag: true, .. });
+    if sign && !run::on_path("gitsign") {
+        return Err(Error::msg("finish --sign-tag needs gitsign on the path"));
+    }
+    // `verify` reads the named repository; every other step reads the checkout's.
+    let verified_repo = match &cmd {
+        ReleaseCommand::Verify { repo, .. } => Some(repo.clone()),
+        _ => None,
+    };
+    let remote = verified_repo.as_ref().map_or_else(
+        || "origin".to_owned(),
+        |r| format!("https://github.com/{r}.git"),
+    );
+    let git = ProcessGit { root, sign, remote };
+    let forge = Gh {
+        root,
+        repo: verified_repo.as_deref(),
+    };
     let registry = CratesIo { root };
     let workspace = LocalWorkspace { root };
     let pause = |d| std::thread::sleep(d);
@@ -188,6 +215,7 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: ReleaseCommand) -> Outco
             version,
             expected_sha,
             artifacts,
+            sign_tag: _,
         } => {
             let version = version
                 .filter(|v| !v.is_empty())
@@ -201,7 +229,20 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: ReleaseCommand) -> Outco
                 &["GH_TOKEN", "DISPATCH_TOKEN", "GITHUB_REPOSITORY"],
                 "finish",
             )?;
-            sequence::finish(&host, version, &expected_sha, &artifacts)
+            require_gh(root, GH_EXACT_SIGNER)?;
+            let repo = std::env::var("GITHUB_REPOSITORY").unwrap_or_default();
+            sequence::finish(&host, version, &expected_sha, &artifacts, &repo)
+        }
+        ReleaseCommand::Verify { version, repo } => {
+            let version = Version::parse(&version)
+                .ok_or_else(|| Error::msg(format!("'{version}' is not X.Y.Z")))?;
+            require_gh(root, GH_EXACT_SIGNER)?;
+            if !run::on_path("gitsign") {
+                return Err(Error::msg(
+                    "release verify needs gitsign on the path to check the tag's signature",
+                ));
+            }
+            sequence::verify(&host, version, &repo)
         }
         ReleaseCommand::DryRun { version, keep } => dry_run(root, &version, keep),
     }
@@ -247,6 +288,9 @@ fn describe(cmd: &ReleaseCommand) -> &'static str {
         }
         ReleaseCommand::Finish { .. } => {
             "(verifies the registry, tags, opens the GitHub release with its assets, deploys the docs)"
+        }
+        ReleaseCommand::Verify { .. } => {
+            "(checks the tag signature, the registry, every attestation and the GitHub release)"
         }
         ReleaseCommand::DryRun { .. } => {
             "(runs assemble --dry-run and prepare --dry-run in a throwaway worktree)"

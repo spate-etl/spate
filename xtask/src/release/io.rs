@@ -12,7 +12,7 @@ use serde::Deserialize;
 use super::version::Version;
 use crate::checks::scratch::Scratch;
 use crate::checks::semver_checks::{UA, fetch_index};
-use crate::run::{self, Error, Outcome, Step, Streams};
+use crate::run::{self, Error, Outcome, Step};
 
 /// The identity the release commit and tag carry.
 const BOT_NAME: &str = "spate-release[bot]";
@@ -45,6 +45,12 @@ pub(crate) trait Git {
     fn tag(&self, name: &str, commit: &str) -> Outcome;
     /// Pushes `refspec` to the repository's origin with the forge token.
     fn push(&self, refspec: &str, force: bool) -> Outcome;
+    /// Fetches `name` and verifies it names `commit` and carries a keyless
+    /// signature made by `release.yml` on `main` in `repo`, from a push of
+    /// `commit`.
+    fn verify_tag(&self, name: &str, repo: &str, commit: &str) -> Outcome;
+    /// Whether `tag` signs the tags it creates.
+    fn signs(&self) -> bool;
 }
 
 /// An open pull request.
@@ -72,10 +78,15 @@ pub(crate) trait Forge {
     ) -> Result<Option<u64>, Error>;
     /// Squash-merges the pull request once its required checks pass.
     fn auto_merge(&self, number: u64) -> Outcome;
-    fn release_exists(&self, tag: &str) -> Result<bool, Error>;
-    /// Creates a release on an existing tag.
+    fn release_state(&self, tag: &str) -> Result<ReleaseState, Error>;
+    /// Creates a draft release on an existing tag.
     fn create_release(&self, tag: &str, notes: &str) -> Outcome;
+    /// Publishes a draft release.
+    fn publish_release(&self, tag: &str) -> Outcome;
+    /// Verifies the attestation GitHub signs for an immutable release.
+    fn verify_release(&self, tag: &str) -> Outcome;
     fn upload(&self, tag: &str, files: &[PathBuf], clobber: bool) -> Outcome;
+    /// The names of the release's fully uploaded assets.
     fn assets(&self, tag: &str) -> Result<Vec<String>, Error>;
     /// Starts the documentation deploy.
     fn dispatch_docs(&self) -> Outcome;
@@ -85,11 +96,23 @@ pub(crate) trait Forge {
     fn verify_attestation(
         &self,
         file: &Path,
-        bundle: &Path,
+        bundle: Option<&Path>,
         signer_workflow: &str,
         predicate_type: &str,
         commit: &str,
     ) -> Outcome;
+}
+
+/// Where a GitHub release stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReleaseState {
+    Missing,
+    /// Assets can still change.
+    Draft,
+    /// Published; an immutable release's assets and tag are locked.
+    Published {
+        immutable: bool,
+    },
 }
 
 /// One version in a crate's sparse-index file.
@@ -114,6 +137,8 @@ pub(crate) trait Registry {
     /// The commit a Trusted Publishing upload of this version recorded, or
     /// `"null"` for a version published any other way.
     fn trustpub_sha(&self, krate: &str, version: Version) -> Result<String, Error>;
+    /// Downloads the `.crate` the registry serves into `dir`.
+    fn download(&self, krate: &str, version: Version, dir: &Path) -> Result<PathBuf, Error>;
 }
 
 /// A publishable workspace member and its manifest directory.
@@ -170,6 +195,19 @@ pub(crate) trait Workspace {
 /// `GITHUB_REPOSITORY`.
 pub(crate) struct ProcessGit<'a> {
     pub(crate) root: &'a Path,
+    /// Sign tags keylessly with gitsign under the workflow's OIDC identity,
+    /// and verify each signature before the tag can be pushed.
+    pub(crate) sign: bool,
+    /// Where tags are read from: a remote name or a URL.
+    pub(crate) remote: String,
+}
+
+/// The OIDC issuer of a GitHub Actions identity.
+pub(crate) const ACTIONS_ISSUER: &str = "https://token.actions.githubusercontent.com";
+
+/// The certificate identity a tag signed by `release.yml` on `main` carries.
+pub(crate) fn tag_signer(repo: &str) -> String {
+    format!("https://github.com/{repo}/.github/workflows/release.yml@refs/heads/main")
 }
 
 impl ProcessGit<'_> {
@@ -232,7 +270,7 @@ impl Git for ProcessGit<'_> {
         let listing = self.capture(&[
             "ls-remote",
             "--tags",
-            "origin",
+            &self.remote,
             &format!("refs/tags/{tag}"),
             &format!("refs/tags/{tag}^{{}}"),
         ])?;
@@ -240,15 +278,28 @@ impl Git for ProcessGit<'_> {
     }
 
     fn tag(&self, name: &str, commit: &str) -> Outcome {
-        run::run(
+        run::run(self.root, false, &tag_step(name, commit, self.sign))?;
+        if !self.sign {
+            return Ok(());
+        }
+        let repo = required_env("GITHUB_REPOSITORY", "a signed tag")?;
+        self.check_tag(name, &repo, commit)
+    }
+
+    fn verify_tag(&self, name: &str, repo: &str, commit: &str) -> Outcome {
+        // Without --force, a local tag that differs from the remote one stops
+        // the fetch and is never overwritten.
+        run::quiet(
             self.root,
             false,
-            &Step::new("git", ["-c"])
-                .arg(format!("user.name={BOT_NAME}"))
-                .arg("-c")
-                .arg(format!("user.email={BOT_EMAIL}"))
-                .args(["tag", "-a", name, "-m", name, commit]),
-        )
+            &Step::new("git", ["fetch", "--quiet", &self.remote])
+                .arg(format!("refs/tags/{name}:refs/tags/{name}")),
+        )?;
+        self.check_tag(name, repo, commit)
+    }
+
+    fn signs(&self) -> bool {
+        self.sign
     }
 
     fn push(&self, refspec: &str, force: bool) -> Outcome {
@@ -277,6 +328,29 @@ impl Git for ProcessGit<'_> {
     }
 }
 
+impl ProcessGit<'_> {
+    /// The local tag `name` is an annotated tag of that name on `commit`,
+    /// signed by `release.yml` on `main` in `repo` during a push of `commit`.
+    fn check_tag(&self, name: &str, repo: &str, commit: &str) -> Outcome {
+        let target = self.capture(&["rev-parse", &format!("refs/tags/{name}^{{commit}}")])?;
+        if target.trim() != commit {
+            return Err(Error::msg(format!(
+                "{name} names {}, not {commit}",
+                target.trim()
+            )));
+        }
+        let object = self.capture(&["cat-file", "tag", &format!("refs/tags/{name}")])?;
+        // The header ends at the first blank line; the message after it is free text.
+        let header = object.lines().take_while(|l| !l.is_empty());
+        if !header.into_iter().any(|l| l == format!("tag {name}")) {
+            return Err(Error::msg(format!(
+                "the {name} tag object carries another tag name"
+            )));
+        }
+        run::run(self.root, false, &tag_verify_step(name, repo, commit))
+    }
+}
+
 /// The commit an `ls-remote` listing of one tag names. The `^{}` line is the
 /// commit an annotated tag points at; a lightweight tag has only the plain line.
 pub(crate) fn peeled(listing: &str) -> Option<String> {
@@ -298,15 +372,45 @@ fn required_env(key: &str, what: &str) -> Result<String, Error> {
 /// The forge through `gh`, authenticated by `GH_TOKEN`.
 pub(crate) struct Gh<'a> {
     pub(crate) root: &'a Path,
+    /// The repository as OWNER/NAME, or `None` for the one gh infers from the
+    /// checkout.
+    pub(crate) repo: Option<&'a str>,
 }
 
-impl Gh<'_> {
+impl<'a> Gh<'a> {
+    fn step(&self, args: &[&str]) -> Step<'a> {
+        let step = Step::new("gh", args);
+        match self.repo {
+            Some(repo) => step.env("GH_REPO", repo),
+            None => step,
+        }
+    }
+
     fn capture(&self, args: &[&str]) -> Result<String, Error> {
-        run::capture(self.root, &Step::new("gh", args))
+        run::capture(self.root, &self.step(args))
     }
 
     fn run(&self, step: &Step<'_>) -> Outcome {
         run::run(self.root, false, step)
+    }
+
+    /// `gh release create` making a draft on a tag that already exists.
+    fn create_step(&self, tag: &str, notes: &Path) -> Step<'a> {
+        self.step(&[
+            "release",
+            "create",
+            tag,
+            "--draft",
+            "--verify-tag",
+            "--title",
+            tag,
+        ])
+        .arg("--notes-file")
+        .arg(notes.to_string_lossy())
+    }
+
+    fn publish_step(&self, tag: &str) -> Step<'a> {
+        self.step(&["release", "edit", tag, "--draft=false"])
     }
 }
 
@@ -378,31 +482,47 @@ impl Forge for Gh<'_> {
         })
     }
 
-    fn release_exists(&self, tag: &str) -> Result<bool, Error> {
-        let done = run::complete(
-            self.root,
-            &Step::new("gh", ["release", "view", tag]),
-            Streams::Discard,
-        )?;
-        Ok(done.code == 0)
+    fn release_state(&self, tag: &str) -> Result<ReleaseState, Error> {
+        let mut command = Command::new("gh");
+        command
+            .args(["release", "view", tag, "--json", "isDraft,isImmutable"])
+            .current_dir(self.root);
+        if let Some(repo) = self.repo {
+            command.env("GH_REPO", repo);
+        }
+        let out = command
+            .output()
+            .map_err(|e| Error::msg(format!("gh release view: {e}")))?;
+        if out.status.success() {
+            return release_state(&String::from_utf8_lossy(&out.stdout));
+        }
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if stderr.contains("release not found") {
+            return Ok(ReleaseState::Missing);
+        }
+        Err(Error::msg(format!(
+            "gh release view {tag} failed: {}",
+            stderr.trim()
+        )))
     }
 
     fn create_release(&self, tag: &str, notes: &str) -> Outcome {
         let scratch = Scratch::new("spate-release-notes")?;
         let file = scratch.join("notes.md");
         std::fs::write(&file, notes).map_err(|e| Error::msg(format!("{}: {e}", file.display())))?;
-        self.run(
-            &Step::new(
-                "gh",
-                ["release", "create", tag, "--verify-tag", "--title", tag],
-            )
-            .arg("--notes-file")
-            .arg(file.to_string_lossy()),
-        )
+        self.run(&self.create_step(tag, &file))
+    }
+
+    fn publish_release(&self, tag: &str) -> Outcome {
+        self.run(&self.publish_step(tag))
+    }
+
+    fn verify_release(&self, tag: &str) -> Outcome {
+        self.run(&self.step(&["release", "verify", tag]))
     }
 
     fn upload(&self, tag: &str, files: &[PathBuf], clobber: bool) -> Outcome {
-        let mut step = Step::new("gh", ["release", "upload", tag]);
+        let mut step = self.step(&["release", "upload", tag]);
         if clobber {
             step = step.arg("--clobber");
         }
@@ -410,6 +530,8 @@ impl Forge for Gh<'_> {
     }
 
     fn assets(&self, tag: &str) -> Result<Vec<String>, Error> {
+        // An upload broken partway leaves an asset by that name in another
+        // state, which publishing would lock in.
         Ok(self
             .capture(&[
                 "release",
@@ -418,7 +540,7 @@ impl Forge for Gh<'_> {
                 "--json",
                 "assets",
                 "--jq",
-                ".assets[].name",
+                ".assets[] | select(.state == \"uploaded\") | .name",
             ])?
             .lines()
             .map(str::to_owned)
@@ -441,7 +563,7 @@ impl Forge for Gh<'_> {
     fn verify_attestation(
         &self,
         file: &Path,
-        bundle: &Path,
+        bundle: Option<&Path>,
         signer_workflow: &str,
         predicate_type: &str,
         commit: &str,
@@ -458,7 +580,7 @@ impl Forge for Gh<'_> {
 /// and to hosted runners, with the repository read from the workflow path.
 fn attestation_step<'a>(
     file: &Path,
-    bundle: &Path,
+    bundle: Option<&Path>,
     signer_workflow: &str,
     predicate_type: &str,
     commit: &str,
@@ -474,8 +596,69 @@ fn attestation_step<'a>(
         .arg(format!("{signer_workflow}@refs/heads/main"))
         .args(["--source-ref", "refs/heads/main", "--source-digest", commit])
         .arg("--deny-self-hosted-runners")
-        .args(["--predicate-type", predicate_type, "--bundle"])
-        .arg(bundle.to_string_lossy())
+        .args(["--predicate-type", predicate_type])
+        .args(
+            bundle
+                .map(|b| vec!["--bundle".to_owned(), b.to_string_lossy().into_owned()])
+                .unwrap_or_default(),
+        )
+}
+
+/// `git tag` making an annotated tag, signed keylessly with gitsign when `sign`
+/// is set.
+fn tag_step<'a>(name: &str, commit: &str, sign: bool) -> Step<'a> {
+    let step = Step::new("git", ["-c"])
+        .arg(format!("user.name={BOT_NAME}"))
+        .arg("-c")
+        .arg(format!("user.email={BOT_EMAIL}"));
+    if !sign {
+        return step.args(["tag", "-a", name, "-m", name, commit]);
+    }
+    // Offline mode embeds the transparency-log entry in the signature, so
+    // verifying it needs no search of the log.
+    step.args([
+        "-c",
+        "gpg.format=x509",
+        "-c",
+        "gpg.x509.program=gitsign",
+        "-c",
+        "gitsign.rekorMode=offline",
+        "tag",
+        "-s",
+        name,
+        "-m",
+        name,
+        commit,
+    ])
+}
+
+/// `gitsign verify-tag` pinned to `release.yml` on `main`, run by a push at
+/// `commit`.
+fn tag_verify_step<'a>(name: &str, repo: &str, commit: &str) -> Step<'a> {
+    Step::new("gitsign", ["verify-tag", name, "--certificate-identity"])
+        .arg(tag_signer(repo))
+        .args(["--certificate-oidc-issuer", ACTIONS_ISSUER])
+        .args(["--certificate-github-workflow-sha", commit])
+        .args(["--certificate-github-workflow-trigger", "push"])
+}
+
+/// The state `gh release view --json isDraft,isImmutable` reports.
+pub(crate) fn release_state(raw: &str) -> Result<ReleaseState, Error> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct View {
+        is_draft: bool,
+        is_immutable: bool,
+    }
+    let view: View =
+        serde_json::from_str(raw).map_err(|e| Error::msg(format!("gh release view: {e}")))?;
+    Ok(if view.is_draft {
+        ReleaseState::Draft
+    } else {
+        ReleaseState::Published {
+            immutable: view.is_immutable,
+        }
+    })
 }
 
 /// The rows of `gh pr list --json number,headRefName,isCrossRepository`.
@@ -546,6 +729,22 @@ impl Registry for CratesIo<'_> {
             .as_str()
             .unwrap_or("null")
             .to_owned())
+    }
+
+    fn download(&self, krate: &str, version: Version, dir: &Path) -> Result<PathBuf, Error> {
+        let file = dir.join(format!("{krate}-{version}.crate"));
+        run::run(
+            self.root,
+            false,
+            &Step::new("curl", ["-fsSL", "--retry", "3", "--max-time", "60", "-H"])
+                .arg(format!("User-Agent: {UA}"))
+                .arg("-o")
+                .arg(file.to_string_lossy())
+                .arg(format!(
+                    "https://static.crates.io/crates/{krate}/{krate}-{version}.crate"
+                )),
+        )?;
+        Ok(file)
     }
 }
 
@@ -865,6 +1064,12 @@ impl Git for DryGit<'_> {
         would(&format!("tag {name} at {commit}"));
         Ok(())
     }
+    fn verify_tag(&self, name: &str, repo: &str, commit: &str) -> Outcome {
+        self.0.verify_tag(name, repo, commit)
+    }
+    fn signs(&self) -> bool {
+        self.0.signs()
+    }
     fn push(&self, refspec: &str, force: bool) -> Outcome {
         would(&format!(
             "push {refspec}{}",
@@ -915,12 +1120,19 @@ impl Forge for DryForge<'_> {
         would(&format!("enable auto-merge on #{number}"));
         Ok(())
     }
-    fn release_exists(&self, tag: &str) -> Result<bool, Error> {
-        self.0.release_exists(tag)
+    fn release_state(&self, tag: &str) -> Result<ReleaseState, Error> {
+        self.0.release_state(tag)
     }
     fn create_release(&self, tag: &str, _notes: &str) -> Outcome {
-        would(&format!("create the {tag} release"));
+        would(&format!("create the {tag} release as a draft"));
         Ok(())
+    }
+    fn publish_release(&self, tag: &str) -> Outcome {
+        would(&format!("publish the {tag} release"));
+        Ok(())
+    }
+    fn verify_release(&self, tag: &str) -> Outcome {
+        self.0.verify_release(tag)
     }
     fn upload(&self, tag: &str, files: &[PathBuf], _clobber: bool) -> Outcome {
         for f in files {
@@ -938,7 +1150,7 @@ impl Forge for DryForge<'_> {
     fn verify_attestation(
         &self,
         file: &Path,
-        bundle: &Path,
+        bundle: Option<&Path>,
         signer_workflow: &str,
         predicate_type: &str,
         commit: &str,
@@ -958,7 +1170,7 @@ mod tests {
     fn attestation_verify_pins_signer_ref_commit_and_runner() {
         let step = attestation_step(
             Path::new("a.crate"),
-            Path::new("b.jsonl"),
+            Some(Path::new("b.jsonl")),
             "spate-etl/spate/.github/workflows/release-build.yml",
             "https://slsa.dev/provenance/v1",
             "abc123",
@@ -978,6 +1190,143 @@ mod tests {
             Some("https://slsa.dev/provenance/v1")
         );
         assert_eq!(pair("--bundle"), Some("b.jsonl"));
+    }
+
+    /// The tag's signature is pinned to the release workflow on `main`, the
+    /// release commit and a push trigger.
+    #[test]
+    fn tag_verify_pins_signer_commit_and_trigger() {
+        let step = tag_verify_step("v0.3.0", "spate-etl/spate", "abc123");
+        let a = &step.args;
+        let pair = |k: &str| a.iter().position(|x| x == k).map(|i| a[i + 1].as_str());
+        assert_eq!(a[..2], ["verify-tag", "v0.3.0"]);
+        assert_eq!(
+            pair("--certificate-identity"),
+            Some(
+                "https://github.com/spate-etl/spate/.github/workflows/release.yml@refs/heads/main"
+            )
+        );
+        assert_eq!(pair("--certificate-oidc-issuer"), Some(ACTIONS_ISSUER));
+        assert_eq!(pair("--certificate-github-workflow-sha"), Some("abc123"));
+        assert_eq!(pair("--certificate-github-workflow-trigger"), Some("push"));
+    }
+
+    /// A signed tag goes through gitsign in offline Rekor mode; an unsigned
+    /// one is a plain annotated tag.
+    #[test]
+    fn the_tag_is_signed_with_gitsign_offline() {
+        let signed = tag_step("v0.3.0", "abc123", true).args;
+        for pin in [
+            "gpg.format=x509",
+            "gpg.x509.program=gitsign",
+            "gitsign.rekorMode=offline",
+        ] {
+            assert!(signed.iter().any(|a| a == pin), "{signed:?} lacks {pin}");
+        }
+        assert!(
+            signed.ends_with(&["tag", "-s", "v0.3.0", "-m", "v0.3.0", "abc123"].map(String::from)),
+            "{signed:?}"
+        );
+        let plain = tag_step("v0.3.0", "abc123", false).args;
+        assert!(!plain.iter().any(|a| a.contains("gitsign")), "{plain:?}");
+        assert!(plain.iter().any(|a| a == "-a"), "{plain:?}");
+    }
+
+    /// The release is created as a draft and published by clearing the draft
+    /// flag.
+    #[test]
+    fn the_release_is_created_as_a_draft_and_published_from_it() {
+        let gh = Gh {
+            root: Path::new("."),
+            repo: None,
+        };
+        let create = gh.create_step("v0.3.0", Path::new("notes.md")).args;
+        assert!(create.starts_with(&["release", "create", "v0.3.0"].map(String::from)));
+        assert!(create.iter().any(|a| a == "--draft"), "{create:?}");
+        assert!(create.iter().any(|a| a == "--verify-tag"), "{create:?}");
+        assert_eq!(
+            gh.publish_step("v0.3.0").args,
+            ["release", "edit", "v0.3.0", "--draft=false"]
+        );
+    }
+
+    /// `check_tag` refuses a tag naming another commit, and a tag object whose
+    /// header names another tag even when its message names this one.
+    #[cfg(unix)]
+    #[test]
+    fn check_tag_refuses_another_commit_or_tag_name() {
+        let scratch = Scratch::new("spate-xtask-check-tag").unwrap();
+        let root = scratch.dir();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args([
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "tag.gpgSign=false",
+                ])
+                .args(args)
+                .current_dir(root)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}");
+            String::from_utf8(out.stdout).unwrap().trim().to_owned()
+        };
+        git(&["init", "-q"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "a"]);
+        let first = git(&["rev-parse", "HEAD"]);
+        git(&["tag", "-a", "v0.3.0", "-m", "v0.3.0", &first]);
+        git(&["commit", "-q", "--allow-empty", "-m", "b"]);
+        let second = git(&["rev-parse", "HEAD"]);
+        let process = ProcessGit {
+            root,
+            sign: false,
+            remote: "origin".into(),
+        };
+        let err = process
+            .check_tag("v0.3.0", "spate-etl/spate", &second)
+            .unwrap_err();
+        assert!(err.message.contains("names"), "{}", err.message);
+
+        git(&["tag", "-a", "v9.9.9", "-m", "tag v0.3.0", &first]);
+        let object = git(&["rev-parse", "refs/tags/v9.9.9"]);
+        git(&["update-ref", "refs/tags/v0.3.0", &object]);
+        let err = process
+            .check_tag("v0.3.0", "spate-etl/spate", &first)
+            .unwrap_err();
+        assert!(
+            err.message.contains("carries another tag name"),
+            "{}",
+            err.message
+        );
+    }
+
+    /// The tag signer identity is the one RELEASING.md tells a consumer to pin.
+    #[test]
+    fn the_tag_signer_matches_releasing_md() {
+        let doc = include_str!("../../../RELEASING.md");
+        let pin = format!("--certificate-identity {} ", tag_signer("spate-etl/spate"));
+        assert!(doc.contains(&pin), "RELEASING.md lacks {pin}");
+    }
+
+    /// Without a bundle the attestation is read from GitHub's attestation store.
+    #[test]
+    fn attestation_verify_without_a_bundle_reads_the_store() {
+        let step = attestation_step(
+            Path::new("a.crate"),
+            None,
+            "spate-etl/spate/.github/workflows/release-build.yml",
+            "https://slsa.dev/provenance/v1",
+            "abc123",
+        );
+        assert!(
+            !step.args.iter().any(|x| x == "--bundle"),
+            "{:?}",
+            step.args
+        );
+        assert!(step.args.iter().any(|x| x == "--deny-self-hosted-runners"));
     }
 
     /// The commit an `ls-remote` listing names: the peeled line of an annotated
@@ -1101,7 +1450,12 @@ mod tests {
                     .success()
             );
         }
-        assert!(ProcessGit { root }.remote_tag("v0.3.0").is_err());
+        let git = ProcessGit {
+            root,
+            sign: false,
+            remote: "origin".into(),
+        };
+        assert!(git.remote_tag("v0.3.0").is_err());
     }
 
     /// Each excluded crate becomes one `--exclude` pair.

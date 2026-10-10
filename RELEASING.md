@@ -99,10 +99,14 @@ After the upload it checks what landed. `trustpub_data` is read back for every
 crate and must name the release commit. Each packaged crate's sha256 must
 equal the index's `cksum`, so the attestation provably covers the bytes the
 registry serves. A scratch project resolves `spate` at the exact version from
-the registry. The commit is then tagged, the GitHub release opens with the
-changelog section, the per-crate SBOMs, `SHA256SUMS` and the attestation bundle
-as assets, and the docs deploy is dispatched. The deploy is dispatched after the crates
-are live, so the install snippets are true the moment the site serves them.
+the registry. The commit is then tagged, with a keyless signature made as
+`release.yml` and checked before the tag is pushed. The GitHub release opens
+as a draft with the changelog section, takes the per-crate SBOMs, `SHA256SUMS`
+and the attestation bundle as assets, and is published only once all of them
+are on it. Published, it is immutable: GitHub locks its assets and its tag and
+signs a release attestation, which the run verifies. The docs deploy is
+dispatched last, after the crates are live, so the install snippets are true
+the moment the site serves them.
 
 ## Rehearse it first
 
@@ -143,7 +147,19 @@ failure surfaces the same way.
 Judge by the registry and the tag, never by the workflow reporting success.
 The publish already enforces the mechanical half: every crate's
 `trustpub_data` names the tagged commit, and a scratch project resolves the
-release. To check by hand:
+release. One command re-checks the rest from what anyone can read:
+
+```sh
+cargo xtask release verify X.Y.Z
+```
+
+It checks the tag's signature, each crate's origin and its provenance and
+SBOM attestations against the tagged commit, and that the GitHub release is
+immutable, attested and carries every asset. It needs `gh` 2.102.0 or later,
+authenticated, and `gitsign` on the path. Run it from a plain clone checked out
+at the tag, since gitsign cannot resolve tags from a linked worktree. It
+fails for 0.2.0 and earlier, which predate signed tags and attestations. To
+check by hand:
 
 ```sh
 # Every crate at the new version.
@@ -155,14 +171,26 @@ for c in $(cargo metadata --no-deps --format-version 1 \
        | jq -r '.crate.max_version')"
 done
 
-# The tag and the release exist.
-git ls-remote --tags origin "refs/tags/vX.Y.Z"
-gh release view vX.Y.Z
+# The tag is signed by release.yml on main, run by the push of the release commit.
+git fetch origin tag vX.Y.Z
+gitsign verify-tag vX.Y.Z \
+  --certificate-identity https://github.com/spate-etl/spate/.github/workflows/release.yml@refs/heads/main \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-github-workflow-sha "$(git rev-parse 'vX.Y.Z^{commit}')" \
+  --certificate-github-workflow-trigger push
+
+# The release is immutable, and a downloaded asset is the one it carries.
+gh release verify vX.Y.Z
+gh release download vX.Y.Z --pattern SHA256SUMS
+gh release verify-asset vX.Y.Z SHA256SUMS
 
 # The site serves the new snippets once the dispatched deploy finishes.
 curl -s https://spate.kainth.dev/docs/user-guide/getting-started/installation \
   | grep -o 'version = "X.Y"'
 ```
+
+GitHub shows the tag as "Unverified", because it does not check gitsign's
+Sigstore certificates; `gitsign verify-tag` is the check.
 
 The dispatched deploy is fire-and-forget: `finish` reports it started, not
 that it landed, which is why the check above exists. docs.rs builds
@@ -260,6 +288,16 @@ skips a new crate, and says so, until the name is claimed.
 Configuration that lives outside this repository, verified when it changes
 rather than on each release:
 
+- **Immutable releases**, turned on in the repository's settings. `finish`
+  refuses a release GitHub does not report as immutable. The setting applies
+  only to releases published after it is turned on. A release published
+  mutable stays mutable: turn the setting on, delete the release with
+  `gh release delete vX.Y.Z` without `--cleanup-tag`, and re-run the failed
+  jobs. Check first that `gh release view vX.Y.Z --json isImmutable` reads
+  false, because deleting an immutable release retires its tag for good.
+- **A tag ruleset on `v*`** restricting creation, update and deletion, with
+  the `spate-release` App as the only bypass actor. Between the tag push and
+  the release's publication, nothing else locks the tag.
 - **The GitHub App**: repository variable `RELEASE_APP_ID` and secret
   `RELEASE_APP_PRIVATE_KEY`. The App is owned by the organisation, so it
   survives an account change, and the workflow narrows each minted token to

@@ -747,17 +747,15 @@ mod tests {
             }
             drawn.insert((leader.stop.kind, leader.stop.n));
         }
-        let stages = [
-            LeaderStage::Bump,
-            LeaderStage::Seed(2),
-            LeaderStage::Seed(3),
-            LeaderStage::Seed(4),
-            LeaderStage::FirstAssign,
-            LeaderStage::MidAssign,
-            LeaderStage::Publish,
-        ];
-        let expected: std::collections::HashSet<_> =
-            stages.iter().map(|s| (s.stop().kind, s.stop().n)).collect();
+        let expected = std::collections::HashSet::from([
+            (WriteKind::Plan, 1),
+            (WriteKind::Seed, 2),
+            (WriteKind::Seed, 3),
+            (WriteKind::Seed, 4),
+            (WriteKind::Assign, 1),
+            (WriteKind::Assign, 2),
+            (WriteKind::Publish, 1),
+        ]);
         assert_eq!(drawn, expected);
     }
 

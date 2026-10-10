@@ -131,24 +131,15 @@ impl Run<'_> {
             fired: true,
         });
 
-        let cap = Instant::now() + Duration::from_millis(TAKEOVER_LEASES * tuning.lease_ms);
-        while !leadership_moved(&name, &read_leader(rt, &env.direct)) {
-            if Instant::now() >= cap {
-                killed.violation = Some(Violation {
-                    check: Check::LeaderNotReplaced,
-                    key: Some("leader".to_owned()),
-                    rev: None,
-                    instance: Some(name.clone()),
-                    pid: Some(pid),
-                    detail: format!(
-                        "no other instance held the leader key within {TAKEOVER_LEASES} leases \
-                         of the kill"
-                    ),
-                });
-                break;
-            }
-            std::thread::sleep(POLL);
-        }
+        let cap_ms = journal::now_ms() + TAKEOVER_LEASES * tuning.lease_ms;
+        killed.violation = await_takeover(
+            &name,
+            pid,
+            cap_ms,
+            || read_leader(rt, &env.direct),
+            journal::now_ms,
+            || std::thread::sleep(POLL),
+        );
 
         std::thread::sleep(Duration::from_millis(plan.respawn_after_ms));
         let process = self.spawn(workers, env, index, 2, tuning)?;
@@ -162,6 +153,36 @@ impl Run<'_> {
             .map_err(status)?;
         Ok((timed_out, fired, killed))
     }
+}
+
+/// Polls `read` until it shows the leader key held by an instance other than
+/// `killed`, calling `sleep` between polls. A [`Check::LeaderNotReplaced`]
+/// violation when `now` reaches `cap_ms` first.
+fn await_takeover(
+    killed: &str,
+    pid: u32,
+    cap_ms: u64,
+    mut read: impl FnMut() -> LeaderAtKill,
+    mut now: impl FnMut() -> u64,
+    mut sleep: impl FnMut(),
+) -> Option<Violation> {
+    while !leadership_moved(killed, &read()) {
+        if now() >= cap_ms {
+            return Some(Violation {
+                check: Check::LeaderNotReplaced,
+                key: Some("leader".to_owned()),
+                rev: None,
+                instance: Some(killed.to_owned()),
+                pid: Some(pid),
+                detail: format!(
+                    "no other instance held the leader key within {TAKEOVER_LEASES} leases \
+                     of the kill"
+                ),
+            });
+        }
+        sleep();
+    }
+    None
 }
 
 /// The first of `first`, in start order, whose journal holds a `leader_stop`
@@ -225,5 +246,43 @@ mod tests {
         assert!(!leadership_moved("w1", &held("w1", 4)));
         assert!(!leadership_moved("w1", &LeaderAtKill::Vacant));
         assert!(!leadership_moved("w1", &LeaderAtKill::Unread));
+    }
+
+    /// The wait ends at the first read naming another owner; the killed
+    /// owner at a higher generation, an absent key and a failed read until
+    /// the cap give a `LeaderNotReplaced` violation at exactly the cap.
+    #[test]
+    fn takeover_comes_from_another_owner_by_the_cap() {
+        let now = std::cell::Cell::new(0);
+        let mut reads = [held("w1", 2), LeaderAtKill::Vacant, held("w2", 2)].into_iter();
+        let found = await_takeover(
+            "w1",
+            9,
+            200,
+            || reads.next().expect("polled past the takeover"),
+            || now.get(),
+            || now.set(now.get() + 50),
+        );
+        assert_eq!((found, now.get()), (None, 100));
+
+        now.set(0);
+        let mut reads = [held("w1", 3), LeaderAtKill::Vacant, LeaderAtKill::Unread]
+            .into_iter()
+            .cycle();
+        let found = await_takeover(
+            "w1",
+            9,
+            200,
+            || reads.next().expect("cycles"),
+            || now.get(),
+            || now.set(now.get() + 50),
+        );
+        assert_eq!(
+            (found.map(|v| (v.check, v.instance, v.pid)), now.get()),
+            (
+                Some((Check::LeaderNotReplaced, Some("w1".to_owned()), Some(9))),
+                200
+            )
+        );
     }
 }

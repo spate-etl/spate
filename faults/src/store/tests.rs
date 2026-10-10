@@ -1392,7 +1392,8 @@ fn count_publish_stop() {
 }
 
 /// A publish plan stops at the first `plan` update after a seed sent through
-/// a clone, so a retried bump before seeding does not count.
+/// a clone and records that publish as not sent; a retried bump before
+/// seeding does not count.
 #[tokio::test]
 async fn stop_at_publish_skips_a_retried_bump() {
     let plan = StopPlan {
@@ -1412,10 +1413,14 @@ async fn stop_at_publish_skips_a_retried_bump() {
     );
     update(&store, "plan", plan_bytes(1), rev).await;
     assert_eq!(PUBLISH_STOPS.load(Ordering::SeqCst), 1);
-    let Some(Event::LeaderStop { value, .. }) = leader_stop_line(&path) else {
+    let Some(Event::LeaderStop {
+        value, published, ..
+    }) = leader_stop_line(&path)
+    else {
         panic!("no leader_stop line: {:?}", events(&path));
     };
     assert_eq!(value["planned"], 1);
+    assert!(!published, "the stopped publish is not yet sent");
 }
 
 static ONCE_STOPS: AtomicU32 = AtomicU32::new(0);

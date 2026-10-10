@@ -894,8 +894,8 @@ pub(crate) fn build_signer(repo: &str) -> String {
 }
 
 /// Judges a published release from what anyone can read, without trusting the
-/// run that made it. Runs from a checkout of the tag, whose members are the
-/// crates it checks.
+/// run that made it. Runs from a clean checkout of the tag, whose members
+/// are the crates it checks.
 pub(crate) fn verify(host: &Host<'_>, version: Version, repo: &str) -> Outcome {
     let tag = format!("v{version}");
 
@@ -904,6 +904,13 @@ pub(crate) fn verify(host: &Host<'_>, version: Version, repo: &str) -> Outcome {
         .git
         .remote_tag(&tag)?
         .ok_or_else(|| Error::msg(format!("{tag} is not tagged in {repo}")))?;
+    // The crate set is read from the working tree, so it must be the tag's.
+    if !host.git.is_clean()? {
+        return Err(Error::msg(format!(
+            "this checkout has uncommitted changes; verify {tag} from a clean\n  \
+             checkout of {tag}"
+        )));
+    }
     let head = host.git.short_head()?;
     if !commit.starts_with(&head) {
         return Err(Error::msg(format!(

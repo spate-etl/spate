@@ -135,6 +135,8 @@ struct FakeForge<'a> {
     create_release_failures: RefCell<u32>,
     /// The first create lands and then reports failure.
     create_lands_then_fails: RefCell<bool>,
+    /// Whether each attestation check was given a bundle.
+    bundled: RefCell<Vec<bool>>,
 }
 
 impl<'a> FakeForge<'a> {
@@ -267,11 +269,12 @@ impl Forge for FakeForge<'_> {
     fn verify_attestation(
         &self,
         file: &Path,
-        _bundle: Option<&Path>,
+        bundle: Option<&Path>,
         signer_workflow: &str,
         predicate_type: &str,
         commit: &str,
     ) -> Outcome {
+        self.bundled.borrow_mut().push(bundle.is_some());
         let name = file.file_name().unwrap().to_string_lossy().into_owned();
         if self.unattested.as_deref() == Some(name.as_str()) || commit != SHA {
             return Err(fail("verify"));
@@ -2150,7 +2153,7 @@ fn finish_verifies_the_release_again_after_a_pause() {
 
 /// `verify` runs only from a checkout of the tag it verifies.
 #[test]
-fn verify_refuses_a_checkout_at_another_version() {
+fn verify_refuses_a_checkout_of_another_commit() {
     let log = Log::default();
     let (mut git, forge) = released(&log);
     git.head = OTHER;
@@ -2320,4 +2323,71 @@ fn finish_stops_when_the_release_never_verifies() {
     );
     assert_eq!(pauses.of(Duration::from_secs(10)), 1);
     assert!(!log.has("dispatch docs"), "{:?}", log.entries());
+}
+
+/// `verify` refuses a checkout with uncommitted changes, whose manifests could
+/// leave a published crate unchecked.
+#[test]
+fn verify_refuses_a_dirty_checkout() {
+    let log = Log::default();
+    let (mut git, forge) = released(&log);
+    git.clean = false;
+    let (registry, _) = published(&log);
+    registry
+        .crates
+        .borrow_mut()
+        .get_mut("spate-kafka")
+        .unwrap()
+        .last_mut()
+        .unwrap()
+        .2 = OTHER.into();
+    let workspace = FakeWorkspace::new(&log, &["spate-core", "spate"]);
+    let pauses = Pauses::default();
+    let err = verify(
+        &host!(&git, &forge, &registry, &workspace, pauses),
+        v("0.3.0"),
+        "spate-etl/spate",
+    )
+    .unwrap_err();
+    assert!(
+        err.message.contains("uncommitted changes"),
+        "{}",
+        err.message
+    );
+}
+
+/// `verify_artifacts` checks each attestation against the staged bundle, and
+/// `verify` reads each one from the attestation store.
+#[test]
+fn attestations_come_from_the_bundle_before_publish_and_the_store_after() {
+    let log = Log::default();
+    let git = FakeGit::new(&log);
+    let forge = FakeForge::new(&log);
+    let registry = FakeRegistry::with(&CRATES);
+    let workspace = FakeWorkspace::new(&log, &CRATES);
+    let staged = artifacts(true);
+    let pauses = Pauses::default();
+    verify_artifacts(
+        &host!(&git, &forge, &registry, &workspace, pauses),
+        staged.dir(),
+        SIGNER,
+        SHA,
+    )
+    .unwrap();
+    let before = forge.bundled.take();
+    assert_eq!(before.len(), 7);
+    assert!(before.iter().all(|b| *b), "{before:?}");
+
+    let log = Log::default();
+    let (git, forge) = released(&log);
+    let (registry, workspace) = published(&log);
+    verify(
+        &host!(&git, &forge, &registry, &workspace, pauses),
+        v("0.3.0"),
+        "spate-etl/spate",
+    )
+    .unwrap();
+    let after = forge.bundled.take();
+    assert_eq!(after.len(), 6);
+    assert!(after.iter().all(|b| !*b), "{after:?}");
 }

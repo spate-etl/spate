@@ -84,9 +84,9 @@ pub(crate) trait Forge {
     fn assets(&self, tag: &str) -> Result<Vec<String>, Error>;
     /// Starts the documentation deploy.
     fn dispatch_docs(&self) -> Outcome;
-    /// Verifies that an attestation in `bundle`, of `predicate_type`, covers
-    /// `file` and was signed by `signer_workflow` running from `main` at
-    /// `commit`.
+    /// Verifies that an attestation of `predicate_type`, read from `bundle` or
+    /// from the attestation store when it is `None`, covers `file` and was
+    /// signed by `signer_workflow` running from `main` at `commit`.
     fn verify_attestation(
         &self,
         file: &Path,
@@ -430,14 +430,12 @@ impl Forge for Gh<'_> {
     }
 
     fn release_state(&self, tag: &str) -> Result<ReleaseState, Error> {
-        let mut command = Command::new("gh");
-        command
-            .args(["release", "view", tag, "--json", "isDraft,isImmutable"])
-            .current_dir(self.root);
-        if let Some(repo) = self.repo {
-            command.env("GH_REPO", repo);
-        }
-        let out = command
+        // Run by hand: gh's stderr decides whether the release is missing.
+        let step = self.step(&["release", "view", tag, "--json", "isDraft,isImmutable"]);
+        let out = Command::new(step.program)
+            .args(&step.args)
+            .envs(step.env.iter().map(|(k, v)| (*k, v.as_str())))
+            .current_dir(self.root)
             .output()
             .map_err(|e| Error::msg(format!("gh release view: {e}")))?;
         release_view(
@@ -1173,6 +1171,25 @@ mod tests {
         assert_eq!(uploaded_assets(raw).unwrap(), ["spate-0.3.0.cdx.json"]);
         assert!(uploaded_assets(r#"{"assets":[]}"#).unwrap().is_empty());
         assert!(uploaded_assets("not json").is_err());
+    }
+
+    /// A named repository reaches gh through `GH_REPO`; without one gh reads
+    /// the checkout's.
+    #[test]
+    fn a_named_repository_reaches_gh() {
+        let named = Gh {
+            root: Path::new("."),
+            repo: Some("spate-etl/spate"),
+        };
+        assert_eq!(
+            named.publish_step("v0.3.0").env,
+            [("GH_REPO", "spate-etl/spate".to_owned())]
+        );
+        let local = Gh {
+            root: Path::new("."),
+            repo: None,
+        };
+        assert!(local.publish_step("v0.3.0").env.is_empty());
     }
 
     /// Without a bundle the attestation is read from GitHub's attestation store.

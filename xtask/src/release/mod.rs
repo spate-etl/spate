@@ -105,11 +105,10 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: ReleaseCommand) -> Outco
         ReleaseCommand::Verify { repo, .. } => Some(repo.clone()),
         _ => None,
     };
-    let remote = verified_repo.as_ref().map_or_else(
-        || "origin".to_owned(),
-        |r| format!("https://github.com/{r}.git"),
-    );
-    let git = ProcessGit { root, remote };
+    let git = ProcessGit {
+        root,
+        remote: remote(verified_repo.as_deref()),
+    };
     let forge = Gh {
         root,
         repo: verified_repo.as_deref(),
@@ -233,6 +232,15 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: ReleaseCommand) -> Outco
         }
         ReleaseCommand::DryRun { version, keep } => dry_run(root, &version, keep),
     }
+}
+
+/// The git remote tags are read from: `repo` on GitHub, or the checkout's
+/// `origin`.
+fn remote(repo: Option<&str>) -> String {
+    repo.map_or_else(
+        || "origin".to_owned(),
+        |r| format!("https://github.com/{r}.git"),
+    )
 }
 
 fn head_is_detached(root: &Path) -> Result<bool, Error> {
@@ -456,6 +464,17 @@ fn dry_run(root: &Path, version: &str, keep: bool) -> Outcome {
 mod tests {
     use super::*;
     use crate::checks::scratch::Scratch;
+
+    /// `verify --repo` reads tags from that repository on GitHub; every other
+    /// step reads the checkout's `origin`.
+    #[test]
+    fn a_named_repository_is_read_over_https() {
+        assert_eq!(
+            remote(Some("spate-etl/spate")),
+            "https://github.com/spate-etl/spate.git"
+        );
+        assert_eq!(remote(None), "origin");
+    }
 
     fn git(root: &Path, args: &[&str]) {
         let status = std::process::Command::new("git")

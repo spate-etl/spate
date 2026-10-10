@@ -156,8 +156,8 @@ It checks each crate's origin and its provenance and SBOM attestations
 against the commit the tag names, and that the GitHub release is immutable,
 attested and carries every asset. GitHub's attestation of an immutable release
 binds the tag to its git object and to every asset's digest. It needs `gh`
-2.102.0 or later, authenticated, and a checkout of the tag, whose members are
-the crates it checks. It fails for 0.2.0 and earlier, which predate
+2.102.0 or later, authenticated, and a clean checkout of the tag, whose
+members are the crates it checks. It fails for 0.2.0 and earlier, which predate
 attestations. To check by hand:
 
 ```sh

@@ -17,13 +17,16 @@ mod scenarios;
 
 use futures_util::StreamExt as _;
 use spate_coordination::store::nats::{NatsConfig, NatsCredentials, NatsStore, Secret};
-use spate_coordination::store::{CasOutcome, CoordinationStore, Keyspace, StoreError, WatchEvent};
+use spate_coordination::store::{
+    CasOutcome, CoordinationStore, Keyspace, Revision, StoreError, WatchEvent,
+};
 use spate_coordination::{
     CoordinationConfig, CoordinationErrorKind, NatsCoordinator, SplitCoordinator, SplitProgress,
     StoreCoordinator,
 };
 use spate_test_support::container_image;
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use support::{Held, PhasedPlanner, crash, drive, drive_pair, runtime, split_id};
@@ -414,6 +417,116 @@ fn a_listing_filters_its_consumer_to_the_prefix() {
         assert_eq!(
             filters,
             ["$KV.spate_coordination_list-filter_state.split.>"]
+        );
+    });
+}
+
+/// A listing taken while every key under its prefix is CAS-rewritten returns
+/// each key at or above the revision it held when the listing began, under a
+/// dot-terminated and a mid-token prefix. Regression for #985.
+#[test]
+#[ignore = "needs Docker; run explicitly"]
+fn a_listing_under_cas_rewrites_omits_no_live_key() {
+    const LISTINGS: usize = 100;
+    let (_nats, port) = start_nats(None);
+    let rt = runtime();
+    let store =
+        NatsStore::new(nats_config(port, "rewrites"), Duration::from_secs(10)).expect("store");
+    let mut keys: Vec<String> = (0..32).map(|i| format!("hb.{i}")).collect();
+    keys.extend(["hbx".to_string(), "other.1".to_string()]);
+    rt.block_on(async {
+        let mut revisions = Vec::new();
+        for key in &keys {
+            let created = store
+                .create(Keyspace::Ephemeral, key, b"v".to_vec())
+                .await
+                .expect("create")
+                .won()
+                .expect("created");
+            revisions.push(AtomicU64::new(created.0));
+        }
+        let revisions = Arc::new(revisions);
+        let stop = Arc::new(AtomicBool::new(false));
+        let writers: Vec<_> = keys
+            .iter()
+            .enumerate()
+            .map(|(i, key)| {
+                let (store, revisions, stop, key) =
+                    (store.clone(), revisions.clone(), stop.clone(), key.clone());
+                tokio::spawn(async move {
+                    let mut revision = Revision(revisions[i].load(Ordering::Acquire));
+                    while !stop.load(Ordering::Acquire) {
+                        match store
+                            .update(Keyspace::Ephemeral, &key, b"v".to_vec(), revision)
+                            .await
+                            .expect("rewrite")
+                        {
+                            CasOutcome::Won(next) => {
+                                revision = next;
+                                revisions[i].store(next.0, Ordering::Release);
+                            }
+                            CasOutcome::Lost => panic!("{key} lost a CAS nobody else writes"),
+                        }
+                    }
+                })
+            })
+            .collect();
+        let snapshot = || -> Vec<u64> {
+            revisions
+                .iter()
+                .map(|r| r.load(Ordering::Acquire))
+                .collect()
+        };
+        let (problems, overlapped) = tokio::time::timeout(Duration::from_secs(30), async {
+            let mut problems = Vec::new();
+            let mut overlapped = 0;
+            for n in 0..LISTINGS {
+                let prefix = if n % 2 == 0 { "hb." } else { "hb" };
+                let floors = snapshot();
+                let listed = store.list(Keyspace::Ephemeral, prefix).await;
+                if floors != snapshot() {
+                    overlapped += 1;
+                }
+                let listed: BTreeMap<String, u64> = match listed {
+                    Ok(listed) => listed.into_iter().map(|e| (e.key, e.revision.0)).collect(),
+                    Err(e) => {
+                        problems.push(format!("listing {n} under {prefix:?} failed: {e}"));
+                        continue;
+                    }
+                };
+                for (key, floor) in keys.iter().zip(floors) {
+                    match (key.starts_with(prefix), listed.get(key)) {
+                        (true, None) => {
+                            problems.push(format!("listing {n} under {prefix:?} omitted {key}"));
+                        }
+                        (true, Some(&revision)) if revision < floor => problems.push(format!(
+                            "listing {n} under {prefix:?} returned {key} at {revision}, \
+                             below {floor}"
+                        )),
+                        (false, Some(_)) => {
+                            problems.push(format!("listing {n} under {prefix:?} returned {key}"));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            (problems, overlapped)
+        })
+        .await
+        .expect("the listings hung");
+        stop.store(true, Ordering::Release);
+        for writer in writers {
+            writer.await.expect("writer");
+        }
+        assert!(
+            problems.is_empty(),
+            "{} problems over {LISTINGS} listings, first: {:?}",
+            problems.len(),
+            &problems[..problems.len().min(5)]
+        );
+        assert!(
+            overlapped >= 90,
+            "rewrites overlapped only {overlapped} of {LISTINGS} listings"
         );
     });
 }

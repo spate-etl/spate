@@ -697,7 +697,11 @@ fn raise_stop() {
 ///
 /// The stop runs when the `create` or `update` future is built, before
 /// anything polls it. Under the coordinator's per-call timeout, which starts on
-/// the first poll, the resumed write therefore gets a whole `op_timeout`.
+/// the first poll, the resumed write therefore gets a whole `op_timeout`. For a
+/// seed plan whose earlier creates are still in flight when its `n`th is built,
+/// the stop runs when the last of them wins, and the creates from the `n`th on
+/// wait until it has returned. An earlier create that does not win, or is
+/// dropped first, releases them with no stop.
 /// Before stopping it appends a `stop` line, or a `leader_stop` line for a
 /// leader write, and arms its [`Fence`], when it has one. With a token path,
 /// it stops only if it creates that file, so one process of those sharing the
@@ -715,10 +719,81 @@ pub struct StopAt<S> {
     seeded: Arc<AtomicBool>,
     /// This process has sent its publish.
     published: Arc<AtomicBool>,
+    seeds: Arc<SeedGate>,
     stop: fn(),
 }
 
+/// The creates a seed plan holds until its stop has run.
+#[derive(Debug, Default)]
+struct SeedGate {
+    state: std::sync::Mutex<SeedState>,
+    open: AtomicBool,
+    opened: tokio::sync::Notify,
+}
+
+#[derive(Debug, Default)]
+struct SeedState {
+    /// Earlier seed creates that have won.
+    won: u32,
+    /// The `n`th seed create's key, value and stop, while it waits.
+    waiting: Option<(String, Vec<u8>, Due)>,
+}
+
+impl SeedGate {
+    fn lock(&self) -> std::sync::MutexGuard<'_, SeedState> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Releases every held create and holds no more. Call without the lock.
+    fn open(&self) {
+        self.lock().waiting = None;
+        self.open.store(true, Ordering::SeqCst);
+        self.opened.notify_waiters();
+    }
+
+    async fn wait(&self) {
+        loop {
+            let opened = self.opened.notified();
+            if self.open.load(Ordering::SeqCst) {
+                return;
+            }
+            opened.await;
+        }
+    }
+}
+
+/// What a `create` future does around the inner create.
+enum Hold {
+    /// Forwards.
+    No,
+    /// Forwards, then counts a win towards the seed plan's `n`th.
+    Earlier(u32, OpenOnDrop),
+    /// Waits for the [`SeedGate`], then forwards.
+    Gate,
+}
+
+/// Opens its [`SeedGate`] if dropped before [`OpenOnDrop::disarm`], so an
+/// earlier seed create dropped before it resolves gives the plan up.
+struct OpenOnDrop(Option<Arc<SeedGate>>);
+
+impl OpenOnDrop {
+    fn disarm(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for OpenOnDrop {
+    fn drop(&mut self) {
+        if let Some(gate) = self.0.take() {
+            gate.open();
+        }
+    }
+}
+
 /// A stop [`StopAt`] has decided on.
+#[derive(Debug)]
 enum Due {
     /// A commit replacing `expected`, at `epoch`.
     Commit { expected: u64, epoch: u64 },
@@ -757,6 +832,7 @@ impl<S> StopAt<S> {
             count: Arc::new(AtomicU32::new(0)),
             seeded: Arc::new(AtomicBool::new(false)),
             published: Arc::new(AtomicBool::new(false)),
+            seeds: Arc::new(SeedGate::default()),
             stop: raise_stop,
         }
     }
@@ -772,7 +848,9 @@ impl<S> StopAt<S> {
     ) -> Option<Due> {
         let plan = self.plan?;
         if plan.leads() {
-            return self.leader_due(plan, ks, key, value, expected);
+            return self
+                .leader_due(plan, ks, key, value, expected)
+                .filter(|due| matches!(due, Due::Leader { n, .. } if *n == plan.n));
         }
         let expected = expected?;
         if ks != Keyspace::Durable || !key.starts_with(SPLIT_PREFIX) {
@@ -789,8 +867,8 @@ impl<S> StopAt<S> {
         })
     }
 
-    /// [`StopAt::due`] under a leader plan. Also records the process's first
-    /// seed and its publish.
+    /// Counts a write a leader plan counts, and returns it as a stop whatever
+    /// its ordinal. Also records the process's first seed and its publish.
     fn leader_due(
         &self,
         plan: StopPlan,
@@ -822,7 +900,7 @@ impl<S> StopAt<S> {
             return None;
         }
         let n = self.count.fetch_add(1, Ordering::SeqCst) + 1;
-        (n == plan.n).then_some(Due::Leader {
+        Some(Due::Leader {
             kind: plan.kind,
             n,
             published,
@@ -832,9 +910,68 @@ impl<S> StopAt<S> {
     /// Stops the process when this write is the one its plan names and, with
     /// a token path, this process creates the token.
     fn stop_if_due(&self, ks: Keyspace, key: &str, value: &[u8], expected: Option<Revision>) {
-        let Some(due) = self.due(ks, key, value, expected) else {
-            return;
+        if let Some(due) = self.due(ks, key, value, expected) {
+            self.stop_at(due, key, value);
+        }
+    }
+
+    /// Counts a create, stops at it when due and nothing is in the way, and
+    /// returns what its future does.
+    fn hold(&self, ks: Keyspace, key: &str, value: &[u8]) -> Hold {
+        let Some(plan) = self.plan.filter(|plan| plan.kind == WriteKind::Seed) else {
+            self.stop_if_due(ks, key, value, None);
+            return Hold::No;
         };
+        let Some(due @ Due::Leader { n, .. }) = self.leader_due(plan, ks, key, value, None) else {
+            return Hold::No;
+        };
+        if n < plan.n {
+            return Hold::Earlier(plan.n, OpenOnDrop(Some(Arc::clone(&self.seeds))));
+        }
+        if n > plan.n {
+            return if self.seeds.open.load(Ordering::SeqCst) {
+                Hold::No
+            } else {
+                Hold::Gate
+            };
+        }
+        {
+            let mut state = self.seeds.lock();
+            if !self.seeds.open.load(Ordering::SeqCst) && state.won < n - 1 {
+                state.waiting = Some((key.to_owned(), value.to_vec(), due));
+                return Hold::Gate;
+            }
+        }
+        self.stop_at(due, key, value);
+        self.seeds.open();
+        Hold::No
+    }
+
+    /// Counts an earlier seed create's result. The win that completes the
+    /// `n − 1` stops at the waiting `n`th; any other result gives the plan up.
+    fn seed_done(&self, n: u32, result: &Result<CasOutcome, StoreError>) {
+        if !matches!(result, Ok(CasOutcome::Won(_))) {
+            self.seeds.open();
+            return;
+        }
+        let waiting = {
+            let mut state = self.seeds.lock();
+            state.won += 1;
+            if state.won + 1 == n {
+                state.waiting.take()
+            } else {
+                None
+            }
+        };
+        if let Some((key, value, due)) = waiting {
+            self.stop_at(due, &key, &value);
+            self.seeds.open();
+        }
+    }
+
+    /// Stops the process at `due` on `key` unless, with a token path, another
+    /// process holds the token.
+    fn stop_at(&self, due: Due, key: &str, value: &[u8]) {
         if let Some(once) = &self.once
             && OpenOptions::new()
                 .write(true)
@@ -890,8 +1027,25 @@ impl<S: CoordinationStore + Clone> CoordinationStore for StopAt<S> {
         key: &str,
         value: Vec<u8>,
     ) -> impl Future<Output = Result<CasOutcome, StoreError>> + Send {
-        self.stop_if_due(ks, key, &value, None);
-        self.inner.create(ks, key, value)
+        let hold = self.hold(ks, key, &value);
+        // Boxed: held inline, the inner future overflows the I/O thread's
+        // stack in debug builds.
+        let inner = Box::pin(self.inner.create(ks, key, value));
+        async move {
+            match hold {
+                Hold::No => inner.await,
+                Hold::Earlier(n, unresolved) => {
+                    let result = inner.await;
+                    unresolved.disarm();
+                    self.seed_done(n, &result);
+                    result
+                }
+                Hold::Gate => {
+                    self.seeds.wait().await;
+                    inner.await
+                }
+            }
+        }
     }
 
     // Not an `async fn`: the stop must happen before the caller's timeout

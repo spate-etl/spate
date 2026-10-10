@@ -203,9 +203,10 @@ scenarios re-send the stopped commit at the current revision after it loses its
 CAS, and pass only when the oracle reports the stale epoch at that write's
 revision against the stopped worker. The leader-kill scenarios start three
 workers at once, and every worker's first process carries one seeded stage of a
-leader's work: the generation bump, the second to fourth seeded progress record,
-the first or second assignment write that names a split, or the plan publish,
-which is the first `plan` update after a seed. The first process to reach the
+leader's work: the generation bump, the second to fourth seeded progress record
+once the records before it have landed, the first or second assignment write
+that names a split, or the plan publish, which is the first `plan` update after
+a seed. The first process to reach the
 stage creates a token file in the run directory and stops itself with SIGSTOP
 before sending the write, and a process that finds the token carries on. Its
 `leader_stop` line records the write's value and whether the publish had gone

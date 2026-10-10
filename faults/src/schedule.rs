@@ -83,7 +83,8 @@ pub struct InProcess {
 pub enum LeaderStage {
     /// Its generation bump, the first `plan` update.
     Bump,
-    /// Its `n`th seeded progress record.
+    /// Its `n`th seeded progress record, once the `n − 1` before it have
+    /// landed.
     Seed(u32),
     /// Its first `assign.*` write that names a split.
     FirstAssign,

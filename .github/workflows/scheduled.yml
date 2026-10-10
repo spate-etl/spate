@@ -405,14 +405,14 @@ jobs:
           git config user.email 'spate-release[bot]@users.noreply.github.com'
           git commit --all --quiet --message "workspace: simulate the release bump to $next"
 
-      # The dry run cannot see these: it packages a crate with no description
+      # Packaging cannot see these: it packages a crate with no description
       # or license with a warning and exit 0, while the upload rejects it
       # (cargo issue 14249).
       - id: metadata
         run: cargo xtask release version check-metadata
 
       - id: dry-run
-        run: cargo publish --workspace --locked --dry-run
+        run: cargo xtask release package
 
       # Gated on the named steps, not `failure()`: a checkout failure would
       # file an issue asserting the workspace no longer packages. The bump
@@ -440,7 +440,7 @@ jobs:
             body_head2='this says nothing about whether the workspace packages. Read the run.'
           else
             title='The workspace no longer packages'
-            body_head='`cargo publish --workspace --locked --dry-run` or the upload-metadata'
+            body_head='`cargo xtask release package` or the upload-metadata'
             body_head2='check failed on the nightly run, at a simulated next-patch version.'
           fi
           matches=$(gh issue list --state open --search "$title in:title" --json number,title)

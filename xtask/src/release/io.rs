@@ -144,9 +144,9 @@ pub(crate) trait Workspace {
     fn generate(&self, version: Version) -> Outcome;
     /// The changelog section for `version`.
     fn notes(&self, version: Version) -> Result<String, Error>;
-    /// Packages and verify-builds every member but `excludes`.
+    /// Packages and verify-builds every publishable member but `excludes`.
     fn package(&self, excludes: &[String]) -> Outcome;
-    /// Packages every member but `excludes` without a verify build.
+    /// Packages every publishable member but `excludes` without a verify build.
     fn package_unverified(&self, excludes: &[String]) -> Outcome;
     /// Uploads every member but `excludes`, without verifying again.
     fn publish(&self, excludes: &[String]) -> Outcome;
@@ -624,6 +624,24 @@ impl LocalWorkspace<'_> {
             })
             .collect())
     }
+
+    /// The packaging step, with a verify build when `verify`, excluding the
+    /// unpublished members as well as `excludes`. `cargo package --workspace`
+    /// packages a `publish = false` member unless it is excluded.
+    fn package_step(&self, excludes: &[String], verify: bool) -> Result<Step<'static>, Error> {
+        let unpublished = self
+            .members()?
+            .into_iter()
+            .filter_map(|(p, publishable)| (!publishable).then_some(p.name));
+        let excludes: Vec<String> = excludes.iter().cloned().chain(unpublished).collect();
+        let step = Step::new("cargo", ["package", "--workspace", "--locked"]);
+        let step = if verify {
+            step
+        } else {
+            step.arg("--no-verify")
+        };
+        Ok(step.args(exclude_args(&excludes)))
+    }
 }
 
 impl Workspace for LocalWorkspace<'_> {
@@ -663,24 +681,11 @@ impl Workspace for LocalWorkspace<'_> {
     }
 
     fn package(&self, excludes: &[String]) -> Outcome {
-        run::run(
-            self.root,
-            false,
-            &Step::new("cargo", ["package", "--workspace", "--locked"])
-                .args(exclude_args(excludes)),
-        )
+        run::run(self.root, false, &self.package_step(excludes, true)?)
     }
 
     fn package_unverified(&self, excludes: &[String]) -> Outcome {
-        run::run(
-            self.root,
-            false,
-            &Step::new(
-                "cargo",
-                ["package", "--workspace", "--locked", "--no-verify"],
-            )
-            .args(exclude_args(excludes)),
-        )
+        run::run(self.root, false, &self.package_step(excludes, false)?)
     }
 
     fn publish(&self, excludes: &[String]) -> Outcome {
@@ -1107,6 +1112,37 @@ mod tests {
             exclude_args(&["a".into(), "b".into()]),
             ["--exclude", "a", "--exclude", "b"]
         );
+    }
+
+    /// Packaging, verified or not, leaves out every unpublished member,
+    /// `spate-faults` among them, and keeps the caller's excludes. Regression
+    /// for #1062.
+    #[test]
+    fn packaging_leaves_out_the_unpublished_members() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let workspace = LocalWorkspace { root };
+        let unpublished: Vec<String> = workspace
+            .members()
+            .unwrap()
+            .into_iter()
+            .filter_map(|(p, publishable)| (!publishable).then_some(p.name))
+            .collect();
+        assert!(unpublished.iter().any(|n| n == "spate-faults"));
+        let mut expected = vec!["spate-core"];
+        expected.extend(unpublished.iter().map(String::as_str));
+        for verify in [true, false] {
+            let step = workspace
+                .package_step(&["spate-core".into()], verify)
+                .unwrap();
+            let excluded: Vec<&str> = step
+                .args
+                .windows(2)
+                .filter(|w| w[0] == "--exclude")
+                .map(|w| w[1].as_str())
+                .collect();
+            assert_eq!(excluded, expected, "verify: {verify}");
+            assert_eq!(step.args.iter().any(|a| a == "--no-verify"), !verify);
+        }
     }
 
     /// The smoke consumer pins the facade and the test crate exactly.

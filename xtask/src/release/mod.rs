@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use clap::Subcommand;
 
 use crate::run::{self, Error, Outcome, Step, Streams};
-use io::{CratesIo, DryForge, DryGit, Gh, Host, LocalWorkspace, ProcessGit};
+use io::{CratesIo, DryForge, DryGit, Gh, Host, LocalWorkspace, ProcessGit, Workspace};
 use version::Version;
 
 #[derive(Subcommand)]
@@ -54,6 +54,8 @@ pub(crate) enum ReleaseCommand {
         #[arg(long, env = "EXPECTED_SHA", value_name = "SHA")]
         expected_sha: Option<String>,
     },
+    /// Package and verify-build every publishable crate, as prepare does
+    Package,
     /// Upload the crates the registry does not yet hold, with CARGO_REGISTRY_TOKEN
     Upload {
         /// The staged artifacts; every crate uploaded must be among them
@@ -177,6 +179,7 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: ReleaseCommand) -> Outco
             };
             sequence::verify_artifacts(&host, &dir, &signer, &expected)
         }
+        ReleaseCommand::Package => workspace.package(&[]),
         ReleaseCommand::Upload { artifacts } => {
             let token = std::env::var("CARGO_REGISTRY_TOKEN").is_ok_and(|t| !t.is_empty());
             sequence::upload(&host, token, &artifacts)
@@ -235,6 +238,9 @@ fn describe(cmd: &ReleaseCommand) -> &'static str {
         }
         ReleaseCommand::VerifyArtifacts { .. } => {
             "(checks SHA256SUMS, then gh attestation verify on each staged artifact)"
+        }
+        ReleaseCommand::Package => {
+            "cargo package --workspace --locked --exclude <each unpublished member>"
         }
         ReleaseCommand::Upload { .. } => {
             "cargo publish --workspace --locked --no-verify --exclude <each crate already published>"

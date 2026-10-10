@@ -131,11 +131,12 @@ that a previous release exercised; the last runs inside the real publish. It
 does not attest or verify; only a real release signs with
 `release-build.yml`'s identity.
 
-The same packaging proof also runs continuously: `ci.yml` runs a
-simulated-bump `cargo publish --dry-run` on pushes to `main` that reach a
-manifest, and `scheduled.yml` repeats it nightly, so a packaging problem
-surfaces before release day. `scheduled.yml` also generates `THIRD-PARTY.md`
-nightly, so a generator failure surfaces the same way.
+The same packaging proof also runs continuously: `ci.yml` runs
+`cargo xtask release package`, the packaging step `prepare` runs, at a
+simulated bump on pushes to `main` that reach a manifest, and `scheduled.yml`
+repeats it nightly, so a packaging problem surfaces before release day.
+`scheduled.yml` also generates `THIRD-PARTY.md` nightly, so a generator
+failure surfaces the same way.
 
 ## Judging a release
 

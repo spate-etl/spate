@@ -1,5 +1,5 @@
 ---
-description: "The Makefile and most of scripts/ move to cargo xtask, so a CI step and its local command are the same code. ADR-0062 supersedes one part."
+description: "The Makefile and most of scripts/ are replaced by cargo xtask, so a CI step and the local command that reproduces it are the same code."
 ---
 
 # ADR-0045 — One Rust task runner replaces the Makefile and most of the shell
@@ -7,7 +7,7 @@ description: "The Makefile and most of scripts/ move to cargo xtask, so a CI ste
 - **Status:** accepted
 - **Date:** 2026-09-18 (the record precedes the implementation it describes)
 - **Supersedes:** —
-- **Superseded by:** [ADR-0062](0062-the-release-sequence-is-rust-in-xtask.md), for the paragraph keeping the release scripts in `scripts/`
+- **Superseded by:** —
 
 ## Context and problem statement
 

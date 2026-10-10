@@ -261,8 +261,6 @@ pub(crate) enum ChangelogCommand {
         #[arg(value_name = "VERSION")]
         version: String,
     },
-    /// Print `breaking` when the release being prepared announces a break, else `none`
-    Breaking,
 }
 
 #[derive(Subcommand)]
@@ -362,7 +360,6 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: Command) -> Outcome {
             ChangelogCommand::Notes { version } => {
                 crate::checks::changelog::notes(root, explain, version)
             }
-            ChangelogCommand::Breaking => crate::checks::changelog::breaking(root, explain),
         },
         Command::CommitMsg { file } => crate::checks::subject::commit_msg(root, explain, &file),
         Command::Hooks { cmd } => match cmd {

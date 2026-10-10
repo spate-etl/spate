@@ -303,8 +303,8 @@ fn anchored_snippet(s: &[u8]) -> Option<usize> {
 /// of version components.
 ///
 /// Deliberately wider than the rewriters, so `check` reports a snippet they
-/// cannot reach. An inline table left open on the line counts, as
-/// a snippet wrapped onto several lines, which no line-based rewriter can move.
+/// cannot reach. An inline table left open on the line counts, as a snippet
+/// wrapped onto several lines, which no line-based rewriter can move.
 /// A name preceded by `[A-Za-z0-9_-]`, as in `myspate`, does not match.
 fn looks_like_snippet(line: &str) -> bool {
     let s = line.as_bytes();

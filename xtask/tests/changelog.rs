@@ -370,29 +370,6 @@ fn an_added_fragment_satisfies_the_requirement() {
     );
 }
 
-/// `changelog breaking` answers `breaking` once a committed fragment opens with
-/// the marker, and `none` before.
-#[test]
-fn breaking_answers_from_the_committed_fragments() {
-    let repo = Repo::new("breaking_answers_from_the_committed_fragments");
-    repo.write("Cargo.toml", "[workspace.package]\nversion = \"0.2.0\"\n");
-    repo.write("CHANGELOG.md", "# Changelog\n");
-    repo.commit("workspace: a manifest");
-    repo.git(&["tag", "v0.2.0"]);
-    let env = [
-        ("GIT_DIR", repo.git_dir.as_str()),
-        ("GIT_WORK_TREE", repo.work_tree.as_str()),
-    ];
-    held(&["changelog", "breaking"], &env, 0, "none\n", "");
-
-    repo.write(
-        "changelog.d/moved.changed.md",
-        "**Breaking:** **A move** (`spate-core`)\n",
-    );
-    repo.commit("core: a move");
-    held(&["changelog", "breaking"], &env, 0, "breaking\n", "");
-}
-
 /// A type the Keep a Changelog six do not name is refused, and so is a slug
 /// that would not make a filename.
 #[test]

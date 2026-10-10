@@ -1326,23 +1326,6 @@ fn today(root: &Path) -> Result<String, Error> {
     Ok(out.trim_end_matches('\n').to_owned())
 }
 
-/// Prints whether the release being prepared announces a breaking change.
-pub(crate) fn breaking(root: &Path, explain: bool) -> Outcome {
-    if explain {
-        println!("(reads {FRAGMENTS}/ and {CHANGELOG} at HEAD)");
-        return Ok(());
-    }
-    println!(
-        "{}",
-        if breaking_announced(root)? {
-            "breaking"
-        } else {
-            "none"
-        }
-    );
-    Ok(())
-}
-
 /// Whether the release being prepared announces a breaking change: a fragment
 /// at `HEAD` opening with `**Breaking:**`, or, while the workspace version is
 /// ahead of the newest tag, that marker inside the version's own section of

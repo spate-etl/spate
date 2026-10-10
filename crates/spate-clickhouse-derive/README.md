@@ -2,8 +2,8 @@
 
 The proc-macro behind `#[derive(ClickHouseRow)]` for the
 [Spate](https://github.com/spate-etl/spate) ClickHouse sink. Depend on
-`spate` or `spate-clickhouse`, which re-export the derive, and not on this
-crate directly.
+`spate` with the `clickhouse` feature, or on `spate-clickhouse`; both
+re-export the derive as `ClickHouseRow`.
 
 ```rust,ignore
 #[derive(Serialize, ClickHouseRow)]
@@ -13,7 +13,8 @@ struct OrderRow { id: u64, name: String, amount: f64 }
 The derive implements `ClickHouseRow` and generates the insert column list
 from the struct's field declaration order. `#[serde(rename = "...")]` names
 a column no Rust identifier can spell, such as a flattened `Nested` table's
-`outer.inner`, and `#[serde(skip)]` leaves a field out.
+`outer.inner`, and `#[serde(skip)]` or `#[serde(skip_serializing)]` leaves
+a field out.
 
 A duplicate or malformed column name is a compile error, as are
 `#[serde(flatten)]`, a struct-level `#[serde(rename_all = "...")]` and

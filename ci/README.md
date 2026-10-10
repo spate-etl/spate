@@ -136,4 +136,4 @@ The bump usually cannot be fixed inside its own pull request, so:
 Steps 1 to 3 are this tree, and `cargo xtask integration-test` picks the service up from
 them with no edit. Steps 5 and 6 name the service once each, because the
 service-to-suite mapping and the bump policy are the two things that cannot be
-derived. `DEVELOPING.md` names no service at all.
+derived. `DEVELOPING.md` needs no edit.

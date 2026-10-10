@@ -132,10 +132,11 @@ them:
 cargo xtask fault-test [--seed N] [FILTER]
 ```
 
-It prints the seed first, drawing one from the clock when `--seed` is absent.
-A seed fixes the data set and the fault schedule. A failure message carries the
-command that replays its seed. A run writes its journals, logs and outcomes
-under `target/fault-runs/`.
+It prints the seed first, drawing one from the clock when `--seed` is absent. A
+seed fixes the data set and the fault schedule. It does not fix the
+interleaving, so a replay can pass where the original run failed. A failure
+message carries the command that replays its seed. A run writes its journals,
+logs and outcomes under `target/fault-runs/`.
 
 The weekly scheduled tier runs every scenario under a fresh seed. A failure
 opens an issue naming the seed and the replay command, or comments on the one

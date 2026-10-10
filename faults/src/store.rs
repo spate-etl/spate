@@ -1,8 +1,9 @@
 //! The coordination-store wrappers a worker runs under: one journals every
-//! write with its reply and every entry it reads on durable `split.*` keys,
-//! the leader key, `plan` and `assign.*`, one injects an in-process fault at a
-//! chosen write, one stops the process at a chosen commit or leader write,
-//! and one re-sends a commit or seed create that lost its CAS.
+//! create and update with its reply and every entry it reads on durable
+//! `split.*` keys, the leader key, `plan` and `assign.*`, one injects an
+//! in-process fault at a chosen write, one stops the process at a chosen
+//! commit or leader write, and one re-sends a commit or seed create that lost
+//! its CAS.
 
 use std::fs::OpenOptions;
 use std::path::PathBuf;
@@ -23,9 +24,10 @@ use crate::journal::{AbortPoint, Event, Journal, Progress, Reply, Source, WriteO
 
 const SPLIT_PREFIX: &str = "split.";
 
-/// Forwards every call to `S` and journals the durable `split.*` traffic, and
-/// the traffic on the ephemeral leader key and the durable `plan` and
-/// `assign.*` keys as `leader_send` and `leader_seen` lines.
+/// Forwards every call to `S` and journals each create and update with its
+/// reply, and each entry read, on the durable `split.*` keys, and on the
+/// ephemeral leader key and the durable `plan` and `assign.*` keys as
+/// `leader_send` and `leader_seen` lines.
 ///
 /// A write's `send` line is appended before the call and its `done` line
 /// after it; a write dropped before it returns, as at an `op_timeout`, still

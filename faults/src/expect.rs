@@ -27,10 +27,11 @@ use crate::outcome::LostReplies;
 /// Writes to the leader key, `plan` and `assign.*` are matched by digest.
 /// After a lost election reply, a `get` reads the landed key back. After any
 /// other, the next write on the key that wins or loses either loses with the
-/// landed value read back, or wins from the landed revision after the landed
-/// value was read. With no such write, a read of the landed value at its
-/// revision recovers a `plan` or `assign.*` write; a `plan` write without one
-/// is unrecovered, and any other process has stopped writing the key.
+/// landed value read back, by a `get` after a renewal, or wins from the landed
+/// revision after the landed value was read. With no such write, a read of the
+/// landed value at its revision recovers a `plan` or `assign.*` write; a `plan`
+/// write without one is unrecovered, and after any other the process has
+/// stopped writing the key.
 #[must_use]
 pub fn lost_replies(journals: &[ProcessJournal], drawn: bool) -> LostReplies {
     let mut out = LostReplies {
@@ -78,7 +79,7 @@ struct Write<'a> {
 }
 
 /// `Ok(true)` when the journal shows the landed write recovered, `Ok(false)`
-/// when the split left the process.
+/// when the split left the process or the process stopped writing the key.
 fn recovered(journal: &ProcessJournal, at: usize, key: &str, rev: u64) -> Result<bool, String> {
     if !key.starts_with("split.") {
         return leader_recovered(journal, at, key, rev);
@@ -238,19 +239,22 @@ fn leader_recovered(
         .filter(|w| w.index < next.index)
         .map(|w| w.digest)
         .collect();
-    let adopted = |from: usize, to: usize, at: Option<u64>| {
+    let adopted = |from: usize, to: usize, at: Option<u64>, by: Option<Source>| {
         lines[from..to].iter().any(|l| {
-            matches!(&l.event, Event::LeaderSeen { key: k, rev: r, digest, .. }
+            matches!(&l.event, Event::LeaderSeen { key: k, rev: r, digest, from: f }
                 if k == key
                     && at.is_none_or(|a| a == *r)
+                    && by.is_none_or(|by| by == *f)
                     && ((*r == rev && *digest == landed.digest)
                         || (*r > rev && unreplied.contains(digest))))
         })
     };
+    // After a lost renewal, the coordinator adopts its key only from a `get`.
+    let read_back = (key == "leader").then_some(Source::Get);
     match next.reply {
-        Some(Reply::Lost) if adopted(next.index, lines.len(), None) => Ok(true),
+        Some(Reply::Lost) if adopted(next.index, lines.len(), None, read_back) => Ok(true),
         Some(Reply::Won(_))
-            if next.expected.is_some() && adopted(landed_done, next.index, next.expected) =>
+            if next.expected.is_some() && adopted(landed_done, next.index, next.expected, None) =>
         {
             Ok(true)
         }
@@ -862,6 +866,49 @@ mod tests {
                 "{expected:?}"
             );
         }
+    }
+
+    /// After a lost renewal reply and a renewal that loses, a `get` of the
+    /// landed key recovers the renewal, and a listing or a watch echo of it
+    /// leaves it unexplained.
+    #[test]
+    fn renewal_evidence_needs_a_get_after_the_lost_write() {
+        let mut lost = leader_lost("leader", Some(4));
+        lost.extend([
+            leader_send(2, "leader", Some(4), 10),
+            leader_done(2, "leader", Reply::Lost),
+        ]);
+        for from in [Source::List, Source::Watch] {
+            let mut listed = lost.clone();
+            listed.push(leader_seen("leader", 5, 10, from));
+            assert_eq!(judge(listed).unexplained.len(), 1, "{from:?}");
+        }
+        lost.push(leader_seen("leader", 5, 10, Source::Get));
+        assert!(recovery_shown(&journal(lost.clone())));
+        assert_eq!(judge(lost).unexplained, Vec::<String>::new());
+    }
+
+    /// The landed write is the send whose call the `won` line answers, also
+    /// when another send on the same key precedes it.
+    #[test]
+    fn leader_evidence_matches_the_landed_send_by_call() {
+        let mut events = vec![
+            leader_send(7, "plan", Some(3), 99),
+            leader_done(7, "plan", Reply::Won(4)),
+        ];
+        events.extend(leader_lost("plan", Some(4)));
+        events.push(leader_seen("plan", 5, 10, Source::Watch));
+        assert!(recovery_shown(&journal(events.clone())));
+        assert_eq!(judge(events).unexplained, Vec::<String>::new());
+    }
+
+    /// A lost renewal echoed on the watch, with no later write, is let go.
+    #[test]
+    fn renewal_echo_with_no_later_write_is_let_go() {
+        let mut events = leader_lost("leader", Some(4));
+        events.push(leader_seen("leader", 5, 10, Source::Watch));
+        assert!(!recovery_shown(&journal(events.clone())));
+        assert_eq!(judge(events).unexplained, Vec::<String>::new());
     }
 
     /// A write from the landed revision whose reply was dropped, then a write

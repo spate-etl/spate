@@ -1,0 +1,945 @@
+//! Everything the release sequence reads from or writes to outside its own
+//! logic: git, the forge, the registry and the workspace, each a trait with a
+//! process-backed implementation, plus the wrappers a dry run substitutes for
+//! the writes.
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::Duration;
+
+use serde::Deserialize;
+
+use super::version::Version;
+use crate::checks::scratch::Scratch;
+use crate::checks::semver_checks::{UA, fetch_index};
+use crate::run::{self, Error, Outcome, Step, Streams};
+
+/// The identity the release commit and tag carry.
+const BOT_NAME: &str = "spate-release[bot]";
+const BOT_EMAIL: &str = "spate-release[bot]@users.noreply.github.com";
+
+const API: &str = "https://crates.io/api/v1/crates";
+
+/// The collaborators one release step works through.
+pub(crate) struct Host<'a> {
+    pub(crate) git: &'a dyn Git,
+    pub(crate) forge: &'a dyn Forge,
+    pub(crate) registry: &'a dyn Registry,
+    pub(crate) workspace: &'a dyn Workspace,
+    /// Waits out a retry interval or a rate limit.
+    pub(crate) pause: &'a dyn Fn(Duration),
+}
+
+pub(crate) trait Git {
+    fn is_clean(&self) -> Result<bool, Error>;
+    /// The newest `vX.Y.Z` tag, or empty when there is none.
+    fn last_tag(&self) -> Result<String, Error>;
+    fn subject(&self) -> Result<String, Error>;
+    fn short_head(&self) -> Result<String, Error>;
+    /// Commits every tracked change as the release identity.
+    fn commit_all(&self, subject: &str, body: &str) -> Outcome;
+    /// The commit `tag` names on origin, peeled through an annotated tag, or
+    /// `None` when origin has no such tag.
+    fn remote_tag(&self, tag: &str) -> Result<Option<String>, Error>;
+    /// Creates an annotated tag locally.
+    fn tag(&self, name: &str, commit: &str) -> Outcome;
+    /// Pushes `refspec` to the repository's origin with the forge token.
+    fn push(&self, refspec: &str, force: bool) -> Outcome;
+}
+
+/// An open pull request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Pull {
+    pub(crate) number: u64,
+    pub(crate) head: String,
+    pub(crate) cross_repository: bool,
+}
+
+pub(crate) trait Forge {
+    fn open_pulls(&self) -> Result<Vec<Pull>, Error>;
+    /// Closes a pull request with a comment and deletes its branch.
+    fn close_pull(&self, number: u64, comment: &str) -> Outcome;
+    /// The open same-repository pull request from `head`, if any.
+    fn pull_for_head(&self, head: &str) -> Result<Option<u64>, Error>;
+    /// Opens a pull request, answering its number, or `None` when none was
+    /// opened.
+    fn create_pull(
+        &self,
+        title: &str,
+        head: &str,
+        label: &str,
+        body: &str,
+    ) -> Result<Option<u64>, Error>;
+    /// Squash-merges the pull request once its required checks pass.
+    fn auto_merge(&self, number: u64) -> Outcome;
+    fn release_exists(&self, tag: &str) -> Result<bool, Error>;
+    /// Creates a release on an existing tag.
+    fn create_release(&self, tag: &str, notes: &str) -> Outcome;
+    fn upload(&self, tag: &str, files: &[PathBuf], clobber: bool) -> Outcome;
+    fn assets(&self, tag: &str) -> Result<Vec<String>, Error>;
+    /// Starts the documentation deploy.
+    fn dispatch_docs(&self) -> Outcome;
+}
+
+/// One version in a crate's sparse-index file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct IndexEntry {
+    pub(crate) vers: String,
+    pub(crate) cksum: String,
+}
+
+/// What the sparse index answered for one crate.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Index {
+    Found(Vec<IndexEntry>),
+    /// The registry holds no crate of that name.
+    Missing,
+    /// Any other HTTP status.
+    Status(String),
+}
+
+pub(crate) trait Registry {
+    fn index(&self, krate: &str) -> Result<Index, Error>;
+    /// The commit a Trusted Publishing upload of this version recorded, or
+    /// `"null"` for a version published any other way.
+    fn trustpub_sha(&self, krate: &str, version: Version) -> Result<String, Error>;
+}
+
+/// A publishable workspace member and its manifest directory.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Package {
+    pub(crate) name: String,
+    pub(crate) dir: PathBuf,
+}
+
+/// What a consumer's resolution of the release came to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Resolution {
+    /// The lockfile resolved, with this many packages.
+    Resolved(usize),
+    /// Cargo refused; the tail of its output.
+    Failed(String),
+}
+
+pub(crate) trait Workspace {
+    /// The members `cargo publish --workspace` uploads.
+    fn publishable(&self) -> Result<Vec<Package>, Error>;
+    /// Publishable members missing a description or a license.
+    fn missing_metadata(&self) -> Result<Vec<String>, Error>;
+    fn version(&self) -> Result<Version, Error>;
+    /// The version the history since the last tag implies.
+    fn derive(&self) -> Result<Version, Error>;
+    /// Writes every generated artifact of the release commit.
+    fn generate(&self, version: Version) -> Outcome;
+    /// The changelog section for `version`.
+    fn notes(&self, version: Version) -> Result<String, Error>;
+    /// Packages and verify-builds every member but `excludes`.
+    fn package(&self, excludes: &[String]) -> Outcome;
+    /// Uploads every member but `excludes`, without verifying again.
+    fn publish(&self, excludes: &[String]) -> Outcome;
+    /// The sha256 of the `.crate` this run packaged, or `None` when it
+    /// packaged none for that crate.
+    fn packaged_sha256(&self, krate: &str, version: Version) -> Result<Option<String>, Error>;
+    /// Resolves a scratch consumer of the facade at exactly `version` from the
+    /// registry.
+    fn resolve(&self, version: Version) -> Result<Resolution, Error>;
+    /// Writes one CycloneDX SBOM per publishable crate into `out`.
+    fn sboms(&self, version: Version, out: &Path) -> Outcome;
+}
+
+// ---------------------------------------------------------------------------
+// Process-backed implementations.
+// ---------------------------------------------------------------------------
+
+/// Git in the repository at `root`, pushing with `GH_TOKEN` to
+/// `GITHUB_REPOSITORY`.
+pub(crate) struct ProcessGit<'a> {
+    pub(crate) root: &'a Path,
+}
+
+impl ProcessGit<'_> {
+    fn capture(&self, args: &[&str]) -> Result<String, Error> {
+        run::capture(self.root, &Step::new("git", args))
+    }
+}
+
+impl Git for ProcessGit<'_> {
+    fn is_clean(&self) -> Result<bool, Error> {
+        Ok(self.capture(&["status", "--porcelain"])?.is_empty())
+    }
+
+    fn last_tag(&self) -> Result<String, Error> {
+        crate::checks::semver_checks::last_tag(self.root)
+    }
+
+    fn subject(&self) -> Result<String, Error> {
+        Ok(self
+            .capture(&["log", "-1", "--format=%s"])?
+            .trim_end()
+            .to_owned())
+    }
+
+    fn short_head(&self) -> Result<String, Error> {
+        Ok(self
+            .capture(&["rev-parse", "--short", "HEAD"])?
+            .trim_end()
+            .to_owned())
+    }
+
+    fn commit_all(&self, subject: &str, body: &str) -> Outcome {
+        run::run(
+            self.root,
+            false,
+            &Step::new("git", ["-c"])
+                .arg(format!("user.name={BOT_NAME}"))
+                .arg("-c")
+                .arg(format!("user.email={BOT_EMAIL}"))
+                .args([
+                    "commit",
+                    "--all",
+                    "--quiet",
+                    "--message",
+                    subject,
+                    "--message",
+                    body,
+                ]),
+        )?;
+        run::run(
+            self.root,
+            false,
+            &Step::new("git", ["show", "--stat", "--format=%h %s", "HEAD"]),
+        )
+    }
+
+    fn remote_tag(&self, tag: &str) -> Result<Option<String>, Error> {
+        // `ls-remote` exits zero with no output for an absent tag, so a network
+        // failure aborts here rather than reading as absence.
+        let listing = self.capture(&[
+            "ls-remote",
+            "--tags",
+            "origin",
+            &format!("refs/tags/{tag}"),
+            &format!("refs/tags/{tag}^{{}}"),
+        ])?;
+        Ok(peeled(&listing))
+    }
+
+    fn tag(&self, name: &str, commit: &str) -> Outcome {
+        run::run(
+            self.root,
+            false,
+            &Step::new("git", ["-c"])
+                .arg(format!("user.name={BOT_NAME}"))
+                .arg("-c")
+                .arg(format!("user.email={BOT_EMAIL}"))
+                .args(["tag", "-a", name, "-m", name, commit]),
+        )
+    }
+
+    fn push(&self, refspec: &str, force: bool) -> Outcome {
+        let token = required_env("GH_TOKEN", "push")?;
+        let repo = required_env("GITHUB_REPOSITORY", "push")?;
+        let mut command = Command::new("git");
+        command
+            .arg("push")
+            .args(force.then_some("--force"))
+            .arg(format!(
+                "https://x-access-token:{token}@github.com/{repo}.git"
+            ))
+            .arg(refspec)
+            .current_dir(self.root);
+        // Run by hand: the URL carries the token, and `run::run` would print it
+        // in its failure message.
+        let status = command
+            .status()
+            .map_err(|e| Error::msg(format!("git push: {e}")))?;
+        if !status.success() {
+            return Err(Error::msg(format!(
+                "git push of {refspec} to {repo} failed"
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// The commit an `ls-remote` listing of one tag names. The `^{}` line is the
+/// commit an annotated tag points at; a lightweight tag has only the plain line.
+pub(crate) fn peeled(listing: &str) -> Option<String> {
+    let lines: Vec<(&str, &str)> = listing.lines().filter_map(|l| l.split_once('\t')).collect();
+    lines
+        .iter()
+        .find(|(_, r)| r.ends_with("^{}"))
+        .or_else(|| lines.first())
+        .map(|(sha, _)| (*sha).to_owned())
+}
+
+fn required_env(key: &str, what: &str) -> Result<String, Error> {
+    std::env::var(key)
+        .ok()
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| Error::msg(format!("{what} needs {key}")))
+}
+
+/// The forge through `gh`, authenticated by `GH_TOKEN`.
+pub(crate) struct Gh<'a> {
+    pub(crate) root: &'a Path,
+}
+
+impl Gh<'_> {
+    fn capture(&self, args: &[&str]) -> Result<String, Error> {
+        run::capture(self.root, &Step::new("gh", args))
+    }
+
+    fn run(&self, step: &Step<'_>) -> Outcome {
+        run::run(self.root, false, step)
+    }
+}
+
+impl Forge for Gh<'_> {
+    fn open_pulls(&self) -> Result<Vec<Pull>, Error> {
+        parse_pulls(&self.capture(&[
+            "pr",
+            "list",
+            "--state",
+            "open",
+            "--limit",
+            "100",
+            "--json",
+            "number,headRefName,isCrossRepository",
+        ])?)
+    }
+
+    fn close_pull(&self, number: u64, comment: &str) -> Outcome {
+        self.run(
+            &Step::new("gh", ["pr", "close"])
+                .arg(number.to_string())
+                .args(["--delete-branch", "--comment", comment]),
+        )
+    }
+
+    fn pull_for_head(&self, head: &str) -> Result<Option<u64>, Error> {
+        // `--head` filters on the server, so no listing limit applies.
+        let raw = self.capture(&[
+            "pr",
+            "list",
+            "--state",
+            "open",
+            "--head",
+            head,
+            "--json",
+            "number,headRefName,isCrossRepository",
+        ])?;
+        Ok(parse_pulls(&raw)?
+            .into_iter()
+            .find(|p| !p.cross_repository && p.head == head)
+            .map(|p| p.number))
+    }
+
+    fn create_pull(
+        &self,
+        title: &str,
+        head: &str,
+        label: &str,
+        body: &str,
+    ) -> Result<Option<u64>, Error> {
+        let out = self.capture(&[
+            "pr", "create", "--title", title, "--label", label, "--head", head, "--body", body,
+        ])?;
+        pull_number(&out).map(Some).ok_or_else(|| {
+            Error::msg(format!(
+                "gh pr create printed no pull request number: {out}"
+            ))
+        })
+    }
+
+    fn auto_merge(&self, number: u64) -> Outcome {
+        self.run(
+            &Step::new("gh", ["pr", "merge"])
+                .arg(number.to_string())
+                .args(["--auto", "--squash", "--delete-branch"]),
+        )
+        .map_err(|_| {
+            Error::msg(format!(
+                "auto-merge could not be enabled on #{number}; is auto-merge still on for the\n  \
+                 repository? The pull request is open and merges by hand."
+            ))
+        })
+    }
+
+    fn release_exists(&self, tag: &str) -> Result<bool, Error> {
+        let done = run::complete(
+            self.root,
+            &Step::new("gh", ["release", "view", tag]),
+            Streams::Discard,
+        )?;
+        Ok(done.code == 0)
+    }
+
+    fn create_release(&self, tag: &str, notes: &str) -> Outcome {
+        let scratch = Scratch::new("spate-release-notes")?;
+        let file = scratch.join("notes.md");
+        std::fs::write(&file, notes).map_err(|e| Error::msg(format!("{}: {e}", file.display())))?;
+        self.run(
+            &Step::new(
+                "gh",
+                ["release", "create", tag, "--verify-tag", "--title", tag],
+            )
+            .arg("--notes-file")
+            .arg(file.to_string_lossy()),
+        )
+    }
+
+    fn upload(&self, tag: &str, files: &[PathBuf], clobber: bool) -> Outcome {
+        let mut step = Step::new("gh", ["release", "upload", tag]);
+        if clobber {
+            step = step.arg("--clobber");
+        }
+        self.run(&step.args(files.iter().map(|f| f.to_string_lossy())))
+    }
+
+    fn assets(&self, tag: &str) -> Result<Vec<String>, Error> {
+        Ok(self
+            .capture(&[
+                "release",
+                "view",
+                tag,
+                "--json",
+                "assets",
+                "--jq",
+                ".assets[].name",
+            ])?
+            .lines()
+            .map(str::to_owned)
+            .collect())
+    }
+
+    fn dispatch_docs(&self) -> Outcome {
+        // `workflow_dispatch` is the documented exception to the rule that
+        // events raised by GITHUB_TOKEN trigger nothing.
+        let token = required_env("DISPATCH_TOKEN", "the docs deploy")?;
+        self.run(
+            &Step::new(
+                "gh",
+                ["workflow", "run", "scheduled.yml", "--field", "tier=docs"],
+            )
+            .env("GH_TOKEN", token),
+        )
+    }
+}
+
+/// The rows of `gh pr list --json number,headRefName,isCrossRepository`.
+pub(crate) fn parse_pulls(raw: &str) -> Result<Vec<Pull>, Error> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Row {
+        number: u64,
+        head_ref_name: String,
+        is_cross_repository: bool,
+    }
+    let rows: Vec<Row> =
+        serde_json::from_str(raw).map_err(|e| Error::msg(format!("gh pr list: {e}")))?;
+    Ok(rows
+        .into_iter()
+        .map(|r| Pull {
+            number: r.number,
+            head: r.head_ref_name,
+            cross_repository: r.is_cross_repository,
+        })
+        .collect())
+}
+
+/// The trailing number of the URL `gh pr create` prints.
+pub(crate) fn pull_number(out: &str) -> Option<u64> {
+    let last = out.trim_end().lines().last()?;
+    let digits: String = last
+        .chars()
+        .rev()
+        .take_while(char::is_ascii_digit)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    digits.parse().ok()
+}
+
+/// crates.io, through `curl`.
+pub(crate) struct CratesIo<'a> {
+    pub(crate) root: &'a Path,
+}
+
+impl Registry for CratesIo<'_> {
+    fn index(&self, krate: &str) -> Result<Index, Error> {
+        let (code, body) = fetch_index(self.root, krate)?;
+        Ok(match code.as_str() {
+            "200" => Index::Found(index_entries(&body)?),
+            "404" => Index::Missing,
+            _ => Index::Status(code),
+        })
+    }
+
+    fn trustpub_sha(&self, krate: &str, version: Version) -> Result<String, Error> {
+        let body = run::capture(
+            self.root,
+            &Step::new("curl", ["-fsS", "--retry", "3", "--max-time", "30", "-H"])
+                .arg(format!("User-Agent: {UA}"))
+                .arg(format!("{API}/{krate}/{version}")),
+        )?;
+        let doc: serde_json::Value = serde_json::from_str(&body)
+            .map_err(|e| Error::msg(format!("crates.io {krate} {version}: {e}")))?;
+        Ok(doc["version"]["trustpub_data"]["sha"]
+            .as_str()
+            .unwrap_or("null")
+            .to_owned())
+    }
+}
+
+/// The entries of a sparse-index file, one JSON object per line.
+pub(crate) fn index_entries(body: &str) -> Result<Vec<IndexEntry>, Error> {
+    #[derive(Deserialize)]
+    struct Line {
+        vers: String,
+        #[serde(default)]
+        cksum: String,
+    }
+    serde_json::Deserializer::from_str(body)
+        .into_iter::<Line>()
+        .map(|l| {
+            l.map(|l| IndexEntry {
+                vers: l.vers,
+                cksum: l.cksum,
+            })
+            .map_err(|e| Error::msg(format!("sparse index: {e}")))
+        })
+        .collect()
+}
+
+/// The checkout at `root`, through cargo and the in-process generators.
+pub(crate) struct LocalWorkspace<'a> {
+    pub(crate) root: &'a Path,
+}
+
+#[derive(Deserialize)]
+struct Metadata {
+    packages: Vec<MetadataPackage>,
+}
+
+#[derive(Deserialize)]
+struct MetadataPackage {
+    name: String,
+    publish: Option<Vec<String>>,
+    manifest_path: PathBuf,
+}
+
+impl LocalWorkspace<'_> {
+    fn metadata(&self) -> Result<String, Error> {
+        run::capture(
+            self.root,
+            &Step::new(
+                "cargo",
+                ["metadata", "--no-deps", "--format-version", "1", "--locked"],
+            ),
+        )
+    }
+
+    fn members(&self) -> Result<Vec<(Package, bool)>, Error> {
+        let parsed: Metadata = serde_json::from_str(&self.metadata()?)
+            .map_err(|e| Error::msg(format!("cargo metadata: {e}")))?;
+        Ok(parsed
+            .packages
+            .into_iter()
+            .map(|p| {
+                let publishable = p.publish.as_ref().is_none_or(|allow| !allow.is_empty());
+                let dir = p
+                    .manifest_path
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_default();
+                (Package { name: p.name, dir }, publishable)
+            })
+            .collect())
+    }
+}
+
+impl Workspace for LocalWorkspace<'_> {
+    fn publishable(&self) -> Result<Vec<Package>, Error> {
+        Ok(self
+            .members()?
+            .into_iter()
+            .filter_map(|(p, publishable)| publishable.then_some(p))
+            .collect())
+    }
+
+    fn missing_metadata(&self) -> Result<Vec<String>, Error> {
+        super::version::missing_metadata(&self.metadata()?)
+    }
+
+    fn version(&self) -> Result<Version, Error> {
+        let manifest = std::fs::read_to_string(self.root.join("Cargo.toml"))
+            .map_err(|e| Error::msg(format!("Cargo.toml: {e}")))?;
+        super::version::workspace_version(&manifest)
+    }
+
+    fn derive(&self) -> Result<Version, Error> {
+        let (next, reason) = super::version::derive(self.root)?;
+        eprintln!("release version: {reason}");
+        Ok(next)
+    }
+
+    fn generate(&self, version: Version) -> Outcome {
+        let v = version.to_string();
+        super::version::bump(self.root, false, &v)?;
+        crate::checks::changelog::build(self.root, false, &v)?;
+        crate::checks::attribution::generate(self.root, false)
+    }
+
+    fn notes(&self, version: Version) -> Result<String, Error> {
+        crate::checks::changelog::notes_text(self.root, &version.to_string())
+    }
+
+    fn package(&self, excludes: &[String]) -> Outcome {
+        run::run(
+            self.root,
+            false,
+            &Step::new("cargo", ["package", "--workspace", "--locked"])
+                .args(exclude_args(excludes)),
+        )
+    }
+
+    fn publish(&self, excludes: &[String]) -> Outcome {
+        run::run(
+            self.root,
+            false,
+            &Step::new(
+                "cargo",
+                ["publish", "--workspace", "--locked", "--no-verify"],
+            )
+            .args(exclude_args(excludes)),
+        )
+    }
+
+    fn packaged_sha256(&self, krate: &str, version: Version) -> Result<Option<String>, Error> {
+        let file = format!("target/package/{krate}-{version}.crate");
+        if !self.root.join(&file).is_file() {
+            return Ok(None);
+        }
+        // Ubuntu runners carry sha256sum; macOS carries shasum.
+        let step = if run::on_path("sha256sum") {
+            Step::new("sha256sum", [file.as_str()])
+        } else {
+            Step::new("shasum", ["-a", "256", file.as_str()])
+        };
+        let out = run::capture(self.root, &step)?;
+        Ok(out.split_whitespace().next().map(str::to_owned))
+    }
+
+    fn resolve(&self, version: Version) -> Result<Resolution, Error> {
+        let scratch = Scratch::new("spate-release-smoke")?;
+        let write = |rel: &str, text: &str| {
+            let path = scratch.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap_or(scratch.dir()))
+                .and_then(|()| std::fs::write(&path, text))
+                .map_err(|e| Error::msg(format!("{}: {e}", path.display())))
+        };
+        write("Cargo.toml", &smoke_manifest(version))?;
+        write("src/main.rs", "fn main() {}\n")?;
+        let out = Command::new("cargo")
+            .arg("generate-lockfile")
+            .current_dir(scratch.dir())
+            .output()
+            .map_err(|e| Error::msg(format!("cargo generate-lockfile: {e}")))?;
+        if !out.status.success() {
+            let log = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let tail: Vec<&str> = log.lines().rev().take(20).collect();
+            return Ok(Resolution::Failed(
+                tail.into_iter().rev().collect::<Vec<_>>().join("\n"),
+            ));
+        }
+        let lock = std::fs::read_to_string(scratch.join("Cargo.lock"))
+            .map_err(|e| Error::msg(format!("Cargo.lock: {e}")))?;
+        Ok(Resolution::Resolved(
+            lock.lines().filter(|l| l.starts_with("name = ")).count(),
+        ))
+    }
+
+    fn sboms(&self, version: Version, out: &Path) -> Outcome {
+        // SOURCE_DATE_EPOCH makes the output a property of the release commit
+        // rather than of the wall clock.
+        let epoch = run::capture(self.root, &Step::new("git", ["log", "-1", "--format=%ct"]))?;
+        run::run(
+            self.root,
+            false,
+            &Step::new(
+                "cargo",
+                [
+                    "cyclonedx",
+                    "-f",
+                    "json",
+                    "--describe",
+                    "crate",
+                    "--all-features",
+                    "--target",
+                    "all",
+                    "--spec-version",
+                    "1.5",
+                    "-q",
+                ],
+            )
+            .env("SOURCE_DATE_EPOCH", epoch.trim()),
+        )?;
+        // The tool writes each SBOM next to its manifest, unpublished members
+        // included; only the publishable ones are kept.
+        let mut collected = 0;
+        for (package, publishable) in self.members()? {
+            let written = package.dir.join(format!("{}.cdx.json", package.name));
+            if !publishable {
+                drop(std::fs::remove_file(&written));
+                continue;
+            }
+            if !written.is_file() {
+                return Err(Error::msg(format!(
+                    "cargo cyclonedx wrote no SBOM for {}",
+                    package.name
+                )));
+            }
+            let target = out.join(format!("{}-{version}.cdx.json", package.name));
+            std::fs::copy(&written, &target)
+                .and_then(|_| std::fs::remove_file(&written))
+                .map_err(|e| Error::msg(format!("{}: {e}", written.display())))?;
+            collected += 1;
+        }
+        println!("collected {collected} SBOMs into {}", out.display());
+        Ok(())
+    }
+}
+
+/// `--exclude NAME` for each name.
+fn exclude_args(excludes: &[String]) -> Vec<String> {
+    excludes
+        .iter()
+        .flat_map(|e| ["--exclude".to_owned(), e.clone()])
+        .collect()
+}
+
+/// A consumer depending on the facade, with every connector feature, and on
+/// the test crate, at exactly `version`.
+fn smoke_manifest(version: Version) -> String {
+    format!(
+        "[package]\n\
+         name = \"spate-smoke\"\n\
+         version = \"0.0.0\"\n\
+         edition = \"2021\"\n\
+         \n\
+         [dependencies]\n\
+         spate = {{ version = \"={version}\", features = [\"kafka\", \"clickhouse\", \"avro\", \"s3\", \"json\", \"coordination-nats\", \"coordination-dynamodb\"] }}\n\
+         \n\
+         [dev-dependencies]\n\
+         spate-test = \"={version}\"\n"
+    )
+}
+
+// ---------------------------------------------------------------------------
+// The dry run's substitutes: reads pass through, writes are printed instead.
+// ---------------------------------------------------------------------------
+
+fn would(what: &str) {
+    println!("would {what}");
+}
+
+/// Git whose pushes are printed instead of sent.
+pub(crate) struct DryGit<'a>(pub(crate) &'a dyn Git);
+
+impl Git for DryGit<'_> {
+    fn is_clean(&self) -> Result<bool, Error> {
+        self.0.is_clean()
+    }
+    fn last_tag(&self) -> Result<String, Error> {
+        self.0.last_tag()
+    }
+    fn subject(&self) -> Result<String, Error> {
+        self.0.subject()
+    }
+    fn short_head(&self) -> Result<String, Error> {
+        self.0.short_head()
+    }
+    fn commit_all(&self, subject: &str, body: &str) -> Outcome {
+        self.0.commit_all(subject, body)
+    }
+    fn remote_tag(&self, tag: &str) -> Result<Option<String>, Error> {
+        self.0.remote_tag(tag)
+    }
+    fn tag(&self, name: &str, commit: &str) -> Outcome {
+        would(&format!("tag {name} at {commit}"));
+        Ok(())
+    }
+    fn push(&self, refspec: &str, force: bool) -> Outcome {
+        would(&format!(
+            "push {refspec}{}",
+            if force { " (forced)" } else { "" }
+        ));
+        Ok(())
+    }
+}
+
+/// A forge whose writes are printed instead of made.
+pub(crate) struct DryForge<'a>(pub(crate) &'a dyn Forge);
+
+impl Forge for DryForge<'_> {
+    fn open_pulls(&self) -> Result<Vec<Pull>, Error> {
+        // A listing the forge refuses, as on a clone with no default
+        // repository, leaves nothing to sweep rather than failing the rehearsal.
+        self.0.open_pulls().or_else(|e| {
+            would(&format!("list the open pull requests ({})", e.message));
+            Ok(Vec::new())
+        })
+    }
+    fn pull_for_head(&self, head: &str) -> Result<Option<u64>, Error> {
+        self.0.pull_for_head(head).or_else(|e| {
+            would(&format!(
+                "look up the pull request from {head} ({})",
+                e.message
+            ));
+            Ok(None)
+        })
+    }
+    fn close_pull(&self, number: u64, comment: &str) -> Outcome {
+        would(&format!("close #{number} with \"{comment}\""));
+        Ok(())
+    }
+    fn create_pull(
+        &self,
+        title: &str,
+        head: &str,
+        label: &str,
+        _body: &str,
+    ) -> Result<Option<u64>, Error> {
+        would(&format!(
+            "open a pull request \"{title}\" from {head}, labeled {label}, set to auto-merge"
+        ));
+        Ok(None)
+    }
+    fn auto_merge(&self, number: u64) -> Outcome {
+        would(&format!("enable auto-merge on #{number}"));
+        Ok(())
+    }
+    fn release_exists(&self, tag: &str) -> Result<bool, Error> {
+        self.0.release_exists(tag)
+    }
+    fn create_release(&self, tag: &str, _notes: &str) -> Outcome {
+        would(&format!("create the {tag} release"));
+        Ok(())
+    }
+    fn upload(&self, tag: &str, files: &[PathBuf], _clobber: bool) -> Outcome {
+        for f in files {
+            would(&format!("upload {} to {tag}", f.display()));
+        }
+        Ok(())
+    }
+    fn assets(&self, tag: &str) -> Result<Vec<String>, Error> {
+        self.0.assets(tag)
+    }
+    fn dispatch_docs(&self) -> Outcome {
+        would("dispatch the docs deploy");
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The commit an `ls-remote` listing names: the peeled line of an annotated
+    /// tag, the plain line of a lightweight one, none for an absent tag.
+    #[test]
+    fn the_remote_tag_is_read_through_an_annotated_tag() {
+        let annotated = "aaaa\trefs/tags/v0.3.0\nbbbb\trefs/tags/v0.3.0^{}\n";
+        assert_eq!(peeled(annotated).as_deref(), Some("bbbb"));
+        assert_eq!(peeled("cccc\trefs/tags/v0.3.0\n").as_deref(), Some("cccc"));
+        assert_eq!(peeled(""), None);
+    }
+
+    /// The number is the trailing digits of the URL `gh pr create` prints last.
+    #[test]
+    fn the_pull_number_is_the_urls_tail() {
+        assert_eq!(
+            pull_number("https://github.com/spate-etl/spate/pull/1058\n"),
+            Some(1058)
+        );
+        assert_eq!(
+            pull_number("Creating pull request\nhttps://x/pull/7"),
+            Some(7)
+        );
+        assert_eq!(pull_number("no number here\n"), None);
+        assert_eq!(pull_number(""), None);
+    }
+
+    /// The sparse index's entries keep their version and cksum and ignore the
+    /// fields this step does not read; a line that is not an entry is an error.
+    #[test]
+    fn index_entries_read_the_version_and_cksum() {
+        let body = concat!(
+            r#"{"name":"spate","vers":"0.1.0","deps":[{"name":"spate-core","req":"=0.1.0","kind":"normal"}],"cksum":"aa","features":{},"yanked":false,"rust_version":"1.94","v":2}"#,
+            "\n",
+            r#"{"name":"spate","vers":"0.2.0","deps":[],"cksum":"bb","features":{},"yanked":true}"#,
+            "\n",
+        );
+        assert_eq!(
+            index_entries(body).unwrap(),
+            [
+                IndexEntry {
+                    vers: "0.1.0".into(),
+                    cksum: "aa".into()
+                },
+                IndexEntry {
+                    vers: "0.2.0".into(),
+                    cksum: "bb".into()
+                },
+            ]
+        );
+        assert!(index_entries("").unwrap().is_empty());
+        assert!(index_entries("<html>").is_err());
+        assert!(index_entries(r#"{"name":"spate"}"#).is_err());
+    }
+
+    /// The pull request listing keeps the fork flag that the sweep relies on.
+    #[test]
+    fn the_pull_listing_keeps_the_fork_flag() {
+        let raw = r#"[{"number":3,"headRefName":"release/v0.3.0","isCrossRepository":true}]"#;
+        assert_eq!(
+            parse_pulls(raw).unwrap(),
+            [Pull {
+                number: 3,
+                head: "release/v0.3.0".into(),
+                cross_repository: true
+            }]
+        );
+    }
+
+    /// Each excluded crate becomes one `--exclude` pair.
+    #[test]
+    fn excludes_become_flag_pairs() {
+        assert!(exclude_args(&[]).is_empty());
+        assert_eq!(
+            exclude_args(&["a".into(), "b".into()]),
+            ["--exclude", "a", "--exclude", "b"]
+        );
+    }
+
+    /// The smoke consumer pins the facade and the test crate exactly.
+    #[test]
+    fn the_smoke_consumer_pins_the_release_exactly() {
+        let manifest: toml::Table =
+            toml::from_str(&smoke_manifest(Version::parse("0.3.0").unwrap())).unwrap();
+        assert_eq!(
+            manifest["dependencies"]["spate"]["version"].as_str(),
+            Some("=0.3.0")
+        );
+        assert_eq!(
+            manifest["dev-dependencies"]["spate-test"].as_str(),
+            Some("=0.3.0")
+        );
+    }
+}

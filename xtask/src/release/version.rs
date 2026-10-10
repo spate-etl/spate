@@ -155,7 +155,7 @@ fn loose(s: &str) -> Result<(u64, u64, u64), Error> {
 /// The `[workspace.package]` version. Members inherit it, so the manifest
 /// carries exactly one line opening `version = "`, and more than one is an
 /// error.
-fn workspace_version(manifest: &str) -> Result<Version, Error> {
+pub(crate) fn workspace_version(manifest: &str) -> Result<Version, Error> {
     let lines: Vec<&str> = manifest
         .lines()
         .filter(|l| l.starts_with("version = \""))
@@ -605,7 +605,7 @@ fn check_metadata(root: &Path, explain: bool) -> Outcome {
 
 /// The publishable packages in `cargo metadata` output missing a description
 /// or a license. A package is publishable unless its `publish` is `[]`.
-fn missing_metadata(metadata: &str) -> Result<Vec<String>, Error> {
+pub(crate) fn missing_metadata(metadata: &str) -> Result<Vec<String>, Error> {
     #[derive(Deserialize)]
     struct Metadata {
         packages: Vec<Package>,
@@ -636,7 +636,7 @@ fn missing_metadata(metadata: &str) -> Result<Vec<String>, Error> {
 /// as incompatible. A raised `rust-version` is a minor under the same rule,
 /// judged by comparing the two values, so an annotation or a lowering is not a
 /// raise.
-fn derive(root: &Path) -> Result<(Version, String), Error> {
+pub(crate) fn derive(root: &Path) -> Result<(Version, String), Error> {
     let last = crate::checks::semver_checks::last_tag(root)?;
     if last.is_empty() {
         return Err(Error::msg(
@@ -694,7 +694,7 @@ fn derive(root: &Path) -> Result<(Version, String), Error> {
 ///
 /// Every rewrite is computed before any file is written, so a snippet the
 /// rewriter cannot find leaves every file unchanged.
-fn bump(root: &Path, explain: bool, new: &str) -> Outcome {
+pub(crate) fn bump(root: &Path, explain: bool, new: &str) -> Outcome {
     let update = Step::new("cargo", ["update", "--workspace"]);
     if explain {
         println!("(rewrites {MANIFEST} and {})", SNIPPET_FILES.join(", "));

@@ -5,9 +5,9 @@ contributors need [`CONTRIBUTING.md`](CONTRIBUTING.md) and the changelog
 conventions in [`changelog.d/README.md`](changelog.d/README.md), not this
 page.
 
-The process itself lives in [`scripts/release.sh`](scripts/release.sh), and
-[`release.yml`](.github/workflows/release.yml) runs those entry points with
-credentials where a step needs one. The same code path runs locally as a dry
+The process itself lives in [`xtask/src/release/`](xtask/src/release/), behind
+`cargo xtask release`, and [`release.yml`](.github/workflows/release.yml) runs
+those entry points with credentials where a step needs one. The same code path runs locally as a dry
 run, so what you rehearse is what CI executes.
 
 ## What a release is
@@ -95,15 +95,17 @@ cargo xtask release dry-run --version 0.3.0
 ```
 
 This runs the same `assemble` and the credential-free half of the publish in
-a throwaway git worktree: the real release commit, built for diffing, and
-every pending crate packaged and verify-built, and the SBOMs generated. It
-stops where the registry token would be minted and prints what a real run
-would do next. It needs `gh` authenticated, and `jq`, `curl`, `cargo-about`
-and `cargo-cyclonedx` on the path; the preflight names anything missing. The
-generator versions in CI come from the `taiki-e/install-action` pin, so the
-inventory a local run produces can differ from CI's when the installed
-versions differ. The worktree is kept for inspection and the run prints the
-command that removes it.
+a throwaway git worktree: the real release commit, and every pending crate
+packaged and verify-built, and the SBOMs generated. `assemble` runs its pull
+request step against the real open pull requests and prints each push, close,
+open and auto-merge instead of making it. The run stops where the registry
+token would be minted and prints what a real run would do next. It needs `gh`
+authenticated, and `curl`, `cargo-about` and `cargo-cyclonedx` on the path;
+the preflight names anything missing. The generator versions in CI come from
+the `taiki-e/install-action` pin, so the inventory a local run produces can
+differ from CI's when the installed versions differ. A successful run removes
+its worktree; `--keep` keeps it for inspection, and a failed run always keeps
+it and prints the command that removes it.
 
 Read a green dry run as "this assembles and packages". It cannot prove the
 registry's acceptance rules (a verified email address, the rate limits), the

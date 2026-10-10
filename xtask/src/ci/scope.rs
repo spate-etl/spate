@@ -104,7 +104,7 @@ mod tests {
             "crates/spate-s3/Cargo.toml",
             "test-support/src/lib.rs",
             "xtask/src/main.rs",
-            "scripts/release.sh",
+            "scripts/transclude.sh",
             "rust-toolchain.toml",
             ".config/nextest.toml",
             ".github/workflows/ci.yml",

@@ -86,6 +86,8 @@ impl<'a> Step<'a> {
     pub(crate) fn display(&self) -> String {
         let mut s = String::new();
         for (k, v) in &self.env {
+            // A credential never reaches a log or an error message.
+            let v = if k.ends_with("_TOKEN") { "***" } else { v };
             s.push_str(&format!("{k}=\"{v}\" "));
         }
         s.push_str(self.program);
@@ -333,6 +335,13 @@ mod tests {
             .env("CI", "true")
             .dir("website");
         assert_eq!(step.display(), r#"(cd website && CI="true" npm run build)"#);
+    }
+
+    /// A token passed in a child's environment is masked in the printed line.
+    #[test]
+    fn a_printed_line_masks_a_token() {
+        let step = Step::new("gh", ["workflow", "run"]).env("GH_TOKEN", "ghs_secret");
+        assert_eq!(step.display(), r#"GH_TOKEN="***" gh workflow run"#);
     }
 
     #[test]

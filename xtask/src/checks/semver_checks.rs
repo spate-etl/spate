@@ -27,7 +27,7 @@ use crate::run::{self, Completed, Error, Outcome, Step, Streams};
 const TOOL: &str = "semver-checks";
 
 /// The agent the sparse index sees.
-const UA: &str = "spate-release (github.com/spate-etl/spate)";
+pub(crate) const UA: &str = "spate-release (github.com/spate-etl/spate)";
 
 /// The tool's verdict for a run.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -51,7 +51,7 @@ fn classify_exit(code: i32) -> Verdict {
 /// A crate's path in the sparse index. The scheme keys on name length, and the
 /// short arms keep a future short name from probing a URL that answers 404 for
 /// the wrong reason.
-fn index_path(name: &str) -> String {
+pub(crate) fn index_path(name: &str) -> String {
     let chars: Vec<char> = name.chars().collect();
     let slice = |from: usize, len: usize| -> String { chars.iter().skip(from).take(len).collect() };
     match chars.len() {
@@ -277,7 +277,7 @@ fn attribute(
 ///
 /// Only 200 and 404 are answers. A transport failure fails the run before it
 /// can claim anything.
-fn fetch_index(root: &Path, name: &str) -> Result<(String, String), Error> {
+pub(crate) fn fetch_index(root: &Path, name: &str) -> Result<(String, String), Error> {
     let step = Step::new(
         "curl",
         [

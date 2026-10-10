@@ -578,11 +578,16 @@ async fn abort_at_create_err_after_land_forwards_then_returns_retryable() {
         .unwrap()
         .expect("the create landed");
     assert_eq!(landed.value, b"w0");
+    let deleted = store
+        .delete(Keyspace::Ephemeral, "leader", Some(landed.revision))
+        .await
+        .unwrap();
+    assert!(deleted.won().is_some(), "{deleted:?}");
     let next = store
         .create(Keyspace::Ephemeral, "leader", b"w1".to_vec())
         .await
         .unwrap();
-    assert_eq!(next, CasOutcome::Lost);
+    assert!(next.won().is_some(), "{next:?}");
     assert_eq!(
         events(&path),
         [Event::ErrAfterLand {

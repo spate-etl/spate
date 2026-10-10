@@ -831,22 +831,6 @@ fn pages_join(prev_max: &str, first: Option<&str>) -> bool {
     first.is_some_and(|first| first <= prev_max)
 }
 
-/// The keys under `key_prefix` among `subjects` of the bucket whose subjects
-/// start with `bucket_prefix`, less the keys in `seen`.
-fn unseen_keys(
-    subjects: &BTreeSet<String>,
-    bucket_prefix: &str,
-    key_prefix: &str,
-    seen: &BTreeSet<String>,
-) -> Vec<String> {
-    subjects
-        .iter()
-        .filter_map(|subject| subject.strip_prefix(bucket_prefix))
-        .filter(|key| key.starts_with(key_prefix) && !seen.contains(*key))
-        .map(str::to_string)
-        .collect()
-}
-
 /// Whether a message with `headers` holds a value. Every marker carries
 /// `Nats-Marker-Reason` or a `KV-Operation` other than `PUT`.
 fn holds_value(headers: &async_nats::HeaderMap) -> bool {
@@ -858,27 +842,54 @@ fn holds_value(headers: &async_nats::HeaderMap) -> bool {
             .is_none_or(|op| op.as_str() == "PUT")
 }
 
-/// Applies one delivered message for `key` to a listing. A value replaces the
-/// key's entry, so a key delivered twice keeps its later message; a marker
-/// drops the key.
-fn fold_listed(
-    live: &mut BTreeMap<String, Entry>,
-    key: &str,
-    headers: Option<&async_nats::HeaderMap>,
-    value: &[u8],
-    revision: u64,
-) {
-    if headers.is_none_or(holds_value) {
-        live.insert(
-            key.to_string(),
-            Entry {
-                key: key.to_string(),
-                value: value.to_vec(),
-                revision: Revision(revision),
-            },
-        );
-    } else {
-        live.remove(key);
+/// The entries of a listing, folded from delivered messages and leader reads.
+#[derive(Default)]
+struct Listing {
+    live: BTreeMap<String, Entry>,
+}
+
+impl Listing {
+    /// Applies one message for `key`. A value replaces the key's entry, so a
+    /// key delivered twice keeps its later message; a marker drops the key.
+    fn fold(
+        &mut self,
+        key: &str,
+        headers: Option<&async_nats::HeaderMap>,
+        value: &[u8],
+        revision: u64,
+    ) {
+        if headers.is_none_or(holds_value) {
+            self.live.insert(
+                key.to_string(),
+                Entry {
+                    key: key.to_string(),
+                    value: value.to_vec(),
+                    revision: Revision(revision),
+                },
+            );
+        } else {
+            self.live.remove(key);
+        }
+    }
+
+    /// The keys under `key_prefix` among `subjects` of the bucket whose
+    /// subjects start with `bucket_prefix` that hold no value in the listing.
+    fn not_live(
+        &self,
+        subjects: &BTreeSet<String>,
+        bucket_prefix: &str,
+        key_prefix: &str,
+    ) -> Vec<String> {
+        subjects
+            .iter()
+            .filter_map(|subject| subject.strip_prefix(bucket_prefix))
+            .filter(|key| key.starts_with(key_prefix) && !self.live.contains_key(*key))
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn into_entries(self) -> Vec<Entry> {
+        self.live.into_values().collect()
     }
 }
 
@@ -1104,8 +1115,7 @@ impl CoordinationStore for NatsStore {
             })
             .await
             .map_err(|e| StoreError::Retryable(format!("listing {filter}: {e}")))?;
-        let mut live = BTreeMap::new();
-        let mut seen = BTreeSet::new();
+        let mut listing = Listing::default();
         // An empty filter delivers nothing, so no message reports the end.
         if consumer.cached_info().num_pending != 0 {
             let mut messages = consumer
@@ -1128,14 +1138,7 @@ impl CoordinationStore for NatsStore {
                 if let Some(key) = message.subject.strip_prefix(store.prefix.as_str())
                     && key.starts_with(prefix)
                 {
-                    fold_listed(
-                        &mut live,
-                        key,
-                        message.headers.as_ref(),
-                        &message.payload,
-                        revision,
-                    );
-                    seen.insert(key.to_string());
+                    listing.fold(key, message.headers.as_ref(), &message.payload, revision);
                 }
                 if pending == 0 {
                     break;
@@ -1143,8 +1146,9 @@ impl CoordinationStore for NatsStore {
             }
         }
         // Pending under-counts while a rewrite replaces a subject's last
-        // message, so the consumer can stop before a live key; the leader's
-        // subject set names every key the consumer skipped.
+        // message, so the consumer can stop before a live key, and a consumer
+        // on a lagging replica can deliver a marker the leader has replaced.
+        // Every subject under the filter that is not live here is re-read.
         let subjects = subjects_under(
             &buckets.jetstream,
             &store.stream_name,
@@ -1152,7 +1156,7 @@ impl CoordinationStore for NatsStore {
         )
         .await?;
         let mut reads =
-            futures_util::stream::iter(unseen_keys(&subjects, &store.prefix, prefix, &seen))
+            futures_util::stream::iter(listing.not_live(&subjects, &store.prefix, prefix))
                 .map(|key| async move {
                     let last = last_on_leader(store, &key).await?;
                     Ok::<_, StoreError>((key, last))
@@ -1160,8 +1164,7 @@ impl CoordinationStore for NatsStore {
                 .buffer_unordered(16);
         while let Some(read) = reads.next().await {
             if let (key, Some(message)) = read? {
-                fold_listed(
-                    &mut live,
+                listing.fold(
                     &key,
                     Some(&message.headers),
                     &message.payload,
@@ -1169,7 +1172,7 @@ impl CoordinationStore for NatsStore {
                 );
             }
         }
-        Ok(live.into_values().collect())
+        Ok(listing.into_entries())
     }
 }
 
@@ -1201,22 +1204,16 @@ mod tests {
             headers(&[("Nats-Marker-Reason", "Remove")]),
         ];
         for marker in &markers {
-            let mut live = BTreeMap::new();
-            fold_listed(&mut live, "k", None, b"v", 1);
-            fold_listed(&mut live, "k", Some(marker), b"", 2);
-            assert!(live.is_empty(), "{marker:?}");
+            let mut listing = Listing::default();
+            listing.fold("k", None, b"v", 1);
+            listing.fold("k", Some(marker), b"", 2);
+            assert!(listing.into_entries().is_empty(), "{marker:?}");
         }
-        let mut live = BTreeMap::new();
-        fold_listed(&mut live, "k", None, b"old", 1);
-        fold_listed(
-            &mut live,
-            "k",
-            Some(&headers(&[("KV-Operation", "PUT")])),
-            b"new",
-            3,
-        );
+        let mut listing = Listing::default();
+        listing.fold("k", None, b"old", 1);
+        listing.fold("k", Some(&headers(&[("KV-Operation", "PUT")])), b"new", 3);
         assert_eq!(
-            live.into_values().collect::<Vec<_>>(),
+            listing.into_entries(),
             [Entry {
                 key: "k".to_string(),
                 value: b"new".to_vec(),
@@ -1225,10 +1222,10 @@ mod tests {
         );
     }
 
-    /// A subject yields a key when it is in the bucket, under the prefix, mid-token
-    /// prefixes included, and not already delivered.
+    /// A subject yields a key when it is in the bucket, under the prefix,
+    /// mid-token prefixes included, and holds no value in the listing.
     #[test]
-    fn unseen_keys_are_undelivered_and_under_the_prefix() {
+    fn keys_not_live_are_under_the_prefix() {
         let subjects: BTreeSet<String> = [
             "$KV.b.hb.1",
             "$KV.b.hb.2",
@@ -1238,16 +1235,24 @@ mod tests {
         ]
         .map(String::from)
         .into();
-        let seen: BTreeSet<String> = ["hb.1".to_string()].into();
+        let mut listing = Listing::default();
         assert_eq!(
-            unseen_keys(&subjects, "$KV.b.", "hb", &seen),
-            ["hb.2", "hbx"]
-        );
-        assert_eq!(unseen_keys(&subjects, "$KV.b.", "hb.", &seen), ["hb.2"]);
-        assert_eq!(
-            unseen_keys(&subjects, "$KV.b.", "", &BTreeSet::new()),
+            listing.not_live(&subjects, "$KV.b.", ""),
             ["hb.1", "hb.2", "hbx", "other.1"]
         );
+        listing.fold("hb.1", None, b"v", 1);
+        assert_eq!(listing.not_live(&subjects, "$KV.b.", "hb"), ["hb.2", "hbx"]);
+        assert_eq!(listing.not_live(&subjects, "$KV.b.", "hb."), ["hb.2"]);
+    }
+
+    /// A key whose delivered message is a marker is named for a leader read,
+    /// since a lagging replica can deliver a marker the leader has replaced.
+    #[test]
+    fn a_key_delivered_as_a_marker_is_not_live() {
+        let subjects: BTreeSet<String> = ["$KV.b.hb.1".to_string()].into();
+        let mut listing = Listing::default();
+        listing.fold("hb.1", Some(&headers(&[("KV-Operation", "DEL")])), b"", 1);
+        assert_eq!(listing.not_live(&subjects, "$KV.b.", "hb."), ["hb.1"]);
     }
 
     /// Pages after the first start inside the page before them, and a page

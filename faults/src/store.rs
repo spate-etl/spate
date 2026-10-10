@@ -568,6 +568,10 @@ impl Fence {
         *self.lock() = Some(key.to_owned());
     }
 
+    fn armed_for(&self, key: &str) -> bool {
+        self.lock().as_deref() == Some(key)
+    }
+
     /// Disarms the fence and returns whether it was armed for `key`.
     fn take(&self, key: &str) -> bool {
         let mut armed = self.lock();
@@ -585,13 +589,15 @@ impl Fence {
     }
 }
 
-/// How many times a [`BrokenFence`] re-sends a lost update.
+/// How many times a [`BrokenFence`] re-sends a lost write.
 const RESENDS: u32 = 8;
 
-/// Forwards every call to `S`, except that the next durable update on the
-/// key its [`Fence`] is armed for, if it loses its CAS, is read back and
-/// re-sent unchanged at the current revision until it lands, up to eight
-/// times.
+/// Forwards every call to `S`, except the next durable write that replies on
+/// the key its [`Fence`] is armed for. An update that loses its CAS, or a
+/// create that finds the key, is read back and re-sent unchanged as an update
+/// at the current revision until it lands, up to eight times. A create that
+/// fails leaves the fence armed. A create on the armed key runs on a task of
+/// its own, so dropping its future cancels neither it nor its re-send.
 #[derive(Clone, Debug)]
 pub struct BrokenFence<S> {
     inner: S,
@@ -605,7 +611,45 @@ impl<S> BrokenFence<S> {
     }
 }
 
-impl<S: CoordinationStore + Clone> CoordinationStore for BrokenFence<S> {
+impl<S: CoordinationStore> BrokenFence<S> {
+    /// Creates `key`, and re-sends `value` when the create finds the key and
+    /// takes the fence.
+    async fn fenced_create(
+        &self,
+        ks: Keyspace,
+        key: &str,
+        value: Vec<u8>,
+    ) -> Result<CasOutcome, StoreError> {
+        let result = Box::pin(self.inner.create(ks, key, value.clone())).await;
+        if result.is_err() || !self.fence.take(key) {
+            return result;
+        }
+        self.resend(ks, key, value, result).await
+    }
+
+    /// Re-sends `value` on `key` at the current revision while `result` is
+    /// `Lost`, up to [`RESENDS`] times.
+    async fn resend(
+        &self,
+        ks: Keyspace,
+        key: &str,
+        value: Vec<u8>,
+        mut result: Result<CasOutcome, StoreError>,
+    ) -> Result<CasOutcome, StoreError> {
+        for _ in 0..RESENDS {
+            if !matches!(result, Ok(CasOutcome::Lost)) {
+                break;
+            }
+            let Some(current) = Box::pin(self.inner.get(ks, key)).await? else {
+                break;
+            };
+            result = Box::pin(self.inner.update(ks, key, value.clone(), current.revision)).await;
+        }
+        result
+    }
+}
+
+impl<S: CoordinationStore + Clone + Send + Sync + 'static> CoordinationStore for BrokenFence<S> {
     fn lease_ttl(&self) -> Duration {
         self.inner.lease_ttl()
     }
@@ -628,7 +672,16 @@ impl<S: CoordinationStore + Clone> CoordinationStore for BrokenFence<S> {
         key: &str,
         value: Vec<u8>,
     ) -> Result<CasOutcome, StoreError> {
-        self.inner.create(ks, key, value).await
+        // Each inner future is boxed. Held inline, they overflow the I/O
+        // thread's stack in debug builds.
+        if ks != Keyspace::Durable || !self.fence.armed_for(key) {
+            return Box::pin(self.inner.create(ks, key, value)).await;
+        }
+        let fenced = self.clone();
+        let key = key.to_owned();
+        tokio::spawn(async move { fenced.fenced_create(ks, &key, value).await })
+            .await
+            .unwrap_or_else(|e| Err(StoreError::Retryable(format!("fenced create: {e}"))))
     }
 
     async fn update(
@@ -638,22 +691,11 @@ impl<S: CoordinationStore + Clone> CoordinationStore for BrokenFence<S> {
         value: Vec<u8>,
         expected: Revision,
     ) -> Result<CasOutcome, StoreError> {
-        // Each inner future is boxed. Held inline, they overflow the I/O
-        // thread's stack in debug builds.
         if ks != Keyspace::Durable || !self.fence.take(key) {
             return Box::pin(self.inner.update(ks, key, value, expected)).await;
         }
-        let mut result = Box::pin(self.inner.update(ks, key, value.clone(), expected)).await;
-        for _ in 0..RESENDS {
-            if !matches!(result, Ok(CasOutcome::Lost)) {
-                break;
-            }
-            let Some(current) = Box::pin(self.inner.get(ks, key)).await? else {
-                break;
-            };
-            result = Box::pin(self.inner.update(ks, key, value.clone(), current.revision)).await;
-        }
-        result
+        let result = Box::pin(self.inner.update(ks, key, value.clone(), expected)).await;
+        self.resend(ks, key, value, result).await
     }
 
     async fn get(&self, ks: Keyspace, key: &str) -> Result<Option<Entry>, StoreError> {

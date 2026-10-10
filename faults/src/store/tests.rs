@@ -1184,6 +1184,82 @@ async fn broken_fence_leaves_ephemeral_updates_alone() {
     assert!(fence.take("split.a"), "still armed");
 }
 
+/// A create on the armed key that finds it is re-sent as an update at the
+/// current revision, where it lands, and the fence fires once. A create that
+/// finds its key with nothing armed, or another key armed, comes back `Lost`
+/// and leaves the fence armed; a create on the armed key that wins disarms it.
+#[tokio::test]
+async fn broken_fence_overwrites_an_armed_create_that_lost() {
+    let fence = Arc::new(Fence::default());
+    let inner = MemoryStore::new(LEASE);
+    let store = BrokenFence::new(inner.clone(), Arc::clone(&fence));
+    let peer = create(&inner, "split.a", record_at(1, Some("w1"), None)).await;
+    create(&inner, "split.b", record_at(1, Some("w1"), None)).await;
+    let stale = |key| store.create(Keyspace::Durable, key, record_at(0, None, None));
+    assert_eq!(
+        stale("split.a").await.unwrap(),
+        CasOutcome::Lost,
+        "nothing armed"
+    );
+
+    fence.arm("split.a");
+    assert_eq!(
+        stale("split.b").await.unwrap(),
+        CasOutcome::Lost,
+        "another key"
+    );
+    let resent = stale("split.a").await.unwrap();
+    let Some(rev) = resent.won() else {
+        panic!("the re-send landed: {resent:?}")
+    };
+    assert!(rev > peer);
+    let landed = inner
+        .get(Keyspace::Durable, "split.a")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(Progress::parse(&landed.value).unwrap().epoch, 0);
+    assert_eq!(
+        stale("split.a").await.unwrap(),
+        CasOutcome::Lost,
+        "fires once"
+    );
+
+    fence.arm("split.c");
+    create(&store, "split.c", record_at(0, None, None)).await;
+    assert!(!fence.take("split.c"), "a won create disarms the fence");
+}
+
+/// A create on the armed key whose future is dropped after its first poll,
+/// as the coordinator's timeout drops one, still re-sends and lands.
+#[tokio::test]
+async fn broken_fence_resends_a_create_dropped_after_its_first_poll() {
+    use futures_util::StreamExt as _;
+    let fence = Arc::new(Fence::default());
+    let inner = MemoryStore::new(LEASE);
+    let store = BrokenFence::new(inner.clone(), Arc::clone(&fence));
+    let peer = create(&inner, "split.a", record_at(1, Some("w1"), None)).await;
+    let mut puts = inner.watch(Keyspace::Durable, "split.a").await.unwrap();
+    fence.arm("split.a");
+    let dropped = store
+        .create(Keyspace::Durable, "split.a", record_at(0, None, None))
+        .now_or_never();
+    assert!(dropped.is_none(), "pending after its first poll");
+    let landed = tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(event) = puts.next().await {
+            if let Ok(WatchEvent::Put(entry)) = event
+                && entry.revision > peer
+            {
+                return entry;
+            }
+        }
+        panic!("the watch ended")
+    })
+    .await
+    .expect("the re-send lands");
+    assert_eq!(Progress::parse(&landed.value).unwrap().epoch, 0);
+}
+
 /// A [`StopAt`] over a journalled [`MemoryStore`], stopping at `plan` through
 /// `stop` with the token `once`, and arming the fence below it at the stop.
 fn leader_stopping(

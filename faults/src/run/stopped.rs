@@ -2,8 +2,8 @@
 //! inside a commit, the peer claims the split, and the sleeper is resumed.
 
 use super::{
-    Env, Event, FaultFired, Faults, Journal, Keyspace, POLL, RUN_DEADLINE, Run, SETUP_DEADLINE,
-    SLEEPER, STOP_CONFIRM, STORE_CALL, Tuning, Workers, journal, journal_holds,
+    Env, Event, FaultFired, Journal, Keyspace, POLL, RUN_DEADLINE, Run, SETUP_DEADLINE, SLEEPER,
+    STOP_CONFIRM, STORE_CALL, Tuning, Workers, journal, journal_holds,
 };
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -15,7 +15,7 @@ const PEER: u32 = 0;
 /// Cap on the sleeper journalling its stop, from its start.
 const STOP_LINE: Duration = Duration::from_secs(60);
 /// How long a broken-fence run waits for its workers after the release.
-const BROKEN_FENCE_WAIT: Duration = Duration::from_secs(90);
+pub(super) const BROKEN_FENCE_WAIT: Duration = Duration::from_secs(90);
 /// How far past one lease from the stop the release falls at the earliest.
 const RELEASE_MARGIN_MS: u64 = 250;
 /// Working-set bound for both workers, above any data set's split count, so
@@ -24,13 +24,15 @@ pub(super) const WORKING_SET: u32 = 32;
 const _: () =
     assert!(WORKING_SET as u64 >= super::OBJECTS * super::MAX_OBJECT.div_ceil(super::MIB));
 
-/// The stop a stopped-writer run saw.
+/// The stop a stopped-writer or deposed-leader run saw.
 #[derive(Clone, Debug)]
 pub(super) struct Stopped {
-    /// The stopped commit's key.
+    /// The stopped write's key.
     pub(super) key: String,
-    /// The revision the stopped commit replaces.
-    pub(super) expected: u64,
+    /// The revision the stopped write replaces, `None` for a create.
+    pub(super) expected: Option<u64>,
+    /// Instance id of the stopped process.
+    pub(super) instance: String,
     /// Pid of the stopped process.
     pub(super) pid: u32,
     /// The peer claimed the split before the cap.
@@ -101,7 +103,7 @@ impl Run<'_> {
         let claimed = await_release(
             stop_ms,
             tuning.lease_ms,
-            || peer_claimed(env, rt, &key, epoch),
+            || peer_claimed(env, rt, &key, epoch, &name),
             journal::now_ms,
             || std::thread::sleep(POLL),
         );
@@ -113,11 +115,7 @@ impl Run<'_> {
                 })
                 .map_err(|e| format!("{}: {e}", faults_path.display()))?;
         }
-        let broken_fence = matches!(
-            self.spec.faults,
-            Faults::StoppedWriter { broken_fence: true }
-        );
-        let wait = if broken_fence {
+        let wait = if self.spec.faults.broken_fence() {
             BROKEN_FENCE_WAIT
         } else {
             until.saturating_duration_since(Instant::now())
@@ -125,7 +123,8 @@ impl Run<'_> {
         let timed_out = workers.wait(wait).map_err(status)?;
         let stopped = Stopped {
             key,
-            expected,
+            expected: Some(expected),
+            instance: name,
             pid,
             reassigned: claimed,
         };
@@ -193,8 +192,15 @@ fn stop_line(
     }
 }
 
-/// Whether the store shows the peer holding `key` at an epoch above `epoch`.
-fn peer_claimed(env: &Env, rt: &tokio::runtime::Runtime, key: &str, epoch: u64) -> bool {
+/// Whether the store shows an instance other than `stopped` holding `key` at
+/// an epoch above `epoch`.
+pub(super) fn peer_claimed(
+    env: &Env,
+    rt: &tokio::runtime::Runtime,
+    key: &str,
+    epoch: u64,
+    stopped: &str,
+) -> bool {
     let entry = rt.block_on(async {
         tokio::time::timeout(STORE_CALL, env.direct.get(Keyspace::Durable, key)).await
     });
@@ -202,7 +208,7 @@ fn peer_claimed(env: &Env, rt: &tokio::runtime::Runtime, key: &str, epoch: u64) 
         return false;
     };
     Progress::parse(&entry.value)
-        .is_ok_and(|p| p.epoch > epoch && p.owner.as_deref() == Some(format!("w{PEER}").as_str()))
+        .is_ok_and(|p| p.epoch > epoch && p.owner.as_deref().is_some_and(|o| o != stopped))
 }
 
 /// Whether the stopped process may be resumed at `now_ms`: the peer's claim
@@ -221,7 +227,7 @@ fn resume_now(stop_ms: u64, claimed: bool, now_ms: u64, lease_ms: u64) -> bool {
 /// Polls `claim` until [`resume_now`] holds at `now`, calling `sleep`
 /// between polls, and returns whether a claim was seen. A claim, once seen,
 /// is not polled again.
-fn await_release(
+pub(super) fn await_release(
     stop_ms: u64,
     lease_ms: u64,
     mut claim: impl FnMut() -> bool,

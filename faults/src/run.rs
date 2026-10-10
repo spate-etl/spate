@@ -109,6 +109,28 @@ pub enum Faults {
     /// leader's work, and only the first to reach it stops. That process is
     /// killed, and another instance must take the leader key within four leases.
     LeaderKilled,
+    /// Three workers. The first process to reach the second to fourth seeded
+    /// progress record while leading stops before sending it, and is resumed
+    /// once another instance has claimed that split. With `broken_fence` the
+    /// resumed create is re-sent as an update after it finds the key, and the
+    /// oracle must catch it.
+    DeposedLeader {
+        /// The stopped leader overwrites the split it finds.
+        broken_fence: bool,
+    },
+}
+
+impl Faults {
+    /// Whether a stopped worker re-sends its write after it loses.
+    #[must_use]
+    pub fn broken_fence(self) -> bool {
+        match self {
+            Faults::StoppedWriter { broken_fence } | Faults::DeposedLeader { broken_fence } => {
+                broken_fence
+            }
+            Faults::None | Faults::Schedule | Faults::LeaderKilled => false,
+        }
+    }
 }
 
 /// Runs `spec` and returns its outcome when every check held.
@@ -133,14 +155,17 @@ pub fn run(spec: &Spec<'_>) -> Outcome {
         StoreKind::Nats => Tuning::nats(),
         StoreKind::DynamoDb => Tuning::dynamodb(),
     };
-    if let Faults::StoppedWriter { .. } = spec.faults {
-        tuning.max_in_flight = stopped::WORKING_SET;
+    match spec.faults {
+        Faults::StoppedWriter { .. } => tuning.max_in_flight = stopped::WORKING_SET,
+        Faults::DeposedLeader { .. } => tuning.max_in_flight = leader::WORKING_SET,
+        Faults::None | Faults::Schedule | Faults::LeaderKilled => {}
     }
     let schedule = match spec.faults {
         Faults::None => Schedule::default(),
         Faults::Schedule => Schedule::draw(&mut rng, spec.instances, tuning.lease_ms),
         Faults::StoppedWriter { .. } => Schedule::stopped_writer(&mut rng),
         Faults::LeaderKilled => Schedule::leader_killed(&mut rng, tuning.lease_ms),
+        Faults::DeposedLeader { .. } => Schedule::deposed_leader(&mut rng),
     };
     let proxy_seed = (spec.store == StoreKind::DynamoDb && spec.faults == Faults::Schedule)
         .then(|| rng.next_u64());
@@ -190,16 +215,14 @@ pub fn run(spec: &Spec<'_>) -> Outcome {
                     &faults_path,
                 )
                 .map(|(timed_out, fired, stopped)| (timed_out, fired, stopped, None)),
-            Faults::LeaderKilled => run
-                .drive_leader(
-                    &mut workers,
-                    &mut processes,
-                    &env,
-                    &rt,
-                    &tuning,
-                    &faults_path,
-                )
-                .map(|(timed_out, fired, killed)| (timed_out, fired, None, Some(killed))),
+            Faults::LeaderKilled | Faults::DeposedLeader { .. } => run.drive_leader(
+                &mut workers,
+                &mut processes,
+                &env,
+                &rt,
+                &tuning,
+                &faults_path,
+            ),
             Faults::None | Faults::Schedule => run
                 .drive(
                     &mut workers,
@@ -260,7 +283,7 @@ pub fn run(spec: &Spec<'_>) -> Outcome {
     })
     .unwrap_or_else(|e| panic!("the oracle could not judge the run: {e}"));
     let scenario = match spec.faults {
-        Faults::StoppedWriter { broken_fence } => {
+        Faults::StoppedWriter { broken_fence } | Faults::DeposedLeader { broken_fence } => {
             violations.extend(stopped.as_ref().and_then(not_reassigned));
             Scenario::StoppedWriter {
                 broken_fence,
@@ -953,12 +976,12 @@ impl Run<'_> {
             sink_delay_ms: self.spec.sink_delay_ms,
             abort,
             stop_at: self.schedule.stop_for(index, incarnation),
-            broken_fence: matches!(
+            broken_fence: self.spec.faults.broken_fence(),
+            stop_once: matches!(
                 self.spec.faults,
-                Faults::StoppedWriter { broken_fence: true }
-            ),
-            stop_once: (self.spec.faults == Faults::LeaderKilled)
-                .then(|| self.dir.join(leader::TOKEN)),
+                Faults::LeaderKilled | Faults::DeposedLeader { .. }
+            )
+            .then(|| self.dir.join(leader::TOKEN)),
         };
         let config_path = self.dir.join(format!("{name}.json"));
         let json = serde_json::to_vec_pretty(&config).map_err(|e| e.to_string())?;
@@ -1308,21 +1331,22 @@ fn not_reassigned(stopped: &stopped::Stopped) -> Option<Violation> {
         check: Check::StoppedSplitNotReassigned,
         key: Some(stopped.key.clone()),
         rev: None,
-        instance: Some(format!("w{SLEEPER}")),
+        instance: Some(stopped.instance.clone()),
         pid: Some(stopped.pid),
-        detail: "the peer did not claim the stopped split within four leases of the stop"
-            .to_owned(),
+        detail: "no peer claimed the stopped split within four leases of the stop".to_owned(),
     })
 }
 
-/// The revision at which the stopped process's commit landed after its
-/// stop, from a revision other than the one it was stopped at.
+/// The revision at which the stopped process's write landed after its
+/// stop, sent from a revision other than the one it was stopped at.
 fn resend_rev(journals: &[ProcessJournal], stopped: &stopped::Stopped) -> Option<u64> {
     let journal = journals.iter().find(|j| j.pid == stopped.pid)?;
-    let after = journal
-        .lines
-        .iter()
-        .skip_while(|l| !matches!(&l.event, Event::Stop { key, .. } if *key == stopped.key));
+    let after = journal.lines.iter().skip_while(|l| {
+        !matches!(
+            &l.event,
+            Event::Stop { key, .. } | Event::LeaderStop { key, .. } if *key == stopped.key
+        )
+    });
     let mut resends = HashSet::new();
     for line in after {
         match &line.event {
@@ -1331,7 +1355,7 @@ fn resend_rev(journals: &[ProcessJournal], stopped: &stopped::Stopped) -> Option
                 key,
                 expected,
                 ..
-            } if *key == stopped.key && *expected != Some(stopped.expected) => {
+            } if *key == stopped.key && *expected != stopped.expected => {
                 resends.insert(*call);
             }
             Event::Done {
@@ -2188,7 +2212,8 @@ mod tests {
         };
         let stopped = stopped::Stopped {
             key: "split.a".to_owned(),
-            expected: 4,
+            expected: Some(4),
+            instance: "w1".to_owned(),
             pid: 9,
             reassigned: true,
         };
@@ -2231,7 +2256,8 @@ mod tests {
     fn a_stop_the_peer_never_claimed_is_a_property_4_violation() {
         let stopped = |reassigned| stopped::Stopped {
             key: "split.a".to_owned(),
-            expected: 4,
+            expected: Some(4),
+            instance: "w2".to_owned(),
             pid: 9,
             reassigned,
         };
@@ -2242,15 +2268,106 @@ mod tests {
                 violation.check,
                 violation.check.property(),
                 violation.key.as_deref(),
+                violation.instance.as_deref(),
                 violation.pid
             ),
             (
                 Check::StoppedSplitNotReassigned,
                 4,
                 Some("split.a"),
+                Some("w2"),
                 Some(9)
             )
         );
+    }
+
+    /// After a `leader_stop` on a seed create, the re-send is the first win
+    /// on that key from a revision: the stopped create itself, lost or won,
+    /// does not count.
+    #[test]
+    fn resend_rev_finds_the_update_after_a_leader_stop() {
+        use crate::classify::WriteKind;
+        use crate::journal::{Progress, Status, WriteOp};
+        let value = Progress {
+            schema: journal::SCHEMA,
+            epoch: 0,
+            owner: None,
+            watermark: None,
+            completed: false,
+            status: Status::Runnable,
+            attempts: 0,
+        };
+        let line = |event| Line { t_ms: 1, event };
+        let send = |call, op, expected| {
+            line(Event::Send {
+                call,
+                op,
+                key: "split.c".to_owned(),
+                expected,
+                value: value.clone(),
+            })
+        };
+        let done = |call, reply| {
+            line(Event::Done {
+                call,
+                key: "split.c".to_owned(),
+                reply,
+            })
+        };
+        let stop = line(Event::LeaderStop {
+            key: "split.c".to_owned(),
+            kind: WriteKind::Seed,
+            n: 3,
+            value: serde_json::Value::Null,
+            published: false,
+        });
+        let stopped = stopped::Stopped {
+            key: "split.c".to_owned(),
+            expected: None,
+            instance: "w0".to_owned(),
+            pid: 9,
+            reassigned: true,
+        };
+        let journal = |lines| ProcessJournal {
+            instance: "w0".to_owned(),
+            pid: 9,
+            lines,
+        };
+        let resent = journal(vec![
+            stop.clone(),
+            send(4, WriteOp::Create, None),
+            done(4, Reply::Lost),
+            send(5, WriteOp::Update, Some(7)),
+            done(5, Reply::Won(8)),
+        ]);
+        assert_eq!(resend_rev(&[resent], &stopped), Some(8));
+        let created = journal(vec![
+            stop,
+            send(4, WriteOp::Create, None),
+            done(4, Reply::Won(3)),
+        ]);
+        assert_eq!(resend_rev(&[created], &stopped), None);
+    }
+
+    /// Both broken-fence variants report a broken fence, and no other
+    /// scenario does.
+    #[test]
+    fn faults_broken_fence_covers_both_variants() {
+        assert!(Faults::StoppedWriter { broken_fence: true }.broken_fence());
+        assert!(Faults::DeposedLeader { broken_fence: true }.broken_fence());
+        for faults in [
+            Faults::StoppedWriter {
+                broken_fence: false,
+            },
+            Faults::DeposedLeader {
+                broken_fence: false,
+            },
+            Faults::LeaderKilled,
+            Faults::Schedule,
+            Faults::None,
+        ] {
+            assert!(!faults.broken_fence(), "{faults:?}");
+        }
     }
 
     /// A kill under a `Held` read names the key's owner and generation, and

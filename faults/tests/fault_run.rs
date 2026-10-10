@@ -55,6 +55,17 @@ fn leader_killed(name: &str, store: StoreKind) {
     });
 }
 
+fn deposed_leader(name: &str, store: StoreKind, broken_fence: bool) {
+    run::run(&Spec {
+        name,
+        store,
+        instances: 3,
+        worker: Path::new(WORKER),
+        sink_delay_ms: 600,
+        faults: Faults::DeposedLeader { broken_fence },
+    });
+}
+
 /// Three NATS workers with no faults deliver every record once.
 #[test]
 #[ignore = "requires Docker"]
@@ -174,6 +185,56 @@ fn nats_leader_killed() {
 #[ignore = "requires Docker"]
 fn dynamodb_leader_killed() {
     leader_killed("dynamodb_leader_killed", StoreKind::DynamoDb);
+}
+
+/// A NATS leader stopped before a seeded progress record for longer than a
+/// lease, while another worker seeds and claims that split, writes nothing
+/// stale on resume.
+#[test]
+#[ignore = "requires Docker"]
+fn nats_deposed_leader_with_fence_passes() {
+    deposed_leader(
+        "nats_deposed_leader_with_fence_passes",
+        StoreKind::Nats,
+        false,
+    );
+}
+
+/// A deposed NATS leader that overwrites the claimed split it finds on resume
+/// lands a stale epoch, and the oracle reports it against that worker.
+#[test]
+#[ignore = "requires Docker"]
+fn nats_leader_broken_fence_fails_the_run() {
+    deposed_leader(
+        "nats_leader_broken_fence_fails_the_run",
+        StoreKind::Nats,
+        true,
+    );
+}
+
+/// A DynamoDB leader stopped before a seeded progress record for longer than
+/// a lease, while another worker seeds and claims that split, writes nothing
+/// stale on resume.
+#[test]
+#[ignore = "requires Docker"]
+fn dynamodb_deposed_leader_with_fence_passes() {
+    deposed_leader(
+        "dynamodb_deposed_leader_with_fence_passes",
+        StoreKind::DynamoDb,
+        false,
+    );
+}
+
+/// A deposed DynamoDB leader that overwrites the claimed split it finds on
+/// resume lands a stale epoch, and the oracle reports it against that worker.
+#[test]
+#[ignore = "requires Docker"]
+fn dynamodb_leader_broken_fence_fails_the_run() {
+    deposed_leader(
+        "dynamodb_leader_broken_fence_fails_the_run",
+        StoreKind::DynamoDb,
+        true,
+    );
 }
 
 /// A DynamoDB update whose first reply the fault proxy drops after it lands

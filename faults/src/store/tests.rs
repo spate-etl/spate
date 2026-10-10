@@ -1263,7 +1263,8 @@ fn count_seed_stop() {
 }
 
 /// A seed create stops when its future is built, before anything polls it,
-/// after its `leader_stop` line and with the fence armed for its key.
+/// after its `leader_stop` line and with the fence armed for its key, and the
+/// creates after it are not held.
 #[tokio::test]
 async fn stop_at_stops_on_a_seed_create_at_construction() {
     let plan = StopPlan {
@@ -1290,6 +1291,11 @@ async fn stop_at_stops_on_a_seed_create_at_construction() {
         }]
     );
     drop(seed);
+    let later = store.create(Keyspace::Durable, "split.b", record_at(0, None, None));
+    assert!(
+        matches!(later.now_or_never(), Some(Ok(CasOutcome::Won(_)))),
+        "a later create is held"
+    );
 }
 
 static ASSIGN_STOPS: AtomicU32 = AtomicU32::new(0);
@@ -1548,4 +1554,68 @@ fn stop_at_seed_gives_up_when_an_earlier_create_is_dropped() {
     assert!(matches!(b, Ok(CasOutcome::Won(_))), "{b:?}");
     assert_eq!(DROPPED_SEED_STOPS.load(Ordering::SeqCst), 0);
     assert_eq!(leader_stop_line(&path), None);
+}
+
+static LATE_SEED_STOPS: AtomicU32 = AtomicU32::new(0);
+
+fn count_late_seed_stop() {
+    LATE_SEED_STOPS.fetch_add(1, Ordering::SeqCst);
+}
+
+/// An earlier seed create dropped before the `n`th is built gives the plan up,
+/// so the `n`th is sent without a stop.
+#[test]
+fn stop_at_seed_gives_up_when_an_earlier_create_is_dropped_before_the_nth() {
+    let plan = StopPlan {
+        kind: WriteKind::Seed,
+        n: 2,
+    };
+    let (store, _dir, path) = leader_stopping(plan, count_late_seed_stop, None);
+    drop(store.create(Keyspace::Durable, "split.a", record_at(0, None, None)));
+    let second = store.create(Keyspace::Durable, "split.b", record_at(0, None, None));
+    assert_eq!(LATE_SEED_STOPS.load(Ordering::SeqCst), 0);
+    assert_eq!(leader_stop_line(&path), None);
+    let b = second.now_or_never().expect("the nth is not held");
+    assert!(matches!(b, Ok(CasOutcome::Won(_))), "{b:?}");
+}
+
+static ORDERED_SEED_STOPS: AtomicU32 = AtomicU32::new(0);
+
+fn count_ordered_seed_stop() {
+    ORDERED_SEED_STOPS.fetch_add(1, Ordering::SeqCst);
+}
+
+/// Under a seed plan, the `n`th create and the creates after it, polled while
+/// an earlier create is unresolved, are sent only after the stop.
+#[tokio::test]
+async fn stop_at_seed_holds_the_nth_and_later_creates_until_the_stop() {
+    let plan = StopPlan {
+        kind: WriteKind::Seed,
+        n: 2,
+    };
+    let (store, _dir, path) = leader_stopping(plan, count_ordered_seed_stop, None);
+    let first = store.create(Keyspace::Durable, "split.a", record_at(0, None, None));
+    let mut second = Box::pin(store.create(Keyspace::Durable, "split.b", record_at(0, None, None)));
+    let mut third = Box::pin(store.create(Keyspace::Durable, "split.c", record_at(0, None, None)));
+    assert!((&mut second).now_or_never().is_none(), "the nth is held");
+    assert!(
+        (&mut third).now_or_never().is_none(),
+        "a later create is held"
+    );
+    assert!(matches!(first.await, Ok(CasOutcome::Won(_))));
+    assert_eq!(ORDERED_SEED_STOPS.load(Ordering::SeqCst), 1);
+    let (b, c) = tokio::join!(second, third);
+    assert!(
+        matches!((&b, &c), (Ok(CasOutcome::Won(_)), Ok(CasOutcome::Won(_)))),
+        "{b:?} {c:?}"
+    );
+    let events = events(&path);
+    let stop = events
+        .iter()
+        .position(|e| matches!(e, Event::LeaderStop { key, .. } if key == "split.b"))
+        .expect("leader_stop on split.b");
+    let early = events[..stop]
+        .iter()
+        .any(|e| matches!(e, Event::Send { key, .. } if key == "split.b" || key == "split.c"));
+    assert!(!early, "{events:?}");
 }

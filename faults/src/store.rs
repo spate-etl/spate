@@ -700,8 +700,9 @@ fn raise_stop() {
 /// the first poll, the resumed write therefore gets a whole `op_timeout`. For a
 /// seed plan whose earlier creates are still in flight when its `n`th is built,
 /// the stop runs when the last of them wins, and the creates from the `n`th on
-/// wait until it has returned. An earlier create that does not win, or is
-/// dropped first, releases them with no stop.
+/// wait until it has returned, with their timeouts already running. An earlier
+/// create that does not win, or is dropped, gives the plan up, and the process
+/// then neither stops nor holds a create.
 /// Before stopping it appends a `stop` line, or a `leader_stop` line for a
 /// leader write, and arms its [`Fence`], when it has one. With a token path,
 /// it stops only if it creates that file, so one process of those sharing the
@@ -934,6 +935,9 @@ impl<S> StopAt<S> {
             } else {
                 Hold::Gate
             };
+        }
+        if self.seeds.open.load(Ordering::SeqCst) {
+            return Hold::No;
         }
         {
             let mut state = self.seeds.lock();

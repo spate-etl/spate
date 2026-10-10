@@ -93,9 +93,10 @@ in CI. Run `cargo xtask hooks install` once per clone, and a commit-msg hook
 applies the same rule to every commit.
 
 A commit body is optional: one line of why where the diff does not show it.
-Branch commits do not reach `main`, so what a reviewer or a later reader needs
-goes in the pull request body. Write it for somebody who was not in the
-conversation, with no reference to a plan or its iterations.
+Branch commits do not reach `main`, so the argument for a change goes in the
+pull request body, and a reason the next editor of the code needs goes in a
+comment beside it. Write both for somebody who was not in the conversation, with
+no reference to a plan or its iterations.
 
 A change to what a crate ships needs a **changelog fragment**. That is anything
 under a crate's `src/`, its `build.rs` or its `Cargo.toml`, and the workspace

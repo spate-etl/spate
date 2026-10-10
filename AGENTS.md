@@ -75,41 +75,44 @@ job. Framework users test with `spate-test` mocks; keep those first-class.
 
 ## Comments
 
-Written for a senior Rust engineer, new to this line of code but not to the
-language or the domain. A comment says what the code does and what a caller may
-rely on, and carries only what they cannot get from the code beside it. Why it
-is this way and not the alternative belongs in the pull request body. If
-deleting a sentence changes nothing a reader would do differently, it goes.
+Written for a senior Rust engineer who is new to this code. A comment carries
+what the code beside it cannot show: the contract a caller relies on, or the
+reason a maintainer needs before changing a line. `main` squashes with an empty
+body, so a reason the next editor needs belongs in the code.
 
-- **One sentence is the default.** A second carries a constraint, a guardrail,
-  or a mechanism the caller cannot see. A doc longer than its item, or any doc
-  on an item whose signature says what it does, is a review finding.
-- **A module header names what the module provides** and its role in the crate,
-  never the dependency it replaces or the failure that motivated it.
-- **State a property as a contract, not a verdict.** "The same seed yields the
-  same stream on any build" is something a caller can use; "a pinned generator
-  cannot drift" closes a decision.
-- **Constraints on use stay in rustdoc**: not cryptographic, not cancel-safe,
-  panics on X.
-- **Guardrails stay.** A comment explaining why a line must not be "simplified"
-  prevents the next edit.
-- **No callers.** Not which, how many, or how often; `grep` finds them and the
-  sentence goes stale. Describe the item's own behavior.
-- **No history.** A sentence narrating the old behavior is a recap with or
-  without "now". Present tense throughout.
-- **No tour of visible control flow.** Restating the loop, the match arms or the
-  early return drifts on the first edit.
-- **Do not explain why something cannot happen.** State a fact once.
+**Rustdoc states the contract.**
 
-A test's doc says what the test pins, in one or two sentences, plus
-`Regression for #N.` where it guards a fixed defect, and the issue holds the
-account of the defect. The same rules hold in commit messages and pull request
-bodies.
+- Open with one sentence saying what the item does. Add more only for what a
+  caller relies on and the signature does not say: units, ordering, blocking,
+  cancel safety, an invariant upheld.
+- Add `# Errors`, `# Panics` and `# Safety` where they apply, and `# Examples`
+  on public entry points.
+- A module header names what the module provides and its role in the crate.
 
-The em-dash used as a dramatic pause, the antithesis frame ("a bound on
-patience, not a deadline"), the evaluative tail (", which is the whole point"),
-the colon reveal, and intensifiers that add nothing all read as machine-written.
-Replacing one with another is not a fix.
+**Inline comments state why, where the code cannot.**
+
+- A guardrail on a line that looks removable: a deliberate re-read, an
+  `#[inline(never)]`, an ordering that must hold.
+- A constraint the code relies on but does not show, such as a lock held or an
+  upstream behavior.
+- `// SAFETY:` on every `unsafe` block, naming the invariant that makes it
+  sound.
+- Self-evident code takes no comment. When a change removes what a comment
+  defended, the comment goes too.
+
+The rejected alternative and how the change came about go in the pull request
+body.
+
+**Never in a comment:** history (old behavior, "now", upstream versions or
+advisory IDs), callers (which, how many, how often), a tour of visible control
+flow, line numbers.
+
+A test's doc says what the test pins, plus `Regression for #N.` where it guards
+a fixed defect.
+
+In comments, commit messages and pull request bodies, avoid the dramatic
+em-dash, the colon reveal, antithesis framing, evaluative tails and empty
+intensifiers. Swapping one for another is no fix.
 
 ## Documentation
 

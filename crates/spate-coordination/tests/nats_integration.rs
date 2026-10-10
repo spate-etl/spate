@@ -1181,3 +1181,97 @@ fn a_listing_whose_consumer_starts_with_nothing_pending_returns_live_keys() {
         );
     });
 }
+
+/// A listing whose consumer delivers a marker for a key the leader holds as a
+/// value returns that key.
+#[test]
+#[ignore = "needs Docker; run explicitly"]
+fn a_listing_rereads_a_key_its_consumer_delivered_as_a_marker() {
+    let (_nats, port) = start_nats(None);
+    let rt = runtime();
+    rt.block_on(async {
+        let direct =
+            NatsStore::new(nats_config(port, "marked"), Duration::from_secs(10)).expect("store");
+        direct
+            .create(Keyspace::Ephemeral, "hb.1", b"v".to_vec())
+            .await
+            .expect("create")
+            .won()
+            .expect("created");
+        // Leader reads carry headers base64-encoded, so only the consumer's
+        // delivery is rewritten.
+        let proxy = Proxy::rewriting(
+            port,
+            b"Nats-Expected-Last-Subject-Sequence: 0",
+            b"KV-Operation: DEL\r\nX-Padding-123456: 0",
+        )
+        .await;
+        let store = NatsStore::new(nats_config(proxy.port, "marked"), Duration::from_secs(10))
+            .expect("store");
+        let listed = store
+            .list(Keyspace::Ephemeral, "hb.")
+            .await
+            .expect("listing");
+        assert_eq!(
+            listed.iter().map(|e| e.key.as_str()).collect::<Vec<_>>(),
+            ["hb.1"]
+        );
+    });
+}
+
+/// A listing whose leader read of an undelivered key fails is Retryable.
+#[test]
+#[ignore = "needs Docker; run explicitly"]
+fn a_listing_whose_leader_read_fails_is_retryable() {
+    let (_nats, port) = start_nats(None);
+    let rt = runtime();
+    rt.block_on(async {
+        let direct =
+            NatsStore::new(nats_config(port, "unread"), Duration::from_secs(10)).expect("store");
+        let created = direct
+            .create(Keyspace::Ephemeral, "hb.1", b"v".to_vec())
+            .await
+            .expect("create")
+            .won()
+            .expect("created");
+        direct
+            .delete(Keyspace::Ephemeral, "hb.1", Some(created))
+            .await
+            .expect("delete")
+            .won()
+            .expect("deleted");
+        let proxy = Proxy::rewriting(port, b"\"message\":{", b"\"messagX\":{").await;
+        let store = NatsStore::new(nats_config(proxy.port, "unread"), Duration::from_secs(10))
+            .expect("store");
+        match store.list(Keyspace::Ephemeral, "hb.").await {
+            Err(StoreError::Retryable(e)) => assert!(e.contains("read hb.1"), "{e}"),
+            Err(e) => panic!("expected Retryable, got {e:?}"),
+            Ok(listed) => panic!("expected Retryable, got Ok with {} entries", listed.len()),
+        }
+    });
+}
+
+/// A subject-set reply that claims a further page, which does not reach
+/// back into the first, fails the listing as Retryable.
+#[test]
+#[ignore = "needs Docker; run explicitly"]
+fn a_listing_whose_next_subject_page_leaves_a_gap_is_retryable() {
+    let (_nats, port) = start_nats(None);
+    let rt = runtime();
+    rt.block_on(async {
+        let proxy = Proxy::rewriting(port, b"\"total\":1,", b"\"total\":9,").await;
+        let store = NatsStore::new(nats_config(proxy.port, "paged"), Duration::from_secs(10))
+            .expect("store");
+        store
+            .create(Keyspace::Ephemeral, "hb.1", b"v".to_vec())
+            .await
+            .expect("create")
+            .won()
+            .expect("created");
+        match store.list(Keyspace::Ephemeral, "hb.").await {
+            Err(StoreError::Retryable(e)) => assert!(e.contains("moved between pages"), "{e}"),
+            Err(e) => panic!("expected Retryable, got {e:?}"),
+            Ok(listed) => panic!("expected Retryable, got Ok with {} entries", listed.len()),
+        }
+    });
+}

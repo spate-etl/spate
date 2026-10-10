@@ -873,6 +873,14 @@ authorization { users: [ { user: spate, password: spate } ] }
     }
 }
 
+/// What a [`Proxy`] does to the bytes the server sends.
+#[derive(Clone, Copy)]
+enum Forward {
+    Plain,
+    Throttled(usize),
+    Rewrite(&'static [u8], &'static [u8]),
+}
+
 /// A TCP proxy on `127.0.0.1` that forwards each new connection to the port
 /// `route` last named.
 struct Proxy {
@@ -883,15 +891,22 @@ struct Proxy {
 
 impl Proxy {
     async fn start(target: u16) -> Proxy {
-        Proxy::spawn(target, None).await
+        Proxy::spawn(target, Forward::Plain).await
     }
 
     /// Forwards server-to-client bytes at no more than `bytes_per_sec`.
     async fn throttled(target: u16, bytes_per_sec: usize) -> Proxy {
-        Proxy::spawn(target, Some(bytes_per_sec)).await
+        Proxy::spawn(target, Forward::Throttled(bytes_per_sec)).await
     }
 
-    async fn spawn(target: u16, rate: Option<usize>) -> Proxy {
+    /// Replaces every `from` the server sends with `to`, which must be the
+    /// same length.
+    async fn rewriting(target: u16, from: &'static [u8], to: &'static [u8]) -> Proxy {
+        assert_eq!(from.len(), to.len(), "a rewrite keeps the length");
+        Proxy::spawn(target, Forward::Rewrite(from, to)).await
+    }
+
+    async fn spawn(target: u16, mode: Forward) -> Proxy {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind a local port");
@@ -907,16 +922,24 @@ impl Proxy {
                     else {
                         return;
                     };
-                    match rate {
-                        None => {
+                    match mode {
+                        Forward::Plain => {
                             let _ = tokio::io::copy_bidirectional(&mut client, &mut server).await;
                         }
-                        Some(rate) => {
+                        Forward::Throttled(rate) => {
                             let (mut client_rx, mut client_tx) = client.split();
                             let (mut server_rx, mut server_tx) = server.split();
                             let _ = tokio::join!(
                                 tokio::io::copy(&mut client_rx, &mut server_tx),
                                 trickle(&mut server_rx, &mut client_tx, rate),
+                            );
+                        }
+                        Forward::Rewrite(from, to) => {
+                            let (mut client_rx, mut client_tx) = client.split();
+                            let (mut server_rx, mut server_tx) = server.split();
+                            let _ = tokio::join!(
+                                tokio::io::copy(&mut client_rx, &mut server_tx),
+                                rewrite(&mut server_rx, &mut client_tx, from, to),
                             );
                         }
                     }
@@ -953,6 +976,43 @@ async fn trickle(
             return Ok(());
         }
         to.write_all(&buf[..n]).await?;
+    }
+}
+
+/// Copies `from` to `to`, replacing every `pattern` with `with`, including one
+/// split across reads.
+async fn rewrite(
+    from: &mut (impl tokio::io::AsyncRead + Unpin),
+    to: &mut (impl tokio::io::AsyncWrite + Unpin),
+    pattern: &[u8],
+    with: &[u8],
+) -> std::io::Result<()> {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let mut pending = Vec::new();
+    let mut buf = vec![0; 64 * 1024];
+    loop {
+        let n = from.read(&mut buf).await?;
+        if n == 0 {
+            return to.write_all(&pending).await;
+        }
+        pending.extend_from_slice(&buf[..n]);
+        let mut i = 0;
+        while i + pattern.len() <= pending.len() {
+            if &pending[i..i + pattern.len()] == pattern {
+                pending[i..i + pattern.len()].copy_from_slice(with);
+                i += pattern.len();
+            } else {
+                i += 1;
+            }
+        }
+        // Hold back a tail that could start a match completed by the next read.
+        let keep = (1..pattern.len())
+            .rev()
+            .find(|&k| pending.ends_with(&pattern[..k]))
+            .unwrap_or(0);
+        let cut = pending.len() - keep;
+        to.write_all(&pending[..cut]).await?;
+        pending.drain(..cut);
     }
 }
 
@@ -1065,4 +1125,59 @@ fn an_existing_bucket_with_another_replica_count_is_rejected() {
         "{message}"
     );
     assert!(message.contains("configured for 3"), "{message}");
+}
+
+/// A listing whose subject-set reply names no stream leader is Retryable.
+#[test]
+#[ignore = "needs Docker; run explicitly"]
+fn a_listing_whose_subject_reply_names_no_leader_is_retryable() {
+    let (_nats, port) = start_nats(None);
+    let rt = runtime();
+    rt.block_on(async {
+        let proxy = Proxy::rewriting(port, b"\"leader\":\"", b"\"leadex\":\"").await;
+        let store = NatsStore::new(
+            nats_config(proxy.port, "leaderless"),
+            Duration::from_secs(10),
+        )
+        .expect("store");
+        store
+            .create(Keyspace::Ephemeral, "hb.1", b"v".to_vec())
+            .await
+            .expect("create")
+            .won()
+            .expect("created");
+        match store.list(Keyspace::Ephemeral, "hb.").await {
+            Err(StoreError::Retryable(e)) => assert!(e.contains("no leader"), "{e}"),
+            Err(e) => panic!("expected Retryable, got {e:?}"),
+            Ok(listed) => panic!("expected Retryable, got Ok with {} entries", listed.len()),
+        }
+    });
+}
+
+/// A listing whose consumer reports nothing pending at creation, while a key
+/// under its prefix holds a value, returns that key.
+#[test]
+#[ignore = "needs Docker; run explicitly"]
+fn a_listing_whose_consumer_starts_with_nothing_pending_returns_live_keys() {
+    let (_nats, port) = start_nats(None);
+    let rt = runtime();
+    rt.block_on(async {
+        let proxy = Proxy::rewriting(port, b"\"num_pending\":1,", b"\"num_pending\":0,").await;
+        let store = NatsStore::new(nats_config(proxy.port, "unpended"), Duration::from_secs(10))
+            .expect("store");
+        store
+            .create(Keyspace::Ephemeral, "hb.1", b"v".to_vec())
+            .await
+            .expect("create")
+            .won()
+            .expect("created");
+        let listed = store
+            .list(Keyspace::Ephemeral, "hb.")
+            .await
+            .expect("listing");
+        assert_eq!(
+            listed.iter().map(|e| e.key.as_str()).collect::<Vec<_>>(),
+            ["hb.1"]
+        );
+    });
 }

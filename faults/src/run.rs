@@ -1323,18 +1323,25 @@ fn resend_rev(journals: &[ProcessJournal], stopped: &stopped::Stopped) -> Option
 
 /// What the leader key holds, read through `direct` under [`PROBE`].
 fn read_leader(rt: &tokio::runtime::Runtime, direct: &Direct) -> LeaderAtKill {
+    leader_from(
+        rt.block_on(async {
+            tokio::time::timeout(PROBE, direct.get(Keyspace::Ephemeral, "leader")).await
+        })
+        .ok(),
+    )
+}
+
+/// The label for a leader read that returned `read`, or `None` when it timed out.
+fn leader_from(read: Option<Result<Option<Entry>, StoreError>>) -> LeaderAtKill {
     /// The leader record's fields the label reads.
     #[derive(serde::Deserialize)]
     struct Record {
         owner: String,
         generation: u64,
     }
-    let read = rt.block_on(async {
-        tokio::time::timeout(PROBE, direct.get(Keyspace::Ephemeral, "leader")).await
-    });
     match read {
-        Ok(Ok(None)) => LeaderAtKill::Vacant,
-        Ok(Ok(Some(entry))) => {
+        Some(Ok(None)) => LeaderAtKill::Vacant,
+        Some(Ok(Some(entry))) => {
             serde_json::from_slice::<Record>(&entry.value).map_or(LeaderAtKill::Unread, |r| {
                 LeaderAtKill::Held {
                     owner: r.owner,
@@ -1343,7 +1350,7 @@ fn read_leader(rt: &tokio::runtime::Runtime, direct: &Direct) -> LeaderAtKill {
                 }
             })
         }
-        Ok(Err(_)) | Err(_) => LeaderAtKill::Unread,
+        Some(Err(_)) | None => LeaderAtKill::Unread,
     }
 }
 
@@ -2281,5 +2288,36 @@ mod tests {
             unread_leader_kills(Faults::None, &lines),
             Vec::<String>::new()
         );
+    }
+
+    /// A leader record decodes to its owner, generation and digest; an absent
+    /// key is `Vacant`; bytes that do not parse, a store error and a timeout
+    /// are `Unread`.
+    #[test]
+    fn a_leader_read_is_labelled_by_what_it_returned() {
+        let entry = |value: &[u8]| Entry {
+            key: "leader".to_owned(),
+            value: value.to_vec(),
+            revision: spate_coordination::store::Revision(1),
+        };
+        let record = br#"{"schema":1,"owner":"w2","nonce":"n","generation":3}"#;
+        assert_eq!(
+            leader_from(Some(Ok(Some(entry(record))))),
+            LeaderAtKill::Held {
+                owner: "w2".to_owned(),
+                generation: 3,
+                digest: spate_test_support::fnv1a(record),
+            }
+        );
+        assert_eq!(leader_from(Some(Ok(None))), LeaderAtKill::Vacant);
+        assert_eq!(
+            leader_from(Some(Ok(Some(entry(b"{\"owner\":7}"))))),
+            LeaderAtKill::Unread
+        );
+        assert_eq!(
+            leader_from(Some(Err(StoreError::Retryable("down".to_owned())))),
+            LeaderAtKill::Unread
+        );
+        assert_eq!(leader_from(None), LeaderAtKill::Unread);
     }
 }

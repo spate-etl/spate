@@ -533,7 +533,141 @@ async fn an_ephemeral_split_update_counts_as_a_renewal() {
     );
 }
 
+/// `AbortAt` counts the leader key's create and update, a durable `plan`
+/// update and `assign.*` writes as leader kinds, and an ephemeral `split.*`
+/// lease create as no kind.
+#[test]
+fn abort_at_counts_leader_writes_and_not_a_lease_create() {
+    let (journalled, _dir, _path) = journalled(MemoryStore::new(LEASE));
+    let journal = Arc::clone(&journalled.journal);
+    let classifier = Arc::clone(&journalled.classifier);
+    let plan = plan(WriteKind::Renew, 1, AbortMode::Before);
+    let store = AbortAt::new(journalled, plan, journal, classifier);
+    let rev = Some(Revision(1));
+    let (ephemeral, durable) = (Keyspace::Ephemeral, Keyspace::Durable);
+    let kind = |ks, key, expected| store.kind(ks, key, b"{}", expected);
+    assert_eq!(kind(ephemeral, "leader", None), Some(WriteKind::Elect));
+    assert_eq!(kind(ephemeral, "leader", rev), Some(WriteKind::LeaderRenew));
+    assert_eq!(kind(durable, "plan", rev), Some(WriteKind::Plan));
+    assert_eq!(kind(durable, "assign.w0", None), Some(WriteKind::Assign));
+    assert_eq!(kind(durable, "assign.w0", rev), Some(WriteKind::Assign));
+    assert_eq!(kind(ephemeral, "split.a", rev), Some(WriteKind::Renew));
+    assert_eq!(kind(ephemeral, "split.a", None), None, "a lease create");
+    assert_eq!(kind(ephemeral, "worker.w0", rev), None);
+}
+
+/// An `ErrAfterLand` plan on the leader key's create lands the key, appends
+/// its `err_after_land` line and hands its caller a retryable error; the next
+/// create is forwarded untouched.
+#[tokio::test]
+async fn abort_at_create_err_after_land_forwards_then_returns_retryable() {
+    let (journalled, _dir, path) = journalled(MemoryStore::new(LEASE));
+    let journal = Arc::clone(&journalled.journal);
+    let classifier = Arc::clone(&journalled.classifier);
+    let plan = plan(WriteKind::Elect, 1, AbortMode::ErrAfterLand);
+    let store = AbortAt::new(journalled, plan, journal, classifier);
+    let lost = store
+        .create(Keyspace::Ephemeral, "leader", b"w0".to_vec())
+        .await;
+    assert!(matches!(lost, Err(StoreError::Retryable(_))), "{lost:?}");
+    let landed = store
+        .inner
+        .inner
+        .get(Keyspace::Ephemeral, "leader")
+        .await
+        .unwrap()
+        .expect("the create landed");
+    assert_eq!(landed.value, b"w0");
+    let next = store
+        .create(Keyspace::Ephemeral, "leader", b"w1".to_vec())
+        .await
+        .unwrap();
+    assert_eq!(next, CasOutcome::Lost);
+    assert_eq!(
+        events(&path),
+        [Event::ErrAfterLand {
+            key: "leader".to_owned(),
+            rev: landed.revision.0,
+        }]
+    );
+}
+
 const ABORT_CHILD: &str = "SPATE_FAULTS_ABORT_CHILD";
+const LEADER_ABORT_CHILD: &str = "SPATE_FAULTS_LEADER_ABORT_CHILD";
+
+/// In a child process: sends the leader key's create through an `AbortAt`
+/// carrying an `Elect` plan in `mode`.
+fn leader_abort_child(mode: &str, path: &std::path::Path) {
+    let mode = match mode {
+        "before" => AbortMode::Before,
+        _ => AbortMode::After,
+    };
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let journal = Arc::new(Journal::open(path).unwrap());
+        let classifier = Arc::new(Classifier::new("w0"));
+        let inner = JournalStore::new(
+            MemoryStore::new(LEASE),
+            Arc::clone(&journal),
+            Arc::clone(&classifier),
+        );
+        let store = AbortAt::new(inner, plan(WriteKind::Elect, 1, mode), journal, classifier);
+        let _ = store
+            .create(Keyspace::Ephemeral, "leader", b"w0".to_vec())
+            .await;
+    });
+}
+
+/// A `Before` or `After` plan on the leader key's create aborts the process
+/// with its `abort` line in the journal.
+#[cfg(unix)]
+#[test]
+fn abort_at_fires_on_a_leader_create() {
+    use std::os::unix::process::ExitStatusExt as _;
+    if let Ok(mode) = std::env::var(LEADER_ABORT_CHILD) {
+        let no_core = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: `setrlimit` reads one valid `rlimit` and changes only this
+        // process's limit.
+        let set = unsafe { libc::setrlimit(libc::RLIMIT_CORE, &raw const no_core) };
+        assert_eq!(set, 0);
+        leader_abort_child(
+            &mode,
+            std::path::Path::new(&std::env::var("SPATE_FAULTS_ABORT_JOURNAL").unwrap()),
+        );
+        return;
+    }
+    for (mode, at) in [("before", AbortPoint::Before), ("after", AbortPoint::After)] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("w0-1.ndjson");
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "store::tests::abort_at_fires_on_a_leader_create",
+                "--nocapture",
+            ])
+            .env(LEADER_ABORT_CHILD, mode)
+            .env("SPATE_FAULTS_ABORT_JOURNAL", &path)
+            .status()
+            .unwrap();
+        assert_eq!(status.signal(), Some(libc::SIGABRT), "{mode}: {status:?}");
+        assert_eq!(
+            events(&path),
+            [Event::Abort {
+                key: "leader".to_owned(),
+                kind: WriteKind::Elect,
+                n: 1,
+                at,
+            }],
+            "{mode}"
+        );
+    }
+}
 
 /// In a child process: claims `split.a` and sends one commit through an
 /// `AbortAt` carrying a commit plan in `mode`.

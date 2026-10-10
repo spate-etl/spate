@@ -378,14 +378,15 @@ impl Trigger {
     }
 }
 
-/// Forwards every call to `S` and applies one [`AbortPlan`] to the updates
-/// it classifies through the shared [`Classifier`].
+/// Forwards every call to `S` and applies one [`AbortPlan`] to the writes
+/// it classifies.
 ///
-/// A durable `split.*` update is classified against the value at its expected
-/// revision, and an ephemeral `split.*` update is a [`WriteKind::Renew`]. An
-/// abort appends its `abort` line first and an `ErrAfterLand` its
-/// `err_after_land` line, so it sits outside the [`JournalStore`] whose
-/// classifier it reads.
+/// A durable `split.*` update is classified through the shared [`Classifier`]
+/// against the value at its expected revision, an ephemeral `split.*` update
+/// is a [`WriteKind::Renew`], and every other create or update goes through
+/// [`classify_leader`]. An abort appends its `abort` line first and an
+/// `ErrAfterLand` its `err_after_land` line, so it sits outside the
+/// [`JournalStore`] whose classifier it reads.
 #[derive(Clone, Debug)]
 pub struct AbortAt<S> {
     inner: S,
@@ -410,14 +411,67 @@ impl<S> AbortAt<S> {
         }
     }
 
-    fn kind(&self, ks: Keyspace, key: &str, value: &[u8], expected: Revision) -> Option<WriteKind> {
-        match ks {
-            Keyspace::Durable if key.starts_with(SPLIT_PREFIX) => {
-                let next = Progress::parse(value).ok()?;
-                self.classifier.classify(key, expected.0, &next)
+    /// The kind the plan counts a write as. `expected` is `None` for a create.
+    fn kind(
+        &self,
+        ks: Keyspace,
+        key: &str,
+        value: &[u8],
+        expected: Option<Revision>,
+    ) -> Option<WriteKind> {
+        let ephemeral = ks == Keyspace::Ephemeral;
+        let Some(expected) = expected else {
+            return classify_leader(ephemeral, WriteOp::Create, key);
+        };
+        if !key.starts_with(SPLIT_PREFIX) {
+            return classify_leader(ephemeral, WriteOp::Update, key);
+        }
+        if ephemeral {
+            return classify_ephemeral(key);
+        }
+        let next = Progress::parse(value).ok()?;
+        self.classifier.classify(key, expected.0, &next)
+    }
+
+    /// Sends one write of `kind` through `send`, aborting or replacing its
+    /// reply where the plan fires.
+    async fn apply<F>(
+        &self,
+        key: &str,
+        kind: Option<WriteKind>,
+        send: impl FnOnce() -> F,
+    ) -> Result<CasOutcome, StoreError>
+    where
+        F: Future<Output = Result<CasOutcome, StoreError>>,
+    {
+        let Some(n) = self.trigger.arm(kind) else {
+            return send().await;
+        };
+        if self.trigger.plan.mode == AbortMode::Before && self.trigger.fire() {
+            self.abort(key, n, AbortPoint::Before);
+        }
+        let result = send().await;
+        let Ok(CasOutcome::Won(rev)) = result else {
+            return result;
+        };
+        if !self.trigger.fire() {
+            return result;
+        }
+        match self.trigger.plan.mode {
+            AbortMode::Before => result,
+            AbortMode::After => self.abort(key, n, AbortPoint::After),
+            AbortMode::ErrAfterLand => {
+                record(
+                    &self.journal,
+                    Event::ErrAfterLand {
+                        key: key.to_owned(),
+                        rev: rev.0,
+                    },
+                );
+                Err(StoreError::Retryable(
+                    "injected: the write landed and its reply was lost".to_owned(),
+                ))
             }
-            Keyspace::Ephemeral => classify_ephemeral(key),
-            Keyspace::Durable => None,
         }
     }
 
@@ -458,7 +512,9 @@ impl<S: CoordinationStore + Clone> CoordinationStore for AbortAt<S> {
         key: &str,
         value: Vec<u8>,
     ) -> Result<CasOutcome, StoreError> {
-        self.inner.create(ks, key, value).await
+        let kind = self.kind(ks, key, &value, None);
+        self.apply(key, kind, || self.inner.create(ks, key, value))
+            .await
     }
 
     async fn update(
@@ -468,35 +524,9 @@ impl<S: CoordinationStore + Clone> CoordinationStore for AbortAt<S> {
         value: Vec<u8>,
         expected: Revision,
     ) -> Result<CasOutcome, StoreError> {
-        let Some(n) = self.trigger.arm(self.kind(ks, key, &value, expected)) else {
-            return self.inner.update(ks, key, value, expected).await;
-        };
-        if self.trigger.plan.mode == AbortMode::Before && self.trigger.fire() {
-            self.abort(key, n, AbortPoint::Before);
-        }
-        let result = self.inner.update(ks, key, value, expected).await;
-        let Ok(CasOutcome::Won(rev)) = result else {
-            return result;
-        };
-        if !self.trigger.fire() {
-            return result;
-        }
-        match self.trigger.plan.mode {
-            AbortMode::Before => result,
-            AbortMode::After => self.abort(key, n, AbortPoint::After),
-            AbortMode::ErrAfterLand => {
-                record(
-                    &self.journal,
-                    Event::ErrAfterLand {
-                        key: key.to_owned(),
-                        rev: rev.0,
-                    },
-                );
-                Err(StoreError::Retryable(
-                    "injected: the write landed and its reply was lost".to_owned(),
-                ))
-            }
-        }
+        let kind = self.kind(ks, key, &value, Some(expected));
+        self.apply(key, kind, || self.inner.update(ks, key, value, expected))
+            .await
     }
 
     async fn get(&self, ks: Keyspace, key: &str) -> Result<Option<Entry>, StoreError> {

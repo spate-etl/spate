@@ -109,7 +109,7 @@ impl LeaderStage {
     }
 }
 
-/// The stage every instance's first process stops at, and how long after the
+/// The stage the first process to reach it stops at, and how long after the
 /// takeover the stopped leader's replacement starts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LeaderPlan {
@@ -198,8 +198,8 @@ impl Schedule {
         }
     }
 
-    /// A leader-kill schedule: every first process stops at one stage of a
-    /// leader's work, and nothing else is injected.
+    /// A leader-kill schedule: the first process to reach one stage of a
+    /// leader's work stops there, and nothing else is injected.
     #[must_use]
     pub fn leader_killed(rng: &mut SplitMix64, lease_ms: u64) -> Schedule {
         let stage = match rng.in_range(0, 4) {
@@ -298,7 +298,7 @@ impl Schedule {
         if let Some(leader) = self.leader {
             let _ = writeln!(
                 text,
-                "w*-1: {}; the first to stop is killed and replaced {} ms after the takeover",
+                "w*-1: {}, first to reach it only; it is killed and replaced {} ms after the takeover",
                 leader.stop, leader.respawn_after_ms
             );
         }

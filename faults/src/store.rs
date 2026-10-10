@@ -1024,7 +1024,8 @@ impl<S: CoordinationStore + Clone> CoordinationStore for StopAt<S> {
         self.inner.attach_metrics(metrics);
     }
 
-    // Not an `async fn`, as `update` is not.
+    // Not an `async fn`, so `hold` runs when the future is built, before the
+    // caller's timeout exists.
     fn create(
         &self,
         ks: Keyspace,

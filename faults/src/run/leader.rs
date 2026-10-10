@@ -1,5 +1,5 @@
-//! The leader-kill run: every worker's first process stops at one stage of a
-//! leader's work, the first to stop is killed, and another instance must take
+//! The leader-kill run: the first worker process to reach one stage of a
+//! leader's work stops there and is killed, and another instance must take
 //! the leader key before the killed instance's replacement starts.
 
 use super::{

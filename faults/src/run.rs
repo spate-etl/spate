@@ -105,9 +105,9 @@ pub enum Faults {
         /// The stopped worker re-sends its lost commit.
         broken_fence: bool,
     },
-    /// Every worker's first process stops at one seeded stage of a leader's
-    /// work. The first to stop is killed, and another instance must take the
-    /// leader key within four leases.
+    /// Every worker's first process carries a stop at one seeded stage of a
+    /// leader's work, and only the first to reach it stops. That process is
+    /// killed, and another instance must take the leader key within four leases.
     LeaderKilled,
 }
 

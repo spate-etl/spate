@@ -12,7 +12,7 @@ use serde::Deserialize;
 use super::version::Version;
 use crate::checks::scratch::Scratch;
 use crate::checks::semver_checks::{UA, fetch_index};
-use crate::run::{self, Error, Outcome, Step, Streams};
+use crate::run::{self, Error, Outcome, Step};
 
 /// The identity the release commit and tag carry.
 const BOT_NAME: &str = "spate-release[bot]";
@@ -72,24 +72,41 @@ pub(crate) trait Forge {
     ) -> Result<Option<u64>, Error>;
     /// Squash-merges the pull request once its required checks pass.
     fn auto_merge(&self, number: u64) -> Outcome;
-    fn release_exists(&self, tag: &str) -> Result<bool, Error>;
-    /// Creates a release on an existing tag.
+    fn release_state(&self, tag: &str) -> Result<ReleaseState, Error>;
+    /// Creates a draft release on an existing tag.
     fn create_release(&self, tag: &str, notes: &str) -> Outcome;
+    /// Publishes a draft release.
+    fn publish_release(&self, tag: &str) -> Outcome;
+    /// Verifies the attestation GitHub signs for an immutable release.
+    fn verify_release(&self, tag: &str) -> Outcome;
     fn upload(&self, tag: &str, files: &[PathBuf], clobber: bool) -> Outcome;
+    /// The names of the release's fully uploaded assets.
     fn assets(&self, tag: &str) -> Result<Vec<String>, Error>;
     /// Starts the documentation deploy.
     fn dispatch_docs(&self) -> Outcome;
-    /// Verifies that an attestation in `bundle`, of `predicate_type`, covers
-    /// `file` and was signed by `signer_workflow` running from `main` at
-    /// `commit`.
+    /// Verifies that an attestation of `predicate_type`, read from `bundle` or
+    /// from the attestation store when it is `None`, covers `file` and was
+    /// signed by `signer_workflow` running from `main` at `commit`.
     fn verify_attestation(
         &self,
         file: &Path,
-        bundle: &Path,
+        bundle: Option<&Path>,
         signer_workflow: &str,
         predicate_type: &str,
         commit: &str,
     ) -> Outcome;
+}
+
+/// Where a GitHub release stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReleaseState {
+    Missing,
+    /// Assets can still change.
+    Draft,
+    /// Published; an immutable release's assets and tag are locked.
+    Published {
+        immutable: bool,
+    },
 }
 
 /// One version in a crate's sparse-index file.
@@ -114,6 +131,8 @@ pub(crate) trait Registry {
     /// The commit a Trusted Publishing upload of this version recorded, or
     /// `"null"` for a version published any other way.
     fn trustpub_sha(&self, krate: &str, version: Version) -> Result<String, Error>;
+    /// Downloads the `.crate` the registry serves into `dir`.
+    fn download(&self, krate: &str, version: Version, dir: &Path) -> Result<PathBuf, Error>;
 }
 
 /// A publishable workspace member and its manifest directory.
@@ -170,6 +189,8 @@ pub(crate) trait Workspace {
 /// `GITHUB_REPOSITORY`.
 pub(crate) struct ProcessGit<'a> {
     pub(crate) root: &'a Path,
+    /// Where tags are read from: a remote name or a URL.
+    pub(crate) remote: String,
 }
 
 impl ProcessGit<'_> {
@@ -232,7 +253,7 @@ impl Git for ProcessGit<'_> {
         let listing = self.capture(&[
             "ls-remote",
             "--tags",
-            "origin",
+            &self.remote,
             &format!("refs/tags/{tag}"),
             &format!("refs/tags/{tag}^{{}}"),
         ])?;
@@ -298,15 +319,45 @@ fn required_env(key: &str, what: &str) -> Result<String, Error> {
 /// The forge through `gh`, authenticated by `GH_TOKEN`.
 pub(crate) struct Gh<'a> {
     pub(crate) root: &'a Path,
+    /// The repository as OWNER/NAME, or `None` for the one gh infers from the
+    /// checkout.
+    pub(crate) repo: Option<&'a str>,
 }
 
-impl Gh<'_> {
+impl<'a> Gh<'a> {
+    fn step(&self, args: &[&str]) -> Step<'a> {
+        let step = Step::new("gh", args);
+        match self.repo {
+            Some(repo) => step.env("GH_REPO", repo),
+            None => step,
+        }
+    }
+
     fn capture(&self, args: &[&str]) -> Result<String, Error> {
-        run::capture(self.root, &Step::new("gh", args))
+        run::capture(self.root, &self.step(args))
     }
 
     fn run(&self, step: &Step<'_>) -> Outcome {
         run::run(self.root, false, step)
+    }
+
+    /// `gh release create` making a draft on a tag that already exists.
+    fn create_step(&self, tag: &str, notes: &Path) -> Step<'a> {
+        self.step(&[
+            "release",
+            "create",
+            tag,
+            "--draft",
+            "--verify-tag",
+            "--title",
+            tag,
+        ])
+        .arg("--notes-file")
+        .arg(notes.to_string_lossy())
+    }
+
+    fn publish_step(&self, tag: &str) -> Step<'a> {
+        self.step(&["release", "edit", tag, "--draft=false"])
     }
 }
 
@@ -378,31 +429,40 @@ impl Forge for Gh<'_> {
         })
     }
 
-    fn release_exists(&self, tag: &str) -> Result<bool, Error> {
-        let done = run::complete(
-            self.root,
-            &Step::new("gh", ["release", "view", tag]),
-            Streams::Discard,
-        )?;
-        Ok(done.code == 0)
+    fn release_state(&self, tag: &str) -> Result<ReleaseState, Error> {
+        // Run by hand: gh's stderr decides whether the release is missing.
+        let step = self.step(&["release", "view", tag, "--json", "isDraft,isImmutable"]);
+        let out = Command::new(step.program)
+            .args(&step.args)
+            .envs(step.env.iter().map(|(k, v)| (*k, v.as_str())))
+            .current_dir(self.root)
+            .output()
+            .map_err(|e| Error::msg(format!("gh release view: {e}")))?;
+        release_view(
+            tag,
+            out.status.success(),
+            &String::from_utf8_lossy(&out.stdout),
+            &String::from_utf8_lossy(&out.stderr),
+        )
     }
 
     fn create_release(&self, tag: &str, notes: &str) -> Outcome {
         let scratch = Scratch::new("spate-release-notes")?;
         let file = scratch.join("notes.md");
         std::fs::write(&file, notes).map_err(|e| Error::msg(format!("{}: {e}", file.display())))?;
-        self.run(
-            &Step::new(
-                "gh",
-                ["release", "create", tag, "--verify-tag", "--title", tag],
-            )
-            .arg("--notes-file")
-            .arg(file.to_string_lossy()),
-        )
+        self.run(&self.create_step(tag, &file))
+    }
+
+    fn publish_release(&self, tag: &str) -> Outcome {
+        self.run(&self.publish_step(tag))
+    }
+
+    fn verify_release(&self, tag: &str) -> Outcome {
+        self.run(&self.step(&["release", "verify", tag]))
     }
 
     fn upload(&self, tag: &str, files: &[PathBuf], clobber: bool) -> Outcome {
-        let mut step = Step::new("gh", ["release", "upload", tag]);
+        let mut step = self.step(&["release", "upload", tag]);
         if clobber {
             step = step.arg("--clobber");
         }
@@ -410,19 +470,7 @@ impl Forge for Gh<'_> {
     }
 
     fn assets(&self, tag: &str) -> Result<Vec<String>, Error> {
-        Ok(self
-            .capture(&[
-                "release",
-                "view",
-                tag,
-                "--json",
-                "assets",
-                "--jq",
-                ".assets[].name",
-            ])?
-            .lines()
-            .map(str::to_owned)
-            .collect())
+        uploaded_assets(&self.capture(&["release", "view", tag, "--json", "assets"])?)
     }
 
     fn dispatch_docs(&self) -> Outcome {
@@ -441,7 +489,7 @@ impl Forge for Gh<'_> {
     fn verify_attestation(
         &self,
         file: &Path,
-        bundle: &Path,
+        bundle: Option<&Path>,
         signer_workflow: &str,
         predicate_type: &str,
         commit: &str,
@@ -458,7 +506,7 @@ impl Forge for Gh<'_> {
 /// and to hosted runners, with the repository read from the workflow path.
 fn attestation_step<'a>(
     file: &Path,
-    bundle: &Path,
+    bundle: Option<&Path>,
     signer_workflow: &str,
     predicate_type: &str,
     commit: &str,
@@ -474,8 +522,74 @@ fn attestation_step<'a>(
         .arg(format!("{signer_workflow}@refs/heads/main"))
         .args(["--source-ref", "refs/heads/main", "--source-digest", commit])
         .arg("--deny-self-hosted-runners")
-        .args(["--predicate-type", predicate_type, "--bundle"])
-        .arg(bundle.to_string_lossy())
+        .args(["--predicate-type", predicate_type])
+        .args(
+            bundle
+                .map(|b| vec!["--bundle".to_owned(), b.to_string_lossy().into_owned()])
+                .unwrap_or_default(),
+        )
+}
+
+/// The state a `gh release view --json isDraft,isImmutable` run reports: gh's
+/// `release not found` reads as `Missing`, and any other failure is an error.
+pub(crate) fn release_view(
+    tag: &str,
+    ok: bool,
+    stdout: &str,
+    stderr: &str,
+) -> Result<ReleaseState, Error> {
+    if ok {
+        return release_state(stdout);
+    }
+    if stderr.contains("release not found") {
+        return Ok(ReleaseState::Missing);
+    }
+    Err(Error::msg(format!(
+        "gh release view {tag} failed: {}",
+        stderr.trim()
+    )))
+}
+
+/// The names of the assets in `gh release view --json assets` whose upload
+/// completed. An upload broken partway leaves an asset by that name in another
+/// state, which publishing would lock in.
+pub(crate) fn uploaded_assets(raw: &str) -> Result<Vec<String>, Error> {
+    #[derive(Deserialize)]
+    struct View {
+        assets: Vec<Asset>,
+    }
+    #[derive(Deserialize)]
+    struct Asset {
+        name: String,
+        state: String,
+    }
+    let view: View = serde_json::from_str(raw)
+        .map_err(|e| Error::msg(format!("gh release view --json assets: {e}")))?;
+    Ok(view
+        .assets
+        .into_iter()
+        .filter(|a| a.state == "uploaded")
+        .map(|a| a.name)
+        .collect())
+}
+
+/// The state `gh release view --json isDraft,isImmutable` reports.
+pub(crate) fn release_state(raw: &str) -> Result<ReleaseState, Error> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct View {
+        is_draft: bool,
+        is_immutable: bool,
+    }
+    let view: View =
+        serde_json::from_str(raw).map_err(|e| Error::msg(format!("gh release view: {e}")))?;
+    Ok(if view.is_draft {
+        ReleaseState::Draft
+    } else {
+        ReleaseState::Published {
+            immutable: view.is_immutable,
+        }
+    })
 }
 
 /// The rows of `gh pr list --json number,headRefName,isCrossRepository`.
@@ -546,6 +660,22 @@ impl Registry for CratesIo<'_> {
             .as_str()
             .unwrap_or("null")
             .to_owned())
+    }
+
+    fn download(&self, krate: &str, version: Version, dir: &Path) -> Result<PathBuf, Error> {
+        let file = dir.join(format!("{krate}-{version}.crate"));
+        run::run(
+            self.root,
+            false,
+            &Step::new("curl", ["-fsSL", "--retry", "3", "--max-time", "60", "-H"])
+                .arg(format!("User-Agent: {UA}"))
+                .arg("-o")
+                .arg(file.to_string_lossy())
+                .arg(format!(
+                    "https://static.crates.io/crates/{krate}/{krate}-{version}.crate"
+                )),
+        )?;
+        Ok(file)
     }
 }
 
@@ -915,12 +1045,19 @@ impl Forge for DryForge<'_> {
         would(&format!("enable auto-merge on #{number}"));
         Ok(())
     }
-    fn release_exists(&self, tag: &str) -> Result<bool, Error> {
-        self.0.release_exists(tag)
+    fn release_state(&self, tag: &str) -> Result<ReleaseState, Error> {
+        self.0.release_state(tag)
     }
     fn create_release(&self, tag: &str, _notes: &str) -> Outcome {
-        would(&format!("create the {tag} release"));
+        would(&format!("create the {tag} release as a draft"));
         Ok(())
+    }
+    fn publish_release(&self, tag: &str) -> Outcome {
+        would(&format!("publish the {tag} release"));
+        Ok(())
+    }
+    fn verify_release(&self, tag: &str) -> Outcome {
+        self.0.verify_release(tag)
     }
     fn upload(&self, tag: &str, files: &[PathBuf], _clobber: bool) -> Outcome {
         for f in files {
@@ -938,7 +1075,7 @@ impl Forge for DryForge<'_> {
     fn verify_attestation(
         &self,
         file: &Path,
-        bundle: &Path,
+        bundle: Option<&Path>,
         signer_workflow: &str,
         predicate_type: &str,
         commit: &str,
@@ -958,7 +1095,7 @@ mod tests {
     fn attestation_verify_pins_signer_ref_commit_and_runner() {
         let step = attestation_step(
             Path::new("a.crate"),
-            Path::new("b.jsonl"),
+            Some(Path::new("b.jsonl")),
             "spate-etl/spate/.github/workflows/release-build.yml",
             "https://slsa.dev/provenance/v1",
             "abc123",
@@ -978,6 +1115,99 @@ mod tests {
             Some("https://slsa.dev/provenance/v1")
         );
         assert_eq!(pair("--bundle"), Some("b.jsonl"));
+    }
+
+    /// The release is created as a draft and published by clearing the draft
+    /// flag.
+    #[test]
+    fn the_release_is_created_as_a_draft_and_published_from_it() {
+        let gh = Gh {
+            root: Path::new("."),
+            repo: None,
+        };
+        let create = gh.create_step("v0.3.0", Path::new("notes.md")).args;
+        assert!(create.starts_with(&["release", "create", "v0.3.0"].map(String::from)));
+        assert!(create.iter().any(|a| a == "--draft"), "{create:?}");
+        assert!(create.iter().any(|a| a == "--verify-tag"), "{create:?}");
+        assert_eq!(
+            gh.publish_step("v0.3.0").args,
+            ["release", "edit", "v0.3.0", "--draft=false"]
+        );
+    }
+
+    /// Only gh's `release not found` reads as a missing release; any other
+    /// failure stays an error.
+    #[test]
+    fn only_release_not_found_reads_as_missing() {
+        assert_eq!(
+            release_view("v0.3.0", false, "", "release not found\n").unwrap(),
+            ReleaseState::Missing
+        );
+        let err = release_view("v0.3.0", false, "", "HTTP 502: Bad Gateway\n").unwrap_err();
+        assert_eq!(
+            err.message,
+            "gh release view v0.3.0 failed: HTTP 502: Bad Gateway"
+        );
+        assert_eq!(
+            release_view(
+                "v0.3.0",
+                true,
+                r#"{"isDraft":true,"isImmutable":false}"#,
+                ""
+            )
+            .unwrap(),
+            ReleaseState::Draft
+        );
+    }
+
+    /// An asset whose upload did not complete is not listed.
+    #[test]
+    fn only_uploaded_assets_are_listed() {
+        let raw = r#"{"assets":[
+            {"name":"spate-0.3.0.cdx.json","state":"uploaded","size":10},
+            {"name":"SHA256SUMS","state":"starter","size":0},
+            {"name":"spate-v0.3.0.intoto.jsonl","state":"open","size":0}
+        ]}"#;
+        assert_eq!(uploaded_assets(raw).unwrap(), ["spate-0.3.0.cdx.json"]);
+        assert!(uploaded_assets(r#"{"assets":[]}"#).unwrap().is_empty());
+        assert!(uploaded_assets("not json").is_err());
+    }
+
+    /// A named repository reaches gh through `GH_REPO`; without one gh reads
+    /// the checkout's.
+    #[test]
+    fn a_named_repository_reaches_gh() {
+        let named = Gh {
+            root: Path::new("."),
+            repo: Some("spate-etl/spate"),
+        };
+        assert_eq!(
+            named.publish_step("v0.3.0").env,
+            [("GH_REPO", "spate-etl/spate".to_owned())]
+        );
+        let local = Gh {
+            root: Path::new("."),
+            repo: None,
+        };
+        assert!(local.publish_step("v0.3.0").env.is_empty());
+    }
+
+    /// Without a bundle the attestation is read from GitHub's attestation store.
+    #[test]
+    fn attestation_verify_without_a_bundle_reads_the_store() {
+        let step = attestation_step(
+            Path::new("a.crate"),
+            None,
+            "spate-etl/spate/.github/workflows/release-build.yml",
+            "https://slsa.dev/provenance/v1",
+            "abc123",
+        );
+        assert!(
+            !step.args.iter().any(|x| x == "--bundle"),
+            "{:?}",
+            step.args
+        );
+        assert!(step.args.iter().any(|x| x == "--deny-self-hosted-runners"));
     }
 
     /// The commit an `ls-remote` listing names: the peeled line of an annotated
@@ -1101,7 +1331,11 @@ mod tests {
                     .success()
             );
         }
-        assert!(ProcessGit { root }.remote_tag("v0.3.0").is_err());
+        let git = ProcessGit {
+            root,
+            remote: "origin".into(),
+        };
+        assert!(git.remote_tag("v0.3.0").is_err());
     }
 
     /// Each excluded crate becomes one `--exclude` pair.

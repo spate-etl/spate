@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use super::io::{Host, Index, Resolution};
+use super::io::{Host, Index, ReleaseState, Resolution};
 use super::version::Version;
 use crate::checks::scratch::Scratch;
 use crate::run::{Error, Outcome};
@@ -405,8 +405,10 @@ pub(crate) fn print_next(prepared: &Prepared) {
     println!("would read back trustpub_data for every crate and require the release commit");
     println!("would compare each attested crate's sha256 against the index cksum");
     println!("would resolve a scratch project against the registry (the smoke test)");
-    println!("would tag v{v}, open the GitHub release with the CHANGELOG section, the");
-    println!("  SBOMs, {SUMS} and the attestation bundle as assets, and deploy the docs");
+    println!("would tag v{v} and push the tag");
+    println!("would draft the GitHub release with the CHANGELOG section, attach the SBOMs,");
+    println!("  {SUMS} and the attestation bundle, publish it immutable, verify its");
+    println!("  attestation, and deploy the docs");
     endgroup();
 }
 
@@ -522,15 +524,20 @@ pub(crate) fn verify_artifacts(
         )));
     }
     let sums_path = dir.join(SUMS);
-    host.forge
-        .verify_attestation(&sums_path, &bundle, signer_workflow, PROVENANCE, commit)?;
+    host.forge.verify_attestation(
+        &sums_path,
+        Some(&bundle),
+        signer_workflow,
+        PROVENANCE,
+        commit,
+    )?;
     println!("provenance verified: {SUMS}");
     for name in crates {
         let file = dir.join(name);
         host.forge
-            .verify_attestation(&file, &bundle, signer_workflow, PROVENANCE, commit)?;
+            .verify_attestation(&file, Some(&bundle), signer_workflow, PROVENANCE, commit)?;
         host.forge
-            .verify_attestation(&file, &bundle, signer_workflow, CYCLONEDX, commit)?;
+            .verify_attestation(&file, Some(&bundle), signer_workflow, CYCLONEDX, commit)?;
         println!("provenance and SBOM verified: {name}");
     }
     endgroup();
@@ -641,6 +648,7 @@ pub(crate) fn finish(
     version: Version,
     expected_sha: &str,
     artifacts: &Path,
+    repo: &str,
 ) -> Outcome {
     let tag = format!("v{version}");
     let packages = host.workspace.publishable()?;
@@ -690,7 +698,7 @@ pub(crate) fn finish(
     resolves(host, version)?;
     endgroup();
 
-    group("Tag and release");
+    group("Tag");
     // Tagged after the publish, so the tag names what the registry holds.
     match host.git.remote_tag(&tag)? {
         Some(commit) if commit == expected_sha => {
@@ -706,63 +714,64 @@ pub(crate) fn finish(
             host.git.push(&format!("refs/tags/{tag}"), false)?;
         }
     }
-    if host.forge.release_exists(&tag)? {
-        println!("the {tag} release already exists.");
-    } else {
-        let notes = host.workspace.notes(version)?;
-        if host.forge.create_release(&tag, &notes).is_err() {
-            // A tag pushed moments ago can lag replication on the API side.
-            (host.pause)(Duration::from_secs(10));
-            host.forge.create_release(&tag, &notes)?;
-        }
-    }
     endgroup();
 
-    group("SBOMs, checksums and attestations on the release");
-    // `--clobber` for the SBOMs, whose generation in CI is byte-stable, so a
-    // resumed run completes the set.
-    let mut files: Vec<PathBuf> = std::fs::read_dir(artifacts)
-        .map_err(|e| Error::msg(format!("{}: {e}", artifacts.display())))?
-        .filter_map(Result::ok)
-        .map(|e| e.path())
-        .filter(|p| p.to_string_lossy().ends_with(".cdx.json"))
-        .collect();
-    files.sort();
-    host.forge.upload(&tag, &files, true)?;
-    // Every attempt stages the same set, so an upload refused because an
-    // earlier attempt's asset exists keeps an identical file; the asset list
-    // below is the check.
-    let scratch = Scratch::new("spate-release-assets")?;
-    let bundle = scratch.join(&format!("spate-{tag}.intoto.jsonl"));
-    if checked > 0 {
-        let mut assets = vec![artifacts.join(SUMS)];
-        if join_bundles(artifacts, &bundle)? > 0 {
-            assets.push(bundle);
-        }
-        for asset in assets {
-            if host.forge.upload(&tag, &[asset], false).is_err() {
-                println!("an earlier attempt's asset is kept.");
+    group("The release, a draft until every asset is on it");
+    // An immutable release locks its assets and tag once published, so every
+    // asset goes onto the draft first.
+    let mut state = host.forge.release_state(&tag)?;
+    if state == (ReleaseState::Published { immutable: false }) {
+        return Err(mutable_release(&tag));
+    }
+    if state == ReleaseState::Missing {
+        let notes = host.workspace.notes(version)?;
+        if host.forge.create_release(&tag, &notes).is_err() {
+            // A tag pushed moments ago can lag replication on the API side. The
+            // state is read again so a create that landed is not repeated.
+            (host.pause)(Duration::from_secs(10));
+            if host.forge.release_state(&tag)? == ReleaseState::Missing {
+                host.forge.create_release(&tag, &notes)?;
             }
         }
+        state = ReleaseState::Draft;
     }
-    // The bundles live only in this run's artifacts, so a run whose
-    // artifacts expired before the upload has lost them.
-    let repo = std::env::var("GITHUB_REPOSITORY").unwrap_or_else(|_| "spate-etl/spate".to_owned());
-    let assets = host.forge.assets(&tag)?;
-    if !assets.iter().any(|a| a == SUMS) {
-        return Err(Error::msg(format!(
-            "the release carries no {SUMS}; an asset upload failed. Re-run the failed jobs."
-        )));
+    if state == (ReleaseState::Published { immutable: true }) {
+        println!("the {tag} release is already published and immutable.");
+    } else {
+        attach_assets(host, &tag, artifacts, checked > 0)?;
     }
-    if !assets.iter().any(|a| a.ends_with(".intoto.jsonl")) {
-        return Err(Error::msg(format!(
-            "the release carries no provenance bundle. Recover it from the attestation\n  \
-             store: download any published .crate of this version from\n  \
-             https://static.crates.io/crates/<name>/<name>-{version}.crate, run\n  \
-             'gh attestation download <file> --repo {repo}', and upload the\n  \
-             bundle as spate-{tag}.intoto.jsonl."
-        )));
+    let names: Vec<String> = packages
+        .iter()
+        .map(|p| format!("{}-{version}.cdx.json", p.name))
+        .collect();
+    let locked = state == (ReleaseState::Published { immutable: true });
+    require_assets(
+        &host.forge.assets(&tag)?,
+        &names,
+        &tag,
+        version,
+        repo,
+        locked,
+    )?;
+    if state == ReleaseState::Draft {
+        host.forge.publish_release(&tag)?;
     }
+    match host.forge.release_state(&tag)? {
+        ReleaseState::Published { immutable: true } => {}
+        ReleaseState::Published { immutable: false } => return Err(mutable_release(&tag)),
+        other => {
+            return Err(Error::msg(format!(
+                "the {tag} release reads as {other:?} after publishing; re-run the failed jobs"
+            )));
+        }
+    }
+    if host.forge.verify_release(&tag).is_err() {
+        // GitHub signs the release attestation as it publishes, and a read
+        // straight after can precede it.
+        (host.pause)(Duration::from_secs(10));
+        host.forge.verify_release(&tag)?;
+    }
+    println!("the {tag} release is immutable and its attestation verifies.");
     endgroup();
 
     group("Deploy the documentation");
@@ -770,6 +779,200 @@ pub(crate) fn finish(
     // are live.
     host.forge.dispatch_docs()?;
     println!("docs deploy dispatched; docs.rs builds on its own and lags the publish.");
+    endgroup();
+    Ok(())
+}
+
+/// Uploads the SBOMs, and, when crates are staged, the checksum list and the
+/// joined bundle.
+///
+/// `--clobber` for the SBOMs, whose generation in CI is byte-stable, so a
+/// resumed run completes the set. The other two are kept when the release
+/// already lists them as uploaded, since every attempt stages the same set.
+/// Otherwise they go up with `--clobber`, which replaces an asset an earlier
+/// upload left broken under the same name.
+fn attach_assets(host: &Host<'_>, tag: &str, artifacts: &Path, attested: bool) -> Outcome {
+    let mut files: Vec<PathBuf> = std::fs::read_dir(artifacts)
+        .map_err(|e| Error::msg(format!("{}: {e}", artifacts.display())))?
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.to_string_lossy().ends_with(".cdx.json"))
+        .collect();
+    files.sort();
+    host.forge.upload(tag, &files, true)?;
+    if !attested {
+        return Ok(());
+    }
+    let scratch = Scratch::new("spate-release-assets")?;
+    let bundle = scratch.join(&format!("spate-{tag}.intoto.jsonl"));
+    let mut once = vec![artifacts.join(SUMS)];
+    if join_bundles(artifacts, &bundle)? > 0 {
+        once.push(bundle);
+    }
+    let uploaded = host.forge.assets(tag)?;
+    for asset in once {
+        let name = asset
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if uploaded.contains(&name) {
+            println!("{name}: an earlier attempt's asset is kept.");
+        } else {
+            host.forge.upload(tag, &[asset], true)?;
+        }
+    }
+    Ok(())
+}
+
+/// The error for a release published mutable, naming the steps that replace it.
+fn mutable_release(tag: &str) -> Error {
+    Error::msg(format!(
+        "the {tag} release is published but not immutable. It becomes immutable only\n  \
+         if republished, and whether that signs a release attestation is unverified,\n  \
+         so replace it. Turn on immutable releases in the repository\n  \
+         settings, delete the release and keep its tag (`gh release delete {tag}`,\n  \
+         without --cleanup-tag), then re-run the failed jobs. Confirm first that\n  \
+         `gh release view {tag} --json isImmutable` reads false: an immutable\n  \
+         release, once deleted, retires its tag for good."
+    ))
+}
+
+/// The release carries `SHA256SUMS`, an attestation bundle, and every SBOM in
+/// `sboms`. A `locked` release is published and immutable, so a gap in it is
+/// reported as permanent.
+fn require_assets(
+    assets: &[String],
+    sboms: &[String],
+    tag: &str,
+    version: Version,
+    repo: &str,
+    locked: bool,
+) -> Outcome {
+    let missing: Vec<&str> = sboms
+        .iter()
+        .map(String::as_str)
+        .chain(std::iter::once(SUMS))
+        .filter(|n| !assets.iter().any(|a| a == n))
+        .collect();
+    let bundled = assets.iter().any(|a| a.ends_with(".intoto.jsonl"));
+    if locked && (!missing.is_empty() || !bundled) {
+        let mut lacks = missing;
+        if !bundled {
+            lacks.push("an attestation bundle");
+        }
+        return Err(Error::msg(format!(
+            "the {tag} release is published and immutable but lacks {}. GitHub\n  \
+             locks its assets, so only a new version can carry them.",
+            lacks.join(" and ")
+        )));
+    }
+    if !missing.is_empty() {
+        return Err(Error::msg(format!(
+            "the {tag} release lacks {}; an asset upload failed. Re-run the failed jobs.",
+            missing.join(" ")
+        )));
+    }
+    if !bundled {
+        return Err(Error::msg(format!(
+            "the {tag} release carries no attestation bundle. Recover each crate's from the\n  \
+             attestation store: download the published .crate from\n  \
+             https://static.crates.io/crates/<name>/<name>-{version}.crate, run\n  \
+             'gh attestation download <file> --repo {repo}', and upload the joined\n  \
+             bundles as spate-{tag}.intoto.jsonl while the release is a draft."
+        )));
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// verify
+// ---------------------------------------------------------------------------
+
+/// The workflow that signs every artifact attestation.
+pub(crate) fn build_signer(repo: &str) -> String {
+    format!("{repo}/.github/workflows/release-build.yml")
+}
+
+/// Judges a published release from what anyone can read, without trusting the
+/// run that made it. Runs from a clean checkout of the tag, whose members
+/// are the crates it checks.
+pub(crate) fn verify(host: &Host<'_>, version: Version, repo: &str) -> Outcome {
+    let tag = format!("v{version}");
+
+    group("The tag");
+    let commit = host
+        .git
+        .remote_tag(&tag)?
+        .ok_or_else(|| Error::msg(format!("{tag} is not tagged in {repo}")))?;
+    // The crate set is read from the working tree, so it must be the tag's.
+    if !host.git.is_clean()? {
+        return Err(Error::msg(format!(
+            "this checkout has uncommitted changes; verify {tag} from a clean\n  \
+             checkout of {tag}"
+        )));
+    }
+    let head = host.git.short_head()?;
+    if !commit.starts_with(&head) {
+        return Err(Error::msg(format!(
+            "this checkout is at {head}, but {tag} names {commit}; verify {tag} from a\n  \
+             checkout of {tag}"
+        )));
+    }
+    println!("{tag} names {commit}, the checked-out commit.");
+    endgroup();
+    let packages = host.workspace.publishable()?;
+
+    group("Every crate came from the tagged commit");
+    for package in &packages {
+        let sha = host.registry.trustpub_sha(&package.name, version)?;
+        if sha != commit {
+            return Err(Error::msg(format!(
+                "{} {version} was published from '{sha}', not the tagged {commit}",
+                package.name
+            )));
+        }
+        (host.pause)(API_INTERVAL);
+    }
+    println!("{} crate(s) published from {commit}.", packages.len());
+    endgroup();
+
+    group("The bytes the registry serves are attested");
+    let scratch = Scratch::new("spate-release-verify")?;
+    let signer = build_signer(repo);
+    for package in &packages {
+        let file = host
+            .registry
+            .download(&package.name, version, scratch.dir())?;
+        let got = host.workspace.sha256(&file)?;
+        let want = served_cksum(host, &package.name, version)?;
+        if got != want {
+            return Err(Error::msg(format!(
+                "{} {version}: the download is {got} but the index lists {want}",
+                package.name
+            )));
+        }
+        for predicate in [PROVENANCE, CYCLONEDX] {
+            host.forge
+                .verify_attestation(&file, None, &signer, predicate, &commit)?;
+        }
+        println!("provenance and SBOM verified: {} {version}", package.name);
+    }
+    endgroup();
+
+    group("The GitHub release");
+    let state = host.forge.release_state(&tag)?;
+    if state != (ReleaseState::Published { immutable: true }) {
+        return Err(Error::msg(format!(
+            "the {tag} release is {state:?}, not published and immutable"
+        )));
+    }
+    host.forge.verify_release(&tag)?;
+    let names: Vec<String> = packages
+        .iter()
+        .map(|p| format!("{}-{version}.cdx.json", p.name))
+        .collect();
+    require_assets(&host.forge.assets(&tag)?, &names, &tag, version, repo, true)?;
+    println!("the {tag} release is immutable, attested and complete.");
     endgroup();
     Ok(())
 }

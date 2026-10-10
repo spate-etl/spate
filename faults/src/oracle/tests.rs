@@ -1180,6 +1180,51 @@ fn p2_accepts_a_duplicate_during_a_self_raised_stop() {
     }
 }
 
+/// A `leader_stop` line in the previous tenant's journal opens a window that
+/// the harness's next `sigcont` for its pid closes.
+#[test]
+fn p2_accepts_a_duplicate_during_a_leader_stop() {
+    for store in STORES {
+        let tuned = Fixture {
+            store,
+            ..Fixture::empty()
+        };
+        let (lease, slack) = (tuned.timing().lease_ms, tuned.slack());
+        let resumed = 1_000 + lease * 5 / 4;
+        for (claim_at, explained) in [
+            (1_000 + lease, true),
+            (resumed + slack, true),
+            (resumed + slack + 1, false),
+        ] {
+            let mut handover = Handover::new(store);
+            handover.claim_at = claim_at;
+            let mut fixture = handover.build();
+            fixture.processes[0].lines.push(Line {
+                t_ms: 1_000,
+                event: Event::LeaderStop {
+                    key: "assign.w0".to_owned(),
+                    kind: WriteKind::Assign,
+                    n: 1,
+                    value: serde_json::json!({"splits": ["s0"]}),
+                    published: false,
+                },
+            });
+            fixture.fault(
+                resumed,
+                Event::Sigcont {
+                    instance: "w0".to_owned(),
+                    pid: 100,
+                },
+            );
+            if explained {
+                assert_clean(&fixture, "claim during or after the stop");
+            } else {
+                assert_flags(&fixture, &[id(0, 1), id(2, 0)], "claim after the window");
+            }
+        }
+    }
+}
+
 /// Splits `s0` and `s2` delivered by `w3` (pid 103), for fixtures whose story
 /// is on `s1`.
 fn others(fixture: &mut Fixture) -> (Progress, Progress) {

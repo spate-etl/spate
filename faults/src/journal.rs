@@ -211,6 +211,20 @@ pub enum Event {
         /// Epoch the commit carries.
         epoch: u64,
     },
+    /// The process is about to stop itself before sending a leader write.
+    LeaderStop {
+        /// Store key of the write.
+        key: String,
+        /// The stop plan's kind.
+        kind: WriteKind,
+        /// The write's ordinal among the writes the plan counts, from 1.
+        n: u32,
+        /// The value the write would send, as JSON.
+        value: serde_json::Value,
+        /// The process had sent its publish: its first `plan` update after
+        /// its first seed.
+        published: bool,
+    },
     /// The harness sent SIGKILL.
     Kill {
         /// Target instance id.

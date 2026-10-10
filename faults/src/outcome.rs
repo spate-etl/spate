@@ -71,6 +71,9 @@ pub enum Check {
     VerdictMissing,
     /// A stopped worker's split was not claimed by its peer within the cap.
     StoppedSplitNotReassigned,
+    /// No other instance took the leader key within the cap after the
+    /// leader was killed.
+    LeaderNotReplaced,
     /// A value at a higher revision carries a lower epoch.
     EpochRegressed,
     /// Two owners hold one epoch.
@@ -95,7 +98,8 @@ impl Check {
             | Check::RecordInNoSplit
             | Check::RecordInTwoSplits
             | Check::VerdictMissing
-            | Check::StoppedSplitNotReassigned => 4,
+            | Check::StoppedSplitNotReassigned
+            | Check::LeaderNotReplaced => 4,
             Check::EpochRegressed
             | Check::TwoOwners
             | Check::StaleEpochCommit
@@ -242,8 +246,8 @@ pub struct Evidence<'a> {
     pub worker_exits: &'a [WorkerExit],
     /// Workers were still running at the deadline.
     pub timed_out: bool,
-    /// The oracle's violations, plus [`Check::StoppedSplitNotReassigned`]
-    /// when the harness recorded it.
+    /// The oracle's violations, plus [`Check::StoppedSplitNotReassigned`] and
+    /// [`Check::LeaderNotReplaced`] when the harness recorded them.
     pub violations: &'a [Violation],
     /// Scenario assertions that failed, described.
     pub expectations: &'a [String],

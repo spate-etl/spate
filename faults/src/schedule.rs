@@ -78,6 +78,48 @@ pub struct InProcess {
     pub respawn_after_ms: u64,
 }
 
+/// A point in a leader's work, named by the write it is about to send.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LeaderStage {
+    /// Its generation bump, the first `plan` update.
+    Bump,
+    /// Its `n`th seeded progress record, once the `n − 1` before it have
+    /// landed.
+    Seed(u32),
+    /// Its first `assign.*` write that names a split.
+    FirstAssign,
+    /// Its second `assign.*` write that names a split.
+    MidAssign,
+    /// Its plan publish, the first `plan` update after a seed.
+    Publish,
+}
+
+impl LeaderStage {
+    /// The stop plan that stops a process at this stage.
+    #[must_use]
+    pub fn stop(self) -> StopPlan {
+        let (kind, n) = match self {
+            LeaderStage::Bump => (WriteKind::Plan, 1),
+            LeaderStage::Seed(n) => (WriteKind::Seed, n),
+            LeaderStage::FirstAssign => (WriteKind::Assign, 1),
+            LeaderStage::MidAssign => (WriteKind::Assign, 2),
+            LeaderStage::Publish => (WriteKind::Publish, 1),
+        };
+        StopPlan { kind, n }
+    }
+}
+
+/// The stage the first process to reach it stops at, and how long after the
+/// takeover the stopped leader's replacement starts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LeaderPlan {
+    /// Where a leading process stops.
+    pub stop: StopPlan,
+    /// How long after the takeover, or its cap, the replacement starts, at
+    /// most one lease.
+    pub respawn_after_ms: u64,
+}
+
 /// The faults drawn for one run.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Schedule {
@@ -89,6 +131,8 @@ pub struct Schedule {
     pub stops: Vec<Stop>,
     /// The write at which [`SLEEPER`]'s first process stops itself.
     pub stop_at: Option<StopPlan>,
+    /// The stage at which a leader-kill run stops its leader.
+    pub leader: Option<LeaderPlan>,
 }
 
 impl Schedule {
@@ -137,6 +181,7 @@ impl Schedule {
             in_process,
             stops,
             stop_at: None,
+            leader: None,
         }
     }
 
@@ -153,12 +198,38 @@ impl Schedule {
         }
     }
 
-    /// The stop plan `instance`'s `incarnation` carries: only [`SLEEPER`]'s
-    /// first process carries one.
+    /// A leader-kill schedule: the first process to reach one stage of a
+    /// leader's work stops there, and nothing else is injected.
+    #[must_use]
+    pub fn leader_killed(rng: &mut SplitMix64, lease_ms: u64) -> Schedule {
+        let stage = match rng.in_range(0, 4) {
+            0 => LeaderStage::Bump,
+            1 => LeaderStage::Seed(u32::try_from(rng.in_range(2, 4)).expect("small")),
+            2 => LeaderStage::FirstAssign,
+            3 => LeaderStage::MidAssign,
+            _ => LeaderStage::Publish,
+        };
+        Schedule {
+            leader: Some(LeaderPlan {
+                stop: stage.stop(),
+                respawn_after_ms: rng.in_range(0, lease_ms),
+            }),
+            ..Schedule::default()
+        }
+    }
+
+    /// The stop plan `instance`'s `incarnation` carries: in a leader-kill
+    /// run every first process carries one, and otherwise only
+    /// [`SLEEPER`]'s first process does.
     #[must_use]
     pub fn stop_for(&self, instance: u32, incarnation: u32) -> Option<StopPlan> {
-        self.stop_at
-            .filter(|_| instance == SLEEPER && incarnation == 1)
+        if incarnation != 1 {
+            return None;
+        }
+        match self.leader {
+            Some(leader) => Some(leader.stop),
+            None => self.stop_at.filter(|_| instance == SLEEPER),
+        }
     }
 
     /// The plan `instance`'s `incarnation` carries: only a first process
@@ -223,6 +294,13 @@ impl Schedule {
         let mut text = String::new();
         if let Some(plan) = self.stop_at {
             let _ = writeln!(text, "w{SLEEPER}-1: {plan}");
+        }
+        if let Some(leader) = self.leader {
+            let _ = writeln!(
+                text,
+                "w*-1: {}, first to reach it only; it is killed and replaced {} ms after the takeover",
+                leader.stop, leader.respawn_after_ms
+            );
         }
         for p in &self.in_process {
             let _ = match p.plan.mode {
@@ -650,6 +728,35 @@ mod tests {
         for incarnation in 2..5 {
             assert_eq!(stopped.stop_for(SLEEPER, incarnation), None);
         }
+    }
+
+    /// Across seeds, a leader-kill schedule draws every stage, including each
+    /// seed ordinal, with a respawn delay of at most one lease. Every
+    /// instance's first process carries its stop plan, and no later process
+    /// does.
+    #[test]
+    fn a_leader_kill_draws_every_stage_and_stops_every_first_process() {
+        let mut drawn = std::collections::HashSet::new();
+        for seed in 0..200 {
+            let schedule = Schedule::leader_killed(&mut SplitMix64::new(seed), LEASE);
+            let leader = schedule.leader.expect("a leader plan");
+            assert!(leader.respawn_after_ms <= LEASE);
+            for instance in 0..3 {
+                assert_eq!(schedule.stop_for(instance, 1), Some(leader.stop));
+                assert_eq!(schedule.stop_for(instance, 2), None);
+            }
+            drawn.insert((leader.stop.kind, leader.stop.n));
+        }
+        let expected = std::collections::HashSet::from([
+            (WriteKind::Plan, 1),
+            (WriteKind::Seed, 2),
+            (WriteKind::Seed, 3),
+            (WriteKind::Seed, 4),
+            (WriteKind::Assign, 1),
+            (WriteKind::Assign, 2),
+            (WriteKind::Publish, 1),
+        ]);
+        assert_eq!(drawn, expected);
     }
 
     /// Across seeds, a run draws between one stop and one per instance,

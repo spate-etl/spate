@@ -115,6 +115,27 @@ pub enum AbortPoint {
     After,
 }
 
+/// What the harness read from the leader key before a kill. The key names an
+/// instance, and every process of that instance writes the same owner.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "read", rename_all = "snake_case")]
+pub enum LeaderAtKill {
+    /// The read failed or timed out, or the value did not parse.
+    #[default]
+    Unread,
+    /// The key was absent.
+    Vacant,
+    /// The key held a leader record.
+    Held {
+        /// Instance id the record names.
+        owner: String,
+        /// Generation the record names.
+        generation: u64,
+        /// `fnv1a` over the bytes the read returned.
+        digest: u64,
+    },
+}
+
 /// One journal entry, without its timestamp.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "ev", rename_all = "snake_case")]
@@ -196,6 +217,9 @@ pub enum Event {
         instance: String,
         /// Target pid.
         pid: u32,
+        /// What the leader key held just before the kill.
+        #[serde(default)]
+        leader: LeaderAtKill,
     },
     /// The harness started a replacement process.
     Respawn {
@@ -480,6 +504,31 @@ mod tests {
         assert_eq!((parsed.epoch, parsed.attempts, parsed.owner), (2, 1, None));
         let old = br#"{"schema":2,"epoch":2,"status":"runnable","owner":null,"attempts":1,"watermark":null,"completed":false}"#;
         assert!(matches!(Progress::parse(old), Err(JournalError::Schema(2))));
+    }
+
+    /// A `kill` line with no `leader` field parses as `Unread`, and a `Held`
+    /// read round-trips with its digest.
+    #[test]
+    fn a_kill_line_without_leader_reads_as_unread() {
+        let old = parse("{\"t_ms\":1,\"ev\":\"kill\",\"instance\":\"w0\",\"pid\":10}\n").unwrap();
+        assert_eq!(
+            old[0].event,
+            Event::Kill {
+                instance: "w0".to_owned(),
+                pid: 10,
+                leader: LeaderAtKill::Unread,
+            }
+        );
+        let held = Event::Kill {
+            instance: "w1".to_owned(),
+            pid: 11,
+            leader: LeaderAtKill::Held {
+                owner: "w1".to_owned(),
+                generation: 2,
+                digest: u64::MAX - 1,
+            },
+        };
+        assert_eq!(parse(&line(held.clone())).unwrap()[0].event, held);
     }
 
     /// A journal holding only an unterminated line reads as empty.

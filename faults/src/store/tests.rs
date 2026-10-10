@@ -184,7 +184,7 @@ fn wrappers_forward_op_timeout_and_watch_mode() {
     );
     let fence = Arc::new(Fence::default());
     let broken = BrokenFence::new(store.clone(), Arc::clone(&fence));
-    let stopping = StopAt::new(store.clone(), None, Some(fence), journal, classifier);
+    let stopping = StopAt::new(store.clone(), None, Some(fence), None, journal, classifier);
     for (lease, op_timeout, watch) in [
         (store.lease_ttl(), store.op_timeout(), store.watch_mode()),
         (
@@ -795,6 +795,7 @@ async fn stopping(
         BrokenFence::new(journalled, Arc::clone(&fence)),
         Some(plan),
         broken.then_some(fence),
+        None,
         journal,
         classifier,
     );
@@ -1017,6 +1018,7 @@ async fn worker_layering_journals_the_resend_only_with_a_broken_fence() {
             peer.clone(),
             Some(plan),
             broken,
+            None,
             &journal,
             &classifier,
             |s| s,
@@ -1091,7 +1093,7 @@ fn stop_child(path: &std::path::Path) {
             kind: WriteKind::Commit,
             n: 1,
         };
-        let store = StopAt::new(inner, Some(plan), None, journal, classifier);
+        let store = StopAt::new(inner, Some(plan), None, None, journal, classifier);
         let claimed = store
             .create(Keyspace::Durable, "split.a", record_at(1, Some("w0"), None))
             .await
@@ -1180,4 +1182,263 @@ async fn broken_fence_leaves_ephemeral_updates_alone() {
         .await;
     assert!(!matches!(renew, Ok(CasOutcome::Won(_))), "{renew:?}");
     assert!(fence.take("split.a"), "still armed");
+}
+
+/// A [`StopAt`] over a journalled [`MemoryStore`], stopping at `plan` through
+/// `stop` with the token `once`, and arming the fence below it at the stop.
+fn leader_stopping(
+    plan: StopPlan,
+    stop: fn(),
+    once: Option<std::path::PathBuf>,
+) -> (
+    StopAt<BrokenFence<JournalStore<MemoryStore>>>,
+    tempfile::TempDir,
+    std::path::PathBuf,
+) {
+    let (journalled, dir, path) = journalled(MemoryStore::new(LEASE));
+    let journal = Arc::clone(&journalled.journal);
+    let classifier = Arc::clone(&journalled.classifier);
+    let fence = Arc::new(Fence::default());
+    let mut store = StopAt::new(
+        BrokenFence::new(journalled, Arc::clone(&fence)),
+        Some(plan),
+        Some(fence),
+        once,
+        journal,
+        classifier,
+    );
+    store.stop = stop;
+    (store, dir, path)
+}
+
+fn plan_bytes(planned: u64) -> Vec<u8> {
+    serde_json::json!({"schema": 3, "generation": 1, "planned": planned})
+        .to_string()
+        .into_bytes()
+}
+
+fn assign_bytes(splits: &[&str]) -> Vec<u8> {
+    serde_json::json!({"schema": 3, "generation": 1, "splits": splits})
+        .to_string()
+        .into_bytes()
+}
+
+/// Creates `key` holding `value` through `store`, and returns its revision.
+async fn create<S: CoordinationStore>(store: &S, key: &str, value: Vec<u8>) -> Revision {
+    store
+        .create(Keyspace::Durable, key, value)
+        .await
+        .unwrap()
+        .won()
+        .unwrap()
+}
+
+/// Updates `key` from `rev` to `value` through `store`, and returns the new
+/// revision.
+async fn update<S: CoordinationStore>(
+    store: &S,
+    key: &str,
+    value: Vec<u8>,
+    rev: Revision,
+) -> Revision {
+    store
+        .update(Keyspace::Durable, key, value, rev)
+        .await
+        .unwrap()
+        .won()
+        .unwrap()
+}
+
+/// The last `leader_stop` line in the journal at `path`.
+fn leader_stop_line(path: &std::path::Path) -> Option<Event> {
+    events(path)
+        .into_iter()
+        .rfind(|e| matches!(e, Event::LeaderStop { .. }))
+}
+
+static SEED_STOPS: AtomicU32 = AtomicU32::new(0);
+
+fn count_seed_stop() {
+    SEED_STOPS.fetch_add(1, Ordering::SeqCst);
+}
+
+/// A seed create stops when its future is built, before anything polls it,
+/// after its `leader_stop` line and with the fence armed for its key.
+#[tokio::test]
+async fn stop_at_stops_on_a_seed_create_at_construction() {
+    let plan = StopPlan {
+        kind: WriteKind::Seed,
+        n: 1,
+    };
+    let (store, _dir, path) = leader_stopping(plan, count_seed_stop, None);
+    let seed = store.create(Keyspace::Durable, "split.a", record_at(0, None, None));
+    assert_eq!(
+        SEED_STOPS.load(Ordering::SeqCst),
+        1,
+        "stopped at construction"
+    );
+    assert!(store.inner.fence.take("split.a"), "the fence was armed");
+    let value: serde_json::Value = serde_json::from_slice(&record_at(0, None, None)).unwrap();
+    assert_eq!(
+        events(&path),
+        [Event::LeaderStop {
+            key: "split.a".to_owned(),
+            kind: WriteKind::Seed,
+            n: 1,
+            value,
+            published: false,
+        }]
+    );
+    drop(seed);
+}
+
+static ASSIGN_STOPS: AtomicU32 = AtomicU32::new(0);
+
+fn count_assign_stop() {
+    ASSIGN_STOPS.fetch_add(1, Ordering::SeqCst);
+}
+
+/// An assignment plan counts only `assign.*` writes whose value names a
+/// split: under the second-assignment plan, an empty create and one
+/// non-empty update pass, and the next non-empty update stops.
+#[tokio::test]
+async fn stop_at_counts_only_assign_writes_that_name_a_split() {
+    let plan = StopPlan {
+        kind: WriteKind::Assign,
+        n: 2,
+    };
+    let (store, _dir, path) = leader_stopping(plan, count_assign_stop, None);
+    let rev = create(&store, "assign.a", assign_bytes(&[])).await;
+    let rev = update(&store, "assign.a", assign_bytes(&["s0"]), rev).await;
+    assert_eq!(ASSIGN_STOPS.load(Ordering::SeqCst), 0, "no stop yet");
+    update(&store, "assign.a", assign_bytes(&["s0", "s1"]), rev).await;
+    assert_eq!(ASSIGN_STOPS.load(Ordering::SeqCst), 1, "stopped once");
+    let Some(Event::LeaderStop { key, n, value, .. }) = leader_stop_line(&path) else {
+        panic!("no leader_stop line: {:?}", events(&path));
+    };
+    assert_eq!((key.as_str(), n), ("assign.a", 2));
+    assert_eq!(value["splits"], serde_json::json!(["s0", "s1"]));
+}
+
+static FIRST_ASSIGN_STOPS: AtomicU32 = AtomicU32::new(0);
+
+fn count_first_assign_stop() {
+    FIRST_ASSIGN_STOPS.fetch_add(1, Ordering::SeqCst);
+}
+
+static MID_ASSIGN_STOPS: AtomicU32 = AtomicU32::new(0);
+
+fn count_mid_assign_stop() {
+    MID_ASSIGN_STOPS.fetch_add(1, Ordering::SeqCst);
+}
+
+/// A leader stop records whether the process had sent its publish, the first
+/// `plan` update after a seed sent through any clone: not at a first
+/// assignment during seeding, and yes at a non-empty create of a peer's
+/// record after the publish.
+#[tokio::test]
+async fn stop_at_records_whether_the_publish_was_sent() {
+    let first = StopPlan {
+        kind: WriteKind::Assign,
+        n: 1,
+    };
+    let (store, _dir, path) = leader_stopping(first, count_first_assign_stop, None);
+    let plan = create(&store, "plan", plan_bytes(0)).await;
+    update(&store, "plan", plan_bytes(0), plan).await;
+    let assign = create(&store, "assign.a", assign_bytes(&[])).await;
+    create(&store, "split.a", record_at(0, None, None)).await;
+    update(&store, "assign.a", assign_bytes(&["a"]), assign).await;
+    assert_eq!(FIRST_ASSIGN_STOPS.load(Ordering::SeqCst), 1);
+    assert!(
+        matches!(
+            leader_stop_line(&path),
+            Some(Event::LeaderStop {
+                published: false,
+                ..
+            })
+        ),
+        "{:?}",
+        events(&path)
+    );
+
+    let mid = StopPlan {
+        kind: WriteKind::Assign,
+        n: 2,
+    };
+    let (store, _dir, path) = leader_stopping(mid, count_mid_assign_stop, None);
+    let seeding = store.clone();
+    let plan = create(&store, "plan", plan_bytes(0)).await;
+    let plan = update(&store, "plan", plan_bytes(0), plan).await;
+    let assign = create(&store, "assign.a", assign_bytes(&[])).await;
+    create(&seeding, "split.a", record_at(0, None, None)).await;
+    update(&store, "assign.a", assign_bytes(&["a"]), assign).await;
+    update(&store, "plan", plan_bytes(1), plan).await;
+    assert_eq!(MID_ASSIGN_STOPS.load(Ordering::SeqCst), 0, "no stop yet");
+    create(&store, "assign.b", assign_bytes(&["b"])).await;
+    assert_eq!(MID_ASSIGN_STOPS.load(Ordering::SeqCst), 1);
+    let Some(Event::LeaderStop {
+        key, n, published, ..
+    }) = leader_stop_line(&path)
+    else {
+        panic!("no leader_stop line: {:?}", events(&path));
+    };
+    assert_eq!((key.as_str(), n, published), ("assign.b", 2, true));
+}
+
+static PUBLISH_STOPS: AtomicU32 = AtomicU32::new(0);
+
+fn count_publish_stop() {
+    PUBLISH_STOPS.fetch_add(1, Ordering::SeqCst);
+}
+
+/// A publish plan stops at the first `plan` update after a seed sent through
+/// a clone, so a retried bump before seeding does not count.
+#[tokio::test]
+async fn stop_at_publish_skips_a_retried_bump() {
+    let plan = StopPlan {
+        kind: WriteKind::Publish,
+        n: 1,
+    };
+    let (store, _dir, path) = leader_stopping(plan, count_publish_stop, None);
+    let seeding = store.clone();
+    let rev = create(&store, "plan", plan_bytes(0)).await;
+    let rev = update(&store, "plan", plan_bytes(0), rev).await;
+    let rev = update(&store, "plan", plan_bytes(0), rev).await;
+    create(&seeding, "split.a", record_at(0, None, None)).await;
+    assert_eq!(
+        PUBLISH_STOPS.load(Ordering::SeqCst),
+        0,
+        "no stop before seeding"
+    );
+    update(&store, "plan", plan_bytes(1), rev).await;
+    assert_eq!(PUBLISH_STOPS.load(Ordering::SeqCst), 1);
+    let Some(Event::LeaderStop { value, .. }) = leader_stop_line(&path) else {
+        panic!("no leader_stop line: {:?}", events(&path));
+    };
+    assert_eq!(value["planned"], 1);
+}
+
+static ONCE_STOPS: AtomicU32 = AtomicU32::new(0);
+
+fn count_once_stop() {
+    ONCE_STOPS.fetch_add(1, Ordering::SeqCst);
+}
+
+/// Of two processes sharing a token path, only the first to reach its stop
+/// stops and journals it.
+#[tokio::test]
+async fn stop_once_lets_only_the_first_process_stop() {
+    let plan = StopPlan {
+        kind: WriteKind::Seed,
+        n: 1,
+    };
+    let token_dir = tempfile::tempdir().unwrap();
+    let token = token_dir.path().join("leader-stop.token");
+    let (first, _a, first_path) = leader_stopping(plan, count_once_stop, Some(token.clone()));
+    let (second, _b, second_path) = leader_stopping(plan, count_once_stop, Some(token));
+    create(&first, "split.a", record_at(0, None, None)).await;
+    create(&second, "split.a", record_at(0, None, None)).await;
+    assert_eq!(ONCE_STOPS.load(Ordering::SeqCst), 1);
+    assert!(leader_stop_line(&first_path).is_some());
+    assert_eq!(leader_stop_line(&second_path), None);
 }

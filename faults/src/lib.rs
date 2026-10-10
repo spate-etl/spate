@@ -3,13 +3,14 @@
 //! delivery contract against their journals and the store's final state.
 //!
 //! This crate provides the journal format, the classification of `split.*`
-//! writes, the seeded generator, the outcome kinds a run reports, the
+//! and leader writes, the seeded generator, the outcome kinds a run reports, the
 //! delivery oracle, the `spate-faults-worker` binary with the store and sink
 //! that journal its traffic, the store wrappers that inject in-process
-//! faults, stop the process inside a commit and re-send a commit that lost its
-//! CAS, the seeded fault schedule, the lost-reply evidence check, the
-//! container health poller, and the harness that runs worker processes,
-//! reads the leader key before each scheduled kill, puts a seeded DynamoDB
+//! faults, stop the process inside a commit or before a leader write and
+//! re-send a commit that lost its CAS, the seeded fault schedule, the
+//! lost-reply evidence check, the container health poller, and the harness
+//! that runs worker processes, reads the leader key before each scheduled
+//! kill, kills the leader at a seeded stage of its work, puts a seeded DynamoDB
 //! fault proxy in front of each worker of the scheduled-fault DynamoDB runs,
 //! opens seeded Toxiproxy windows on each worker's store link in the
 //! scheduled-fault runs, and judges them.
@@ -35,7 +36,8 @@
 //!   written each record of the split in `[W0, W)` before that `send`. A value
 //!   that sets `completed` has W above every record of the split. Every landed
 //!   value that moves the watermark or sets `completed` has a journalled sender.
-//! - **4. No split completes twice or goes missing.** One landed value per
+//! - **4. No split completes twice or goes missing, and after a killed
+//!   leader, another instance takes the leader key.** One landed value per
 //!   split sets `completed`, the split ends `Completed`, the swept descriptors
 //!   partition the generated records, and a DynamoDB store holds a verdict.
 //! - **5. No two owners commit on one split.** Per key in revision order, the

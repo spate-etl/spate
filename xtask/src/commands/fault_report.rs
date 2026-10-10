@@ -448,7 +448,7 @@ const PROPERTIES: [&str; 5] = [
     "every record arrives",
     "duplicates appear only inside a fault or replay window",
     "no committed position runs ahead of durable rows",
-    "no split completes twice or goes missing",
+    "no split completes twice or goes missing, and a killed leader is replaced",
     "no two owners commit on one split",
 ];
 

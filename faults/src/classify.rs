@@ -1,13 +1,14 @@
-//! Names what a `split.*` write does from the value it replaces.
+//! Names what a `split.*` write does from the value it replaces, and a
+//! leader's writes to `plan`, `split.*` and `assign.*` from their key.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
-use crate::journal::{Progress, Status};
+use crate::journal::{Progress, Status, WriteOp};
 
-/// What a `split.*` update does to the split.
+/// What a write does: a `split.*` update to the split, or a leader's write.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WriteKind {
@@ -25,6 +26,15 @@ pub enum WriteKind {
     FailReport,
     /// Re-arms the split lease, an ephemeral write.
     Renew,
+    /// Updates the durable `plan` record.
+    Plan,
+    /// Creates a durable `split.*` progress record.
+    Seed,
+    /// Creates or updates a durable `assign.*` record.
+    Assign,
+    /// The first [`WriteKind::Plan`] write a process sends after its first
+    /// [`WriteKind::Seed`]. Only a stop plan names it.
+    Publish,
 }
 
 /// Classifies a durable update by `me` from `prev`, the value at its expected
@@ -63,6 +73,21 @@ pub fn classify(prev: &Progress, next: &Progress, me: &str) -> Option<WriteKind>
 #[must_use]
 pub fn classify_ephemeral(key: &str) -> Option<WriteKind> {
     key.starts_with("split.").then_some(WriteKind::Renew)
+}
+
+/// Classifies a leader's write of `key` by its key and call: a durable `plan`
+/// update, `split.*` create or `assign.*` write. `None` for anything else.
+#[must_use]
+pub fn classify_leader(ephemeral: bool, op: WriteOp, key: &str) -> Option<WriteKind> {
+    if ephemeral {
+        return None;
+    }
+    match op {
+        _ if key.starts_with("assign.") => Some(WriteKind::Assign),
+        WriteOp::Update if key == "plan" => Some(WriteKind::Plan),
+        WriteOp::Create if key.starts_with("split.") => Some(WriteKind::Seed),
+        WriteOp::Create | WriteOp::Update => None,
+    }
 }
 
 /// The values one process has learned at each `(key, rev)`, from its own
@@ -171,6 +196,27 @@ mod tests {
 
         assert_eq!(classify_ephemeral("split.a"), Some(WriteKind::Renew));
         assert_eq!(classify_ephemeral("worker.w0"), None);
+    }
+
+    /// A durable `plan` update, `split.*` create and `assign.*` create or
+    /// update are leader writes; the startup `plan` create, `spec.*`, `verdict`,
+    /// `_probe.*`, `split.*` updates and ephemeral writes are not.
+    #[test]
+    fn classifies_leader_writes_by_key_and_call() {
+        use WriteOp::{Create, Update};
+        let k = |op, key| classify_leader(false, op, key);
+        assert_eq!(k(Update, "plan"), Some(WriteKind::Plan));
+        assert_eq!(k(Create, "split.a"), Some(WriteKind::Seed));
+        assert_eq!(k(Create, "assign.w0"), Some(WriteKind::Assign));
+        assert_eq!(k(Update, "assign.w0"), Some(WriteKind::Assign));
+        assert_eq!(k(Create, "plan"), None);
+        assert_eq!(k(Create, "spec.a"), None);
+        assert_eq!(k(Create, "verdict"), None);
+        assert_eq!(k(Create, "_probe.w0"), None);
+        assert_eq!(k(Update, "_probe.w0"), None);
+        assert_eq!(k(Update, "split.a"), None);
+        assert_eq!(classify_leader(true, Create, "split.a"), None);
+        assert_eq!(classify_leader(true, Update, "assign.w0"), None);
     }
 
     /// A `Classifier` judges ownership by the instance id it was built with.

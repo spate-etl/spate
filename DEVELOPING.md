@@ -136,8 +136,8 @@ and passes it to every scenario. A seed fixes the data set and the fault
 schedule: which worker is killed when, how long its replacement waits to start
 under the same instance id, which worker is stopped with SIGSTOP when and for
 how long, which worker aborts before or after which of its writes, which one
-is handed an error for a write that landed, when each window on a worker's
-store link is due and how long it lasts, and on DynamoDB how each worker's
+is handed an error for a write that landed, which stage of its work the leader
+stops at, when each window on a worker's store link is due and how long it lasts, and on DynamoDB how each worker's
 fault proxy answers each of its calls by number. It does not
 fix the interleaving. The operating system's scheduling and real time decide
 which split a worker holds when something happens. Each scenario writes a
@@ -201,7 +201,20 @@ and a lease and a quarter second have passed since the stop. If the claim does
 not come within four leases, the outcome is `violation`. With the fence intact every property must hold. The broken-fence
 scenarios re-send the stopped commit at the current revision after it loses its
 CAS, and pass only when the oracle reports the stale epoch at that write's
-revision against the stopped worker. The command writes
+revision against the stopped worker. The leader-kill scenarios start three
+workers at once, and every worker's first process carries one seeded stage of a
+leader's work: the generation bump, the second to fourth seeded progress record,
+the first or second assignment write that names a split, or the plan publish,
+which is the first `plan` update after a seed. The first process to reach the
+stage creates a token file in the run directory and stops itself with SIGSTOP
+before sending the write, and a process that finds the token carries on. Its
+`leader_stop` line records the write's value and whether the publish had gone
+out. The harness reads the leader key, records it on the `kill` line and kills
+the process. If no other worker holds the leader key within four leases of the
+kill, the outcome is `violation`. The killed worker's replacement starts a
+seeded delay after that. A run where no process reaches the stage within a
+minute, or where the stopped process did not hold the leader key, is
+`expectation`. The command writes
 `target/fault-runs/summary.json` and exits 1 on any `violation`, `worker` or
 `expectation` outcome, 3 when only `harness` outcomes failed, or nextest failed
 with no failing outcome, such as a build error or a run the oracle could not

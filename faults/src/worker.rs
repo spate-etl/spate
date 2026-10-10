@@ -51,6 +51,9 @@ pub struct WorkerConfig {
     /// revision.
     #[serde(default)]
     pub broken_fence: bool,
+    /// A token file: the process stops only if it creates this file.
+    #[serde(default)]
+    pub stop_once: Option<PathBuf>,
 }
 
 /// The coordination store a worker connects to.
@@ -234,12 +237,14 @@ fn run_on<S: CoordinationStore + Clone>(config: &WorkerConfig, store: S) -> Resu
     let pipeline = Pipeline::from_config(pipeline_config).map_err(|e| e.to_string())?;
     let classifier = Arc::new(Classifier::new(config.instance.clone()));
     let (stop_at, broken_fence) = (config.stop_at, config.broken_fence);
+    let once = config.stop_once.clone();
     match config.abort {
         Some(plan) => {
             let store = layered(
                 store,
                 stop_at,
                 broken_fence,
+                once,
                 &journal,
                 &classifier,
                 |store| AbortAt::new(store, plan, Arc::clone(&journal), Arc::clone(&classifier)),
@@ -247,7 +252,15 @@ fn run_on<S: CoordinationStore + Clone>(config: &WorkerConfig, store: S) -> Resu
             run_pipeline(config, pipeline, store, journal)
         }
         None => {
-            let store = layered(store, stop_at, broken_fence, &journal, &classifier, |s| s);
+            let store = layered(
+                store,
+                stop_at,
+                broken_fence,
+                once,
+                &journal,
+                &classifier,
+                |s| s,
+            );
             run_pipeline(config, pipeline, store, journal)
         }
     }
@@ -255,7 +268,8 @@ fn run_on<S: CoordinationStore + Clone>(config: &WorkerConfig, store: S) -> Resu
 
 /// `store` under a worker's wrappers, innermost first: [`JournalStore`], the
 /// layer `middle` adds, [`BrokenFence`] and [`StopAt`]. [`StopAt`] stops at
-/// `stop_at`, and arms the fence there only when `broken_fence` is set.
+/// `stop_at`, only if it creates the token `once` when there is one, and arms
+/// the fence there only when `broken_fence` is set.
 ///
 /// The journal sits below [`BrokenFence`] so that each re-send is journalled
 /// as its own `send`.
@@ -263,6 +277,7 @@ pub(crate) fn layered<S, M>(
     store: S,
     stop_at: Option<StopPlan>,
     broken_fence: bool,
+    once: Option<PathBuf>,
     journal: &Arc<Journal>,
     classifier: &Arc<Classifier>,
     middle: impl FnOnce(JournalStore<S>) -> M,
@@ -273,6 +288,7 @@ pub(crate) fn layered<S, M>(
         BrokenFence::new(middle(store), Arc::clone(&fence)),
         stop_at,
         broken_fence.then_some(fence),
+        once,
         Arc::clone(journal),
         Arc::clone(classifier),
     )
@@ -361,6 +377,7 @@ mod tests {
             abort: None,
             stop_at: None,
             broken_fence: false,
+            stop_once: None,
         };
         let pipeline =
             Pipeline::from_config(PipelineConfig::from_str(&pipeline_yaml(&config)).unwrap())

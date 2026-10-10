@@ -531,7 +531,7 @@ fn tenancy_changes<'s, 'a>(
 ///
 /// Kills, aborts, `err_after_land` lines and proxy faults other than `pass`
 /// and those named `delay…` last zero time; SIGSTOPs and toxics last their duration. A
-/// `stop` line lasts until the next `sigcont` for the process, else its next
+/// `stop` or `leader_stop` line lasts until the next `sigcont` for the process, else its next
 /// kill, else `end_of_run`.
 fn windows(process: &ProcessJournal, faults: &[Line], end_of_run: u64) -> Vec<Window> {
     let mine = |instance: &str, pid: u32| instance == process.instance && pid == process.pid;
@@ -542,7 +542,7 @@ fn windows(process: &ProcessJournal, faults: &[Line], end_of_run: u64) -> Vec<Wi
         match &line.event {
             Event::Abort { .. } => raw.push((t, t, true)),
             Event::ErrAfterLand { .. } => raw.push((t, t, false)),
-            Event::Stop { .. } => {
+            Event::Stop { .. } | Event::LeaderStop { .. } => {
                 let after = || faults.iter().filter(|l| l.t_ms >= t);
                 let sigcont = after().find(
                     |l| matches!(&l.event, Event::Sigcont { instance, pid } if mine(instance, *pid)),

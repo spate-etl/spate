@@ -44,6 +44,17 @@ fn stopped_writer(name: &str, store: StoreKind, broken_fence: bool) {
     });
 }
 
+fn leader_killed(name: &str, store: StoreKind) {
+    run::run(&Spec {
+        name,
+        store,
+        instances: 3,
+        worker: Path::new(WORKER),
+        sink_delay_ms: 600,
+        faults: Faults::LeaderKilled,
+    });
+}
+
 /// Three NATS workers with no faults deliver every record once.
 #[test]
 #[ignore = "requires Docker"]
@@ -145,6 +156,24 @@ fn dynamodb_broken_fence_fails_the_run() {
         StoreKind::DynamoDb,
         true,
     );
+}
+
+/// Three NATS workers whose leader is killed at a seeded stage of its work
+/// deliver every record under the five properties, and another worker takes
+/// the leader key within four leases of the kill.
+#[test]
+#[ignore = "requires Docker"]
+fn nats_leader_killed() {
+    leader_killed("nats_leader_killed", StoreKind::Nats);
+}
+
+/// Three DynamoDB workers whose leader is killed at a seeded stage of its
+/// work deliver every record under the five properties, and another worker
+/// takes the leader key within four leases of the kill.
+#[test]
+#[ignore = "requires Docker"]
+fn dynamodb_leader_killed() {
+    leader_killed("dynamodb_leader_killed", StoreKind::DynamoDb);
 }
 
 /// A DynamoDB update whose first reply the fault proxy drops after it lands

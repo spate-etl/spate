@@ -165,6 +165,19 @@ fn peer_never_claimed_is_a_violation() {
     );
 }
 
+/// A killed leader that no other instance replaced is a property 4
+/// violation, and fails an ordinary run as one.
+#[test]
+fn leader_not_replaced_is_a_property_4_violation() {
+    assert_eq!(Check::LeaderNotReplaced.property(), 4);
+    assert_eq!(
+        Run::ordinary()
+            .violation(found(Check::LeaderNotReplaced))
+            .kind(),
+        Kind::Violation
+    );
+}
+
 /// A stopped-writer scenario whose stop never fired did not test anything.
 #[test]
 fn stop_line_never_seen_is_expectation() {

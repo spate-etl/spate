@@ -66,6 +66,7 @@ const PROBE: Duration = Duration::from_secs(2);
 /// Cap on a stopped worker reporting stopped.
 const STOP_CONFIRM: Duration = Duration::from_secs(5);
 
+mod leader;
 mod link;
 mod proxy;
 mod stopped;
@@ -104,6 +105,10 @@ pub enum Faults {
         /// The stopped worker re-sends its lost commit.
         broken_fence: bool,
     },
+    /// Every worker's first process stops at one seeded stage of a leader's
+    /// work. The first to stop is killed, and another instance must take the
+    /// leader key within four leases.
+    LeaderKilled,
 }
 
 /// Runs `spec` and returns its outcome when every check held.
@@ -135,6 +140,7 @@ pub fn run(spec: &Spec<'_>) -> Outcome {
         Faults::None => Schedule::default(),
         Faults::Schedule => Schedule::draw(&mut rng, spec.instances, tuning.lease_ms),
         Faults::StoppedWriter { .. } => Schedule::stopped_writer(&mut rng),
+        Faults::LeaderKilled => Schedule::leader_killed(&mut rng, tuning.lease_ms),
     };
     let proxy_seed = (spec.store == StoreKind::DynamoDb && spec.faults == Faults::Schedule)
         .then(|| rng.next_u64());
@@ -174,14 +180,26 @@ pub fn run(spec: &Spec<'_>) -> Outcome {
         let (targets, path) = (&targets, run.dir.join("health.ndjson"));
         let poller = s.spawn(move || health::watch(targets, &path, HEALTH_INTERVAL, &stopped));
         let driven = match spec.faults {
-            Faults::StoppedWriter { .. } => run.drive_stopped(
-                &mut workers,
-                &mut processes,
-                &env,
-                &rt,
-                &tuning,
-                &faults_path,
-            ),
+            Faults::StoppedWriter { .. } => run
+                .drive_stopped(
+                    &mut workers,
+                    &mut processes,
+                    &env,
+                    &rt,
+                    &tuning,
+                    &faults_path,
+                )
+                .map(|(timed_out, fired, stopped)| (timed_out, fired, stopped, None)),
+            Faults::LeaderKilled => run
+                .drive_leader(
+                    &mut workers,
+                    &mut processes,
+                    &env,
+                    &rt,
+                    &tuning,
+                    &faults_path,
+                )
+                .map(|(timed_out, fired, killed)| (timed_out, fired, None, Some(killed))),
             Faults::None | Faults::Schedule => run
                 .drive(
                     &mut workers,
@@ -191,12 +209,12 @@ pub fn run(spec: &Spec<'_>) -> Outcome {
                     &tuning,
                     &faults_path,
                 )
-                .map(|(timed_out, fired)| (timed_out, fired, None)),
+                .map(|(timed_out, fired)| (timed_out, fired, None, None)),
         };
         drop(stop);
         (driven, poller.join().expect("the health poller panicked"))
     });
-    let (timed_out, mut fired, stopped) = match driven {
+    let (timed_out, mut fired, stopped, killed) = match driven {
         Ok(driven) => driven,
         Err(failure) => return run.harness(Stage::Running, &failure),
     };
@@ -253,13 +271,17 @@ pub fn run(spec: &Spec<'_>) -> Outcome {
                 }),
             }
         }
-        Faults::None | Faults::Schedule => Scenario::Ordinary,
+        Faults::None | Faults::Schedule | Faults::LeaderKilled => Scenario::Ordinary,
     };
     let mut expectations = if spec.faults == Faults::None {
         duplicates(&journals)
     } else {
         Vec::new()
     };
+    if let Some(killed) = killed {
+        violations.extend(killed.violation);
+        expectations.extend(killed.expectations);
+    }
     if spec.instances > 1 && scenario == Scenario::Ordinary && !claims_overlap(&journals) {
         expectations.push("no two processes held splits at overlapping times".to_owned());
     }
@@ -935,6 +957,8 @@ impl Run<'_> {
                 self.spec.faults,
                 Faults::StoppedWriter { broken_fence: true }
             ),
+            stop_once: (self.spec.faults == Faults::LeaderKilled)
+                .then(|| self.dir.join(leader::TOKEN)),
         };
         let config_path = self.dir.join(format!("{name}.json"));
         let json = serde_json::to_vec_pretty(&config).map_err(|e| e.to_string())?;

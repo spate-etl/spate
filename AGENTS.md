@@ -110,9 +110,9 @@ flow, line numbers.
 A test's doc says what the test pins, plus `Regression for #N.` where it guards
 a fixed defect.
 
-These rules hold in commit messages and pull request bodies too. Avoid the
-dramatic em-dash, antithesis framing, evaluative tails and empty intensifiers;
-swapping one for another is no fix.
+In comments, commit messages and pull request bodies, avoid the dramatic
+em-dash, the colon reveal, antithesis framing, evaluative tails and empty
+intensifiers. Swapping one for another is no fix.
 
 ## Documentation
 

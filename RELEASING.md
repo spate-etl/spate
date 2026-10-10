@@ -37,7 +37,7 @@ The workflow derives the version independently and fails when the two
 disagree: a changelog fragment that opens with `**Breaking:**`, or a
 `rust-version` raise since the last tag, means a minor bump; anything else
 means a patch. Commit subjects play no part.
-`./scripts/release-version.sh --derive` prints the same answer locally.
+`cargo xtask release version derive` prints the same answer locally.
 
 Everything after the input runs unattended. The release pull request
 auto-merges when `CI gate` passes, and nobody approves the diff. The controls
@@ -53,9 +53,9 @@ from the version input, in one commit on `release/vX.Y.Z`:
 
 | Artifact | Produced by |
 |---|---|
-| `[workspace.package] version` and the `=` pins | `scripts/release-version.sh --bump` |
+| `[workspace.package] version` and the `=` pins | `cargo xtask release version bump` |
 | `Cargo.lock` | `cargo update --workspace`, inside the bump |
-| The install snippets at `X.Y` | the same bump; `--check` holds the set closed |
+| The install snippets at `X.Y` | the same bump; `cargo xtask release version check` holds the set closed |
 | `CHANGELOG.md`, fragments consumed, moved dependency requirements listed | `cargo xtask changelog build` |
 | `THIRD-PARTY.md` | `cargo xtask attribution` |
 
@@ -201,8 +201,8 @@ includes a new crate:
 5. Run `cargo xtask tidy self-test`, which pins the container map to
    the crate graph.
 6. If it carries an install snippet anywhere, add the file to
-   `SNIPPET_FILES` in `scripts/release-version.sh`; `--check` fails until the
-   snippet is in the rewritten set.
+   `SNIPPET_FILES` in `xtask/src/release/version.rs`; `cargo xtask release
+   version check` fails until the snippet is in the rewritten set.
 
 The semver gate compares each crate against its published release, so it
 skips a new crate, and says so, until the name is claimed.

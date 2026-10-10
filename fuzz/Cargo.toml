@@ -9,8 +9,8 @@ publish = false
 [package.metadata]
 cargo-fuzz = true
 
-# Every dependency is one inline table on one line. `scripts/release-version.sh
-# --check` reads a `{` at end of line anywhere in a tracked `.toml` as an
+# Every dependency is one inline table on one line. `cargo xtask release
+# version check` reads a `{` at end of line anywhere in a tracked `.toml` as an
 # install snippet and fails.
 [dependencies]
 libfuzzer-sys = { workspace = true }

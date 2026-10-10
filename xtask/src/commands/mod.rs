@@ -171,18 +171,6 @@ pub(crate) enum Command {
         cache_key: bool,
     },
 
-    /// The workspace version tool
-    ReleaseVersion {
-        #[arg(long, value_name = "VERSION", group = "mode")]
-        bump: Option<String>,
-        #[arg(long, group = "mode")]
-        check: bool,
-        #[arg(long, group = "mode")]
-        derive: bool,
-        #[arg(long, group = "mode")]
-        check_publish_metadata: bool,
-    },
-
     /// The digest-pinned container image for a lane
     ContainerImage(ImageArgs),
 
@@ -215,6 +203,11 @@ pub(crate) struct ImageArgs {
 
 #[derive(Subcommand)]
 pub(crate) enum ReleaseCommand {
+    /// The workspace version and the literals that carry it
+    Version {
+        #[command(subcommand)]
+        cmd: crate::release::version::VersionCommand,
+    },
     /// Build the release commit and open the pull request
     Assemble {
         #[arg(long, value_name = "X.Y.Z")]
@@ -380,6 +373,9 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: Command) -> Outcome {
         Command::Docs { serve } => docs::dispatch(root, explain, serve),
         Command::Release { cmd } => {
             let s = match &cmd {
+                ReleaseCommand::Version { cmd } => {
+                    return crate::release::version::dispatch(root, explain, cmd);
+                }
                 ReleaseCommand::Assemble { version, dry_run } => {
                     let s = Step::new("./scripts/release.sh", ["assemble", "--version", version]);
                     if *dry_run { s.arg("--dry-run") } else { s }
@@ -426,27 +422,6 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: Command) -> Outcome {
                      | --cache-key",
                 ))
             }
-        }
-        Command::ReleaseVersion {
-            bump,
-            check,
-            derive,
-            check_publish_metadata,
-        } => {
-            let mut s = Step::new("./scripts/release-version.sh", [] as [&str; 0]);
-            if let Some(v) = &bump {
-                s = s.args(["--bump", v]);
-            }
-            if check {
-                s = s.arg("--check");
-            }
-            if derive {
-                s = s.arg("--derive");
-            }
-            if check_publish_metadata {
-                s = s.arg("--check-publish-metadata");
-            }
-            run::run(root, explain, &s)
         }
         Command::ContainerImage(args) => container_image(root, explain, &args),
         Command::SyncLabels { dry_run, repo } => {

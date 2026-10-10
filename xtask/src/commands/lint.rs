@@ -103,7 +103,11 @@ fn one_check(root: &Path, explain: bool, check: TidyCheck) -> Outcome {
         TidyCheck::GungraunBenches => crate::checks::gungraun::check(root, explain),
         TidyCheck::Transclusions => script(root, explain, "transclude.sh", "--check"),
         TidyCheck::SupportedVersions => crate::checks::supported_versions::check(root, explain),
-        TidyCheck::ReleaseVersion => script(root, explain, "release-version.sh", "--check"),
+        TidyCheck::ReleaseVersion => crate::release::version::dispatch(
+            root,
+            explain,
+            &crate::release::version::VersionCommand::Check,
+        ),
     }
 }
 

@@ -400,7 +400,7 @@ jobs:
         run: |
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml)
           next="${version%.*}.$(( ${version##*.} + 1 ))"
-          cargo xtask release-version --bump "$next"
+          cargo xtask release version bump "$next"
           git config user.name 'spate-release[bot]'
           git config user.email 'spate-release[bot]@users.noreply.github.com'
           git commit --all --quiet --message "workspace: simulate the release bump to $next"
@@ -409,7 +409,7 @@ jobs:
       # or license with a warning and exit 0, while the upload rejects it
       # (cargo issue 14249).
       - id: metadata
-        run: cargo xtask release-version --check-publish-metadata
+        run: cargo xtask release version check-metadata
 
       - id: dry-run
         run: cargo publish --workspace --locked --dry-run

@@ -9,6 +9,7 @@
 mod checks;
 mod ci;
 mod commands;
+mod release;
 mod run;
 
 use std::path::{Path, PathBuf};

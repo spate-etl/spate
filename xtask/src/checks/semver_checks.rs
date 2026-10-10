@@ -204,7 +204,7 @@ fn crates_now(root: &Path) -> Vec<String> {
 }
 
 /// The newest release tag, which names the versions the registry serves.
-fn last_tag(root: &Path) -> Result<String, Error> {
+pub(crate) fn last_tag(root: &Path) -> Result<String, Error> {
     let step = Step::new("git", ["tag", "--list", "v[0-9]*", "--sort=-v:refname"]);
     let listing = run::capture(root, &step)?;
     Ok(listing.split('\n').next().unwrap_or_default().to_owned())

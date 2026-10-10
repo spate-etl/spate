@@ -1291,7 +1291,7 @@ fn tracked(root: &Path, file: &str) -> bool {
 }
 
 /// The newest release tag. `v[0-9]*` keeps a non-release tag such as `vnext`
-/// from standing in for one, the same pattern `release-version.sh` reads.
+/// from standing in for one.
 fn previous_tag(root: &Path) -> Option<String> {
     capture(root, &["tag", "--list", "v[0-9]*", "--sort=-v:refname"])
 }

@@ -145,7 +145,6 @@ pub(crate) fn is_manifest(path: &str) -> bool {
             "fuzz/Cargo.toml",
             "test-support/Cargo.toml",
             "xtask/Cargo.toml",
-            "scripts/release-version.sh",
             "xtask/*",
             ".github/workflows/ci.yml",
             ".github/toolchains/*",

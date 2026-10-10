@@ -122,126 +122,25 @@ When you are not touching the TLS surface, replace it with the features the
 `e2e_examples` stanza in `crates/spate/Cargo.toml` requires.
 
 The fault scenarios in `faults/` run coordinated S3 workers as separate
-processes against SeaweedFS and NATS or DynamoDB Local, and judge what each
-worker journalled, and the store's final state, against five delivery
-properties. The `docker` profile's `default-filter` holds them back too, and one
-command runs them:
+processes against SeaweedFS and NATS or DynamoDB Local, inject faults on a
+seeded schedule, and judge each run against the five delivery properties the
+`spate-faults` crate doc states. They need Docker, and the `docker` profile's
+`default-filter` holds them back from every other nextest run. One command runs
+them:
 
 ```sh
 cargo xtask fault-test [--seed N] [FILTER]
 ```
 
-It prints the seed first, drawing one from the clock when `--seed` is absent,
-and passes it to every scenario. A seed fixes the data set and the fault
-schedule: which worker is killed when, how long its replacement waits to start
-under the same instance id, which worker is stopped with SIGSTOP when and for
-how long, which worker aborts before or after which of its writes, which one
-is handed an error for a write that landed, which stage of its work the leader
-stops at, when each window on a worker's store link is due and how long it lasts, and on DynamoDB how each worker's
-fault proxy answers each of its calls by number. It does not
-fix the interleaving. The operating system's scheduling and real time decide
-which split a worker holds when something happens. Each scenario writes a
-directory under `target/fault-runs/` holding every worker's config, journal and
-stderr, the faults the harness injected in `faults.ndjson`, polls of each
-container in turn, a second apart between rounds, in `health.ndjson`, and an
-`outcome.json`; a passing scenario keeps only the outcome. An outcome is `pass`,
-`violation` (the oracle found a delivery violation), `worker` (a worker failed
-while every check held), `expectation` (the scenario's own assertion failed) or
-`harness` (setup, a journal write or a final store read failed, or a container
-stopped answering during a failed run with no property 3 or 5 violation). A
-worker handed an error for a landed write must show in its journal that it
-recovered the write or let the split go, or the outcome is `expectation`. A
-retry with no `won` or `lost` reply may have landed as well, and a read of its
-value counts as a read of the landed write. A kill the schedule draws for that
-worker waits until its journal shows the recovery, or one lease from the first
-poll at which the kill is due and the journal holds its `err_after_land` line,
-and a stop drawn for it is skipped. Before each scheduled kill the harness reads
-the leader key through its own store handle. The `kill` line records the
-instance the key named, its generation and a digest of its bytes, and the
-kill's entry under `faults_fired` in `outcome.json` names that instance. A
-scheduled kill whose read fails or times out makes the outcome `expectation`.
-In `dynamodb_one_instance` and `dynamodb_three_instances` each worker reaches
-the store through an HTTP proxy of its own, which throttles calls, answers them
-with a 5xx status the SDK retries, delays them by up to 100 ms, or forwards a
-durable split update and then replaces its reply with a 5xx or closes the
-connection without one. The worker handed an error for a landed write gets a
-proxy that forwards every call. `faults.ndjson` records each answer but a plain
-forward as a `proxy_fault` line, and the oracle counts every one but a delay as
-a fault of no duration. A run with proxies whose `faults.ndjson` holds no
-`proxy_fault` line is `expectation`.
-In those two scenarios, and in `nats_one_instance` and
-`nats_three_instances`, each worker process reaches the store through a
-Toxiproxy proxy of its own, on a Docker network the run creates for the store
-and Toxiproxy. On DynamoDB the fault proxy forwards to it. The windows on a
-worker's link are latency below the store timeout, which on DynamoDB stays
-within the SDK's read timeout together with the fault proxy's longest delay; a
-heal-near-expiry window that holds what the worker sends for about a lease and
-delivers it on the same connection when it closes; a blackhole that drops both
-directions for about a lease and then closes the connection; a refuse
-window that disables the proxy, so the worker's open connections close and each
-new one is accepted and then closed; and on NATS a `limit_data` window that
-closes each connection once a few kilobytes have reached the worker. A window
-waits while its worker has another window open or no live process, and while
-the worker is the one handed an error for a landed write. With more than one
-worker, no window is drawn on that one. `faults.ndjson`
-records each window as a `toxic` line, and the oracle counts it as a fault
-lasting the window. A run that draws windows and opens none is `expectation`.
-`dynamodb_drop_after_land_then_pass_wins` drives one store through the proxy
-against DynamoDB Local: an update whose first reply is dropped must return
-`Won` on the SDK's retry, and one whose every reply is dropped `Retryable`.
-Every failed or timed-out `get` of a split is journalled, and after a lost claim
-reply the worker may claim the split again only once such a read has failed. A
-worker that aborts on its plan must be replaced under its instance id, or the
-outcome is `expectation`; a run that ends with workers still running at its
-deadline skips this check and is `worker`. The stopped-writer scenarios run two
-workers, each with a working set above the run's split count. The second starts
-once the first leads, stops itself with SIGSTOP inside one of its first three
-commits, and is continued once the first has claimed the split at a higher epoch
-and a lease and a quarter second have passed since the stop. If the claim does
-not come within four leases, the outcome is `violation`. With the fence intact every property must hold. The broken-fence
-scenarios re-send the stopped commit at the current revision after it loses its
-CAS, and pass only when the oracle reports the stale epoch at that write's
-revision against the stopped worker. The leader-kill scenarios start three
-workers at once, and every worker's first process carries one seeded stage of a
-leader's work: the generation bump, the second to fourth seeded progress record
-once the records before it have landed, the first or second assignment write
-that names a split, or the plan publish, which is the first `plan` update after
-a seed. The first process to reach the
-stage creates a token file in the run directory and stops itself with SIGSTOP
-before sending the write, and a process that finds the token carries on. Its
-`leader_stop` line records the write's value and whether the publish had gone
-out. The harness reads the leader key, records it on the `kill` line and kills
-the process. If no other worker holds the leader key within four leases of the
-kill, the outcome is `violation`. The killed worker's replacement starts a
-seeded delay after that. A run where no process reaches the stage within a
-minute, or where the stopped process did not hold the leader key, is
-`expectation`. The command writes
-`target/fault-runs/summary.json` and exits 1 on any `violation`, `worker` or
-`expectation` outcome, 3 when only `harness` outcomes failed, or nextest failed
-with no failing outcome, such as a build error or a run the oracle could not
-judge, and 0 otherwise. A failure message carries the command that replays its
-seed and the schedule it applies.
+It prints the seed first, drawing one from the clock when `--seed` is absent. A
+seed fixes the data set and the fault schedule. It does not fix the
+interleaving, so a replay can pass where the original run failed. A failure
+message carries the command that replays its seed. A run writes its journals,
+logs and outcomes under `target/fault-runs/`.
 
-The weekly scheduled tier runs `cargo xtask fault-test` under a seed drawn from
-the clock, and uploads the junit report as `fault-junit` and
-`target/fault-runs/` as `fault-runs`. When the run fails,
-`cargo xtask fault-test report` writes one issue body per route, laid out as
-the issue form the route files under, and the job files each under a fixed
-title, or comments `Still failing` on the open issue that already has it:
-
-| Route | Filed when | Title |
-| --- | --- | --- |
-| `delivery` | any `violation` | `[delivery] The weekly fault run found a delivery violation` |
-| `worker` | any `worker` | `[bug] A weekly fault run worker failed with no delivery violation` |
-| `expectation` | any `expectation` | `[bug] A weekly fault scenario did not meet its own expectation` |
-| `harness` | only `harness`, or no failing outcome | `[bug] The weekly fault run hit an infrastructure failure` |
-
-`delivery` follows the delivery-correctness form and carries the
-`delivery-correctness` label; the other three follow the bug form. Every issue
-is typed Bug. Its body names the seed and the replay command. A run that
-wrote no `summary.json`, such as one the step timeout stopped, is routed from
-the `outcome.json` files already on disk as a failed nextest run, and its
-body takes the seed from them or points to the run log for it.
+The weekly scheduled tier runs every scenario under a fresh seed. A failure
+opens an issue naming the seed and the replay command, or comments on the one
+already open.
 
 **On macOS every freshly linked binary stalls for tens of seconds at 0% CPU on
 its first exec** while Gatekeeper scans it. Across this workspace that alone

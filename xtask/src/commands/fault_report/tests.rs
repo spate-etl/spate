@@ -662,15 +662,6 @@ spate-s3 = { workspace = true, features = ["testing"] }
     );
 }
 
-/// DEVELOPING.md names each route's issue title.
-#[test]
-fn developing_md_names_every_title() {
-    let text = fs::read_to_string(repo().join("DEVELOPING.md")).unwrap();
-    for route in ROUTES {
-        assert!(text.contains(route.title()), "{}", route.title());
-    }
-}
-
 /// `report` writes a body and a title per route from the run directories
 /// beside the summary, leaving out empty stderr files, and reports an absent
 /// runs root as `harness`.

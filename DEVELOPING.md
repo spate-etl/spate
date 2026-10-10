@@ -215,15 +215,7 @@ the process. If no other worker holds the leader key within four leases of the
 kill, the outcome is `violation`. The killed worker's replacement starts a
 seeded delay after that. A run where no process reaches the stage within a
 minute, or where the stopped process did not hold the leader key, is
-`expectation`. The deposed-leader scenarios start three workers the same way,
-and every first process carries the second to fourth seeded progress record.
-The process that stops is not killed. It is continued once another worker holds
-that split at a higher epoch and a lease and a quarter second have passed since
-the stop, and the outcome is `violation` if that claim does not come within
-four leases. With the fence intact every property must hold. The broken-fence
-leader scenarios re-send the resumed create as an update at the current
-revision when it finds the key, and pass only when the oracle reports the stale
-epoch at that write's revision against the stopped worker. The command writes
+`expectation`. The command writes
 `target/fault-runs/summary.json` and exits 1 on any `violation`, `worker` or
 `expectation` outcome, 3 when only `harness` outcomes failed, or nextest failed
 with no failing outcome, such as a build error or a run the oracle could not

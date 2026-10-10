@@ -1238,6 +1238,25 @@ async fn broken_fence_leaves_ephemeral_updates_alone() {
     assert!(fence.take("split.a"), "still armed");
 }
 
+/// An armed fence passes an ephemeral create of its key through untouched
+/// and stays armed for the durable one.
+#[tokio::test]
+async fn broken_fence_leaves_ephemeral_creates_alone() {
+    let fence = Arc::new(Fence::default());
+    let inner = MemoryStore::new(LEASE);
+    let store = BrokenFence::new(inner.clone(), Arc::clone(&fence));
+    let peer = inner
+        .create(Keyspace::Ephemeral, "split.a", b"peer".to_vec())
+        .await;
+    assert!(matches!(peer, Ok(CasOutcome::Won(_))), "{peer:?}");
+    fence.arm("split.a");
+    let acquire = store
+        .create(Keyspace::Ephemeral, "split.a", b"lease".to_vec())
+        .await;
+    assert!(matches!(acquire, Ok(CasOutcome::Lost)), "{acquire:?}");
+    assert!(fence.take("split.a"), "still armed");
+}
+
 /// A create on the armed key that finds it is re-sent as an update at the
 /// current revision, where it lands, and the fence fires once. A create that
 /// finds its key with nothing armed, or another key armed, comes back `Lost`

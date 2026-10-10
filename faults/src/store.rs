@@ -1,8 +1,8 @@
 //! The coordination-store wrappers a worker runs under: one journals every
 //! durable `split.*` write with its reply and every durable `split.*` entry
 //! it reads, one injects an in-process fault at a chosen write, one stops the
-//! process at a chosen commit or leader write, and one re-sends a commit that
-//! lost its CAS.
+//! process at a chosen commit or leader write, and one re-sends a commit or
+//! seed create that lost its CAS.
 
 use std::fs::OpenOptions;
 use std::path::PathBuf;

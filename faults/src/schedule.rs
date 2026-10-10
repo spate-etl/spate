@@ -110,7 +110,7 @@ impl LeaderStage {
 }
 
 /// The stage the first process to reach it stops at, and how long after the
-/// takeover the stopped leader's replacement starts.
+/// takeover a killed leader's replacement starts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LeaderPlan {
     /// Where a leading process stops.

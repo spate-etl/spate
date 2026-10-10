@@ -238,13 +238,13 @@ assemble() {
 
     # The dispatched version has to fall out of the history since the last
     # tag as well.
-    expected=$(./scripts/release-version.sh --derive)
+    expected=$(cargo xtask release version derive)
     [ "$expected" = "$version" ] || fail "the input says $version but the history since $last
   derives $expected. One of the two is wrong; nothing proceeds until they agree."
     endgroup
 
     group "Generate every artefact"
-    ./scripts/release-version.sh --bump "$version"
+    cargo xtask release version bump "$version"
     cargo xtask changelog build "$version"
     cargo xtask attribution
     endgroup

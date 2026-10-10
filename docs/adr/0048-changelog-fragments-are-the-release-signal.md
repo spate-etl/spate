@@ -63,8 +63,7 @@ new version's section of `CHANGELOG.md` instead.
 ### Confirmation
 
 `breaking_announced` in `xtask/src/checks/changelog.rs` is the one reader. The
-semver gate calls it, and `release-version.sh --derive` reaches it through
-`cargo xtask changelog breaking`. The
+semver gate and `cargo xtask release version derive` call it. The
 changelog gate runs as `cargo xtask tidy changelog` in the `changelog` CI job,
 and `cargo xtask tidy title` rejects a subject carrying a type or `!`.
 

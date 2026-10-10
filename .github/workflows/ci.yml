@@ -341,7 +341,7 @@ jobs:
         run: |
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml)
           next="${version%.*}.$(( ${version##*.} + 1 ))"
-          cargo xtask release-version --bump "$next"
+          cargo xtask release version bump "$next"
           # The dry run refuses a dirty worktree.
           git config user.name 'spate-release[bot]'
           git config user.email 'spate-release[bot]@users.noreply.github.com'
@@ -351,7 +351,7 @@ jobs:
       # or license with a warning and exit 0, while the upload rejects it
       # (cargo issue 14249).
       - name: Prove the upload metadata is present
-        run: cargo xtask release-version --check-publish-metadata
+        run: cargo xtask release version check-metadata
 
       - name: Prove every crate packages
         run: cargo publish --workspace --locked --dry-run

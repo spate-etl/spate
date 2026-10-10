@@ -1291,7 +1291,7 @@ fn tracked(root: &Path, file: &str) -> bool {
 }
 
 /// The newest release tag. `v[0-9]*` keeps a non-release tag such as `vnext`
-/// from standing in for one, the same pattern `release-version.sh` reads.
+/// from standing in for one.
 fn previous_tag(root: &Path) -> Option<String> {
     capture(root, &["tag", "--list", "v[0-9]*", "--sort=-v:refname"])
 }
@@ -1324,23 +1324,6 @@ fn shortlog_name(line: &str) -> &str {
 fn today(root: &Path) -> Result<String, Error> {
     let out = run::capture(root, &Step::new("date", ["-u", "+%Y-%m-%d"]))?;
     Ok(out.trim_end_matches('\n').to_owned())
-}
-
-/// Prints whether the release being prepared announces a breaking change.
-pub(crate) fn breaking(root: &Path, explain: bool) -> Outcome {
-    if explain {
-        println!("(reads {FRAGMENTS}/ and {CHANGELOG} at HEAD)");
-        return Ok(());
-    }
-    println!(
-        "{}",
-        if breaking_announced(root)? {
-            "breaking"
-        } else {
-            "none"
-        }
-    );
-    Ok(())
 }
 
 /// Whether the release being prepared announces a breaking change: a fragment

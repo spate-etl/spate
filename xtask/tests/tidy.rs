@@ -57,7 +57,7 @@ fn table() -> Vec<(&'static str, String)> {
         ),
         (
             "release-version",
-            "./scripts/release-version.sh --check\n".to_owned(),
+            "(reads Cargo.toml and the tracked files for install snippets)\n".to_owned(),
         ),
     ]
 }

@@ -47,10 +47,6 @@ struct FakeGit<'a> {
     /// A push that reaches origin and then reports failure.
     push_lands_then_fails: bool,
     push_fails: bool,
-    /// Tags are signed, so a tag already on origin is verified before use.
-    signs: bool,
-    /// The tag on origin carries no valid signature.
-    unsigned: bool,
 }
 
 impl<'a> FakeGit<'a> {
@@ -63,8 +59,6 @@ impl<'a> FakeGit<'a> {
             remote: RefCell::default(),
             push_lands_then_fails: false,
             push_fails: false,
-            signs: false,
-            unsigned: false,
         }
     }
 }
@@ -92,19 +86,6 @@ impl Git for FakeGit<'_> {
     fn tag(&self, name: &str, commit: &str) -> Outcome {
         self.log.push(format!("tag {name} {commit}"));
         Ok(())
-    }
-    fn verify_tag(&self, name: &str, repo: &str, commit: &str) -> Outcome {
-        if self.unsigned {
-            return Err(fail("verify tag"));
-        }
-        if self.remote.borrow().get(name).map(String::as_str) != Some(commit) {
-            return Err(fail("tag names another commit"));
-        }
-        self.log.push(format!("verify tag {name} in {repo}"));
-        Ok(())
-    }
-    fn signs(&self) -> bool {
-        self.signs
     }
     fn push(&self, refspec: &str, force: bool) -> Outcome {
         if self.push_fails {
@@ -1981,8 +1962,8 @@ fn released(log: &Log) -> (FakeGit<'_>, FakeForge<'_>) {
     (git, forge)
 }
 
-/// `verify` checks the tag signature, each crate's origin and attestations
-/// against the tagged commit, and the release's immutability and assets.
+/// `verify` checks each crate's origin and attestations against the tagged
+/// commit, and the release's immutability and assets.
 #[test]
 fn verify_judges_a_finished_release() {
     let log = Log::default();
@@ -1996,7 +1977,7 @@ fn verify_judges_a_finished_release() {
     )
     .unwrap();
     let signer = "spate-etl/spate/.github/workflows/release-build.yml";
-    let mut want = vec!["verify tag v0.3.0 in spate-etl/spate".to_owned()];
+    let mut want = Vec::new();
     for c in CRATES {
         want.push(format!("verify provenance {c}-0.3.0.crate by {signer}"));
         want.push(format!("verify sbom {c}-0.3.0.crate by {signer}"));
@@ -2005,7 +1986,7 @@ fn verify_judges_a_finished_release() {
     assert_eq!(log.entries(), want);
 }
 
-/// An unsigned tag, a crate from another commit, an unattested crate and a
+/// A missing tag, a crate from another commit, an unattested crate and a
 /// mutable release each fail `verify`.
 #[test]
 fn verify_refuses_each_broken_link() {
@@ -2022,11 +2003,11 @@ fn verify_refuses_each_broken_link() {
     };
 
     let log = Log::default();
-    let (mut git, forge) = released(&log);
+    let (git, forge) = released(&log);
     let (registry, workspace) = published(&log);
-    git.unsigned = true;
+    git.remote.borrow_mut().clear();
     let err = run(&git, &forge, &registry, &workspace).unwrap_err();
-    assert_eq!(err.message, "injected: verify tag");
+    assert_eq!(err.message, "v0.3.0 is not tagged in spate-etl/spate");
 
     let log = Log::default();
     let (git, forge) = released(&log);
@@ -2162,51 +2143,6 @@ fn finish_verifies_the_release_again_after_a_pause() {
     assert_eq!(pauses.of(Duration::from_secs(10)), 1);
     assert!(log.has("verify release v0.3.0"));
     assert!(log.has("dispatch docs"));
-}
-
-/// With signing on, a tag already on origin is verified before the release
-/// uses it, and one without a valid signature stops `finish`.
-#[test]
-fn finish_with_signing_verifies_a_tag_already_on_origin() {
-    let log = Log::default();
-    let mut git = FakeGit::new(&log);
-    git.signs = true;
-    git.remote.borrow_mut().insert("v0.3.0".into(), SHA.into());
-    let forge = FakeForge::new(&log);
-    let (registry, workspace) = published(&log);
-    let staged = artifacts(true);
-    let pauses = Pauses::default();
-    finish(
-        &host!(&git, &forge, &registry, &workspace, pauses),
-        v("0.3.0"),
-        SHA,
-        staged.dir(),
-        "spate-etl/spate",
-    )
-    .unwrap();
-    assert!(
-        log.has("verify tag v0.3.0 in spate-etl/spate"),
-        "{:?}",
-        log.entries()
-    );
-
-    let log = Log::default();
-    let mut git = FakeGit::new(&log);
-    git.signs = true;
-    git.unsigned = true;
-    git.remote.borrow_mut().insert("v0.3.0".into(), SHA.into());
-    let forge = FakeForge::new(&log);
-    let (registry, workspace) = published(&log);
-    let err = finish(
-        &host!(&git, &forge, &registry, &workspace, pauses),
-        v("0.3.0"),
-        SHA,
-        staged.dir(),
-        "spate-etl/spate",
-    )
-    .unwrap_err();
-    assert_eq!(err.message, "injected: verify tag");
-    assert!(!log.has("draft"), "{:?}", log.entries());
 }
 
 /// `verify` runs only from a checkout at the version it verifies.

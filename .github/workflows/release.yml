@@ -116,8 +116,6 @@ jobs:
       # short-lived registry token, so no CARGO_REGISTRY_TOKEN exists in this
       # repository and crates.io refuses token-authenticated publishes for
       # these crates. The publisher matches this file, not release-build.yml.
-      # gitsign mints its own Sigstore-audience token under the same
-      # permission to sign the tag.
       id-token: write
       # `gh workflow run` for the docs deploy at the end.
       actions: write
@@ -152,25 +150,6 @@ jobs:
           EXPECTED_SHA: ${{ github.sha }}
         run: cargo xtask release verify-artifacts --dir "$RUNNER_TEMP/release"
 
-      # gitsign signs the tag in `finish`. It is installed before the registry
-      # token is minted, so a failed download stops the run before any upload,
-      # and is pinned by the digest of its release asset.
-      - name: Install gitsign
-        env:
-          GITSIGN_VERSION: 0.17.1
-          GITSIGN_SHA256: 69213a8a0813a151e5a47d0060862952ff833a845d57309dff76f7ba6600abae
-        run: |
-          if [ "$RUNNER_ARCH" != X64 ]; then
-            echo "::error::the pinned gitsign digest is for linux_amd64, not $RUNNER_ARCH"
-            exit 1
-          fi
-          mkdir -p "$RUNNER_TEMP/gitsign"
-          curl -fsSL --retry 3 -o "$RUNNER_TEMP/gitsign/gitsign" \
-            "https://github.com/sigstore/gitsign/releases/download/v${GITSIGN_VERSION}/gitsign_${GITSIGN_VERSION}_linux_amd64"
-          echo "$GITSIGN_SHA256  $RUNNER_TEMP/gitsign/gitsign" | sha256sum --check --strict
-          chmod +x "$RUNNER_TEMP/gitsign/gitsign"
-          echo "$RUNNER_TEMP/gitsign" >> "$GITHUB_PATH"
-
       # Minted after all verification: the exchanged token lives 30 minutes,
       # fixed, and everything before this point needs none.
       - uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
@@ -197,4 +176,4 @@ jobs:
           EXPECTED_SHA: ${{ github.sha }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           DISPATCH_TOKEN: ${{ github.token }}
-        run: cargo xtask release finish --artifacts "$RUNNER_TEMP/release" --sign-tag
+        run: cargo xtask release finish --artifacts "$RUNNER_TEMP/release"

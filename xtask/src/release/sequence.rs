@@ -405,7 +405,7 @@ pub(crate) fn print_next(prepared: &Prepared) {
     println!("would read back trustpub_data for every crate and require the release commit");
     println!("would compare each attested crate's sha256 against the index cksum");
     println!("would resolve a scratch project against the registry (the smoke test)");
-    println!("would sign v{v} with gitsign as release.yml, verify it, and push it");
+    println!("would tag v{v} and push the tag");
     println!("would draft the GitHub release with the CHANGELOG section, attach the SBOMs,");
     println!("  {SUMS} and the attestation bundle, publish it immutable, verify its");
     println!("  attestation, and deploy the docs");
@@ -702,12 +702,7 @@ pub(crate) fn finish(
     // Tagged after the publish, so the tag names what the registry holds.
     match host.git.remote_tag(&tag)? {
         Some(commit) if commit == expected_sha => {
-            // A tag this step did not just make is checked before the release
-            // locks it.
-            if host.git.signs() {
-                host.git.verify_tag(&tag, repo, expected_sha)?;
-            }
-            println!("{tag} is already tagged on this commit.");
+            println!("{tag} is already tagged on this commit.")
         }
         Some(commit) => {
             return Err(Error::msg(format!(
@@ -915,8 +910,7 @@ pub(crate) fn verify(host: &Host<'_>, version: Version, repo: &str) -> Outcome {
         .git
         .remote_tag(&tag)?
         .ok_or_else(|| Error::msg(format!("{tag} is not tagged in {repo}")))?;
-    host.git.verify_tag(&tag, repo, &commit)?;
-    println!("{tag} names {commit} and its signature verifies.");
+    println!("{tag} names {commit}.");
     endgroup();
 
     group("Every crate came from the tagged commit");

@@ -187,7 +187,7 @@ pub fn container_outage(polls: &[HealthPoll]) -> Option<(&str, u64)> {
 /// The stop a stopped-writer scenario observed.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StopSeen {
-    /// The stopped commit's key.
+    /// The stopped write's key.
     pub key: String,
     /// Pid of the stopped process.
     pub pid: u32,
@@ -201,9 +201,9 @@ pub struct StopSeen {
 pub enum Scenario {
     /// Every delivery property holds under the schedule.
     Ordinary,
-    /// A worker stops itself inside a commit and resumes after its peer
-    /// claimed the split. With `broken_fence` the resumed commit skips its
-    /// revision check and the oracle must catch it.
+    /// A worker stops itself before a write and resumes after another
+    /// instance claimed the split. With `broken_fence` the resumed write is
+    /// re-sent at the current revision and the oracle must catch it.
     StoppedWriter {
         /// The fence is broken.
         broken_fence: bool,

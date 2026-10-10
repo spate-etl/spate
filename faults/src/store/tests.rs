@@ -95,6 +95,60 @@ impl CoordinationStore for Hang {
     }
 }
 
+/// A store whose creates fail, over a [`MemoryStore`].
+#[derive(Clone)]
+struct FailCreate(MemoryStore);
+
+impl CoordinationStore for FailCreate {
+    fn lease_ttl(&self) -> Duration {
+        LEASE
+    }
+
+    fn watch_mode(&self) -> WatchMode {
+        self.0.watch_mode()
+    }
+
+    async fn create(
+        &self,
+        _ks: Keyspace,
+        _key: &str,
+        _value: Vec<u8>,
+    ) -> Result<CasOutcome, StoreError> {
+        Err(StoreError::Retryable("create failed".to_owned()))
+    }
+
+    async fn update(
+        &self,
+        ks: Keyspace,
+        key: &str,
+        value: Vec<u8>,
+        expected: Revision,
+    ) -> Result<CasOutcome, StoreError> {
+        self.0.update(ks, key, value, expected).await
+    }
+
+    async fn get(&self, ks: Keyspace, key: &str) -> Result<Option<Entry>, StoreError> {
+        self.0.get(ks, key).await
+    }
+
+    async fn delete(
+        &self,
+        ks: Keyspace,
+        key: &str,
+        expected: Option<Revision>,
+    ) -> Result<CasOutcome, StoreError> {
+        self.0.delete(ks, key, expected).await
+    }
+
+    async fn watch(&self, ks: Keyspace, prefix: &str) -> Result<WatchStream, StoreError> {
+        self.0.watch(ks, prefix).await
+    }
+
+    async fn list(&self, ks: Keyspace, prefix: &str) -> Result<Vec<Entry>, StoreError> {
+        self.0.list(ks, prefix).await
+    }
+}
+
 fn journalled<S>(inner: S) -> (JournalStore<S>, tempfile::TempDir, std::path::PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("w0-1.ndjson");
@@ -1228,6 +1282,23 @@ async fn broken_fence_overwrites_an_armed_create_that_lost() {
     fence.arm("split.c");
     create(&store, "split.c", record_at(0, None, None)).await;
     assert!(!fence.take("split.c"), "a won create disarms the fence");
+}
+
+/// A create on the armed key that fails returns the error and leaves the
+/// fence armed.
+#[tokio::test]
+async fn broken_fence_keeps_the_fence_armed_after_a_failed_create() {
+    let fence = Arc::new(Fence::default());
+    let store = BrokenFence::new(FailCreate(MemoryStore::new(LEASE)), Arc::clone(&fence));
+    fence.arm("split.a");
+    let failed = store
+        .create(Keyspace::Durable, "split.a", record_at(0, None, None))
+        .await;
+    assert!(
+        matches!(failed, Err(StoreError::Retryable(_))),
+        "{failed:?}"
+    );
+    assert!(fence.take("split.a"), "still armed");
 }
 
 /// A create on the armed key whose future is dropped after its first poll,

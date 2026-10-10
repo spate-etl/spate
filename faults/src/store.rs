@@ -556,8 +556,8 @@ impl std::fmt::Display for StopPlan {
     }
 }
 
-/// The durable key whose next update a [`BrokenFence`] re-sends, if that
-/// update loses its CAS.
+/// The durable key a [`BrokenFence`] re-sends on. The next update on it, or
+/// the next create on it that replies `Ok`, disarms it.
 #[derive(Debug, Default)]
 pub struct Fence {
     armed: std::sync::Mutex<Option<String>>,
@@ -592,12 +592,12 @@ impl Fence {
 /// How many times a [`BrokenFence`] re-sends a lost write.
 const RESENDS: u32 = 8;
 
-/// Forwards every call to `S`, except the next durable write that replies on
-/// the key its [`Fence`] is armed for. An update that loses its CAS, or a
-/// create that finds the key, is read back and re-sent unchanged as an update
-/// at the current revision until it lands, up to eight times. A create that
-/// fails leaves the fence armed. A create on the armed key runs on a task of
-/// its own, so dropping its future cancels neither it nor its re-send.
+/// Forwards every call to `S`, except the durable write that disarms its
+/// [`Fence`]. An update on the armed key disarms it when sent, and a create on
+/// it when it replies `Ok`. If that write comes back `Lost`, it is read back
+/// and re-sent unchanged as an update at the current revision until it lands,
+/// up to eight times. A create on the armed key runs on a task of its own, so
+/// dropping its future cancels neither it nor its re-send.
 #[derive(Clone, Debug)]
 pub struct BrokenFence<S> {
     inner: S,

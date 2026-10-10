@@ -2282,7 +2282,7 @@ mod tests {
     }
 
     /// After a `leader_stop` on a seed create, the re-send is the first win
-    /// on that key from a revision: the stopped create itself, lost or won,
+    /// on that key from a revision. The stopped create itself, lost or won,
     /// does not count.
     #[test]
     fn resend_rev_finds_the_update_after_a_leader_stop() {

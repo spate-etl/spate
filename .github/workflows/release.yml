@@ -2,8 +2,10 @@ name: Release
 
 # Two phases handing off through a squash merge. `assemble` runs on the
 # workflow_dispatch carrying the version, builds the single release commit and
-# opens an auto-merging pull request; `publish` runs on the push that merge
-# produces and does everything that touches the registry. The sequence lives
+# opens an auto-merging pull request; `build` and `publish` run on the push
+# that merge produces. `build` calls release-build.yml, which packages and
+# attests; `publish` verifies those attestations and does everything that
+# touches the registry. The sequence lives
 # in xtask/src/release/ and `cargo xtask release dry-run` runs it locally; this
 # file adds the credentials and the OIDC exchange. RELEASING.md is the account
 # of the whole process.
@@ -67,8 +69,7 @@ jobs:
           persist-credentials: false
 
       # setup-rust's save-if writes a key only from `main`, so a pull request
-      # cannot seed this cache. Reading is safe; writing stays with the
-      # publish job, which owns the key.
+      # cannot seed this cache. Reading is safe, and this job never writes it.
       - uses: ./.github/actions/setup-rust
         with:
           tools: cargo-about
@@ -81,17 +82,27 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: cargo xtask release assemble --version "$VERSION"
 
-  publish:
-    name: Publish
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    # The subject is matched rather than a tag, since this job creates the
-    # tag. Skipped rather than run-and-no-op: entering the `crates-io`
-    # environment writes a deployment record, one per push to main otherwise.
+  build:
+    name: Build
+    # The subject is matched rather than a tag, since the publish creates the
+    # tag. Skipped rather than run-and-no-op, as the publish is.
     if: >-
       github.event_name == 'push' &&
       startsWith(github.event.head_commit.message, 'release: v') &&
       vars.RELEASE_APP_ID != ''
+    # No concurrency group: the build only reads the registry, and a group
+    # here would let a second release's build queue ahead of this publish.
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    uses: ./.github/workflows/release-build.yml
+
+  publish:
+    name: Publish
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
     # A second run started mid-publish could tag a version the first is still
     # uploading; `cancel-in-progress` stays false so a publish finishes. The
     # group sits on the job: skipped jobs never enter it, where a pending
@@ -104,12 +115,12 @@ jobs:
       # Trusted Publishing: crates-io-auth-action exchanges this for a
       # short-lived registry token, so no CARGO_REGISTRY_TOKEN exists in this
       # repository and crates.io refuses token-authenticated publishes for
-      # these crates.
+      # these crates. The publisher matches this file, not release-build.yml.
       id-token: write
       # `gh workflow run` for the docs deploy at the end.
       actions: write
-      # The provenance attestation on the packaged crates.
-      attestations: write
+    # Entering the environment writes a deployment record, so it sits on the
+    # job that needs its token and nowhere else.
     environment:
       name: crates-io
       url: https://crates.io/crates/spate
@@ -118,42 +129,38 @@ jobs:
         with:
           persist-credentials: false
 
-      # setup-rust's save-if writes a key only from `main`, which this push
-      # is, so a pull request cannot seed this cache. A warm dependency graph
-      # keeps the verify build well inside the job budget; the token is
-      # minted after it either way.
       - uses: ./.github/actions/setup-rust
         with:
-          tools: cargo-cyclonedx
           shared-key: release
+          cache-save: never
 
-      - name: Prepare
-        id: prepare
+      # The crates, SBOMs and SHA256SUMS release-build.yml staged, with every
+      # attestation bundle it produced.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/release
+
+      # Before any credential exists: the staged bytes match SHA256SUMS, each
+      # one carries attestations signed by release-build.yml from main at this
+      # commit, and this checkout packages the same bytes the upload will send.
+      - name: Verify the artifacts
         env:
           EXPECTED_SHA: ${{ github.sha }}
-        run: cargo xtask release prepare
+        run: cargo xtask release verify-artifacts --dir "$RUNNER_TEMP/release"
 
-      # Covers target/package/*.crate exactly as `prepare` packaged them;
-      # `finish` requires the registry's cksum to equal these files' sha256.
-      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
-        id: attest
-        if: steps.prepare.outputs.pending != '0'
-        with:
-          subject-path: target/package/*.crate
-
-      # Minted after all packaging work: the exchanged token lives 30
-      # minutes, fixed, and everything before this point needs none.
+      # Minted after all verification: the exchanged token lives 30 minutes,
+      # fixed, and everything before this point needs none.
       - uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
         id: auth
-        if: steps.prepare.outputs.pending != '0'
+        if: needs.build.outputs.pending != '0'
 
       - name: Upload
-        if: steps.prepare.outputs.pending != '0'
+        if: needs.build.outputs.pending != '0'
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-          EXCLUDES: ${{ steps.prepare.outputs.excludes }}
-          PENDING: ${{ steps.prepare.outputs.pending }}
-        run: cargo xtask release upload
+        run: cargo xtask release upload --artifacts "$RUNNER_TEMP/release"
 
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         id: app-token
@@ -165,9 +172,8 @@ jobs:
 
       - name: Finish
         env:
-          VERSION: ${{ steps.prepare.outputs.version }}
+          VERSION: ${{ needs.build.outputs.version }}
           EXPECTED_SHA: ${{ github.sha }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           DISPATCH_TOKEN: ${{ github.token }}
-          BUNDLE_PATH: ${{ steps.attest.outputs.bundle-path }}
-        run: cargo xtask release finish
+        run: cargo xtask release finish --artifacts "$RUNNER_TEMP/release"

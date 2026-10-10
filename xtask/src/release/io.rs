@@ -79,6 +79,17 @@ pub(crate) trait Forge {
     fn assets(&self, tag: &str) -> Result<Vec<String>, Error>;
     /// Starts the documentation deploy.
     fn dispatch_docs(&self) -> Outcome;
+    /// Verifies that an attestation in `bundle`, of `predicate_type`, covers
+    /// `file` and was signed by `signer_workflow` running from `main` at
+    /// `commit`.
+    fn verify_attestation(
+        &self,
+        file: &Path,
+        bundle: &Path,
+        signer_workflow: &str,
+        predicate_type: &str,
+        commit: &str,
+    ) -> Outcome;
 }
 
 /// One version in a crate's sparse-index file.
@@ -135,11 +146,15 @@ pub(crate) trait Workspace {
     fn notes(&self, version: Version) -> Result<String, Error>;
     /// Packages and verify-builds every member but `excludes`.
     fn package(&self, excludes: &[String]) -> Outcome;
+    /// Packages every member but `excludes` without a verify build.
+    fn package_unverified(&self, excludes: &[String]) -> Outcome;
     /// Uploads every member but `excludes`, without verifying again.
     fn publish(&self, excludes: &[String]) -> Outcome;
-    /// The sha256 of the `.crate` this run packaged, or `None` when it
-    /// packaged none for that crate.
-    fn packaged_sha256(&self, krate: &str, version: Version) -> Result<Option<String>, Error>;
+    /// The `.crate` this run packaged, or `None` when it packaged none for
+    /// that crate.
+    fn crate_file(&self, krate: &str, version: Version) -> Option<PathBuf>;
+    /// The hex sha256 of a file.
+    fn sha256(&self, path: &Path) -> Result<String, Error>;
     /// Resolves a scratch consumer of the facade at exactly `version` from the
     /// registry.
     fn resolve(&self, version: Version) -> Result<Resolution, Error>;
@@ -422,6 +437,45 @@ impl Forge for Gh<'_> {
             .env("GH_TOKEN", token),
         )
     }
+
+    fn verify_attestation(
+        &self,
+        file: &Path,
+        bundle: &Path,
+        signer_workflow: &str,
+        predicate_type: &str,
+        commit: &str,
+    ) -> Outcome {
+        run::quiet(
+            self.root,
+            false,
+            &attestation_step(file, bundle, signer_workflow, predicate_type, commit),
+        )
+    }
+}
+
+/// `gh attestation verify` pinned to `signer_workflow` on `main`, to `commit`,
+/// and to hosted runners, with the repository read from the workflow path.
+fn attestation_step<'a>(
+    file: &Path,
+    bundle: &Path,
+    signer_workflow: &str,
+    predicate_type: &str,
+    commit: &str,
+) -> Step<'a> {
+    let repo = signer_workflow
+        .splitn(3, '/')
+        .take(2)
+        .collect::<Vec<_>>()
+        .join("/");
+    Step::new("gh", ["attestation", "verify"])
+        .arg(file.to_string_lossy())
+        .args(["--repo", &repo, "--signer-workflow"])
+        .arg(format!("{signer_workflow}@refs/heads/main"))
+        .args(["--source-ref", "refs/heads/main", "--source-digest", commit])
+        .arg("--deny-self-hosted-runners")
+        .args(["--predicate-type", predicate_type, "--bundle"])
+        .arg(bundle.to_string_lossy())
 }
 
 /// The rows of `gh pr list --json number,headRefName,isCrossRepository`.
@@ -617,6 +671,18 @@ impl Workspace for LocalWorkspace<'_> {
         )
     }
 
+    fn package_unverified(&self, excludes: &[String]) -> Outcome {
+        run::run(
+            self.root,
+            false,
+            &Step::new(
+                "cargo",
+                ["package", "--workspace", "--locked", "--no-verify"],
+            )
+            .args(exclude_args(excludes)),
+        )
+    }
+
     fn publish(&self, excludes: &[String]) -> Outcome {
         run::run(
             self.root,
@@ -629,19 +695,26 @@ impl Workspace for LocalWorkspace<'_> {
         )
     }
 
-    fn packaged_sha256(&self, krate: &str, version: Version) -> Result<Option<String>, Error> {
-        let file = format!("target/package/{krate}-{version}.crate");
-        if !self.root.join(&file).is_file() {
-            return Ok(None);
-        }
+    fn crate_file(&self, krate: &str, version: Version) -> Option<PathBuf> {
+        let file = self
+            .root
+            .join(format!("target/package/{krate}-{version}.crate"));
+        file.is_file().then_some(file)
+    }
+
+    fn sha256(&self, path: &Path) -> Result<String, Error> {
+        let file = path.to_string_lossy();
         // Ubuntu runners carry sha256sum; macOS carries shasum.
         let step = if run::on_path("sha256sum") {
-            Step::new("sha256sum", [file.as_str()])
+            Step::new("sha256sum", [file.as_ref()])
         } else {
-            Step::new("shasum", ["-a", "256", file.as_str()])
+            Step::new("shasum", ["-a", "256", file.as_ref()])
         };
         let out = run::capture(self.root, &step)?;
-        Ok(out.split_whitespace().next().map(str::to_owned))
+        out.split_whitespace()
+            .next()
+            .map(str::to_owned)
+            .ok_or_else(|| Error::msg(format!("no digest for {file}")))
     }
 
     fn resolve(&self, version: Version) -> Result<Resolution, Error> {
@@ -857,11 +930,50 @@ impl Forge for DryForge<'_> {
         would("dispatch the docs deploy");
         Ok(())
     }
+    fn verify_attestation(
+        &self,
+        file: &Path,
+        bundle: &Path,
+        signer_workflow: &str,
+        predicate_type: &str,
+        commit: &str,
+    ) -> Outcome {
+        self.0
+            .verify_attestation(file, bundle, signer_workflow, predicate_type, commit)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The verification is pinned to the signer's main ref, the release commit
+    /// and hosted runners.
+    #[test]
+    fn attestation_verify_pins_signer_ref_commit_and_runner() {
+        let step = attestation_step(
+            Path::new("a.crate"),
+            Path::new("b.jsonl"),
+            "spate-etl/spate/.github/workflows/release-build.yml",
+            "https://slsa.dev/provenance/v1",
+            "abc123",
+        );
+        let a = &step.args;
+        let pair = |k: &str| a.iter().position(|x| x == k).map(|i| a[i + 1].as_str());
+        assert_eq!(pair("--repo"), Some("spate-etl/spate"));
+        assert_eq!(
+            pair("--signer-workflow"),
+            Some("spate-etl/spate/.github/workflows/release-build.yml@refs/heads/main")
+        );
+        assert_eq!(pair("--source-ref"), Some("refs/heads/main"));
+        assert_eq!(pair("--source-digest"), Some("abc123"));
+        assert!(a.iter().any(|x| x == "--deny-self-hosted-runners"));
+        assert_eq!(
+            pair("--predicate-type"),
+            Some("https://slsa.dev/provenance/v1")
+        );
+        assert_eq!(pair("--bundle"), Some("b.jsonl"));
+    }
 
     /// The commit an `ls-remote` listing names: the peeled line of an annotated
     /// tag, the plain line of a lightweight one, none for an absent tag.

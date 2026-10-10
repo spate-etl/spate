@@ -56,6 +56,8 @@ fn finish_needs_its_token_first() {
             "0.3.0",
             "--expected-sha",
             "abc",
+            "--artifacts",
+            "artifacts",
         ],
         &[],
         "finish needs GH_TOKEN",

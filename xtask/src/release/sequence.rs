@@ -174,6 +174,14 @@ pub(crate) struct Prepared {
     pub(crate) excludes: Vec<String>,
 }
 
+impl Prepared {
+    /// Whether `stage` writes anything: only before any crate of the version
+    /// is published, so every staged set covers the whole release.
+    pub(crate) fn stages(&self) -> bool {
+        self.excludes.is_empty()
+    }
+}
+
 /// Verifies the release commit, selects the crates still to publish, and
 /// packages and verify-builds them, all before any credential exists.
 pub(crate) fn prepare(host: &Host<'_>, expected_sha: Option<&str>) -> Result<Prepared, Error> {
@@ -293,13 +301,17 @@ pub(crate) fn write_outputs(prepared: &Prepared) -> Outcome {
     }
 }
 
-/// Appends `version=`, `excludes=` and `pending=` lines to `path`.
+/// Appends `version=`, `excludes=`, `pending=`, `crates=` and `staged=` lines
+/// to `path`.
 fn append_outputs(path: &Path, prepared: &Prepared) -> Outcome {
     let lines = format!(
-        "version={}\nexcludes={}\npending={}\n",
+        "version={}\nexcludes={}\npending={}\ncrates={}\nstaged={}\n",
         prepared.version,
         prepared.excludes.join(" "),
-        prepared.pending.len()
+        prepared.pending.len(),
+        serde_json::to_string(&prepared.pending)
+            .map_err(|e| Error::msg(format!("GITHUB_OUTPUT: {e}")))?,
+        prepared.stages()
     );
     use std::io::Write;
     std::fs::OpenOptions::new()
@@ -310,12 +322,72 @@ fn append_outputs(path: &Path, prepared: &Prepared) -> Outcome {
         .map_err(|e| Error::msg(format!("GITHUB_OUTPUT: {e}")))
 }
 
-/// What a real run does after the point a dry run stops.
-pub(crate) fn print_next(host: &Host<'_>, prepared: &Prepared) -> Outcome {
-    group("SBOMs generate");
-    let scratch = Scratch::new("spate-release-sbom")?;
-    host.workspace.sboms(prepared.version, scratch.dir())?;
+/// The checksum list `stage` writes beside the artifacts.
+pub(crate) const SUMS: &str = "SHA256SUMS";
+
+/// Collects what a release attests into `out`: each packaged `.crate`, one
+/// SBOM per publishable crate, and a `SHA256SUMS` over both.
+///
+/// Writes nothing once part of the version is published. The publish then
+/// reads the set the first build staged, which covers every crate.
+pub(crate) fn stage(host: &Host<'_>, prepared: &Prepared, out: &Path) -> Outcome {
+    let version = prepared.version;
+    if !prepared.stages() {
+        println!(
+            "release: part of {version} is already published, so this build stages nothing;\n  \
+             the publish uses the artifacts the first build staged"
+        );
+        return Ok(());
+    }
+    group("Stage the artifacts to attest");
+    std::fs::create_dir_all(out).map_err(|e| Error::msg(format!("{}: {e}", out.display())))?;
+    // Everything in `out` is listed and attested, so it starts empty.
+    if std::fs::read_dir(out)
+        .map_err(|e| Error::msg(format!("{}: {e}", out.display())))?
+        .next()
+        .is_some()
+    {
+        return Err(Error::msg(format!(
+            "{} is not empty; the release stages into an empty directory",
+            out.display()
+        )));
+    }
+    for name in &prepared.pending {
+        let file = host
+            .workspace
+            .crate_file(name, version)
+            .ok_or_else(|| Error::msg(format!("{name} {version} was not packaged by this run")))?;
+        let target = out.join(format!("{name}-{version}.crate"));
+        std::fs::copy(&file, &target)
+            .map_err(|e| Error::msg(format!("{}: {e}", file.display())))?;
+    }
+    host.workspace.sboms(version, out)?;
+    let mut names: Vec<String> = std::fs::read_dir(out)
+        .map_err(|e| Error::msg(format!("{}: {e}", out.display())))?
+        .filter_map(Result::ok)
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".crate") || n.ends_with(".cdx.json"))
+        .collect();
+    names.sort();
+    let mut sums = String::new();
+    for name in &names {
+        sums.push_str(&format!(
+            "{}  {name}\n",
+            host.workspace.sha256(&out.join(name))?
+        ));
+    }
+    std::fs::write(out.join(SUMS), sums).map_err(|e| Error::msg(format!("{SUMS}: {e}")))?;
+    println!(
+        "staged {} file(s) and {SUMS} in {}",
+        names.len(),
+        out.display()
+    );
     endgroup();
+    Ok(())
+}
+
+/// What a real run does after the point a dry run stops.
+pub(crate) fn print_next(prepared: &Prepared) {
     group("What a real run would do next");
     let v = prepared.version;
     let excludes: String = prepared
@@ -323,16 +395,168 @@ pub(crate) fn print_next(host: &Host<'_>, prepared: &Prepared) -> Outcome {
         .iter()
         .map(|e| format!(" --exclude {e}"))
         .collect();
-    println!("would attest target/package/*.crate (actions/attest-build-provenance)");
+    println!("would attest each .crate and {SUMS} with SLSA provenance, and each .crate");
+    println!("  with its CycloneDX SBOM, from the release-build.yml reusable workflow");
+    println!("would verify every attestation against release-build.yml before any token exists");
     println!(
         "would mint the 30-minute registry token (crates-io-auth-action, environment crates-io)"
     );
     println!("would run: cargo publish --workspace --locked --no-verify{excludes}");
     println!("would read back trustpub_data for every crate and require the release commit");
-    println!("would compare each packaged crate's sha256 against the index cksum");
+    println!("would compare each attested crate's sha256 against the index cksum");
     println!("would resolve a scratch project against the registry (the smoke test)");
-    println!("would tag v{v}, open the GitHub release with the CHANGELOG section and the");
-    println!("  SBOMs and provenance bundle as assets, and deploy the docs");
+    println!("would tag v{v}, open the GitHub release with the CHANGELOG section, the");
+    println!("  SBOMs, {SUMS} and the attestation bundle as assets, and deploy the docs");
+    endgroup();
+}
+
+// ---------------------------------------------------------------------------
+// verify-artifacts
+// ---------------------------------------------------------------------------
+
+/// The predicate type of a SLSA provenance attestation.
+pub(crate) const PROVENANCE: &str = "https://slsa.dev/provenance/v1";
+/// The predicate type of a CycloneDX SBOM attestation.
+pub(crate) const CYCLONEDX: &str = "https://cyclonedx.org/bom";
+
+/// The `<sha256>  <name>` lines of a checksum file, by name.
+pub(crate) fn parse_sums(text: &str) -> Result<Vec<(String, String)>, Error> {
+    text.lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| {
+            let (digest, name) = l
+                .split_once("  ")
+                .ok_or_else(|| Error::msg(format!("{SUMS}: malformed line '{l}'")))?;
+            if digest.len() != 64 || !digest.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err(Error::msg(format!("{SUMS}: malformed digest in '{l}'")));
+            }
+            Ok((name.to_owned(), digest.to_owned()))
+        })
+        .collect()
+}
+
+/// Every attestation bundle in `dir`, joined into one JSON-lines file at
+/// `out`. Answers how many attestations it holds.
+pub(crate) fn join_bundles(dir: &Path, out: &Path) -> Result<usize, Error> {
+    let mut names: Vec<PathBuf> = std::fs::read_dir(dir)
+        .map_err(|e| Error::msg(format!("{}: {e}", dir.display())))?
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.to_string_lossy().ends_with(".intoto.jsonl") && p != out)
+        .collect();
+    names.sort();
+    let mut joined = String::new();
+    for path in &names {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| Error::msg(format!("{}: {e}", path.display())))?;
+        for line in text.lines().filter(|l| !l.trim().is_empty()) {
+            joined.push_str(line);
+            joined.push('\n');
+        }
+    }
+    std::fs::write(out, &joined).map_err(|e| Error::msg(format!("{}: {e}", out.display())))?;
+    Ok(joined.lines().count())
+}
+
+/// Checks the staged artifacts before any credential exists.
+///
+/// `SHA256SUMS` lists exactly the crates and SBOMs present, with their digests.
+/// Every crate the registry does not yet hold is staged. Each staged crate
+/// carries a provenance and an SBOM attestation, and `SHA256SUMS` a provenance
+/// attestation, each signed by `signer_workflow` from `main` at `commit`. This
+/// checkout packages each unpublished crate to the same bytes as the staged
+/// one, so the upload sends what was attested.
+pub(crate) fn verify_artifacts(
+    host: &Host<'_>,
+    dir: &Path,
+    signer_workflow: &str,
+    commit: &str,
+) -> Outcome {
+    group("The staged artifacts match their checksums");
+    let sums =
+        std::fs::read_to_string(dir.join(SUMS)).map_err(|e| Error::msg(format!("{SUMS}: {e}")))?;
+    let listed = parse_sums(&sums)?;
+    let mut present: Vec<String> = std::fs::read_dir(dir)
+        .map_err(|e| Error::msg(format!("{}: {e}", dir.display())))?
+        .filter_map(Result::ok)
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".crate") || n.ends_with(".cdx.json"))
+        .collect();
+    present.sort();
+    let mut names: Vec<String> = listed.iter().map(|(n, _)| n.clone()).collect();
+    names.sort();
+    if names != present {
+        return Err(Error::msg(format!(
+            "{SUMS} lists [{}] but the directory holds [{}]",
+            names.join(" "),
+            present.join(" ")
+        )));
+    }
+    for (name, digest) in &listed {
+        let got = host.workspace.sha256(&dir.join(name))?;
+        if &got != digest {
+            return Err(Error::msg(format!(
+                "{name}: {SUMS} says {digest} but the file is {got}"
+            )));
+        }
+    }
+    println!("{} file(s) match {SUMS}", listed.len());
+    endgroup();
+
+    let version = host.workspace.version()?;
+    let (pending, excludes) = unpublished(host, version)?;
+    if pending.is_empty() {
+        println!("release: every crate already carries {version}; nothing to upload or verify.");
+        return Ok(());
+    }
+    require_staged(&pending, version, dir)?;
+    let crates: Vec<&String> = present.iter().filter(|n| n.ends_with(".crate")).collect();
+
+    group("Every artifact carries its attestations");
+    let scratch = Scratch::new("spate-release-verify")?;
+    let bundle = scratch.join("bundles.intoto.jsonl");
+    if join_bundles(dir, &bundle)? == 0 {
+        return Err(Error::msg(format!(
+            "no attestation bundle in {}; the packaged crates are unattested",
+            dir.display()
+        )));
+    }
+    let sums_path = dir.join(SUMS);
+    host.forge
+        .verify_attestation(&sums_path, &bundle, signer_workflow, PROVENANCE, commit)?;
+    println!("provenance verified: {SUMS}");
+    for name in crates {
+        let file = dir.join(name);
+        host.forge
+            .verify_attestation(&file, &bundle, signer_workflow, PROVENANCE, commit)?;
+        host.forge
+            .verify_attestation(&file, &bundle, signer_workflow, CYCLONEDX, commit)?;
+        println!("provenance and SBOM verified: {name}");
+    }
+    endgroup();
+
+    group("This checkout packages the attested bytes");
+    // The upload packages again from this checkout, so its bytes are compared
+    // before any token exists.
+    host.workspace.package_unverified(&excludes)?;
+    for name in &pending {
+        let file = host.workspace.crate_file(name, version).ok_or_else(|| {
+            Error::msg(format!(
+                "{name} {version} was not packaged by this checkout"
+            ))
+        })?;
+        let local = host.workspace.sha256(&file)?;
+        let staged = host
+            .workspace
+            .sha256(&dir.join(format!("{name}-{version}.crate")))?;
+        if local != staged {
+            return Err(Error::msg(format!(
+                "{name} {version}: this checkout packages {local} but the attested file is\n  \
+                 {staged}; the upload would send bytes no attestation covers"
+            )));
+        }
+        println!("same bytes as attested: {name}");
+    }
     endgroup();
     Ok(())
 }
@@ -341,20 +565,68 @@ pub(crate) fn print_next(host: &Host<'_>, prepared: &Prepared) -> Outcome {
 // upload
 // ---------------------------------------------------------------------------
 
-/// Uploads the pending crates. The only step that holds the registry token.
+/// Uploads every crate the registry does not yet hold, each of which must be
+/// staged in `artifacts`. The only step that holds the registry token.
 ///
-/// No verify build runs: `prepare` packaged and verify-built every pending
-/// crate in the same job, and the token's fixed 30-minute life is not spent
-/// compiling the workspace again.
-pub(crate) fn upload(host: &Host<'_>, token: bool, pending: u32, excludes: &[String]) -> Outcome {
+/// No verify build runs: the build verify-built every staged crate, and
+/// `verify_artifacts` showed this checkout packages the same bytes, so the
+/// token's fixed 30-minute life is not spent compiling the workspace again.
+pub(crate) fn upload(host: &Host<'_>, token: bool, artifacts: &Path) -> Outcome {
     if !token {
         return Err(Error::msg("upload needs CARGO_REGISTRY_TOKEN"));
     }
-    if pending == 0 {
-        println!("release: nothing pending; skipping the upload.");
+    let version = host.workspace.version()?;
+    let (pending, excludes) = unpublished(host, version)?;
+    if pending.is_empty() {
+        println!("release: every crate already carries {version}; skipping the upload.");
         return Ok(());
     }
-    host.workspace.publish(excludes)
+    require_staged(&pending, version, artifacts)?;
+    host.workspace.publish(&excludes)
+}
+
+/// The publishable crates the registry does not yet hold at `version`, and the
+/// ones it does. Read when each step runs, so a step re-run after part of the
+/// release landed sees what landed.
+fn unpublished(host: &Host<'_>, version: Version) -> Result<(Vec<String>, Vec<String>), Error> {
+    let (mut pending, mut published) = (Vec::new(), Vec::new());
+    for package in host.workspace.publishable()? {
+        let at_version = match host.registry.index(&package.name)? {
+            Index::Found(entries) => entries.iter().any(|e| e.vers == version.to_string()),
+            Index::Missing => false,
+            Index::Status(code) => {
+                return Err(Error::msg(format!(
+                    "the index answered {code} for {}; refusing to act on a registry the run\n  \
+                     cannot read",
+                    package.name
+                )));
+            }
+        };
+        if at_version {
+            published.push(package.name);
+        } else {
+            pending.push(package.name);
+        }
+    }
+    Ok((pending, published))
+}
+
+/// Every crate in `pending` was staged, and so attested, by the build.
+fn require_staged(pending: &[String], version: Version, dir: &Path) -> Outcome {
+    let missing: Vec<&str> = pending
+        .iter()
+        .filter(|c| !dir.join(format!("{c}-{version}.crate")).is_file())
+        .map(String::as_str)
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(Error::msg(format!(
+        "{} {version} not staged in {}, so no attestation covers it; these are not\n  \
+         the artifacts the run's first build staged",
+        missing.join(" "),
+        dir.display()
+    )))
 }
 
 // ---------------------------------------------------------------------------
@@ -368,7 +640,7 @@ pub(crate) fn finish(
     host: &Host<'_>,
     version: Version,
     expected_sha: &str,
-    bundle: Option<&Path>,
+    artifacts: &Path,
 ) -> Outcome {
     let tag = format!("v{version}");
     let packages = host.workspace.publishable()?;
@@ -388,16 +660,17 @@ pub(crate) fn finish(
     }
     endgroup();
 
-    group("The registry serves the bytes this run packaged");
+    group("The registry serves the bytes this run attested");
     // The index's cksum is the sha256 of the served `.crate`, and it must equal
-    // the local file the attestation covers. Only crates packaged in this run
-    // have a local file.
+    // the staged file the attestations cover.
     let mut checked = 0;
     for package in &packages {
         let name = &package.name;
-        let Some(got) = host.workspace.packaged_sha256(name, version)? else {
+        let staged = artifacts.join(format!("{name}-{version}.crate"));
+        if !staged.is_file() {
             continue;
-        };
+        }
+        let got = host.workspace.sha256(&staged)?;
         let want = served_cksum(host, name, version)?;
         if want != got {
             return Err(Error::msg(format!(
@@ -409,7 +682,7 @@ pub(crate) fn finish(
         checked += 1;
     }
     if checked == 0 {
-        println!("nothing was packaged in this run; nothing to compare.");
+        println!("no crate is staged; nothing to compare.");
     }
     endgroup();
 
@@ -445,40 +718,49 @@ pub(crate) fn finish(
     }
     endgroup();
 
-    group("SBOMs and provenance on the release");
-    // `--clobber` for the SBOMs, whose regeneration is byte-stable, so a
-    // resumed run completes the set. Not for the bundle: attempts only shrink
-    // the pending set, so the first bundle covers the most crates.
-    let scratch = Scratch::new("spate-release-assets")?;
-    host.workspace.sboms(version, scratch.dir())?;
-    let sboms: Vec<PathBuf> = packages
-        .iter()
-        .map(|p| scratch.join(&format!("{}-{version}.cdx.json", p.name)))
+    group("SBOMs, checksums and attestations on the release");
+    // `--clobber` for the SBOMs, whose generation in CI is byte-stable, so a
+    // resumed run completes the set.
+    let mut files: Vec<PathBuf> = std::fs::read_dir(artifacts)
+        .map_err(|e| Error::msg(format!("{}: {e}", artifacts.display())))?
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.to_string_lossy().ends_with(".cdx.json"))
         .collect();
-    host.forge.upload(&tag, &sboms, true)?;
-    if let Some(bundle) = bundle.filter(|b| b.is_file()) {
-        let named = scratch.join(&format!("spate-{tag}-provenance.intoto.jsonl"));
-        std::fs::copy(bundle, &named)
-            .map_err(|e| Error::msg(format!("{}: {e}", bundle.display())))?;
-        if host.forge.upload(&tag, &[named], false).is_err() {
-            println!("an attestation bundle is already attached; keeping it.");
+    files.sort();
+    host.forge.upload(&tag, &files, true)?;
+    // Every attempt stages the same set, so an upload refused because an
+    // earlier attempt's asset exists keeps an identical file; the asset list
+    // below is the check.
+    let scratch = Scratch::new("spate-release-assets")?;
+    let bundle = scratch.join(&format!("spate-{tag}.intoto.jsonl"));
+    if checked > 0 {
+        let mut assets = vec![artifacts.join(SUMS)];
+        if join_bundles(artifacts, &bundle)? > 0 {
+            assets.push(bundle);
+        }
+        for asset in assets {
+            if host.forge.upload(&tag, &[asset], false).is_err() {
+                println!("an earlier attempt's asset is kept.");
+            }
         }
     }
-    // The bundle lives only on the runner that attested, so a run that died
-    // between attesting and uploading has lost its copy.
+    // The bundles live only in this run's artifacts, so a run whose
+    // artifacts expired before the upload has lost them.
     let repo = std::env::var("GITHUB_REPOSITORY").unwrap_or_else(|_| "spate-etl/spate".to_owned());
-    if !host
-        .forge
-        .assets(&tag)?
-        .iter()
-        .any(|a| a.ends_with(".intoto.jsonl"))
-    {
+    let assets = host.forge.assets(&tag)?;
+    if !assets.iter().any(|a| a == SUMS) {
+        return Err(Error::msg(format!(
+            "the release carries no {SUMS}; an asset upload failed. Re-run the failed jobs."
+        )));
+    }
+    if !assets.iter().any(|a| a.ends_with(".intoto.jsonl")) {
         return Err(Error::msg(format!(
             "the release carries no provenance bundle. Recover it from the attestation\n  \
              store: download any published .crate of this version from\n  \
              https://static.crates.io/crates/<name>/<name>-{version}.crate, run\n  \
              'gh attestation download <file> --repo {repo}', and upload the\n  \
-             bundle as spate-{tag}-provenance.intoto.jsonl."
+             bundle as spate-{tag}.intoto.jsonl."
         )));
     }
     endgroup();

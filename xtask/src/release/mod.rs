@@ -5,7 +5,7 @@ mod io;
 mod sequence;
 pub(crate) mod version;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use clap::Subcommand;
 
@@ -37,15 +37,28 @@ pub(crate) enum ReleaseCommand {
         /// The commit any already-published crate must have come from
         #[arg(long, env = "EXPECTED_SHA", value_name = "SHA")]
         expected_sha: Option<String>,
+        /// Stage the packaged crates, their SBOMs and SHA256SUMS here
+        #[arg(long, value_name = "DIR")]
+        out: Option<PathBuf>,
     },
-    /// Upload the pending crates with CARGO_REGISTRY_TOKEN
+    /// Verify staged artifacts against their checksums and attestations
+    VerifyArtifacts {
+        /// The directory `prepare --out` staged, with the attestation bundles
+        #[arg(long, value_name = "DIR")]
+        dir: PathBuf,
+        /// The workflow that must have signed every attestation, as
+        /// OWNER/REPO/.github/workflows/FILE
+        #[arg(long, value_name = "WORKFLOW")]
+        signer_workflow: Option<String>,
+        /// The release commit every attestation must name
+        #[arg(long, env = "EXPECTED_SHA", value_name = "SHA")]
+        expected_sha: Option<String>,
+    },
+    /// Upload the crates the registry does not yet hold, with CARGO_REGISTRY_TOKEN
     Upload {
-        /// The crates already published, space-separated
-        #[arg(long, env = "EXCLUDES", default_value = "")]
-        excludes: String,
-        /// How many crates `prepare` found pending
-        #[arg(long, env = "PENDING")]
-        pending: Option<u32>,
+        /// The staged artifacts; every crate uploaded must be among them
+        #[arg(long, value_name = "DIR")]
+        artifacts: PathBuf,
     },
     /// Verify the registry, then tag, release and deploy the docs
     Finish {
@@ -54,9 +67,9 @@ pub(crate) enum ReleaseCommand {
         /// The release commit
         #[arg(long, env = "EXPECTED_SHA", value_name = "SHA")]
         expected_sha: Option<String>,
-        /// The provenance bundle from the attestation step
-        #[arg(long, env = "BUNDLE_PATH", value_name = "PATH")]
-        bundle: Option<String>,
+        /// The staged artifacts and their attestation bundles
+        #[arg(long, value_name = "DIR")]
+        artifacts: PathBuf,
     },
     /// The whole release in a throwaway worktree, nothing pushed or uploaded
     DryRun {
@@ -124,28 +137,54 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: ReleaseCommand) -> Outco
         ReleaseCommand::Prepare {
             dry_run,
             expected_sha,
+            out,
         } => {
-            if dry_run {
+            if dry_run || out.is_some() {
                 preflight_sbom(root)?;
             }
             let expected = expected_sha.filter(|s| !s.is_empty());
             let prepared = sequence::prepare(&host, expected.as_deref())?;
             sequence::write_outputs(&prepared)?;
+            match (&out, dry_run) {
+                (Some(dir), _) => sequence::stage(&host, &prepared, dir)?,
+                (None, true) => {
+                    let scratch = crate::checks::scratch::Scratch::new("spate-release-stage")?;
+                    sequence::stage(&host, &prepared, scratch.dir())?;
+                }
+                (None, false) => {}
+            }
             if dry_run {
-                sequence::print_next(&host, &prepared)?;
+                sequence::print_next(&prepared);
             }
             Ok(())
         }
-        ReleaseCommand::Upload { excludes, pending } => {
-            let excludes: Vec<String> = excludes.split_whitespace().map(str::to_owned).collect();
+        ReleaseCommand::VerifyArtifacts {
+            dir,
+            signer_workflow,
+            expected_sha,
+        } => {
+            let expected = expected_sha
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| Error::msg("verify-artifacts needs EXPECTED_SHA"))?;
+            require_gh(root, GH_EXACT_SIGNER)?;
+            let signer = match signer_workflow.filter(|s| !s.is_empty()) {
+                Some(s) => s,
+                None => format!(
+                    "{}/.github/workflows/release-build.yml",
+                    std::env::var("GITHUB_REPOSITORY")
+                        .unwrap_or_else(|_| "spate-etl/spate".to_owned())
+                ),
+            };
+            sequence::verify_artifacts(&host, &dir, &signer, &expected)
+        }
+        ReleaseCommand::Upload { artifacts } => {
             let token = std::env::var("CARGO_REGISTRY_TOKEN").is_ok_and(|t| !t.is_empty());
-            let pending = pending.ok_or_else(|| Error::msg("upload needs PENDING from prepare"))?;
-            sequence::upload(&host, token, pending, &excludes)
+            sequence::upload(&host, token, &artifacts)
         }
         ReleaseCommand::Finish {
             version,
             expected_sha,
-            bundle,
+            artifacts,
         } => {
             let version = version
                 .filter(|v| !v.is_empty())
@@ -159,12 +198,7 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: ReleaseCommand) -> Outco
                 &["GH_TOKEN", "DISPATCH_TOKEN", "GITHUB_REPOSITORY"],
                 "finish",
             )?;
-            sequence::finish(
-                &host,
-                version,
-                &expected_sha,
-                bundle.as_deref().filter(|p| !p.is_empty()).map(Path::new),
-            )
+            sequence::finish(&host, version, &expected_sha, &artifacts)
         }
         ReleaseCommand::DryRun { version, keep } => dry_run(root, &version, keep),
     }
@@ -199,8 +233,11 @@ fn describe(cmd: &ReleaseCommand) -> &'static str {
         ReleaseCommand::Prepare { .. } => {
             "(verifies the release commit against the registry, then packages the pending crates)"
         }
+        ReleaseCommand::VerifyArtifacts { .. } => {
+            "(checks SHA256SUMS, then gh attestation verify on each staged artifact)"
+        }
         ReleaseCommand::Upload { .. } => {
-            "cargo publish --workspace --locked --no-verify --exclude <each excluded crate>"
+            "cargo publish --workspace --locked --no-verify --exclude <each crate already published>"
         }
         ReleaseCommand::Finish { .. } => {
             "(verifies the registry, tags, opens the GitHub release with its assets, deploys the docs)"
@@ -209,6 +246,35 @@ fn describe(cmd: &ReleaseCommand) -> &'static str {
             "(runs assemble --dry-run and prepare --dry-run in a throwaway worktree)"
         }
     }
+}
+
+/// The first `gh` whose `--signer-workflow` matches the whole workflow path
+/// rather than a prefix of it.
+const GH_EXACT_SIGNER: (u64, u64, u64) = (2, 102, 0);
+
+/// Fails unless the `gh` on the path is at least `min`.
+fn require_gh(root: &Path, min: (u64, u64, u64)) -> Outcome {
+    let out = run::capture(root, &Step::new("gh", ["--version"]))?;
+    let found = gh_version(&out)
+        .ok_or_else(|| Error::msg(format!("cannot read a version from `gh --version`: {out}")))?;
+    if !gh_at_least(found, min) {
+        return Err(Error::msg(format!(
+            "gh {}.{}.{} matches --signer-workflow as a prefix; {}.{}.{} or later is required",
+            found.0, found.1, found.2, min.0, min.1, min.2
+        )));
+    }
+    Ok(())
+}
+
+fn gh_at_least(found: (u64, u64, u64), min: (u64, u64, u64)) -> bool {
+    found >= min
+}
+
+/// The version on the first line of `gh --version`, `gh version X.Y.Z (date)`.
+fn gh_version(out: &str) -> Option<(u64, u64, u64)> {
+    let word = out.lines().next()?.split_whitespace().nth(2)?;
+    let mut parts = word.split('.').map(|p| p.parse::<u64>().ok());
+    Some((parts.next()??, parts.next()??, parts.next()??))
 }
 
 /// Names whatever a local release run is missing before any step starts.
@@ -376,5 +442,26 @@ mod tests {
         assert!(!head_is_detached(root).unwrap());
         git(root, &["checkout", "-q", "--detach"]);
         assert!(head_is_detached(root).unwrap());
+    }
+
+    /// The version is the third word of `gh --version`'s first line.
+    #[test]
+    fn the_gh_version_is_read_from_its_banner() {
+        assert_eq!(
+            gh_version(
+                "gh version 2.102.0 (2026-09-29)\nhttps://github.com/cli/cli/releases/tag/v2.102.0\n"
+            ),
+            Some((2, 102, 0))
+        );
+        assert!(gh_version("gh version 2.89.0 (2026-03-01)").unwrap() < (2, 102, 0));
+        assert_eq!(gh_version("garbage"), None);
+    }
+
+    /// 2.102.0 is the first `gh` accepted for verification.
+    #[test]
+    fn gh_from_2_102_0_matches_the_signer_exactly() {
+        assert!(gh_at_least((2, 102, 0), GH_EXACT_SIGNER));
+        assert!(gh_at_least((3, 0, 0), GH_EXACT_SIGNER));
+        assert!(!gh_at_least((2, 101, 9), GH_EXACT_SIGNER));
     }
 }

@@ -763,6 +763,7 @@ impl Run<'_> {
                             Some(_) => read_leader(rt, &env.direct),
                             None => LeaderAtKill::Unread,
                         };
+                        let mut sent = false;
                         if let Some(pid) = live {
                             log(Event::Kill {
                                 instance: name.clone(),
@@ -772,6 +773,10 @@ impl Run<'_> {
                             workers
                                 .kill(&name)
                                 .map_err(|e| format!("kill {name}: {e}"))?;
+                            sent = killed_sent(
+                                &self.journal_path(instance, incarnations[instance as usize]),
+                                &leader,
+                            );
                             timeline.respawn(instance, respawn_at_ms);
                             // This replacement also stands in for an abort that
                             // ended the process after the `live` read.
@@ -779,7 +784,7 @@ impl Run<'_> {
                         }
                         fired.push(FaultFired {
                             incarnation: format!("{name}-{}", incarnations[instance as usize]),
-                            fault: kill_fault_text(at_ms, &leader),
+                            fault: kill_fault_text(at_ms, &leader, sent),
                             fired: live.is_some(),
                         });
                     }
@@ -857,7 +862,7 @@ impl Run<'_> {
             if let Action::Kill { at_ms, instance } = kill {
                 fired.push(FaultFired {
                     incarnation: format!("w{instance}-{}", incarnations[instance as usize]),
-                    fault: kill_fault_text(at_ms, &LeaderAtKill::Unread),
+                    fault: kill_fault_text(at_ms, &LeaderAtKill::Unread, false),
                     fired: false,
                 });
             }
@@ -1403,14 +1408,38 @@ fn leader_from(read: Option<Result<Option<Entry>, StoreError>>) -> LeaderAtKill 
 }
 
 /// The fault-list text of a kill at `at_ms`, naming the leader key's owner
-/// when the read found one.
-fn kill_fault_text(at_ms: u64, leader: &LeaderAtKill) -> String {
+/// when the read found one. With `sent`, the killed process sent the bytes the
+/// read returned, and the text names it the leader.
+fn kill_fault_text(at_ms: u64, leader: &LeaderAtKill, sent: bool) -> String {
     match leader {
+        LeaderAtKill::Held {
+            owner, generation, ..
+        } if sent => {
+            format!("kill at {at_ms} ms (killed the leader, {owner}, generation {generation})")
+        }
         LeaderAtKill::Held {
             owner, generation, ..
         } => format!("kill at {at_ms} ms (leader key named {owner}, generation {generation})"),
         LeaderAtKill::Vacant | LeaderAtKill::Unread => format!("kill at {at_ms} ms"),
     }
+}
+
+/// Whether `lines` hold a `leader_send` on the leader key whose bytes digest
+/// to `digest`.
+fn sent_leader_key(lines: &[Line], digest: u64) -> bool {
+    lines.iter().any(|line| {
+        matches!(&line.event, Event::LeaderSend { key, digest: d, .. }
+            if key == "leader" && *d == digest)
+    })
+}
+
+/// Whether the journal at `path` shows its process sent the leader key the
+/// harness read as `leader`. A journal that cannot be read shows nothing.
+fn killed_sent(path: &Path, leader: &LeaderAtKill) -> bool {
+    let LeaderAtKill::Held { digest, .. } = leader else {
+        return false;
+    };
+    journal::read(path).is_ok_and(|lines| sent_leader_key(&lines, *digest))
 }
 
 /// One expectation per `kill` line in `faults` whose leader read failed, in
@@ -2380,16 +2409,64 @@ mod tests {
             digest: 9,
         };
         assert_eq!(
-            kill_fault_text(1500, &held),
+            kill_fault_text(1500, &held, false),
             "kill at 1500 ms (leader key named w2, generation 3)"
         );
         assert_eq!(
-            kill_fault_text(1500, &LeaderAtKill::Vacant),
+            kill_fault_text(1500, &LeaderAtKill::Vacant, false),
             "kill at 1500 ms"
         );
         assert_eq!(
-            kill_fault_text(1500, &LeaderAtKill::Unread),
+            kill_fault_text(1500, &LeaderAtKill::Unread, false),
             "kill at 1500 ms"
+        );
+    }
+
+    /// A kill is labelled as the leader only when the killed process's
+    /// journal has a `leader_send` on the leader key with the digest the
+    /// harness read; another digest, or only a read of that digest, keeps the
+    /// owner label.
+    #[test]
+    fn kill_label_names_the_leader_only_from_its_own_send() {
+        const D: u64 = 0xfeed;
+        let read = LeaderAtKill::Held {
+            owner: "w1".to_owned(),
+            generation: 2,
+            digest: D,
+        };
+        let line = |event| Line { t_ms: 1, event };
+        let send = |digest| {
+            line(Event::LeaderSend {
+                call: 1,
+                op: crate::journal::WriteOp::Create,
+                key: "leader".to_owned(),
+                expected: None,
+                digest,
+            })
+        };
+        let label = |lines: &[Line]| {
+            let LeaderAtKill::Held { digest, .. } = &read else {
+                unreachable!("a held read")
+            };
+            kill_fault_text(900, &read, sent_leader_key(lines, *digest))
+        };
+        assert_eq!(
+            label(&[send(D)]),
+            "kill at 900 ms (killed the leader, w1, generation 2)"
+        );
+        assert_eq!(
+            label(&[send(D + 1)]),
+            "kill at 900 ms (leader key named w1, generation 2)"
+        );
+        let seen_only = [line(Event::LeaderSeen {
+            key: "leader".to_owned(),
+            rev: 4,
+            digest: D,
+            from: crate::journal::Source::Get,
+        })];
+        assert_eq!(
+            label(&seen_only),
+            "kill at 900 ms (leader key named w1, generation 2)"
         );
     }
 

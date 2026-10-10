@@ -6,7 +6,7 @@
 
 use super::{
     Env, Event, FaultFired, Journal, LeaderAtKill, POLL, RUN_DEADLINE, Run, STOP_CONFIRM, Tuning,
-    Workers, journal, journal_holds, kill_fault_text, millis, read_leader, stopped,
+    Workers, journal, journal_holds, kill_fault_text, killed_sent, millis, read_leader, stopped,
 };
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -180,9 +180,10 @@ impl Run<'_> {
         workers
             .kill(&name)
             .map_err(|e| format!("kill {name}: {e}"))?;
+        let sent = killed_sent(&self.journal_path(index, 1), &read);
         fired.push(FaultFired {
             incarnation: format!("{name}-1"),
-            fault: kill_fault_text(kill_ms, &read),
+            fault: kill_fault_text(kill_ms, &read, sent),
             fired: true,
         });
 

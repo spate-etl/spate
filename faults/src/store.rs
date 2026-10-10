@@ -1,8 +1,8 @@
 //! The coordination-store wrappers a worker runs under: one journals every
-//! durable `split.*` write with its reply and every durable `split.*` entry
-//! it reads, one injects an in-process fault at a chosen write, one stops the
-//! process at a chosen commit or leader write, and one re-sends a commit or
-//! seed create that lost its CAS.
+//! write with its reply and every entry it reads on durable `split.*` keys,
+//! the leader key, `plan` and `assign.*`, one injects an in-process fault at a
+//! chosen write, one stops the process at a chosen commit or leader write,
+//! and one re-sends a commit or seed create that lost its CAS.
 
 use std::fs::OpenOptions;
 use std::path::PathBuf;
@@ -23,7 +23,9 @@ use crate::journal::{AbortPoint, Event, Journal, Progress, Reply, Source, WriteO
 
 const SPLIT_PREFIX: &str = "split.";
 
-/// Forwards every call to `S` and journals the durable `split.*` traffic.
+/// Forwards every call to `S` and journals the durable `split.*` traffic, and
+/// the traffic on the ephemeral leader key and the durable `plan` and
+/// `assign.*` keys as `leader_send` and `leader_seen` lines.
 ///
 /// A write's `send` line is appended before the call and its `done` line
 /// after it; a write dropped before it returns, as at an `op_timeout`, still
@@ -51,8 +53,20 @@ impl<S> JournalStore<S> {
         }
     }
 
-    fn seen(&self, entry: &Entry, from: Source) {
-        if !entry.key.starts_with(SPLIT_PREFIX) {
+    fn seen(&self, ks: Keyspace, entry: &Entry, from: Source) {
+        if leader_traffic(ks, &entry.key) {
+            record(
+                &self.journal,
+                Event::LeaderSeen {
+                    key: entry.key.clone(),
+                    rev: entry.revision.0,
+                    digest: spate_test_support::fnv1a(&entry.value),
+                    from,
+                },
+            );
+            return;
+        }
+        if ks != Keyspace::Durable || !entry.key.starts_with(SPLIT_PREFIX) {
             return;
         }
         match Progress::parse(&entry.value) {
@@ -73,8 +87,8 @@ impl<S> JournalStore<S> {
         }
     }
 
-    /// Appends the `send` line for a durable `split.*` write, and returns the
-    /// guard that appends its `done`.
+    /// Appends the `send` or `leader_send` line for a journalled write, and
+    /// returns the guard that appends its `done`.
     fn send(
         &self,
         ks: Keyspace,
@@ -83,6 +97,27 @@ impl<S> JournalStore<S> {
         value: &[u8],
         expected: Option<u64>,
     ) -> Option<Pending<'_>> {
+        if leader_traffic(ks, key) {
+            let call = self.calls.fetch_add(1, Ordering::Relaxed) + 1;
+            record(
+                &self.journal,
+                Event::LeaderSend {
+                    call,
+                    op,
+                    key: key.to_owned(),
+                    expected,
+                    digest: spate_test_support::fnv1a(value),
+                },
+            );
+            return Some(Pending {
+                journal: &self.journal,
+                classifier: &self.classifier,
+                call,
+                key: key.to_owned(),
+                value: None,
+                done: false,
+            });
+        }
         if ks != Keyspace::Durable || !key.starts_with(SPLIT_PREFIX) {
             return None;
         }
@@ -109,9 +144,18 @@ impl<S> JournalStore<S> {
             classifier: &self.classifier,
             call,
             key: key.to_owned(),
-            value,
+            value: Some(value),
             done: false,
         })
+    }
+}
+
+/// Whether a write or read of `key` in `ks` is the ephemeral leader key or a
+/// durable `plan` or `assign.*` key.
+fn leader_traffic(ks: Keyspace, key: &str) -> bool {
+    match ks {
+        Keyspace::Ephemeral => key == "leader",
+        Keyspace::Durable => key == "plan" || key.starts_with("assign."),
     }
 }
 
@@ -121,7 +165,8 @@ struct Pending<'a> {
     classifier: &'a Classifier,
     call: u64,
     key: String,
-    value: Progress,
+    /// The progress record a `split.*` write carries.
+    value: Option<Progress>,
     done: bool,
 }
 
@@ -129,7 +174,9 @@ impl Pending<'_> {
     fn finish(mut self, result: &Result<CasOutcome, StoreError>) {
         let reply = match result {
             Ok(CasOutcome::Won(rev)) => {
-                self.classifier.learn(&self.key, rev.0, self.value.clone());
+                if let Some(value) = &self.value {
+                    self.classifier.learn(&self.key, rev.0, value.clone());
+                }
                 Reply::Won(rev.0)
             }
             Ok(CasOutcome::Lost) => Reply::Lost,
@@ -246,10 +293,8 @@ impl<S: CoordinationStore + Clone> CoordinationStore for JournalStore<S> {
         let entry = self.inner.get(ks, key).await?;
         guard.ok = true;
         drop(guard);
-        if ks == Keyspace::Durable
-            && let Some(entry) = &entry
-        {
-            self.seen(entry, Source::Get);
+        if let Some(entry) = &entry {
+            self.seen(ks, entry, Source::Get);
         }
         Ok(entry)
     }
@@ -265,14 +310,11 @@ impl<S: CoordinationStore + Clone> CoordinationStore for JournalStore<S> {
 
     async fn watch(&self, ks: Keyspace, prefix: &str) -> Result<WatchStream, StoreError> {
         let inner = self.inner.watch(ks, prefix).await?;
-        if ks != Keyspace::Durable {
-            return Ok(inner);
-        }
         let this = self.clone();
         Ok(inner
             .inspect(move |event| {
                 if let Ok(WatchEvent::Put(entry)) = event {
-                    this.seen(entry, Source::Watch);
+                    this.seen(ks, entry, Source::Watch);
                 }
             })
             .boxed())
@@ -280,10 +322,8 @@ impl<S: CoordinationStore + Clone> CoordinationStore for JournalStore<S> {
 
     async fn list(&self, ks: Keyspace, prefix: &str) -> Result<Vec<Entry>, StoreError> {
         let entries = self.inner.list(ks, prefix).await?;
-        if ks == Keyspace::Durable {
-            for entry in &entries {
-                self.seen(entry, Source::List);
-            }
+        for entry in &entries {
+            self.seen(ks, entry, Source::List);
         }
         Ok(entries)
     }

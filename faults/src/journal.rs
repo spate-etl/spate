@@ -1,8 +1,10 @@
 //! The append-only NDJSON journal every worker process and the harness write.
 //!
 //! A worker journals the rows its sink made durable, each durable `split.*`
-//! write it sent with its reply, and each durable `split.*` entry it read. The
-//! harness journals the faults it injected, in the same line format.
+//! write it sent with its reply, and each durable `split.*` entry it read. It
+//! journals writes and reads of the leader key, `plan` and `assign.*` by a
+//! digest of their bytes. The harness journals the faults it injected, in the
+//! same line format.
 
 use std::fmt;
 use std::fs::{File, OpenOptions};
@@ -158,9 +160,9 @@ pub enum Event {
         /// The value written.
         value: Progress,
     },
-    /// The reply to the `send` with the same `call`.
+    /// The reply to the `send` or `leader_send` with the same `call`.
     Done {
-        /// The `send` this answers.
+        /// The `send` or `leader_send` this answers.
         call: u64,
         /// Store key.
         key: String,
@@ -175,6 +177,32 @@ pub enum Event {
         rev: u64,
         /// The entry's value.
         value: Progress,
+        /// The call that returned it.
+        from: Source,
+    },
+    /// A write to the leader key, `plan` or an `assign.*` key is about to be
+    /// sent. It shares its `call` sequence and its `done` line with `send`.
+    LeaderSend {
+        /// Pairs this line with its `done`; unique within one process.
+        call: u64,
+        /// The store call.
+        op: WriteOp,
+        /// Store key.
+        key: String,
+        /// The revision an update replaces; absent on a create.
+        expected: Option<u64>,
+        /// `fnv1a` over the bytes written.
+        digest: u64,
+    },
+    /// An entry of the leader key, `plan` or an `assign.*` key read from the
+    /// store.
+    LeaderSeen {
+        /// Store key.
+        key: String,
+        /// Revision of the entry.
+        rev: u64,
+        /// `fnv1a` over the entry's bytes.
+        digest: u64,
         /// The call that returned it.
         from: Source,
     },

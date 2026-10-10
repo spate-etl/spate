@@ -73,19 +73,34 @@ re-run excludes what already landed. Any crate already at the version must
 have been published from this commit, read back from `trustpub_data`. The
 metadata the dry run cannot check is checked explicitly.
 
-Then it packages. Every pending crate is packaged and verify-built with no
-credential in the job, and the packaged `.crate` files are attested with
-`actions/attest-build-provenance`. Only then is the Trusted Publishing token
-minted, and the upload runs with `--no-verify`, so none of the token's fixed
-30-minute budget is spent compiling.
+Then it packages, in the reusable
+[`release-build.yml`](.github/workflows/release-build.yml). Every pending crate
+is packaged and verify-built with no credential in the job, and staged with one
+CycloneDX SBOM per crate and a `SHA256SUMS` over both. One SLSA provenance
+attestation covers every staged `.crate` and `SHA256SUMS`, and each `.crate`
+gets an SBOM attestation of its own. Both are signed by `release-build.yml`'s
+identity, not the caller's. The job builds without a cache.
+
+The publish job then checks, still with no credential:
+
+- every staged digest against `SHA256SUMS`;
+- every attestation against `release-build.yml` running from `main` at the
+  release commit;
+- that its own `cargo package` produces the attested bytes, since the upload
+  packages again in this job.
+
+It reads the registry for itself, so a re-run of the failed jobs alone sees
+what an earlier attempt already uploaded. Only then is the Trusted Publishing
+token minted, and the upload runs with `--no-verify`, so none of the token's
+fixed 30-minute budget is spent compiling.
 
 After the upload it checks what landed. `trustpub_data` is read back for every
 crate and must name the release commit. Each packaged crate's sha256 must
 equal the index's `cksum`, so the attestation provably covers the bytes the
 registry serves. A scratch project resolves `spate` at the exact version from
 the registry. The commit is then tagged, the GitHub release opens with the
-changelog section, the per-crate SBOMs and the provenance bundle as assets,
-and the docs deploy is dispatched. The deploy is dispatched after the crates
+changelog section, the per-crate SBOMs, `SHA256SUMS` and the attestation bundle
+as assets, and the docs deploy is dispatched. The deploy is dispatched after the crates
 are live, so the install snippets are true the moment the site serves them.
 
 ## Rehearse it first
@@ -154,34 +169,59 @@ it.
 
 crates.io records and displays its own provenance for every Trusted
 Publishing upload: the repository, workflow and run, in `trustpub_data`. The
-release attaches its own artifacts on top of that. A SLSA provenance bundle
-covers the `.crate` files the run packaged; a consumer verifies one against
-the GitHub attestation store by fetching the served artifact first:
+release attests on top of that, with every attestation signed by
+`release-build.yml` through Sigstore and recorded in the public transparency
+log:
+
+| Subject | Attestation |
+|---|---|
+| Each `.crate` | SLSA provenance, and its CycloneDX SBOM |
+| `SHA256SUMS` | SLSA provenance |
+
+Because the signer is a reusable workflow, the caller cannot alter how the
+attested artifacts or their provenance are produced, which is what SLSA Build
+Level 3 asks. The upload's own packaging is held to those bytes before the
+token exists, and the registry's cksum to them after.
+A consumer verifies a crate the registry serves against that workflow, and
+pins the branch it ran from:
 
 ```sh
 curl -fLO https://static.crates.io/crates/spate/spate-X.Y.Z.crate
-gh attestation verify spate-X.Y.Z.crate --repo spate-etl/spate
+gh attestation verify spate-X.Y.Z.crate --repo spate-etl/spate \
+  --signer-workflow spate-etl/spate/.github/workflows/release-build.yml \
+  --source-ref refs/heads/main
+gh attestation verify spate-X.Y.Z.crate --repo spate-etl/spate \
+  --signer-workflow spate-etl/spate/.github/workflows/release-build.yml \
+  --source-ref refs/heads/main --predicate-type https://cyclonedx.org/bom
 ```
 
-That lookup needs the network; fully offline verification passes the release
-asset to `--bundle` instead. The run also generates one CycloneDX SBOM per
-crate (spec 1.5) from the release commit's `Cargo.lock`, so each one describes
-exactly the tree that was published. All of it lands among the release assets,
-and the provenance bundle is what OpenSSF Scorecard's Signed-Releases check
-reads, by its `.intoto.jsonl` suffix.
+`--source-digest <release commit>` pins the commit as well.
+
+Use `gh` 2.102.0 or later: earlier versions match `--signer-workflow` as a
+prefix. Passing the release's `spate-vX.Y.Z.intoto.jsonl` asset to `--bundle`
+skips the attestation lookup; the Sigstore trust root is still fetched unless
+`--custom-trusted-root` is given.
+
+The SBOMs (CycloneDX 1.5) are generated from the release commit's
+`Cargo.lock` with `SOURCE_DATE_EPOCH` set to the commit time, so each one
+describes exactly the tree that was published and regenerates byte for byte.
+They, `SHA256SUMS` and the joined attestation bundle land among the release
+assets, and the bundle is what OpenSSF Scorecard's Signed-Releases check reads,
+by its `.intoto.jsonl` suffix.
 
 The release is one commit, and the cksum check ties the attested bytes to
 what the registry serves. The sha256 in the sparse index is the served
 `.crate`'s checksum, and the publish fails when it differs from a file the run
-packaged. On a resumed run the check covers only what that run packaged;
-crates published by an earlier attempt were checked, and attested, by the
-attempt that uploaded them, and the store keeps every attestation even when a
-bundle asset is lost.
+attested. On a resumed run the check covers only what that run packaged.
+The first attempt that attested crates supplies the release's `SHA256SUMS`
+and bundle, and a later attempt never replaces them; crates published by an
+earlier attempt were checked, and attested, by the attempt that uploaded them,
+and the store keeps every attestation even when a bundle asset is lost.
 
-`actions/attest-build-provenance`, and anything it calls internally, has to be
-on the organisation's Actions allowlist. A refused action does not fail the
-job; the run never starts and reports `startup_failure` with nothing naming
-the action.
+`actions/attest`, `actions/upload-artifact` and `actions/download-artifact`,
+and anything they call internally, have to be on the organisation's Actions
+allowlist. A refused action does not fail the job; the run never starts and
+reports `startup_failure` with nothing naming the action.
 
 ## Adding a crate
 

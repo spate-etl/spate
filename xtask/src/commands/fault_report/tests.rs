@@ -545,6 +545,7 @@ fn checkboxes_tick_kills_aborts_respawns_and_stops() {
     assert_eq!(ticked(&["respawn"]), [joining]);
     assert_eq!(ticked(&["sigstop"]), [joining]);
     assert_eq!(ticked(&["stop"]), [joining]);
+    assert_eq!(ticked(&["leader_stop"]), [joining]);
     assert_eq!(ticked(&["kill", "respawn"]), [joining, kill]);
     assert_eq!(ticked(&["rows", "send", "done"]), [steady]);
 }

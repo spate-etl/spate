@@ -7,10 +7,11 @@
 //! delivery oracle, the `spate-faults-worker` binary with the store and sink
 //! that journal its traffic, the store wrappers that inject in-process
 //! faults, stop the process inside a commit or before a leader write and
-//! re-send a commit that lost its CAS, the seeded fault schedule, the
-//! lost-reply evidence check, the container health poller, and the harness
-//! that runs worker processes, reads the leader key before each scheduled
-//! kill, kills the leader at a seeded stage of its work, puts a seeded DynamoDB
+//! re-send a commit or seed create that lost its CAS, the seeded fault
+//! schedule, the lost-reply evidence check, the container health poller, and
+//! the harness that runs worker processes, reads the leader key before each
+//! scheduled kill, kills the leader at a seeded stage of its work or resumes it
+//! once a peer has claimed the split it stopped before, puts a seeded DynamoDB
 //! fault proxy in front of each worker of the scheduled-fault DynamoDB runs,
 //! opens seeded Toxiproxy windows on each worker's store link in the
 //! scheduled-fault runs, and judges them.

@@ -1,10 +1,12 @@
-//! The leader-kill run: the first worker process to reach one stage of a
-//! leader's work stops there and is killed, and another instance must take
-//! the leader key before the killed instance's replacement starts.
+//! The leader runs: the first worker process to reach one stage of a
+//! leader's work stops there. In a leader-kill run it is killed, and another
+//! instance must take the leader key before the killed instance's replacement
+//! starts. In a deposed-leader run it is resumed once another instance has
+//! claimed the split it was about to seed.
 
 use super::{
     Env, Event, FaultFired, Journal, LeaderAtKill, POLL, RUN_DEADLINE, Run, STOP_CONFIRM, Tuning,
-    Workers, journal, journal_holds, kill_fault_text, millis, read_leader,
+    Workers, journal, journal_holds, kill_fault_text, millis, read_leader, stopped,
 };
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -18,8 +20,23 @@ pub(super) const TOKEN: &str = "leader-stop.token";
 const STOP_LINE: Duration = Duration::from_secs(60);
 /// Leases from the kill within which another instance must hold the key.
 const TAKEOVER_LEASES: u64 = 4;
+/// Working-set bound for every worker of a deposed-leader run, above any data
+/// set's split count.
+pub(super) const WORKING_SET: u32 = 32;
+const _: () =
+    assert!(WORKING_SET as u64 >= super::OBJECTS * super::MAX_OBJECT.div_ceil(super::MIB));
 
-/// What a leader-kill run found besides the oracle's checks.
+/// What [`Run::drive_leader`] returns: whether a worker was still running at
+/// the end, the faults fired, a deposed leader's stop, and the run's own
+/// findings.
+type Driven = (
+    bool,
+    Vec<FaultFired>,
+    Option<stopped::Stopped>,
+    Option<Killed>,
+);
+
+/// What a leader run found besides the oracle's checks.
 #[derive(Debug, Default)]
 pub(super) struct Killed {
     /// The takeover that did not come within the cap.
@@ -28,20 +45,26 @@ pub(super) struct Killed {
     pub(super) expectations: Vec<String>,
 }
 
-/// The process that journalled a `leader_stop` line.
+/// The process that journalled a `leader_stop` line, and the line.
 struct Stopped {
     index: u32,
     instance: String,
     pid: u32,
+    t_ms: u64,
+    key: String,
+    /// The epoch of the value the stopped write carried.
+    epoch: u64,
 }
 
 impl Run<'_> {
     /// Starts every worker at once and waits for a `leader_stop` line. Once
-    /// that process reports stopped it reads the leader key, journals the
-    /// kill with what it read, kills the process, and polls the key until
-    /// another instance holds it or [`TAKEOVER_LEASES`] leases pass. It
-    /// starts the killed instance's replacement the drawn delay after that,
-    /// then waits for the workers until [`RUN_DEADLINE`] from the start.
+    /// that process reports stopped it reads the leader key. In a leader-kill
+    /// run it journals the kill with what it read, kills the process, and
+    /// polls the key until another instance holds it or [`TAKEOVER_LEASES`]
+    /// leases pass. It starts the killed instance's replacement the drawn
+    /// delay after that, then waits for the workers until [`RUN_DEADLINE`]
+    /// from the start. A deposed leader is resumed as a stopped writer is,
+    /// once another instance holds the stopped key.
     ///
     /// # Errors
     ///
@@ -56,7 +79,7 @@ impl Run<'_> {
         rt: &tokio::runtime::Runtime,
         tuning: &Tuning,
         faults_path: &Path,
-    ) -> Result<(bool, Vec<FaultFired>, Killed), String> {
+    ) -> Result<Driven, String> {
         let faults =
             Journal::open(faults_path).map_err(|e| format!("{}: {e}", faults_path.display()))?;
         let log = |event| {
@@ -90,6 +113,9 @@ impl Run<'_> {
             index,
             instance: name,
             pid,
+            t_ms,
+            key,
+            epoch,
         }) = stopped
         else {
             killed.expectations.push(format!(
@@ -99,7 +125,7 @@ impl Run<'_> {
             let timed_out = workers
                 .wait(until.saturating_duration_since(Instant::now()))
                 .map_err(status)?;
-            return Ok((timed_out, fired, killed));
+            return Ok((timed_out, fired, None, Some(killed)));
         };
         if !workers
             .confirm_stopped(&name, STOP_CONFIRM)
@@ -116,6 +142,35 @@ impl Run<'_> {
                 "the stopped process {name} (pid {pid}) did not hold the leader key: read {read:?}"
             ));
         }
+        let Some(respawn_after_ms) = plan.respawn_after_ms else {
+            let claimed = stopped::await_release(
+                t_ms,
+                tuning.lease_ms,
+                || stopped::peer_claimed(env, rt, &key, epoch, &name),
+                journal::now_ms,
+                || std::thread::sleep(POLL),
+            );
+            if workers.resume(&name, pid).map_err(status)? {
+                log(Event::Sigcont {
+                    instance: name.clone(),
+                    pid,
+                })?;
+            }
+            let wait = if self.spec.faults.broken_fence() {
+                stopped::BROKEN_FENCE_WAIT
+            } else {
+                until.saturating_duration_since(Instant::now())
+            };
+            let timed_out = workers.wait(wait).map_err(status)?;
+            let stop = stopped::Stopped {
+                key,
+                expected: None,
+                instance: name,
+                pid,
+                reassigned: claimed,
+            };
+            return Ok((timed_out, fired, Some(stop), Some(killed)));
+        };
         let kill_ms = millis(start.elapsed());
         log(Event::Kill {
             instance: name.clone(),
@@ -141,7 +196,7 @@ impl Run<'_> {
             || std::thread::sleep(POLL),
         );
 
-        std::thread::sleep(Duration::from_millis(plan.respawn_after_ms));
+        std::thread::sleep(Duration::from_millis(respawn_after_ms));
         let process = self.spawn(workers, env, index, 2, tuning)?;
         log(Event::Respawn {
             instance: process.0.clone(),
@@ -151,7 +206,7 @@ impl Run<'_> {
         let timed_out = workers
             .wait(until.saturating_duration_since(Instant::now()))
             .map_err(status)?;
-        Ok((timed_out, fired, killed))
+        Ok((timed_out, fired, None, Some(killed)))
     }
 }
 
@@ -194,17 +249,24 @@ fn leader_stop(
     let until = Instant::now() + STOP_LINE;
     loop {
         for (index, (instance, pid, path)) in (0..).zip(first) {
-            let stopped = journal_holds(path, "leader_stop")
-                && journal::read(path).is_ok_and(|lines| {
-                    lines
-                        .iter()
-                        .any(|l| matches!(l.event, Event::LeaderStop { .. }))
-                });
-            if stopped {
+            let line = if journal_holds(path, "leader_stop") {
+                journal::read(path).ok().and_then(|lines| {
+                    lines.into_iter().find_map(|l| match l.event {
+                        Event::LeaderStop { key, value, .. } => Some((l.t_ms, key, value)),
+                        _ => None,
+                    })
+                })
+            } else {
+                None
+            };
+            if let Some((t_ms, key, value)) = line {
                 return Ok(Some(Stopped {
                     index,
                     instance: instance.clone(),
                     pid: *pid,
+                    t_ms,
+                    key,
+                    epoch: value["epoch"].as_u64().unwrap_or(0),
                 }));
             }
         }

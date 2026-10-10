@@ -95,6 +95,60 @@ impl CoordinationStore for Hang {
     }
 }
 
+/// A store whose creates fail, over a [`MemoryStore`].
+#[derive(Clone)]
+struct FailCreate(MemoryStore);
+
+impl CoordinationStore for FailCreate {
+    fn lease_ttl(&self) -> Duration {
+        LEASE
+    }
+
+    fn watch_mode(&self) -> WatchMode {
+        self.0.watch_mode()
+    }
+
+    async fn create(
+        &self,
+        _ks: Keyspace,
+        _key: &str,
+        _value: Vec<u8>,
+    ) -> Result<CasOutcome, StoreError> {
+        Err(StoreError::Retryable("create failed".to_owned()))
+    }
+
+    async fn update(
+        &self,
+        ks: Keyspace,
+        key: &str,
+        value: Vec<u8>,
+        expected: Revision,
+    ) -> Result<CasOutcome, StoreError> {
+        self.0.update(ks, key, value, expected).await
+    }
+
+    async fn get(&self, ks: Keyspace, key: &str) -> Result<Option<Entry>, StoreError> {
+        self.0.get(ks, key).await
+    }
+
+    async fn delete(
+        &self,
+        ks: Keyspace,
+        key: &str,
+        expected: Option<Revision>,
+    ) -> Result<CasOutcome, StoreError> {
+        self.0.delete(ks, key, expected).await
+    }
+
+    async fn watch(&self, ks: Keyspace, prefix: &str) -> Result<WatchStream, StoreError> {
+        self.0.watch(ks, prefix).await
+    }
+
+    async fn list(&self, ks: Keyspace, prefix: &str) -> Result<Vec<Entry>, StoreError> {
+        self.0.list(ks, prefix).await
+    }
+}
+
 fn journalled<S>(inner: S) -> (JournalStore<S>, tempfile::TempDir, std::path::PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("w0-1.ndjson");
@@ -1182,6 +1236,118 @@ async fn broken_fence_leaves_ephemeral_updates_alone() {
         .await;
     assert!(!matches!(renew, Ok(CasOutcome::Won(_))), "{renew:?}");
     assert!(fence.take("split.a"), "still armed");
+}
+
+/// An armed fence passes an ephemeral create of its key through untouched
+/// and stays armed for the durable one.
+#[tokio::test]
+async fn broken_fence_leaves_ephemeral_creates_alone() {
+    let fence = Arc::new(Fence::default());
+    let inner = MemoryStore::new(LEASE);
+    let store = BrokenFence::new(inner.clone(), Arc::clone(&fence));
+    let peer = inner
+        .create(Keyspace::Ephemeral, "split.a", b"peer".to_vec())
+        .await;
+    assert!(matches!(peer, Ok(CasOutcome::Won(_))), "{peer:?}");
+    fence.arm("split.a");
+    let acquire = store
+        .create(Keyspace::Ephemeral, "split.a", b"lease".to_vec())
+        .await;
+    assert!(matches!(acquire, Ok(CasOutcome::Lost)), "{acquire:?}");
+    assert!(fence.take("split.a"), "still armed");
+}
+
+/// A create on the armed key that finds it is re-sent as an update at the
+/// current revision, where it lands, and the fence fires once. A create that
+/// finds its key with nothing armed, or another key armed, comes back `Lost`
+/// and leaves the fence armed; a create on the armed key that wins disarms it.
+#[tokio::test]
+async fn broken_fence_overwrites_an_armed_create_that_lost() {
+    let fence = Arc::new(Fence::default());
+    let inner = MemoryStore::new(LEASE);
+    let store = BrokenFence::new(inner.clone(), Arc::clone(&fence));
+    let peer = create(&inner, "split.a", record_at(1, Some("w1"), None)).await;
+    create(&inner, "split.b", record_at(1, Some("w1"), None)).await;
+    let stale = |key| store.create(Keyspace::Durable, key, record_at(0, None, None));
+    assert_eq!(
+        stale("split.a").await.unwrap(),
+        CasOutcome::Lost,
+        "nothing armed"
+    );
+
+    fence.arm("split.a");
+    assert_eq!(
+        stale("split.b").await.unwrap(),
+        CasOutcome::Lost,
+        "another key"
+    );
+    let resent = stale("split.a").await.unwrap();
+    let Some(rev) = resent.won() else {
+        panic!("the re-send landed: {resent:?}")
+    };
+    assert!(rev > peer);
+    let landed = inner
+        .get(Keyspace::Durable, "split.a")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(Progress::parse(&landed.value).unwrap().epoch, 0);
+    assert_eq!(
+        stale("split.a").await.unwrap(),
+        CasOutcome::Lost,
+        "fires once"
+    );
+
+    fence.arm("split.c");
+    create(&store, "split.c", record_at(0, None, None)).await;
+    assert!(!fence.take("split.c"), "a won create disarms the fence");
+}
+
+/// A create on the armed key that fails returns the error and leaves the
+/// fence armed.
+#[tokio::test]
+async fn broken_fence_keeps_the_fence_armed_after_a_failed_create() {
+    let fence = Arc::new(Fence::default());
+    let store = BrokenFence::new(FailCreate(MemoryStore::new(LEASE)), Arc::clone(&fence));
+    fence.arm("split.a");
+    let failed = store
+        .create(Keyspace::Durable, "split.a", record_at(0, None, None))
+        .await;
+    assert!(
+        matches!(failed, Err(StoreError::Retryable(_))),
+        "{failed:?}"
+    );
+    assert!(fence.take("split.a"), "still armed");
+}
+
+/// A create on the armed key whose future is dropped after its first poll,
+/// as the coordinator's timeout drops one, still re-sends and lands.
+#[tokio::test]
+async fn broken_fence_resends_a_create_dropped_after_its_first_poll() {
+    use futures_util::StreamExt as _;
+    let fence = Arc::new(Fence::default());
+    let inner = MemoryStore::new(LEASE);
+    let store = BrokenFence::new(inner.clone(), Arc::clone(&fence));
+    let peer = create(&inner, "split.a", record_at(1, Some("w1"), None)).await;
+    let mut puts = inner.watch(Keyspace::Durable, "split.a").await.unwrap();
+    fence.arm("split.a");
+    let dropped = store
+        .create(Keyspace::Durable, "split.a", record_at(0, None, None))
+        .now_or_never();
+    assert!(dropped.is_none(), "pending after its first poll");
+    let landed = tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(event) = puts.next().await {
+            if let Ok(WatchEvent::Put(entry)) = event
+                && entry.revision > peer
+            {
+                return entry;
+            }
+        }
+        panic!("the watch ended")
+    })
+    .await
+    .expect("the re-send lands");
+    assert_eq!(Progress::parse(&landed.value).unwrap().epoch, 0);
 }
 
 /// A [`StopAt`] over a journalled [`MemoryStore`], stopping at `plan` through

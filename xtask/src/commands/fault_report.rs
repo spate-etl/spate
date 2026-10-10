@@ -651,7 +651,7 @@ fn others(text: &mut String, runs: &[RunDir], heading: &str) {
 fn circumstances(run: Option<&RunDir>) -> String {
     let events = run.map(|r| &r.events);
     let any = |names: &[&str]| events.is_some_and(|e| names.iter().any(|n| e.contains(*n)));
-    let joining = any(&["respawn", "sigstop", "stop"]);
+    let joining = any(&["respawn", "sigstop", "stop", "leader_stop"]);
     let killed = any(&["kill", "abort"]);
     let ticked = [joining, false, killed, false, false, !joining && !killed];
     let mut text = String::new();

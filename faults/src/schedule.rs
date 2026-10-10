@@ -110,14 +110,15 @@ impl LeaderStage {
 }
 
 /// The stage the first process to reach it stops at, and how long after the
-/// takeover the stopped leader's replacement starts.
+/// takeover a killed leader's replacement starts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LeaderPlan {
     /// Where a leading process stops.
     pub stop: StopPlan,
     /// How long after the takeover, or its cap, the replacement starts, at
-    /// most one lease.
-    pub respawn_after_ms: u64,
+    /// most one lease. `None` when the stopped process is resumed instead of
+    /// killed.
+    pub respawn_after_ms: Option<u64>,
 }
 
 /// The faults drawn for one run.
@@ -212,7 +213,22 @@ impl Schedule {
         Schedule {
             leader: Some(LeaderPlan {
                 stop: stage.stop(),
-                respawn_after_ms: rng.in_range(0, lease_ms),
+                respawn_after_ms: Some(rng.in_range(0, lease_ms)),
+            }),
+            ..Schedule::default()
+        }
+    }
+
+    /// A deposed-leader schedule: the first process to reach the second to
+    /// fourth seeded progress record stops there and is later resumed, and
+    /// nothing else is injected.
+    #[must_use]
+    pub fn deposed_leader(rng: &mut SplitMix64) -> Schedule {
+        let n = u32::try_from(rng.in_range(2, 4)).expect("small");
+        Schedule {
+            leader: Some(LeaderPlan {
+                stop: LeaderStage::Seed(n).stop(),
+                respawn_after_ms: None,
             }),
             ..Schedule::default()
         }
@@ -296,11 +312,18 @@ impl Schedule {
             let _ = writeln!(text, "w{SLEEPER}-1: {plan}");
         }
         if let Some(leader) = self.leader {
-            let _ = writeln!(
-                text,
-                "w*-1: {}, first to reach it only; it is killed and replaced {} ms after the takeover",
-                leader.stop, leader.respawn_after_ms
-            );
+            let _ = match leader.respawn_after_ms {
+                Some(ms) => writeln!(
+                    text,
+                    "w*-1: {}, first to reach it only; it is killed and replaced {ms} ms after the takeover",
+                    leader.stop
+                ),
+                None => writeln!(
+                    text,
+                    "w*-1: {}, first to reach it only; it is resumed once a peer claims the split",
+                    leader.stop
+                ),
+            };
         }
         for p in &self.in_process {
             let _ = match p.plan.mode {
@@ -740,7 +763,7 @@ mod tests {
         for seed in 0..200 {
             let schedule = Schedule::leader_killed(&mut SplitMix64::new(seed), LEASE);
             let leader = schedule.leader.expect("a leader plan");
-            assert!(leader.respawn_after_ms <= LEASE);
+            assert!(leader.respawn_after_ms.is_some_and(|ms| ms <= LEASE));
             for instance in 0..3 {
                 assert_eq!(schedule.stop_for(instance, 1), Some(leader.stop));
                 assert_eq!(schedule.stop_for(instance, 2), None);
@@ -757,6 +780,25 @@ mod tests {
             (WriteKind::Publish, 1),
         ]);
         assert_eq!(drawn, expected);
+    }
+
+    /// Across seeds, a deposed-leader schedule stops every first process at
+    /// the second, third or fourth seed, draws each of them, and kills nothing.
+    #[test]
+    fn a_deposed_leader_stops_at_a_later_seed_and_is_never_killed() {
+        let mut ns = std::collections::BTreeSet::new();
+        for seed in 0..200 {
+            let schedule = Schedule::deposed_leader(&mut SplitMix64::new(seed));
+            let leader = schedule.leader.expect("a leader plan");
+            assert_eq!(leader.respawn_after_ms, None);
+            assert_eq!(leader.stop.kind, WriteKind::Seed);
+            for instance in 0..3 {
+                assert_eq!(schedule.stop_for(instance, 1), Some(leader.stop));
+            }
+            assert!(schedule.kills.is_empty());
+            ns.insert(leader.stop.n);
+        }
+        assert_eq!(ns.into_iter().collect::<Vec<_>>(), [2, 3, 4]);
     }
 
     /// Across seeds, a run draws between one stop and one per instance,

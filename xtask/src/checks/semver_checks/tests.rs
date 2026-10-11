@@ -347,6 +347,59 @@ fn an_empty_group_runs_nothing() {
     assert_eq!(breaking, ["kept"]);
 }
 
+// ── Proc-macro crates ──────────────────────────────────────────────────
+
+#[test]
+fn a_proc_macro_library_is_recognized_under_either_spelling() {
+    assert_eq!(proc_macro("[lib]\nproc-macro = true\n"), Ok(true));
+    assert_eq!(proc_macro("[lib]\nproc_macro = true\n"), Ok(true));
+}
+
+#[test]
+fn a_crate_type_listing_proc_macro_is_a_proc_macro_library() {
+    assert_eq!(
+        proc_macro("[lib]\ncrate-type = [\"proc-macro\"]\n"),
+        Ok(true)
+    );
+    assert_eq!(proc_macro("[lib]\ncrate-type = [\"rlib\"]\n"), Ok(false));
+}
+
+#[test]
+fn a_manifest_without_a_proc_macro_library_is_not_one() {
+    assert_eq!(proc_macro("[package]\nname = \"x\"\n"), Ok(false));
+    assert_eq!(proc_macro("[lib]\nname = \"x\"\n"), Ok(false));
+    assert_eq!(proc_macro("[lib]\nproc-macro = false\n"), Ok(false));
+}
+
+#[test]
+fn a_manifest_that_does_not_parse_is_an_error() {
+    assert!(proc_macro("[lib\n").is_err());
+}
+
+#[test]
+fn the_shipped_derive_crate_is_a_proc_macro_crate() {
+    let root = crate::repo_root().unwrap();
+    assert!(is_proc_macro(&root, "spate-clickhouse-derive").unwrap());
+    assert!(!is_proc_macro(&root, "spate-clickhouse").unwrap());
+}
+
+// ── Attribution ────────────────────────────────────────────────────────
+
+/// An empty stream adds no line to the attribution error.
+#[test]
+fn an_attribution_error_carries_only_the_streams_with_output() {
+    let run = Completed {
+        code: 101,
+        stdout: "found nothing\n".to_owned(),
+        stderr: String::new(),
+    };
+    assert_eq!(
+        attribution_failed("spate-core", &run).message,
+        "cargo semver-checks exited 101 for spate-core while attributing a break.\n  \
+         The batch already reported the findings. The re-run's output:\nfound nothing"
+    );
+}
+
 // ── Discovery ──────────────────────────────────────────────────────────
 
 /// Discovery is the directories under `crates/`, sorted, so a new crate is

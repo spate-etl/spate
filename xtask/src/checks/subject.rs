@@ -137,7 +137,9 @@ fn subject_of(message: &str, comment: char) -> &str {
 fn comment_char(root: &Path) -> char {
     let step = Step::new("git", ["config", "--get", "core.commentChar"]);
     let value = match run::complete(root, &step, Streams::Collect) {
-        Ok(Completed { code: 0, stdout }) => stdout.trim_end_matches('\n').to_owned(),
+        Ok(Completed {
+            code: 0, stdout, ..
+        }) => stdout.trim_end_matches('\n').to_owned(),
         _ => String::new(),
     };
     let mut chars = value.chars();

@@ -337,7 +337,10 @@ fn merge_base(root: &Path, a: &str, b: &str) -> Option<String> {
 /// answered with nothing.
 fn capture(root: &Path, args: &[&str]) -> Option<String> {
     let step = Step::new("git", args.iter().copied());
-    let Ok(Completed { code: 0, stdout }) = run::complete(root, &step, Streams::Collect) else {
+    let Ok(Completed {
+        code: 0, stdout, ..
+    }) = run::complete(root, &step, Streams::Collect)
+    else {
         return None;
     };
     let first = stdout.split('\n').next().unwrap_or_default();
@@ -368,7 +371,9 @@ fn shipped_changes(root: &Path, base: &str, head: Option<&str>) -> Vec<String> {
         step = step.arg(head);
     }
     let listing = match run::complete(root, &step, Streams::Collect) {
-        Ok(Completed { code: 0, stdout }) => stdout,
+        Ok(Completed {
+            code: 0, stdout, ..
+        }) => stdout,
         _ => String::new(),
     };
     let mut out: Vec<String> = listing
@@ -404,7 +409,9 @@ fn rust_version_moved(root: &Path, base: &str, head: Option<&str>) -> bool {
         step = step.arg(head);
     }
     let diff = match run::complete(root, &step.args(["--", "Cargo.toml"]), Streams::Collect) {
-        Ok(Completed { code: 0, stdout }) => stdout,
+        Ok(Completed {
+            code: 0, stdout, ..
+        }) => stdout,
         _ => String::new(),
     };
     diff_moves_rust_version(&diff)
@@ -440,7 +447,9 @@ fn body_says_none(body: &str) -> bool {
 fn branch_says_none(root: &Path, scratch: &Scratch, range: &str) -> Option<String> {
     let step = Step::new("git", ["log", "--no-merges", "--format=%h", range]);
     let listing = match run::complete(root, &step, Streams::Collect) {
-        Ok(Completed { code: 0, stdout }) => stdout,
+        Ok(Completed {
+            code: 0, stdout, ..
+        }) => stdout,
         _ => String::new(),
     };
     listing
@@ -454,7 +463,9 @@ fn branch_says_none(root: &Path, scratch: &Scratch, range: &str) -> Option<Strin
 fn commit_says_none(root: &Path, scratch: &Scratch, sha: &str) -> bool {
     let step = Step::new("git", ["log", "-1", "--format=%B", sha]);
     let message = match run::complete(root, &step, Streams::Collect) {
-        Ok(Completed { code: 0, stdout }) => stdout,
+        Ok(Completed {
+            code: 0, stdout, ..
+        }) => stdout,
         _ => String::new(),
     };
     trailer_says_none(&parse_trailers(root, scratch, &message))
@@ -472,7 +483,9 @@ fn parse_trailers(root: &Path, scratch: &Scratch, message: &str) -> String {
     }
     let step = Step::new("git", ["interpret-trailers", "--parse"]).arg(path.to_string_lossy());
     match run::complete(root, &step, Streams::Collect) {
-        Ok(Completed { code: 0, stdout }) => stdout,
+        Ok(Completed {
+            code: 0, stdout, ..
+        }) => stdout,
         _ => String::new(),
     }
 }
@@ -528,7 +541,9 @@ fn added_fragments(root: &Path, base: &str, head: Option<&str>) -> (usize, Vec<S
         ],
     );
     let listing = match run::complete(root, &step, Streams::Collect) {
-        Ok(Completed { code: 0, stdout }) => stdout,
+        Ok(Completed {
+            code: 0, stdout, ..
+        }) => stdout,
         _ => String::new(),
     };
 
@@ -555,7 +570,9 @@ fn uncommitted_fragments(root: &Path) -> usize {
     let pathspec = format!("{FRAGMENTS}/");
     let step = Step::new("git", ["status", "--porcelain", "--", &pathspec]);
     let listing = match run::complete(root, &step, Streams::Collect) {
-        Ok(Completed { code: 0, stdout }) => stdout,
+        Ok(Completed {
+            code: 0, stdout, ..
+        }) => stdout,
         _ => String::new(),
     };
     listing

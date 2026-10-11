@@ -623,8 +623,9 @@ fn a_proc_macro_crate_is_skipped_before_the_index_and_the_tool() {
         stdout(&out).starts_with(
             "::notice::spate-clickhouse-derive is a proc-macro crate, which cargo semver-checks \
              reads no API from.\n  \
-             Its tests hold its interface; a change to them needs a **Breaking:** fragment by \
-             review.\n"
+             A change is breaking, and needs a **Breaking:** fragment by review, when code using \
+             the macro stops compiling or an item it generates for the same input changes or goes \
+             away.\n"
         ),
         "{}",
         stdout(&out)

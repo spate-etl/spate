@@ -17,9 +17,9 @@
 //! the announcement. A finding with nothing announcing a break fails.
 //!
 //! A proc-macro crate is skipped with a notice, since the tool reads no API
-//! from one. Its tests are what hold its interface: the macro's name, the input
-//! it accepts and rejects, and the code it generates. A change that edits those
-//! tests needs a `**Breaking:**` fragment by review, with no gate behind it.
+//! from one. A change is breaking, and needs a `**Breaking:**` fragment by
+//! review, when code using the macro stops compiling or an item it generates
+//! for the same input changes or goes away.
 
 use std::ffi::OsStr;
 use std::path::Path;
@@ -186,16 +186,21 @@ fn group_step(release_type: Option<&str>, pkgs: &[String]) -> Step<'static> {
     step
 }
 
-/// Whether a manifest declares a proc-macro library, under either spelling
-/// cargo accepts.
+/// Whether a manifest declares a proc-macro library: `proc-macro = true`,
+/// `proc_macro = true`, or a `crate-type` listing `"proc-macro"`.
 fn proc_macro(manifest: &str) -> Result<bool, String> {
     let table: toml::Table = toml::from_str(manifest).map_err(|e| e.to_string())?;
     let Some(lib) = table.get("lib").and_then(toml::Value::as_table) else {
         return Ok(false);
     };
-    Ok(["proc-macro", "proc_macro"]
+    let flagged = ["proc-macro", "proc_macro"]
         .iter()
-        .any(|key| lib.get(*key).and_then(toml::Value::as_bool) == Some(true)))
+        .any(|key| lib.get(*key).and_then(toml::Value::as_bool) == Some(true));
+    let typed = lib
+        .get("crate-type")
+        .and_then(toml::Value::as_array)
+        .is_some_and(|types| types.iter().any(|t| t.as_str() == Some("proc-macro")));
+    Ok(flagged || typed)
 }
 
 /// Whether the crate under `crates/<name>` is a proc-macro crate.
@@ -383,7 +388,7 @@ pub(crate) fn registry(root: &Path, explain: bool, packages: Option<&str>) -> Ou
                 "::notice::{name} is a proc-macro crate, which cargo semver-checks reads no API from."
             );
             println!(
-                "  Its tests hold its interface; a change to them needs a **Breaking:** fragment by review."
+                "  A change is breaking, and needs a **Breaking:** fragment by review, when code using the macro stops compiling or an item it generates for the same input changes or goes away."
             );
             skipped += 1;
             continue;

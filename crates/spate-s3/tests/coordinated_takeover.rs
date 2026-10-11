@@ -9,6 +9,8 @@
 //! keeps streaming (an in-memory stream has no socket to sever), which
 //! only lets the victim *observe* its losses; it cannot act on anything.
 
+#![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
+
 mod support;
 
 use spate_coordination::StoreCoordinator;

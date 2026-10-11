@@ -3,7 +3,9 @@
 Distributed work coordination for the
 [Spate](https://github.com/spate-etl/spate) framework: how several instances
 of the same pipeline divide a body of work between them without duplicating it
-or dropping any of it.
+or dropping any of it. Deprecated, and removed in v0.4.0, where a work feed
+replaces split coordination
+([#1088](https://github.com/spate-etl/spate/issues/1088)).
 
 A leader-elected planner enumerates weighted splits into a shared low-latency
 store and publishes a desired assignment per instance. Workers lease and

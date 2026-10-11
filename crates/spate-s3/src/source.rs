@@ -21,6 +21,8 @@
 //! The one backend this crate links itself is the in-process `MemoryStore`,
 //! unconditionally, as the solo fallback below.
 
+#![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
+
 use crate::config::S3SourceConfig;
 use crate::lane::S3Lane;
 use crate::metrics::S3Metrics;
@@ -154,6 +156,10 @@ impl S3Source {
     /// the section's tuning. Either way progress is ephemeral, and a restart
     /// replays the whole prefix (a startup WARN says so).
     #[must_use]
+    #[deprecated(
+        since = "0.3.0",
+        note = "removed in v0.4.0, where a work feed replaces split coordination; see https://github.com/spate-etl/spate/issues/1088"
+    )]
     pub fn with_coordinator(mut self, coordinator: Box<dyn SplitCoordinator>) -> S3Source {
         self.coordinator = Some(coordinator);
         self

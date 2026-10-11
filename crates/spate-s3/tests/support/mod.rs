@@ -1,6 +1,7 @@
 //! Shared pipeline-assembly helpers for the spate-s3 integration suites.
 // Each test binary compiles this module independently and uses a subset.
 #![allow(dead_code)]
+#![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
 
 pub(crate) mod seaweed;
 pub(crate) mod spy;

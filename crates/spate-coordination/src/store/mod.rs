@@ -45,6 +45,10 @@ pub mod nats;
 
 /// Which keyspace an operation targets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[deprecated(
+    since = "0.3.0",
+    note = "removed in v0.4.0, where a work feed replaces split coordination; see https://github.com/spate-etl/spate/issues/1088"
+)]
 pub enum Keyspace {
     /// Never expires; survives owner death (split records, plan record).
     Durable,
@@ -57,6 +61,10 @@ pub enum Keyspace {
 /// How a store's watches learn of changes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
+#[deprecated(
+    since = "0.3.0",
+    note = "removed in v0.4.0, where a work feed replaces split coordination; see https://github.com/spate-etl/spate/issues/1088"
+)]
 pub enum WatchMode {
     /// Every write and expiry reaches the watch as it happens.
     Push,
@@ -74,10 +82,18 @@ pub enum WatchMode {
 /// [`WatchEvent::Delete`]. Content-independent, so it carries none of the
 /// ABA hazards a content-hash token would.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[deprecated(
+    since = "0.3.0",
+    note = "removed in v0.4.0, where a work feed replaces split coordination; see https://github.com/spate-etl/spate/issues/1088"
+)]
 pub struct Revision(pub u64);
 
 /// One key's current value and revision.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[deprecated(
+    since = "0.3.0",
+    note = "removed in v0.4.0, where a work feed replaces split coordination; see https://github.com/spate-etl/spate/issues/1088"
+)]
 pub struct Entry {
     /// The key, relative to the keyspace.
     pub key: String,
@@ -91,6 +107,10 @@ pub struct Entry {
 /// else won the race), never an error.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[must_use]
+#[deprecated(
+    since = "0.3.0",
+    note = "removed in v0.4.0, where a work feed replaces split coordination; see https://github.com/spate-etl/spate/issues/1088"
+)]
 pub enum CasOutcome {
     /// The write landed at this revision.
     Won(Revision),
@@ -112,6 +132,10 @@ impl CasOutcome {
 /// One observation from a keyspace watch.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
+#[deprecated(
+    since = "0.3.0",
+    note = "removed in v0.4.0, where a work feed replaces split coordination; see https://github.com/spate-etl/spate/issues/1088"
+)]
 pub enum WatchEvent {
     /// A key's current value (snapshot replay or live update).
     Put(Entry),
@@ -136,6 +160,10 @@ pub enum WatchEvent {
 /// A store operation failed.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
+#[deprecated(
+    since = "0.3.0",
+    note = "removed in v0.4.0, where a work feed replaces split coordination; see https://github.com/spate-etl/spate/issues/1088"
+)]
 pub enum StoreError {
     /// Transient: the operation may succeed if retried.
     #[error("retryable store error: {0}")]
@@ -146,6 +174,10 @@ pub enum StoreError {
 }
 
 /// Boxed watch stream: ordered per key, snapshot-then-live.
+#[deprecated(
+    since = "0.3.0",
+    note = "removed in v0.4.0, where a work feed replaces split coordination; see https://github.com/spate-etl/spate/issues/1088"
+)]
 pub type WatchStream = futures_util::stream::BoxStream<'static, Result<WatchEvent, StoreError>>;
 
 /// The minimal primitives the coordination protocol needs; see the
@@ -163,6 +195,10 @@ pub type WatchStream = futures_util::stream::BoxStream<'static, Result<WatchEven
 ///   store and box the
 ///   [`SplitCoordinator`](spate_core::coordination::SplitCoordinator)
 ///   instead; that trait is the dyn-compatible seam.
+#[deprecated(
+    since = "0.3.0",
+    note = "removed in v0.4.0, where a work feed replaces split coordination; see https://github.com/spate-etl/spate/issues/1088"
+)]
 pub trait CoordinationStore: Send + Sync + 'static {
     /// The TTL every [`Ephemeral`](Keyspace::Ephemeral) write re-arms.
     /// Fixed at store construction (per-write TTLs are not portable).

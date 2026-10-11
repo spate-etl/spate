@@ -1,6 +1,11 @@
 //! Split coordination: the seam that lets several pipeline instances divide
 //! one broker-less source's work without duplicates.
 //!
+//! [`SplitPlanner`], [`SplitCoordinator`], [`driver::SplitSource`] and
+//! [`driver::CoordinationDriver`] are deprecated. v0.4.0 removes this module,
+//! and a work feed replaces split coordination
+//! ([#1088](https://github.com/spate-etl/spate/issues/1088)).
+//!
 //! Brokered sources bring their own coordination (a Kafka consumer group
 //! assigns partitions across processes). Broker-less sources (object-store
 //! backfills, database range scans, file tails) have no group protocol, so
@@ -481,6 +486,10 @@ impl CoordinationError {
 /// [`SplitCoordinator::start`]; whichever instance holds leadership uses
 /// its own copy. `plan` may block on I/O (an object-store LIST, an
 /// index query), so backends call it off their async loop.
+#[deprecated(
+    since = "0.3.0",
+    note = "removed in v0.4.0, where a work feed replaces split coordination; see https://github.com/spate-etl/spate/issues/1088"
+)]
 pub trait SplitPlanner: Send {
     /// Cheap, deterministic job identity, derived from *configuration*,
     /// never from the enumeration itself. Every worker joining the job
@@ -599,6 +608,11 @@ pub trait SplitPlanner: Send {
 ///     Some(CoordinationEvent::AllComplete)
 /// ));
 /// ```
+#[deprecated(
+    since = "0.3.0",
+    note = "removed in v0.4.0, where a work feed replaces split coordination; see https://github.com/spate-etl/spate/issues/1088"
+)]
+#[expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
 pub trait SplitCoordinator: Send {
     /// Join the job: verify the fingerprint, hand over this worker's
     /// planner (used only if and while this instance is elected leader),
@@ -808,6 +822,7 @@ pub(crate) fn control_channel() -> (ControlWaker, crossbeam_channel::Receiver<()
 }
 
 #[cfg(test)]
+#[expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
 mod tests {
     use super::*;
 

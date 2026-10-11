@@ -3,6 +3,8 @@
 //!
 //! `nats_integration` runs the same checks against a real NATS server.
 
+#![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
+
 mod support;
 
 use futures_util::StreamExt as _;

@@ -86,6 +86,7 @@ mod tls;
 #[cfg(feature = "proptest")]
 pub mod strategies;
 
+#[expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
 pub use coordination::{CoordinatorScript, ScriptedCoordinator, scripted_coordinator};
 pub use deser::{EmitCollector, TestDeserializer};
 pub use exposition::{MetricSample, metric_series, metric_sum, metric_value, render_metrics};

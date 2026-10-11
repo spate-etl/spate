@@ -29,6 +29,7 @@ use crate::offset::Position;
 use crate::split::SplitDescriptor;
 use serde::{Deserialize, Serialize};
 use spate_core::checkpoint::AckIssuer;
+#[expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
 use spate_core::coordination::driver::{SplitOpening, SplitSource};
 use spate_core::coordination::{LeaseEpoch, SplitId, SplitProgress, SplitSpec};
 use spate_core::error::{ErrorClass, SourceError};
@@ -313,6 +314,7 @@ impl SplitCtx {
     }
 }
 
+#[expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
 impl SplitSource for SplitCtx {
     type Lane = S3Lane;
 
@@ -652,6 +654,7 @@ impl SplitSource for SplitCtx {
 }
 
 #[cfg(test)]
+#[expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
 mod tests {
     use super::*;
 

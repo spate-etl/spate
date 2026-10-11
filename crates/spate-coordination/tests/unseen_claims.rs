@@ -2,6 +2,8 @@
 //! every split with the worker it was assigned to until that worker's claim
 //! reaches the leader.
 
+#![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
+
 mod support;
 
 use spate_coordination::{

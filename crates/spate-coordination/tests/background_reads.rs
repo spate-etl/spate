@@ -3,6 +3,8 @@
 //! listing older than what the view learned meanwhile neither drops a claim
 //! made since nor restores a lease deleted since.
 
+#![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
+
 mod support;
 
 use futures_util::StreamExt as _;

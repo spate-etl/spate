@@ -1,6 +1,8 @@
 //! The real coordinator after a lost claim reply whose read-back fails once,
 //! judged by the lost-reply check.
 
+#![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, Instant};

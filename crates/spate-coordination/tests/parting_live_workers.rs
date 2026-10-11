@@ -3,6 +3,8 @@
 //! Its own binary: the exporter installs a process-global recorder and the
 //! log capture a process-global subscriber.
 
+#![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
+
 mod support;
 
 use spate_coordination::SplitCoordinator as _;

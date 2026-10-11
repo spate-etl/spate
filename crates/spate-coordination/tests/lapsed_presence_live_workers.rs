@@ -1,6 +1,8 @@
 //! The fleet size a running worker reports after its own presence key lapsed.
 //!
 //! Its own binary: the exporter installs a process-global recorder.
+
+#![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
 mod support;
 
 use spate_coordination::SplitCoordinator as _;

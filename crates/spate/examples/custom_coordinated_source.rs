@@ -37,6 +37,7 @@
 
 // Examples talk to their user on stdout/stderr by design.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
+#![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
 
 use spate::checkpoint::{AckIssuer, AckRef};
 use spate::coordination::driver::{CoordinationDriver, SplitOpening, SplitSource};

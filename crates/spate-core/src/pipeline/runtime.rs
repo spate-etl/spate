@@ -185,6 +185,11 @@ impl<S: Source + 'static> PipelineRuntime<S> {
             return Err(StartError::Config("thread counts must be non-zero".into()));
         }
         if let Some(section) = &self.config.coordination {
+            tracing::warn!(
+                "the `coordination:` section is deprecated, and v0.4.0 removes it; a work feed \
+                 replaces split coordination (https://github.com/spate-etl/spate/issues/1088)"
+            );
+            #[expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
             self.source
                 .configure_coordination(section)
                 .map_err(|e| StartError::Config(e.to_string()))?;

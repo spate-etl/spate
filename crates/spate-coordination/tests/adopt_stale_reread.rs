@@ -1,6 +1,8 @@
 //! An election that adopts its own earlier bump from a plan re-read served
 //! by a lagging replica.
 
+#![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
+
 mod support;
 
 use futures_util::StreamExt as _;

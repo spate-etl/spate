@@ -2,6 +2,8 @@
 //! delete in either keyspace, and a correct store passes it while another
 //! process sharing the instance id probes too.
 
+#![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
+
 mod support;
 
 use spate_coordination::store::memory::MemoryStore;

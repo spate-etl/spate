@@ -8,6 +8,8 @@
 //! Workers never list; they read member objects straight from the split
 //! descriptors the planner wrote.
 
+#![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
+
 use crate::config::Compression;
 use crate::error::classify;
 use crate::fetch::{MAX_ATTEMPTS, list_all};

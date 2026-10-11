@@ -12,6 +12,16 @@ it; it carries split records, leases, and the plan, at roughly one small write
 per held split per third of a lease, so a handful of writes per second per
 worker.
 
+:::warning Deprecated
+The NATS JetStream store is deprecated with `spate-coordination`, and v0.4.0
+removes it. Source coordination's replacement is a work feed, where sources
+read work units from a queue that a lister and storage notifications fill. A
+coordinated job started on v0.3.0 has to finish on v0.3.0 or run again through
+the feed. The [work feed's tracking
+issue](https://github.com/spate-etl/spate/issues/1088) follows the
+replacement.
+:::
+
 Select it under `store:` in the pipeline's
 [`coordination:` section](../../../07-reference/configuration.mdx#coordination):
 

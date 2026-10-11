@@ -97,7 +97,8 @@ them wherever your source resumes from instead.
   stop and returns the partitions it still holds and whose commit it could
   not confirm. The runtime counts every other position as committed. An
   unconfirmed commit may or may not have been stored, and positions past the
-  stored one may replay.
+  stored one may replay. Deprecated with
+  [source coordination](#coordination-aware-sources), and v0.4.0 removes it.
 - **`pause`/`resume`** (default no-ops) are the backpressure hooks: stop
   and restart fetching for specific lanes. Sources that can't pause rely on
   bounded-queue pushback alone, but a pausable source keeps memory flat
@@ -105,7 +106,8 @@ them wherever your source resumes from instead.
 - **`configure_coordination`** receives the pipeline's `coordination:`
   section before `open`, when the file has one. The default rejects it, so
   only a [coordination-aware source](#coordination-aware-sources) overrides
-  it.
+  it. Deprecated with [source coordination](#coordination-aware-sources), and
+  v0.4.0 removes it.
 
 **Class a rejected credential or TLS handshake `Fatal`.** That covers a
 certificate your TLS stack fails to verify, a fatal TLS alert from the server
@@ -248,6 +250,17 @@ store, in one process and with nothing installed:
 ```sh
 cargo run -p spate --features coordination --example custom_coordinated_source
 ```
+
+:::warning Deprecated
+The coordination traits, `CoordinationDriver`, the
+`Source::configure_coordination` and `Source::commit_final` methods, and
+`spate-test`'s `scripted_coordinator` are deprecated, and v0.4.0 removes them.
+Overriding either method compiles without a warning. Source coordination's
+replacement is a work feed, where sources read work units from a queue that a
+lister and storage notifications fill. The [work feed's tracking
+issue](https://github.com/spate-etl/spate/issues/1088) follows the
+replacement.
+:::
 
 Every type named from here on lives under `spate::coordination`, with the
 driver and its callbacks in the `driver` submodule and the shipped stores

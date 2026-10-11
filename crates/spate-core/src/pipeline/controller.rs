@@ -645,6 +645,7 @@ fn commit_cycle<S: Source>(
         return;
     }
     let started = Instant::now();
+    #[expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
     let result = if final_pass {
         source.commit_final(&positions)
     } else {

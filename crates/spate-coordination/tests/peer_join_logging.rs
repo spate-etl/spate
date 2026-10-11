@@ -10,6 +10,8 @@
 //! One test in its own binary, because the capture below is a process-wide
 //! global subscriber and `cargo test` shares one process across a binary.
 
+#![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
+
 mod support;
 
 use spate_coordination::store::memory::MemoryStore;

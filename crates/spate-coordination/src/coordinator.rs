@@ -64,6 +64,10 @@ fn stopping_error(outcome: &str) -> CoordinationError {
 /// writes nothing, even if this worker has claimed the split again. The
 /// rejection emits no `Lost` and leaves the current tenancy held. A `Lost` that
 /// ended the earlier tenancy can still arrive on a later `poll`.
+#[deprecated(
+    since = "0.3.0",
+    note = "removed in v0.4.0, where a work feed replaces split coordination; see https://github.com/spate-etl/spate/issues/1088"
+)]
 pub struct StoreCoordinator<S: CoordinationStore + Clone> {
     store: S,
     config: CoordinationConfig,

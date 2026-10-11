@@ -2,6 +2,8 @@
 //! the coordinator: every steady-state call the store refuses outright is
 //! reported, never retried forever.
 
+#![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
+
 mod support;
 
 use spate_coordination::store::memory::MemoryStore;

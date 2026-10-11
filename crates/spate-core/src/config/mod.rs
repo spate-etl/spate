@@ -60,6 +60,8 @@
 //! assert_eq!(cfg.source.type_tag(), "memory");
 //! ```
 
+#![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
+
 mod chunk;
 mod component;
 mod coordination;

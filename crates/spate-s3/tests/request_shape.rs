@@ -10,6 +10,8 @@
 //! The metrics layer cannot stand in for the store: it counts bytes and
 //! objects, not requests.
 
+#![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
+
 mod support;
 
 use spate_coordination::StoreCoordinator;

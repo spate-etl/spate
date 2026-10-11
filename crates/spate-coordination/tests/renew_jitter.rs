@@ -1,5 +1,7 @@
 //! Split lease renewal under the heartbeat jitter.
 
+#![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
+
 mod support;
 
 use spate_coordination::store::memory::MemoryStore;

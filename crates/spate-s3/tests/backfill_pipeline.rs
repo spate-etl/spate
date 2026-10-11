@@ -14,6 +14,8 @@
 //! infrastructure-free stand-in for a durable backend, which is what
 //! makes resume-across-restart testable here.
 
+#![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
+
 mod support;
 
 use spate_core::pipeline::{ExitState, RuntimeOptions};

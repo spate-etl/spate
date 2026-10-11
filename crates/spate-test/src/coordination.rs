@@ -6,6 +6,8 @@
 //! script observes every commit, failure report, and release. There is no
 //! store and no clock, and behavior is deterministic.
 
+#![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
+
 use spate_core::coordination::ControlWaker;
 use spate_core::coordination::{
     CoordinationError, CoordinationErrorKind, CoordinationEvent, LeaseEpoch, SplitCoordinator,
@@ -32,6 +34,10 @@ struct State {
 /// A [`SplitCoordinator`] whose events and outcomes are scripted by the
 /// paired [`CoordinatorScript`]. Build both with [`scripted_coordinator`].
 #[derive(Debug)]
+#[deprecated(
+    since = "0.3.0",
+    note = "removed in v0.4.0, where a work feed replaces split coordination; see https://github.com/spate-etl/spate/issues/1088"
+)]
 pub struct ScriptedCoordinator {
     state: Arc<Mutex<State>>,
 }
@@ -43,6 +49,10 @@ pub struct ScriptedCoordinator {
 /// [`lose`](CoordinatorScript::lose) and a [`gain`](CoordinatorScript::gain)
 /// back to back to exercise same-batch interleavings.
 #[derive(Clone, Debug)]
+#[deprecated(
+    since = "0.3.0",
+    note = "removed in v0.4.0, where a work feed replaces split coordination; see https://github.com/spate-etl/spate/issues/1088"
+)]
 pub struct CoordinatorScript {
     state: Arc<Mutex<State>>,
 }
@@ -59,6 +69,10 @@ impl std::fmt::Debug for State {
 
 /// A scripted coordinator and its handle.
 #[must_use]
+#[deprecated(
+    since = "0.3.0",
+    note = "removed in v0.4.0, where a work feed replaces split coordination; see https://github.com/spate-etl/spate/issues/1088"
+)]
 pub fn scripted_coordinator() -> (ScriptedCoordinator, CoordinatorScript) {
     let state = Arc::new(Mutex::new(State::default()));
     (

@@ -28,6 +28,16 @@ The rest of this page is about the coordinated case: what a fleet does, what it
 costs, and how it fails. The store itself is a connector with its own page,
 where requirements, provisioning, and outage behavior live.
 
+:::warning Deprecated
+The coordinated case this page describes depends on source coordination, which
+is deprecated, and v0.4.0 removes it. Source coordination's replacement is a
+work feed, where sources read work units from a queue that a lister and
+storage notifications fill. A coordinated job started on v0.3.0 has to finish
+on v0.3.0 or run again through the feed. The [work feed's tracking
+issue](https://github.com/spate-etl/spate/issues/1088) follows the
+replacement.
+:::
+
 ## Deploying the fleet
 
 Each replica names its store and its identity in the pipeline file's

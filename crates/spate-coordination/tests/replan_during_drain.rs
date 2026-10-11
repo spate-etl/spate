@@ -1,5 +1,7 @@
 //! A leader that republishes while a split it moved is still draining.
 
+#![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
+
 mod support;
 
 use spate_coordination::{PlanFinality, PlannedSplit, SplitCoordinator as _, SplitId, SplitSpec};

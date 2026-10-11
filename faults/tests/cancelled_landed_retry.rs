@@ -1,6 +1,8 @@
 //! The real coordinator after a lost commit reply whose retry lands with its
 //! reply cancelled at `op_timeout`, judged by the lost-reply check.
 
+#![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};

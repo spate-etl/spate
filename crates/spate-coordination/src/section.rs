@@ -21,6 +21,10 @@ type Build = Box<
 /// [`build`](Self::build) runs later, once the source has its metrics scope.
 /// The store's lease TTL and the coordinator's `lease_duration` are the same
 /// value by construction.
+#[deprecated(
+    since = "0.3.0",
+    note = "removed in v0.4.0, where a work feed replaces split coordination; see https://github.com/spate-etl/spate/issues/1088"
+)]
 pub struct CoordinatorSpec {
     build: Build,
 }

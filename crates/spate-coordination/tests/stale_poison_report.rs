@@ -2,6 +2,8 @@
 //! fail a later tenancy of the same split. Real `StoreCoordinator` over a
 //! `MemoryStore` on a test clock, driven by the real `CoordinationDriver`.
 
+#![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
+
 mod support;
 
 use spate_coordination::store::memory::MemoryStore;

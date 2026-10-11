@@ -88,6 +88,10 @@ impl Inner {
 
 /// See the [module docs](self).
 #[derive(Clone, Debug)]
+#[deprecated(
+    since = "0.3.0",
+    note = "removed in v0.4.0, where a work feed replaces split coordination; see https://github.com/spate-etl/spate/issues/1088"
+)]
 pub struct MemoryStore {
     inner: Arc<Inner>,
 }

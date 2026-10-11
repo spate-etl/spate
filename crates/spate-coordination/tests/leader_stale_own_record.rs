@@ -1,5 +1,7 @@
 //! A leader's own assignment record overwritten at an older generation.
 
+#![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
+
 mod support;
 
 use spate_coordination::SplitCoordinator as _;

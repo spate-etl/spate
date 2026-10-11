@@ -17,6 +17,7 @@ pub use barrier::DrainBarrier;
 
 use crate::checkpoint::AckIssuer;
 use crate::checkpoint::AckRef;
+#[expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
 use crate::config::{ConfigError, CoordinationSection};
 use crate::error::SourceError;
 use crate::framing::FramingContract;
@@ -305,6 +306,11 @@ pub trait Source: Send {
     /// A coordinated source validates the section here and builds its
     /// coordinator from it in `open`. The default rejects the section, so a
     /// source that does not coordinate fails at startup when one is set.
+    #[deprecated(
+        since = "0.3.0",
+        note = "removed in v0.4.0, where a work feed replaces split coordination; see https://github.com/spate-etl/spate/issues/1088"
+    )]
+    #[expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
     fn configure_coordination(&mut self, section: &CoordinationSection) -> Result<(), ConfigError> {
         let _ = section;
         Err(ConfigError::Component {
@@ -338,6 +344,10 @@ pub trait Source: Send {
     /// source no longer holds. `Err` counts none of them as committed, and a
     /// fatal error fails the run. An unconfirmed commit may or may not have
     /// been stored, and positions past the stored one may replay.
+    #[deprecated(
+        since = "0.3.0",
+        note = "removed in v0.4.0, where a work feed replaces split coordination; see https://github.com/spate-etl/spate/issues/1088"
+    )]
     fn commit_final(
         &mut self,
         watermarks: &[(PartitionId, i64)],

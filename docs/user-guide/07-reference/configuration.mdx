@@ -263,6 +263,15 @@ not coordinate, the section fails startup. These keys are checked when
 the pipeline starts, before the source opens and before the pipeline threads
 run.
 
+:::warning Deprecated
+The `coordination:` section is deprecated, and v0.4.0 removes it. A pipeline
+started with it logs a warning, and on v0.4.0 a file that keeps it fails to
+load. Source coordination's replacement is a work feed, where sources read
+work units from a queue that a lister and storage notifications fill. The
+[work feed's tracking issue](https://github.com/spate-etl/spate/issues/1088)
+follows the replacement.
+:::
+
 ```yaml
 coordination:
   instance_id: "${POD_NAME}"

@@ -4,6 +4,8 @@
 //! objects, and the script observes every commit, failure report, and
 //! release. Deterministic, no store, no clock.
 
+#![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
+
 mod support;
 
 use spate_core::coordination::{CoordinationErrorKind, LeaseEpoch, SplitProgress, SplitSpec};

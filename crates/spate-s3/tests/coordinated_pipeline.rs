@@ -6,6 +6,8 @@
 //! once (union), with the leader's single LIST as the fleet's only
 //! enumeration.
 
+#![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
+
 mod support;
 
 use spate_core::pipeline::ExitState;

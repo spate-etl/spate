@@ -23,6 +23,12 @@
 //!
 //! Custom backends (Redis, etcd) implement the store trait; the protocol,
 //! fencing, election, and work assignment live above it and are shared.
+//!
+//! This crate and every public item it defines are deprecated. v0.4.0 removes
+//! them, and a work feed replaces split coordination
+//! ([#1088](https://github.com/spate-etl/spate/issues/1088)).
+
+#![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
 
 pub use spate_core::coordination::*;
 
@@ -52,6 +58,10 @@ pub use section::CoordinatorSpec;
 
 /// [`StoreCoordinator`] over the in-memory store: tests and
 /// single-process embedding.
+#[deprecated(
+    since = "0.3.0",
+    note = "removed in v0.4.0, where a work feed replaces split coordination; see https://github.com/spate-etl/spate/issues/1088"
+)]
 pub type MemoryCoordinator = StoreCoordinator<store::memory::MemoryStore>;
 
 /// [`StoreCoordinator`] over NATS JetStream KV: the production backend
@@ -59,4 +69,8 @@ pub type MemoryCoordinator = StoreCoordinator<store::memory::MemoryStore>;
 /// [`NatsStore::new`](store::nats::NatsStore::new). Construction is
 /// synchronous; the connection is made lazily under the startup budget.
 #[cfg(feature = "nats")]
+#[deprecated(
+    since = "0.3.0",
+    note = "removed in v0.4.0, where a work feed replaces split coordination; see https://github.com/spate-etl/spate/issues/1088"
+)]
 pub type NatsCoordinator = StoreCoordinator<store::nats::NatsStore>;

@@ -1,6 +1,8 @@
 //! A store handle kept after its coordinator drops leaves the coordination
 //! series free for the next coordinator.
 
+#![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
+
 mod support;
 
 use spate_coordination::StoreCoordinator;

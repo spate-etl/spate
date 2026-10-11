@@ -20,6 +20,10 @@ use std::time::Duration;
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
+#[deprecated(
+    since = "0.3.0",
+    note = "removed in v0.4.0, where a work feed replaces split coordination; see https://github.com/spate-etl/spate/issues/1088"
+)]
 pub struct CoordinationConfig {
     /// How long a lease outlives its last heartbeat, on the store's clock. A
     /// dead worker's split moves once the leader has seen its lease expire,

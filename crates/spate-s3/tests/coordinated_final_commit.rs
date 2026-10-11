@@ -2,6 +2,8 @@
 //! in-process store, committed by a healthy store and bounded by
 //! `op_timeout` over one that stops answering, before or after the stop.
 
+#![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
+
 mod support;
 
 use spate_coordination::StoreCoordinator;

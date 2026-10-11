@@ -1,4 +1,6 @@
 //! Conditional leader-key cleanup through the public release path.
+
+#![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
 mod support;
 
 use spate_coordination::store::memory::MemoryStore;

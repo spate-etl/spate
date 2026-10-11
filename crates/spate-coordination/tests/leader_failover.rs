@@ -2,6 +2,8 @@
 //! idempotent replanning, open plans that grow across replan ticks, and
 //! elections over a final plan, which run no planner.
 
+#![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
+
 mod support;
 
 use spate_coordination::store::{CoordinationStore as _, Keyspace};

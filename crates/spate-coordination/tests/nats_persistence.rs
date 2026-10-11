@@ -1,5 +1,6 @@
 //! Adoption diagnostics and configuration preservation on a real NATS server.
 #![cfg(feature = "nats")]
+#![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
 
 use async_nats::jetstream::{Context, stream};
 use spate_coordination::store::nats::{NatsConfig, NatsStore};

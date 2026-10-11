@@ -47,6 +47,7 @@
 // Workers and the harness report on stderr, which the harness keeps per
 // process.
 #![allow(clippy::print_stderr)]
+#![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
 
 pub mod classify;
 pub mod expect;

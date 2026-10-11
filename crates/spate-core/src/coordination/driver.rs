@@ -45,6 +45,8 @@
 //!    so the runtime chases the final acks instead of waiting out its
 //!    commit tick.
 
+#![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
+
 use super::{
     ControlWaker, CoordinationError, CoordinationErrorKind, CoordinationEvent, LeaseEpoch,
     SplitCoordinator, SplitId, SplitPlanner, SplitProgress, SplitSpec,
@@ -88,6 +90,10 @@ pub struct SplitOpening<'a> {
 /// holds what lane construction needs), not on the source itself. The
 /// driver lives beside that context as a sibling field, so both can be
 /// borrowed disjointly.
+#[deprecated(
+    since = "0.3.0",
+    note = "removed in v0.4.0, where a work feed replaces split coordination; see https://github.com/spate-etl/spate/issues/1088"
+)]
 pub trait SplitSource {
     /// The data-plane lane type produced for gained splits.
     type Lane: SourceLane;
@@ -266,6 +272,10 @@ struct QueuedReport {
 
 /// Source-side coordination choreography, embedded by a coordinated
 /// source; see the [module docs](self) for the protocol it implements.
+#[deprecated(
+    since = "0.3.0",
+    note = "removed in v0.4.0, where a work feed replaces split coordination; see https://github.com/spate-etl/spate/issues/1088"
+)]
 pub struct CoordinationDriver {
     coordinator: Box<dyn SplitCoordinator>,
     /// Parking half of the control-plane wakeup; the waker half is held by

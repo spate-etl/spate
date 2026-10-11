@@ -11,6 +11,16 @@ of this; a source that does not gets its scale-out story from
 [source coordination](../../02-concepts/07-source-coordination.mdx) and one of
 the stores below.
 
+:::warning Deprecated
+The coordination stores and `spate-coordination` are deprecated, and v0.4.0
+removes them. Source coordination's replacement is a work feed, where sources
+read work units from a queue that a lister and storage notifications fill. A
+coordinated job started on v0.3.0 has to finish on v0.3.0 or run again through
+the feed. The [work feed's tracking
+issue](https://github.com/spate-etl/spate/issues/1088) follows the
+replacement.
+:::
+
 | Store | `store:` key | Feature on `spate` | Summary |
 |---|---|---|---|
 | [NATS JetStream](nats/README.mdx) | `nats` | `coordination-nats` | The production backend. Two KV buckets per job; leases ride per-message age limits. |

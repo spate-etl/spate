@@ -1,6 +1,8 @@
 //! A failure report after this worker's own completing commit whose reply was
 //! lost.
 
+#![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
+
 mod support;
 
 use spate_coordination::store::memory::MemoryStore;

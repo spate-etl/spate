@@ -3,6 +3,8 @@
 //! the real coordinator through the public API; the fault store is a
 //! [`CoordinationStore`] like any custom backend.
 
+#![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
+
 mod support;
 
 use futures_util::StreamExt;

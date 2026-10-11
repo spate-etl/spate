@@ -1,6 +1,8 @@
 //! Toxiproxy on a Docker network shared with the store it proxies. Needs
 //! Docker and is ignored by default; run it with `cargo xtask fault-test`.
 
+#![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
+
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use spate_coordination::store::nats::{NatsConfig, NatsStore};

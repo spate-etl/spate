@@ -75,6 +75,10 @@ const SUBJECT_PAGE_OVERLAP: usize = 1024;
 /// A secret that never prints: `Debug`/`Display` render `<redacted>`.
 #[derive(Clone, Deserialize)]
 #[serde(transparent)]
+#[deprecated(
+    since = "0.3.0",
+    note = "removed in v0.4.0, where a work feed replaces split coordination; see https://github.com/spate-etl/spate/issues/1088"
+)]
 pub struct Secret(String);
 
 impl Secret {
@@ -108,6 +112,10 @@ impl fmt::Display for Secret {
 /// `{ creds_file: … }`. The YAML-tagged forms (`!token …`) parse too.
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
+#[deprecated(
+    since = "0.3.0",
+    note = "removed in v0.4.0, where a work feed replaces split coordination; see https://github.com/spate-etl/spate/issues/1088"
+)]
 pub enum NatsCredentials {
     /// Anonymous (dev clusters).
     #[default]
@@ -216,6 +224,10 @@ impl<'de> Deserialize<'de> for NatsCredentials {
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
+#[deprecated(
+    since = "0.3.0",
+    note = "removed in v0.4.0, where a work feed replaces split coordination; see https://github.com/spate-etl/spate/issues/1088"
+)]
 pub struct NatsTls {
     /// PEM bundle of root CAs trusted in addition to the system trust store.
     pub root_ca: Option<PathBuf>,
@@ -235,6 +247,10 @@ pub struct NatsTls {
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
+#[deprecated(
+    since = "0.3.0",
+    note = "removed in v0.4.0, where a work feed replaces split coordination; see https://github.com/spate-etl/spate/issues/1088"
+)]
 pub struct NatsConfig {
     /// Server URLs (`nats://host:4222`, `tls://...`, `ws://...`, `wss://...`).
     /// At least one.
@@ -388,6 +404,10 @@ impl fmt::Debug for Lazy {
 
 /// See the [module docs](self).
 #[derive(Clone, Debug)]
+#[deprecated(
+    since = "0.3.0",
+    note = "removed in v0.4.0, where a work feed replaces split coordination; see https://github.com/spate-etl/spate/issues/1088"
+)]
 pub struct NatsStore {
     inner: Arc<Lazy>,
 }

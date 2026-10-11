@@ -1,6 +1,8 @@
 //! A plan run whose seeding fails partway. Its own test binary because it
 //! installs the process-wide metrics recorder.
 
+#![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
+
 mod support;
 
 use futures_util::StreamExt as _;

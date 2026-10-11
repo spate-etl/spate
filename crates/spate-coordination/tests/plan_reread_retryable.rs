@@ -1,6 +1,8 @@
 //! An election whose fence CAS loses and whose plan-record re-read then
 //! fails Retryable.
 
+#![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
+
 mod support;
 
 use spate_coordination::store::memory::MemoryStore;

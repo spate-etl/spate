@@ -7,6 +7,8 @@
 //! a [`TapStore`] that hides it, and the reconcile interval is long, so only
 //! the read under test can bring the view up to date.
 
+#![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
+
 mod support;
 
 use spate_coordination::store::memory::MemoryStore;

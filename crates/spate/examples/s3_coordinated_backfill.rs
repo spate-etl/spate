@@ -26,6 +26,7 @@
 
 // Examples talk to their user on stdout/stderr by design.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
+#![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
 
 use spate::coordination::store::memory::MemoryStore;
 use spate::coordination::{CoordinationConfig, StoreCoordinator};

@@ -1,5 +1,7 @@
 //! A generation bump whose plan write applies while its reply is lost.
 
+#![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
+
 mod support;
 
 use futures_util::StreamExt as _;

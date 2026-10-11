@@ -10,6 +10,7 @@
 //! cargo test -p spate-coordination --test nats_integration -- --ignored
 //! ```
 #![cfg(feature = "nats")]
+#![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
 
 mod support;
 #[macro_use]

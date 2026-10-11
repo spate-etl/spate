@@ -1,6 +1,8 @@
 //! Failure reports that quarantine a split, over a store that loses a reply
 //! or rejects a request.
 
+#![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
+
 mod support;
 
 use spate_coordination::store::memory::MemoryStore;

@@ -1,6 +1,8 @@
 //! The `coordination:` section: coordinator tuning plus the store that
 //! coordinated instances of one job share.
 
+#![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
+
 use super::redact;
 use super::{ComponentConfig, ConfigError, YamlValue};
 use serde::Deserialize;
@@ -23,6 +25,10 @@ use std::fmt;
 ///     nats: { servers: ["nats://nats:4222"], job: exports-backfill }
 /// ```
 #[derive(Clone, PartialEq)]
+#[deprecated(
+    since = "0.3.0",
+    note = "removed in v0.4.0, where a work feed replaces split coordination; see https://github.com/spate-etl/spate/issues/1088"
+)]
 pub struct CoordinationSection {
     store: ComponentConfig,
     tuning: YamlValue,

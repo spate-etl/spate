@@ -1,6 +1,8 @@
 //! `bytes_read_total` for a ranged split. Its own test binary because it
 //! installs the process-wide metrics recorder.
 
+#![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
+
 mod support;
 
 use spate_core::metrics::{Exporter, MetricsSettings, install};

@@ -10,6 +10,16 @@ the substrate (splits, leases, fencing, quarantine, completion) and is
 deliberately separate, because that substrate has outlived three different
 assignment algorithms.
 
+:::warning Deprecated
+The work assignment on this page is part of source coordination, which is
+deprecated, and v0.4.0 removes it. Source coordination's replacement is a work
+feed, where sources read work units from a queue that a lister and storage
+notifications fill. A coordinated job started on v0.3.0 has to finish on
+v0.3.0 or run again through the feed. The [work feed's tracking
+issue](https://github.com/spate-etl/spate/issues/1088) follows the
+replacement.
+:::
+
 If the code and this page disagree, one of them is a bug. The
 [invariants](#invariants) below name the tests that enforce them.
 

@@ -11,6 +11,15 @@ scans, file tails) have no group protocol. Two processes pointed at the
 same input each see *all* of it, so scaling out means duplicating every
 record.
 
+:::warning Deprecated
+Source coordination is deprecated, and v0.4.0 removes it. Its replacement is a
+work feed, where sources read work units from a queue that a lister and
+storage notifications fill. A coordinated job started on v0.3.0 has to finish
+on v0.3.0 or run again through the feed. The [work feed's tracking
+issue](https://github.com/spate-etl/spate/issues/1088) follows the
+replacement.
+:::
+
 The coordination layer closes that gap with a **leader-assigned
 coordinator–worker model**. It is not a data path (records never flow
 through it), and it is not a new deployable, since every pipeline replica

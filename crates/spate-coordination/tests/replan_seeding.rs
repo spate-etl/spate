@@ -1,6 +1,8 @@
 //! Leader seeding: which splits a plan run writes to the store, and how
 //! many of those writes it keeps in flight.
 
+#![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
+
 mod support;
 
 use spate_coordination::store::{CoordinationStore as _, Keyspace};

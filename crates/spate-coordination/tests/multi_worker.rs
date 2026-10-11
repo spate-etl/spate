@@ -6,6 +6,8 @@
 //! [`PolledStore`](support::polled::PolledStore), which delivers changes by
 //! polling. The scenarios below need a frozen clock and run here only.
 
+#![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
+
 mod support;
 #[macro_use]
 mod scenarios;

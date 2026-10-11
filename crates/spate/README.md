@@ -9,7 +9,7 @@ Prometheus metrics.
 
 ```toml
 [dependencies]
-spate = { version = "0.2", features = ["kafka", "clickhouse", "avro"] }
+spate = { version = "0.3", features = ["kafka", "clickhouse", "avro"] }
 ```
 
 This crate re-exports the engine and every connector behind a feature flag, so

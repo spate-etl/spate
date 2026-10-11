@@ -12,10 +12,12 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 /// The version `Cargo.toml` declares, which a baseline is compared against.
-const TREE: &str = "0.2.0";
+/// Read from the manifest: the binary under test reads the same file, and the
+/// release commit moves it.
+const TREE: &str = env!("CARGO_PKG_VERSION");
 
-/// The newest release tag the `git` shim reports.
-const TAG: &str = "v0.2.0";
+/// The newest release tag the `git` shim reports, naming the tree's version.
+const TAG: &str = concat!("v", env!("CARGO_PKG_VERSION"));
 
 /// One live index entry per version, newest published last.
 fn index(versions: &[(&str, bool)]) -> String {
@@ -803,6 +805,7 @@ fn a_plain_fragment_does_not_excuse_a_break() {
 #[test]
 fn a_release_awaiting_its_tag_excuses_through_its_section() {
     let shim = Shim::new("awaiting-tag");
+    shim.fixture("git.tags", "v0.2.0\nv0.1.0\n");
     shim.shows("Cargo.toml", "[workspace.package]\nversion = \"0.3.0\"\n");
     shim.shows(
         "CHANGELOG.md",

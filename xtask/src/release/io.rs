@@ -419,7 +419,7 @@ impl Forge for Gh<'_> {
         self.run(
             &Step::new("gh", ["pr", "merge"])
                 .arg(number.to_string())
-                .args(["--auto", "--squash", "--delete-branch"]),
+                .args(["--auto", "--squash"]),
         )
         .map_err(|_| {
             Error::msg(format!(

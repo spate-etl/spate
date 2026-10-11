@@ -11,5 +11,5 @@ Overriding `commit_final` does not warn. A pipeline started with a
 `coordination:` section logs a warning, including a solo run that uses the
 section for tuning. Version 0.4.0 removes all of this in favour of a work feed
 ([#1088]), so a coordinated job started on 0.3.0 has to finish on 0.3.0 or run
-again through the feed. [#DEFECTS] lists the known defects in the deprecated
+again through the feed. [#1111] lists the known defects in the deprecated
 crate.

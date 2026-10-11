@@ -4596,3 +4596,85 @@ fn a_decline_at_the_stop_leaves_the_revocation_pending() {
         .any(|e| matches!(&e, CoordinationEvent::Lost { split } if *split == revoked));
     assert!(!lost, "the revocation was forced");
 }
+
+/// Commits `completed(7, s1)` on `c0` with its reply lost, then waits until
+/// the task's durable watch has applied the stored record.
+fn ambiguous_completing_then_fold(
+    rt: &tokio::runtime::Runtime,
+    fault: &FaultStore,
+    a: &mut StoreCoordinator<FaultStore>,
+) {
+    arm_ambiguous(fault, "split.c0");
+    let first = a.commit(
+        &support::split_id("c0"),
+        &SplitProgress::completed(7, b"s1".to_vec()),
+    );
+    assert!(
+        is_kind(&first, CoordinationErrorKind::Retryable),
+        "{first:?}"
+    );
+    let stored = rt
+        .block_on(fault.inner.get(Keyspace::Durable, "split.c0"))
+        .unwrap()
+        .unwrap()
+        .revision;
+    let probe = a.loop_probe();
+    spate_test::wait_until(
+        support::DEADLINE,
+        "the task folds the stored record",
+        || probe.state().is_some_and(|s| s.durable >= stored),
+    );
+}
+
+/// A completing commit resent after its first send was stored, answered
+/// `Retryable` and folded from the watch, returns `Ok` without `Lost`.
+/// Regression for #992.
+#[test]
+fn a_resent_completing_commit_after_a_folded_ambiguous_one_is_ok() {
+    let rt = runtime();
+    let fault = FaultStore::new(LEASE);
+    let mut a = holding(&rt, &fault, config_for(LEASE, Some("worker-a")), &["c0"]);
+    ambiguous_completing_then_fold(&rt, &fault, &mut a);
+    let next = a.commit(
+        &support::split_id("c0"),
+        &SplitProgress::completed(7, b"s1".to_vec()),
+    );
+    let record = fault.record(&rt, "split.c0");
+    let lost = lost_queued(&mut a, "c0");
+    assert!(
+        next.is_ok() && record["completed"] == true && !lost,
+        "commit returned {next:?}; record {record}; Lost: {lost}"
+    );
+}
+
+/// A completing commit resent after a stop cut its first send short and that
+/// send then landed returns `Fenced` without `Lost`, leaving the split
+/// completed.
+/// Regression for #992.
+#[test]
+fn a_resent_completing_commit_after_a_cut_short_one_is_fenced_without_lost() {
+    let rt = runtime();
+    let store = FaultStore::new(STOP_LEASE);
+    let (mut a, flag) = stopping_worker(&rt, &store);
+    let release = store.hold("split.c0", &flag);
+    let first = a.commit(
+        &support::split_id("c0"),
+        &SplitProgress::completed(5, vec![]),
+    );
+    assert!(
+        is_stopping(&first, "this command may still land"),
+        "{first:?}"
+    );
+    release.notify_one();
+    flag.store(false, Ordering::SeqCst);
+    let again = a.commit(
+        &support::split_id("c0"),
+        &SplitProgress::completed(5, vec![]),
+    );
+    let record = store.record(&rt, "split.c0");
+    let lost = lost_queued(&mut a, "c0");
+    assert!(
+        is_kind(&again, CoordinationErrorKind::Fenced) && !lost && record["completed"] == true,
+        "commit returned {again:?}; record {record}; Lost: {lost}"
+    );
+}

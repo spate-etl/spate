@@ -643,12 +643,10 @@ pub trait SplitCoordinator: Send {
     /// A commit on a split this instance no longer holds (including one
     /// whose completing commit returned `Ok`) returns `Fenced` without a
     /// following [`Lost`](CoordinationEvent::Lost) event. `Lost` marks an
-    /// involuntary end of a live tenancy, and there is none. After a
-    /// completing commit that returned `Retryable`, a completing commit at
-    /// the same watermark returns `Ok`, and any other commit returns
-    /// `Fenced` without `Lost` if the first one was stored. (The
-    /// [`CoordinationDriver`](driver::CoordinationDriver) never issues
-    /// such commits; hand-rolled callers must tolerate the error.)
+    /// involuntary end of a live tenancy, and there is none. Resending a
+    /// completing commit that returned `Retryable` returns `Ok`, or
+    /// `Fenced` without `Lost` if the first one was stored. Callers must
+    /// tolerate the error.
     fn commit(
         &mut self,
         split: &SplitId,

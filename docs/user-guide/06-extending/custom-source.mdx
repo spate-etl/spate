@@ -255,7 +255,7 @@ cargo run -p spate --features coordination --example custom_coordinated_source
 The coordination traits, `CoordinationDriver`, the
 `Source::configure_coordination` and `Source::commit_final` methods, and
 `spate-test`'s `scripted_coordinator` are deprecated, and v0.4.0 removes them.
-Overriding either method compiles without a warning. Source coordination's
+Overriding `commit_final` compiles without a warning. Source coordination's
 replacement is a work feed, where sources read work units from a queue that a
 lister and storage notifications fill. The [work feed's tracking
 issue](https://github.com/spate-etl/spate/issues/1088) follows the

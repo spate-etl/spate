@@ -145,8 +145,8 @@ fn deprecation_lines(capture: &LogCapture, from: usize) -> Vec<String> {
 fn assert_one_warn(lines: &[String], run: &str) {
     assert_eq!(lines.len(), 1, "{run}: one deprecation line, got {lines:?}");
     assert!(
-        lines[0].contains("WARN") && lines[0].contains("v0.4.0"),
-        "{run}: the line is a WARN naming v0.4.0: {}",
+        lines[0].contains("WARN") && lines[0].contains("v0.4.0") && lines[0].contains("work feed"),
+        "{run}: the line is a WARN naming v0.4.0 and the work feed: {}",
         lines[0]
     );
 }

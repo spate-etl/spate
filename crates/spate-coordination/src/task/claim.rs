@@ -243,6 +243,23 @@ impl<S: CoordinationStore + Clone> Task<S> {
         id: &str,
         kind: ClaimKind,
     ) -> Result<(), CoordinationError> {
+        if kind == ClaimKind::Expired {
+            // Only a lease the store reads as absent or expired is a death.
+            match self
+                .store
+                .get(Keyspace::Ephemeral, &records::split_key_str(id))
+                .await
+            {
+                Ok(Some(entry)) if self.own_lease_epoch(&entry.value).is_none() => return Ok(()),
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::debug!(split = %id, error = %e, "lease read before a quarantine failed; next tick retries");
+                    fatal_only("reading a lease before quarantining", &e)?;
+                    self.quarantine_scan = true;
+                    return Ok(());
+                }
+            }
+        }
         let Some(state) = self.splits.get(id) else {
             return Ok(());
         };

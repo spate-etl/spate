@@ -1076,3 +1076,224 @@ async fn a_lease_write_under_this_id_on_a_last_attempt_is_fatal() {
     task.apply_lease_put(&put("spare", 1)).unwrap();
     task.apply_lease_put(&put("spare", 2)).unwrap();
 }
+
+/// Asserts that `peer`, holding split `s`'s record at `(attempts, epoch)`,
+/// leaves `s` runnable when it sees w1's claim of the record before w1's
+/// lease.
+async fn record_before_lease(peer: &str, max_attempts: u32, attempts: u32, epoch: u64) {
+    let clock = TestClock::frozen();
+    let cfg = CoordinationConfig {
+        max_attempts,
+        ..CoordinationConfig::default()
+    };
+    let store = MemoryStore::with_clock(cfg.lease_duration, clock.clone());
+    let fp = records::fingerprint_hash(FINGERPRINT);
+    let id = SplitId::new("s").unwrap();
+    let key = records::split_key_str("s");
+    let mut planned = SplitProgressRecord::planned(&id, fp, None);
+    planned.attempts = attempts;
+    planned.epoch = epoch;
+    let rev0 = create(&store, Keyspace::Durable, &key, planned.encode()).await;
+    let (_commands, commands_rx) = mpsc::channel(8);
+    let (events_tx, _events) = std_mpsc::channel();
+    let mut p2 = Task::new(
+        store.clone(),
+        cfg,
+        clock,
+        FINGERPRINT.to_string(),
+        peer.into(),
+        uuid::Uuid::new_v4().simple().to_string(),
+        Box::new(Planner),
+        None,
+        commands_rx,
+        events_tx,
+        None,
+    );
+    p2.apply_state_put(&Entry {
+        key: key.clone(),
+        value: planned.encode(),
+        revision: rev0,
+    })
+    .unwrap();
+
+    // The claimant w1 writes its lease, then CASes the record.
+    let p1_nonce = uuid::Uuid::new_v4().simple().to_string();
+    let lease_rev = create(
+        &store,
+        Keyspace::Ephemeral,
+        &key,
+        lease_val("w1", &p1_nonce, epoch + 1),
+    )
+    .await;
+    let mut claimed = planned.clone();
+    claimed.owner = Some("w1".into());
+    claimed.epoch = epoch + 1;
+    let rev1 = store
+        .update(Keyspace::Durable, &key, claimed.encode(), rev0)
+        .await
+        .unwrap()
+        .won()
+        .unwrap();
+
+    // The peer's state stream delivers the record before its lease stream delivers the lease.
+    p2.apply_state_put(&Entry {
+        key: key.clone(),
+        value: claimed.encode(),
+        revision: rev1,
+    })
+    .unwrap();
+    p2.reconcile_assignment().await.unwrap();
+    let after = p2.apply_lease_put(&Entry {
+        key: key.clone(),
+        value: lease_val("w1", &p1_nonce, epoch + 1),
+        revision: lease_rev,
+    });
+
+    let stored = store.get(Keyspace::Durable, &key).await.unwrap().unwrap();
+    let stored = SplitProgressRecord::parse(&key, &stored.value, fp).unwrap();
+    assert_eq!(
+        stored.status,
+        crate::records::SplitStatus::Runnable,
+        "peer {peer} quarantined a live claimant's split: {stored:?}; lease put then gave {after:?}"
+    );
+}
+
+/// A peer that sees a first claim's record before its lease, under
+/// `max_attempts: 1`, keeps the split runnable. Regression for #1052.
+#[tokio::test]
+async fn a_peer_keeps_a_first_claim_whose_lease_it_has_not_seen() {
+    record_before_lease("w2", 1, 0, 0).await;
+}
+
+/// A twin under the claimant's instance id, with another nonce, keeps the
+/// split runnable in the same order. Regression for #1052.
+#[tokio::test]
+async fn a_twin_keeps_a_first_claim_whose_lease_it_has_not_seen() {
+    record_before_lease("w1", 1, 0, 0).await;
+}
+
+/// A peer that sees a released split's claim at `attempts: 3` before its
+/// lease, under the default cap, keeps the split runnable. Regression for
+/// #1052.
+#[tokio::test]
+async fn a_peer_keeps_a_last_attempt_claim_whose_lease_it_has_not_seen() {
+    record_before_lease("w2", 4, 3, 3).await;
+}
+
+/// A memory store whose ephemeral reads fail with a retryable error while
+/// `fail` is set.
+#[derive(Clone)]
+struct FailLeaseReads {
+    memory: MemoryStore,
+    fail: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl CoordinationStore for FailLeaseReads {
+    fn lease_ttl(&self) -> Duration {
+        self.memory.lease_ttl()
+    }
+    fn watch_mode(&self) -> WatchMode {
+        self.memory.watch_mode()
+    }
+    fn op_timeout(&self) -> Option<Duration> {
+        self.memory.op_timeout()
+    }
+    fn attach_metrics(&self, metrics: &spate_core::metrics::CoordinationMetrics) {
+        self.memory.attach_metrics(metrics);
+    }
+    async fn create(
+        &self,
+        ks: Keyspace,
+        key: &str,
+        value: Vec<u8>,
+    ) -> Result<crate::store::CasOutcome, StoreError> {
+        self.memory.create(ks, key, value).await
+    }
+    async fn update(
+        &self,
+        ks: Keyspace,
+        key: &str,
+        value: Vec<u8>,
+        expected: Revision,
+    ) -> Result<crate::store::CasOutcome, StoreError> {
+        self.memory.update(ks, key, value, expected).await
+    }
+    async fn get(&self, ks: Keyspace, key: &str) -> Result<Option<Entry>, StoreError> {
+        if ks == Keyspace::Ephemeral && self.fail.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(StoreError::Retryable("lease read failed".into()));
+        }
+        self.memory.get(ks, key).await
+    }
+    async fn delete(
+        &self,
+        ks: Keyspace,
+        key: &str,
+        expected: Option<Revision>,
+    ) -> Result<crate::store::CasOutcome, StoreError> {
+        self.memory.delete(ks, key, expected).await
+    }
+    async fn list(&self, ks: Keyspace, prefix: &str) -> Result<Vec<Entry>, StoreError> {
+        self.memory.list(ks, prefix).await
+    }
+    async fn watch(&self, ks: Keyspace, prefix: &str) -> Result<WatchStream, StoreError> {
+        self.memory.watch(ks, prefix).await
+    }
+}
+
+/// A failed lease read leaves a split whose owner shows no lease runnable
+/// and re-arms the quarantine scan; once reads recover, the next reconcile
+/// quarantines it. Regression for #1052.
+#[tokio::test]
+async fn a_failed_lease_read_defers_the_quarantine() {
+    let clock = TestClock::frozen();
+    let cfg = CoordinationConfig {
+        max_attempts: 1,
+        ..CoordinationConfig::default()
+    };
+    let memory = MemoryStore::with_clock(cfg.lease_duration, clock.clone());
+    let fail = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let fp = records::fingerprint_hash(FINGERPRINT);
+    let key = records::split_key_str("s");
+    let mut dead = SplitProgressRecord::planned(&SplitId::new("s").unwrap(), fp, None);
+    dead.owner = Some("w1".into());
+    dead.epoch = 1;
+    let rev = create(&memory, Keyspace::Durable, &key, dead.encode()).await;
+    let (_commands, commands_rx) = mpsc::channel(8);
+    let (events_tx, _events) = std_mpsc::channel();
+    let mut task = Task::new(
+        FailLeaseReads {
+            memory: memory.clone(),
+            fail: fail.clone(),
+        },
+        cfg,
+        clock,
+        FINGERPRINT.to_string(),
+        "w2".into(),
+        uuid::Uuid::new_v4().simple().to_string(),
+        Box::new(Planner),
+        None,
+        commands_rx,
+        events_tx,
+        None,
+    );
+    task.apply_state_put(&Entry {
+        key: key.clone(),
+        value: dead.encode(),
+        revision: rev,
+    })
+    .unwrap();
+    let status = async || {
+        let stored = memory.get(Keyspace::Durable, &key).await.unwrap().unwrap();
+        SplitProgressRecord::parse(&key, &stored.value, fp)
+            .unwrap()
+            .status
+    };
+
+    task.reconcile_assignment().await.unwrap();
+    assert_eq!(status().await, crate::records::SplitStatus::Runnable);
+    assert!(task.quarantine_scan, "a failed read re-arms the scan");
+
+    fail.store(false, std::sync::atomic::Ordering::SeqCst);
+    task.reconcile_assignment().await.unwrap();
+    assert_eq!(status().await, crate::records::SplitStatus::Quarantined);
+}

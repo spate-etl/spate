@@ -2666,3 +2666,182 @@ async fn eviction_judges_against_the_oldest_read_in_flight() {
     observed.evict(t + TTL * 2 + Duration::from_millis(1));
     assert!(observed.tracks("k"), "{observed:?}");
 }
+
+/// Two workers' tasks over one table, each on its own handle, with the
+/// leader's refresh timer and lease poller out of phase.
+mod record_before_lease {
+    use super::*;
+    use crate::CoordinationConfig;
+    use crate::records::{self, SplitProgressRecord, SplitStatus};
+    use crate::store::metered::Metered;
+    use crate::task::{Task, TaskEvent};
+    use spate_core::coordination::{
+        CoordinationError, CoordinationEvent, PlanContext, PlanFinality, PlannedSplit, SplitId,
+        SplitPlan, SplitPlanner, SplitSpec,
+    };
+    use std::sync::mpsc as std_mpsc;
+
+    const FINGERPRINT: &str = "record-before-lease:v1";
+
+    struct Planner;
+
+    impl SplitPlanner for Planner {
+        fn fingerprint(&self) -> String {
+            FINGERPRINT.into()
+        }
+
+        fn plan(&mut self, _: PlanContext<'_>) -> Result<SplitPlan, CoordinationError> {
+            let splits = ["s1", "s2"]
+                .into_iter()
+                .map(|id| {
+                    PlannedSplit::new(SplitSpec::new(
+                        SplitId::new(id).unwrap(),
+                        id.as_bytes().to_vec(),
+                    ))
+                })
+                .collect();
+            Ok(SplitPlan::new(splits, PlanFinality::Final))
+        }
+    }
+
+    struct Worker {
+        _commands: tokio::sync::mpsc::Sender<crate::task::Command>,
+        events: std_mpsc::Receiver<TaskEvent>,
+    }
+
+    impl Worker {
+        fn drain(&self) -> Vec<CoordinationEvent> {
+            let mut out = Vec::new();
+            while let Ok(event) = self.events.try_recv() {
+                match event {
+                    TaskEvent::Coordination(event) => out.push(event),
+                    TaskEvent::Failed(kind, reason) => panic!("task failed: {kind:?} {reason}"),
+                }
+            }
+            out
+        }
+    }
+
+    fn spawn(table: &FakeTable, config: &CoordinationConfig, instance: &str) -> Worker {
+        let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+        let store = DynamoDbStore::over_fake_table(
+            DynamoDbConfig::new("spate-test", "job"),
+            config.lease_duration,
+            config.op_timeout,
+            clock.clone(),
+            table,
+        )
+        .expect("store");
+        let store = Metered::new(store, config.op_timeout, None);
+        let (commands, commands_rx) = tokio::sync::mpsc::channel(8);
+        let (events_tx, events) = std_mpsc::channel();
+        let task = Task::new(
+            store,
+            config.clone(),
+            clock,
+            FINGERPRINT.to_string(),
+            instance.to_string(),
+            uuid::Uuid::new_v4().simple().to_string(),
+            Box::new(Planner),
+            None,
+            commands_rx,
+            events_tx,
+            None,
+        );
+        tokio::spawn(task.run());
+        Worker {
+            _commands: commands,
+            events,
+        }
+    }
+
+    /// Where the leader's refresh timer ticks after each of its lease polls, as
+    /// a fraction of the poll interval.
+    const REFRESH_LAG: f64 = 0.5;
+
+    /// Where `w1`'s assignment poll, which starts its claim of `s2`, ticks
+    /// after each of the leader's lease polls.
+    const CLAIM_LAG: f64 = 0.25;
+
+    /// Runs a leader and `w1` for four poll intervals and asserts `s2` ends
+    /// runnable and owned by `w1`. `seed` pre-writes `s2`'s progress record
+    /// at `(attempts, epoch)` with no owner.
+    async fn claim_between_lease_poll_and_refresh(max_attempts: u32, seed: Option<(u32, u64)>) {
+        let poll = DynamoDbConfig::new("t", "j").poll_interval;
+        let config = CoordinationConfig {
+            max_attempts,
+            max_in_flight: 1,
+            reconcile_interval: Duration::from_secs(3_600),
+            ..CoordinationConfig::default()
+        };
+        let table = FakeTable::new();
+        let observer = DynamoDbStore::over_fake_table(
+            DynamoDbConfig::new("spate-test", "job"),
+            config.lease_duration,
+            config.op_timeout,
+            Arc::new(SystemClock),
+            &table,
+        )
+        .expect("store");
+        let fp = records::fingerprint_hash(FINGERPRINT);
+        let id = SplitId::new("s2").unwrap();
+        let key = records::split_key_str("s2");
+        if let Some((attempts, epoch)) = seed {
+            let mut record = SplitProgressRecord::planned(&id, fp, None);
+            record.attempts = attempts;
+            record.epoch = epoch;
+            won(observer.create(D, &key, record.encode()).await.unwrap());
+        }
+        let t0 = Instant::now();
+
+        // The leader's first Query is its lease watch's subscribing read.
+        // Holding it arms the refresh timer `REFRESH_LAG` after the lease
+        // poller, as slow startup reads would.
+        let mut gate = table.hold_next(FakeOp::Query);
+        let leader = spawn(&table, &config, "leader");
+        reached(&mut gate).await;
+        let held = table.queries().last().cloned().expect("a held query");
+        assert_eq!(
+            (held.pk.as_str(), held.prefix.as_deref()),
+            ("job#e", None),
+            "{held:?}"
+        );
+        tokio::time::sleep_until(t0 + poll.mul_f64(REFRESH_LAG)).await;
+        gate.release();
+
+        tokio::time::sleep_until(t0 + poll + poll.mul_f64(CLAIM_LAG)).await;
+        let gained: Vec<_> = leader.drain();
+        assert!(
+            gained
+                .iter()
+                .any(|e| matches!(e, CoordinationEvent::Gained { split, .. } if split.id.as_str() == "s1")),
+            "the leader holds s1: {gained:?}"
+        );
+        let w1 = spawn(&table, &config, "w1");
+
+        tokio::time::sleep_until(t0 + poll * 4).await;
+        let w1 = w1.drain();
+        let leader = leader.drain();
+        let stored = observer.get(D, &key).await.unwrap().expect("s2's record");
+        let stored = SplitProgressRecord::parse(&key, &stored.value, fp).unwrap();
+        assert!(
+            stored.status == SplitStatus::Runnable && stored.owner.as_deref() == Some("w1"),
+            "the leader quarantined w1's live claim: {stored:?}\nw1: {w1:?}\nleader: {leader:?}"
+        );
+    }
+
+    /// A first claim under `max_attempts: 1` stays runnable when the leader
+    /// reads its record between two lease polls. Regression for #1052.
+    #[tokio::test(start_paused = true)]
+    async fn a_leader_keeps_a_first_claim_it_reads_between_lease_polls() {
+        claim_between_lease_poll_and_refresh(1, None).await;
+    }
+
+    /// A released split's claim on its last attempt under the default cap
+    /// stays runnable when the leader reads its record between two lease
+    /// polls. Regression for #1052.
+    #[tokio::test(start_paused = true)]
+    async fn a_leader_keeps_a_last_attempt_claim_it_reads_between_lease_polls() {
+        claim_between_lease_poll_and_refresh(4, Some((3, 3))).await;
+    }
+}

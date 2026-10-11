@@ -201,9 +201,10 @@ pub struct StopSeen {
 pub enum Scenario {
     /// Every delivery property holds under the schedule.
     Ordinary,
-    /// A worker stops itself before a write and resumes after another
-    /// instance claimed the split. With `broken_fence` the resumed write is
-    /// re-sent at the current revision and the oracle must catch it.
+    /// A worker stops itself before a write and resumes after its lease has
+    /// run out, and after another instance claimed the split when the run has
+    /// one. With `broken_fence` the resumed write is re-sent at the current
+    /// revision and the oracle must catch it.
     StoppedWriter {
         /// The fence is broken.
         broken_fence: bool,

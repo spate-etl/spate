@@ -105,6 +105,10 @@ pub enum Faults {
         /// The stopped worker re-sends its lost commit.
         broken_fence: bool,
     },
+    /// One worker stops itself inside a seeded commit and is resumed two leases
+    /// later. A worker that finds its leases expired claims its own splits
+    /// again at a later epoch.
+    StoppedAlone,
     /// Every worker's first process carries a stop at one seeded stage of a
     /// leader's work, and only the first to reach it stops. That process is
     /// killed, and another instance must take the leader key within four leases.
@@ -128,7 +132,7 @@ impl Faults {
             Faults::StoppedWriter { broken_fence } | Faults::DeposedLeader { broken_fence } => {
                 broken_fence
             }
-            Faults::None | Faults::Schedule | Faults::LeaderKilled => false,
+            Faults::None | Faults::Schedule | Faults::StoppedAlone | Faults::LeaderKilled => false,
         }
     }
 }
@@ -158,12 +162,12 @@ pub fn run(spec: &Spec<'_>) -> Outcome {
     match spec.faults {
         Faults::StoppedWriter { .. } => tuning.max_in_flight = stopped::WORKING_SET,
         Faults::DeposedLeader { .. } => tuning.max_in_flight = leader::WORKING_SET,
-        Faults::None | Faults::Schedule | Faults::LeaderKilled => {}
+        Faults::None | Faults::Schedule | Faults::StoppedAlone | Faults::LeaderKilled => {}
     }
     let schedule = match spec.faults {
         Faults::None => Schedule::default(),
         Faults::Schedule => Schedule::draw(&mut rng, spec.instances, tuning.lease_ms),
-        Faults::StoppedWriter { .. } => Schedule::stopped_writer(&mut rng),
+        Faults::StoppedWriter { .. } | Faults::StoppedAlone => Schedule::stopped_writer(&mut rng),
         Faults::LeaderKilled => Schedule::leader_killed(&mut rng, tuning.lease_ms),
         Faults::DeposedLeader { .. } => Schedule::deposed_leader(&mut rng),
     };
@@ -205,7 +209,7 @@ pub fn run(spec: &Spec<'_>) -> Outcome {
         let (targets, path) = (&targets, run.dir.join("health.ndjson"));
         let poller = s.spawn(move || health::watch(targets, &path, HEALTH_INTERVAL, &stopped));
         let driven = match spec.faults {
-            Faults::StoppedWriter { .. } => run
+            Faults::StoppedWriter { .. } | Faults::StoppedAlone => run
                 .drive_stopped(
                     &mut workers,
                     &mut processes,
@@ -282,11 +286,14 @@ pub fn run(spec: &Spec<'_>) -> Outcome {
         timing: tuning.timing(),
     })
     .unwrap_or_else(|e| panic!("the oracle could not judge the run: {e}"));
+    let reclaimed = stopped.as_ref().map(|s| reclaimed_own(&journals, s));
     let scenario = match spec.faults {
-        Faults::StoppedWriter { broken_fence } | Faults::DeposedLeader { broken_fence } => {
-            violations.extend(stopped.as_ref().and_then(not_reassigned));
+        Faults::StoppedWriter { .. } | Faults::StoppedAlone | Faults::DeposedLeader { .. } => {
+            if spec.faults != Faults::StoppedAlone {
+                violations.extend(stopped.as_ref().and_then(not_reassigned));
+            }
             Scenario::StoppedWriter {
-                broken_fence,
+                broken_fence: spec.faults.broken_fence(),
                 stop: stopped.map(|s| StopSeen {
                     resend_rev: resend_rev(&journals, &s),
                     key: s.key,
@@ -301,6 +308,17 @@ pub fn run(spec: &Spec<'_>) -> Outcome {
     } else {
         Vec::new()
     };
+    // A DynamoDB lease expires only once a handle has seen it unchanged for a
+    // lease, so a lone worker's renewal on resume can keep it. NATS expires it
+    // in the server, and the re-claim always follows.
+    if spec.faults == Faults::StoppedAlone
+        && spec.store == StoreKind::Nats
+        && reclaimed == Some(false)
+    {
+        expectations.push(
+            "fault not exercised: the stopped process claimed none of its splits again".to_owned(),
+        );
+    }
     if let Some(killed) = killed {
         violations.extend(killed.violation);
         expectations.extend(killed.expectations);
@@ -1374,6 +1392,44 @@ fn resend_rev(journals: &[ProcessJournal], stopped: &stopped::Stopped) -> Option
     None
 }
 
+/// Whether the stopped process, after its stop, won a write as owner of a
+/// split at a later epoch than one it won that split under before the stop.
+fn reclaimed_own(journals: &[ProcessJournal], stopped: &stopped::Stopped) -> bool {
+    let Some(journal) = journals.iter().find(|j| j.pid == stopped.pid) else {
+        return false;
+    };
+    let mut held: HashMap<&str, u64> = HashMap::new();
+    let mut sends: HashMap<u64, (&str, u64)> = HashMap::new();
+    let mut after = false;
+    for line in &journal.lines {
+        match &line.event {
+            Event::Stop { key, .. } if *key == stopped.key => after = true,
+            Event::Send {
+                call, key, value, ..
+            } if value.owner.as_deref() == Some(stopped.instance.as_str()) => {
+                sends.insert(*call, (key.as_str(), value.epoch));
+            }
+            Event::Done {
+                call,
+                reply: Reply::Won(_),
+                ..
+            } => {
+                let Some(&(key, epoch)) = sends.get(call) else {
+                    continue;
+                };
+                if !after {
+                    let e = held.entry(key).or_insert(epoch);
+                    *e = (*e).max(epoch);
+                } else if held.get(key).is_some_and(|&e| epoch > e) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 /// What the leader key holds, read through `direct` under [`PROBE`].
 fn read_leader(rt: &tokio::runtime::Runtime, direct: &Direct) -> LeaderAtKill {
     leader_from(
@@ -2279,6 +2335,111 @@ mod tests {
         assert_eq!(resend_rev(&[fenced], &stopped), None);
     }
 
+    /// A re-claim is a win after the stop, by the stopped process as owner, at
+    /// a later epoch than its own win on that key before the stop. A later
+    /// win on a key it never held, a win at the old epoch, a later epoch
+    /// written under another owner, or a lost write does not count.
+    #[test]
+    fn reclaimed_own_needs_a_later_epoch_on_a_split_held_before_the_stop() {
+        use crate::journal::{Progress, Status, WriteOp};
+        let line = |event| Line { t_ms: 1, event };
+        let send = |call, key: &str, epoch, owner: &str| {
+            line(Event::Send {
+                call,
+                op: WriteOp::Update,
+                key: key.to_owned(),
+                expected: Some(1),
+                value: Progress {
+                    schema: journal::SCHEMA,
+                    epoch,
+                    owner: Some(owner.to_owned()),
+                    watermark: None,
+                    completed: false,
+                    status: Status::Runnable,
+                    attempts: 0,
+                },
+            })
+        };
+        let done = |call, key: &str, reply| {
+            line(Event::Done {
+                call,
+                key: key.to_owned(),
+                reply,
+            })
+        };
+        let stop = || {
+            line(Event::Stop {
+                key: "split.a".to_owned(),
+                expected: 1,
+                epoch: 1,
+            })
+        };
+        let stopped = stopped::Stopped {
+            key: "split.a".to_owned(),
+            expected: Some(1),
+            instance: "w1".to_owned(),
+            pid: 9,
+            reassigned: false,
+        };
+        let journal = |lines| ProcessJournal {
+            instance: "w1".to_owned(),
+            pid: 9,
+            lines,
+        };
+        let held = || {
+            vec![
+                send(1, "split.a", 1, "w1"),
+                done(1, "split.a", Reply::Won(2)),
+                stop(),
+            ]
+        };
+        let with = |tail: Vec<Line>| journal(held().into_iter().chain(tail).collect());
+
+        assert!(reclaimed_own(
+            &[with(vec![
+                send(2, "split.a", 2, "w1"),
+                done(2, "split.a", Reply::Won(5))
+            ])],
+            &stopped
+        ));
+        assert!(!reclaimed_own(
+            &[with(vec![
+                send(2, "split.a", 1, "w1"),
+                done(2, "split.a", Reply::Won(5))
+            ])],
+            &stopped
+        ));
+        assert!(!reclaimed_own(
+            &[with(vec![
+                send(2, "split.b", 2, "w1"),
+                done(2, "split.b", Reply::Won(5))
+            ])],
+            &stopped
+        ));
+        assert!(!reclaimed_own(
+            &[with(vec![
+                send(2, "split.a", 2, "w0"),
+                done(2, "split.a", Reply::Won(5))
+            ])],
+            &stopped
+        ));
+        assert!(!reclaimed_own(
+            &[with(vec![
+                send(2, "split.a", 2, "w1"),
+                done(2, "split.a", Reply::Lost)
+            ])],
+            &stopped
+        ));
+        let before_stop = journal(vec![
+            send(1, "split.a", 1, "w1"),
+            done(1, "split.a", Reply::Won(2)),
+            send(2, "split.a", 2, "w1"),
+            done(2, "split.a", Reply::Won(3)),
+            stop(),
+        ]);
+        assert!(!reclaimed_own(&[before_stop], &stopped));
+    }
+
     /// A stop the peer never claimed during is a property-4 violation
     /// against the stopped process; a claimed one is none.
     #[test]
@@ -2391,6 +2552,7 @@ mod tests {
             Faults::DeposedLeader {
                 broken_fence: false,
             },
+            Faults::StoppedAlone,
             Faults::LeaderKilled,
             Faults::Schedule,
             Faults::None,

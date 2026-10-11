@@ -1,9 +1,11 @@
 //! The stopped-writer rendezvous: the peer leads, the sleeper stops itself
 //! inside a commit, the peer claims the split, and the sleeper is resumed.
+//! With [`Faults::StoppedAlone`] the sleeper runs alone and is resumed two
+//! leases after its stop.
 
 use super::{
-    Env, Event, FaultFired, Journal, Keyspace, POLL, RUN_DEADLINE, Run, SETUP_DEADLINE, SLEEPER,
-    STOP_CONFIRM, STORE_CALL, Tuning, Workers, journal, journal_holds,
+    Env, Event, FaultFired, Faults, Journal, Keyspace, POLL, RUN_DEADLINE, Run, SETUP_DEADLINE,
+    SLEEPER, STOP_CONFIRM, STORE_CALL, Tuning, Workers, journal, journal_holds,
 };
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -48,9 +50,11 @@ impl Run<'_> {
     /// waits for its `stop` line. Once the sleeper reports stopped it polls
     /// the store until the peer holds the split at a higher epoch, and sends
     /// SIGCONT once that holds and a lease plus [`RELEASE_MARGIN_MS`] has
-    /// passed since the `stop` line, or four leases from it. Then it waits
-    /// for the workers: [`BROKEN_FENCE_WAIT`] with a broken fence, else until
-    /// [`RUN_DEADLINE`] from the start.
+    /// passed since the `stop` line, or four leases from it. With
+    /// [`Faults::StoppedAlone`] there is no peer, and SIGCONT goes two leases
+    /// after the `stop` line. Then it waits for the workers:
+    /// [`BROKEN_FENCE_WAIT`] with a broken fence, else until [`RUN_DEADLINE`]
+    /// from the start.
     ///
     /// # Errors
     ///
@@ -74,8 +78,11 @@ impl Run<'_> {
             .schedule
             .stop_at
             .ok_or("a stopped-writer schedule carries a stop plan")?;
-        processes.push(self.spawn(workers, env, PEER, 1, tuning)?);
-        self.await_leader(workers, env, rt)?;
+        let alone = self.spec.faults == Faults::StoppedAlone;
+        if !alone {
+            processes.push(self.spawn(workers, env, PEER, 1, tuning)?);
+            self.await_leader(workers, env, rt)?;
+        }
         let sleeper = self.spawn(workers, env, SLEEPER, 1, tuning)?;
         let (name, pid, path) = sleeper.clone();
         processes.push(sleeper);
@@ -100,13 +107,20 @@ impl Run<'_> {
                 "{name} (pid {pid}) journalled its stop and did not report stopped"
             ));
         }
-        let claimed = await_release(
-            stop_ms,
-            tuning.lease_ms,
-            || peer_claimed(env, rt, &key, epoch, &name),
-            journal::now_ms,
-            || std::thread::sleep(POLL),
-        );
+        let claimed = if alone {
+            while journal::now_ms() < stop_ms + 2 * tuning.lease_ms {
+                std::thread::sleep(POLL);
+            }
+            false
+        } else {
+            await_release(
+                stop_ms,
+                tuning.lease_ms,
+                || peer_claimed(env, rt, &key, epoch, &name),
+                journal::now_ms,
+                || std::thread::sleep(POLL),
+            )
+        };
         if workers.resume(&name, pid).map_err(status)? {
             faults
                 .append(Event::Sigcont {

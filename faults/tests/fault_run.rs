@@ -44,6 +44,17 @@ fn stopped_writer(name: &str, store: StoreKind, broken_fence: bool) {
     });
 }
 
+fn stopped_alone(name: &str, store: StoreKind) {
+    run::run(&Spec {
+        name,
+        store,
+        instances: 1,
+        worker: Path::new(WORKER),
+        sink_delay_ms: 600,
+        faults: Faults::StoppedAlone,
+    });
+}
+
 fn leader_killed(name: &str, store: StoreKind) {
     let outcome = run::run(&Spec {
         name,
@@ -176,6 +187,25 @@ fn dynamodb_broken_fence_fails_the_run() {
         "dynamodb_broken_fence_fails_the_run",
         StoreKind::DynamoDb,
         true,
+    );
+}
+
+/// A lone NATS worker stopped inside a commit for longer than a lease claims
+/// its own splits again and finishes them. Regression for #1014.
+#[test]
+#[ignore = "requires Docker"]
+fn nats_stopped_worker_reclaims_its_splits() {
+    stopped_alone("nats_stopped_worker_reclaims_its_splits", StoreKind::Nats);
+}
+
+/// A lone DynamoDB worker stopped inside a commit for longer than a lease
+/// claims its own splits again and finishes them. Regression for #1014.
+#[test]
+#[ignore = "requires Docker"]
+fn dynamodb_stopped_worker_reclaims_its_splits() {
+    stopped_alone(
+        "dynamodb_stopped_worker_reclaims_its_splits",
+        StoreKind::DynamoDb,
     );
 }
 

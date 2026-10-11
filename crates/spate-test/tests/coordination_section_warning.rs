@@ -161,25 +161,26 @@ fn a_coordination_section_is_warned_at_start_and_its_absence_is_not() {
         .init();
 
     // No section: the pipeline runs and logs no deprecation line.
-    let from = capture.lines().len();
     let (source, _handle) = memory_source();
-    let code = run_to_listening(&capture, from, runtime(NO_SECTION, source));
+    let rt = runtime(NO_SECTION, source);
+    let from = capture.lines().len();
+    let code = run_to_listening(&capture, from, rt);
     assert_eq!(code, 0, "no section: clean drain");
     assert_eq!(deprecation_lines(&capture, from), Vec::<String>::new());
 
     // A section the source rejects: the start fails and the WARN is logged.
-    let from = capture.lines().len();
     let (source, _handle) = memory_source();
-    let err = runtime(REJECTED, source)
-        .run()
-        .expect_err("memory rejects the section");
+    let rt = runtime(REJECTED, source);
+    let from = capture.lines().len();
+    let err = rt.run().expect_err("memory rejects the section");
     assert!(matches!(err, StartError::Config(_)), "rejected: {err:?}");
     assert_one_warn(&deprecation_lines(&capture, from), "rejected");
 
     // A section the source accepts: the pipeline runs and the WARN is logged.
-    let from = capture.lines().len();
     let (source, _handle) = memory_source();
-    let code = run_to_listening(&capture, from, runtime(ACCEPTED, Accepting(source)));
+    let rt = runtime(ACCEPTED, Accepting(source));
+    let from = capture.lines().len();
+    let code = run_to_listening(&capture, from, rt);
     assert_eq!(code, 0, "accepted: clean drain");
     assert_one_warn(&deprecation_lines(&capture, from), "accepted");
 }

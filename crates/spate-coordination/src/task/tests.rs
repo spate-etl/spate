@@ -1504,3 +1504,99 @@ async fn an_own_live_lease_does_not_defer_the_quarantine() {
         "{stored:?}"
     );
 }
+
+/// On a polled store, a leader that defers a quarantine on a lease it read
+/// keeps that lease out of its view, so its next refresh tick re-reads the
+/// split's record after the claimant removed the lease.
+/// Regression for #1052.
+#[tokio::test]
+async fn a_deferred_quarantine_keeps_the_read_lease_out_of_a_polled_view() {
+    let clock = TestClock::frozen();
+    let cfg = CoordinationConfig {
+        max_attempts: 1,
+        ..CoordinationConfig::default()
+    };
+    let store = MemoryStore::with_clock(cfg.lease_duration, clock.clone());
+    let fp = records::fingerprint_hash(FINGERPRINT);
+    let id = SplitId::new("s").unwrap();
+    let key = records::split_key_str("s");
+    let planned = SplitProgressRecord::planned(&id, fp, None);
+    let rev0 = create(&store, Keyspace::Durable, &key, planned.encode()).await;
+    let (_commands, commands_rx) = mpsc::channel(8);
+    let (events_tx, _events) = std_mpsc::channel();
+    let mut leader = Task::new(
+        store.clone(),
+        cfg,
+        clock,
+        FINGERPRINT.to_string(),
+        "leader".into(),
+        uuid::Uuid::new_v4().simple().to_string(),
+        Box::new(Planner),
+        None,
+        commands_rx,
+        events_tx,
+        None,
+    );
+    leader.polled = Some(Duration::from_secs(2));
+    leader.leadership = Some(Revision(1));
+    leader.assignments.insert(
+        "w1".into(),
+        (
+            AssignmentVal {
+                schema: SCHEMA,
+                generation: 1,
+                splits: vec!["s".into()],
+            },
+            Revision(1),
+        ),
+    );
+    leader
+        .apply_state_put(&Entry {
+            key: key.clone(),
+            value: planned.encode(),
+            revision: rev0,
+        })
+        .unwrap();
+
+    // w1 writes its lease, then CASes the record; the leader's refresh read
+    // returns the record before its next lease poll.
+    let nonce = uuid::Uuid::new_v4().simple().to_string();
+    let lease_rev = create(
+        &store,
+        Keyspace::Ephemeral,
+        &key,
+        lease_val("w1", &nonce, 1),
+    )
+    .await;
+    let mut claimed = planned.clone();
+    claimed.owner = Some("w1".into());
+    claimed.epoch = 1;
+    let rev1 = store
+        .update(Keyspace::Durable, &key, claimed.encode(), rev0)
+        .await
+        .unwrap()
+        .won()
+        .unwrap();
+    leader
+        .apply_state_put(&Entry {
+            key: key.clone(),
+            value: claimed.encode(),
+            revision: rev1,
+        })
+        .unwrap();
+    leader.reconcile_assignment().await.unwrap();
+
+    // w1 removes its lease before the leader's next lease poll lists it.
+    store
+        .delete(Keyspace::Ephemeral, &key, Some(lease_rev))
+        .await
+        .unwrap()
+        .won()
+        .unwrap();
+    leader.refresh_due = true;
+    assert!(
+        leader.wanted_reads().contains(&key),
+        "the leader stopped refreshing s: {:?}",
+        leader.splits.get("s").map(|s| &s.lease)
+    );
+}

@@ -17,7 +17,6 @@ use crate::outcome::{Check, Violation};
 
 const SPLIT_PREFIX: &str = "split.";
 const SPEC_PREFIX: &str = "spec.";
-const VERDICT_KEY: &str = "verdict";
 /// How many ids a grouped violation names.
 const NAMED: usize = 5;
 /// Margin added to property 2's time bound for scheduling and clock reads.
@@ -27,10 +26,8 @@ const MARGIN_MS: u64 = 2_000;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StoreKind {
-    /// NATS JetStream, a push store.
+    /// NATS JetStream.
     Nats,
-    /// DynamoDB, a polled store. A worker writes a verdict to it.
-    DynamoDb,
 }
 
 /// A record the harness generated.
@@ -83,18 +80,12 @@ pub struct Timing {
     pub drain_deadline_ms: u64,
     /// Per-call store timeout.
     pub op_timeout_ms: u64,
-    /// Watch poll interval; 0 on a push store.
-    pub poll_interval_ms: u64,
 }
 
 impl Timing {
     /// How long after a fault window closes a claim it caused may come.
     fn slack(self) -> u64 {
-        2 * self.lease_ms
-            + self.drain_deadline_ms
-            + 2 * self.op_timeout_ms
-            + 2 * self.poll_interval_ms
-            + MARGIN_MS
+        2 * self.lease_ms + self.drain_deadline_ms + 2 * self.op_timeout_ms + MARGIN_MS
     }
 }
 
@@ -196,13 +187,6 @@ pub fn check(inputs: &Inputs<'_>) -> Result<Vec<Violation>, OracleError> {
             .and_then(|rev| revisions.get_key_value(rev))
             .map(|(rev, value)| (*rev, value));
         completion(key, completions, last, &mut violations);
-    }
-    if inputs.store == StoreKind::DynamoDb && !inputs.sweep.iter().any(|e| e.key == VERDICT_KEY) {
-        violations.push(violation(
-            Check::VerdictMissing,
-            None,
-            "the store holds no verdict".to_owned(),
-        ));
     }
     duplicates(inputs, &splits, &landed, &sends, &mut violations);
     let mut keys: Vec<&&str> = landed.keys().collect();
@@ -529,10 +513,9 @@ fn tenancy_changes<'s, 'a>(
 
 /// The merged fault windows on one process.
 ///
-/// Kills, aborts, `err_after_land` lines and proxy faults other than `pass`
-/// and those named `delay…` last zero time; SIGSTOPs and toxics last their duration. A
-/// `stop` or `leader_stop` line lasts until the next `sigcont` for the process, else its next
-/// kill, else `end_of_run`.
+/// Kills, aborts and `err_after_land` lines last zero time; SIGSTOPs and
+/// toxics last their duration. A `stop` or `leader_stop` line lasts until the
+/// next `sigcont` for the process, else its next kill, else `end_of_run`.
 fn windows(process: &ProcessJournal, faults: &[Line], end_of_run: u64) -> Vec<Window> {
     let mine = |instance: &str, pid: u32| instance == process.instance && pid == process.pid;
     // (start, end, a kill or abort)
@@ -573,14 +556,6 @@ fn windows(process: &ProcessJournal, faults: &[Line], end_of_run: u64) -> Vec<Wi
                 duration_ms,
                 ..
             } if mine(instance, *pid) => raw.push((t, t + duration_ms, false)),
-            Event::ProxyFault {
-                instance,
-                pid,
-                fault,
-                ..
-            } if mine(instance, *pid) && fault != "pass" && !fault.starts_with("delay") => {
-                raw.push((t, t, false));
-            }
             _ => {}
         }
     }

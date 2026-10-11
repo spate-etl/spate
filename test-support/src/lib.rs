@@ -3,8 +3,6 @@
 
 mod child;
 mod corpus;
-#[cfg(feature = "dynamodb-proxy")]
-mod dynamodb_proxy;
 mod http;
 #[cfg(feature = "tls")]
 mod tls;
@@ -13,8 +11,6 @@ mod toxiproxy;
 
 pub use child::run_in_child;
 pub use corpus::{fnv1a, pin};
-#[cfg(feature = "dynamodb-proxy")]
-pub use dynamodb_proxy::{Call, DynamoDbFaultProxy, Fault, RETRIED_STATUSES, retried_status};
 pub use http::{http, http_with_body};
 #[cfg(feature = "tls")]
 pub use tls::{TestCa, native_certs, pem, serve_tls};

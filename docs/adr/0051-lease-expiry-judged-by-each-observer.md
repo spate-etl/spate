@@ -1,14 +1,14 @@
 ---
-description: "Each handle may judge lease expiry on its own clock, and the DynamoDB store does. Its revision consequence is superseded by ADR-0057."
+description: "Each handle may judge lease expiry on its own clock, and the DynamoDB store does. Superseded by ADR-0065, which removes the store."
 ---
 
 # ADR-0051 — Lease expiry may be judged by each observer, and the DynamoDB store does so
 
-- **Status:** accepted
+- **Status:** superseded
 - **Date:** 2026-09-29
 - **Supersedes:** —
 - **Superseded by:** [ADR-0057](0057-a-deleted-dynamodb-ephemeral-key-leaves-a-revision-floor.md)
-  (revision consequence)
+  (revision consequence), [ADR-0065](0065-the-dynamodb-coordination-store-is-removed.md)
 
 ## Context and problem statement
 
@@ -111,7 +111,7 @@ the latency bounds above; they follow from the poll cadence.
 
 - Landed in #818, which modelled the store over an in-memory table on
   2026-09-29. #819 backed it with the AWS SDK and shipped it on 2026-09-30.
-- [DynamoDB store](../user-guide/04-connectors/coordination/dynamodb/README.mdx#lease-expiry)
+- [DynamoDB store](https://github.com/spate-etl/spate/blob/ba7459347131a223e0a34422fcadba1594158d0b/docs/user-guide/04-connectors/coordination/dynamodb/README.mdx)
   — lease expiry and takeover latency as the store page states them.
 - [Work assignment](../user-guide/02-concepts/08-work-assignment.mdx#discovery)
   — the normative statement of observer-judged expiry.

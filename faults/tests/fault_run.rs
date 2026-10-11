@@ -104,37 +104,6 @@ fn nats_three_instances() {
     faulted("nats_three_instances", StoreKind::Nats, 3);
 }
 
-/// Three DynamoDB workers with no faults deliver every record once.
-#[test]
-#[ignore = "requires Docker"]
-fn dynamodb_no_faults_writes_no_duplicates() {
-    fault_free(
-        "dynamodb_no_faults_writes_no_duplicates",
-        StoreKind::DynamoDb,
-    );
-}
-
-/// One DynamoDB worker, killed and replaced on the seeded schedule and handed
-/// one lost reply, delivers every record under the five properties and
-/// recovers the landed write. It is also stopped on some seeds: a stop is
-/// skipped while the first process, which carries the lost reply, is live.
-/// Its replacement's store link is slowed, cut or refused in seeded windows.
-#[test]
-#[ignore = "requires Docker"]
-fn dynamodb_one_instance() {
-    faulted("dynamodb_one_instance", StoreKind::DynamoDb, 1);
-}
-
-/// Three DynamoDB workers under seeded kills, stops, link windows, one lost
-/// reply and aborts before or after a write deliver every record under the
-/// five properties, while two of them land writes as split owners at
-/// overlapping times.
-#[test]
-#[ignore = "requires Docker"]
-fn dynamodb_three_instances() {
-    faulted("dynamodb_three_instances", StoreKind::DynamoDb, 3);
-}
-
 /// A NATS worker stopped inside a commit for longer than a lease, while its
 /// peer claims the split, writes nothing stale on resume.
 #[test]
@@ -155,30 +124,6 @@ fn nats_broken_fence_fails_the_run() {
     stopped_writer("nats_broken_fence_fails_the_run", StoreKind::Nats, true);
 }
 
-/// A DynamoDB worker stopped inside a commit for longer than a lease, while
-/// its peer claims the split, writes nothing stale on resume.
-#[test]
-#[ignore = "requires Docker"]
-fn dynamodb_stopped_writer_with_fence_passes() {
-    stopped_writer(
-        "dynamodb_stopped_writer_with_fence_passes",
-        StoreKind::DynamoDb,
-        false,
-    );
-}
-
-/// A DynamoDB worker that re-sends its stopped commit after losing the CAS
-/// lands a stale epoch, and the oracle reports it against that worker.
-#[test]
-#[ignore = "requires Docker"]
-fn dynamodb_broken_fence_fails_the_run() {
-    stopped_writer(
-        "dynamodb_broken_fence_fails_the_run",
-        StoreKind::DynamoDb,
-        true,
-    );
-}
-
 /// Three NATS workers whose leader is killed at a seeded stage of its work
 /// deliver every record under the five properties, and another worker takes
 /// the leader key within four leases of the kill. The kill's fault entry
@@ -187,16 +132,6 @@ fn dynamodb_broken_fence_fails_the_run() {
 #[ignore = "requires Docker"]
 fn nats_leader_killed() {
     leader_killed("nats_leader_killed", StoreKind::Nats);
-}
-
-/// Three DynamoDB workers whose leader is killed at a seeded stage of its
-/// work deliver every record under the five properties, and another worker
-/// takes the leader key within four leases of the kill. The kill's fault
-/// entry reads "killed the leader".
-#[test]
-#[ignore = "requires Docker"]
-fn dynamodb_leader_killed() {
-    leader_killed("dynamodb_leader_killed", StoreKind::DynamoDb);
 }
 
 /// A NATS leader stopped before a seeded progress record for longer than a
@@ -222,38 +157,4 @@ fn nats_leader_broken_fence_fails_the_run() {
         StoreKind::Nats,
         true,
     );
-}
-
-/// A DynamoDB leader stopped before a seeded progress record for longer than
-/// a lease, while another worker seeds and claims that split, writes nothing
-/// stale on resume.
-#[test]
-#[ignore = "requires Docker"]
-fn dynamodb_deposed_leader_with_fence_passes() {
-    deposed_leader(
-        "dynamodb_deposed_leader_with_fence_passes",
-        StoreKind::DynamoDb,
-        false,
-    );
-}
-
-/// A deposed DynamoDB leader that overwrites the claimed split it finds on
-/// resume lands a stale epoch, and the oracle reports it against that worker.
-#[test]
-#[ignore = "requires Docker"]
-fn dynamodb_leader_broken_fence_fails_the_run() {
-    deposed_leader(
-        "dynamodb_leader_broken_fence_fails_the_run",
-        StoreKind::DynamoDb,
-        true,
-    );
-}
-
-/// A DynamoDB update whose first reply the fault proxy drops after it lands
-/// resolves `Won` on the SDK's retry, and one whose every reply is dropped
-/// returns `Retryable`; both values land.
-#[test]
-#[ignore = "requires Docker"]
-fn dynamodb_drop_after_land_then_pass_wins() {
-    run::drop_after_land_then_pass_wins("dynamodb_drop_after_land_then_pass_wins");
 }

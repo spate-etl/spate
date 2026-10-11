@@ -184,8 +184,6 @@ pub enum StoreOp {
     List,
     /// Watch (re)establishment.
     Watch,
-    /// One listing a polled watch runs every interval.
-    Poll,
 }
 
 /// Coordination handles (`spate_coordination_*`), pre-registered at build
@@ -229,7 +227,6 @@ pub struct CoordinationMetrics {
     store_op_delete: Histogram,
     store_op_list: Histogram,
     store_op_watch: Histogram,
-    store_op_poll: Histogram,
     drain_duration: Histogram,
     assignment_latency: Histogram,
     split_lease_headroom: Histogram,
@@ -336,7 +333,6 @@ impl CoordinationMetrics {
             store_op_delete: store_op("delete"),
             store_op_list: store_op("list"),
             store_op_watch: store_op("watch"),
-            store_op_poll: store_op("poll"),
             drain_duration: labels.histogram(names::COORDINATION_DRAIN_DURATION_SECONDS),
             assignment_latency: labels.histogram(names::COORDINATION_ASSIGNMENT_LATENCY_SECONDS),
             split_lease_headroom: labels
@@ -501,21 +497,6 @@ impl CoordinationMetrics {
         self.reconcile_duration.record(d.as_secs_f64());
     }
 
-    /// A recorder for `op`'s round-trip time. It holds no series claim, so it
-    /// can outlive this value.
-    pub fn store_op_recorder(&self, op: StoreOp) -> impl Fn(Duration) + Send + Sync + 'static {
-        let h = match op {
-            StoreOp::Get => &self.store_op_get,
-            StoreOp::Put => &self.store_op_put,
-            StoreOp::Delete => &self.store_op_delete,
-            StoreOp::List => &self.store_op_list,
-            StoreOp::Watch => &self.store_op_watch,
-            StoreOp::Poll => &self.store_op_poll,
-        }
-        .clone();
-        move |d| h.record(d.as_secs_f64())
-    }
-
     /// Record one store primitive's round-trip time.
     pub fn store_op(&self, op: StoreOp, d: Duration) {
         let h = match op {
@@ -524,7 +505,6 @@ impl CoordinationMetrics {
             StoreOp::Delete => &self.store_op_delete,
             StoreOp::List => &self.store_op_list,
             StoreOp::Watch => &self.store_op_watch,
-            StoreOp::Poll => &self.store_op_poll,
         };
         h.record(d.as_secs_f64());
     }

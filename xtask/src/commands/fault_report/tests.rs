@@ -312,7 +312,7 @@ fn render_fields_use_the_forms_fences() {
             route,
             &context(),
             &[run(
-                "dynamodb_one_instance",
+                "nats_one_instance",
                 vec![violation(1, "RecordMissing")],
             )],
         );
@@ -647,13 +647,13 @@ fn features_list_each_spate_dependency() {
     let manifest = r#"
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
-spate-coordination = { workspace = true, features = ["dynamodb", "nats", "testing"] }
+spate-coordination = { workspace = true, features = ["nats", "testing"] }
 spate-core = { workspace = true }
 spate-s3 = { workspace = true, features = ["testing"] }
 "#;
     assert_eq!(
         features(manifest).unwrap(),
-        "spate-coordination: dynamodb, nats, testing; spate-s3: testing"
+        "spate-coordination: nats, testing; spate-s3: testing"
     );
     assert!(
         !features(&fs::read_to_string(repo().join("faults/Cargo.toml")).unwrap())
@@ -738,11 +738,11 @@ fn a_summaryless_run_files_an_earlier_violation_as_delivery() {
     let _ = fs::remove_dir_all(&dir);
     let runs = dir.join("runs");
     let out = dir.join("out");
-    let run = runs.join("dynamodb_three_instances-0000000000000001");
+    let run = runs.join("nats_three_instances-0000000000000001");
     fs::create_dir_all(&run).unwrap();
     fs::write(
         run.join("outcome.json"),
-        r#"{"scenario":"dynamodb_three_instances","store":"dynamodb","instances":3,"seed":1,"replay":"r","stage":"oracle","kind":"violation","message":"P1 RecordMissing","violations":[{"property":1,"check":"RecordMissing","key":null,"rev":null,"instance":null,"pid":null,"detail":"d"}],"expectations":[],"faults_fired":[]}"#,
+        r#"{"scenario":"nats_three_instances","store":"nats","instances":3,"seed":1,"replay":"r","stage":"oracle","kind":"violation","message":"P1 RecordMissing","violations":[{"property":1,"check":"RecordMissing","key":null,"rev":null,"instance":null,"pid":null,"detail":"d"}],"expectations":[],"faults_fired":[]}"#,
     )
     .unwrap();
     let routes = report(&runs.join("summary.json"), &out, &context()).unwrap();

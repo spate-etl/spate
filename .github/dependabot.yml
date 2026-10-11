@@ -63,13 +63,6 @@ updates:
       proc-macro-trio:
         patterns: ["syn", "quote", "proc-macro2"]
         update-types: ["minor", "patch"]
-      # smithy-rs releases the SDK crates together, and a client built with
-      # one release and a config loader from another can disagree. aws-lc-rs
-      # and aws-lc-sys release on their own schedule, so the patterns name the
-      # SDK crates alone.
-      aws-sdk:
-        patterns: ["aws-config", "aws-sdk-*", "aws-smithy-*", "aws-credential-types"]
-        update-types: ["minor", "patch"]
 
   # --------------------------------------------------- Rust (the nightly) ----
   # The dated nightly every job needing one installs. Nothing else moves it:
@@ -255,21 +248,6 @@ updates:
     directory: "/ci/kafka/stable"
     schedule:
       interval: weekly
-      day: friday
-    open-pull-requests-limit: 1
-    labels: ["dependencies", "area: ci"]
-    commit-message:
-      prefix: "ci"
-    cooldown:
-      default-days: 7
-
-  # --------------------------------------------- Docker (DynamoDB Local) ----
-  # `ci/dynamodb/stable/Dockerfile` pins the emulator the DynamoDB store's
-  # container suite boots. No `ignore`, so it follows every release.
-  - package-ecosystem: docker
-    directory: "/ci/dynamodb/stable"
-    schedule:
-      interval: monthly
       day: friday
     open-pull-requests-limit: 1
     labels: ["dependencies", "area: ci"]

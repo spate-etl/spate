@@ -122,11 +122,10 @@ When you are not touching the TLS surface, replace it with the features the
 `e2e_examples` stanza in `crates/spate/Cargo.toml` requires.
 
 The fault scenarios in `faults/` run coordinated S3 workers as separate
-processes against SeaweedFS and NATS or DynamoDB Local, inject faults on a
-seeded schedule, and judge each run against the five delivery properties the
-`spate-faults` crate doc states. They need Docker, and the `docker` profile's
-`default-filter` holds them back from every other nextest run. One command runs
-them:
+processes against SeaweedFS and NATS, inject faults on a seeded schedule, and
+judge each run against the five delivery properties the `spate-faults` crate
+doc states. They need Docker, and the `docker` profile's `default-filter` holds
+them back from every other nextest run. One command runs them:
 
 ```sh
 cargo xtask fault-test [--seed N] [FILTER]

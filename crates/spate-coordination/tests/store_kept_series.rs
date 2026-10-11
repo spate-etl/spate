@@ -34,17 +34,3 @@ fn frees_the_series_while_the_store_is_kept<S: CoordinationStore + Clone>(store:
 fn a_kept_memory_store_frees_the_series() {
     frees_the_series_while_the_store_is_kept(support::store(), "memory");
 }
-
-#[cfg(feature = "dynamodb")]
-#[test]
-fn a_kept_dynamodb_store_frees_the_series() {
-    use spate_coordination::store::dynamodb::FakeTable;
-    use spate_core::clock::tokio::SystemClock;
-    use std::sync::Arc;
-
-    let table = FakeTable::new();
-    frees_the_series_while_the_store_is_kept(
-        support::dynamodb::store(&table, Arc::new(SystemClock)),
-        "dynamodb",
-    );
-}

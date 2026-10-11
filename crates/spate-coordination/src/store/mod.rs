@@ -7,24 +7,19 @@
 //! whose keys expire one TTL after their last write, holding leases
 //! that every heartbeat rewrite re-arms. [`CoordinationStore`] is
 //! that contract, public so deployments can bring their own backend
-//! (Redis, etcd) next to the built-in NATS, DynamoDB and in-memory stores.
+//! (Redis, etcd) next to the built-in NATS and in-memory stores.
 //!
 //! # Contract notes for implementors
 //!
 //! - Operations on one handle must be safe to run concurrently.
-//! - [`Revision`]s are store-assigned. Outside the DynamoDB re-create
-//!   exception in the `store::dynamodb` docs, the revisions a key's writes
+//! - [`Revision`]s are store-assigned, and the revisions a key's writes
 //!   return **strictly increase** across its write history (bucket-wide
-//!   sequences satisfy this), and while any handle can reach the store, an
+//!   sequences satisfy this). While any handle can reach the store, an
 //!   acknowledged write is never rolled back and its revision is never
 //!   reused, including across a server crash or failover. A watch delete's
 //!   revision follows the rule on [`WatchEvent::Delete`].
 //! - `update` on an [`Ephemeral`](Keyspace::Ephemeral) key re-arms its
-//!   TTL; expiry surfaces to watchers as [`WatchEvent::Delete`]. A store
-//!   may judge expiry on its own clock, or each handle may judge it on its
-//!   own clock from the first read that returned the key's current
-//!   revision, confirmed by a later read of that revision. A handle that
-//!   first reads a key late sees it expire one TTL after that read.
+//!   TTL; expiry surfaces to watchers as [`WatchEvent::Delete`].
 //! - A watch delivers a snapshot of live keys, then [`WatchEvent::
 //!   SnapshotDone`], then live updates. Either part may also replay
 //!   deletes of keys that were gone before the watch began. A broken watch
@@ -40,12 +35,9 @@
 //!   delivered; graceful release vs expiry is decided from durable
 //!   record state, not from watch semantics.)
 
-use spate_core::metrics::CoordinationMetrics;
 use std::future::Future;
 use std::time::Duration;
 
-#[cfg(feature = "dynamodb")]
-pub mod dynamodb;
 pub mod memory;
 pub(crate) mod metered;
 #[cfg(feature = "nats")]
@@ -57,8 +49,8 @@ pub enum Keyspace {
     /// Never expires; survives owner death (split records, plan record).
     Durable,
     /// Every write re-arms expiry [`lease_ttl`](CoordinationStore::lease_ttl)
-    /// from write time, as the store or the reading handle measures it;
-    /// expiry surfaces to watchers as a delete.
+    /// from write time on the store's clock; expiry surfaces to watchers
+    /// as a delete.
     Ephemeral,
 }
 
@@ -78,9 +70,8 @@ pub enum WatchMode {
 }
 
 /// Store-assigned version token. The revisions a key's writes return
-/// strictly increase outside the DynamoDB re-create exception in the
-/// `store::dynamodb` docs, and a watch delete's revision follows the rule
-/// on [`WatchEvent::Delete`]. Content-independent, so it carries none of the
+/// strictly increase, and a watch delete's revision follows the rule on
+/// [`WatchEvent::Delete`]. Content-independent, so it carries none of the
 /// ABA hazards a content-hash token would.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Revision(pub u64);
@@ -132,14 +123,10 @@ pub enum WatchEvent {
         /// key held before the deletion that this handle, or a clone of it,
         /// returned from a create, update, read or listing, or that a watch
         /// of it delivered. It can sit at or below a revision another handle
-        /// wrote that this handle never saw. On the DynamoDB store, once
-        /// native TTL collects the key's revision floor or its last item,
-        /// the re-create exception in the `store::dynamodb` docs applies,
-        /// and a delete can sit at or below a revision this handle returned
-        /// before then. Deletes and puts for one key are only ordered
-        /// through these revisions: a consumer that rewrote the key must
-        /// ignore a delete whose revision is below its own write's (the
-        /// stale echo of an older deletion).
+        /// wrote that this handle never saw. Deletes and puts for one key are
+        /// only ordered through these revisions: a consumer that rewrote the
+        /// key must ignore a delete whose revision is below its own write's
+        /// (the stale echo of an older deletion).
         revision: Revision,
     },
     /// The initial snapshot is fully delivered; everything after is live.
@@ -186,17 +173,6 @@ pub trait CoordinationStore: Send + Sync + 'static {
     fn watch_mode(&self) -> WatchMode {
         WatchMode::Push
     }
-
-    /// The per-operation deadline the store sizes its own client timeouts
-    /// from, when it has one. The coordinator rejects a store whose value
-    /// differs from its `op_timeout`.
-    fn op_timeout(&self) -> Option<Duration> {
-        None
-    }
-
-    /// Receives the coordinator's metrics once, at start, for the I/O a
-    /// store runs outside the trait's operations.
-    fn attach_metrics(&self, _metrics: &CoordinationMetrics) {}
 
     /// Create `key` if absent.
     fn create(

@@ -1,15 +1,15 @@
 ---
-description: "A DynamoDB lease renewal or takeover of R writes R + 2 or above, so a put lands above a reported delete until TTL collects. ADR-0061 supersedes one part."
+description: "A DynamoDB lease renewal or takeover of R writes R + 2 or above. Superseded by ADR-0065, which removes the store."
 ---
 
 # ADR-0058 — A DynamoDB ephemeral write leaves its predecessor's removal revision free
 
-- **Status:** accepted
+- **Status:** superseded
 - **Date:** 2026-10-04
 - **Supersedes:** [ADR-0057](0057-a-deleted-dynamodb-ephemeral-key-leaves-a-revision-floor.md)
   (watch-delete consequences)
 - **Superseded by:** [ADR-0061](0061-a-watch-delete-orders-above-what-its-handle-has-seen.md)
-  (the #959 consequence)
+  (the #959 consequence), [ADR-0065](0065-the-dynamodb-coordination-store-is-removed.md)
 
 ## Context and problem statement
 
@@ -100,5 +100,5 @@ the in-memory table.
   — the watch-delete consequences this replaces; its floor stands.
 - [ADR-0051](0051-lease-expiry-judged-by-each-observer.md) — the expiry
   judgment whose delete revisions this keeps apart from read and written ones.
-- [DynamoDB store](../user-guide/04-connectors/coordination/dynamodb/README.mdx#lease-expiry)
+- [DynamoDB store](https://github.com/spate-etl/spate/blob/ba7459347131a223e0a34422fcadba1594158d0b/docs/user-guide/04-connectors/coordination/dynamodb/README.mdx)
   — the rule as the store page states it.

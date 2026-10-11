@@ -61,10 +61,6 @@ impl<S: CoordinationStore + Clone> CoordinationStore for ReplyLost<S> {
         self.inner.watch_mode()
     }
 
-    fn op_timeout(&self) -> Option<Duration> {
-        self.inner.op_timeout()
-    }
-
     async fn create(
         &self,
         ks: Keyspace,

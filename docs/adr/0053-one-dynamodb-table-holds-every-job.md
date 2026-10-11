@@ -1,14 +1,14 @@
 ---
-description: "One operator-provisioned DynamoDB table holds every job, keyed by job and keyspace, so IAM can scope a job. Its partition-key list is superseded by ADR-0057."
+description: "One operator-provisioned DynamoDB table holds every job, keyed by job and keyspace. Superseded by ADR-0065, which removes the store."
 ---
 
 # ADR-0053 — One operator-provisioned table holds every job, keyed by job and keyspace
 
-- **Status:** accepted
+- **Status:** superseded
 - **Date:** 2026-09-29
 - **Supersedes:** —
 - **Superseded by:** [ADR-0057](0057-a-deleted-dynamodb-ephemeral-key-leaves-a-revision-floor.md)
-  (partition keys)
+  (partition keys), [ADR-0065](0065-the-dynamodb-coordination-store-is-removed.md)
 
 ## Context and problem statement
 
@@ -103,6 +103,6 @@ interval. The real-table run in #819 measured table-wide capacity at 3, 10 and
 - #848 — sharding a job's keyspaces over several partition keys.
 - [ADR-0052](0052-dynamodb-store-polls-without-streams.md) — the poll whose
   reads concentrate on the lease partition key.
-- [DynamoDB store](../user-guide/04-connectors/coordination/dynamodb/README.mdx#the-table)
+- [DynamoDB store](https://github.com/spate-etl/spate/blob/ba7459347131a223e0a34422fcadba1594158d0b/docs/user-guide/04-connectors/coordination/dynamodb/README.mdx)
   — the key schema, the IAM policy and the startup checks as the store page
   states them.

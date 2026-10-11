@@ -67,8 +67,6 @@ pub enum Check {
     RecordInNoSplit,
     /// A generated record lies in two splits.
     RecordInTwoSplits,
-    /// A polled store holds no verdict.
-    VerdictMissing,
     /// A stopped worker's split was not claimed by its peer within the cap.
     StoppedSplitNotReassigned,
     /// No other instance took the leader key within the cap after the
@@ -97,7 +95,6 @@ impl Check {
             | Check::Unfinished
             | Check::RecordInNoSplit
             | Check::RecordInTwoSplits
-            | Check::VerdictMissing
             | Check::StoppedSplitNotReassigned
             | Check::LeaderNotReplaced => 4,
             Check::EpochRegressed

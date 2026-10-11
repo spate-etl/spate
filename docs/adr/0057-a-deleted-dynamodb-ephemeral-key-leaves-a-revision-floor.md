@@ -1,16 +1,16 @@
 ---
-description: "A deleted DynamoDB lease or presence key leaves a revision floor that every create checks. Its watch-delete consequences are superseded by ADR-0058."
+description: "A deleted DynamoDB lease or presence key leaves a revision floor that every create checks. Superseded by ADR-0065, which removes the store."
 ---
 
 # ADR-0057 — A deleted DynamoDB ephemeral key leaves a revision floor that every create checks
 
-- **Status:** accepted
+- **Status:** superseded
 - **Date:** 2026-10-04
 - **Supersedes:** [ADR-0051](0051-lease-expiry-judged-by-each-observer.md)
   (revision consequence), [ADR-0053](0053-one-dynamodb-table-holds-every-job.md)
   (partition keys)
 - **Superseded by:** [ADR-0058](0058-a-dynamodb-ephemeral-write-leaves-its-predecessors-removal-revision.md)
-  (watch-delete consequences)
+  (watch-delete consequences), [ADR-0065](0065-the-dynamodb-coordination-store-is-removed.md)
 
 ## Context and problem statement
 
@@ -134,5 +134,5 @@ against DynamoDB Local.
   consequence this replaces; its expiry rule stands.
 - [ADR-0053](0053-one-dynamodb-table-holds-every-job.md) — the table layout
   this adds a partition key to.
-- [DynamoDB store](../user-guide/04-connectors/coordination/dynamodb/README.mdx#lease-expiry)
+- [DynamoDB store](https://github.com/spate-etl/spate/blob/ba7459347131a223e0a34422fcadba1594158d0b/docs/user-guide/04-connectors/coordination/dynamodb/README.mdx)
   — the floor and its retention as the store page states them.

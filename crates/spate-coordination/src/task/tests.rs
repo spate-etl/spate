@@ -559,14 +559,6 @@ mod ready_bursts {
             WatchMode::Push
         }
 
-        fn op_timeout(&self) -> Option<Duration> {
-            self.memory.op_timeout()
-        }
-
-        fn attach_metrics(&self, metrics: &spate_core::metrics::CoordinationMetrics) {
-            self.memory.attach_metrics(metrics);
-        }
-
         async fn create(
             &self,
             ks: Keyspace,
@@ -863,12 +855,6 @@ mod ready_bursts {
         }
         fn watch_mode(&self) -> WatchMode {
             WatchMode::Push
-        }
-        fn op_timeout(&self) -> Option<Duration> {
-            self.memory.op_timeout()
-        }
-        fn attach_metrics(&self, metrics: &spate_core::metrics::CoordinationMetrics) {
-            self.memory.attach_metrics(metrics);
         }
         async fn create(
             &self,

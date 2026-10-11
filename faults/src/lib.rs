@@ -11,10 +11,9 @@
 //! schedule, the lost-reply evidence check, the container health poller, and
 //! the harness that runs worker processes, reads the leader key before each
 //! scheduled kill, kills the leader at a seeded stage of its work or resumes it
-//! once a peer has claimed the split it stopped before, puts a seeded DynamoDB
-//! fault proxy in front of each worker of the scheduled-fault DynamoDB runs,
-//! opens seeded Toxiproxy windows on each worker's store link in the
-//! scheduled-fault runs, and judges them.
+//! once a peer has claimed the split it stopped before, opens seeded
+//! Toxiproxy windows on each worker's store link in the scheduled-fault runs,
+//! and judges them.
 //!
 //! # Delivery properties
 //!
@@ -29,9 +28,8 @@
 //!   record of the split that the previous tenant's process wrote. The claim
 //!   either followed that process's release, or spent an attempt and was sent
 //!   no earlier than the start of a fault window on that process and no later
-//!   than two leases, the drain deadline, two store timeouts, two poll
-//!   intervals and two seconds after the window's end or the replacement's
-//!   start, whichever is later.
+//!   than two leases, the drain deadline, two store timeouts and two seconds
+//!   after the window's end or the replacement's start, whichever is later.
 //! - **3. No committed position runs ahead of durable rows.** Every process
 //!   that sent a landed value moving a split's watermark from W0 to W had
 //!   written each record of the split in `[W0, W)` before that `send`. A value
@@ -39,8 +37,8 @@
 //!   value that moves the watermark or sets `completed` has a journalled sender.
 //! - **4. No split completes twice or goes missing, and after a killed
 //!   leader, another instance takes the leader key.** One landed value per
-//!   split sets `completed`, the split ends `Completed`, the swept descriptors
-//!   partition the generated records, and a DynamoDB store holds a verdict.
+//!   split sets `completed`, the split ends `Completed`, and the swept
+//!   descriptors partition the generated records.
 //! - **5. No two owners commit on one split.** Per key in revision order, the
 //!   epoch never falls, each epoch has at most one owner, and every value
 //!   that moves the watermark carries the highest epoch at a lower revision.

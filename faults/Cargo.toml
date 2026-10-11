@@ -18,12 +18,12 @@ futures-util = { workspace = true }
 object_store = { workspace = true, features = ["aws"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
-spate-coordination = { workspace = true, features = ["dynamodb", "nats", "testing"] }
+spate-coordination = { workspace = true, features = ["nats", "testing"] }
 spate-core = { workspace = true }
 spate-json = { workspace = true }
 spate-s3 = { workspace = true, features = ["testing"] }
 spate-test = { workspace = true }
-spate-test-support = { workspace = true, features = ["dynamodb-proxy", "toxiproxy"] }
+spate-test-support = { workspace = true, features = ["toxiproxy"] }
 testcontainers = { workspace = true, features = ["blocking"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
 url = { workspace = true }

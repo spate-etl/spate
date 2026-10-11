@@ -6,7 +6,6 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use spate_coordination::store::CoordinationStore;
-use spate_coordination::store::dynamodb::{DynamoDbConfig, DynamoDbStore};
 use spate_coordination::store::nats::{NatsConfig, NatsStore};
 use spate_coordination::{CoordinationConfig, StoreCoordinator};
 use spate_core::config::PipelineConfig;
@@ -67,16 +66,6 @@ pub enum StoreConfig {
         /// Job identity, shared by every worker of the run.
         job: String,
     },
-    /// DynamoDB, here DynamoDB Local. The table is created when missing.
-    #[serde(rename = "dynamodb")]
-    DynamoDb {
-        /// Endpoint URL.
-        endpoint: String,
-        /// Table name.
-        table: String,
-        /// Job identity, shared by every worker of the run.
-        job: String,
-    },
 }
 
 /// An S3 gateway that accepts unsigned requests over plain HTTP.
@@ -103,9 +92,6 @@ pub struct Tuning {
     pub drain_deadline_ms: u64,
     /// Delivery attempts before a split is quarantined.
     pub max_attempts: u32,
-    /// Interval between two listings of a watched prefix on a polled store;
-    /// 0 on a push store.
-    pub poll_ms: u64,
     /// Working-set bound per worker.
     pub max_in_flight: u32,
 }
@@ -123,21 +109,7 @@ impl Tuning {
             replan_ms: 2_000,
             drain_deadline_ms: 5_000,
             max_attempts: 1_000,
-            poll_ms: 0,
             max_in_flight: 8,
-        }
-    }
-
-    /// The tuning for DynamoDB workers: six polls per lease, and a lease of at
-    /// least two store timeouts.
-    #[must_use]
-    pub fn dynamodb() -> Tuning {
-        Tuning {
-            lease_ms: 3_000,
-            op_timeout_ms: 1_000,
-            replan_ms: 3_000,
-            poll_ms: 500,
-            ..Tuning::nats()
         }
     }
 
@@ -164,7 +136,6 @@ impl Tuning {
             lease_ms: self.lease_ms,
             drain_deadline_ms: self.drain_deadline_ms,
             op_timeout_ms: self.op_timeout_ms,
-            poll_interval_ms: self.poll_ms,
         }
     }
 }
@@ -173,44 +144,12 @@ impl Tuning {
 ///
 /// # Errors
 ///
-/// Fails on an invalid server URL or job, or when `store` is not NATS.
+/// Fails on an invalid server URL or job.
 pub fn nats_store(store: &StoreConfig, tuning: &Tuning) -> Result<NatsStore, String> {
-    let StoreConfig::Nats { server, job } = store else {
-        return Err(format!("not a NATS store: {store:?}"));
-    };
+    let StoreConfig::Nats { server, job } = store;
     NatsStore::new(
         NatsConfig::new(vec![server.clone()], job.clone()),
         Duration::from_millis(tuning.lease_ms),
-    )
-    .map_err(|e| e.to_string())
-}
-
-/// The DynamoDB store that `store` names, signing with a fixed local key
-/// pair, configured with no I/O. It creates its table when missing.
-///
-/// # Errors
-///
-/// Fails on an invalid configuration, or when `store` is not DynamoDB.
-pub fn dynamodb_store(store: &StoreConfig, tuning: &Tuning) -> Result<DynamoDbStore, String> {
-    let StoreConfig::DynamoDb {
-        endpoint,
-        table,
-        job,
-    } = store
-    else {
-        return Err(format!("not a DynamoDB store: {store:?}"));
-    };
-    let mut config = DynamoDbConfig::new(table.clone(), job.clone());
-    config.region = Some("us-east-1".to_owned());
-    config.endpoint = Some(endpoint.clone());
-    config.create_table = true;
-    config.poll_interval = Duration::from_millis(tuning.poll_ms);
-    DynamoDbStore::with_static_credentials(
-        config,
-        Duration::from_millis(tuning.lease_ms),
-        Duration::from_millis(tuning.op_timeout_ms),
-        "local",
-        "local",
     )
     .map_err(|e| e.to_string())
 }
@@ -224,9 +163,6 @@ pub fn dynamodb_store(store: &StoreConfig, tuning: &Tuning) -> Result<DynamoDbSt
 pub fn run(config: &WorkerConfig) -> Result<(), String> {
     match &config.store {
         StoreConfig::Nats { .. } => run_on(config, nats_store(&config.store, &config.tuning)?),
-        StoreConfig::DynamoDb { .. } => {
-            run_on(config, dynamodb_store(&config.store, &config.tuning)?)
-        }
     }
 }
 
@@ -391,11 +327,6 @@ mod tests {
                 let store = JournalStore::new(store, journal, classifier);
                 StoreCoordinator::new(store, coordination, pipeline.io_handle(), None).unwrap();
             }
-            StoreConfig::DynamoDb { .. } => {
-                let store = dynamodb_store(&config.store, &config.tuning).unwrap();
-                let store = JournalStore::new(store, journal, classifier);
-                StoreCoordinator::new(store, coordination, pipeline.io_handle(), None).unwrap();
-            }
         }
         S3Source::from_component_config(&pipeline.config().source, pipeline.io_handle()).unwrap();
     }
@@ -409,17 +340,5 @@ mod tests {
             job: "job".to_owned(),
         };
         assembles_without_io(store, Tuning::nats());
-    }
-
-    /// The DynamoDB tuning passes the coordinator's checks and assembles a
-    /// worker pipeline without I/O.
-    #[test]
-    fn dynamodb_worker_assembles_without_io() {
-        let store = StoreConfig::DynamoDb {
-            endpoint: "http://127.0.0.1:1".to_owned(),
-            table: "table".to_owned(),
-            job: "job".to_owned(),
-        };
-        assembles_without_io(store, Tuning::dynamodb());
     }
 }

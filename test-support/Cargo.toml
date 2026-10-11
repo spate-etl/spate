@@ -13,8 +13,6 @@ repository.workspace = true
 workspace = true
 
 [features]
-# `DynamoDbFaultProxy`.
-dynamodb-proxy = ["dep:serde_json"]
 # `TestCa`, `native_certs` and `serve_tls`.
 tls = [
     "dep:base64",

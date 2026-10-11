@@ -286,17 +286,6 @@ pub enum Event {
         /// Target pid.
         pid: u32,
     },
-    /// The DynamoDB fault proxy serving a worker answered a call with a fault.
-    ProxyFault {
-        /// Instance id the proxy serves.
-        instance: String,
-        /// That instance's pid.
-        pid: u32,
-        /// The fault, as the proxy names it.
-        fault: String,
-        /// Store key of the call, when it carried one.
-        key: Option<String>,
-    },
     /// The harness opened a Toxiproxy window on a worker's store link.
     Toxic {
         /// Instance id the proxy serves.

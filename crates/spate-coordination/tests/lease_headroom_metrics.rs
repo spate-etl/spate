@@ -71,14 +71,6 @@ impl CoordinationStore for FaultyStore {
         self.inner.watch_mode()
     }
 
-    fn op_timeout(&self) -> Option<Duration> {
-        self.inner.op_timeout()
-    }
-
-    fn attach_metrics(&self, metrics: &CoordinationMetrics) {
-        self.inner.attach_metrics(metrics);
-    }
-
     async fn create(
         &self,
         ks: Keyspace,

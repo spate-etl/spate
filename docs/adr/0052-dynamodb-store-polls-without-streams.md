@@ -1,13 +1,13 @@
 ---
-description: "The DynamoDB store discovers changes by querying each watched prefix every poll interval, without Streams; lease-poll reads grow with the fleet squared."
+description: "The DynamoDB store discovers changes by querying each watched prefix every poll interval, without Streams. Superseded by ADR-0065, which removes the store."
 ---
 
 # ADR-0052 — The DynamoDB store discovers changes by polling, without Streams
 
-- **Status:** accepted
+- **Status:** superseded
 - **Date:** 2026-09-29
 - **Supersedes:** —
-- **Superseded by:** —
+- **Superseded by:** [ADR-0065](0065-the-dynamodb-coordination-store-is-removed.md)
 
 ## Context and problem statement
 
@@ -106,5 +106,5 @@ and nothing has been run near 100 workers.
   polled watch and what the coordinator reads on such a store.
 - [ADR-0053](0053-one-dynamodb-table-holds-every-job.md) — why every lease of a
   job shares one partition key.
-- [DynamoDB store](../user-guide/04-connectors/coordination/dynamodb/README.mdx#latency-and-cost)
+- [DynamoDB store](https://github.com/spate-etl/spate/blob/ba7459347131a223e0a34422fcadba1594158d0b/docs/user-guide/04-connectors/coordination/dynamodb/README.mdx)
   — the latency and cost terms as the store page states them.

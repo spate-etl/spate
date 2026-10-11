@@ -17,7 +17,6 @@ use spate_coordination::store::{
     CasOutcome, CoordinationStore, Entry, Keyspace, Revision, StoreError, WatchEvent, WatchMode,
     WatchStream,
 };
-use spate_core::metrics::CoordinationMetrics;
 
 use crate::classify::{Classifier, WriteKind, classify_ephemeral, classify_leader};
 use crate::journal::{AbortPoint, Event, Journal, Progress, Reply, Source, WriteOp};
@@ -247,14 +246,6 @@ impl<S: CoordinationStore + Clone> CoordinationStore for JournalStore<S> {
 
     fn watch_mode(&self) -> WatchMode {
         self.inner.watch_mode()
-    }
-
-    fn op_timeout(&self) -> Option<Duration> {
-        self.inner.op_timeout()
-    }
-
-    fn attach_metrics(&self, metrics: &CoordinationMetrics) {
-        self.inner.attach_metrics(metrics);
     }
 
     async fn create(
@@ -540,14 +531,6 @@ impl<S: CoordinationStore + Clone> CoordinationStore for AbortAt<S> {
         self.inner.watch_mode()
     }
 
-    fn op_timeout(&self) -> Option<Duration> {
-        self.inner.op_timeout()
-    }
-
-    fn attach_metrics(&self, metrics: &CoordinationMetrics) {
-        self.inner.attach_metrics(metrics);
-    }
-
     async fn create(
         &self,
         ks: Keyspace,
@@ -728,14 +711,6 @@ impl<S: CoordinationStore + Clone + Send + Sync + 'static> CoordinationStore for
 
     fn watch_mode(&self) -> WatchMode {
         self.inner.watch_mode()
-    }
-
-    fn op_timeout(&self) -> Option<Duration> {
-        self.inner.op_timeout()
-    }
-
-    fn attach_metrics(&self, metrics: &CoordinationMetrics) {
-        self.inner.attach_metrics(metrics);
     }
 
     async fn create(
@@ -1128,14 +1103,6 @@ impl<S: CoordinationStore + Clone> CoordinationStore for StopAt<S> {
 
     fn watch_mode(&self) -> WatchMode {
         self.inner.watch_mode()
-    }
-
-    fn op_timeout(&self) -> Option<Duration> {
-        self.inner.op_timeout()
-    }
-
-    fn attach_metrics(&self, metrics: &CoordinationMetrics) {
-        self.inner.attach_metrics(metrics);
     }
 
     // Not an `async fn`, so `hold` runs when the future is built, before the

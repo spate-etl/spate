@@ -5,8 +5,6 @@
 #![allow(dead_code, unreachable_pub)]
 
 pub mod contract;
-#[cfg(feature = "dynamodb")]
-pub mod dynamodb;
 pub mod lagged;
 pub mod polled;
 pub mod tap;

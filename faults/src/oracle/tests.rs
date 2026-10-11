@@ -166,7 +166,6 @@ struct Fixture {
     specs: Vec<(String, SplitDescriptor)>,
     processes: Vec<ProcessJournal>,
     finals: Vec<(String, u64, Progress)>,
-    verdict: bool,
     faults: Vec<Line>,
 }
 
@@ -209,7 +208,7 @@ impl Fixture {
     /// and no progress.
     fn empty() -> Fixture {
         Fixture {
-            store: StoreKind::DynamoDb,
+            store: StoreKind::Nats,
             generated: vec![object(0, A, 2), object(1, B, 4), object(2, C, 2)],
             specs: vec![
                 (
@@ -227,7 +226,6 @@ impl Fixture {
             ],
             processes: Vec::new(),
             finals: Vec::new(),
-            verdict: true,
             faults: Vec::new(),
         }
     }
@@ -239,24 +237,16 @@ impl Fixture {
                 lease_ms: 2_000,
                 drain_deadline_ms: 5_000,
                 op_timeout_ms: 500,
-                poll_interval_ms: 0,
-            },
-            StoreKind::DynamoDb => Timing {
-                lease_ms: 3_000,
-                drain_deadline_ms: 5_000,
-                op_timeout_ms: 1_000,
-                poll_interval_ms: 500,
             },
         }
     }
 
     /// Property 2's bound after a fault window, written out from
     /// [`Fixture::timing`]: two leases, the drain deadline, two store
-    /// timeouts, two poll intervals and two seconds.
+    /// timeouts and two seconds.
     fn slack(&self) -> u64 {
         match self.store {
             StoreKind::Nats => 2 * 2_000 + 5_000 + 2 * 500 + 2_000,
-            StoreKind::DynamoDb => 2 * 3_000 + 5_000 + 2 * 1_000 + 2 * 500 + 2_000,
         }
     }
 
@@ -286,13 +276,6 @@ impl Fixture {
                 key: key.clone(),
                 rev: *rev,
                 value: serde_json::to_vec(value).unwrap(),
-            });
-        }
-        if self.verdict {
-            sweep.push(SweptEntry {
-                key: VERDICT_KEY.to_owned(),
-                rev: 1,
-                value: b"{}".to_vec(),
             });
         }
         sweep
@@ -627,16 +610,6 @@ fn p4_flags_a_split_left_unfinished() {
     assert_eq!(fixture.checks(4), vec![Check::Unfinished]);
 }
 
-/// A missing verdict is flagged on DynamoDB and not on NATS.
-#[test]
-fn p4_requires_the_verdict_on_dynamodb_only() {
-    let mut fixture = Fixture::clean();
-    fixture.verdict = false;
-    assert_eq!(fixture.checks(4), vec![Check::VerdictMissing]);
-    fixture.store = StoreKind::Nats;
-    assert_eq!(fixture.check(), Vec::new());
-}
-
 /// The swept value at a revision is judged over a journalled `won` at the same revision.
 #[test]
 fn p4_judges_the_swept_value_over_a_journalled_won() {
@@ -796,13 +769,12 @@ fn p3_does_not_attribute_a_commit_to_a_losing_claim() {
     assert_eq!(fixture.check(), Vec::new());
 }
 
-const STORES: [StoreKind; 2] = [StoreKind::Nats, StoreKind::DynamoDb];
+const STORES: [StoreKind; 1] = [StoreKind::Nats];
 
-/// Revisions one key moves through: consecutive on DynamoDB, which counts
-/// per item, and spaced on NATS, whose stream sequence every key shares.
+/// Revisions one key moves through, spaced as on NATS, whose stream sequence
+/// every key shares.
 fn revs(store: StoreKind) -> [u64; 6] {
     match store {
-        StoreKind::DynamoDb => [1, 2, 3, 4, 5, 6],
         StoreKind::Nats => [7, 11, 18, 24, 31, 40],
     }
 }
@@ -812,15 +784,6 @@ fn kill(instance: &str, pid: u32) -> Event {
         instance: instance.to_owned(),
         pid,
         leader: LeaderAtKill::Unread,
-    }
-}
-
-fn proxy_fault(fault: &str) -> Event {
-    Event::ProxyFault {
-        instance: "w0".to_owned(),
-        pid: 100,
-        fault: fault.to_owned(),
-        key: Some("split.s0".to_owned()),
     }
 }
 
@@ -984,18 +947,13 @@ fn p2_flags_a_duplicate_whose_only_fault_comes_after_the_claim() {
     }
 }
 
-/// A DynamoDB proxy fault and an `err_after_land` line on the previous tenant
-/// each explain a replay as faults of no duration; a `pass` or `delay` answer
-/// does not.
+/// An `err_after_land` line on the previous tenant explains a replay as a
+/// fault of no duration.
 #[test]
 fn p2_accepts_a_duplicate_after_a_zero_length_logged_fault() {
     for store in STORES {
         let handover = Handover::new(store);
         let before = handover.claim_at - 100;
-        let mut fixture = handover.build();
-        fixture.fault(before, proxy_fault("throttle"));
-        assert_clean(&fixture, "proxy fault");
-
         let mut fixture = handover.build();
         fixture.processes[0].lines.push(Line {
             t_ms: before,
@@ -1005,12 +963,6 @@ fn p2_accepts_a_duplicate_after_a_zero_length_logged_fault() {
             },
         });
         assert_clean(&fixture, "err_after_land");
-
-        for benign in ["pass", "delay(50ms)"] {
-            let mut fixture = handover.build();
-            fixture.fault(before, proxy_fault(benign));
-            assert_flags(&fixture, &[id(0, 1), id(2, 0)], benign);
-        }
     }
 }
 

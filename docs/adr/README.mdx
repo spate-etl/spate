@@ -84,20 +84,21 @@ record appears in the table below.
 | [0048](0048-changelog-fragments-are-the-release-signal.md) | Changelog fragments carry the release signal, so subjects carry none | accepted | 2026-09-27 |
 | [0049](0049-coordination-section-in-the-pipeline-config.md) | The coordination store is configured in a top-level pipeline section, and the source builds its coordinator from it | accepted | 2026-09-27 |
 | [0050](0050-coordination-stores-may-declare-a-polled-watch.md) | A coordination store may declare a polled watch, and the coordinator reads what it misses | accepted | 2026-09-29 |
-| [0051](0051-lease-expiry-judged-by-each-observer.md) | Lease expiry may be judged by each observer, and the DynamoDB store does so | accepted | 2026-09-29 |
-| [0052](0052-dynamodb-store-polls-without-streams.md) | The DynamoDB store discovers changes by polling, without Streams | accepted | 2026-09-29 |
-| [0053](0053-one-dynamodb-table-holds-every-job.md) | One operator-provisioned table holds every job, keyed by job and keyspace | accepted | 2026-09-29 |
+| [0051](0051-lease-expiry-judged-by-each-observer.md) | Lease expiry may be judged by each observer, and the DynamoDB store does so | superseded | 2026-09-29 |
+| [0052](0052-dynamodb-store-polls-without-streams.md) | The DynamoDB store discovers changes by polling, without Streams | superseded | 2026-09-29 |
+| [0053](0053-one-dynamodb-table-holds-every-job.md) | One operator-provisioned table holds every job, keyed by job and keyspace | superseded | 2026-09-29 |
 | [0054](0054-s3-byte-range-subdivision.md) | A large uncompressed object is cut into byte-range splits, and the rest pack as before | accepted | 2026-10-01 |
 | [0055](0055-graceful-departure-not-withheld.md) | A crashed instance's splits are withheld briefly, and a graceful departure's are not | accepted | 2026-10-01 |
 | [0056](0056-in-process-store-selectable-in-coordination-section.md) | A solo run takes its coordinator tuning from the `coordination:` section by selecting the in-process store | accepted | 2026-10-01 |
-| [0057](0057-a-deleted-dynamodb-ephemeral-key-leaves-a-revision-floor.md) | A deleted DynamoDB ephemeral key leaves a revision floor that every create checks | accepted | 2026-10-04 |
-| [0058](0058-a-dynamodb-ephemeral-write-leaves-its-predecessors-removal-revision.md) | A DynamoDB ephemeral write leaves its predecessor's removal revision free | accepted | 2026-10-04 |
+| [0057](0057-a-deleted-dynamodb-ephemeral-key-leaves-a-revision-floor.md) | A deleted DynamoDB ephemeral key leaves a revision floor that every create checks | superseded | 2026-10-04 |
+| [0058](0058-a-dynamodb-ephemeral-write-leaves-its-predecessors-removal-revision.md) | A DynamoDB ephemeral write leaves its predecessor's removal revision free | superseded | 2026-10-04 |
 | [0059](0059-final-coordinated-commit-runs-under-one-op-timeout-budget.md) | The final coordinated commit runs under one op_timeout budget, and the splits it does not reach may replay | accepted | 2026-10-04 |
 | [0060](0060-the-plan-record-names-the-worker-whose-election-wrote-its-generation.md) | The plan record names the worker whose election wrote its generation | accepted | 2026-10-04 |
 | [0061](0061-a-watch-delete-orders-above-what-its-handle-has-seen.md) | A watch delete orders above what its handle has seen of the key | accepted | 2026-10-05 |
 | [0062](0062-the-release-sequence-is-rust-in-xtask.md) | The release sequence moves from Bash into xtask, behind traits a test can fail | accepted | 2026-10-10 |
 | [0063](0063-releases-are-attested-by-a-reusable-build-workflow.md) | A reusable build workflow signs every release attestation | accepted | 2026-10-10 |
 | [0064](0064-releases-are-immutable-and-published-from-a-complete-draft.md) | GitHub releases are immutable, published only from a complete draft | accepted | 2026-10-10 |
+| [0065](0065-the-dynamodb-coordination-store-is-removed.md) | The DynamoDB coordination store is removed before its first release | accepted | 2026-10-11 |
 
 ## Related
 

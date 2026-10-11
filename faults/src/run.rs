@@ -10,13 +10,12 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock, mpsc};
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use spate_coordination::store::dynamodb::DynamoDbStore;
 use spate_coordination::store::nats::NatsStore;
 use spate_coordination::store::{CoordinationStore as _, Entry, Keyspace, StoreError};
-use spate_test_support::{DynamoDbFaultProxy, Toxiproxy, container_image};
+use spate_test_support::{Toxiproxy, container_image};
 use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::runners::SyncRunner;
 use testcontainers::{Container, ContainerRequest, GenericImage, ImageExt};
@@ -34,7 +33,7 @@ use crate::schedule::{Action, InProcess, SLEEPER, Schedule, Step, Stop, Timeline
 use crate::seaweed::Gateway;
 use crate::seed::{self, SplitMix64};
 use crate::store::AbortMode;
-use crate::worker::{S3Config, StoreConfig, Tuning, WorkerConfig, dynamodb_store, nats_store};
+use crate::worker::{S3Config, StoreConfig, Tuning, WorkerConfig, nats_store};
 use crate::workers::Workers;
 
 /// Environment variable holding the run seed, in decimal or `0x` hex.
@@ -48,9 +47,7 @@ const MIN_OBJECT: u64 = 48 * 1024;
 const MAX_OBJECT: u64 = 5 * MIB / 2;
 const BUCKET: &str = "spate-faults";
 const JOB: &str = "faults";
-const TABLE: &str = "spate-faults";
 const NATS_CLIENT_PORT: u16 = 4222;
-const DYNAMODB_PORT: u16 = 8000;
 /// Cap on starting the containers and creating the store.
 const SETUP_DEADLINE: Duration = Duration::from_secs(60);
 /// Cap on one store call the harness makes directly.
@@ -68,10 +65,7 @@ const STOP_CONFIRM: Duration = Duration::from_secs(5);
 
 mod leader;
 mod link;
-mod proxy;
 mod stopped;
-
-pub use proxy::drop_after_land_then_pass_wins;
 
 /// One scenario.
 #[derive(Clone, Copy, Debug)]
@@ -153,7 +147,6 @@ pub fn run(spec: &Spec<'_>) -> Outcome {
     let (generated, objects) = generate(&mut rng);
     let mut tuning = match spec.store {
         StoreKind::Nats => Tuning::nats(),
-        StoreKind::DynamoDb => Tuning::dynamodb(),
     };
     match spec.faults {
         Faults::StoppedWriter { .. } => tuning.max_in_flight = stopped::WORKING_SET,
@@ -167,15 +160,12 @@ pub fn run(spec: &Spec<'_>) -> Outcome {
         Faults::LeaderKilled => Schedule::leader_killed(&mut rng, tuning.lease_ms),
         Faults::DeposedLeader { .. } => Schedule::deposed_leader(&mut rng),
     };
-    let proxy_seed = (spec.store == StoreKind::DynamoDb && spec.faults == Faults::Schedule)
-        .then(|| rng.next_u64());
     let links = link_windows(&mut rng, spec, &schedule, &tuning);
     let run = Run {
         spec,
         seed,
         dir,
         schedule,
-        proxy_seed,
         links,
     };
     eprintln!("fault-run schedule for {}:\n{}", spec.name, run.render());
@@ -259,7 +249,6 @@ pub fn run(spec: &Spec<'_>) -> Outcome {
     } else {
         Vec::new()
     };
-    fired.extend(proxy::fired(&faults, &processes));
     let journals: Vec<ProcessJournal> = processes
         .into_iter()
         .map(|(instance, pid, path)| ProcessJournal {
@@ -311,7 +300,6 @@ pub fn run(spec: &Spec<'_>) -> Outcome {
     if !timed_out {
         expectations.extend(unreplaced_aborts(&journals));
     }
-    expectations.extend(proxy::unexercised(run.proxy_seed.is_some(), &faults));
     expectations.extend(link::unexercised(!run.links.is_empty(), &faults));
     expectations.extend(unread_leader_kills(spec.faults, &faults));
     let lost_replies = expect::lost_replies(&journals, run.schedule.lost_reply().is_some());
@@ -346,28 +334,23 @@ struct Env {
     store_name: &'static str,
     store_config: StoreConfig,
     direct: Direct,
-    /// DynamoDB Local's address, which a worker's fault proxy forwards to.
-    dynamodb: Option<SocketAddr>,
 }
 
-/// The harness's own handle on either store.
+/// The harness's own handle on the store.
 enum Direct {
     Nats(NatsStore),
-    DynamoDb(DynamoDbStore),
 }
 
 impl Direct {
     async fn get(&self, ks: Keyspace, key: &str) -> Result<Option<Entry>, StoreError> {
         match self {
             Direct::Nats(s) => s.get(ks, key).await,
-            Direct::DynamoDb(s) => s.get(ks, key).await,
         }
     }
 
     async fn list(&self, prefix: &str) -> Result<Vec<Entry>, StoreError> {
         match self {
             Direct::Nats(s) => s.list(Keyspace::Durable, prefix).await,
-            Direct::DynamoDb(s) => s.list(Keyspace::Durable, prefix).await,
         }
     }
 }
@@ -425,7 +408,7 @@ fn setup(
     let network = format!("spate-faults-{}-{nanos}", std::process::id());
     let on = linked.then(|| (network.as_str(), format!("{network}-store")));
     let on = on.as_ref().map(|(n, c)| (*n, c.as_str()));
-    let (store, store_name, store_config, direct, dynamodb) = match kind {
+    let (store, store_name, store_config, direct) = match kind {
         StoreKind::Nats => {
             let (image, tag) = container_image(&["--pull", "nats"]);
             let nats = GenericImage::new(image, tag)
@@ -443,27 +426,15 @@ fn setup(
                 job: JOB.to_owned(),
             };
             let direct = Direct::Nats(nats_store(&config, tuning)?);
-            (nats, "nats", config, direct, None)
-        }
-        StoreKind::DynamoDb => {
-            let (local, config, direct, addr) = dynamodb_local(tuning, on)?;
-            (
-                local,
-                "dynamodb",
-                config,
-                Direct::DynamoDb(direct),
-                Some(addr),
-            )
+            (nats, "nats", config, direct)
         }
     };
-    // The first call creates the NATS buckets or the DynamoDB table with the
-    // workers' parameters.
+    // The first call creates the NATS buckets with the workers' parameters.
     await_ready(rt, || direct.get(Keyspace::Durable, "plan"))?;
     let link = match on {
         Some((network, name)) => {
             let port = match kind {
                 StoreKind::Nats => NATS_CLIENT_PORT,
-                StoreKind::DynamoDb => DYNAMODB_PORT,
             };
             Some((Toxiproxy::start(network)?, format!("{name}:{port}")))
         }
@@ -476,7 +447,6 @@ fn setup(
         store_name,
         store_config,
         direct,
-        dynamodb,
     })
 }
 
@@ -489,42 +459,6 @@ fn joined(
         Some((network, name)) => request.with_network(network).with_container_name(name),
         None => request,
     }
-}
-
-/// Starts DynamoDB Local, on `on`'s network under its container name when
-/// given, and returns it with the store config workers get, the harness's
-/// own store handle and its address. Needs a runtime context.
-fn dynamodb_local(
-    tuning: &Tuning,
-    on: Option<(&str, &str)>,
-) -> Result<
-    (
-        Container<GenericImage>,
-        StoreConfig,
-        DynamoDbStore,
-        SocketAddr,
-    ),
-    String,
-> {
-    let (image, tag) = container_image(&["--pull", "dynamodb"]);
-    let local = GenericImage::new(image, tag)
-        .with_exposed_port(DYNAMODB_PORT.tcp())
-        .with_wait_for(WaitFor::message_on_stdout("Initializing DynamoDB Local"))
-        .with_cmd(["-jar", "DynamoDBLocal.jar", "-inMemory"]);
-    let local = joined(local, on)
-        .start()
-        .map_err(|e| format!("start DynamoDB Local: {e}"))?;
-    let port = local
-        .get_host_port_ipv4(DYNAMODB_PORT)
-        .map_err(|e| format!("DynamoDB Local port: {e}"))?;
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    let config = StoreConfig::DynamoDb {
-        endpoint: format!("http://{addr}"),
-        table: TABLE.to_owned(),
-        job: JOB.to_owned(),
-    };
-    let direct = dynamodb_store(&config, tuning)?;
-    Ok((local, config, direct, addr))
 }
 
 /// Retries `get` until it returns `Ok`, for at most [`SETUP_DEADLINE`].
@@ -573,43 +507,21 @@ fn link_windows(
 enum Route {
     Direct,
     Through(SocketAddr),
-    FaultProxy { seed: u64, upstream: SocketAddr },
-}
-
-/// A worker's route: a fault proxy when the run has a proxy seed, forwarding
-/// to Toxiproxy at `linked` when the run has one and to `dynamodb` otherwise;
-/// without a seed, Toxiproxy at `linked` or the store directly.
-fn route(
-    linked: Option<SocketAddr>,
-    dynamodb: Option<SocketAddr>,
-    proxy_seed: Option<u64>,
-) -> Route {
-    match (proxy_seed, linked.or(dynamodb)) {
-        (Some(seed), Some(upstream)) => Route::FaultProxy { seed, upstream },
-        _ => linked.map_or(Route::Direct, Route::Through),
-    }
 }
 
 impl Route {
-    /// The store config a worker on this route connects with; `None` for a
-    /// fault proxy, whose address is known once it starts.
-    fn store(&self, store: &StoreConfig) -> Option<StoreConfig> {
+    /// The store config a worker on this route connects with.
+    fn store(&self, store: &StoreConfig) -> StoreConfig {
         match self {
-            Route::Direct => Some(store.clone()),
-            Route::Through(addr) => Some(through(store, *addr)),
-            Route::FaultProxy { .. } => None,
+            Route::Direct => store.clone(),
+            Route::Through(addr) => through(store, *addr),
         }
     }
 }
 
-/// `store` with its DynamoDB endpoint or NATS server at `addr`.
+/// `store` with its NATS server at `addr`.
 fn through(store: &StoreConfig, addr: SocketAddr) -> StoreConfig {
     match store {
-        StoreConfig::DynamoDb { table, job, .. } => StoreConfig::DynamoDb {
-            endpoint: format!("http://{addr}"),
-            table: table.clone(),
-            job: job.clone(),
-        },
         StoreConfig::Nats { job, .. } => StoreConfig::Nats {
             server: format!("nats://{addr}"),
             job: job.clone(),
@@ -617,10 +529,10 @@ fn through(store: &StoreConfig, addr: SocketAddr) -> StoreConfig {
     }
 }
 
-/// The durable `spec.`, `split.`, `plan` and `verdict` entries.
+/// The durable `spec.`, `split.` and `plan` entries.
 fn sweep(rt: &tokio::runtime::Runtime, store: &Direct) -> Result<Vec<SweptEntry>, String> {
     let mut sweep = Vec::new();
-    for prefix in ["spec.", "split.", "plan", "verdict"] {
+    for prefix in ["spec.", "split.", "plan"] {
         let entries = rt
             .block_on(async { tokio::time::timeout(STORE_CALL, store.list(prefix)).await })
             .map_err(|_| format!("the sweep of {prefix} timed out"))?
@@ -640,9 +552,6 @@ struct Run<'a> {
     seed: u64,
     dir: PathBuf,
     schedule: Schedule,
-    /// The seed of the DynamoDB proxy scripts, when the run puts a fault
-    /// proxy in front of each worker.
-    proxy_seed: Option<u64>,
     /// The Toxiproxy windows on the workers' store links.
     links: Vec<link::Window>,
 }
@@ -658,8 +567,7 @@ impl Run<'_> {
     /// stopped process or on none is skipped. Link windows open as
     /// [`link::Links`] releases them. Returns whether one was still running
     /// at the deadline, and each kill, stop and window the run drew. Each
-    /// kill's line records what the leader key held just before it. A proxy
-    /// fault that could not be journalled fails the run once it ends.
+    /// kill's line records what the leader key held just before it.
     fn drive(
         &self,
         workers: &mut Workers,
@@ -672,8 +580,6 @@ impl Run<'_> {
         let faults = Arc::new(
             Journal::open(faults_path).map_err(|e| format!("{}: {e}", faults_path.display()))?,
         );
-        let mut proxies = Vec::new();
-        let unjournalled = Arc::new(OnceLock::new());
         let log = |event| {
             faults
                 .append(event)
@@ -685,17 +591,7 @@ impl Run<'_> {
         let until = start + RUN_DEADLINE;
         let mut incarnations = vec![1; instances];
         for i in 0..self.spec.instances {
-            processes.push(self.spawn_proxied(
-                workers,
-                env,
-                i,
-                1,
-                tuning,
-                &mut proxies,
-                &faults,
-                &unjournalled,
-                &mut links,
-            )?);
+            processes.push(self.spawn_proxied(workers, env, i, 1, tuning, &mut links)?);
         }
         let status = |e: std::io::Error| format!("read worker status: {e}");
         let mut timeline = Timeline::new(&self.schedule);
@@ -798,9 +694,6 @@ impl Run<'_> {
                             instance,
                             incarnations[at],
                             tuning,
-                            &mut proxies,
-                            &faults,
-                            &unjournalled,
                             &mut links,
                         )?;
                         log(Event::Respawn {
@@ -867,9 +760,6 @@ impl Run<'_> {
                 });
             }
         }
-        if let Some(failure) = unjournalled.get() {
-            return Err(failure.clone());
-        }
         Ok((timed_out, fired))
     }
 
@@ -899,12 +789,7 @@ impl Run<'_> {
     }
 
     /// Starts `instance`'s `incarnation` as [`Run::spawn`] does, behind a
-    /// Toxiproxy proxy of its own when the run has link windows, and in front
-    /// of that a DynamoDB fault proxy of its own when the run has a proxy
-    /// seed. Each answer but `pass` is journalled to `faults` against the
-    /// process, and one that cannot be is answered `pass` with the failure
-    /// kept in `unjournalled`.
-    #[allow(clippy::too_many_arguments)]
+    /// Toxiproxy proxy of its own when the run has link windows.
     fn spawn_proxied(
         &self,
         workers: &mut Workers,
@@ -912,42 +797,17 @@ impl Run<'_> {
         instance: u32,
         incarnation: u32,
         tuning: &Tuning,
-        proxies: &mut Vec<DynamoDbFaultProxy>,
-        faults: &Arc<Journal>,
-        unjournalled: &Arc<OnceLock<String>>,
         links: &mut link::Links<'_>,
     ) -> Result<(String, u32, PathBuf), String> {
-        let linked = match &env.link {
+        let route = match &env.link {
             Some((toxiproxy, store)) => {
                 let (name, listen) = links.proxy(instance, incarnation)?;
-                Some(toxiproxy.create_proxy(&name, listen, store)?)
+                Route::Through(toxiproxy.create_proxy(&name, listen, store)?)
             }
-            None => None,
+            None => Route::Direct,
         };
-        let route = route(linked, env.dynamodb, self.proxy_seed);
-        let Route::FaultProxy { seed, upstream } = route else {
-            let store = route
-                .store(&env.store_config)
-                .expect("a route without a fault proxy");
-            return self.spawn_on(workers, env, store, instance, incarnation, tuning);
-        };
-        let script = proxy::ProxyScript::new(seed, &self.schedule, instance, incarnation);
-        let pid = Arc::new(OnceLock::new());
-        let faults = Arc::clone(faults);
-        let answer = proxy::logged(
-            script,
-            format!("w{instance}"),
-            Arc::clone(&pid),
-            move |event| faults.append(event),
-            Arc::clone(unjournalled),
-        );
-        let proxy = DynamoDbFaultProxy::start(upstream, answer)
-            .map_err(|e| format!("start the fault proxy for w{instance}: {e}"))?;
-        let store = through(&env.store_config, proxy.addr());
-        let process = self.spawn_on(workers, env, store, instance, incarnation, tuning)?;
-        let _ = pid.set(process.1);
-        proxies.push(proxy);
-        Ok(process)
+        let store = route.store(&env.store_config);
+        self.spawn_on(workers, env, store, instance, incarnation, tuning)
     }
 
     /// Writes the config of `instance`'s `incarnation`, connecting to
@@ -1036,7 +896,6 @@ impl Run<'_> {
             scenario: spec.name.to_owned(),
             store: match spec.store {
                 StoreKind::Nats => "nats",
-                StoreKind::DynamoDb => "dynamodb",
             }
             .to_owned(),
             instances: spec.instances,
@@ -1648,7 +1507,6 @@ mod tests {
             seed: 0xff,
             dir: dir.clone(),
             schedule: Schedule::default(),
-            proxy_seed: None,
             links: Vec::new(),
         };
         let outcome = run.finish(
@@ -1671,33 +1529,6 @@ mod tests {
         assert_eq!(left, ["outcome.json"]);
     }
 
-    /// A linked worker reaches its store through Toxiproxy, behind its fault
-    /// proxy when the run has a proxy seed.
-    #[test]
-    fn linked_workers_reach_the_store_through_toxiproxy() {
-        let toxiproxy = SocketAddr::from(([127, 0, 0, 1], 21_000));
-        let local = SocketAddr::from(([127, 0, 0, 1], 8_000));
-        assert_eq!(
-            route(Some(toxiproxy), Some(local), Some(7)),
-            Route::FaultProxy {
-                seed: 7,
-                upstream: toxiproxy
-            }
-        );
-        assert_eq!(
-            route(Some(toxiproxy), None, None),
-            Route::Through(toxiproxy)
-        );
-        assert_eq!(
-            route(None, Some(local), Some(7)),
-            Route::FaultProxy {
-                seed: 7,
-                upstream: local
-            }
-        );
-        assert_eq!(route(None, Some(local), None), Route::Direct);
-    }
-
     /// A worker routed through Toxiproxy connects to Toxiproxy's address, and
     /// one routed directly keeps the store's.
     #[test]
@@ -1709,42 +1540,24 @@ mod tests {
         };
         assert_eq!(
             Route::Through(toxiproxy).store(&nats),
-            Some(through(&nats, toxiproxy))
+            through(&nats, toxiproxy)
         );
-        assert_eq!(Route::Direct.store(&nats), Some(nats.clone()));
-        let proxied = Route::FaultProxy {
-            seed: 7,
-            upstream: toxiproxy,
-        };
-        assert_eq!(proxied.store(&nats), None);
+        assert_eq!(Route::Direct.store(&nats), nats);
     }
 
-    /// A worker's store config reaches either store at the given address,
-    /// keeping its job and table.
+    /// A worker's store config reaches the store at the given address,
+    /// keeping its job.
     #[test]
-    fn through_points_either_store_at_the_address() {
+    fn through_points_the_store_at_the_address() {
         let addr = SocketAddr::from(([127, 0, 0, 1], 21_000));
         let nats = StoreConfig::Nats {
             server: "nats://127.0.0.1:4222".to_owned(),
-            job: JOB.to_owned(),
-        };
-        let dynamodb = StoreConfig::DynamoDb {
-            endpoint: "http://127.0.0.1:8000".to_owned(),
-            table: TABLE.to_owned(),
             job: JOB.to_owned(),
         };
         assert_eq!(
             through(&nats, addr),
             StoreConfig::Nats {
                 server: "nats://127.0.0.1:21000".to_owned(),
-                job: JOB.to_owned(),
-            }
-        );
-        assert_eq!(
-            through(&dynamodb, addr),
-            StoreConfig::DynamoDb {
-                endpoint: "http://127.0.0.1:21000".to_owned(),
-                table: TABLE.to_owned(),
                 job: JOB.to_owned(),
             }
         );

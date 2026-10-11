@@ -8,7 +8,8 @@ description: "A watch delete orders above every revision of the key its own hand
 - **Date:** 2026-10-05
 - **Supersedes:** [ADR-0058](0058-a-dynamodb-ephemeral-write-leaves-its-predecessors-removal-revision.md)
   (the #959 consequence)
-- **Superseded by:** —
+- **Superseded by:** [ADR-0065](0065-the-dynamodb-coordination-store-is-removed.md)
+  (DynamoDB re-create exception)
 
 ## Context and problem statement
 
@@ -112,5 +113,5 @@ the conformance suite, and the three `a_polled_delete_*` tests in
   for the DynamoDB store's expiry judgment.
 - [ADR-0050](0050-coordination-stores-may-declare-a-polled-watch.md) — the
   polled watch.
-- [DynamoDB store](../user-guide/04-connectors/coordination/dynamodb/README.mdx#lease-expiry)
+- [DynamoDB store](https://github.com/spate-etl/spate/blob/ba7459347131a223e0a34422fcadba1594158d0b/docs/user-guide/04-connectors/coordination/dynamodb/README.mdx)
   — the rule as the store page states it.

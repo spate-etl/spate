@@ -311,7 +311,7 @@ metric_names! {
         /// One full reconcile listing (the watch-loss backstop).
         COORDINATION_RECONCILE_DURATION_SECONDS = "spate_coordination_reconcile_duration_seconds",
         /// Store primitive round-trip time, by [`L_OP`] (`get`, `put`, `delete`,
-        /// `list`, `watch`, `poll`).
+        /// `list`, `watch`).
         COORDINATION_STORE_OP_DURATION_SECONDS = "spate_coordination_store_op_duration_seconds",
         /// Cooperative drain time on the **releasing** worker: revocation
         /// requested to the release landing. Only drains that end a revocation

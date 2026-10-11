@@ -35,7 +35,7 @@ fn progress(epoch: u64, owner: Option<&str>) -> Progress {
 }
 
 /// A store whose updates never complete and whose reads fail, with a polled
-/// watch and an `op_timeout`, over a [`MemoryStore`].
+/// watch, over a [`MemoryStore`].
 #[derive(Clone)]
 struct Hang(MemoryStore);
 
@@ -48,10 +48,6 @@ impl CoordinationStore for Hang {
         WatchMode::Polled {
             interval: Duration::from_millis(300),
         }
-    }
-
-    fn op_timeout(&self) -> Option<Duration> {
-        Some(Duration::from_millis(700))
     }
 
     async fn create(
@@ -222,10 +218,10 @@ async fn journal_store_writes_cancelled_on_drop() {
     );
 }
 
-/// Every wrapper reports the inner store's lease, watch mode and
-/// `op_timeout`, which the coordinator checks against its config.
+/// Every wrapper reports the inner store's lease and watch mode, which the
+/// coordinator checks against its config.
 #[test]
-fn wrappers_forward_op_timeout_and_watch_mode() {
+fn wrappers_forward_lease_and_watch_mode() {
     let (store, _dir, _path) = journalled(Hang(MemoryStore::new(LEASE)));
     let journal = Arc::clone(&store.journal);
     let classifier = Arc::clone(&store.classifier);
@@ -239,22 +235,13 @@ fn wrappers_forward_op_timeout_and_watch_mode() {
     let fence = Arc::new(Fence::default());
     let broken = BrokenFence::new(store.clone(), Arc::clone(&fence));
     let stopping = StopAt::new(store.clone(), None, Some(fence), None, journal, classifier);
-    for (lease, op_timeout, watch) in [
-        (store.lease_ttl(), store.op_timeout(), store.watch_mode()),
-        (
-            aborting.lease_ttl(),
-            aborting.op_timeout(),
-            aborting.watch_mode(),
-        ),
-        (broken.lease_ttl(), broken.op_timeout(), broken.watch_mode()),
-        (
-            stopping.lease_ttl(),
-            stopping.op_timeout(),
-            stopping.watch_mode(),
-        ),
+    for (lease, watch) in [
+        (store.lease_ttl(), store.watch_mode()),
+        (aborting.lease_ttl(), aborting.watch_mode()),
+        (broken.lease_ttl(), broken.watch_mode()),
+        (stopping.lease_ttl(), stopping.watch_mode()),
     ] {
         assert_eq!(lease, LEASE);
-        assert_eq!(op_timeout, Some(Duration::from_millis(700)));
         assert_eq!(
             watch,
             WatchMode::Polled {
@@ -892,9 +879,6 @@ impl CoordinationStore for SlowFirstGet {
     }
     fn watch_mode(&self) -> WatchMode {
         self.0.watch_mode()
-    }
-    fn op_timeout(&self) -> Option<Duration> {
-        None
     }
     async fn create(
         &self,

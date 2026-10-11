@@ -6,12 +6,12 @@ use std::fmt::Write as _;
 
 use spate_test_support::{LISTEN_PORTS, Stream, Toxic, Toxiproxy};
 
-use super::proxy::link_faults;
 use crate::journal::{Event, Line};
 use crate::oracle::StoreKind;
 use crate::outcome::FaultFired;
 use crate::schedule::Schedule;
 use crate::seed::SplitMix64;
+use crate::store::AbortMode;
 use crate::worker::Tuning;
 
 /// Earliest window, from the start of the running stage.
@@ -21,9 +21,6 @@ const FROM_MS: u64 = 1_000;
 const UNTIL_MS: u64 = 5_000;
 /// Longest ordinary latency on a NATS link, below its store timeout.
 const NATS_MAX_LATENCY_MS: u64 = 300;
-/// Longest ordinary latency on a DynamoDB link. With the fault proxy's
-/// longest delay it stays inside the SDK's read timeout.
-pub(super) const DYNAMODB_MAX_LATENCY_MS: u64 = 100;
 
 /// What a window does to the link.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -90,8 +87,8 @@ pub(super) struct Window {
 /// Draws between one and `instances + 1` windows due one to five seconds
 /// into the running stage. Ordinary latency lasts half a lease to a lease;
 /// heal-near-expiry, blackhole and refuse windows last a lease give or take
-/// one store timeout; `limit_data` is drawn on NATS only. With more than one
-/// instance, none is drawn on `lost`, whose first process never takes one.
+/// one store timeout. With more than one instance, none is drawn on `lost`,
+/// whose first process never takes one.
 pub(super) fn draw(
     rng: &mut SplitMix64,
     store: StoreKind,
@@ -102,7 +99,6 @@ pub(super) fn draw(
     let (lease, op) = (tuning.lease_ms, tuning.op_timeout_ms);
     let (kinds, max_latency) = match store {
         StoreKind::Nats => (5, NATS_MAX_LATENCY_MS),
-        StoreKind::DynamoDb => (4, DYNAMODB_MAX_LATENCY_MS),
     };
     (0..rng.in_range(1, u64::from(instances) + 1))
         .map(|_| {
@@ -212,6 +208,14 @@ pub(super) fn render(windows: &[Window]) -> String {
         );
     }
     text
+}
+
+/// Whether `instance`'s `incarnation` gets faults on its store link: every
+/// process but the one carrying the `ErrAfterLand` plan does.
+fn link_faults(schedule: &Schedule, instance: u32, incarnation: u32) -> bool {
+    schedule
+        .plan_for(instance, incarnation)
+        .is_none_or(|p| p.plan.mode != AbortMode::ErrAfterLand)
 }
 
 /// A run's link windows, opened in drawn order on the proxy of each
@@ -336,7 +340,6 @@ mod tests {
 
     use super::*;
     use crate::journal::LeaderAtKill;
-    use crate::run::proxy::MAX_DELAY_MS;
 
     fn window(at_ms: u64, instance: u32, duration_ms: u64) -> Window {
         Window {
@@ -347,48 +350,42 @@ mod tests {
         }
     }
 
-    /// Across seeds, a DynamoDB call's longest proxy delay plus its longest
-    /// ordinary link latency is at most 200 ms, inside the SDK's read timeout
-    /// of a quarter store timeout; heal-near-expiry windows exceed it.
+    /// Across seeds, the process carrying the `ErrAfterLand` plan opens no
+    /// window, every other process opens its own, and the plan's replacement
+    /// opens one too.
     #[test]
-    fn dynamodb_draws_keep_delay_plus_latency_under_the_read_timeout() {
-        let tuning = Tuning::dynamodb();
-        let read_timeout = tuning.op_timeout_ms / 4;
-        let (mut latencies, mut heals) = (0, 0);
-        for seed in 0..500 {
-            for w in draw(
-                &mut SplitMix64::new(seed),
-                StoreKind::DynamoDb,
-                3,
-                None,
-                &tuning,
-            ) {
-                match w.kind {
-                    LinkKind::Latency { latency_ms } => {
-                        assert!(latency_ms + MAX_DELAY_MS <= 200, "seed {seed}: {w:?}");
-                        latencies += 1;
-                    }
-                    LinkKind::HealNearExpiry { latency_ms } => {
-                        assert!(latency_ms > read_timeout, "seed {seed}: {w:?}");
-                        heals += 1;
-                    }
-                    _ => {}
+    fn err_after_land_incarnations_draw_no_link_faults() {
+        for instances in [1, 3] {
+            for seed in 0..50 {
+                let schedule = Schedule::draw(&mut SplitMix64::new(seed), instances, 3_000);
+                let lost = schedule.lost_reply().expect("a lost reply is drawn");
+                let windows: Vec<Window> = (0..instances)
+                    .map(|instance| window(1_000, instance, 100))
+                    .collect();
+                let mut links = Links::new(&schedule, &windows);
+                let mut incarnations = vec![1; instances as usize];
+                let mut opened = Vec::new();
+                while let Some((_, proxy, _)) = links.next_open(1_000, &incarnations, |_| Some(7)) {
+                    opened.push(proxy);
                 }
+                let others: Vec<String> = (0..instances)
+                    .filter(|i| *i != lost)
+                    .map(|i| format!("w{i}-1"))
+                    .collect();
+                assert_eq!(opened, others, "seed {seed}");
+                incarnations[lost as usize] = 2;
+                let replaced = links.next_open(1_000, &incarnations, |_| Some(7));
+                assert_eq!(replaced.map(|o| o.1), Some(format!("w{lost}-2")));
             }
         }
-        assert!(200 < read_timeout);
-        assert!(latencies > 0 && heals > 0);
     }
 
-    /// Across seeds, every kind is drawn on NATS and all but `limit_data` on
-    /// DynamoDB; NATS latency stays below the store timeout; heal-near-expiry
-    /// holds data past its own close; and windows fall inside their bounds.
+    /// Across seeds, every kind is drawn; latency stays below the store
+    /// timeout; heal-near-expiry holds data past its own close; and windows
+    /// fall inside their bounds.
     #[test]
     fn window_draws_stay_inside_their_bounds() {
-        for (store, tuning, kinds) in [
-            (StoreKind::Nats, Tuning::nats(), 5),
-            (StoreKind::DynamoDb, Tuning::dynamodb(), 4),
-        ] {
+        for (store, tuning, kinds) in [(StoreKind::Nats, Tuning::nats(), 5)] {
             let (lease, op) = (tuning.lease_ms, tuning.op_timeout_ms);
             let mut drawn = std::collections::HashSet::new();
             let (mut counts, mut instances) = (BTreeSet::new(), BTreeSet::new());
@@ -403,16 +400,13 @@ mod tests {
                     let short = (lease / 2..=lease).contains(&w.duration_ms);
                     match w.kind {
                         LinkKind::Latency { latency_ms } => {
-                            assert!(short && latency_ms < op, "{store:?} {w:?}");
-                            assert!(store == StoreKind::DynamoDb || latency_ms <= 300);
+                            assert!(short && latency_ms < op && latency_ms <= 300, "{w:?}");
                         }
                         LinkKind::HealNearExpiry { latency_ms } => {
                             assert!(near && latency_ms > w.duration_ms, "{w:?}");
                         }
                         LinkKind::Blackhole | LinkKind::Refuse => assert!(near, "{w:?}"),
-                        LinkKind::LimitData { .. } => {
-                            assert!(short && store == StoreKind::Nats, "{w:?}");
-                        }
+                        LinkKind::LimitData { .. } => assert!(short, "{w:?}"),
                     }
                     drawn.insert(std::mem::discriminant(&w.kind));
                 }
@@ -423,14 +417,11 @@ mod tests {
         }
     }
 
-    /// No seed draws a window due after 5 s into the running stage, for
-    /// either store and instance count.
+    /// No seed draws a window due after 5 s into the running stage, for any
+    /// instance count.
     #[test]
     fn windows_fall_due_within_five_seconds() {
-        for (store, tuning) in [
-            (StoreKind::Nats, Tuning::nats()),
-            (StoreKind::DynamoDb, Tuning::dynamodb()),
-        ] {
+        for (store, tuning) in [(StoreKind::Nats, Tuning::nats())] {
             for (instances, lost) in [(1, None), (1, Some(0)), (3, None), (3, Some(1))] {
                 for seed in 0..1000 {
                     let mut rng = SplitMix64::new(seed);

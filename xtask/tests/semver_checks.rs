@@ -359,8 +359,8 @@ fn a_crate_with_every_version_yanked_is_skipped() {
     assert_eq!(
         stdout(&out),
         "::notice::every published version of spate-core is yanked; nothing to diff against.\n\
-         semver-checks: every crate was skipped for want of a baseline; the check is silent\n  \
-         until the first release publishes one.\n"
+         semver-checks: every selected crate was skipped, as the notices above say;\n  \
+         nothing was compared.\n"
     );
     assert!(shim.calls("cargo").is_empty());
 }
@@ -578,7 +578,8 @@ fn a_batch_without_a_verdict_fails_the_run() {
 }
 
 /// An error while attributing fails the run, so a break is never reported
-/// against a set the tool could not finish judging.
+/// against a set the tool could not finish judging. The re-run's own output
+/// reaches the log, stdout first. Regression for #1084.
 #[test]
 fn an_error_while_attributing_fails_the_run() {
     let shim = Shim::new("attribute-error");
@@ -586,14 +587,86 @@ fn an_error_while_attributing_fails_the_run() {
     let out = xtask(
         &shim,
         &["--against-registry", "--packages", "spate-core"],
-        &[("SPATE_CARGO_CODES", "100 101")],
+        &[("SPATE_CARGO_CODES", "100 101"), ("SPATE_CARGO_NOISE", "1")],
     );
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(
         stderr(&out),
-        "xtask: cargo semver-checks exited 101 for spate-core while attributing a break.\n  \
-         Read its output above; the batch already reported the findings.\n"
+        "noise 1\n\
+         xtask: cargo semver-checks exited 101 for spate-core while attributing a break.\n  \
+         The batch already reported the findings. The re-run's output:\n\
+         findings 2\n\
+         noise 2\n"
     );
+}
+
+// ── Proc-macro crates ──────────────────────────────────────────────────
+
+/// A proc-macro crate is skipped with a notice before the index or the tool
+/// sees it, so a broken batch never attributes to it. Regression for #1084.
+#[test]
+fn a_proc_macro_crate_is_skipped_before_the_index_and_the_tool() {
+    let shim = Shim::new("proc-macro");
+    shim.announced();
+    shim.published("spate-core", &[(TREE, false)]);
+    let out = xtask(
+        &shim,
+        &[
+            "--against-registry",
+            "--packages",
+            "spate-clickhouse-derive spate-core",
+        ],
+        &[("SPATE_CARGO_CODES", "100 100")],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(
+        stdout(&out).starts_with(
+            "::notice::spate-clickhouse-derive is a proc-macro crate, which cargo semver-checks \
+             reads no API from.\n  \
+             A change is breaking, and needs a **Breaking:** fragment by review, when code using \
+             the macro stops compiling or an item it generates for the same input changes or goes \
+             away.\n"
+        ),
+        "{}",
+        stdout(&out)
+    );
+    let calls = shim.calls("cargo");
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    assert_eq!(group(&calls[0]), (vec!["spate-core"], None));
+    assert_eq!(group(&calls[1]), (vec!["spate-core"], None));
+    assert!(
+        shim.calls("curl")
+            .iter()
+            .all(|call| !call.iter().any(|a| a.ends_with("/spate-clickhouse-derive"))),
+        "{:?}",
+        shim.calls("curl")
+    );
+}
+
+/// A selection holding only a proc-macro crate compares nothing and passes.
+#[test]
+fn a_selection_of_only_a_proc_macro_crate_compares_nothing() {
+    let shim = Shim::new("proc-macro-alone");
+    let out = xtask(
+        &shim,
+        &[
+            "--against-registry",
+            "--packages",
+            "spate-clickhouse-derive",
+        ],
+        &[],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(
+        stdout(&out).ends_with(
+            "semver-checks: every selected crate was skipped, as the notices above say;\n  \
+             nothing was compared.\n"
+        ),
+        "{}",
+        stdout(&out)
+    );
+    assert!(shim.calls("cargo").is_empty());
+    assert!(shim.calls("curl").is_empty());
 }
 
 // ── Removals ───────────────────────────────────────────────────────────

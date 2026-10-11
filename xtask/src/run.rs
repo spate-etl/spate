@@ -216,6 +216,8 @@ pub(crate) enum Streams {
     Discard,
     /// stdout collected, stderr discarded.
     Collect,
+    /// Both collected.
+    Capture,
 }
 
 /// A child that ran to completion, whatever status it reported.
@@ -223,8 +225,10 @@ pub(crate) struct Completed {
     /// The status a shell would report: the exit code, or 128 plus the signal
     /// that killed the child.
     pub(crate) code: i32,
-    /// Empty unless [`Streams::Collect`] gathered it.
+    /// Empty unless [`Streams::Collect`] or [`Streams::Capture`] gathered it.
     pub(crate) stdout: String,
+    /// Empty unless [`Streams::Capture`] gathered it.
+    pub(crate) stderr: String,
 }
 
 /// Runs one step and answers how it finished, leaving a non-zero status for the
@@ -250,6 +254,11 @@ pub(crate) fn complete(root: &Path, step: &Step<'_>, streams: Streams) -> Result
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::null());
         }
+        Streams::Capture => {
+            command
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
+        }
     }
     let out = command
         .spawn()
@@ -259,6 +268,7 @@ pub(crate) fn complete(root: &Path, step: &Step<'_>, streams: Streams) -> Result
     Ok(Completed {
         code: shell_code(&out.status),
         stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
     })
 }
 
@@ -380,6 +390,21 @@ mod tests {
         let done = complete(&root, &step, Streams::Discard).unwrap();
         assert_eq!(done.code, 100);
         assert_eq!(done.stdout, "");
+    }
+
+    /// `Capture` carries both streams, and only `Capture` carries stderr.
+    #[cfg(unix)]
+    #[test]
+    fn capture_carries_both_streams() {
+        let root = crate::repo_root().unwrap();
+        let step = Step::new("sh", ["-c", "printf 'out'; printf 'err' >&2; exit 101"]);
+        let done = complete(&root, &step, Streams::Capture).unwrap();
+        assert_eq!(done.code, 101);
+        assert_eq!(done.stdout, "out");
+        assert_eq!(done.stderr, "err");
+        let done = complete(&root, &step, Streams::Collect).unwrap();
+        assert_eq!(done.stdout, "out");
+        assert_eq!(done.stderr, "");
     }
 
     /// A child killed by a signal reports the status a shell would, so nothing

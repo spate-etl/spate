@@ -269,7 +269,12 @@ includes a new crate:
    version check` fails until the snippet is in the rewritten set.
 
 The semver gate compares each crate against its published release, so it
-skips a new crate, and says so, until the name is claimed.
+skips a new crate, and says so, until the name is claimed. It also skips a
+proc-macro crate, which the tool reads no API from. Review catches a break in
+such a crate. A change under which code using the macro stops compiling, or an
+item it generates for the same input changes or goes away, needs a
+**Breaking:** fragment. The tests that use the macro show such a change, in its
+own crate and in any crate that re-exports it.
 
 ## What the release rests on
 

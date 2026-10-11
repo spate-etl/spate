@@ -15,6 +15,11 @@
 //!
 //! Pre-1.0 a breaking change ships in a minor bump, so the gate exists to force
 //! the announcement. A finding with nothing announcing a break fails.
+//!
+//! A proc-macro crate is skipped with a notice, since the tool reads no API
+//! from one. A change is breaking, and needs a `**Breaking:**` fragment by
+//! review, when code using the macro stops compiling or an item it generates
+//! for the same input changes or goes away.
 
 use std::ffi::OsStr;
 use std::path::Path;
@@ -181,6 +186,31 @@ fn group_step(release_type: Option<&str>, pkgs: &[String]) -> Step<'static> {
     step
 }
 
+/// Whether a manifest declares a proc-macro library: `proc-macro = true`,
+/// `proc_macro = true`, or a `crate-type` listing `"proc-macro"`.
+fn proc_macro(manifest: &str) -> Result<bool, String> {
+    let table: toml::Table = toml::from_str(manifest).map_err(|e| e.to_string())?;
+    let Some(lib) = table.get("lib").and_then(toml::Value::as_table) else {
+        return Ok(false);
+    };
+    let flagged = ["proc-macro", "proc_macro"]
+        .iter()
+        .any(|key| lib.get(*key).and_then(toml::Value::as_bool) == Some(true));
+    let typed = lib
+        .get("crate-type")
+        .and_then(toml::Value::as_array)
+        .is_some_and(|types| types.iter().any(|t| t.as_str() == Some("proc-macro")));
+    Ok(flagged || typed)
+}
+
+/// Whether the crate under `crates/<name>` is a proc-macro crate.
+fn is_proc_macro(root: &Path, name: &str) -> Result<bool, Error> {
+    let path = root.join("crates").join(name).join("Cargo.toml");
+    let manifest = std::fs::read_to_string(&path)
+        .map_err(|e| Error::msg(format!("{}: {e}", path.display())))?;
+    proc_macro(&manifest).map_err(|e| Error::msg(format!("{}: {e}", path.display())))
+}
+
 /// The publishable crates, by directory name under `crates/`, sorted.
 fn crates_now(root: &Path) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(root.join("crates")) else {
@@ -208,9 +238,9 @@ pub(crate) fn last_tag(root: &Path) -> Result<String, Error> {
 ///
 /// One invocation per group: the tool shares a rustdoc build across the
 /// packages of a single run and shares nothing between runs. A break re-runs
-/// the group one crate at a time to name which crates broke, and the findings
-/// are already on the log from the batch, so the re-run discards its output and
-/// reads only the verdict.
+/// the group one crate at a time to name which crates broke. The findings are
+/// already on the log from the batch, so a re-run prints its output only when
+/// it fails to complete.
 fn check_group(
     root: &Path,
     release_type: Option<&str>,
@@ -252,18 +282,27 @@ fn attribute(
     breaking: &mut Vec<String>,
 ) -> Outcome {
     let alone = [pkg.to_owned()];
-    let code = run::complete(root, &group_step(release_type, &alone), Streams::Discard)?.code;
-    match classify_exit(code) {
+    let run = run::complete(root, &group_step(release_type, &alone), Streams::Capture)?;
+    match classify_exit(run.code) {
         Verdict::Breaking => breaking.push(pkg.to_owned()),
         Verdict::Clean => {}
-        Verdict::Error => {
-            return Err(Error::msg(format!(
-                "cargo semver-checks exited {code} for {pkg} while attributing a break.\n  \
-                 Read its output above; the batch already reported the findings."
-            )));
-        }
+        Verdict::Error => return Err(attribution_failed(pkg, &run)),
     }
     Ok(())
+}
+
+/// The error for a re-run that did not complete, carrying the tool's output.
+fn attribution_failed(pkg: &str, run: &Completed) -> Error {
+    let output: String = [run.stdout.trim_end(), run.stderr.trim_end()]
+        .iter()
+        .filter(|s| !s.is_empty())
+        .map(|s| format!("\n{s}"))
+        .collect();
+    Error::msg(format!(
+        "cargo semver-checks exited {} for {pkg} while attributing a break.\n  \
+         The batch already reported the findings. The re-run's output:{output}",
+        run.code
+    ))
 }
 
 /// Fetches a crate's sparse-index entry, answering the status code and body.
@@ -344,6 +383,16 @@ pub(crate) fn registry(root: &Path, explain: bool, packages: Option<&str>) -> Ou
     let mut pinned: Vec<String> = Vec::new();
     let mut skipped = 0usize;
     for name in &selected {
+        if is_proc_macro(root, name)? {
+            println!(
+                "::notice::{name} is a proc-macro crate, which cargo semver-checks reads no API from."
+            );
+            println!(
+                "  A change is breaking, and needs a **Breaking:** fragment by review, when code using the macro stops compiling or an item it generates for the same input changes or goes away."
+            );
+            skipped += 1;
+            continue;
+        }
         let (code, body) = fetch_index(root, name)?;
         match code.as_str() {
             "200" => {}
@@ -403,8 +452,8 @@ pub(crate) fn registry(root: &Path, explain: bool, packages: Option<&str>) -> Ou
         return verdict(root, &breaking);
     }
     if checked == 0 {
-        println!("{TOOL}: every crate was skipped for want of a baseline; the check is silent");
-        println!("  until the first release publishes one.");
+        println!("{TOOL}: every selected crate was skipped, as the notices above say;");
+        println!("  nothing was compared.");
         return Ok(());
     }
     println!("{TOOL}: {checked} crate(s) hold their published API surface.");

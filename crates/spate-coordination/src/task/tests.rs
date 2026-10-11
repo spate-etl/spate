@@ -1297,3 +1297,109 @@ async fn a_failed_lease_read_defers_the_quarantine() {
     task.reconcile_assignment().await.unwrap();
     assert_eq!(status().await, crate::records::SplitStatus::Quarantined);
 }
+
+/// A worker fenced off its split by a peer's takeover that starts the
+/// split's last attempt keeps the split runnable when it sees the
+/// peer's record before the peer's lease. Regression for #1052.
+#[tokio::test]
+async fn a_fenced_owner_keeps_a_last_attempt_takeover_whose_lease_it_has_not_seen() {
+    let clock = TestClock::frozen();
+    let cfg = CoordinationConfig {
+        max_attempts: 4,
+        ..CoordinationConfig::default()
+    };
+    let store = MemoryStore::with_clock(cfg.lease_duration, clock.clone());
+    let fp = records::fingerprint_hash(FINGERPRINT);
+    let id = SplitId::new("s").unwrap();
+    let key = records::split_key_str("s");
+    let w1_nonce = uuid::Uuid::new_v4().simple().to_string();
+    let mut held = SplitProgressRecord::planned(&id, fp, None);
+    held.owner = Some("w1".into());
+    held.epoch = 3;
+    held.attempts = 2;
+    let rev0 = create(&store, Keyspace::Durable, &key, held.encode()).await;
+    let lease0 = create(
+        &store,
+        Keyspace::Ephemeral,
+        &key,
+        lease_val("w1", &w1_nonce, 3),
+    )
+    .await;
+    let (_commands, commands_rx) = mpsc::channel(8);
+    let (events_tx, _events) = std_mpsc::channel();
+    let mut w1 = Task::new(
+        store.clone(),
+        cfg,
+        clock.clone(),
+        FINGERPRINT.to_string(),
+        "w1".into(),
+        w1_nonce.clone(),
+        Box::new(Planner),
+        None,
+        commands_rx,
+        events_tx,
+        None,
+    );
+    w1.apply_state_put(&Entry {
+        key: key.clone(),
+        value: held.encode(),
+        revision: rev0,
+    })
+    .unwrap();
+    w1.apply_lease_put(&Entry {
+        key: key.clone(),
+        value: lease_val("w1", &w1_nonce, 3),
+        revision: lease0,
+    })
+    .unwrap();
+    w1.owned.insert(
+        "s".into(),
+        OwnedSplit {
+            lease_rev: lease0,
+            last_ok_write: clock.now(),
+            attempts: 2,
+            unconfirmed_since: None,
+        },
+    );
+
+    store
+        .delete(Keyspace::Ephemeral, &key, None)
+        .await
+        .unwrap()
+        .won()
+        .unwrap();
+    let w2_nonce = uuid::Uuid::new_v4().simple().to_string();
+    create(
+        &store,
+        Keyspace::Ephemeral,
+        &key,
+        lease_val("w2", &w2_nonce, 4),
+    )
+    .await;
+    let mut taken = held.clone();
+    taken.owner = Some("w2".into());
+    taken.epoch = 4;
+    taken.attempts = 3;
+    let rev1 = store
+        .update(Keyspace::Durable, &key, taken.encode(), rev0)
+        .await
+        .unwrap()
+        .won()
+        .unwrap();
+
+    w1.apply_state_put(&Entry {
+        key: key.clone(),
+        value: taken.encode(),
+        revision: rev1,
+    })
+    .unwrap();
+    w1.reconcile_assignment().await.unwrap();
+
+    let stored = store.get(Keyspace::Durable, &key).await.unwrap().unwrap();
+    let stored = SplitProgressRecord::parse(&key, &stored.value, fp).unwrap();
+    assert_eq!(
+        stored.status,
+        crate::records::SplitStatus::Runnable,
+        "w1 quarantined w2's live takeover: {stored:?}"
+    );
+}

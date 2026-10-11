@@ -243,8 +243,8 @@ impl<S: CoordinationStore + Clone> Task<S> {
         id: &str,
         kind: ClaimKind,
     ) -> Result<(), CoordinationError> {
-        if kind == ClaimKind::Expired {
-            // Only a lease the store reads as absent or expired is a death.
+        if kind.consumes_attempt() {
+            // A live lease another process wrote defers the quarantine: a claim's record can arrive before its lease.
             match self
                 .store
                 .get(Keyspace::Ephemeral, &records::split_key_str(id))

@@ -649,11 +649,11 @@ jobs:
           # A pure consumer of the entry `perf-warm` owns.
           cache-save: never
 
-      # The version is part of the measurement: valgrind emulates CPUID, so a
-      # new release can move a count with nothing here changing. Built from
-      # source because the image's apt valgrind 3.22 can load no symbols or CFI
-      # for a bench binary whose two RW segments abut (valgrind bug 492663,
-      # fixed in 3.24), and DHAT then records frames gungraun-runner rejects.
+      # The version is part of the measurement: valgrind emulates CPUID, so
+      # changing `VALGRIND_VERSION` can move a count. Built from source because
+      # Ubuntu 24.04's apt valgrind 3.22 can load no symbols or CFI for a bench
+      # binary whose two RW segments abut (valgrind bug 492663, fixed in 3.24),
+      # and DHAT then records frames gungraun-runner rejects.
       - name: Cache valgrind
         id: valgrind-cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

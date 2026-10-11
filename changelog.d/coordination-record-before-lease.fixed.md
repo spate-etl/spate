@@ -7,4 +7,5 @@ versions it quarantined the split when the claim started the split's last
 delivery attempt, the new owner dropped it, and a bounded job could end
 `Stalled` on a healthy split. Under `max_attempts: 1` this could happen on any
 first claim. A split whose owner died is still quarantined once its lease
-expires.
+expires. On NATS with `replicas` above 1, a worker whose read of the lease
+reaches a lagging replica can still quarantine the split.

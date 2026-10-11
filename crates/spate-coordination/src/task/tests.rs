@@ -1180,12 +1180,13 @@ async fn a_peer_keeps_a_last_attempt_claim_whose_lease_it_has_not_seen() {
     record_before_lease("w2", 4, 3, 3).await;
 }
 
-/// A memory store whose ephemeral reads fail with a retryable error while
-/// `fail` is set.
+/// A memory store whose ephemeral reads fail with `error` while `fail` is
+/// set.
 #[derive(Clone)]
 struct FailLeaseReads {
     memory: MemoryStore,
     fail: Arc<std::sync::atomic::AtomicBool>,
+    error: fn(String) -> StoreError,
 }
 
 impl CoordinationStore for FailLeaseReads {
@@ -1220,7 +1221,7 @@ impl CoordinationStore for FailLeaseReads {
     }
     async fn get(&self, ks: Keyspace, key: &str) -> Result<Option<Entry>, StoreError> {
         if ks == Keyspace::Ephemeral && self.fail.load(std::sync::atomic::Ordering::SeqCst) {
-            return Err(StoreError::Retryable("lease read failed".into()));
+            return Err((self.error)("lease read failed".into()));
         }
         self.memory.get(ks, key).await
     }
@@ -1264,6 +1265,7 @@ async fn a_failed_lease_read_defers_the_quarantine() {
         FailLeaseReads {
             memory: memory.clone(),
             fail: fail.clone(),
+            error: StoreError::Retryable,
         },
         cfg,
         clock,
@@ -1401,5 +1403,104 @@ async fn a_fenced_owner_keeps_a_last_attempt_takeover_whose_lease_it_has_not_see
         stored.status,
         crate::records::SplitStatus::Runnable,
         "w1 quarantined w2's live takeover: {stored:?}"
+    );
+}
+
+/// A fatal error from the lease read before a quarantine stops the task.
+#[tokio::test]
+async fn a_fatal_lease_read_before_a_quarantine_is_fatal() {
+    let clock = TestClock::frozen();
+    let cfg = CoordinationConfig {
+        max_attempts: 1,
+        ..CoordinationConfig::default()
+    };
+    let memory = MemoryStore::with_clock(cfg.lease_duration, clock.clone());
+    let fp = records::fingerprint_hash(FINGERPRINT);
+    let key = records::split_key_str("s");
+    let mut dead = SplitProgressRecord::planned(&SplitId::new("s").unwrap(), fp, None);
+    dead.owner = Some("w1".into());
+    dead.epoch = 1;
+    let rev = create(&memory, Keyspace::Durable, &key, dead.encode()).await;
+    let (_commands, commands_rx) = mpsc::channel(8);
+    let (events_tx, _events) = std_mpsc::channel();
+    let mut task = Task::new(
+        FailLeaseReads {
+            memory: memory.clone(),
+            fail: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            error: StoreError::Fatal,
+        },
+        cfg,
+        clock,
+        FINGERPRINT.to_string(),
+        "w2".into(),
+        uuid::Uuid::new_v4().simple().to_string(),
+        Box::new(Planner),
+        None,
+        commands_rx,
+        events_tx,
+        None,
+    );
+    task.apply_state_put(&Entry {
+        key: key.clone(),
+        value: dead.encode(),
+        revision: rev,
+    })
+    .unwrap();
+    let err = task.reconcile_assignment().await.unwrap_err();
+    assert_eq!(err.kind, CoordinationErrorKind::Fatal, "{err:?}");
+}
+
+/// A split whose record names this process, which does not hold it, is
+/// quarantined at the cap while this process's own lease is still live.
+#[tokio::test]
+async fn an_own_live_lease_does_not_defer_the_quarantine() {
+    let clock = TestClock::frozen();
+    let cfg = CoordinationConfig {
+        max_attempts: 1,
+        ..CoordinationConfig::default()
+    };
+    let store = MemoryStore::with_clock(cfg.lease_duration, clock.clone());
+    let fp = records::fingerprint_hash(FINGERPRINT);
+    let key = records::split_key_str("s");
+    let nonce = uuid::Uuid::new_v4().simple().to_string();
+    create(
+        &store,
+        Keyspace::Ephemeral,
+        &key,
+        lease_val("w2", &nonce, 1),
+    )
+    .await;
+    let mut rec = SplitProgressRecord::planned(&SplitId::new("s").unwrap(), fp, None);
+    rec.owner = Some("w2".into());
+    rec.epoch = 1;
+    let rev = create(&store, Keyspace::Durable, &key, rec.encode()).await;
+    let (_commands, commands_rx) = mpsc::channel(8);
+    let (events_tx, _events) = std_mpsc::channel();
+    let mut task = Task::new(
+        store.clone(),
+        cfg,
+        clock,
+        FINGERPRINT.to_string(),
+        "w2".into(),
+        nonce,
+        Box::new(Planner),
+        None,
+        commands_rx,
+        events_tx,
+        None,
+    );
+    task.apply_state_put(&Entry {
+        key: key.clone(),
+        value: rec.encode(),
+        revision: rev,
+    })
+    .unwrap();
+    task.reconcile_assignment().await.unwrap();
+    let stored = store.get(Keyspace::Durable, &key).await.unwrap().unwrap();
+    let stored = SplitProgressRecord::parse(&key, &stored.value, fp).unwrap();
+    assert_eq!(
+        stored.status,
+        crate::records::SplitStatus::Quarantined,
+        "{stored:?}"
     );
 }

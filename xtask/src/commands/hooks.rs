@@ -61,7 +61,10 @@ pub(crate) fn install(root: &Path, explain: bool) -> Outcome {
 /// answered with nothing.
 fn git(root: &Path, args: &[&str]) -> Option<String> {
     let step = Step::new("git", args.iter().copied());
-    let Ok(Completed { code: 0, stdout }) = run::complete(root, &step, Streams::Collect) else {
+    let Ok(Completed {
+        code: 0, stdout, ..
+    }) = run::complete(root, &step, Streams::Collect)
+    else {
         return None;
     };
     let first = stdout.split('\n').next().unwrap_or_default();

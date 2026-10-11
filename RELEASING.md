@@ -269,7 +269,9 @@ includes a new crate:
    version check` fails until the snippet is in the rewritten set.
 
 The semver gate compares each crate against its published release, so it
-skips a new crate, and says so, until the name is claimed.
+skips a new crate, and says so, until the name is claimed. It also skips a
+proc-macro crate, which the tool reads no API from, so that crate's tests are
+what hold its interface.
 
 ## What the release rests on
 

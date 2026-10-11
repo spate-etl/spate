@@ -644,9 +644,9 @@ pub trait SplitCoordinator: Send {
     /// whose completing commit returned `Ok`) returns `Fenced` without a
     /// following [`Lost`](CoordinationEvent::Lost) event. `Lost` marks an
     /// involuntary end of a live tenancy, and there is none. Resending a
-    /// completing commit that returned `Retryable` returns `Ok`, or
-    /// `Fenced` without `Lost` if the first one was stored. Callers must
-    /// tolerate the error.
+    /// completing commit that returned `Retryable` can return `Fenced`
+    /// without `Lost` when the first one was stored. Callers must tolerate
+    /// the error.
     fn commit(
         &mut self,
         split: &SplitId,

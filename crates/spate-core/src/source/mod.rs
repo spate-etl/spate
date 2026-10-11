@@ -333,10 +333,11 @@ pub trait Source: Send {
     /// store may bound as a whole.
     ///
     /// `Ok` lists the partitions among `watermarks` that the source still
-    /// holds and did not store; the runtime counts every other position as
-    /// committed, as `commit` does for a partition the source no longer
-    /// holds. `Err` counts none of them as committed, and a fatal error fails
-    /// the run. Positions not stored replay from the last durable ones.
+    /// holds and whose commit it could not confirm; the runtime counts every
+    /// other position as committed, as `commit` does for a partition the
+    /// source no longer holds. `Err` counts none of them as committed, and a
+    /// fatal error fails the run. An unconfirmed commit may or may not have
+    /// been stored, and positions past the stored one may replay.
     fn commit_final(
         &mut self,
         watermarks: &[(PartitionId, i64)],

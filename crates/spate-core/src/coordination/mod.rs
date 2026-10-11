@@ -636,13 +636,17 @@ pub trait SplitCoordinator: Send {
     /// durable. [`Fenced`](CoordinationErrorKind::Fenced) means the split
     /// is no longer owned and **nothing was written**; stop the split and
     /// do not retry the write. [`Retryable`](CoordinationErrorKind::Retryable)
-    /// leaves the previous committed state authoritative, and
+    /// means the write may or may not have been stored; either outcome is
+    /// safe because a commit carries only acknowledged progress, and
     /// re-committing the merged progress later is idempotent.
     ///
     /// A commit on a split this instance no longer holds (including one
-    /// it already committed `completed`) returns `Fenced` without a
+    /// whose completing commit returned `Ok`) returns `Fenced` without a
     /// following [`Lost`](CoordinationEvent::Lost) event. `Lost` marks an
-    /// involuntary end of a live tenancy, and there is none. (The
+    /// involuntary end of a live tenancy, and there is none. After a
+    /// completing commit that returned `Retryable`, a completing commit at
+    /// the same watermark returns `Ok`, and any other commit returns
+    /// `Fenced` without `Lost` if the first one was stored. (The
     /// [`CoordinationDriver`](driver::CoordinationDriver) never issues
     /// such commits; hand-rolled callers must tolerate the error.)
     fn commit(

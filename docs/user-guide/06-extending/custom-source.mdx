@@ -455,8 +455,9 @@ attempt cap instead.
   transient failure, `driver.commit` still sends the other splits and then
   returns a retryable error, so the runtime keeps every position of that
   commit and sends it again on the next tick or in the final commit. The
-  previous durable state stays authoritative meanwhile, so a crash before the
-  resend widens replay without losing data.
+  deferred commit may already be in the store. Either way it holds only
+  acknowledged positions, so a crash before the resend can widen replay and
+  loses no data.
 - **`commit_final` forwards to `driver.commit_final`.** The driver then sends
   the final commit of a stop under one `coordination.op_timeout` budget for
   every split together, and returns the partitions whose commit it did not

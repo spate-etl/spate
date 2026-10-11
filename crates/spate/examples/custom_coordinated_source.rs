@@ -367,9 +367,10 @@ impl Source for LedgerSource {
     // flush_commits stays the default no-op: an Ok commit is durable in
     // the store for every partition the source still holds, and a deferred
     // commit returns a retryable error that keeps its positions pending. A
-    // final commit returns the partitions it did not store, and those splits
-    // may replay under their next owner. The previous durable state stays
-    // authoritative until then, so replay can widen and data cannot be lost.
+    // final commit returns the partitions the store did not confirm, and
+    // those splits may replay under their next owner. An unconfirmed commit
+    // may still be in the store and holds only acknowledged positions, so
+    // replay can widen and data cannot be lost.
 }
 
 impl Drop for LedgerSource {

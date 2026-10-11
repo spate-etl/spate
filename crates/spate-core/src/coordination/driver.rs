@@ -1243,9 +1243,8 @@ enum CommitDisposition {
     /// Fenced: nothing written, the split belongs to a peer; the tenancy
     /// has already been retired with the fence flag.
     Fenced,
-    /// Retryable: nothing was written, the previous durable state stays
-    /// authoritative, and each caller decides when the progress goes out
-    /// again.
+    /// Retryable: the write may or may not have been stored, and each
+    /// caller decides when the progress goes out again.
     Deferred,
 }
 

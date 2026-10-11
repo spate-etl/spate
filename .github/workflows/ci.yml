@@ -624,6 +624,9 @@ jobs:
     # workflow-level error, and a false `if:` is what prevents the expansion.
     if: needs.changes.outputs.bench == 'true' && needs.changes.outputs.bench-shards != '[]'
     timeout-minutes: 45
+    env:
+      VALGRIND_VERSION: 3.27.1
+      VALGRIND_SHA256: 5d589152eb8071c02feab8ce6ab719e431a1fbc3e2b1700f5432632a8b9264dc
     strategy:
       # `ci-gate` counts `cancelled` as failure, so fail-fast would turn one real
       # failure into several unattributable ones.
@@ -646,14 +649,38 @@ jobs:
           # A pure consumer of the entry `perf-warm` owns.
           cache-save: never
 
-      # The version is part of the measurement: valgrind emulates CPUID, so a
-      # runner-image bump can move a count with nothing here changing.
-      - name: Install valgrind
+      # The version is part of the measurement: valgrind emulates CPUID, so
+      # changing `VALGRIND_VERSION` can move a count. Built from source because
+      # Ubuntu 24.04's apt valgrind 3.22 can load no symbols or CFI for a bench
+      # binary whose two RW segments abut (valgrind bug 492663, fixed in 3.24),
+      # and DHAT then records frames gungraun-runner rejects.
+      - name: Cache valgrind
+        id: valgrind-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.valgrind
+          key: valgrind-${{ runner.os }}-${{ runner.arch }}-${{ env.VALGRIND_VERSION }}
+
+      - name: Build valgrind
+        if: steps.valgrind-cache.outputs.cache-hit != 'true'
+        working-directory: ${{ runner.temp }}
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y valgrind
-          valgrind --version
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+            --output valgrind.tar.bz2 \
+            "https://sourceware.org/pub/valgrind/valgrind-$VALGRIND_VERSION.tar.bz2"
+          echo "$VALGRIND_SHA256  valgrind.tar.bz2" | sha256sum --check --strict
+          tar -xjf valgrind.tar.bz2
+          cd "valgrind-$VALGRIND_VERSION"
+          ./configure --prefix="$HOME/.valgrind"
+          make -j"$(nproc)"
+          make install
+
+      - name: Put valgrind on PATH
+        run: |
+          set -euo pipefail
+          echo "$HOME/.valgrind/bin" >>"$GITHUB_PATH"
+          "$HOME/.valgrind/bin/valgrind" --version
 
       # Its own step because it is also the cache key below.
       - name: Resolve the gungraun-runner version

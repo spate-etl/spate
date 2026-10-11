@@ -244,9 +244,9 @@ single component. A claim no tier here can measure is stated as unmeasured.
 
 `cargo xtask bench counted` counts instructions under valgrind rather than measuring
 wall time, so its numbers are comparable across machines. It needs Linux,
-valgrind, and a `gungraun-runner` at the version `Cargo.lock` pins for
-`gungraun`; a mismatch is a hard error. On macOS the most you can check is that
-the benches build, with `cargo xtask bench gungraun --check`.
+valgrind 3.24 or later, and a `gungraun-runner` at the version `Cargo.lock`
+pins for `gungraun`; a mismatch is a hard error. On macOS the most you can
+check is that the benches build, with `cargo xtask bench gungraun --check`.
 
 Adding one means naming the file `benches/<something>_gungraun.rs` and declaring
 it in the crate's `Cargo.toml` as a `[[bench]]` with `harness = false`.

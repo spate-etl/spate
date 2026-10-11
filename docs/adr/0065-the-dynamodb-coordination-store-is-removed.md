@@ -7,8 +7,6 @@ description: "The DynamoDB coordination store is removed before its first releas
 - **Status:** accepted
 - **Date:** 2026-10-11
 - **Supersedes:** [ADR-0051](0051-lease-expiry-judged-by-each-observer.md),
-  [ADR-0052](0052-dynamodb-store-polls-without-streams.md),
-  [ADR-0053](0053-one-dynamodb-table-holds-every-job.md),
   [ADR-0057](0057-a-deleted-dynamodb-ephemeral-key-leaves-a-revision-floor.md),
   [ADR-0058](0058-a-dynamodb-ephemeral-write-leaves-its-predecessors-removal-revision.md),
   [ADR-0061](0061-a-watch-delete-orders-above-what-its-handle-has-seen.md)
@@ -44,6 +42,11 @@ and the `op_timeout` and `attach_metrics` store hooks with the `op="poll"`
 series. The contract again states that ephemeral keys expire on the store's
 clock and that a key's revisions strictly increase.
 
+[ADR-0052](0052-dynamodb-store-polls-without-streams.md) and
+[ADR-0053](0053-one-dynamodb-table-holds-every-job.md) record how the store
+polls and how its table is laid out. Nothing replaces them, so they are
+deprecated.
+
 The polled watch ([ADR-0050](0050-coordination-stores-may-declare-a-polled-watch.md))
 and the delete-revision rule of
 [ADR-0061](0061-a-watch-delete-orders-above-what-its-handle-has-seen.md) stay.
@@ -55,10 +58,14 @@ regression tests that model a view lagging the store run over it.
 - Good, because the AWS SDK crates leave the dependency graph.
 - Good, because the store contract has one expiry clock and no exception to
   increasing revisions.
-- Bad, because no built-in store runs without a server of its own.
+- Bad, because no built-in store that several processes share runs without a
+  server of its own.
 - Bad, because the fault scenarios lose the HTTP-level faults injected between
   the SDK and DynamoDB Local: throttling, 5xx replies, and a reply dropped
   after its write landed.
+- Bad, because no fault scenario runs the polled watch. Every remaining
+  scenario uses NATS, whose watch pushes, so only in-process tests over polled
+  test doubles exercise it.
 - Neutral, because the polled watch stays with no built-in store that declares
   it.
 

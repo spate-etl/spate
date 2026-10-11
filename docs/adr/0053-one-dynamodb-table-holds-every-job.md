@@ -1,14 +1,14 @@
 ---
-description: "One operator-provisioned DynamoDB table holds every job, keyed by job and keyspace. Superseded by ADR-0065, which removes the store."
+description: "One operator-provisioned DynamoDB table holds every job, keyed by job and keyspace. Deprecated by ADR-0065, which removes the store."
 ---
 
 # ADR-0053 — One operator-provisioned table holds every job, keyed by job and keyspace
 
-- **Status:** superseded
+- **Status:** deprecated
 - **Date:** 2026-09-29
 - **Supersedes:** —
 - **Superseded by:** [ADR-0057](0057-a-deleted-dynamodb-ephemeral-key-leaves-a-revision-floor.md)
-  (partition keys), [ADR-0065](0065-the-dynamodb-coordination-store-is-removed.md)
+  (partition keys)
 
 ## Context and problem statement
 

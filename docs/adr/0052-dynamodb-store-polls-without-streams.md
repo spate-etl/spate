@@ -1,13 +1,13 @@
 ---
-description: "The DynamoDB store discovers changes by querying each watched prefix every poll interval, without Streams. Superseded by ADR-0065, which removes the store."
+description: "The DynamoDB store discovers changes by querying each watched prefix every poll interval, without Streams. Deprecated by ADR-0065, which removes the store."
 ---
 
 # ADR-0052 — The DynamoDB store discovers changes by polling, without Streams
 
-- **Status:** superseded
+- **Status:** deprecated
 - **Date:** 2026-09-29
 - **Supersedes:** —
-- **Superseded by:** [ADR-0065](0065-the-dynamodb-coordination-store-is-removed.md)
+- **Superseded by:** —
 
 ## Context and problem statement
 

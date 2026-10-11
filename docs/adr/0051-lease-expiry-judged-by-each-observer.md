@@ -113,7 +113,7 @@ the latency bounds above; they follow from the poll cadence.
   2026-09-29. #819 backed it with the AWS SDK and shipped it on 2026-09-30.
 - [DynamoDB store](https://github.com/spate-etl/spate/blob/ba7459347131a223e0a34422fcadba1594158d0b/docs/user-guide/04-connectors/coordination/dynamodb/README.mdx)
   — lease expiry and takeover latency as the store page states them.
-- [Work assignment](../user-guide/02-concepts/08-work-assignment.mdx#discovery)
+- [Work assignment](https://github.com/spate-etl/spate/blob/ba7459347131a223e0a34422fcadba1594158d0b/docs/user-guide/02-concepts/08-work-assignment.mdx)
   — the normative statement of observer-judged expiry.
 - [ADR-0052](0052-dynamodb-store-polls-without-streams.md) — why the store's
   watches poll.

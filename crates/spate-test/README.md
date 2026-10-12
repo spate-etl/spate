@@ -11,6 +11,10 @@ zero infrastructure.
 - `capture_writer()` → `CaptureWriter` + `SinkScript`: script per-replica
   write outcomes (success, retryable failure, fatal, delays on tokio test
   time) and inspect every captured batch down to decoded rows.
+- `scripted_feed()` → `ScriptedFeed` + `FeedScript`: script deliveries,
+  redeliveries, duplicates, dead letters and publish outcomes for a source
+  that reads a work feed, and observe every acknowledgement, failure and
+  renewal.
 - `TestDeserializer` (passthrough / split / fail-on-prefix),
   `TestEncoder`/`decode_rows`, and `EmitCollector` for exercising stages
   in isolation.

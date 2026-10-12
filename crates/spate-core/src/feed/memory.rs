@@ -1,0 +1,329 @@
+//! The in-process feed: a [`Feed`] for one pipeline instance.
+//!
+//! [`MemoryFeed`] keeps its units in memory and nothing across a restart. It
+//! has no lease: a received unit stays held until it is acknowledged or
+//! failed, so it is delivered again only after a [`fail`](Feed::fail). It
+//! counts every delivery of a unit and moves a unit failed on its tenth
+//! delivery to an in-memory dead-letter list. Its [`counts`](MemoryFeed::counts)
+//! are exact.
+
+use super::{
+    Confirmation, Delivery, Feed, FeedError, FeedErrorKind, FeedWaker, Receipt, Unit, confirmation,
+};
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex, MutexGuard};
+
+/// Deliveries after which a failed unit is dead-lettered.
+const ATTEMPT_CAP: u32 = 10;
+
+/// What a [`MemoryFeed`] holds at one moment.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct FeedCounts {
+    /// Units waiting to be received.
+    pub visible: u64,
+    /// Units received and not yet acknowledged or failed.
+    pub held: u64,
+    /// Units moved to the dead-letter list.
+    pub dead_lettered: u64,
+    /// Units acknowledged as done.
+    pub acknowledged: u64,
+}
+
+/// A [`Feed`] held in this process, for a single instance.
+///
+/// Clones share one feed, so a lister and a reader can each hold one. Units
+/// are delivered in the order they were published, and a failed unit goes
+/// to the back of the queue.
+#[derive(Clone, Debug, Default)]
+pub struct MemoryFeed {
+    state: Arc<Mutex<State>>,
+}
+
+#[derive(Debug, Default)]
+struct State {
+    /// Units waiting to be received, with the deliveries each has had.
+    visible: VecDeque<(Unit, u32)>,
+    held: HashMap<Receipt, (Unit, u32)>,
+    dead: Vec<Unit>,
+    acknowledged: u64,
+    next_receipt: u64,
+    waker: Option<FeedWaker>,
+}
+
+impl State {
+    fn wake(&self) {
+        if let Some(waker) = &self.waker {
+            waker.wake();
+        }
+    }
+}
+
+impl MemoryFeed {
+    /// An empty feed.
+    #[must_use]
+    pub fn new() -> MemoryFeed {
+        MemoryFeed::default()
+    }
+
+    /// The units this feed holds, by state.
+    #[must_use]
+    pub fn counts(&self) -> FeedCounts {
+        let state = self.lock();
+        FeedCounts {
+            visible: state.visible.len() as u64,
+            held: state.held.len() as u64,
+            dead_lettered: state.dead.len() as u64,
+            acknowledged: state.acknowledged,
+        }
+    }
+
+    /// The units moved to the dead-letter list, in the order they moved.
+    #[must_use]
+    pub fn dead_letters(&self) -> Vec<Unit> {
+        self.lock().dead.clone()
+    }
+
+    fn lock(&self) -> MutexGuard<'_, State> {
+        // Nothing panics while holding the lock, so a poisoned lock still
+        // guards consistent state.
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+fn gone(receipt: Receipt) -> FeedError {
+    FeedError::new(
+        FeedErrorKind::Gone,
+        format!("{receipt} is not held by the in-process feed"),
+    )
+}
+
+impl Feed for MemoryFeed {
+    fn set_waker(&self, waker: FeedWaker) {
+        let mut state = self.lock();
+        // A unit published before the waker arrived still needs a wakeup.
+        if !state.visible.is_empty() {
+            waker.wake();
+        }
+        state.waker = Some(waker);
+    }
+
+    fn receive(&self, max: usize) -> Result<Vec<Delivery>, FeedError> {
+        let mut state = self.lock();
+        let take = max.min(state.visible.len());
+        let mut out = Vec::with_capacity(take);
+        for _ in 0..take {
+            let Some((unit, deliveries)) = state.visible.pop_front() else {
+                break;
+            };
+            state.next_receipt += 1;
+            let receipt = Receipt(state.next_receipt);
+            let deliveries = deliveries + 1;
+            state.held.insert(receipt, (unit.clone(), deliveries));
+            out.push(Delivery::new(unit, receipt, deliveries));
+        }
+        Ok(out)
+    }
+
+    fn renew(&self, receipt: Receipt) -> Result<(), FeedError> {
+        if self.lock().held.contains_key(&receipt) {
+            Ok(())
+        } else {
+            Err(gone(receipt))
+        }
+    }
+
+    fn acknowledge(&self, receipt: Receipt) -> Result<(), FeedError> {
+        let mut state = self.lock();
+        if state.held.remove(&receipt).is_none() {
+            return Err(gone(receipt));
+        }
+        state.acknowledged += 1;
+        Ok(())
+    }
+
+    fn fail(&self, receipt: Receipt, reason: &str) -> Result<(), FeedError> {
+        let mut state = self.lock();
+        let Some((unit, deliveries)) = state.held.remove(&receipt) else {
+            return Err(gone(receipt));
+        };
+        if deliveries >= ATTEMPT_CAP {
+            tracing::warn!(
+                unit = %unit.id,
+                deliveries,
+                reason,
+                "in-process feed dead-lettered a unit at its delivery cap"
+            );
+            state.dead.push(unit);
+        } else {
+            state.visible.push_back((unit, deliveries));
+            state.wake();
+        }
+        Ok(())
+    }
+
+    fn publish(&self, unit: Unit) -> Confirmation {
+        let mut state = self.lock();
+        state.visible.push_back((unit, 0));
+        state.wake();
+        let (confirmer, confirmation) = confirmation();
+        confirmer.confirm();
+        confirmation
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::feed::wake_channel;
+    use std::time::Duration;
+
+    fn unit(id: &str) -> Unit {
+        Unit::new(id, id.as_bytes().to_vec())
+    }
+
+    fn receive_one(feed: &MemoryFeed) -> Delivery {
+        let mut got = feed.receive(usize::MAX).unwrap();
+        assert_eq!(got.len(), 1, "expected exactly one delivery, got {got:?}");
+        got.remove(0)
+    }
+
+    /// Pins the attempt cap: a unit failed on deliveries 1 through 9 is
+    /// delivered again with its count raised by one, and one failed on its
+    /// tenth delivery moves to the dead-letter list and is never delivered
+    /// again.
+    #[test]
+    fn a_unit_at_the_cap_moves_to_the_in_memory_dead_letter_list() {
+        let feed = MemoryFeed::new();
+        drop(feed.publish(unit("poison")));
+        // The cap is written out: a loop bound read from the constant would
+        // follow a changed cap.
+        for i in 1..=10 {
+            let delivery = receive_one(&feed);
+            assert_eq!(delivery.deliveries, i, "delivery count on attempt {i}");
+            assert_eq!(delivery.unit, unit("poison"));
+            feed.fail(delivery.receipt, "unreadable").unwrap();
+            if i < 10 {
+                assert_eq!(feed.counts().visible, 1, "re-queued after attempt {i}");
+                assert_eq!(feed.counts().dead_lettered, 0);
+            }
+        }
+        assert_eq!(
+            feed.counts(),
+            FeedCounts {
+                visible: 0,
+                held: 0,
+                dead_lettered: 1,
+                acknowledged: 0,
+            }
+        );
+        assert_eq!(feed.dead_letters(), vec![unit("poison")]);
+        assert!(feed.receive(usize::MAX).unwrap().is_empty());
+    }
+
+    /// Pins that acknowledging removes the unit for good, and that its
+    /// receipt then answers Gone to every call.
+    #[test]
+    fn an_acknowledged_unit_leaves_and_its_receipt_is_gone() {
+        let feed = MemoryFeed::new();
+        drop(feed.publish(unit("done")));
+        let delivery = receive_one(&feed);
+        assert_eq!(feed.counts().held, 1);
+        feed.renew(delivery.receipt).unwrap();
+        feed.acknowledge(delivery.receipt).unwrap();
+        assert_eq!(
+            feed.counts(),
+            FeedCounts {
+                visible: 0,
+                held: 0,
+                dead_lettered: 0,
+                acknowledged: 1,
+            }
+        );
+        let kind = |r: Result<(), FeedError>| r.unwrap_err().kind;
+        assert_eq!(
+            kind(feed.acknowledge(delivery.receipt)),
+            FeedErrorKind::Gone
+        );
+        assert_eq!(kind(feed.renew(delivery.receipt)), FeedErrorKind::Gone);
+        assert_eq!(kind(feed.fail(delivery.receipt, "x")), FeedErrorKind::Gone);
+        assert_eq!(feed.counts().acknowledged, 1);
+        assert!(feed.receive(usize::MAX).unwrap().is_empty());
+    }
+
+    /// Pins that the feed does not deduplicate by id: a unit published twice
+    /// is delivered twice, under two receipts, each needing its own
+    /// acknowledgement.
+    #[test]
+    fn a_unit_published_twice_is_delivered_twice() {
+        let feed = MemoryFeed::new();
+        drop(feed.publish(unit("twice")));
+        drop(feed.publish(unit("twice")));
+        let got = feed.receive(usize::MAX).unwrap();
+        assert_eq!(got.len(), 2);
+        assert_ne!(got[0].receipt, got[1].receipt);
+        assert!(
+            got.iter()
+                .all(|d| d.unit == unit("twice") && d.deliveries == 1)
+        );
+        feed.acknowledge(got[0].receipt).unwrap();
+        assert_eq!(feed.counts().held, 1);
+        feed.acknowledge(got[1].receipt).unwrap();
+        assert_eq!(feed.counts().acknowledged, 2);
+    }
+
+    /// Pins that `publish` settles its confirmation before returning and
+    /// wakes a reader parked on the feed, including one whose waker was set
+    /// after the publish.
+    #[test]
+    fn a_publish_is_confirmed_at_once_and_wakes_the_reader() {
+        let feed = MemoryFeed::new();
+        let (waker, park) = wake_channel();
+        feed.set_waker(waker);
+        assert!(!park.park(Duration::ZERO));
+        let mut confirmation = feed.publish(unit("one"));
+        assert!(matches!(confirmation.try_outcome(), Some(Ok(()))));
+        assert!(park.park(Duration::ZERO), "publish did not wake the reader");
+
+        let late = MemoryFeed::new();
+        drop(late.publish(unit("early")));
+        let (waker, park) = wake_channel();
+        late.set_waker(waker);
+        assert!(park.park(Duration::ZERO), "set_waker missed a waiting unit");
+    }
+
+    /// Pins FIFO order, the `max` bound on one receive, and that a failed
+    /// unit below the cap re-queues behind units already waiting and wakes
+    /// the reader.
+    #[test]
+    fn units_arrive_in_publish_order_and_a_failed_unit_goes_to_the_back() {
+        let feed = MemoryFeed::new();
+        let (waker, park) = wake_channel();
+        feed.set_waker(waker);
+        for id in ["a", "b", "c"] {
+            drop(feed.publish(unit(id)));
+        }
+        let first = feed.receive(1).unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].unit.id, "a");
+        assert!(park.park(Duration::ZERO));
+        feed.fail(first[0].receipt, "retry later").unwrap();
+        assert!(park.park(Duration::ZERO), "fail did not wake the reader");
+        let ids: Vec<_> = feed
+            .receive(usize::MAX)
+            .unwrap()
+            .into_iter()
+            .map(|d| (d.unit.id, d.deliveries))
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                ("b".to_owned(), 1),
+                ("c".to_owned(), 1),
+                ("a".to_owned(), 2)
+            ]
+        );
+    }
+}

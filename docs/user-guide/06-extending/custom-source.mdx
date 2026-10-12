@@ -235,6 +235,65 @@ exactly this with the memory source, and
 generic, so no registration is needed
 ([Assembling a pipeline](../03-guides/assembling-a-pipeline.mdx)).
 
+## Feed-reading sources
+
+A source whose input is a queue of [work units](../07-reference/glossary.mdx#work-unit)
+reads it through the `Feed` trait in
+[`spate-core/src/feed/mod.rs`](repo:crates/spate-core/src/feed/mod.rs). The
+[feed](../07-reference/glossary.mdx#feed) delivers each unit at least once,
+and the source acknowledges a unit when it is done with it. The trait is
+synchronous, so `poll_events` drives it from the controller thread.
+
+Your source follows these rules:
+
+- **Acknowledge a unit only after you have read it to its end and the sink
+  has acknowledged every record in it.** A unit you read in several parts is
+  acknowledged once, after every part meets that rule.
+- **Fail a unit you cannot read.** The feed delivers it again, and moves it to
+  its dead-letter destination at its delivery cap.
+- **Key the units you hold by `Receipt`.** A second delivery of a unit you
+  already hold arrives under a new receipt with the same unit id, and you read
+  it again from its start. No feed deduplicates by unit id.
+- **Let go of a delivery whose receipt answers `Gone`.** The feed has
+  delivered that unit again or already settled it, so retrying the call
+  cannot succeed.
+- **Renew every unit you hold on each `poll_events` call.** A backend that
+  leases units extends a lease only while its holder renews it, so a control
+  plane that stops running gives its units back to the feed.
+- **Never wait on the feed inside `poll_events`.** Hand the feed a waker from
+  `wake_channel` with `set_waker`, and park on the paired `FeedPark` for at
+  most the poll timeout when there is nothing to do.
+
+The scripted feed in `spate-test` lets a test play the feed's side. This
+reader holds a unit, sees it delivered again, and lets go of the lapsed
+receipt when a renewal answers `Gone`:
+
+```rust file=crates/spate-test/tests/feed.rs region=reader
+```
+
+`FeedScript` also scripts a duplicate delivery (`deliver` with an id already
+delivered), a dead letter, and a publish that is refused or held until the
+test confirms it. It records every acknowledgement, failure, renewal and
+`Gone` answer for the test to assert on.
+
+To implement a feed backend, keep every method free of waits:
+
+- Run receives, lease renewals and publishes on a task or thread the backend
+  owns. `receive` returns what that task has buffered, and the other methods
+  hand their request to it. `Ok` means the backend accepted the request.
+- Mint a new `Receipt` for every delivery, and count deliveries in
+  `Delivery::deliveries`, starting at 1.
+- Signal the waker whenever a later `receive` would return a delivery,
+  including for a unit that arrived before `set_waker`.
+- Settle each publish through the `Confirmer` from `confirmation()`, and
+  confirm only once the unit is stored. A confirmer dropped unsettled reads as
+  `Retryable`, because the unit may or may not have been stored.
+
+The in-process feed,
+[`spate-core/src/feed/memory.rs`](repo:crates/spate-core/src/feed/memory.rs),
+is the smallest complete backend. Worked reference:
+[`spate-test/src/feed.rs`](repo:crates/spate-test/src/feed.rs).
+
 ## Coordination-aware sources
 
 A broker-less source can let several pipeline replicas divide its work by

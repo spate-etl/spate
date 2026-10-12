@@ -1,0 +1,481 @@
+//! Scripted feed for testing feed-reading sources.
+//!
+//! [`scripted_feed`] pairs a [`Feed`] implementation with a [`FeedScript`]
+//! handle. The test scripts deliveries, redeliveries, duplicates,
+//! dead-lettering and publish outcomes, the source under test reads through
+//! the trait, and the script observes every acknowledgement, failure,
+//! renewal and publish. There is no queue and no clock, and behavior is
+//! deterministic.
+
+use spate_core::feed::{
+    Confirmation, Confirmer, Delivery, Feed, FeedError, FeedErrorKind, FeedWaker, Receipt, Unit,
+    confirmation,
+};
+use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::sync::{Arc, Mutex, MutexGuard};
+
+#[derive(Default)]
+struct State {
+    /// Scripted deliveries not yet received.
+    queued: VecDeque<Delivery>,
+    /// Deliveries received and not yet acknowledged, failed or lapsed.
+    held: BTreeMap<Receipt, Delivery>,
+    /// Deliveries scripted so far per unit id, for `Delivery::deliveries`.
+    counts: HashMap<String, u32>,
+    next_receipt: u64,
+    delivered: Vec<Delivery>,
+    acknowledged: Vec<Receipt>,
+    failed: Vec<(Receipt, String)>,
+    renewed: Vec<Receipt>,
+    gone: Vec<Receipt>,
+    published: Vec<Unit>,
+    dead_lettered: Vec<Unit>,
+    publish_outcomes: VecDeque<FeedErrorKind>,
+    hold_publishes: bool,
+    held_publishes: Vec<(Unit, Confirmer)>,
+    waker: Option<FeedWaker>,
+}
+
+impl State {
+    fn queue(&mut self, unit: Unit) -> Receipt {
+        self.next_receipt += 1;
+        let receipt = Receipt(self.next_receipt);
+        let count = self.counts.entry(unit.id.clone()).or_default();
+        *count += 1;
+        let delivery = Delivery::new(unit, receipt, *count);
+        self.queued.push_back(delivery);
+        receipt
+    }
+
+    /// Take the delivery `receipt` names out of the queue or the held set.
+    fn lapse(&mut self, receipt: Receipt) -> Option<Delivery> {
+        if let Some(delivery) = self.held.remove(&receipt) {
+            return Some(delivery);
+        }
+        let at = self.queued.iter().position(|d| d.receipt == receipt)?;
+        self.queued.remove(at)
+    }
+
+    /// Answer a call on `receipt`: run `f` on the held delivery, or record
+    /// and return Gone.
+    fn on_held(
+        &mut self,
+        receipt: Receipt,
+        f: impl FnOnce(&mut State) -> Result<(), FeedError>,
+    ) -> Result<(), FeedError> {
+        if self.held.contains_key(&receipt) {
+            f(self)
+        } else {
+            self.gone.push(receipt);
+            Err(FeedError::new(
+                FeedErrorKind::Gone,
+                format!("{receipt} is not held by the scripted feed"),
+            ))
+        }
+    }
+
+    fn wake(&self) {
+        if let Some(waker) = &self.waker {
+            waker.wake();
+        }
+    }
+}
+
+impl std::fmt::Debug for State {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("State")
+            .field("queued", &self.queued.len())
+            .field("held", &self.held.len())
+            .field("acknowledged", &self.acknowledged.len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// A [`Feed`] whose deliveries and publish outcomes are scripted by the
+/// paired [`FeedScript`]. Build both with [`scripted_feed`].
+///
+/// `receive` hands out scripted deliveries in the order they were scripted.
+/// `fail` records the report and lets go of the delivery, and delivers
+/// nothing again on its own: the script decides what the feed does next. A
+/// call with a receipt the feed no longer holds returns
+/// [`Gone`](FeedErrorKind::Gone) and is recorded by
+/// [`FeedScript::gone`].
+#[derive(Debug)]
+pub struct ScriptedFeed {
+    state: Arc<Mutex<State>>,
+}
+
+/// Scripting and observation handle for a [`ScriptedFeed`].
+///
+/// Every scripting call wakes the reader, so a source parked on the feed
+/// picks the change up at once.
+#[derive(Clone, Debug)]
+pub struct FeedScript {
+    state: Arc<Mutex<State>>,
+}
+
+/// A scripted feed and its handle.
+///
+/// # Examples
+///
+/// ```
+/// use spate_core::feed::{Feed, FeedErrorKind, Unit};
+///
+/// let (feed, script) = spate_test::scripted_feed();
+/// let first = script.deliver(Unit::new("day-1", b"2026-10-01".to_vec()));
+/// let held = feed.receive(8).unwrap();
+/// assert_eq!(held[0].receipt, first);
+///
+/// // The queue gives the unit to the reader again under a new receipt.
+/// let second = script.redeliver(first);
+/// let again = feed.receive(8).unwrap();
+/// assert_eq!((again[0].receipt, again[0].deliveries), (second, 2));
+///
+/// // The first receipt has lapsed; the second acknowledges the unit.
+/// let lapsed = feed.acknowledge(first).unwrap_err();
+/// assert_eq!(lapsed.kind, FeedErrorKind::Gone);
+/// feed.acknowledge(second).unwrap();
+/// assert_eq!(script.acknowledged(), vec![second]);
+/// assert_eq!(script.gone(), vec![first]);
+/// ```
+#[must_use]
+pub fn scripted_feed() -> (ScriptedFeed, FeedScript) {
+    let state = Arc::new(Mutex::new(State::default()));
+    (
+        ScriptedFeed {
+            state: Arc::clone(&state),
+        },
+        FeedScript { state },
+    )
+}
+
+impl FeedScript {
+    /// Queue a delivery of `unit` for the next `receive`, and return its
+    /// receipt. Delivering a unit whose id was delivered before is a
+    /// duplicate, counted in [`Delivery::deliveries`].
+    pub fn deliver(&self, unit: Unit) -> Receipt {
+        let mut state = self.lock();
+        let receipt = state.queue(unit);
+        state.wake();
+        receipt
+    }
+
+    /// Deliver the unit `receipt` names again under a new receipt, as a queue
+    /// does when a lease lapses. The old receipt lapses: every later call
+    /// with it returns [`Gone`](FeedErrorKind::Gone).
+    ///
+    /// # Panics
+    ///
+    /// If `receipt` names no delivery that is queued or held.
+    pub fn redeliver(&self, receipt: Receipt) -> Receipt {
+        let mut state = self.lock();
+        let Some(delivery) = state.lapse(receipt) else {
+            panic!("redeliver: {receipt} is neither queued nor held");
+        };
+        let receipt = state.queue(delivery.unit);
+        state.wake();
+        receipt
+    }
+
+    /// Move the unit `receipt` names to the dead-letter destination. The
+    /// receipt lapses as for [`redeliver`](Self::redeliver).
+    ///
+    /// # Panics
+    ///
+    /// If `receipt` names no delivery that is queued or held.
+    pub fn dead_letter(&self, receipt: Receipt) {
+        let mut state = self.lock();
+        let Some(delivery) = state.lapse(receipt) else {
+            panic!("dead_letter: {receipt} is neither queued nor held");
+        };
+        state.dead_lettered.push(delivery.unit);
+        state.wake();
+    }
+
+    /// Refuse the next unscripted `publish` with `kind` (repeat to script a
+    /// sequence). A refused unit is never delivered.
+    pub fn refuse_next_publish(&self, kind: FeedErrorKind) {
+        let mut state = self.lock();
+        state.publish_outcomes.push_back(kind);
+        state.wake();
+    }
+
+    /// Leave every later `publish` unsettled until
+    /// [`confirm_held_publishes`](Self::confirm_held_publishes).
+    pub fn hold_publishes(&self) {
+        let mut state = self.lock();
+        state.hold_publishes = true;
+        state.wake();
+    }
+
+    /// Confirm every held publish, queue a delivery of each unit in publish
+    /// order, and stop holding publishes.
+    pub fn confirm_held_publishes(&self) {
+        let mut state = self.lock();
+        state.hold_publishes = false;
+        for (unit, confirmer) in std::mem::take(&mut state.held_publishes) {
+            confirmer.confirm();
+            state.queue(unit);
+        }
+        state.wake();
+    }
+
+    /// Every delivery `receive` handed out, in order.
+    #[must_use]
+    pub fn delivered(&self) -> Vec<Delivery> {
+        self.lock().delivered.clone()
+    }
+
+    /// The receipts received and not yet acknowledged, failed or lapsed, in
+    /// receipt order.
+    #[must_use]
+    pub fn held(&self) -> Vec<Receipt> {
+        self.lock().held.keys().copied().collect()
+    }
+
+    /// Every receipt acknowledged, in order.
+    #[must_use]
+    pub fn acknowledged(&self) -> Vec<Receipt> {
+        self.lock().acknowledged.clone()
+    }
+
+    /// Every receipt failed, with its reason, in order.
+    #[must_use]
+    pub fn failed(&self) -> Vec<(Receipt, String)> {
+        self.lock().failed.clone()
+    }
+
+    /// Every receipt renewed, in order, one entry per call.
+    #[must_use]
+    pub fn renewed(&self) -> Vec<Receipt> {
+        self.lock().renewed.clone()
+    }
+
+    /// Every receipt a call was answered [`Gone`](FeedErrorKind::Gone) for,
+    /// in order.
+    #[must_use]
+    pub fn gone(&self) -> Vec<Receipt> {
+        self.lock().gone.clone()
+    }
+
+    /// Every unit passed to `publish`, in order, whatever its outcome.
+    #[must_use]
+    pub fn published(&self) -> Vec<Unit> {
+        self.lock().published.clone()
+    }
+
+    /// Every unit moved to the dead-letter destination by
+    /// [`dead_letter`](Self::dead_letter), in order.
+    #[must_use]
+    pub fn dead_lettered(&self) -> Vec<Unit> {
+        self.lock().dead_lettered.clone()
+    }
+
+    fn lock(&self) -> MutexGuard<'_, State> {
+        self.state.lock().expect("feed script poisoned")
+    }
+}
+
+impl ScriptedFeed {
+    fn lock(&self) -> MutexGuard<'_, State> {
+        self.state.lock().expect("feed script poisoned")
+    }
+}
+
+impl Feed for ScriptedFeed {
+    fn set_waker(&self, waker: FeedWaker) {
+        let mut state = self.lock();
+        if !state.queued.is_empty() {
+            waker.wake();
+        }
+        state.waker = Some(waker);
+    }
+
+    fn receive(&self, max: usize) -> Result<Vec<Delivery>, FeedError> {
+        let mut state = self.lock();
+        let take = max.min(state.queued.len());
+        let out: Vec<Delivery> = state.queued.drain(..take).collect();
+        for delivery in &out {
+            state.held.insert(delivery.receipt, delivery.clone());
+            state.delivered.push(delivery.clone());
+        }
+        Ok(out)
+    }
+
+    fn renew(&self, receipt: Receipt) -> Result<(), FeedError> {
+        self.lock().on_held(receipt, |state| {
+            state.renewed.push(receipt);
+            Ok(())
+        })
+    }
+
+    fn acknowledge(&self, receipt: Receipt) -> Result<(), FeedError> {
+        self.lock().on_held(receipt, |state| {
+            state.held.remove(&receipt);
+            state.acknowledged.push(receipt);
+            Ok(())
+        })
+    }
+
+    fn fail(&self, receipt: Receipt, reason: &str) -> Result<(), FeedError> {
+        self.lock().on_held(receipt, |state| {
+            state.held.remove(&receipt);
+            state.failed.push((receipt, reason.to_owned()));
+            Ok(())
+        })
+    }
+
+    fn publish(&self, unit: Unit) -> Confirmation {
+        let mut state = self.lock();
+        state.published.push(unit.clone());
+        let (confirmer, confirmation) = confirmation();
+        if let Some(kind) = state.publish_outcomes.pop_front() {
+            confirmer.reject(FeedError::new(kind, "refused by the feed script"));
+        } else if state.hold_publishes {
+            state.held_publishes.push((unit, confirmer));
+        } else {
+            confirmer.confirm();
+            state.queue(unit);
+            state.wake();
+        }
+        confirmation
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use spate_core::feed::wake_channel;
+    use std::time::Duration;
+
+    fn unit(id: &str) -> Unit {
+        Unit::new(id, id.as_bytes().to_vec())
+    }
+
+    fn kind(result: Result<(), FeedError>) -> FeedErrorKind {
+        result.unwrap_err().kind
+    }
+
+    /// Pins that a redelivery lapses the old receipt, counts the delivery,
+    /// and records every call on the lapsed receipt as Gone.
+    #[test]
+    fn a_redelivery_lapses_the_old_receipt() {
+        let (feed, script) = scripted_feed();
+        let first = script.deliver(unit("a"));
+        assert_eq!(feed.receive(8).unwrap()[0].receipt, first);
+        assert_eq!(script.held(), vec![first]);
+
+        let second = script.redeliver(first);
+        assert!(script.held().is_empty(), "the lapsed receipt is still held");
+        let again = feed.receive(8).unwrap();
+        assert_eq!(again.len(), 1);
+        assert_eq!((again[0].receipt, again[0].deliveries), (second, 2));
+
+        assert_eq!(kind(feed.renew(first)), FeedErrorKind::Gone);
+        assert_eq!(kind(feed.acknowledge(first)), FeedErrorKind::Gone);
+        assert_eq!(kind(feed.fail(first, "late")), FeedErrorKind::Gone);
+        assert_eq!(script.gone(), vec![first, first, first]);
+        feed.renew(second).unwrap();
+        feed.acknowledge(second).unwrap();
+        assert_eq!(script.renewed(), vec![second]);
+        assert_eq!(script.acknowledged(), vec![second]);
+        assert!(script.failed().is_empty());
+        assert_eq!(script.delivered().len(), 2);
+    }
+
+    /// Pins that a duplicate of a held unit is a second delivery under its
+    /// own receipt, and that both receipts stay valid.
+    #[test]
+    fn a_duplicate_is_held_beside_the_first_delivery() {
+        let (feed, script) = scripted_feed();
+        let first = script.deliver(unit("a"));
+        let _ = feed.receive(8).unwrap();
+        let second = script.deliver(unit("a"));
+        let dup = feed.receive(8).unwrap();
+        assert_eq!((dup[0].receipt, dup[0].deliveries), (second, 2));
+        assert_eq!(script.held(), vec![first, second]);
+        feed.acknowledge(first).unwrap();
+        feed.fail(second, "poison").unwrap();
+        assert_eq!(script.acknowledged(), vec![first]);
+        assert_eq!(script.failed(), vec![(second, "poison".to_owned())]);
+        assert!(script.held().is_empty());
+        assert!(feed.receive(8).unwrap().is_empty(), "fail redelivered");
+    }
+
+    /// Pins that a dead-lettered unit lapses its receipt, whether queued or
+    /// held, and is recorded.
+    #[test]
+    fn a_dead_lettered_unit_lapses_its_receipt() {
+        let (feed, script) = scripted_feed();
+        let queued = script.deliver(unit("q"));
+        script.dead_letter(queued);
+        assert!(feed.receive(8).unwrap().is_empty());
+
+        let held = script.deliver(unit("h"));
+        let _ = feed.receive(8).unwrap();
+        script.dead_letter(held);
+        assert_eq!(kind(feed.acknowledge(held)), FeedErrorKind::Gone);
+        assert_eq!(script.dead_lettered(), vec![unit("q"), unit("h")]);
+    }
+
+    /// Pins publish outcomes: an unscripted publish is confirmed and
+    /// delivered, a refused one is never delivered, and a held one settles
+    /// only when confirmed and is delivered then.
+    #[test]
+    fn publishes_are_confirmed_refused_or_held_as_scripted() {
+        let (feed, script) = scripted_feed();
+        let mut plain = feed.publish(unit("plain"));
+        assert!(matches!(plain.try_outcome(), Some(Ok(()))));
+
+        script.refuse_next_publish(FeedErrorKind::Refused);
+        let mut refused = feed.publish(unit("refused"));
+        assert_eq!(
+            refused.try_outcome().unwrap().unwrap_err().kind,
+            FeedErrorKind::Refused
+        );
+
+        script.hold_publishes();
+        let mut held = feed.publish(unit("held"));
+        assert!(held.try_outcome().is_none());
+        let ids = |d: Vec<Delivery>| d.into_iter().map(|d| d.unit.id).collect::<Vec<_>>();
+        assert_eq!(ids(feed.receive(8).unwrap()), vec!["plain"]);
+
+        script.confirm_held_publishes();
+        assert!(matches!(held.try_outcome(), Some(Ok(()))));
+        assert_eq!(ids(feed.receive(8).unwrap()), vec!["held"]);
+        assert_eq!(
+            script.published(),
+            vec![unit("plain"), unit("refused"), unit("held")]
+        );
+    }
+
+    /// Pins that scripting calls wake a parked reader, and that a waker set
+    /// after a delivery was queued is woken at once.
+    #[test]
+    fn scripting_wakes_the_reader() {
+        let (feed, script) = scripted_feed();
+        let early = script.deliver(unit("early"));
+        let (waker, park) = wake_channel();
+        feed.set_waker(waker);
+        assert!(
+            park.park(Duration::ZERO),
+            "set_waker missed a queued delivery"
+        );
+
+        let _ = feed.receive(8).unwrap();
+        assert!(!park.park(Duration::ZERO));
+        let again = script.redeliver(early);
+        assert!(park.park(Duration::ZERO), "redeliver did not wake");
+        script.dead_letter(again);
+        assert!(park.park(Duration::ZERO), "dead_letter did not wake");
+        script.hold_publishes();
+        assert!(park.park(Duration::ZERO), "hold_publishes did not wake");
+        let _held = feed.publish(unit("p"));
+        assert!(!park.park(Duration::ZERO), "a held publish woke the reader");
+        script.confirm_held_publishes();
+        assert!(
+            park.park(Duration::ZERO),
+            "confirm_held_publishes did not wake"
+        );
+    }
+}

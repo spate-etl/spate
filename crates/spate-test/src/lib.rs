@@ -63,6 +63,9 @@
 //! assert_eq!(handle.last_committed(p), Some(1));
 //! ```
 //!
+//! To test a source that reads a work feed, script its deliveries,
+//! redeliveries and publish outcomes with [`scripted_feed`].
+//!
 //! For failure-path testing, script the sink
 //! ([`SinkScript::enqueue_for`]) and the deserializer
 //! ([`TestDeserializer::fail_on_prefix`]); for property tests, enable the
@@ -76,6 +79,7 @@
 mod coordination;
 mod deser;
 mod exposition;
+mod feed;
 mod fixtures;
 mod logs;
 mod run;
@@ -90,6 +94,7 @@ pub mod strategies;
 pub use coordination::{CoordinatorScript, ScriptedCoordinator, scripted_coordinator};
 pub use deser::{EmitCollector, TestDeserializer};
 pub use exposition::{MetricSample, metric_series, metric_sum, metric_value, render_metrics};
+pub use feed::{FeedScript, ScriptedFeed, scripted_feed};
 pub use fixtures::{component_config, raw_payload, record, test_ack, unique_name};
 pub use logs::{LogCapture, capture_logs, show_logs};
 pub use run::{PipelineRun, wait_until};

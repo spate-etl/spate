@@ -39,6 +39,10 @@ pub mod config;
 pub mod coordination;
 pub mod deser;
 pub mod error;
+// tokio's sync primitives change shape under `--cfg loom`, and nothing
+// loom-modelled reads a feed.
+#[cfg(not(loom))]
+pub mod feed;
 pub mod framing;
 pub mod metrics;
 #[cfg(not(loom))]

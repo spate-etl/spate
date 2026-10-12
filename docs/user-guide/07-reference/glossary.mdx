@@ -120,6 +120,17 @@ commit loses its compare-and-swap; and the **plan generation**, bumped by
 every newly elected coordination leader so a deposed leader's plan write
 is rejected.
 
+### Feed
+
+The queue a feed-reading source receives [work units](#work-unit) from,
+behind the `Feed` trait. A feed delivers each unit at least once. A failed
+unit is delivered again under a new receipt, and so is a unit whose holder
+stops renewing it on a feed that leases units. A unit that reaches the feed's
+delivery cap moves to its dead-letter destination. A source acknowledges a
+unit only after reading it to its end and after the sink has acknowledged
+every record in it. The in-process feed (`MemoryFeed`) serves one instance and
+keeps nothing across a restart.
+
 ### Fencing token
 
 A monotonically increasing number a writer must present with a write, so
@@ -269,3 +280,11 @@ at-least-once invariant is that it never passes unacknowledged data; a
 failed batch stalls it (alert on `spate_checkpoint_watermark_age_seconds`)
 rather than being skipped. Distinct from the
 [backpressure watermarks](#backpressure-watermarks-high--low).
+
+### Work unit
+
+One piece of work a [feed](#feed) carries (`Unit`): an id, and an opaque body
+the source decodes to find the input it reads. A unit is acknowledged once,
+as a whole, and carries no progress, so a unit delivered again is read again
+from its start. Distinct from a [split](#split), whose progress a coordinated
+source commits as it reads.

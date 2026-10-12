@@ -11,6 +11,7 @@ use spate_core::sink::{
 };
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::task::{Poll, Waker};
 use std::time::Duration;
 
 /// A replica endpoint tag, [`CaptureWriter`]'s
@@ -35,10 +36,13 @@ pub enum ScriptedResult {
     Fatal(String),
 }
 
-/// One scripted write outcome: an optional delay, then a result.
+/// One scripted write outcome: an optional hold, an optional delay, then a
+/// result.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct WriteOutcome {
+    /// Wait for [`SinkScript::release_held`] before the delay starts.
+    pub hold: bool,
     /// Sleep this long (tokio time, controllable with `test-util`) before
     /// resolving.
     pub delay: Option<Duration>,
@@ -51,6 +55,7 @@ impl WriteOutcome {
     #[must_use]
     pub fn ok() -> Self {
         WriteOutcome {
+            hold: false,
             delay: None,
             result: ScriptedResult::Ok,
         }
@@ -60,6 +65,7 @@ impl WriteOutcome {
     #[must_use]
     pub fn retryable(reason: impl Into<String>) -> Self {
         WriteOutcome {
+            hold: false,
             delay: None,
             result: ScriptedResult::Retryable(reason.into()),
         }
@@ -69,6 +75,7 @@ impl WriteOutcome {
     #[must_use]
     pub fn fatal(reason: impl Into<String>) -> Self {
         WriteOutcome {
+            hold: false,
             delay: None,
             result: ScriptedResult::Fatal(reason.into()),
         }
@@ -78,6 +85,19 @@ impl WriteOutcome {
     #[must_use]
     pub fn after(mut self, delay: Duration) -> Self {
         self.delay = Some(delay);
+        self
+    }
+
+    /// Keep the write open until the test calls
+    /// [`SinkScript::release_held`].
+    ///
+    /// No amount of time releases a held write, real or tokio, so a test can
+    /// assert what the pipeline does while a write is outstanding without
+    /// reading a clock. A shutdown waits on a held write like any other, so
+    /// release it before stopping the run.
+    #[must_use]
+    pub fn held(mut self) -> Self {
+        self.hold = true;
         self
     }
 }
@@ -108,6 +128,25 @@ struct SinkState {
     per_endpoint: HashMap<(usize, usize), VecDeque<WriteOutcome>>,
     probe_failures: HashMap<(usize, usize), String>,
     writes: Vec<CapturedWrite>,
+    /// Count of `release_held` calls. A held write waits for this to pass
+    /// the count it read when it started.
+    releases: u64,
+    /// Writes waiting on a release.
+    holding: usize,
+    /// Wakers of the writes waiting on a release.
+    held_wakers: Vec<Waker>,
+}
+
+/// Counts a write in [`SinkState::holding`] for as long as it waits,
+/// including when the write future is dropped mid-hold.
+struct Holding(Arc<Mutex<SinkState>>);
+
+impl Drop for Holding {
+    fn drop(&mut self) {
+        if let Ok(mut st) = self.0.lock() {
+            st.holding -= 1;
+        }
+    }
 }
 
 /// Build a paired scriptable writer and its handle.
@@ -167,6 +206,28 @@ impl SinkScript {
     pub fn writes(&self) -> Vec<CapturedWrite> {
         self.lock().writes.clone()
     }
+
+    /// Release every write currently held by a
+    /// [`held`](WriteOutcome::held) outcome.
+    ///
+    /// A held outcome that a later write consumes holds again until the next
+    /// call.
+    pub fn release_held(&self) {
+        let wakers = {
+            let mut st = self.lock();
+            st.releases += 1;
+            std::mem::take(&mut st.held_wakers)
+        };
+        for waker in wakers {
+            waker.wake();
+        }
+    }
+
+    /// How many writes are waiting on [`release_held`](Self::release_held).
+    #[must_use]
+    pub fn held_writes(&self) -> usize {
+        self.lock().holding
+    }
 }
 
 /// A [`ShardWriter`] that records every attempt and resolves it according
@@ -204,7 +265,7 @@ impl ShardWriter for CaptureWriter {
             .flat_map(|f: &Bytes| f.iter().copied())
             .collect();
         async move {
-            let outcome = {
+            let (outcome, hold) = {
                 let mut st = state.lock().expect("spate-test sink state poisoned");
                 let outcome = st
                     .per_endpoint
@@ -221,8 +282,26 @@ impl ShardWriter for CaptureWriter {
                     payload,
                     result: outcome.result.clone(),
                 });
-                outcome
+                // Read under the lock that recorded the write, so a release
+                // that follows a test's read of `writes()` reaches this one.
+                let hold = outcome.hold.then(|| {
+                    st.holding += 1;
+                    (st.releases, Holding(Arc::clone(&state)))
+                });
+                (outcome, hold)
             };
+            if let Some((started_at, _holding)) = hold {
+                std::future::poll_fn(|cx| {
+                    let mut st = state.lock().expect("spate-test sink state poisoned");
+                    if st.releases > started_at {
+                        Poll::Ready(())
+                    } else {
+                        st.held_wakers.push(cx.waker().clone());
+                        Poll::Pending
+                    }
+                })
+                .await;
+            }
             if let Some(delay) = outcome.delay {
                 tokio::time::sleep(delay).await;
             }

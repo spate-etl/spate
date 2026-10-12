@@ -330,6 +330,54 @@ async fn delays_run_on_tokio_time() {
     );
 }
 
+/// Poll `fut` once and report what it returned.
+async fn poll_once<F: std::future::Future>(
+    mut fut: std::pin::Pin<&mut F>,
+) -> std::task::Poll<F::Output> {
+    std::future::poll_fn(|cx| std::task::Poll::Ready(fut.as_mut().poll(cx))).await
+}
+
+/// Pins that a held write stays open across any amount of tokio time until
+/// the script releases it, and that a release reaches only the writes held
+/// when it was called.
+#[tokio::test(start_paused = true)]
+async fn a_held_write_resolves_only_when_released() {
+    let (writer, script) = capture_writer();
+    script.enqueue_global(WriteOutcome::ok().held());
+    script.enqueue_global(WriteOutcome::retryable("later").held());
+    let ep = ReplicaTag {
+        shard: 0,
+        replica: 0,
+    };
+
+    let first_batch = sealed("held-1", b"");
+    let mut first = std::pin::pin!(writer.write_batch(&ep, &first_batch));
+    assert!(poll_once(first.as_mut()).await.is_pending());
+    assert_eq!(script.held_writes(), 1);
+    tokio::time::advance(Duration::from_secs(3600)).await;
+    assert!(
+        poll_once(first.as_mut()).await.is_pending(),
+        "time does not release a held write"
+    );
+
+    script.release_held();
+    first.await.unwrap();
+    assert_eq!(script.held_writes(), 0);
+
+    let second_batch = sealed("held-2", b"");
+    let mut second = std::pin::pin!(writer.write_batch(&ep, &second_batch));
+    assert!(
+        poll_once(second.as_mut()).await.is_pending(),
+        "an earlier release does not reach a later hold"
+    );
+    script.release_held();
+    assert!(
+        second.await.is_err(),
+        "the scripted result follows the hold"
+    );
+    assert_eq!(script.writes().len(), 2);
+}
+
 #[tokio::test]
 async fn probes_fail_and_heal() {
     let (writer, script) = capture_writer();

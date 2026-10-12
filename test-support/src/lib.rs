@@ -3,7 +3,11 @@
 
 mod child;
 mod corpus;
+#[cfg(feature = "elasticmq")]
+mod elasticmq;
 mod http;
+#[cfg(feature = "rustfs")]
+mod rustfs;
 #[cfg(feature = "tls")]
 mod tls;
 #[cfg(feature = "toxiproxy")]
@@ -11,7 +15,11 @@ mod toxiproxy;
 
 pub use child::run_in_child;
 pub use corpus::{fnv1a, pin};
+#[cfg(feature = "elasticmq")]
+pub use elasticmq::{ElasticMq, Message, QUERY_PORT};
 pub use http::{http, http_with_body};
+#[cfg(feature = "rustfs")]
+pub use rustfs::{ACCESS_KEY, REGION, Rustfs, S3_PORT, SECRET_KEY};
 #[cfg(feature = "tls")]
 pub use tls::{TestCa, native_certs, pem, serve_tls};
 #[cfg(feature = "toxiproxy")]

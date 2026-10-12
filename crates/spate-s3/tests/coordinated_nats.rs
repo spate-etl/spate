@@ -1,5 +1,5 @@
 //! The coordinated backfill against the real production pair: a NATS
-//! JetStream coordination store and a SeaweedFS S3 gateway, covering
+//! JetStream coordination store and a RustFS S3 store, covering
 //! durable resume across process "restarts" and multi-instance sharing, as
 //! a deployment would assemble them.
 //!
@@ -15,7 +15,7 @@ use spate_core::pipeline::ExitState;
 use spate_test::{SinkScript, WriteOutcome, wait_until};
 use spate_test_support::container_image;
 use std::time::Duration;
-use support::seaweed::Gateway;
+use support::rustfs::Gateway;
 use support::{
     Launched, PipelineYaml, captured_rows, launch_customized, line_framer, lines_bytes, recs,
     sorted, test_options,

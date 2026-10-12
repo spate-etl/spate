@@ -3,7 +3,7 @@
 #![allow(dead_code)]
 #![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
 
-pub(crate) mod seaweed;
+pub(crate) mod rustfs;
 pub(crate) mod spy;
 
 use object_store::ObjectStoreExt as _;
@@ -44,7 +44,7 @@ impl PipelineYaml {
     }
 
     /// Reads `data/` in the gateway's bucket.
-    pub(crate) fn bucket(name: &str, gw: &seaweed::Gateway) -> Self {
+    pub(crate) fn bucket(name: &str, gw: &rustfs::Gateway) -> Self {
         let url = format!("s3://{}/data/", gw.bucket);
         Self::over(name, url, Some(gw.store_options_yaml()))
     }

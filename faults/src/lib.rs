@@ -57,8 +57,8 @@ pub mod oracle;
 pub mod outcome;
 #[cfg(unix)]
 pub mod run;
+pub mod rustfs;
 pub mod schedule;
-pub mod seaweed;
 pub mod seed;
 pub mod sink;
 pub mod store;

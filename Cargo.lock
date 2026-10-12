@@ -4227,6 +4227,8 @@ name = "spate-test-support"
 version = "0.3.0"
 dependencies = [
  "base64 0.22.1",
+ "futures-util",
+ "object_store",
  "rcgen",
  "rustls",
  "rustls-native-certs",

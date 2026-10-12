@@ -331,7 +331,7 @@ fn p3_or_p5_violation_with_a_container_down_is_violation() {
 #[test]
 fn one_failed_health_poll_is_not_a_container_failure() {
     let other = |t_ms| HealthPoll {
-        container: "seaweedfs".to_owned(),
+        container: "rustfs".to_owned(),
         ..poll(t_ms, false)
     };
     assert_eq!(container_outage(&[poll(1, false), poll(2, true)]), None);

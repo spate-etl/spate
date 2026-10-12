@@ -23,7 +23,7 @@ spate-core = { workspace = true }
 spate-json = { workspace = true }
 spate-s3 = { workspace = true, features = ["testing"] }
 spate-test = { workspace = true }
-spate-test-support = { workspace = true, features = ["toxiproxy"] }
+spate-test-support = { workspace = true, features = ["rustfs", "toxiproxy"] }
 testcontainers = { workspace = true, features = ["blocking"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
 url = { workspace = true }

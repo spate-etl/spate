@@ -15,6 +15,7 @@ use spate_core::sink::KeyHashRouter;
 use spate_json::NdjsonFramer;
 use spate_s3::S3Source;
 use spate_test::{BytesPassthrough, TestEncoder};
+use spate_test_support::{ACCESS_KEY, REGION, SECRET_KEY};
 
 use crate::classify::Classifier;
 use crate::journal::Journal;
@@ -34,7 +35,7 @@ pub struct WorkerConfig {
     pub journal: PathBuf,
     /// The coordination store.
     pub store: StoreConfig,
-    /// The S3 gateway holding the data set under `data/`.
+    /// The S3 store holding the data set under `data/`.
     pub s3: S3Config,
     /// Coordinator tuning.
     pub tuning: Tuning,
@@ -68,7 +69,8 @@ pub enum StoreConfig {
     },
 }
 
-/// An S3 gateway that accepts unsigned requests over plain HTTP.
+/// A RustFS store over plain HTTP, signed with the key pair
+/// [`spate_test_support::Rustfs`] sets.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct S3Config {
     /// Endpoint URL.
@@ -284,8 +286,9 @@ source:
     store:
       endpoint: \"{endpoint}\"
       allow_http: \"true\"
-      skip_signature: \"true\"
-      region: \"us-east-1\"
+      access_key_id: \"{ACCESS_KEY}\"
+      secret_access_key: \"{SECRET_KEY}\"
+      region: \"{REGION}\"
 sink: {{ journal: {{}} }}
 ",
         instance = config.instance,

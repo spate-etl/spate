@@ -29,8 +29,8 @@ use crate::oracle::{
 use crate::outcome::{
     self, Check, Evidence, FaultFired, Kind, Outcome, Scenario, Stage, StopSeen, Violation,
 };
+use crate::rustfs::Gateway;
 use crate::schedule::{Action, InProcess, SLEEPER, Schedule, Step, Stop, Timeline};
-use crate::seaweed::Gateway;
 use crate::seed::{self, SplitMix64};
 use crate::store::AbortMode;
 use crate::worker::{S3Config, StoreConfig, Tuning, WorkerConfig, nats_store};
@@ -374,7 +374,7 @@ impl Env {
                 }),
             },
             Target {
-                container: "seaweedfs",
+                container: "rustfs",
                 running: Box::new(|| self.gateway.is_running()),
                 reach: Box::new(move || self.gateway.probe(rt, PROBE)),
             },
@@ -1397,14 +1397,14 @@ mod tests {
     use crate::journal::{Event, LeaderAtKill, Line};
 
     /// A run with link windows polls Toxiproxy beside the store and
-    /// SeaweedFS, and one without polls only those two.
+    /// RustFS, and one without polls only those two.
     #[test]
     #[ignore = "requires Docker"]
     fn a_linked_run_polls_toxiproxy() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         for (linked, expected) in [
-            (true, &["nats", "seaweedfs", "toxiproxy"][..]),
-            (false, &["nats", "seaweedfs"][..]),
+            (true, &["nats", "rustfs", "toxiproxy"][..]),
+            (false, &["nats", "rustfs"][..]),
         ] {
             let env = setup(&rt, StoreKind::Nats, &Tuning::nats(), Vec::new(), linked).unwrap();
             let polls: Vec<_> = env.health_targets(&rt).iter().map(Target::poll).collect();

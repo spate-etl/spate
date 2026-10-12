@@ -126,7 +126,7 @@ mod tests {
         let (a, b) = (AtomicBool::new(false), AtomicBool::new(false));
         let targets = [
             target("nats", Ok(true), Ok(()), &a),
-            target("seaweedfs", Ok(true), Err("refused".to_owned()), &b),
+            target("rustfs", Ok(true), Err("refused".to_owned()), &b),
         ];
         let polls = std::thread::scope(|s| {
             // Inside the scope, so a failed wait drops `tx` and the poller ends.
@@ -148,7 +148,7 @@ mod tests {
         assert!(polls.len() >= 4 && polls.len() % 2 == 0);
         assert!(polls.chunks(2).all(|p| p[0].container == "nats"
             && p[0].ok
-            && p[1].container == "seaweedfs"
+            && p[1].container == "rustfs"
             && !p[1].ok));
     }
 }

@@ -442,10 +442,15 @@ lets the rest of the backfill finish first.
 The whole coordinated lifecycle runs against `file://` URLs with no
 infrastructure, which is what the examples this page draws on do: solo,
 and two-instance over a shared in-process store. The Docker-gated suites run
-against a **SeaweedFS** S3 gateway, and, for durable resume and multi-instance
-over the production backend, SeaweedFS plus a
+against a **RustFS** S3 store, and, for durable resume and multi-instance
+over the production backend, RustFS plus a
 [NATS](../../coordination/nats/README.mdx#supported-server-versions) container
 (`cargo test -p spate-s3 -- --ignored --test-threads=1`).
+
+SeaweedFS is unproven as a store for this source. SeaweedFS 4.48 reports a
+`ListObjectsV2` page that ends on an empty folder marker, a zero-byte key
+ending in `/`, as the last page, so a backfill completes without the keys that
+sort after it.
 
 ## Metrics
 

@@ -217,6 +217,17 @@ pub(crate) fn classify(
                 image_suites.extend(["spate-coordination", "spate-s3"].map(String::from));
                 out.container_pkgs.extend(image_suites.iter().cloned());
             }
+            // The S3 store the spate-s3 suites run against, and the queue the
+            // shared helpers start. The fault runs boot RustFS too, outside
+            // the container suites.
+            if glob(path, "ci/rustfs/*") {
+                image_suites.extend(["spate-s3", "spate-test-support"].map(String::from));
+                out.container_pkgs.extend(image_suites.iter().cloned());
+            }
+            if glob(path, "ci/elasticmq/*") {
+                image_suites.insert("spate-test-support".to_string());
+                out.container_pkgs.extend(image_suites.iter().cloned());
+            }
             // The client image `spate-kafka`'s TLS suite runs its clients in.
             if glob(path, "ci/debian/*") {
                 image_suites.insert("spate-kafka".to_string());
@@ -492,8 +503,8 @@ mod tests {
         );
     }
 
-    /// The shared test helpers reach the suites that dev-depend on them, and
-    /// no published API.
+    /// The shared test helpers reach their own smoke tests and the suites that
+    /// dev-depend on them, and no published API.
     #[test]
     fn a_test_support_change_selects_its_dependent_suites() {
         let out = run(&["test-support/src/lib.rs"]);
@@ -504,7 +515,8 @@ mod tests {
                 "spate-clickhouse",
                 "spate-coordination",
                 "spate-kafka",
-                "spate-s3"
+                "spate-s3",
+                "spate-test-support"
             ]
         );
         assert!(out.semver_pkgs.is_empty());
@@ -749,6 +761,31 @@ mod tests {
             };
             let out = classify(&image, Event::PullRequest, &ctx, &graph(), &[]);
             assert_eq!(suites(&out), ["spate-coordination", "spate-s3"]);
+        }
+    }
+
+    /// A RustFS bump selects the suites that boot RustFS and an ElasticMQ bump
+    /// the shared helpers' suite alone, on a Dependabot pull request too.
+    #[test]
+    fn a_test_store_image_bump_selects_the_suites_that_boot_it() {
+        let ctx = Context {
+            author: "dependabot[bot]".into(),
+            labels: vec![],
+        };
+        for (image, expected) in [
+            (
+                "ci/rustfs/stable/Dockerfile",
+                &["spate-s3", "spate-test-support"][..],
+            ),
+            (
+                "ci/elasticmq/stable/Dockerfile",
+                &["spate-test-support"][..],
+            ),
+        ] {
+            assert_eq!(suites(&run(&[image])), expected, "{image}");
+            let image = vec![image.to_string()];
+            let out = classify(&image, Event::PullRequest, &ctx, &graph(), &[]);
+            assert_eq!(suites(&out), expected, "{image:?}");
         }
     }
 

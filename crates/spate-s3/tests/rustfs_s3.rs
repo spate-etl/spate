@@ -1,4 +1,4 @@
-//! Backfill tests against a real S3 API: a SeaweedFS container.
+//! Backfill tests against a real S3 API: a RustFS container.
 //!
 //! This suite covers what the local-filesystem suite cannot: real
 //! ListObjectsV2 pagination across pages (>1000 keys) feeding the
@@ -9,18 +9,18 @@
 //! Ignored by default; run with Docker available:
 //!
 //! ```sh
-//! cargo test -p spate-s3 --test seaweedfs_s3 -- --ignored
+//! cargo test -p spate-s3 --test rustfs_s3 -- --ignored
 //! ```
 
 mod support;
 
 use spate_core::pipeline::ExitState;
 use std::time::Duration;
-use support::seaweed::Gateway;
+use support::rustfs::Gateway;
 use support::{PipelineYaml, captured_rows, launch, lines_bytes, recs, sorted, test_options};
 
 fn config_yaml(gw: &Gateway) -> String {
-    PipelineYaml::bucket("s3-seaweedfs-test", gw).build()
+    PipelineYaml::bucket("s3-rustfs-test", gw).build()
 }
 
 /// More than 1000 keys forces ListObjectsV2 pagination; ordering must

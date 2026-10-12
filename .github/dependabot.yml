@@ -271,6 +271,36 @@ updates:
     cooldown:
       default-days: 7
 
+  # ----------------------------------------------- Docker (RustFS store) ----
+  # `ci/rustfs/stable/Dockerfile` pins the S3 store the spate-s3 container
+  # suites and the fault runs boot. No `ignore`, so it follows every release.
+  - package-ecosystem: docker
+    directory: "/ci/rustfs/stable"
+    schedule:
+      interval: monthly
+      day: friday
+    open-pull-requests-limit: 1
+    labels: ["dependencies", "area: ci"]
+    commit-message:
+      prefix: "ci"
+    cooldown:
+      default-days: 7
+
+  # -------------------------------------------- Docker (ElasticMQ queue) ----
+  # `ci/elasticmq/stable/Dockerfile` pins the SQS-compatible queue the
+  # container suites boot. No `ignore`, so it follows every release.
+  - package-ecosystem: docker
+    directory: "/ci/elasticmq/stable"
+    schedule:
+      interval: monthly
+      day: friday
+    open-pull-requests-limit: 1
+    labels: ["dependencies", "area: ci"]
+    commit-message:
+      prefix: "ci"
+    cooldown:
+      default-days: 7
+
   # ------------------------------------------- Docker (NATS test server) ----
   # `ci/nats/floor` pins the server the NATS container suites boot, and
   # `ci/nats/below-floor` the older one a single test expects the store to

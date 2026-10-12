@@ -18,6 +18,10 @@ const WALL_BENCH_HARNESS: &str = "spate-bench";
 /// test, so both closures intersect it away and neither set gains a member.
 const FUZZ_HARNESS: &str = "spate-fuzz";
 
+/// The shared test helpers. They sit outside `crates/` and own smoke tests for
+/// the containers they start, so they are a container suite of their own.
+const TEST_SUPPORT: &str = "spate-test-support";
+
 #[derive(Deserialize)]
 struct Metadata {
     packages: Vec<MetaPackage>,
@@ -53,7 +57,8 @@ pub(crate) struct Graph {
     container_rdeps: BTreeMap<String, BTreeSet<String>>,
     /// Reverse edges over normal dependencies alone.
     semver_rdeps: BTreeMap<String, BTreeSet<String>>,
-    /// Workspace members under `crates/` that own `#[ignore]`d container tests.
+    /// Workspace members under `crates/`, and the shared test helpers, that
+    /// own `#[ignore]`d container tests.
     container_pkgs: BTreeSet<String>,
     /// Publishable crates under `crates/`.
     semver_pkgs: BTreeSet<String>,
@@ -154,14 +159,19 @@ fn cargo_metadata(root: &Path) -> Result<Metadata, String> {
     serde_json::from_slice(&out.stdout).map_err(|e| format!("cargo metadata output: {e}"))
 }
 
-/// Workspace members under `crates/` that own at least one `#[ignore]`d test.
+/// Workspace members under `crates/`, and the shared test helpers, that own at
+/// least one `#[ignore]`d test.
 fn container_test_owners(
     root: &Path,
     members: &BTreeSet<&str>,
 ) -> Result<BTreeSet<String>, String> {
     let mut owners = BTreeSet::new();
     for member in members {
-        let dir = root.join("crates").join(member);
+        let dir = if *member == TEST_SUPPORT {
+            root.join("test-support")
+        } else {
+            root.join("crates").join(member)
+        };
         if !dir.is_dir() {
             continue;
         }

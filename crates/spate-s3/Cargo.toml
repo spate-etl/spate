@@ -40,7 +40,7 @@ async-trait = { workspace = true }
 spate-s3 = { path = ".", features = ["testing"] }
 spate-coordination = { workspace = true, features = ["nats"] }
 spate-test = { workspace = true }
-spate-test-support = { workspace = true, features = ["tls"] }
+spate-test-support = { workspace = true, features = ["rustfs", "tls"] }
 spate-json = { workspace = true }
 gungraun = { workspace = true }
 proptest = { workspace = true }

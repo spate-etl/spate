@@ -115,7 +115,7 @@ jobs:
           # would race the owner the first time it is missing.
           shared-key: xtask
           cache-save: never
-      - uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
+      - uses: taiki-e/install-action@183e4297cca2404691e9380e1307288dced5c82a # v2.87.25
         with:
           # zizmor alone carries a version: a release can relax the default
           # audit policy this job rests on, and the action's own bump would
@@ -436,7 +436,7 @@ jobs:
           flags: unit
 
       - name: Publish test report
-        uses: mikepenz/action-junit-report@a9170d5795813c01ab4901ffb045b52bab4ab09d # v6.5.0
+        uses: mikepenz/action-junit-report@b7b80d7ac5b1da46d6aaff9fb57ad50d8453bcb3 # v6.6.0
         if: always()
         with:
           report_paths: target/nextest/ci/junit.xml
@@ -963,7 +963,7 @@ jobs:
             --run-ignored ignored-only --test-threads 1
 
       - name: Publish container test report
-        uses: mikepenz/action-junit-report@a9170d5795813c01ab4901ffb045b52bab4ab09d # v6.5.0
+        uses: mikepenz/action-junit-report@b7b80d7ac5b1da46d6aaff9fb57ad50d8453bcb3 # v6.6.0
         if: always()
         with:
           report_paths: target/nextest/docker/junit.xml
@@ -1024,7 +1024,7 @@ jobs:
       # Both names carry the lane: upload-artifact rejects a duplicate name
       # within one run, and two checks sharing a name are unattributable.
       - name: Publish ClickHouse test report
-        uses: mikepenz/action-junit-report@a9170d5795813c01ab4901ffb045b52bab4ab09d # v6.5.0
+        uses: mikepenz/action-junit-report@b7b80d7ac5b1da46d6aaff9fb57ad50d8453bcb3 # v6.6.0
         if: always()
         with:
           report_paths: target/nextest/docker/junit.xml

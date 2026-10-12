@@ -29,14 +29,11 @@ use spate_core::source::{DrainBarrier, LaneId, SourceEvent};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::mpsc;
 
 /// Units held at once: the reader receives only while it holds fewer.
 const UNITS_HELD: usize = 8;
-
-/// Least time between two renewals of the held units.
-const RENEW_EVERY: Duration = Duration::from_secs(1);
 
 /// What the reader needs to open a lane, fixed at `open`.
 pub(crate) struct LaneParts {
@@ -85,7 +82,6 @@ pub(crate) struct UnitReader {
     retired: Vec<LaneId>,
     /// `fail`s for undecodable units that the feed answered `Retryable`.
     unsent_fails: Vec<(Receipt, String)>,
-    last_renewal: Option<Instant>,
     poison_tx: std::sync::mpsc::Sender<PoisonReport>,
     poison_rx: std::sync::mpsc::Receiver<PoisonReport>,
 }
@@ -113,7 +109,6 @@ impl UnitReader {
             revoked: Vec::new(),
             retired: Vec::new(),
             unsent_fails: Vec::new(),
-            last_renewal: None,
             poison_tx,
             poison_rx,
         }
@@ -191,8 +186,9 @@ impl UnitReader {
         }
     }
 
-    /// Settle what the lanes and the feed left since the last poll: poison
-    /// reports, refused fails, finished units and renewals.
+    /// Settle what the lanes and the feed left since the last poll (poison
+    /// reports, refused fails, finished units), then renew every unit still
+    /// held.
     fn settle(&mut self) -> Result<(), SourceError> {
         while let Ok(report) = self.poison_rx.try_recv() {
             if let Some(m) = &self.parts.metrics {
@@ -247,27 +243,21 @@ impl UnitReader {
             self.acknowledge(partition)?;
         }
 
-        if self
-            .last_renewal
-            .is_none_or(|at| at.elapsed() >= RENEW_EVERY)
-        {
-            self.last_renewal = Some(Instant::now());
-            let receipts: Vec<(PartitionId, Receipt)> = self
-                .held
-                .iter()
-                .map(|(&partition, held)| (partition, held.receipt))
-                .collect();
-            for (partition, receipt) in receipts {
-                match self.feed.renew(receipt) {
-                    Ok(()) => {}
-                    // The feed delivered the unit again or settled it, so
-                    // this reading is no longer the unit's.
-                    Err(e) if e.kind == FeedErrorKind::Gone => self.close(partition, false),
-                    Err(e) if e.kind == FeedErrorKind::Retryable => {
-                        tracing::warn!(%receipt, error = %e, "renewing a held unit failed; retrying");
-                    }
-                    Err(e) => return Err(feed_error("renewing a held unit", &e)),
+        let receipts: Vec<(PartitionId, Receipt)> = self
+            .held
+            .iter()
+            .map(|(&partition, held)| (partition, held.receipt))
+            .collect();
+        for (partition, receipt) in receipts {
+            match self.feed.renew(receipt) {
+                Ok(()) => {}
+                // The feed delivered the unit again or settled it, so this
+                // reading is no longer the unit's.
+                Err(e) if e.kind == FeedErrorKind::Gone => self.close(partition, false),
+                Err(e) if e.kind == FeedErrorKind::Retryable => {
+                    tracing::warn!(%receipt, error = %e, "renewing a held unit failed; retrying");
                 }
+                Err(e) => return Err(feed_error("renewing a held unit", &e)),
             }
         }
         Ok(())

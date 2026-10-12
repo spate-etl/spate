@@ -4108,7 +4108,6 @@ dependencies = [
  "tempfile",
  "testcontainers",
  "tokio",
- "url",
 ]
 
 [[package]]

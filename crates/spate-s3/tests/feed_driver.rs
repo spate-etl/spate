@@ -369,6 +369,9 @@ fn launch_one_row_writes(
 ) -> Launched {
     let yaml = PipelineYaml::file("s3-feed-row-writes", data)
         .threads(1)
+        // No periodic commit runs before the lane reaches its end, so the
+        // first commit carries the partial watermark with the terminal known.
+        .checkpoint("10s")
         .build()
         .replace(
             "sink: { capture: {} }",

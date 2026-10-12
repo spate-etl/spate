@@ -97,15 +97,13 @@ fn a_redelivered_unit_is_read_again_from_its_start() {
 
     let (feed, script) = scripted_feed();
     let first = script.deliver(unit_over(&data, "r.ndjson"));
-    // Pace the sink so the first delivery's records are still in flight when
-    // the redelivery arrives.
+    // Hold the first write so the first delivery's records are still in
+    // flight when the redelivery arrives.
     let l = launch_on_feed(&data, Arc::new(feed), |sink| {
-        for _ in 0..4 {
-            sink.enqueue_global(WriteOutcome::ok().after(Duration::from_millis(150)));
-        }
+        sink.enqueue_global(WriteOutcome::ok().held());
     });
-    wait_until(DEADLINE, "the first delivery's rows reach the sink", || {
-        !captured_rows(&l.script).is_empty()
+    wait_until(DEADLINE, "the first delivery's write is held", || {
+        l.script.held_writes() == 1
     });
     assert!(
         script.acknowledged().is_empty(),
@@ -113,6 +111,7 @@ fn a_redelivered_unit_is_read_again_from_its_start() {
     );
 
     let second = script.redeliver(first);
+    l.script.release_held();
     wait_until(DEADLINE, "the redelivery is acknowledged", || {
         script.acknowledged() == vec![second]
     });

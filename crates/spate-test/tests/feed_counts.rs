@@ -40,6 +40,7 @@ fn deliver(feed: &ScriptedFeed, script: &FeedScript, id: &str) -> (Receipt, u32)
     script.deliver(unit(id));
     let got = receive(feed);
     assert_eq!(got.len(), 1);
+    assert_eq!(got[0].1, 1, "a first scripted delivery is 1");
     got[0]
 }
 
@@ -257,8 +258,7 @@ fn interleaved_redeliveries_then_a_duplicate_count_two_two_three() {
 fn a_publish_before_the_first_delivery_counts_apart() {
     let (feed, script) = scripted_feed();
     let published = publish(&feed, "a");
-    let (scripted, n) = deliver(&feed, &script, "a");
-    assert_eq!(n, 1);
+    let (scripted, _) = deliver(&feed, &script, "a");
     script.redeliver(scripted);
     assert_eq!(counts(&feed), vec![2]);
     script.redeliver(published);

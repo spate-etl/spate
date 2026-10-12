@@ -449,9 +449,10 @@ over the production backend, RustFS plus a
 
 The S3 source ends a listing at the first `ListObjectsV2` page that carries no
 continuation token. The store must return one on every page that has keys after
-it. A store that does not completes a backfill without the remaining objects and
-reports no error. SeaweedFS 4.48 omits it when a page ends on a folder marker, a
-key ending in `/`, and every key after it sits under that marker.
+it. When a store omits it, a backfill completes without the remaining objects
+and reports no error. SeaweedFS 4.48 omits the token when a page ends on a
+folder marker, a key ending in `/`, and every key after it sits under that
+marker.
 
 ## Metrics
 

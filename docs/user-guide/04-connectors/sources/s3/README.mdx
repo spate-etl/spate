@@ -447,10 +447,11 @@ over the production backend, RustFS plus a
 [NATS](../../coordination/nats/README.mdx#supported-server-versions) container
 (`cargo test -p spate-s3 -- --ignored --test-threads=1`).
 
-SeaweedFS is unproven as a store for this source. SeaweedFS 4.48 reports a
-`ListObjectsV2` page as the last one when it ends on a folder marker, a key
-ending in `/`, and every key after it sits under that marker, so a backfill
-completes without those keys.
+The S3 source ends a listing at the first `ListObjectsV2` page that carries no
+continuation token. The store must return one on every page that has keys after
+it. A store that does not completes a backfill without the remaining objects and
+reports no error. SeaweedFS 4.48 omits it when a page ends on a folder marker, a
+key ending in `/`, and every key after it sits under that marker.
 
 ## Metrics
 

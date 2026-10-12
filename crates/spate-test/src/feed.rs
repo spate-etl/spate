@@ -20,7 +20,8 @@ struct State {
     queued: VecDeque<Delivery>,
     /// Deliveries received and not yet acknowledged, failed or lapsed.
     held: BTreeMap<Receipt, Delivery>,
-    /// Deliveries scripted so far per unit id, for `Delivery::deliveries`.
+    /// Deliveries scripted by `deliver` so far per unit id, so a scripted
+    /// duplicate counts as a further delivery of the same unit.
     counts: HashMap<String, u32>,
     next_receipt: u64,
     delivered: Vec<Delivery>,
@@ -37,12 +38,10 @@ struct State {
 }
 
 impl State {
-    fn queue(&mut self, unit: Unit) -> Receipt {
+    fn queue(&mut self, unit: Unit, deliveries: u32) -> Receipt {
         self.next_receipt += 1;
         let receipt = Receipt(self.next_receipt);
-        let count = self.counts.entry(unit.id.clone()).or_default();
-        *count += 1;
-        let delivery = Delivery::new(unit, receipt, *count);
+        let delivery = Delivery::new(unit, receipt, deliveries);
         self.queued.push_back(delivery);
         receipt
     }
@@ -151,11 +150,14 @@ pub fn scripted_feed() -> (ScriptedFeed, FeedScript) {
 
 impl FeedScript {
     /// Queue a delivery of `unit` for the next `receive`, and return its
-    /// receipt. Delivering a unit whose id was delivered before is a
+    /// receipt. Delivering a unit whose id this method delivered before is a
     /// duplicate, counted in [`Delivery::deliveries`].
     pub fn deliver(&self, unit: Unit) -> Receipt {
         let mut state = self.lock();
-        let receipt = state.queue(unit);
+        let count = state.counts.entry(unit.id.clone()).or_default();
+        *count += 1;
+        let deliveries = *count;
+        let receipt = state.queue(unit, deliveries);
         state.wake();
         receipt
     }
@@ -172,7 +174,7 @@ impl FeedScript {
         let Some(delivery) = state.lapse(receipt) else {
             panic!("redeliver: {receipt} is neither queued nor held");
         };
-        let receipt = state.queue(delivery.unit);
+        let receipt = state.queue(delivery.unit, delivery.deliveries + 1);
         state.wake();
         receipt
     }
@@ -215,7 +217,7 @@ impl FeedScript {
         state.hold_publishes = false;
         for (unit, confirmer) in std::mem::take(&mut state.held_publishes) {
             confirmer.confirm();
-            state.queue(unit);
+            state.queue(unit, 1);
         }
         state.wake();
     }
@@ -299,6 +301,11 @@ impl Feed for ScriptedFeed {
             state.held.insert(delivery.receipt, delivery.clone());
             state.delivered.push(delivery.clone());
         }
+        // A receive that took nothing sends no signal, or a reader at
+        // capacity calling `receive(0)` would never park.
+        if take > 0 && !state.queued.is_empty() {
+            state.wake();
+        }
         Ok(out)
     }
 
@@ -335,7 +342,7 @@ impl Feed for ScriptedFeed {
             state.held_publishes.push((unit, confirmer));
         } else {
             confirmer.confirm();
-            state.queue(unit);
+            state.queue(unit, 1);
             state.wake();
         }
         confirmation
@@ -476,6 +483,54 @@ mod tests {
         assert!(
             park.park(Duration::ZERO),
             "confirm_held_publishes did not wake"
+        );
+    }
+
+    /// Pins that a receive which leaves deliveries queued leaves a wake
+    /// pending, and that one which takes nothing sends none.
+    #[test]
+    fn a_partial_receive_leaves_a_wake_pending() {
+        let (feed, script) = scripted_feed();
+        let (waker, park) = wake_channel();
+        feed.set_waker(waker);
+        script.deliver(unit("a"));
+        script.deliver(unit("b"));
+        assert!(park.park(Duration::ZERO));
+        assert_eq!(feed.receive(1).unwrap().len(), 1);
+        assert!(
+            park.park(Duration::ZERO),
+            "a delivery is queued but the reader's park was not signalled"
+        );
+        assert!(feed.receive(0).unwrap().is_empty());
+        assert!(
+            !park.park(Duration::ZERO),
+            "receive(0) at capacity re-signalled"
+        );
+    }
+
+    /// Pins that a confirmed publish wakes the reader.
+    #[test]
+    fn a_confirmed_publish_wakes_the_reader() {
+        let (feed, _script) = scripted_feed();
+        let (waker, park) = wake_channel();
+        feed.set_waker(waker);
+        assert!(!park.park(Duration::ZERO));
+        drop(feed.publish(unit("p")));
+        assert!(park.park(Duration::ZERO), "publish did not wake the reader");
+    }
+
+    /// Pins that scripting a publish refusal wakes the reader, as every
+    /// scripting call does.
+    #[test]
+    fn refusing_the_next_publish_wakes_the_reader() {
+        let (feed, script) = scripted_feed();
+        let (waker, park) = wake_channel();
+        feed.set_waker(waker);
+        assert!(!park.park(Duration::ZERO));
+        script.refuse_next_publish(FeedErrorKind::Refused);
+        assert!(
+            park.park(Duration::ZERO),
+            "refuse_next_publish did not wake the reader"
         );
     }
 }

@@ -124,6 +124,11 @@ impl Feed for MemoryFeed {
             state.held.insert(receipt, (unit.clone(), deliveries));
             out.push(Delivery::new(unit, receipt, deliveries));
         }
+        // A receive that took nothing sends no signal, or a reader at
+        // capacity calling `receive(0)` would never park.
+        if take > 0 && !state.visible.is_empty() {
+            state.wake();
+        }
         Ok(out)
     }
 
@@ -150,13 +155,17 @@ impl Feed for MemoryFeed {
             return Err(gone(receipt));
         };
         if deliveries >= ATTEMPT_CAP {
+            let id = unit.id.clone();
+            state.dead.push(unit);
+            // Logged after the guard drops: a subscriber that panics must not
+            // unwind through the lock.
+            drop(state);
             tracing::warn!(
-                unit = %unit.id,
+                unit = %id,
                 deliveries,
                 reason,
                 "in-process feed dead-lettered a unit at its delivery cap"
             );
-            state.dead.push(unit);
         } else {
             state.visible.push_back((unit, deliveries));
             state.wake();
@@ -324,6 +333,85 @@ mod tests {
                 ("c".to_owned(), 1),
                 ("a".to_owned(), 2)
             ]
+        );
+    }
+
+    /// Pins that a receive which leaves units visible leaves a wake pending,
+    /// so a reader that took only what it had room for does not wait out
+    /// its park.
+    #[test]
+    fn a_partial_receive_leaves_a_wake_pending() {
+        let feed = MemoryFeed::new();
+        let (waker, park) = wake_channel();
+        feed.set_waker(waker);
+        for id in ["a", "b"] {
+            drop(feed.publish(unit(id)));
+        }
+        assert!(park.park(Duration::ZERO));
+        assert_eq!(feed.receive(1).unwrap().len(), 1);
+        assert_eq!(feed.counts().visible, 1);
+        assert!(
+            park.park(Duration::ZERO),
+            "a unit is visible but the reader's park was not signalled"
+        );
+    }
+
+    /// Pins that a receive which takes nothing sends no signal, so a reader
+    /// at capacity calling `receive(0)` parks instead of spinning.
+    #[test]
+    fn an_empty_receive_at_capacity_does_not_wake() {
+        let feed = MemoryFeed::new();
+        let (waker, park) = wake_channel();
+        feed.set_waker(waker);
+        drop(feed.publish(unit("a")));
+        assert!(park.park(Duration::ZERO));
+        assert!(feed.receive(0).unwrap().is_empty());
+        assert!(
+            !park.park(Duration::ZERO),
+            "receive(0) at capacity re-signalled"
+        );
+    }
+
+    /// Pins that a unit failed at the cap is on the dead-letter list even
+    /// when the warning about it unwinds, so the recovered lock guards
+    /// consistent state.
+    #[test]
+    fn a_panicking_subscriber_in_fail_at_the_cap_keeps_the_unit() {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        struct PanicOnWarn;
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for PanicOnWarn {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _ctx: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if *event.metadata().level() == tracing::Level::WARN {
+                    panic!("warning emitted");
+                }
+            }
+        }
+
+        let feed = MemoryFeed::new();
+        drop(feed.publish(unit("poison")));
+        for _ in 1..10 {
+            let delivery = receive_one(&feed);
+            feed.fail(delivery.receipt, "x").unwrap();
+        }
+        let last = receive_one(&feed);
+        let subscriber = tracing_subscriber::registry().with(PanicOnWarn);
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            tracing::subscriber::with_default(subscriber, || feed.fail(last.receipt, "x"))
+        }));
+        assert!(unwound.is_err(), "the subscriber did not panic");
+        assert_eq!(
+            feed.counts(),
+            FeedCounts {
+                visible: 0,
+                held: 0,
+                dead_lettered: 1,
+                acknowledged: 0,
+            }
         );
     }
 }

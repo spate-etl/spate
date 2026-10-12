@@ -88,8 +88,9 @@ pub struct Delivery {
     pub unit: Unit,
     /// The receipt for this delivery, unique within the feed.
     pub receipt: Receipt,
-    /// How many times the feed has delivered this unit, this delivery
-    /// included, so `1` on the first.
+    /// How many times the feed has delivered this published unit, this
+    /// delivery included, so `1` on the first. Each publish starts its own
+    /// count, whatever the unit's id.
     pub deliveries: u32,
 }
 
@@ -217,8 +218,9 @@ pub trait Feed: Send + Sync {
     ///
     /// The backend extends the unit's lease on its own schedule, and only for
     /// units marked since its last extension. A caller renews every unit it
-    /// holds from the controller thread, so a controller that stops running
-    /// stops renewing, and its units return to the feed for another reader.
+    /// holds from the controller thread. On a backend that leases units, a
+    /// controller that stops running stops renewing, and its units return to
+    /// the feed for another reader.
     ///
     /// # Errors
     ///
@@ -501,5 +503,18 @@ mod tests {
         assert_eq!(class(FeedErrorKind::Gone), ErrorClass::Fatal);
         assert_eq!(class(FeedErrorKind::Refused), ErrorClass::Fatal);
         assert_eq!(class(FeedErrorKind::Fatal), ErrorClass::Fatal);
+    }
+
+    /// Pins that an awaited outcome is repeated to a later check, though the
+    /// await spent the receiver.
+    #[test]
+    fn an_awaited_confirmation_repeats_its_outcome_to_a_check() {
+        let (confirmer, mut confirmation) = confirmation();
+        confirmer.confirm();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        assert!(rt.block_on(&mut confirmation).is_ok());
+        assert!(matches!(confirmation.try_outcome(), Some(Ok(()))));
     }
 }

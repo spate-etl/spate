@@ -1,6 +1,7 @@
 import React from 'react';
 
 import {
+  ARROW,
   Bar,
   Edge,
   GAP,
@@ -16,7 +17,6 @@ import {
   SEQ_W,
   SequenceFigure,
   Step,
-  STROKE,
   Text,
   centredBaseline,
   chipW,
@@ -30,7 +30,7 @@ const LAST = SEQ_W - M - chipW(HEADS[3]) / 2;
 const D = (LAST - FIRST) / 3;
 const [P, PAY, REF, C] = [0, 1, 2, 3].map((i) => FIRST + i * D);
 
-const Y1 = HEAD_BOTTOM + GAP + LINE_BOX + S1 + STROKE / 2;
+const Y1 = HEAD_BOTTOM + GAP + LINE_BOX + S1 + ARROW / 2;
 const Y2 = Y1 + ROW;
 const Y3 = Y2 + ROW;
 /** The refunds sink lingers a row longer than the payments sink took to write. */

@@ -19,15 +19,18 @@
   width: 100%;
   height: auto;
   font-family: var(--ifm-font-family-monospace);
+  /* `textLength` spreads its spacing over one glyph per character, and a ligature joins two. */
+  font-variant-ligatures: none;
 }
 
-/* No landscape viewBox is wider than 586 units and the smallest text is 12, so from a 554px column
-   up every label renders at 11px or more. Below that the portrait layout takes over. */
+/* No landscape viewBox is wider than 586 units and the smallest text is 12. From a 557px column up
+   a landscape drawing renders within 5% of the sequence drawings' one pixel per unit, and every
+   label at 11px or more. Below that the portrait layout takes over. */
 .figure svg.narrow {
   display: none;
 }
 
-@container (max-width: 553px) {
+@container (max-width: 556px) {
   .figure svg.wide {
     display: none;
   }
@@ -323,7 +326,7 @@
   color: var(--spate-muted);
 }
 
-@container (max-width: 553px) {
+@container (max-width: 556px) {
   .figure .key {
     display: block;
   }

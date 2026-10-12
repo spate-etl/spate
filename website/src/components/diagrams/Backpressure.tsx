@@ -1,6 +1,7 @@
 import React from 'react';
 
 import {
+  ARROW,
   ARROW_GAP,
   ASCENT,
   DESCENT,
@@ -24,7 +25,6 @@ import {
   SEQ_W,
   SequenceFigure,
   Step,
-  STROKE,
   Text,
   centredBaseline,
   chipW,
@@ -46,7 +46,7 @@ const FULL_BASE = Y1 + QUEUE_T / 2 + S1 + ASCENT;
 const BYTES = ['or in-flight', 'bytes ≥ high', 'watermark'];
 const BYTES_X = P + R_STEP + S2;
 const BYTES_BASE = centredBaseline(Y1, BYTES.length);
-const Y2 = Math.max(linesBottom(FULL_BASE), linesBottom(BYTES_BASE, BYTES.length)) + GAP + LINE_BOX + S1 + STROKE / 2;
+const Y2 = Math.max(linesBottom(FULL_BASE), linesBottom(BYTES_BASE, BYTES.length)) + GAP + LINE_BOX + S1 + ARROW / 2;
 const Y3 = Y2 + ROW;
 const FRAME_TOP = Y3 + GAP;
 const TAG = 'paused';
@@ -54,7 +54,7 @@ const TAG_H = LINE_BOX + S1;
 const Y4 = FRAME_TOP + TAG_H + GAP;
 const POLL_Y = Y4 + ROW;
 const FRAME_BOTTOM = POLL_Y + GAP;
-const Y5 = FRAME_BOTTOM + GAP + LINE_BOX + S1 + STROKE / 2;
+const Y5 = FRAME_BOTTOM + GAP + LINE_BOX + S1 + ARROW / 2;
 const Y6 = Y5 + ROW;
 const H = Y6 + R_STEP + M;
 
@@ -118,7 +118,7 @@ export default function BackpressureDiagram(): React.JSX.Element {
           A full shard queue refuses <code>try_send</code>, or the in-flight byte budget crosses its
           high watermark.
         </>,
-        <>The pipeline thread sends a pause request for its lanes to the controller. It never waits on the queue.</>,
+        <>The pipeline thread sends a pause request for its lanes to the controller. It never blocks on a channel send.</>,
         <>
           The controller calls <code>Source::pause</code>. Only the controller thread touches the
           source.
@@ -130,7 +130,8 @@ export default function BackpressureDiagram(): React.JSX.Element {
         <>
           The pipeline thread sends a resume request once three things hold: in-flight bytes are at or
           below the low watermark, every shard queue has drained below its low mark, and at least{' '}
-          <code>min_pause</code> has passed since the pause.
+          <code>min_pause</code> has passed since the later of the pause and the last refused{' '}
+          <code>try_send</code>.
         </>,
         <>
           The controller calls <code>Source::resume</code>.

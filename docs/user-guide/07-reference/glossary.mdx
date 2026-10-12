@@ -49,7 +49,7 @@ usage is `spate_backpressure_inflight_bytes`.
 
 The operator pipeline one pipeline thread runs: deserializer →
 `map`/`filter`/`try_map`/`flat_map` stages → the terminal sink stage
-(encode, chunk, route). Statically composed and monomorphized into one
+(route, encode, chunk). Statically composed and monomorphized into one
 loop; type erasure happens exactly once, at the chain boundary, with one
 virtual call per batch. Built by the chain factory you pass to
 `Pipeline::chains`, once per pipeline thread.

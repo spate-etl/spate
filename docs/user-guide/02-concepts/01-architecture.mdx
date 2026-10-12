@@ -39,8 +39,9 @@ These decisions define this stage:
 The chain's terminal stage routes each record to a shard and encodes it into
 the sink's wire format (encoding is CPU work, so it happens *on the pipeline
 thread*), then hands the chunk to that shard's bounded queue with `try_send`,
-never a blocking send. When a queue is full, the source lanes pause and the
-thread keeps polling; see
+never a blocking send. When a queue is full, the pipeline thread asks the
+controller to pause its lanes, and the controller keeps calling `poll_events`;
+see
 [Backpressure](03-backpressure.mdx).
 
 <BackpressureDiagram />

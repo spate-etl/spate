@@ -52,11 +52,11 @@ tested.
 One process runs one pipeline, in four stages. The property each stage holds
 to is stated and numbered in [docs/INVARIANTS.md](docs/INVARIANTS.md).
 
-**Extract** — one consumer per process. Partitions fan out across CPU-pinned
+**Extract** — one consumer per process. Partitions fan out across pipeline
 threads as zero-copy lanes, so a record is read from the source buffer and
-never copied on the way in. A thread that cannot keep up pauses its lanes and
-keeps polling; it never blocks on a channel send, because a blocked poll loop
-is how a consumer gets evicted from its group.
+never copied on the way in. A thread that cannot keep up has its lanes paused
+while the controller keeps polling the source; it never blocks on a channel
+send, because a blocked poll loop is how a consumer gets evicted from its group.
 
 **Transform** — operators are stateful closures chained in Rust. A chain
 compiles to a single loop over borrowed records with no per-record

@@ -10,20 +10,24 @@ const PAGES: Array<[RouteName, number]> = [
 
 /**
  * 1280 and 1100 are desktop windows whose docs columns (703 and 568px) must both hold the
- * landscape layouts; 390 is a phone, which takes the portrait ones.
+ * landscape layouts; 390 is a phone, which takes the portrait ones. 587 and 1083 give a 555px
+ * column, just under the breakpoint, where a landscape overview would render more than 5% smaller
+ * than the sequence drawings.
  */
-const WIDTHS = [1280, 1100, 390];
+const WIDTHS = [1280, 1100, 1083, 587, 390];
 
 /** The drawings a figure shows at the current width, not its legend swatches. */
 const DRAWINGS = 'article figure svg[role="img"]';
 
 /**
  * Every collision between a label and something else drawn in the visible figures, as readable
- * strings. Geometry is read in SVG user units from the rendered fonts, so a font metric change
- * shows up here. A label may sit wholly inside a box or a circle (a chip, a step disc) but may not
- * straddle its edge, cross a line, touch another label or leave the viewBox. Labels are compared box
- * to box with no margin, since a text box already carries the font's line gap; lines, edges and
- * nodes keep `PAD` of clearance.
+ * strings. Geometry is read in SVG user units from the rendered fonts. Every text line is pinned to
+ * its layout width with `textLength`, so only a change in the face's vertical metrics shows up here.
+ * A label may sit wholly inside a box or a circle (a chip, a step disc) but may not straddle its
+ * edge, cross a line or an arrowhead, touch another label or leave the viewBox. Labels are compared
+ * box to box with no margin, since a text box already carries the font's line gap; lines, edges and
+ * nodes keep `PAD` of clearance. A line counts at its computed stroke width and caps, with its
+ * arrowhead.
  */
 function collisions(selector: string): string[] {
   type Box = {x0: number; y0: number; x1: number; y1: number};
@@ -33,27 +37,15 @@ function collisions(selector: string): string[] {
   const shrink = (a: Box) => ({x0: a.x0 + PAD, y0: a.y0 + PAD, x1: a.x1 - PAD, y1: a.y1 - PAD});
   const inside = (a: Box, b: Box) => a.x0 >= b.x0 && a.x1 <= b.x1 && a.y0 >= b.y0 && a.y1 <= b.y1;
 
-  // Liang-Barsky clip: does the segment p→q pass through the box?
-  const crosses = ([px, py]: number[], [qx, qy]: number[], b: Box) => {
-    let t0 = 0;
-    let t1 = 1;
-    const dx = qx - px;
-    const dy = qy - py;
-    for (const [p, q] of [
-      [-dx, px - b.x0],
-      [dx, b.x1 - px],
-      [-dy, py - b.y0],
-      [dy, b.y1 - py],
-    ]) {
-      if (p === 0) {
-        if (q < 0) return false;
-      } else {
-        const t = q / p;
-        if (p < 0) t0 = Math.max(t0, t);
-        else t1 = Math.min(t1, t);
-      }
-    }
-    return t0 <= t1;
+  // Separating-axis test: does the convex outline `poly` meet the box? Touching counts.
+  const hits = (poly: number[][], b: Box) => {
+    const corners = [[b.x0, b.y0], [b.x1, b.y0], [b.x1, b.y1], [b.x0, b.y1]];
+    const axes = [[1, 0], [0, 1], ...poly.map(([x, y], i) => [poly[(i + 1) % poly.length][1] - y, x - poly[(i + 1) % poly.length][0]])];
+    return axes.every(([ax, ay]) => {
+      const along = (pts: number[][]) => pts.map(([x, y]) => x * ax + y * ay);
+      const [p, q] = [along(poly), along(corners)];
+      return Math.max(...p) >= Math.min(...q) && Math.max(...q) >= Math.min(...p);
+    });
   };
 
   for (const svg of Array.from(document.querySelectorAll<SVGSVGElement>(selector))) {
@@ -70,10 +62,38 @@ function collisions(selector: string): string[] {
         box: {x0: b.x - PAD, y0: b.y - PAD, x1: b.x + b.width + PAD, y1: b.y + b.height + PAD},
       };
     });
-    const segments = drawn('path').flatMap((el) => {
+    // Each drawn line as the outline its stroke covers, plus its arrowhead's outline.
+    const strokes = drawn('path').flatMap((el) => {
       const pts = (el.getAttribute('d') ?? '').match(/-?[\d.]+/g)?.map(Number) ?? [];
+      const style = getComputedStyle(el);
+      const half = Number.parseFloat(style.strokeWidth) / 2 || 0;
+      // A butt cap stops at the endpoint; a round or square one reaches `half` past it.
+      const cap = style.strokeLinecap === 'butt' ? 0 : half;
       const out: number[][][] = [];
-      for (let i = 0; i + 3 < pts.length; i += 2) out.push([[pts[i], pts[i + 1]], [pts[i + 2], pts[i + 3]]]);
+      let last: {q: number[]; u: number[]} | undefined;
+      for (let i = 0; i + 3 < pts.length; i += 2) {
+        const [p, q] = [[pts[i], pts[i + 1]], [pts[i + 2], pts[i + 3]]];
+        const len = Math.hypot(q[0] - p[0], q[1] - p[1]);
+        const u = len ? [(q[0] - p[0]) / len, (q[1] - p[1]) / len] : [1, 0];
+        const at = ([x, y]: number[], along: number, across: number) => [x + along * u[0] - across * u[1], y + along * u[1] + across * u[0]];
+        out.push([at(p, -cap, -half), at(q, cap, -half), at(q, cap, half), at(p, -cap, half)]);
+        last = {q, u};
+      }
+      // An arrowhead is its marker's outline, placed at the path's end and turned to its last segment.
+      const marker = /url\(#(.+)\)/.exec(el.getAttribute('marker-end') ?? '')?.[1];
+      const head = marker ? document.getElementById(marker) : null;
+      if (head instanceof SVGMarkerElement && last) {
+        const {q, u} = last;
+        const k = head.markerWidth.baseVal.value / head.viewBox.baseVal.width;
+        const [rx, ry] = [head.refX.baseVal.value, head.refY.baseVal.value];
+        const outline = (head.querySelector('path')?.getAttribute('d') ?? '').match(/-?[\d.]+/g)?.map(Number) ?? [];
+        const corners: number[][] = [];
+        for (let i = 0; i + 1 < outline.length; i += 2) {
+          const [a, b] = [(outline[i] - rx) * k, (outline[i + 1] - ry) * k];
+          corners.push([q[0] + a * u[0] - b * u[1], q[1] + a * u[1] + b * u[0]]);
+        }
+        out.push(corners);
+      }
       return out;
     });
     const rects = drawn('rect').map((el) => {
@@ -93,7 +113,7 @@ function collisions(selector: string): string[] {
       labels.slice(i + 1).forEach((b) => {
         if (overlaps(shrink(a.box), shrink(b.box))) found.push(`${where} overlaps ${b.name}`);
       });
-      if (!a.onLine && segments.some(([p, q]) => crosses(p, q, a.box))) found.push(`${where} crosses a line`);
+      if (!a.onLine && strokes.some((outline) => hits(outline, a.box))) found.push(`${where} crosses a line`);
       if (rects.some((r) => overlaps(a.box, r) && !inside(a.box, r))) {
         found.push(`${where} straddles a box edge`);
       }
@@ -345,6 +365,10 @@ function legendFaults(): string[] {
 for (const colorMode of ['light', 'dark'] as const) {
   test.describe(`concept diagrams: ${colorMode}`, () => {
     test.use({colorMode});
+    test.skip(
+      ({browserName}) => browserName !== 'chromium',
+      'CI runs Chromium only, and the tolerances here are measured in Chromium',
+    );
     for (const [route, figures] of PAGES) {
       for (const width of WIDTHS) {
         test(`${route} at ${width}px`, async ({page}) => {

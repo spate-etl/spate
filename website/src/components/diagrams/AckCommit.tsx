@@ -1,6 +1,7 @@
 import React from 'react';
 
 import {
+  ARROW,
   ARROW_GAP,
   ASCENT,
   DESCENT,
@@ -39,7 +40,7 @@ const D = (CK - SRC) / 3;
 const P = SRC + D;
 const W = P + D;
 
-const Y1 = HEAD_BOTTOM + GAP + LINE_BOX + S1 + STROKE / 2;
+const Y1 = HEAD_BOTTOM + GAP + LINE_BOX + S1 + ARROW / 2;
 const ACKREF = ['one AckRef,', 'cloned into', 'each record'];
 const Y2 = Y1 + R_STEP + S1 + ACKREF.length * LINE + GAP + LINE_BOX;
 /** The write loops back to the worker's lifeline one step below where it leaves. */
@@ -118,7 +119,10 @@ export default function AckCommitDiagram(): React.JSX.Element {
           A lane poll returns a batch. The pipeline thread makes one <code>AckRef</code> for it and
           clones it into every record derived from the batch.
         </>,
-        <>Records travel to a shard worker in chunks, each record still holding its clone.</>,
+        <>
+          Records are encoded into chunks for a shard worker. Each chunk carries one clone for every
+          batch its rows came from.
+        </>,
         <>The shard worker writes the batch it sealed, retrying until it succeeds or gives up.</>,
         <>
           The write outcome resolves the clones. When the last one drops, the batch&apos;s outcome

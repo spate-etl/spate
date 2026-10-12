@@ -44,6 +44,10 @@ export const CHIP_X = 6;
 export const CHIP_H = 24;
 /** An arrowhead stops this far short of what it points at. */
 export const ARROW_GAP = 1;
+/** An arrowhead's length and width on a records, acks or control line. */
+export const ARROW = 7;
+/** The commit rail's arrowhead, drawn larger to clear the `RAIL` stroke. */
+const RAIL_ARROW = 12;
 /** Stroke width of a records or acks line, which a label beside it clears. */
 export const STROKE = 2;
 /** Stroke width of the commit rail. */
@@ -136,8 +140,7 @@ export function Markers({id}: {id: string}): React.JSX.Element {
   return (
     <defs>
       {(Object.keys(HEAD) as Kind[]).map((kind) => {
-        // The rail is `RAIL` wide, so its head is drawn larger to clear the stroke.
-        const size = kind === 'mark' ? 12 : 7;
+        const size = kind === 'mark' ? RAIL_ARROW : ARROW;
         return (
           <marker
             key={kind}
@@ -445,15 +448,16 @@ type MessageProps = {
 };
 
 /**
- * A message from one lifeline to another at height `y`, labelled above. With `step`, the numbered
- * disc sits on the sending lifeline and the line leaves from its edge.
+ * A message from one lifeline to another at height `y`, labelled above. The label clears the
+ * arrowhead, which is wider than the stroke. With `step`, the numbered disc sits on the sending
+ * lifeline and the line leaves from its edge.
  */
 export function Message({id, from, to, y, kind = 'data', label, over, step}: MessageProps): React.JSX.Element {
   const dir = Math.sign(to - from);
   const start = from + (step ? dir * R_STEP : 0);
   const end = to - dir * ARROW_GAP;
   const [a, b] = over ?? [start, end];
-  const half = kind === 'mark' ? RAIL / 2 : STROKE / 2;
+  const half = kind === 'mark' ? RAIL_ARROW / 2 : ARROW / 2;
   return (
     <>
       <Edge id={id} kind={kind} points={[[start, y], [end, y]]} />

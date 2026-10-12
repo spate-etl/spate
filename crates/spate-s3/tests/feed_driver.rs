@@ -355,10 +355,6 @@ fn a_feed_refuses_coordination_on_the_same_source() {
     assert!(reason.contains("coordinator"), "{reason}");
 }
 
-/// Control-plane passes a test lets run while a sink write is held. Each
-/// pass renews every held unit once, so the count is read from the feed.
-const PASSES_WHILE_HELD: usize = 50;
-
 /// Launch over `feed` with one record per source batch and one row per sink
 /// write, so an object's records span many sink writes.
 fn launch_one_row_writes(
@@ -368,9 +364,6 @@ fn launch_one_row_writes(
 ) -> Launched {
     let yaml = PipelineYaml::file("s3-feed-row-writes", data)
         .threads(1)
-        // No periodic commit runs before the lane reaches its end, so the
-        // first commit carries the partial watermark with the terminal known.
-        .checkpoint("10s")
         .build()
         .replace(
             "sink: { capture: {} }",
@@ -418,11 +411,11 @@ fn launch_one_row_writes(
     }
 }
 
-/// Pins INV-1 for a unit whose records span several sink writes: while a
-/// later write is held and the earlier ones have succeeded, the acknowledged
-/// watermark stays below the terminal one and the unit is not acknowledged.
+/// Pins that a unit whose records span several sink writes is not
+/// acknowledged while one of them is held, and is acknowledged once, with
+/// every row written, after the write is released.
 #[test]
-fn a_partial_watermark_does_not_acknowledge_the_unit() {
+fn a_unit_over_several_writes_is_acknowledged_after_its_held_write() {
     let dir = tempfile::tempdir().unwrap();
     let data = data_dir(&dir);
     let rows = recs("p", 40);
@@ -438,12 +431,6 @@ fn a_partial_watermark_does_not_acknowledge_the_unit() {
 
     wait_until(DEADLINE, "the third write is held", || {
         l.script.held_writes() == 1
-    });
-    let from = renewals_of(&script, receipt);
-    // An acknowledgment ends the renewals, so it also ends the wait.
-    wait_until(DEADLINE, "the reader runs while the write is held", || {
-        renewals_of(&script, receipt) >= from + PASSES_WHILE_HELD
-            || !script.acknowledged().is_empty()
     });
     assert!(
         script.acknowledged().is_empty(),

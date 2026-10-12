@@ -29,8 +29,10 @@
 //!
 //! # Expected floors at 20 ms
 //!
-//! Both arms make 4,608 GETs over 96 readers, a 960 ms floor of GET latency
-//! alone. They differ in how often a reader waits for the sink.
+//! The coordinated arm makes 4,608 GETs over 96 readers, a 960 ms floor of GET
+//! latency alone. The feed arm makes them over `UNITS_HELD` readers: the same
+//! floor at 96 held, 11.5 s at 8. They differ in how often a reader waits for
+//! the sink.
 //!
 //! - A feed unit holds its slot until the sink has written its last rows, and
 //!   a wave of small units never fills a batch by size, so every wave also
@@ -44,12 +46,8 @@
 //!
 //! # Cases
 //!
-//! - `small_objects/{feed,coordinated}/get_{0,20}ms`: the sittings filter on
-//!   `small_objects`. The 0 ms pair prices the path with no GET latency to hide
-//!   behind.
-//! - `default_linger/{feed,coordinated}/get_20ms`: the same reads at the
-//!   sink's default 1 s linger, read on their own. At 8 units held a feed run
-//!   is about ten minutes.
+//! - `small_objects/{feed,coordinated}/get_{0,20}ms`. The 0 ms pair prices the
+//!   path with no GET latency to hide behind.
 //!
 //! The coordinated cases go with the coordination removal in v0.4.0.
 //!
@@ -72,8 +70,8 @@ mod feed_bench;
 
 use feed_bench::{Arm, LINES, OBJECTS, Rig, SHORT_LINGER};
 
-/// How long one run may take before it panics. The slowest case, the feed arm
-/// at the default linger and 8 units held, takes about ten minutes.
+/// How long one run may take before it panics. It sits far above the slowest
+/// case, so a run that reaches it has hung.
 const DEADLINE: Duration = Duration::from_secs(3_600);
 
 fn case(suite: Suite, id: &str, arm: Arm, hold_ms: u64, linger: Duration) -> Suite {
@@ -135,27 +133,12 @@ fn suite() -> Suite {
         20,
         SHORT_LINGER,
     );
-    let suite = case(
+    case(
         suite,
         "small_objects/coordinated/get_20ms",
         Arm::Coordinated,
         20,
         SHORT_LINGER,
-    );
-    let default_linger = spate_core::sink::SinkPoolConfig::default().batch.linger;
-    let suite = case(
-        suite,
-        "default_linger/feed/get_20ms",
-        Arm::Feed,
-        20,
-        default_linger,
-    );
-    case(
-        suite,
-        "default_linger/coordinated/get_20ms",
-        Arm::Coordinated,
-        20,
-        default_linger,
     )
 }
 

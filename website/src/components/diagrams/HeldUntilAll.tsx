@@ -100,7 +100,7 @@ export default function HeldUntilAllDiagram(): React.JSX.Element {
           last clone.
         </>,
         <>
-          The watermark moves past the batch and the controller commits it on its next commit. A failed write
+          The watermark moves past the batch, and the controller&apos;s next commit includes it. A failed write
           in either branch fails the whole batch instead.
         </>,
       ]}

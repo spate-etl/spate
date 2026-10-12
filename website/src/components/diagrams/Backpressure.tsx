@@ -120,7 +120,7 @@ export default function BackpressureDiagram(): React.JSX.Element {
         </>,
         <>The pipeline thread sends a pause request for its lanes to the controller. It never blocks on a channel send.</>,
         <>
-          The controller calls <code>Source::pause</code>. Only the controller thread touches the
+          The controller calls <code>Source::pause</code>. Only the controller thread touches the{' '}
           <code>Source</code>.
         </>,
         <>

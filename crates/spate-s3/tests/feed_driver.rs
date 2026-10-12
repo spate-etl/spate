@@ -27,6 +27,7 @@ use std::fs;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use support::spy::{SpyOptions, spying_local_store};
 use support::{
     Launched, PipelineYaml, captured_rows, key_of, launch_customized, line_framer, lines_bytes,
     recs, sorted, test_options,
@@ -624,4 +625,82 @@ fn a_retryable_receive_or_renewal_is_tried_again() {
         inner.counts().acknowledged == 1
     });
     stop(&l);
+}
+
+/// Pins that a lane reaching the end of its unit wakes the control plane:
+/// the unit is acknowledged long before the reader's 60 s park would time
+/// out. The unit's GET is held until the reader has renewed it, so the
+/// reader is parked when the lane ends.
+#[test]
+fn a_finished_unit_is_acknowledged_before_the_poll_timeout() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    stage(&data, "w.ndjson", &recs("w", 30));
+
+    let (feed, script) = scripted_feed();
+    let receipt = script.deliver(unit_over(&data, "w.ndjson"));
+    // A depth of two is never reached by one GET, so the gate holds it
+    // until `open_gate`; the deadline outlasts every wait below.
+    let (store, spy) = spying_local_store(SpyOptions {
+        gate_depth: 2,
+        gate_deadline: Duration::from_secs(300),
+        ..SpyOptions::default()
+    });
+
+    // The checkpoint interval also bounds the chase that follows the lane's
+    // signal. Past it, a sink write still in flight leaves the acknowledgment
+    // to the 60 s park, so the interval outlasts any write under load.
+    let yaml = PipelineYaml::file("s3-feed-wake", &data)
+        .checkpoint("30s")
+        .build();
+    let mut config = PipelineConfig::from_str(&yaml).unwrap();
+    config.pipeline.name = spate_test::unique_name(&config.pipeline.name);
+    let pipeline = Pipeline::from_config(config).unwrap();
+    let io = pipeline.io_handle();
+    let source =
+        line_framer(S3Source::from_component_config(&pipeline.config().source, io).unwrap())
+            .with_store(store)
+            .with_feed(Arc::new(feed));
+    let mut pool = SinkPoolConfig::default();
+    pool.batch.linger = Duration::from_millis(10);
+    let (sink, sink_script) = capture_sink(1, 1);
+    let runtime = pipeline
+        .sink(sink.with_pool_config(pool))
+        .unwrap()
+        .chains(|ctx| {
+            let chunk_cfg = ctx.chunk();
+            chain_owned::<Vec<u8>, _>(BytesPassthrough)
+                .sink(
+                    TestEncoder,
+                    KeyHashRouter,
+                    chunk_cfg,
+                    ctx.queues,
+                    ctx.budget,
+                )
+                .build()
+        })
+        .runtime_options(RuntimeOptions {
+            event_poll_timeout: Duration::from_secs(60),
+            ..test_options()
+        })
+        .into_runtime(source)
+        .unwrap();
+    let shutdown = runtime.shutdown_handle();
+    let run = PipelineRun::spawn(move || runtime.run());
+
+    wait_until(DEADLINE, "the reader renews the unit", || {
+        renewals_of(&script, receipt) > 0
+    });
+    spy.open_gate();
+    wait_until(DEADLINE, "the unit is acknowledged", || {
+        script.acknowledged() == vec![receipt]
+    });
+
+    shutdown.trigger();
+    // The reader is parked for up to the poll timeout; a scripted call wakes
+    // it to see the shutdown.
+    script.hold_publishes();
+    let report = run.wait_exit(DEADLINE).expect("the run exits").unwrap();
+    assert_eq!(report.state, ExitState::Completed);
+    assert_eq!(sorted(written_rows(&sink_script)), sorted(recs("w", 30)));
 }

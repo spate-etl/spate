@@ -21,9 +21,11 @@ use crate::metrics::S3Metrics;
 use crate::split::SplitDescriptor;
 use crate::split_ctx::{LANE_HANDOFF_CHUNKS, PoisonReport, SplitTracker};
 use spate_core::checkpoint::AckIssuer;
-use spate_core::coordination::{ControlWaker, LeaseEpoch, SplitId};
+use spate_core::coordination::{LeaseEpoch, SplitId};
 use spate_core::error::SourceError;
-use spate_core::feed::{Delivery, Feed, FeedError, FeedErrorKind, FeedPark, Receipt, wake_channel};
+use spate_core::feed::{
+    Delivery, Feed, FeedError, FeedErrorKind, FeedPark, FeedWaker, Receipt, wake_channel,
+};
 use spate_core::record::PartitionId;
 use spate_core::source::{DrainBarrier, LaneId, SourceEvent};
 use std::collections::BTreeMap;
@@ -70,6 +72,9 @@ struct Held {
 pub(crate) struct UnitReader {
     feed: Arc<dyn Feed>,
     park: FeedPark,
+    /// The waker the feed signals, cloned into every lane so a lane that
+    /// ends or fails ends the park too.
+    waker: FeedWaker,
     parts: LaneParts,
     started: bool,
     /// Sequence number of the next delivery, which names its partition,
@@ -98,11 +103,12 @@ impl std::fmt::Debug for UnitReader {
 impl UnitReader {
     pub(crate) fn new(feed: Arc<dyn Feed>, parts: LaneParts) -> UnitReader {
         let (waker, park) = wake_channel();
-        feed.set_waker(waker);
+        feed.set_waker(waker.clone());
         let (poison_tx, poison_rx) = std::sync::mpsc::channel();
         UnitReader {
             feed,
             park,
+            waker,
             parts,
             started: false,
             next: 0,
@@ -372,10 +378,7 @@ impl UnitReader {
             LeaseEpoch(u64::from(n)),
             Arc::clone(&tracker),
             self.poison_tx.clone(),
-            // The control plane parks on the feed, which this waker cannot
-            // reach, so a lane's end-of-input and poison are noticed when
-            // that park times out.
-            ControlWaker::inert(),
+            self.waker.clone(),
             parts.metrics.clone(),
         );
         self.held.insert(
@@ -583,5 +586,25 @@ mod tests {
         assert_eq!(refill.len(), 1, "lanes opened into the freed room");
         assert_eq!(script.held().len(), 96, "units held after the refill");
         assert_eq!(script.delivered().len(), 97, "one unit stays queued");
+    }
+
+    /// Pins that a lane the reader opens signals the park the reader waits
+    /// on.
+    #[test]
+    fn every_lane_wakes_the_readers_park() {
+        let (mut reader, script, _rt) = reader();
+        script.deliver(descriptor_unit(0));
+        let first = reader.poll_events(Duration::ZERO).unwrap();
+        assert!(matches!(first, SourceEvent::LanesAssigned(ref l) if l.is_empty()));
+        let mut lanes = lanes_added(reader.poll_events(Duration::ZERO).unwrap());
+        assert_eq!(lanes.len(), 1);
+        // Drain the signal the delivery left in the slot.
+        while reader.park.park(Duration::ZERO) {}
+
+        lanes[0].wake_control();
+        assert!(
+            reader.park.park(Duration::ZERO),
+            "the lane's signal did not reach the reader's park"
+        );
     }
 }

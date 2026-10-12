@@ -267,6 +267,10 @@ Your source follows these rules:
   paired `FeedPark` for at most the `timeout` that `poll_events` was given. A
   park uses up the feed's signal, so call `receive` with the room you have
   before you park.
+- **Give each lane a clone of the same waker.** A lane signals it once, when
+  it reaches the end of its input or fails, after making that state visible
+  to the control plane. The park then ends at once, and the unit is settled
+  without waiting out the `timeout`.
 
 The scripted feed in `spate-test` lets a test play the feed's side. This
 reader, from [`spate-test/tests/feed.rs`](repo:crates/spate-test/tests/feed.rs),

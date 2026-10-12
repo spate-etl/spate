@@ -146,6 +146,11 @@ impl StoreSpy {
     pub(crate) fn peak_concurrent_gets(&self) -> usize {
         self.depth.peak.load(Ordering::SeqCst)
     }
+
+    /// Open the gate for every GET held at it and every later one.
+    pub(crate) fn open_gate(&self) {
+        self.depth.open.send_replace(true);
+    }
 }
 
 /// In-flight accounting, plus the optional gate that makes a depth

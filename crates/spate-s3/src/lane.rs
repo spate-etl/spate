@@ -30,12 +30,51 @@ use crate::split_ctx::{PoisonKind, PoisonReport, SplitTracker};
 use spate_core::checkpoint::{AckIssuer, AckRef};
 use spate_core::coordination::{ControlWaker, LeaseEpoch, SplitId};
 use spate_core::error::{ErrorClass, SourceError};
+use spate_core::feed::FeedWaker;
 use spate_core::record::{PartitionId, RawPayload};
 use spate_core::source::{LaneId, PayloadBatch, SourceLane};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TryRecvError;
+
+/// The control-plane waker a lane signals when it ends or fails.
+pub(crate) enum LaneWaker {
+    /// A coordinated source's driver waker, signalled on every call.
+    Control(ControlWaker),
+    /// A feed reader's waker, signalled on the first call only. End-of-input
+    /// and poison share the flag, since either one ends the lane. One signal
+    /// suffices: the slot holds it until a park consumes it, and the reader
+    /// re-reads the lane's state on every pass.
+    Feed { waker: FeedWaker, sent: bool },
+}
+
+impl LaneWaker {
+    /// Signal the control plane. Never blocks.
+    fn wake(&mut self) {
+        match self {
+            LaneWaker::Control(waker) => waker.wake(),
+            LaneWaker::Feed { waker, sent } => {
+                if !*sent {
+                    *sent = true;
+                    waker.wake();
+                }
+            }
+        }
+    }
+}
+
+impl From<ControlWaker> for LaneWaker {
+    fn from(waker: ControlWaker) -> LaneWaker {
+        LaneWaker::Control(waker)
+    }
+}
+
+impl From<FeedWaker> for LaneWaker {
+    fn from(waker: FeedWaker) -> LaneWaker {
+        LaneWaker::Feed { waker, sent: false }
+    }
+}
 
 /// The object currently being framed.
 struct CurrentObject {
@@ -83,10 +122,10 @@ pub struct S3Lane {
     tracker: Arc<SplitTracker>,
     /// Side channel for object-level failures (see the module docs).
     poison_tx: std::sync::mpsc::Sender<PoisonReport>,
-    /// Wakes the control plane. Signalled on the two edges the driver
-    /// would otherwise only notice between waits: end-of-input, and
-    /// poison. Never on the per-record path.
-    waker: ControlWaker,
+    /// Wakes the control plane. Signalled on the two edges it would
+    /// otherwise only notice between waits: end-of-input, and poison.
+    /// Never on the per-record path.
+    waker: LaneWaker,
     /// The split hit poison: everything undelivered was discarded and
     /// every later poll idles with `Ok(None)` until the lane is retired.
     poisoned: bool,
@@ -129,7 +168,7 @@ impl S3Lane {
         epoch: LeaseEpoch,
         tracker: Arc<SplitTracker>,
         poison_tx: std::sync::mpsc::Sender<PoisonReport>,
-        waker: ControlWaker,
+        waker: impl Into<LaneWaker>,
         metrics: Option<S3Metrics>,
     ) -> S3Lane {
         let watermark_candidate = resume.map_or(0, |p| {
@@ -153,7 +192,7 @@ impl S3Lane {
             epoch,
             tracker,
             poison_tx,
-            waker,
+            waker: waker.into(),
             poisoned: false,
             watermark_candidate,
             failed: None,
@@ -186,7 +225,7 @@ impl S3Lane {
             reason,
         });
         // The report is only read between control-plane waits; wake so the
-        // split is handed back now rather than an idle timeout from now.
+        // control plane handles it at once.
         self.waker.wake();
     }
 
@@ -372,6 +411,12 @@ impl S3Lane {
             self.decoded_reported = total;
         }
     }
+
+    /// Signal the lane's control-plane waker as end-of-input does.
+    #[cfg(test)]
+    pub(crate) fn wake_control(&mut self) {
+        self.waker.wake();
+    }
 }
 
 impl SourceLane for S3Lane {
@@ -499,10 +544,9 @@ impl SourceLane for S3Lane {
                     // out, so `watermark_candidate` is the terminal
                     // watermark.
                     self.tracker.set_terminal(self.watermark_candidate);
-                    // Completion is decided here, on a pipeline thread; the
-                    // control plane reads it via `take_finishing` between
-                    // waits. Wake so the split completes and frees its
-                    // working-set slot in microseconds. Once per lane.
+                    // Completion is decided here, on a pipeline thread, and
+                    // the control plane reads it between waits. The terminal
+                    // is set first so the woken control plane sees it.
                     self.waker.wake();
                     return Ok(None);
                 }
@@ -565,6 +609,7 @@ mod tests {
     use super::*;
     use crate::testutil::TestLineFramer;
     use spate_core::checkpoint::Checkpointer;
+    use spate_core::feed::wake_channel;
 
     fn runtime() -> tokio::runtime::Runtime {
         tokio::runtime::Builder::new_multi_thread()
@@ -583,6 +628,10 @@ mod tests {
     }
 
     fn rig(resume: Option<Position>) -> LaneRig {
+        rig_with(resume, ControlWaker::inert())
+    }
+
+    fn rig_with(resume: Option<Position>, waker: impl Into<LaneWaker>) -> LaneRig {
         let rt = runtime();
         let (tx, rx) = mpsc::channel(64);
         let checkpointer = Checkpointer::new();
@@ -601,7 +650,7 @@ mod tests {
             LeaseEpoch(1),
             Arc::clone(&tracker),
             poison_tx,
-            ControlWaker::inert(),
+            waker,
             None,
         );
         LaneRig {
@@ -810,6 +859,50 @@ mod tests {
         assert!(poll_batch(&mut r.lane, 512).is_none());
         let report = r.poison_rx.try_recv().expect("a poison report");
         assert!(report.reason.contains("vanished"), "{}", report.reason);
+    }
+
+    /// Pins the feed lane's signal at end-of-input: none while records
+    /// remain, one when the lane decides end-of-input, and none on a later
+    /// poll that decides it again.
+    #[test]
+    fn end_of_input_wakes_the_control_plane() {
+        let (waker, park) = wake_channel();
+        let mut r = rig_with(None, waker);
+        start(&r, 0, "p/a.ndjson");
+        send(&r, ChunkMsg::Chunk(bytes::Bytes::from_static(b"a1\na2\n")));
+        send(&r, ChunkMsg::ObjectEnd);
+        r.tx.take();
+
+        assert_eq!(poll_batch(&mut r.lane, 512).map(|b| b.len()), Some(2));
+        assert!(!park.park(Duration::ZERO), "signalled while records remain");
+        assert!(poll_batch(&mut r.lane, 512).is_none());
+        assert!(r.tracker.terminal().is_some());
+        assert!(park.park(Duration::ZERO), "no signal at end-of-input");
+        assert!(poll_batch(&mut r.lane, 512).is_none());
+        assert!(
+            !park.park(Duration::ZERO),
+            "signalled again after end-of-input"
+        );
+    }
+
+    /// Pins the feed lane's signal on poison: the poll that poisons the lane
+    /// signals the control plane.
+    #[test]
+    fn poison_wakes_the_control_plane() {
+        let (waker, park) = wake_channel();
+        let mut r = rig_with(None, waker);
+        start(&r, 0, "p/a.ndjson");
+        send(&r, ChunkMsg::Chunk(bytes::Bytes::from_static(b"a1\n")));
+        send(
+            &r,
+            ChunkMsg::LaneFailed(SplitFailure::Poison(
+                PoisonKind::NotFound,
+                "object vanished".into(),
+            )),
+        );
+        assert!(poll_batch(&mut r.lane, 512).is_none());
+        assert!(r.poison_rx.try_recv().is_ok(), "a poison report");
+        assert!(park.park(Duration::ZERO), "no signal on poison");
     }
 
     #[test]

@@ -81,10 +81,12 @@ therefore never blocks on the feed, in keeping with the rule that
 [a source thread never blocks](03-backpressure.mdx).
 
 When the control plane has nothing to do, it waits on a signal the feed raises
-when a unit becomes ready, for at most its poll timeout. A wait consumes the
-signal, and a receive that takes nothing raises none, so the control plane
-receives what it has room for before it waits. A source holds a bounded number
-of units at once and receives only while it holds fewer.
+when a unit becomes ready, for at most its poll timeout. A source can also hand
+that signal to its lanes, so a lane that reaches the end of its input or fails
+ends the wait at once. A wait consumes the signal, and a receive that takes
+nothing raises none, so the control plane receives what it has room for before
+it waits. A source holds a bounded number of units at once and receives only
+while it holds fewer.
 
 ## Related
 

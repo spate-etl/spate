@@ -8,19 +8,7 @@ One process runs one pipeline. Inside that process, work splits along a
 hard line: CPU-bound record processing on pinned OS threads, I/O on a small
 shared tokio runtime, and a control plane coordinating both.
 
-```text
-                    ┌────────────────────────────────────────────────┐
- pinned std thread  │ lane.poll → deserialize (borrowed) → operator  │──try_send──▶ per-shard
- (× N, cgroup-aware)│ chain (map/filter/flat_map, monomorphized)     │              bounded queues
-                    └────────────────────────────────────────────────┘                   │
-                         ▲            full? pause lanes, keep polling                     ▼
-                         │                                              ┌──────────────────────────────┐
-                    ┌──────────┐   acks (unbounded, never block)        │ tokio runtime (small):       │
-                    │ source   │◀───────────────────────────────────────│ shard workers: batch, seal,  │
-                    │ control  │   watermarks → store/commit            │ rotate replicas, retry;      │
-                    │ plane    │                                        │ checkpointer; admin server   │
-                    └──────────┘                                        └──────────────────────────────┘
-```
+<ArchitectureDiagram />
 
 ## Pipeline threads: where records live
 

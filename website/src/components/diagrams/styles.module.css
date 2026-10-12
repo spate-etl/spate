@@ -1,0 +1,153 @@
+/* Concept-page figures. Colours come from the brand tokens the homepage pipeline figure uses, so
+   both themes follow `brand.css`: data in the diagram orange, control signals muted and dashed,
+   and the accent kept for the committed watermark. */
+
+.figure {
+  margin: 1.5rem 0 2rem;
+}
+
+.figure svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  font-family: var(--ifm-font-family-monospace);
+}
+
+/* The portrait layout replaces the landscape one where the landscape labels would render below
+   about 11px. */
+.figure .narrow {
+  display: none;
+}
+
+@media (max-width: 640px) {
+  .figure .wide {
+    display: none;
+  }
+
+  .figure .narrow {
+    display: block;
+    max-width: 420px;
+    margin: 0 auto;
+  }
+}
+
+.region {
+  fill: var(--spate-surface);
+  stroke: var(--spate-border);
+  stroke-width: 1.5;
+}
+
+.behind {
+  fill: var(--spate-bg);
+  stroke: var(--spate-border);
+  stroke-width: 1.5;
+}
+
+.title {
+  fill: var(--spate-ink);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.note,
+.label {
+  fill: var(--spate-muted);
+  font-size: 11px;
+}
+
+.label {
+  font-size: 12px;
+}
+
+.chip {
+  fill: var(--spate-bg);
+  stroke: var(--spate-diagram-edge);
+  stroke-width: 1.2;
+}
+
+.chipLabel,
+.chipLabelSmall {
+  fill: var(--spate-ink);
+  font-size: 12px;
+}
+
+.chipLabelSmall {
+  font-size: 11px;
+}
+
+.node {
+  fill: var(--spate-diagram-node);
+}
+
+.data {
+  stroke: var(--spate-diagram-edge);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  fill: none;
+}
+
+.signal {
+  stroke: var(--spate-muted);
+  stroke-width: 1.4;
+  stroke-dasharray: 3 4;
+  fill: none;
+}
+
+.mark {
+  stroke: var(--spate-accent);
+  stroke-width: 2;
+  fill: none;
+}
+
+.dataHead {
+  fill: var(--spate-diagram-edge);
+}
+
+.signalHead {
+  fill: var(--spate-muted);
+}
+
+.markHead {
+  fill: var(--spate-accent);
+}
+
+.cell {
+  fill: none;
+  stroke: var(--spate-muted);
+  stroke-width: 1.2;
+}
+
+.cellFull {
+  fill: var(--spate-diagram-core);
+}
+
+.callout {
+  fill: var(--spate-bg);
+  stroke: var(--spate-muted);
+  stroke-width: 1.2;
+}
+
+.calloutLabel {
+  fill: var(--spate-ink);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.key {
+  display: none;
+  margin: 1rem 0 0;
+  padding-left: 1.5rem;
+  font-size: 0.9rem;
+  color: var(--spate-muted);
+}
+
+.key li + li {
+  margin-top: 0.4rem;
+}
+
+@media (max-width: 640px) {
+  .key {
+    display: block;
+  }
+}

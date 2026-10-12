@@ -19,11 +19,7 @@ write sizing under its own configuration.
 
 ## The shape
 
-```text
-                        ┌─ branch "payments" → encoder → router → destination
-source → deserialize →  ├─ branch "refunds"  → encoder → router → destination
-        (one stream)    └─ unmatched → ErrorPolicy (Fail | Skip)
-```
+<SplitDiagram />
 
 Each branch is an ordinary sink, the same route → encode → per-shard queue →
 worker path as a single `.sink(...)`, one per destination. The addition is

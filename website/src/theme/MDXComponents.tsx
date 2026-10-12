@@ -5,6 +5,8 @@ import {useAnchorTargetClassName} from '@docusaurus/theme-common';
 import MDXComponents from '@theme-original/MDXComponents';
 
 import MarkdownTable from '../components/MarkdownTable';
+import ArchitectureDiagram from '../components/diagrams/Architecture';
+import SplitDiagram from '../components/diagrams/Split';
 import {useToolchain} from '../toolchain';
 
 /**
@@ -27,4 +29,4 @@ function Edition(): React.JSX.Element {
   return <>{useToolchain().edition}</>;
 }
 
-export default {...MDXComponents, Anchor, Msrv, Edition, table: MarkdownTable};
+export default {...MDXComponents, Anchor, Msrv, Edition, ArchitectureDiagram, SplitDiagram, table: MarkdownTable};

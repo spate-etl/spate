@@ -29,6 +29,22 @@ fn rustfs_round_trips_an_object() {
         rustfs.container_name(),
         Some(format!("{network}-rustfs").as_str())
     );
+    let joined = std::process::Command::new("docker")
+        .args([
+            "inspect",
+            "--format",
+            "{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}",
+        ])
+        .arg(rustfs.container_name().unwrap())
+        .output()
+        .expect("docker inspect");
+    assert!(joined.status.success(), "{joined:?}");
+    assert!(
+        String::from_utf8_lossy(&joined.stdout)
+            .split_whitespace()
+            .any(|n| n == network),
+        "{joined:?}"
+    );
     rustfs.create_bucket("smoke").expect("create the bucket");
 
     let store = AmazonS3Builder::new()

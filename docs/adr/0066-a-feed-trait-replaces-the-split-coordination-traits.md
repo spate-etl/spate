@@ -14,7 +14,7 @@ description: "A feed trait with a spate-test double replaces spate-core's SplitP
 
 ## Context and problem statement
 
-`SplitPlanner`, `SplitCoordinator` and `CoordinationDriver` shipped in 0.2.0
+`SplitPlanner`, `SplitCoordinator` and `CoordinationDriver` shipped in 0.1.0
 with `spate_test::scripted_coordinator` as their test double.
 `Source::configure_coordination` and `commit_final` were added after it. Their
 contract is a lease: a fenced durable commit, epochs, and a `Lost` outcome. The

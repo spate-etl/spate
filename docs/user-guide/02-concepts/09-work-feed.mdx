@@ -1,0 +1,98 @@
+---
+description: "How a work feed carries units to a source: the ack rule, redelivery, dead-lettering, and how the control plane waits on the feed."
+---
+
+# Work feed
+
+A work feed is a queue of [work units](../07-reference/glossary.mdx#work-unit)
+that a source reads its input through. Each unit names a piece of input, such
+as an object to read, and the source decodes the unit's body to find it. The
+[feed](../07-reference/glossary.mdx#feed) hands a unit to a reader, and the
+reader acknowledges it once the unit's records are safely downstream. A unit
+carries no progress. It is acknowledged once, as a whole, or delivered again
+and read again from its start.
+
+A feed sits behind the `Feed` trait, so any queue that can hold a unit, hide
+it while a reader holds it, and deliver it again can back one. The in-process
+feed serves a single instance and keeps nothing across a restart.
+
+## The ack rule
+
+Every feed and every source follows one rule:
+
+- A source acknowledges a unit only after it has read the unit to its end and
+  the sink has acknowledged every record in it.
+- A unit read in several parts is acknowledged once, after every part meets
+  that rule.
+- A unit whose read stops before its end leaves the feed through redelivery,
+  until the feed moves it to its dead-letter destination.
+
+The rule is the unit-level form of the
+[at-least-once guarantee](02-delivery-guarantees.mdx). A source learns that
+the sink has acknowledged a unit's last record the same way it learns any
+committable position: the acknowledged watermark of the partition the unit is
+read on reaches the offset one past that record. A unit that yields no records
+has nothing to wait for and is acknowledged once its read ends.
+
+## Redelivery and duplicates
+
+A feed delivers each unit at least once. Every delivery carries a new
+receipt, and a source keys the units it holds by receipt:
+
+- **A failed unit is delivered again.** A source that cannot read a unit, for
+  example because the input it names is missing or undecodable, fails it back
+  to the feed.
+- **A leased unit returns when its renewals stop.** A source renews every unit
+  it holds from its control plane. A feed that leases units keeps a unit from
+  other readers only while it is renewed, so a control plane that stops
+  running gives its units back for another reader.
+- **A duplicate is read again in full.** A second delivery of a unit the
+  source already holds is read again from its start, beside the first. No
+  feed deduplicates by unit id.
+
+A call with a receipt the feed no longer honors, because the unit was
+delivered again or already settled, answers `Gone`. The source lets go of that
+delivery, and the newer one carries the unit from there.
+
+Each redelivery repeats records already sent downstream, so a destination
+that cannot tolerate duplicates needs the replay-safe design
+[delivery guarantees](02-delivery-guarantees.mdx) describes.
+
+## Dead-lettering
+
+A feed counts the deliveries of each unit. A unit that reaches the feed's
+delivery cap without an acknowledgment moves to its dead-letter destination
+and is not delivered again. A unit that fails on every reader, such as one
+naming an object that no longer exists, ends there after a bounded number of
+attempts. The in-process feed keeps its dead letters in memory, with exact
+counts of the units it holds in each state.
+
+Dead-lettering is a property of the feed. The
+[record-level error policies](04-error-handling.mdx) still decide what happens
+to an individual record that fails inside a unit that is read.
+
+## How the control plane waits
+
+The control plane drives the feed synchronously, and no call to the feed waits
+on I/O. A feed backend runs its receives, lease renewals and publishes on a
+task or thread of its own. A receive returns what that task has already
+buffered, and the other calls hand their request to it. The control plane
+therefore never blocks on the feed, in keeping with the rule that
+[a source thread never blocks](03-backpressure.mdx).
+
+When the control plane has nothing to do, it waits on a signal the feed raises
+when a unit becomes ready, for at most its poll timeout. A wait consumes the
+signal, and a receive that takes nothing raises none, so the control plane
+receives what it has room for before it waits. A source holds a bounded number
+of units at once and receives only while it holds fewer.
+
+## Related
+
+- [Feed-reading sources](../06-extending/custom-source.mdx#feed-reading-sources)
+  — the rules a source and a feed backend implement, with the scripted feed as
+  a test double.
+- [Delivery guarantees](02-delivery-guarantees.mdx) — the watermark path an
+  acknowledgment waits on.
+- [Source coordination](07-source-coordination.mdx) — the leased-split model
+  the work feed replaces.
+- [Glossary](../07-reference/glossary.mdx) — feed, work unit, watermark.

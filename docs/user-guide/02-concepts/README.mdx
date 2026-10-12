@@ -51,6 +51,13 @@ heartbeats and reconcile toward a leader-computed assignment, and epoch-fenced c
 writes impossible. At-least-once is preserved, and the failure mode is
 duplicates, never loss.
 
+## [9. Work feed](09-work-feed.mdx)
+
+How a source reads work units from a queue: the ack rule that ties a unit's
+acknowledgment to the sink's, redelivery and duplicates under new receipts,
+dead-lettering at the delivery cap, and how the control plane waits on the
+feed without blocking.
+
 ## Related
 
 - [Guides](../03-guides/README.mdx) — task-oriented how-tos built on these

@@ -243,6 +243,8 @@ reads it through the `Feed` trait in
 [feed](../07-reference/glossary.mdx#feed) delivers each unit at least once,
 and the source acknowledges a unit when it is done with it. The trait is
 synchronous, so `poll_events` drives it from the controller thread.
+[Work feed](../02-concepts/09-work-feed.mdx) explains the model behind the
+rules below.
 
 Your source follows these rules:
 

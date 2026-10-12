@@ -411,11 +411,10 @@ fn launch_one_row_writes(
     }
 }
 
-/// Pins that a unit whose records span several sink writes is not
-/// acknowledged while one of them is held, and is acknowledged once, with
-/// every row written, after the write is released.
+/// Pins that a unit whose records span several sink writes, one of them
+/// held and then released, is acknowledged with every row written.
 #[test]
-fn a_unit_over_several_writes_is_acknowledged_after_its_held_write() {
+fn a_unit_over_several_writes_is_acknowledged_with_every_row_written() {
     let dir = tempfile::tempdir().unwrap();
     let data = data_dir(&dir);
     let rows = recs("p", 40);

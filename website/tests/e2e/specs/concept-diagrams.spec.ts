@@ -250,6 +250,32 @@ function misalignments(selector: string): string[] {
 }
 
 /**
+ * Scale faults in the visible drawings, in CSS pixels per viewBox unit: no drawing renders above
+ * one, the drawings on a page render within 5% of each other, and each starts at its figure's left
+ * edge.
+ */
+function scaleFaults(selector: string): string[] {
+  const found: string[] = [];
+  const scales: Array<{name: string; scale: number}> = [];
+  for (const svg of Array.from(document.querySelectorAll<SVGSVGElement>(selector))) {
+    const rect = svg.getBoundingClientRect();
+    if (rect.width === 0) continue;
+    const name = svg.getAttribute('aria-label')?.split(':')[0] ?? '?';
+    const scale = rect.width / svg.viewBox.baseVal.width;
+    scales.push({name, scale});
+    // Layout rounds a width to 1/64px, so a capped drawing can measure a hair over one.
+    if (scale > 1 + 1e-3) found.push(`${name} renders at ${scale.toFixed(3)}px per unit`);
+    const inset = rect.left - svg.closest('figure')!.getBoundingClientRect().left;
+    if (Math.abs(inset) > 0.5) found.push(`${name} starts ${inset.toFixed(1)}px in from its figure's left edge`);
+  }
+  const values = scales.map((s) => s.scale);
+  if (values.length && Math.min(...values) < 0.95 * Math.max(...values)) {
+    found.push(`drawings render more than 5% apart: ${scales.map((s) => `${s.name} ${s.scale.toFixed(3)}`).join('; ')}`);
+  }
+  return found;
+}
+
+/**
  * Layout faults in the visible legends, in CSS pixels: a swatch and its label share a centre within
  * 1px, every swatch has one width, items never overlap, items on a row share a top within 1px and
  * one gap, and the legend sits as far below its drawing as the caption sits below what precedes it.
@@ -314,7 +340,7 @@ function legendFaults(): string[] {
 /**
  * Pins that each concept-page figure shows exactly one of its layouts at a width, that no label in
  * it collides with another label, a line, a box edge or a node, that its drawing holds its
- * alignment rules, and that its legend lines up, in both colour modes.
+ * alignment rules and the page's one scale, and that its legend lines up, in both colour modes.
  */
 for (const colorMode of ['light', 'dark'] as const) {
   test.describe(`concept diagrams: ${colorMode}`, () => {
@@ -334,6 +360,7 @@ for (const colorMode of ['light', 'dark'] as const) {
           expect(shown, 'layouts shown per figure').toEqual(Array.from({length: figures}, () => 1));
           expect(await page.evaluate(collisions, DRAWINGS), 'label collisions').toEqual([]);
           expect(await page.evaluate(misalignments, DRAWINGS), 'drawing alignment').toEqual([]);
+          expect(await page.evaluate(scaleFaults, DRAWINGS), 'drawing scale').toEqual([]);
           expect(await page.evaluate(legendFaults), 'legend layout').toEqual([]);
         });
       }

@@ -14,12 +14,14 @@
 
 .figure svg[role='img'] {
   display: block;
+  /* `parts.tsx` caps the width at the viewBox's, so a drawing fills a narrow column and sits at
+     the left edge of a wide one, in line with the legend and caption under it. */
   width: 100%;
   height: auto;
   font-family: var(--ifm-font-family-monospace);
 }
 
-/* No landscape viewBox is wider than 604 units and the smallest text is 12, so from a 554px column
+/* No landscape viewBox is wider than 586 units and the smallest text is 12, so from a 554px column
    up every label renders at 11px or more. Below that the portrait layout takes over. */
 .figure svg.narrow {
   display: none;
@@ -32,8 +34,6 @@
 
   .figure svg.narrow {
     display: block;
-    max-width: 440px;
-    margin: 0 auto;
   }
 }
 
@@ -46,13 +46,10 @@
   align-items: start;
 }
 
-.sequence .drawing svg {
-  max-width: 400px;
-}
-
+/* The drawing column is `SEQ_W` wide, so the drawing fills it at one pixel per unit. */
 @container (min-width: 640px) {
   .sequence {
-    grid-template-columns: minmax(0, 380px) minmax(0, 1fr);
+    grid-template-columns: minmax(0, 360px) minmax(0, 1fr);
   }
 }
 
@@ -131,7 +128,6 @@
 .ack {
   stroke: var(--spate-ink);
   stroke-width: 2;
-  stroke-dasharray: 7 4;
   stroke-linejoin: round;
   fill: none;
 }
@@ -139,8 +135,7 @@
 .control {
   stroke: var(--spate-muted);
   stroke-width: 1.8;
-  /* Zero-length dashes with round caps draw round dots, unlike the ack line's long dashes. */
-  stroke-dasharray: 0 4;
+  /* Round caps turn the zero-length dashes `parts.tsx` sets into dots. */
   stroke-linecap: round;
   fill: none;
 }

@@ -74,30 +74,32 @@ const PAUSE = ['on a refused try_send, or', 'bytes in flight past the', 'high wa
 const DRIVERS = ['assign lanes,', 'FlushNow, drain,', 'shutdown'];
 const CT = PB + GAP + LINE_BOX + PAUSE.length * LINE + GAP;
 
-// The controller holds the source control plane over the checkpointer, both at its right, with
-// the commit rail leaving the checkpointer to the left and its labels under the rail.
+// The controller holds the source control plane over the checkpointer, both at its right. The
+// commit rail leaves the checkpointer to the left, and its labels sit under the checkpointer.
 const COMMIT = 'Source::commit';
+const COMMIT_NOTE = 'watermarks, on the tick';
 const CP = ['checkpointer', 'tokio-free'];
 const CP_W = chipW(CP);
 const CP_H = CHIP_H + LINE;
-const CR = PL + PAD + textW(COMMIT) + GAP + CP_W + PAD;
-const CP_X = CR - PAD - CP_W;
 const PLANE = 'source control plane';
+const PLANE_NOTE = 'poll_events, pause, resume';
+const CR = PL + PAD + Math.max(textW(PLANE_NOTE), textW(COMMIT_NOTE), chipW(PLANE), CP_W, titleW(CTRL_TITLE)) + PAD;
+const CP_X = CR - PAD - CP_W;
 const PLANE_X = CR - PAD - chipW(PLANE);
 const PLANE_Y = CT + PAD + TITLE_BOX + GAP + CHIP_H / 2;
 const PLANE_NOTE_BASE = PLANE_Y + CHIP_H / 2 + S1 + ASCENT;
 
 // The I/O runtime sits beside the controller, the acks line between them. Records enter its
-// worker from above, between the region's title and its thread-count note, and leave at the
-// same x for the destination below.
+// worker from above, between the region's title and its thread-count note, and leave at the same
+// x for the destination below, right of the admin server.
 const IO_L = CR + textW('unbounded') + 2 * S2;
 const IO_TITLE = 'I/O runtime';
 const IO_NOTE = 'io_threads';
 const WORKER_NOTES = ['one per shard;', 'batch, seal, write,', 'retry, rotate replicas'];
-const ADMIN = ['admin', 'server'];
-const IOW = Math.max(chipW(WORKER_NOTES), titleW(IO_TITLE) + 2 * GAP + textW(IO_NOTE));
+const ADMIN = 'admin server';
+const REC_X = IO_L + PAD + Math.max(titleW(IO_TITLE), chipW(ADMIN)) + GAP;
+const IOW = Math.max(chipW(WORKER_NOTES), REC_X + GAP + textW(IO_NOTE) - (IO_L + PAD));
 const IO_R = IO_L + PAD + IOW + PAD;
-const REC_X = IO_L + PAD + titleW(IO_TITLE) + GAP;
 const WORKER_TOP = CT + PAD + TITLE_BOX + GAP;
 
 /** The acks row: the worker's last line and the checkpointer's centre, whichever sits lower. */
@@ -105,14 +107,13 @@ const Y2 = Math.max(
   WORKER_TOP + CHIP_H + (WORKER_NOTES.length + 1) * LINE - CHIP_H / 2,
   linesBottom(PLANE_NOTE_BASE) + GAP + CP_H / 2,
 );
-/** The note under the commit label clears the checkpointer's foot by `S1`. */
-const COMMIT_BASE = Y2 + CP_H / 2 + S1 + ASCENT - LINE;
+/** The commit labels clear the checkpointer's foot by `S1`. */
+const COMMIT_BASE = Y2 + CP_H / 2 + S1 + ASCENT;
 const CTRL_BOTTOM = linesBottom(COMMIT_BASE, 2) + PAD;
 
 const WORKER_BOTTOM = Y2 + CHIP_H / 2;
-const ADMIN_H = CHIP_H + LINE;
-const ADMIN_Y = WORKER_BOTTOM + GAP + ADMIN_H / 2;
-const IO_BOTTOM = ADMIN_Y + ADMIN_H / 2 + PAD;
+const ADMIN_Y = WORKER_BOTTOM + GAP + CHIP_H / 2;
+const IO_BOTTOM = ADMIN_Y + CHIP_H / 2 + PAD;
 const DEST_Y = IO_BOTTOM + 2 * GAP + LINE_BOX + R_NODE;
 const DEST_BASE = DEST_Y + R_NODE + S1 + ASCENT;
 const VIEW_W = Math.max(IO_R, PR + STACK) + M;
@@ -155,7 +156,7 @@ function wide(id: string): React.ReactNode {
       <Text kind="label" x={workerLeft + CHIP_X} y={centredBaseline(WORKER_TOP + CHIP_H / 2)} lines="shard worker" />
       <Text x={workerLeft + CHIP_X} y={centredBaseline(WORKER_TOP + CHIP_H / 2) + LINE} lines={WORKER_NOTES} />
       <Text kind="label" x={workerLeft + CHIP_X} y={centredBaseline(Y2)} lines="resolve acks" />
-      <Chip x={workerLeft} y={ADMIN_Y} h={ADMIN_H} label={ADMIN} />
+      <Chip x={workerLeft} y={ADMIN_Y} label={ADMIN} />
 
       <Edge id={id} points={[[REC_X, WORKER_BOTTOM], [REC_X, DEST_Y - R_NODE - ARROW_GAP]]} />
       <Text x={REC_X + S2} y={centredBaseline((IO_BOTTOM + DEST_Y - R_NODE) / 2)} lines="write" />
@@ -171,12 +172,12 @@ function wide(id: string): React.ReactNode {
       <Text x={CP_X + CP_W / 2} y={centredBaseline(Y2, 2) + LINE} lines={CP[1]} anchor="middle" />
       <Edge id={id} kind="mark" points={[[CP_X, Y2], [SRC_X, Y2], [SRC_X, Y1 + R_NODE + ARROW_GAP]]} />
       <Text kind="label" x={PL + PAD} y={COMMIT_BASE} lines={COMMIT} />
-      <Text x={PL + PAD} y={COMMIT_BASE + LINE} lines="watermarks, on the tick" />
+      <Text x={PL + PAD} y={COMMIT_BASE + LINE} lines={COMMIT_NOTE} />
       <Text kind="title" x={PL + PAD} y={CT + PAD + TITLE_ASCENT} lines={CTRL_TITLE} />
 
       {/* Control: the controller drives the source and the drivers; drivers ask it to pause. */}
       <Chip x={PLANE_X} y={PLANE_Y} label={PLANE} />
-      <Text x={CR - PAD} y={PLANE_NOTE_BASE} lines="poll_events, pause, resume" anchor="end" />
+      <Text x={CR - PAD} y={PLANE_NOTE_BASE} lines={PLANE_NOTE} anchor="end" />
       <Edge
         id={id}
         kind="control"

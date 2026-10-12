@@ -50,6 +50,11 @@ export const STROKE = 2;
 export const RAIL = 6;
 /** Lane fan-out from a source node. */
 export const LANE_SPREAD = 6;
+/** An ack line's dash and the space after it. */
+const ACK_DASH = 7;
+const ACK_SPACE = 4;
+/** A control line's dot pitch; zero-length dashes with round caps draw the dots. */
+const CONTROL_PITCH = 4;
 
 export const R_NODE = 10;
 export const R_STEP = 8.5;
@@ -101,6 +106,14 @@ function pathData(points: Point[]): string {
 }
 
 type Kind = 'data' | 'ack' | 'control' | 'mark';
+
+/** The dash pattern of each line kind, shared by the drawings and the legend swatches. */
+const DASH: Record<Kind, string | undefined> = {
+  data: undefined,
+  ack: `${ACK_DASH} ${ACK_SPACE}`,
+  control: `0 ${CONTROL_PITCH}`,
+  mark: undefined,
+};
 
 const HEAD: Record<Kind, string> = {
   data: styles.dataHead,
@@ -161,7 +174,15 @@ export function Edge({id, points, kind = 'data', head = true, link}: EdgeProps):
       </g>
     );
   }
-  return <path className={styles[kind]} d={pathData(points)} markerEnd={marker} data-link={link ? '' : undefined} />;
+  return (
+    <path
+      className={styles[kind]}
+      d={pathData(points)}
+      strokeDasharray={DASH[kind]}
+      markerEnd={marker}
+      data-link={link ? '' : undefined}
+    />
+  );
 }
 
 /** The arrows of a run whose boxes are given in order, each stopping `ARROW_GAP` short of the next box. */
@@ -458,39 +479,51 @@ const LEGEND_TEXT: Record<LegendEntry, string> = {
   wait: 'rows wait in the sink',
 };
 
+/** A line swatch's length: three ack dashes and the two spaces between them. */
+const SW_LINE = 3 * ACK_DASH + 2 * ACK_SPACE;
+/** A line swatch's inset from each end of its box. */
+const SW_INSET = 2;
 /**
- * Every swatch is drawn in one 28 × 20 box, the legend's line height, so items line up whatever
- * mark they show and a lifeline swatch runs the full height of its row.
+ * Every swatch is drawn in one box `SW_W` wide and the legend's line height tall, so items line up
+ * whatever mark they show and a lifeline swatch runs the full height of its row.
  */
-const SW_W = 28;
+const SW_W = SW_LINE + 2 * SW_INSET;
 const SW_H = 20;
 const SW_MID = SW_H / 2;
 
 function Swatch({entry}: {entry: LegendEntry}): React.JSX.Element {
-  // A dashed or dotted swatch is cut to whole periods of its pattern, so it starts and ends on a mark.
-  const line = (className: string, inset = 2) => (
-    <path className={className} d={`M${inset} ${SW_MID} L${SW_W - inset} ${SW_MID}`} />
+  // A line swatch draws its kind's own dash pattern, at a length that ends the ack line on its
+  // third dash.
+  const line = (kind: Kind, className = styles[kind]) => (
+    <path className={className} d={`M${SW_INSET} ${SW_MID} L${SW_INSET + SW_LINE} ${SW_MID}`} strokeDasharray={DASH[kind]} />
   );
-  // A box mark of height `h`, centred on the swatch's middle line.
-  const box = (className: string, x: number, w: number, h: number, rx = 3) => (
-    <rect className={className} x={x} y={SW_MID - h / 2} width={w} height={h} rx={rx} />
+  // A box mark `w` by `h`, centred in the swatch.
+  const box = (className: string, w: number, h: number, rx = 3) => (
+    <rect className={className} x={(SW_W - w) / 2} y={SW_MID - h / 2} width={w} height={h} rx={rx} />
   );
   const marks: Record<LegendEntry, React.ReactNode> = {
-    data: line(styles.data),
-    ack: line(styles.ack, 5),
-    control: line(styles.control),
+    data: line('data'),
+    ack: line('ack'),
+    control: line('control'),
     mark: (
       <>
-        {line(styles.markOuter)}
-        {line(styles.markInner)}
+        {line('mark', styles.markOuter)}
+        {line('mark', styles.markInner)}
       </>
     ),
-    region: box(styles.region, 5, 18, 12),
-    chip: box(styles.chip, 3, 22, 10),
+    region: box(styles.region, 18, 12),
+    chip: box(styles.chip, 22, 10),
     queue: (
       <g>
         {[0, 1, 2, 3].map((i) => (
-          <rect key={i} className={i === 0 ? styles.cellFull : styles.cell} x={5 + i * 4.5} y={SW_MID - 5} width={4} height={10} />
+          <rect
+            key={i}
+            className={i === 0 ? styles.cellFull : styles.cell}
+            x={(SW_W - 17.5) / 2 + i * 4.5}
+            y={SW_MID - 5}
+            width={4}
+            height={10}
+          />
         ))}
       </g>
     ),
@@ -506,12 +539,12 @@ function Swatch({entry}: {entry: LegendEntry}): React.JSX.Element {
     ),
     frame: (
       <>
-        {box(styles.frame, 3, 22, 12, 2)}
-        <rect className={styles.frameTag} x={3} y={SW_MID - 6} width={10} height={5} rx="1" />
+        {box(styles.frame, 22, 12, 2)}
+        <rect className={styles.frameTag} x={(SW_W - 22) / 2} y={SW_MID - 6} width={10} height={5} rx="1" />
       </>
     ),
-    hold: box(styles.hold, SW_W / 2 - 3, 6, 12, 0),
-    wait: box(styles.wait, SW_W / 2 - 3, 6, 12, 0),
+    hold: box(styles.hold, 6, 12, 0),
+    wait: box(styles.wait, 6, 12, 0),
   };
   return (
     <svg className={styles.swatch} viewBox={`0 0 ${SW_W} ${SW_H}`} width={SW_W} height={SW_H} aria-hidden="true">
@@ -536,6 +569,15 @@ export function Legend({entries}: {entries: LegendEntry[]}): React.JSX.Element {
 
 // ---- figure frames ----
 
+/**
+ * A drawing's width cap: one CSS pixel per viewBox unit. A drawing shrinks only in a column
+ * narrower than its viewBox, so 12-unit text renders at 12px at most and every drawing on a page
+ * shares one scale.
+ */
+function atMostOneToOne(viewBox: string): React.CSSProperties {
+  return {maxWidth: `${viewBox.split(' ')[2]}px`};
+}
+
 type OverviewProps = {
   name: string;
   wide: {viewBox: string; draw: (id: string) => React.ReactNode};
@@ -556,11 +598,11 @@ export function OverviewFigure({name, wide, narrow, legend, steps, caption}: Ove
   const captionId = `${id}-caption`;
   return (
     <figure className={styles.figure}>
-      <svg className={styles.wide} viewBox={wide.viewBox} role="img" aria-label={name} aria-describedby={captionId}>
+      <svg className={styles.wide} viewBox={wide.viewBox} style={atMostOneToOne(wide.viewBox)} role="img" aria-label={name} aria-describedby={captionId}>
         <Markers id={`${id}w`} />
         {wide.draw(`${id}w`)}
       </svg>
-      <svg className={styles.narrow} viewBox={narrow.viewBox} role="img" aria-label={name} aria-describedby={captionId}>
+      <svg className={styles.narrow} viewBox={narrow.viewBox} style={atMostOneToOne(narrow.viewBox)} role="img" aria-label={name} aria-describedby={captionId}>
         <Markers id={`${id}n`} />
         {narrow.draw(`${id}n`)}
       </svg>
@@ -599,7 +641,7 @@ export function SequenceFigure({name, viewBox, heading, legend, draw, steps}: Se
     <figure className={styles.figure}>
       <div className={styles.sequence}>
         <div className={styles.drawing}>
-          <svg viewBox={viewBox} role="img" aria-label={name} aria-describedby={captionId}>
+          <svg viewBox={viewBox} style={atMostOneToOne(viewBox)} role="img" aria-label={name} aria-describedby={captionId}>
             <Markers id={id} />
             {draw(id)}
           </svg>

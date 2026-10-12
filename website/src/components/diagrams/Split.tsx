@@ -50,7 +50,7 @@ const COL_W = chipW(BRANCH);
  * past the runtime band's padding, so the last column's acks turn down outside the band.
  */
 const ACK_DX = COL_W / 2 + PAD + S2;
-/** Column pitch: a branch's quoted name fits between its drop and the next column's. */
+/** Column pitch in the portrait layout: a branch's quoted name fits between its drop and the next column's. */
 const PITCH = textW(`"${NAMES[0]}"`) + 2 * S2;
 const CP = 'checkpointer';
 const CTRL_TITLE = 'controller thread';
@@ -59,9 +59,20 @@ const CTRL_TITLE = 'controller thread';
 type Lower = {
   pay: number;
   ref: number;
-  /** Where the acks join, and where the skip share comes from: straight above, or along the bottom row from `x`. */
   joinX: number;
-  skipFrom: Point;
+  /**
+   * The ack that drops into the join from above; the other two arrive from the left. With `ref`,
+   * `joinX` is the refunds worker's ack column.
+   */
+  above: 'skip' | 'ref';
+  /** The skip share's path up to its last turn down, which ends at `joinX` when it drops from above. */
+  skipFrom: Point[];
+  joinLabel: string[];
+  /**
+   * The controller sits under the join, its right edge `GAP` left of the return, which carries its
+   * label beside it. Otherwise the controller sits at `pl` and the return runs along its row.
+   */
+  ctrlUnderJoin: boolean;
   /** The pipeline region's bottom edge. */
   pb: number;
   band: {x: number; y: number; w: number; h: number};
@@ -102,18 +113,27 @@ function intoJoin(l: Lower, joinY: number, dy: number): Point[] {
 function LowerPart({id, l}: {id: string; l: Lower}): React.JSX.Element {
   const {pay, ref, joinX, band, wy} = l;
   const {destY, destBase, joinY, ct, cpY, commitBase, cb} = lowerRows(l);
-  const cr = l.pl + PAD + titleW(CTRL_TITLE) + PAD;
+  const ctrlW = PAD + titleW(CTRL_TITLE) + PAD;
+  const cr = l.ctrlUnderJoin ? joinX - GAP : l.pl + ctrlW;
+  const cl = cr - ctrlW;
   const cpX = cr - PAD - chipW(CP);
   const qy = l.pb + QUEUE_GAP / 2;
-  // The refunds ack takes the top row and the payments ack the next, so neither crosses the other.
-  const skipAbove = l.skipFrom[0] === joinX;
-  const rows = skipAbove ? {ref: -S2, pay: S2} : {ref: -S2, pay: 0, skip: S2};
+  // Of the acks arriving from the left, the one from further right takes the upper row, so no two
+  // cross.
+  const rows: Record<'pay' | 'ref' | 'skip', number> =
+    l.above === 'skip' ? {ref: -S2, pay: S2, skip: 0} : {ref: 0, pay: -S2, skip: S2};
+  const workerAck = (x: number, dy: number, fromAbove: boolean): Point[] => [
+    [x + COL_W / 2, wy],
+    [x + ACK_DX, wy],
+    ...(fromAbove ? [[x + ACK_DX, joinY - R_JOIN] as Point] : [[x + ACK_DX, joinY + dy] as Point, ...intoJoin(l, joinY, dy)]),
+  ];
+  const skipTurn = l.skipFrom[l.skipFrom.length - 1];
   return (
     <>
       <Region x={band.x} y={band.y} w={band.w} h={band.h} />
-      <Region x={l.pl} y={ct} w={cr - l.pl} h={cb - ct} />
+      <Region x={cl} y={ct} w={cr - cl} h={cb - ct} />
       <Text kind="title" x={band.x + PAD} y={band.y + PAD + TITLE_ASCENT} lines={l.bandTitle} />
-      <Text kind="title" x={l.pl + PAD} y={ct + PAD + TITLE_ASCENT} lines={CTRL_TITLE} />
+      <Text kind="title" x={cl + PAD} y={ct + PAD + TITLE_ASCENT} lines={CTRL_TITLE} />
 
       {[pay, ref].map((x, i) => (
         <React.Fragment key={NAMES[i]}>
@@ -127,38 +147,32 @@ function LowerPart({id, l}: {id: string; l: Lower}): React.JSX.Element {
       ))}
 
       {/* The fan-in: each worker resolves its branch's acks, and a skipped record releases its share. */}
-      {[
-        [pay, rows.pay],
-        [ref, rows.ref],
-      ].map(([x, dy]) => (
-        <Edge
-          key={x}
-          id={id}
-          kind="ack"
-          head={false}
-          points={[[x + COL_W / 2, wy], [x + ACK_DX, wy], [x + ACK_DX, joinY + dy], ...intoJoin(l, joinY, dy)]}
-        />
-      ))}
+      <Edge id={id} kind="ack" head={false} points={workerAck(pay, rows.pay, false)} />
+      <Edge id={id} kind="ack" head={false} points={workerAck(ref, rows.ref, l.above === 'ref')} />
       <Edge
         id={id}
         kind="ack"
         head={false}
         points={
-          skipAbove
-            ? [l.skipFrom, [joinX, joinY - R_JOIN]]
-            : [l.skipFrom, [l.skipFrom[0], joinY + rows.skip!], ...intoJoin(l, joinY, rows.skip!)]
+          l.above === 'skip'
+            ? [...l.skipFrom, [joinX, joinY - R_JOIN]]
+            : [...l.skipFrom, [skipTurn[0], joinY + rows.skip], ...intoJoin(l, joinY, rows.skip)]
         }
       />
       <Join x={joinX} y={joinY} />
-      <Text kind="label" x={joinX + R_JOIN + S2} y={centredBaseline(joinY, 2)} lines={['batch', 'ack']} />
+      <Text kind="label" x={joinX + R_JOIN + S2} y={centredBaseline(joinY, l.joinLabel.length)} lines={l.joinLabel} />
 
       <Edge id={id} kind="ack" points={[[joinX, joinY + R_JOIN], [joinX, cpY], [cr - PAD + ARROW_GAP, cpY]]} />
-      <Text x={(cr + joinX) / 2} y={cpY - STROKE / 2 - S1 - DESCENT} lines="unbounded" anchor="middle" />
+      {l.ctrlUnderJoin ? (
+        <Text x={joinX + STROKE / 2 + S2} y={centredBaseline((joinY + R_JOIN + cpY) / 2)} lines="unbounded" />
+      ) : (
+        <Text x={(cr + joinX) / 2} y={cpY - STROKE / 2 - S1 - DESCENT} lines="unbounded" anchor="middle" />
+      )}
       <Chip x={cpX} y={cpY} label={CP} />
       <Edge id={id} kind="mark" points={[[cpX, cpY], [l.srcX, cpY], [l.srcX, l.srcBottom + ARROW_GAP]]} />
       {/* Under the checkpointer's foot, so the rail's labels can run beneath the chip. */}
-      <Text kind="label" x={l.pl + PAD} y={commitBase} lines="Source::commit" />
-      <Text x={l.pl + PAD} y={commitBase + LINE} lines="watermarks" />
+      <Text kind="label" x={cl + PAD} y={commitBase} lines="Source::commit" />
+      <Text x={cl + PAD} y={commitBase + LINE} lines="watermarks" />
     </>
   );
 }
@@ -182,7 +196,8 @@ function Branches({id, l, un, fanFrom, busY, routeY}: {id: string; l: Lower; un:
 }
 
 // ---- landscape: the trunk runs along the top, the unmatched branch fills the region's lower left
-// and its skip share joins the fan-in along the bottom row ----
+// and its skip share joins the fan-in along the bottom row. The refunds ack drops into the batch
+// ack, and the controller sits under it. ----
 
 const W_SRC_X = M + textW('source') / 2;
 const W_PL = W_SRC_X + R_NODE + 2 * GAP;
@@ -192,9 +207,15 @@ const W_TRUNK = rowOf(TRUNK, W_PL + PAD, W_Y);
 const W_CLASSIFY = W_TRUNK[2];
 /** Payments drops straight from the classifier. */
 const W_PAY = W_CLASSIFY.x + W_CLASSIFY.w / 2;
-const W_REF = W_PAY + PITCH;
+/**
+ * Each quoted name sits left of its drop, `S2` from it. The pitch keeps the refunds name `2 * GAP`
+ * from the payments drop, so it reads as its own drop's.
+ */
+const W_REF = W_PAY + 2 * GAP + textW(`"${NAMES[1]}"`) + S2;
 const W_BUS = W_Y + CHIP_H / 2 + GAP;
-const W_ROUTE_Y = W_BUS + 2 * GAP + CHIP_H / 2;
+/** The drops run long enough to hold the quoted names `GAP` clear of the bus and the route boxes. */
+const W_NAME_Y = W_BUS + GAP + LINE_BOX / 2;
+const W_ROUTE_Y = W_NAME_Y + LINE_BOX / 2 + GAP + CHIP_H / 2;
 const W_POLICY = ['Fail: stops the pipeline', 'Skip: drops and counts'];
 const W_UN_X = W_PL + PAD;
 const W_UN = W_UN_X + chipW('unmatched') / 2;
@@ -206,13 +227,21 @@ const W_PR = Math.max(W_CLASSIFY.x + W_CLASSIFY.w, W_REF + COL_W / 2) + PAD;
 const W_IO_TITLE = 'I/O runtime';
 const W_BAND_L = W_PAY - COL_W / 2 - GAP - titleW(W_IO_TITLE) - PAD;
 const W_BAND_TOP = W_PB + QUEUE_GAP;
-const W_JOIN_X = W_REF + ACK_DX + 2 * GAP;
+const W_JOIN_X = W_REF + ACK_DX;
+/** The skip share leaves the unmatched box's left edge and turns down as far out as a worker's ack. */
+const W_SKIP_X = W_UN_X - PAD - S2;
 
 const W_LOWER: Lower = {
   pay: W_PAY,
   ref: W_REF,
   joinX: W_JOIN_X,
-  skipFrom: [W_UN, W_POLICY_BOTTOM + S1],
+  above: 'ref',
+  skipFrom: [
+    [W_UN_X, W_ROUTE_Y],
+    [W_SKIP_X, W_ROUTE_Y],
+  ],
+  joinLabel: ['batch ack'],
+  ctrlUnderJoin: true,
   pb: W_PB,
   band: {x: W_BAND_L, y: W_BAND_TOP, w: W_REF + COL_W / 2 + PAD - W_BAND_L, h: PAD + CHIP_H + PAD},
   bandTitle: [W_IO_TITLE],
@@ -221,7 +250,7 @@ const W_LOWER: Lower = {
   srcX: W_SRC_X,
   srcBottom: W_Y + R_NODE,
 };
-const W_WIDTH = W_JOIN_X + R_JOIN + S2 + textW('batch') + M;
+const W_WIDTH = W_JOIN_X + Math.max(R_JOIN + S2 + textW('batch ack'), STROKE / 2 + S2 + textW('unbounded')) + M;
 
 function wide(id: string): React.ReactNode {
   const l = W_LOWER;
@@ -237,12 +266,12 @@ function wide(id: string): React.ReactNode {
 
       <Branches id={id} l={l} un={W_UN} fanFrom={[W_PAY, W_Y + CHIP_H / 2]} busY={W_BUS} routeY={W_ROUTE_Y} />
       {[W_PAY, W_REF].map((x, i) => (
-        <Text key={x} x={x - S2} y={centredBaseline(W_BUS + GAP)} lines={`"${NAMES[i]}"`} anchor="end" />
+        <Text key={x} x={x - S2} y={centredBaseline(W_NAME_Y)} lines={`"${NAMES[i]}"`} anchor="end" />
       ))}
       <Chip x={W_UN_X} y={W_ROUTE_Y} label="unmatched" />
       <Text kind="label" x={W_UN_X} y={W_POLICY_BASE} lines={W_POLICY[0]} />
       <Text x={W_UN_X} y={W_POLICY_BASE + LINE} lines={W_POLICY[1]} />
-      <Text x={W_UN + S2} y={centredBaseline(W_PB + QUEUE_GAP / 2, 2)} lines={['skip:', 'ack share']} />
+      <Text x={W_SKIP_X + S2} y={centredBaseline(W_PB + QUEUE_GAP / 2, 2)} lines={['skip:', 'ack share']} />
 
       <LowerPart id={id} l={l} />
     </>
@@ -282,7 +311,10 @@ const N_LOWER: Lower = {
   pay: N_PAY,
   ref: N_REF,
   joinX: N_UN,
-  skipFrom: [N_UN, N_POLICY_BOTTOM + S1],
+  above: 'skip',
+  skipFrom: [[N_UN, N_POLICY_BOTTOM + S1]],
+  joinLabel: ['batch', 'ack'],
+  ctrlUnderJoin: false,
   pb: N_PB,
   band: {x: N_PL, y: N_BAND_TOP, w: N_REF + COL_W / 2 + PAD - N_PL, h: N_WY + CHIP_H / 2 + PAD - N_BAND_TOP},
   bandTitle: N_IO_TITLE,

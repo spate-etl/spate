@@ -150,6 +150,11 @@ failure paths:
   the next write to that endpoint fails retryably (the framework retries the
   same sealed batch, rotating replicas); `WriteOutcome::fatal(...)` abandons
   the batch and stalls the watermark; `.after(duration)` adds a delay.
+- `WriteOutcome::ok().held()` — the write stays open until
+  `script.release_held()`, whatever the clock does, so a test can assert
+  what the pipeline does while a write is outstanding.
+  `script.held_writes()` counts the writes still waiting. A shutdown waits
+  on a held write like any other, so release it before stopping the run.
 - `script.enqueue_global(...)` — same, for the next write to any endpoint.
 - `script.fail_probe(shard, replica, "down")` / `heal_probe` — drive the
   readiness probe, and with it `/readyz`.

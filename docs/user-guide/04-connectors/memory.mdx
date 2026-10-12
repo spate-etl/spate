@@ -79,8 +79,9 @@ no scripting; the `SinkScript` handle drives everything else:
 | Script method | What it does |
 |---|---|
 | `writes()` | Every write attempt so far, in order: shard, replica, rows, bytes, dedup token, payload, and how it resolved. |
-| `enqueue_for(shard, replica, outcome)` | Script the next write to one endpoint: `WriteOutcome::ok()`, `::retryable("...")`, `::fatal("...")`, each optionally `.after(delay)`. |
+| `enqueue_for(shard, replica, outcome)` | Script the next write to one endpoint: `WriteOutcome::ok()`, `::retryable("...")`, `::fatal("...")`, each optionally `.after(delay)` or `.held()`. |
 | `enqueue_global(outcome)` | Same, for the next otherwise-unscripted write to any endpoint. |
+| `release_held()` / `held_writes()` | Release every write a `.held()` outcome keeps open, and count the writes still waiting. No amount of time releases a held write, so a test can assert what the pipeline does while a write is outstanding without reading a clock. |
 | `fail_probe(shard, replica, reason)` / `heal_probe(...)` | Drive the readiness probe (and with it `/readyz`) per replica. |
 
 Scripting a `retryable` outcome exercises the framework's real retry and

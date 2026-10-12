@@ -448,9 +448,9 @@ over the production backend, RustFS plus a
 (`cargo test -p spate-s3 -- --ignored --test-threads=1`).
 
 SeaweedFS is unproven as a store for this source. SeaweedFS 4.48 reports a
-`ListObjectsV2` page that ends on an empty folder marker, a zero-byte key
-ending in `/`, as the last page, so a backfill completes without the keys that
-sort after it.
+`ListObjectsV2` page as the last one when it ends on a folder marker, a key
+ending in `/`, and every key after it sits under that marker, so a backfill
+completes without those keys.
 
 ## Metrics
 

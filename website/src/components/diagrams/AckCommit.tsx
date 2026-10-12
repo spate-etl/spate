@@ -26,6 +26,7 @@ import {
   Text,
   centredBaseline,
   chipW,
+  linesBottom,
   textW,
 } from './parts';
 
@@ -47,17 +48,16 @@ const Y3 = Y2 + ROW;
 const Y4 = Y3 + LOOP + ROW;
 const Y5 = Y4 + LINE_BOX + 2 * GAP;
 const Y6 = Y5 + ROW + GAP;
-const H = Y6 + GAP + M;
 const COMMIT = 'Source::commit';
+/** The commit label is wider than a lifeline pitch, so it sits under its rail, below the lifelines' end. */
+const COMMIT_BASE = Y6 + RAIL / 2 + S1 + ASCENT;
+const H = linesBottom(COMMIT_BASE) + M;
 
 /**
  * The ack and commit loop as numbered steps: nothing commits past an unresolved batch (INV-1), and
  * acks travel an unbounded channel, never behind data (INV-4).
  */
 function draw(id: string): React.ReactNode {
-  // The commit label is wider than a lifeline pitch, so it sits over the pipeline thread's
-  // lifeline, which breaks around it.
-  const labelTop = Y6 - RAIL / 2 - S1 - LINE_BOX;
   return (
     <>
       <Node x={SRC} y={HEAD_BOTTOM - R_NODE} />
@@ -70,16 +70,9 @@ function draw(id: string): React.ReactNode {
         ]}
       />
 
-      <Lifeline x={SRC} spans={[[HEAD_BOTTOM, H - M]]} />
-      <Lifeline
-        x={P}
-        spans={[
-          [HEAD_BOTTOM, labelTop - S1],
-          [Y6 - RAIL / 2, H - M],
-        ]}
-      />
-      <Lifeline x={W} spans={[[HEAD_BOTTOM, H - M]]} />
-      <Lifeline x={CK} spans={[[HEAD_BOTTOM, Y5], [Y6, H - M]]} />
+      {[SRC, P, W, CK].map((x) => (
+        <Lifeline key={x} x={x} end={Y6} />
+      ))}
 
       <Message id={id} from={SRC} to={P} y={Y1} label="batch" step={1} />
       <Text x={P + S2} y={Y1 + R_STEP + S1 + ASCENT} lines={ACKREF} />
@@ -105,7 +98,8 @@ function draw(id: string): React.ReactNode {
       <Text x={CK - RAIL / 2 - S2} y={centredBaseline((Y5 + Y6) / 2)} lines="watermark" anchor="end" />
       <Step x={CK} y={Y5} n={5} />
 
-      <Message id={id} kind="mark" from={CK} to={SRC} y={Y6} label={COMMIT} over={[SRC, W]} step={6} />
+      <Message id={id} kind="mark" from={CK} to={SRC} y={Y6} step={6} />
+      <Text x={(SRC + CK) / 2} y={COMMIT_BASE} lines={COMMIT} anchor="middle" />
     </>
   );
 }

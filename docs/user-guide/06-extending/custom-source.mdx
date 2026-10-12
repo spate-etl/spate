@@ -53,8 +53,8 @@ What the framework holds you to:
   track individual records.
 - **Idle lanes block, never spin.** `Ok(None)` means nothing arrived, but
   reach it by waiting up to `timeout` (a blocking queue read, a condvar,
-  worst case a sleep). A zero-timeout poll loop busy-spins a pinned
-  pipeline thread at 100% for nothing.
+  worst case a sleep). A zero-timeout poll loop busy-spins a pipeline
+  thread at 100% for nothing.
 
 The batch type holds one poll's payloads and streams them out one at a time,
 all sharing the batch lifetime:

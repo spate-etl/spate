@@ -12,10 +12,11 @@ deserializers. You define the operator graph in code; YAML configures
 connectors and tuning, never the topology.
 
 One process runs one pipeline. CPU work (polling, deserialization, the
-operator chain) runs on pinned threads with zero per-record allocations on
-the hot path; I/O (sink writes, schema fetches, the admin server) runs on a
-small shared tokio runtime. The design is Kubernetes-native: scrape-based
-Prometheus metrics, `/healthz` and `/readyz` probes, and drain-on-SIGTERM.
+operator chain) runs on dedicated pipeline threads, optionally core-pinned,
+with zero per-record allocations on the hot path; I/O (sink writes, schema
+fetches, the admin server) runs on a small shared tokio runtime. The design
+is Kubernetes-native: scrape-based Prometheus metrics, `/healthz` and
+`/readyz` probes, and drain-on-SIGTERM.
 
 ## Guarantees at a glance
 

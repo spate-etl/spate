@@ -1,6 +1,6 @@
 /* The concept figures. Colours come only from the brand tokens, so both themes follow `brand.css`.
    Four line kinds: records in the diagram orange, acks in ink at the records' weight and dashed,
-   control signals muted and dotted, and the watermark and commit as an accent double rail, which
+   control signals as a thin muted dotted line, and the watermark and commit as an accent double rail, which
    differs from records by shape where the dark theme gives both one hue. */
 
 .figure {
@@ -19,8 +19,8 @@
   font-family: var(--ifm-font-family-monospace);
 }
 
-/* The widest landscape viewBox is 604.2 units and the smallest text 12, so from a 554px column up
-   every label renders at 11px or more. Below that the portrait layout takes over. */
+/* No landscape viewBox is wider than 604 units and the smallest text is 12, so from a 554px column
+   up every label renders at 11px or more. Below that the portrait layout takes over. */
 .figure svg.narrow {
   display: none;
 }
@@ -138,8 +138,9 @@
 
 .control {
   stroke: var(--spate-muted);
-  stroke-width: 1.4;
-  stroke-dasharray: 2 4;
+  stroke-width: 1.8;
+  /* Zero-length dashes with round caps draw round dots, unlike the ack line's long dashes. */
+  stroke-dasharray: 0 4;
   stroke-linecap: round;
   fill: none;
 }

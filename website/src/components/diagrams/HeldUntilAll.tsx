@@ -37,7 +37,7 @@ const Y3 = Y2 + ROW;
 const Y4 = Y3 + 2 * ROW;
 const Y5 = Y4 + ROW;
 const Y6 = Y5 + ROW;
-const H = Y6 + GAP + M;
+const H = Y6 + M;
 /** The bars stop clear of the step discs at their ends. */
 const WAIT: [number, number] = [Y2 + S2, Y4 - S2 - S1];
 const HOLD: [number, number] = [Y3 + S2, Y4 - S2 - S1];
@@ -50,10 +50,9 @@ function draw(id: string): React.ReactNode {
   return (
     <>
       <Heads heads={HEADS.map((label, i) => ({x: [P, PAY, REF, C][i], label}))} />
-      <Lifeline x={P} spans={[[HEAD_BOTTOM, H - M]]} />
-      <Lifeline x={PAY} spans={[[HEAD_BOTTOM, H - M]]} />
-      <Lifeline x={REF} spans={[[HEAD_BOTTOM, H - M]]} />
-      <Lifeline x={C} spans={[[HEAD_BOTTOM, Y5], [Y6, H - M]]} />
+      {[P, PAY, REF, C].map((x) => (
+        <Lifeline key={x} x={x} end={Y6} />
+      ))}
 
       <Message id={id} from={P} to={PAY} y={Y1} label="rows" step={1} />
       <Message id={id} from={P} to={REF} y={Y2} label="rows" over={[PAY, REF]} step={2} />

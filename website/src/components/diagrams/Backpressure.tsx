@@ -42,10 +42,11 @@ const P = C - D;
 
 const Y1 = HEAD_BOTTOM + GAP + LINE_BOX + S1 + QUEUE_T / 2;
 const FULL_BASE = Y1 + QUEUE_T / 2 + S1 + ASCENT;
-const BYTES = ['or in-flight bytes', '≥ high watermark'];
-const BYTES_BASE = linesBottom(FULL_BASE) + S2 + ASCENT;
-const BYTES_BOTTOM = linesBottom(BYTES_BASE, BYTES.length);
-const Y2 = BYTES_BOTTOM + GAP + LINE_BOX + S1 + STROKE / 2;
+/** The other trigger sits beside step 1, between the pipeline and controller lifelines. */
+const BYTES = ['or in-flight', 'bytes ≥ high', 'watermark'];
+const BYTES_X = P + R_STEP + S2;
+const BYTES_BASE = centredBaseline(Y1, BYTES.length);
+const Y2 = Math.max(linesBottom(FULL_BASE), linesBottom(BYTES_BASE, BYTES.length)) + GAP + LINE_BOX + S1 + STROKE / 2;
 const Y3 = Y2 + ROW;
 const FRAME_TOP = Y3 + GAP;
 const TAG = 'paused';
@@ -55,7 +56,7 @@ const POLL_Y = Y4 + ROW;
 const FRAME_BOTTOM = POLL_Y + GAP;
 const Y5 = FRAME_BOTTOM + GAP + LINE_BOX + S1 + STROKE / 2;
 const Y6 = Y5 + ROW;
-const H = Y6 + GAP + M;
+const H = Y6 + R_STEP + M;
 
 /**
  * The pipeline thread never blocks on a full queue: it asks the controller to pause its lanes, and
@@ -75,15 +76,9 @@ function draw(id: string): React.ReactNode {
       <Node x={S} y={HEAD_BOTTOM - R_NODE} />
       <Text kind="label" x={S} y={HEAD_BOTTOM - 2 * R_NODE - S1 - DESCENT} lines="source" anchor="middle" />
 
-      <Lifeline
-        x={P}
-        spans={[
-          [HEAD_BOTTOM, BYTES_BASE - ASCENT - S1],
-          [BYTES_BOTTOM + S1, H - M],
-        ]}
-      />
-      <Lifeline x={C} spans={[[HEAD_BOTTOM, H - M]]} />
-      <Lifeline x={S} spans={[[HEAD_BOTTOM, H - M]]} />
+      {[P, C, S].map((x) => (
+        <Lifeline key={x} x={x} end={Y6} />
+      ))}
 
       <Queue x={qx} y={Y1} full />
       <Text x={M} y={FULL_BASE} lines="full queue" />
@@ -91,7 +86,7 @@ function draw(id: string): React.ReactNode {
       <Edge id={id} points={[[P - R_STEP, Y1], [arrowEnd, Y1]]} />
       <Reject x={(P - R_STEP + arrowEnd) / 2} y={Y1} />
       <Step x={P} y={Y1} n={1} />
-      <Text x={M} y={BYTES_BASE} lines={BYTES} />
+      <Text x={BYTES_X} y={BYTES_BASE} lines={BYTES} />
 
       <Message id={id} kind="control" from={P} to={C} y={Y2} label="pause request" step={2} />
       <Message id={id} kind="control" from={C} to={S} y={Y3} label="Source::pause" step={3} />

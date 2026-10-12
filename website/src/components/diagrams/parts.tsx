@@ -63,6 +63,13 @@ export const QUEUE_T = 14;
 export const QUEUE_W = 3 * CELL_PITCH + CELL;
 /** The space between two regions a queue crosses: the queue, `S2` clear of each edge. */
 export const QUEUE_GAP = QUEUE_W + 2 * S2;
+/** How far a stacked region's copies reach above and right of it. */
+export const STACK = 2 * S1;
+
+/** The rendered width of 13-unit title `text`. */
+export function titleW(text: string): number {
+  return text.length * TITLE_CHAR;
+}
 
 /** The rendered width of 12-unit `text`. */
 export function textW(text: string): number {
@@ -242,17 +249,17 @@ export function Run({id, labels, boxes, vertical}: {id: string; labels: string[]
 
 type RegionProps = {x: number; y: number; w: number; h: number; stacked?: boolean};
 
-/** A thread or runtime boundary. `stacked` draws two copies above it for "× N". */
+/**
+ * A thread or runtime boundary. `stacked` draws two copies behind it for "× N", each offset `S1`
+ * up and right, so the stack shows along the top and right edges and reaches `STACK` past them.
+ */
 export function Region({x, y, w, h, stacked}: RegionProps): React.JSX.Element {
   return (
     <g>
-      {stacked && (
-        <>
-          {/* Only the strip above the front box shows, so the copies stop short of its contents. */}
-          <rect className={styles.behind} x={x + 2 * S1} y={y - 10} width={w - 4 * S1} height={12} rx="6" />
-          <rect className={styles.behind} x={x + S1} y={y - 5} width={w - 2 * S1} height={12} rx="6" />
-        </>
-      )}
+      {stacked &&
+        [2, 1].map((k) => (
+          <rect key={k} className={styles.behind} x={x + k * S1} y={y - k * S1} width={w} height={h} rx="8" />
+        ))}
       <rect className={styles.region} x={x} y={y} width={w} height={h} rx="8" data-region="" />
     </g>
   );
@@ -267,17 +274,20 @@ type TextProps = {
   anchor?: 'start' | 'middle' | 'end';
 };
 
-/** Lines of text `LINE` apart, or `TITLE_LINE` for a title. */
+/**
+ * Lines of text `LINE` apart, or `TITLE_LINE` for a title. The lines form one block, marked
+ * `data-block` with its kind so the layout tests can find a region's title and its wrapped notes.
+ */
 export function Text({x, y, lines, kind = 'note', anchor = 'start'}: TextProps): React.JSX.Element {
   const all = typeof lines === 'string' ? [lines] : lines;
   return (
-    <>
+    <g data-block={kind}>
       {all.map((line, i) => (
         <text key={line} className={styles[kind]} x={x} y={y + i * (kind === 'title' ? TITLE_LINE : LINE)} textAnchor={anchor}>
           {line}
         </text>
       ))}
-    </>
+    </g>
   );
 }
 
@@ -335,13 +345,14 @@ export function Step({x, y, n}: {x: number; y: number; n: number}): React.JSX.El
   );
 }
 
-/** A participant's lifeline in a sequence figure, drawn as segments so a note can interrupt it. */
-export function Lifeline({x, spans}: {x: number; spans: [number, number][]}): React.JSX.Element {
+/**
+ * A participant's lifeline in a sequence figure: one unbroken line from under the headers to `end`,
+ * the figure's last row. Labels keep clear of it; a rail drawn along it covers it.
+ */
+export function Lifeline({x, end}: {x: number; end: number}): React.JSX.Element {
   return (
     <g data-lifeline={x}>
-      {spans.map(([y0, y1]) => (
-        <path key={y0} className={styles.lifeline} d={`M${x} ${y0} L${x} ${y1}`} />
-      ))}
+      <path className={styles.lifeline} d={`M${x} ${HEAD_BOTTOM} L${x} ${end}`} />
     </g>
   );
 }
@@ -447,32 +458,39 @@ const LEGEND_TEXT: Record<LegendEntry, string> = {
   wait: 'rows wait in the sink',
 };
 
-/** Every swatch is drawn in one 28 × 14 box, so items line up whatever mark they show. */
+/**
+ * Every swatch is drawn in one 28 × 20 box, the legend's line height, so items line up whatever
+ * mark they show and a lifeline swatch runs the full height of its row.
+ */
 const SW_W = 28;
-const SW_H = 14;
+const SW_H = 20;
 const SW_MID = SW_H / 2;
 
 function Swatch({entry}: {entry: LegendEntry}): React.JSX.Element {
-  // A dashed swatch is cut to whole dashes of its pattern, so it starts and ends on a dash.
+  // A dashed or dotted swatch is cut to whole periods of its pattern, so it starts and ends on a mark.
   const line = (className: string, inset = 2) => (
     <path className={className} d={`M${inset} ${SW_MID} L${SW_W - inset} ${SW_MID}`} />
+  );
+  // A box mark of height `h`, centred on the swatch's middle line.
+  const box = (className: string, x: number, w: number, h: number, rx = 3) => (
+    <rect className={className} x={x} y={SW_MID - h / 2} width={w} height={h} rx={rx} />
   );
   const marks: Record<LegendEntry, React.ReactNode> = {
     data: line(styles.data),
     ack: line(styles.ack, 5),
-    control: line(styles.control, 4),
+    control: line(styles.control),
     mark: (
       <>
         {line(styles.markOuter)}
         {line(styles.markInner)}
       </>
     ),
-    region: <rect className={styles.region} x={5} y={1} width={18} height={12} rx="3" />,
-    chip: <rect className={styles.chip} x={3} y={2} width={22} height={10} rx="3" />,
+    region: box(styles.region, 5, 18, 12),
+    chip: box(styles.chip, 3, 22, 10),
     queue: (
       <g>
         {[0, 1, 2, 3].map((i) => (
-          <rect key={i} className={i === 0 ? styles.cellFull : styles.cell} x={5 + i * 4.5} y={2} width={4} height={10} />
+          <rect key={i} className={i === 0 ? styles.cellFull : styles.cell} x={5 + i * 4.5} y={SW_MID - 5} width={4} height={10} />
         ))}
       </g>
     ),
@@ -481,16 +499,19 @@ function Swatch({entry}: {entry: LegendEntry}): React.JSX.Element {
     join: <circle className={styles.join} cx={SW_W / 2} cy={SW_MID} r={4} />,
     lifeline: <path className={styles.lifeline} d={`M${SW_W / 2} 0 L${SW_W / 2} ${SW_H}`} />,
     reject: (
-      <path className={styles.reject} d={`M${SW_W / 2 - 4} 3 L${SW_W / 2 + 4} 11 M${SW_W / 2 + 4} 3 L${SW_W / 2 - 4} 11`} />
+      <path
+        className={styles.reject}
+        d={`M${SW_W / 2 - 4} ${SW_MID - 4} L${SW_W / 2 + 4} ${SW_MID + 4} M${SW_W / 2 + 4} ${SW_MID - 4} L${SW_W / 2 - 4} ${SW_MID + 4}`}
+      />
     ),
     frame: (
       <>
-        <rect className={styles.frame} x={3} y={1} width={22} height={12} rx="2" />
-        <rect className={styles.frameTag} x={3} y={1} width={10} height={5} rx="1" />
+        {box(styles.frame, 3, 22, 12, 2)}
+        <rect className={styles.frameTag} x={3} y={SW_MID - 6} width={10} height={5} rx="1" />
       </>
     ),
-    hold: <rect className={styles.hold} x={SW_W / 2 - 3} y={1} width={6} height={12} />,
-    wait: <rect className={styles.wait} x={SW_W / 2 - 3} y={1} width={6} height={12} />,
+    hold: box(styles.hold, SW_W / 2 - 3, 6, 12, 0),
+    wait: box(styles.wait, SW_W / 2 - 3, 6, 12, 0),
   };
   return (
     <svg className={styles.swatch} viewBox={`0 0 ${SW_W} ${SW_H}`} width={SW_W} height={SW_H} aria-hidden="true">

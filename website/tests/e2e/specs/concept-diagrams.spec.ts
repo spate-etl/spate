@@ -108,8 +108,10 @@ function collisions(selector: string): string[] {
 /**
  * Alignment faults in the visible drawings, in SVG user units. Stages in a run share a centre line
  * and one gap; the arrows between them share a length and stop the same distance from the box they
- * point at; every region keeps one padding on all four sides, the same across regions; sequence
- * lifelines are evenly spaced and every step disc sits on one; no text renders below 11px.
+ * point at; every region keeps one padding on all four sides, the same across regions; every region
+ * has one title, set at the same inset from its top-left corner as every other region's; no text
+ * wrapped inside a region leaves a single word on a line; sequence lifelines are single unbroken
+ * segments, evenly spaced, and every step disc sits on one; no text renders below 11px.
  */
 function misalignments(selector: string): string[] {
   const TOL = 0.5;
@@ -185,6 +187,50 @@ function misalignments(selector: string): string[] {
         if (!near(value, padding, TEXT_TOL)) {
           found.push(`${name} region at ${outer.x0.toFixed(0)},${outer.y0.toFixed(0)} pads ${side} ${value.toFixed(2)}, not ${padding.toFixed(2)}`);
         }
+      }
+    }
+
+    // Every region carries one title, and every title sits the same distance in from its region's
+    // top-left corner.
+    const regionBoxes = drawn('rect[data-region]').map(box);
+    const within = (b: {x0: number; y0: number; x1: number; y1: number}) =>
+      regionBoxes.find((r) => b.x0 >= r.x0 && b.x1 <= r.x1 && b.y0 >= r.y0 && b.y1 <= r.y1);
+    const offsets = regionBoxes.map((region) => {
+      const titles = drawn('[data-block="title"]')
+        .map((block) => box(block.querySelector('text')!))
+        .filter((b) => within(b) === region);
+      if (titles.length !== 1) {
+        found.push(`${name} region at ${region.x0.toFixed(0)},${region.y0.toFixed(0)} has ${titles.length} titles`);
+        return undefined;
+      }
+      return {at: region, dx: titles[0].x0 - region.x0, dy: titles[0].y0 - region.y0};
+    });
+    const placed = offsets.filter((o) => o !== undefined);
+    for (const axis of ['dx', 'dy'] as const) {
+      if (placed.length && spread(placed.map((o) => o[axis])) > TOL) {
+        const list = placed.map((o) => `${o.at.x0.toFixed(0)},${o.at.y0.toFixed(0)}: ${o[axis].toFixed(2)}`).join('; ');
+        found.push(`${name} region titles sit at different ${axis === 'dx' ? 'left' : 'top'} insets (${list})`);
+      }
+    }
+
+    // A note or label wrapped over several lines inside a region never leaves one word on a line.
+    for (const block of drawn('[data-block="note"], [data-block="label"]')) {
+      const lines = Array.from(block.querySelectorAll('text'));
+      if (lines.length < 2 || !within(box(lines[0]))) continue;
+      for (const line of lines) {
+        if (!/\S\s+\S/.test(line.textContent ?? '')) {
+          found.push(`${name} ${JSON.stringify(line.textContent)} is a one-word line in a wrapped block`);
+        }
+      }
+    }
+
+    // A lifeline is one unbroken vertical segment.
+    for (const lifeline of drawn('[data-lifeline]')) {
+      const paths = lifeline.querySelectorAll('path');
+      const d = paths[0]?.getAttribute('d') ?? '';
+      const pts = d.match(/-?[\d.]+/g)?.map(Number) ?? [];
+      if (paths.length !== 1 || (d.match(/[ML]/g) ?? []).length !== 2 || pts[0] !== pts[2]) {
+        found.push(`${name} lifeline at x=${Number(lifeline.getAttribute('data-lifeline')).toFixed(1)} is ${paths.length} paths, not one segment`);
       }
     }
 

@@ -76,8 +76,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
    yourself *before* building the pipeline (the demos use `Pretty`).
 2. **The metrics exporter** — installed from the config's `metrics` section.
 3. **The I/O runtime** — a tokio runtime with `pipeline.io_threads` workers
-   (thread name `spate-io`) that will host sink workers, the checkpointer,
-   and the admin server.
+   (thread name `spate-io`) that will host sink workers and the admin server.
 
 The constructor does process init because **metric handles bind to the
 recorder present at the moment they are constructed**. A handle built before

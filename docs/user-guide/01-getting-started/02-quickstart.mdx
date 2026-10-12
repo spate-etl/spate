@@ -69,8 +69,8 @@ are identical. See the [memory connector](../04-connectors/memory.mdx).
 
 Payloads are comma-separated words. The deserializer splits them (one
 payload in, N records out), the chain filters and transforms, and the
-terminal `.sink(...)` stage encodes rows and routes them to the shard
-queues. The factory closure runs once per pipeline thread; `ChainCtx`
+terminal `.sink(...)` stage routes rows to shards and encodes them into the
+shard queues. The factory closure runs once per pipeline thread; `ChainCtx`
 carries that thread's plumbing (queues, byte budget, pipeline name):
 
 ```rust file=crates/spate/examples/memory_pipeline.rs region=chain

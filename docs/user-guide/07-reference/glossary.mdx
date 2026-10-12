@@ -246,7 +246,7 @@ one per generated lane, set by `partitions`.
 ### Pipeline thread
 
 One of the N plain `std::thread`s (optionally core-pinned) running the hot
-path: poll lanes → deserialize → operator chain → route to shard queues.
+path: poll lanes → deserialize → operator chain → route → encode → shard queues.
 All CPU work happens here, with zero per-record allocations; I/O lives on
 the tokio [I/O runtime](../02-concepts/01-architecture.mdx) instead.
 

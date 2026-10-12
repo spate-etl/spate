@@ -1,11 +1,11 @@
 ---
-description: "Pinned CPU threads, a shared I/O runtime, and the control plane that make up a running pipeline process."
+description: "CPU threads, a shared I/O runtime, and the control plane that make up a running pipeline process."
 ---
 
 # Architecture
 
 One process runs one pipeline. Inside that process, work splits along a
-hard line: CPU-bound record processing on pinned OS threads, I/O on a small
+hard line: CPU-bound record processing on OS threads, I/O on a small
 shared tokio runtime, and a control plane coordinating both.
 
 <ArchitectureDiagram />
@@ -19,7 +19,7 @@ overridable in YAML (`pipeline.threads`). Each thread owns a set of source
 runs the whole hot path single-threaded:
 
 ```text
-poll → deserialize → operator chain → route to shard queues
+poll → deserialize → operator chain → route → encode → shard queues
 ```
 
 These decisions define this stage:
@@ -27,7 +27,7 @@ These decisions define this stage:
 - **Deserialization happens here, not on an I/O task.** Payloads borrow
   from the source's buffers, and those borrows cannot cross threads.
   Keeping deserialization on the pipeline thread makes zero-copy legal and
-  keeps all CPU work on the pinned cores.
+  keeps all CPU work on the pipeline threads.
 - **The chain is monomorphized.** Operators (`map`, `filter`, `flat_map`,
   `try_map`, ...) compose statically, and the whole chain compiles to one
   loop. Type erasure happens exactly once, at the chain boundary, with one
@@ -36,11 +36,14 @@ These decisions define this stage:
   nanoseconds and zero allocations per record (see
   [ADR-0013](../../adr/0013-zero-copy-seam.md)).
 
-The chain's terminal stage encodes records into the sink's wire format
-(encoding is CPU work, so it happens *on the pipeline thread*) and routes them to
-per-shard bounded queues with `try_send`, never a blocking send. When a
-queue is full, the source lanes pause and the thread keeps polling; see
+The chain's terminal stage routes each record to a shard and encodes it into
+the sink's wire format (encoding is CPU work, so it happens *on the pipeline
+thread*), then hands the chunk to that shard's bounded queue with `try_send`,
+never a blocking send. When a queue is full, the source lanes pause and the
+thread keeps polling; see
 [Backpressure](03-backpressure.mdx).
+
+<BackpressureDiagram />
 
 You build one chain per pipeline thread via the builder's `.chains(|ctx| ...)`
 factory. Each call receives a `ChainCtx` carrying that thread's queue
@@ -104,6 +107,8 @@ Acknowledgments arrive over an unbounded channel, so the ack path can never
 block behind data, and per-partition contiguity tracking turns them into
 committable watermarks. [Delivery guarantees](02-delivery-guarantees.mdx)
 covers that machinery.
+
+<AckCommitDiagram />
 
 ## Why one process = one pipeline
 

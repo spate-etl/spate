@@ -113,6 +113,8 @@ ack:
 - **Held until all.** A batch whose records fan across three destinations is not
   committable until all three have flushed the batches those records landed in.
 
+<HeldUntilAllDiagram />
+
 ## The trade: write size vs. checkpoint lag
 
 Per-destination write size is governed by each sink's

@@ -12,7 +12,7 @@ these pages are the working subset a pipeline author needs.
 
 ## [1. Architecture](01-architecture.mdx)
 
-The anatomy of a running pipeline process: pinned pipeline threads (poll →
+The anatomy of a running pipeline process: pipeline threads (poll →
 deserialize → operator chain → route), the single shared tokio I/O runtime
 (sink workers, admin server, async fetchers), and the control plane. Why one
 process runs exactly one pipeline.

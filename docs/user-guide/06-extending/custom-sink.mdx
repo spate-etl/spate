@@ -37,7 +37,7 @@ each order line as a JSON object on a line of its own:
 
 Contracts:
 
-- **No I/O, ever.** `encode` runs inside the hot loop on a pinned pipeline
+- **No I/O, ever.** `encode` runs inside the hot loop on a pipeline
   thread. A network call or blocking syscall here stalls polling for every
   lane on that thread.
 - **Frames must concatenate.** Chunks encoded on different pipeline threads

@@ -57,9 +57,10 @@ The process splits work between two pools
 ([Architecture](../02-concepts/01-architecture.mdx)):
 
 - **Pipeline threads** (plain `std::thread`) run the hot path: lane polling,
-  deserialization, the operator chain, row encoding, shard routing.
+  deserialization, the operator chain, shard routing, row encoding.
 - **The I/O runtime** (`io_threads` tokio workers, default **2**) runs sink
-  shard workers, flush timers, the checkpointer, and the admin server.
+  shard workers, flush timers, and the admin server. The checkpointer runs
+  on the controller thread.
 
 When `pipeline.threads` is unset, the count derives at startup as
 `available_parallelism` minus the I/O reserve (the `io_threads` workers plus

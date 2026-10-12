@@ -5,7 +5,10 @@ import {useAnchorTargetClassName} from '@docusaurus/theme-common';
 import MDXComponents from '@theme-original/MDXComponents';
 
 import MarkdownTable from '../components/MarkdownTable';
+import AckCommitDiagram from '../components/diagrams/AckCommit';
 import ArchitectureDiagram from '../components/diagrams/Architecture';
+import BackpressureDiagram from '../components/diagrams/Backpressure';
+import HeldUntilAllDiagram from '../components/diagrams/HeldUntilAll';
 import SplitDiagram from '../components/diagrams/Split';
 import {useToolchain} from '../toolchain';
 
@@ -29,4 +32,15 @@ function Edition(): React.JSX.Element {
   return <>{useToolchain().edition}</>;
 }
 
-export default {...MDXComponents, Anchor, Msrv, Edition, ArchitectureDiagram, SplitDiagram, table: MarkdownTable};
+export default {
+  ...MDXComponents,
+  Anchor,
+  Msrv,
+  Edition,
+  ArchitectureDiagram,
+  BackpressureDiagram,
+  AckCommitDiagram,
+  SplitDiagram,
+  HeldUntilAllDiagram,
+  table: MarkdownTable,
+};

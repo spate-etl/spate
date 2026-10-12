@@ -81,6 +81,15 @@ export function textW(text: string): number {
   return text.length * CHAR;
 }
 
+/**
+ * Sets a text line to `width`, the width the layout gave it. Some renderers round glyph advances:
+ * Linux Chromium sets this face at 7.04 units per 12-unit character against `CHAR`'s 7.4, which
+ * would move every edge sized to text. Spacing absorbs the difference; glyphs keep their shape.
+ */
+function pinnedWidth(width: number): {textLength: number; lengthAdjust: 'spacing'} {
+  return {textLength: width, lengthAdjust: 'spacing'};
+}
+
 /** A box wide enough for the longest of `label`'s lines. */
 export function chipW(label: string | string[]): number {
   const lines = typeof label === 'string' ? [label] : label;
@@ -248,7 +257,13 @@ export function Chip({x, y, label, w = chipW(label), h = CHIP_H, head}: ChipProp
     <g data-chip="">
       <rect className={head ? styles.head : styles.chip} x={x} y={y - h / 2} width={w} height={h} rx="4" />
       {lines.map((line, i) => (
-        <text key={line} className={styles.chipLabel} x={x + w / 2} y={first + i * LINE} textAnchor="middle">
+        <text
+          key={line}
+          className={styles.chipLabel}
+          x={x + w / 2}
+          y={first + i * LINE}
+          textAnchor="middle"
+          {...pinnedWidth(textW(line))}>
           {line}
         </text>
       ))}
@@ -304,7 +319,13 @@ export function Text({x, y, lines, kind = 'note', anchor = 'start'}: TextProps):
   return (
     <g data-block={kind}>
       {all.map((line, i) => (
-        <text key={line} className={styles[kind]} x={x} y={y + i * (kind === 'title' ? TITLE_LINE : LINE)} textAnchor={anchor}>
+        <text
+          key={line}
+          className={styles[kind]}
+          x={x}
+          y={y + i * (kind === 'title' ? TITLE_LINE : LINE)}
+          textAnchor={anchor}
+          {...pinnedWidth(kind === 'title' ? titleW(line) : textW(line))}>
           {line}
         </text>
       ))}

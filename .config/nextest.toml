@@ -16,7 +16,7 @@ fail-fast = false
 slow-timeout = { period = "30s", terminate-after = 4 }
 
 # Docker/testcontainers runs:
-#   cargo nextest run --profile docker --run-ignored all
+#   cargo nextest run --profile docker --run-ignored all --all-features
 #
 # These boot real containers (RustFS, ElasticMQ, NATS, Kafka, ClickHouse). Warn
 # late and do not terminate: a cold image pull exceeds any period worth setting,

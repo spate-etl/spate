@@ -102,7 +102,6 @@ const config: Config = {
   },
 
   markdown: {
-    mermaid: true,
     hooks: {
       // `onBrokenLinks: 'throw'` above governs links Docusaurus has resolved
       // into routes. A Markdown link such as `[x](./other.md)` that resolves
@@ -161,7 +160,6 @@ const config: Config = {
   ],
 
   themes: [
-    '@docusaurus/theme-mermaid',
     [
       '@easyops-cn/docusaurus-search-local',
       {
@@ -203,18 +201,15 @@ const config: Config = {
             'STYLE.md',
           ],
           // Renders `file=`/`region=` fences from the sources under `crates/`
-          // and `examples/` (docs/STYLE.md § 10). Registered BEFORE the defaults
-          // rather than after them (`remarkPlugins`) for two reasons: the
-          // default list ends with plugins that mutate the tree and can throw
-          // first under this site's `onBrokenMarkdownLinks: 'throw'`, so a
-          // stale region should report as a stale region; and the mermaid
-          // plugin *replaces* a fenced node, so a ```mermaid fence carrying
-          // `file=` would never reach a plugin registered after it.
+          // and `examples/` (docs/STYLE.md § 10). Registered BEFORE the
+          // defaults, where `remarkPlugins` would run after them: the default
+          // list ends with plugins that mutate the tree and can throw first
+          // under this site's `onBrokenMarkdownLinks: 'throw'`, and a stale
+          // region should report as a stale region.
           //
-          // `repoLinks` is here for the second reason as well: the default list
-          // includes the plugin that resolves Markdown links, and `repo:` is a
-          // scheme it does not know. Resolving first means it only ever sees a
-          // finished URL.
+          // `repoLinks` runs first as well: the default list includes the
+          // plugin that resolves Markdown links, and `repo:` is a scheme it does
+          // not know. Resolving first means it only ever sees a finished URL.
           beforeDefaultRemarkPlugins: [
             transclude,
             [repoLinks, {githubUrl, sourceRef: SOURCE_REF}],

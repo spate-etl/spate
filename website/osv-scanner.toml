@@ -4,11 +4,11 @@
 # advisory again from that day. The date is the review point.
 
 [[IgnoredVulns]]
-id = "GHSA-w3rx-r6r6-pgpr"
-ignoreUntil = 2027-02-23
-reason = "image-size reaches this tree as @docusaurus/mdx-loader -> image-size and runs only while the site builds, over images committed to this repository. The advisory range covers every published release up to and including 2.0.2, which is the newest, so no upgrade and no overrides entry clears it."
+id = "GHSA-vfj7-8cjw-p6xm"
+ignoreUntil = 2027-04-12
+reason = "braces reaches this tree through @docusaurus/core -> chokidar and @docusaurus/utils -> micromatch. It expands glob patterns from this site's own configuration while the site builds or serves locally, and never sees visitor input. The advisory range covers every published release up to and including 3.0.3, which is the newest, so no upgrade and no overrides entry clears it."
 
 [[IgnoredVulns]]
-id = "GHSA-5p2g-fcmc-qvqq"
-ignoreUntil = 2027-02-23
-reason = "Same package, same reach and same absence of a fixed release as GHSA-w3rx-r6r6-pgpr above."
+id = "GHSA-ch52-4w7c-c8xp"
+ignoreUntil = 2027-04-12
+reason = "http-cache-semantics reaches this tree as @docusaurus/core -> update-notifier -> got -> cacheable-request, which caches the CLI's own version check against the npm registry. The advisory concerns a shared cache serving one user's response to another, and this tree never caches a response for more than one user. The advisory range covers every release up to and including 4.2.0, and 4.3.0 leaves the max-stale handling unchanged, so no upgrade clears it."

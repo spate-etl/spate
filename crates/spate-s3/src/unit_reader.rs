@@ -437,3 +437,104 @@ fn one_object(delivery: &Delivery) -> Result<ObjectEntry, String> {
         )),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testutil::TestLineFramer;
+    use spate_core::checkpoint::Checkpointer;
+    use spate_core::feed::Unit;
+    use spate_test::{FeedScript, scripted_feed};
+
+    /// A reader over a scripted feed. The runtime only backs `LaneParts`:
+    /// these tests open no lane and spawn no fetcher.
+    fn reader() -> (UnitReader, FeedScript, tokio::runtime::Runtime) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let (feed, script) = scripted_feed();
+        let parts = LaneParts {
+            store: Arc::new(object_store::memory::InMemory::new()),
+            handle: rt.handle().clone(),
+            issuer: Checkpointer::new().handle(),
+            make_framer: Arc::new(|| Box::new(TestLineFramer::new(1 << 20))),
+            compression: Compression::Auto,
+            chunk_bytes: 1 << 16,
+            range_bytes: 1 << 16,
+            retry_base: Duration::from_millis(1),
+            metrics: None,
+        };
+        (UnitReader::new(Arc::new(feed), parts), script, rt)
+    }
+
+    /// Receive one scripted unit and hold it as `open` does, returning its
+    /// partition, its receipt and the tracker its lane would report
+    /// end-of-input on.
+    fn hold_one(
+        reader: &mut UnitReader,
+        script: &FeedScript,
+    ) -> (PartitionId, Receipt, Arc<SplitTracker>) {
+        let receipt = script.deliver(Unit::new("u", b"unused".to_vec()));
+        let delivery = reader.feed.receive(1).unwrap().pop().unwrap();
+        let partition = PartitionId(reader.next);
+        reader.next += 1;
+        let tracker = Arc::new(SplitTracker::new());
+        reader.held.insert(
+            partition,
+            Held {
+                receipt: delivery.receipt,
+                unit: delivery.unit.id,
+                lane: LaneId(partition.0),
+                pause: Arc::new(AtomicBool::new(false)),
+                tracker: Arc::clone(&tracker),
+                last_committed: None,
+                hinted: false,
+                failing: None,
+            },
+        );
+        (partition, receipt, tracker)
+    }
+
+    /// Pins INV-1 in `commit`: with end-of-input decided at `T`, a
+    /// watermark below `T` acknowledges nothing, in `commit` or in the sweep
+    /// after it, and a watermark at `T` acknowledges the unit once.
+    #[test]
+    fn commit_acknowledges_only_at_the_terminal_watermark() {
+        let (mut reader, script, _rt) = reader();
+        let (p, receipt, tracker) = hold_one(&mut reader, &script);
+        tracker.set_terminal(5);
+
+        reader.commit(&[(p, 3)]).unwrap();
+        assert_eq!(
+            script.acknowledged(),
+            vec![],
+            "acknowledged by commit at W < T"
+        );
+        reader.settle().unwrap();
+        assert_eq!(
+            script.acknowledged(),
+            vec![],
+            "acknowledged by the sweep at W < T"
+        );
+
+        reader.commit(&[(p, 5)]).unwrap();
+        reader.settle().unwrap();
+        assert_eq!(script.acknowledged(), vec![receipt]);
+    }
+
+    /// Pins INV-1 in the sweep: a watermark that reached the reader before
+    /// end-of-input acknowledges the unit only when it equals the terminal
+    /// watermark the lane then decides.
+    #[test]
+    fn the_sweep_acknowledges_only_at_the_terminal_watermark() {
+        let (mut reader, script, _rt) = reader();
+        let (below, _, below_tracker) = hold_one(&mut reader, &script);
+        let (at, at_receipt, at_tracker) = hold_one(&mut reader, &script);
+        reader.commit(&[(below, 3), (at, 5)]).unwrap();
+        below_tracker.set_terminal(5);
+        at_tracker.set_terminal(5);
+
+        reader.settle().unwrap();
+        assert_eq!(script.acknowledged(), vec![at_receipt]);
+    }
+}

@@ -124,6 +124,11 @@ impl Rustfs {
     ///
     /// Fails when the request cannot be signed or sent, or the server answers
     /// anything but `200`.
+    ///
+    /// # Panics
+    ///
+    /// Panics when called from async code on a tokio runtime. Call it through
+    /// `tokio::task::spawn_blocking` there.
     pub fn create_bucket(&self, bucket: &str) -> Result<(), String> {
         let store = AmazonS3Builder::new()
             .with_endpoint(self.endpoint())

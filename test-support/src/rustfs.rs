@@ -123,7 +123,7 @@ impl Rustfs {
     /// # Errors
     ///
     /// Fails when the request cannot be signed or sent, or the server answers
-    /// anything but `200`, as it does for a bucket that exists.
+    /// anything but `200`.
     pub fn create_bucket(&self, bucket: &str) -> Result<(), String> {
         let store = AmazonS3Builder::new()
             .with_endpoint(self.endpoint())

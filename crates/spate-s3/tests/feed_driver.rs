@@ -10,14 +10,22 @@ use spate_core::checkpoint::Checkpointer;
 use spate_core::config::PipelineConfig;
 use spate_core::error::{ErrorClass, SourceError};
 use spate_core::feed::memory::{FeedCounts, MemoryFeed};
-use spate_core::feed::{Feed, FeedErrorKind, Receipt, Unit};
-use spate_core::pipeline::ExitState;
+use spate_core::feed::{
+    Confirmation, Delivery, Feed, FeedError, FeedErrorKind, FeedWaker, Receipt, Unit,
+};
+use spate_core::ops::chain_owned;
+use spate_core::pipeline::{ExitState, Pipeline, RuntimeOptions};
+use spate_core::sink::{KeyHashRouter, SinkPoolConfig};
 use spate_core::source::{Source, SourceCtx};
 use spate_s3::{DescriptorObject, S3Source, SplitDescriptor};
-use spate_test::{FeedScript, SinkScript, WriteOutcome, scripted_feed, wait_until};
+use spate_test::{
+    BytesPassthrough, FeedScript, PipelineRun, SinkScript, TestEncoder, WriteOutcome, capture_sink,
+    scripted_feed, wait_until,
+};
+use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use support::{
     Launched, PipelineYaml, captured_rows, key_of, launch_customized, line_framer, lines_bytes,
@@ -125,8 +133,7 @@ fn a_redelivered_unit_is_read_again_from_its_start() {
 }
 
 /// Pins that two deliveries of one unit held at once are each read in full
-/// and each acknowledged under its own receipt. Regression guard for keying
-/// held units by unit id.
+/// and each acknowledged under its own receipt.
 #[test]
 fn a_duplicate_delivery_of_a_held_unit_is_read_twice() {
     let dir = tempfile::tempdir().unwrap();
@@ -249,8 +256,9 @@ fn a_unit_is_acknowledged_only_after_its_last_record_is_acknowledged() {
 }
 
 /// Pins the in-process feed end to end: a unit with rows and a zero-byte
-/// unit are acknowledged, and a unit over a missing object and a unit whose
-/// body names two objects are failed on every delivery until the feed
+/// unit are acknowledged, and a unit over a missing object, a unit whose body
+/// names two objects, a unit whose body is not a descriptor and a unit that
+/// names a byte range are failed on every delivery until the feed
 /// dead-letters them.
 #[test]
 fn in_process_units_are_acknowledged_or_dead_lettered_at_the_cap() {
@@ -277,20 +285,35 @@ fn in_process_units_are_acknowledged_or_dead_lettered_at_the_cap() {
         unit_over(&data, "empty.ndjson"),
         unit_over(&data, "missing.ndjson"),
         two_members,
+        Unit::new("not-a-descriptor", b"{ not a descriptor".to_vec()),
+        Unit::new(
+            "ranged",
+            support::ranged_spec(&data, "other.ndjson", 0, 12, b'\n').descriptor,
+        ),
     ] {
         drop(feed.publish(unit));
     }
     let l = launch_on_feed(&data, Arc::new(feed.clone()), |_| {});
 
     let counts = |c: FeedCounts| (c.visible, c.held, c.dead_lettered, c.acknowledged);
-    wait_until(DEADLINE, "every unit acknowledged or dead-lettered", || {
-        counts(feed.counts()) == (0, 0, 2, 2)
+    wait_until(DEADLINE, "every unit settled", || {
+        let c = feed.counts();
+        c.visible == 0 && c.held == 0
     });
     stop(&l);
+    assert_eq!(counts(feed.counts()), (0, 0, 4, 2));
 
     let mut dead: Vec<String> = feed.dead_letters().into_iter().map(|u| u.id).collect();
     dead.sort();
-    assert_eq!(dead, ["missing.ndjson", "two-members"]);
+    assert_eq!(
+        dead,
+        [
+            "missing.ndjson",
+            "not-a-descriptor",
+            "ranged",
+            "two-members"
+        ]
+    );
     let got = captured_rows(&l.script);
     assert_eq!(sorted(got), sorted(rows), "the rows unit is read once");
 }
@@ -331,4 +354,218 @@ fn a_feed_refuses_coordination_on_the_same_source() {
     };
     assert_eq!(class, ErrorClass::Fatal);
     assert!(reason.contains("coordinator"), "{reason}");
+}
+
+/// Control-plane passes a test lets run while a sink write is held. Each
+/// pass renews every held unit once, so the count is read from the feed.
+const PASSES_WHILE_HELD: usize = 50;
+
+/// Launch over `feed` with one record per source batch and one row per sink
+/// write, so an object's records span many sink writes.
+fn launch_one_row_writes(
+    data: &Path,
+    feed: Arc<dyn Feed>,
+    pre: impl FnOnce(&SinkScript),
+) -> Launched {
+    let yaml = PipelineYaml::file("s3-feed-row-writes", data)
+        .threads(1)
+        .build()
+        .replace(
+            "sink: { capture: {} }",
+            "sink: { capture: { chunk: { target_bytes: 64 } } }",
+        );
+    let mut config = PipelineConfig::from_str(&yaml).unwrap();
+    config.pipeline.name = spate_test::unique_name(&config.pipeline.name);
+    let pipeline = Pipeline::from_config(config).unwrap();
+    let io = pipeline.io_handle();
+    let source =
+        line_framer(S3Source::from_component_config(&pipeline.config().source, io).unwrap())
+            .with_feed(feed);
+    let mut pool = SinkPoolConfig::default();
+    pool.batch.max_rows = 1;
+    pool.batch.linger = Duration::from_millis(10);
+    let (sink, script) = capture_sink(1, 1);
+    pre(&script);
+    let runtime = pipeline
+        .sink(sink.with_pool_config(pool))
+        .unwrap()
+        .chains(|ctx| {
+            let chunk_cfg = ctx.chunk();
+            chain_owned::<Vec<u8>, _>(BytesPassthrough)
+                .sink(
+                    TestEncoder,
+                    KeyHashRouter,
+                    chunk_cfg,
+                    ctx.queues,
+                    ctx.budget,
+                )
+                .build()
+        })
+        .runtime_options(RuntimeOptions {
+            max_records: 4,
+            ..test_options()
+        })
+        .into_runtime(source)
+        .unwrap();
+    let shutdown = runtime.shutdown_handle();
+    let run = PipelineRun::spawn(move || runtime.run());
+    Launched {
+        run,
+        script,
+        shutdown,
+    }
+}
+
+/// Pins INV-1 for a unit whose records span several sink writes: while a
+/// later write is held and the earlier ones have succeeded, the acknowledged
+/// watermark stays below the terminal one and the unit is not acknowledged.
+#[test]
+fn a_partial_watermark_does_not_acknowledge_the_unit() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let rows = recs("p", 40);
+    stage(&data, "p.ndjson", &rows);
+
+    let (feed, script) = scripted_feed();
+    let receipt = script.deliver(unit_over(&data, "p.ndjson"));
+    let l = launch_one_row_writes(&data, Arc::new(feed), |sink| {
+        sink.enqueue_global(WriteOutcome::ok());
+        sink.enqueue_global(WriteOutcome::ok());
+        sink.enqueue_global(WriteOutcome::ok().held());
+    });
+
+    wait_until(DEADLINE, "the third write is held", || {
+        l.script.held_writes() == 1
+    });
+    let from = renewals_of(&script, receipt);
+    // An acknowledgment ends the renewals, so it also ends the wait.
+    wait_until(DEADLINE, "the reader runs while the write is held", || {
+        renewals_of(&script, receipt) >= from + PASSES_WHILE_HELD
+            || !script.acknowledged().is_empty()
+    });
+    assert!(
+        script.acknowledged().is_empty(),
+        "the unit was acknowledged while one of its writes was held"
+    );
+    let writes = l.script.writes();
+    assert!(
+        writes[..2]
+            .iter()
+            .all(|w| w.result == spate_test::ScriptedResult::Ok),
+        "the writes before the held one succeeded"
+    );
+
+    l.script.release_held();
+    wait_until(DEADLINE, "the unit is acknowledged", || {
+        !script.acknowledged().is_empty()
+    });
+    assert_eq!(script.acknowledged(), vec![receipt]);
+    assert_eq!(sorted(written_rows(&l.script)), sorted(rows));
+    stop(&l);
+}
+
+/// Pins that a receipt answered `Gone` on renewal is let go: the reader
+/// neither renews nor acknowledges it again, and the redelivery is read and
+/// acknowledged under its own receipt.
+#[test]
+fn a_receipt_answered_gone_on_renewal_is_let_go() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let rows = recs("g", 40);
+    stage(&data, "g.ndjson", &rows);
+
+    let (feed, script) = scripted_feed();
+    let first = script.deliver(unit_over(&data, "g.ndjson"));
+    // Holding the first write keeps the first delivery short of its terminal
+    // watermark, so only a renewal can learn that its receipt lapsed.
+    let l = launch_on_feed(&data, Arc::new(feed), |sink| {
+        sink.enqueue_global(WriteOutcome::ok().held());
+    });
+    wait_until(DEADLINE, "the first delivery's write is held", || {
+        l.script.held_writes() == 1
+    });
+
+    let second = script.redeliver(first);
+    wait_until(DEADLINE, "a renewal is answered Gone", || {
+        script.gone().contains(&first)
+    });
+    l.script.release_held();
+    wait_until(DEADLINE, "the redelivery is acknowledged", || {
+        script.acknowledged() == vec![second]
+    });
+    stop(&l);
+
+    assert_eq!(
+        script.gone(),
+        vec![first],
+        "the lapsed receipt was used after Gone"
+    );
+    let mut seen = sorted(captured_rows(&l.script));
+    seen.dedup();
+    assert_eq!(seen, sorted(rows), "every record at least once");
+}
+
+/// A feed over [`MemoryFeed`] that answers the first `acknowledge` and the
+/// first `fail` of each receipt with `Retryable`.
+struct FirstCallRetryable {
+    inner: MemoryFeed,
+    seen: Mutex<HashSet<(bool, Receipt)>>,
+}
+
+impl FirstCallRetryable {
+    fn first(&self, ack: bool, receipt: Receipt) -> bool {
+        self.seen.lock().unwrap().insert((ack, receipt))
+    }
+}
+
+impl Feed for FirstCallRetryable {
+    fn set_waker(&self, waker: FeedWaker) {
+        self.inner.set_waker(waker);
+    }
+    fn receive(&self, max: usize) -> Result<Vec<Delivery>, FeedError> {
+        self.inner.receive(max)
+    }
+    fn renew(&self, receipt: Receipt) -> Result<(), FeedError> {
+        self.inner.renew(receipt)
+    }
+    fn acknowledge(&self, receipt: Receipt) -> Result<(), FeedError> {
+        if self.first(true, receipt) {
+            return Err(FeedError::new(FeedErrorKind::Retryable, "throttled"));
+        }
+        self.inner.acknowledge(receipt)
+    }
+    fn fail(&self, receipt: Receipt, reason: &str) -> Result<(), FeedError> {
+        if self.first(false, receipt) {
+            return Err(FeedError::new(FeedErrorKind::Retryable, "throttled"));
+        }
+        self.inner.fail(receipt, reason)
+    }
+    fn publish(&self, unit: Unit) -> Confirmation {
+        self.inner.publish(unit)
+    }
+}
+
+/// Pins that an `acknowledge` or `fail` answered `Retryable` is sent again:
+/// a unit with rows is acknowledged, and a unit over a missing object and an
+/// undecodable unit are failed until they dead-letter.
+#[test]
+fn a_retryable_answer_is_sent_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    stage(&data, "rows.ndjson", &recs("y", 10));
+    let inner = MemoryFeed::new();
+    drop(inner.publish(unit_over(&data, "rows.ndjson")));
+    drop(inner.publish(unit_over(&data, "missing.ndjson")));
+    drop(inner.publish(Unit::new("not-a-descriptor", b"{".to_vec())));
+    let feed = FirstCallRetryable {
+        inner: inner.clone(),
+        seen: Mutex::default(),
+    };
+    let l = launch_on_feed(&data, Arc::new(feed), |_| {});
+
+    let counts = |c: FeedCounts| (c.visible, c.held, c.dead_lettered, c.acknowledged);
+    wait_until(DEADLINE, "acknowledged and dead-lettered", || {
+        counts(inner.counts()) == (0, 0, 2, 1)
+    });
+    stop(&l);
 }

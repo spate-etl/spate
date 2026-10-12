@@ -262,7 +262,8 @@ Your source follows these rules:
   plane that stops running gives its units back to the feed.
 - **Never wait on the feed inside `poll_events`.** Hand the feed a waker from
   `wake_channel` with `set_waker`, and park on the paired `FeedPark` for at
-  most the poll timeout when there is nothing to do.
+  most the `timeout` that `poll_events` was given when there is nothing to
+  do.
 
 The scripted feed in `spate-test` lets a test play the feed's side. This
 reader holds a unit, sees it delivered again, and lets go of the lapsed
@@ -327,7 +328,7 @@ under `store`.
 
 ### 1. Plan the work: `SplitPlanner`
 
-The planner enumerates the input as **splits**: leasable work units with
+The planner enumerates the input as **splits**: leasable units of work with
 deterministic ids. It runs only on the fleet's elected leader; workers
 receive the descriptors and never re-enumerate.
 

@@ -124,8 +124,9 @@ is rejected.
 
 The queue a feed-reading source receives [work units](#work-unit) from,
 behind the `Feed` trait. A feed delivers each unit at least once. A failed
-unit is delivered again under a new receipt, and so is a unit whose holder
-stops renewing it on a feed that leases units. A unit that reaches the feed's
+unit is delivered again under a new receipt. A feed that leases units keeps a
+received unit from other readers only while its holder renews it, and
+delivers it again once the renewals stop. A unit that reaches the feed's
 delivery cap moves to its dead-letter destination. A source acknowledges a
 unit only after reading it to its end and after the sink has acknowledged
 every record in it. The in-process feed (`MemoryFeed`) serves one instance and
@@ -174,7 +175,7 @@ the cap, where it stays visible, is never re-offered, and blocks `AllComplete`
 
 ### Split
 
-The leasable work unit of a coordinated source, enumerated by the
+The leasable unit of work of a coordinated source, enumerated by the
 source's `SplitPlanner`. Deterministic id, opaque descriptor, weight hint;
 progress commits are per-split, fenced, and resumable, so a taken-over split
 continues from its last committed watermark. Distinct from a [lane](#lane)

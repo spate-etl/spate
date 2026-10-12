@@ -471,3 +471,21 @@ fn collector_reports_flow() {
     assert_eq!(out.emit(record(b"x".to_vec())), Flow::Blocked);
     assert!(out.records.is_empty());
 }
+
+/// Pins that a held write dropped before its release no longer counts as
+/// held.
+#[tokio::test]
+async fn a_dropped_held_write_is_no_longer_held() {
+    let (writer, script) = capture_writer();
+    script.enqueue_global(WriteOutcome::ok().held());
+    let ep = ReplicaTag {
+        shard: 0,
+        replica: 0,
+    };
+    let batch = sealed("held", b"");
+    let mut write = Box::pin(writer.write_batch(&ep, &batch));
+    assert!(poll_once(write.as_mut()).await.is_pending());
+    assert_eq!(script.held_writes(), 1);
+    drop(write);
+    assert_eq!(script.held_writes(), 0);
+}

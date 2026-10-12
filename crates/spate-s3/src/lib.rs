@@ -96,6 +96,7 @@ mod test_servers;
 #[cfg(test)]
 mod testutil;
 mod trim;
+mod unit_reader;
 
 pub use config::{Compression, S3SourceConfig};
 pub use lane::{S3Batch, S3Lane};

@@ -42,7 +42,7 @@ use tokio::sync::mpsc;
 
 /// Fetcher→lane channel depth, in messages. Queued zero-copy chunks can retain
 /// earlier GET buffers while the fetcher buffers the next window.
-const LANE_HANDOFF_CHUNKS: usize = 4;
+pub(crate) const LANE_HANDOFF_CHUNKS: usize = 4;
 
 /// Sentinel for "the lane has not observed end-of-input yet".
 const UNKNOWN: i64 = i64::MIN;

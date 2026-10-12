@@ -15,6 +15,9 @@
 //! progress commits; the coordination store is the source's **only**
 //! progress store.
 //!
+//! A source given a feed through the `testing`-gated `with_feed` reads work
+//! units through `unit_reader::UnitReader` in place of all of the above.
+//!
 //! No coordination backend appears in this crate's public API or in its
 //! cargo features. The store comes from the `coordination:` section through
 //! `spate-coordination`, whose features decide which stores a build has.
@@ -29,6 +32,7 @@ use crate::metrics::S3Metrics;
 use crate::planner::{S3Planner, job_fingerprint};
 use crate::split::Packing;
 use crate::split_ctx::SplitCtx;
+use crate::unit_reader::{LaneParts, UnitReader};
 use object_store::aws::{AmazonS3Builder, AmazonS3ConfigKey};
 use object_store::{ClientConfigKey, ObjectStore, ObjectStoreScheme};
 use spate_coordination::store::memory::MemoryStore;
@@ -37,6 +41,7 @@ use spate_core::config::{ComponentConfig, ConfigError, CoordinationSection};
 use spate_core::coordination::driver::CoordinationDriver;
 use spate_core::coordination::{PlanFinality, SplitCoordinator};
 use spate_core::error::{ErrorClass, SourceError};
+use spate_core::feed::Feed;
 use spate_core::framing::{FramingContract, RecordFramer};
 use spate_core::metrics::CoordinationMetrics;
 use spate_core::record::PartitionId;
@@ -57,6 +62,8 @@ enum State {
     /// first `poll_events`. Boxed: the open state dwarfs `Created` and
     /// lives once per source.
     Open(Box<OpenState>),
+    /// Opened over a feed: units are read one lane per delivery.
+    Feed(Box<UnitReader>),
 }
 
 /// The contents of [`State::Open`].
@@ -81,6 +88,8 @@ pub struct S3Source {
     spec: Option<CoordinatorSpec>,
     /// A data store injected via the `testing`-gated `with_store` seam.
     store: Option<Arc<dyn ObjectStore>>,
+    /// A feed injected via the `testing`-gated `with_feed` seam.
+    feed: Option<Arc<dyn Feed>>,
     state: State,
 }
 
@@ -88,7 +97,7 @@ impl std::fmt::Debug for S3Source {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("S3Source")
             .field("url", &self.config.url)
-            .field("opened", &matches!(self.state, State::Open { .. }))
+            .field("opened", &!matches!(self.state, State::Created))
             .finish()
     }
 }
@@ -111,6 +120,7 @@ impl S3Source {
             coordinator: None,
             spec: None,
             store: None,
+            feed: None,
             state: State::Created,
         }
     }
@@ -179,6 +189,25 @@ impl S3Source {
         self.store = Some(store);
         self
     }
+
+    /// Test seam: read one-object work units from `feed` in place of
+    /// coordinated splits. Each unit's body is a [`SplitDescriptor`] naming
+    /// one whole object; a unit naming anything else is failed back to the
+    /// feed. Conflicts with [`with_coordinator`](S3Source::with_coordinator)
+    /// and with a `coordination:` section, and never reports the input
+    /// drained, so the run ends at a shutdown.
+    ///
+    /// Behind the off-by-default `testing` feature, outside the semver
+    /// surface.
+    ///
+    /// [`SplitDescriptor`]: crate::SplitDescriptor
+    #[cfg(feature = "testing")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_feed(mut self, feed: Arc<dyn Feed>) -> S3Source {
+        self.feed = Some(feed);
+        self
+    }
 }
 
 impl Source for S3Source {
@@ -195,6 +224,14 @@ impl Source for S3Source {
     }
 
     fn configure_coordination(&mut self, section: &CoordinationSection) -> Result<(), ConfigError> {
+        if self.feed.is_some() {
+            return Err(ConfigError::Component {
+                context: "coordination".into(),
+                message: "the S3 source reads from a feed given with `with_feed`; \
+                          remove the `coordination:` section"
+                    .into(),
+            });
+        }
         if self.coordinator.is_some() {
             return Err(ConfigError::Component {
                 context: "coordination".into(),
@@ -250,6 +287,29 @@ impl Source for S3Source {
         };
 
         let metrics = ctx.meter.as_ref().map(S3Metrics::new);
+        if let Some(feed) = self.feed.take() {
+            if self.coordinator.is_some() {
+                return Err(SourceError::Client {
+                    class: ErrorClass::Fatal,
+                    reason: "the S3 source was given both a feed and a coordinator; \
+                             drop `with_coordinator`"
+                        .into(),
+                });
+            }
+            let parts = LaneParts {
+                store,
+                handle: self.handle.clone(),
+                issuer: ctx.issuer,
+                make_framer,
+                compression: self.config.compression,
+                chunk_bytes: self.config.chunk_bytes.as_u64() as usize,
+                range_bytes: self.config.prefetch_bytes.as_u64() as usize,
+                retry_base: RETRY_BASE,
+                metrics,
+            };
+            self.state = State::Feed(Box::new(UnitReader::new(feed, parts)));
+            return Ok(());
+        }
         // Coordination metrics are constructor-injected (there is no later
         // hook); a coordinator built here shares the source's labels.
         let coord_metrics = || {
@@ -323,11 +383,15 @@ impl Source for S3Source {
     }
 
     fn poll_events(&mut self, timeout: Duration) -> Result<SourceEvent<S3Lane>, SourceError> {
-        let State::Open(open) = &mut self.state else {
-            return Err(SourceError::Client {
-                class: ErrorClass::Fatal,
-                reason: "poll_events before open".into(),
-            });
+        let open = match &mut self.state {
+            State::Open(open) => open,
+            State::Feed(reader) => return reader.poll_events(timeout),
+            State::Created => {
+                return Err(SourceError::Client {
+                    class: ErrorClass::Fatal,
+                    reason: "poll_events before open".into(),
+                });
+            }
         };
         let OpenState {
             driver,
@@ -354,9 +418,13 @@ impl Source for S3Source {
     }
 
     fn commit(&mut self, watermarks: &[(PartitionId, i64)]) -> Result<(), SourceError> {
-        let State::Open(open) = &mut self.state else {
-            debug_assert!(watermarks.is_empty(), "watermarks before open");
-            return Ok(());
+        let open = match &mut self.state {
+            State::Open(open) => open,
+            State::Feed(reader) => return reader.commit(watermarks),
+            State::Created => {
+                debug_assert!(watermarks.is_empty(), "watermarks before open");
+                return Ok(());
+            }
         };
         let OpenState { driver, ctx, .. } = open.as_mut();
         driver.commit(ctx, watermarks)
@@ -366,9 +434,13 @@ impl Source for S3Source {
         &mut self,
         watermarks: &[(PartitionId, i64)],
     ) -> Result<Vec<PartitionId>, SourceError> {
-        let State::Open(open) = &mut self.state else {
-            debug_assert!(watermarks.is_empty(), "watermarks before open");
-            return Ok(Vec::new());
+        let open = match &mut self.state {
+            State::Open(open) => open,
+            State::Feed(reader) => return reader.commit(watermarks).map(|()| Vec::new()),
+            State::Created => {
+                debug_assert!(watermarks.is_empty(), "watermarks before open");
+                return Ok(Vec::new());
+            }
         };
         let OpenState { driver, ctx, .. } = open.as_mut();
         driver.commit_final(ctx, watermarks)
@@ -380,15 +452,19 @@ impl Source for S3Source {
     // not store, and those splits may replay under their next owner.
 
     fn pause(&mut self, lanes: &[LaneId]) -> Result<(), SourceError> {
-        if let State::Open(open) = &self.state {
-            open.ctx.set_paused(lanes, true);
+        match &self.state {
+            State::Open(open) => open.ctx.set_paused(lanes, true),
+            State::Feed(reader) => reader.set_paused(lanes, true),
+            State::Created => {}
         }
         Ok(())
     }
 
     fn resume(&mut self, lanes: &[LaneId]) -> Result<(), SourceError> {
-        if let State::Open(open) = &self.state {
-            open.ctx.set_paused(lanes, false);
+        match &self.state {
+            State::Open(open) => open.ctx.set_paused(lanes, false),
+            State::Feed(reader) => reader.set_paused(lanes, false),
+            State::Created => {}
         }
         Ok(())
     }

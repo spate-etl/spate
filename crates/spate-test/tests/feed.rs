@@ -144,3 +144,29 @@ fn a_second_redelivery_counts_three() {
     script.redeliver(second);
     assert_eq!(feed.receive(8).unwrap()[0].deliveries, 3);
 }
+
+/// Pins that a published unit keeps its own count beside a scripted unit
+/// of the same id.
+#[test]
+fn a_published_unit_keeps_its_count_beside_a_scripted_id() {
+    let (feed, script) = scripted_feed();
+    let scripted = script.deliver(Unit::new("a", b"x".to_vec()));
+    drop(feed.publish(Unit::new("a", b"y".to_vec())));
+    let published = feed.receive(8).unwrap()[1].receipt;
+    script.redeliver(scripted);
+    assert_eq!(feed.receive(8).unwrap()[0].deliveries, 2);
+    script.redeliver(published);
+    assert_eq!(feed.receive(8).unwrap()[0].deliveries, 2);
+}
+
+/// Pins that a published unit redelivered twice is on its third delivery.
+#[test]
+fn a_published_unit_redelivered_twice_counts_three() {
+    let (feed, script) = scripted_feed();
+    drop(feed.publish(Unit::new("a", b"x".to_vec())));
+    let first = feed.receive(8).unwrap()[0].receipt;
+    let second = script.redeliver(first);
+    assert_eq!(feed.receive(8).unwrap()[0].deliveries, 2);
+    script.redeliver(second);
+    assert_eq!(feed.receive(8).unwrap()[0].deliveries, 3);
+}

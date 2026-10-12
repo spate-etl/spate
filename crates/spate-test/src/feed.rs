@@ -11,7 +11,7 @@ use spate_core::feed::{
     Confirmation, Confirmer, Delivery, Feed, FeedError, FeedErrorKind, FeedWaker, Receipt, Unit,
     confirmation,
 };
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 #[derive(Default)]
@@ -20,10 +20,12 @@ struct State {
     queued: VecDeque<Delivery>,
     /// Deliveries received and not yet acknowledged, failed or lapsed.
     held: BTreeMap<Receipt, Delivery>,
-    /// Deliveries so far per unit id that `deliver` scripted. `deliver` and
-    /// `redeliver` both raise it, so duplicates and redeliveries of one unit
-    /// share a count.
+    /// Deliveries so far per unit id that `deliver` scripted. `deliver`
+    /// raises it, and so does `redeliver` of a receipt in `scripted`, so
+    /// duplicates and their redeliveries share a count.
     counts: HashMap<String, u32>,
+    /// Receipts of deliveries `deliver` scripted, and of their redeliveries.
+    scripted: HashSet<Receipt>,
     next_receipt: u64,
     delivered: Vec<Delivery>,
     acknowledged: Vec<Receipt>,
@@ -152,14 +154,16 @@ pub fn scripted_feed() -> (ScriptedFeed, FeedScript) {
 impl FeedScript {
     /// Queue a delivery of `unit` for the next `receive`, and return its
     /// receipt. Delivering a unit whose id this method delivered before is a
-    /// duplicate, counted in [`Delivery::deliveries`] together with every
-    /// redelivery of that id.
+    /// duplicate. [`Delivery::deliveries`] counts the deliveries this method
+    /// scripted for an id and their redeliveries together; a unit published
+    /// through the feed keeps its own count, whatever its id.
     pub fn deliver(&self, unit: Unit) -> Receipt {
         let mut state = self.lock();
         let count = state.counts.entry(unit.id.clone()).or_default();
         *count += 1;
         let deliveries = *count;
         let receipt = state.queue(unit, deliveries);
+        state.scripted.insert(receipt);
         state.wake();
         receipt
     }
@@ -176,15 +180,20 @@ impl FeedScript {
         let Some(delivery) = state.lapse(receipt) else {
             panic!("redeliver: {receipt} is neither queued nor held");
         };
-        // A unit `deliver` scripted shares one count with its duplicates.
+        // A unit `deliver` scripted shares one count with its duplicates. A
+        // published unit keeps its own count, whatever its id.
+        let scripted = state.scripted.remove(&receipt);
         let deliveries = match state.counts.get_mut(&delivery.unit.id) {
-            Some(count) => {
+            Some(count) if scripted => {
                 *count += 1;
                 *count
             }
-            None => delivery.deliveries + 1,
+            _ => delivery.deliveries + 1,
         };
         let receipt = state.queue(delivery.unit, deliveries);
+        if scripted {
+            state.scripted.insert(receipt);
+        }
         state.wake();
         receipt
     }

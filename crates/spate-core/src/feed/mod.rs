@@ -30,9 +30,10 @@
 //! publishes on a task or thread it owns. [`receive`](Feed::receive) returns
 //! what that task has already buffered, and the other methods hand their
 //! request to it. The backend signals the [`FeedWaker`] it was given when a
-//! later `receive` would return something, so the source parks on the paired
-//! [`FeedPark`] between polls. Methods take `&self`, so one `Arc<dyn Feed>`
-//! serves a reader and a publisher at once.
+//! unit becomes ready to receive, and after a `receive` that takes some units
+//! and leaves others, so the source parks on the paired [`FeedPark`] between
+//! polls. A `receive` that takes nothing sends no signal. Methods take
+//! `&self`, so one `Arc<dyn Feed>` serves a reader and a publisher at once.
 
 use crate::error::ErrorClass;
 use std::fmt;
@@ -199,9 +200,11 @@ impl FeedError {
 /// feed.acknowledge(delivery.receipt).unwrap();
 /// ```
 pub trait Feed: Send + Sync {
-    /// Hand the backend the waker it signals when a later
-    /// [`receive`](Feed::receive) would return a delivery. Called before the
-    /// first `receive`; a later call replaces the waker.
+    /// Hand the backend the waker it signals when a unit becomes ready to
+    /// receive, including one that arrived before this call, and after a
+    /// [`receive`](Feed::receive) that takes some units and leaves others. A
+    /// `receive` that takes nothing sends no signal. Called before the first
+    /// `receive`; a later call replaces the waker.
     fn set_waker(&self, waker: FeedWaker);
 
     /// Up to `max` deliveries the backend has buffered, oldest first. Never

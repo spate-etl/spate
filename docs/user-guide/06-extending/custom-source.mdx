@@ -261,20 +261,22 @@ Your source follows these rules:
   leases units extends a lease only while its holder renews it, so a control
   plane that stops running gives its units back to the feed.
 - **Never wait on the feed inside `poll_events`.** Hand the feed a waker from
-  `wake_channel` with `set_waker`, and park on the paired `FeedPark` for at
-  most the `timeout` that `poll_events` was given when there is nothing to
-  do.
+  `wake_channel` with `set_waker`. When there is nothing to do, park on the
+  paired `FeedPark` for at most the `timeout` that `poll_events` was given. A
+  park uses up the feed's signal, so call `receive` with the room you have
+  before you park.
 
 The scripted feed in `spate-test` lets a test play the feed's side. This
-reader holds a unit, sees it delivered again, and lets go of the lapsed
-receipt when a renewal answers `Gone`:
+reader, from [`spate-test/tests/feed.rs`](repo:crates/spate-test/tests/feed.rs),
+holds a unit, sees it delivered again, and lets go of the lapsed receipt when a
+renewal answers `Gone`:
 
 ```rust file=crates/spate-test/tests/feed.rs region=reader
 ```
 
 `FeedScript` also scripts a duplicate delivery (`deliver` with an id already
 delivered), a dead letter, and a publish that is refused or held until the
-test confirms it. It records every acknowledgement, failure, renewal and
+test confirms it. It records every acknowledgment, failure, renewal and
 `Gone` answer for the test to assert on.
 
 To implement a feed backend, keep every method free of waits:
@@ -284,8 +286,10 @@ To implement a feed backend, keep every method free of waits:
   hand their request to it. `Ok` means the backend accepted the request.
 - Mint a new `Receipt` for every delivery, and count deliveries in
   `Delivery::deliveries`, starting at 1.
-- Signal the waker whenever a later `receive` would return a delivery,
-  including for a unit that arrived before `set_waker`.
+- Signal the waker when a unit becomes ready to receive, including one that
+  arrived before `set_waker`, and after a `receive` that takes some units and
+  leaves others. A `receive` that takes nothing sends no signal, so a reader at
+  capacity can still park.
 - Settle each publish through the `Confirmer` from `confirmation()`, and
   confirm only once the unit is stored. A confirmer dropped unsettled reads as
   `Retryable`, because the unit may or may not have been stored.

@@ -41,8 +41,8 @@
 //! - A coordinated split reads its 16 objects back to back and waits for the
 //!   sink once, three waves in all (about 0.975 s, 4,726 objects/s).
 //!
-//! At 96 held the feed floor is about 19% below the coordinated one before any
-//! control-plane cost.
+//! At 96 held the feed arm's ceiling is about 19% below the coordinated one
+//! (3,840 against 4,726 objects/s) before any control-plane cost.
 //!
 //! # Cases
 //!

@@ -239,12 +239,14 @@ fn element<'a>(xml: &'a str, tag: &str) -> Option<&'a str> {
     Some(&xml[start..start + len])
 }
 
-/// Undoes XML's five predefined entity escapes.
+/// Undoes XML's five predefined entity escapes and `&#13;`, the numeric
+/// reference the server sends for a carriage return.
 fn unescape(s: &str) -> String {
     s.replace("&lt;", "<")
         .replace("&gt;", ">")
         .replace("&quot;", "\"")
         .replace("&apos;", "'")
+        .replace("&#13;", "\r")
         .replace("&amp;", "&")
 }
 
@@ -293,12 +295,13 @@ mod tests {
     }
 
     /// An element's text comes back escaped, and unescaping undoes `&amp;`
-    /// last so an escaped entity stays literal.
+    /// last so an escaped entity or reference stays literal.
     #[test]
     fn element_text_unescapes_once() {
         let xml = "<Message><Body>a &amp;lt; b &lt; c</Body></Message>";
         assert_eq!(element(xml, "Body"), Some("a &amp;lt; b &lt; c"));
         assert_eq!(unescape(element(xml, "Body").unwrap()), "a &lt; b < c");
         assert_eq!(element(xml, "ReceiptHandle"), None);
+        assert_eq!(unescape("a&#13;\nb &amp;#13;"), "a\r\nb &#13;");
     }
 }

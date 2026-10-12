@@ -73,7 +73,7 @@ fn elasticmq_sends_receives_and_deletes() {
     let elasticmq = ElasticMq::start().expect("start ElasticMQ");
     let queue = elasticmq.create_queue("smoke").unwrap();
     assert_eq!(queue, "/000000000000/smoke");
-    let body = "a & b <c> / #d";
+    let body = "a & b <c> / #d\r\n";
     elasticmq.send_message(&queue, body).unwrap();
 
     let received = elasticmq.receive_messages(&queue).unwrap();

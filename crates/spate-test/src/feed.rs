@@ -552,4 +552,21 @@ mod tests {
             "refuse_next_publish did not wake the reader"
         );
     }
+
+    /// Pins that a later `set_waker` replaces the waker: a scripting call
+    /// signals only the newest one.
+    #[test]
+    fn a_later_set_waker_replaces_the_waker() {
+        let (feed, script) = scripted_feed();
+        let (first, first_park) = wake_channel();
+        feed.set_waker(first);
+        let (second, second_park) = wake_channel();
+        feed.set_waker(second);
+        script.deliver(unit("a"));
+        assert!(
+            second_park.park(Duration::ZERO),
+            "deliver signalled the replaced waker"
+        );
+        assert!(!first_park.park(Duration::ZERO));
+    }
 }

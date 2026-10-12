@@ -385,7 +385,7 @@ async fn stream_object_ranged(
     retries: Option<&spate_core::metrics::Counter>,
     bytes_read: Option<&spate_core::metrics::Counter>,
 ) -> Result<bool, SplitFailure> {
-    let path = Path::from(entry.key.as_str());
+    let path = object_path(split, entry)?;
     let window = range_bytes.max(1) as u64;
     // `delivered` is the GET position of the next window, trimmed or not.
     let mut delivered: u64 = trim.as_ref().map_or(0, RangeTrim::first_byte);
@@ -504,7 +504,7 @@ async fn stream_object_streaming(
     retry_base: Duration,
     retries: Option<&spate_core::metrics::Counter>,
 ) -> Result<bool, SplitFailure> {
-    let path = Path::from(entry.key.as_str());
+    let path = object_path(split, entry)?;
     let mut delivered: u64 = 0;
     let mut attempt: u32 = 0;
 
@@ -598,6 +598,21 @@ async fn stream_object_streaming(
             }
         }
     }
+}
+
+/// The store path of a listed object, under the exact key the listing gave.
+///
+/// `Path::from` would read the key as unencoded parts and percent-encode `%`,
+/// `#`, `[`, non-ASCII and other reserved bytes, addressing a different
+/// object. A listed key always parses; a key that does not cannot be read and
+/// poisons the split.
+fn object_path(split: &SplitId, entry: &ObjectEntry) -> Result<Path, SplitFailure> {
+    Path::parse(&entry.key).map_err(|e| {
+        SplitFailure::Poison(
+            PoisonKind::NotFound,
+            format!("split {split}: \"{}\" is not an object key: {e}", entry.key),
+        )
+    })
 }
 
 /// Back off and bump the attempt counter for a retryable error; escalate
@@ -985,6 +1000,62 @@ mod tests {
             }
         }
         out
+    }
+
+    /// Keys `Path::from` would percent-encode on the way back to the store.
+    const ENCODED_KEYS: [&str; 4] = [
+        "dir/a b.ndjson",
+        "dir/a%20b.ndjson",
+        "dir/x#y[1].ndjson",
+        "dir/\u{e9}.ndjson",
+    ];
+
+    async fn seeded_verbatim(keys: &[&str]) -> Arc<dyn ObjectStore> {
+        let store = InMemory::new();
+        for key in keys {
+            store
+                .put(
+                    &Path::parse(*key).unwrap(),
+                    PutPayload::from(key.as_bytes().to_vec()),
+                )
+                .await
+                .unwrap();
+        }
+        Arc::new(store)
+    }
+
+    /// Each key with its body (the key's bytes), sorted as the listing is.
+    fn verbatim_bodies() -> Vec<(String, Vec<u8>)> {
+        let mut want: Vec<_> = ENCODED_KEYS
+            .iter()
+            .map(|k| ((*k).to_owned(), k.as_bytes().to_vec()))
+            .collect();
+        want.sort();
+        want
+    }
+
+    /// A ranged read fetches each listed object under the key the listing
+    /// gave, whatever characters it holds. Regression for #1081.
+    #[tokio::test]
+    async fn ranged_read_fetches_the_listed_key_verbatim() {
+        let store = seeded_verbatim(&ENCODED_KEYS).await;
+        let slice = listed(&store).await;
+        assert!(slice.iter().all(|e| e.etag.is_some()));
+        let got = assembled(&collect_fetch(store, slice, 0, 4, 64).await);
+        assert_eq!(got, verbatim_bodies());
+    }
+
+    /// The no-ETag streaming read fetches each listed object under the key
+    /// the listing gave. Regression for #1081.
+    #[tokio::test]
+    async fn streaming_read_fetches_the_listed_key_verbatim() {
+        let store = seeded_verbatim(&ENCODED_KEYS).await;
+        let mut slice = listed(&store).await;
+        for entry in &mut slice {
+            entry.etag = None;
+        }
+        let got = assembled(&collect_fetch(store, slice, 0, 4, 64).await);
+        assert_eq!(got, verbatim_bodies());
     }
 
     #[tokio::test]

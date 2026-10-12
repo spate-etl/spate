@@ -107,3 +107,22 @@ fn elasticmq_sends_receives_and_deletes() {
     elasticmq.delete_message(&queue, receipt_handle).unwrap();
     assert_eq!(elasticmq.approximate_counts(&queue).unwrap(), (0, 0));
 }
+
+/// One receive returns every visible message, up to ten.
+#[test]
+#[ignore = "requires Docker"]
+fn elasticmq_one_receive_returns_every_message() {
+    let elasticmq = ElasticMq::start().expect("start ElasticMQ");
+    let queue = elasticmq.create_queue("several").unwrap();
+    for body in ["one", "two", "three"] {
+        elasticmq.send_message(&queue, body).unwrap();
+    }
+    let mut bodies: Vec<String> = elasticmq
+        .receive_messages(&queue)
+        .unwrap()
+        .into_iter()
+        .map(|m| m.body)
+        .collect();
+    bodies.sort();
+    assert_eq!(bodies, ["one", "three", "two"]);
+}

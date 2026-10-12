@@ -261,6 +261,7 @@ mod tests {
     fn encode_keeps_unreserved_characters_alone() {
         assert_eq!(encode("aZ09-._~"), "aZ09-._~");
         assert_eq!(encode("a b/c#d&e=é"), "a%20b%2Fc%23d%26e%3D%C3%A9");
+        assert_eq!(encode("a+b"), "a%2Bb");
     }
 
     /// A call is a `GET` of the path with each parameter encoded.

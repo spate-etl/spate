@@ -1002,7 +1002,8 @@ mod tests {
         out
     }
 
-    /// Keys `Path::from` would percent-encode on the way back to the store.
+    /// Listed keys a read must address verbatim. `Path::from` percent-encodes
+    /// every one except `dir/a b.ndjson`.
     const ENCODED_KEYS: [&str; 4] = [
         "dir/a b.ndjson",
         "dir/a%20b.ndjson",
@@ -1056,6 +1057,29 @@ mod tests {
         }
         let got = assembled(&collect_fetch(store, slice, 0, 4, 64).await);
         assert_eq!(got, verbatim_bodies());
+    }
+
+    /// A key that is not a valid store path poisons the split as `NotFound`
+    /// on both read paths, before any GET, and does not fail the pipeline.
+    #[tokio::test]
+    async fn an_unparseable_key_poisons_the_split() {
+        for etag in [Some("\"e\""), None] {
+            let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+            let slice = vec![entry("dir//x.ndjson", 1, etag)];
+            let msgs = collect_fetch(store, slice, 0, 4, 64).await;
+            let poison = msgs.iter().find_map(|m| match m {
+                ChunkMsg::LaneFailed(SplitFailure::Poison(kind, reason)) => {
+                    Some((*kind, reason.clone()))
+                }
+                _ => None,
+            });
+            let (kind, reason) = poison.expect("an unparseable key is split poison");
+            assert_eq!(kind, PoisonKind::NotFound);
+            assert!(
+                reason.contains("\"dir//x.ndjson\" is not an object key"),
+                "{reason}"
+            );
+        }
     }
 
     #[tokio::test]

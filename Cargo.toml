@@ -49,6 +49,7 @@ spate-test-support = { path = "test-support" }
 
 tokio = { version = "1.52", default-features = false }
 hyper = "1.10"
+http = "1.2"
 hyper-util = "0.1.16"
 http-body-util = "0.1.3"
 

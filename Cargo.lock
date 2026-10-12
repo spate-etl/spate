@@ -4228,6 +4228,7 @@ version = "0.3.0"
 dependencies = [
  "base64 0.22.1",
  "futures-util",
+ "http",
  "object_store",
  "rcgen",
  "rustls",

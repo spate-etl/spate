@@ -5,9 +5,10 @@ use std::fmt;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
+use ::http::Method;
 use object_store::aws::AmazonS3Builder;
 use object_store::path::Path as StorePath;
-use object_store::signer::{Method, Signer as _};
+use object_store::signer::Signer as _;
 use testcontainers::core::IntoContainerPort;
 use testcontainers::runners::SyncRunner;
 use testcontainers::{Container, GenericImage, ImageExt};

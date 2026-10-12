@@ -25,12 +25,14 @@ tls = [
 # `Toxiproxy`.
 toxiproxy = ["dep:serde_json", "dep:testcontainers"]
 # `Rustfs`.
-rustfs = ["dep:object_store", "dep:testcontainers", "dep:tokio"]
+rustfs = ["dep:http", "dep:object_store", "dep:testcontainers", "dep:tokio"]
 # `ElasticMq`.
 elasticmq = ["dep:testcontainers"]
 
 [dependencies]
 base64 = { workspace = true, optional = true }
+# `object_store` keeps the signer's `Method` private at its declared floor.
+http = { workspace = true, optional = true }
 object_store = { workspace = true, optional = true, features = ["aws"] }
 rcgen = { workspace = true, optional = true }
 rustls = { workspace = true, optional = true }

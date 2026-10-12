@@ -20,11 +20,11 @@ pub fn http(addr: SocketAddr, method: &str, path: &str) -> io::Result<(u16, Stri
     http_with_body(addr, method, path, "")
 }
 
-/// [`http`] with `body` as the request body, sent with its `Content-Length`.
+/// [`http()`] with `body` as the request body, sent with its `Content-Length`.
 ///
 /// # Errors
 ///
-/// As [`http`].
+/// As [`http()`].
 pub fn http_with_body(
     addr: SocketAddr,
     method: &str,

@@ -504,7 +504,7 @@ mod tests {
         let (p, receipt, tracker) = hold_one(&mut reader, &script);
         tracker.set_terminal(5);
 
-        reader.commit(&[(p, 3)]).unwrap();
+        reader.commit(&[(p, 4)]).unwrap();
         assert_eq!(
             script.acknowledged(),
             vec![],
@@ -530,7 +530,7 @@ mod tests {
         let (mut reader, script, _rt) = reader();
         let (below, _, below_tracker) = hold_one(&mut reader, &script);
         let (at, at_receipt, at_tracker) = hold_one(&mut reader, &script);
-        reader.commit(&[(below, 3), (at, 5)]).unwrap();
+        reader.commit(&[(below, 4), (at, 5)]).unwrap();
         below_tracker.set_terminal(5);
         at_tracker.set_terminal(5);
 

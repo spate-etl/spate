@@ -39,6 +39,7 @@ zstd = { workspace = true }
 async-trait = { workspace = true }
 spate-s3 = { path = ".", features = ["testing"] }
 spate-coordination = { workspace = true, features = ["nats"] }
+spate-bench = { workspace = true }
 spate-test = { workspace = true }
 spate-test-support = { workspace = true, features = ["rustfs", "tls"] }
 spate-json = { workspace = true }
@@ -58,6 +59,10 @@ harness = false
 
 [[bench]]
 name = "descriptor_gungraun"
+harness = false
+
+[[bench]]
+name = "feed_small_objects_wall"
 harness = false
 
 [lints]

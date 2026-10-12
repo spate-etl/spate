@@ -372,9 +372,8 @@ mod tests {
         );
     }
 
-    /// Pins that a unit failed at the cap is on the dead-letter list even
-    /// when the warning about it unwinds, so the recovered lock guards
-    /// consistent state.
+    /// Pins that a unit failed at the cap is on the dead-letter list, and
+    /// the lock is not poisoned, when the warning about it unwinds.
     #[test]
     fn a_panicking_subscriber_in_fail_at_the_cap_keeps_the_unit() {
         use tracing_subscriber::layer::SubscriberExt;
@@ -413,5 +412,26 @@ mod tests {
                 acknowledged: 0,
             }
         );
+        assert!(
+            !feed.state.is_poisoned(),
+            "the warning unwound through the lock"
+        );
+    }
+
+    /// Pins that a later `set_waker` replaces the waker: a publish signals
+    /// only the newest one.
+    #[test]
+    fn a_later_set_waker_replaces_the_waker() {
+        let feed = MemoryFeed::new();
+        let (first, first_park) = wake_channel();
+        feed.set_waker(first);
+        let (second, second_park) = wake_channel();
+        feed.set_waker(second);
+        drop(feed.publish(unit("a")));
+        assert!(
+            second_park.park(Duration::ZERO),
+            "publish signalled the replaced waker"
+        );
+        assert!(!first_park.park(Duration::ZERO));
     }
 }

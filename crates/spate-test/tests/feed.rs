@@ -101,3 +101,46 @@ fn a_unit_published_again_after_its_ack_is_a_first_delivery() {
     drop(feed.publish(Unit::new("k", b"x".to_vec())));
     assert_eq!(feed.receive(8).unwrap().remove(0).deliveries, 1);
 }
+
+/// Pins that a scripted duplicate after a redelivery is the unit's third
+/// delivery.
+#[test]
+fn a_duplicate_after_a_redelivery_counts_three() {
+    let (feed, script) = scripted_feed();
+    let first = script.deliver(Unit::new("a", b"x".to_vec()));
+    assert_eq!(feed.receive(8).unwrap()[0].deliveries, 1);
+    script.redeliver(first);
+    assert_eq!(feed.receive(8).unwrap()[0].deliveries, 2);
+    script.deliver(Unit::new("a", b"x".to_vec()));
+    assert_eq!(feed.receive(8).unwrap()[0].deliveries, 3);
+}
+
+/// Pins that a redelivery after a scripted duplicate is the unit's third
+/// delivery.
+#[test]
+fn a_redelivery_after_a_duplicate_counts_three() {
+    let (feed, script) = scripted_feed();
+    let first = script.deliver(Unit::new("a", b"x".to_vec()));
+    script.deliver(Unit::new("a", b"x".to_vec()));
+    let got: Vec<u32> = feed
+        .receive(8)
+        .unwrap()
+        .iter()
+        .map(|d| d.deliveries)
+        .collect();
+    assert_eq!(got, vec![1, 2]);
+    script.redeliver(first);
+    assert_eq!(feed.receive(8).unwrap()[0].deliveries, 3);
+}
+
+/// Pins that redelivering a redelivery is the unit's third delivery.
+#[test]
+fn a_second_redelivery_counts_three() {
+    let (feed, script) = scripted_feed();
+    let first = script.deliver(Unit::new("a", b"x".to_vec()));
+    let _ = feed.receive(8).unwrap();
+    let second = script.redeliver(first);
+    let _ = feed.receive(8).unwrap();
+    script.redeliver(second);
+    assert_eq!(feed.receive(8).unwrap()[0].deliveries, 3);
+}

@@ -20,8 +20,9 @@ struct State {
     queued: VecDeque<Delivery>,
     /// Deliveries received and not yet acknowledged, failed or lapsed.
     held: BTreeMap<Receipt, Delivery>,
-    /// Deliveries scripted by `deliver` so far per unit id, so a scripted
-    /// duplicate counts as a further delivery of the same unit.
+    /// Deliveries so far per unit id that `deliver` scripted. `deliver` and
+    /// `redeliver` both raise it, so duplicates and redeliveries of one unit
+    /// share a count.
     counts: HashMap<String, u32>,
     next_receipt: u64,
     delivered: Vec<Delivery>,
@@ -151,7 +152,8 @@ pub fn scripted_feed() -> (ScriptedFeed, FeedScript) {
 impl FeedScript {
     /// Queue a delivery of `unit` for the next `receive`, and return its
     /// receipt. Delivering a unit whose id this method delivered before is a
-    /// duplicate, counted in [`Delivery::deliveries`].
+    /// duplicate, counted in [`Delivery::deliveries`] together with every
+    /// redelivery of that id.
     pub fn deliver(&self, unit: Unit) -> Receipt {
         let mut state = self.lock();
         let count = state.counts.entry(unit.id.clone()).or_default();
@@ -174,7 +176,15 @@ impl FeedScript {
         let Some(delivery) = state.lapse(receipt) else {
             panic!("redeliver: {receipt} is neither queued nor held");
         };
-        let receipt = state.queue(delivery.unit, delivery.deliveries + 1);
+        // A unit `deliver` scripted shares one count with its duplicates.
+        let deliveries = match state.counts.get_mut(&delivery.unit.id) {
+            Some(count) => {
+                *count += 1;
+                *count
+            }
+            None => delivery.deliveries + 1,
+        };
+        let receipt = state.queue(delivery.unit, deliveries);
         state.wake();
         receipt
     }

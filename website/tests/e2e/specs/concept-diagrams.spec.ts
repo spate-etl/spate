@@ -15,6 +15,8 @@ const PAGES: Array<[RouteName, number]> = [
  * than the sequence drawings.
  */
 const WIDTHS = [1280, 1100, 1083, 587, 390];
+/** The windows whose docs column is wider than 556px, where an overview shows its landscape layout. */
+const LANDSCAPE = [1280, 1100];
 
 /** The drawings a figure shows at the current width, not its legend swatches. */
 const DRAWINGS = 'article figure svg[role="img"]';
@@ -297,12 +299,12 @@ function scaleFaults(selector: string): string[] {
 
 /**
  * Layout faults in the visible legends, in CSS pixels: a swatch and its label share a centre within
- * 1px, every swatch has one width, items never overlap, items on a row share a top within 1px and
+ * 1px, every swatch has one size, items never overlap, items on a row share a top within 1px and
  * one gap, and the legend sits as far below its drawing as the caption sits below what precedes it.
  */
 function legendFaults(): string[] {
   const found: string[] = [];
-  const widths = new Set<number>();
+  const sizes = new Set<string>();
   for (const [f, figure] of Array.from(document.querySelectorAll('article figure')).entries()) {
     const legend = figure.querySelector<HTMLElement>('ul[aria-label="Legend"]');
     if (!legend) {
@@ -313,7 +315,7 @@ function legendFaults(): string[] {
       const swatch = li.querySelector('svg')!.getBoundingClientRect();
       const label = li.querySelector('span')!.getBoundingClientRect();
       const rect = li.getBoundingClientRect();
-      widths.add(Math.round(swatch.width * 100) / 100);
+      sizes.add(`${Math.round(swatch.width * 100) / 100}x${Math.round(swatch.height * 100) / 100}`);
       const offset = swatch.top + swatch.height / 2 - (label.top + label.height / 2);
       if (Math.abs(offset) > 1) found.push(`figure ${f} "${li.textContent}" swatch is ${offset.toFixed(2)}px off its label`);
       return {name: li.textContent, rect};
@@ -353,7 +355,7 @@ function legendFaults(): string[] {
       }
     }
   }
-  if (widths.size > 1) found.push(`legend swatch widths ${[...widths].join(', ')}`);
+  if (sizes.size > 1) found.push(`legend swatch sizes ${[...sizes].join(', ')}`);
   return found;
 }
 
@@ -375,13 +377,16 @@ for (const colorMode of ['light', 'dark'] as const) {
           await page.setViewportSize({width, height: 900});
           await gotoRoute(page, route, colorMode);
           const shown = await page.evaluate(() =>
-            Array.from(document.querySelectorAll('article figure')).map(
-              (figure) =>
-                Array.from(figure.querySelectorAll('svg[role="img"]')).filter((svg) => svg.getBoundingClientRect().width > 0)
-                  .length,
-            ),
+            Array.from(document.querySelectorAll('article figure')).map((figure) => {
+              const drawings = Array.from(figure.querySelectorAll('svg[role="img"]'));
+              return {count: drawings.length, visible: drawings.flatMap((svg, i) => (svg.getBoundingClientRect().width > 0 ? [i] : []))};
+            }),
           );
-          expect(shown, 'layouts shown per figure').toEqual(Array.from({length: figures}, () => 1));
+          expect(shown.length, 'figures on the page').toBe(figures);
+          // An overview draws its landscape layout first and its portrait layout second.
+          expect(shown.map((s) => s.visible), 'layout shown per figure').toEqual(
+            shown.map((s) => [s.count === 2 && !LANDSCAPE.includes(width) ? 1 : 0]),
+          );
           expect(await page.evaluate(collisions, DRAWINGS), 'label collisions').toEqual([]);
           expect(await page.evaluate(misalignments, DRAWINGS), 'drawing alignment').toEqual([]);
           expect(await page.evaluate(scaleFaults, DRAWINGS), 'drawing scale').toEqual([]);

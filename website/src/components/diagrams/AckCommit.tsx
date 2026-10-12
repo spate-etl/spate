@@ -134,7 +134,8 @@ export default function AckCommitDiagram(): React.JSX.Element {
           only. A failed or pending batch holds it.
         </>,
         <>
-          On its commit tick the controller hands the watermark to <code>Source::commit</code>, so
+          On its commit tick, and at a rebalance and at shutdown, the controller hands the watermark to{' '}
+          <code>Source::commit</code>, so
           nothing commits past unacknowledged data (INV-1).
         </>,
       ]}

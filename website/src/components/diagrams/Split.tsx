@@ -38,7 +38,7 @@ import {
   type Point,
 } from './parts';
 
-const NAME = 'Split terminal: each branch acks into one batch ack, which commits only after every branch has written.';
+const NAME = 'Split terminal: each branch acks into one batch ack, which commits only after every branch it reached has written.';
 
 const TRUNK = ['deserialize', 'operators', 'classify'];
 const BRANCH = ['route', 'encode'];
@@ -292,8 +292,9 @@ const N_PAY = N_PL + PAD + titleW(N_IO_TITLE[1]) + S2 + STROKE / 2;
 const N_REF = N_PAY + PITCH;
 const N_POLICY = ['Fail: stops', 'the pipeline', 'Skip: drops', 'and counts'];
 const N_UN_W = Math.max(chipW('unmatched'), ...N_POLICY.map(textW));
-/** The unmatched policy text clears the refunds column's stages. */
-const N_UN = N_REF + COL_W / 2 + GAP + N_UN_W / 2;
+/** The region runs to the right margin, so every portrait drawing leaves the same margin. */
+const N_PR = N_W - M;
+const N_UN = N_PR - PAD - N_UN_W / 2;
 const N_TRUNK_W = chipW(TRUNK);
 const N_TRUNK = columnOf(3, N_REF - N_TRUNK_W / 2, N_PT + PAD + TITLE_BOX + GAP + CHIP_H / 2, N_TRUNK_W);
 const N_TRUNK_END = N_TRUNK[2].y + CHIP_H / 2;
@@ -302,7 +303,6 @@ const N_ROUTE_Y = N_BUS + 2 * GAP + CHIP_H / 2;
 const N_POLICY_BASE = N_ROUTE_Y + CHIP_H / 2 + S1 + ASCENT;
 const N_POLICY_BOTTOM = linesBottom(N_POLICY_BASE, N_POLICY.length);
 const N_PB = Math.max(N_POLICY_BOTTOM, N_ROUTE_Y + CHIP_H / 2 + GAP + CHIP_H) + PAD;
-const N_PR = N_UN + N_UN_W / 2 + PAD;
 const N_BAND_TOP = N_PB + QUEUE_GAP;
 /** The workers sit under the runtime's two-line title. */
 const N_WY = N_BAND_TOP + PAD + TITLE_BOX + TITLE_LINE + GAP + CHIP_H / 2;
@@ -372,8 +372,8 @@ export default function SplitDiagram(): React.JSX.Element {
           operator chain, one classifier sends each record to one branch, here payments or refunds.
           Each branch routes the record to a shard and encodes it into that sink&apos;s own queues and
           shard workers. A record that reaches no branch follows the unmatched policy: Fail stops the
-          pipeline, Skip drops and counts it and releases its share of the ack. Every branch holds a
-          clone of the poll batch&apos;s ack, and each branch&apos;s shard worker resolves its clones
+          pipeline, Skip drops and counts it and releases its share of the ack. Every branch the batch
+          reached holds a clone of its ack, and each branch&apos;s shard worker resolves its clones
           from the write outcome, so the acks fan back in to one batch ack. The batch commits through
           Source::commit only after every branch it reached has written.
         </>

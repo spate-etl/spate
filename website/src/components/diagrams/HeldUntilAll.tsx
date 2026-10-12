@@ -23,12 +23,12 @@ import {
 } from './parts';
 
 const M = S1;
-const HEADS = [['pipeline', 'thread'], ['payments', 'sink'], ['refunds', 'sink'], ['controller', 'thread']];
+const HEADS = [['pipeline', 'thread'], ['refunds', 'sink'], ['payments', 'sink'], ['controller', 'thread']];
 const FIRST = M + chipW(HEADS[0]) / 2;
 const LAST = SEQ_W - M - chipW(HEADS[3]) / 2;
 /** Four lifelines, evenly spaced. */
 const D = (LAST - FIRST) / 3;
-const [P, PAY, REF, C] = [0, 1, 2, 3].map((i) => FIRST + i * D);
+const [P, REF, PAY, C] = [0, 1, 2, 3].map((i) => FIRST + i * D);
 
 const Y1 = HEAD_BOTTOM + GAP + LINE_BOX + S1 + ARROW / 2;
 const Y2 = Y1 + ROW;
@@ -49,23 +49,22 @@ const HOLD: [number, number] = [Y3 + S2, Y4 - S2 - S1];
 function draw(id: string): React.ReactNode {
   return (
     <>
-      <Heads heads={HEADS.map((label, i) => ({x: [P, PAY, REF, C][i], label}))} />
-      {[P, PAY, REF, C].map((x) => (
+      <Heads heads={HEADS.map((label, i) => ({x: [P, REF, PAY, C][i], label}))} />
+      {[P, REF, PAY, C].map((x) => (
         <Lifeline key={x} x={x} end={Y6} />
       ))}
 
-      <Message id={id} from={P} to={PAY} y={Y1} label="rows" step={1} />
-      <Message id={id} from={P} to={REF} y={Y2} label="rows" over={[PAY, REF]} step={2} />
+      <Message id={id} from={P} to={PAY} y={Y1} label="rows" over={[REF, PAY]} step={1} />
+      <Message id={id} from={P} to={REF} y={Y2} label="rows" step={2} />
 
       <Bar kind="wait" x={REF} y0={WAIT[0]} y1={WAIT[1]} />
-      {/* Centred on the stretch of the bar below the ack that crosses it. */}
-      <Text x={REF - S1 - S2} y={centredBaseline((Y3 + WAIT[1]) / 2)} lines="linger" anchor="end" />
+      <Text x={REF - S1 - S2} y={centredBaseline((WAIT[0] + WAIT[1]) / 2)} lines="linger" anchor="end" />
 
-      <Message id={id} kind="ack" from={PAY} to={C} y={Y3} label="ack" over={[REF, C]} step={3} />
+      <Message id={id} kind="ack" from={PAY} to={C} y={Y3} label="ack" step={3} />
       <Bar kind="hold" x={C} y0={HOLD[0]} y1={HOLD[1]} />
       <Text x={C + S1 + S2} y={centredBaseline((HOLD[0] + HOLD[1]) / 2)} lines="held" />
 
-      <Message id={id} kind="ack" from={REF} to={C} y={Y4} label="last ack" step={4} />
+      <Message id={id} kind="ack" from={REF} to={C} y={Y4} label="last ack" over={[PAY, C]} step={4} />
 
       <Edge id={id} kind="mark" points={[[C, Y5], [C, Y6]]} head={false} />
       <Text x={C - RAIL / 2 - S2} y={centredBaseline((Y5 + Y6) / 2)} lines="commit" anchor="end" />
@@ -101,7 +100,7 @@ export default function HeldUntilAllDiagram(): React.JSX.Element {
           last clone.
         </>,
         <>
-          The watermark moves past the batch and the controller commits it on its tick. A failed write
+          The watermark moves past the batch and the controller commits it on its next commit. A failed write
           in either branch fails the whole batch instead.
         </>,
       ]}

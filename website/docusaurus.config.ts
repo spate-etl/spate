@@ -175,6 +175,7 @@ const config: Config = {
         docsRouteBasePath: ['/docs', `/${BENCHMARKS_BASE}`],
         highlightSearchTermsOnTargetPage: true,
         explicitSearchResultPath: true,
+        ignoreCssSelectors: ['figure svg[role="img"]'],
       },
     ],
   ],

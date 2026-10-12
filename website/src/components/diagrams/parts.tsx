@@ -42,7 +42,11 @@ export const PAD = 12;
 /** Inside a box, between its edge and its label. */
 export const CHIP_X = 6;
 export const CHIP_H = 24;
-/** An arrowhead stops this far short of what it points at. */
+/**
+ * A line with an arrowhead stops this far short of what it points at. The head's tip runs an eighth
+ * of the head's length past the line's end (`refX` in `Markers`), so a 7-unit head stops 0.125
+ * short and the rail's 12-unit head reaches 0.5 into its target.
+ */
 export const ARROW_GAP = 1;
 /** An arrowhead's length and width on a records, acks or control line. */
 export const ARROW = 7;
@@ -478,6 +482,7 @@ export type LegendEntry =
   | 'chip'
   | 'queue'
   | 'node'
+  | 'replicas'
   | 'source'
   | 'join'
   | 'lifeline'
@@ -491,13 +496,14 @@ const LEGEND_TEXT: Record<LegendEntry, string> = {
   ack: 'acks',
   control: 'control signal',
   mark: 'watermark, commit',
-  region: 'thread',
+  region: 'thread, runtime',
   chip: 'stage',
   queue: 'bounded queue',
   node: 'source, destination',
+  replicas: 'destination replicas',
   source: 'source',
   join: 'batch ack',
-  lifeline: 'thread over time',
+  lifeline: 'participant over time',
   reject: 'send refused',
   frame: 'repeats while paused',
   hold: 'batch held',
@@ -553,6 +559,13 @@ function Swatch({entry}: {entry: LegendEntry}): React.JSX.Element {
       </g>
     ),
     node: <circle className={styles.node} cx={SW_W / 2} cy={SW_MID} r={6} />,
+    replicas: (
+      <g>
+        {[-1, 0, 1].map((i) => (
+          <circle key={i} className={styles.replica} cx={SW_W / 2 + i * 6.6} cy={SW_MID} r={6} />
+        ))}
+      </g>
+    ),
     source: <circle className={styles.node} cx={SW_W / 2} cy={SW_MID} r={6} />,
     join: <circle className={styles.join} cx={SW_W / 2} cy={SW_MID} r={4} />,
     lifeline: <path className={styles.lifeline} d={`M${SW_W / 2} 0 L${SW_W / 2} ${SW_H}`} />,
@@ -663,8 +676,8 @@ export function SequenceFigure({name, viewBox, heading, legend, draw, steps}: Se
   const id = useId();
   const captionId = `${id}-caption`;
   return (
-    <figure className={styles.figure}>
-      <div className={styles.sequence}>
+    <div className={styles.figure}>
+      <figure className={styles.sequence}>
         <div className={styles.drawing}>
           <svg viewBox={viewBox} style={atMostOneToOne(viewBox)} role="img" aria-label={name} aria-describedby={captionId}>
             <Markers id={id} />
@@ -680,8 +693,8 @@ export function SequenceFigure({name, viewBox, heading, legend, draw, steps}: Se
             ))}
           </ol>
         </figcaption>
-      </div>
-    </figure>
+      </figure>
+    </div>
   );
 }
 

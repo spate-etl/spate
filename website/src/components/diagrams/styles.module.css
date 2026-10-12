@@ -43,6 +43,7 @@
 /* A sequence drawing is 360 wide: beside its steps where the column has room, above them where it
    has not. At a 358px phone column one unit is still 0.99px, so 12-unit text renders above 11px. */
 .sequence {
+  margin: 0;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   gap: var(--figure-gap) 1.75rem;

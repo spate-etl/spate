@@ -70,14 +70,14 @@ const PB = linesBottom(NOTE_BASE, 2) + PAD;
 const CTRL_TITLE = 'controller thread';
 const DRIVERS_X = PL + PAD + titleW(CTRL_TITLE) + S2;
 const PAUSE_X = DRIVERS_X + GAP;
-const PAUSE = ['on a refused try_send, or', 'bytes in flight past the', 'high watermark'];
+const PAUSE = ['on a refused try_send, or', 'bytes in flight reaching', 'the high watermark'];
 const DRIVERS = ['assign lanes,', 'FlushNow, drain,', 'shutdown'];
 const CT = PB + GAP + LINE_BOX + PAUSE.length * LINE + GAP;
 
 // The controller holds the source control plane over the checkpointer, both at its right. The
 // commit rail leaves the checkpointer to the left, and its labels sit under the checkpointer.
 const COMMIT = 'Source::commit';
-const COMMIT_NOTE = 'watermarks, on the tick';
+const COMMIT_NOTE = 'watermarks';
 const CP = ['checkpointer', 'tokio-free'];
 const CP_W = chipW(CP);
 const CP_H = CHIP_H + LINE;
@@ -346,13 +346,13 @@ export default function ArchitectureDiagram(): React.JSX.Element {
       name={NAME}
       wide={{viewBox: `0 0 ${VIEW_W} ${VIEW_H}`, draw: wide}}
       narrow={{viewBox: `0 0 ${N_W} ${N_H}`, draw: narrow}}
-      legend={['data', 'ack', 'mark', 'control', 'region', 'chip', 'queue', 'node']}
+      legend={['data', 'ack', 'mark', 'control', 'region', 'chip', 'queue', 'source', 'replicas']}
       steps={[
-        'A driver asks the controller to pause its lanes when a try_send is refused or bytes in flight pass the high watermark, and to resume them once they drain.',
+        'A driver asks the controller to pause its lanes when a try_send is refused or bytes in flight reach the high watermark, and to resume them once they drain.',
         'The controller sends drivers lane assignments, FlushNow on the commit tick, drain barriers and shutdown.',
         'Acks travel over an unbounded channel, so they never wait behind data.',
         'The checkpointer turns acks into per-partition watermarks.',
-        'On the commit tick the controller commits the watermarks through Source::commit.',
+        'On the commit tick, and at a rebalance and at shutdown, the controller commits the watermarks through Source::commit.',
         'The controller keeps calling poll_events, and applies pause and resume to the source.',
       ]}
       caption={

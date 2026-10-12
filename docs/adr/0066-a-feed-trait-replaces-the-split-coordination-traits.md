@@ -87,7 +87,7 @@ review; nothing checks the trait's signatures.
 
 ## More information
 
-- Landed in the pull request titled `s3: read work units from the feed trait`.
+- Landed in #1124.
 - The work-feed record — the work feed this trait serves, and the break that
   removes the coordination traits.
 - [Work feed](../user-guide/02-concepts/09-work-feed.mdx) — units, the ack

@@ -571,3 +571,71 @@ fn a_retryable_answer_is_sent_again() {
     });
     stop(&l);
 }
+
+/// A feed over [`MemoryFeed`] that answers the first `receive` and the first
+/// `renew` of each receipt with `Retryable`.
+struct RetryableReceiveAndRenew {
+    inner: MemoryFeed,
+    receives: Mutex<usize>,
+    refused: Mutex<HashSet<Receipt>>,
+}
+
+impl Feed for RetryableReceiveAndRenew {
+    fn set_waker(&self, waker: FeedWaker) {
+        self.inner.set_waker(waker);
+    }
+    fn receive(&self, max: usize) -> Result<Vec<Delivery>, FeedError> {
+        let mut receives = self.receives.lock().unwrap();
+        *receives += 1;
+        if *receives == 1 {
+            return Err(FeedError::new(FeedErrorKind::Retryable, "throttled"));
+        }
+        drop(receives);
+        self.inner.receive(max)
+    }
+    fn renew(&self, receipt: Receipt) -> Result<(), FeedError> {
+        if self.refused.lock().unwrap().insert(receipt) {
+            return Err(FeedError::new(FeedErrorKind::Retryable, "throttled"));
+        }
+        self.inner.renew(receipt)
+    }
+    fn acknowledge(&self, receipt: Receipt) -> Result<(), FeedError> {
+        self.inner.acknowledge(receipt)
+    }
+    fn fail(&self, receipt: Receipt, reason: &str) -> Result<(), FeedError> {
+        self.inner.fail(receipt, reason)
+    }
+    fn publish(&self, unit: Unit) -> Confirmation {
+        self.inner.publish(unit)
+    }
+}
+
+/// Pins that a `receive` or a renewal answered `Retryable` is tried again:
+/// the run goes on and the unit it holds is acknowledged.
+#[test]
+fn a_retryable_receive_or_renewal_is_tried_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    stage(&data, "rows.ndjson", &recs("k", 10));
+    let inner = MemoryFeed::new();
+    drop(inner.publish(unit_over(&data, "rows.ndjson")));
+    let feed = Arc::new(RetryableReceiveAndRenew {
+        inner: inner.clone(),
+        receives: Mutex::default(),
+        refused: Mutex::default(),
+    });
+    let l = launch_on_feed(&data, feed.clone(), |sink| {
+        sink.enqueue_global(WriteOutcome::ok().held());
+    });
+    wait_until(DEADLINE, "the write is held", || {
+        l.script.held_writes() == 1
+    });
+    wait_until(DEADLINE, "a renewal is refused", || {
+        !feed.refused.lock().unwrap().is_empty()
+    });
+    l.script.release_held();
+    wait_until(DEADLINE, "the unit is acknowledged", || {
+        inner.counts().acknowledged == 1
+    });
+    stop(&l);
+}

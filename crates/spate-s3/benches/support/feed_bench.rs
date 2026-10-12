@@ -48,7 +48,7 @@ pub(crate) const READ_PARALLELISM: u32 = 96;
 /// Pipeline threads, the same for both arms.
 pub(crate) const THREADS: usize = 4;
 
-/// Sink linger of the gated cases, the value the measured cloud runs used.
+/// Sink linger of every case, the value the measured cloud runs used.
 pub(crate) const SHORT_LINGER: Duration = Duration::from_millis(5);
 
 /// How each run reads the corpus.

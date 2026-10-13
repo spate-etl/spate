@@ -29,7 +29,7 @@ const HEADER_LEN: usize = 9;
 const META_LEN: usize = CHECKSUM_LEN + HEADER_LEN;
 const LZ4_MAGIC: u8 = 0x82;
 const ZSTD_MAGIC: u8 = 0x90;
-/// The scratch capacity a codec never shrinks below, so chunks near the
+/// A scratch at or under this capacity is never replaced, so chunks near the
 /// default chunk target reuse one allocation.
 const SCRATCH_FLOOR: usize = 256 * 1024;
 
@@ -38,7 +38,8 @@ const SCRATCH_FLOOR: usize = 256 * 1024;
 pub(crate) struct BlockCodec {
     method: Method,
     /// The block being built. Bytes past the last block are stale, and its
-    /// length only grows, so a call zero-fills only what a larger chunk adds.
+    /// length only grows until the scratch is replaced, so a call that keeps
+    /// the scratch zero-fills only what a larger chunk adds.
     scratch: Vec<u8>,
 }
 

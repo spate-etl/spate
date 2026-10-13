@@ -191,3 +191,22 @@ fn the_scratch_shrinks_after_an_oversized_frame() {
         );
     }
 }
+
+/// A short chunk after a chunk at the default chunk target keeps the
+/// scratch's allocation, because that scratch is under the floor.
+#[test]
+fn a_short_chunk_after_a_full_one_keeps_the_scratch() {
+    for zstd_level in [None, Some(3)] {
+        let mut codec = BlockCodec::new(zstd_level);
+        codec
+            .encode_frame(&bytes(64 * 1024, 3, 16))
+            .expect("the full chunk codes");
+        let kept = codec.scratch.as_ptr();
+        codec.encode_frame(&[0x2a]).expect("the short chunk codes");
+        assert_eq!(
+            codec.scratch.as_ptr(),
+            kept,
+            "zstd level {zstd_level:?}: the scratch was replaced"
+        );
+    }
+}

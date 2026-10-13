@@ -14,7 +14,7 @@ use spate_core::sink::FrameCodecFactory;
 use crate::Compression;
 pub use crate::schema::ColumnRow;
 
-/// The frame codec the sink uses under `compression`, or `None` under
+/// The frame codec for `compression`, or `None` under
 /// `off`.
 ///
 /// Each instance turns one sealed chunk into one compressed block in

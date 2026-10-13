@@ -443,7 +443,8 @@ fn the_bench_server_serves_the_schema_under_every_compression() {
 
 /// `testing::frame_codec`, the frame benches' route to the sink's codec,
 /// gives no codec under `off` and a block codec under every other
-/// compression, with the method byte and the level that compression names.
+/// compression, with the method byte that compression names. zstd:1 and
+/// zstd:3 give different blocks.
 #[test]
 fn the_codec_export_codes_under_every_compression() {
     let compression = |s: &str| s.parse::<Compression>().expect("a compression value");

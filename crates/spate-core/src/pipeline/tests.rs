@@ -73,6 +73,17 @@ fn start_with_options(
     options: RuntimeOptions,
     mode_factory: impl Fn(Arc<ChainShared>, Arc<Mutex<SourceLog>>) -> FakeChain + Send + 'static,
 ) -> Harness {
+    start_with(config, options, |runtime| runtime, mode_factory)
+}
+
+/// [`start_with_options`], with `customize` applied to the assembled runtime
+/// before it runs.
+fn start_with(
+    config: PipelineConfig,
+    options: RuntimeOptions,
+    customize: impl FnOnce(PipelineRuntime<FakeSource>) -> PipelineRuntime<FakeSource>,
+    mode_factory: impl Fn(Arc<ChainShared>, Arc<Mutex<SourceLog>>) -> FakeChain + Send + 'static,
+) -> Harness {
     let (source, shared, script) = FakeSource::new();
     let chain_shared = Arc::new(ChainShared::default());
     let (sink, drained) = test_sink();
@@ -91,6 +102,7 @@ fn start_with_options(
         budget,
     )
     .with_options(options);
+    let runtime = customize(runtime);
     let shutdown = runtime.shutdown_handle();
     let join = std::thread::spawn(move || runtime.run());
     Harness {
@@ -1346,6 +1358,110 @@ fn the_inflight_budget_reaches_the_exposition_as_one_series() {
         series(&handle.render()).iter().any(|l| l.ends_with(" 0"))
     });
 
+    h.script.lock().unwrap().push_back(Script::Drained);
+    let report = h.join.join().unwrap().unwrap();
+    assert_eq!(report.state, ExitState::Completed);
+}
+
+/// The value of one pipeline's `spate_pipeline_io_busy_ratio` line, if the
+/// exposition carries it.
+fn io_busy_ratio(rendered: &str, pipeline_name: &str) -> Option<f64> {
+    let prefix = format!(
+        r#"{}{{pipeline="{pipeline_name}",component="runtime",component_type="pipeline"}} "#,
+        names::PIPELINE_IO_BUSY_RATIO
+    );
+    rendered
+        .lines()
+        .find_map(|l| l.strip_prefix(&prefix))
+        .and_then(|v| v.parse().ok())
+}
+
+fn install_prometheus(cfg: &PipelineConfig) -> crate::metrics::MetricsHandle {
+    // Installed before the pipeline builds. Handles bind to the recorder
+    // present at construction, and `install` is idempotent, so the runtime
+    // reuses this one and renders through this handle.
+    crate::metrics::install(&crate::metrics::MetricsSettings {
+        exporter: crate::metrics::Exporter::Prometheus,
+        per_partition_detail: cfg.metrics.per_partition_detail,
+        e2e_basis: crate::metrics::E2eBasis::Ingest,
+    })
+    .expect("install the exporter")
+}
+
+/// The I/O busy gauge is in the exposition, at 0, before its first sample.
+#[test]
+fn the_io_busy_ratio_is_published_from_start() {
+    let mut cfg = test_config(1);
+    cfg.metrics.exporter = crate::config::MetricsExporter::Prometheus;
+    let pipeline_name = cfg.pipeline.name.clone();
+    let handle = install_prometheus(&cfg);
+
+    let h = start_with_config(cfg, |shared, log| FakeChain {
+        shared,
+        log,
+        mode: ChainMode::Ok,
+        batches_seen: 0,
+    });
+    wait_for(
+        "the busy gauge is published",
+        Duration::from_secs(5),
+        || io_busy_ratio(&handle.render(), &pipeline_name) == Some(0.0),
+    );
+
+    h.script.lock().unwrap().push_back(Script::Drained);
+    let report = h.join.join().unwrap().unwrap();
+    assert_eq!(report.state, ExitState::Completed);
+}
+
+/// A caller-owned I/O runtime kept busy by a task of its own reads as busy
+/// in the exposition, sampled by the running pipeline.
+#[test]
+fn a_busy_io_runtime_reaches_the_exposition() {
+    let mut cfg = test_config(1);
+    cfg.metrics.exporter = crate::config::MetricsExporter::Prometheus;
+    let pipeline_name = cfg.pipeline.name.clone();
+    let handle = install_prometheus(&cfg);
+
+    let io = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let stop = Arc::new(AtomicBool::new(false));
+    let spin = Arc::clone(&stop);
+    io.spawn(async move {
+        // CPU work inside a poll is what tokio counts as busy.
+        while !spin.load(Ordering::Relaxed) {
+            let polled = Instant::now();
+            while polled.elapsed() < Duration::from_millis(10) {
+                std::hint::spin_loop();
+            }
+            tokio::task::yield_now().await;
+        }
+    });
+
+    let h = start_with(
+        cfg,
+        test_options(),
+        |runtime| {
+            runtime
+                .with_io_runtime(io)
+                .with_io_busy_interval(Duration::from_millis(50))
+        },
+        |shared, log| FakeChain {
+            shared,
+            log,
+            mode: ChainMode::Ok,
+            batches_seen: 0,
+        },
+    );
+    wait_for(
+        "a busy sample is published",
+        Duration::from_secs(10),
+        || io_busy_ratio(&handle.render(), &pipeline_name).is_some_and(|r| r > 0.5),
+    );
+
+    stop.store(true, Ordering::Relaxed);
     h.script.lock().unwrap().push_back(Script::Drained);
     let report = h.join.join().unwrap().unwrap();
     assert_eq!(report.state, ExitState::Completed);

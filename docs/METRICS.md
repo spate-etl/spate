@@ -421,6 +421,7 @@ publishes no lag), but a new connector must not.
 | `spate_pipeline_info` | gauge | `version` | Constant 1; carries build metadata. |
 | `spate_pipeline_state` | gauge | `state` (`starting`\|`running`\|`draining`\|`failed`) | 1 for the current state, 0 otherwise. |
 | `spate_pipeline_threads` | gauge | | Pinned pipeline thread count. |
+| `spate_pipeline_io_busy_ratio` | gauge | | Mean fraction of time the I/O runtime's async workers spent running tasks, from 0 to 1, sampled every 5s over the interval since the previous sample. The blocking pool is not counted. Reads 0 until the first sample, and holds its last value during the shutdown drain. |
 | `process_*` | — | | CPU, memory, fds via `metrics-process`. |
 
 ## Histogram buckets
@@ -440,6 +441,10 @@ Configured on the exporter, by name suffix or full name:
 - `spate_checkpoint_watermark_age_seconds > 5m` while
   `rate(spate_source_records_total[5m]) > 0` — pipeline is stuck, not idle.
 - `spate_backpressure_paused == 1` sustained — sink capacity problem.
+- `spate_pipeline_io_busy_ratio > 0.9` sustained while the sink queues fill —
+  the I/O runtime's workers are the limit. Raise `pipeline.io_threads` before
+  reading it as a slow sink. The pipeline also logs a warning once the ratio
+  has stayed at 0.9 or above for 60s.
 - `rate(spate_deser_records_dropped_total[5m]) > 0` — schema drift or poison
   messages being skipped.
 - `spate_sink_replica_healthy == 0` — replica down; sustained across all

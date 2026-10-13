@@ -89,6 +89,9 @@ writes. The hot path never runs there, so extra I/O workers buy nothing for
 CPU-bound pipelines. Each odd-numbered worker (the first, the third, and so
 on) takes one core from the derived pipeline-thread count, down to its floor
 of 1.
+Read `spate_pipeline_io_busy_ratio` before raising it: a value that stays
+near 1 means the I/O workers are saturated
+([Metrics](../../METRICS.md#pipeline--process)).
 
 ## Sink batching: `batch.max_rows` / `batch.max_bytes` / `batch.linger`
 

@@ -76,7 +76,7 @@ required-features = ["kafka", "clickhouse", "avro"]
 
 [[test]]
 name = "e2e_examples"
-required-features = ["kafka", "clickhouse", "avro", "s3", "json", "coordination-nats"]
+required-features = ["kafka", "clickhouse", "avro", "s3", "json", "coordination-nats", "datagen-avro"]
 
 [[example]]
 name = "memory_pipeline"
@@ -138,6 +138,10 @@ required-features = ["kafka"]
 [[example]]
 name = "clickhouse_aggregating_mv"
 required-features = ["clickhouse"]
+
+[[example]]
+name = "clickhouse_load"
+required-features = ["datagen-avro", "avro", "clickhouse"]
 
 [[example]]
 name = "json_skip_bad_records"

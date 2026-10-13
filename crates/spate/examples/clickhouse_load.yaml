@@ -1,0 +1,87 @@
+# Load run: datagen → Avro → flat_map → ClickHouse Native, sized like a
+# production sink (32 shards, 4 inserts in flight each, 1M-row batches).
+# Every endpoint and the run size interpolate from the environment, so one
+# file serves every host a measurement runs on.
+
+pipeline:
+  name: clickhouse-load
+  # `threads` and `io_threads` are left at their derived defaults. Set them
+  # here to measure a fixed shape.
+
+checkpoint:
+  interval: 5s
+  # A partition at this ceiling stops generating until its batches are
+  # acknowledged. Raised from 1024 so batches waiting out the 2 s linger
+  # below leave room for more.
+  max_pending_batches: 8192
+
+backpressure:
+  # Above what 32 shards x 4 in-flight batches can hold, so the budget never
+  # paces the run and the sink does.
+  max_inflight_bytes: 64GiB
+
+admin:
+  listen: none
+
+metrics:
+  exporter: none
+
+source:
+  datagen:
+    encoding: avro
+    partitions: 32
+    # Unthrottled: each lane generates as fast as the pipeline takes events.
+    tick_interval: 0s
+    # Fixed, so every run with the same `count` writes the same rows.
+    seed: 1133
+    # Events across all lanes; each order fans out to one to five rows.
+    count: ${SPATE_LOAD_COUNT:-10000000}
+
+sink:
+  clickhouse:
+    table: ${CLICKHOUSE_TABLE:-order_lines}
+    format: native
+    compression: lz4
+    # 32 entries against one server: the shard count sets how many batches
+    # build and send in parallel. Point each at its own server to load a
+    # cluster.
+    shards:
+      - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
+      - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
+      - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
+      - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
+      - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
+      - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
+      - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
+      - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
+      - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
+      - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
+      - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
+      - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
+      - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
+      - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
+      - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
+      - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
+      - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
+      - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
+      - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
+      - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
+      - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
+      - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
+      - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
+      - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
+      - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
+      - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
+      - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
+      - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
+      - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
+      - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
+      - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
+      - replicas: ["${CLICKHOUSE_URL:-http://localhost:8123}"]
+    user: ${CLICKHOUSE_USER:-default}
+    password: ${CLICKHOUSE_PASSWORD:-}
+    inflight:
+      max_per_shard: 4
+    batch:
+      linger: 2000ms
+      max_rows: 1048576

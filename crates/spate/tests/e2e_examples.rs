@@ -942,6 +942,82 @@ fn clickhouse_aggregating_mv_example_builds_states() {
     );
 }
 
+/// `clickhouse_load`: a bounded datagen run into a 32-shard Native sink
+/// completes, prints a summary line that parses, and writes the same number
+/// of rows when run again.
+///
+/// Equal counts let two builds of the example be compared on the same work.
+/// The seed is fixed, so the line count per order repeats.
+#[test]
+#[ignore = "requires Docker"]
+fn clickhouse_load_completes_and_repeats_its_workload() {
+    let h = Harness::up();
+    // The DDL in the example's module doc. No deduplication window: the
+    // second run writes the same rows, and a window could drop them.
+    ddl(
+        &h,
+        "CREATE TABLE order_lines (\
+             order_id UInt64, placed_at DateTime64(3), \
+             sku LowCardinality(String), qty UInt32, unit_cents UInt32) \
+         ENGINE = MergeTree ORDER BY (order_id, sku)",
+    );
+    let config = render_config("clickhouse_load");
+    let env = vec![
+        ("CLICKHOUSE_URL", h.ch_url.clone()),
+        ("CLICKHOUSE_PASSWORD", CH_PASSWORD.to_string()),
+        ("SPATE_LOAD_COUNT", "20000".to_string()),
+    ];
+
+    let mut counts = Vec::new();
+    for run in 1..=2 {
+        if run > 1 {
+            ddl(&h, "TRUNCATE TABLE order_lines");
+        }
+        let log = spawn_as(
+            "clickhouse_load",
+            &format!("clickhouse_load.{run}"),
+            Some(&config.path),
+            &env,
+        )
+        .wait_exit(OUTPUT_DEADLINE);
+        let summary = load_summary(&log);
+        assert_eq!(summary["state"], "completed", "run {run}: {summary}");
+        assert!(summary["wall_ms"].is_u64(), "run {run}: {summary}");
+        assert!(
+            summary["available_parallelism"]
+                .as_u64()
+                .is_some_and(|n| n > 0),
+            "run {run}: {summary}"
+        );
+        assert_eq!(summary["compression"], "lz4", "run {run}: {summary}");
+        // The shipped file leaves `threads` unset, so the runtime derives it.
+        assert!(summary["threads"].is_null(), "run {run}: {summary}");
+        assert!(summary["io_threads"].is_u64(), "run {run}: {summary}");
+        counts.push(h.count("order_lines"));
+    }
+    assert!(counts[0] > 0, "the first run wrote rows: {counts:?}");
+    assert_eq!(
+        counts[0], counts[1],
+        "two runs of the same seed and count wrote the same rows"
+    );
+}
+
+/// The one JSON line in an example log that carries `wall_ms`. Panics unless
+/// exactly one line does.
+fn load_summary(log: &str) -> serde_json::Value {
+    let summaries: Vec<serde_json::Value> = log
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|value| value.get("wall_ms").is_some())
+        .collect();
+    assert_eq!(
+        summaries.len(),
+        1,
+        "expected one summary line\n--- log ---\n{log}"
+    );
+    summaries.into_iter().next().expect("one summary")
+}
+
 // ── NATS JetStream ─────────────────────────────────────────────────────────
 
 /// `nats_coordinated_backfill`: a bounded backfill divided over the durable

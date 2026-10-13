@@ -101,6 +101,7 @@ What the pipeline tells you, and what it does when something breaks.
 
 | Example | What it shows | Features | Needs |
 |---|---|---|---|
+| [`clickhouse_load`](clickhouse_load.rs) | How to measure how fast a sharded ClickHouse sink takes generated rows with **datagen, Avro and ClickHouse Native** | `datagen-avro,avro,clickhouse` | ClickHouse |
 | [`custom_metrics`](custom_metrics.rs) | How to register your own metrics beside the framework's with **the Meter API** | — | nothing |
 | [`instrumented_operator`](instrumented_operator.rs) | How to count what an operator you wrote is doing with **the Meter API** | — | nothing |
 | [`sink_failures`](sink_failures.rs) | How to see what a failing sink does to the watermark with **no infrastructure** | — | nothing |

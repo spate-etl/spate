@@ -156,9 +156,10 @@ pub struct PipelineSection {
     /// (rounded up) and one for the controller, at least 1.
     #[serde(default)]
     pub threads: Option<usize>,
-    /// Worker threads for the I/O runtime (sink workers, checkpointer,
-    /// admin server). While `threads` is unset, every two extra workers take
-    /// one core from the derived pipeline thread count.
+    /// Worker threads for the I/O runtime (sink workers, admin server).
+    /// While `threads` is unset, each odd-numbered worker (the first, the
+    /// third, and so on) takes one core from the derived pipeline thread
+    /// count, down to its floor of 1.
     #[serde(default = "defaults::io_threads")]
     pub io_threads: usize,
     /// Core-pinning mode for pipeline threads.

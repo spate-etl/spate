@@ -65,9 +65,9 @@ The process splits work between two pools
 When `pipeline.threads` is unset, the count derives at startup as
 `available_parallelism` minus the I/O reserve, floored at 1. The I/O reserve
 is one core for every two `io_threads` workers, rounded up, plus one core for
-the controller thread. Row encoding and any compression the sink asks for run
-on the pipeline threads, so an I/O worker spends most of its time waiting on
-the network. With the default `io_threads: 2`:
+the controller thread. Row encoding runs on the pipeline threads, and so does
+compression when the sink supplies a frame codec. The I/O workers carry the
+socket writes. With the default `io_threads: 2`:
 
 | `available_parallelism` | I/O reserve | Pipeline threads |
 |---|---|---|
@@ -86,8 +86,9 @@ explicitly.
 
 Raise `io_threads` only if you have many shards with slow, concurrent
 writes. The hot path never runs there, so extra I/O workers buy nothing for
-CPU-bound pipelines, and every two extra workers take one core from the
-derived pipeline-thread count.
+CPU-bound pipelines. Each odd-numbered worker (the first, the third, and so
+on) takes one core from the derived pipeline-thread count, down to its floor
+of 1.
 
 ## Sink batching: `batch.max_rows` / `batch.max_bytes` / `batch.linger`
 

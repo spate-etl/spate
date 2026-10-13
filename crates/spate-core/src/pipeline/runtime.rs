@@ -579,11 +579,13 @@ impl<S: Source + 'static> PipelineRuntime<S> {
 /// `cores` minus one core for every two I/O workers (rounded up) and one for
 /// the controller, at least 1.
 ///
-/// Row encoding and any sink-side compression run on the pipeline threads, so
-/// an I/O worker carries socket writes and shard bookkeeping, sized at about
-/// half a core at a high insert rate. When every thread is busy, the runnable
-/// threads exceed the cores by `floor(io_threads / 2)`, and the I/O workers
-/// share cores with pipeline threads. Compact pinning leaves the
+/// Row encoding runs on the pipeline threads, and so does compression when the
+/// sink supplies a [`FrameCodec`](crate::sink::FrameCodec). The I/O workers
+/// carry the socket writes and shard bookkeeping. While `cores` is at least
+/// `ceil(io_threads / 2) + 2`, the runnable threads exceed the cores by
+/// `floor(io_threads / 2)` when every thread is busy, and the I/O workers
+/// share cores with pipeline threads. While `cores` is at least
+/// `ceil(io_threads / 2) + 2`, compact pinning leaves the
 /// `ceil(io_threads / 2) + 1` highest cores unpinned for the I/O runtime, the
 /// controller and the source's own threads.
 pub(super) fn default_thread_count(cores: usize, io_threads: usize) -> usize {

@@ -111,8 +111,9 @@ threads compress each chunk when it seals. The I/O workers write the
 compressed bytes to the sockets, with TLS when the URL is `https://`, and at
 very high byte rates that work can still saturate two workers and become the
 limit. Raise `io_threads` then, but sparingly, because the derived pipeline-thread count is
-`available_parallelism` minus the I/O reserve, so every two extra I/O workers take
-one hot-path thread (see [Deployment tuning](../../../05-deployment/tuning.mdx)).
+`available_parallelism` minus the I/O reserve, so each odd-numbered I/O worker (the
+first, the third, and so on) takes one hot-path thread, down to the floor of 1 (see
+[Deployment tuning](../../../05-deployment/tuning.mdx)).
 On a host where ClickHouse runs **locally**, remember the server needs cores too:
 client threads (pipeline `threads` + `io_threads`) and the server compete for the
 same machine, so oversubscribing the client starves the server it is feeding.

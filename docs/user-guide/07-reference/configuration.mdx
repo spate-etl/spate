@@ -72,7 +72,7 @@ for the parsing caveats.
 |---|---|---|---|
 | `name` | string | `required` | Pipeline identity; the `pipeline` label on every metric. Must be non-blank. |
 | `threads` | integer | `none` | Pipeline thread count. Unset: `available_parallelism` minus the I/O reserve (one core per two `io_threads`, rounded up, plus 1 for the controller), at least 1. Cgroup-aware — set explicitly on pods without CPU limits ([Tuning](../05-deployment/tuning.mdx)). Must be ≥ 1 when set. |
-| `io_threads` | integer | `2` | Worker threads for the I/O runtime (sink workers, admin server). While `threads` is unset, every two extra workers take one core from the derived pipeline thread count. Must be ≥ 1. |
+| `io_threads` | integer | `2` | Worker threads for the I/O runtime (sink workers, admin server). While `threads` is unset, each odd-numbered worker (the first, the third, and so on) takes one core from the derived pipeline thread count, down to its floor of 1. Must be ≥ 1. |
 | `pinning` | `off` \| `compact` | `off` | Core pinning for pipeline threads. `compact` pins thread *i* to core *i* — only useful with exclusive cores (Kubernetes static CPU manager + Guaranteed QoS). |
 
 ## `checkpoint:`

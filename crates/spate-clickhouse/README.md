@@ -29,10 +29,10 @@ the sanctioned pattern for replay tolerance.
 
 ## Transport compression
 
-Insert (and schema-probe) request/response bodies are compressed on the wire.
-This is **transport compression only** — negotiated per connection with the
-server — and is independent of the on-disk column `CODEC`s you declare in table
-DDL, which remain your responsibility.
+Insert bodies are compressed on the wire. The sink compresses them on the
+pipeline threads when each chunk seals, and query responses are decoded by the
+client. This is **transport compression only**, independent of the on-disk
+column `CODEC`s you declare in table DDL, which remain your responsibility.
 
 ```yaml
 sink:

@@ -20,6 +20,7 @@ use crate::sink::{
 use crate::telemetry::RateLimit;
 use bytes::{Bytes, BytesMut};
 use std::collections::VecDeque;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -72,8 +73,9 @@ struct ShardBuf<E> {
     oldest_event_ms: i64,
     /// `rows` when a codec error left `buf` holding a block the encoder
     /// already finished. A seal skips `finish_chunk` while `rows` still
-    /// equals it, so no row has been encoded since.
-    finished_rows: Option<u32>,
+    /// equals it, so no row has been encoded since. A seal with no rows
+    /// returns before it reaches the codec, so the count is never zero.
+    finished_rows: Option<NonZeroU32>,
 }
 
 /// This stage's own [`FrameCodec`] instance. The wrapper gives
@@ -178,7 +180,7 @@ where
         // later finalize succeeds and fail on teardown otherwise. A flush seals
         // every shard after this one, so the latch keeps the first reason.
         let before = shard.buf.len();
-        if shard.finished_rows != Some(shard.rows)
+        if shard.finished_rows != NonZeroU32::new(shard.rows)
             && let Err(e) = shard.encoder.finish_chunk(&mut shard.buf)
         {
             // The encoder may have written a partial block; roll it back to
@@ -221,7 +223,7 @@ where
                 Err(e) => {
                     // The finished block stays in the buffer, so the rows and
                     // acks stay with the shard as on a failed finalize.
-                    shard.finished_rows = Some(shard.rows);
+                    shard.finished_rows = NonZeroU32::new(shard.rows);
                     self.meter.0.fatal_error();
                     self.fatal.0.get_or_insert_with(|| FatalError {
                         component: self.component.to_string(),

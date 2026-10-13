@@ -237,7 +237,23 @@ fn a_slightly_shorter_chunk_above_the_floor_keeps_the_scratch() {
 #[test]
 fn the_scratch_is_replaced_past_twice_the_next_need() {
     for zstd_level in [None, Some(3)] {
-        for (len, replaced) in [(600 * 1024, false), (400 * 1024, true)] {
+        let need = |len: usize| {
+            META_LEN
+                + match zstd_level {
+                    None => lz4_flex::block::get_maximum_output_size(len),
+                    Some(_) => zstd_safe::compress_bound(len),
+                }
+        };
+        let mut probe = BlockCodec::new(zstd_level);
+        probe
+            .encode_frame(&bytes(1024 * 1024, 3, 16))
+            .expect("the first chunk codes");
+        let capacity = probe.scratch.capacity();
+        // The shortest chunk whose need is at least half the scratch.
+        let kept_len = (0..1024 * 1024)
+            .find(|&len| 2 * need(len) >= capacity)
+            .expect("a chunk under 1 MiB needs half the scratch");
+        for (len, replaced) in [(kept_len, false), (kept_len - 1, true)] {
             let mut codec = BlockCodec::new(zstd_level);
             codec
                 .encode_frame(&bytes(1024 * 1024, 3, 16))

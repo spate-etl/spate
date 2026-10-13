@@ -16,7 +16,10 @@ use spate_core::deser::{Deserializer, EmitRecord, Owned, RecFamily};
 use spate_core::error::DeserError;
 use spate_core::ops::{ChunkConfig, Emitter, PushOutcome, RunnableChain, chain, chain_owned};
 use spate_core::record::{PartitionId, RawPayload, Record, RecordMeta};
-use spate_core::sink::{EncodedChunk, KeyHashRouter, RowEncoder, ShardRouter, shard_queues};
+use spate_core::sink::{
+    EncodedChunk, FrameCodec, FrameCodecFactory, KeyHashRouter, RowEncoder, ShardRouter,
+    shard_queues,
+};
 use spate_core::source::PayloadBatch;
 use std::sync::Arc;
 
@@ -98,6 +101,21 @@ impl RowEncoder<Owned<Vec<u8>>> for VecEncoder {
         buf.extend_from_slice(&(rec.payload.len() as u32).to_le_bytes());
         buf.extend_from_slice(&rec.payload);
         Ok(())
+    }
+}
+
+/// A [`FrameCodec`] that copies the chunk unchanged into its own buffer, so a
+/// coded case prices the codec step itself and no compressor.
+#[derive(Default)]
+struct CopyCodec {
+    out: Vec<u8>,
+}
+
+impl FrameCodec for CopyCodec {
+    fn encode_frame(&mut self, chunk: &[u8]) -> Result<&[u8], spate_core::error::SinkError> {
+        self.out.clear();
+        self.out.extend_from_slice(chunk);
+        Ok(&self.out)
     }
 }
 
@@ -278,6 +296,29 @@ impl Rig {
         }
         rows
     }
+
+    /// [`drive`](Self::drive), returning the chunks instead of their row
+    /// count, for a test that checks what a case seals.
+    pub(crate) fn drive_chunks(&mut self) -> Vec<EncodedChunk> {
+        let (ack, _rx) = AckRef::test_pair();
+        let mut batch = TestBatch {
+            corpus: &self.corpus,
+            idx: 0,
+            ack,
+        };
+        assert!(matches!(
+            self.chain.push_batch(&mut batch, 0),
+            PushOutcome::Done
+        ));
+        assert!(matches!(self.chain.flush(), PushOutcome::Done));
+        let mut chunks = Vec::new();
+        for rx in &mut self.rxs {
+            while let Ok(chunk) = rx.try_recv() {
+                chunks.push(chunk);
+            }
+        }
+        chunks
+    }
 }
 
 /// A chunk target must land on a sub-record boundary, or a chunk case seals a
@@ -363,6 +404,22 @@ pub(crate) fn borrowed_rig() -> Rig {
 /// varies: which router runs per record, how many shard buffers it routes
 /// between, and the frame size a chunk seals at.
 pub(crate) fn borrowed_rig_with(routing: Routing, shards: usize, target_bytes: usize) -> Rig {
+    build_borrowed(routing, shards, target_bytes, None)
+}
+
+/// The one-shard, constant-router borrowed rig with a [`CopyCodec`] on its
+/// queues, so every seal also runs the codec step.
+pub(crate) fn coded_rig_with(target_bytes: usize) -> Rig {
+    let codec = FrameCodecFactory::new(|| Box::new(CopyCodec::default()));
+    build_borrowed(Routing::Fixed, 1, target_bytes, Some(codec))
+}
+
+fn build_borrowed(
+    routing: Routing,
+    shards: usize,
+    target_bytes: usize,
+    codec: Option<FrameCodecFactory>,
+) -> Rig {
     let corpus = corpus(routing);
     assert_encodes_to(&corpus);
     assert_seals_on_a_record_boundary(target_bytes);
@@ -370,6 +427,10 @@ pub(crate) fn borrowed_rig_with(routing: Routing, shards: usize, target_bytes: u
         assert_spreads(&corpus, shards);
     }
     let (queues, rxs) = shard_queues(shards, 4096);
+    let queues = match codec {
+        Some(codec) => queues.with_frame_codec(codec),
+        None => queues,
+    };
     let cfg = ChunkConfig {
         target_bytes,
         ..ChunkConfig::default()

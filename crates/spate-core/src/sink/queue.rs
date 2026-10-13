@@ -3,7 +3,7 @@
 //! Senders live on pipeline threads and only ever `try_send`, so a poll loop
 //! never blocks; receivers live in shard worker tasks on the I/O runtime.
 
-use super::EncodedChunk;
+use super::{EncodedChunk, FrameCodec, FrameCodecFactory};
 use crate::metrics::{ComponentLabels, MetricsError, QueueMetrics};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -22,9 +22,30 @@ pub struct ShardQueues {
     /// this queue. `None` until `attach_metrics` runs (and in bare transport
     /// tests), so the no-metrics path stays untouched.
     metrics: Option<Arc<Vec<QueueMetrics>>>,
+    /// The sink's frame codec, if it has one. Each terminal stage built on
+    /// these queues makes its own instance.
+    codec: Option<FrameCodecFactory>,
 }
 
 impl ShardQueues {
+    /// Attach the sink's [`FrameCodec`]: every terminal stage built on these
+    /// queues, or on a clone made afterwards, codes each chunk it seals with
+    /// its own instance from `codec`. Call it before handing the queues to
+    /// chains. The builder does this from
+    /// [`SinkParts::frame_codec`](crate::sink::SinkParts::frame_codec); a
+    /// manual assembly does it itself.
+    #[must_use]
+    pub fn with_frame_codec(mut self, codec: FrameCodecFactory) -> Self {
+        self.codec = Some(codec);
+        self
+    }
+
+    /// A fresh codec instance for one terminal stage, if the sink has a
+    /// codec.
+    pub(crate) fn new_frame_codec(&self) -> Option<Box<dyn FrameCodec>> {
+        self.codec.as_ref().map(FrameCodecFactory::make)
+    }
+
     /// Number of shards.
     #[must_use]
     pub fn num_shards(&self) -> usize {
@@ -109,6 +130,7 @@ pub fn shard_queues(
             senders,
             capacity,
             metrics: None,
+            codec: None,
         },
         receivers,
     )
@@ -124,6 +146,7 @@ mod tests {
             oldest_ingest: std::time::Instant::now(),
             oldest_event_ms: 0,
             frame: Bytes::from_static(b"x"),
+            raw_len: 1,
             rows: 1,
             acks: crate::checkpoint::AckSet::new(),
         }

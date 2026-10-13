@@ -7,7 +7,8 @@ use spate_core::error::{ErrorClass, SinkError};
 use spate_core::metrics::Meter;
 use spate_core::record::Record;
 use spate_core::sink::{
-    RowEncoder, SealedBatch, ShardWriter, SinkBundle, SinkParts, SinkPoolConfig, endpoint_probe,
+    FrameCodecFactory, RowEncoder, SealedBatch, ShardWriter, SinkBundle, SinkParts, SinkPoolConfig,
+    endpoint_probe,
 };
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -359,6 +360,7 @@ pub fn capture_sink(shards: usize, replicas: usize) -> (CaptureSink, SinkScript)
             shards,
             replicas,
             pool: SinkPoolConfig::default(),
+            codec: None,
         },
         script,
     )
@@ -371,6 +373,7 @@ pub struct CaptureSink {
     shards: usize,
     replicas: usize,
     pool: SinkPoolConfig,
+    codec: Option<FrameCodecFactory>,
 }
 
 impl CaptureSink {
@@ -378,6 +381,14 @@ impl CaptureSink {
     #[must_use]
     pub fn with_pool_config(mut self, pool: SinkPoolConfig) -> Self {
         self.pool = pool;
+        self
+    }
+
+    /// Attach a frame codec, so the captured payloads are the codec's output
+    /// and [`CapturedWrite::bytes`] counts the bytes before it.
+    #[must_use]
+    pub fn with_frame_codec(mut self, codec: FrameCodecFactory) -> Self {
+        self.codec = Some(codec);
         self
     }
 }
@@ -398,9 +409,13 @@ impl SinkBundle for CaptureSink {
         // The separate-probe-clients rule matters for real connectors with a
         // live pool, not an in-memory fake.
         let probe = endpoint_probe(self.writer.clone(), Arc::new(endpoints.clone()));
-        SinkParts::new(self.writer, endpoints, self.pool)
+        let parts = SinkParts::new(self.writer, endpoints, self.pool)
             .with_component_type("capture")
-            .with_probe(probe)
+            .with_probe(probe);
+        match self.codec {
+            Some(codec) => parts.with_frame_codec(codec),
+            None => parts,
+        }
     }
 }
 

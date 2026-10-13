@@ -224,9 +224,9 @@ series carry its name as the `component` label (a single sink uses
 | Metric | Type | Extra labels | Description |
 |---|---|---|---|
 | `spate_sink_records_total` | counter | `shard` | Records durably written (acknowledged flushes only). |
-| `spate_sink_bytes_total` | counter | `shard` | Bytes durably written. |
+| `spate_sink_bytes_total` | counter | `shard` | Bytes durably written, counted before the sink's frame codec. |
 | `spate_sink_batch_rows` | histogram | | Rows per sealed batch. |
-| `spate_sink_batch_bytes` | histogram | | Bytes per sealed batch. |
+| `spate_sink_batch_bytes` | histogram | | Bytes per sealed batch, counted before the sink's frame codec. |
 | `spate_sink_flushes_total` | counter | `shard`, `reason` (`rows`\|`bytes`\|`linger`\|`drain`) | Flushes by trigger. |
 | `spate_sink_flush_duration_seconds` | histogram | `shard` | **Seal→settle** per durably written batch: the wait for an `inflight.max_per_shard` slot, every attempt, every retry-backoff sleep and quarantine probe wait, and the write that finally succeeded. The right input for a commit-lag budget and the **wrong** first reach for "is the sink slow" — see [What a flush contains](#what-a-flush-contains). Only settled batches are observed; an abandoned one is counted by `spate_sink_abandoned_batches_total` instead. |
 | `spate_sink_write_duration_seconds` | histogram | `shard`, `outcome` (`ok`\|`error`) | One **attempt**, wrapping the sink write and nothing else *of the framework's* — no permit wait, no retry backoff, no probe wait. This is the "how fast is the sink system" signal. Note what that does include: a connector that sleeps *inside* its write puts that sleep here (the Kafka sink does, on a full producer queue), and the wall-clock charges whatever the sink's I/O runtime was busy with at each await point. Every attempt is observed, retries included, so the count is per attempt rather than per batch. Split by outcome because a fatal reject in a millisecond and a timeout after thirty seconds are both attempts, and mixing them moves the distribution in opposite directions; the error's taxonomy class stays on `spate_sink_errors_total{error_type}`. An attempt aborted at the drain deadline is never observed — but attempts that completed before the abort are. |

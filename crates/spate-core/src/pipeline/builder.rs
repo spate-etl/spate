@@ -39,7 +39,7 @@
 //! | Builder | Primitives |
 //! |---|---|
 //! | `from_config(config)` | [`telemetry::init`](crate::telemetry::init) → [`metrics::install`](crate::metrics::install)`(&`[`metrics_settings`](crate::pipeline::metrics_settings)`(&config))` → `tokio::runtime::Builder` (`io_threads` workers) → [`InflightBudget::new`](crate::backpressure::InflightBudget::new) |
-//! | `.sink(bundle)` | [`SinkBundle::into_parts`](crate::sink::SinkBundle::into_parts) → [`shard_queues`](crate::sink::shard_queues) → [`SinkShardMetrics::try_new`](crate::metrics::SinkShardMetrics::try_new) per shard → [`SinkPool::spawn`](crate::sink::SinkPool::spawn) → a boxed drain closure. It also resolves this sink's [`ChunkConfig`] from the YAML `chunk:` block / [`SinkOptions::with_chunk`]. This is the one builder step without a manual-assembly equivalent, since the config layer is what carries `chunk:`. |
+//! | `.sink(bundle)` | [`SinkBundle::into_parts`](crate::sink::SinkBundle::into_parts) → [`shard_queues`](crate::sink::shard_queues) → [`ShardQueues::with_frame_codec`](crate::sink::ShardQueues::with_frame_codec) when the parts carry a [`frame_codec`](crate::sink::SinkParts::frame_codec) → [`SinkShardMetrics::try_new`](crate::metrics::SinkShardMetrics::try_new) per shard → [`SinkPool::spawn`](crate::sink::SinkPool::spawn) → a boxed drain closure. It also resolves this sink's [`ChunkConfig`] from the YAML `chunk:` block / [`SinkOptions::with_chunk`]. This is the one builder step without a manual-assembly equivalent, since the config layer is what carries `chunk:`. |
 //! | `.chains(f)` | the factory handed to [`PipelineRuntime::new`], with queue/budget/name plumbing pre-threaded per call |
 //! | `.into_runtime(source)` / `.run(source)` | [`PipelineRuntime::new`]`(config, source, factory, `[`SinkRuntime`]`{..}, budget)` + [`PipelineRuntime::with_io_runtime`] |
 //!
@@ -627,6 +627,11 @@ impl Pipeline {
         queues
             .attach_metrics(&sink_labels)
             .map_err(|e| BuildError::DuplicateSeries(e.to_string()))?;
+        // Before any clone, like the metrics: every chain's terminal makes its
+        // own codec instance from these queues.
+        if let Some(codec) = parts.frame_codec {
+            queues = queues.with_frame_codec(codec);
+        }
         let e2e_basis = metrics_settings(&self.config).e2e_basis;
         // A shard's gauges are edge-triggered, so two live handle sets on one
         // series leave a stale reading standing rather than a double count. On
@@ -1200,6 +1205,88 @@ mod tests {
             (128 * 1024, 512 * 1024),
             "each branch resolves its own per-sink chunk"
         );
+    }
+
+    /// A [`FrameCodec`](crate::sink::FrameCodec) that writes a fixed prefix
+    /// before the chunk.
+    struct PrefixCodec {
+        prefix: &'static [u8],
+        out: Vec<u8>,
+    }
+
+    impl crate::sink::FrameCodec for PrefixCodec {
+        fn encode_frame(&mut self, chunk: &[u8]) -> Result<&[u8], SinkError> {
+            self.out.clear();
+            self.out.extend_from_slice(self.prefix);
+            self.out.extend_from_slice(chunk);
+            Ok(&self.out)
+        }
+    }
+
+    fn prefix_codec(prefix: &'static [u8]) -> crate::sink::FrameCodecFactory {
+        crate::sink::FrameCodecFactory::new(move || {
+            Box::new(PrefixCodec {
+                prefix,
+                out: Vec::new(),
+            })
+        })
+    }
+
+    /// The codec a sink's parts carry reaches that sink's queues in every
+    /// chain, and no other sink's.
+    #[test]
+    fn each_sinks_frame_codec_reaches_every_chain() {
+        let (source, shared, script) = FakeSource::new();
+        script
+            .lock()
+            .unwrap()
+            .push_back(Script::Assign(vec![LaneSpec {
+                id: LaneId(0),
+                partition: PartitionId(0),
+                batches: batches(&[0..1, 1..2]),
+            }]));
+
+        let config = test_config(2);
+        type Coded = Option<Vec<u8>>;
+        let captured: Arc<Mutex<Vec<(Coded, Coded)>>> = Arc::new(Mutex::new(Vec::new()));
+        let cap = Arc::clone(&captured);
+        let chain_shared = Arc::new(ChainShared::default());
+        let cs = Arc::clone(&chain_shared);
+        let log = Arc::clone(&shared);
+        let code = |ctx: &ChainCtx, sink: &str| -> Coded {
+            let mut codec = ctx.sink(sink).queues.new_frame_codec()?;
+            Some(codec.encode_frame(b"probe").expect("prefix codec").to_vec())
+        };
+        let runtime = Pipeline::from_config(config)
+            .expect("builder")
+            .add_sink("a", null_sink(1).with_frame_codec(prefix_codec(b"A:")))
+            .expect("sink a")
+            .add_sink("b", null_sink(1).with_frame_codec(prefix_codec(b"B:")))
+            .expect("sink b")
+            .chains(move |ctx| {
+                cap.lock().unwrap().push((code(&ctx, "a"), code(&ctx, "b")));
+                fake_chain(&cs, &log)
+            })
+            .runtime_options(test_options())
+            .into_runtime(source)
+            .expect("into_runtime");
+
+        let shutdown = runtime.shutdown_handle();
+        let join = std::thread::spawn(move || runtime.run());
+        wait_for("every chain factory ran", Duration::from_secs(5), || {
+            captured.lock().unwrap().len() == 2
+        });
+        shutdown.trigger();
+        let _ = join.join().unwrap();
+
+        let captured = captured.lock().unwrap();
+        for (thread, coded) in captured.iter().enumerate() {
+            assert_eq!(
+                coded,
+                &(Some(b"A:probe".to_vec()), Some(b"B:probe".to_vec())),
+                "chain {thread} codes each sink with that sink's codec"
+            );
+        }
     }
 
     /// Drive a capture of `ctx.chunk()` through a full assembly, shared by

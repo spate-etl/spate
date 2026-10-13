@@ -212,6 +212,11 @@ fn suite() -> Suite {
     let suite = batch_case(suite, "chain_chunk_sixteenth_batch", || {
         borrowed_rig_with(Routing::Fixed, 1, BORROWED_BATCH_BYTES / 16)
     });
+    // The same sixteen seals with a frame codec that copies each chunk
+    // unchanged: read against `chain_chunk_sixteenth_batch`, the codec step.
+    let suite = batch_case(suite, "chain_chunk_sixteenth_batch_coded", || {
+        chain_rig::coded_rig_with(BORROWED_BATCH_BYTES / 16)
+    });
 
     // --- the microscopic floor ----------------------------------------------
     //

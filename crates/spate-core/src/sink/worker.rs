@@ -151,7 +151,7 @@ impl Accumulator {
     fn push(&mut self, chunk: EncodedChunk, now: Instant) {
         self.first_at.get_or_insert(now);
         self.rows += u64::from(chunk.rows);
-        self.bytes += chunk.frame.len() as u64;
+        self.bytes += chunk.raw_len as u64;
         self.frames.push(chunk.frame);
         self.oldest_ingest = Some(match self.oldest_ingest {
             Some(cur) => cur.min(chunk.oldest_ingest),

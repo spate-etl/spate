@@ -119,7 +119,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // `into_parts` is the seam every sink crosses: writer, `[shard][replica]`
-    // topology, pool tuning, labels, probe. The builder validates the
+    // topology, pool tuning, labels, probe, frame codec. The builder validates the
     // topology here (non-empty, no ragged shards, replica labels shaped like
     // the endpoints) and returns `BuildError::Sink`. By hand the first two
     // are panics instead (an empty topology out of `shard_queues`, a shard
@@ -135,6 +135,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // One bounded chunk queue per shard: `queues` is the sending half the
     // chain terminals hold, `receivers` the half the workers own.
     let (queues, receivers) = shard_queues(shards, sink_options.queue_capacity);
+
+    // A sink that codes its chunks (compression, typically) carries its
+    // codec in the parts. Attach it before the queues reach any chain, so
+    // every chain terminal makes its own instance.
+    let queues = match parts.frame_codec {
+        Some(codec) => queues.with_frame_codec(codec),
+        None => queues,
+    };
 
     // Per-shard metric handles, resolved once at assembly and never on the
     // record path. `"sink"` is the `component` label the builder gives the

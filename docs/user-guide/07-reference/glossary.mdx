@@ -58,7 +58,8 @@ virtual call per batch. Built by the chain factory you pass to
 
 The handoff unit between a pipeline thread and a shard worker: rows encoded
 (by the `RowEncoder`) into a frame targeting `ChunkConfig::target_bytes`
-(default 64 KiB), carrying its rows' acks as an [`AckSet`](#ackset).
+(default 64 KiB), then coded by the sink's [frame codec](#frame-codec) if it has one,
+carrying its rows' acks as an [`AckSet`](#ackset).
 A chunk seals when it reaches the target, on every commit tick
 (`checkpoint.interval`), or on an idle lull, so while the pipeline is
 unblocked, a slow-filling buffer holds its acks for at most ~one checkpoint
@@ -140,6 +141,15 @@ is *rejected by the store* rather than trusted. In coordinated sources
 the token is the split record's revision/epoch, and the fenced write is
 the progress commit itself: a fenced commit writes **nothing**. Leases
 alone cannot provide this; only the store-side check can.
+
+### Frame codec
+
+A sink's optional step that turns each sealed [chunk](#chunk) into its wire
+form, for example by compressing it, behind the `FrameCodec` trait. It runs
+once per chunk, on the pipeline thread that sealed it. Each output decodes on
+its own, and outputs concatenated in seal order form a legal body. The
+[budget](#budget--in-flight-bytes) and `max_bytes` count the bytes before the
+codec.
 
 ### Lane
 

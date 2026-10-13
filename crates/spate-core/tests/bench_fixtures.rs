@@ -569,6 +569,20 @@ fn every_chunk_target_seals_on_a_record_boundary() {
     );
 }
 
+/// The coded seal case seals the sixteen chunks its uncoded sibling does,
+/// each counted at the length the encoder wrote.
+#[test]
+fn the_coded_chunk_case_seals_sixteen_chunks() {
+    let target = BORROWED_BATCH_BYTES / 16;
+    let chunks = chain_rig::coded_rig_with(target).drive_chunks();
+    assert_eq!(chunks.len(), 16, "chain_chunk_sixteenth_batch_coded seals");
+    for chunk in &chunks {
+        assert_eq!(chunk.raw_len, target, "each chunk seals at the target");
+        assert_eq!(chunk.frame.len(), chunk.raw_len, "the copy codec");
+    }
+    assert_eq!(chunks.iter().map(|c| c.rows).sum::<u32>(), 1536);
+}
+
 /// The keyed corpus spreads over every shard count a case names, and the
 /// keyless one does not spread.
 ///

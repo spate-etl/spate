@@ -20,7 +20,8 @@
 //!
 //! A connector implements [`RowEncoder`] (CPU half) and [`ShardWriter`]
 //! (I/O half), and may ship a [`RecordRouter`] when the target's sharding
-//! is payload-derived; the framework owns everything between them.
+//! is payload-derived and a [`FrameCodec`] when its wire form is a coded
+//! version of the encoded rows; the framework owns everything between them.
 
 mod breaker;
 mod bundle;
@@ -94,10 +95,15 @@ use std::time::Instant;
 
 /// A small frame of encoded rows produced on a pipeline thread, the unit
 /// shipped over the per-shard queues. Wire frames are concatenable, so
-/// workers accumulate chunks without re-encoding. Either the format is
-/// headerless (RowBinary rows appended back-to-back), or each frame is one
-/// complete, self-describing block (ClickHouse Native) and a concatenation
-/// of complete blocks is itself a legal insert stream.
+/// workers accumulate chunks without re-encoding. A frame is one of three
+/// things:
+///
+/// - headerless rows appended back-to-back (RowBinary);
+/// - one complete, self-describing block (ClickHouse Native);
+/// - a unit the sink's [`FrameCodec`] made from one of those, which decodes
+///   on its own.
+///
+/// In every case, frames concatenated in seal order form a legal body.
 ///
 /// Teardown safety: `acks` is an [`AckSet`]. Dropping a chunk anywhere
 /// (a closed queue, an aborted worker, a parked chunk at teardown) fails
@@ -105,8 +111,13 @@ use std::time::Instant;
 /// write delivers them.
 #[derive(Debug)]
 pub struct EncodedChunk {
-    /// Encoded rows in the sink's wire format.
+    /// Encoded rows in the sink's wire format, after the sink's
+    /// [`FrameCodec`] when it has one.
     pub frame: Bytes,
+    /// The frame's length as the encoder wrote it, before any codec. Equal
+    /// to `frame.len()` when the sink has no codec. The in-flight budget and
+    /// [`BatchConfig::max_bytes`] count this length.
+    pub raw_len: usize,
     /// Number of rows in `frame`.
     pub rows: u32,
     /// Acknowledgment handles of the source batches represented in
@@ -178,6 +189,111 @@ pub trait RowEncoder<F: RecFamily>: Send {
     }
 }
 
+/// Turns each sealed chunk into its wire form, on the pipeline thread that
+/// sealed it. Compression is the usual case.
+///
+/// The terminal stage calls [`encode_frame`](Self::encode_frame) once per
+/// sealed chunk, after the [`RowEncoder`] has finished it and before the
+/// chunk is queued. The output becomes the chunk's frame, is stored, and is
+/// never recomputed, so every write attempt of a batch, including retries,
+/// sends the same bytes. The in-flight budget and
+/// [`BatchConfig::max_bytes`] count the chunk's length before the codec, so
+/// neither depends on what a codec does.
+///
+/// The contract:
+///
+/// - The output is one unit that decodes on its own, and units concatenated
+///   in seal order form a legal stream for the sink. Compressed database
+///   blocks and the members of a multi-frame zstd or gzip object body both
+///   fit.
+/// - The output is a deterministic function of the input.
+/// - An instance may keep state between calls, such as a compression
+///   context or a scratch buffer. The framework makes one instance per sink
+///   per chain, which is one per pipeline thread, and calls it from that
+///   thread only.
+/// - The terminal stage copies the returned slice before the next call.
+/// - An `Err` stops the pipeline whatever its [`ErrorClass`]. Nothing ships
+///   for the chunk; its rows and acknowledgments stay in the shard buffer,
+///   and they fail on teardown if no later call succeeds.
+///
+/// [`ErrorClass`]: crate::error::ErrorClass
+///
+/// # Examples
+///
+/// A codec that writes each chunk's length before it:
+///
+/// ```
+/// use spate_core::error::SinkError;
+/// use spate_core::sink::{FrameCodec, FrameCodecFactory};
+///
+/// #[derive(Default)]
+/// struct LengthPrefix {
+///     out: Vec<u8>,
+/// }
+///
+/// impl FrameCodec for LengthPrefix {
+///     fn encode_frame(&mut self, chunk: &[u8]) -> Result<&[u8], SinkError> {
+///         self.out.clear();
+///         let len = u32::try_from(chunk.len()).map_err(|_| SinkError::Client {
+///             class: spate_core::ErrorClass::Fatal,
+///             reason: "chunk longer than u32::MAX".into(),
+///         })?;
+///         self.out.extend_from_slice(&len.to_le_bytes());
+///         self.out.extend_from_slice(chunk);
+///         Ok(&self.out)
+///     }
+/// }
+///
+/// let factory = FrameCodecFactory::new(|| Box::new(LengthPrefix::default()));
+/// let mut codec = factory.make();
+/// assert_eq!(codec.encode_frame(b"ab").unwrap(), b"\x02\x00\x00\x00ab");
+/// ```
+pub trait FrameCodec: Send + Sync {
+    /// Code one finished chunk, returning the frame to ship.
+    ///
+    /// # Errors
+    ///
+    /// Any error stops the pipeline; see the trait's contract.
+    fn encode_frame(&mut self, chunk: &[u8]) -> Result<&[u8], SinkError>;
+}
+
+/// Makes the [`FrameCodec`] instances for one sink: one per chain. Cloning
+/// shares the factory.
+///
+/// The closure is `RefUnwindSafe`, so the factory, and a sink type that holds
+/// one, stays `UnwindSafe` and `RefUnwindSafe`.
+#[derive(Clone)]
+pub struct FrameCodecFactory(std::sync::Arc<dyn MakeFrameCodec>);
+
+/// The closure a [`FrameCodecFactory`] wraps.
+trait MakeFrameCodec: Fn() -> Box<dyn FrameCodec> + Send + Sync + std::panic::RefUnwindSafe {}
+
+impl<T> MakeFrameCodec for T where
+    T: Fn() -> Box<dyn FrameCodec> + Send + Sync + std::panic::RefUnwindSafe
+{
+}
+
+impl FrameCodecFactory {
+    /// Wrap `make`, which builds one codec instance per call.
+    pub fn new(
+        make: impl Fn() -> Box<dyn FrameCodec> + Send + Sync + std::panic::RefUnwindSafe + 'static,
+    ) -> Self {
+        FrameCodecFactory(std::sync::Arc::new(make))
+    }
+
+    /// Build a fresh codec instance.
+    #[must_use]
+    pub fn make(&self) -> Box<dyn FrameCodec> {
+        (self.0)()
+    }
+}
+
+impl std::fmt::Debug for FrameCodecFactory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("FrameCodecFactory")
+    }
+}
+
 /// A batch sealed by a shard worker, ready to write. Frames concatenate to
 /// the full wire payload (a stream of one or more self-describing blocks for
 /// block formats like ClickHouse Native).
@@ -187,7 +303,9 @@ pub struct SealedBatch {
     pub frames: Vec<Bytes>,
     /// Total rows across `frames`.
     pub rows: u64,
-    /// Total bytes across `frames`.
+    /// Total bytes the encoder wrote for `frames`: the sum of each chunk's
+    /// [`EncodedChunk::raw_len`], which exceeds the frames' length when the
+    /// sink's [`FrameCodec`] compresses.
     pub bytes: u64,
     /// Deterministic-within-a-session batch identity. Retries of the same
     /// sealed batch (including on other replicas) reuse the same token,

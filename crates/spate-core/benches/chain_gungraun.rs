@@ -28,6 +28,11 @@
 //!   exactly, so every one of those seals fires inside `push` and `flush`
 //!   finds the shard empty. The pair prices the steady-state seal, not the
 //!   flush-time partial one the baselines carry.
+//! - **The frame codec.** `chunk_sixteenth_batch_coded` is
+//!   `chunk_sixteenth_batch` with a codec on the queues that copies each
+//!   chunk unchanged, so the gap between them, divided by 16, prices the codec
+//!   step per seal: the virtual call, the copy into an exact-size frame, and
+//!   the buffer reuse that replaces the fresh `reserve`.
 //!
 //! The two swept axes carry no interior points (four shards, a quarter-batch
 //! target) and no product of one axis with another. Both axes are linear in
@@ -57,7 +62,9 @@ use std::hint::black_box;
 #[path = "support/chain_rig.rs"]
 mod chain_rig;
 
-use chain_rig::{BORROWED_BATCH_BYTES, Rig, Routing, borrowed_rig, borrowed_rig_with, owned_rig};
+use chain_rig::{
+    BORROWED_BATCH_BYTES, Rig, Routing, borrowed_rig, borrowed_rig_with, coded_rig_with, owned_rig,
+};
 
 /// Build the rig and drive one batch through it, so the measured batch sees
 /// warm shard queues and chunk buffers. Everything a `#[bench]` argument
@@ -89,6 +96,11 @@ fn sealing(divisor: usize) -> Rig {
     ))
 }
 
+/// [`sealing`] with a copying frame codec on the queues.
+fn coded_sealing(divisor: usize) -> Rig {
+    warmed(coded_rig_with(BORROWED_BATCH_BYTES / divisor))
+}
+
 // One batch of 512 payloads through the chain.
 //
 // Returns the rig rather than dropping it: a value moved into the benchmark
@@ -108,6 +120,7 @@ fn sealing(divisor: usize) -> Rig {
 #[bench::keyed_sixteen_shards(keyed(16))]
 #[bench::chunk_half_batch(sealing(2))]
 #[bench::chunk_sixteenth_batch(sealing(16))]
+#[bench::chunk_sixteenth_batch_coded(coded_sealing(16))]
 fn push_batch(mut rig: Rig) -> Rig {
     black_box(rig.drive());
     rig

@@ -9,7 +9,7 @@
 //! types, keeping 0.x dependencies out of this crate's public bounds
 //! (INV-6; ADR-0011).
 
-use super::{ShardWriter, SinkPoolConfig, SinkProbeFn};
+use super::{FrameCodecFactory, ShardWriter, SinkPoolConfig, SinkProbeFn};
 
 /// A sink ready for assembly: the writer, the shard/replica topology, pool
 /// tuning, and optional metadata (metric labels, readiness probe).
@@ -50,6 +50,11 @@ pub struct SinkParts<W: ShardWriter> {
     /// Sharing the writer's connections would report the insert path
     /// healthy because probing keeps it warm.
     pub probe: Option<SinkProbeFn>,
+    /// Optional [`FrameCodec`](crate::sink::FrameCodec), run on each chunk
+    /// when it seals. The builder attaches it to the sink's queues; a manual
+    /// assembly passes it to
+    /// [`ShardQueues::with_frame_codec`](crate::sink::ShardQueues::with_frame_codec).
+    pub frame_codec: Option<FrameCodecFactory>,
 }
 
 impl<W: ShardWriter> SinkParts<W> {
@@ -63,6 +68,7 @@ impl<W: ShardWriter> SinkParts<W> {
             component_type: "custom".to_string(),
             replica_labels: Vec::new(),
             probe: None,
+            frame_codec: None,
         }
     }
 
@@ -85,6 +91,13 @@ impl<W: ShardWriter> SinkParts<W> {
     #[must_use]
     pub fn with_probe(mut self, probe: SinkProbeFn) -> Self {
         self.probe = Some(probe);
+        self
+    }
+
+    /// Attach a frame codec, run on each chunk when it seals.
+    #[must_use]
+    pub fn with_frame_codec(mut self, codec: FrameCodecFactory) -> Self {
+        self.frame_codec = Some(codec);
         self
     }
 
@@ -123,6 +136,7 @@ impl<W: ShardWriter> std::fmt::Debug for SinkParts<W> {
             )
             .field("pool", &self.pool)
             .field("probe", &self.probe.is_some())
+            .field("frame_codec", &self.frame_codec.is_some())
             .finish_non_exhaustive()
     }
 }

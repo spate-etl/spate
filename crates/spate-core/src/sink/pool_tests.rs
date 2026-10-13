@@ -42,6 +42,11 @@ struct Call {
     replica: usize,
     token: String,
     rows: u64,
+    /// `SealedBatch::bytes`.
+    bytes: u64,
+    /// The batch's frames, sharing the attempt's allocations, so a test can
+    /// tell a resent frame from a copy of it.
+    frames: Vec<Bytes>,
     /// When the attempt started, on the (usually paused) tokio clock. Lets a
     /// test assert *when* a parked batch resumed, which is the only way to
     /// tell a wake driven by an event from one driven by a timer.
@@ -114,6 +119,8 @@ impl ShardWriter for MockWriter {
             replica: ep.replica,
             token: batch.dedup_token.clone(),
             rows: batch.rows,
+            bytes: batch.bytes,
+            frames: batch.frames.clone(),
             at: tokio::time::Instant::now(),
         });
         let now = self.concurrent.fetch_add(1, Ordering::SeqCst) + 1;
@@ -221,11 +228,22 @@ fn fixture(shards: usize, replicas: usize, cfg: SinkPoolConfig, queue_cap: usize
 
 /// A chunk of `rows` rows, `bytes_per_row * rows` bytes, carrying `ack`.
 fn chunk(rows: u32, bytes_per_row: usize, ack: &AckRef) -> EncodedChunk {
+    let len = bytes_per_row * rows as usize;
+    EncodedChunk {
+        rows,
+        ..coded_chunk(len, len, ack)
+    }
+}
+
+/// A one-row chunk whose encoder wrote `raw_len` bytes and whose codec shipped
+/// a `frame_len`-byte frame, carrying `ack`.
+fn coded_chunk(raw_len: usize, frame_len: usize, ack: &AckRef) -> EncodedChunk {
     EncodedChunk {
         oldest_ingest: std::time::Instant::now(),
         oldest_event_ms: 0,
-        frame: Bytes::from(vec![0u8; bytes_per_row * rows as usize]),
-        rows,
+        frame: Bytes::from(vec![0u8; frame_len]),
+        raw_len,
+        rows: 1,
         acks: vec![ack.clone()].into(),
     }
 }
@@ -348,6 +366,79 @@ async fn byte_threshold_seals_independently_of_rows() {
     let report = f.pool.drain(Duration::from_secs(5)).await;
     assert_eq!(report.flushed, 3);
     assert_eq!(f.writer.calls().len(), 3);
+}
+
+/// `batch.max_bytes` compares the chunks' pre-codec lengths, so ten-byte
+/// frames that stand for 100 bytes each seal a 300-byte batch every third
+/// chunk.
+#[tokio::test]
+async fn max_bytes_counts_raw_bytes() {
+    let cfg = SinkPoolConfig {
+        batch: BatchConfig {
+            max_rows: u64::MAX,
+            max_bytes: 300,
+            linger: Duration::from_secs(3600),
+        },
+        ..SinkPoolConfig::default()
+    };
+    let f = fixture(1, 1, cfg, 16);
+    let (ack, _rx) = AckRef::test_pair();
+    for _ in 0..6 {
+        f.queues.try_send(0, coded_chunk(100, 10, &ack)).unwrap();
+    }
+    drop(ack);
+    drop(f.queues);
+    f.pool.drain(Duration::from_secs(5)).await;
+
+    let sealed: Vec<(u64, u64)> = f.writer.calls().iter().map(|c| (c.rows, c.bytes)).collect();
+    assert_eq!(
+        sealed,
+        vec![(3, 300), (3, 300)],
+        "each batch seals on max_bytes at three 100-byte chunks"
+    );
+}
+
+/// A written batch returns to the budget what the handoff added for its
+/// chunks: their pre-codec lengths.
+#[tokio::test]
+async fn settle_releases_what_the_handoff_budgeted() {
+    let f = fixture(1, 1, small_batches(), 16);
+    let (ack, _rx) = AckRef::test_pair();
+    for _ in 0..3 {
+        f.budget.add(100);
+        f.queues.try_send(0, coded_chunk(100, 10, &ack)).unwrap();
+    }
+    drop(ack);
+    drop(f.queues);
+    let report = f.pool.drain(Duration::from_secs(5)).await;
+    assert_eq!(report.flushed, 3);
+    assert_eq!(f.budget.usage(), 0, "every budgeted byte released");
+}
+
+/// A retry writes the batch's sealed frames again: the same bytes, in the same
+/// allocations, under the same token.
+#[tokio::test(start_paused = true)]
+async fn retries_resend_the_sealed_frames_unchanged() {
+    let f = fixture(1, 2, small_batches(), 16);
+    f.writer
+        .script(0, 0, [Outcome::Fail(ErrorClass::Retryable, Duration::ZERO)]);
+    let (ack, _rx) = AckRef::test_pair();
+    f.queues.try_send(0, coded_chunk(100, 10, &ack)).unwrap();
+    drop(ack);
+    drop(f.queues);
+    f.pool.drain(Duration::from_secs(30)).await;
+
+    let calls = f.writer.calls();
+    assert_eq!(calls.len(), 2, "one failed attempt, one retry");
+    let (first, retry) = (&calls[0], &calls[1]);
+    assert_eq!(first.token, retry.token);
+    assert_eq!(first.frames, retry.frames);
+    let ptrs = |c: &Call| c.frames.iter().map(|f| f.as_ptr()).collect::<Vec<_>>();
+    assert_eq!(
+        ptrs(first),
+        ptrs(retry),
+        "the retry sends the sealed allocations"
+    );
 }
 
 #[tokio::test(start_paused = true)]

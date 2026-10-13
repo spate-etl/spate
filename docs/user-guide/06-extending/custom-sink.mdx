@@ -4,13 +4,15 @@ description: "Implementing a sink's row encoder and shard writer halves, and the
 
 # Custom sinks
 
-A sink is two pieces, split across the process's two halves
+A sink's pieces split across the process's two halves
 ([Architecture](../02-concepts/01-architecture.mdx)):
 
 - **`RowEncoder`** — the CPU half. Turns one record into wire bytes. Runs
   on pipeline threads, where payload borrows are still valid.
 - **`ShardWriter`** — the I/O half. Writes one sealed batch to one replica
   endpoint. Runs on sink workers in the I/O runtime.
+- **`FrameCodec`** (optional) — turns each sealed chunk into its wire form,
+  for example by compressing it. Runs on pipeline threads, once per chunk.
 
 Everything between is the framework's: chunking, per-shard batching to
 `max_rows`/`max_bytes`/`linger`, replica rotation, circuit breakers,
@@ -170,6 +172,14 @@ workers, their queues and their metric labels from the topology it carries.
   your sink. Probes should use their **own** client set. Sharing the
   writer's connections would report the insert path healthy because
   probing keeps it warm.
+- `.with_frame_codec(...)` — an optional `FrameCodecFactory`. The builder
+  gives every chain its own codec instance, and each chunk passes through
+  it once, on the pipeline thread, when it seals. Each output must decode on
+  its own, and outputs concatenated in seal order must form a legal body for
+  the writer. The output must be a deterministic function of the input. The
+  writer receives the coded frames, and every retry resends the same bytes.
+  The in-flight budget and `max_bytes` count the bytes before the codec, so
+  sizing does not depend on the codec.
 
 Construct the struct via `new` plus the `with_*` methods. It is
 `#[non_exhaustive]`, so fields can grow without breaking you. Queue depth between

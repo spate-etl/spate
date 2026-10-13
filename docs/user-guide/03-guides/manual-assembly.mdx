@@ -92,10 +92,12 @@ is all `Pipeline::io_handle` and `Pipeline::block_on` forward to.
 ### The sink — what `.sink(bundle)` does
 
 `SinkBundle::into_parts` is the seam every sink crosses: out of it come the
-writer, the `[shard][replica]` topology, the pool tuning and the readiness
-probe. This step turns those into the shard queues the chain terminals send
-into, the per-shard metric handles, the worker pool, and the drain hook the
-runtime calls once at shutdown:
+writer, the `[shard][replica]` topology, the pool tuning, the readiness
+probe and the optional frame codec. This step turns those into the shard
+queues the chain terminals send into, with the codec attached through
+`ShardQueues::with_frame_codec` before any chain receives them, the
+per-shard metric handles, the worker pool, and the drain hook the runtime
+calls once at shutdown:
 
 ```rust file=crates/spate/examples/manual_assembly.rs region=sink
 ```

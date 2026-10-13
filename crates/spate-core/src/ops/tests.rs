@@ -3012,6 +3012,39 @@ fn a_row_pushed_after_a_codec_error_is_finished_at_the_next_seal() {
     chunk.acks.deliver();
 }
 
+/// Once the retried chunk ships, the next chunk is finished at its seal,
+/// even when it holds as many rows as the chunk that failed.
+#[test]
+fn a_chunk_after_a_retried_seal_is_finished() {
+    let (queues, mut rxs) = shard_queues(1, 64);
+    let mut c = chain_owned(BytesPassthrough)
+        .sink(
+            TrailerEncoder,
+            KeyHashRouter,
+            ChunkConfig::default(),
+            queues.with_frame_codec(FrameCodecFactory::new(
+                || Box::new(FailOnceCodec::default()),
+            )),
+            Arc::new(InflightBudget::new()),
+        )
+        .build();
+
+    let first = payloads(&["one"]);
+    let (mut batch, _rx) = TestBatch::new(&first);
+    assert!(matches!(c.push_batch(&mut batch, 0), PushOutcome::Done));
+    assert!(matches!(c.flush(), PushOutcome::Fatal(_)));
+    assert!(matches!(c.flush(), PushOutcome::Done));
+    rxs[0].try_recv().expect("the retried chunk").acks.deliver();
+    drop(batch);
+    let second = payloads(&["two"]);
+    let (mut batch, _rx2) = TestBatch::new(&second);
+    assert!(matches!(c.push_batch(&mut batch, 0), PushOutcome::Done));
+    assert!(matches!(c.flush(), PushOutcome::Done));
+    let chunk = rxs[0].try_recv().expect("the next chunk");
+    assert_eq!(&chunk.frame[..], b"C:two|END", "the next block finished");
+    chunk.acks.deliver();
+}
+
 /// The shard buffer's capacity after one coded row of `payload_len` bytes
 /// seals a chunk against a 1 KiB target.
 fn capacity_after_one_coded_row(payload_len: usize) -> usize {

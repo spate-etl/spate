@@ -231,3 +231,26 @@ fn a_slightly_shorter_chunk_above_the_floor_keeps_the_scratch() {
         );
     }
 }
+
+/// Above the floor, the scratch is replaced once it holds more than twice
+/// what the next chunk needs, and kept while it holds at most twice.
+#[test]
+fn the_scratch_is_replaced_past_twice_the_next_need() {
+    for zstd_level in [None, Some(3)] {
+        for (len, replaced) in [(600 * 1024, false), (400 * 1024, true)] {
+            let mut codec = BlockCodec::new(zstd_level);
+            codec
+                .encode_frame(&bytes(1024 * 1024, 3, 16))
+                .expect("the first chunk codes");
+            let kept = codec.scratch.as_ptr();
+            codec
+                .encode_frame(&bytes(len, 5, 16))
+                .expect("the second chunk codes");
+            assert_eq!(
+                codec.scratch.as_ptr() != kept,
+                replaced,
+                "zstd level {zstd_level:?}, second chunk {len} bytes"
+            );
+        }
+    }
+}

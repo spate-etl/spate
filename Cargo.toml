@@ -87,11 +87,14 @@ sha2 = "0.11"
 # async-nats) are internal only, never in public signatures (INV-6).
 rdkafka = "0.39"
 openssl-sys = "0.9.108"
-# Do not declare the lz4 codec separately. It arrives transitively through this
-# crate's `lz4` feature, which spate-clickhouse enables; declaring it again
-# either widens the client's features for workspace builds only, or puts two
-# majors in the graph.
 clickhouse = "0.15"
+# spate-clickhouse compresses insert blocks with the lz4 codec the client
+# uses, and features unify into one copy. So this entry names exactly the
+# client's features: `safe-encode`, a default, would slow the client's codec
+# as well as spate's, and a second major would put two codecs in the graph.
+lz4_flex = { version = "0.11.6", default-features = false, features = ["std"] }
+# The checksum of ClickHouse's compressed block framing.
+cityhash-rs = "1.0.1"
 apache-avro = "0.22"
 object_store = "0.14"
 # The `server_2_11` default feature gates the limit-marker KV config the lease

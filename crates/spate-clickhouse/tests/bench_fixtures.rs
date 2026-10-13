@@ -1,6 +1,7 @@
 //! Both encoders accept every bench schema, every bench corpus is the one
-//! its recorded numbers were measured against, and the write-path benches'
-//! HTTP server serves a sink under every compression.
+//! its recorded numbers were measured against, the write-path benches' HTTP
+//! server serves a sink under every compression, and the frame codec the
+//! compression benches reach through `testing` codes under each of them.
 //!
 //! The Native encoder is driven by a column list written beside the row
 //! struct, and a mismatch between the two (a column added without its field,
@@ -12,7 +13,8 @@
 
 use bytes::BytesMut;
 use spate_clickhouse::{
-    ClickHouseEncoder, ClickHouseRow, DistributedRouter, NativeEncoder, NativeSchema, ShardKey,
+    ClickHouseEncoder, ClickHouseRow, Compression, DistributedRouter, NativeEncoder, NativeSchema,
+    ShardKey,
 };
 use spate_core::deser::Owned;
 use spate_core::sink::{RowEncoder, ShardWriter};
@@ -437,4 +439,31 @@ fn the_bench_server_serves_the_schema_under_every_compression() {
             );
         }
     }
+}
+
+/// `testing::frame_codec`, the frame benches' route to the sink's codec,
+/// gives no codec under `off` and a block codec under every other
+/// compression, with the method byte and the level that compression names.
+#[test]
+fn the_codec_export_codes_under_every_compression() {
+    let compression = |s: &str| s.parse::<Compression>().expect("a compression value");
+    assert!(
+        spate_clickhouse::testing::frame_codec(compression("off")).is_none(),
+        "off: no codec"
+    );
+    let frame = &frames::native_frames(1)[0].bytes;
+    let mut blocks = Vec::new();
+    for (name, method) in [("lz4", 0x82), ("zstd:1", 0x90), ("zstd:3", 0x90)] {
+        let mut codec = spate_clickhouse::testing::frame_codec(compression(name))
+            .unwrap_or_else(|| panic!("{name}: a codec"))
+            .make();
+        let block = codec.encode_frame(frame).expect("the frame codes").to_vec();
+        // A 16-byte checksum, then the method byte.
+        assert_eq!(block[16], method, "{name}: the block's method");
+        blocks.push(block);
+    }
+    assert!(
+        blocks[1] != blocks[2],
+        "zstd:1 and zstd:3 code at their own levels"
+    );
 }

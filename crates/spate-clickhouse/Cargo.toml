@@ -15,6 +15,13 @@ categories.workspace = true
 bytes = { workspace = true }
 bytesize = { workspace = true }
 clickhouse = { workspace = true, features = ["lz4", "zstd"] }
+cityhash-rs = { workspace = true }
+lz4_flex = { workspace = true }
+# Declared directly: Cargo ignores `default-features = false` on an inherited
+# entry whose workspace entry keeps the defaults, and the workspace entry keeps
+# them for spate-s3. A bump of the workspace requirement (#562) changes this
+# line too.
+zstd = { version = "0.13", default-features = false }
 hyper-rustls = { workspace = true }
 hyper-util = { workspace = true, features = ["client-legacy", "http1", "tokio"] }
 rustls = { workspace = true }
@@ -63,7 +70,6 @@ hyper = { workspace = true, features = ["http1", "server"] }
 hyper-util = { workspace = true, features = ["tokio"] }
 http-body-util = { workspace = true }
 spate-bench = { workspace = true }
-zstd = { workspace = true }
 tempfile = { workspace = true }
 serde_yaml = { workspace = true }
 testcontainers-modules = { workspace = true, features = ["clickhouse"] }

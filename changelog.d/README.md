@@ -109,12 +109,14 @@ implementation, including readers whose first language is not English.
 - **Open with a short bold title and the crate name**, then put the body in a
   separate paragraph. Keep the voice impersonal: "The pipeline now logs…"
   describes the behavior directly.
-- **Write each paragraph on one line.** A GitHub release body turns every
-  newline into a line break, so a paragraph wrapped at 80 columns renders as
-  ragged short lines. `cargo xtask tidy changelog` parses each fragment as
-  GitHub Flavored Markdown and refuses one whose text holds a line break: a
-  newline inside a paragraph, list item, blockquote or heading, or a hard break
-  from two trailing spaces or a trailing `\`. Code blocks, tables and HTML
+- **Write each paragraph on one line.** A line inside a wrapped paragraph that
+  begins with a list, heading or quote marker (`- `, `1. `, `# `, `> `) opens
+  that block in `CHANGELOG.md` and splits the sentence. With each paragraph on
+  one line, no line starts mid-sentence. `cargo xtask tidy changelog` parses
+  each fragment as GitHub Flavored Markdown. It refuses a paragraph, list item,
+  blockquote or heading whose text spans lines, including a hard break from two
+  trailing spaces or a trailing `\`. It also refuses a list, heading or quote
+  that starts on the line after a paragraph. Code blocks, tables and HTML
   blocks are not affected. Write each list item on one line too.
 - **Usually write three to five sentences.** A simple change can take fewer;
   a breaking change may need additional paragraphs for migration details.

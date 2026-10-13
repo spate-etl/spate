@@ -406,7 +406,7 @@ pub(crate) fn print_next(prepared: &Prepared) {
     println!("would compare each attested crate's sha256 against the index cksum");
     println!("would resolve a scratch project against the registry (the smoke test)");
     println!("would tag v{v} and push the tag");
-    println!("would draft the GitHub release with the CHANGELOG section, attach the SBOMs,");
+    println!("would draft the GitHub release with the compact release notes, attach the SBOMs,");
     println!("  {SUMS} and the attestation bundle, publish it immutable, verify its");
     println!("  attestation, and deploy the docs");
     endgroup();

@@ -439,24 +439,34 @@ fn changelog() -> String {
     .unwrap()
 }
 
-/// The notes are the section's own bytes and nothing else, so what a release
-/// body carries is what the changelog says.
+/// The notes are the release body: a link to the full section at the release
+/// tag, no indented or `## ` line, and every `([#N])` found in the changelog.
 #[test]
-fn the_notes_are_a_verbatim_slice_of_the_changelog() {
-    let got = xtask(&["changelog", "notes", "0.2.0"], &[]);
+fn the_notes_are_the_release_body_for_the_section() {
+    let got = xtask(&["changelog", "notes", "0.3.0"], &[]);
     let stdout = String::from_utf8(got.stdout).unwrap();
     assert_eq!(String::from_utf8_lossy(&got.stderr), "", "stderr");
     assert_eq!(got.status.code(), Some(0));
-    assert!(changelog().contains(&stdout), "{stdout}");
-    assert!(!stdout.starts_with('\n'), "{stdout}");
+    assert!(
+        stdout.starts_with(
+            "The full notes for this release are in [CHANGELOG.md](https://github.com/spate-etl/spate/blob/v0.3.0/CHANGELOG.md#030--2026-10-11).\n\n"
+        ),
+        "{stdout}"
+    );
     assert!(
         stdout.ends_with('\n') && !stdout.ends_with("\n\n"),
         "{stdout}"
     );
-    assert!(
-        !stdout.split('\n').any(|line| line.starts_with("## ")),
-        "{stdout}"
-    );
+    let changelog = changelog();
+    for line in stdout.split('\n').skip(1) {
+        assert!(
+            !line.starts_with("  ") && !line.starts_with("## "),
+            "{line}"
+        );
+        if let Some(reference) = line.rsplit_once(" ([#").map(|(_, r)| r) {
+            assert!(changelog.contains(&format!("([#{reference}")), "{line}");
+        }
+    }
 }
 
 /// A version the changelog does not carry is a refusal on stderr with nothing
@@ -489,7 +499,7 @@ fn explain_names_what_the_release_commands_would_do() {
         &["--explain", "changelog", "notes", "0.3.0"],
         &[],
         0,
-        "(prints the ## [0.3.0] section of CHANGELOG.md)\n",
+        "(prints the release body for the ## [0.3.0] section of CHANGELOG.md)\n",
         "",
     );
     assert_eq!(changelog(), before);

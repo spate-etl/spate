@@ -43,7 +43,7 @@ Everything after the input runs unattended. The release pull request
 auto-merges when `CI gate` passes, and nobody approves the diff. The controls
 are the version input, the derivation check, and the gates every pull request
 already passes. What is worth reading on that pull request is the assembled
-`CHANGELOG.md` section, which is the release notes.
+`CHANGELOG.md` section, which holds the full release notes.
 
 ## What the automation does
 
@@ -99,13 +99,16 @@ After the upload it checks what landed. `trustpub_data` is read back for every
 crate and must name the release commit. Each packaged crate's sha256 must
 equal the index's `cksum`, so the attestation provably covers the bytes the
 registry serves. A scratch project resolves `spate` at the exact version from
-the registry. The commit is then tagged. The GitHub release opens
-as a draft with the changelog section, takes the per-crate SBOMs, `SHA256SUMS`
-and the attestation bundle as assets, and is published only once all of them
-are on it. Published, it is immutable: GitHub locks its assets and its tag and
-signs a release attestation, which the run verifies. The docs deploy is
-dispatched last, after the crates are live, so the install snippets are true
-the moment the site serves them.
+the registry. The commit is then tagged. The GitHub release opens as a draft
+whose body is the compact form that `cargo xtask changelog notes <version>`
+prints. It links the full section in `CHANGELOG.md` at the tag and lists
+every entry's title on one line, the breaking ones first under their own
+heading. The release takes the per-crate SBOMs, `SHA256SUMS` and the
+attestation bundle as assets, and is published only once all of them are on
+it. Published, it is immutable: GitHub locks its assets and its tag and signs
+a release attestation, which the run verifies. The docs deploy is dispatched
+last, after the crates are live, so the install snippets are true the moment
+the site serves them.
 
 ## Rehearse it first
 

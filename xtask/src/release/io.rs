@@ -161,7 +161,7 @@ pub(crate) trait Workspace {
     fn derive(&self) -> Result<Version, Error>;
     /// Writes every generated artifact of the release commit.
     fn generate(&self, version: Version) -> Outcome;
-    /// The changelog section for `version`.
+    /// The GitHub release body for `version`.
     fn notes(&self, version: Version) -> Result<String, Error>;
     /// Packages and verify-builds every publishable member but `excludes`.
     fn package(&self, excludes: &[String]) -> Outcome;

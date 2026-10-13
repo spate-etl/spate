@@ -1,5 +1,13 @@
 use super::*;
 
+/// The lines `wrapped_blocks` reports, without the name of an opened block.
+fn wrapped_paragraphs(text: &str) -> Vec<(usize, usize)> {
+    wrapped_blocks(text)
+        .into_iter()
+        .map(|(first, last, _)| (first, last))
+        .collect()
+}
+
 /// Which paths are part of what a crate ships.
 #[test]
 fn a_crate_ships_its_source_manifest_and_build_script() {
@@ -119,7 +127,7 @@ fn a_wrapped_paragraph_is_named_by_its_lines() {
 }
 
 /// Fenced code, tables, headings, indented code, HTML blocks and one-line list
-/// items hold consecutive lines that render no line break.
+/// items hold consecutive lines with no break in their text.
 #[test]
 fn blocks_without_a_line_break_pass() {
     for text in [
@@ -145,8 +153,8 @@ fn blocks_without_a_line_break_pass() {
     );
 }
 
-/// A list item, a blockquote and a paragraph inside either render a newline as
-/// a line break too, and are named by the lines of their text.
+/// A newline inside a list item, a blockquote or a paragraph inside either is
+/// a break too, and the block is named by the lines of its text.
 #[test]
 fn list_items_and_blockquotes_are_held_to_one_line() {
     for (text, lines) in [
@@ -166,7 +174,7 @@ fn list_items_and_blockquotes_are_held_to_one_line() {
 }
 
 /// A hard break, written as two trailing spaces or a trailing backslash,
-/// renders the same line break as a soft one.
+/// counts the same as a soft one.
 #[test]
 fn a_hard_break_is_a_wrapped_paragraph() {
     assert_eq!(
@@ -265,14 +273,7 @@ fn a_paragraph_ends_where_gfm_ends_it() {
         assert_eq!(wrapped_paragraphs(text).len(), 1, "{text}");
     }
     for text in [
-        "A para\n01. x\n",
-        "A para\n# h\n",
-        "A para\n#\n",
-        "A para\n> q\n",
-        "A para\n>q\n",
         "1.\nwrapped.\n",
-        "A para\n1)\tx\n",
-        "A para\n   - x\n",
         "A para\n-\n",
         "A para\n---\nNext.\n",
         "A para\n===\n",
@@ -302,6 +303,69 @@ fn a_paragraph_ends_where_gfm_ends_it() {
         );
     }
     assert_eq!(wrapped_paragraphs("a\nb\n---\n"), vec![(1, 2)]);
+}
+
+/// A list, heading or blockquote that opens on the line after a paragraph is
+/// refused with the paragraph, named from its first line to the opening line.
+#[test]
+fn a_block_opened_on_the_line_after_a_paragraph_is_refused() {
+    for (text, lines) in [
+        ("The sink waits up to\n- 5 ms before it flushes.\n", (1, 2)),
+        ("The sink waits up to\n1. time before it fails.\n", (1, 2)),
+        ("Fixed by the change in\n# 1141 and later.\n", (1, 2)),
+        ("The maintainer said\n> quoted.\n", (1, 2)),
+        (
+            "**A title** (`spate-core`)\n\nThe sink waits up to\n- 5 ms before it flushes.\n",
+            (3, 4),
+        ),
+        ("The sink\nwaits up to\n- 5 ms before it flushes.\n", (1, 3)),
+        (
+            "> The sink waits up to\n> - 5 ms before it flushes.\n",
+            (1, 2),
+        ),
+        ("> The maintainer said\n- a list.\n", (1, 2)),
+        (
+            "- An item.\n\n- The sink waits up to\n  - 5 ms before it flushes.\n",
+            (3, 4),
+        ),
+        ("A para\n01. x\n", (1, 2)),
+        ("A para\n# h\n", (1, 2)),
+        ("A para\n#\n", (1, 2)),
+        ("A para\n>q\n", (1, 2)),
+        ("A para\n1)\tx\n", (1, 2)),
+        ("A para\n   - x\n", (1, 2)),
+    ] {
+        assert_eq!(wrapped_paragraphs(text), vec![lines], "{text}");
+    }
+}
+
+/// A list, heading or blockquote after a blank line, and the items of a tight
+/// list, open where their author meant them to.
+#[test]
+fn a_block_opened_after_a_blank_line_passes() {
+    for text in [
+        "The sink waits up to 5 ms.\n\n- 5 ms before it flushes.\n",
+        "The sink waits up to 5 ms.\n\n1. first\n2. second\n",
+        "The sink waits up to 5 ms.\n\n# A heading\n",
+        "The sink waits up to 5 ms.\n\n> quoted.\n",
+        "- one\n- two\n- three\n",
+        "**A title** (`spate-core`)\n\nThe body.\n",
+    ] {
+        assert_eq!(
+            wrapped_paragraphs(text),
+            Vec::<(usize, usize)>::new(),
+            "{text}"
+        );
+    }
+}
+
+/// The items of a loose list open on the line after a paragraph, and pass.
+#[test]
+fn adjacent_items_of_a_loose_list_pass() {
+    assert_eq!(
+        wrapped_paragraphs("- a\n- b\n\n- c\n"),
+        Vec::<(usize, usize)>::new()
+    );
 }
 
 /// A line holding only whitespace ends a paragraph.
@@ -614,6 +678,34 @@ fn the_gate_refuses_a_wrapped_fragment_by_file_and_line() {
         "**A title** (`spate-core`)\n\nThe pipeline does a thing. It wraps here.\n",
     );
     assert!(gate(repo.path(), &push, false, "").is_ok());
+}
+
+/// A lead-in directly above a list is refused naming the list it opens, with
+/// the blank-line fix first.
+#[test]
+fn a_block_opened_after_a_paragraph_is_named_with_the_blank_line_fix_first() {
+    let repo = Repo::new("a_block_opened_after_a_paragraph_is_named_with_the_blank_line_fix_first");
+    repo.write(
+        "changelog.d/lead.fixed.md",
+        "**A title** (`spate-core`)\n\nThe options are:\n- `a` does one thing.\n",
+    );
+    let push = Fields {
+        event: "push".to_owned(),
+        ..Fields::default()
+    };
+    let refused = refused(gate(repo.path(), &push, false, ""));
+    assert!(
+        refused.starts_with("a fragment paragraph runs into the block on its next line:\n\n"),
+        "{refused}"
+    );
+    assert!(
+        refused.contains(
+            "\n    changelog.d/lead.fixed.md:3: a list opens on line 4, the line after this paragraph.\n"
+        ),
+        "{refused}"
+    );
+    let blank = refused.find("needs a blank line before it").unwrap();
+    assert!(blank < refused.find("Join the").unwrap(), "{refused}");
 }
 
 /// On a pull request, a wrapped fragment is refused even when the change ships
@@ -1131,6 +1223,527 @@ fn the_slice_drops_its_opening_blank_lines() {
         section_notes(text, "1.0.0", "CHANGELOG.md").unwrap(),
         "### Added\n\n- A thing.\n"
     );
+}
+
+/// A section in the shape the assembly writes: breaking entries in two groups,
+/// a multi-paragraph entry with a fence, titles wrapped across lines, a
+/// reference written into the prose, a commit link, and the dependency entry
+/// with no reference.
+const ASSEMBLED: &str = "\
+# Changelog
+
+## [Unreleased]
+
+## [0.4.0] — 2026-11-02
+
+### Added
+
+- **A plain entry** (`spate-core`)
+
+  One paragraph of prose.
+  ([#10])
+- **Breaking:** **A breaking addition** (`spate-kafka`)
+
+  First paragraph.
+
+  Second paragraph cites [#3] in passing.
+  ([#11])
+- **A reference written into the prose** (`spate-json`)
+
+  Prose that ends on its own reference. ([#15])
+
+### Changed
+
+- **A multi-paragraph entry** (`spate-s3`)
+
+  First paragraph.
+
+  ```yaml
+  key: value
+  ```
+
+  Last paragraph.
+  ([#12])
+- **Dependency requirements** (`spate-avro`, `spate-core`)
+
+  - `http` (`spate-core`): `1.5.0`.
+
+### Removed
+
+- **Breaking:** **The old knob** (`spate-core`)
+
+  Prose.
+  ([#13])
+
+### Fixed
+
+- **Breaking:** **A wrapped title that runs past the
+  column limit** (`spate-core`, `spate-s3`)
+
+  Prose.
+  ([#14])
+- **A title that wraps before its crates**
+  (`spate-clickhouse`)
+
+  Prose.
+  ([`abcdef1`](https://github.com/spate-etl/spate/commit/abcdef1234567890))
+
+### Contributors
+
+- Marcus Kainth
+- whiteye
+
+[#3]: https://github.com/spate-etl/spate/pull/3
+[#10]: https://github.com/spate-etl/spate/pull/10
+[#11]: https://github.com/spate-etl/spate/pull/11
+[#12]: https://github.com/spate-etl/spate/pull/12
+[#13]: https://github.com/spate-etl/spate/pull/13
+[#14]: https://github.com/spate-etl/spate/pull/14
+[#15]: https://github.com/spate-etl/spate/pull/15
+
+[Unreleased]: https://github.com/spate-etl/spate/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/spate-etl/spate/releases/tag/v0.4.0
+";
+
+/// The release body opens on a link to the full section, lists the breaking
+/// entries once under their own heading, reduces every other entry to its
+/// title, crates and reference on one line, drops a group the breaking list
+/// emptied, and keeps the contributors as assembled.
+#[test]
+fn the_release_body_lists_one_line_per_entry() {
+    assert_eq!(
+        release_body(ASSEMBLED, "0.4.0", CHANGELOG).unwrap(),
+        "\
+The full notes for this release are in [CHANGELOG.md](https://github.com/spate-etl/spate/blob/v0.4.0/CHANGELOG.md#040--2026-11-02).
+
+### Breaking changes
+
+- **A breaking addition** (`spate-kafka`) ([#11])
+- **The old knob** (`spate-core`) ([#13])
+- **A wrapped title that runs past the column limit** (`spate-core`, `spate-s3`) ([#14])
+
+### Added
+
+- **A plain entry** (`spate-core`) ([#10])
+- **A reference written into the prose** (`spate-json`) ([#15])
+
+### Changed
+
+- **A multi-paragraph entry** (`spate-s3`) ([#12])
+- **Dependency requirements** (`spate-avro`, `spate-core`)
+
+### Fixed
+
+- **A title that wraps before its crates** (`spate-clickhouse`) ([`abcdef1`](https://github.com/spate-etl/spate/commit/abcdef1234567890))
+
+### Contributors
+
+- Marcus Kainth
+- whiteye
+
+[#10]: https://github.com/spate-etl/spate/pull/10
+[#11]: https://github.com/spate-etl/spate/pull/11
+[#12]: https://github.com/spate-etl/spate/pull/12
+[#13]: https://github.com/spate-etl/spate/pull/13
+[#14]: https://github.com/spate-etl/spate/pull/14
+[#15]: https://github.com/spate-etl/spate/pull/15
+"
+    );
+}
+
+/// The `[#N]` numbers a text uses outside definitions, and those it defines.
+fn used_and_defined(text: &str) -> (Vec<String>, Vec<String>) {
+    let (definitions, prose): (Vec<&str>, Vec<&str>) = text
+        .split('\n')
+        .partition(|line| line.starts_with("[#") && line.contains("]: "));
+    let mut used: Vec<String> = issue_references(&prose.join("\n"))
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    let mut defined: Vec<String> = issue_references(&definitions.join("\n"))
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    used.sort();
+    used.dedup();
+    defined.sort();
+    (used, defined)
+}
+
+/// The anchor is the one GitHub renders for a release heading: lowercase, with
+/// everything but letters, digits, `-`, `_` and spaces dropped, and each space
+/// a hyphen. GitHub's rendered CHANGELOG.md at v0.3.0 carries the id
+/// `user-content-030--2026-10-11` for the first heading below.
+#[test]
+fn a_release_heading_anchors_as_github_renders_it() {
+    assert_eq!(github_anchor("## [0.3.0] — 2026-10-11"), "030--2026-10-11");
+    assert_eq!(
+        github_anchor("## [1.10.0-rc.1] — 2027-01-02"),
+        "1100-rc1--2027-01-02"
+    );
+}
+
+/// A line outside the shape the assembly writes is carried into the release
+/// body verbatim: before the first group it follows the link line, and inside
+/// a group it keeps its place among the entries.
+#[test]
+fn a_line_outside_the_assembled_shape_is_carried_in_place() {
+    assert_eq!(
+        release_body(
+            "## [0.5.0] — d\n\nAn intro.\n\n### Added\n\n- **A** ([#1])\n\nA paragraph at the margin.\n- **B** ([#2])\n\n[#1]: https://github.com/spate-etl/spate/pull/1\n[#2]: https://github.com/spate-etl/spate/pull/2\n",
+            "0.5.0",
+            CHANGELOG
+        )
+        .unwrap(),
+        "\
+The full notes for this release are in [CHANGELOG.md](https://github.com/spate-etl/spate/blob/v0.5.0/CHANGELOG.md#050--d).
+
+An intro.
+
+### Added
+
+- **A** ([#1])
+
+A paragraph at the margin.
+- **B** ([#2])
+
+[#1]: https://github.com/spate-etl/spate/pull/1
+[#2]: https://github.com/spate-etl/spate/pull/2
+"
+    );
+}
+
+/// An indented line with no entry open is carried into the release body.
+#[test]
+fn an_indented_line_with_no_entry_open_is_carried() {
+    for text in [
+        "## [0.5.0] — d\n\n### Added\n\n  An indented line.\n",
+        "## [0.5.0] — d\n\n### Contributors\n\n- Someone\n  An indented line.\n",
+    ] {
+        let body = release_body(text, "0.5.0", CHANGELOG).unwrap();
+        assert!(body.contains("\n  An indented line.\n"), "{body}");
+    }
+}
+
+/// The real v0.1.0 section opens on a sentence and holds two groups of prose,
+/// none of which the assembly writes. The body carries all of it.
+#[test]
+fn the_v0_1_0_release_body_carries_its_prose() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let body = notes_text(root, "0.1.0").unwrap();
+    assert!(
+        body.starts_with(
+            "The full notes for this release are in [CHANGELOG.md](https://github.com/spate-etl/spate/blob/v0.1.0/CHANGELOG.md#010--2026-07-27).\n\nFirst public release.\n\n### Added\n\n- **The engine** (`spate-core`)"
+        ),
+        "{body}"
+    );
+    for line in [
+        "\n### Delivery semantics\n\nAt-least-once. A source watermark is never committed past unacknowledged data,\n",
+        "\n\nDuplicates remain possible after a crash: replay re-batches with new\n",
+        "\n### Known limitations\n\n- Pre-1.0. The API will change, and a breaking change ships in a minor bump.\n",
+    ] {
+        assert!(body.contains(line), "{body}");
+    }
+}
+
+/// A code span holding `**` does not close the bold title.
+#[test]
+fn a_code_span_holding_stars_stays_in_the_title() {
+    assert_eq!(
+        entry_line(&["**Use `**` globs** (`spate-core`)", "", "Body.", "([#15])"]),
+        "- **Use `**` globs** (`spate-core`) ([#15])"
+    );
+}
+
+/// A link definition a fragment writes for its own entry reaches the release
+/// body when the listed line uses it.
+#[test]
+fn a_fragment_s_own_link_definition_reaches_the_release_body() {
+    let release = Release::new("a_fragment_s_own_link_definition_reaches_the_release_body");
+    release.fragment(
+        "a.added.md",
+        "**See [the guide][guide]** (`spate-core`)\n\nProse. ([#4])\n\n[guide]: https://example.com/guide\n",
+    );
+    build(release.path(), false, "0.3.0").unwrap();
+    let body = release_body(&release.changelog(), "0.3.0", CHANGELOG).unwrap();
+    assert!(
+        body.contains("\n- **See [the guide][guide]** (`spate-core`) ([#4])\n"),
+        "{body}"
+    );
+    assert!(
+        body.contains("\n[guide]: https://example.com/guide\n"),
+        "{body}"
+    );
+}
+
+/// A fenced block at the margin of a group is carried as written, its lines
+/// read as none of the shapes the assembly writes.
+#[test]
+fn a_fenced_block_at_the_margin_is_carried_as_written() {
+    let body = release_body(
+        "## [0.5.0] — d\n\n### Changed\n\n- **A** ([#1])\n\nMigrate with:\n\n```yaml\n- name: x\n  key: v\n```\n\n[#1]: https://github.com/spate-etl/spate/pull/1\n",
+        "0.5.0",
+        CHANGELOG,
+    )
+    .unwrap();
+    assert!(
+        body.contains("\nMigrate with:\n\n```yaml\n- name: x\n  key: v\n```\n"),
+        "{body}"
+    );
+}
+
+/// A margin line shaped like a link definition whose label is not `#N` is
+/// carried, as GitHub renders it as a paragraph.
+#[test]
+fn a_margin_line_shaped_like_a_definition_is_carried() {
+    let body = release_body(
+        "## [0.5.0] — d\n\n[Note]: this release drops coordination.\n\n### Added\n\n- **A** ([#1])\n\n[#1]: https://github.com/spate-etl/spate/pull/1\n",
+        "0.5.0",
+        CHANGELOG,
+    )
+    .unwrap();
+    assert!(
+        body.contains("\n[Note]: this release drops coordination.\n\n### Added\n"),
+        "{body}"
+    );
+}
+
+/// A breaking marker in a paragraph of its own lists the title from the
+/// paragraph after it.
+#[test]
+fn a_breaking_marker_in_its_own_paragraph_keeps_the_title() {
+    let release = Release::new("a_breaking_marker_in_its_own_paragraph_keeps_the_title");
+    release.fragment(
+        "a.changed.md",
+        "**Breaking:**\n\n**The old knob is gone** (`spate-core`)\n\nProse. ([#4])\n",
+    );
+    build(release.path(), false, "0.3.0").unwrap();
+    let body = release_body(&release.changelog(), "0.3.0", CHANGELOG).unwrap();
+    assert!(
+        body.contains(
+            "\n### Breaking changes\n\n- **The old knob is gone** (`spate-core`) ([#4])\n"
+        ),
+        "{body}"
+    );
+}
+
+/// A breaking marker followed by a tab or by no space is listed as breaking,
+/// without the marker.
+#[test]
+fn a_breaking_marker_without_a_space_after_it_is_breaking() {
+    let body = release_body(
+        "## [0.5.0] — d\n\n### Changed\n\n- **Breaking:**\t**A** ([#1])\n- **Breaking:**`Foo::bar` is removed. ([#2])\n\n[#1]: https://github.com/spate-etl/spate/pull/1\n[#2]: https://github.com/spate-etl/spate/pull/2\n",
+        "0.5.0",
+        CHANGELOG,
+    )
+    .unwrap();
+    assert!(
+        body.contains(
+            "\n### Breaking changes\n\n- **A** ([#1])\n- `Foo::bar` is removed. ([#2])\n\n[#1]"
+        ),
+        "{body}"
+    );
+}
+
+/// A margin line written right after a breaking entry continues that entry, so
+/// it moves with it to the breaking heading.
+#[test]
+fn a_lazy_line_after_a_breaking_entry_moves_with_it() {
+    let body = release_body(
+        "## [0.5.0] — d\n\n### Changed\n\n- **C** ([#3])\n- **Breaking:** **D** ([#4])\nLazy note about D.\n\n[#3]: https://github.com/spate-etl/spate/pull/3\n[#4]: https://github.com/spate-etl/spate/pull/4\n",
+        "0.5.0",
+        CHANGELOG,
+    )
+    .unwrap();
+    assert!(
+        body.contains("\n### Breaking changes\n\n- **D** ([#4])\nLazy note about D.\n\n### Changed\n\n- **C** ([#3])\n\n[#3]"),
+        "{body}"
+    );
+}
+
+/// A line written before the first group comes ahead of the breaking entries.
+#[test]
+fn the_preface_comes_before_the_breaking_entries() {
+    let body = release_body(
+        "## [0.5.0] — d\n\nAn intro.\n\n### Changed\n\n- **Breaking:** **A** ([#1])\n- **B** ([#2])\n\n[#1]: https://github.com/spate-etl/spate/pull/1\n[#2]: https://github.com/spate-etl/spate/pull/2\n",
+        "0.5.0",
+        CHANGELOG,
+    )
+    .unwrap();
+    assert!(
+        body.contains(").\n\nAn intro.\n\n### Breaking changes\n\n- **A** ([#1])\n"),
+        "{body}"
+    );
+}
+
+/// A code span that closes inside the title leaves the closing `**` after it
+/// visible.
+#[test]
+fn a_closed_code_span_leaves_the_title_end_visible() {
+    assert_eq!(
+        entry_line(&[
+            "**Set `linger.ms` to zero** (`spate-kafka`) — the producer",
+            "flushes at once.",
+            "([#9])",
+        ]),
+        "- **Set `linger.ms` to zero** (`spate-kafka`) ([#9])"
+    );
+}
+
+/// A double-backtick code span closes only on a run of two, so `**` inside it
+/// stays in the title.
+#[test]
+fn a_double_backtick_span_holding_stars_stays_in_the_title() {
+    assert_eq!(
+        entry_line(&[
+            "**Use `` ** `` globs** (`spate-core`)",
+            "",
+            "Body.",
+            "([#15])"
+        ]),
+        "- **Use `` ** `` globs** (`spate-core`) ([#15])"
+    );
+}
+
+/// A definition reaches the release body when the listed line uses its label
+/// in another case, as GitHub matches labels without case.
+#[test]
+fn a_definition_label_matches_without_case() {
+    let body = release_body(
+        "## [0.5.0] — d\n\n### Added\n\n- **See [the guide][Guide]** ([#1])\n\n  [guide]: https://example.com/guide\n\n[#1]: https://github.com/spate-etl/spate/pull/1\n",
+        "0.5.0",
+        CHANGELOG,
+    )
+    .unwrap();
+    assert!(
+        body.contains("\n[guide]: https://example.com/guide\n"),
+        "{body}"
+    );
+}
+
+/// An entry that does not open on a bold title keeps its first paragraph and
+/// lists its reference once, also where the reference closes that paragraph.
+#[test]
+fn an_entry_without_a_bold_title_lists_its_reference_once() {
+    let body = release_body(
+        "## [0.5.0] — d\n\n### Fixed\n\n- A fix written as one paragraph.\n  ([#7])\n- **A title** ([#8])\n\n[#7]: https://github.com/spate-etl/spate/pull/7\n[#8]: https://github.com/spate-etl/spate/pull/8\n",
+        "0.5.0",
+        CHANGELOG,
+    )
+    .unwrap();
+    assert!(
+        body.contains("\n- A fix written as one paragraph. ([#7])\n"),
+        "{body}"
+    );
+    assert!(body.contains("\n- **A title** ([#8])\n"), "{body}");
+}
+
+/// A title whose prose continues after the crate list, as in v0.2.0, is cut at
+/// the end of the crate list.
+#[test]
+fn a_title_followed_by_prose_in_its_paragraph_is_cut_at_the_crate_list() {
+    let body = release_body(
+        "## [0.5.0] — d\n\n### Added\n\n- **A deadline** (`spate-kafka`) — the source\n  reports a fatal error.\n  ([#9])\n\n[#9]: https://github.com/spate-etl/spate/pull/9\n",
+        "0.5.0",
+        CHANGELOG,
+    )
+    .unwrap();
+    assert!(
+        body.contains("\n- **A deadline** (`spate-kafka`) ([#9])\n"),
+        "{body}"
+    );
+}
+
+/// A crate list holding parentheses of its own is kept whole.
+#[test]
+fn a_crate_list_with_nested_parentheses_is_kept_whole() {
+    let body = release_body(
+        "## [0.5.0] — d\n\n### Added\n\n- **A title** (`spate-kafka` (feature `ssl`))\n\n  Prose (with an aside).\n  ([#9])\n\n[#9]: https://github.com/spate-etl/spate/pull/9\n",
+        "0.5.0",
+        CHANGELOG,
+    )
+    .unwrap();
+    assert!(
+        body.contains("\n- **A title** (`spate-kafka` (feature `ssl`)) ([#9])\n"),
+        "{body}"
+    );
+}
+
+/// Every v0.3.0 entry but the dependency requirements keeps its reference.
+#[test]
+fn every_v0_3_0_entry_keeps_its_reference() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let body = notes_text(root, "0.3.0").unwrap();
+    for line in body.split('\n').filter(|line| line.starts_with("- **")) {
+        if line.starts_with("- **Dependency requirements**") {
+            continue;
+        }
+        let referenced = line.rsplit_once(" ([").is_some_and(|(_, tail)| {
+            (tail.starts_with('#') && tail.ends_with("])")) || tail.ends_with("))")
+        });
+        assert!(referenced, "{line}");
+    }
+}
+
+/// The release body for the real v0.3.0 section, whose titles were wrapped
+/// across lines: every entry appears once on one line, the breaking ones
+/// under their own heading, every `[#N]` used is defined and none is left
+/// unused, and the body stays short. A reference with no definition renders
+/// as its literal text.
+#[test]
+fn the_v0_3_0_release_body_has_one_line_per_entry() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let section = section_notes(
+        &std::fs::read_to_string(root.join(CHANGELOG)).unwrap(),
+        "0.3.0",
+        CHANGELOG,
+    )
+    .unwrap();
+    let (mut entries, mut breaking, mut contributors) = (0, 0, 0);
+    let mut group = "";
+    for line in section.split('\n') {
+        if let Some(heading) = line.strip_prefix("### ") {
+            group = heading;
+        } else if line.starts_with("- ") && group == "Contributors" {
+            contributors += 1;
+        } else if line.starts_with("- ") {
+            entries += 1;
+            breaking += usize::from(line.starts_with("- **Breaking:**"));
+        }
+    }
+    assert_eq!((entries, breaking, contributors), (127, 22, 2));
+
+    let body = notes_text(root, "0.3.0").unwrap();
+    assert!(
+        body.starts_with(
+            "The full notes for this release are in [CHANGELOG.md](https://github.com/spate-etl/spate/blob/v0.3.0/CHANGELOG.md#030--2026-10-11).\n\n### Breaking changes\n\n"
+        ),
+        "{body}"
+    );
+    let lines: Vec<&str> = body.split('\n').collect();
+    let listed: Vec<&str> = lines
+        .iter()
+        .copied()
+        .filter(|line| line.starts_with("- **"))
+        .collect();
+    assert_eq!(listed.len(), entries, "{body}");
+    let mut unique = listed.clone();
+    unique.sort_unstable();
+    unique.dedup();
+    assert_eq!(unique.len(), entries, "an entry is listed twice\n{body}");
+    assert!(lines.iter().all(|line| !line.starts_with("  ")), "{body}");
+    assert!(!body.contains("**Breaking:**"), "{body}");
+    assert!(
+        listed.contains(
+            &"- **A split lease whose renewal reply was lost is renewed again in the same heartbeat** (`spate-coordination`) ([#919])"
+        ),
+        "{body}"
+    );
+    let at = |heading: &str| lines.iter().position(|line| *line == heading).unwrap();
+    assert_eq!(at("### Added") - at("### Breaking changes") - 3, breaking);
+    let (used, defined) = used_and_defined(&body);
+    assert_eq!(used, defined);
+    assert!(lines.len() < 300, "{} lines", lines.len());
 }
 
 /// A fragment's prose loses the whitespace at the end of every line and the
@@ -2121,4 +2734,47 @@ fn a_release_of_requirement_changes_alone_assembles() {
             bullet(simd_json_entry("0.18.1", "0.19.0").trim_end_matches('\n'))
         )
     );
+}
+
+/// Only the margin lines that run on from a breaking entry move with it; a
+/// line after a blank line keeps its place in the group.
+#[test]
+fn a_line_after_a_blank_stays_in_the_group_of_a_breaking_entry() {
+    for (text, want) in [
+        (
+            "## [0.5.0] — d\n\n### Changed\n\n- **C** ([#3])\n- **Breaking:** **D** ([#4])\n\nA group note.\n\n[#3]: https://github.com/spate-etl/spate/pull/3\n[#4]: https://github.com/spate-etl/spate/pull/4\n",
+            "\n### Breaking changes\n\n- **D** ([#4])\n\n### Changed\n\n- **C** ([#3])\n\nA group note.\n\n[#3]",
+        ),
+        (
+            "## [0.5.0] — d\n\n### Changed\n\n- **C** ([#3])\n- **Breaking:** **D** ([#4])\nLazy one.\nLazy two.\n\nA group note.\n\n[#3]: https://github.com/spate-etl/spate/pull/3\n[#4]: https://github.com/spate-etl/spate/pull/4\n",
+            "\n### Breaking changes\n\n- **D** ([#4])\nLazy one.\nLazy two.\n\n### Changed\n\n- **C** ([#3])\n\nA group note.\n\n[#3]",
+        ),
+    ] {
+        let body = release_body(text, "0.5.0", CHANGELOG).unwrap();
+        assert!(body.contains(want), "{body}");
+    }
+}
+
+/// A shorter backtick run inside a code span does not close it.
+#[test]
+fn a_shorter_backtick_run_inside_a_code_span_does_not_close_it() {
+    assert_eq!(
+        entry_line(&[
+            "**Use `` ` ** `` globs** (`spate-core`)",
+            "",
+            "Body.",
+            "([#15])"
+        ]),
+        "- **Use `` ` ** `` globs** (`spate-core`) ([#15])"
+    );
+}
+
+/// A heading or quote opened on the line after a paragraph is named.
+#[test]
+fn a_heading_or_quote_opened_after_a_paragraph_is_named() {
+    assert_eq!(
+        wrapped_blocks("A para\n# h\n"),
+        vec![(1, 2, Some("heading"))]
+    );
+    assert_eq!(wrapped_blocks("A para\n> q\n"), vec![(1, 2, Some("quote"))]);
 }

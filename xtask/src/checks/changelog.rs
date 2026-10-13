@@ -1,7 +1,7 @@
 //! The changelog fragments: the gate, the scaffolder that writes one, the
 //! release assembly that consumes them and adds the moved root dependency
-//! requirements, one version's notes, and whether the release being prepared
-//! announces a breaking change.
+//! requirements, one version's release body, and whether the release being
+//! prepared announces a breaking change.
 //!
 //! A change somebody upgrading would care about carries a file under
 //! `changelog.d/`, and `changelog.d/README.md` states the format and the
@@ -148,18 +148,30 @@ fn gate(root: &Path, fields: &Fields, in_actions: bool, github_event: &str) -> O
 
     let wrapped = wrapped_fragments(root);
     if !wrapped.is_empty() {
+        let join = "Write each paragraph and list item of a fragment on one line. Join the\n  \
+                    named lines into one, with a space where each newline and any trailing\n  \
+                    `\\` or spaces were.";
+        let blank = "A line meant to start a new block needs a blank line before it.";
+        let (header, fixes) = if wrapped.iter().any(|(_, opened)| *opened) {
+            (
+                "a fragment paragraph runs into the block on its next line",
+                format!("{blank}\n  {join}"),
+            )
+        } else {
+            (
+                "a fragment paragraph spans more than one line",
+                format!("{join}\n  {blank}"),
+            )
+        };
         return Err(Error::msg(format!(
-            "a fragment paragraph spans more than one line:\n\n{}\n  \
-             Write each paragraph and list item of a fragment on one line. A GitHub\n  \
-             release body renders every newline in a paragraph, list item, blockquote\n  \
-             or heading as a line break, so a wrapped paragraph renders ragged. Join\n  \
-             the named lines into one, with a space where each newline and any\n  \
-             trailing `\\` or spaces were. A line meant to start a new block needs a\n  \
-             blank line before it.\n  \
+            "{header}:\n\n{}\n  \
+             A line inside a wrapped paragraph that begins with a list, heading or\n  \
+             quote marker opens that block in CHANGELOG.md and splits the sentence.\n  \
+             {fixes}\n  \
              {FRAGMENTS}/README.md has the conventions.",
             wrapped
                 .iter()
-                .map(|line| format!("    {line}\n"))
+                .map(|(line, _)| format!("    {line}\n"))
                 .collect::<String>()
         )));
     }
@@ -643,31 +655,47 @@ fn has_prose(bytes: &[u8]) -> bool {
         .any(|c| !c.is_whitespace())
 }
 
-/// Every paragraph of every pending fragment that spans more than one line, as
-/// `<file>:<first>: this paragraph runs over lines <first>-<last>.` lines.
-fn wrapped_fragments(root: &Path) -> Vec<String> {
+/// Every paragraph of every pending fragment that spans more than one line or
+/// runs into a block opened on its next line, as a report line and whether a
+/// block opened.
+fn wrapped_fragments(root: &Path) -> Vec<(String, bool)> {
     let mut out = Vec::new();
     for file in fragment_names(root) {
         let Ok(bytes) = std::fs::read(root.join(&file)) else {
             continue;
         };
-        for (first, last) in wrapped_paragraphs(&String::from_utf8_lossy(&bytes)) {
-            out.push(format!(
-                "{file}:{first}: this paragraph runs over lines {first}-{last}."
-            ));
+        for (first, last, opened) in wrapped_blocks(&String::from_utf8_lossy(&bytes)) {
+            out.push(match opened {
+                Some(block) => (
+                    format!(
+                        "{file}:{first}: a {block} opens on line {last}, the line after this paragraph."
+                    ),
+                    true,
+                ),
+                None => (
+                    format!("{file}:{first}: this paragraph runs over lines {first}-{last}."),
+                    false,
+                ),
+            });
         }
     }
     out
 }
 
-/// The blocks of text in one fragment that hold a line break, each as the
-/// 1-based first and last line of its text.
+/// The blocks of text in one fragment that span lines, each as the 1-based
+/// first and last line it covers and the name of the block opened on the last
+/// line, if one did.
 ///
-/// The fragment is parsed as GitHub Flavored Markdown. A soft break (a newline
+/// A line inside a wrapped paragraph that begins with a list, heading or quote
+/// marker opens that block in `CHANGELOG.md` and splits the sentence. The
+/// fragment is parsed as GitHub Flavored Markdown. A soft break (a newline
 /// inside a paragraph, list item, blockquote or heading) and a hard break (two
-/// trailing spaces or a trailing `\`) both render as a line break in a GitHub
-/// release body. Code, tables and HTML blocks hold no breaks.
-fn wrapped_paragraphs(text: &str) -> Vec<(usize, usize)> {
+/// trailing spaces or a trailing `\`) both count. So does a list, heading or
+/// blockquote that opens on the line after a paragraph's last line, which the
+/// parser has already split from the paragraph; it is named from the
+/// paragraph's first line to the line it opens on. Code, tables and HTML blocks
+/// hold no breaks.
+fn wrapped_blocks(text: &str) -> Vec<(usize, usize, Option<&'static str>)> {
     use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 
     let line = |offset: usize| text[..offset].matches('\n').count() + 1;
@@ -676,6 +704,9 @@ fn wrapped_paragraphs(text: &str) -> Vec<(usize, usize)> {
     // a break. Any block start or end closes the run.
     let mut run: Option<(usize, usize)> = None;
     let mut broken = false;
+    // The lines of the paragraph that ended last, and whether it holds a
+    // break, until the next block shows whether it opened on the line after.
+    let mut ended: Option<((usize, usize), bool)> = None;
     let options = Options::ENABLE_TABLES
         | Options::ENABLE_FOOTNOTES
         | Options::ENABLE_STRIKETHROUGH
@@ -717,11 +748,39 @@ fn wrapped_paragraphs(text: &str) -> Vec<(usize, usize)> {
             run = Some(run.map_or((range.start, range.end), |(first, _)| (first, range.end)));
             continue;
         }
-        if let Some((first, last)) = run.take()
-            && std::mem::take(&mut broken)
-        {
-            out.push((line(first), line(last - 1)));
+        if let Some((first, last)) = run.take() {
+            let lines = (line(first), line(last - 1));
+            let broken = std::mem::take(&mut broken);
+            if matches!(event, Event::End(TagEnd::Paragraph)) {
+                ended = Some((lines, broken));
+                continue;
+            }
+            if broken {
+                out.push((lines.0, lines.1, None));
+            }
         }
+        // The blocks a paragraph closes along with it do not separate it from
+        // the block that follows.
+        if matches!(event, Event::End(_)) {
+            continue;
+        }
+        if let Some(((first, last), broken)) = ended.take() {
+            let opened = line(range.start);
+            let block = match event {
+                Event::Start(Tag::List(_)) => Some("list"),
+                Event::Start(Tag::Heading { .. }) => Some("heading"),
+                Event::Start(Tag::BlockQuote(_)) => Some("quote"),
+                _ => None,
+            };
+            if opened == last + 1 && block.is_some() {
+                out.push((first, opened, block));
+            } else if broken {
+                out.push((first, last, None));
+            }
+        }
+    }
+    if let Some(((first, last), true)) = ended {
+        out.push((first, last, None));
     }
     out
 }
@@ -836,21 +895,21 @@ fn summary(version: &str, today: &str) -> String {
     )
 }
 
-/// Prints one version's section on stdout, for the release body. The heading is
-/// dropped because the release title already carries the version.
+/// Prints one version's release body on stdout: a link to the full section,
+/// then every entry reduced to one line.
 pub(crate) fn notes(root: &Path, explain: bool, version: &str) -> Outcome {
     if version.is_empty() {
         return Err(Error::msg("usage: cargo xtask changelog notes <version>"));
     }
     if explain {
-        println!("(prints the ## [{version}] section of {CHANGELOG})");
+        println!("(prints the release body for the ## [{version}] section of {CHANGELOG})");
         return Ok(());
     }
     print!("{}", notes_text(root, version)?);
     Ok(())
 }
 
-/// One version's section, without its heading.
+/// One version's release body, read from its section of the changelog.
 pub(crate) fn notes_text(root: &Path, version: &str) -> Result<String, Error> {
     let path = root.join(CHANGELOG);
     if !path.is_file() {
@@ -858,7 +917,299 @@ pub(crate) fn notes_text(root: &Path, version: &str) -> Result<String, Error> {
     }
     let text =
         std::fs::read_to_string(&path).map_err(|e| Error::msg(format!("{CHANGELOG}: {e}")))?;
-    section_notes(&text, version, CHANGELOG)
+    release_body(&text, version, CHANGELOG)
+}
+
+// ---------------------------------------------------------------------------
+// The release body.
+// ---------------------------------------------------------------------------
+
+/// The heading the breaking entries are listed under, ahead of the groups.
+const BREAKING_HEADING: &str = "Breaking changes";
+
+/// The group the assembly writes last, copied into the release body as it is.
+const CONTRIBUTORS: &str = "Contributors";
+
+/// One group of the section: its heading and the lines the body lists under it.
+struct Group<'a> {
+    heading: &'a str,
+    lines: Vec<String>,
+}
+
+/// The release body for one version: a line linking the full section in the
+/// changelog at the release tag, the breaking entries under their own heading,
+/// every other entry on one line under its group, the contributors as
+/// assembled, and the definition of every link the body uses.
+///
+/// It reads the shape `build` writes. A line outside that shape, such as a
+/// hand-written sentence or a fenced block at the margin, is carried into the
+/// body as written and in place, so the shape of a section never stops a
+/// release. A breaking entry is listed once, under the breaking heading, with
+/// any margin line that continues it, and a group left empty is omitted.
+fn release_body(text: &str, version: &str, file: &str) -> Result<String, Error> {
+    let section = section_notes(text, version, file)?;
+    let prefix = format!("## [{version}] ");
+    let heading = records(text)
+        .into_iter()
+        .find(|line| line.starts_with(&prefix))
+        .unwrap_or_default();
+
+    let mut preface: Vec<String> = Vec::new();
+    let mut breaking: Vec<String> = Vec::new();
+    let mut groups: Vec<Group<'_>> = Vec::new();
+    let mut definitions: Vec<(&str, &str)> = Vec::new();
+    let mut entry: Vec<&str> = Vec::new();
+    let mut after_blank = false;
+    let mut fenced = false;
+    // The line before was carried with a breaking entry it continues.
+    let mut lazy = false;
+
+    for line in section.trim_end_matches('\n').split('\n') {
+        let margin_fence = !line.starts_with("  ") && is_fence(line);
+        let continues = !fenced && !margin_fence && (line.is_empty() || line.starts_with("  "));
+        let moved = !continues && place(&mut entry, &mut breaking, &mut groups);
+        let lazy_now = std::mem::take(&mut lazy) || (moved && !after_blank);
+
+        if fenced || margin_fence {
+            let lines = groups
+                .last_mut()
+                .map_or(&mut preface, |group| &mut group.lines);
+            if fenced {
+                lines.push(line.to_owned());
+            } else {
+                carry(lines, line, after_blank);
+            }
+            fenced ^= margin_fence;
+        } else if let Some(name) = line.strip_prefix("### ") {
+            groups.push(Group {
+                heading: name,
+                lines: Vec::new(),
+            });
+        } else if let Some(label) = definition_label(line.trim_start())
+            && (line.starts_with("  ") || label.starts_with('#'))
+        {
+            definitions.push((label, line.trim_start()));
+        } else if let Some(item) = line.strip_prefix("- ")
+            && let Some(group) = groups.last_mut()
+        {
+            if group.heading == CONTRIBUTORS {
+                group.lines.push(line.to_owned());
+            } else {
+                entry.push(item);
+            }
+        } else if !entry.is_empty() {
+            entry.push(line.strip_prefix("  ").unwrap_or(line));
+        } else if lazy_now && !line.is_empty() {
+            // A paragraph continues onto a line with no indent, so this line
+            // belongs to the breaking entry listed above it.
+            breaking.push(line.to_owned());
+            lazy = true;
+        } else {
+            let lines = groups
+                .last_mut()
+                .map_or(&mut preface, |group| &mut group.lines);
+            carry(lines, line, after_blank);
+        }
+        after_blank = line.is_empty();
+    }
+    place(&mut entry, &mut breaking, &mut groups);
+
+    let mut out = format!(
+        "The full notes for this release are in [{CHANGELOG}]({REPO_URL}/blob/v{version}/{CHANGELOG}#{}).\n",
+        github_anchor(heading)
+    );
+    let listed = [(None, &preface), (Some(BREAKING_HEADING), &breaking)]
+        .into_iter()
+        .chain(
+            groups
+                .iter()
+                .map(|group| (Some(group.heading), &group.lines)),
+        );
+    for (name, lines) in listed {
+        let end = lines
+            .iter()
+            .rposition(|line| !line.is_empty())
+            .map_or(0, |at| at + 1);
+        if end == 0 {
+            continue;
+        }
+        match name {
+            Some(name) => out.push_str(&format!("\n### {name}\n\n")),
+            None => out.push('\n'),
+        }
+        for line in &lines[..end] {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+
+    // GitHub matches a reference to its definition without case.
+    let folded = out.to_lowercase();
+    let kept: Vec<&str> = definitions
+        .into_iter()
+        .filter(|(label, _)| folded.contains(&format!("[{}]", label.to_lowercase())))
+        .map(|(_, line)| line)
+        .collect();
+    if !kept.is_empty() {
+        out.push('\n');
+        for line in kept {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    Ok(out)
+}
+
+/// Reduces the entry read so far to one line and lists it, under the breaking
+/// heading without its marker or under the group it was read in, and empties
+/// it. Returns whether it listed a breaking entry.
+fn place(entry: &mut Vec<&str>, breaking: &mut Vec<String>, groups: &mut [Group<'_>]) -> bool {
+    if entry.is_empty() {
+        return false;
+    }
+    let reduced = entry_line(entry);
+    entry.clear();
+    if let Some(rest) = reduced
+        .strip_prefix("- ")
+        .and_then(|rest| rest.strip_prefix(BREAKING))
+    {
+        breaking.push(format!("- {}", rest.trim_start()));
+        return true;
+    }
+    if let Some(group) = groups.last_mut() {
+        group.lines.push(reduced);
+    }
+    false
+}
+
+/// Appends a line the assembly does not write. A blank line before it in the
+/// section stays, so the line does not join the entry listed above it.
+fn carry(lines: &mut Vec<String>, line: &str, after_blank: bool) {
+    let last_blank = lines.last().is_none_or(String::is_empty);
+    if !last_blank && (line.is_empty() || after_blank) {
+        lines.push(String::new());
+    }
+    if !line.is_empty() {
+        lines.push(line.to_owned());
+    }
+}
+
+/// The label of a `[label]: ` link definition: the `[#N]` ones the assembly
+/// writes below the groups, and any a fragment writes for its own links.
+fn definition_label(line: &str) -> Option<&str> {
+    let (label, rest) = line.strip_prefix('[')?.split_once(']')?;
+    (!label.is_empty() && rest.starts_with(": ")).then_some(label)
+}
+
+/// One entry as a single list item: its title and crate list, then the
+/// reference its last line ends in.
+///
+/// The lines are the entry's own, with the bullet and the two-space indent
+/// removed. A title and crate list wrapped over several lines are joined with a
+/// space. A breaking marker in a paragraph of its own is read with the
+/// paragraph after it. An entry that does not open on a bold title keeps its
+/// whole first paragraph.
+fn entry_line(lines: &[&str]) -> String {
+    let paragraph = |from: &[&str]| {
+        from.iter()
+            .skip_while(|line| line.trim().is_empty())
+            .take_while(|line| !line.trim().is_empty())
+            .map(|line| line.trim())
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let mut first_paragraph = paragraph(lines);
+    if first_paragraph == BREAKING {
+        let next = lines
+            .iter()
+            .position(|line| line.trim().is_empty())
+            .unwrap_or(lines.len());
+        first_paragraph = format!("{BREAKING} {}", paragraph(&lines[next..]));
+    }
+    let head = title_and_crates(&first_paragraph).unwrap_or(&first_paragraph);
+
+    let last = lines
+        .iter()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .map_or("", |line| line.trim_end_matches(is_space));
+    match trailing_reference(last) {
+        Some(reference) if !head.ends_with(reference) => format!("- {head} {reference}"),
+        _ => format!("- {head}"),
+    }
+}
+
+/// The opening `**Title**` of a paragraph, with any `**Breaking:**` before it
+/// and the balanced `( … )` crate list after it.
+fn title_and_crates(paragraph: &str) -> Option<&str> {
+    let start = paragraph
+        .strip_prefix(BREAKING)
+        .map_or(0, |rest| paragraph.len() - rest.trim_start().len());
+    let title = paragraph[start..].strip_prefix("**")?;
+    let mut end = start + 2 + closing_stars(title)? + 2;
+    if let Some(list) = paragraph[end..].strip_prefix(" (") {
+        let mut depth = 1;
+        for (at, c) in list.char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                _ => {}
+            }
+            if depth == 0 {
+                end += 2 + at + 1;
+                break;
+            }
+        }
+    }
+    Some(&paragraph[..end])
+}
+
+/// Where the `**` closing a bold title opens, outside any code span. A span
+/// closes on a backtick run as long as the one that opened it.
+fn closing_stars(title: &str) -> Option<usize> {
+    let mut open_run = None;
+    let mut at = 0;
+    while let Some(c) = title[at..].chars().next() {
+        let run = title[at..].len() - title[at..].trim_start_matches('`').len();
+        if run > 0 {
+            open_run = match open_run {
+                None => Some(run),
+                Some(open) if open == run => None,
+                still_open => still_open,
+            };
+            at += run;
+        } else if open_run.is_none() && title[at..].starts_with("**") {
+            return Some(at);
+        } else {
+            at += c.len_utf8();
+        }
+    }
+    None
+}
+
+/// The `([#N])` or ``([`sha`](url))`` an entry's last line ends in. The
+/// assembly appends one to every entry it can derive a reference for.
+fn trailing_reference(line: &str) -> Option<&str> {
+    if ends_with_reference(line) {
+        return line.rfind("([#").map(|at| &line[at..]);
+    }
+    if line.ends_with("))") {
+        return line.rfind("([`").map(|at| &line[at..]);
+    }
+    None
+}
+
+/// The id GitHub gives a heading: its text lowercased, every character other
+/// than a letter, digit, `-`, `_` or space dropped, and each space a hyphen.
+fn github_anchor(heading: &str) -> String {
+    heading
+        .trim_start_matches('#')
+        .trim_start()
+        .chars()
+        .filter(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | ' '))
+        .flat_map(char::to_lowercase)
+        .map(|c| if c == ' ' { '-' } else { c })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------

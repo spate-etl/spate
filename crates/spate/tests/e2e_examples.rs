@@ -943,8 +943,12 @@ fn clickhouse_aggregating_mv_example_builds_states() {
 }
 
 /// `clickhouse_load`: a bounded datagen run into a 32-shard Native sink
-/// completes, prints a summary line that parses, and writes the same number
-/// of rows when run again.
+/// completes and prints a summary line that echoes its configured `threads`,
+/// `io_threads` and `compression`. A second run, with another thread shape
+/// and codec, writes the same number of rows. The table then holds the rows
+/// and column sums that the same datagen section yields in-process. The two
+/// runs send at least 64 inserts, and none goes through the server's async
+/// buffer.
 ///
 /// Equal counts let two builds of the example be compared on the same work.
 /// The seed is fixed, so the line count per order repeats.

@@ -5,8 +5,10 @@
 //! never rejects a record. When a sealed chunk cannot be sent it is parked
 //! and pressure is reported through `relieve()`, which the chain checks
 //! between payloads. A shard with parked chunks parks every chunk it seals
-//! after them, and parked chunks drain in seal order, so each shard's sink
-//! worker receives its chunks in seal order.
+//! after them, and parked chunks drain in seal order, so the chunks this
+//! stage seals for a shard reach its queue in seal order. Each pipeline
+//! thread runs its own stage over the shared queues, so chunks from
+//! different threads can reach a shard in any order.
 
 use super::Collector;
 use super::chain::{FatalSlot, OpMeterSlot, StageLifecycle};

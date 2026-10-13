@@ -5,6 +5,7 @@ use super::labels::{ComponentLabels, OwnedGauge};
 use super::names;
 use super::ownership::{SeriesClaim, series_key};
 use metrics::Gauge;
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 /// Lifecycle state of the pipeline, exported via `spate_pipeline_state`.
@@ -150,32 +151,40 @@ impl IoRuntimeMetrics {
 /// One reading of [`IoBusySampler`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct IoBusySample {
-    /// Mean busy fraction of the workers over the interval, in `0..=1`.
+    /// Mean busy fraction of the workers over the trailing window, clamped
+    /// to `0..=1` for publication.
     pub(crate) ratio: f64,
-    /// Every sample over the last [`IoBusySampler::SUSTAIN`] read at least
-    /// [`IoBusySampler::SATURATED`]. True on the one sample that completes
-    /// such a run; it re-arms after a sample below the threshold.
+    /// The window spans [`IoBusySampler::SUSTAIN`] and its unclamped ratio
+    /// reached [`IoBusySampler::SATURATED`]. True on the one sample that
+    /// crosses; it re-arms once the unclamped ratio drops below.
     pub(crate) sustained: bool,
 }
 
-/// Turns the I/O runtime's cumulative busy time into a per-interval ratio.
+/// Turns the I/O runtime's cumulative busy time into a ratio over a
+/// trailing window.
+///
+/// A worker publishes its busy time at its periodic maintenance or when it
+/// parks, so a worker held by long polls reports it in lumps that land in
+/// some samples and not others. Averaging over the window absorbs the
+/// lumps. Polls of a second or more can still read unevenly.
 ///
 /// Pure: the caller passes the instant and the busy total, so tests drive it
 /// without a clock.
 #[derive(Debug)]
 pub(crate) struct IoBusySampler {
     interval: Duration,
-    last_at: Instant,
-    last_busy: Duration,
-    /// Start of the current run of saturated samples.
-    saturated_since: Option<Instant>,
+    /// `(instant, busy_total)` at the baseline and at each sample, oldest
+    /// first. The front is the newest entry at least [`Self::SUSTAIN`] old,
+    /// or the baseline while none is.
+    history: VecDeque<(Instant, Duration)>,
     warned: bool,
 }
 
 impl IoBusySampler {
-    /// The ratio at or above which a sample counts as saturated.
+    /// The unclamped ratio at or above which the window counts as saturated.
     pub(crate) const SATURATED: f64 = 0.9;
-    /// How long every sample must read saturated before the warning.
+    /// The trailing window, and how much of it must have passed before the
+    /// warning can fire.
     pub(crate) const SUSTAIN: Duration = Duration::from_secs(60);
 
     /// A sampler that yields at most one sample per `interval`, with its
@@ -183,9 +192,7 @@ impl IoBusySampler {
     pub(crate) fn new(interval: Duration, now: Instant, busy_total: Duration) -> Self {
         IoBusySampler {
             interval,
-            last_at: now,
-            last_busy: busy_total,
-            saturated_since: None,
+            history: VecDeque::from([(now, busy_total)]),
             warned: false,
         }
     }
@@ -193,38 +200,46 @@ impl IoBusySampler {
     /// Take a sample when at least one interval has passed since the last.
     ///
     /// `busy_total` is the sum over all `workers` of their cumulative busy
-    /// time. Returns `None` before a full interval has passed.
+    /// time. The ratio covers the trailing [`Self::SUSTAIN`], or the time
+    /// since the baseline while that is shorter. Returns `None` before a
+    /// full interval has passed.
     pub(crate) fn observe(
         &mut self,
         now: Instant,
         busy_total: Duration,
         workers: usize,
     ) -> Option<IoBusySample> {
-        let elapsed = now.saturating_duration_since(self.last_at);
+        let &(last_at, _) = self.history.back()?;
+        let elapsed = now.saturating_duration_since(last_at);
         if elapsed.is_zero() || elapsed < self.interval {
             return None;
         }
-        let busy = busy_total.saturating_sub(self.last_busy);
-        let capacity = elapsed.as_secs_f64() * workers.max(1) as f64;
-        let ratio = (busy.as_secs_f64() / capacity).min(1.0);
-
-        // A saturated run starts where the first saturated interval began.
-        let started = self.last_at;
-        self.last_at = now;
-        self.last_busy = busy_total;
-
-        let mut sustained = false;
-        if ratio >= Self::SATURATED {
-            let since = *self.saturated_since.get_or_insert(started);
-            if !self.warned && now.saturating_duration_since(since) >= Self::SUSTAIN {
-                self.warned = true;
-                sustained = true;
-            }
-        } else {
-            self.saturated_since = None;
-            self.warned = false;
+        self.history.push_back((now, busy_total));
+        while self
+            .history
+            .get(1)
+            .is_some_and(|&(at, _)| now.saturating_duration_since(at) >= Self::SUSTAIN)
+        {
+            self.history.pop_front();
         }
-        Some(IoBusySample { ratio, sustained })
+        let &(start, start_busy) = self.history.front()?;
+        let span = now.saturating_duration_since(start);
+        let busy = busy_total.saturating_sub(start_busy);
+        let unclamped = busy.as_secs_f64() / (span.as_secs_f64() * workers.max(1) as f64);
+
+        // Judged unclamped: a lump that lands inside the window carries busy
+        // time from before it, and clamping would drop that time.
+        let mut sustained = false;
+        if unclamped < Self::SATURATED {
+            self.warned = false;
+        } else if span >= Self::SUSTAIN && !self.warned {
+            self.warned = true;
+            sustained = true;
+        }
+        Some(IoBusySample {
+            ratio: unclamped.min(1.0),
+            sustained,
+        })
     }
 
     /// [`observe`](Self::observe) with the busy total and worker count read
@@ -278,15 +293,22 @@ mod tests {
         assert_eq!(ratio(SECS(30), SECS(5), 2), 1.0, "clamped at 1");
     }
 
-    /// Each sample covers the busy time since the previous one only.
+    /// The ratio averages since start until the window is full, then over
+    /// the trailing window, so busy time older than the window drops out.
     #[test]
-    fn each_sample_covers_the_interval_since_the_last() {
+    fn the_ratio_covers_the_trailing_window() {
         let t0 = Instant::now();
         let mut s = sampler(t0);
-        let first = s.observe(t0 + SECS(5), SECS(5), 1).expect("sample");
-        assert_eq!(first.ratio, 1.0);
-        let second = s.observe(t0 + SECS(10), SECS(5), 1).expect("sample");
-        assert_eq!(second.ratio, 0.0, "no busy time accrued since the first");
+        let busy = SECS(5);
+        let mut at = |secs| s.observe(t0 + SECS(secs), busy, 1).expect("sample").ratio;
+        assert_eq!(at(5), 1.0);
+        assert_eq!(at(10), 0.5, "averaged since start");
+        let mut last = 0.0;
+        for secs in (15..=60).step_by(5) {
+            last = at(secs);
+        }
+        assert_eq!(last, 5.0 / 60.0);
+        assert_eq!(at(65), 0.0, "the busy first interval left the window");
     }
 
     /// No sample before a full interval has passed, including at zero elapsed.
@@ -304,69 +326,129 @@ mod tests {
         assert_eq!(unpaced.observe(t0, SECS(1), 1), None, "zero elapsed");
     }
 
-    /// Feeds saturated (or idle) intervals of 5 s to `s`, starting at `from`
-    /// seconds after `t0`, and returns the elapsed seconds of each sample that
-    /// asked for the warning.
+    /// Feeds one-worker samples 5 s apart, from `from` to `to` seconds after
+    /// `t0`, adding `add(at)` busy time at each, and returns every sample with
+    /// its elapsed seconds.
     fn feed(
         s: &mut IoBusySampler,
         t0: Instant,
         busy: &mut Duration,
-        from: u64,
-        to: u64,
-        saturated: bool,
-    ) -> Vec<u64> {
-        let mut warned = Vec::new();
-        let mut at = from + 5;
-        while at <= to {
-            if saturated {
-                *busy += SECS(5);
-            }
-            let sample = s.observe(t0 + SECS(at), *busy, 1).expect("sample");
-            if sample.sustained {
-                warned.push(at);
-            }
-            at += 5;
-        }
-        warned
+        (from, to): (u64, u64),
+        add: impl Fn(u64) -> Duration,
+    ) -> Vec<(u64, IoBusySample)> {
+        (from + 5..=to)
+            .step_by(5)
+            .map(|at| {
+                *busy += add(at);
+                (at, s.observe(t0 + SECS(at), *busy, 1).expect("sample"))
+            })
+            .collect()
     }
 
-    /// The warning fires once, when every sample over 60 s read saturated.
-    #[test]
-    fn the_warning_fires_once_after_sixty_saturated_seconds() {
+    /// The elapsed seconds of each sample that asked for the warning.
+    fn warnings(samples: &[(u64, IoBusySample)]) -> Vec<u64> {
+        samples
+            .iter()
+            .filter(|(_, sample)| sample.sustained)
+            .map(|(at, _)| *at)
+            .collect()
+    }
+
+    fn busy(_: u64) -> Duration {
+        SECS(5)
+    }
+
+    fn idle(_: u64) -> Duration {
+        Duration::ZERO
+    }
+
+    /// A span of elapsed seconds and the busy time each sample in it adds.
+    type Span = ((u64, u64), fn(u64) -> Duration);
+
+    /// Runs one scenario of consecutive spans against a fresh sampler and
+    /// returns the warnings each span asked for.
+    fn scenario(spans: &[Span]) -> Vec<Vec<u64>> {
         let t0 = Instant::now();
         let mut s = sampler(t0);
-        let mut busy = Duration::ZERO;
+        let mut total = Duration::ZERO;
+        spans
+            .iter()
+            .map(|(span, add)| warnings(&feed(&mut s, t0, &mut total, *span, add)))
+            .collect()
+    }
+
+    /// The warning fires once, when the window first spans 60 s of
+    /// saturation.
+    #[test]
+    fn the_warning_fires_once_after_a_saturated_window() {
         assert_eq!(
-            feed(&mut s, t0, &mut busy, 0, 120, true),
-            vec![60],
+            scenario(&[((0, 120), busy)]),
+            [vec![60]],
             "fires at 60 s, not at 55 s, and once"
         );
     }
 
-    /// A sample below the threshold restarts the window.
+    /// Until the window spans 60 s nothing warns, however far the busy time
+    /// runs over capacity.
     #[test]
-    fn a_dip_restarts_the_window() {
-        let t0 = Instant::now();
-        let mut s = sampler(t0);
-        let mut busy = Duration::ZERO;
-        assert!(feed(&mut s, t0, &mut busy, 0, 30, true).is_empty());
-        assert!(feed(&mut s, t0, &mut busy, 30, 35, false).is_empty());
+    fn no_warning_before_the_window_spans_sixty_seconds() {
+        let over = |_| SECS(30);
         assert_eq!(
-            feed(&mut s, t0, &mut busy, 35, 120, true),
-            vec![95],
-            "60 s after the dip"
+            scenario(&[((0, 55), over), ((55, 60), over)]),
+            [vec![], vec![60]]
         );
     }
 
-    /// After a recovery the warning fires again on the next sustained run.
+    /// A saturated worker whose busy time arrives in lumps, here a 15 s lump
+    /// every third sample, reads saturated and warns once.
     #[test]
-    fn the_warning_rearms_after_a_recovery() {
+    fn busy_time_published_in_lumps_reads_saturated() {
         let t0 = Instant::now();
         let mut s = sampler(t0);
-        let mut busy = Duration::ZERO;
-        assert_eq!(feed(&mut s, t0, &mut busy, 0, 60, true), vec![60]);
-        assert!(feed(&mut s, t0, &mut busy, 60, 65, false).is_empty());
-        assert_eq!(feed(&mut s, t0, &mut busy, 65, 125, true), vec![125]);
+        let mut total = Duration::ZERO;
+        let lumps = |at| {
+            if at % 15 == 0 {
+                SECS(15)
+            } else {
+                Duration::ZERO
+            }
+        };
+        let samples = feed(&mut s, t0, &mut total, (0, 120), lumps);
+        assert_eq!(warnings(&samples), [60]);
+        for (at, sample) in samples.iter().filter(|(at, _)| *at >= 60) {
+            assert!(sample.ratio >= 0.9, "{at} s read {}", sample.ratio);
+        }
+    }
+
+    /// A worker busy half the time reads half and never warns.
+    #[test]
+    fn a_half_busy_worker_does_not_warn() {
+        let t0 = Instant::now();
+        let mut s = sampler(t0);
+        let mut total = Duration::ZERO;
+        let samples = feed(&mut s, t0, &mut total, (0, 180), |_| {
+            Duration::from_millis(2_500)
+        });
+        assert!(warnings(&samples).is_empty());
+        assert!(samples.iter().all(|(_, sample)| sample.ratio == 0.5));
+    }
+
+    /// A short dip that keeps the trailing ratio at or above the threshold
+    /// does not re-arm the warning. A dip that takes it below does, and the
+    /// warning fires again once the window is back above it.
+    #[test]
+    fn the_warning_rearms_when_the_trailing_ratio_drops() {
+        assert_eq!(
+            scenario(&[
+                ((0, 60), busy),
+                ((60, 65), idle),
+                ((65, 200), busy),
+                ((200, 210), idle),
+                ((210, 300), busy),
+            ]),
+            [vec![60], vec![], vec![], vec![], vec![265]],
+            "55 of 60 s busy stays saturated; 50 of 60 s re-arms"
+        );
     }
 
     /// A ratio at the threshold counts as saturated; just under it does not.

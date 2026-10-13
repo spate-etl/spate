@@ -91,7 +91,10 @@ on) takes one core from the derived pipeline-thread count, down to its floor
 of 1.
 Read `spate_pipeline_io_busy_ratio` before raising it: a value that stays
 near 1 means the I/O workers are saturated
-([Metrics](../../METRICS.md#pipeline--process)).
+([Metrics](../../METRICS.md#pipeline--process)). It averages the last 60
+seconds and updates every 5. A task that holds a worker for a long poll
+shows up late and in steps, and polls of a second or more can read
+unevenly.
 
 ## Sink batching: `batch.max_rows` / `batch.max_bytes` / `batch.linger`
 

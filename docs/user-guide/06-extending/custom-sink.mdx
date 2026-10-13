@@ -176,10 +176,10 @@ workers, their queues and their metric labels from the topology it carries.
   gives every chain its own codec instance, and each chunk passes through
   it once, on the pipeline thread, when it seals. Each output must decode on
   its own, and outputs concatenated in seal order must form a legal body for
-  the writer. The output must be a deterministic function of the input. The
-  writer receives the coded frames, and every retry resends the same bytes.
-  The in-flight budget and `max_bytes` count the bytes before the codec, so
-  sizing does not depend on the codec.
+  the writer. The output must be a deterministic function of the input. A
+  codec must not perform I/O. The writer receives the coded frames, and
+  every retry resends the same bytes. The in-flight budget and `max_bytes`
+  count the bytes before the codec, so sizing does not depend on the codec.
 
 Construct the struct via `new` plus the `with_*` methods. It is
 `#[non_exhaustive]`, so fields can grow without breaking you. Queue depth between

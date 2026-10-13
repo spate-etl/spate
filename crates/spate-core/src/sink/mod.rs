@@ -207,6 +207,7 @@ pub trait RowEncoder<F: RecFamily>: Send {
 ///   blocks and the members of a multi-frame zstd or gzip object body both
 ///   fit.
 /// - The output is a deterministic function of the input.
+/// - A codec must not perform I/O.
 /// - An instance may keep state between calls, such as a compression
 ///   context or a scratch buffer. The framework makes one instance per sink
 ///   per chain, which is one per pipeline thread, and calls it from that
@@ -266,6 +267,12 @@ pub trait FrameCodec: Send + Sync {
 ///
 /// The closure is `RefUnwindSafe`, so the factory, and a sink type that holds
 /// one, stays `UnwindSafe` and `RefUnwindSafe`.
+///
+/// A closure that captures state which is not `RefUnwindSafe` wraps it in
+/// [`AssertUnwindSafe`](std::panic::AssertUnwindSafe) and reaches it through
+/// deref, as in `let state: &T = &wrapper;`. Under edition 2024 a closure
+/// that names `wrapper.0` captures only the inner field, which loses the
+/// wrapper and fails the bound.
 #[derive(Clone)]
 pub struct FrameCodecFactory(std::sync::Arc<dyn MakeFrameCodec>);
 

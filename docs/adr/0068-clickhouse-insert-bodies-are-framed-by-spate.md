@@ -107,7 +107,8 @@ corrupted part on one replica, and another replica can take the insert.
 stock compressing client under lz4 and zstd at levels 1, 3 and 19, in both
 formats. `into_parts_attaches_a_codec_only_when_compressing` and
 `an_uncoded_frame_is_fatal_before_any_request` sit beside it.
-`server_decode_failures_are_fatal` and
+`a_wrong_method_or_size_frame_is_fatal_before_any_request` pins the method and
+size checks one at a time. `server_decode_failures_are_fatal` and
 `a_server_side_checksum_failure_is_retryable` (`src/writer.rs`) and
 `decompress_is_a_reserved_setting` (`src/config.rs`) pin the classification and
 the reserved setting. The block codec's oracle, round-trip, context-reuse and

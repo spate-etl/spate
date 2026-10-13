@@ -256,3 +256,42 @@ fn an_uncoded_frame_is_fatal_before_any_request() {
         "only the schema query reached the server"
     );
 }
+
+/// Each of the writer's method and size checks rejects a frame on its own: a
+/// well-formed zstd block sent to an lz4 writer fails the method check, and an
+/// lz4 block with one byte appended fails the size check. Both fail `Fatal`
+/// and send no request.
+#[test]
+fn a_wrong_method_or_size_frame_is_fatal_before_any_request() {
+    let runtime = runtime();
+    let server = BenchServer::recording(&rows::event_columns());
+    let sink = runtime.block_on(http_server::events_sink_in(server.url(), "lz4", "native"));
+    let raw = frames::native_frames(1).remove(0);
+    let zstd = support::coded_batch(
+        compression("zstd:3"),
+        vec![raw.bytes.clone()],
+        raw.rows,
+        TOKEN,
+    );
+    let mut long = support::coded_batch(compression("lz4"), vec![raw.bytes], raw.rows, TOKEN);
+    let mut frame = long.frames[0].to_vec();
+    frame.push(0);
+    long.frames[0] = Bytes::from(frame);
+    for (what, batch) in [
+        ("a zstd block", zstd),
+        ("an lz4 block and a stray byte", long),
+    ] {
+        let err = runtime
+            .block_on(sink.writer.write_batch(&sink.endpoints[0][0], &batch))
+            .expect_err(what);
+        let SinkError::Client { class, reason } = &err else {
+            panic!("{what}: {err:?}");
+        };
+        assert_eq!(*class, ErrorClass::Fatal, "{what}: {reason}");
+    }
+    assert_eq!(
+        server.requests().len(),
+        1,
+        "only the schema query reached the server"
+    );
+}

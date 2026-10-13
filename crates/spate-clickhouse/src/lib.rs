@@ -129,13 +129,6 @@
 #[cfg(test)]
 extern crate self as spate_clickhouse;
 
-#[cfg_attr(
-    not(feature = "testing"),
-    expect(
-        dead_code,
-        reason = "the writer does not use the codec; only `testing` reaches it"
-    )
-)]
 mod codec;
 pub mod config;
 mod distributed;

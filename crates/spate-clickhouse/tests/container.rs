@@ -7,12 +7,11 @@ mod support;
 
 use bytes::BytesMut;
 use spate_clickhouse::config::{self, ClickHouseSinkConfig};
-use spate_clickhouse::{ClickHouseRow, ClickHouseRowFamily};
+use spate_clickhouse::{ClickHouseRow, ClickHouseRowFamily, Compression};
 use spate_core::deser::Owned;
 use spate_core::sink::SealedBatch;
 use spate_test::record;
 use spate_test_support::container_image;
-use support::sealed;
 // The concern modules under tests/container/ reach the writer trait through
 // `use super::*`; re-export it so that stays a no-op for the root helpers.
 use serde::{Deserialize, Serialize};
@@ -155,6 +154,12 @@ async fn server() -> Server {
     srv
 }
 
+/// [`support::sealed_for`] under the sinks' default compression, which every
+/// sink in this binary uses unless a test sets another.
+fn sealed<T: Serialize>(rows: &[T], token: &str, frames: usize) -> SealedBatch {
+    support::sealed_for(Compression::default(), rows, token, frames)
+}
+
 async fn sink_for(url: &str) -> config::ClickHouseSink {
     let cfg: ClickHouseSinkConfig = serde_yaml::from_str(&format!(
         r#"
@@ -225,7 +230,8 @@ shards:
 }
 
 /// Encode `rows` through a (possibly schema-checked) encoder into one
-/// sealed batch, the same CPU path a pipeline thread runs.
+/// sealed batch, coded under the sinks' default compression, the same CPU
+/// path a pipeline thread runs.
 fn encode_batch<T, E>(
     encoder: &mut E,
     rows: Vec<T>,
@@ -240,19 +246,18 @@ where
     for row in rows {
         encoder.encode(&record(row), &mut buf)?;
     }
-    let frame = buf.freeze();
-    let bytes = frame.len() as u64;
-    Ok(SealedBatch {
-        frames: vec![frame],
-        rows: n,
-        bytes,
-        dedup_token: token.to_string(),
-    })
+    Ok(support::coded_batch(
+        Compression::default(),
+        vec![buf.freeze()],
+        n,
+        token,
+    ))
 }
 
 /// Encode `rows` through a [`NativeEncoder`](spate_clickhouse::NativeEncoder)
 /// into one sealed batch: `encode` per row (buffering columnar), then one
-/// `finish_chunk` producing exactly one Native block frame.
+/// `finish_chunk` producing exactly one Native block frame, coded under the
+/// sinks' default compression.
 fn encode_native_batch<T>(
     encoder: &mut spate_clickhouse::NativeEncoder<Owned<T>>,
     rows: Vec<T>,
@@ -268,14 +273,12 @@ where
         encoder.encode(&record(row), &mut buf)?;
     }
     encoder.finish_chunk(&mut buf)?;
-    let frame = buf.freeze();
-    let bytes = frame.len() as u64;
-    Ok(SealedBatch {
-        frames: vec![frame],
-        rows: n,
-        bytes,
-        dedup_token: token.to_string(),
-    })
+    Ok(support::coded_batch(
+        Compression::default(),
+        vec![buf.freeze()],
+        n,
+        token,
+    ))
 }
 
 /// A server on the lane [`lane_image`] selects, with no tables created.
@@ -352,6 +355,8 @@ mod basics;
 mod distributed_check;
 #[path = "container/distributed_parity.rs"]
 mod distributed_parity;
+#[path = "container/frame_codec.rs"]
+mod frame_codec;
 #[path = "container/multi_table.rs"]
 mod multi_table;
 #[cfg(feature = "uuid")]

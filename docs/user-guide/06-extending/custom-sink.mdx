@@ -194,8 +194,9 @@ that (worked reference:
 [`spate-clickhouse/src/config.rs`](repo:crates/spate-clickhouse/src/config.rs),
 rendered below): `into_parts` moves the writer and the topology its config
 produced into `SinkParts::new`, then chains its refinements: the metric
-`component_type`, per-replica labels derived from the endpoints themselves, and
-the connectivity probe a hand-rolled sink most often leaves unset:
+`component_type`, per-replica labels derived from the endpoints themselves,
+the connectivity probe a hand-rolled sink most often leaves unset, and a frame
+codec when its configuration compresses:
 
 ```rust file=crates/spate-clickhouse/src/config.rs region=bundle title="config.rs"
 ```

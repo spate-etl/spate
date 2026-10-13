@@ -100,3 +100,22 @@ pub(crate) fn sealed(frames: &[Frame], token: &str) -> SealedBatch {
         dedup_token: token.to_owned(),
     }
 }
+
+/// [`sealed`], with each frame coded by one instance of the sink's frame
+/// codec for `compression` (`lz4`, `zstd:3`, `off`), as a pipeline thread
+/// codes each chunk at seal.
+///
+/// # Panics
+///
+/// Panics on an unknown compression value or a frame that does not code.
+pub(crate) fn coded(frames: &[Frame], compression: &str, token: &str) -> SealedBatch {
+    let compression = compression.parse().expect("a compression value");
+    let mut batch = sealed(frames, token);
+    if let Some(factory) = spate_clickhouse::testing::frame_codec(compression) {
+        let mut codec = factory.make();
+        for frame in &mut batch.frames {
+            *frame = Bytes::copy_from_slice(codec.encode_frame(frame).expect("the frame codes"));
+        }
+    }
+    batch
+}

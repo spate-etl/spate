@@ -7,18 +7,20 @@
 //! supplies the row type and produces the runnable [`ClickHouseSink`],
 //! including its writer.
 
+use crate::codec::{BlockCodec, BlockMethod};
 use crate::distributed::{self, DistributedCheckError};
 use crate::router::{DistributedRouter, KeyExtractor};
 use crate::schema::{self, RowSchema, SchemaError};
 use crate::writer::{ClickHouseEndpoint, ClickHouseWriter};
+use bytes::Bytes;
 use rustls::ClientConfig;
 use rustls_native_certs::CertificateResult;
 use serde::{Deserialize, Deserializer, de};
 use spate_core::config::{ComponentConfig, ConfigError, redact};
 use spate_core::deser::RecFamily;
 use spate_core::sink::{
-    BatchConfig, BreakerConfig, InflightConfig, RetryConfig, SinkBundle, SinkParts, SinkPoolConfig,
-    SinkProbeFn, endpoint_probe,
+    BatchConfig, BreakerConfig, FrameCodecFactory, InflightConfig, RetryConfig, SinkBundle,
+    SinkParts, SinkPoolConfig, SinkProbeFn, endpoint_probe,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -183,12 +185,11 @@ impl Format {
     }
 }
 
-/// Transport compression the client applies to insert bodies and query
-/// responses.
+/// Transport compression of insert bodies and query responses.
 ///
-/// This is wire-level compression negotiated per connection, unrelated to
-/// on-disk column `CODEC`s declared in table DDL, which stay the caller's
-/// responsibility. Deserialized from a scalar string:
+/// This is wire-level compression, unrelated to on-disk column `CODEC`s
+/// declared in table DDL, which stay the caller's responsibility.
+/// Deserialized from a scalar string:
 ///
 /// ```yaml
 /// compression: lz4         # off | none | lz4 | zstd | zstd:<1-22>
@@ -197,6 +198,13 @@ impl Format {
 /// `lz4` is fast and low-CPU (the default); `zstd`
 /// trades CPU for a better ratio and accepts an explicit level (`zstd` alone
 /// uses level 3). `off` disables compression.
+///
+/// Insert bodies are compressed on the pipeline threads: the sink's frame
+/// codec ([`ClickHouseSink::frame_codec`]) turns each chunk into one
+/// compressed block when the chunk seals, reusing one zstd context per
+/// pipeline thread, and the writer sends the blocks with `decompress=1`. A
+/// retry resends the stored blocks. Query responses are decompressed by the
+/// client.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Compression {
@@ -516,14 +524,25 @@ impl ClickHouseSinkBuilder {
         let schema = schema::validate(&check, &self.endpoints).await?;
 
         let insert_sql = insert_statement(&self.cfg.table, F::COLUMNS, self.cfg.format);
+        let frame_codec = BlockCodec::factory(self.cfg.compression);
+        // A Native block names its own columns and types; a RowBinary body
+        // carries them once, ahead of the rows, in the same blocks as the rows.
+        let header = match (self.cfg.format, &frame_codec) {
+            (Format::Native, _) => None,
+            (Format::RowBinary, None) => Some(schema.header()),
+            (Format::RowBinary, Some(codec)) => {
+                let block = codec
+                    .make()
+                    .encode_frame(&schema.header())
+                    .map(Bytes::copy_from_slice)
+                    .map_err(|e| SchemaError::Columns(format!("sink.clickhouse: {e}")))?;
+                Some(block)
+            }
+        };
         let writer = ClickHouseWriter::new(
             insert_sql,
-            // A Native block names its own columns and types; a RowBinary body
-            // carries them once, ahead of the rows.
-            match self.cfg.format {
-                Format::RowBinary => Some(schema.header()),
-                Format::Native => None,
-            },
+            header,
+            BlockMethod::of(self.cfg.compression),
             self.cfg.settings.clone().into_iter().collect(),
             self.cfg.timeouts.send,
             self.cfg.timeouts.end,
@@ -538,6 +557,7 @@ impl ClickHouseSinkBuilder {
             writer,
             endpoints: self.endpoints,
             pool: self.pool,
+            frame_codec,
             format: self.cfg.format,
             schema,
             probe_endpoints: self.probe_endpoints,
@@ -570,6 +590,8 @@ pub struct ClickHouseSink {
     pub pool: SinkPoolConfig,
     /// The configured insert wire format.
     format: Format,
+    /// Codes each chunk at seal under `lz4` or `zstd`; `None` under `off`.
+    frame_codec: Option<FrameCodecFactory>,
     /// The live table's columns, fetched at `with_row`.
     schema: Arc<RowSchema>,
     /// An independent client set for readiness probing: sharing the insert
@@ -596,6 +618,22 @@ impl ClickHouseSink {
     #[must_use]
     pub fn format(&self) -> Format {
         self.format
+    }
+
+    /// The frame codec that turns each sealed chunk into one compressed
+    /// block, or `None` under `compression: off`.
+    ///
+    /// Under `lz4` or `zstd` the writer sends only blocks this codec made, and
+    /// fails `Fatal` on any other frame. [`SinkBundle::into_parts`] attaches
+    /// it as `SinkParts::frame_codec`, and the pipeline builder hands it to
+    /// every chain. A manually assembled pipeline passes it to
+    /// `ShardQueues::with_frame_codec` before the queues reach any chain. A
+    /// caller of [`ClickHouseWriter`]'s `write_batch` outside a pipeline codes
+    /// each frame with it first. Take it before `into_parts` consumes the
+    /// sink.
+    #[must_use]
+    pub fn frame_codec(&self) -> Option<FrameCodecFactory> {
+        self.frame_codec.clone()
     }
 
     /// A [`NativeSchema`](crate::native::NativeSchema) over the fetched
@@ -655,10 +693,14 @@ impl SinkBundle for ClickHouseSink {
             .iter()
             .map(|shard| shard.iter().map(|e| e.display_url().to_string()).collect())
             .collect();
-        SinkParts::new(self.writer, self.endpoints, self.pool)
+        let parts = SinkParts::new(self.writer, self.endpoints, self.pool)
             .with_component_type("clickhouse")
             .with_replica_labels(replica_labels)
-            .with_probe(probe)
+            .with_probe(probe);
+        match self.frame_codec {
+            Some(codec) => parts.with_frame_codec(codec),
+            None => parts,
+        }
     }
 }
 // ANCHOR_END: bundle
@@ -862,6 +904,8 @@ fn validate(cfg: &ClickHouseSinkConfig) -> Result<(), ConfigError> {
         "wait_end_of_query",
         "input_format_with_names_use_header",
         "input_format_with_types_use_header",
+        // Set on every compressed insert, whose blocks the sink frames.
+        "decompress",
     ] {
         if cfg.settings.contains_key(reserved) {
             return fail(format!(
@@ -1133,6 +1177,7 @@ shards:
         let writer = ClickHouseWriter::new(
             "INSERT".into(),
             None,
+            None,
             vec![("password".into(), "hunter2".into())],
             None,
             None,
@@ -1181,6 +1226,21 @@ settings: { insert_quorum: "auto" }
         assert_eq!(sink.pool.inflight.max_per_shard, 4);
         assert_eq!(sink.pool.retry.max_attempts, 7);
         assert_eq!(sink.pool.breaker.failure_threshold, 9);
+    }
+
+    /// The sink sets `decompress` on every compressed insert, so a configured
+    /// value for it fails validation.
+    #[test]
+    fn decompress_is_a_reserved_setting() {
+        let err = from_component_config(&component(&format!(
+            "{MINIMAL}settings: {{decompress: \"0\"}}\n"
+        )))
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("setting `decompress` is managed by the sink"),
+            "{err}"
+        );
     }
 
     #[test]

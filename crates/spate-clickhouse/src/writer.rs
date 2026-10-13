@@ -1,5 +1,6 @@
 //! The I/O half of the sink: writing sealed batches to replica endpoints.
 
+use crate::codec::BlockMethod;
 use bytes::Bytes;
 use spate_core::config::redact;
 use spate_core::error::{ErrorClass, SinkError};
@@ -12,12 +13,22 @@ use std::time::Duration;
 /// breaking releases never become ours.
 pub struct ClickHouseEndpoint {
     client: clickhouse::Client,
+    /// `client` with compression off, sharing its connection pool, for
+    /// inserts whose blocks the sink's frame codec already made.
+    insert_client: clickhouse::Client,
     url: String,
 }
 
 impl ClickHouseEndpoint {
     pub(crate) fn new(client: clickhouse::Client, url: String) -> Self {
-        ClickHouseEndpoint { client, url }
+        let insert_client = client
+            .clone()
+            .with_compression(clickhouse::Compression::None);
+        ClickHouseEndpoint {
+            client,
+            insert_client,
+            url,
+        }
     }
 
     /// The replica URL this endpoint writes to.
@@ -55,10 +66,21 @@ impl fmt::Debug for ClickHouseEndpoint {
 /// (RowBinary rows behind their header, or a stream of Native blocks).
 /// `write_batch` returning `Ok` is the durable-ack point (the server confirmed
 /// the insert, materialized views included, thanks to `wait_end_of_query=1`).
+///
+/// Under `compression: lz4` or `zstd`, each frame must already be one
+/// compressed block, made on the pipeline thread by the sink's frame codec
+/// ([`ClickHouseSink::frame_codec`](crate::ClickHouseSink::frame_codec)). The
+/// writer sends the blocks as they are, with `decompress=1`, and compresses
+/// nothing itself. A frame that is not a block of the configured method fails
+/// the write `Fatal` before any request is made. Under `off`, frames are sent
+/// as the encoder wrote them.
 #[derive(Clone)]
 pub struct ClickHouseWriter {
     insert_sql: String,
+    /// The RowBinary header, coded as one block when `coded` is set.
     header: Option<Bytes>,
+    /// The block method every frame carries, or `None` under `off`.
+    coded: Option<BlockMethod>,
     settings: Vec<(String, String)>,
     send_timeout: Option<Duration>,
     end_timeout: Option<Duration>,
@@ -71,6 +93,7 @@ impl fmt::Debug for ClickHouseWriter {
         let ClickHouseWriter {
             insert_sql,
             header,
+            coded,
             settings,
             send_timeout,
             end_timeout,
@@ -78,6 +101,7 @@ impl fmt::Debug for ClickHouseWriter {
         f.debug_struct("ClickHouseWriter")
             .field("insert_sql", insert_sql)
             .field("header", header)
+            .field("coded", coded)
             .field("settings", &redact::map(settings.iter().map(|(k, _)| k)))
             .field("send_timeout", send_timeout)
             .field("end_timeout", end_timeout)
@@ -89,6 +113,7 @@ impl ClickHouseWriter {
     pub(crate) fn new(
         insert_sql: String,
         header: Option<Bytes>,
+        coded: Option<BlockMethod>,
         settings: Vec<(String, String)>,
         send_timeout: Option<Duration>,
         end_timeout: Option<Duration>,
@@ -96,6 +121,7 @@ impl ClickHouseWriter {
         ClickHouseWriter {
             insert_sql,
             header,
+            coded,
             settings,
             send_timeout,
             end_timeout,
@@ -117,8 +143,14 @@ impl ShardWriter for ClickHouseWriter {
         endpoint: &ClickHouseEndpoint,
         batch: &SealedBatch,
     ) -> Result<(), SinkError> {
-        let mut insert = endpoint
-            .client
+        let client = match self.coded {
+            Some(method) => {
+                check_frames(method, batch)?;
+                &endpoint.insert_client
+            }
+            None => &endpoint.client,
+        };
+        let mut insert = client
             .insert_formatted_with(self.insert_sql.clone())
             .with_setting("insert_deduplicate", "1")
             .with_setting("wait_end_of_query", "1")
@@ -129,6 +161,10 @@ impl ShardWriter for ClickHouseWriter {
             .with_setting("input_format_with_names_use_header", "1")
             .with_setting("input_format_with_types_use_header", "1")
             .with_timeouts(self.send_timeout, self.end_timeout);
+        if self.coded.is_some() {
+            // What a compressing client adds to its own inserts.
+            insert = insert.with_setting("decompress", "1");
+        }
         for (name, value) in &self.settings {
             insert = insert.with_setting(name.clone(), value.clone());
         }
@@ -155,21 +191,48 @@ impl ShardWriter for ClickHouseWriter {
     }
 }
 
+/// Fails `Fatal` unless every frame of `batch` is one block of `method`.
+///
+/// The sink's frame codec makes these blocks at seal. A frame that skipped it
+/// would reach the server as a body it cannot decode, and every retry would
+/// send the same bytes again.
+fn check_frames(method: BlockMethod, batch: &SealedBatch) -> Result<(), SinkError> {
+    for (i, frame) in batch.frames.iter().enumerate() {
+        method.check(frame).map_err(|why| SinkError::Client {
+            class: ErrorClass::Fatal,
+            reason: format!(
+                "frame {i} of the batch is not a compressed block ({why}); a compressing \
+                 sink's frames must be coded by its frame codec: attach it with \
+                 `ShardQueues::with_frame_codec`, or code frames with \
+                 `ClickHouseSink::frame_codec` before calling `write_batch` directly"
+            ),
+        })?;
+    }
+    Ok(())
+}
+
 /// Server exception codes that cannot succeed on retry: schema, parse,
-/// and authentication classes. Everything else is retried: with
-/// deduplication tokens a spurious retry is idempotent, and the circuit
+/// authentication and block-decoding classes. Everything else is retried:
+/// with deduplication tokens a spurious retry is idempotent, and the circuit
 /// breaker plus the stalled-watermark alert surface persistent failures.
+///
+/// The block-decoding codes (40, 89, 271) mean the server could not decode a
+/// compressed block of the body. The sink makes those blocks once, at seal,
+/// and a retry resends the same bytes.
 const FATAL_EXCEPTION_CODES: &[u32] = &[
     6,   // CANNOT_PARSE_TEXT
     16,  // NO_SUCH_COLUMN_IN_TABLE
     20,  // NUMBER_OF_COLUMNS_DOESNT_MATCH
     27,  // CANNOT_PARSE_INPUT_ASSERTION_FAILED
+    40,  // CHECKSUM_DOESNT_MATCH
     53,  // TYPE_MISMATCH
     60,  // UNKNOWN_TABLE
     73,  // UNKNOWN_FORMAT
     81,  // UNKNOWN_DATABASE
+    89,  // UNKNOWN_COMPRESSION_METHOD
     117, // INCORRECT_DATA
     192, // UNKNOWN_USER
+    271, // CANNOT_DECOMPRESS
     497, // ACCESS_DENIED
     516, // AUTHENTICATION_FAILED
 ];
@@ -180,9 +243,9 @@ const FATAL_EXCEPTION_CODES: &[u32] = &[
 ///   `Fatal`, whatever the variant carrying it;
 /// - other transport (`Network`, `TimedOut`) and uncategorized client errors
 ///   (`Other`) → `Retryable`;
-/// - server exceptions (`BadResponse`) → fatal only for the schema/parse/
-///   auth codes above, `Retryable` otherwise (e.g. `TOO_MANY_PARTS`,
-///   memory pressure, shutdown races);
+/// - server exceptions (`BadResponse`) → fatal only for the schema, parse,
+///   auth and block-decoding codes above, `Retryable` otherwise (e.g.
+///   `TOO_MANY_PARTS`, memory pressure, shutdown races);
 /// - client-side params and both codec directions (`InvalidParams`,
 ///   `SchemaMismatch`, `Unsupported`, `Compression`, `Decompression`) →
 ///   `Fatal`.
@@ -322,6 +385,30 @@ mod tests {
         ));
     }
 
+    /// A server that cannot decode an insert's compressed blocks answers 40,
+    /// 89 or 271, and each classifies `Fatal`: a retry would resend the same
+    /// blocks.
+    #[test]
+    fn server_decode_failures_are_fatal() {
+        for reason in [
+            "Code: 40. DB::Exception: Checksum doesn't match: corrupted data.",
+            "Code: 89. DB::Exception: Unknown compression method: 0x00.",
+            "Code: 271. DB::Exception: Cannot decompress: LZ4 decompression failed.",
+        ] {
+            let err = classify(clickhouse::error::Error::BadResponse(reason.into()));
+            assert!(
+                matches!(
+                    err,
+                    SinkError::Client {
+                        class: ErrorClass::Fatal,
+                        ..
+                    }
+                ),
+                "{reason}: {err:?}"
+            );
+        }
+    }
+
     /// A replica whose certificate does not verify fails both a header-led
     /// insert and a probe `Fatal`, with the rejection and its remedy in the
     /// reason.
@@ -335,6 +422,7 @@ mod tests {
         let writer = ClickHouseWriter::new(
             "INSERT INTO t FORMAT RowBinaryWithNamesAndTypes".into(),
             Some(Bytes::from_static(b"header")),
+            None,
             Vec::new(),
             None,
             None,

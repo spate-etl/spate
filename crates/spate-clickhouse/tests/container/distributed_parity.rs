@@ -468,9 +468,14 @@ async fn run_pipeline(sink: config::ClickHouseSink, payloads: &[String]) -> Drai
     let pool_cfg = sink.pool;
     let writer = Arc::new(sink.writer.clone());
     let schema = sink.schema();
+    let codec = sink.frame_codec();
     let endpoints = sink.endpoints; // partial move; the rest of `sink` drops at scope end
 
     let (queues, receivers) = shard_queues(num_shards, 256);
+    let queues = match codec {
+        Some(codec) => queues.with_frame_codec(codec),
+        None => queues,
+    };
     let budget = Arc::new(InflightBudget::new());
 
     let mut driver = chain(BatchDeser)

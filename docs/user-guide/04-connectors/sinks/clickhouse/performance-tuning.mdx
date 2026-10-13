@@ -106,9 +106,11 @@ interleaving them at their await points. Writers do **not** serialize when
 `io_threads` is below `shards × max_per_shard`; the default of **2** runs far
 more than two inserts at once. So leave it at the default until you have a
 concrete reason to raise it. That reason is **CPU work on the I/O runtime**, not
-insert count: request compression runs there, so at very high byte rates the
-compression threads can saturate two workers and become the limit. Raise
-`io_threads` then, but sparingly, because the derived pipeline-thread count is
+insert count. Compression is not part of that work, because the pipeline
+threads compress each chunk when it seals. The I/O workers write the
+compressed bytes to the sockets, with TLS when the URL is `https://`, and at
+very high byte rates that work can still saturate two workers and become the
+limit. Raise `io_threads` then, but sparingly, because the derived pipeline-thread count is
 `available_parallelism` minus the I/O reserve, so every extra I/O worker is one
 fewer hot-path thread (see [Deployment tuning](../../../05-deployment/tuning.mdx)).
 On a host where ClickHouse runs **locally**, remember the server needs cores too:
@@ -187,9 +189,13 @@ sink:
 ```
 
 This compresses the HTTP insert body and the responses to the sink's queries.
-Under `lz4` the sink sends `network_compression_method=LZ4` on every request, so
-a server whose network codec defaults to ZSTD still answers in LZ4, the only
-codec the client decodes. `lz4` is cheap and a good default on most
+The sink compresses each chunk on the pipeline thread that sealed it, so
+compression costs pipeline-thread CPU and scales with `pipeline.threads`. On a
+host where the pipeline threads are already the limit, compression costs rows
+per second, and `zstd` costs more of them than `lz4`. Under `lz4` the sink
+sends `network_compression_method=LZ4` on every request, so a server whose
+network codec defaults to ZSTD still answers in LZ4, the only codec the client
+decodes. `lz4` is cheap and a good default on most
 links. `zstd` (optionally `zstd:N`) compresses smaller for a bit more CPU, worth
 it on metered or cross-region links where bandwidth, not CPU, is the limit. `off`
 saves client CPU on a fast, trusted LAN where the wire is not the bottleneck.
@@ -266,7 +272,7 @@ ClickHouse, this is a reasonable place to begin, then measure:
 
 ```yaml
 pipeline:
-  io_threads: 2              # the default; raise only if compression saturates it
+  io_threads: 2              # the default; raise only if the sends saturate it
 backpressure:
   max_inflight_bytes: 3GiB   # sized to the rule — see the note below
 sink:

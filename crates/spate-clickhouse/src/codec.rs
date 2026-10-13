@@ -33,6 +33,67 @@ const ZSTD_MAGIC: u8 = 0x90;
 /// default chunk target reuse one allocation.
 const SCRATCH_FLOOR: usize = 256 * 1024;
 
+/// The method a compressing sink's blocks carry, which the writer checks
+/// each frame against before it opens a request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BlockMethod {
+    Lz4,
+    Zstd,
+}
+
+impl BlockMethod {
+    /// The method for `compression`, or `None` under `off`.
+    pub(crate) fn of(compression: Compression) -> Option<Self> {
+        match compression {
+            Compression::None => None,
+            Compression::Lz4 => Some(BlockMethod::Lz4),
+            Compression::Zstd(_) => Some(BlockMethod::Zstd),
+        }
+    }
+
+    fn magic(self) -> u8 {
+        match self {
+            BlockMethod::Lz4 => LZ4_MAGIC,
+            BlockMethod::Zstd => ZSTD_MAGIC,
+        }
+    }
+
+    /// Whether `frame` is one block of this method, read from its header
+    /// alone: room for the checksum and header, this method's byte, and a
+    /// recorded size that spans the rest of the frame.
+    ///
+    /// # Errors
+    ///
+    /// Says which of the three the frame fails.
+    pub(crate) fn check(self, frame: &[u8]) -> Result<(), String> {
+        if frame.len() < META_LEN {
+            return Err(format!(
+                "{} bytes, shorter than a block's {META_LEN}-byte checksum and header",
+                frame.len()
+            ));
+        }
+        if frame[CHECKSUM_LEN] != self.magic() {
+            return Err(format!(
+                "method byte {:#04x}, where {self:?} writes {:#04x}",
+                frame[CHECKSUM_LEN],
+                self.magic()
+            ));
+        }
+        let sized = u32::from_le_bytes(
+            frame[CHECKSUM_LEN + 1..CHECKSUM_LEN + 5]
+                .try_into()
+                .expect("a 4-byte slice"),
+        );
+        if usize::try_from(sized).ok() != Some(frame.len() - CHECKSUM_LEN) {
+            return Err(format!(
+                "a recorded size of {sized} bytes in a {}-byte frame",
+                frame.len()
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// One block compressor, made per chain by the factory from
 /// [`BlockCodec::factory`].
 pub(crate) struct BlockCodec {

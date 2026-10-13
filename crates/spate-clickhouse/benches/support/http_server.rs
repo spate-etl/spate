@@ -34,7 +34,7 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use spate_clickhouse::config::{self, ClickHouseSinkConfig};
+use spate_clickhouse::config::{self, ClickHouseSink, ClickHouseSinkConfig};
 use spate_clickhouse::testing::{ColumnRow, system_columns};
 use spate_clickhouse::{ClickHouseEndpoint, ClickHouseWriter, serialize_row};
 use spate_core::deser::Owned;
@@ -173,21 +173,7 @@ pub(crate) async fn events_sink(
     url: &str,
     compression: &str,
 ) -> (ClickHouseWriter, ClickHouseEndpoint) {
-    let cfg: ClickHouseSinkConfig = serde_yaml::from_str(&format!(
-        r#"
-table: events
-format: native
-compression: "{compression}"
-shards:
-  - replicas: ["{url}"]
-"#
-    ))
-    .expect("config yaml");
-    let sink = config::build(cfg)
-        .expect("valid sink config")
-        .with_row::<Owned<EventRow>>()
-        .await
-        .expect("the schema fetch");
+    let sink = events_sink_in(url, compression, "native").await;
     let endpoint = sink
         .endpoints
         .into_iter()
@@ -195,6 +181,30 @@ shards:
         .and_then(|replicas| replicas.into_iter().next())
         .expect("one shard with one replica");
     (sink.writer, endpoint)
+}
+
+/// A one-replica sink over the `events` table at `url` in `format`
+/// (`rowbinary` or `native`), built as [`events_sink`] builds it.
+///
+/// # Panics
+///
+/// Panics when the config is invalid or the schema fetch fails.
+pub(crate) async fn events_sink_in(url: &str, compression: &str, format: &str) -> ClickHouseSink {
+    let cfg: ClickHouseSinkConfig = serde_yaml::from_str(&format!(
+        r#"
+table: events
+format: {format}
+compression: "{compression}"
+shards:
+  - replicas: ["{url}"]
+"#
+    ))
+    .expect("config yaml");
+    config::build(cfg)
+        .expect("valid sink config")
+        .with_row::<Owned<EventRow>>()
+        .await
+        .expect("the schema fetch")
 }
 
 /// `rows` as ClickHouse answers `FORMAT RowBinaryWithNamesAndTypes`: the

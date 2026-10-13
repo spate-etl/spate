@@ -361,9 +361,10 @@ const BATCH_DIGEST: u64 = 0x18d4_801a_4f0c_7919;
 /// `write_wall.rs` builds its sink against `http_server.rs` in setup, so a
 /// server that answered the schema query in a form the client cannot read
 /// would fail minutes into a bench run. This builds the same sink under each
-/// `compression` value, writes one batch, and checks what the server received:
-/// the schema query, then one insert carrying the frames, raw under `off` and
-/// compressed by the client otherwise.
+/// `compression` value, writes one batch coded by the sink's frame codec, and
+/// checks what the server received: the schema query, then one insert
+/// carrying the frames, raw under `off` and as the client's own blocks
+/// otherwise.
 #[test]
 fn the_bench_server_serves_the_schema_under_every_compression() {
     assert_eq!(
@@ -375,7 +376,6 @@ fn the_bench_server_serves_the_schema_under_every_compression() {
         "the fixture's insert columns are the events schema's"
     );
     let frames = frames::native_frames(frames::FRAMES);
-    let batch = frames::sealed(&frames, "bench-fixture");
     let raw: Vec<u8> = frames
         .iter()
         .flat_map(|f| f.bytes.iter().copied())
@@ -389,6 +389,7 @@ fn the_bench_server_serves_the_schema_under_every_compression() {
             .expect("a runtime");
         let (writer, endpoint) =
             runtime.block_on(http_server::events_sink(server.url(), compression));
+        let batch = frames::coded(&frames, compression, "bench-fixture");
         runtime
             .block_on(writer.write_batch(&endpoint, &batch))
             .unwrap_or_else(|e| panic!("{compression}: the server accepts the batch: {e}"));
@@ -419,8 +420,8 @@ fn the_bench_server_serves_the_schema_under_every_compression() {
                 insert.body.len(),
                 raw.len()
             );
-            // The client compresses each frame into one block.
-            // `_priv::zstd_compress` uses zstd's default level, 3.
+            // The sink codes each frame into the block the client would
+            // make. `_priv::zstd_compress` uses zstd's default level, 3.
             assert_eq!(zstd::DEFAULT_COMPRESSION_LEVEL, 3, "zstd's default level");
             let blocks: Vec<u8> = frames
                 .iter()

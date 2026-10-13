@@ -295,3 +295,36 @@ fn a_wrong_method_or_size_frame_is_fatal_before_any_request() {
         "only the schema query reached the server"
     );
 }
+
+/// A compressing sink's writer given a batch whose first frame is a block of
+/// its method and whose second is a raw Native block fails `Fatal` and sends
+/// no request.
+#[test]
+fn an_uncoded_frame_after_a_coded_one_is_fatal_before_any_request() {
+    let runtime = runtime();
+    let server = BenchServer::recording(&rows::event_columns());
+    let sink = runtime.block_on(http_server::events_sink_in(server.url(), "lz4", "native"));
+    let raw = frames::native_frames(2);
+    let mut batch = support::coded_batch(
+        compression("lz4"),
+        vec![raw[0].bytes.clone()],
+        raw[0].rows,
+        TOKEN,
+    );
+    batch.frames.push(raw[1].bytes.clone());
+    batch.rows += raw[1].rows;
+    batch.bytes += raw[1].bytes.len() as u64;
+    let err = runtime
+        .block_on(sink.writer.write_batch(&sink.endpoints[0][0], &batch))
+        .expect_err("the second frame is not a block");
+    let SinkError::Client { class, reason } = &err else {
+        panic!("{err:?}");
+    };
+    assert_eq!(*class, ErrorClass::Fatal, "{reason}");
+    assert!(reason.starts_with("frame 1 "), "{reason}");
+    assert_eq!(
+        server.requests().len(),
+        1,
+        "only the schema query reached the server"
+    );
+}

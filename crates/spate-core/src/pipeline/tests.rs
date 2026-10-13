@@ -1601,31 +1601,37 @@ fn the_default_thread_count_reserves_half_a_core_per_io_worker() {
 }
 
 /// With `pipeline.threads` unset, the runtime starts as many drivers as
-/// `default_thread_count` derives from `available_parallelism`.
+/// `default_thread_count` derives from `available_parallelism` and the
+/// configured `io_threads`.
 #[test]
 fn an_unset_thread_count_starts_the_derived_number_of_drivers() {
-    let mut cfg = test_config(1);
-    cfg.pipeline.threads = None;
-    cfg.pipeline.io_threads = 2;
-    let built = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let counter = Arc::clone(&built);
-    let h = start_with_config(cfg, move |shared, log| {
-        counter.fetch_add(1, Ordering::Relaxed);
-        FakeChain {
-            shared,
-            log,
-            mode: ChainMode::Ok,
-            batches_seen: 0,
-        }
-    });
-    h.script.lock().unwrap().push_back(Script::Drained);
-    let report = h.join.join().unwrap().unwrap();
-    assert_eq!(report.state, ExitState::Completed);
+    // From 4 cores up, `io_threads: 2` tells a reserve of one core per worker
+    // apart. `io_threads: 4` tells apart a reserve that ignores the configured
+    // count, since 1 and 2 workers both reserve one core.
+    for io_threads in [2, 4] {
+        let mut cfg = test_config(1);
+        cfg.pipeline.threads = None;
+        cfg.pipeline.io_threads = io_threads;
+        let built = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&built);
+        let h = start_with_config(cfg, move |shared, log| {
+            counter.fetch_add(1, Ordering::Relaxed);
+            FakeChain {
+                shared,
+                log,
+                mode: ChainMode::Ok,
+                batches_seen: 0,
+            }
+        });
+        h.script.lock().unwrap().push_back(Script::Drained);
+        let report = h.join.join().unwrap().unwrap();
+        assert_eq!(report.state, ExitState::Completed);
 
-    let cores = std::thread::available_parallelism().map_or(2, usize::from);
-    assert_eq!(
-        built.load(Ordering::Relaxed),
-        crate::pipeline::runtime::default_thread_count(cores, 2),
-        "{cores} cores, io_threads: 2"
-    );
+        let cores = std::thread::available_parallelism().map_or(2, usize::from);
+        assert_eq!(
+            built.load(Ordering::Relaxed),
+            crate::pipeline::runtime::default_thread_count(cores, io_threads),
+            "{cores} cores, io_threads: {io_threads}"
+        );
+    }
 }

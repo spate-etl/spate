@@ -9,8 +9,8 @@ use crate::checkpoint::Checkpointer;
 use crate::config::{MetricsExporter, PinningMode, PipelineConfig};
 use crate::metrics::{
     self, BackpressureMetrics, CheckpointMetrics, ComponentLabels, E2eBasis, Exporter,
-    InflightBudgetMetrics, IoBusySampler, IoRuntimeMetrics, Meter, MetricRole, MetricsHandle,
-    MetricsSettings, PipelineMetrics, PipelineState, SourceMetrics,
+    InflightBudgetMetrics, IoBusySample, IoBusySampler, IoRuntimeMetrics, Meter, MetricRole,
+    MetricsHandle, MetricsSettings, PipelineMetrics, PipelineState, SourceMetrics,
 };
 use crate::ops::RunnableChain;
 use crate::source::{DrainBarrier, Source};
@@ -626,22 +626,31 @@ pub(super) fn default_thread_count(cores: usize, io_threads: usize) -> usize {
     cores.saturating_sub(io_threads.div_ceil(2) + 1).max(1)
 }
 
-/// Publish an I/O busy sample when one is due, and warn once per sustained
-/// saturated run.
+/// Publish an I/O busy sample when one is due.
 fn sample_io_busy(
     sampler: &mut IoBusySampler,
     gauge: &IoRuntimeMetrics,
     io: &tokio::runtime::RuntimeMetrics,
     pipeline: &str,
 ) {
-    let Some(sample) = sampler.observe_runtime(Instant::now(), io) else {
-        return;
-    };
+    if let Some(sample) = sampler.observe_runtime(Instant::now(), io) {
+        publish_io_busy(sample, gauge, io.num_workers(), pipeline);
+    }
+}
+
+/// Set the busy gauge from `sample`, and warn when it completes a sustained
+/// saturated window.
+pub(super) fn publish_io_busy(
+    sample: IoBusySample,
+    gauge: &IoRuntimeMetrics,
+    io_workers: usize,
+    pipeline: &str,
+) {
     gauge.set_busy_ratio(sample.ratio);
     if sample.sustained {
         tracing::warn!(
             pipeline,
-            io_workers = io.num_workers(),
+            io_workers,
             ratio = sample.ratio,
             "the I/O runtime's workers have been saturated for a minute; if the sink \
              queues are filling, raise `pipeline.io_threads`"

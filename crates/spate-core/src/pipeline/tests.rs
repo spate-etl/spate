@@ -1467,6 +1467,69 @@ fn a_busy_io_runtime_reaches_the_exposition() {
     assert_eq!(report.state, ExitState::Completed);
 }
 
+/// One event's fields, as `(name, debug value)` pairs.
+type Fields = Vec<(String, String)>;
+
+/// The fields of every warning event.
+#[derive(Clone, Default)]
+struct Warnings(Arc<Mutex<Vec<Fields>>>);
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Warnings {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        struct Record(Fields);
+        impl tracing::field::Visit for Record {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                self.0.push((field.name().to_owned(), format!("{value:?}")));
+            }
+        }
+        if *event.metadata().level() == tracing::Level::WARN {
+            let mut fields = Record(Vec::new());
+            event.record(&mut fields);
+            self.0.lock().unwrap().push(fields.0);
+        }
+    }
+}
+
+/// A sustained I/O busy sample logs one warning carrying the pipeline and
+/// the worker count; any other sample logs nothing.
+#[test]
+fn a_sustained_io_busy_sample_logs_one_warning() {
+    use crate::metrics::{ComponentLabels, IoBusySample, IoRuntimeMetrics};
+    use crate::pipeline::runtime::publish_io_busy;
+    use tracing_subscriber::layer::SubscriberExt;
+
+    let labels = ComponentLabels::new("io-busy-warning", "runtime", "pipeline");
+    let gauge = IoRuntimeMetrics::try_new(&labels).expect("free series");
+    let warnings = Warnings::default();
+    let subscriber = tracing_subscriber::registry().with(warnings.clone());
+    tracing::subscriber::with_default(subscriber, || {
+        let busy = |sustained| IoBusySample {
+            ratio: 0.95,
+            sustained,
+        };
+        publish_io_busy(busy(false), &gauge, 3, "io-busy-warning");
+        assert!(
+            warnings.0.lock().unwrap().is_empty(),
+            "a sample that is not sustained warned"
+        );
+        publish_io_busy(busy(true), &gauge, 3, "io-busy-warning");
+    });
+    let logged = warnings.0.lock().unwrap();
+    assert_eq!(logged.len(), 1, "{logged:?}");
+    let field = |name: &str| {
+        logged[0]
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.as_str())
+    };
+    assert_eq!(field("pipeline"), Some("\"io-busy-warning\""));
+    assert_eq!(field("io_workers"), Some("3"));
+}
+
 /// One pipeline's `spate_checkpoint_pending_batches` lines, sorted. The
 /// pipeline label keeps the assertion independent of any other pipeline a
 /// sibling test registered in this process.

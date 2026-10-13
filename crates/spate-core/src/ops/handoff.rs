@@ -4,8 +4,9 @@
 //! Pressure discipline (matches [`StageLifecycle`]'s contract): `push`
 //! never rejects a record. When a sealed chunk cannot be sent it is parked
 //! and pressure is reported through `relieve()`, which the chain checks
-//! between payloads. Parked chunks always drain before newer ones, so
-//! per-shard order is preserved.
+//! between payloads. A shard with parked chunks parks every chunk it seals
+//! after them, and parked chunks drain in seal order, so each shard's sink
+//! worker receives its chunks in seal order.
 
 use super::Collector;
 use super::chain::{FatalSlot, OpMeterSlot, StageLifecycle};
@@ -76,6 +77,8 @@ struct ShardBuf<E> {
     /// equals it, so no row has been encoded since. A seal with no rows
     /// returns before it reaches the codec, so the count is never zero.
     finished_rows: Option<NonZeroU32>,
+    /// How many of this shard's chunks wait in [`SinkHandoff::parked`].
+    parked: u32,
 }
 
 /// This stage's own [`FrameCodec`] instance. The wrapper gives
@@ -101,7 +104,7 @@ pub struct SinkHandoff<F: RecFamily, E, R> {
     budget: Arc<InflightBudget>,
     cfg: ChunkConfig,
     shards: Vec<ShardBuf<E>>,
-    /// Sealed chunks that could not be sent, in seal order.
+    /// Sealed chunks waiting for a queue slot, in seal order.
     parked: VecDeque<(usize, EncodedChunk)>,
     /// The sink's frame codec, made from `queues` for this stage alone.
     codec: Option<CodecSlot>,
@@ -144,6 +147,7 @@ where
                 first_ingest: None,
                 oldest_event_ms: i64::MAX,
                 finished_rows: None,
+                parked: 0,
             })
             .collect();
         let codec = queues.new_frame_codec().map(CodecSlot);
@@ -245,9 +249,18 @@ where
         shard.rows = 0;
         shard.last_batch = None;
         shard.oldest_event_ms = i64::MAX;
+        // A free slot must not let this chunk overtake one parked before it.
+        if shard.parked > 0 {
+            shard.parked += 1;
+            self.parked.push_back((idx, chunk));
+            return;
+        }
         match self.queues.try_send(idx, chunk) {
             Ok(()) => {}
-            Err(ChunkSendError(chunk)) => self.parked.push_back((idx, chunk)),
+            Err(ChunkSendError(chunk)) => {
+                shard.parked += 1;
+                self.parked.push_back((idx, chunk));
+            }
         }
     }
 
@@ -255,7 +268,7 @@ where
     fn drain_parked(&mut self) -> bool {
         while let Some((idx, chunk)) = self.parked.pop_front() {
             match self.queues.try_send(idx, chunk) {
-                Ok(()) => {}
+                Ok(()) => self.shards[idx].parked -= 1,
                 Err(ChunkSendError(chunk)) => {
                     self.parked.push_front((idx, chunk));
                     return false;

@@ -108,7 +108,7 @@ async fn coded_frames_insert_under_every_compression() {
 
 /// A block that passes the writer's own check but not the server's, one
 /// payload byte flipped so the checksum no longer matches, fails the write
-/// `Fatal` with a server code the classifier lists, and inserts nothing.
+/// `Fatal` with server code 271, and inserts nothing.
 #[tokio::test]
 #[ignore = "requires Docker"]
 #[expect(
@@ -142,9 +142,10 @@ async fn a_block_the_server_rejects_is_fatal() {
                 .and_then(|d| d.parse::<u32>().ok())
         });
         eprintln!("lane {lane}, {compression}: the server answered code {code:?}");
-        assert!(
-            matches!(code, Some(40 | 89 | 271)),
-            "{compression}: a decode failure code: {reason}"
+        assert_eq!(
+            code,
+            Some(271),
+            "{compression}: the decode failure code: {reason}"
         );
         assert_eq!(*class, ErrorClass::Fatal, "{compression}: {reason}");
         assert_eq!(

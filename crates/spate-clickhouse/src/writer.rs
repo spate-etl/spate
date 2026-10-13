@@ -216,20 +216,18 @@ fn check_frames(method: BlockMethod, batch: &SealedBatch) -> Result<(), SinkErro
 /// with deduplication tokens a spurious retry is idempotent, and the circuit
 /// breaker plus the stalled-watermark alert surface persistent failures.
 ///
-/// The block-decoding codes (40, 89, 271) mean the server could not decode a
-/// compressed block of the body. The sink makes those blocks once, at seal,
-/// and a retry resends the same bytes.
+/// 271 is the block-decoding code. A `decompress=1` body whose block fails its
+/// checksum or does not decode answers 271. The sink makes those blocks once,
+/// at seal, and a retry resends the same bytes.
 const FATAL_EXCEPTION_CODES: &[u32] = &[
     6,   // CANNOT_PARSE_TEXT
     16,  // NO_SUCH_COLUMN_IN_TABLE
     20,  // NUMBER_OF_COLUMNS_DOESNT_MATCH
     27,  // CANNOT_PARSE_INPUT_ASSERTION_FAILED
-    40,  // CHECKSUM_DOESNT_MATCH
     53,  // TYPE_MISMATCH
     60,  // UNKNOWN_TABLE
     73,  // UNKNOWN_FORMAT
     81,  // UNKNOWN_DATABASE
-    89,  // UNKNOWN_COMPRESSION_METHOD
     117, // INCORRECT_DATA
     192, // UNKNOWN_USER
     271, // CANNOT_DECOMPRESS
@@ -385,14 +383,12 @@ mod tests {
         ));
     }
 
-    /// A server that cannot decode an insert's compressed blocks answers 40,
-    /// 89 or 271, and each classifies `Fatal`: a retry would resend the same
-    /// blocks.
+    /// A server that cannot decode an insert's compressed blocks answers 271,
+    /// which classifies `Fatal`: a retry would resend the same blocks.
     #[test]
     fn server_decode_failures_are_fatal() {
         for reason in [
-            "Code: 40. DB::Exception: Checksum doesn't match: corrupted data.",
-            "Code: 89. DB::Exception: Unknown compression method: 0x00.",
+            "Code: 271. DB::Exception: Checksum doesn't match: corrupted data.",
             "Code: 271. DB::Exception: Cannot decompress: LZ4 decompression failed.",
         ] {
             let err = classify(clickhouse::error::Error::BadResponse(reason.into()));
@@ -407,6 +403,25 @@ mod tests {
                 "{reason}: {err:?}"
             );
         }
+    }
+
+    /// A checksum failure in data the server reads itself, here a materialized
+    /// view reading a corrupted part, answers 40 and classifies `Retryable`, so
+    /// the next attempt can reach a healthy replica.
+    #[test]
+    fn a_server_side_checksum_failure_is_retryable() {
+        let reason = "Code: 40. DB::Exception: Checksum doesn't match: corrupted data. Reference: 2338a6e26c614fec6feb62deae67c37e. Actual: 71bfc9638d4ed97f67949d6eba179620. Size of compressed block: 32780: While reading or decompressing /var/lib/clickhouse/store/c50/c5066d20-e7a6-4ee3-83d5-a200e66893db/all_1_1_0/data.bin (position: 32796, typename: DB::AsynchronousReadBufferFromFileWithDescriptorsCache, compressed data header: <uninitialized>): (while reading column k): (while reading from part /var/lib/clickhouse/store/c50/c5066d20-e7a6-4ee3-83d5-a200e66893db/all_1_1_0/ in table default.dim (c5066d20-e7a6-4ee3-83d5-a200e66893db) located on disk default of type local, from mark 0 with max_rows_to_read = 65536): While reading part all_1_1_0: While executing MergeTreeSelect(pool: ReadPoolInOrder, algorithm: InOrder): while pushing to view default.mv: While executing WaitForAsyncInsert. (CHECKSUM_DOESNT_MATCH) (version 26.8.17.4 (official build))";
+        let err = classify(clickhouse::error::Error::BadResponse(reason.into()));
+        assert!(
+            matches!(
+                err,
+                SinkError::Client {
+                    class: ErrorClass::Retryable,
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
     }
 
     /// A replica whose certificate does not verify fails both a header-led

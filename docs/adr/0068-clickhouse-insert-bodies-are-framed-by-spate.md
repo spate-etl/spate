@@ -71,13 +71,15 @@ spans the frame. A frame that fails fails the write `Fatal`, naming
 `ShardQueues::with_frame_codec`, because the server would reject it and a
 retry would send it again.
 
-Server exception codes 40 (`CHECKSUM_DOESNT_MATCH`), 89
-(`UNKNOWN_COMPRESSION_METHOD`) and 271 (`CANNOT_DECOMPRESS`) classify `Fatal`.
-Every compressed insert carries the sink's own blocks, and a retry resends the
-same bytes, so a block the server cannot decode would fail on every attempt
+Server exception code 271 (`CANNOT_DECOMPRESS`) classifies `Fatal`. A
+`decompress=1` body whose block fails its checksum or does not decode answers
+271. Every compressed insert carries the sink's own blocks, and a retry resends
+the same bytes, so a block the server cannot decode would fail on every attempt
 under the default unbounded `retry.max_attempts`. This was the maintainer's
 call, following the zstd-level check that rejects a deterministic server-side
-failure at load.
+failure at load. Code 40 (`CHECKSUM_DOESNT_MATCH`) stays `Retryable`. The server
+answers it for data it reads itself, such as a materialized view reading a
+corrupted part on one replica, and another replica can take the insert.
 
 ### Consequences
 
@@ -105,14 +107,15 @@ failure at load.
 stock compressing client under lz4 and zstd at levels 1, 3 and 19, in both
 formats. `into_parts_attaches_a_codec_only_when_compressing` and
 `an_uncoded_frame_is_fatal_before_any_request` sit beside it.
-`server_decode_failures_are_fatal` (`src/writer.rs`) and
+`server_decode_failures_are_fatal` and
+`a_server_side_checksum_failure_is_retryable` (`src/writer.rs`) and
 `decompress_is_a_reserved_setting` (`src/config.rs`) pin the classification and
 the reserved setting. The block codec's oracle, round-trip, context-reuse and
 scratch tests are in `src/codec/tests.rs`. Against a real server on every
 container lane, `tests/container/frame_codec.rs` inserts coded frames under
 every compression, many blocks of very different sizes in one insert,
 incompressible rows, and empty and one-row batches; checks that a corrupted
-block fails `Fatal` with a code above; and checks that a retry after a lost
+block fails `Fatal` with code 271; and checks that a retry after a lost
 response resends identical bytes and inserts once.
 
 ## Evidence

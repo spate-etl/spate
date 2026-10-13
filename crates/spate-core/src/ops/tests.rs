@@ -1607,6 +1607,34 @@ fn a_second_shard_sends_directly_once_its_parked_chunks_drain() {
     chunk.acks.deliver();
 }
 
+/// A chunk sealed while a shard still has one chunk parked after a
+/// partial drain goes behind it, on a shard other than the first.
+#[test]
+fn a_seal_waits_behind_a_chunk_still_parked_after_a_partial_drain() {
+    let (queues, mut rxs) = shard_queues(2, 1);
+    let mut handoff = order_handoff(queues, ByPrefix, 1);
+    let mut keep = Vec::new();
+    // "s1:a" fills shard 1's one-slot queue; "s1:b" and "s1:c" park behind it.
+    for p in [&b"s1:a"[..], b"s1:b", b"s1:c"] {
+        let (rec, rx) = probe_rec(p);
+        keep.push(rx);
+        let _ = Collector::push(&mut handoff, rec);
+    }
+    rxs[1].try_recv().expect("s1:a queued").acks.deliver();
+    // "s1:b" takes the freed slot and "s1:c" stays parked.
+    let _ = StageLifecycle::relieve(&mut handoff);
+    let b = rxs[1].try_recv().expect("s1:b queued");
+    assert_eq!(decode_rows(&b.frame), vec![b"s1:b".to_vec()]);
+    b.acks.deliver();
+    // The queue has a free slot when "s1:d" seals.
+    let (rec, rx) = probe_rec(b"s1:d");
+    keep.push(rx);
+    let _ = Collector::push(&mut handoff, rec);
+    let _ = StageLifecycle::relieve(&mut handoff);
+    let order = drain_relieving(&mut handoff, &mut rxs[1]);
+    assert_eq!(order, vec![b"s1:c".to_vec(), b"s1:d".to_vec()]);
+}
+
 #[test]
 fn multi_shard_routing_by_key_hash() {
     #[derive(Clone, Copy)]

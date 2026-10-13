@@ -462,4 +462,55 @@ mod tests {
         let ratio = sample_until(&io, |_| true);
         assert!(ratio < 0.5, "idle runtime read {ratio}");
     }
+
+    /// Holds `held` of a two-worker runtime's workers for one 500 ms poll each
+    /// and returns the ratio over that span once the busy time is published.
+    fn two_worker_ratio(held: usize) -> f64 {
+        let io = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let metrics = io.handle().metrics();
+        let (t0, base) = (Instant::now(), busy_total(&metrics));
+        // The barrier holds each poll until every task is polled, so no two
+        // share a worker.
+        let all = Arc::new(std::sync::Barrier::new(held));
+        let tasks: Vec<_> = (0..held)
+            .map(|_| {
+                let all = Arc::clone(&all);
+                io.spawn(async move {
+                    all.wait();
+                    let polled = Instant::now();
+                    while polled.elapsed() < Duration::from_millis(500) {
+                        std::hint::spin_loop();
+                    }
+                })
+            })
+            .collect();
+        for task in tasks {
+            io.block_on(task).expect("task");
+        }
+        // A worker publishes its busy time when it parks.
+        let deadline = Instant::now() + SECS(10);
+        while busy_total(&metrics).saturating_sub(base) < Duration::from_millis(400) * held as u32
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        IoBusySampler::new(Duration::ZERO, t0, base)
+            .observe_runtime(Instant::now(), &metrics)
+            .expect("sample")
+            .ratio
+    }
+
+    /// The runtime path divides by the runtime's worker count and sums every
+    /// worker: one held worker of two reads about half, both read busy.
+    #[test]
+    fn the_runtime_reading_covers_every_worker() {
+        let one = two_worker_ratio(1);
+        assert!((0.3..0.7).contains(&one), "one of two read {one}");
+        let both = two_worker_ratio(2);
+        assert!(both > 0.7, "two of two read {both}");
+    }
 }

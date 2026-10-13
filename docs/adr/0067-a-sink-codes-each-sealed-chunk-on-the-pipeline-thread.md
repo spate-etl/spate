@@ -44,6 +44,7 @@ The contract the terminal stage relies on, stated on the trait:
   legal body for the sink. Compressed database blocks and the members of a
   multi-frame zstd or gzip object body both fit.
 - The output is a deterministic function of the input.
+- The codec does no I/O.
 - An instance may keep state. The framework makes one per sink per chain, which
   is one per pipeline thread.
 - The trait is `Send + Sync`. The `Sync` bound keeps `SinkHandoff`, the

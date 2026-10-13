@@ -270,7 +270,7 @@ pub trait FrameCodec: Send + Sync {
 ///
 /// A closure that captures state which is not `RefUnwindSafe` wraps it in
 /// [`AssertUnwindSafe`](std::panic::AssertUnwindSafe) and reaches it through
-/// deref, as in `let state: &T = &wrapper;`. Under edition 2024 a closure
+/// deref, as in `let state: &T = &wrapper;`. From edition 2021 a closure
 /// that names `wrapper.0` captures only the inner field, which loses the
 /// wrapper and fails the bound.
 #[derive(Clone)]

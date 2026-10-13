@@ -952,16 +952,30 @@ fn clickhouse_aggregating_mv_example_builds_states() {
 #[ignore = "requires Docker"]
 fn clickhouse_load_completes_and_repeats_its_workload() {
     let h = Harness::up();
-    // The DDL in the example's module doc. No deduplication window: the
-    // second run writes the same rows, and a window could drop them.
+    // The DDL in the example's module doc.
     ddl(
         &h,
         "CREATE TABLE order_lines (\
              order_id UInt64, placed_at DateTime64(3), \
              sku LowCardinality(String), qty UInt32, unit_cents UInt32) \
-         ENGINE = MergeTree ORDER BY (order_id, sku)",
+         ENGINE = MergeTree ORDER BY (order_id, sku) \
+         SETTINGS non_replicated_deduplication_window = 100",
     );
     let config = render_config("clickhouse_load");
+    // The second run fixes the shape the shipped file leaves open, so each
+    // summary field has a configured value to echo.
+    let shaped = config.path.with_file_name("clickhouse_load.shaped.yaml");
+    let rendered = std::fs::read_to_string(&config.path).expect("read rendered config");
+    std::fs::write(
+        &shaped,
+        rendered
+            .replace(
+                "  name: clickhouse-load\n",
+                "  name: clickhouse-load\n  threads: 2\n  io_threads: 3\n",
+            )
+            .replace("compression: lz4", "compression: zstd:3"),
+    )
+    .expect("write shaped config");
     let env = vec![
         ("CLICKHOUSE_URL", h.ch_url.clone()),
         ("CLICKHOUSE_PASSWORD", CH_PASSWORD.to_string()),
@@ -969,14 +983,17 @@ fn clickhouse_load_completes_and_repeats_its_workload() {
     ];
 
     let mut counts = Vec::new();
-    for run in 1..=2 {
+    for (run, path, threads, io_threads, compression) in [
+        (1, &config.path, serde_json::Value::Null, 2, "lz4"),
+        (2, &shaped, serde_json::json!(2), 3, "zstd:3"),
+    ] {
         if run > 1 {
             ddl(&h, "TRUNCATE TABLE order_lines");
         }
         let log = spawn_as(
             "clickhouse_load",
             &format!("clickhouse_load.{run}"),
-            Some(&config.path),
+            Some(path),
             &env,
         )
         .wait_exit(OUTPUT_DEADLINE);
@@ -989,10 +1006,9 @@ fn clickhouse_load_completes_and_repeats_its_workload() {
                 .is_some_and(|n| n > 0),
             "run {run}: {summary}"
         );
-        assert_eq!(summary["compression"], "lz4", "run {run}: {summary}");
-        // The shipped file leaves `threads` unset, so the runtime derives it.
-        assert!(summary["threads"].is_null(), "run {run}: {summary}");
-        assert!(summary["io_threads"].is_u64(), "run {run}: {summary}");
+        assert_eq!(summary["threads"], threads, "run {run}: {summary}");
+        assert_eq!(summary["io_threads"], io_threads, "run {run}: {summary}");
+        assert_eq!(summary["compression"], compression, "run {run}: {summary}");
         counts.push(h.count("order_lines"));
     }
     assert!(counts[0] > 0, "the first run wrote rows: {counts:?}");
@@ -1000,6 +1016,56 @@ fn clickhouse_load_completes_and_repeats_its_workload() {
         counts[0], counts[1],
         "two runs of the same seed and count wrote the same rows"
     );
+    let (rows, qty, cents) = expected_load(20_000);
+    assert_eq!(counts[1], rows, "one row per line of every placed order");
+    assert_eq!(h.scalar("SELECT sum(qty) FROM order_lines"), qty);
+    assert_eq!(h.scalar("SELECT sum(unit_cents) FROM order_lines"), cents);
+}
+
+/// Rows, total `qty` and total `unit_cents` that the shipped datagen section
+/// produces for `count` events, generated in-process. The event plan does not
+/// depend on the encoding, so the default JSON encoding yields the same
+/// events the example decodes from Avro.
+fn expected_load(count: u64) -> (u64, u64, u64) {
+    use spate::checkpoint::Checkpointer;
+    use spate::source::{PayloadBatch, Source, SourceCtx, SourceEvent, SourceLane};
+    use spate_datagen::{DatagenSource, DatagenSourceConfig, StorefrontEvent};
+    let mut cfg = DatagenSourceConfig::default();
+    cfg.partitions = 32;
+    cfg.seed = 1133;
+    cfg.tick_interval = Duration::ZERO;
+    cfg.count = Some(count);
+    let checkpointer = Checkpointer::new();
+    let mut source = DatagenSource::new(cfg);
+    source
+        .open(SourceCtx::new(checkpointer.handle()))
+        .expect("open datagen");
+    let SourceEvent::LanesAssigned(mut lanes) = source
+        .poll_events(Duration::from_millis(1))
+        .expect("poll datagen")
+    else {
+        panic!("the first poll assigns every lane");
+    };
+    let (mut rows, mut qty, mut cents) = (0, 0, 0);
+    for lane in &mut lanes {
+        while let Some(mut batch) = lane
+            .poll(4096, Duration::from_millis(1))
+            .expect("poll lane")
+        {
+            while let Some(payload) = batch.next_payload() {
+                if let StorefrontEvent::OrderPlaced(order) =
+                    serde_json::from_slice(payload.bytes).expect("decode event")
+                {
+                    for line in &order.lines {
+                        rows += 1;
+                        qty += u64::from(line.qty);
+                        cents += u64::from(line.unit_cents);
+                    }
+                }
+            }
+        }
+    }
+    (rows, qty, cents)
 }
 
 /// The one JSON line in an example log that carries `wall_ms`. Panics unless

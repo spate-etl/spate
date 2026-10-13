@@ -5,7 +5,7 @@
 
 pipeline:
   name: clickhouse-load
-  # `threads` and `io_threads` are left at their derived defaults. Set them
+  # `threads` derives from the host and `io_threads` defaults to 2. Set them
   # here to measure a fixed shape.
 
 checkpoint:
@@ -42,6 +42,10 @@ sink:
     table: ${CLICKHOUSE_TABLE:-order_lines}
     format: native
     compression: lz4
+    # Synchronous inserts at every batch size. The server default sends a
+    # small insert through its async buffer, so a batch's size would pick
+    # the write path.
+    settings: { async_insert: "0" }
     # 32 entries against one server: the shard count sets how many batches
     # build and send in parallel. Point each at its own server to load a
     # cluster.

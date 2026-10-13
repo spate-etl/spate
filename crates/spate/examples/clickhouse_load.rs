@@ -1,8 +1,10 @@
 //! Load run: datagen → Avro → flat_map → ClickHouse **Native**, for measuring
 //! how fast a sink takes rows.
 //!
-//! The pipeline is `kafka_avro_flatmap_clickhouse.rs` with the broker taken
-//! out. [`DatagenSource`] generates Avro storefront events in-process,
+//! The chain follows `kafka_avro_flatmap_clickhouse.rs` without its
+//! `with_metrics` stage and `qty > 0` filter. It decodes the whole event
+//! union and keeps placed orders, and the broker is taken out.
+//! [`DatagenSource`] generates Avro storefront events in-process,
 //! unthrottled, on 32 partitions, and the chain explodes each placed order
 //! into one row per line. The sink is sized like a production one: 32 shards,
 //! four inserts in flight per shard, batches of up to 1,048,576 rows. With no
@@ -43,7 +45,8 @@
 //!     sku         LowCardinality(String),
 //!     qty         UInt32,
 //!     unit_cents  UInt32
-//! ) ENGINE = MergeTree ORDER BY (order_id, sku);
+//! ) ENGINE = MergeTree ORDER BY (order_id, sku)
+//! SETTINGS non_replicated_deduplication_window = 100;
 //! ```
 //!
 //! ```sh

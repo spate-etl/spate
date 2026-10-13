@@ -1016,17 +1016,39 @@ fn clickhouse_load_completes_and_repeats_its_workload() {
         counts[0], counts[1],
         "two runs of the same seed and count wrote the same rows"
     );
-    let (rows, qty, cents) = expected_load(20_000);
+    let (rows, qty, cents, ids, placed_ms, sku_bytes) = expected_load(20_000);
     assert_eq!(counts[1], rows, "one row per line of every placed order");
     assert_eq!(h.scalar("SELECT sum(qty) FROM order_lines"), qty);
     assert_eq!(h.scalar("SELECT sum(unit_cents) FROM order_lines"), cents);
+    assert_eq!(h.scalar("SELECT sum(order_id) FROM order_lines"), ids);
+    assert_eq!(
+        h.scalar("SELECT toUInt64(sum(toUnixTimestamp64Milli(placed_at))) FROM order_lines"),
+        placed_ms
+    );
+    assert_eq!(
+        h.scalar("SELECT sum(length(sku)) FROM order_lines"),
+        sku_bytes
+    );
+
+    // Every shard sends at least one insert per run, and none goes through
+    // the server's async buffer.
+    ddl(&h, "SYSTEM FLUSH LOGS");
+    let inserts = "FROM system.query_log WHERE type = 'QueryFinish' \
+         AND query_kind = 'Insert' AND has(tables, 'default.order_lines')";
+    let n = h.scalar(&format!("SELECT count() {inserts}"));
+    assert!(n >= 64, "32 shards over two runs: {n} inserts");
+    let n = h.scalar(&format!(
+        "SELECT countIf(ProfileEvents['AsyncInsertQuery'] > 0) {inserts}"
+    ));
+    assert_eq!(n, 0, "async inserts");
 }
 
-/// Rows, total `qty` and total `unit_cents` that the shipped datagen section
-/// produces for `count` events, generated in-process. The event plan does not
+/// Rows, then the totals of `qty`, `unit_cents`, `order_id`, `placed_at` in
+/// milliseconds and `sku` length, that the shipped datagen section produces
+/// for `count` events, generated in-process. The event plan does not
 /// depend on the encoding, so the default JSON encoding yields the same
 /// events the example decodes from Avro.
-fn expected_load(count: u64) -> (u64, u64, u64) {
+fn expected_load(count: u64) -> (u64, u64, u64, u64, u64, u64) {
     use spate::checkpoint::Checkpointer;
     use spate::source::{PayloadBatch, Source, SourceCtx, SourceEvent, SourceLane};
     use spate_datagen::{DatagenSource, DatagenSourceConfig, StorefrontEvent};
@@ -1047,6 +1069,7 @@ fn expected_load(count: u64) -> (u64, u64, u64) {
         panic!("the first poll assigns every lane");
     };
     let (mut rows, mut qty, mut cents) = (0, 0, 0);
+    let (mut ids, mut placed_ms, mut sku_bytes) = (0, 0, 0);
     for lane in &mut lanes {
         while let Some(mut batch) = lane
             .poll(4096, Duration::from_millis(1))
@@ -1056,16 +1079,20 @@ fn expected_load(count: u64) -> (u64, u64, u64) {
                 if let StorefrontEvent::OrderPlaced(order) =
                     serde_json::from_slice(payload.bytes).expect("decode event")
                 {
+                    let at = u64::try_from(order.placed_at).expect("after the epoch");
                     for line in &order.lines {
                         rows += 1;
                         qty += u64::from(line.qty);
                         cents += u64::from(line.unit_cents);
+                        ids += order.order_id;
+                        placed_ms += at;
+                        sku_bytes += u64::try_from(line.sku.len()).expect("fits u64");
                     }
                 }
             }
         }
     }
-    (rows, qty, cents)
+    (rows, qty, cents, ids, placed_ms, sku_bytes)
 }
 
 /// The one JSON line in an example log that carries `wall_ms`. Panics unless

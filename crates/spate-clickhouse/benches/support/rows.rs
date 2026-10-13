@@ -202,25 +202,29 @@ pub(crate) fn exotic_columns() -> Vec<(&'static str, &'static str)> {
 }
 
 pub(crate) fn events(n: usize) -> Vec<EventRow> {
-    (0..n)
-        .map(|i| EventRow {
-            event_id: i as u64,
-            event_time: DateTime64Millis(1_700_000_000_000 + (i as i64) * 137),
-            user_id: (i as u64).wrapping_mul(2_654_435_761) % 1_000_000,
-            event_type: EVENT_TYPES[i % EVENT_TYPES.len()].to_owned(),
-            country: COUNTRIES[i % COUNTRIES.len()].to_owned(),
-            city: format!("city{}", i % 5000),
-            url: format!("https://example.com/p/{}/item/{}", i % 1000, i % 97),
-            referrer: (i % 7 != 0).then(|| format!("https://ref.example/{}", i % 300)),
-            status: [200u16, 200, 200, 404, 500][i % 5],
-            duration_ms: (i as u32 * 13) % 9_000,
-            revenue: Decimal64::<4>(((i as i64) * 251) % 1_000_000),
-            tags: (0..i % 5)
-                .map(|t| EVENT_TYPES[(i + t) % EVENT_TYPES.len()].to_owned())
-                .collect(),
-            is_conversion: i % 11 == 0,
-        })
-        .collect()
+    (0..n).map(event).collect()
+}
+
+/// Row `i` of the `events` corpus, for a caller that streams more rows than
+/// it should hold at once.
+pub(crate) fn event(i: usize) -> EventRow {
+    EventRow {
+        event_id: i as u64,
+        event_time: DateTime64Millis(1_700_000_000_000 + (i as i64) * 137),
+        user_id: (i as u64).wrapping_mul(2_654_435_761) % 1_000_000,
+        event_type: EVENT_TYPES[i % EVENT_TYPES.len()].to_owned(),
+        country: COUNTRIES[i % COUNTRIES.len()].to_owned(),
+        city: format!("city{}", i % 5000),
+        url: format!("https://example.com/p/{}/item/{}", i % 1000, i % 97),
+        referrer: (!i.is_multiple_of(7)).then(|| format!("https://ref.example/{}", i % 300)),
+        status: [200u16, 200, 200, 404, 500][i % 5],
+        duration_ms: (i as u32 * 13) % 9_000,
+        revenue: Decimal64::<4>(((i as i64) * 251) % 1_000_000),
+        tags: (0..i % 5)
+            .map(|t| EVENT_TYPES[(i + t) % EVENT_TYPES.len()].to_owned())
+            .collect(),
+        is_conversion: i.is_multiple_of(11),
+    }
 }
 
 pub(crate) fn metrics(n: usize) -> Vec<MetricRow> {

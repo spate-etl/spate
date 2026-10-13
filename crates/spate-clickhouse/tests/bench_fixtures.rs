@@ -10,12 +10,16 @@
 
 use bytes::BytesMut;
 use spate_clickhouse::{
-    ClickHouseEncoder, DistributedRouter, NativeEncoder, NativeSchema, ShardKey,
+    ClickHouseEncoder, ClickHouseRow, DistributedRouter, NativeEncoder, NativeSchema, ShardKey,
 };
 use spate_core::deser::Owned;
-use spate_core::sink::RowEncoder;
+use spate_core::sink::{RowEncoder, ShardWriter};
 use spate_test::record;
 
+#[path = "../benches/support/frames.rs"]
+mod frames;
+#[path = "../benches/support/http_server.rs"]
+mod http_server;
 #[path = "../benches/support/keys.rs"]
 mod keys;
 #[path = "../benches/support/rows.rs"]
@@ -273,4 +277,134 @@ fn the_weight_tables_reach_both_selection_paths() {
 )]
 fn first_char(rec: &String) -> ShardKey<'_> {
     ShardKey::Str(rec)
+}
+
+/// The compression benches' frames, pinned.
+///
+/// A per-frame figure is only comparable across revisions that compressed the
+/// same frames. The frames come from the `events` corpus through the Native
+/// encoder's size estimate, so a change to either moves the rows per frame,
+/// the frame sizes, and how well the frames compress. Each pin fails on one of
+/// those. The rows per frame and the size range are exact; the lz4 ratio is a
+/// band, since it is a property of the corpus rather than of one byte.
+#[test]
+fn the_frame_fixture_is_pinned_across_revisions() {
+    let frames = frames::native_frames(frames::FRAMES);
+    assert_eq!(frames.len(), frames::FRAMES);
+
+    let per_frame: Vec<u64> = frames.iter().map(|f| f.rows).collect();
+    assert_eq!(per_frame, ROWS_PER_FRAME, "rows per frame");
+
+    let sizes = frames.iter().map(|f| f.bytes.len());
+    assert_eq!(
+        (sizes.clone().min(), sizes.max()),
+        (Some(FRAME_BYTES_MIN), Some(FRAME_BYTES_MAX)),
+        "frame size range"
+    );
+
+    let raw: usize = frames.iter().map(|f| f.bytes.len()).sum();
+    let lz4: usize = frames
+        .iter()
+        .map(|f| {
+            clickhouse::_priv::lz4_compress(&f.bytes)
+                .expect("lz4 compresses")
+                .len()
+        })
+        .sum();
+    let ratio = raw as f64 / lz4 as f64;
+    assert!(
+        (LZ4_RATIO_MIN..=LZ4_RATIO_MAX).contains(&ratio),
+        "lz4 ratio {ratio:.3} outside {LZ4_RATIO_MIN}..={LZ4_RATIO_MAX}"
+    );
+
+    // The write-path batch extends the same frames; its row total pins the
+    // frames past the eighth.
+    let batch = frames::sealed(&frames::native_frames(frames::BATCH_FRAMES), "pin");
+    assert_eq!(batch.frames.len(), frames::BATCH_FRAMES);
+    assert_eq!(batch.rows, BATCH_ROWS, "rows in the write-path batch");
+    assert_eq!(
+        batch.frames[..frames::FRAMES],
+        frames.iter().map(|f| f.bytes.clone()).collect::<Vec<_>>()[..],
+        "the batch opens with the per-frame fixture"
+    );
+}
+
+/// Rows in each of the eight frames.
+const ROWS_PER_FRAME: [u64; 8] = [448, 448, 448, 432, 432, 432, 432, 432];
+/// The smallest and largest of the eight frames, in bytes. The encoder's
+/// estimate runs ahead of the bytes it writes, so a frame seals below the
+/// 64 KiB target.
+const FRAME_BYTES_MIN: usize = 51_074;
+const FRAME_BYTES_MAX: usize = 52_859;
+/// Uncompressed over lz4-compressed bytes across the eight frames: 2.600.
+const LZ4_RATIO_MIN: f64 = 2.55;
+const LZ4_RATIO_MAX: f64 = 2.65;
+/// Rows across the write-path batch's 1,600 frames.
+const BATCH_ROWS: u64 = 698_224;
+
+/// The write-path bench's setup works end to end under every compression.
+///
+/// `write_wall.rs` builds its sink against `http_server.rs` in setup, so a
+/// server that answered the schema query in a form the client cannot read
+/// would fail minutes into a bench run. This builds the same sink under each
+/// `compression` value, writes one batch, and checks what the server received:
+/// the schema query, then one insert carrying the frames, raw under `off` and
+/// compressed by the client otherwise.
+#[test]
+fn the_bench_server_serves_the_schema_under_every_compression() {
+    assert_eq!(
+        <rows::EventRow as ClickHouseRow>::COLUMNS,
+        rows::event_columns()
+            .iter()
+            .map(|(name, _)| *name)
+            .collect::<Vec<_>>(),
+        "the fixture's insert columns are the events schema's"
+    );
+    let frames = frames::native_frames(frames::FRAMES);
+    let batch = frames::sealed(&frames, "bench-fixture");
+    let raw: Vec<u8> = frames
+        .iter()
+        .flat_map(|f| f.bytes.iter().copied())
+        .collect();
+
+    for compression in ["lz4", "zstd:3", "off"] {
+        let server = http_server::BenchServer::recording(&rows::event_columns());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        let (writer, endpoint) =
+            runtime.block_on(http_server::events_sink(server.url(), compression));
+        runtime
+            .block_on(writer.write_batch(&endpoint, &batch))
+            .unwrap_or_else(|e| panic!("{compression}: the server accepts the batch: {e}"));
+
+        let requests = server.requests();
+        assert_eq!(
+            requests.len(),
+            2,
+            "{compression}: the schema query, then the insert"
+        );
+        let insert = &requests[1];
+        assert!(
+            insert.param("query") == Some(writer.insert_sql()),
+            "{compression}: the second request is the insert"
+        );
+        if compression == "off" {
+            assert_eq!(insert.param("decompress"), None, "off: no decompress");
+            assert_eq!(&insert.body[..], &raw[..], "off: the frames, unchanged");
+        } else {
+            assert_eq!(
+                insert.param("decompress"),
+                Some("1"),
+                "{compression}: decompress"
+            );
+            assert!(
+                !insert.body.is_empty() && insert.body.len() < raw.len(),
+                "{compression}: a compressed body, {} bytes against {} raw",
+                insert.body.len(),
+                raw.len()
+            );
+        }
+    }
 }

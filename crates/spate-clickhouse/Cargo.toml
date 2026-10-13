@@ -61,6 +61,9 @@ proptest = { workspace = true }
 serde_repr = { workspace = true }
 hyper = { workspace = true, features = ["http1", "server"] }
 hyper-util = { workspace = true, features = ["tokio"] }
+http-body-util = { workspace = true }
+spate-bench = { workspace = true }
+zstd = { workspace = true }
 tempfile = { workspace = true }
 serde_yaml = { workspace = true }
 testcontainers-modules = { workspace = true, features = ["clickhouse"] }
@@ -76,6 +79,18 @@ harness = false
 
 [[bench]]
 name = "route_gungraun"
+harness = false
+
+[[bench]]
+name = "frame_gungraun"
+harness = false
+
+[[bench]]
+name = "frame_wall"
+harness = false
+
+[[bench]]
+name = "write_wall"
 harness = false
 
 [package.metadata.docs.rs]

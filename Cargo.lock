@@ -3974,6 +3974,7 @@ dependencies = [
  "criterion",
  "foldhash",
  "gungraun",
+ "http-body-util",
  "humantime-serde",
  "hyper",
  "hyper-rustls",
@@ -3984,6 +3985,7 @@ dependencies = [
  "rustls-native-certs",
  "serde",
  "serde_repr",
+ "spate-bench",
  "spate-clickhouse",
  "spate-clickhouse-derive",
  "spate-core",
@@ -4000,6 +4002,7 @@ dependencies = [
  "uuid",
  "webpki-roots 1.0.9",
  "yaml_serde",
+ "zstd",
 ]
 
 [[package]]

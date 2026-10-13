@@ -92,7 +92,7 @@ clickhouse = "0.15"
 # uses, and features unify into one copy. So this entry names exactly the
 # client's features: `safe-encode`, a default, would slow the client's codec
 # as well as spate's, and a second major would put two codecs in the graph.
-lz4_flex = { version = "0.11.6", default-features = false, features = ["std"] }
+lz4_flex = { version = "0.14.0", default-features = false, features = ["std"] }
 # The checksum of ClickHouse's compressed block framing.
 cityhash-rs = "1.0.1"
 apache-avro = "0.22"

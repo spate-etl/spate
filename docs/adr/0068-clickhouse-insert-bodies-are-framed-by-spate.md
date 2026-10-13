@@ -99,6 +99,14 @@ corrupted part on one replica, and another replica can take the insert.
   must attach or apply the codec, and fails `Fatal` when it does not.
 - Bad, because a block the server cannot decode stops the sink, where it used
   to be retried until `retry.max_attempts`.
+- Bad, because a bit flip in transit over plain HTTP reaches the server as 271
+  and stops the sink, where a resend would have cleared it. Under TLS the
+  record check catches the flip first, and it arrives as a retryable transport
+  error.
+- Bad, because each pipeline thread keeps one zstd context per compressing
+  sink, outside `max_inflight_bytes`. Its size grows with the level and the
+  chunk target. Review-measured on darwin with `CCtx::sizeof`: 0.63 MiB at
+  level 3 with 64 KiB chunks, 17.25 MiB at level 19 with 1 MiB chunks.
 
 ### Confirmation
 

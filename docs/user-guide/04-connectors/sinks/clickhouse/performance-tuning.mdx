@@ -192,7 +192,11 @@ This compresses the HTTP insert body and the responses to the sink's queries.
 The sink compresses each chunk on the pipeline thread that sealed it, so
 compression costs pipeline-thread CPU and scales with `pipeline.threads`. On a
 host where the pipeline threads are already the limit, compression costs rows
-per second, and `zstd` costs more of them than `lz4`. Under `lz4` the sink
+per second, and `zstd` costs more of them than `lz4`. Under `zstd` each
+pipeline thread keeps one compression context per compressing sink, outside
+`backpressure.max_inflight_bytes`. Its size grows with the level and with
+[`chunk.target_bytes`](../../../07-reference/configuration.mdx#chunk), from about
+0.6 MiB at the defaults to tens of MiB at high levels with large chunks. Under `lz4` the sink
 sends `network_compression_method=LZ4` on every request, so a server whose
 network codec defaults to ZSTD still answers in LZ4, the only codec the client
 decodes. `lz4` is cheap and a good default on most

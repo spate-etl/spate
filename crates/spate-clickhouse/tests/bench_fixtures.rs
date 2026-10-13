@@ -1,12 +1,14 @@
-//! Both encoders accept every bench schema, and every bench corpus is the
-//! one its recorded numbers were measured against.
+//! Both encoders accept every bench schema, every bench corpus is the one
+//! its recorded numbers were measured against, and the write-path benches'
+//! HTTP server serves a sink under every compression.
 //!
 //! The Native encoder is driven by a column list written beside the row
 //! struct, and a mismatch between the two (a column added without its field,
 //! or a type that does not match) is a fatal error raised at encode time.
 //! `cargo bench --no-run` cannot catch that: it compiles the bench without
 //! running it, so the first sign would be a failed valgrind job minutes into
-//! CI. This runs in milliseconds wherever `cargo test` does.
+//! CI. These tests run wherever `cargo test` does; the frame pin, the
+//! slowest, takes about a second in the dev profile.
 
 use bytes::BytesMut;
 use spate_clickhouse::{
@@ -286,7 +288,7 @@ fn first_char(rec: &String) -> ShardKey<'_> {
 /// encoder's size estimate, so a change to either moves the rows per frame,
 /// the frame sizes, and how well the frames compress. Each pin fails on one of
 /// those. The rows per frame and the size range are exact; the lz4 ratio is a
-/// band, since it is a property of the corpus rather than of one byte.
+/// band around the measured 2.600.
 #[test]
 fn the_frame_fixture_is_pinned_across_revisions() {
     let frames = frames::native_frames(frames::FRAMES);
@@ -332,8 +334,8 @@ fn the_frame_fixture_is_pinned_across_revisions() {
 /// Rows in each of the eight frames.
 const ROWS_PER_FRAME: [u64; 8] = [448, 448, 448, 432, 432, 432, 432, 432];
 /// The smallest and largest of the eight frames, in bytes. The encoder's
-/// estimate runs ahead of the bytes it writes, so a frame seals below the
-/// 64 KiB target.
+/// estimate runs ahead of the bytes it writes, so a frame seals below
+/// `ChunkConfig`'s default target.
 const FRAME_BYTES_MIN: usize = 51_074;
 const FRAME_BYTES_MAX: usize = 52_859;
 /// Uncompressed over lz4-compressed bytes across the eight frames: 2.600.
@@ -405,6 +407,10 @@ fn the_bench_server_serves_the_schema_under_every_compression() {
                 insert.body.len(),
                 raw.len()
             );
+            // A ClickHouse compressed block opens with a 16-byte checksum,
+            // then the method byte.
+            let method = if compression == "lz4" { 0x82 } else { 0x90 };
+            assert_eq!(insert.body[16], method, "{compression}: the block's codec");
         }
     }
 }

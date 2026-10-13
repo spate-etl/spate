@@ -2,10 +2,10 @@
 //!
 //! Each frame is one Native block of `events` rows from `rows.rs`, sealed by
 //! the rule the sink's terminal stage applies: once the bytes written plus
-//! the encoder's buffered estimate reach `TARGET_BYTES`, the encoder
-//! finishes the block. The frames are therefore the size and shape a
-//! production chunk has at the default chunk target, and every bench that
-//! compresses or sends them prices the same bytes.
+//! the encoder's buffered estimate reach `ChunkConfig`'s default
+//! `target_bytes`, the encoder finishes the block. The frames are therefore
+//! the size and shape a production chunk has at the default chunk target, and
+//! every bench that compresses or sends them prices the same bytes.
 //!
 //! Rows are streamed from `rows::event`, so a long batch never holds its
 //! source rows at once. Frame `k` of a longer fixture is frame `k` of every
@@ -24,9 +24,6 @@ use spate_core::deser::Owned;
 use spate_core::sink::{RowEncoder, SealedBatch};
 
 use super::rows::{self, EventRow};
-
-/// The chunk target the frames are sealed at: `ChunkConfig`'s default.
-pub(crate) const TARGET_BYTES: usize = 64 * 1024;
 
 /// Frames a per-frame compression case covers.
 pub(crate) const FRAMES: usize = 8;
@@ -70,6 +67,7 @@ pub(crate) struct Frame {
 pub(crate) fn native_frames(count: usize) -> Vec<Frame> {
     let schema = NativeSchema::from_columns(&rows::event_columns()).expect("event schema builds");
     let mut enc = NativeEncoder::<Owned<EventRow>>::new(schema);
+    let target_bytes = spate_core::ops::ChunkConfig::default().target_bytes;
     let mut buf = BytesMut::new();
     let mut frames = Vec::with_capacity(count);
     let mut rows_in_frame = 0u64;
@@ -79,7 +77,7 @@ pub(crate) fn native_frames(count: usize) -> Vec<Frame> {
             .expect("row encodes");
         i += 1;
         rows_in_frame += 1;
-        if buf.len() + enc.buffered_bytes() >= TARGET_BYTES {
+        if buf.len() + enc.buffered_bytes() >= target_bytes {
             enc.finish_chunk(&mut buf).expect("block finishes");
             frames.push(Frame {
                 bytes: buf.split().freeze(),

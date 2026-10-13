@@ -2,11 +2,11 @@
 //! `ClickHouseWriter::write_batch`.
 //!
 //! The batch is the first 1,600 frames of `support/frames.rs`, Native blocks
-//! of the `events` corpus sealed at the default 64 KiB chunk target. The sink
-//! is built by `config::build(..).with_row()` against the in-process server in
-//! `support/http_server.rs`, as a pipeline builds it, so the writer, its
-//! settings and its client are the production ones. The build and the schema
-//! fetch run in setup, outside the measured region.
+//! of the `events` corpus sealed at `ChunkConfig`'s default chunk target. The
+//! sink is built by `config::build(..).with_row()` against the in-process
+//! server in `support/http_server.rs`, as a pipeline builds it, so the writer,
+//! its settings and its client are the production ones. The build and the
+//! schema fetch run in setup, outside the measured region.
 //!
 //! One iteration is one `write_batch`: the request is opened, every frame
 //! goes through `InsertFormatted::send` (which compresses it under `lz4` and

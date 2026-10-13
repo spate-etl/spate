@@ -12,10 +12,10 @@
 //! # Cases
 //!
 //! `frame_upstream_lz4`, `frame_upstream_zstd1` and `frame_upstream_zstd3`.
-//! The `frame_` prefix is what `--filter frame_` selects; the counted cases
-//! carry the same names without it.
+//! Within this package, `--filter frame_` selects these three; the counted
+//! cases carry the same names without the prefix.
 //!
-//! Run: `cargo xtask bench ab --ref main --filter frame_`
+//! Run: `cargo xtask bench ab --ref main --package spate-clickhouse --filter frame_`
 
 use clickhouse::Compression;
 use clickhouse::insert_formatted::CompressedData;

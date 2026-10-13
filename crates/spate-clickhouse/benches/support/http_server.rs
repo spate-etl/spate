@@ -5,9 +5,10 @@
 //! `system.columns` rows it was built with, so a sink built by
 //! `config::build(..).with_row()` points at it like a real server, and it
 //! accepts every insert. A request is an insert when its URL carries a
-//! `query` pair, which only `insert_formatted_with` writes. The client validates the schema answer against its
-//! `RowBinaryWithNamesAndTypes` header, and a compressing client decodes it
-//! in its own codec, so the answer follows the request as ClickHouse does:
+//! `query` pair, which only the client's insert requests write. The client
+//! validates the schema answer against its `RowBinaryWithNamesAndTypes`
+//! header, and a compressing client decodes it in its own codec, so the
+//! answer follows the request as ClickHouse does:
 //!
 //! - `compress=1` (the client under lz4) gets ClickHouse-framed lz4 blocks;
 //! - `enable_http_compression=1` with `Accept-Encoding: zstd` (the client

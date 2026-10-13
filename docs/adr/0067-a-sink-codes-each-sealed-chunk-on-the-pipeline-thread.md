@@ -46,6 +46,8 @@ The contract the terminal stage relies on, stated on the trait:
 - The output is a deterministic function of the input.
 - An instance may keep state. The framework makes one per sink per chain, which
   is one per pipeline thread.
+- The trait is `Send + Sync`. The `Sync` bound keeps `SinkHandoff`, the
+  terminal stage that holds the codec, `Sync`.
 - The returned slice is copied before the next call.
 - An `Err` stops the pipeline whatever its class. The chunk's rows and
   acknowledgments stay in the shard buffer, as on a failed `finish_chunk`.
@@ -121,8 +123,7 @@ whether a host's pipeline threads or its I/O runtime are the limit.
 
 ## More information
 
-- Landed in the pull request titled "core: let a sink code each sealed chunk on
-  the pipeline thread".
+- Landed in #1137.
 - [ADR-0006](0006-per-shard-sink-workers.md) — the shard workers that merge and
   write the coded frames.
 - [ADR-0007](0007-clickhouse-insert-path.md) — frames encoded on pipeline

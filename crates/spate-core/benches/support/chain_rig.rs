@@ -111,8 +111,14 @@ struct CopyCodec {
     out: Vec<u8>,
 }
 
+/// Calls to [`CopyCodec::encode_frame`], so a fixture can tell the coded rig
+/// from an uncoded one that ships the same bytes.
+pub(crate) static COPY_CODEC_CALLS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 impl FrameCodec for CopyCodec {
     fn encode_frame(&mut self, chunk: &[u8]) -> Result<&[u8], spate_core::error::SinkError> {
+        COPY_CODEC_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.out.clear();
         self.out.extend_from_slice(chunk);
         Ok(&self.out)

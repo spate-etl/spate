@@ -70,6 +70,10 @@ struct ShardBuf<E> {
     first_ingest: Option<Instant>,
     /// Smallest event time seen in the open chunk (ms since epoch).
     oldest_event_ms: i64,
+    /// Set by a codec error, which leaves `buf` holding a block the encoder
+    /// already finished; cleared by the next encoded row. A seal skips
+    /// `finish_chunk` while it is set.
+    finished: bool,
 }
 
 /// This stage's own [`FrameCodec`] instance. The wrapper gives
@@ -137,6 +141,7 @@ where
                 last_batch: None,
                 first_ingest: None,
                 oldest_event_ms: i64::MAX,
+                finished: false,
             })
             .collect();
         let codec = queues.new_frame_codec().map(CodecSlot);
@@ -173,7 +178,9 @@ where
         // later finalize succeeds and fail on teardown otherwise. A flush seals
         // every shard after this one, so the latch keeps the first reason.
         let before = shard.buf.len();
-        if let Err(e) = shard.encoder.finish_chunk(&mut shard.buf) {
+        if !shard.finished
+            && let Err(e) = shard.encoder.finish_chunk(&mut shard.buf)
+        {
             // The encoder may have written a partial block; roll it back to
             // the rows `encode` wrote, so the frame stays well-formed.
             shard.buf.truncate(before);
@@ -213,6 +220,7 @@ where
                 Err(e) => {
                     // The finished block stays in the buffer, so the rows and
                     // acks stay with the shard as on a failed finalize.
+                    shard.finished = true;
                     self.meter.0.fatal_error();
                     self.fatal.0.get_or_insert_with(|| FatalError {
                         component: self.component.to_string(),
@@ -294,6 +302,7 @@ where
         match shard.encoder.encode(&rec, &mut shard.buf) {
             Ok(()) => {
                 shard.rows += 1;
+                shard.finished = false;
                 self.meter.0.out();
                 shard.first_ingest.get_or_insert_with(Instant::now);
                 shard.oldest_event_ms = shard.oldest_event_ms.min(rec.meta.event_time_ms);

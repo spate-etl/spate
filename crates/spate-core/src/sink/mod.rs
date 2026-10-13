@@ -216,7 +216,11 @@ pub trait RowEncoder<F: RecFamily>: Send {
 ///   for the chunk; its rows and acknowledgments stay in the shard buffer,
 ///   and they fail on teardown if no later call succeeds.
 ///
+/// The `Sync` bound keeps [`SinkHandoff`], the terminal stage that holds the
+/// codec, `Sync`.
+///
 /// [`ErrorClass`]: crate::error::ErrorClass
+/// [`SinkHandoff`]: crate::ops::SinkHandoff
 ///
 /// # Examples
 ///

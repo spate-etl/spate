@@ -2895,10 +2895,126 @@ fn a_codec_failure_is_fatal_and_keeps_the_rows() {
     assert_eq!(ack_rx.try_recv().unwrap().status, AckStatus::Delivered);
 }
 
-/// After a seal through a codec, a buffer that one oversized row grew far
-/// past the chunk target is released.
+/// A frame codec failure counts one fatal on the sink stage, however many
+/// times the drain flushes the same rows afterwards.
 #[test]
-fn an_oversized_row_does_not_pin_its_buffer() {
+fn a_codec_failure_counts_a_fatal_on_the_sink_stage() {
+    /// A codec that fails every call.
+    struct AlwaysFails;
+    impl FrameCodec for AlwaysFails {
+        fn encode_frame(&mut self, _chunk: &[u8]) -> Result<&[u8], SinkError> {
+            Err(SinkError::Client {
+                class: crate::error::ErrorClass::Fatal,
+                reason: "cannot code the chunk".into(),
+            })
+        }
+    }
+    let rendered = crate::metrics::render_local(|| {
+        let (queues, mut rxs) = shard_queues(1, 64);
+        let mut c = chain_owned(OwnedPassthrough)
+            .with_metrics("errtest", "main")
+            .sink(
+                VecEncoder,
+                KeyHashRouter,
+                ChunkConfig::default(),
+                queues.with_frame_codec(FrameCodecFactory::new(|| Box::new(AlwaysFails))),
+                Arc::new(InflightBudget::new()),
+            )
+            .build();
+        let bufs = payloads(&["row"]);
+        let (mut batch, _rx) = TestBatch::new(&bufs);
+        assert!(matches!(c.push_batch(&mut batch, 0), PushOutcome::Done));
+        assert!(matches!(c.flush(), PushOutcome::Fatal(_)));
+        let _ = c.flush();
+        let _ = c.flush();
+        assert!(rxs[0].try_recv().is_err(), "a failed codec ships nothing");
+    });
+    assert_eq!(
+        error_series(&rendered),
+        stage_errors(&stage_labels(0, "sink_handoff"), 0, 1),
+        "a failed codec is one fatal for the sink stage:\n{rendered}"
+    );
+}
+
+/// A row encoder whose `finish_chunk` closes each block with `|END`.
+#[derive(Clone, Default)]
+struct TrailerEncoder;
+
+impl RowEncoder<Owned<Vec<u8>>> for TrailerEncoder {
+    fn encode<'buf>(&mut self, rec: &Record<Vec<u8>>, buf: &mut BytesMut) -> Result<(), SinkError> {
+        buf.extend_from_slice(&rec.payload);
+        Ok(())
+    }
+    fn finish_chunk(&mut self, buf: &mut BytesMut) -> Result<(), SinkError> {
+        buf.extend_from_slice(b"|END");
+        Ok(())
+    }
+}
+
+/// A seal after a codec error ships the block the encoder already finished,
+/// and does not call `finish_chunk` for it again.
+#[test]
+fn a_seal_after_a_codec_error_does_not_finish_the_chunk_again() {
+    let (queues, mut rxs) = shard_queues(1, 64);
+    let mut c = chain_owned(BytesPassthrough)
+        .sink(
+            TrailerEncoder,
+            KeyHashRouter,
+            ChunkConfig::default(),
+            queues.with_frame_codec(FrameCodecFactory::new(
+                || Box::new(FailOnceCodec::default()),
+            )),
+            Arc::new(InflightBudget::new()),
+        )
+        .build();
+
+    let bufs = payloads(&["one"]);
+    let (mut batch, _rx) = TestBatch::new(&bufs);
+    assert!(matches!(c.push_batch(&mut batch, 0), PushOutcome::Done));
+    assert!(matches!(c.flush(), PushOutcome::Fatal(_)));
+    assert!(matches!(c.flush(), PushOutcome::Done));
+    let chunk = rxs[0].try_recv().expect("the second flush ships the chunk");
+    assert_eq!(&chunk.frame[..], b"C:one|END", "one finished block");
+    chunk.acks.deliver();
+}
+
+/// A row pushed after a codec error is finished by the next seal.
+#[test]
+fn a_row_pushed_after_a_codec_error_is_finished_at_the_next_seal() {
+    let (queues, mut rxs) = shard_queues(1, 64);
+    let mut c = chain_owned(BytesPassthrough)
+        .sink(
+            TrailerEncoder,
+            KeyHashRouter,
+            ChunkConfig::default(),
+            queues.with_frame_codec(FrameCodecFactory::new(
+                || Box::new(FailOnceCodec::default()),
+            )),
+            Arc::new(InflightBudget::new()),
+        )
+        .build();
+
+    let first = payloads(&["one"]);
+    let (mut batch, _rx) = TestBatch::new(&first);
+    assert!(matches!(c.push_batch(&mut batch, 0), PushOutcome::Done));
+    assert!(matches!(c.flush(), PushOutcome::Fatal(_)));
+    drop(batch);
+    let second = payloads(&["two"]);
+    let (mut batch, _rx2) = TestBatch::new(&second);
+    assert!(matches!(c.push_batch(&mut batch, 0), PushOutcome::Done));
+    assert!(matches!(c.flush(), PushOutcome::Done));
+    let chunk = rxs[0].try_recv().expect("the second flush ships the chunk");
+    assert_eq!(
+        &chunk.frame[..],
+        b"C:one|ENDtwo|END",
+        "both blocks finished"
+    );
+    chunk.acks.deliver();
+}
+
+/// The shard buffer's capacity after one coded row of `payload_len` bytes
+/// seals a chunk against a 1 KiB target.
+fn capacity_after_one_coded_row(payload_len: usize) -> usize {
     use super::chain::{OpMeter, OpMeterSlot};
     use crate::record::RecordMeta;
 
@@ -2915,11 +3031,11 @@ fn an_oversized_row_does_not_pin_its_buffer() {
         Arc::new(InflightBudget::new()),
         cfg,
         OpMeterSlot(OpMeter::new(None)),
-        Arc::from("oversized"),
+        Arc::from("capacity"),
     );
     let (ack, _rx) = AckRef::test_pair();
     let rec = Record {
-        payload: vec![7u8; 64 * 1024],
+        payload: vec![7u8; payload_len],
         meta: RecordMeta {
             partition: PartitionId(0),
             offset: 0,
@@ -2932,11 +3048,20 @@ fn an_oversized_row_does_not_pin_its_buffer() {
         Collector::push(&mut handoff, rec),
         crate::record::Flow::Continue
     ));
-    assert!(
-        handoff.buffer_capacity(0) <= 2 * 1024,
-        "the shard buffer kept {} bytes after the seal",
-        handoff.buffer_capacity(0)
-    );
+    handoff.buffer_capacity(0)
+}
+
+/// A coded seal keeps a buffer that grew to at most twice the chunk target.
+#[test]
+fn a_coded_seal_keeps_a_buffer_within_twice_the_target() {
+    assert!(capacity_after_one_coded_row(1500) > 1024);
+}
+
+/// A coded seal releases a buffer that one row grew past twice the chunk
+/// target.
+#[test]
+fn an_oversized_row_does_not_pin_its_buffer() {
+    assert!(capacity_after_one_coded_row(2 * 1024) <= 2 * 1024);
 }
 
 /// Each split branch codes with the codec of the queue set it was given.

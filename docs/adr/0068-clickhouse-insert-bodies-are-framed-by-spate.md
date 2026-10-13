@@ -71,15 +71,26 @@ spans the frame. A frame that fails fails the write `Fatal`, naming
 `ShardQueues::with_frame_codec`, because the server would reject it and a
 retry would send it again.
 
-Server exception code 271 (`CANNOT_DECOMPRESS`) classifies `Fatal`. A
-`decompress=1` body whose block fails its checksum or does not decode answers
-271. Every compressed insert carries the sink's own blocks, and a retry resends
-the same bytes, so a block the server cannot decode would fail on every attempt
-under the default unbounded `retry.max_attempts`. This was the maintainer's
-call, following the zstd-level check that rejects a deterministic server-side
-failure at load. Code 40 (`CHECKSUM_DOESNT_MATCH`) stays `Retryable`. The server
-answers it for data it reads itself, such as a materialized view reading a
-corrupted part on one replica, and another replica can take the insert.
+Server exception code 271 (`CANNOT_DECOMPRESS`) classifies `Fatal` under
+`compression: lz4` or `zstd`. A `decompress=1` body whose block fails its
+checksum or does not decode answers 271. Every compressed insert carries the
+sink's own blocks, and a retry resends the same bytes, so a block the server
+cannot decode would fail on every attempt under the default unbounded
+`retry.max_attempts`. This was the maintainer's call, following the zstd-level
+check that rejects a deterministic server-side failure at load.
+
+An insert also answers 271 when the server reads a stored block that passes
+its checksum and fails to decode, such as a materialized view reading a
+damaged part. Under `compression: off` no body carries a block, so 271 stays
+`Retryable` there and another replica can take the insert. Under lz4 or zstd
+the two causes share the code, so such a read stops the sink too. This is
+rare, since the block must be damaged before its checksum is written, or read
+with checksums off. Only the server's message text tells the causes apart, and
+matching it would tie the class to the server's wording, so the maintainer
+chose to gate on whether the sink codes its frames. Code 40
+(`CHECKSUM_DOESNT_MATCH`) stays `Retryable` under every compression. The server
+answers it when a block it reads itself fails its checksum, and another replica
+can take the insert.
 
 ### Consequences
 
@@ -97,8 +108,10 @@ corrupted part on one replica, and another replica can take the insert.
   per second, since the compression they now run used to run elsewhere.
 - Bad, because a manually assembled pipeline or a direct `write_batch` caller
   must attach or apply the codec, and fails `Fatal` when it does not.
-- Bad, because a block the server cannot decode stops the sink, where it used
-  to be retried until `retry.max_attempts`.
+- Bad, because under lz4 or zstd a block the server cannot decode stops the
+  sink, where it used to be retried until `retry.max_attempts`. That includes
+  the rare stored block that passes its checksum and fails to decode when an
+  insert's materialized view reads it.
 - Bad, because a bit flip in transit over plain HTTP reaches the server as 271
   and stops the sink, where a resend would have cleared it. Under TLS the
   record check catches the flip first, and it arrives as a retryable transport
@@ -116,7 +129,10 @@ stock compressing client under lz4 and zstd at levels 1, 3 and 19, in both
 formats. `into_parts_attaches_a_codec_only_when_compressing` and
 `an_uncoded_frame_is_fatal_before_any_request` sit beside it.
 `a_wrong_method_or_size_frame_is_fatal_before_any_request` pins the method and
-size checks one at a time. `server_decode_failures_are_fatal` and
+size checks one at a time, and
+`an_uncoded_frame_after_a_coded_one_is_fatal_before_any_request` pins that every
+frame is checked. `server_decode_failures_are_fatal`,
+`a_server_side_decode_failure_is_fatal_only_when_coded` and
 `a_server_side_checksum_failure_is_retryable` (`src/writer.rs`) and
 `decompress_is_a_reserved_setting` (`src/config.rs`) pin the classification and
 the reserved setting. The block codec's oracle, round-trip, context-reuse and

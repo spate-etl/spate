@@ -170,6 +170,8 @@ impl ShardWriter for ClickHouseWriter {
         }
         // Once per request body, ahead of the rows, so a retry re-sends
         // identical bytes under an identical token.
+        let coded = self.coded.is_some();
+        let classify = |err| classify_insert(err, coded);
         if let Some(header) = &self.header {
             insert.send(header.clone()).await.map_err(classify)?;
         }
@@ -218,7 +220,10 @@ fn check_frames(method: BlockMethod, batch: &SealedBatch) -> Result<(), SinkErro
 ///
 /// 271 is the block-decoding code. A `decompress=1` body whose block fails its
 /// checksum or does not decode answers 271. The sink makes those blocks once,
-/// at seal, and a retry resends the same bytes.
+/// at seal, and a retry resends the same bytes. An insert answers 271 too when
+/// the server reads a stored block that passes its checksum and fails to
+/// decode, such as a materialized view reading a damaged part, so
+/// [`classify_insert`] keeps 271 `Fatal` only for an insert whose body is coded.
 const FATAL_EXCEPTION_CODES: &[u32] = &[
     6,   // CANNOT_PARSE_TEXT
     16,  // NO_SUCH_COLUMN_IN_TABLE
@@ -230,10 +235,34 @@ const FATAL_EXCEPTION_CODES: &[u32] = &[
     81,  // UNKNOWN_DATABASE
     117, // INCORRECT_DATA
     192, // UNKNOWN_USER
-    271, // CANNOT_DECOMPRESS
+    CANNOT_DECOMPRESS,
     497, // ACCESS_DENIED
     516, // AUTHENTICATION_FAILED
 ];
+
+/// The server's block-decoding exception code.
+const CANNOT_DECOMPRESS: u32 = 271;
+
+/// Classifies an insert's error as [`classify`] does, except that 271 is
+/// `Retryable` when the body is not `coded`.
+///
+/// An uncoded body carries no compressed block, so its 271 comes from data the
+/// server reads itself, and another replica can take the insert.
+fn classify_insert(err: clickhouse::error::Error, coded: bool) -> SinkError {
+    let stored_block = !coded
+        && matches!(
+            &err,
+            clickhouse::error::Error::BadResponse(reason)
+                if exception_code(reason) == Some(CANNOT_DECOMPRESS)
+        );
+    match classify(err) {
+        SinkError::Client { reason, .. } if stored_block => SinkError::Client {
+            class: ErrorClass::Retryable,
+            reason,
+        },
+        classified => classified,
+    }
+}
 
 /// Map a client error onto the framework's retryable/fatal taxonomy.
 ///
@@ -383,15 +412,15 @@ mod tests {
         ));
     }
 
-    /// A server that cannot decode an insert's compressed blocks answers 271,
-    /// which classifies `Fatal`: a retry would resend the same blocks.
+    /// A server that cannot decode a coded insert's blocks answers 271, which
+    /// classifies `Fatal`: a retry would resend the same blocks.
     #[test]
     fn server_decode_failures_are_fatal() {
         for reason in [
             "Code: 271. DB::Exception: Checksum doesn't match: corrupted data.",
             "Code: 271. DB::Exception: Cannot decompress: LZ4 decompression failed.",
         ] {
-            let err = classify(clickhouse::error::Error::BadResponse(reason.into()));
+            let err = classify_insert(clickhouse::error::Error::BadResponse(reason.into()), true);
             assert!(
                 matches!(
                     err,
@@ -407,7 +436,8 @@ mod tests {
 
     /// A checksum failure in data the server reads itself, here a materialized
     /// view reading a corrupted part, answers 40 and classifies `Retryable`, so
-    /// the next attempt can reach a healthy replica.
+    /// the next attempt can reach a healthy replica. A stored block that passes
+    /// its checksum and fails to decode answers 271 instead.
     #[test]
     fn a_server_side_checksum_failure_is_retryable() {
         let reason = "Code: 40. DB::Exception: Checksum doesn't match: corrupted data. Reference: 2338a6e26c614fec6feb62deae67c37e. Actual: 71bfc9638d4ed97f67949d6eba179620. Size of compressed block: 32780: While reading or decompressing /var/lib/clickhouse/store/c50/c5066d20-e7a6-4ee3-83d5-a200e66893db/all_1_1_0/data.bin (position: 32796, typename: DB::AsynchronousReadBufferFromFileWithDescriptorsCache, compressed data header: <uninitialized>): (while reading column k): (while reading from part /var/lib/clickhouse/store/c50/c5066d20-e7a6-4ee3-83d5-a200e66893db/all_1_1_0/ in table default.dim (c5066d20-e7a6-4ee3-83d5-a200e66893db) located on disk default of type local, from mark 0 with max_rows_to_read = 65536): While reading part all_1_1_0: While executing MergeTreeSelect(pool: ReadPoolInOrder, algorithm: InOrder): while pushing to view default.mv: While executing WaitForAsyncInsert. (CHECKSUM_DOESNT_MATCH) (version 26.8.17.4 (official build))";
@@ -422,6 +452,21 @@ mod tests {
             ),
             "{err:?}"
         );
+    }
+
+    /// A stored block that passes its checksum and fails to decode, here read
+    /// by a materialized view, answers an insert 271. It classifies
+    /// `Retryable` for an uncoded insert and `Fatal` for a coded one.
+    #[test]
+    fn a_server_side_decode_failure_is_fatal_only_when_coded() {
+        let reason = "Code: 271. DB::Exception: Cannot decompress LZ4-encoded data: While reading or decompressing /var/lib/clickhouse/store/a16/a1609cef-2585-4c66-be6e-1707b7b286c6/all_1_1_0/k.bin (position: 32796, typename: DB::AsynchronousReadBufferFromFileWithDescriptorsCache, compressed data header: <uninitialized>): (while reading column k): (while reading from part /var/lib/clickhouse/store/a16/a1609cef-2585-4c66-be6e-1707b7b286c6/all_1_1_0/ in table default.dim (a1609cef-2585-4c66-be6e-1707b7b286c6) located on disk default of type local, from mark 0 with max_rows_to_read = 49152): While reading part all_1_1_0: While executing MergeTreeSelect(pool: ReadPoolInOrder, algorithm: InOrder): while pushing to view default.mv: While executing WaitForAsyncInsert. (CANNOT_DECOMPRESS) (version 26.8.17.4 (official build))";
+        for (coded, expected) in [(false, ErrorClass::Retryable), (true, ErrorClass::Fatal)] {
+            let err = classify_insert(clickhouse::error::Error::BadResponse(reason.into()), coded);
+            let SinkError::Client { class, .. } = &err else {
+                panic!("{err:?}");
+            };
+            assert_eq!(*class, expected, "coded: {coded}, {err:?}");
+        }
     }
 
     /// A replica whose certificate does not verify fails both a header-led

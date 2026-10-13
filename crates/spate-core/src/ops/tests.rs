@@ -1584,6 +1584,29 @@ fn a_parked_chunk_does_not_hold_back_another_shard() {
     assert_eq!(order, vec![b"a".to_vec(), b"b".to_vec()]);
 }
 
+/// A shard other than the first counts its parked chunks down as they
+/// drain, so its next seal goes straight to its queue.
+#[test]
+fn a_second_shard_sends_directly_once_its_parked_chunks_drain() {
+    let (queues, mut rxs) = shard_queues(2, 1);
+    let mut handoff = order_handoff(queues, ByPrefix, 1);
+    let mut keep = Vec::new();
+    // "s1:a" fills shard 1's one-slot queue and "s1:b" parks behind it.
+    for p in [&b"s1:a"[..], b"s1:b"] {
+        let (rec, rx) = probe_rec(p);
+        keep.push(rx);
+        let _ = Collector::push(&mut handoff, rec);
+    }
+    let order = drain_relieving(&mut handoff, &mut rxs[1]);
+    assert_eq!(order, vec![b"s1:a".to_vec(), b"s1:b".to_vec()]);
+    let (rec, rx) = probe_rec(b"s1:c");
+    keep.push(rx);
+    let _ = Collector::push(&mut handoff, rec);
+    let chunk = rxs[1].try_recv().expect("s1:c queued without a relieve");
+    assert_eq!(decode_rows(&chunk.frame), vec![b"s1:c".to_vec()]);
+    chunk.acks.deliver();
+}
+
 #[test]
 fn multi_shard_routing_by_key_hash() {
     #[derive(Clone, Copy)]

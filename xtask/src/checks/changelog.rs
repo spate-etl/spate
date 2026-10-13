@@ -38,23 +38,28 @@ const TYPES: &[&str] = &[
 /// derives a minor bump from it.
 const BREAKING: &str = "**Breaking:**";
 
-/// What a new fragment carries until its author writes the entry.
+/// What a new fragment carries until its author writes the entry. Each `\`
+/// continuation keeps a paragraph on one line of the written file.
 const TEMPLATE: &str = "\
 **A short descriptive title** (`spate-crate`)
 
-Start with what happens now, in present tense. Follow with what happened
-previously, in past tense, then explain the practical consequence or required
-action. For a new feature, include previous limitations only when useful.
+Start with what happens now, in present tense. \
+Follow with what happened previously, in past tense, \
+then explain the practical consequence or required action. \
+For a new feature, include previous limitations only when useful.
 
-Use short sentences and familiar words. Keep exact setting, type and metric
-names readers need to find. Avoid idioms, implementation jargon and vague
-claims. Include qualifications when they prevent a likely misunderstanding.
-Usually write three to five sentences; add paragraphs for migration details.
-Check current behavior against source and tests, and previous behavior against
-history. Say \"in previous versions\" only for behavior verified in a release.
+Use short sentences and familiar words. \
+Keep exact setting, type and metric names readers need to find. \
+Avoid idioms, implementation jargon and vague claims. \
+Include qualifications when they prevent a likely misunderstanding. \
+Usually write three to five sentences; add paragraphs for migration details. \
+Check current behavior against source and tests, and previous behavior against history. \
+Say \"in previous versions\" only for behavior verified in a release.
 
-Delete this template text and write the entry. If the change is breaking, open
-with `**Breaking:**`. See changelog.d/README.md for the guide and an example.
+Write each paragraph on one line. \
+Delete this template text and write the entry. \
+If the change is breaking, open with `**Breaking:**`. \
+See changelog.d/README.md for the guide and an example.
 ";
 
 /// What the failure prints under the shipped paths.
@@ -112,7 +117,8 @@ enum Mode {
     Require { base: String, head: Option<String> },
 }
 
-/// The gate: demands a fragment when the change touches what a crate ships.
+/// The gate: demands a fragment when the change touches what a crate ships, and
+/// refuses a pending fragment with a paragraph written over several lines.
 pub(crate) fn check(root: &Path, explain: bool) -> Outcome {
     if explain {
         println!("(reads the paths this branch changes and {FRAGMENTS}/)");
@@ -137,6 +143,24 @@ fn gate(root: &Path, fields: &Fields, in_actions: bool, github_event: &str) -> O
         return Err(Error::msg(format!(
             "{FRAGMENTS}/README.md not found. It states the format and, less obviously,\n  \
              is what keeps the directory in git once a release has consumed every fragment."
+        )));
+    }
+
+    let wrapped = wrapped_fragments(root);
+    if !wrapped.is_empty() {
+        return Err(Error::msg(format!(
+            "a fragment paragraph spans more than one line:\n\n{}\n  \
+             Write each paragraph and list item of a fragment on one line. A GitHub\n  \
+             release body renders every newline in a paragraph, list item, blockquote\n  \
+             or heading as a line break, so a wrapped paragraph renders ragged. Join\n  \
+             the named lines into one, with a space where each newline and any\n  \
+             trailing `\\` or spaces were. A line meant to start a new block needs a\n  \
+             blank line before it.\n  \
+             {FRAGMENTS}/README.md has the conventions.",
+            wrapped
+                .iter()
+                .map(|line| format!("    {line}\n"))
+                .collect::<String>()
         )));
     }
 
@@ -617,6 +641,89 @@ fn has_prose(bytes: &[u8]) -> bool {
     String::from_utf8_lossy(bytes)
         .chars()
         .any(|c| !c.is_whitespace())
+}
+
+/// Every paragraph of every pending fragment that spans more than one line, as
+/// `<file>:<first>: this paragraph runs over lines <first>-<last>.` lines.
+fn wrapped_fragments(root: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    for file in fragment_names(root) {
+        let Ok(bytes) = std::fs::read(root.join(&file)) else {
+            continue;
+        };
+        for (first, last) in wrapped_paragraphs(&String::from_utf8_lossy(&bytes)) {
+            out.push(format!(
+                "{file}:{first}: this paragraph runs over lines {first}-{last}."
+            ));
+        }
+    }
+    out
+}
+
+/// The blocks of text in one fragment that hold a line break, each as the
+/// 1-based first and last line of its text.
+///
+/// The fragment is parsed as GitHub Flavored Markdown. A soft break (a newline
+/// inside a paragraph, list item, blockquote or heading) and a hard break (two
+/// trailing spaces or a trailing `\`) both render as a line break in a GitHub
+/// release body. Code, tables and HTML blocks hold no breaks.
+fn wrapped_paragraphs(text: &str) -> Vec<(usize, usize)> {
+    use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+
+    let line = |offset: usize| text[..offset].matches('\n').count() + 1;
+    let mut out = Vec::new();
+    // The byte span of the current run of inline content, and whether it holds
+    // a break. Any block start or end closes the run.
+    let mut run: Option<(usize, usize)> = None;
+    let mut broken = false;
+    let options = Options::ENABLE_TABLES
+        | Options::ENABLE_FOOTNOTES
+        | Options::ENABLE_STRIKETHROUGH
+        | Options::ENABLE_TASKLISTS;
+    for (event, range) in Parser::new_ext(text, options).into_offset_iter() {
+        let inline = match &event {
+            Event::SoftBreak | Event::HardBreak => {
+                broken = true;
+                true
+            }
+            Event::Start(
+                Tag::Emphasis
+                | Tag::Strong
+                | Tag::Strikethrough
+                | Tag::Superscript
+                | Tag::Subscript
+                | Tag::Link { .. }
+                | Tag::Image { .. },
+            )
+            | Event::End(
+                TagEnd::Emphasis
+                | TagEnd::Strong
+                | TagEnd::Strikethrough
+                | TagEnd::Superscript
+                | TagEnd::Subscript
+                | TagEnd::Link
+                | TagEnd::Image,
+            )
+            | Event::Text(_)
+            | Event::Code(_)
+            | Event::InlineMath(_)
+            | Event::DisplayMath(_)
+            | Event::InlineHtml(_)
+            | Event::FootnoteReference(_)
+            | Event::TaskListMarker(_) => true,
+            Event::Start(_) | Event::End(_) | Event::Html(_) | Event::Rule => false,
+        };
+        if inline {
+            run = Some(run.map_or((range.start, range.end), |(first, _)| (first, range.end)));
+            continue;
+        }
+        if let Some((first, last)) = run.take()
+            && std::mem::take(&mut broken)
+        {
+            out.push((line(first), line(last - 1)));
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------

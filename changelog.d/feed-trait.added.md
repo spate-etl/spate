@@ -1,10 +1,3 @@
 **A feed trait for queue-fed sources** (`spate-core`, `spate-test`)
 
-`spate_core::feed::Feed` is the contract a source uses to read work units from
-a queue. A source receives units, renews the ones it holds, and acknowledges or
-fails each one. A publisher adds units and reads a `Confirmation` that reports
-when the feed has stored each one. `spate_core::feed::memory::MemoryFeed` is an
-in-process feed for one instance. It keeps nothing across a restart and moves a
-unit that fails on its tenth delivery to an in-memory dead-letter list.
-`spate_test::scripted_feed` lets a test script redelivery, duplicate delivery,
-dead letters and publish outcomes.
+`spate_core::feed::Feed` is the contract a source uses to read work units from a queue. A source receives units, renews the ones it holds, and acknowledges or fails each one. A publisher adds units and reads a `Confirmation` that reports when the feed has stored each one. `spate_core::feed::memory::MemoryFeed` is an in-process feed for one instance. It keeps nothing across a restart and moves a unit that fails on its tenth delivery to an in-memory dead-letter list. `spate_test::scripted_feed` lets a test script redelivery, duplicate delivery, dead letters and publish outcomes.

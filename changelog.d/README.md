@@ -109,6 +109,13 @@ implementation, including readers whose first language is not English.
 - **Open with a short bold title and the crate name**, then put the body in a
   separate paragraph. Keep the voice impersonal: "The pipeline now logs…"
   describes the behavior directly.
+- **Write each paragraph on one line.** A GitHub release body turns every
+  newline into a line break, so a paragraph wrapped at 80 columns renders as
+  ragged short lines. `cargo xtask tidy changelog` parses each fragment as
+  GitHub Flavored Markdown and refuses one whose text holds a line break: a
+  newline inside a paragraph, list item, blockquote or heading, or a hard break
+  from two trailing spaces or a trailing `\`. Code blocks, tables and HTML
+  blocks are not affected. Write each list item on one line too.
 - **Usually write three to five sentences.** A simple change can take fewer;
   a breaking change may need additional paragraphs for migration details.
 - No pull request number and no author. The number is derived at release time
@@ -132,11 +139,7 @@ For example:
 ```markdown
 **Admin server address** (`spate-core`)
 
-The pipeline now logs the admin server's bound address at `INFO` with the
-message `admin server listening`. Previously, startup did not report this
-address, so configuring `admin.listen` with port `0` left the automatically
-assigned port out of the logs. You can use the logged address to reach
-`/metrics`, `/healthz`, and `/readyz`.
+The pipeline now logs the admin server's bound address at `INFO` with the message `admin server listening`. Previously, startup did not report this address, so configuring `admin.listen` with port `0` left the automatically assigned port out of the logs. You can use the logged address to reach `/metrics`, `/healthz`, and `/readyz`.
 ```
 
 ## What happens at release

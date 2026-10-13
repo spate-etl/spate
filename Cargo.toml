@@ -155,6 +155,9 @@ clap = { version = "4.5", default-features = false, features = [
 # Raise the patch floor only when the `-Z direct-minimal-versions` job says to.
 libc = "0.2.183"
 gungraun = "0.19.4"
+# xtask's changelog gate parses fragments as CommonMark; the HTML renderer
+# and its CLI stay off.
+pulldown-cmark = { version = "0.13.4", default-features = false }
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(docsrs)", "cfg(loom)"] }

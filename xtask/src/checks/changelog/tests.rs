@@ -96,6 +96,260 @@ fn an_empty_fragment_is_not_prose() {
     assert!(has_prose(b"\xff"));
 }
 
+/// A paragraph written over several lines is named by its first and last line,
+/// and the bold title counts as a paragraph of its own.
+#[test]
+fn a_wrapped_paragraph_is_named_by_its_lines() {
+    assert_eq!(
+        wrapped_paragraphs("**A title** (`spate-core`)\n\nOne line.\n\nFirst\nsecond\nthird.\n"),
+        vec![(5, 7)]
+    );
+    assert_eq!(
+        wrapped_paragraphs("**A title** (`spate-core`)\nThe body.\n"),
+        vec![(1, 2)]
+    );
+    assert_eq!(
+        wrapped_paragraphs("First\n  indented second.\n\nOne line.\n\nA\nB\n"),
+        vec![(1, 2), (6, 7)]
+    );
+    assert_eq!(
+        wrapped_paragraphs("One line.\n\nOne more line.\n"),
+        Vec::<(usize, usize)>::new()
+    );
+}
+
+/// Fenced code, tables, headings, indented code, HTML blocks and one-line list
+/// items hold consecutive lines that render no line break.
+#[test]
+fn blocks_without_a_line_break_pass() {
+    for text in [
+        "Migrate with:\n\n```yaml\nsource:\n  kind: s3\n```\n",
+        "~~~\na\nb\n~~~\n",
+        "Steps:\n\n- one\n- two\n\n1. first\n2) second\n* star\n+ plus\n",
+        "| a | b |\n| --- | --- |\n| 1 | 2 |\n",
+        "Choose a or\n| b | c |\n| --- | --- |\n",
+        "> quoted\n>\n> a second paragraph\n",
+        "# Heading\nThe paragraph under it.\n",
+        "Code follows.\n\n    let a = 1;\n    let b = 2;\n",
+        "- an item\n  - a nested item\n",
+    ] {
+        assert_eq!(
+            wrapped_paragraphs(text),
+            Vec::<(usize, usize)>::new(),
+            "{text}"
+        );
+    }
+    assert_eq!(
+        wrapped_paragraphs("```\na\n```\nAfter the fence\nand wrapped.\n"),
+        vec![(4, 5)]
+    );
+}
+
+/// A list item, a blockquote and a paragraph inside either render a newline as
+/// a line break too, and are named by the lines of their text.
+#[test]
+fn list_items_and_blockquotes_are_held_to_one_line() {
+    for (text, lines) in [
+        ("- one\n- two\n  continued\n", (2, 3)),
+        ("- one\ncontinued lazily\n", (1, 2)),
+        ("1. one\n   two\n", (1, 2)),
+        (
+            "- an item\n\n  a second paragraph\n  over two lines\n",
+            (3, 4),
+        ),
+        ("- an item\n  wrapped\n  - a nested item\n", (1, 2)),
+        ("> quoted\n> still quoted\n", (1, 2)),
+        ("> quoted\nlazy continuation\n", (1, 2)),
+    ] {
+        assert_eq!(wrapped_paragraphs(text), vec![lines], "{text}");
+    }
+}
+
+/// A hard break, written as two trailing spaces or a trailing backslash,
+/// renders the same line break as a soft one.
+#[test]
+fn a_hard_break_is_a_wrapped_paragraph() {
+    assert_eq!(
+        wrapped_paragraphs("Two spaces  \nthen more.\n"),
+        vec![(1, 2)]
+    );
+    assert_eq!(
+        wrapped_paragraphs("A backslash\\\nthen more.\n"),
+        vec![(1, 2)]
+    );
+}
+
+/// Inline markup at either end of a line stays inside its paragraph, so a
+/// wrapped paragraph is named once, by its first and last line.
+#[test]
+fn inline_markup_does_not_split_a_wrapped_paragraph() {
+    for text in [
+        "See\n[the guide](https://x.example)\nfor more.\n",
+        "Set\n`io_threads`\nhigher.\n",
+        "A\n**strong**\nword.\n",
+        "An\n*emphasised*\nword.\n",
+        "A\n~~struck~~\nword.\n",
+        "Some\n<b>inline</b>\nHTML.\n",
+        "An\n![image](x.png)\nhere.\n",
+        "A note\n[^1]\nhere.\n\n[^1]: The note.\n",
+    ] {
+        assert_eq!(wrapped_paragraphs(text), vec![(1, 3)], "{text}");
+    }
+}
+
+/// A footnote holds paragraphs of its own, indented under its label, and each
+/// is held to one line like any other.
+#[test]
+fn a_footnote_paragraph_is_held_to_one_line() {
+    assert_eq!(
+        wrapped_paragraphs("Text[^1].\n\n[^1]: A note.\n\n    More\n    lines.\n"),
+        vec![(5, 6)]
+    );
+}
+
+/// A line that cannot interrupt a paragraph continues it, though it would open
+/// a block after a blank line.
+#[test]
+fn wrapped_before_a_non_interrupting_marker() {
+    assert_eq!(
+        wrapped_paragraphs("Released in\n2025. The next sentence.\n"),
+        vec![(1, 2)]
+    );
+    assert_eq!(
+        wrapped_paragraphs("Choose a or\n| b as needed.\n"),
+        vec![(1, 2)]
+    );
+}
+
+/// Consecutive link reference definitions and the lines of an HTML block are
+/// not a wrapped paragraph.
+#[test]
+fn valid_blocks_are_not_wrapped_paragraphs() {
+    for t in [
+        "[a]: https://x\n[b]: https://y\n",
+        "<details>\n<summary>x</summary>\n</details>\n",
+    ] {
+        assert_eq!(wrapped_paragraphs(t), Vec::<(usize, usize)>::new(), "{t}");
+    }
+}
+
+/// Each line after a paragraph line ends the paragraph exactly where GitHub's
+/// GFM renderer ends it, and each HTML block runs to where the renderer ends
+/// it.
+#[test]
+fn a_paragraph_ends_where_gfm_ends_it() {
+    let wrapped = [
+        "A para\n1.\n",
+        "A para\n0. x\n",
+        "A para\n    - x\n",
+        "A para\n  \t- x\n",
+        "A para\n\t# x\n",
+        "A para\n__\n",
+        "[a] and [b]: x\nwrapped.\n",
+        "[]: x\nwrapped.\n",
+        "1234567890. x\nwrapped.\n",
+        "<1x>\nwrapped.\n",
+        "A para\n    ```\n",
+        "A para\n#######\n",
+        "A para\n[b]: https://y\n",
+        "A para\n<span>x</span>\n",
+        "A para\n</pre>\n",
+        "<https://x.example> is the guide\nwrapped.\n",
+        "<b>Bold</b> text\nwrapped.\n",
+        "<!-- note -->\nA para\nwrapped.\n",
+        "<pre>\nx\n</pre>\nA para\nwrapped.\n",
+        "<details>\n\nA para\nwrapped.\n\n</details>\n",
+        "===\nA para\n",
+    ];
+    for text in wrapped {
+        assert_eq!(wrapped_paragraphs(text).len(), 1, "{text}");
+    }
+    for text in [
+        "A para\n01. x\n",
+        "A para\n# h\n",
+        "A para\n#\n",
+        "A para\n> q\n",
+        "A para\n>q\n",
+        "1.\nwrapped.\n",
+        "A para\n1)\tx\n",
+        "A para\n   - x\n",
+        "A para\n-\n",
+        "A para\n---\nNext.\n",
+        "A para\n===\n",
+        "A para\n===\nNext.\n",
+        "A para\n***\n",
+        "A para\n_ _ _\n",
+        "A para\n<details>\n",
+        "A para\n<hr/>\n",
+        "A para\n<div\n",
+        "A para\n</DIV>\n",
+        "A para\n<pre class=\"x\">\n",
+        "A para\n<!-- c -->\n",
+        "A para\n<?php x ?>\n",
+        "A para\n<!DOCTYPE html>\n",
+        "A para\n<![CDATA[x]]>\n",
+        "---\nA para\n",
+        "<span>\nwrapped\nmore\n",
+        "<div>\nraw\nhtml\nlines\n",
+        "<x-tag>\nraw\nlines.\n",
+        "<!-- a\n\nb -->\n",
+        "[a]: https://x\nA para\n",
+    ] {
+        assert_eq!(
+            wrapped_paragraphs(text),
+            Vec::<(usize, usize)>::new(),
+            "{text}"
+        );
+    }
+    assert_eq!(wrapped_paragraphs("a\nb\n---\n"), vec![(1, 2)]);
+}
+
+/// A line holding only whitespace ends a paragraph.
+#[test]
+fn a_whitespace_line_ends_a_paragraph() {
+    assert_eq!(
+        wrapped_paragraphs("One line.\n  \nAnother line.\n"),
+        Vec::<(usize, usize)>::new()
+    );
+}
+
+/// A run of `#` with no space after it is paragraph text, not a heading.
+#[test]
+fn a_hash_without_a_space_continues_a_paragraph() {
+    assert_eq!(
+        wrapped_paragraphs("Fixed in\n#123 and more.\n"),
+        vec![(1, 2)]
+    );
+}
+
+/// What `changelog new` writes, and every example the README shows, are already
+/// one line per paragraph.
+#[test]
+fn the_template_and_the_readme_examples_are_unwrapped() {
+    assert_eq!(wrapped_paragraphs(TEMPLATE), Vec::<(usize, usize)>::new());
+    let root = crate::repo_root().unwrap();
+    let readme = std::fs::read_to_string(root.join("changelog.d/README.md")).unwrap();
+    let mut examples = 0;
+    let mut lines = readme.lines();
+    while let Some(line) = lines.next() {
+        if line != "```markdown" {
+            continue;
+        }
+        let example: String = lines
+            .by_ref()
+            .take_while(|line| *line != "```")
+            .map(|line| format!("{line}\n"))
+            .collect();
+        assert_eq!(
+            wrapped_paragraphs(&example),
+            Vec::<(usize, usize)>::new(),
+            "{example}"
+        );
+        examples += 1;
+    }
+    assert!(examples > 0, "changelog.d/README.md shows no example");
+}
+
 /// The trailer is read in any casing, with whatever spacing, and a sentence
 /// that merely opens with the word is not one.
 #[test]
@@ -324,6 +578,77 @@ fn the_gate_refuses_a_tree_missing_the_fragment_directory() {
         refused.message,
         "changelog.d/README.md not found. It states the format and, less obviously,\n  \
          is what keeps the directory in git once a release has consumed every fragment."
+    );
+}
+
+/// The gate refuses a pending fragment with a wrapped paragraph whatever the
+/// event, naming the file and the lines, and passes it once it is unwrapped.
+#[test]
+fn the_gate_refuses_a_wrapped_fragment_by_file_and_line() {
+    let repo = Repo::new("the_gate_refuses_a_wrapped_fragment_by_file_and_line");
+    repo.write(
+        "changelog.d/wrapped.fixed.md",
+        "**A title** (`spate-core`)\n\nThe pipeline does a thing. It\nwraps here.\n",
+    );
+    repo.write(
+        "changelog.d/fine.added.md",
+        "**A title** (`spate-core`)\n\nOne line.\n",
+    );
+    let push = Fields {
+        event: "push".to_owned(),
+        ..Fields::default()
+    };
+    let refused = refused(gate(repo.path(), &push, false, ""));
+    assert!(
+        refused.starts_with(
+            "a fragment paragraph spans more than one line:\n\n    \
+             changelog.d/wrapped.fixed.md:3: this paragraph runs over lines 3-4.\n\n"
+        ),
+        "{refused}"
+    );
+    assert!(!refused.contains("fine.added.md"), "{refused}");
+    assert!(refused.contains("one line"), "{refused}");
+
+    repo.write(
+        "changelog.d/wrapped.fixed.md",
+        "**A title** (`spate-core`)\n\nThe pipeline does a thing. It wraps here.\n",
+    );
+    assert!(gate(repo.path(), &push, false, "").is_ok());
+}
+
+/// On a pull request, a wrapped fragment is refused even when the change ships
+/// nothing, or ships something and says `Changelog: none`.
+#[test]
+fn a_pull_request_with_a_wrapped_fragment_is_refused() {
+    let repo = Repo::new("a_pull_request_with_a_wrapped_fragment_is_refused");
+    let base = repo.git(&["rev-parse", "HEAD"]);
+    repo.write(
+        "changelog.d/wrapped.fixed.md",
+        "**A title** (`spate-core`)\n\nThe pipeline does a thing. It\nwraps here.\n",
+    );
+    let unshipped = repo.commit("core: a wrapped fragment");
+    let refused_unshipped = refused(gate(
+        repo.path(),
+        &pull_request(&base, &unshipped, ""),
+        false,
+        "",
+    ));
+    assert!(
+        refused_unshipped.contains("changelog.d/wrapped.fixed.md:3:"),
+        "{refused_unshipped}"
+    );
+
+    repo.write("crates/spate-core/src/lib.rs", "pub fn f() {}\n");
+    let shipped = repo.commit("core: a function");
+    let refused_none = refused(gate(
+        repo.path(),
+        &pull_request(&base, &shipped, "Changelog: none"),
+        false,
+        "",
+    ));
+    assert!(
+        refused_none.contains("changelog.d/wrapped.fixed.md:3:"),
+        "{refused_none}"
     );
 }
 

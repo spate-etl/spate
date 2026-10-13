@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 clap = { workspace = true, features = ["derive", "env"] }
+pulldown-cmark = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["raw_value"] }
 toml = { workspace = true }

@@ -151,12 +151,14 @@ pub struct PipelineConfig {
 pub struct PipelineSection {
     /// Pipeline name; the `pipeline` label on every metric.
     pub name: String,
-    /// Pinned pipeline thread count. `None` derives from
-    /// `available_parallelism` minus the I/O reserve at startup.
+    /// Pinned pipeline thread count. `None` derives it at startup from
+    /// `available_parallelism`, minus one core for every two `io_threads`
+    /// (rounded up) and one for the controller, at least 1.
     #[serde(default)]
     pub threads: Option<usize>,
     /// Worker threads for the I/O runtime (sink workers, checkpointer,
-    /// admin server).
+    /// admin server). While `threads` is unset, every two extra workers take
+    /// one core from the derived pipeline thread count.
     #[serde(default = "defaults::io_threads")]
     pub io_threads: usize,
     /// Core-pinning mode for pipeline threads.

@@ -1577,3 +1577,25 @@ fn per_partition_pending_is_absent_when_detail_is_off() {
         "the aggregate alone:\n{rendered}"
     );
 }
+
+/// With `pipeline.threads` unset, the pipeline keeps one core per two I/O
+/// workers, rounded up, plus one for the controller, and always runs at least
+/// one thread.
+#[test]
+fn the_default_thread_count_reserves_half_a_core_per_io_worker() {
+    for (cores, io_threads, threads) in [
+        (1, 2, 1),
+        (2, 2, 1),
+        (4, 1, 2),
+        (4, 2, 2),
+        (8, 8, 3),
+        (32, 2, 30),
+        (32, 8, 27),
+    ] {
+        assert_eq!(
+            crate::pipeline::runtime::default_thread_count(cores, io_threads),
+            threads,
+            "{cores} cores, io_threads: {io_threads}"
+        );
+    }
+}

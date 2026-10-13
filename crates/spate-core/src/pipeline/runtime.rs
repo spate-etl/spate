@@ -164,16 +164,14 @@ impl<S: Source + 'static> PipelineRuntime<S> {
     }
 
     /// Effective pipeline thread count: the config override, else
-    /// `available_parallelism` minus the I/O reserve (I/O workers + the
-    /// controller), at least 1. `available_parallelism` respects cgroup
-    /// CPU quotas, so Kubernetes limits size this correctly. Pods without
-    /// limits see the node's cores; set `pipeline.threads` explicitly there.
+    /// [`default_thread_count`] over `available_parallelism`.
+    /// `available_parallelism` respects cgroup CPU quotas, so Kubernetes
+    /// limits size this correctly. Pods without limits see the node's cores;
+    /// set `pipeline.threads` explicitly there.
     fn thread_count(&self) -> usize {
         self.config.pipeline.threads.unwrap_or_else(|| {
             let cores = std::thread::available_parallelism().map_or(2, usize::from);
-            cores
-                .saturating_sub(self.config.pipeline.io_threads + 1)
-                .max(1)
+            default_thread_count(cores, self.config.pipeline.io_threads)
         })
     }
 
@@ -575,6 +573,21 @@ impl<S: Source + 'static> PipelineRuntime<S> {
             final_watermarks,
         })
     }
+}
+
+/// The pipeline thread count for `cores` when `pipeline.threads` is unset:
+/// `cores` minus one core for every two I/O workers (rounded up) and one for
+/// the controller, at least 1.
+///
+/// Row encoding and any sink-side compression run on the pipeline threads, so
+/// an I/O worker carries socket writes and shard bookkeeping, sized at about
+/// half a core at a high insert rate. When every thread is busy, the runnable
+/// threads exceed the cores by `floor(io_threads / 2)`, and the I/O workers
+/// share cores with pipeline threads. Compact pinning leaves the
+/// `ceil(io_threads / 2) + 1` highest cores unpinned for the I/O runtime, the
+/// controller and the source's own threads.
+pub(super) fn default_thread_count(cores: usize, io_threads: usize) -> usize {
+    cores.saturating_sub(io_threads.div_ceil(2) + 1).max(1)
 }
 
 /// Set the shutdown flag, tell every driver thread to stop within a bounded

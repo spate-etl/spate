@@ -1,0 +1,3 @@
+**The derived pipeline thread count keeps fewer cores for the I/O runtime** (`spate-core`)
+
+When `pipeline.threads` is unset, the pipeline now runs `available_parallelism` minus one core for every two `io_threads` workers (rounded up), minus one core for the controller. Previously it subtracted one core for each I/O worker. With the default `io_threads: 2`, a 4-core host now runs 2 pipeline threads instead of 1, and a 32-core host runs 30 instead of 29. Compression no longer runs on the I/O runtime, so those cores were mostly idle. Pipelines that set `pipeline.threads` are unaffected. To keep the previous count, set `pipeline.threads` to it.

@@ -3094,7 +3094,7 @@ fn a_coded_seal_keeps_a_buffer_within_twice_the_target() {
 /// target.
 #[test]
 fn an_oversized_row_does_not_pin_its_buffer() {
-    assert!(capacity_after_one_coded_row(2 * 1024) <= 2 * 1024);
+    assert_eq!(capacity_after_one_coded_row(2 * 1024), 1024);
 }
 
 /// Each split branch codes with the codec of the queue set it was given.

@@ -190,6 +190,7 @@ const EXERCISED_WHILE_RUNNING: &[&str] = &[
     names::OPERATOR_RECORDS_IN_TOTAL,
     names::OPERATOR_RECORDS_OUT_TOTAL,
     names::PIPELINE_INFO,
+    names::PIPELINE_IO_BUSY_RATIO,
     names::PIPELINE_STATE,
     names::PIPELINE_THREADS,
     names::QUEUE_DEPTH,

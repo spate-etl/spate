@@ -112,7 +112,7 @@ base64 = "0.22.1"
 flate2 = "1.1"
 # clickhouse requires ^0.13, so 0.14 adds a second copy of the crate. Tracked
 # in #562.
-zstd = "0.13"
+zstd = "0.13.1"
 # spate-avro's schema registry client; internal only (INV-6).
 reqwest = { version = "0.13.4", default-features = false }
 

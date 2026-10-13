@@ -6,9 +6,10 @@
 //! on. The cases are the codecs the sink's `compression` key selects:
 //! `upstream_lz4`, `upstream_zstd1` and `upstream_zstd3`.
 //!
-//! The frames are Native blocks of the `events` corpus sealed at the default
-//! 64 KiB chunk target, so a count here prices one sealed chunk's compression
-//! at the size production seals. Divide by eight for a per-frame figure.
+//! The frames are Native blocks of the `events` corpus sealed at
+//! `ChunkConfig`'s default chunk target, so each is the size production
+//! seals. A count here covers all eight frames; divide by eight for a
+//! per-frame figure.
 //!
 //! Needs valgrind and a same-version `gungraun-runner`: run it with
 //! `cargo xtask bench counted`.

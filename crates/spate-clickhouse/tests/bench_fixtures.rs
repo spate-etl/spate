@@ -8,7 +8,7 @@
 //! `cargo bench --no-run` cannot catch that: it compiles the bench without
 //! running it, so the first sign would be a failed valgrind job minutes into
 //! CI. These tests run wherever `cargo test` does; the frame pin, the
-//! slowest, takes about a second in the dev profile.
+//! slowest, takes under two seconds in the dev profile.
 
 use bytes::BytesMut;
 use spate_clickhouse::{
@@ -285,10 +285,9 @@ fn first_char(rec: &String) -> ShardKey<'_> {
 ///
 /// A per-frame figure is only comparable across revisions that compressed the
 /// same frames. The frames come from the `events` corpus through the Native
-/// encoder's size estimate, so a change to either moves the rows per frame,
-/// the frame sizes, and how well the frames compress. Each pin fails on one of
-/// those. The rows per frame and the size range are exact; the lz4 ratio is a
-/// band around the measured 2.600.
+/// encoder's size estimate. The rows per frame and the size range are exact,
+/// the lz4 ratio is a band around the measured 2.600, and a digest pins the
+/// write-path batch's bytes, so a corpus edit that moves no size still fails.
 #[test]
 fn the_frame_fixture_is_pinned_across_revisions() {
     let frames = frames::native_frames(frames::FRAMES);
@@ -329,6 +328,13 @@ fn the_frame_fixture_is_pinned_across_revisions() {
         frames.iter().map(|f| f.bytes.clone()).collect::<Vec<_>>()[..],
         "the batch opens with the per-frame fixture"
     );
+
+    let digest = batch
+        .frames
+        .iter()
+        .map(|f| DistributedRouter::<Owned<String>>::hash_key(ShardKey::Bytes(&f[..])))
+        .fold(0u64, |acc, h| acc.rotate_left(7) ^ h);
+    assert_eq!(digest, BATCH_DIGEST, "the write-path batch's bytes");
 }
 
 /// Rows in each of the eight frames.
@@ -343,6 +349,10 @@ const LZ4_RATIO_MIN: f64 = 2.55;
 const LZ4_RATIO_MAX: f64 = 2.65;
 /// Rows across the write-path batch's 1,600 frames.
 const BATCH_ROWS: u64 = 698_224;
+/// XXH64 of each frame in the write-path batch, folded. An edit to a
+/// fixed-width column's value formula in `rows.rs` moves no row count or frame
+/// size, and fails here.
+const BATCH_DIGEST: u64 = 0x18d4_801a_4f0c_7919;
 
 /// The write-path bench's setup works end to end under every compression.
 ///
@@ -407,10 +417,24 @@ fn the_bench_server_serves_the_schema_under_every_compression() {
                 insert.body.len(),
                 raw.len()
             );
-            // A ClickHouse compressed block opens with a 16-byte checksum,
-            // then the method byte.
-            let method = if compression == "lz4" { 0x82 } else { 0x90 };
-            assert_eq!(insert.body[16], method, "{compression}: the block's codec");
+            // The client compresses each frame into one block.
+            // `_priv::zstd_compress` uses zstd's default level, 3.
+            assert_eq!(zstd::DEFAULT_COMPRESSION_LEVEL, 3, "zstd's default level");
+            let blocks: Vec<u8> = frames
+                .iter()
+                .flat_map(|f| {
+                    let block = if compression == "lz4" {
+                        clickhouse::_priv::lz4_compress(&f.bytes)
+                    } else {
+                        clickhouse::_priv::zstd_compress(&f.bytes)
+                    };
+                    block.expect("compresses").to_vec()
+                })
+                .collect();
+            assert!(
+                insert.body[..] == blocks[..],
+                "{compression}: one block per frame, at the configured level"
+            );
         }
     }
 }

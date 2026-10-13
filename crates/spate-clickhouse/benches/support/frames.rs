@@ -13,8 +13,9 @@
 //! batch a wall-clock case writes.
 //!
 //! `tests/bench_fixtures.rs` pins the frame count, rows per frame, the size
-//! range and the lz4 ratio, so a change to the corpus or to the encoder's
-//! size estimate fails there before it re-baselines a bench.
+//! range, the lz4 ratio and a digest of the batch's bytes, so a change to the
+//! corpus or to the encoder's size estimate fails there before it re-baselines
+//! a bench.
 
 #![allow(dead_code, reason = "each target uses a different subset")]
 

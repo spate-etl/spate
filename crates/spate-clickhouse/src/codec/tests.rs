@@ -210,3 +210,24 @@ fn a_short_chunk_after_a_full_one_keeps_the_scratch() {
         );
     }
 }
+
+/// Above the floor, a chunk that needs more than half the scratch keeps it,
+/// so chunks near a large chunk target reuse one allocation.
+#[test]
+fn a_slightly_shorter_chunk_above_the_floor_keeps_the_scratch() {
+    for zstd_level in [None, Some(3)] {
+        let mut codec = BlockCodec::new(zstd_level);
+        codec
+            .encode_frame(&bytes(1024 * 1024, 3, 16))
+            .expect("the first chunk codes");
+        let kept = codec.scratch.as_ptr();
+        codec
+            .encode_frame(&bytes(900 * 1024, 5, 16))
+            .expect("the second chunk codes");
+        assert_eq!(
+            codec.scratch.as_ptr(),
+            kept,
+            "zstd level {zstd_level:?}: the scratch was replaced"
+        );
+    }
+}

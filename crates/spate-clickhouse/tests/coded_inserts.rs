@@ -328,3 +328,30 @@ fn an_uncoded_frame_after_a_coded_one_is_fatal_before_any_request() {
         "only the schema query reached the server"
     );
 }
+
+/// An insert answered 271 for a stored block the server read, here a
+/// materialized view reading a damaged part, fails `Retryable` from an `off`
+/// sink's writer and `Fatal` from an lz4 sink's writer.
+#[test]
+fn a_server_side_decode_failure_fails_fatal_only_from_a_coding_writer() {
+    const STORED_BLOCK_271: &str = "Code: 271. DB::Exception: Cannot decompress LZ4-encoded data: While reading or decompressing /var/lib/clickhouse/store/a16/a1609cef-2585-4c66-be6e-1707b7b286c6/all_1_1_0/k.bin (position: 32796, typename: DB::AsynchronousReadBufferFromFileWithDescriptorsCache, compressed data header: <uninitialized>): (while reading column k): (while reading from part /var/lib/clickhouse/store/a16/a1609cef-2585-4c66-be6e-1707b7b286c6/all_1_1_0/ in table default.dim (a1609cef-2585-4c66-be6e-1707b7b286c6) located on disk default of type local, from mark 0 with max_rows_to_read = 49152): While reading part all_1_1_0: While executing MergeTreeSelect(pool: ReadPoolInOrder, algorithm: InOrder): while pushing to view default.mv: While executing WaitForAsyncInsert. (CANNOT_DECOMPRESS) (version 26.8.17.4 (official build))";
+    let runtime = runtime();
+    let server = BenchServer::failing_inserts(&rows::event_columns(), 271, STORED_BLOCK_271);
+    let raw = frames::native_frames(1);
+    for (compression, expected) in [("off", ErrorClass::Retryable), ("lz4", ErrorClass::Fatal)] {
+        let sink = runtime.block_on(http_server::events_sink_in(
+            server.url(),
+            compression,
+            "native",
+        ));
+        let batch = frames::coded(&raw, compression, TOKEN);
+        let err = runtime
+            .block_on(sink.writer.write_batch(&sink.endpoints[0][0], &batch))
+            .expect_err(compression);
+        let SinkError::Client { class, reason } = &err else {
+            panic!("{compression}: {err:?}");
+        };
+        assert_eq!(*class, expected, "{compression}: {reason}");
+        assert!(reason.contains("Code: 271."), "{compression}: {reason}");
+    }
+}

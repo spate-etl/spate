@@ -1,5 +1,5 @@
-// The blog's tags are declared once, in `blog/tags.yml`. These tests read the
-// posts and the config as text because the config loads through the bundler's
+// The blog's tags are declared once, in `blog/tags.yml`. These tests read it
+// and the config as text because the config loads through the bundler's
 // resolver, which `node --test` does not have.
 
 import assert from 'node:assert/strict';
@@ -28,19 +28,6 @@ function declaredTags(): Map<string, Set<string>> {
   return tags;
 }
 
-/** Each post's file name and the tags its front matter lists. */
-function postTags(): Array<[string, string[]]> {
-  return fs
-    .readdirSync(BLOG)
-    .filter((f) => /^\d{4}-\d{2}-\d{2}-.*\.mdx?$/.test(f))
-    .map((f) => {
-      const front = /^---\n([\s\S]*?)\n---\n/.exec(fs.readFileSync(path.join(BLOG, f), 'utf8'));
-      assert.ok(front, `${f} has no front matter`);
-      const list = /^tags:\s*\[([^\]]*)\]\s*$/m.exec(front[1]);
-      return [f, list ? list[1].split(',').map((t) => t.trim()).filter(Boolean) : []];
-    });
-}
-
 test('every tag declares a label, a permalink and a description', () => {
   const tags = declaredTags();
   assert.deepEqual([...tags.keys()].sort(), ['engineering', 'release']);
@@ -49,14 +36,7 @@ test('every tag declares a label, a permalink and a description', () => {
   }
 });
 
-test('every tag a post lists is declared in tags.yml', () => {
-  const tags = declaredTags();
-  for (const [post, listed] of postTags()) {
-    for (const tag of listed) assert.ok(tags.has(tag), `${post} lists ${tag}, which tags.yml does not declare`);
-  }
-});
-
-/** A tag missing from `tags.yml` stops the build, so the list above cannot drift from the posts. */
+/** A tag missing from `tags.yml` stops the build, so `tags.yml` cannot drift from the posts. */
 test('the blog options refuse a tag that tags.yml does not declare', () => {
   const config = fs.readFileSync(path.join(SITE, 'docusaurus.config.ts'), 'utf8');
   const blog = /\n {8}blog: \{\n([\s\S]*?)\n {8}\},\n/.exec(config);

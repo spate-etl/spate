@@ -169,5 +169,5 @@ test('the top tick is the max when the max sits on a tick, at any magnitude', ()
 });
 
 test('columns refuse a group label wider than its group', () => {
-  assert.throws(() => columns({...DATA, groups: ['4 instances on a very long group label', '8']}, 560, 'x'), /too narrow for the group/);
+  assert.throws(() => columns({...DATA, groups: ['4 instances on a very long group label', '8']}, 560, 'x'), /too narrow for the group 4 instances on a very long group label/);
 });

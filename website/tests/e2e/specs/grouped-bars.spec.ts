@@ -39,15 +39,19 @@ function chartFaults(values: number): string[] {
 }
 
 /**
- * The bars in each chart drawing whose computed fill is their own series' hatch, as `group-series`.
+ * The bars in each chart drawing whose fill resolves to their own series' hatch inside that same
+ * drawing, as `group-series`. A `url(#id)` resolves to the first element with that id in the
+ * document, so a pattern in the other, hidden drawing does not count.
  */
 function hatchedBars(): string[][] {
   return Array.from(document.querySelectorAll<SVGSVGElement>('article figure svg[role="img"]')).map((svg) =>
     Array.from(svg.querySelectorAll<SVGGElement>('[data-bar]'))
       .filter((g) => {
         const series = g.dataset.bar!.split('-')[1];
-        const fill = getComputedStyle(g.querySelector('rect')!).fill;
-        return new RegExp(`-hatch-${series}"?\\)$`).test(fill);
+        const m = /url\("?#([^")]+)"?\)$/.exec(getComputedStyle(g.querySelector('rect')!).fill);
+        if (!m || !m[1].endsWith(`-hatch-${series}`)) return false;
+        const pattern = document.getElementById(m[1]);
+        return pattern !== null && pattern.tagName === 'pattern' && svg.contains(pattern);
       })
       .map((g) => g.dataset.bar!),
   );
@@ -86,15 +90,16 @@ for (const colorMode of ['light', 'dark'] as const) {
 }
 
 /**
- * Pins that the blog's feeds carry the chart's caption and none of its inline SVG, which a feed
- * reader would draw without the site's CSS.
+ * Pins that the blog's feeds carry the chart's caption and none of its inline SVG or legend, which
+ * a feed reader would draw without the site's CSS.
  */
-test('the blog feeds carry the chart caption and no inline SVG', async ({request}) => {
+test('the blog feeds carry the chart caption and no inline SVG or legend', async ({request}) => {
   for (const feed of ['/blog/rss.xml', '/blog/atom.xml']) {
     const response = await request.get(feed);
     expect(response.ok(), feed).toBe(true);
     const body = await response.text();
     expect(body, feed).toContain('Decoded bytes per second across the fleet.');
     expect(body, feed).not.toMatch(/<svg\b|&lt;svg\b/);
+    expect(body, feed).not.toMatch(/aria-label="Legend"|aria-label=&quot;Legend&quot;/);
   }
 });

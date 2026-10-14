@@ -1,0 +1,241 @@
+---
+title: Moving insert compression onto the pipeline threads
+description: "The ClickHouse sink compressed every insert on two I/O workers, which capped it at 18.8M rows/s with lz4 and 8.3M with zstd:3. Compressing each chunk on the pipeline thread that seals it lifts both to about 32M on the same box."
+slug: compression-on-the-pipeline-threads
+authors: [marcus]
+tags: [engineering]
+---
+
+import GroupedBars from '@site/src/components/charts/GroupedBars';
+import WhereCompressionRuns from '@site/src/components/diagrams/WhereCompressionRuns';
+
+On the benchmark rig, Spate 0.3.0's ClickHouse sink stopped scaling with its
+pipeline threads. With the default two I/O workers it inserted 18.76M rows per
+second under lz4 and 8.34M under zstd:3. Both workers were busy compressing
+insert bodies, and 32 pipeline threads waited on them.
+
+I moved that compression onto the pipeline threads. Each thread now compresses
+the chunks it seals, and the I/O workers only send them. On the same box, with
+the same two I/O workers, the sink runs lz4 1.69 times and zstd:3 3.85 times
+faster. The change is on `main` and ships in 0.4.0.
+
+<!-- truncate -->
+
+## The symptom
+
+The rig drains 2.94 billion rows from Kafka, decodes them from Avro and
+inserts them into ClickHouse in the Native format, on one `c8gd.metal-24xl`.
+The arm runs 32 pipeline threads and 32 sink shards. Within a build, the only
+setting I changed between runs was `pipeline.io_threads`, the size of the
+runtime that runs every shard worker and socket write. Its default is 2.
+
+At 2 I/O workers, 0.3.0 inserted 18.76M rows/s with lz4 and 8.34M with
+zstd:3. At 8 workers the same build inserted 32.53M and 30.67M. zstd:3 at the
+default ran at 44% of lz4's rate, while sending 13.1 bytes per row against
+lz4's 21.7.
+
+## Where the time went
+
+In 0.3.0 the `clickhouse` client compressed each frame inside its `send`, on
+the I/O task that sent it. It handed the result to a body channel with no
+buffer, so one insert's frames were compressed and written one at a time. Each
+zstd frame also built a fresh compression context.
+
+I sampled each thread's CPU from `/proc` during the drains. With lz4 at the
+default, the I/O runtime used 2.07 cores, so both workers were full, and the
+pipeline threads used 10.6 of their 32. zstd:3 is slower per frame, and a
+frame's compression holds its worker until it finishes. Nothing else scheduled
+on that worker runs in the meantime, including other inserts' socket writes
+and the shard workers' intake. A shard whose inserts stall stops taking chunks,
+its queue fills, and every pipeline thread routes rows to every shard. Under
+zstd:3 the I/O runtime averaged 1.35 cores and the pipeline threads 4.0.
+
+<WhereCompressionRuns />
+
+## Compressing at seal
+
+A pipeline thread already finishes each chunk of encoded rows and seals it
+before handing it to a shard. I made compression a step of that seal. It took
+four pull requests:
+
+- [#1137](https://github.com/spate-etl/spate/pull/1137) lets a sink supply a
+  `FrameCodec`. The pipeline thread runs it once on each chunk it seals, and
+  the shard worker sends the coded bytes unchanged, retries included. The
+  in-flight budget and `batch.max_bytes` keep counting the bytes before the
+  codec, so no sizing rule changes.
+  [ADR-0067](https://github.com/spate-etl/spate/blob/799d36400044080767c821e2c14c858bfb5d10d2/docs/adr/0067-a-sink-codes-each-sealed-chunk-on-the-pipeline-thread.md)
+  has the contract.
+- [#1141](https://github.com/spate-etl/spate/pull/1141) adds the ClickHouse
+  block codec. It writes ClickHouse's compressed block format itself: a
+  CityHash128 checksum, a method byte, the two sizes, and one lz4 block or one
+  zstd frame. Its bytes equal the client's for the same chunk. Each pipeline
+  thread keeps one zstd context and resets it for each chunk.
+- [#1142](https://github.com/spate-etl/spate/pull/1142) switches the sink over.
+  Inserts go out on a second client with compression off that shares the
+  first one's connections, and the sink adds `decompress=1` to the request, as
+  the compressing client did. A test pins that request against a stock
+  compressing client under lz4 and zstd at levels 1, 3 and 19.
+  [ADR-0068](https://github.com/spate-etl/spate/blob/799d36400044080767c821e2c14c858bfb5d10d2/docs/adr/0068-clickhouse-insert-bodies-are-framed-by-spate.md)
+  has the design.
+- [#1144](https://github.com/spate-etl/spate/pull/1144) gives that work cores.
+  With `pipeline.threads` unset, Spate used to keep back one core per I/O
+  worker, plus one for the controller. It now keeps one core per two I/O
+  workers, rounded up, plus the controller's. A 4-core host with the default two I/O workers runs 2 pipeline
+  threads instead of 1.
+
+A retry now resends the stored bytes and compresses nothing again. In a
+loopback spike before the change, I measured the I/O thread's CPU per 43 KB
+Native frame on a Graviton4 host. Compressing inside `send` cost 48.60 µs under lz4 and 88.26 µs
+under zstd:3. Sending the same frame pre-compressed cost 5.51 µs and 4.92 µs.
+
+## The same box, before and after
+
+I ran 0.3.0 and the `main` commit that carries all four changes, 799d3640, on
+the same rig box. The commit ran lz4, zstd:1 and zstd:3 at 2, 4, 8 and 16 I/O
+workers, three runs each, interleaved, with a second lz4 arm as an A/A control.
+0.3.0 ran lz4 and zstd:3 at 2 and 8 workers, two runs each, after the main
+sweep. Each figure is the median.
+
+<GroupedBars
+  name="Rows per second at 2 I/O workers, 0.3.0 against 799d3640"
+  groups={['lz4', 'zstd:3']}
+  series={['0.3.0, 2 I/O workers', '0.3.0, 8 I/O workers', '799d3640, 2 I/O workers']}
+  values={[
+    [18.76, 32.53, 31.78],
+    [8.34, 30.67, 32.09],
+  ]}
+  measure="insert throughput"
+  unit="M rows/s"
+  caption={<>
+    Median rows per second on one c8gd.metal-24xl. Under lz4, 0.3.0 inserted
+    18.76M rows/s with 2 I/O workers and 32.53M with 8, and 799d3640 inserted
+    31.78M with 2. Under zstd:3 the same three read 8.34M, 30.67M and 32.09M.
+  </>}
+/>
+
+At the default, 799d3640 runs lz4 1.69 times and zstd:3 3.85 times faster
+than 0.3.0, and it matches what 0.3.0 needed 8 workers for. The I/O runtime
+fell from 2.07 cores to 0.61 under lz4, and to 0.57 under zstd:3. The pipeline
+threads went from 10.6 cores to 21.2 under lz4, and from 4.0 to 23.7 under
+zstd:3. The compression now shows up on them.
+
+The number of I/O workers no longer matters on this rig. From 2 to 16 workers
+each codec moved by at most 4.4%, and the A/A control moved by the same step
+between 2 and 4 workers, from 31.88M to 32.80M. So the default of 2 stays.
+
+<GroupedBars
+  name="Rows per second on 799d3640 by I/O worker count"
+  groups={['2 I/O workers', '4', '8', '16']}
+  series={['lz4', 'zstd:1', 'zstd:3']}
+  values={[
+    [31.78, 31.60, 32.09],
+    [32.69, 32.47, 32.26],
+    [32.51, 32.91, 32.65],
+    [32.76, 32.98, 32.47],
+  ]}
+  measure="insert throughput"
+  unit="M rows/s"
+  caption={<>
+    Median rows per second on 799d3640 at 2, 4, 8 and 16 I/O workers. lz4 read
+    31.78M, 32.69M, 32.51M and 32.76M. zstd:1 read 31.60M, 32.47M, 32.91M and
+    32.98M. zstd:3 read 32.09M, 32.26M, 32.65M and 32.47M. The I/O runtime used
+    between 0.56 and 0.70 cores in every cell.
+  </>}
+/>
+
+The three codecs run at the same rate, so they differ only in cost. Per row,
+zstd:1 sends 13.6 bytes and zstd:3 sends 13.1, against lz4's 21.7. They cost
+the arm 0.678 and 0.706 µs of CPU against lz4's 0.638. zstd:1 gets nearly all
+of zstd:3's saving for about half the extra CPU. The rig reaches ClickHouse
+over a local bridge, where fewer bytes buy no time. Whether zstd:1 should
+become the default is
+[#795](https://github.com/spate-etl/spate/issues/795).
+
+## What it costs
+
+The compression still runs, only on other threads. A host whose pipeline
+threads are already the limit loses rows per second when they take on more
+work. I measured that case on AWS, with a c8g.8xlarge and a c7i.8xlarge client
+in a 4-core CPU quota, each against a ClickHouse 26.8 server, five rounds of
+45 seconds, lz4, with `threads` and `io_threads` unset. That quota runs a
+single pipeline thread before #1144.
+
+| client | before #1142 | #1142 | #1142 and #1144 |
+|---|---|---|---|
+| c8g | 0.98M | 0.95M | 1.84M |
+| c7i | 1.32M | 1.24M | 2.39M |
+
+#1142 on its own cost 3.1% on c8g and 6.5% on c7i, which is inside c7i's
+run-to-run noise of 7.2%. I expected that drop. Before #1144, the quota kept
+two cores back for the I/O workers, and #1142 moved the compression off them
+onto the one pipeline thread. The pipeline thread's CPU per
+row rose by 32.60 ns on c8g, and the I/O runtime's fell from 47.85 to 11.86
+ns. #1144 then gave the quota a second pipeline thread, which nearly doubled
+the rate. zstd:3 followed the same pattern: 0.98M, 0.93M and 1.81M on c8g,
+and 1.32M, 1.21M and 2.35M on c7i.
+
+## What the `clickhouse` crate still does
+
+I stopped letting the `clickhouse` crate compress inserts because a sealed
+chunk has to hold the exact bytes that every retry sends. The crate can
+pre-compress a frame, but its `CompressedData` type has private fields, cannot
+be cloned and is consumed by the send, so a chunk cannot hold one. Writing the
+block format in Spate was the only option I found that compresses once and
+keeps the result.
+It also let each thread reuse one zstd context. The cost is that Spate now
+owns that format and its checksum. A change to ClickHouse's compressed block
+format needs a change in Spate, where the client would otherwise carry it.
+
+The sink still uses the crate for everything else on the wire:
+
+- **The HTTP client.** Spate builds the HTTPS connector and hands it to the
+  crate, which keeps the connection pool and builds every request.
+- **Inserts.** The crate sends the `INSERT`, its settings and timeouts, streams
+  the frames Spate already compressed, and reads the reply.
+- **Queries.** The readiness probe, the schema check against `system.columns`
+  and the distributed table check run as queries, and the crate decodes their
+  result rows.
+- **Response decompression.** The query client keeps the configured method, and
+  the crate decompresses what the server sends back.
+- **Errors.** The crate turns a failed response into an error with the
+  server's message, and Spate reads the exception code from it to decide
+  whether to retry.
+- **Tests.** The crate's mock server backs `spate_clickhouse::testing`.
+
+Response decompression had a problem of its own. ClickHouse 26.9 compresses
+responses with ZSTD by default, and `clickhouse` 0.15.2 decoded them only as
+LZ4 under `compression: lz4`. 0.3.0 works around it by asking for LZ4 on every
+request. `clickhouse` 0.15.3 negotiates the encoding itself, so
+[#1166](https://github.com/spate-etl/spate/pull/1166) removed the workaround.
+It does not touch the insert body.
+
+## Seeing it on your own pipeline
+
+Until [#1148](https://github.com/spate-etl/spate/pull/1148), a saturated I/O
+runtime looked like a slow sink. On `main`, and in 0.4.0, each pipeline
+exports `spate_pipeline_io_busy_ratio`, the share of time the I/O
+workers spent running tasks, averaged over the last five minutes. When a full
+five-minute window averages 0.9 or more, the pipeline logs a warning that
+names `pipeline.io_threads`.
+
+## What these runs do not show
+
+- **They are tuning runs.** Every rig run used the benchmark's tuning trigger,
+  so the benchmark site does not publish them.
+- **799d3640 is not released.** 0.3.0 has none of this.
+- **About 32M is the rig's limit today.** Every 799d3640 run sits at 72–77% of
+  the rig's measured Native ingest ceiling of 43.2M rows/s. The arm uses about
+  21 of its 32 cores and ClickHouse about 15 of its 32, so something outside
+  both CPU limits caps the rate at about 32M. That is
+  [benchmark#106](https://github.com/spate-etl/benchmark/issues/106). The runs
+  show that the bottleneck moved and the I/O runtime went idle.
+- **The two builds ran apart.** The 0.3.0 runs came after the main sweep, so
+  drift between the two phases is included in the comparison. The effect, 1.7
+  and 3.9 times, is far outside it.
+- **The rig runs ClickHouse 26.3.** The insert body codec does not depend on
+  the response default that changed in 26.9.
+- **The build predates two fixes.** 799d3640 still sent the LZ4 workaround.
+  Its Native encoder also sealed blocks of about 42 KB for the 64 KiB
+  target, which [#1161](https://github.com/spate-etl/spate/pull/1161) fixed
+  after the sweep.
+- **The drains are short.** Each lasts about 90 seconds.

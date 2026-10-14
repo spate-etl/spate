@@ -116,7 +116,7 @@ pub(crate) fn assemble(host: &Host<'_>, input: &str) -> Outcome {
     group("Generate every artefact");
     host.workspace.generate(version)?;
     // The post merged as a draft, which a production build leaves out, so it
-    // goes live with the docs deploy the publish dispatches.
+    // goes live with the first site deploy after this commit reaches `main`.
     if let Some(path) = &post {
         post::publish(path)?;
     }

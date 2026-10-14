@@ -55,9 +55,10 @@ shape and the voice.
 
 The gate and the publication are automatic. `assemble` refuses a minor release
 unless exactly one post carries the slug, and the release commit removes the
-`draft: true` line, so the post goes live with the docs deploy at
-`/blog/releases/X.Y`. The GitHub release body links it there, under the site
-named by `[workspace.package] homepage`.
+`draft: true` line. The post goes live at `/blog/releases/X.Y` with the first
+site deploy after the release pull request merges, normally the one the release
+dispatches. The GitHub release body links it there, under the site named by
+`[workspace.package] homepage`.
 
 ## What the automation does
 
@@ -129,14 +130,17 @@ the site serves them.
 ## Rehearse it first
 
 ```sh
-cargo xtask release dry-run --version 0.3.0
+cargo xtask release dry-run --version X.Y.Z
 ```
 
-This runs the same `assemble` and the publish up to staging in a throwaway git
-worktree. That covers the real release commit, every pending crate packaged
-and verify-built, and the SBOMs and `SHA256SUMS` staged. `assemble` runs its pull
-request step against the real open pull requests and prints each push, close,
-open and auto-merge instead of making it. The run stops before attesting
+`X.Y.Z` is the version the next release will take. The rehearsal assembles
+from the local `HEAD`, so a minor release's post has to be committed there
+first, as a draft. The dry run runs the same `assemble` and the publish up to
+staging in a throwaway git worktree. That covers the real release commit,
+every pending crate packaged and verify-built, and the SBOMs and `SHA256SUMS`
+staged. `assemble` runs its pull request step against the real open pull
+requests and prints each push, close, open and auto-merge instead of making
+it. The run stops before attesting
 and prints what a real run would do next. It needs `gh`
 authenticated, and `curl`, `cargo-about` and `cargo-cyclonedx` on the path;
 the preflight names anything missing. The generator versions in CI come from

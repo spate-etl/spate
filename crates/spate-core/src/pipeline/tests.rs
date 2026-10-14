@@ -1057,6 +1057,59 @@ fn caller_owned_io_runtime_is_used_and_shut_down_by_run() {
     );
 }
 
+/// A caller-owned current-thread I/O runtime fails `run` with
+/// `StartError::Config` before the source opens. Regression for #1155.
+#[test]
+fn current_thread_io_runtime_fails_startup() {
+    let io = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let (queues, receivers) = shard_queues(1, 8);
+    let drain: super::SinkDrainFn = Box::new(move |_budget| {
+        Box::pin(async move {
+            let _receivers = receivers;
+            DrainReport::default()
+        })
+    });
+    let sink = SinkRuntime {
+        queues: vec![queues],
+        drain,
+        probe: None,
+        failures: SinkFailures::new(),
+    };
+
+    let (source, shared, _script) = FakeSource::new();
+    let chain_shared = Arc::new(ChainShared::default());
+    let log = Arc::new(Mutex::new(SourceLog::default()));
+    let runtime = PipelineRuntime::new(
+        test_config(1),
+        source,
+        move |_thread| {
+            Box::new(FakeChain {
+                shared: Arc::clone(&chain_shared),
+                log: Arc::clone(&log),
+                mode: ChainMode::Ok,
+                batches_seen: 0,
+            }) as Box<dyn RunnableChain>
+        },
+        sink,
+        Arc::new(crate::backpressure::InflightBudget::new()),
+    )
+    .with_options(test_options())
+    .with_io_runtime(io);
+    // Without the check, a pre-triggered shutdown lets `run` drain and
+    // return `Ok`, so the assertion below fails instead of hanging.
+    runtime.shutdown_handle().trigger();
+    let result = std::thread::spawn(move || runtime.run()).join().unwrap();
+
+    let Err(err @ StartError::Config(_)) = result else {
+        panic!("expected StartError::Config, got {result:?}");
+    };
+    assert!(err.to_string().contains("multi-thread"), "{err}");
+    assert!(!shared.lock().unwrap().opened, "the source must not open");
+}
+
 /// The source drops while the io runtime still runs, so work its `Drop`
 /// spawns there completes. Regression for #854.
 #[test]

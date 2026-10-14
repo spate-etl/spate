@@ -169,6 +169,13 @@ impl<S: Source + 'static> PipelineRuntime<S> {
     /// built one; connector tasks spawned on it earlier keep running until
     /// then. Without this, assemblies end up running a second runtime,
     /// doubling `pipeline.io_threads`.
+    ///
+    /// The runtime must be multi-thread, built with
+    /// [`tokio::runtime::Builder::new_multi_thread`]. `run` waits on the
+    /// controller outside `block_on`, and a current-thread runtime runs no
+    /// spawned task then, so sink workers, the admin server and upkeep would
+    /// stall while records flow. `run` returns [`StartError::Config`] for a
+    /// current-thread runtime.
     #[must_use]
     pub fn with_io_runtime(mut self, io: tokio::runtime::Runtime) -> Self {
         self.io = Some(io);
@@ -199,6 +206,15 @@ impl<S: Source + 'static> PipelineRuntime<S> {
         let threads = self.thread_count();
         if threads == 0 || self.config.pipeline.io_threads == 0 {
             return Err(StartError::Config("thread counts must be non-zero".into()));
+        }
+        if self.io.as_ref().is_some_and(|io| {
+            io.handle().runtime_flavor() == tokio::runtime::RuntimeFlavor::CurrentThread
+        }) {
+            return Err(StartError::Config(
+                "the I/O runtime must be multi-thread: a current-thread runtime runs no \
+                 spawned task while `run` waits on the controller"
+                    .into(),
+            ));
         }
         if let Some(section) = &self.config.coordination {
             tracing::warn!(

@@ -207,6 +207,22 @@ mod tests {
         assert_eq!(undraft("No front matter.\ndraft: true\n"), None);
     }
 
+    /// Only the exact flag line is removable; a `draft` key in another spelling,
+    /// or front matter that does not parse, is named.
+    #[test]
+    fn a_draft_the_release_cannot_remove_is_named() {
+        assert_eq!(unremovable_draft(POST), None);
+        assert_eq!(unremovable_draft("---\nslug: releases/0.4\n---\n"), None);
+        assert_eq!(
+            unremovable_draft("---\ndraft : true\n---\n"),
+            Some("a draft key the release would not remove")
+        );
+        assert_eq!(
+            unremovable_draft("---\ndraft: true\ntitle: [unclosed\n---\n"),
+            Some("front matter that does not parse as YAML")
+        );
+    }
+
     /// A slug is read from the front matter, quoted or not, and nowhere else.
     #[test]
     fn the_slug_is_read_from_the_front_matter() {

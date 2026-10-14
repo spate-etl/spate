@@ -8,11 +8,12 @@
 //! `query` pair, which only the client's insert requests write. The client
 //! validates the schema answer against its `RowBinaryWithNamesAndTypes`
 //! header, and a compressing client decodes it in its own codec, so the
-//! answer follows the request as ClickHouse does:
+//! answer follows the request's `Accept-Encoding` as ClickHouse does:
 //!
-//! - `compress=1` (the client under lz4) gets ClickHouse-framed lz4 blocks;
-//! - `enable_http_compression=1` with `Accept-Encoding: zstd` (the client
-//!   under zstd) gets a plain zstd stream under `Content-Encoding: zstd`;
+//! - `zstd` (the client under zstd) gets a zstd stream under
+//!   `Content-Encoding: zstd`;
+//! - `lz4` (the client under lz4) gets an LZ4 frame under
+//!   `Content-Encoding: lz4`;
 //! - anything else gets plain RowBinary.
 //!
 //! An insert body is read frame by frame and discarded, and the server
@@ -266,9 +267,12 @@ async fn answer(
             )
         })
         .collect();
-    let accepts_zstd = headers
-        .iter()
-        .any(|(k, v)| k == "accept-encoding" && v.contains("zstd"));
+    let accepts = |codec: &str| {
+        headers
+            .iter()
+            .any(|(k, v)| k == "accept-encoding" && v.contains(codec))
+    };
+    let (accepts_zstd, accepts_lz4) = (accepts("zstd"), accepts("lz4"));
 
     let mut body = req.into_body();
     let mut kept = state.recorded.as_ref().map(|_| BytesMut::new());
@@ -282,7 +286,6 @@ async fn answer(
     }
 
     let insert = query.iter().any(|(k, _)| k == "query");
-    let flag = |name: &str| query.iter().any(|(k, v)| k == name && v == "1");
     let response = if let (true, Some((code, body))) = (insert, &state.insert_error) {
         Response::builder()
             .status(StatusCode::INTERNAL_SERVER_ERROR)
@@ -291,14 +294,16 @@ async fn answer(
             .expect("a valid response")
     } else if insert {
         status(StatusCode::OK)
-    } else if flag("compress") {
-        let block = clickhouse::_priv::lz4_compress(&state.columns).expect("lz4 frames the answer");
-        Response::new(Full::new(block))
-    } else if flag("enable_http_compression") && accepts_zstd {
+    } else if accepts_zstd {
         let stream = zstd::encode_all(&state.columns[..], 3).expect("zstd encodes the answer");
         Response::builder()
             .header("content-encoding", "zstd")
             .body(Full::new(Bytes::from(stream)))
+            .expect("a valid response")
+    } else if accepts_lz4 {
+        Response::builder()
+            .header("content-encoding", "lz4")
+            .body(Full::new(lz4_frame(&state.columns)))
             .expect("a valid response")
     } else {
         Response::new(Full::new(state.columns.clone()))
@@ -312,6 +317,23 @@ async fn answer(
         });
     }
     Ok(response)
+}
+
+/// Wraps `data` in an LZ4 frame holding one block stored uncompressed.
+///
+/// The header is fixed: FLG 0x60 (version 1, independent blocks, no
+/// checksums), BD 0x70 (4 MiB blocks), and 0x73, the second byte of the
+/// XXH32 of those two bytes. The block size has its high bit set to mark the
+/// block as stored, and four zero bytes end the frame.
+fn lz4_frame(data: &[u8]) -> Bytes {
+    let len = u32::try_from(data.len()).expect("the schema answer fits one block");
+    assert!(len < 4 << 20, "the schema answer fits one 4 MiB block");
+    let mut frame = BytesMut::with_capacity(data.len() + 15);
+    frame.extend_from_slice(&[0x04, 0x22, 0x4D, 0x18, 0x60, 0x70, 0x73]);
+    frame.extend_from_slice(&(len | 0x8000_0000).to_le_bytes());
+    frame.extend_from_slice(data);
+    frame.extend_from_slice(&[0, 0, 0, 0]);
+    frame.freeze()
 }
 
 fn status(code: StatusCode) -> Response<Full<Bytes>> {

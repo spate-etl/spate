@@ -766,3 +766,34 @@ async fn wait_for_signal() {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pipeline::fakes::{FakeSource, test_config};
+
+    /// A runtime samples the I/O busy ratio every 5 s over the sampler's
+    /// 5-minute window unless a test overrides both.
+    #[test]
+    fn the_io_busy_sampling_defaults_to_five_seconds_over_five_minutes() {
+        let (source, _log, _script) = FakeSource::new();
+        let (queues, _receivers) = crate::sink::shard_queues(1, 1);
+        let sink = SinkRuntime {
+            queues: vec![queues],
+            drain: Box::new(|_budget| Box::pin(async { crate::sink::DrainReport::default() })),
+            probe: None,
+            failures: crate::sink::SinkFailures::new(),
+        };
+        let runtime = PipelineRuntime::new(
+            test_config(1),
+            source,
+            |_thread| unreachable!("the runtime is never run"),
+            sink,
+            Arc::new(InflightBudget::new()),
+        );
+
+        assert_eq!(runtime.io_busy_interval, Duration::from_secs(5));
+        assert_eq!(runtime.io_busy_window, IoBusySampler::WINDOW);
+        assert_eq!(IoBusySampler::WINDOW, Duration::from_secs(300));
+    }
+}

@@ -7,8 +7,8 @@
 //! accepts every insert. A request is an insert when its URL carries a
 //! `query` pair, which only the client's insert requests write. The client
 //! validates the schema answer against its `RowBinaryWithNamesAndTypes`
-//! header, and a compressing client decodes it in its own codec, so the
-//! answer follows the request's `Accept-Encoding` as ClickHouse does:
+//! header and decodes it by its `Content-Encoding`. The answer follows the
+//! request's `Accept-Encoding` as ClickHouse does:
 //!
 //! - `zstd` (the client under zstd) gets a zstd stream under
 //!   `Content-Encoding: zstd`;

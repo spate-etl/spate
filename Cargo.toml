@@ -78,7 +78,7 @@ crossbeam-channel = "0.5.15"
 bytes = "1.11.1"
 core_affinity = "0.8"
 foldhash = "0.2"
-twox-hash = { version = "2.1", default-features = false, features = ["xxhash64"] }
+twox-hash = { version = "2.1.4", default-features = false, features = ["xxhash64"] }
 # Split identity in spate-s3. Ids are persisted and a collision drops work
 # silently, so this must resist adversarially-named keys.
 sha2 = "0.11"

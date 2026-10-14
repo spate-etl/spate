@@ -342,8 +342,8 @@ fn the_frame_fixture_is_pinned_across_revisions() {
 /// Rows in each of the eight frames.
 const ROWS_PER_FRAME: [u64; 8] = [576, 560, 560, 560, 560, 560, 560, 560];
 /// The smallest and largest of the eight frames, in bytes. The encoder's
-/// buffered size is refreshed every 16th row, so a frame seals up to 15 rows
-/// past `ChunkConfig`'s default target.
+/// buffered size is refreshed every 16th row, so a frame closes up to 15 rows
+/// after its size reaches `ChunkConfig`'s default target.
 const FRAME_BYTES_MIN: usize = 65_704;
 const FRAME_BYTES_MAX: usize = 67_310;
 /// Uncompressed over lz4-compressed bytes across the eight frames: 2.664.

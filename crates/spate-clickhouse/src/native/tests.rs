@@ -756,6 +756,31 @@ mod block_size {
         }
     }
 
+    /// A column type name of 128 bytes or more takes a two-byte length
+    /// prefix in the block header, and the buffered size counts it.
+    #[test]
+    fn buffered_size_counts_a_two_byte_header_prefix() {
+        #[derive(Serialize)]
+        struct Level {
+            v: i8,
+        }
+        let enum_type = format!(
+            "Enum8({})",
+            (0..12)
+                .map(|n| format!("'variant_{n:02}' = {n}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        assert!(enum_type.len() >= 128);
+        let mut enc = NativeEncoder::<Owned<Level>>::new(schema(&[("v", &enum_type)]));
+        let mut buf = BytesMut::new();
+        enc.encode(&record(Level { v: 1 }), &mut buf)
+            .expect("row encodes");
+        let size = enc.compute_buffered();
+        enc.finish_chunk(&mut buf).expect("finish");
+        assert_eq!(size, buf.len());
+    }
+
     /// Sealing on `buffered_bytes` the way the terminal stage does yields
     /// blocks of at least the target, overshooting by under one refresh
     /// interval of rows. Regression for #1139.

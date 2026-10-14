@@ -1,15 +1,15 @@
 /**
  * A grouped bar chart drawn as inline SVG on the concept figures' scale and frame. The figure's own
  * width picks one of two drawings: bars standing over a value axis, or, in a phone column, bars laid
- * along one.
+ * along one. A chart whose value labels do not fit over its bars lays them along the axis in both.
  */
 import React, {useId} from 'react';
 
 import {S1, Text, atMostOneToOne, styles as frame} from '../diagrams/parts';
-import {columns, rows, type ChartData, type Layout} from './layout';
+import {landscape, rows, type ChartData, type Layout} from './layout';
 import styles from './styles.module.css';
 
-/** The column chart's width, inside the 586 units the frame's landscape breakpoint allows for. */
+/** The landscape drawing's width, inside the 586 units the frame's landscape breakpoint allows for. */
 const WIDE = 560;
 /** The row chart's width, the sequence figures' width, which a phone column renders near 1:1. */
 const NARROW = 360;
@@ -128,14 +128,14 @@ export default function GroupedBars({name, groups, series, values, single, measu
   if (series.length > SERIES.length) throw new Error(`GroupedBars draws at most ${SERIES.length} series`);
   const data: ChartData = {groups, series, values, decimals};
   const axisLabel = `${measure}, ${unit} · higher is better`;
-  const wide = columns(data, WIDE, axisLabel);
+  const {layout: wide, vertical} = landscape(data, WIDE, axisLabel);
   const narrow = rows(data, NARROW, axisLabel);
   const anySingle = single?.some((row) => row.some(Boolean)) ?? false;
   const viewBox = (l: Layout) => `0 0 ${l.width} ${Math.ceil(l.height)}`;
   return (
     <figure className={frame.figure}>
       <svg className={frame.wide} viewBox={viewBox(wide)} style={atMostOneToOne(viewBox(wide))} role="img" aria-label={name} aria-describedby={captionId}>
-        <Drawing id={`${id}w`} layout={wide} single={single} vertical />
+        <Drawing id={`${id}w`} layout={wide} single={single} vertical={vertical} />
       </svg>
       <svg className={frame.narrow} viewBox={viewBox(narrow)} style={atMostOneToOne(viewBox(narrow))} role="img" aria-label={name} aria-describedby={captionId}>
         <Drawing id={`${id}n`} layout={narrow} single={single} vertical={false} />

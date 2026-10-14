@@ -7,7 +7,7 @@ const DESKTOP = {width: 1280, height: 900};
 const SIZES = {desktop: DESKTOP, phone: VIEWPORTS.phone};
 const DIAGRAM = 'article figure:has(svg[data-mode])';
 const CAPTION =
-  'In 0.3.0, two I/O workers compressed every insert body before sending it, and the pipeline threads waited for queue space. On 799d3640, each pipeline thread compresses the chunks it seals, and the I/O workers only send them.';
+  'In 0.3.0, two I/O workers compressed every insert body before sending it, and the pipeline threads waited for queue space. On 799d3640, each pipeline thread compresses the chunks it seals, and the I/O workers only send them. The drawing gives each thread one queue. In Spate every thread routes rows to every shard queue, so one full queue stalls them all.';
 
 /**
  * Faults in each chart's visible drawing, in SVG user units from the rendered fonts: a label

@@ -50,6 +50,8 @@ one the release dispatches, and the GitHub release body links it.
   names the hardware and the number of runs, and says which benchmark tier
   proves it. A few figures compared side by side can be drawn with the grouped
   bar chart in `src/components/charts/`, whose caption states them in words.
+  The feeds drop every inline drawing and its legend, so a figure's caption
+  must carry its content in words.
 - **A fix worth telling** is a short arc in place of a feature section: the
   symptom, the cause, the fix, and the proof.
 - **A credit line** under a highlight that someone other than the author

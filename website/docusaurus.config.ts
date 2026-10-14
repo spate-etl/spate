@@ -239,12 +239,16 @@ const config: Config = {
             description: 'Notes from building Spate.',
             copyright: `Copyright © ${new Date().getFullYear()} Marcus Kainth.`,
             // A feed item carries a post's HTML without the site's CSS, so an
-            // inline chart renders there with no colours and no wide/narrow
-            // switch. The figure caption states its values in words and stays.
+            // inline drawing renders there with no colours and no wide/narrow
+            // switch, and its legend keys nothing. Every inline SVG and every
+            // figure legend leaves the feeds; a figure's caption carries its
+            // content in words and stays.
             createFeedItems: async ({defaultCreateFeedItems, ...params}) =>
               (await defaultCreateFeedItems(params)).map((item) => ({
                 ...item,
-                content: item.content?.replace(/<svg\b[\s\S]*?<\/svg>/g, ''),
+                content: item.content
+                  ?.replace(/<svg\b[\s\S]*?<\/svg>/g, '')
+                  .replace(/<ul\b[^>]*aria-label="Legend"[\s\S]*?<\/ul>/g, ''),
               })),
           },
           // A post without a truncation marker lists in full; the list page

@@ -197,10 +197,11 @@ on an instance of the same type. Rows per second and per-thread CPU come from a
 45-second window, five rounds per cell, against the parent of the change. In a
 4-core CPU quota, where the one pipeline thread is the limit, with TLS off:
 
-- Pipeline-thread CPU per row rose by the compression it took over. On c8g,
-  1015.18 → 1047.77 ns (+32.60) under lz4 and 1015.11 → 1072.56 ns (+57.45)
-  under zstd level 3. On c7i, 755.88 → 808.59 ns (+52.70) and
-  755.78 → 826.24 ns (+70.46).
+- Pipeline-thread CPU per row rose. On c8g, 1015.18 → 1047.77 ns (+32.60)
+  under lz4 and 1015.11 → 1072.56 ns (+57.45) under zstd level 3, within 4 ns
+  of the `spate-io` fall below. On c7i, 755.88 → 808.59 ns (+52.70) and
+  755.78 → 826.24 ns (+70.46), 18.75 ns and 15.02 ns more than the
+  `spate-io` fall.
 - `spate-io` CPU per row fell. On c8g, 47.85 → 11.86 ns (lz4) and
   66.46 → 10.95 ns (zstd level 3). On c7i, 58.79 → 24.84 ns and
   79.31 → 23.87 ns.
@@ -208,15 +209,16 @@ on an instance of the same type. Rows per second and per-thread CPU come from a
 - Rows per second fell, medians [min–max]. On c8g, 0.98 [0.98–0.99] →
   0.95 [0.95–0.96] M under lz4 (−3.1%) and 0.98 [0.98–0.99] →
   0.93 [0.93–0.93] M under zstd level 3 (−5.4%). On c7i,
-  1.32 [1.28–1.38] → 1.24 [1.23–1.28] M (−6.5%) and 1.32 [1.29–1.37] →
-  1.21 [1.20–1.25] M (−8.5%). With TLS on the changes were −3.1%, −5.4%,
-  −6.1% and −8.7%. Each change is taken from the unrounded medians.
+  1.32 [1.28–1.38] → 1.24 [1.23–1.28] M (−6.5%, within its 7.2% noise) and
+  1.32 [1.29–1.37] → 1.21 [1.20–1.25] M (−8.5%). With TLS on the changes were
+  −3.1%, −5.4%, −6.1% and −8.7%. Each change is taken from the unrounded
+  medians.
 
 The 32-core shapes do not measure the I/O-runtime limit this change removes.
-There the client spent 28–31 cores on its pipeline threads, and raising
-`io_threads` from 2 to 8 at the parent moved rows per second −1.1% against
-20.3% noise (c8g, zstd level 3). The best median of this change at 32 cores
-was 18.63M rows per second.
+There the client process used 28–31 of its 32 cores, and raising `io_threads`
+from 2 to 8 at the parent moved rows per second −1.1% against 20.3% noise
+(c8g, zstd level 3). The best median of this change at 32 cores was 18.63M
+rows per second.
 
 ## More information
 

@@ -74,6 +74,8 @@ The posts already in this directory are the reference.
 - Short, plain sentences. A long one is fine between short ones.
 - Concrete numbers from real runs, including what did not work.
 - No marketing: no pitch, no sign-up prompt, no emoji.
+- Say what changed since the last release. "Now" and "will" are fine in a
+  post.
 - State what is. No "X, not Y" contrasts, no hedging, no adjectives that grade
   the work, and nothing that tells the reader how to feel about it.
 

@@ -29,7 +29,9 @@ Several of these change a metric, or a signature that only a custom connector
 or a hand-built pipeline uses. The ones a pipeline file or a `Cargo.toml` meets
 first come with the old form and the new.
 
-**The `full` feature is gone.** Each build names the connectors it uses.
+**The `full` feature is gone.** Each build must now name the connectors it
+uses. `full` was redundant. It pulled in every source, format and sink in
+Spate except the data generator, and no pipeline uses them all.
 
 ```toml
 # 0.2
@@ -45,15 +47,14 @@ manifest that still asks for `full` fails to resolve:
 package `full-feature` depends on `spate` with feature `full` but `spate` does not have that feature.
 ```
 
-To keep the old set, list `avro`, `json`, `kafka`, `clickhouse`,
-`coordination-nats` and `s3`. Building Spate also needs Rust 1.96 or newer.
+**Spate needs Rust 1.96 or newer.** 0.2 built on 1.94.
 
 **The ClickHouse sink takes its columns from the row type.** Remove `columns`
 and `validate_schema` from the sink section, and remove
 `input_format_with_names_use_header` and `input_format_with_types_use_header`
-from `settings`. The sink manages those two and rejects an override. The row
-struct derives `ClickHouseRow`, and the builder's `with_row` supplies it. A
-section further down shows the derive.
+from `settings`. The sink now manages those two and rejects an override. The
+row struct derives `ClickHouseRow`, and the builder's `with_row` supplies it.
+A section further down shows the derive.
 
 ```yaml
 # 0.2
@@ -80,11 +81,10 @@ In code, `from_component_config` returns a `ClickHouseSinkBuilder`. Await
 `.with_row::<Owned<YourRow>>()` on it to get the sink, and build the encoder
 with `ClickHouseEncoder::with_schema(sink.schema())`. A `format: native` sink
 builds a `NativeEncoder` from `sink.native_schema()`, which is no longer
-awaited. Every sink checks the
-row's field types against the table, so a field of the right width and the
-wrong type fails on the first record. A `u64` for a `DateTime64` column is one.
-With `format: rowbinary`, a `SimpleAggregateFunction(f, T)` column is checked
-against `T`.
+awaited. Every sink checks the row's field types against the table, so a field
+of the right width and the wrong type fails on the first record. A `u64` for a
+`DateTime64` column is one such field. With `format: rowbinary`, a
+`SimpleAggregateFunction(f, T)` column is checked against `T`.
 
 **A URL with credentials in it fails at load.** This covers a ClickHouse
 replica URL, a `distributed_check.endpoint` and a schema registry URL. Move the
@@ -136,7 +136,7 @@ and the planner rejects a descriptor above 294,720 raw bytes.
 - `spate_backpressure_inflight_bytes` reports real usage. In 0.2 it always read
   zero.
 - `spate_operator_errors_total{error_type="fatal"}` counts fatal errors, and the
-  `retryable` series is gone.
+  `retryable` series is gone. In 0.2 both always read zero.
 - With `metrics.per_partition_detail: true`,
   `spate_checkpoint_pending_batches` publishes a series per partition. Select
   the aggregate with `{partition=""}`.
@@ -149,7 +149,8 @@ and the planner rejects a descriptor above 294,720 raw bytes.
 
 **Hand-built pipelines.** `SinkPool::spawn` takes the sink's name and a
 `SinkFailures` register, and `SinkRuntime` has a `failures` field.
-`BackpressureMetrics::set_inflight_bytes` is removed. Replace calls to
+`BackpressureMetrics::set_inflight_bytes` is removed, because the runtime
+publishes the value itself. Replace calls to
 `OperatorMetrics::errors` with `record_errors` or `fatal_error`. A pipeline
 built with `Pipeline` needs no change.
 
@@ -206,7 +207,7 @@ Most of the fixes in this release are in the coordination protocol, and
 [#1111](https://github.com/spate-etl/spate/issues/1111) lists the defects that
 remain.
 
-In 0.4.0 a work feed takes its place. The design is in
+In 0.4.0 a work feed will take its place. The design is in
 [#1088](https://github.com/spate-etl/spate/issues/1088):
 
 - A work unit is one object, or one byte range of one object.
@@ -301,15 +302,14 @@ finishes on 0.3, or runs again through the feed on 0.4.
 
 ## Large S3 objects are read in byte ranges
 
-In 0.2 one lane read an object above the split target from start to end, so
-the largest object in a prefix set the job's tail. The 0.3 planner cuts an
+In 0.2 one lane read an object above the split target from start to end, so the
+largest object in a prefix set the job's tail. The planner now cuts an
 uncompressed object above `split_target_bytes` into byte ranges of at most the
-target, one split each, and several lanes or workers read them at once. A
-reader that starts inside an object skips to the next record boundary, and the
-reader of the range before it reads past its end to finish the last record.
-This needs an object with an ETag, and a framer that names the byte a record
-starts after. `NdjsonFramer` names `\n`. Compressed objects are still read
-whole.
+target, one split each, and several lanes or workers read them at once. A reader
+that starts inside an object skips to the next record boundary, and the reader
+of the range before it reads past its end to finish the last record. This needs
+an object with an ETag, and a framer that names the byte a record starts after.
+`NdjsonFramer` names `\n`. Compressed objects are still read whole.
 
 I ran the backfill above without its `coordination:` section, over one NDJSON
 object of 4,194,410 bytes and 31,152 records, with `split_target_bytes: 1MiB`:
@@ -366,26 +366,26 @@ WrongView: sink error (Fatal): row struct does not match declared columns for `p
   declared columns:                  id, tags.key, tags.value, viewed_at
 ```
 
-That run used the default `compression: lz4`. A 0.2 sink on that setting,
-built with `clickhouse` 0.15.2 or earlier, cannot read the ZSTD responses that
-ClickHouse 26.9 and later send by default. Its readiness probe never passes, and its
-startup schema check fails when `validate_schema` is not `off` or `format` is
-`native`. The 0.3 sink asks for LZ4 responses on every
-request. The type check also accepts an `Int256` field for a `Decimal256`
-column, and `format: native` accepts a `SimpleAggregateFunction` column whose
-stored type the Native encoder supports.
+That run used the default `compression: lz4`. A 0.2 sink on that setting, built
+with `clickhouse` 0.15.2 or earlier, cannot read the ZSTD responses that
+ClickHouse 26.9 and later send by default. Its readiness probe never passes, and
+its startup schema check fails when `validate_schema` is not `off` or `format`
+is `native`. The sink now asks for LZ4 responses on every request. The type
+check also accepts an `Int256` field for a `Decimal256` column, and
+`format: native` accepts a `SimpleAggregateFunction` column whose stored type
+the Native encoder supports.
 
 ## A rejected handshake stops the pipeline
 
 In 0.2 these connectors retried a TLS handshake the other side refused. The
 ClickHouse and Kafka sinks retried it for the life of the process under the
 default retry settings, and the Avro deserializer held the batch while it
-retried, so the reason showed only in a warning. In 0.3 a certificate that
-fails verification, or a TLS alert such as `handshake_failure`, is fatal in the
-Kafka source and sink, the ClickHouse sink, the Avro schema registry client,
-the NATS store and the S3 source. A rejected credential is fatal in the Kafka
-sink, the registry client, the NATS store and the S3 source. Other alerts, such
-as `internal_error`, stay retryable.
+retried, so the reason showed only in a warning. A certificate that fails
+verification, or a TLS alert such as `handshake_failure`, is now fatal in the
+Kafka source and sink, the ClickHouse sink, the Avro schema registry client, the
+NATS store and the S3 source. A rejected credential is fatal in the Kafka sink,
+the registry client, the NATS store and the S3 source. Other alerts, such as
+`internal_error`, stay retryable.
 
 This pipeline points its Avro deserializer at a local server that answers every
 TLS client with alert 40, `handshake_failure`, and pushes one Confluent-framed
@@ -530,13 +530,13 @@ offset. A `pause` or `resume` that lands in that window can cancel the start
 Spate's assignment sequence pauses and resumes every partition it accepts, and
 backpressure pauses them too, so any assignment could hit the window.
 
-The 0.3 source reads the group's committed offsets before it accepts an
+The source now reads the group's committed offsets before it accepts an
 assignment, and gives every partition a concrete start offset, except one whose
 committed offset could not be read or one with no committed offset under
-`auto.offset.reset: error`. The fetchers
-then start inside `assign`, before the pause. One side effect is that
-`spate_source_lag_records` appears as soon as the group has committed an offset
-for a partition, without waiting for this member's first commit.
+`auto.offset.reset: error`. The fetchers then start inside `assign`, before the
+pause. One side effect is that `spate_source_lag_records` appears as soon as the
+group has committed an offset for a partition, without waiting for this member's
+first commit.
 
 The regression test, `the_fetcher_starts_before_the_lane_is_handed_out`, runs
 against librdkafka's mock cluster with a 300 ms broker round trip. It failed on
@@ -557,10 +557,10 @@ system-trusted CA failed verification. If you placed a CA under
 Forty-nine of the 87 fixes in 0.3.0 are in split coordination. Fifteen of them
 cover a store write that applied while its reply was lost: a claim, a commit, a
 lease renewal, a failure report, an election. In 0.2 each of those could cost a
-delivery attempt, a lease, or the fleet's leader until a key expired. In 0.3 the
-worker reads the record back and carries on from what it finds. Others keep a
-slow store listing from blocking lease renewals, and hand back splits,
-leadership and membership on a graceful stop.
+delivery attempt, a lease, or the fleet's leader until a key expired. The worker
+now reads the record back and carries on from what it finds. Others keep a slow
+store listing from blocking lease renewals, and hand back splits, leadership and
+membership on a graceful stop.
 
 They are there so that a job started on 0.3 can finish on it.
 [#1111](https://github.com/spate-etl/spate/issues/1111) lists the known

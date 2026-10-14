@@ -25,6 +25,14 @@ pub(crate) fn posts_with_slug(blog: &Path, slug: &str) -> Result<Vec<PathBuf>, E
             let path = entry
                 .map_err(|e| Error::msg(format!("{}: {e}", dir.display())))?
                 .path();
+            // The blog plugin's default `exclude` drops `_`-prefixed files and
+            // directories, so the site never builds a post found there.
+            if path
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with('_'))
+            {
+                continue;
+            }
             if path.is_dir() {
                 dirs.push(path);
             } else if path
@@ -88,6 +96,12 @@ pub(crate) fn undraft(text: &str) -> Option<String> {
     None
 }
 
+/// The first front matter line that sets `draft:` to anything other than the
+/// exact [`DRAFT`] line [`undraft`] removes.
+fn unremovable_draft(text: &str) -> Option<&str> {
+    front_matter(text)?.find(|line| line.starts_with("draft:") && line.trim_end() != DRAFT)
+}
+
 /// Removes the draft flag from the post at `path`, in place. A post that is
 /// already published is left as it is.
 pub(crate) fn publish(path: &Path) -> Result<(), Error> {
@@ -108,14 +122,27 @@ pub(crate) fn publish(path: &Path) -> Result<(), Error> {
 ///
 /// # Errors
 ///
-/// When a minor release has no post with its slug, or more than one.
+/// When a minor release has no post with its slug, or more than one, or its
+/// post sets a draft flag the release commit would not remove.
 pub(crate) fn required(blog: &Path, version: Version) -> Result<Option<PathBuf>, Error> {
     let Some(slug) = version.post_slug() else {
         return Ok(None);
     };
     let mut posts = posts_with_slug(blog, &slug)?;
     match posts.len() {
-        1 => Ok(posts.pop()),
+        1 => {
+            let path = posts.remove(0);
+            let text = std::fs::read_to_string(&path)
+                .map_err(|e| Error::msg(format!("{}: {e}", path.display())))?;
+            if let Some(line) = unremovable_draft(&text) {
+                return Err(Error::msg(format!(
+                    "{} has '{line}' in its front matter.\n  \
+                     The release removes only the exact line '{DRAFT}'; write the flag that way.",
+                    path.display()
+                )));
+            }
+            Ok(Some(path))
+        }
         0 => Err(Error::msg(format!(
             "{version} is a minor release and {BLOG}/ has no post with 'slug: {slug}'.\n  \
              Merge the release post first, as a draft; {BLOG}/README.md has the convention."

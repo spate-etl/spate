@@ -45,11 +45,26 @@ are the version input, the derivation check, and the gates every pull request
 already passes. What is worth reading on that pull request is the assembled
 `CHANGELOG.md` section, which holds the full release notes.
 
+## The release post
+
+A minor release, `X.Y.0`, needs a post on the blog; a patch release does not.
+Write it on a pull request and merge it before the dispatch, with
+`slug: releases/X.Y` and `draft: true` in its front matter.
+[`website/blog/README.md`](website/blog/README.md) has the convention, the
+shape and the voice.
+
+The gate and the publication are automatic. `assemble` refuses a minor release
+unless exactly one post carries the slug, and the release commit removes the
+`draft: true` line, so the post goes live with the docs deploy at
+`/blog/releases/X.Y`. The GitHub release body links it there, under the site
+named by `[workspace.package] homepage`.
+
 ## What the automation does
 
 **Assemble**, on the dispatch: guards first (the tree matches the last tag,
-the tag is free, the derivation agrees), then every artifact is generated
-from the version input, in one commit on `release/vX.Y.Z`:
+the tag is free, the derivation agrees, a minor release has its post), then
+every artifact is generated from the version input, in one commit on
+`release/vX.Y.Z`:
 
 | Artifact | Produced by |
 |---|---|
@@ -58,6 +73,7 @@ from the version input, in one commit on `release/vX.Y.Z`:
 | The install snippets at `X.Y` | the same bump; `cargo xtask release version check` holds the set closed |
 | `CHANGELOG.md`, fragments consumed, moved dependency requirements listed | `cargo xtask changelog build` |
 | `THIRD-PARTY.md` | `cargo xtask attribution` |
+| The release post, out of draft | `assemble`, for a minor release |
 
 The pull request it opens is titled `release: vX.Y.Z`, labeled
 `release`, and set to auto-merge. Re-dispatching the same version refreshes

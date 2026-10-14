@@ -895,8 +895,9 @@ fn summary(version: &str, today: &str) -> String {
     )
 }
 
-/// Prints one version's release body on stdout: a link to the full section,
-/// then every entry reduced to one line.
+/// Prints one version's release body on stdout: a link to the release post of
+/// a minor release and to the full section, then every entry reduced to one
+/// line.
 pub(crate) fn notes(root: &Path, explain: bool, version: &str) -> Outcome {
     if version.is_empty() {
         return Err(Error::msg("usage: cargo xtask changelog notes <version>"));
@@ -909,7 +910,8 @@ pub(crate) fn notes(root: &Path, explain: bool, version: &str) -> Outcome {
     Ok(())
 }
 
-/// One version's release body, read from its section of the changelog.
+/// One version's release body, read from its section of the changelog. A
+/// minor release links its post under the manifest's homepage.
 pub(crate) fn notes_text(root: &Path, version: &str) -> Result<String, Error> {
     let path = root.join(CHANGELOG);
     if !path.is_file() {
@@ -917,7 +919,15 @@ pub(crate) fn notes_text(root: &Path, version: &str) -> Result<String, Error> {
     }
     let text =
         std::fs::read_to_string(&path).map_err(|e| Error::msg(format!("{CHANGELOG}: {e}")))?;
-    release_body(&text, version, CHANGELOG)
+    let post = match crate::release::version::Version::parse(version) {
+        Some(parsed) => {
+            let manifest = std::fs::read_to_string(root.join("Cargo.toml"))
+                .map_err(|e| Error::msg(format!("Cargo.toml: {e}")))?;
+            crate::release::post::url(&manifest, parsed)?
+        }
+        None => None,
+    };
+    release_body(&text, version, CHANGELOG, post.as_deref())
 }
 
 // ---------------------------------------------------------------------------
@@ -936,17 +946,23 @@ struct Group<'a> {
     lines: Vec<String>,
 }
 
-/// The release body for one version: a line linking the full section in the
-/// changelog at the release tag, the breaking entries under their own heading,
-/// every other entry on one line under its group, the contributors as
-/// assembled, and the definition of every link the body uses.
+/// The release body for one version: a line linking the release post at
+/// `post`, when there is one, and the full section in the changelog at the
+/// release tag, the breaking entries under their own heading, every other
+/// entry on one line under its group, the contributors as assembled, and the
+/// definition of every link the body uses.
 ///
 /// It reads the shape `build` writes. A line outside that shape, such as a
 /// hand-written sentence or a fenced block at the margin, is carried into the
 /// body as written and in place, so the shape of a section never stops a
 /// release. A breaking entry is listed once, under the breaking heading, with
 /// any margin line that continues it, and a group left empty is omitted.
-fn release_body(text: &str, version: &str, file: &str) -> Result<String, Error> {
+fn release_body(
+    text: &str,
+    version: &str,
+    file: &str,
+    post: Option<&str>,
+) -> Result<String, Error> {
     let section = section_notes(text, version, file)?;
     let prefix = format!("## [{version}] ");
     let heading = records(text)
@@ -1014,10 +1030,13 @@ fn release_body(text: &str, version: &str, file: &str) -> Result<String, Error> 
     }
     place(&mut entry, &mut breaking, &mut groups);
 
-    let mut out = format!(
+    let mut out = post.map_or_else(String::new, |url| {
+        format!("Read [the release post]({url}) for the highlights. ")
+    });
+    out.push_str(&format!(
         "The full notes for this release are in [{CHANGELOG}]({REPO_URL}/blob/v{version}/{CHANGELOG}#{}).\n",
         github_anchor(heading)
-    );
+    ));
     let listed = [(None, &preface), (Some(BREAKING_HEADING), &breaking)]
         .into_iter()
         .chain(

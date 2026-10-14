@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::io::{Host, Index, ReleaseState, Resolution};
+use super::post;
 use super::version::Version;
 use crate::checks::scratch::Scratch;
 use crate::run::{Error, Outcome};
@@ -109,10 +110,16 @@ pub(crate) fn assemble(host: &Host<'_>, input: &str) -> Outcome {
              derives {expected}. One of the two is wrong; nothing proceeds until they agree."
         )));
     }
+    let post = post::required(&host.workspace.blog(), version)?;
     endgroup();
 
     group("Generate every artefact");
     host.workspace.generate(version)?;
+    // The post merged as a draft, which a production build leaves out, so it
+    // goes live with the docs deploy the publish dispatches.
+    if let Some(path) = &post {
+        post::publish(path)?;
+    }
     endgroup();
 
     group("The release commit");

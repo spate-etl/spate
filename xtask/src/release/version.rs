@@ -98,6 +98,12 @@ impl Version {
         format!("{}.{}", self.major, self.minor)
     }
 
+    /// The blog slug of the post this release requires, `releases/X.Y`, or
+    /// `None` for a patch release, which requires none.
+    pub(crate) fn post_slug(self) -> Option<String> {
+        (self.patch == 0).then(|| format!("releases/{}", self.minor_of()))
+    }
+
     fn next(self, bump: Bump) -> Self {
         match bump {
             Bump::Minor => Self {

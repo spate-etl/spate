@@ -161,6 +161,8 @@ pub(crate) trait Workspace {
     fn derive(&self) -> Result<Version, Error>;
     /// Writes every generated artifact of the release commit.
     fn generate(&self, version: Version) -> Outcome;
+    /// The blog's source directory, where a release post lives.
+    fn blog(&self) -> PathBuf;
     /// The GitHub release body for `version`.
     fn notes(&self, version: Version) -> Result<String, Error>;
     /// Packages and verify-builds every publishable member but `excludes`.
@@ -804,6 +806,10 @@ impl Workspace for LocalWorkspace<'_> {
         super::version::bump(self.root, false, &v)?;
         crate::checks::changelog::build(self.root, false, &v)?;
         crate::checks::attribution::generate(self.root, false)
+    }
+
+    fn blog(&self) -> PathBuf {
+        self.root.join(super::post::BLOG)
     }
 
     fn notes(&self, version: Version) -> Result<String, Error> {

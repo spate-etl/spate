@@ -439,8 +439,9 @@ fn changelog() -> String {
     .unwrap()
 }
 
-/// The notes are the release body: a link to the full section at the release
-/// tag, no indented or `## ` line, and every `([#N])` found in the changelog.
+/// The notes are the release body: a link to the release post and the full
+/// section at the release tag, no indented or `## ` line, and every `([#N])`
+/// found in the changelog.
 #[test]
 fn the_notes_are_the_release_body_for_the_section() {
     let got = xtask(&["changelog", "notes", "0.3.0"], &[]);
@@ -449,7 +450,7 @@ fn the_notes_are_the_release_body_for_the_section() {
     assert_eq!(got.status.code(), Some(0));
     assert!(
         stdout.starts_with(
-            "The full notes for this release are in [CHANGELOG.md](https://github.com/spate-etl/spate/blob/v0.3.0/CHANGELOG.md#030--2026-10-11).\n\n"
+            "Read [the release post](https://spate.kainth.dev/blog/releases/0.3) for the highlights. The full notes for this release are in [CHANGELOG.md](https://github.com/spate-etl/spate/blob/v0.3.0/CHANGELOG.md#030--2026-10-11).\n\n"
         ),
         "{stdout}"
     );

@@ -2,6 +2,7 @@
 //! sequence that assembles, publishes and closes out a version.
 
 mod io;
+pub(crate) mod post;
 mod sequence;
 pub(crate) mod version;
 

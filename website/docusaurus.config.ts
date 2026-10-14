@@ -221,6 +221,15 @@ const config: Config = {
           blogTitle: 'Blog',
           blogDescription: 'Notes from building Spate: releases, benchmark runs, and what changed on the site.',
           blogSidebarCount: 10,
+          // Keep the Docusaurus defaults and add the post guide, which is for
+          // the person writing a post and would otherwise publish as one.
+          exclude: [
+            '**/_*.{js,jsx,ts,tsx,md,mdx}',
+            '**/_*/**',
+            '**/*.test.{js,jsx,ts,tsx}',
+            '**/__tests__/**',
+            'README.md',
+          ],
           showReadingTime: false,
           // No archive page: the list is the archive.
           archiveBasePath: null,

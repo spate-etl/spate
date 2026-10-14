@@ -1312,7 +1312,7 @@ const ASSEMBLED: &str = "\
 #[test]
 fn the_release_body_lists_one_line_per_entry() {
     assert_eq!(
-        release_body(ASSEMBLED, "0.4.0", CHANGELOG).unwrap(),
+        release_body(ASSEMBLED, "0.4.0", CHANGELOG, None).unwrap(),
         "\
 The full notes for this release are in [CHANGELOG.md](https://github.com/spate-etl/spate/blob/v0.4.0/CHANGELOG.md#040--2026-11-02).
 
@@ -1392,7 +1392,7 @@ fn a_line_outside_the_assembled_shape_is_carried_in_place() {
         release_body(
             "## [0.5.0] — d\n\nAn intro.\n\n### Added\n\n- **A** ([#1])\n\nA paragraph at the margin.\n- **B** ([#2])\n\n[#1]: https://github.com/spate-etl/spate/pull/1\n[#2]: https://github.com/spate-etl/spate/pull/2\n",
             "0.5.0",
-            CHANGELOG
+            CHANGELOG, None
         )
         .unwrap(),
         "\
@@ -1420,7 +1420,7 @@ fn an_indented_line_with_no_entry_open_is_carried() {
         "## [0.5.0] — d\n\n### Added\n\n  An indented line.\n",
         "## [0.5.0] — d\n\n### Contributors\n\n- Someone\n  An indented line.\n",
     ] {
-        let body = release_body(text, "0.5.0", CHANGELOG).unwrap();
+        let body = release_body(text, "0.5.0", CHANGELOG, None).unwrap();
         assert!(body.contains("\n  An indented line.\n"), "{body}");
     }
 }
@@ -1433,7 +1433,7 @@ fn the_v0_1_0_release_body_carries_its_prose() {
     let body = notes_text(root, "0.1.0").unwrap();
     assert!(
         body.starts_with(
-            "The full notes for this release are in [CHANGELOG.md](https://github.com/spate-etl/spate/blob/v0.1.0/CHANGELOG.md#010--2026-07-27).\n\nFirst public release.\n\n### Added\n\n- **The engine** (`spate-core`)"
+            "Read [the release post](https://spate.kainth.dev/blog/releases/0.1) for the highlights. The full notes for this release are in [CHANGELOG.md](https://github.com/spate-etl/spate/blob/v0.1.0/CHANGELOG.md#010--2026-07-27).\n\nFirst public release.\n\n### Added\n\n- **The engine** (`spate-core`)"
         ),
         "{body}"
     );
@@ -1465,7 +1465,7 @@ fn a_fragment_s_own_link_definition_reaches_the_release_body() {
         "**See [the guide][guide]** (`spate-core`)\n\nProse. ([#4])\n\n[guide]: https://example.com/guide\n",
     );
     build(release.path(), false, "0.3.0").unwrap();
-    let body = release_body(&release.changelog(), "0.3.0", CHANGELOG).unwrap();
+    let body = release_body(&release.changelog(), "0.3.0", CHANGELOG, None).unwrap();
     assert!(
         body.contains("\n- **See [the guide][guide]** (`spate-core`) ([#4])\n"),
         "{body}"
@@ -1483,7 +1483,7 @@ fn a_fenced_block_at_the_margin_is_carried_as_written() {
     let body = release_body(
         "## [0.5.0] — d\n\n### Changed\n\n- **A** ([#1])\n\nMigrate with:\n\n```yaml\n- name: x\n  key: v\n```\n\n[#1]: https://github.com/spate-etl/spate/pull/1\n",
         "0.5.0",
-        CHANGELOG,
+        CHANGELOG, None,
     )
     .unwrap();
     assert!(
@@ -1499,7 +1499,7 @@ fn a_margin_line_shaped_like_a_definition_is_carried() {
     let body = release_body(
         "## [0.5.0] — d\n\n[Note]: this release drops coordination.\n\n### Added\n\n- **A** ([#1])\n\n[#1]: https://github.com/spate-etl/spate/pull/1\n",
         "0.5.0",
-        CHANGELOG,
+        CHANGELOG, None,
     )
     .unwrap();
     assert!(
@@ -1518,7 +1518,7 @@ fn a_breaking_marker_in_its_own_paragraph_keeps_the_title() {
         "**Breaking:**\n\n**The old knob is gone** (`spate-core`)\n\nProse. ([#4])\n",
     );
     build(release.path(), false, "0.3.0").unwrap();
-    let body = release_body(&release.changelog(), "0.3.0", CHANGELOG).unwrap();
+    let body = release_body(&release.changelog(), "0.3.0", CHANGELOG, None).unwrap();
     assert!(
         body.contains(
             "\n### Breaking changes\n\n- **The old knob is gone** (`spate-core`) ([#4])\n"
@@ -1534,7 +1534,7 @@ fn a_breaking_marker_without_a_space_after_it_is_breaking() {
     let body = release_body(
         "## [0.5.0] — d\n\n### Changed\n\n- **Breaking:**\t**A** ([#1])\n- **Breaking:**`Foo::bar` is removed. ([#2])\n\n[#1]: https://github.com/spate-etl/spate/pull/1\n[#2]: https://github.com/spate-etl/spate/pull/2\n",
         "0.5.0",
-        CHANGELOG,
+        CHANGELOG, None,
     )
     .unwrap();
     assert!(
@@ -1552,7 +1552,7 @@ fn a_lazy_line_after_a_breaking_entry_moves_with_it() {
     let body = release_body(
         "## [0.5.0] — d\n\n### Changed\n\n- **C** ([#3])\n- **Breaking:** **D** ([#4])\nLazy note about D.\n\n[#3]: https://github.com/spate-etl/spate/pull/3\n[#4]: https://github.com/spate-etl/spate/pull/4\n",
         "0.5.0",
-        CHANGELOG,
+        CHANGELOG, None,
     )
     .unwrap();
     assert!(
@@ -1567,7 +1567,7 @@ fn the_preface_comes_before_the_breaking_entries() {
     let body = release_body(
         "## [0.5.0] — d\n\nAn intro.\n\n### Changed\n\n- **Breaking:** **A** ([#1])\n- **B** ([#2])\n\n[#1]: https://github.com/spate-etl/spate/pull/1\n[#2]: https://github.com/spate-etl/spate/pull/2\n",
         "0.5.0",
-        CHANGELOG,
+        CHANGELOG, None,
     )
     .unwrap();
     assert!(
@@ -1612,7 +1612,7 @@ fn a_definition_label_matches_without_case() {
     let body = release_body(
         "## [0.5.0] — d\n\n### Added\n\n- **See [the guide][Guide]** ([#1])\n\n  [guide]: https://example.com/guide\n\n[#1]: https://github.com/spate-etl/spate/pull/1\n",
         "0.5.0",
-        CHANGELOG,
+        CHANGELOG, None,
     )
     .unwrap();
     assert!(
@@ -1628,7 +1628,7 @@ fn an_entry_without_a_bold_title_lists_its_reference_once() {
     let body = release_body(
         "## [0.5.0] — d\n\n### Fixed\n\n- A fix written as one paragraph.\n  ([#7])\n- **A title** ([#8])\n\n[#7]: https://github.com/spate-etl/spate/pull/7\n[#8]: https://github.com/spate-etl/spate/pull/8\n",
         "0.5.0",
-        CHANGELOG,
+        CHANGELOG, None,
     )
     .unwrap();
     assert!(
@@ -1645,7 +1645,7 @@ fn a_title_followed_by_prose_in_its_paragraph_is_cut_at_the_crate_list() {
     let body = release_body(
         "## [0.5.0] — d\n\n### Added\n\n- **A deadline** (`spate-kafka`) — the source\n  reports a fatal error.\n  ([#9])\n\n[#9]: https://github.com/spate-etl/spate/pull/9\n",
         "0.5.0",
-        CHANGELOG,
+        CHANGELOG, None,
     )
     .unwrap();
     assert!(
@@ -1661,12 +1661,45 @@ fn a_crate_list_with_nested_parentheses_is_kept_whole() {
         "## [0.5.0] — d\n\n### Added\n\n- **A title** (`spate-kafka` (feature `ssl`))\n\n  Prose (with an aside).\n  ([#9])\n\n[#9]: https://github.com/spate-etl/spate/pull/9\n",
         "0.5.0",
         CHANGELOG,
+        None,
     )
     .unwrap();
     assert!(
         body.contains("\n- **A title** (`spate-kafka` (feature `ssl`)) ([#9])\n"),
         "{body}"
     );
+}
+
+/// A minor release's body opens on a link to its post, under the homepage the
+/// workspace manifest names, and a patch release's body links no post.
+#[test]
+fn a_minor_release_body_links_its_post() {
+    let scratch = crate::checks::scratch::Scratch::new("spate-xtask-notes-post").unwrap();
+    std::fs::write(
+        scratch.join("Cargo.toml"),
+        "[workspace.package]\nversion = \"0.4.1\"\nhomepage = \"https://example.test\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        scratch.join(CHANGELOG),
+        "# Changelog\n\n## [Unreleased]\n\n## [0.4.1] — d\n\n### Fixed\n\n- **B** ([#2])\n\n[#2]: https://github.com/spate-etl/spate/pull/2\n\n## [0.4.0] — d\n\n### Added\n\n- **A** ([#1])\n\n[#1]: https://github.com/spate-etl/spate/pull/1\n",
+    )
+    .unwrap();
+    let minor = notes_text(scratch.dir(), "0.4.0").unwrap();
+    assert!(
+        minor.starts_with(
+            "Read [the release post](https://example.test/blog/releases/0.4) for the highlights. The full notes for this release are in [CHANGELOG.md](https://github.com/spate-etl/spate/blob/v0.4.0/CHANGELOG.md#040--d).\n\n### Added\n"
+        ),
+        "{minor}"
+    );
+    let patch = notes_text(scratch.dir(), "0.4.1").unwrap();
+    assert!(
+        patch.starts_with(
+            "The full notes for this release are in [CHANGELOG.md](https://github.com/spate-etl/spate/blob/v0.4.1/CHANGELOG.md#041--d).\n\n### Fixed\n"
+        ),
+        "{patch}"
+    );
+    assert!(!patch.contains("/blog/"), "{patch}");
 }
 
 /// Every v0.3.0 entry but the dependency requirements keeps its reference.
@@ -1686,9 +1719,9 @@ fn every_v0_3_0_entry_keeps_its_reference() {
 }
 
 /// The release body for the real v0.3.0 section, whose titles were wrapped
-/// across lines: every entry appears once on one line, the breaking ones
-/// under their own heading, every `[#N]` used is defined and none is left
-/// unused, and the body stays short. A reference with no definition renders
+/// across lines: it links the post under the workspace homepage, every entry
+/// appears once on one line, the breaking ones under their own heading, every
+/// `[#N]` used is defined and none is left unused, and the body stays short. A reference with no definition renders
 /// as its literal text.
 #[test]
 fn the_v0_3_0_release_body_has_one_line_per_entry() {
@@ -1716,7 +1749,7 @@ fn the_v0_3_0_release_body_has_one_line_per_entry() {
     let body = notes_text(root, "0.3.0").unwrap();
     assert!(
         body.starts_with(
-            "The full notes for this release are in [CHANGELOG.md](https://github.com/spate-etl/spate/blob/v0.3.0/CHANGELOG.md#030--2026-10-11).\n\n### Breaking changes\n\n"
+            "Read [the release post](https://spate.kainth.dev/blog/releases/0.3) for the highlights. The full notes for this release are in [CHANGELOG.md](https://github.com/spate-etl/spate/blob/v0.3.0/CHANGELOG.md#030--2026-10-11).\n\n### Breaking changes\n\n"
         ),
         "{body}"
     );
@@ -2533,6 +2566,11 @@ fn a_missing_version_is_a_usage_error() {
 #[test]
 fn the_notes_read_a_changelog_that_is_there() {
     let release = Release::new("the_notes_read_a_changelog_that_is_there");
+    // A minor release's body links its post under the manifest's homepage.
+    release.0.write(
+        "Cargo.toml",
+        "[workspace.package]\nhomepage = \"https://example.test\"\n",
+    );
     notes(release.path(), false, "0.2.0").unwrap();
     std::fs::remove_file(release.path().join(CHANGELOG)).unwrap();
     assert_eq!(
@@ -2750,7 +2788,7 @@ fn a_line_after_a_blank_stays_in_the_group_of_a_breaking_entry() {
             "\n### Breaking changes\n\n- **D** ([#4])\nLazy one.\nLazy two.\n\n### Changed\n\n- **C** ([#3])\n\nA group note.\n\n[#3]",
         ),
     ] {
-        let body = release_body(text, "0.5.0", CHANGELOG).unwrap();
+        let body = release_body(text, "0.5.0", CHANGELOG, None).unwrap();
         assert!(body.contains(want), "{body}");
     }
 }

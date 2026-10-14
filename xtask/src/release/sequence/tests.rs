@@ -805,11 +805,10 @@ fn the_release_commit_publishes_the_post() {
     assert_eq!(std::fs::read_to_string(&path).unwrap(), published);
 }
 
-/// Assembling again over a post the first run already published passes and
-/// leaves the post as it is, so a re-dispatch refreshes the release pull
-/// request.
+/// A second assemble over a post with no draft flag passes and leaves the post
+/// as it is.
 #[test]
-fn assemble_again_over_a_published_post_refreshes_the_pull_request() {
+fn assemble_leaves_a_post_with_no_draft_flag_as_it_is() {
     let log = Log::default();
     let git = FakeGit::new(&log);
     let mut forge = FakeForge::new(&log);

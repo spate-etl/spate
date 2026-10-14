@@ -135,6 +135,24 @@ test.describe('compression post with motion', () => {
     await expect(figure.getByRole('button', {name: 'Play'})).toBeVisible();
     await expectNoAxeViolations(page, testInfo);
   });
+
+  /** Pins that the figure stops drawing once it leaves the screen. */
+  const markup = (sel: string) => Array.from(document.querySelector(sel)!.querySelectorAll('svg[data-mode]')).map((s) => s.innerHTML).join('\n');
+  test('the figure holds still off screen', async ({page}) => {
+    await page.setViewportSize(DESKTOP);
+    await gotoRoute(page, 'compressionPost', 'light');
+    const figure = page.locator(DIAGRAM);
+    await expect(figure).toHaveAttribute('data-motion', 'full');
+    await figure.scrollIntoViewIfNeeded();
+    const shown = await page.evaluate(markup, DIAGRAM);
+    await expect.poll(() => page.evaluate(markup, DIAGRAM)).not.toEqual(shown);
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await expect.poll(async () => (await figure.boundingBox())!.y > DESKTOP.height).toBe(true);
+    let last = '';
+    await expect.poll(async () => { const now = await page.evaluate(markup, DIAGRAM); const still = now === last; last = now; return still; }, {intervals: [100]}).toBe(true);
+    await page.waitForTimeout(500); // stillness over an interval is the property
+    expect(await page.evaluate(markup, DIAGRAM), 'the off-screen figure').toEqual(last);
+  });
 });
 
 /** Pins that the engineering tag page lists this post and the DOOM post. */

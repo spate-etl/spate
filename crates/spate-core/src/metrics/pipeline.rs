@@ -497,19 +497,20 @@ mod tests {
         assert!(samples.iter().all(|(_, sample)| sample.ratio == 0.5));
     }
 
-    /// A 40 s idle gap keeps the trailing ratio below the threshold for
-    /// 270 s, from 335 s to 605 s, and a second one from 735 s to 1005 s.
-    /// Neither re-arms the warning, though the two together span more than a
-    /// window. A 70 s gap keeps it below from 1135 s to 1435 s, exactly one
-    /// window, which re-arms it, and the warning fires again at 1440 s when
-    /// the window is back at the threshold.
+    /// A 65 s idle gap keeps the trailing ratio below the threshold for
+    /// 295 s, from 335 s to 630 s, one interval short of a window. A 40 s
+    /// gap keeps it below from 735 s to 1005 s. Neither re-arms the warning,
+    /// though the two together span more than a window. A 70 s gap keeps it
+    /// below from 1135 s to 1435 s, exactly one window, which re-arms it, and
+    /// the warning fires again at 1440 s when the window is back at the
+    /// threshold.
     #[test]
     fn the_warning_rearms_only_after_a_full_window_below() {
         assert_eq!(
             scenario(&[
                 ((0, 300), busy),
-                ((300, 340), idle),
-                ((340, 700), busy),
+                ((300, 365), idle),
+                ((365, 700), busy),
                 ((700, 740), idle),
                 ((740, 1_100), busy),
                 ((1_100, 1_170), idle),

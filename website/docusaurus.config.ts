@@ -222,7 +222,7 @@ const config: Config = {
           blogDescription: 'Notes from building Spate: releases, benchmark runs, and what changed on the site.',
           blogSidebarCount: 10,
           // Tags are declared in `blog/tags.yml`, so a misspelt tag in a post
-          // fails the build instead of making a tag page of its own.
+          // fails the build.
           onInlineTags: 'throw',
           // Keep the Docusaurus defaults and add the post guide, which is for
           // the person writing a post and would otherwise publish as one.

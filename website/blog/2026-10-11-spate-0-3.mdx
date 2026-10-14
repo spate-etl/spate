@@ -49,9 +49,11 @@ To keep the old set, list `avro`, `json`, `kafka`, `clickhouse`,
 `coordination-nats` and `s3`. Building Spate also needs Rust 1.96 or newer.
 
 **The ClickHouse sink takes its columns from the row type.** Remove `columns`
-and `validate_schema` from the sink section. The row struct derives
-`ClickHouseRow`, and the builder's `with_row` supplies it. A section further
-down shows the derive.
+and `validate_schema` from the sink section, and remove
+`input_format_with_names_use_header` and `input_format_with_types_use_header`
+from `settings`. The sink manages those two and rejects an override. The row
+struct derives `ClickHouseRow`, and the builder's `with_row` supplies it. A
+section further down shows the derive.
 
 ```yaml
 # 0.2
@@ -139,18 +141,23 @@ and the planner rejects a descriptor above 294,720 raw bytes.
 - `spate_kafka_source_partition_fetch_queue_messages` and
   `spate_kafka_source_partition_lag_stored_records` follow partition
   ownership. A partition that moves away keeps a series at zero.
+- `spate_s3_source_objects_completed_total` and
+  `spate_s3_source_objects_remaining` count each byte range as one object, so
+  completed objects can exceed `spate_s3_source_objects_listed_total`.
 
 **Hand-built pipelines.** `SinkPool::spawn` takes the sink's name and a
 `SinkFailures` register, and `SinkRuntime` has a `failures` field.
-`BackpressureMetrics::set_inflight_bytes` is removed. A pipeline built with
-`Pipeline` needs no change.
+`BackpressureMetrics::set_inflight_bytes` is removed. Replace calls to
+`OperatorMetrics::errors` with `record_errors` or `fatal_error`. A pipeline
+built with `Pipeline` needs no change.
 
 **Coordination.** These matter only to a job that finishes on 0.3:
 
 - `SplitCoordinator::fail` and `CoordinationDriver::fail` take the `LeaseEpoch`
   of the tenancy they report.
 - `CoordinationDriver::commit` returns a retryable error when the store defers
-  a split's commit, and the runtime sends it again on the next tick.
+  a split's commit, and the runtime sends it again on the next tick. Each such
+  tick counts as `error` in `spate_checkpoint_commits_total`.
 - A plan record written by 0.3 stops a 0.2 worker. Stop every 0.2 worker on a
   job before starting 0.3 on it.
 - The NATS store fails startup when an existing bucket's replica count differs
@@ -159,12 +166,13 @@ and the planner rejects a descriptor above 294,720 raw bytes.
 
 ## Split coordination is deprecated
 
-In 0.3.0, `spate-coordination` and every public item in it are deprecated. So
-are the `coordination` and `coordination-nats` features, the split traits and
-driver in `spate-core`, `S3Source::with_coordinator`, and the scripted
-coordinator in `spate-test`. Code that names them warns at build time. A
-pipeline started with a `coordination:` section logs a warning. This is an S3
-backfill with the in-process store, run on 0.3.0:
+In 0.3.0, `spate-coordination` and every item it defines are deprecated. So
+are the split traits and driver in `spate-core`, `S3Source::with_coordinator`,
+and the scripted coordinator in `spate-test`, and code that names one of them
+warns at build time. The `coordination` and `coordination-nats` features are
+deprecated too, but Cargo prints no warning for a feature. A pipeline started
+with a `coordination:` section logs a warning. This is an S3 backfill with the
+in-process store, run on 0.3.0:
 
 ```yaml
 pipeline: { name: events-backfill }
@@ -202,7 +210,7 @@ In 0.4.0 a work feed takes its place. The design is in
 - A work unit is one object, or one byte range of one object.
 - The design has three backends: in-process for one instance, SQS standard
   queues, and Kafka. A source names no backend.
-- A separate one-shot run of the same binary lists the input. It checkpoints
+- A fleet's lister is a separate one-shot run of the same binary. It checkpoints
   the last key whose units the feed confirmed, and resumes after it.
 - A job that names a location is bounded. It ends on the lister's end marker
   and an empty feed, and ends `Stalled` when its dead-letter destination is not
@@ -235,7 +243,8 @@ feed:
 Before deprecating anything, I compared a queue-fed fleet with a
 NATS-coordinated fleet and a static split, at 4 and 8 instances, on large and
 on small objects. The queue stood in through the coordination traits, so no
-figure measures the feed trait itself.
+figure measures the feed trait itself. These are one-off fleet runs on AWS,
+outside the repository's benchmark tiers.
 
 Each instance was a c8g.16xlarge in eu-west-2 with 96 lanes. The large-object
 input was zstd objects that decode to 1 GiB each. Each figure is decoded bytes
@@ -267,9 +276,11 @@ at each size, and the Kafka queue ran once at 8 instances.
 
 Coordination fell from 93% of the static split at 4 instances to 66% at 8. Both
 queues stayed at 102%. At 4 instances the last 5% of rows took 244 seconds on
-the static split, 19 on coordination and 20 on either queue.
+the static split, 19 on coordination, 20 on the SQS queue and 21 on the Kafka
+queue.
 
-On 868,608 objects of about 2 MB at 4 instances, the queue read 30.76 GB/s.
+On 868,608 objects of about 2 MB compressed at 4 instances, the SQS queue read
+30.76 GB/s.
 Coordination read 13.39 GB/s and did not finish inside the 15-minute limit on
 any of its three runs.
 
@@ -353,9 +364,11 @@ WrongView: sink error (Fatal): row struct does not match declared columns for `p
   declared columns:                  id, tags.key, tags.value, viewed_at
 ```
 
-That run used the default `compression: lz4`. A 0.2 sink on that setting fails
-to start against ClickHouse 26.9 and later, because those servers compress
-responses with ZSTD by default. The 0.3 sink asks for LZ4 responses on every
+That run used the default `compression: lz4`. A 0.2 sink built with
+`clickhouse` 0.15.2 or earlier cannot read the ZSTD responses that ClickHouse
+26.9 and later send by default. Its readiness probe never passes, and its
+startup schema check fails when `validate_schema` is not `off` or `format` is
+`native`. The 0.3 sink asks for LZ4 responses on every
 request. The type check also accepts an `Int256` field for a `Decimal256`
 column, and `format: native` accepts a `SimpleAggregateFunction` column whose
 stored type the Native encoder supports.
@@ -516,7 +529,9 @@ Spate's assignment sequence pauses and resumes every partition it accepts, and
 backpressure pauses them too, so any assignment could hit the window.
 
 The 0.3 source reads the group's committed offsets before it accepts an
-assignment, and gives every partition a concrete start offset. The fetchers
+assignment, and gives every partition a concrete start offset, except one whose
+committed offset could not be read or one with no committed offset under
+`auto.offset.reset: error`. The fetchers
 then start inside `assign`, before the pause. One side effect is that
 `spate_source_lag_records` appears as soon as the group has committed an offset
 for a partition, without waiting for this member's first commit.
@@ -532,11 +547,12 @@ partition that is not fetching. A stall like this one shows on that gauge.
 With `kafka-tls` and its default vendored OpenSSL, the Kafka source and sink
 also load the system CA bundle when no CA is configured. In 0.2 those builds
 read only `/usr/local/ssl` on Linux and BSD, and a broker certificate from a
-system-trusted CA failed verification.
+system-trusted CA failed verification. If you placed a CA under
+`/usr/local/ssl`, set `ssl.ca.location` to its path.
 
 ## Coordination fixes for jobs that finish on 0.3
 
-Forty-nine of the 87 fixes in 0.3.0 are in split coordination. Sixteen of them
+Forty-nine of the 87 fixes in 0.3.0 are in split coordination. Fifteen of them
 cover a store write that applied while its reply was lost: a claim, a commit, a
 lease renewal, a failure report, an election. In 0.2 each of those could cost a
 delivery attempt, a lease, or the fleet's leader until a key expired. In 0.3 the

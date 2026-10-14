@@ -1,0 +1,50 @@
+/* The figure of where insert compression runs. Colours come only from the brand tokens, so both
+   themes follow `brand.css`. */
+
+/* Two drawings 324 units wide side by side from a column that sets both at 11px text or more, and
+   stacked below that. */
+.panels {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--figure-gap) 1.5rem;
+}
+
+@container (min-width: 620px) {
+  .panels {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+/* A thread waiting for a free slot: a dashed outline on a muted ground. */
+.stalled {
+  fill: var(--spate-surface-2);
+  stroke: var(--spate-dim);
+  stroke-width: 1.2;
+  stroke-dasharray: 3 2;
+}
+
+/* A chunk is grey before it is compressed and takes the accent once it is, and it narrows too, so
+   the two read apart without colour. */
+.raw {
+  fill: var(--spate-dim);
+}
+
+.packed {
+  fill: var(--spate-accent);
+}
+
+.progress {
+  fill: var(--spate-diagram-edge);
+}
+
+.toggle {
+  margin-top: var(--figure-gap);
+  padding: 0.15rem 0.75rem;
+  border: 1px solid var(--spate-dim);
+  border-radius: 4px;
+  background: var(--spate-bg);
+  color: var(--spate-ink);
+  font-family: var(--ifm-font-family-monospace);
+  font-size: 0.8rem;
+  cursor: pointer;
+}

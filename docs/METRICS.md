@@ -421,7 +421,7 @@ publishes no lag), but a new connector must not.
 | `spate_pipeline_info` | gauge | `version` | Constant 1; carries build metadata. |
 | `spate_pipeline_state` | gauge | `state` (`starting`\|`running`\|`draining`\|`failed`) | 1 for the current state, 0 otherwise. |
 | `spate_pipeline_threads` | gauge | | Pinned pipeline thread count. |
-| `spate_pipeline_io_busy_ratio` | gauge | | Mean fraction of time the I/O runtime's async workers spent running tasks, from 0 to 1, averaged over the trailing 5 minutes (since start while shorter) and updated every 5s. A worker records its busy time about every 31 polls, so a reading can be off by up to 31 polls' worth of busy time over the 5 minutes: a few percent for polls under about 500 ms and about 10% at 1 s polls. Longer polls read late and unevenly. The blocking pool is not counted. Reads 0 until the first sample, and holds its last value during the shutdown drain. |
+| `spate_pipeline_io_busy_ratio` | gauge | | Mean fraction of time the I/O runtime's async workers spent running tasks, from 0 to 1, averaged over the trailing 5 minutes (since start while shorter) and updated every 5s. A worker records its busy time about every 31 polls, so once the window is full a reading can be off by up to 31 polls' worth of busy time over the 5 minutes: a few percent for polls under about 500 ms and about 10% at 1 s polls. Longer polls read late and unevenly. The blocking pool is not counted. Reads 0 until the first sample, and holds its last value during the shutdown drain. |
 | `process_*` | — | | CPU, memory, fds via `metrics-process`. |
 
 ## Histogram buckets

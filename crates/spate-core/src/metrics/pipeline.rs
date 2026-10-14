@@ -164,10 +164,10 @@ pub(crate) struct IoBusySample {
 ///
 /// A worker records its busy time about every 31 polls, at its periodic
 /// maintenance, or when it parks. A worker held by long polls therefore
-/// reports in lumps of about 31 polls' worth of busy time, and a reading can
-/// be off by up to one lump over the window: a few percent for polls under
-/// about 500 ms over [`Self::WINDOW`], and about 10% at 1 s polls. Longer
-/// polls read late and unevenly.
+/// reports in lumps of about 31 polls' worth of busy time, and once the
+/// window is full a reading can be off by up to one lump over it: a few
+/// percent for polls under about 500 ms over [`Self::WINDOW`], and about 10%
+/// at 1 s polls. Longer polls read late and unevenly.
 ///
 /// The warning fires once, on the first sample whose window spans the full
 /// length with an unclamped ratio at or above [`Self::SATURATED`]. It re-arms

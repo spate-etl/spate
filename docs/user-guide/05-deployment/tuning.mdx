@@ -89,12 +89,13 @@ writes. The hot path never runs there, so extra I/O workers buy nothing for
 CPU-bound pipelines. Each odd-numbered worker (the first, the third, and so
 on) takes one core from the derived pipeline-thread count, down to its floor
 of 1.
-Read `spate_pipeline_io_busy_ratio` before raising it: a value that stays
+Read `spate_pipeline_io_busy_ratio` before raising `io_threads`: a value that stays
 near 1 means the I/O workers are saturated
 ([Metrics](../../METRICS.md#pipeline--process)). It averages the last 5
-minutes and updates every 5 seconds. A worker records its busy time about
-every 31 polls, so a reading can be off by up to that much busy time: a few
-percent for polls under about 500 ms and about 10% at 1 s polls. Longer
+minutes (since start while shorter) and updates every 5 seconds. A worker
+records its busy time about every 31 polls, so once the window is full a
+reading can be off by up to that much busy time: a few percent for polls under
+about 500 ms and about 10% at 1 s polls. Longer
 polls read late and unevenly.
 
 ## Sink batching: `batch.max_rows` / `batch.max_bytes` / `batch.linger`

@@ -172,7 +172,7 @@ of [Metrics](../../METRICS.md).
   own request compression on that runtime, high byte rates can make the runtime
   the limit rather than the server, and `pipeline.io_threads` is the lever
   there. `spate_pipeline_io_busy_ratio` near 1, averaged over the last 5
-  minutes, shows that case.
+  minutes (since start while shorter), shows that case.
 
 For alerting on skipped records (schema drift, poison messages), replica and
 shard health, and queue saturation, use the `*_dropped_total`,

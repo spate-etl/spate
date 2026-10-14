@@ -1467,6 +1467,67 @@ fn a_busy_io_runtime_reaches_the_exposition() {
     assert_eq!(report.state, ExitState::Completed);
 }
 
+/// A running pipeline divides by its I/O runtime's worker count: one task
+/// holding one of two workers reads about half in the exposition.
+#[test]
+fn one_busy_worker_of_two_reads_half_in_the_exposition() {
+    let mut cfg = test_config(1);
+    cfg.metrics.exporter = crate::config::MetricsExporter::Prometheus;
+    let pipeline_name = cfg.pipeline.name.clone();
+    let handle = install_prometheus(&cfg);
+
+    let io = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let stop = Arc::new(AtomicBool::new(false));
+    let spin = Arc::clone(&stop);
+    io.spawn(async move {
+        while !spin.load(Ordering::Relaxed) {
+            let polled = Instant::now();
+            while polled.elapsed() < Duration::from_millis(10) {
+                std::hint::spin_loop();
+            }
+            tokio::task::yield_now().await;
+        }
+    });
+
+    let h = start_with(
+        cfg,
+        test_options(),
+        |runtime| {
+            runtime
+                .with_io_runtime(io)
+                .with_io_busy_sampling(Duration::from_millis(50), Duration::from_secs(2))
+        },
+        |shared, log| FakeChain {
+            shared,
+            log,
+            mode: ChainMode::Ok,
+            batches_seen: 0,
+        },
+    );
+    // A reading counted against one worker sits near 1 once the window
+    // fills; against two it stays near half for many samples in a row.
+    let in_band = std::cell::Cell::new(0u32);
+    wait_for(
+        "the gauge to hold near half",
+        Duration::from_secs(15),
+        || {
+            let half = io_busy_ratio(&handle.render(), &pipeline_name)
+                .is_some_and(|r| (0.3..0.7).contains(&r));
+            in_band.set(if half { in_band.get() + 1 } else { 0 });
+            in_band.get() >= 500
+        },
+    );
+
+    stop.store(true, Ordering::Relaxed);
+    h.script.lock().unwrap().push_back(Script::Drained);
+    let report = h.join.join().unwrap().unwrap();
+    assert_eq!(report.state, ExitState::Completed);
+}
+
 /// One event's fields, as `(name, debug value)` pairs.
 type Fields = Vec<(String, String)>;
 

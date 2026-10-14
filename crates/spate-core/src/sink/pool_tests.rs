@@ -552,7 +552,7 @@ async fn inflight_cap_bounds_concurrent_writes() {
     assert_eq!(report.flushed, 6);
     assert!(
         f.writer.max_concurrent.load(Ordering::SeqCst) <= 2,
-        "at most max_inflight writes ran concurrently, saw {}",
+        "at most inflight.max_per_shard writes ran concurrently, saw {}",
         f.writer.max_concurrent.load(Ordering::SeqCst)
     );
 }

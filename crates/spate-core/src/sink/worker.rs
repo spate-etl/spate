@@ -6,8 +6,9 @@
 //! write task at the drain deadline is therefore safe; an aborted task
 //! cannot resolve a batch as delivered.
 //!
-//! Batches of one shard may complete out of order across the `max_inflight`
-//! window; the checkpointer's contiguity tracker absorbs this.
+//! Batches of one shard may complete out of order across the
+//! `inflight.max_per_shard` window; the checkpointer's contiguity tracker
+//! absorbs this.
 
 use super::breaker::BreakerSet;
 use super::config::SinkPoolConfig;

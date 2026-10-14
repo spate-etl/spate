@@ -13,7 +13,7 @@
 //!   record-aware [`RecordRouter`] for payload-derived shard affinity.
 //! - **Shard workers** (tokio tasks) merge chunks from all pipeline
 //!   threads into full-size batches, seal on `max_rows` / `max_bytes` /
-//!   `linger`, and dispatch up to `max_inflight` concurrent
+//!   `linger`, and dispatch up to `inflight.max_per_shard` concurrent
 //!   [`ShardWriter::write_batch`] calls rotating across healthy replicas.
 //!   Merging at the worker keeps batches large regardless of the pipeline
 //!   thread count.

@@ -1058,7 +1058,8 @@ fn caller_owned_io_runtime_is_used_and_shut_down_by_run() {
 }
 
 /// A caller-owned current-thread I/O runtime fails `run` with
-/// `StartError::Config` before the source opens. Regression for #1155.
+/// `StartError::Config` before any pipeline thread starts. Regression for
+/// #1155.
 #[test]
 fn current_thread_io_runtime_fails_startup() {
     let io = tokio::runtime::Builder::new_current_thread()
@@ -1082,10 +1083,13 @@ fn current_thread_io_runtime_fails_startup() {
     let (source, shared, _script) = FakeSource::new();
     let chain_shared = Arc::new(ChainShared::default());
     let log = Arc::new(Mutex::new(SourceLog::default()));
+    let chains_built = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let chains_built_in = Arc::clone(&chains_built);
     let runtime = PipelineRuntime::new(
         test_config(1),
         source,
         move |_thread| {
+            chains_built_in.fetch_add(1, Ordering::Relaxed);
             Box::new(FakeChain {
                 shared: Arc::clone(&chain_shared),
                 log: Arc::clone(&log),
@@ -1108,6 +1112,11 @@ fn current_thread_io_runtime_fails_startup() {
     };
     assert!(err.to_string().contains("multi-thread"), "{err}");
     assert!(!shared.lock().unwrap().opened, "the source must not open");
+    assert_eq!(
+        chains_built.load(Ordering::Relaxed),
+        0,
+        "no pipeline thread may start"
+    );
 }
 
 /// The source drops while the io runtime still runs, so work its `Drop`

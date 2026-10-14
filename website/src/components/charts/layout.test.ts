@@ -119,3 +119,55 @@ test('columns refuse a width whose bars are narrower than their value labels', (
 test('a ragged value table is refused', () => {
   assert.throws(() => columns({...DATA, values: [[1, 2, 3, 4], [1, 2, 3]]}, 560, 'x'), /one value per series/);
 });
+
+test('a negative or non-finite value is refused by both layouts', () => {
+  for (const [layout, width] of [[columns, 560], [rows, 360]] as const) {
+    for (const bad of [-5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      const values = [[45.32, 41.98, 46.15, bad], DATA.values[1]];
+      assert.throws(() => layout({...DATA, values}, width, 'decoded, GB/s'), /finite value of at least zero/);
+    }
+  }
+});
+
+test('rows refuse a group label that would end past the viewBox, naming it', () => {
+  const groups = ['4 instances on a c8g.16xlarge fleet, one region', '8 instances'];
+  assert.throws(
+    () => rows({...DATA, groups}, 360, 'decoded throughput, GB/s · higher is better'),
+    /too narrow for the group 4 instances on a c8g\.16xlarge fleet, one region/,
+  );
+});
+
+test('columns and rows refuse an axis label that would end past the viewBox, naming it', () => {
+  const axis = 'decoded throughput across the whole fleet of instances in one region, GB/s · higher is better';
+  for (const [layout, w] of [[columns, 560], [rows, 360]] as const) {
+    assert.throws(() => layout(DATA, w, axis), /too narrow for the axis label decoded throughput across the whole fleet/);
+  }
+});
+
+test('columns: bars in a group stand S1 apart', () => {
+  const l = columns(DATA, 560, 'decoded, GB/s');
+  for (const g of [0, 1]) {
+    const bars = l.bars.filter((b) => b.group === g);
+    bars.slice(1).forEach((b, i) => assert.ok(Math.abs(b.rect.x - (bars[i].rect.x + bars[i].rect.w) - S1) < 1e-9));
+  }
+});
+
+test('a value table with a row per group missing or extra is refused', () => {
+  for (const layout of [columns, rows]) {
+    assert.throws(() => layout({...DATA, groups: ['4 instances']}, 560, 'x'), /one value row per group/);
+    assert.throws(() => layout({...DATA, groups: ['a', 'b', 'c']}, 560, 'x'), /one value row per group/);
+  }
+});
+
+test('rows refuse a width whose tick labels would touch', () => {
+  assert.throws(() => rows(DATA, 150, 'decoded, GB/s'), /tick labels/);
+});
+
+test('the top tick is the max when the max sits on a tick, at any magnitude', () => {
+  assert.equal(niceScale(0.00001).ticks.length, 6);
+  assert.equal(niceScale(0.00001).top, 0.00001);
+});
+
+test('columns refuse a group label wider than its group', () => {
+  assert.throws(() => columns({...DATA, groups: ['4 instances on a very long group label', '8']}, 560, 'x'), /too narrow for the group/);
+});

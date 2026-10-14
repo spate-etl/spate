@@ -58,6 +58,12 @@ function label(text: string, x: number, y: number, anchor: Label['anchor']): Lab
   return {x, y, text, anchor, w: textW(text)};
 }
 
+/** `l`, after checking it ends inside the margin of a `width`-unit viewBox. */
+function inside(l: Label, width: number, what: string): Label {
+  if (labelBox(l).x1 > width - M) throw new Error(`a ${width}-unit chart is too narrow for the ${what} ${l.text}`);
+  return l;
+}
+
 /** A tick value as a label shows it, with the float noise of `i * step` removed. */
 function tickText(t: number): string {
   return String(Number(t.toFixed(10)));
@@ -79,12 +85,14 @@ export function niceScale(max: number, target = 5): Scale {
   return {top: ticks[n], step, ticks};
 }
 
-/** The largest value, after checking every group holds one value per series. */
+/** The largest value, after checking every group holds one value per series, each finite and at least zero. */
 function largest(data: ChartData): number {
   for (const row of data.values) {
     if (row.length !== data.series.length) throw new Error('a group needs one value per series');
   }
   if (data.values.length !== data.groups.length) throw new Error('the chart needs one value row per group');
+  const bad = data.values.flat().find((v) => !(Number.isFinite(v) && v >= 0));
+  if (bad !== undefined) throw new Error(`a bar from zero needs a finite value of at least zero, got ${bad}`);
   return Math.max(...data.values.flat());
 }
 
@@ -92,7 +100,8 @@ function largest(data: ChartData): number {
  * Bars standing over a value axis, `width` units wide. Each bar carries its value above it, and each
  * group its label under the base line.
  *
- * Throws when `width` leaves a bar narrower than its value label, or a group narrower than its label.
+ * Throws when `width` leaves a bar narrower than its value label, a group narrower than its label,
+ * or too little room for the axis label.
  */
 export function columns(data: ChartData, width: number, axisLabel: string): Layout {
   const scale = niceScale(largest(data));
@@ -134,7 +143,7 @@ export function columns(data: ChartData, width: number, axisLabel: string): Layo
     bars,
     ticks: scale.ticks.map((t) => ({at: at(t), label: label(tickText(t), left - S2, at(t) + MID, 'end')})),
     groupLabels,
-    axisLabel: label(axisLabel, M, M + ASCENT, 'start'),
+    axisLabel: inside(label(axisLabel, M, M + ASCENT, 'start'), width, 'axis label'),
     axis: {x0: left, y0: base, x1: left, y1: at(scale.top)},
     base: {x0: left, y0: base, x1: right, y1: base},
   };
@@ -145,7 +154,8 @@ export function columns(data: ChartData, width: number, axisLabel: string): Layo
  * bars, and each bar carries its value after its end. The axis is as long as the longest value
  * label allows.
  *
- * Throws when `width` leaves the axis too short to set its tick labels apart.
+ * Throws when `width` leaves the axis too short to set its tick labels apart, or too little room
+ * for a group label or the axis label.
  */
 export function rows(data: ChartData, width: number, axisLabel: string): Layout {
   const scale = niceScale(largest(data));
@@ -164,7 +174,7 @@ export function rows(data: ChartData, width: number, axisLabel: string): Layout 
   const groupLabels: Label[] = [];
   data.values.forEach((row, g) => {
     // Clear of the zero line the bars start from.
-    groupLabels.push(label(data.groups[g], x0 + S2, y + ASCENT, 'start'));
+    groupLabels.push(inside(label(data.groups[g], x0 + S2, y + ASCENT, 'start'), width, 'group'));
     y += LINE_BOX + S1;
     row.forEach((v, s) => {
       const w = at(v) - x0;
@@ -190,7 +200,7 @@ export function rows(data: ChartData, width: number, axisLabel: string): Layout 
     bars,
     ticks,
     groupLabels,
-    axisLabel: label(axisLabel, M, M + ASCENT, 'start'),
+    axisLabel: inside(label(axisLabel, M, M + ASCENT, 'start'), width, 'axis label'),
     axis: {x0, y0: axisY, x1: at(scale.top), y1: axisY},
     base: {x0, y0: firstBar - S1, x1: x0, y1: axisY},
   };

@@ -13,8 +13,8 @@ use support::s3_stub::s3_stub;
 use support::{PipelineYaml, launch_tuned, shared_store, test_options, test_tuning};
 
 /// Every object the store lists counts as listed, including those the S3
-/// client takes out of the listing, the planner leaves out of the plan, or
-/// decodes to the same key as another.
+/// client takes out of the listing, those the planner leaves out of the plan,
+/// and those whose key decodes to the same key as another's.
 #[test]
 fn unaddressable_objects_count_as_listed() {
     let handle = install(&MetricsSettings {

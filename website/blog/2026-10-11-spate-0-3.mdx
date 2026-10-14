@@ -31,7 +31,8 @@ first come with the old form and the new.
 
 **The `full` feature is gone.** Each build must now name the connectors it
 uses. `full` was redundant. It pulled in every source, format and sink in
-Spate except the data generator, and no pipeline uses them all.
+Spate except the data generator, plus the NATS coordination store, and no
+pipeline uses them all.
 
 ```toml
 # 0.2

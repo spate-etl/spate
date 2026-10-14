@@ -1,7 +1,8 @@
 /**
  * A grouped bar chart drawn as inline SVG on the concept figures' scale and frame. The figure's own
  * width picks one of two drawings: bars standing over a value axis, or, in a phone column, bars laid
- * along one. A chart whose value labels do not fit over its bars lays them along the axis in both.
+ * along one. A chart whose value labels do not fit over its bars, or whose group labels do not fit
+ * under its groups, lays them along the axis in both.
  */
 import React, {useId} from 'react';
 

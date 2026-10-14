@@ -1,7 +1,8 @@
 /**
  * The geometry of a grouped bar chart, in viewBox units on the figures' type and spacing scale.
  * `columns` stands the bars up over a value axis on the left; `rows` lays them along a value axis at
- * the foot, for a column too narrow to set a value label over each bar. Both scale from zero.
+ * the foot, for a column too narrow to set a value label over each bar or a group label under each
+ * group. Both scale from zero.
  */
 import {ASCENT, DESCENT, GAP, LINE_BOX, MID, S1, S2, centredBaseline, textW} from '../diagrams/scale.ts';
 
@@ -106,9 +107,14 @@ function columnGeometry(scale: Scale, data: ChartData, width: number): {left: nu
   return {left, groupW, pitch, barW: pitch - S1};
 }
 
-/** A column chart's bar width at `width`. */
-function columnBarW(data: ChartData, width: number): number {
-  return columnGeometry(niceScale(largest(data)), data, width).barW;
+/**
+ * Whether a column chart `width` units wide can set every value label over its bar and every group
+ * label under its group, by the same widths `columns` refuses.
+ */
+function columnsFit(data: ChartData, width: number): boolean {
+  const {groupW, barW} = columnGeometry(niceScale(largest(data)), data, width);
+  const values = data.values.flat().every((v) => textW(v.toFixed(data.decimals)) <= barW);
+  return values && data.groups.every((g) => textW(g) <= groupW);
 }
 
 /**
@@ -218,12 +224,11 @@ export function rows(data: ChartData, width: number, axisLabel: string): Layout 
 
 /**
  * The drawing for a column `width` units wide: bars standing over the axis when each value label
- * fits over its bar, or bars laid along it when one does not.
+ * fits over its bar and each group label under its group, or bars laid along it when one does not.
  *
  * Throws when neither drawing can set its labels at `width`, as `rows` does.
  */
 export function landscape(data: ChartData, width: number, axisLabel: string): {layout: Layout; vertical: boolean} {
-  const widest = Math.max(...data.values.flat().map((v) => textW(v.toFixed(data.decimals))));
-  if (widest <= columnBarW(data, width)) return {layout: columns(data, width, axisLabel), vertical: true};
+  if (columnsFit(data, width)) return {layout: columns(data, width, axisLabel), vertical: true};
   return {layout: rows(data, width, axisLabel), vertical: false};
 }

@@ -203,3 +203,11 @@ test('the landscape drawing lays bars along the axis when a value label is wider
 test('the landscape drawing refuses what neither drawing can set', () => {
   assert.throws(() => landscape({...SWEEP, groups: ['a group label long enough to run past the end of a 560-unit drawing in either layout', '4', '8', '16']}, 560, 'x'), /too narrow for the group/);
 });
+
+test('the landscape drawing lays bars along the axis when a group label is wider than its group', () => {
+  const wideGroup: ChartData = {groups: ['2 I/O workers, default', '4', '8', '16'], series: ['a', 'b'], values: [[1, 2], [3, 4], [5, 6], [7, 8]], decimals: 0};
+  assert.throws(() => columns(wideGroup, 560, 'x'), /too narrow for the group/);
+  const {layout, vertical} = landscape(wideGroup, 560, 'x');
+  assert.equal(vertical, false);
+  assert.deepEqual(layout, rows(wideGroup, 560, 'x'));
+});

@@ -17,14 +17,17 @@ categories.workspace = true
 testing = []
 
 [dependencies]
+async-trait = { workspace = true }
 base64 = { workspace = true }
 bytes = { workspace = true }
 bytesize = { workspace = true }
+chrono = { workspace = true }
 spate-coordination = { workspace = true }
 spate-core = { workspace = true }
 flate2 = { workspace = true }
 futures-util = { workspace = true }
 object_store = { workspace = true, features = ["aws"] }
+quick-xml = { workspace = true }
 # `tls_rejection!` expands against this crate's rustls.
 rustls = { workspace = true }
 serde = { workspace = true }
@@ -36,7 +39,6 @@ url = { workspace = true }
 zstd = { workspace = true }
 
 [dev-dependencies]
-async-trait = { workspace = true }
 spate-s3 = { path = ".", features = ["testing"] }
 spate-coordination = { workspace = true, features = ["nats"] }
 spate-bench = { workspace = true }

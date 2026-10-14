@@ -97,6 +97,9 @@ lz4_flex = { version = "0.14.0", default-features = false, features = ["std"] }
 cityhash-rs = "1.0.1"
 apache-avro = "0.22"
 object_store = "0.14"
+# spate-s3 decodes listing pages with the decoder object_store uses, so its
+# version and features follow object_store's.
+quick-xml = { version = "0.41.0", features = ["serialize", "overlapped-lists"] }
 # The `server_2_11` default feature gates the limit-marker KV config the lease
 # buckets depend on.
 async-nats = "0.50"

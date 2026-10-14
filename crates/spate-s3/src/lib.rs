@@ -85,6 +85,7 @@ mod framer;
 #[doc(hidden)]
 pub mod fuzz_seams;
 mod lane;
+mod listing;
 mod metrics;
 mod offset;
 mod planner;

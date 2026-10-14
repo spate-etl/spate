@@ -37,6 +37,64 @@ fn answer(mut stream: TcpStream, status_line: &str) -> std::io::Result<()> {
     stream.flush()
 }
 
+/// An HTTP server on `127.0.0.1` that answers `ListObjectsV2` with `pages`
+/// in turn: the first request gets `pages[0]`, and a request carrying
+/// `continuation-token=N` gets `pages[N]`. Any other request is a 404.
+///
+/// Returns the server's `http://` URL. The server runs on a detached thread
+/// for the life of the process.
+pub(crate) fn listing_server(pages: Vec<String>) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind a local port");
+    let url = format!("http://{}", listener.local_addr().expect("local address"));
+    let pages = std::sync::Arc::new(pages);
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let pages = std::sync::Arc::clone(&pages);
+            std::thread::spawn(move || {
+                let _ = answer_listing(stream, &pages);
+            });
+        }
+    });
+    url
+}
+
+fn answer_listing(mut stream: TcpStream, pages: &[String]) -> std::io::Result<()> {
+    let mut request = Vec::new();
+    let mut buf = [0u8; 4096];
+    while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+        let n = stream.read(&mut buf)?;
+        if n == 0 {
+            return Ok(());
+        }
+        request.extend_from_slice(&buf[..n]);
+    }
+    let line = String::from_utf8_lossy(&request);
+    let target = line.split_whitespace().nth(1).unwrap_or_default();
+    let query = target.split_once('?').map_or("", |(_, q)| q);
+    let page = query
+        .split('&')
+        .any(|p| p == "list-type=2")
+        .then(|| {
+            query
+                .split('&')
+                .find_map(|p| p.strip_prefix("continuation-token="))
+                .map_or(Some(0), |t| t.parse::<usize>().ok())
+        })
+        .flatten()
+        .and_then(|i| pages.get(i));
+    let (status, body) = match page {
+        Some(body) => ("200 OK", body.as_str()),
+        None => ("404 Not Found", "<Error><Code>NoSuchKey</Code></Error>"),
+    };
+    write!(
+        stream,
+        "HTTP/1.1 {status}\r\ncontent-type: application/xml\r\n\
+         content-length: {}\r\nconnection: close\r\n\r\n{body}",
+        body.len()
+    )?;
+    stream.flush()
+}
+
 /// A builder for bucket `b` at `endpoint`, with plain HTTP allowed and
 /// object_store's own retries off.
 pub(crate) fn builder_at(endpoint: &str) -> AmazonS3Builder {

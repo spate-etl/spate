@@ -13,6 +13,7 @@
 use crate::config::Compression;
 use crate::error::classify;
 use crate::fetch::{MAX_ATTEMPTS, list_all};
+use crate::listing::UnaddressableKeys;
 use crate::split::Packing;
 use object_store::ObjectStore;
 use object_store::path::Path;
@@ -81,6 +82,10 @@ pub(crate) struct S3Planner {
     /// fail fast (the crate's retry philosophy) instead of idling the
     /// fleet behind per-tick WARNs forever.
     consecutive_failures: u32,
+    /// Objects the store's client took out of the listing because
+    /// `object_store` cannot address their keys. `None` for a store built
+    /// without that filter.
+    unaddressable: Option<UnaddressableKeys>,
 }
 
 impl std::fmt::Debug for S3Planner {
@@ -113,7 +118,14 @@ impl S3Planner {
             fingerprint,
             metrics,
             consecutive_failures: 0,
+            unaddressable: None,
         }
+    }
+
+    /// Plan the objects `keys` collects from each listing as well.
+    pub(crate) fn with_unaddressable(mut self, keys: Option<UnaddressableKeys>) -> S3Planner {
+        self.unaddressable = keys;
+        self
     }
 }
 
@@ -123,6 +135,10 @@ impl SplitPlanner for S3Planner {
     }
 
     fn plan(&mut self, _ctx: PlanContext<'_>) -> Result<SplitPlan, CoordinationError> {
+        // Drop what an earlier failed listing left behind.
+        if let Some(keys) = &self.unaddressable {
+            keys.take();
+        }
         let entries = match self
             .handle
             .block_on(list_all(&self.store, self.prefix.as_ref()))
@@ -160,11 +176,34 @@ impl SplitPlanner for S3Planner {
                 ));
             }
         };
+        let mut unaddressable = self
+            .unaddressable
+            .as_ref()
+            .map(UnaddressableKeys::take)
+            .unwrap_or_default();
+        // A page `object_store` requested twice is recorded twice.
+        unaddressable.sort_unstable_by(|a, b| a.key.cmp(&b.key));
+        unaddressable.dedup_by(|a, b| a.key == b.key);
         if let Some(m) = &self.metrics {
-            m.objects_listed.increment(entries.len() as u64);
+            m.objects_listed
+                .increment((entries.len() + unaddressable.len()) as u64);
         }
 
-        let packed = crate::split::pack(entries, &self.packing);
+        let mut packed = crate::split::pack(entries, &self.packing);
+        // An unaddressable object poisons whatever split holds it, so each
+        // one is planned whole and alone and the objects beside it in the
+        // listing are still read. One with no bytes holds no records.
+        let alone = Packing {
+            delimiter: None,
+            ..self.packing
+        };
+        for entry in unaddressable {
+            if entry.size == 0 {
+                tracing::debug!(key = %entry.key, "not planning an empty object whose key the store cannot address");
+                continue;
+            }
+            packed.extend(crate::split::pack(vec![entry], &alone));
+        }
         let mut splits = Vec::with_capacity(packed.len());
         for split in packed {
             let id = split.id()?;
@@ -451,6 +490,83 @@ mod tests {
             assert_eq!(err.kind, CoordinationErrorKind::Fatal, "{}", err.reason);
             assert!(err.reason.contains(status), "{}", err.reason);
             assert!(!err.reason.contains("plan attempts"), "{}", err.reason);
+        }
+    }
+
+    fn list_page(objects: &[(&str, u64)], token: Option<&str>) -> String {
+        let contents: String = objects
+            .iter()
+            .map(|(key, size)| {
+                format!(
+                    "<Contents><Key>{key}</Key><LastModified>2026-10-11T13:38:17.000Z\
+                     </LastModified><ETag>&quot;e&quot;</ETag><Size>{size}</Size></Contents>"
+                )
+            })
+            .collect();
+        let next = token.map_or_else(String::new, |t| {
+            format!("<NextContinuationToken>{t}</NextContinuationToken>")
+        });
+        format!(
+            "<ListBucketResult><IsTruncated>{}</IsTruncated>{contents}{next}</ListBucketResult>",
+            token.is_some()
+        )
+    }
+
+    /// A listing that holds keys `object_store` cannot address plans every
+    /// other object, in splits without them, and plans each such object with
+    /// bytes in a split of its own. Regression for #1082 and #1116.
+    #[test]
+    fn unaddressable_keys_are_planned_alone() {
+        let rt = runtime();
+        let url = crate::test_servers::listing_server(vec![
+            list_page(
+                &[
+                    ("data/a.ndjson", 7),
+                    ("data/d//dbl.ndjson", 7),
+                    ("data/dir/", 0),
+                ],
+                Some("1"),
+            ),
+            list_page(&[("/data/lead.ndjson", 7), ("data/z.ndjson", 7)], None),
+        ]);
+
+        let plain = crate::test_servers::store_at(&url);
+        let mut p = planner(Arc::new(plain), rt.handle().clone(), 64 * MB);
+        let err = p.plan(PlanContext::new(None, 1)).unwrap_err();
+        assert!(err.reason.contains("d//dbl.ndjson"), "{}", err.reason);
+
+        let keys = UnaddressableKeys::default();
+        let store = crate::test_servers::builder_at(&url)
+            .with_access_key_id("AKIDTEST")
+            .with_secret_access_key("secret")
+            .with_http_connector(crate::listing::UnaddressableConnector::new(keys.clone()))
+            .build()
+            .unwrap();
+        let mut p =
+            planner(Arc::new(store), rt.handle().clone(), 64 * MB).with_unaddressable(Some(keys));
+        for attempt in 1..=2 {
+            let plan = p.plan(PlanContext::new(None, attempt)).unwrap();
+            let members: Vec<Vec<String>> = plan
+                .splits
+                .iter()
+                .map(|s| {
+                    SplitDescriptor::decode(&s.spec.descriptor)
+                        .unwrap()
+                        .objects
+                        .into_iter()
+                        .map(|o| o.key)
+                        .collect()
+                })
+                .collect();
+            assert_eq!(
+                members,
+                [
+                    vec!["data/a.ndjson", "data/z.ndjson"],
+                    vec!["/data/lead.ndjson"],
+                    vec!["data/d//dbl.ndjson"],
+                ],
+                "plan {attempt}"
+            );
         }
     }
 

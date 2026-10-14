@@ -432,6 +432,15 @@ default, so `run()` returns `ExitState::Failed` rather than a silently partial
 with a WARN. Either way, alert on
 `spate_coordination_splits_quarantined > 0`.
 
+A key the S3 client cannot address poisons as well. The client rejects a key
+with an empty segment (`d//x.ndjson`), a `.` or `..` segment, or an ASCII
+control character, and reads a key that starts or ends with `/` under a
+different key. The listing still returns every other object. Each object with
+such a key is planned in a split of its own, which poisons on its first read
+and names the key, and the objects listed beside it are read. An object with
+such a key and no bytes, such as a folder marker `dir/`, holds no records and
+is not planned.
+
 There is no skip-an-object mode; the reasoning is in
 [ADR-0035](../../../../adr/0035-s3-poison-policy.md), which also covers why
 credential and configuration failures fail the pipeline instead. Quarantine

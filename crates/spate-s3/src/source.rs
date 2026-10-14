@@ -28,6 +28,7 @@
 
 use crate::config::S3SourceConfig;
 use crate::lane::S3Lane;
+use crate::listing::{UnaddressableConnector, UnaddressableKeys};
 use crate::metrics::S3Metrics;
 use crate::planner::{S3Planner, job_fingerprint};
 use crate::split::Packing;
@@ -266,7 +267,7 @@ impl Source for S3Source {
         })?;
 
         let url = parse(&self.config.url)?;
-        let (store, prefix) = match self.store.take() {
+        let (store, prefix, unaddressable) = match self.store.take() {
             // Injected store: the URL still names the listing prefix.
             Some(store) => {
                 let (_, path) =
@@ -274,15 +275,15 @@ impl Source for S3Source {
                         class: ErrorClass::Fatal,
                         reason: format!("parsing {}: {e}", self.config.url),
                     })?;
-                (store, path)
+                (store, path, None)
             }
             None => {
-                let (store, path) =
+                let built =
                     build_store(&url, &self.config.store).map_err(|e| SourceError::Client {
                         class: ErrorClass::Fatal,
                         reason: format!("building the object store for {}: {e}", self.config.url),
                     })?;
-                (Arc::from(store), path)
+                (Arc::from(built.store), built.prefix, built.unaddressable)
             }
         };
 
@@ -359,7 +360,8 @@ impl Source for S3Source {
                 delimiter,
             ),
             metrics.clone(),
-        );
+        )
+        .with_unaddressable(unaddressable);
         let split_ctx = SplitCtx::new(
             store,
             self.handle.clone(),
@@ -534,7 +536,7 @@ fn opts(map: &std::collections::BTreeMap<String, String>) -> Vec<(String, String
 fn build_store(
     url: &Url,
     options: &std::collections::BTreeMap<String, String>,
-) -> Result<(Box<dyn ObjectStore>, object_store::path::Path), object_store::Error> {
+) -> Result<BuiltStore, object_store::Error> {
     // `ObjectStoreScheme::parse` returns the scheme and the in-store `Path` —
     // the very call `parse_url_opts` makes, so `path` is the exact listing
     // prefix it would return and every planned descriptor that depends on it
@@ -543,14 +545,36 @@ fn build_store(
     // Every non-S3 scheme (notably `file://` for infrastructure-free runs and
     // tests) keeps the stock, scheme-generic behavior.
     if !matches!(scheme, ObjectStoreScheme::AmazonS3) {
-        return object_store::parse_url_opts(url, opts(options));
+        let (store, prefix) = object_store::parse_url_opts(url, opts(options))?;
+        return Ok(BuiltStore {
+            store,
+            prefix,
+            unaddressable: None,
+        });
     }
     // Harden the HTTP client (idle-connection recycling, explicit timeouts)
     // before overlaying the operator's `store` options, so the passthrough
     // still wins; see `harden_client_defaults`.
     let builder = harden_client_defaults(AmazonS3Builder::from_env().with_url(url.as_str()));
-    let store = apply_options(builder, options).build()?;
-    Ok((Box::new(store), path))
+    let unaddressable = UnaddressableKeys::default();
+    let store = apply_options(builder, options)
+        .with_http_connector(UnaddressableConnector::new(unaddressable.clone()))
+        .build()?;
+    Ok(BuiltStore {
+        store: Box::new(store),
+        prefix: path,
+        unaddressable: Some(unaddressable),
+    })
+}
+
+/// What [`build_store`] returns.
+struct BuiltStore {
+    store: Box<dyn ObjectStore>,
+    /// The listing prefix within the store.
+    prefix: object_store::path::Path,
+    /// The objects the S3 client takes out of each listing; `None` for any
+    /// other scheme.
+    unaddressable: Option<UnaddressableKeys>,
 }
 
 /// Conservative HTTP-client defaults for the S3 backend, applied *before* the
@@ -663,7 +687,7 @@ mod tests {
     #[test]
     fn build_store_s3_prefix_matches_parse_url_opts() {
         let url = Url::parse("s3://bucket/exports/2026/").unwrap();
-        let (_, got) = build_store(&url, &BTreeMap::new()).unwrap();
+        let got = build_store(&url, &BTreeMap::new()).unwrap().prefix;
         let (_, want) =
             object_store::parse_url_opts(&url, std::iter::empty::<(String, String)>()).unwrap();
         assert_eq!(got, want);
@@ -695,7 +719,7 @@ mod tests {
     fn build_store_delegates_non_s3_schemes() {
         let dir = tempfile::tempdir().unwrap();
         let url = Url::from_directory_path(dir.path()).unwrap();
-        let (_, got) = build_store(&url, &BTreeMap::new()).unwrap();
+        let got = build_store(&url, &BTreeMap::new()).unwrap().prefix;
         let (_, want) =
             object_store::parse_url_opts(&url, std::iter::empty::<(String, String)>()).unwrap();
         assert_eq!(got, want, "file:// delegates to parse_url_opts unchanged");

@@ -83,10 +83,13 @@ four pull requests:
   workers, rounded up, plus the controller's. A 4-core host with the default two I/O workers runs 2 pipeline
   threads instead of 1.
 
-A retry now resends the stored bytes and compresses nothing again. In a
-loopback spike before the change, I measured the I/O thread's CPU per 43 KB
-Native frame on a Graviton4 host. Compressing inside `send` cost 48.60 µs under lz4 and 88.26 µs
-under zstd:3. Sending the same frame pre-compressed cost 5.51 µs and 4.92 µs.
+A retry now resends the stored bytes and compresses nothing again. Chunks
+waiting in a queue or in flight now stay compressed in memory, while the
+in-flight budget and `batch.max_bytes` still count their size before
+compression. In a loopback spike before the change, I measured the I/O thread's
+CPU per 43 KB Native frame on a Graviton4 host. Compressing inside `send` cost
+48.60 µs under lz4 and 88.26 µs under zstd:3. Sending the same frame
+pre-compressed cost 5.51 µs and 4.92 µs.
 
 ## The same box, before and after
 

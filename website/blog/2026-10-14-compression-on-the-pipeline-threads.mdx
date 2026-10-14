@@ -119,9 +119,9 @@ control, after the main sweep. Each figure is the median.
 At the default, 799d3640 runs lz4 about 1.6 times and zstd:3 3.85 times faster
 than 0.3.0, and it matches what 0.3.0 needed 8 workers for. The lz4 ratio is
 1.69 against the arm in the chart and 1.59 against 0.3.0's A/A arm. The I/O
-runtime fell from 2.07 cores to 0.61 under lz4, and to 0.57 under zstd:3. The
-pipeline threads went from 10.6 cores to 21.2 under lz4, and from 4.0 to 23.7
-under zstd:3. The compression now shows up on them.
+runtime fell from 2.07 cores to 0.61 under lz4, and from 1.35 to 0.57 under
+zstd:3. The pipeline threads went from 10.6 cores to 21.2 under lz4, and from
+4.0 to 23.7 under zstd:3. The compression now shows up on them.
 
 The number of I/O workers no longer matters on this rig. From 2 to 16 workers
 each codec moved by at most 4.4%, so the default of 2 stays.

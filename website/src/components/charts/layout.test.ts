@@ -1,0 +1,121 @@
+import assert from 'node:assert/strict';
+import {test} from 'node:test';
+
+import {S1} from '../diagrams/scale.ts';
+import {columns, labelBox, niceScale, rows, type ChartData, type Label, type Layout} from './layout.ts';
+
+const DATA: ChartData = {
+  groups: ['4 instances', '8 instances'],
+  series: ['static split', 'NATS coordination', 'SQS queue', 'Kafka queue'],
+  values: [
+    [45.32, 41.98, 46.15, 46.12],
+    [90.64, 59.81, 92.23, 92.24],
+  ],
+  decimals: 2,
+};
+
+type Box = {x0: number; y0: number; x1: number; y1: number};
+const overlaps = (a: Box, b: Box) => a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1;
+const rectBox = ({x, y, w, h}: {x: number; y: number; w: number; h: number}): Box => ({x0: x, y0: y, x1: x + w, y1: y + h});
+
+/** Every label the layout sets. */
+function labels(l: Layout): Label[] {
+  return [l.axisLabel, ...l.groupLabels, ...l.ticks.map((t) => t.label), ...l.bars.map((b) => b.value)];
+}
+
+/** Faults a reader would see: a label outside the viewBox, two labels touching, a label on a bar. */
+function faults(l: Layout): string[] {
+  const found: string[] = [];
+  const all = labels(l);
+  all.forEach((a, i) => {
+    const box = labelBox(a);
+    if (box.x0 < 0 || box.y0 < 0 || box.x1 > l.width || box.y1 > l.height) found.push(`${a.text} leaves the viewBox`);
+    all.slice(i + 1).forEach((b) => {
+      if (overlaps(box, labelBox(b))) found.push(`${a.text} overlaps ${b.text}`);
+    });
+    l.bars.forEach((bar) => {
+      if (overlaps(box, rectBox(bar.rect))) found.push(`${a.text} overlaps the bar of ${bar.series} in ${bar.group}`);
+    });
+  });
+  return found;
+}
+
+test('the scale starts at zero and ends on the first tick at or above the largest value', () => {
+  assert.deepEqual(niceScale(92.24), {top: 100, step: 20, ticks: [0, 20, 40, 60, 80, 100]});
+  assert.deepEqual(niceScale(46.15), {top: 50, step: 10, ticks: [0, 10, 20, 30, 40, 50]});
+  assert.deepEqual(niceScale(100), {top: 100, step: 20, ticks: [0, 20, 40, 60, 80, 100]});
+  assert.deepEqual(niceScale(1.2), {top: 1.25, step: 0.25, ticks: [0, 0.25, 0.5, 0.75, 1, 1.25]});
+  assert.deepEqual(niceScale(7), {top: 8, step: 2, ticks: [0, 2, 4, 6, 8]});
+});
+
+test('a scale over nothing positive is refused', () => {
+  assert.throws(() => niceScale(0), /positive/);
+  assert.throws(() => niceScale(Number.NaN), /positive/);
+});
+
+for (const [name, layout, width] of [
+  ['columns', columns, 560],
+  ['rows', rows, 360],
+  ['rows', rows, 300],
+] as const) {
+  test(`${name} at ${width}: every label inside the viewBox, clear of every other label and every bar`, () => {
+    const l = layout(DATA, width, 'decoded, GB/s');
+    assert.equal(l.width, width);
+    assert.deepEqual(faults(l), []);
+  });
+
+  test(`${name} at ${width}: one bar per value, its length proportional from zero`, () => {
+    const l = layout(DATA, width, 'decoded, GB/s');
+    const {top} = niceScale(92.24);
+    assert.equal(l.bars.length, 8);
+    const vertical = name === 'columns';
+    const full = vertical ? l.axis.y0 - l.axis.y1 : l.axis.x1 - l.axis.x0;
+    for (const bar of l.bars) {
+      const v = DATA.values[bar.group][bar.series];
+      const length = vertical ? bar.rect.h : bar.rect.w;
+      assert.ok(Math.abs(length - (v / top) * full) < 1e-9, `${v} drawn ${length} of ${full}`);
+      // Every bar starts on the base line.
+      if (vertical) assert.ok(Math.abs(bar.rect.y + bar.rect.h - l.base.y0) < 1e-9);
+      else assert.ok(Math.abs(bar.rect.x - l.base.x0) < 1e-9);
+      assert.equal(bar.value.text, v.toFixed(2));
+    }
+  });
+
+  test(`${name} at ${width}: bars in a group keep series order and one pitch`, () => {
+    const l = layout(DATA, width, 'decoded, GB/s');
+    const along = (b: (typeof l.bars)[number]) => (name === 'columns' ? b.rect.x : b.rect.y);
+    for (const g of [0, 1]) {
+      const bars = l.bars.filter((b) => b.group === g);
+      assert.deepEqual(bars.map((b) => b.series), [0, 1, 2, 3]);
+      const pitches = bars.slice(1).map((b, i) => along(b) - along(bars[i]));
+      assert.ok(pitches.every((p) => Math.abs(p - pitches[0]) < 1e-9 && p > 0), `pitches ${pitches}`);
+    }
+  });
+}
+
+test('columns: a value label sits S1 above its bar, centred on it', () => {
+  const l = columns(DATA, 560, 'decoded, GB/s');
+  for (const bar of l.bars) {
+    assert.equal(bar.value.anchor, 'middle');
+    assert.ok(Math.abs(bar.value.x - (bar.rect.x + bar.rect.w / 2)) < 1e-9);
+    assert.ok(Math.abs(labelBox(bar.value).y1 - (bar.rect.y - S1)) < 1e-9);
+  }
+});
+
+test('rows: a value label sits S1 after its bar, on its centre line', () => {
+  const l = rows(DATA, 360, 'decoded, GB/s');
+  for (const bar of l.bars) {
+    assert.equal(bar.value.anchor, 'start');
+    assert.ok(Math.abs(bar.value.x - (bar.rect.x + bar.rect.w + S1)) < 1e-9);
+    const box = labelBox(bar.value);
+    assert.ok(Math.abs((box.y0 + box.y1) / 2 - (bar.rect.y + bar.rect.h / 2)) < 1e-9);
+  }
+});
+
+test('columns refuse a width whose bars are narrower than their value labels', () => {
+  assert.throws(() => columns(DATA, 300, 'decoded, GB/s'), /too narrow/);
+});
+
+test('a ragged value table is refused', () => {
+  assert.throws(() => columns({...DATA, values: [[1, 2, 3, 4], [1, 2, 3]]}, 560, 'x'), /one value per series/);
+});

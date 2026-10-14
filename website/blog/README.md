@@ -7,8 +7,8 @@ one. The site build leaves it out.
 
 Every minor release, `X.Y.0`, has a post. A patch release has none.
 
-The file is `YYYY-MM-DD-spate-X-Y.md`, dated for the release day, with this
-front matter:
+The file is `YYYY-MM-DD-spate-X-Y.md`, or `.mdx` when the post renders a
+component, dated for the release day, with this front matter:
 
 ```yaml
 ---
@@ -48,7 +48,8 @@ one the release dispatches, and the GitHub release body links it.
   output shows.
 - **A performance claim** shows the before and the after on the same setup,
   names the hardware and the number of runs, and says which benchmark tier
-  proves it.
+  proves it. A few figures compared side by side can be drawn with the grouped
+  bar chart in `src/components/charts/`, whose caption states them in words.
 - **A fix worth telling** is a short arc in place of a feature section: the
   symptom, the cause, the fix, and the proof.
 - **A credit line** under a highlight that someone other than the author

@@ -5,40 +5,11 @@
  */
 import React, {useId} from 'react';
 
+import {DESCENT, GAP, LINE, MID, S1, S2, TITLE_LINE, centredBaseline, textW, titleW} from './scale';
 import styles from './styles.module.css';
 
-// ---- type scale, in viewBox units ----
-// Labels and notes are set at 12 units and region titles at 13, in `styles.module.css`. The metrics
-// below are those sizes as the monospace face renders them; a change of size or face changes them.
+export * from './scale';
 
-/** Advance of one 12-unit character; box widths derive from it. */
-export const CHAR = 7.4;
-export const TITLE_CHAR = 8;
-/** A 12-unit line's box above and below its baseline. */
-export const ASCENT = 10.31;
-export const DESCENT = 4.3;
-export const TITLE_ASCENT = 11.17;
-export const TITLE_DESCENT = 5.16;
-/** A 12-unit line box. */
-export const LINE_BOX = ASCENT + DESCENT;
-export const TITLE_BOX = TITLE_ASCENT + TITLE_DESCENT;
-/** How far a baseline sits below the centre of its line box. */
-const MID = (ASCENT - DESCENT) / 2;
-/** Baseline to baseline. */
-export const LINE = 17;
-/** Baseline to baseline for region titles, whose box is taller. */
-export const TITLE_LINE = 18;
-
-// ---- spacing scale ----
-
-/** The small step: a note under the box it annotates. */
-export const S1 = 4;
-/** Text beside the line or node it names. */
-export const S2 = 8;
-/** Between stages in a run, between rows, between a region's content blocks. */
-export const GAP = 12;
-/** Inside a region, on all four sides. */
-export const PAD = 12;
 /** Inside a box, between its edge and its label. */
 export const CHIP_X = 6;
 export const CHIP_H = 24;
@@ -79,16 +50,6 @@ export const QUEUE_GAP = QUEUE_W + 2 * S2;
 /** How far a stacked region's copies reach above and right of it. */
 export const STACK = 2 * S1;
 
-/** The rendered width of 13-unit title `text`. */
-export function titleW(text: string): number {
-  return text.length * TITLE_CHAR;
-}
-
-/** The rendered width of 12-unit `text`. */
-export function textW(text: string): number {
-  return text.length * CHAR;
-}
-
 /**
  * Sets a text line to `width`, the width the layout gave it. Some renderers round glyph advances:
  * Linux Chromium sets this face at 7.04 units per 12-unit character against `CHAR`'s 7.4, which
@@ -102,11 +63,6 @@ function pinnedWidth(width: number): {textLength: number; lengthAdjust: 'spacing
 export function chipW(label: string | string[]): number {
   const lines = typeof label === 'string' ? [label] : label;
   return Math.max(...lines.map(textW)) + 2 * CHIP_X;
-}
-
-/** The first baseline of `n` lines centred on `y`. */
-export function centredBaseline(y: number, n = 1): number {
-  return y + MID - ((n - 1) * LINE) / 2;
 }
 
 /** The bottom of `n` lines whose first baseline is `baseline`. */
@@ -612,7 +568,7 @@ export function Legend({entries}: {entries: LegendEntry[]}): React.JSX.Element {
  * narrower than its viewBox, so 12-unit text renders at 12px at most and every drawing on a page
  * shares one scale.
  */
-function atMostOneToOne(viewBox: string): React.CSSProperties {
+export function atMostOneToOne(viewBox: string): React.CSSProperties {
   return {maxWidth: `${viewBox.split(' ')[2]}px`};
 }
 

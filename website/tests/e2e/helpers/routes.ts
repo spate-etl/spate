@@ -3,9 +3,9 @@
  * `brand` are the accessibility sweep's set; `installation` is a `docs-table.spec.ts`
  * fixture for a table that fits its column and carries no axe run of its
  * own; `clickdoomPost` is the one built page carrying an `<hr>`;
- * `architecture` and `multiSink` carry the concept figures. Paths are
- * checked against the built output, not derived from the source tree —
- * Docusaurus strips numeric directory prefixes.
+ * `architecture` and `multiSink` carry the concept figures, and `releasePost03`
+ * the grouped bar chart. Paths are checked against the built output, not
+ * derived from the source tree — Docusaurus strips numeric directory prefixes.
  */
 export const ROUTES = {
   home: '/',
@@ -16,6 +16,7 @@ export const ROUTES = {
   brand: '/brand',
   architecture: '/docs/user-guide/concepts/architecture',
   multiSink: '/docs/user-guide/concepts/multi-sink',
+  releasePost03: '/blog/releases/0.3',
 } as const;
 
 export type RouteName = keyof typeof ROUTES;

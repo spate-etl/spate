@@ -1,0 +1,556 @@
+---
+title: Spate 0.3
+description: "Split coordination is deprecated and a work feed replaces it in 0.4. Large S3 objects are read in parallel byte ranges, ClickHouse rows carry their columns, and a rejected TLS handshake stops the pipeline."
+slug: releases/0.3
+authors: [marcus]
+tags: [release]
+---
+
+import GroupedBars from '@site/src/components/charts/GroupedBars';
+
+Spate 0.3.0 came out on 11 October. It is the last release with split
+coordination. Everything that divides an S3 prefix between instances through
+leases in a shared store is deprecated in 0.3.0. In 0.4.0 a work feed replaces
+it: a queue of work units that every instance reads directly. A coordinated job
+started on 0.3 has to finish on 0.3.
+
+Large uncompressed S3 objects are read as several byte ranges at once. The
+ClickHouse sink takes its insert columns from the row type and checks them
+against the table before it writes. A rejected TLS handshake stops the pipeline
+with an error that names it. In 0.2 most connectors retried it. Credentials
+stay out of `Debug` output and config errors. The changelog has 127 entries and
+22 of them are breaking, so this post starts with the upgrade.
+
+<!-- truncate -->
+
+## Breaking changes
+
+Several of these change a metric, or a signature that only a custom connector
+or a hand-built pipeline uses. The ones a pipeline file or a `Cargo.toml` meets
+first come with the old form and the new.
+
+**The `full` feature is gone.** Each build names the connectors it uses.
+
+```toml
+# 0.2
+spate = { version = "0.2", features = ["full"] }
+# 0.3
+spate = { version = "0.3", features = ["kafka", "clickhouse", "avro"] }
+```
+
+That 0.3 line builds without the NATS and object storage dependencies. A
+manifest that still asks for `full` fails to resolve:
+
+```text
+package `full-feature` depends on `spate` with feature `full` but `spate` does not have that feature.
+```
+
+To keep the old set, list `avro`, `json`, `kafka`, `clickhouse`,
+`coordination-nats` and `s3`. Building Spate also needs Rust 1.96 or newer.
+
+**The ClickHouse sink takes its columns from the row type.** Remove `columns`
+and `validate_schema` from the sink section. The row struct derives
+`ClickHouseRow`, and the builder's `with_row` supplies it. A section further
+down shows the derive.
+
+```yaml
+# 0.2
+sink:
+  clickhouse:
+    table: events
+    shards: [{ replicas: ["http://ch-0:8123"] }]
+    columns: [id, kind]
+    validate_schema: names
+# 0.3
+sink:
+  clickhouse:
+    table: events
+    shards: [{ replicas: ["http://ch-0:8123"] }]
+```
+
+The 0.2 form fails at load on 0.3:
+
+```text
+sink.clickhouse.columns: unknown field `columns`, expected one of `table`, `shards`, `database`, `user`, `password`, `tls`, `settings`, `batch`, `inflight`, `retry`, `breaker`, `timeouts`, `compression`, `format`, `distributed_check`
+```
+
+In code, `from_component_config` returns a `ClickHouseSinkBuilder`. Await
+`.with_row::<Owned<YourRow>>()` on it to get the sink, and build the encoder
+with `ClickHouseEncoder::with_schema(sink.schema())`. Every sink checks the
+row's field types against the table, so a field of the right width and the
+wrong type fails on the first record. A `u64` for a `DateTime64` column is one.
+With `format: rowbinary`, a `SimpleAggregateFunction(f, T)` column is checked
+against `T`.
+
+**A URL with credentials in it fails at load.** This covers a ClickHouse
+replica URL, a `distributed_check.endpoint` and a schema registry URL. Move the
+credentials into their own fields.
+
+```yaml
+# 0.2
+shards: [{ replicas: ["http://svc:secret@ch-0:8123"] }]
+# 0.3
+shards: [{ replicas: ["http://ch-0:8123"] }]
+user: svc
+password: secret
+```
+
+```text
+invalid configuration: sink.clickhouse: shard 0 replica 0 URL contains credentials; set them in user and password
+avro configuration: registry.url contains credentials; set them in registry.username and registry.password
+```
+
+The ClickHouse sink never sent the credentials in a replica URL. Requests went
+out as the configured `user`, or as the server's `default` user.
+
+**The clock traits moved to `spate::clock`.** The traits are unchanged.
+
+```rust
+// 0.2
+use spate::backpressure::{Clock, MonotonicClock};
+// 0.3
+use spate::clock::{Clock, SystemClock};
+```
+
+The tokio clock is `spate::clock::tokio::{Clock, Sleep, SystemClock}`. In 0.2
+it was under `spate::coordination`.
+
+**Avro.** `RegistrySection` is `#[non_exhaustive]` and gains a `tls` field, so
+build it with `RegistrySection::new(url)`. A truncated string body, boolean or
+union index is rejected as malformed and follows the deserializer's error
+policy. A pipeline on `Fail` can stop on a payload 0.2 accepted.
+
+**S3.** The split descriptor format is version 2, and the framer's delimiter
+joins the job fingerprint. A coordinated job started on 0.2 stops at startup on
+0.3 with `job fingerprint mismatch`. Finish it on 0.2, or give it a new store
+prefix and read the input again. A solo job keeps no progress across restarts
+and is not affected. The records of a large object arrive out of object order,
+and the planner rejects a descriptor above 294,720 raw bytes.
+
+**Metrics.** Dashboards built on these need a look:
+
+- `spate_backpressure_inflight_bytes` reports real usage. In 0.2 it always read
+  zero.
+- `spate_operator_errors_total{error_type="fatal"}` counts fatal errors, and the
+  `retryable` series is gone.
+- With `metrics.per_partition_detail: true`,
+  `spate_checkpoint_pending_batches` publishes a series per partition. Select
+  the aggregate with `{partition=""}`.
+- `spate_kafka_source_partition_fetch_queue_messages` and
+  `spate_kafka_source_partition_lag_stored_records` follow partition
+  ownership. A partition that moves away keeps a series at zero.
+
+**Hand-built pipelines.** `SinkPool::spawn` takes the sink's name and a
+`SinkFailures` register, and `SinkRuntime` has a `failures` field.
+`BackpressureMetrics::set_inflight_bytes` is removed. A pipeline built with
+`Pipeline` needs no change.
+
+**Coordination.** These matter only to a job that finishes on 0.3:
+
+- `SplitCoordinator::fail` and `CoordinationDriver::fail` take the `LeaseEpoch`
+  of the tenancy they report.
+- `CoordinationDriver::commit` returns a retryable error when the store defers
+  a split's commit, and the runtime sends it again on the next tick.
+- A plan record written by 0.3 stops a 0.2 worker. Stop every 0.2 worker on a
+  job before starting 0.3 on it.
+- The NATS store fails startup when an existing bucket's replica count differs
+  from `replicas`.
+- The NATS store rejects a `ws://` server when `tls` is set. Use `wss://`.
+
+## Split coordination is deprecated
+
+In 0.3.0, `spate-coordination` and every public item in it are deprecated. So
+are the `coordination` and `coordination-nats` features, the split traits and
+driver in `spate-core`, `S3Source::with_coordinator`, and the scripted
+coordinator in `spate-test`. Code that names them warns at build time. A
+pipeline started with a `coordination:` section logs a warning. This is an S3
+backfill with the in-process store, run on 0.3.0:
+
+```yaml
+pipeline: { name: events-backfill }
+admin: { listen: none }
+metrics: { exporter: none }
+source:
+  s3:
+    url: ${EVENTS_URL}
+    split_target_bytes: 1MiB
+deserializer:
+  json: {}
+sink: { capture: {} }
+coordination:
+  store: { memory: {} }
+  max_in_flight: 16
+```
+
+```text
+{"timestamp":"2026-10-14T06:26:04.020346Z","level":"WARN","message":"the `coordination:` section is deprecated, and v0.4.0 removes it; a work feed replaces split coordination (https://github.com/spate-etl/spate/issues/1088)","target":"spate_core::pipeline::runtime"}
+```
+
+Split coordination divides a prefix between instances with a leader-run
+planner, leases, an epoch-fenced progress record in a shared store, and
+cooperative revocation. No source needs that protocol for its own sake. A
+queue already gives at-least-once delivery, a visibility lease, redelivery and
+dead-lettering. Object stores already publish "object created" notifications
+to queues, and continuous ingestion from such a store needs a queue.
+Most of the fixes in this release are in the coordination protocol, and
+[#1111](https://github.com/spate-etl/spate/issues/1111) lists the defects that
+remain.
+
+In 0.4.0 a work feed takes its place. The design is in
+[#1088](https://github.com/spate-etl/spate/issues/1088):
+
+- A work unit is one object, or one byte range of one object.
+- The design has three backends: in-process for one instance, SQS standard
+  queues, and Kafka. A source names no backend.
+- A separate one-shot run of the same binary lists the input. It checkpoints
+  the last key whose units the feed confirmed, and resumes after it.
+- A job that names a location is bounded. It ends on the lister's end marker
+  and an empty feed, and ends `Stalled` when its dead-letter destination is not
+  empty. A job that names no location is continuous and fed by notifications.
+
+The feed trait, the in-process `MemoryFeed` and a scripted feed for tests are
+on `main` ([#1123](https://github.com/spate-etl/spate/pull/1123)), and the S3
+source reads work units through the trait
+([#1124](https://github.com/spate-etl/spate/pull/1124),
+[ADR-0066](https://github.com/spate-etl/spate/blob/cbe69060bfaa1528828b63d06a32d8b406d330b1/docs/adr/0066-a-feed-trait-replaces-the-split-coordination-traits.md)).
+The [work feed](https://github.com/spate-etl/spate/blob/cbe69060bfaa1528828b63d06a32d8b406d330b1/docs/user-guide/02-concepts/09-work-feed.mdx) page has the rules a unit
+follows. The configuration is a top-level `feed:` section. This is the sketch
+from #1088. The key names are not settled and will change, and 0.3.0 rejects a
+`feed:` section:
+
+```yaml
+source:
+  s3:
+    url: s3://bucket/events/
+feed:
+  sqs:
+    queue_url: https://sqs.eu-west-2.amazonaws.com/123456789012/events-backfill-0042
+    location: s3://ops-bucket/spate-jobs/events-backfill-0042/   # bounded job only
+  units_held: 48          # the source's read parallelism
+  visibility: 60s         # renewed every 20s
+  attempt_cap: 10
+  settling_window: 5m
+```
+
+Before deprecating anything, I compared a queue-fed fleet with a
+NATS-coordinated fleet and a static split, at 4 and 8 instances, on large and
+on small objects. The queue stood in through the coordination traits, so no
+figure measures the feed trait itself.
+
+Each instance was a c8g.16xlarge in eu-west-2 with 96 lanes. The large-object
+input was zstd objects that decode to 1 GiB each. Each figure is decoded bytes
+per second across the fleet, the mean of three runs. The static split ran once
+at each size, and the Kafka queue ran once at 8 instances.
+
+<GroupedBars
+  name="Decoded GB/s across the fleet at 4 and 8 instances"
+  groups={['4 instances', '8 instances']}
+  series={['static split', 'NATS coordination', 'SQS queue', 'Kafka queue']}
+  values={[
+    [45.32, 41.98, 46.15, 46.12],
+    [90.64, 59.81, 92.23, 92.24],
+  ]}
+  single={[
+    [true, false, false, false],
+    [true, false, false, true],
+  ]}
+  measure="decoded throughput"
+  unit="GB/s"
+  caption={<>
+    Decoded bytes per second across the fleet. At 4 instances the static split
+    read 45.32 GB/s, NATS coordination 41.98, the SQS queue 46.15 and the Kafka
+    queue 46.12. At 8 instances they read 90.64, 59.81, 92.23 and 92.24 GB/s.
+    The static split at both sizes and the Kafka queue at 8 instances are single
+    runs, drawn hatched. The rest are the mean of three runs.
+  </>}
+/>
+
+Coordination fell from 93% of the static split at 4 instances to 66% at 8. Both
+queues stayed at 102%. At 4 instances the last 5% of rows took 244 seconds on
+the static split, 19 on coordination and 20 on either queue.
+
+On 868,608 objects of about 2 MB at 4 instances, the queue read 30.76 GB/s.
+Coordination read 13.39 GB/s and did not finish inside the 15-minute limit on
+any of its three runs.
+
+I also killed one of 4 instances halfway through an SQS-fed job. The 96 units
+it held each went to another instance exactly once, after the 60-second
+visibility timeout. No row was lost in any of the three runs.
+
+Some things go with it. There is no static sharding, because it cannot rescale
+in the middle of a job. `refresh_listing` goes too, so continuous ingestion
+needs a store that publishes S3-format bucket notifications. A unit whose
+worker stops early replays from its start. A coordinated job started on 0.3
+cannot resume on 0.4.
+
+What to do today: a solo S3 backfill needs no change. A coordinated job
+finishes on 0.3, or runs again through the feed on 0.4.
+
+## Large S3 objects are read in byte ranges
+
+In 0.2 one lane read an object above the split target from start to end, so
+the largest object in a prefix set the job's tail. The 0.3 planner cuts an
+uncompressed object above `split_target_bytes` into byte ranges of at most the
+target, one split each, and several lanes or workers read them at once. A
+reader that starts inside an object skips to the next record boundary, and the
+reader of the range before it reads past its end to finish the last record.
+This needs an object with an ETag, and a framer that names the byte a record
+starts after. `NdjsonFramer` names `\n`. Compressed objects are still read
+whole.
+
+I ran the backfill above without its `coordination:` section, over one NDJSON
+object of 4,194,410 bytes and 31,152 records, with `split_target_bytes: 1MiB`:
+
+```text
+{"timestamp":"2026-10-14T06:26:02.842760Z","level":"INFO","message":"plan is final","planned":5,"target":"spate_coordination::leader"}
+Completed: 31152 rows, 31152 distinct ids
+```
+
+Five ranges, and every record arrived once. With the 64 MiB default the same
+object is one split. The design is in
+[ADR-0054](https://github.com/spate-etl/spate/blob/v0.3.0/docs/adr/0054-s3-byte-range-subdivision.md).
+
+## ClickHouse rows carry their columns
+
+`#[derive(ClickHouseRow)]` generates a row's insert column list in field
+declaration order. `#[serde(rename)]` names a column a Rust field cannot, such
+as one half of a flattened `Nested` column:
+
+```rust
+use serde::Serialize;
+use spate::clickhouse::{ClickHouseRow, DateTime64Millis};
+
+#[derive(Serialize, ClickHouseRow)]
+struct PageView {
+    id: u64,
+    #[serde(rename = "tags.key")]
+    tag_keys: Vec<String>,
+    #[serde(rename = "tags.value")]
+    tag_values: Vec<String>,
+    viewed_at: DateTime64Millis,
+}
+
+fn main() {
+    println!("{:?}", PageView::COLUMNS);
+}
+```
+
+```text
+["id", "tags.key", "tags.value", "viewed_at"]
+```
+
+A duplicate or malformed column name is a compile error. When the sink is
+built, it reads the table's columns from every replica and checks them against
+that list. The encoder checks the field types on the first record. I built the
+sink against a `page_views` table on ClickHouse 26.9.10.4, once with the struct
+above and once with a copy named `WrongView` whose `viewed_at` is a `u64`. The
+first encoded its row. The second failed on its first record:
+
+```text
+WrongView: sink error (Fatal): row struct does not match declared columns for `page_views`:
+  - position 3: struct field `viewed_at` (u64) is not compatible with `viewed_at` DateTime64(3)
+  struct fields (declaration order): id, tags.key, tags.value, viewed_at
+  declared columns:                  id, tags.key, tags.value, viewed_at
+```
+
+That run used the default `compression: lz4`. A 0.2 sink on that setting fails
+to start against ClickHouse 26.9 and later, because those servers compress
+responses with ZSTD by default. The 0.3 sink asks for LZ4 responses on every
+request. The type check also accepts an `Int256` field for a `Decimal256`
+column, and `format: native` accepts a `SimpleAggregateFunction` column whose
+stored type the Native encoder supports.
+
+## A rejected handshake stops the pipeline
+
+In 0.2 these connectors retried a TLS handshake the other side refused. The
+ClickHouse and Kafka sinks retried it for the life of the process under the
+default retry settings, and the Avro deserializer held the batch while it
+retried, so the reason showed only in a warning. In 0.3 a certificate that
+fails verification, or a TLS alert such as `handshake_failure`, is fatal in the
+Kafka source and sink, the ClickHouse sink, the Avro schema registry client,
+the NATS store and the S3 source. A rejected credential is fatal in the Kafka
+sink, the registry client, the NATS store and the S3 source. Other alerts, such
+as `internal_error`, stay retryable.
+
+This pipeline points its Avro deserializer at a local server that answers every
+TLS client with alert 40, `handshake_failure`, and pushes one Confluent-framed
+payload through it:
+
+```yaml
+pipeline: { name: registry-alert, threads: 1 }
+admin: { listen: none }
+metrics: { exporter: none }
+source: { memory: {} }
+deserializer:
+  avro:
+    mode: confluent
+    registry: { url: "https://localhost:56645" }
+sink: { capture: {} }
+```
+
+```text
+after 114.6ms: Failed(FatalErrorReport { component: "deserializer", reason: "the TLS handshake with schema registry https://localhost:56645/ failed: received fatal alert: HandshakeFailure" })
+```
+
+The run failed on the first payload, with the registry's URL and the alert in
+the exit report. A registry that answers `401` or `403` stops it the same way.
+The server is `spate_test::tls_alert_server`. A custom connector can test its
+own classification against it.
+
+Two smaller changes help with the same problem. When several stages fail on one
+payload, the exit report carries the first fatal error. A sink failure that
+stalls a partition names the sink and the error that ended its last batch.
+
+## Credentials stay out of logs
+
+A config printed with `{:?}` shows every credential as `<redacted>`. A replica,
+registry or NATS URL shows `<redacted>` in place of its user info, query and
+fragment. This ClickHouse sink section sets a password and a setting:
+
+```yaml
+sink:
+  clickhouse:
+    table: events
+    shards: [{ replicas: ["https://ch-0:8443"] }]
+    user: etl
+    password: hunter2
+    settings: { insert_quorum: "2" }
+```
+
+Its typed config, printed with `{:?}`:
+
+```text
+ClickHouseSinkConfig { table: "events", shards: [ShardConfig { replicas: ["https://ch-0:8443"], weight: 1 }], database: None, user: Some("etl"), password: Some(<redacted>), tls: TlsSection { root_ca: None }, settings: {"insert_quorum": <redacted>}, batch: BatchConfig { max_rows: 500000, max_bytes: 134217728, linger: 1s }, inflight: InflightConfig { max_per_shard: 2 }, retry: RetryConfig { initial: 100ms, max: 10s, multiplier: 2.0, jitter: 0.2, max_attempts: 0 }, breaker: BreakerConfig { failure_threshold: 3, open_for: 5s, half_open_probes: 1 }, timeouts: TimeoutSection { send: Some(30s), end: Some(180s) }, compression: Lz4, format: RowBinary, distributed_check: None }
+```
+
+A config error names the field and the type it expected, and leaves out the
+value. `${VAR}` interpolation runs before parsing, so that value could have been
+a secret. A password written as a number reads:
+
+```text
+sink.clickhouse.password: invalid type: integer, expected a string
+```
+
+`spate_core::config::redact` has the same helpers for a custom connector's
+`Debug`. The schema registry also takes `registry.tls.root_ca`, a PEM bundle of
+private CAs it trusts beside the system store.
+
+## Testing what a stage logs and counts
+
+`spate-test` gains helpers for a test of one stage. `capture_logs` runs a
+closure under a `tracing` subscriber and returns the lines it formatted.
+`render_metrics` runs a closure under a recorder local to the thread, and
+`metric_value` reads one series back out. `component_config`, `raw_payload`,
+`test_ack` and `unique_name` build the stage's input. This test checks that a
+bad line in an NDJSON payload is skipped, counted and logged:
+
+```rust
+use serde::Deserialize;
+use spate::deser::Deserializer;
+use spate::json::JsonDeserializerBuilder;
+use spate_test::{
+    EmitCollector, capture_logs, component_config, metric_value, raw_payload, render_metrics,
+    test_ack, unique_name,
+};
+use tracing::Level;
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+struct Order {
+    id: u64,
+}
+
+#[test]
+fn a_bad_line_is_skipped_counted_and_logged() {
+    let config = component_config("json", "framing: ndjson\non_error: skip");
+    let pipeline = unique_name("orders");
+    let mut out = EmitCollector::new();
+
+    let mut rendered = String::new();
+    let logs = capture_logs(Level::WARN, || {
+        rendered = render_metrics(|| {
+            let mut deser = JsonDeserializerBuilder::from_component(&config)
+                .unwrap()
+                .with_metrics(pipeline.clone(), "orders_in")
+                .build_serde::<Order>();
+            let payload = raw_payload(b"{\"id\":1}\nnot json\n{\"id\":3}\n");
+            deser.deserialize(&payload, &test_ack(), &mut out).unwrap();
+        });
+    });
+
+    assert_eq!(out.payloads(), vec![Order { id: 1 }, Order { id: 3 }]);
+    let dropped = metric_value(
+        &rendered,
+        "spate_json_deser_records_dropped_total",
+        &[("pipeline", pipeline.as_str()), ("reason", "malformed")],
+    );
+    assert_eq!(dropped, Some(1.0));
+    assert!(logs[0].contains("json record skipped by on_error policy"));
+}
+```
+
+The captured lines also reach the test harness, so a failing test prints what
+the stage logged. With the expected count changed to 2, the failure reads:
+
+```text
+---- a_bad_line_is_skipped_counted_and_logged stdout ----
+ WARN spate_json::deser: json record skipped by on_error policy reason="malformed" error=expected ident at line 1 column 2
+
+thread 'a_bad_line_is_skipped_counted_and_logged' (430816748) panicked at tests/skip_bad_lines.rs:39:5:
+assertion `left == right` failed
+  left: Some(1.0)
+ right: Some(2.0)
+```
+
+`unique_name` is there because `cargo test` runs a binary's tests in one
+process, and two tests that claim the same gauge series collide. The
+[testing guide](https://github.com/spate-etl/spate/blob/v0.3.0/docs/user-guide/03-guides/testing-pipelines.mdx) covers the rest.
+
+## A Kafka partition that stopped fetching
+
+The symptom was a partition that delivered nothing right after an assignment,
+with no error, until the next rebalance. librdkafka starts a partition's
+fetcher after `assign` returns when the partition has no concrete start
+offset. A `pause` or `resume` that lands in that window can cancel the start
+([librdkafka#5591](https://github.com/confluentinc/librdkafka/issues/5591)).
+Spate's assignment sequence pauses and resumes every partition it accepts, and
+backpressure pauses them too, so any assignment could hit the window.
+
+The 0.3 source reads the group's committed offsets before it accepts an
+assignment, and gives every partition a concrete start offset. The fetchers
+then start inside `assign`, before the pause. One side effect is that
+`spate_source_lag_records` appears as soon as the group has committed an offset
+for a partition, without waiting for this member's first commit.
+
+The regression test, `the_fetcher_starts_before_the_lane_is_handed_out`, runs
+against librdkafka's mock cluster with a 300 ms broker round trip. It failed on
+5 of 5 runs before the fix
+([#702](https://github.com/spate-etl/spate/pull/702)) and passes at the
+v0.3.0 tag. With `metrics.per_partition_detail: true`, the new
+`spate_kafka_source_partition_not_fetching` gauge reads 1 for an assigned
+partition that is not fetching. A stall like this one shows on that gauge.
+
+With `kafka-tls` and its default vendored OpenSSL, the Kafka source and sink
+also load the system CA bundle when no CA is configured. In 0.2 those builds
+read only `/usr/local/ssl` on Linux and BSD, and a broker certificate from a
+system-trusted CA failed verification.
+
+## Coordination fixes for jobs that finish on 0.3
+
+Forty-nine of the 87 fixes in 0.3.0 are in split coordination. Sixteen of them
+cover a store write that applied while its reply was lost: a claim, a commit, a
+lease renewal, a failure report, an election. In 0.2 each of those could cost a
+delivery attempt, a lease, or the fleet's leader until a key expired. In 0.3 the
+worker reads the record back and carries on from what it finds. Others keep a
+slow store listing from blocking lease renewals, and hand back splits,
+leadership and membership on a graceful stop.
+
+They are there so that a job started on 0.3 can finish on it.
+[#1111](https://github.com/spate-etl/spate/issues/1111) lists the known
+defects that 0.3 will not fix.
+
+## The rest
+
+The full list is the
+[0.3.0 section of the changelog](https://github.com/spate-etl/spate/blob/v0.3.0/CHANGELOG.md).
+Thanks to whiteye, who removed a copy of every object key from the JSON
+duplicate-key guard ([#542](https://github.com/spate-etl/spate/pull/542)).

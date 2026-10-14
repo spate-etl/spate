@@ -1,0 +1,49 @@
+/* The grouped bar chart. Colours come only from the brand tokens, so both themes follow
+   `brand.css`. The first two series are greys and the last two take the accent pair, the way the
+   benchmark field gives the accent to the marks a reader compares. Every series fill holds 3:1 or
+   better against the page in both themes, and neighbouring series differ in lightness. */
+
+.s0 {
+  fill: var(--spate-dim);
+  stroke: var(--spate-dim);
+}
+
+.s1 {
+  fill: var(--spate-ink);
+  stroke: var(--spate-ink);
+}
+
+.s2 {
+  fill: var(--spate-accent);
+  stroke: var(--spate-accent);
+}
+
+.s3 {
+  fill: var(--spate-diagram-core);
+  stroke: var(--spate-diagram-core);
+}
+
+/* A bar is a filled shape; only a single-run bar draws its outline, over its hatching. */
+.bar {
+  stroke: none;
+}
+
+.single {
+  stroke-width: 1.5;
+}
+
+/* The page ground between a hatch's stripes. */
+.ground {
+  fill: var(--spate-bg);
+  stroke: none;
+}
+
+.stripe {
+  stroke: none;
+}
+
+.axis {
+  stroke: var(--spate-dim);
+  stroke-width: 1;
+  fill: none;
+}

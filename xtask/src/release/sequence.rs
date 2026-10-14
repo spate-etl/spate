@@ -67,8 +67,9 @@ fn is_release_branch(head: &str) -> bool {
 
 const COMMIT_BODY: &str = "Every artefact is generated from the version input: the manifest rewrite,\n\
 Cargo.lock, CHANGELOG.md assembled from changelog.d/ and the moved dependency\n\
-requirements, THIRD-PARTY.md and the install snippets. The squash merge of\n\
-this pull request is what triggers the publish.";
+requirements, THIRD-PARTY.md, the install snippets and, for a minor release,\n\
+the release post out of draft. The squash merge of this pull request is what\n\
+triggers the publish.";
 
 const PULL_BODY: &str = "Assembled by `release.yml` from the v{version} dispatch. Every file in this diff is generated; the reviewed prose is the fragments it consumes, which landed with their changes, and the dependency requirement entry the build writes from `Cargo.toml`. The squash merge triggers the publish. The controls are the version input and its derivation check, so a review here is reading the assembled changelog, not the mechanics.";
 

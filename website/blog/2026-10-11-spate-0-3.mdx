@@ -78,7 +78,9 @@ sink.clickhouse.columns: unknown field `columns`, expected one of `table`, `shar
 
 In code, `from_component_config` returns a `ClickHouseSinkBuilder`. Await
 `.with_row::<Owned<YourRow>>()` on it to get the sink, and build the encoder
-with `ClickHouseEncoder::with_schema(sink.schema())`. Every sink checks the
+with `ClickHouseEncoder::with_schema(sink.schema())`. A `format: native` sink
+builds a `NativeEncoder` from `sink.native_schema()`, which is no longer
+awaited. Every sink checks the
 row's field types against the table, so a field of the right width and the
 wrong type fails on the first record. A `u64` for a `DateTime64` column is one.
 With `format: rowbinary`, a `SimpleAggregateFunction(f, T)` column is checked
@@ -364,9 +366,9 @@ WrongView: sink error (Fatal): row struct does not match declared columns for `p
   declared columns:                  id, tags.key, tags.value, viewed_at
 ```
 
-That run used the default `compression: lz4`. A 0.2 sink built with
-`clickhouse` 0.15.2 or earlier cannot read the ZSTD responses that ClickHouse
-26.9 and later send by default. Its readiness probe never passes, and its
+That run used the default `compression: lz4`. A 0.2 sink on that setting,
+built with `clickhouse` 0.15.2 or earlier, cannot read the ZSTD responses that
+ClickHouse 26.9 and later send by default. Its readiness probe never passes, and its
 startup schema check fails when `validate_schema` is not `off` or `format` is
 `native`. The 0.3 sink asks for LZ4 responses on every
 request. The type check also accepts an `Int256` field for a `Decimal256`

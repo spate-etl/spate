@@ -210,8 +210,7 @@ impl Format {
 pub enum Compression {
     /// No transport compression.
     None,
-    /// LZ4 (default): fast, low CPU, moderate ratio. Sends
-    /// `network_compression_method=LZ4` on every request.
+    /// LZ4 (default): fast, low CPU, moderate ratio.
     #[default]
     Lz4,
     /// ZSTD at the given level (`1..=22`): higher ratio, more CPU.
@@ -791,12 +790,6 @@ fn client_for(url: &str, cfg: &ClickHouseSinkConfig, tls: &ClientConfig) -> clic
     }
     if let Some(password) = &cfg.password {
         client = client.with_password(password);
-    }
-    if cfg.compression == Compression::Lz4 {
-        // The client decodes compressed responses as LZ4 only. From 26.9 the
-        // server frames them in the `network_compression_method` codec, which
-        // defaults to ZSTD.
-        client = client.with_setting("network_compression_method", "LZ4");
     }
     client.with_compression(to_client_compression(cfg.compression))
 }
@@ -1422,27 +1415,6 @@ settings: { insert_quorum: "auto" }
         ] {
             let cfg: ClickHouseSinkConfig = serde_yaml::from_str(&format!("{base}{yaml}")).unwrap();
             assert_eq!(cfg.compression, expected, "for `{yaml}`");
-        }
-    }
-
-    /// Only `lz4` asks the server for LZ4 response frames. Regression for #458.
-    #[test]
-    fn lz4_requests_lz4_response_frames() {
-        let base = "table: t\nshards: [{replicas: [\"http://a\"]}]\n";
-        let tls = crate::http::client_config(rustls::RootCertStore::empty());
-        for (yaml, expected) in [
-            ("", Some("LZ4")),
-            ("compression: lz4\n", Some("LZ4")),
-            ("compression: zstd\n", None),
-            ("compression: off\n", None),
-        ] {
-            let cfg: ClickHouseSinkConfig = serde_yaml::from_str(&format!("{base}{yaml}")).unwrap();
-            let client = client_for("http://a", &cfg, &tls);
-            assert_eq!(
-                client.get_setting("network_compression_method"),
-                expected,
-                "for `{yaml}`"
-            );
         }
     }
 

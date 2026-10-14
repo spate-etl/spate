@@ -85,13 +85,10 @@ async fn stock_insert(
     header: Option<Bytes>,
     raw: &[Bytes],
 ) {
-    let mut client = clickhouse::Client::default().with_url(url);
+    let client = clickhouse::Client::default().with_url(url);
     let method = match compression {
         Compression::None => clickhouse::Compression::None,
-        Compression::Lz4 => {
-            client = client.with_setting("network_compression_method", "LZ4");
-            clickhouse::Compression::Lz4
-        }
+        Compression::Lz4 => clickhouse::Compression::Lz4,
         Compression::Zstd(level) => clickhouse::Compression::Zstd(level),
         other => panic!("no client compression for {other:?}"),
     };

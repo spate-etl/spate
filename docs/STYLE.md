@@ -554,7 +554,10 @@ headings, link text that names its destination, and a quantitative claim
 that carries how it was established. § 10 holds too: a Rust snippet on a site
 page is rendered from a compiled source under `crates/`, through the same
 fences a docs page uses. A blog post is dated, so it may say "now" and
-"recently", as a decision record may.
+"recently", as a decision record may. For the same reason its Rust snippets
+are written by hand: a post shows the code as it stood on its date, and a
+rendered source would change or empty it as the code moves. Each one is built
+or run against the crates the post describes before the post merges.
 
 The benchmark's own pages, rendered from the submodule under `/benchmarks`,
 keep the benchmark repository's conventions, including its first person.

@@ -56,8 +56,10 @@ links it.
 - **The close** links the full section in `CHANGELOG.md` and thanks the
   contributors by name.
 
-Every snippet is built or run against the release's crates before the post
-merges, and the output shown is the output it printed.
+Snippets are written by hand, because a dated post shows the code as it was at
+the release ([`docs/STYLE.md`](../../docs/STYLE.md) § 11). Each one is built or
+run against the release's crates before the post merges, and the output shown
+is the output it printed.
 
 ## Voice
 

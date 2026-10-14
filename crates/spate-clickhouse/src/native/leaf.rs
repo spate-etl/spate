@@ -22,8 +22,18 @@ pub(crate) fn put_leb128(buf: &mut BytesMut, mut value: u64) {
     }
 }
 
+/// The number of bytes [`put_leb128`] writes for `value`.
+pub(crate) fn leb128_len(value: u64) -> usize {
+    (u64::BITS - (value | 1).leading_zeros()).div_ceil(7) as usize
+}
+
 /// A ClickHouse `String` value: LEB128 length prefix then the raw bytes.
 pub(crate) fn put_string(buf: &mut BytesMut, bytes: &[u8]) {
     put_leb128(buf, bytes.len() as u64);
     buf.put_slice(bytes);
+}
+
+/// The number of bytes [`put_string`] writes for a value of `s`'s length.
+pub(crate) fn string_len(s: &str) -> usize {
+    leb128_len(s.len() as u64) + s.len()
 }

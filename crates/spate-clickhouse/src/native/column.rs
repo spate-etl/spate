@@ -332,7 +332,9 @@ impl ColumnWriter {
         }
     }
 
-    /// Approximate bytes buffered so far (for the chunk-size threshold).
+    /// The bytes [`write_prefix`](Self::write_prefix) and
+    /// [`write_data`](Self::write_data) emit for the rows buffered so far,
+    /// exactly.
     pub(crate) fn byte_len(&self) -> usize {
         match self {
             ColumnWriter::Scalar { buf, .. }

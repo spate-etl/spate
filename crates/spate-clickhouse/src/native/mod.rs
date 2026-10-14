@@ -31,7 +31,7 @@ use crate::schema::typeparse::ChType;
 use bytes::BytesMut;
 use column::ColumnWriter;
 use dispatch::RowDispatchSer;
-use leaf::{put_leb128, put_string};
+use leaf::{leb128_len, put_leb128, put_string, string_len};
 use serde::Serialize;
 use spate_core::deser::RecFamily;
 use spate_core::error::{ErrorClass, SinkError};
@@ -135,6 +135,9 @@ impl NativeError {
 #[derive(Debug)]
 pub struct NativeSchema {
     expected: RowSchema,
+    /// Block header bytes that do not depend on the rows: the column count
+    /// and every column's name and type-name strings.
+    header_len: usize,
 }
 
 impl NativeSchema {
@@ -162,7 +165,16 @@ impl NativeSchema {
                 ch_type,
             })?;
         }
-        Ok(Arc::new(NativeSchema { expected }))
+        let header_len = leb128_len(expected.columns.len() as u64)
+            + expected
+                .columns
+                .iter()
+                .map(|(name, _, type_name)| string_len(name) + string_len(type_name))
+                .sum::<usize>();
+        Ok(Arc::new(NativeSchema {
+            expected,
+            header_len,
+        }))
     }
 
     /// Build a schema from `(column name, ClickHouse type string)` pairs,
@@ -254,13 +266,19 @@ impl<F> NativeEncoder<F> {
         }
     }
 
-    /// Sum the current buffered bytes across all columns (O(columns)).
+    /// The exact length of the block [`finalize_block`](Self::finalize_block)
+    /// would write now, or 0 with no rows buffered (O(columns)).
     fn compute_buffered(&self) -> usize {
-        self.columns
-            .iter()
-            .map(ColumnWriter::byte_len)
-            .sum::<usize>()
-            + self.columns.len() * 16
+        if self.rows == 0 {
+            return 0;
+        }
+        self.schema.header_len
+            + leb128_len(u64::from(self.rows))
+            + self
+                .columns
+                .iter()
+                .map(ColumnWriter::byte_len)
+                .sum::<usize>()
     }
 
     /// Build directly from a validated [`RowSchema`].
@@ -269,20 +287,10 @@ impl<F> NativeEncoder<F> {
     }
 
     fn finalize_block(&mut self, buf: &mut BytesMut) {
-        // One up-front reservation for the whole block: a cheap overestimate
-        // (compute_buffered over-counts LowCard keys ×8 and adds 16 B/column
-        // slack) plus each column's name/type-name bytes and a constant for
-        // the two leading VarUInts. Not exact: the overestimate is what
-        // guarantees a single output allocation.
-        let reserve = self.compute_buffered()
-            + self
-                .schema
-                .columns()
-                .iter()
-                .map(|(name, _, type_name)| name.len() + type_name.len())
-                .sum::<usize>()
-            + 20;
-        buf.reserve(reserve);
+        // The block length is exact, so one reservation covers the block.
+        let len = self.compute_buffered();
+        let start = buf.len();
+        buf.reserve(len);
         put_leb128(buf, self.columns.len() as u64);
         put_leb128(buf, u64::from(self.rows));
         for (col, (name, _, type_name)) in self.columns.iter().zip(self.schema.columns()) {
@@ -292,6 +300,9 @@ impl<F> NativeEncoder<F> {
             col.write_prefix(buf);
             col.write_data(buf);
         }
+        // The terminal stage seals on `buffered_bytes`, so a size that drifts
+        // from the bytes written makes blocks miss `target_bytes`.
+        debug_assert_eq!(buf.len() - start, len, "Native block length estimate");
         for col in &mut self.columns {
             col.reset();
         }
@@ -359,7 +370,7 @@ where
                 // Refresh the cached size cheaply: every row for the first 16
                 // (small blocks stay accurate), then every 16th (amortizing
                 // the O(columns) walk). The seal threshold tolerates the
-                // ≤16-row lag; blocks are thousands of rows.
+                // ≤15-row lag; blocks are hundreds of rows.
                 if self.rows <= 16 || self.rows.is_multiple_of(16) {
                     self.approx_bytes = self.compute_buffered();
                 }

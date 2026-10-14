@@ -166,8 +166,15 @@ impl LowCard {
         self.seed();
     }
 
+    /// The bytes [`write_prefix`](Self::write_prefix) and
+    /// [`write_data`](Self::write_data) emit for the buffered block, exactly.
     pub(crate) fn byte_len(&self) -> usize {
-        self.dict.len() + self.keys.len() * 8
+        let prefix = 8;
+        if self.keys.is_empty() {
+            return prefix;
+        }
+        // Flags, dictionary size and key count are a UInt64 each.
+        prefix + 24 + self.dict.len() + (self.keys.len() << key_width_code(self.dict_count))
     }
 }
 

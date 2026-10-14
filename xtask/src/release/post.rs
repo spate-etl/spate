@@ -98,17 +98,31 @@ pub(crate) fn undraft(text: &str) -> Option<String> {
     None
 }
 
-/// What keeps the post a draft once [`undraft`] has removed the exact
-/// [`DRAFT`] line: a `draft` key left in its front matter, in any YAML
-/// spelling, or front matter that does not parse. `None` when nothing does.
+/// What can keep the post a draft once [`undraft`] has removed the exact
+/// [`DRAFT`] line: a top-level key that is `draft`, the merge key `<<`, or not
+/// a plain string, or front matter that does not parse. `None` when nothing
+/// does.
 fn unremovable_draft(text: &str) -> Option<&'static str> {
     let published = undraft(text).unwrap_or_else(|| text.to_owned());
     match front_matter_map(&published) {
         None => Some("front matter that does not parse as YAML"),
-        Some(map) if map.contains_key("draft") => Some("a draft key the release would not remove"),
+        // The parser keeps `<<` as a literal key and a sequence key as a
+        // sequence, while the site build merges the one and reads a
+        // one-element sequence key as its string, so either can hide `draft`.
+        Some(map)
+            if map
+                .keys()
+                .any(|k| k.as_str().is_none_or(|k| k == "draft" || k == "<<")) =>
+        {
+            Some(UNREMOVABLE_KEY)
+        }
         Some(_) => None,
     }
 }
+
+/// The reason [`unremovable_draft`] gives for a front matter key.
+const UNREMOVABLE_KEY: &str = "a key the release would not remove: 'draft', \
+     a merge key '<<', or a key that is not a plain string";
 
 /// Removes the draft flag from the post at `path`, in place. A post that is
 /// already published is left as it is.
@@ -131,7 +145,8 @@ pub(crate) fn publish(path: &Path) -> Result<(), Error> {
 /// # Errors
 ///
 /// When a minor release has no post with its slug, or more than one, or its
-/// post sets a draft flag the release commit would not remove.
+/// post's front matter has a key that could keep it a draft after the release
+/// commit.
 pub(crate) fn required(blog: &Path, version: Version) -> Result<Option<PathBuf>, Error> {
     let Some(slug) = version.post_slug() else {
         return Ok(None);
@@ -208,15 +223,19 @@ mod tests {
     }
 
     /// Only the exact flag line is removable; a `draft` key in another spelling,
-    /// or front matter that does not parse, is named.
+    /// a merge key, a key that is not a plain string, or front matter that does
+    /// not parse, is named.
     #[test]
     fn a_draft_the_release_cannot_remove_is_named() {
         assert_eq!(unremovable_draft(POST), None);
         assert_eq!(unremovable_draft("---\nslug: releases/0.4\n---\n"), None);
-        assert_eq!(
-            unremovable_draft("---\ndraft : true\n---\n"),
-            Some("a draft key the release would not remove")
-        );
+        for front_matter in ["draft : true", "<<: {title: x}", "[draft]: true", "1: x"] {
+            assert_eq!(
+                unremovable_draft(&format!("---\n{front_matter}\n---\n")),
+                Some(UNREMOVABLE_KEY),
+                "{front_matter:?}"
+            );
+        }
         assert_eq!(
             unremovable_draft("---\ndraft: true\ntitle: [unclosed\n---\n"),
             Some("front matter that does not parse as YAML")

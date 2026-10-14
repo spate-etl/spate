@@ -2604,3 +2604,40 @@ fn attestations_come_from_the_bundle_before_publish_and_the_store_after() {
     assert_eq!(after.len(), 6);
     assert!(after.iter().all(|b| !*b), "{after:?}");
 }
+
+/// A `draft` key hidden behind a merge key or a key that is not a plain
+/// string stops `assemble`, since the site build still reads it as a draft.
+#[test]
+fn a_hidden_draft_key_is_not_assembled() {
+    let mut shipped = Vec::new();
+    for line in [
+        "<<: {draft: true}",
+        "<<:\n  draft: true",
+        "x: &a {draft: true}\n<<: *a",
+        "<<: [{draft: true}]",
+        "!!merge <<: {draft: true}",
+        "<<: {<<: {draft: true}}",
+        "x: &a {draft: true}\n<<: [*a]",
+        "? [draft]\n: true",
+        "[draft]: true",
+        "? - draft\n: true",
+        "<<: {\"dr\\x61ft\": true}",
+        "[\"dr\\x61ft\"]: true",
+    ] {
+        let log = Log::default();
+        let git = FakeGit::new(&log);
+        let forge = FakeForge::new(&log);
+        let registry = FakeRegistry::default();
+        let mut workspace = FakeWorkspace::new(&log, &CRATES);
+        workspace.version = v("0.2.0");
+        let path = workspace.post("2026-10-11-spate-0-3.md");
+        std::fs::write(&path, POST_0_3.replace("draft: true", line)).unwrap();
+        let pauses = Pauses::default();
+        let result = assemble(&host!(&git, &forge, &registry, &workspace, pauses), "0.3.0");
+        let still_draft = std::fs::read_to_string(&path).unwrap().contains(line);
+        if result.is_ok() && still_draft {
+            shipped.push(line);
+        }
+    }
+    assert!(shipped.is_empty(), "shipped still a draft: {shipped:?}");
+}

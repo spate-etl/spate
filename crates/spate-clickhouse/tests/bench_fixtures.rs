@@ -340,21 +340,21 @@ fn the_frame_fixture_is_pinned_across_revisions() {
 }
 
 /// Rows in each of the eight frames.
-const ROWS_PER_FRAME: [u64; 8] = [448, 448, 448, 432, 432, 432, 432, 432];
+const ROWS_PER_FRAME: [u64; 8] = [576, 560, 560, 560, 560, 560, 560, 560];
 /// The smallest and largest of the eight frames, in bytes. The encoder's
-/// estimate runs ahead of the bytes it writes, so a frame seals below
-/// `ChunkConfig`'s default target.
-const FRAME_BYTES_MIN: usize = 51_074;
-const FRAME_BYTES_MAX: usize = 52_859;
-/// Uncompressed over lz4-compressed bytes across the eight frames: 2.600.
-const LZ4_RATIO_MIN: f64 = 2.55;
-const LZ4_RATIO_MAX: f64 = 2.65;
+/// buffered size is refreshed every 16th row, so a frame seals up to 15 rows
+/// past `ChunkConfig`'s default target.
+const FRAME_BYTES_MIN: usize = 65_704;
+const FRAME_BYTES_MAX: usize = 67_310;
+/// Uncompressed over lz4-compressed bytes across the eight frames: 2.664.
+const LZ4_RATIO_MIN: f64 = 2.61;
+const LZ4_RATIO_MAX: f64 = 2.71;
 /// Rows across the write-path batch's 1,600 frames.
-const BATCH_ROWS: u64 = 698_224;
+const BATCH_ROWS: u64 = 896_384;
 /// XXH64 of each frame in the write-path batch, folded. An edit to a
 /// fixed-width column's value formula in `rows.rs` moves no row count or frame
 /// size, and fails here.
-const BATCH_DIGEST: u64 = 0x18d4_801a_4f0c_7919;
+const BATCH_DIGEST: u64 = 0x605d_4db1_29ec_fb64;
 
 /// The write-path bench's setup works end to end under every compression.
 ///

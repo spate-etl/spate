@@ -722,7 +722,7 @@ mod block_size {
         Row {
             id: i,
             url: format!("https://example.com/{i}"),
-            referrer: (i % 3 != 0).then(|| format!("ref-{i}")),
+            referrer: (!i.is_multiple_of(3)).then(|| format!("ref-{i}")),
             code: ["us", "gb-1", "jp-tokyo"][i as usize % 3].into(),
             peer: std::net::Ipv6Addr::LOCALHOST,
             sizes: (0..i % 4).map(|n| n as u32).collect(),
@@ -730,7 +730,7 @@ mod block_size {
             span: (format!("s{i}"), i as u32),
             country: ["US", "GB", "DE"][i as usize % 3].into(),
             city: format!("city-{i}"),
-            tier: (i % 7 != 0).then(|| ["free", "pro"][i as usize % 2].into()),
+            tier: (!i.is_multiple_of(7)).then(|| ["free", "pro"][i as usize % 2].into()),
             tags: if i < 4 {
                 Vec::new()
             } else {

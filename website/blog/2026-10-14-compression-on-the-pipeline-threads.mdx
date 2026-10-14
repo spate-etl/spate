@@ -30,9 +30,9 @@ codec and `pipeline.io_threads` between runs. `pipeline.io_threads` sizes the
 runtime that runs every shard worker and socket write, and its default is 2.
 
 At 2 I/O workers, 0.3.0 inserted a median of 19.73M rows/s over four lz4 runs,
-and 8.34M with zstd:3. At 8 workers the same build inserted 32.53M and 30.67M.
-zstd:3 at the default ran at 42% of lz4's rate, while sending 13.1 bytes per row
-against lz4's 21.7.
+and 8.34M with zstd:3. At 8 workers the same build inserted a median of 32.90M
+over four lz4 runs, and 30.67M with zstd:3. zstd:3 at the default ran at 42% of
+lz4's rate, while sending 13.1 bytes per row against lz4's 21.7.
 
 ## Where the time went
 

@@ -781,6 +781,21 @@ mod block_size {
         assert_eq!(size, buf.len());
     }
 
+    /// A schema of 128 columns or more takes a two-byte column count in the
+    /// block header, and the buffered size counts it.
+    #[test]
+    fn buffered_size_counts_a_two_byte_column_count() {
+        let names: Vec<String> = (0..130).map(|n| format!("c{n}")).collect();
+        let cols: Vec<(&str, &str)> = names.iter().map(|n| (n.as_str(), "UInt8")).collect();
+        let mut enc = NativeEncoder::<Owned<Vec<u8>>>::new(schema(&cols));
+        let mut buf = BytesMut::new();
+        enc.encode(&record(vec![1u8; cols.len()]), &mut buf)
+            .expect("row encodes");
+        let size = enc.compute_buffered();
+        enc.finish_chunk(&mut buf).expect("finish");
+        assert_eq!(size, buf.len());
+    }
+
     /// Sealing on `buffered_bytes` the way the terminal stage does yields
     /// blocks of at least the target, overshooting by under one refresh
     /// interval of rows. Regression for #1139.

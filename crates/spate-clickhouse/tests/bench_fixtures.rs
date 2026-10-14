@@ -288,7 +288,7 @@ fn first_char(rec: &String) -> ShardKey<'_> {
 /// A per-frame figure is only comparable across revisions that compressed the
 /// same frames. The frames come from the `events` corpus through the Native
 /// encoder's size estimate. The rows per frame and the size range are exact,
-/// the lz4 ratio is a band around the measured 2.600, and a digest pins the
+/// the lz4 ratio is a band around the measured 2.664, and a digest pins the
 /// write-path batch's bytes, so a corpus edit that moves no size still fails.
 #[test]
 fn the_frame_fixture_is_pinned_across_revisions() {

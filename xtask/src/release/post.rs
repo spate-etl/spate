@@ -41,7 +41,7 @@ pub(crate) fn posts_with_slug(blog: &Path, slug: &str) -> Result<Vec<PathBuf>, E
             {
                 let text = std::fs::read_to_string(&path)
                     .map_err(|e| Error::msg(format!("{}: {e}", path.display())))?;
-                if slug_of(&text) == Some(slug) {
+                if slug_of(&text).as_deref() == Some(slug) {
                     found.push(path);
                 }
             }
@@ -63,18 +63,19 @@ fn front_matter(text: &str) -> Option<impl Iterator<Item = &str>> {
     Some(rest.into_iter().take(end))
 }
 
-/// The `slug:` value of a post's front matter, without surrounding quotes.
-fn slug_of(text: &str) -> Option<&str> {
-    front_matter(text)?.find_map(|line| {
-        let value = line.strip_prefix("slug:")?.trim();
-        Some(
-            value
-                .strip_prefix('"')
-                .and_then(|v| v.strip_suffix('"'))
-                .or_else(|| value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
-                .unwrap_or(value),
-        )
-    })
+/// A post's front matter parsed as a YAML mapping, or `None` when it has none
+/// or it does not parse.
+fn front_matter_map(text: &str) -> Option<serde_yaml::Mapping> {
+    let yaml: Vec<&str> = front_matter(text)?.collect();
+    serde_yaml::from_str(&yaml.join("\n")).ok()
+}
+
+/// The `slug` value of a post's front matter.
+fn slug_of(text: &str) -> Option<String> {
+    front_matter_map(text)?
+        .get("slug")?
+        .as_str()
+        .map(str::to_owned)
 }
 
 /// The post's text with the `draft: true` line removed from its front matter,
@@ -96,10 +97,16 @@ pub(crate) fn undraft(text: &str) -> Option<String> {
     None
 }
 
-/// The first front matter line that sets `draft:` to anything other than the
-/// exact [`DRAFT`] line [`undraft`] removes.
-fn unremovable_draft(text: &str) -> Option<&str> {
-    front_matter(text)?.find(|line| line.starts_with("draft:") && line.trim_end() != DRAFT)
+/// What keeps the post a draft once [`undraft`] has removed the exact
+/// [`DRAFT`] line: a `draft` key left in its front matter, in any YAML
+/// spelling, or front matter that does not parse. `None` when nothing does.
+fn unremovable_draft(text: &str) -> Option<&'static str> {
+    let published = undraft(text).unwrap_or_else(|| text.to_owned());
+    match front_matter_map(&published) {
+        None => Some("front matter that does not parse as YAML"),
+        Some(map) if map.contains_key("draft") => Some("a draft key the release would not remove"),
+        Some(_) => None,
+    }
 }
 
 /// Removes the draft flag from the post at `path`, in place. A post that is
@@ -134,9 +141,9 @@ pub(crate) fn required(blog: &Path, version: Version) -> Result<Option<PathBuf>,
             let path = posts.remove(0);
             let text = std::fs::read_to_string(&path)
                 .map_err(|e| Error::msg(format!("{}: {e}", path.display())))?;
-            if let Some(line) = unremovable_draft(&text) {
+            if let Some(problem) = unremovable_draft(&text) {
                 return Err(Error::msg(format!(
-                    "{} has '{line}' in its front matter.\n  \
+                    "{} has {problem}.\n  \
                      The release removes only the exact line '{DRAFT}'; write the flag that way.",
                     path.display()
                 )));
@@ -202,13 +209,13 @@ mod tests {
     /// A slug is read from the front matter, quoted or not, and nowhere else.
     #[test]
     fn the_slug_is_read_from_the_front_matter() {
-        assert_eq!(slug_of(POST), Some("releases/0.4"));
+        assert_eq!(slug_of(POST).as_deref(), Some("releases/0.4"));
         assert_eq!(
-            slug_of("---\nslug: \"releases/0.4\"\n---\n"),
+            slug_of("---\nslug: \"releases/0.4\"\n---\n").as_deref(),
             Some("releases/0.4")
         );
         assert_eq!(
-            slug_of("---\nslug: 'releases/0.4'\n---\n"),
+            slug_of("---\nslug: 'releases/0.4'\n---\n").as_deref(),
             Some("releases/0.4")
         );
         assert_eq!(slug_of("# Title\n\nslug: releases/0.4\n"), None);

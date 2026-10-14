@@ -4265,6 +4265,7 @@ dependencies = [
  "serde",
  "serde_json",
  "toml",
+ "yaml_serde",
 ]
 
 [[package]]

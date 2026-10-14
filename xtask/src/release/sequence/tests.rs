@@ -786,6 +786,35 @@ fn an_excluded_post_does_not_satisfy_the_guard() {
     }
 }
 
+/// A `draft` key in any YAML spelling the site build reads as a draft stops
+/// `assemble` unless the release commit removes it.
+#[test]
+fn a_draft_key_spelled_otherwise_is_not_assembled() {
+    for line in [
+        "draft : true",
+        "\"draft\": true",
+        "'draft': true",
+        "draft\t: true",
+        "? draft\n: true",
+    ] {
+        let log = Log::default();
+        let git = FakeGit::new(&log);
+        let forge = FakeForge::new(&log);
+        let registry = FakeRegistry::default();
+        let mut workspace = FakeWorkspace::new(&log, &CRATES);
+        workspace.version = v("0.2.0");
+        let path = workspace.post("2026-10-11-spate-0-3.md");
+        std::fs::write(&path, POST_0_3.replace("draft: true", line)).unwrap();
+        let pauses = Pauses::default();
+        let result = assemble(&host!(&git, &forge, &registry, &workspace, pauses), "0.3.0");
+        let still_draft = std::fs::read_to_string(&path).unwrap().contains(line);
+        assert!(
+            result.is_err() || !still_draft,
+            "{line:?}: assembled and committed with the post still a draft"
+        );
+    }
+}
+
 /// The release commit carries the post with its `draft: true` line removed and
 /// every other byte as written, so the post goes live with the release.
 #[test]

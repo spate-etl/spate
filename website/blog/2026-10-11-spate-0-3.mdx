@@ -170,6 +170,19 @@ built with `Pipeline` needs no change.
 
 ## Split coordination is deprecated
 
+I deprecated split coordination because a queue does the same job with far less
+code to keep correct. Split coordination divides a prefix between instances with
+a leader-run planner, leases, an epoch-fenced progress record in a shared store,
+and cooperative revocation. A queue already gives at-least-once delivery, a
+visibility lease, redelivery and dead-lettering. Object stores already publish
+"object created" notifications to queues, so continuous ingestion from a store
+needs a queue anyway.
+
+The protocol also took the most maintenance. Most of the fixes in this release
+are in it, and [#1111](https://github.com/spate-etl/spate/issues/1111) lists the
+defects that remain. It needs a store of its own to run, and it scaled worse
+than a queue in the comparison further down.
+
 In 0.3.0, `spate-coordination` and every item it defines are deprecated. So
 are the split traits and driver in `spate-core`, `S3Source::with_coordinator`,
 and the scripted coordinator in `spate-test`, and code that names one of them
@@ -197,16 +210,6 @@ coordination:
 ```text
 {"timestamp":"2026-10-14T06:26:04.020346Z","level":"WARN","message":"the `coordination:` section is deprecated, and v0.4.0 removes it; a work feed replaces split coordination (https://github.com/spate-etl/spate/issues/1088)","target":"spate_core::pipeline::runtime"}
 ```
-
-Split coordination divides a prefix between instances with a leader-run
-planner, leases, an epoch-fenced progress record in a shared store, and
-cooperative revocation. No source needs that protocol for its own sake. A
-queue already gives at-least-once delivery, a visibility lease, redelivery and
-dead-lettering. Object stores already publish "object created" notifications
-to queues, and continuous ingestion from such a store needs a queue.
-Most of the fixes in this release are in the coordination protocol, and
-[#1111](https://github.com/spate-etl/spate/issues/1111) lists the defects that
-remain.
 
 In 0.4.0 a work feed will take its place. The design is in
 [#1088](https://github.com/spate-etl/spate/issues/1088):

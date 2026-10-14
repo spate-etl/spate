@@ -2,6 +2,7 @@
 title: Running DOOM inside ClickHouse
 description: "DOOM in ClickHouse two ways: the 1993 engine on a RISC-V CPU written in SQL, and the engine's own simulation and renderer rewritten as SQL."
 authors: [marcus]
+tags: [engineering]
 image: /img/clickdoom-social.png
 ---
 

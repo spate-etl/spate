@@ -35,6 +35,12 @@ with the first site deploy after the release pull request merges, normally the
 one the release dispatches, and the GitHub release body links it.
 [`RELEASING.md`](../../RELEASING.md) has the release itself.
 
+## Tags
+
+An engineering post, on how something in Spate was built, measured or fixed,
+takes `tags: [engineering]`. Every tag is declared in `tags.yml`, and the build
+fails on a tag that is not, so a new tag goes into `tags.yml` first.
+
 ## Shape
 
 - **The opener.** A paragraph or two that states the point of the release:

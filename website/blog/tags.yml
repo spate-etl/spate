@@ -1,0 +1,8 @@
+release:
+  label: release
+  permalink: /release
+  description: Posts that announce a minor release of Spate and what it ships.
+engineering:
+  label: engineering
+  permalink: /engineering
+  description: Posts on how something in Spate was built, measured or fixed.

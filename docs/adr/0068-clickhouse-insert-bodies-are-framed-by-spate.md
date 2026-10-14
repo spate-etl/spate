@@ -5,7 +5,7 @@ description: "The ClickHouse sink frames its own compressed blocks at seal and s
 # ADR-0068 — ClickHouse insert bodies are framed by spate and sent with `decompress=1`
 
 - **Status:** accepted
-- **Date:** 2026-10-13
+- **Date:** 2026-10-14
 - **Supersedes:** —
 - **Superseded by:** —
 
@@ -157,25 +157,66 @@ frame, compressing inside the send against sending pre-compressed bytes.
 - liblz4 against lz4_flex, wall-clock: −9.8% (c8g), −3.1% (c7a), +2.4% (c7i),
   +1.6% (darwin).
 
-Measured by `crates/spate-clickhouse/benches/frame_gungraun.rs` (CI x86_64,
-counted, eight frames): the sink's codec against the client's,
-lz4 5,092,996 → 4,850,387 instructions (−4.76%), zstd level 1
+Measured by `crates/spate-clickhouse/benches/frame_gungraun.rs`, counted,
+eight frames: the sink's codec against the client's. On CI x86_64, lz4
+5,092,996 → 4,850,387 instructions (−4.76%), zstd level 1
 10,412,004 → 9,923,368 (−4.69%), zstd level 3 14,849,050 → 12,196,088
-(−17.87%).
+(−17.87%). On AWS c8g.8xlarge (Graviton4, valgrind 3.27.1), lz4
+4,200,446 → 4,195,519 (−0.12%), zstd level 1 8,970,373 → 8,938,892 (−0.35%),
+zstd level 3 10,084,541 → 9,917,559 (−1.66%).
 
-Measured by `crates/spate-clickhouse/benches/write_wall.rs`, wall-clock on
-darwin (aarch64), a smoke run of 20 paired replicates against the parent of
-the change. The process CPU to code and write one 1,600-frame Native batch,
-including the in-process server's discard loop in both legs, rose 5.32% under
-lz4 (median 74.67 → 79.04 ms, 90% interval +4.41% to +6.19%). Under zstd level
-3 it moved −2.30%, inside the harness's 5% floor. Under `off` it did not
-change. Writing pre-coded blocks alone, which is the work left on the I/O
-runtime, took 22.80 ms under lz4 and 22.32 ms under zstd level 3 in a separate
-run of the same tree. This does not measure end-to-end throughput.
+Measured by `crates/spate-clickhouse/benches/frame_wall.rs`, wall-clock, 20
+replicates on AWS c8g.8xlarge and c7i.8xlarge (Xeon Platinum 8488C). CPU per
+eight frames, the sink's codec against the client's, medians: lz4 0.39 against
+0.39 ms (c8g) and 0.33 against 0.34 ms (c7i); zstd level 1 0.76 against 0.77
+and 0.64 against 0.67; zstd level 3 0.83 against 0.85 and 0.73 against 0.81.
 
-PLACEHOLDER (AWS sitting, not yet run): the end-to-end figures on c8g and c7i
-against a real server, rows per second and CPU per row over a fixed window,
-are added here before this record lands.
+Measured by `crates/spate-clickhouse/benches/write_wall.rs`, wall-clock, 20
+paired replicates against the parent of the change on the same two hosts. The
+process CPU to code and write one 1,600-frame Native batch, including the
+in-process server's discard loop in both legs:
+
+- lz4: 104.42 → 101.58 ms on c8g (−2.60%, 90% interval −4.51% to −0.71%) and
+  94.95 → 93.24 ms on c7i (−1.68%, −3.72% to +0.58%), both inside the
+  harness's 5% floor.
+- zstd level 3: 193.99 → 187.56 ms on c8g (−3.30%, inside the floor) and
+  187.84 → 164.29 ms on c7i (−12.53%).
+- `off`: no change on either host.
+- Writing pre-coded blocks alone, which is the work left on the I/O runtime,
+  took 19.18 of 98.58 ms under lz4 and 13.67 of 187.85 ms under zstd level 3
+  on c8g, and 21.05 of 92.12 and 13.19 of 164.14 ms on c7i, in a separate run
+  of the same tree.
+- A darwin (aarch64) smoke run of the same comparison showed lz4 +5.32%
+  (74.67 → 79.04 ms, +4.41% to +6.19%), so the lz4 total depends on the
+  platform.
+
+Measured end to end on AWS eu-west-2 by a hand-run harness this repository
+does not carry: the `clickhouse_load` example (datagen to 32 Native shards) on
+a c8g.8xlarge and a c7i.8xlarge client, each against a ClickHouse 26.8 server
+on an instance of the same type. Rows per second and per-thread CPU come from a
+45-second window, five rounds per cell, against the parent of the change. In a
+4-core CPU quota, where the one pipeline thread is the limit, with TLS off:
+
+- Pipeline-thread CPU per row rose by the compression it took over. On c8g,
+  1015.18 → 1047.77 ns (+32.60) under lz4 and 1015.11 → 1072.56 ns (+57.45)
+  under zstd level 3. On c7i, 755.88 → 808.59 ns (+52.70) and
+  755.78 → 826.24 ns (+70.46).
+- `spate-io` CPU per row fell. On c8g, 47.85 → 11.86 ns (lz4) and
+  66.46 → 10.95 ns (zstd level 3). On c7i, 58.79 → 24.84 ns and
+  79.31 → 23.87 ns.
+- Process CPU per row moved −0.4% and +0.2% on c8g, +2.4% and +1.7% on c7i.
+- Rows per second fell, medians [min–max]. On c8g, 0.98 [0.98–0.99] →
+  0.95 [0.95–0.96] M under lz4 (−3.1%) and 0.98 [0.98–0.99] →
+  0.93 [0.93–0.93] M under zstd level 3 (−5.4%). On c7i,
+  1.32 [1.28–1.38] → 1.24 [1.23–1.28] M (−6.5%) and 1.32 [1.29–1.37] →
+  1.21 [1.20–1.25] M (−8.5%). With TLS on the changes were −3.1%, −5.4%,
+  −6.1% and −8.7%. Each change is taken from the unrounded medians.
+
+The 32-core shapes do not measure the I/O-runtime limit this change removes.
+There the client spent 28–31 cores on its pipeline threads, and raising
+`io_threads` from 2 to 8 at the parent moved rows per second −1.1% against
+20.3% noise (c8g, zstd level 3). The best median of this change at 32 cores
+was 18.63M rows per second.
 
 ## More information
 

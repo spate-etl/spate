@@ -26,10 +26,11 @@ pub(crate) fn posts_with_slug(blog: &Path, slug: &str) -> Result<Vec<PathBuf>, E
                 .map_err(|e| Error::msg(format!("{}: {e}", dir.display())))?
                 .path();
             // The blog plugin's default `exclude` drops `_`-prefixed files and
-            // directories, so the site never builds a post found there.
+            // directories, and its glob skips hidden ones, so the site never
+            // builds a post found there.
             if path
                 .file_name()
-                .is_some_and(|name| name.to_string_lossy().starts_with('_'))
+                .is_some_and(|name| name.to_string_lossy().starts_with(['_', '.']))
             {
                 continue;
             }

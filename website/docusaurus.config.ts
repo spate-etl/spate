@@ -238,6 +238,14 @@ const config: Config = {
             title: 'Spate blog',
             description: 'Notes from building Spate.',
             copyright: `Copyright © ${new Date().getFullYear()} Marcus Kainth.`,
+            // A feed item carries a post's HTML without the site's CSS, so an
+            // inline chart renders there with no colours and no wide/narrow
+            // switch. The figure caption states its values in words and stays.
+            createFeedItems: async ({defaultCreateFeedItems, ...params}) =>
+              (await defaultCreateFeedItems(params)).map((item) => ({
+                ...item,
+                content: item.content?.replace(/<svg\b[\s\S]*?<\/svg>/g, ''),
+              })),
           },
           // A post without a truncation marker lists in full; the list page
           // should show openings.

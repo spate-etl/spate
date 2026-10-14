@@ -39,9 +39,25 @@ function chartFaults(values: number): string[] {
 }
 
 /**
+ * The bars in each chart drawing whose computed fill is their own series' hatch, as `group-series`.
+ */
+function hatchedBars(): string[][] {
+  return Array.from(document.querySelectorAll<SVGSVGElement>('article figure svg[role="img"]')).map((svg) =>
+    Array.from(svg.querySelectorAll<SVGGElement>('[data-bar]'))
+      .filter((g) => {
+        const series = g.dataset.bar!.split('-')[1];
+        const fill = getComputedStyle(g.querySelector('rect')!).fill;
+        return new RegExp(`-hatch-${series}"?\\)$`).test(fill);
+      })
+      .map((g) => g.dataset.bar!),
+  );
+}
+
+/**
  * Pins that the 0.3 release post's chart shows its column drawing on a desktop and its row drawing
  * on a phone, in both colour modes, with every label inside the drawing and apart from every other,
- * no horizontal page scroll, and no axe violations.
+ * the three single-run bars hatched in each drawing, no horizontal page scroll, and no axe
+ * violations.
  */
 for (const colorMode of ['light', 'dark'] as const) {
   test.describe(`grouped bar chart: ${colorMode}`, () => {
@@ -58,6 +74,9 @@ for (const colorMode of ['light', 'dark'] as const) {
         await expect(drawings.nth(visible)).toBeVisible();
         await expect(drawings.nth(1 - visible)).toBeHidden();
         expect(await page.evaluate(chartFaults, 8), 'chart labels').toEqual([]);
+        // The static split at both sizes and the Kafka queue at 8 instances are single runs.
+        const single = ['0-0', '1-0', '1-3'];
+        expect(await page.evaluate(hatchedBars), 'hatched bars per drawing').toEqual([single, single]);
         const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
         expect(overflow, 'horizontal page scroll').toBeLessThanOrEqual(0);
         await expectNoAxeViolations(page, testInfo);
@@ -65,3 +84,17 @@ for (const colorMode of ['light', 'dark'] as const) {
     }
   });
 }
+
+/**
+ * Pins that the blog's feeds carry the chart's caption and none of its inline SVG, which a feed
+ * reader would draw without the site's CSS.
+ */
+test('the blog feeds carry the chart caption and no inline SVG', async ({request}) => {
+  for (const feed of ['/blog/rss.xml', '/blog/atom.xml']) {
+    const response = await request.get(feed);
+    expect(response.ok(), feed).toBe(true);
+    const body = await response.text();
+    expect(body, feed).toContain('Decoded bytes per second across the fleet.');
+    expect(body, feed).not.toMatch(/<svg\b|&lt;svg\b/);
+  }
+});

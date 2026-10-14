@@ -1105,7 +1105,13 @@ fn current_thread_io_runtime_fails_startup() {
     // Without the check, a pre-triggered shutdown lets `run` drain and
     // return `Ok`, so the assertion below fails instead of hanging.
     runtime.shutdown_handle().trigger();
-    let result = std::thread::spawn(move || runtime.run()).join().unwrap();
+    let (result, rendered) = std::thread::spawn(move || {
+        let mut result = None;
+        let rendered = crate::metrics::render_local(|| result = Some(runtime.run()));
+        (result.expect("run returned"), rendered)
+    })
+    .join()
+    .unwrap();
 
     let Err(err @ StartError::Config(_)) = result else {
         panic!("expected StartError::Config, got {result:?}");
@@ -1116,6 +1122,10 @@ fn current_thread_io_runtime_fails_startup() {
         chains_built.load(Ordering::Relaxed),
         0,
         "no pipeline thread may start"
+    );
+    assert!(
+        !rendered.contains(names::PIPELINE_STATE),
+        "a refused runtime must register no series:\n{rendered}"
     );
 }
 

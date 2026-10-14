@@ -1446,7 +1446,7 @@ fn a_busy_io_runtime_reaches_the_exposition() {
         |runtime| {
             runtime
                 .with_io_runtime(io)
-                .with_io_busy_interval(Duration::from_millis(50))
+                .with_io_busy_sampling(Duration::from_millis(50), Duration::from_secs(1))
         },
         |shared, log| FakeChain {
             shared,
@@ -1494,31 +1494,48 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Warnings {
     }
 }
 
-/// A sustained I/O busy sample logs one warning carrying the pipeline and
-/// the worker count; any other sample logs nothing.
-#[test]
-fn a_sustained_io_busy_sample_logs_one_warning() {
-    use crate::metrics::{ComponentLabels, IoBusySample, IoRuntimeMetrics};
-    use crate::pipeline::runtime::publish_io_busy;
+/// Feeds `sample_io_busy` a sample every 5 s for ten minutes from a
+/// three-worker runtime busy `share` of the time, under a captured subscriber,
+/// and returns the fields of every warning it logged.
+fn io_busy_warnings(pipeline: &'static str, share: f64) -> Vec<Fields> {
+    use crate::metrics::{ComponentLabels, IoBusySampler, IoRuntimeMetrics};
+    use crate::pipeline::runtime::sample_io_busy;
     use tracing_subscriber::layer::SubscriberExt;
 
-    let labels = ComponentLabels::new("io-busy-warning", "runtime", "pipeline");
+    const WORKERS: usize = 3;
+    let labels = ComponentLabels::new(pipeline, "runtime", "pipeline");
     let gauge = IoRuntimeMetrics::try_new(&labels).expect("free series");
+    let t0 = Instant::now();
+    let mut sampler = IoBusySampler::new(
+        Duration::from_secs(5),
+        IoBusySampler::WINDOW,
+        t0,
+        Duration::ZERO,
+    );
     let warnings = Warnings::default();
     let subscriber = tracing_subscriber::registry().with(warnings.clone());
     tracing::subscriber::with_default(subscriber, || {
-        let busy = |sustained| IoBusySample {
-            ratio: 0.95,
-            sustained,
-        };
-        publish_io_busy(busy(false), &gauge, 3, "io-busy-warning");
-        assert!(
-            warnings.0.lock().unwrap().is_empty(),
-            "a sample that is not sustained warned"
-        );
-        publish_io_busy(busy(true), &gauge, 3, "io-busy-warning");
+        for secs in (5..=600).step_by(5) {
+            let busy = Duration::from_secs_f64(share * (WORKERS as u64 * secs) as f64);
+            sample_io_busy(
+                &mut sampler,
+                &gauge,
+                t0 + Duration::from_secs(secs),
+                busy,
+                WORKERS,
+                pipeline,
+            );
+        }
     });
-    let logged = warnings.0.lock().unwrap();
+    warnings.0.lock().unwrap().clone()
+}
+
+/// Ten minutes of a saturated three-worker I/O runtime log one warning,
+/// carrying the pipeline and the worker count. Half busy on three workers
+/// logs nothing.
+#[test]
+fn a_saturated_io_runtime_logs_one_warning() {
+    let logged = io_busy_warnings("io-busy-warning", 0.95);
     assert_eq!(logged.len(), 1, "{logged:?}");
     let field = |name: &str| {
         logged[0]
@@ -1528,6 +1545,9 @@ fn a_sustained_io_busy_sample_logs_one_warning() {
     };
     assert_eq!(field("pipeline"), Some("\"io-busy-warning\""));
     assert_eq!(field("io_workers"), Some("3"));
+
+    let half = io_busy_warnings("io-busy-half", 0.5);
+    assert!(half.is_empty(), "half busy warned: {half:?}");
 }
 
 /// One pipeline's `spate_checkpoint_pending_batches` lines, sorted. The

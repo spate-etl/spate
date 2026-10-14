@@ -9,8 +9,8 @@ use crate::checkpoint::Checkpointer;
 use crate::config::{MetricsExporter, PinningMode, PipelineConfig};
 use crate::metrics::{
     self, BackpressureMetrics, CheckpointMetrics, ComponentLabels, E2eBasis, Exporter,
-    InflightBudgetMetrics, IoBusySample, IoBusySampler, IoRuntimeMetrics, Meter, MetricRole,
-    MetricsHandle, MetricsSettings, PipelineMetrics, PipelineState, SourceMetrics,
+    InflightBudgetMetrics, IoBusySampler, IoRuntimeMetrics, Meter, MetricRole, MetricsHandle,
+    MetricsSettings, PipelineMetrics, PipelineState, SourceMetrics,
 };
 use crate::ops::RunnableChain;
 use crate::source::{DrainBarrier, Source};
@@ -108,6 +108,7 @@ pub struct PipelineRuntime<S: Source> {
     options: RuntimeOptions,
     io: Option<tokio::runtime::Runtime>,
     io_busy_interval: Duration,
+    io_busy_window: Duration,
 }
 
 impl<S: Source> std::fmt::Debug for PipelineRuntime<S> {
@@ -139,14 +140,17 @@ impl<S: Source + 'static> PipelineRuntime<S> {
             options: RuntimeOptions::default(),
             io: None,
             io_busy_interval: IO_BUSY_INTERVAL,
+            io_busy_window: IoBusySampler::WINDOW,
         }
     }
 
-    /// Sample the I/O runtime's busy ratio on this cadence.
+    /// Sample the I/O runtime's busy ratio every `interval`, averaged over
+    /// the trailing `window`.
     #[cfg(test)]
     #[must_use]
-    pub(crate) fn with_io_busy_interval(mut self, interval: Duration) -> Self {
+    pub(crate) fn with_io_busy_sampling(mut self, interval: Duration, window: Duration) -> Self {
         self.io_busy_interval = interval;
+        self.io_busy_window = window;
         self
     }
 
@@ -521,15 +525,19 @@ impl<S: Source + 'static> PipelineRuntime<S> {
         let io_runtime_metrics = io.handle().metrics();
         let mut io_busy = IoBusySampler::new(
             self.io_busy_interval,
+            self.io_busy_window,
             Instant::now(),
-            metrics::io_busy_total(&io_runtime_metrics),
+            metrics::io_busy_reading(&io_runtime_metrics).0,
         );
 
         let (mut state, final_watermarks) = loop {
+            let (busy, workers) = metrics::io_busy_reading(&io_runtime_metrics);
             sample_io_busy(
                 &mut io_busy,
                 &io_busy_metrics,
-                &io_runtime_metrics,
+                Instant::now(),
+                busy,
+                workers,
                 &pipeline_name,
             );
             match to_main_rx.recv_timeout(Duration::from_millis(100)) {
@@ -626,34 +634,30 @@ pub(super) fn default_thread_count(cores: usize, io_threads: usize) -> usize {
     cores.saturating_sub(io_threads.div_ceil(2) + 1).max(1)
 }
 
-/// Publish an I/O busy sample when one is due.
-fn sample_io_busy(
+/// Publish an I/O busy sample when one is due, and warn on the sample that
+/// completes a saturated window.
+///
+/// `busy_total` is the I/O runtime's cumulative busy time over its
+/// `io_workers` async workers.
+pub(super) fn sample_io_busy(
     sampler: &mut IoBusySampler,
     gauge: &IoRuntimeMetrics,
-    io: &tokio::runtime::RuntimeMetrics,
-    pipeline: &str,
-) {
-    if let Some(sample) = sampler.observe_runtime(Instant::now(), io) {
-        publish_io_busy(sample, gauge, io.num_workers(), pipeline);
-    }
-}
-
-/// Set the busy gauge from `sample`, and warn when it completes a sustained
-/// saturated window.
-pub(super) fn publish_io_busy(
-    sample: IoBusySample,
-    gauge: &IoRuntimeMetrics,
+    now: Instant,
+    busy_total: Duration,
     io_workers: usize,
     pipeline: &str,
 ) {
+    let Some(sample) = sampler.observe(now, busy_total, io_workers) else {
+        return;
+    };
     gauge.set_busy_ratio(sample.ratio);
     if sample.sustained {
         tracing::warn!(
             pipeline,
             io_workers,
             ratio = sample.ratio,
-            "the I/O runtime's workers have been saturated for a minute; if the sink \
-             queues are filling, raise `pipeline.io_threads`"
+            "the I/O runtime's workers have been saturated for five minutes; if the \
+             sink queues are filling, raise `pipeline.io_threads`"
         );
     }
 }

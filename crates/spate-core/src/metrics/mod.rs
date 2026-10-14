@@ -78,9 +78,7 @@ pub(crate) use meter::MetricRole;
 pub use operator::OperatorMetrics;
 pub use pipeline::{PipelineMetrics, PipelineState};
 // The runtime owns the only instance and the sampler that feeds it.
-pub(crate) use pipeline::{
-    IoBusySample, IoBusySampler, IoRuntimeMetrics, busy_total as io_busy_total,
-};
+pub(crate) use pipeline::{IoBusySampler, IoRuntimeMetrics, busy_reading as io_busy_reading};
 pub use queue::QueueMetrics;
 pub use sink::{BackoffGuard, FlushReason, SinkShardMetrics};
 // Labels a family the sink worker alone observes; no connector can produce a

@@ -421,7 +421,7 @@ publishes no lag), but a new connector must not.
 | `spate_pipeline_info` | gauge | `version` | Constant 1; carries build metadata. |
 | `spate_pipeline_state` | gauge | `state` (`starting`\|`running`\|`draining`\|`failed`) | 1 for the current state, 0 otherwise. |
 | `spate_pipeline_threads` | gauge | | Pinned pipeline thread count. |
-| `spate_pipeline_io_busy_ratio` | gauge | | Mean fraction of time the I/O runtime's async workers spent running tasks, from 0 to 1, averaged over the trailing 60s (since start while shorter) and updated every 5s. Tokio publishes a worker's busy time at its maintenance tick or when it parks, so a task that holds a worker for a long poll shows up late and in steps, and polls of a second or more can read unevenly. The blocking pool is not counted. Reads 0 until the first sample, and holds its last value during the shutdown drain. |
+| `spate_pipeline_io_busy_ratio` | gauge | | Mean fraction of time the I/O runtime's async workers spent running tasks, from 0 to 1, averaged over the trailing 5 minutes (since start while shorter) and updated every 5s. A worker records its busy time about every 31 polls, so a reading can be off by up to 31 polls' worth of busy time over the 5 minutes: a few percent for polls under about 500 ms and about 10% at 1 s polls. Longer polls read late and unevenly. The blocking pool is not counted. Reads 0 until the first sample, and holds its last value during the shutdown drain. |
 | `process_*` | — | | CPU, memory, fds via `metrics-process`. |
 
 ## Histogram buckets
@@ -444,8 +444,8 @@ Configured on the exporter, by name suffix or full name:
 - `spate_pipeline_io_busy_ratio > 0.9` sustained while the sink queues fill —
   the I/O runtime's workers are the limit. Raise `pipeline.io_threads` before
   reading it as a slow sink. The pipeline also logs one warning when a full
-  60s window averages 0.9 or above, and logs it again only after the average
-  has dropped below 0.9.
+  5-minute window averages 0.9 or above. It logs it again only after the
+  average has read below 0.9 for a full 5 minutes.
 - `rate(spate_deser_records_dropped_total[5m]) > 0` — schema drift or poison
   messages being skipped.
 - `spate_sink_replica_healthy == 0` — replica down; sustained across all

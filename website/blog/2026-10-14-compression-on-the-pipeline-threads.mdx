@@ -168,14 +168,13 @@ single pipeline thread before #1144.
 | c8g | 0.98M | 0.95M | 1.84M |
 | c7i | 1.32M | 1.24M | 2.39M |
 
-#1142 on its own cost 3.1% on c8g and 6.5% on c7i, which is inside c7i's
-run-to-run noise of 7.2%. I expected that drop. Before #1144, the quota kept
-two cores back for the I/O workers, and #1142 moved the compression off them
-onto the one pipeline thread. The pipeline thread's CPU per
-row rose by 32.60 ns on c8g, and the I/O runtime's fell from 47.85 to 11.86
-ns. #1144 then gave the quota a second pipeline thread, which nearly doubled
-the rate. zstd:3 followed the same pattern: 0.98M, 0.93M and 1.81M on c8g,
-and 1.32M, 1.21M and 2.35M on c7i.
+#1142 on its own cost 3.1% on c8g and 6.5% on c7i. I expected that drop. Before
+#1144, the quota kept two cores back for the I/O workers, and #1142 moved the
+compression off them onto the one pipeline thread. The pipeline thread's CPU per
+row rose by 32.60 ns on c8g, and the I/O runtime's fell from 47.85 to 11.86 ns.
+#1144 then gave the quota a second pipeline thread, which nearly doubled the
+rate. zstd:3 followed the same pattern: 0.98M, 0.93M and 1.81M on c8g, and
+1.32M, 1.21M and 2.35M on c7i.
 
 ## What the `clickhouse` crate still does
 

@@ -555,21 +555,25 @@ mod tests {
             .expect("runtime");
         let metrics = io.handle().metrics();
         let (t0, base) = (Instant::now(), busy_total(&metrics));
-        // The barrier holds each poll until every task is polled, so no two
-        // share a worker.
-        let all = Arc::new(std::sync::Barrier::new(held));
-        let tasks: Vec<_> = (0..held)
-            .map(|_| {
-                let all = Arc::clone(&all);
-                io.spawn(async move {
-                    all.wait();
-                    let polled = Instant::now();
-                    while polled.elapsed() < Duration::from_millis(500) {
-                        std::hint::spin_loop();
-                    }
-                })
-            })
-            .collect();
+        let started = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let deadline = Instant::now() + SECS(10);
+        let mut tasks = Vec::with_capacity(held);
+        for n in 1..=held {
+            let started_here = Arc::clone(&started);
+            tasks.push(io.spawn(async move {
+                started_here.fetch_add(1, Ordering::SeqCst);
+                let polled = Instant::now();
+                while polled.elapsed() < Duration::from_millis(500) {
+                    std::hint::spin_loop();
+                }
+            }));
+            // The next task is spawned only once this one is inside its poll,
+            // so it lands in the shared queue and not behind the held worker.
+            while started.load(Ordering::SeqCst) < n {
+                assert!(Instant::now() < deadline, "task {n} was not polled");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
         for task in tasks {
             io.block_on(task).expect("task");
         }

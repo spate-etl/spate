@@ -247,7 +247,7 @@ metric_names! {
         /// Pinned pipeline thread count.
         PIPELINE_THREADS = "spate_pipeline_threads",
         /// Mean busy fraction of the I/O runtime's async workers over the
-        /// last sample interval, 0 to 1.
+        /// trailing 5 minutes (since start while shorter), 0 to 1.
         PIPELINE_IO_BUSY_RATIO = "spate_pipeline_io_busy_ratio",
     }
 }

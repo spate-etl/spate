@@ -271,6 +271,30 @@ mod tests {
         assert_eq!(keys, ["c-soh/x\u{1}y.ndjson"]);
     }
 
+    /// A response to a request that is not a `ListObjectsV2` listing passes
+    /// through unchanged, even when its body reads as a listing page.
+    #[test]
+    fn an_object_read_passes_through_unfiltered() {
+        let body = page(&["d//dbl.ndjson"], None);
+        let url = crate::test_servers::sequence_server(vec![("200 OK", body.clone())]);
+        let keys = UnaddressableKeys::default();
+        let client = UnaddressableConnector::new(keys.clone())
+            .connect(&ClientOptions::new().with_allow_http(true))
+            .unwrap();
+        let mut request = HttpRequest::new(Vec::<u8>::new().into());
+        *request.uri_mut() = format!("{url}/b/data/x.ndjson").parse().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let read = rt.block_on(async {
+            let response = client.execute(request).await.unwrap();
+            response.into_body().bytes().await.unwrap()
+        });
+        assert_eq!(std::str::from_utf8(&read).unwrap(), body);
+        assert!(keys.take().is_empty());
+    }
+
     /// The filtered page keeps the other keys and the continuation token, and
     /// every key it keeps parses as a `Path`.
     #[test]

@@ -516,11 +516,7 @@ async fn stream_object_streaming(
     'attempts: loop {
         // In this fallback `delivered` is always 0: a mid-object stream error
         // is fatal below (no ETag to pin a resumed read), so a retry never
-        // resumes partway. The guard therefore only fires for a zero-length
-        // object, and every GET re-reads the whole object un-ranged.
-        if delivered >= entry.size {
-            return Ok(true);
-        }
+        // resumes partway, and every GET re-reads the whole object un-ranged.
         let options = GetOptions::default();
         let result = match store.get_opts(&path, options).await {
             Ok(r) => r,

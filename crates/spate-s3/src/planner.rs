@@ -183,7 +183,8 @@ impl SplitPlanner for S3Planner {
             .unwrap_or_default();
         // XML end-of-line handling decodes keys that differ only in CR, LF
         // or CRLF to one key, and one key planned twice is one split id twice.
-        unaddressable.sort_unstable_by(|a, b| a.key.cmp(&b.key));
+        // The largest is kept, so an empty one cannot hide one with records.
+        unaddressable.sort_unstable_by(|a, b| a.key.cmp(&b.key).then(b.size.cmp(&a.size)));
         unaddressable.dedup_by(|a, b| a.key == b.key);
         if let Some(m) = &self.metrics {
             m.objects_listed

@@ -4,6 +4,7 @@
 #![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
 
 pub(crate) mod rustfs;
+pub(crate) mod s3_stub;
 pub(crate) mod spy;
 
 use object_store::ObjectStoreExt as _;

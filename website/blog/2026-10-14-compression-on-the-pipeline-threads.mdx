@@ -45,9 +45,9 @@ I sampled each thread's CPU from `/proc` during the drains. With lz4 at the
 default, the I/O runtime used 2.07 cores, so both workers were full, and the
 pipeline threads used 10.6 of their 32. zstd:3 is slower per frame, and a
 frame's compression holds its worker until it finishes. Nothing else scheduled
-on that worker runs in the meantime, including other inserts' socket writes
-and the shard workers' intake. A shard whose inserts stall stops taking chunks,
-its queue fills, and every pipeline thread routes rows to every shard. Under
+on that worker runs in the meantime, including other inserts' socket writes and
+the shard workers' intake. A shard whose inserts stall stops taking chunks, its
+queue fills, and every pipeline thread with rows for that shard stops. Under
 zstd:3 the I/O runtime averaged 1.35 cores and the pipeline threads 4.0.
 
 <WhereCompressionRuns />

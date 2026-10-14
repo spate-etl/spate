@@ -211,7 +211,7 @@ function Swatch({className, w, h, rx = 1}: {className: string; w: number; h: num
 }
 
 const CAPTION =
-  'In 0.3.0, two I/O workers compressed every insert body before sending it, and the pipeline threads waited for queue space. On 799d3640, each pipeline thread compresses the chunks it seals, and the I/O workers only send them. The drawing gives each thread one queue. In Spate every thread routes rows to every shard queue, so one full queue stalls them all.';
+  'In 0.3.0, two I/O workers compressed every insert body before sending it, and the pipeline threads waited for queue space. On 799d3640, each pipeline thread compresses the chunks it seals, and the I/O workers only send them. The drawing shows four of the 32 threads and gives each one queue. In Spate a thread can route rows to several shard queues, and one full queue stalls every thread with a chunk for it.';
 
 /**
  * Before and after moving insert compression onto the pipeline threads. Under reduced motion both

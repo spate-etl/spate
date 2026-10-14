@@ -214,7 +214,7 @@ fn the_snippet_problems_name_file_and_line() {
 }
 
 /// The changelog and the attribution are generated, and the decision records
-/// are immutable, so the scan leaves them out.
+/// and blog posts are dated, so the scan leaves them out.
 #[test]
 fn generated_and_historical_files_are_left_out_of_the_scan() {
     for path in [
@@ -222,11 +222,28 @@ fn generated_and_historical_files_are_left_out_of_the_scan() {
         "THIRD-PARTY.md",
         "changelog.d/x.fixed.md",
         "docs/adr/0001-x.md",
+        "website/blog/2026-11-02-spate-0-4.md",
     ] {
         assert!(scan_excluded(path), "{path}");
     }
     assert!(!scan_excluded("README.md"));
     assert!(!scan_excluded("docs/user-guide/x.mdx"));
+}
+
+/// A dated release post keeps the dependency line it was written with, so a
+/// snippet under the blog passes `check` at any workspace version.
+#[test]
+fn check_leaves_a_release_post_as_written() {
+    let repo = Repo::new("check_leaves_a_release_post_as_written");
+    for path in SNIPPET_FILES {
+        repo.write(path, "spate = \"0.2\"\n");
+    }
+    repo.write(
+        "website/blog/2026-11-02-spate-0-4.md",
+        "```toml\nspate = { version = \"0.4\", features = [\"s3\"] }\n```\n",
+    );
+    repo.commit("docs: the snippets and a release post");
+    assert!(check(repo.path()).is_ok());
 }
 
 /// The upload rejects a publishable crate with no description or license; a

@@ -484,14 +484,16 @@ fn read(root: &Path, rel: &str) -> Result<String, Error> {
 
 /// Whether `check` leaves a tracked file out of its scan. The changelog and the
 /// attribution are generated with the versions they are meant to hold, and an
-/// accepted decision record is immutable, so a literal there stays as written.
-/// This module's tests hold snippet-shaped fixtures by design.
+/// accepted decision record and a dated blog post keep the version they were
+/// written for, so a literal there stays as written. This module's tests hold
+/// snippet-shaped fixtures by design.
 fn scan_excluded(path: &str) -> bool {
     matches!(
         path,
         "CHANGELOG.md" | "THIRD-PARTY.md" | "xtask/src/release/version/tests.rs"
     ) || path.starts_with("changelog.d/")
         || path.starts_with("docs/adr/")
+        || path.starts_with("website/blog/")
 }
 
 /// The problems `check` finds in the manifest's pins, one diagnostic each.

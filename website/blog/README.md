@@ -59,7 +59,9 @@ links it.
 Snippets are written by hand, because a dated post shows the code as it was at
 the release ([`docs/STYLE.md`](../../docs/STYLE.md) § 11). Each one is built or
 run against the release's crates before the post merges, and the output shown
-is the output it printed.
+is the output it printed. A dependency line carries the release's version, as
+in `spate = { version = "X.Y", features = ["s3"] }`; the release version check
+leaves the blog out.
 
 ## Voice
 

@@ -181,15 +181,15 @@ impl SplitPlanner for S3Planner {
             .as_ref()
             .map(UnaddressableKeys::take)
             .unwrap_or_default();
+        if let Some(m) = &self.metrics {
+            m.objects_listed
+                .increment((entries.len() + unaddressable.len()) as u64);
+        }
         // XML end-of-line handling decodes keys that differ only in CR, LF
         // or CRLF to one key, and one key planned twice is one split id twice.
         // The largest is kept, so an empty one cannot hide one with records.
         unaddressable.sort_unstable_by(|a, b| a.key.cmp(&b.key).then(b.size.cmp(&a.size)));
         unaddressable.dedup_by(|a, b| a.key == b.key);
-        if let Some(m) = &self.metrics {
-            m.objects_listed
-                .increment((entries.len() + unaddressable.len()) as u64);
-        }
 
         let mut packed = crate::split::pack(entries, &self.packing);
         // An unaddressable object poisons whatever split holds it, so each

@@ -13,7 +13,8 @@ use support::s3_stub::s3_stub;
 use support::{PipelineYaml, launch_tuned, shared_store, test_options, test_tuning};
 
 /// Every object the store lists counts as listed, including those the S3
-/// client takes out of the listing and the planner leaves out of the plan.
+/// client takes out of the listing, the planner leaves out of the plan, or
+/// decodes to the same key as another.
 #[test]
 fn unaddressable_objects_count_as_listed() {
     let handle = install(&MetricsSettings {
@@ -26,6 +27,8 @@ fn unaddressable_objects_count_as_listed() {
         ("data/d//dbl.ndjson", b"{\"k\":\"dbl\"}\n"),
         ("data/dir/", b""),
         ("data/z.ndjson", b"{\"k\":\"z\"}\n"),
+        ("data/c\nr.ndjson", b"{\"k\":\"lf\"}\n"),
+        ("data/c\rr.ndjson", b"{\"k\":\"cr\"}\n"),
     ]);
     let yaml = PipelineYaml::endpoint("objects-listed", &endpoint).build();
     let mut tuning = test_tuning();
@@ -38,5 +41,5 @@ fn unaddressable_objects_count_as_listed() {
     let rendered = handle.render();
     let listed = metric_value(&rendered, "spate_s3_source_objects_listed_total", &[])
         .unwrap_or_else(|| panic!("no objects_listed_total series:\n{rendered}"));
-    assert_eq!(listed, 4.0, "{rendered}");
+    assert_eq!(listed, 6.0, "{rendered}");
 }

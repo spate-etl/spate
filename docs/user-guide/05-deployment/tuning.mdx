@@ -84,15 +84,15 @@ pipeline threads. If you don't set limits, set `pipeline.threads`
 explicitly.
 :::
 
-Raise `io_threads` when the tasks on the I/O runtime run short of CPU:
-request building, TLS, compression a sink does on the I/O runtime, and
-response handling. A shard worker waiting on a slow write is parked on the
-network and holds no worker, so slow writes need no more `io_threads`,
-however many shards wait at once. The hot path never runs on the I/O
-runtime, so extra workers do nothing for a pipeline whose pipeline threads
-are the limit. Each odd-numbered worker (the first, the third, and so on)
-takes one core from the derived pipeline-thread count, down to its floor
-of 1.
+When the tasks on the I/O runtime run short of CPU, raise `io_threads`.
+That work is request building, TLS, compression a sink does on the I/O
+runtime, and response handling. A write waiting on a slow sink is parked
+on the network and holds no I/O worker, so slow writes need no more
+`io_threads`, however many are in flight. The hot path never runs on the
+I/O runtime, so extra workers do nothing for a pipeline whose pipeline
+threads are the limit. Each odd-numbered worker (the first, the third, and
+so on) takes one core from the derived pipeline-thread count, down to its
+floor of 1.
 
 Read `spate_pipeline_io_busy_ratio` before raising `io_threads`: a value that stays
 near 1 means the I/O workers are saturated

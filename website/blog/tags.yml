@@ -5,4 +5,4 @@ release:
 engineering:
   label: engineering
   permalink: /engineering
-  description: Posts on how something in Spate was built, measured or fixed.
+  description: Posts on how something was built, measured or fixed.

@@ -37,9 +37,9 @@ one the release dispatches, and the GitHub release body links it.
 
 ## Tags
 
-An engineering post, on how something in Spate was built, measured or fixed,
-takes `tags: [engineering]`. Every tag is declared in `tags.yml`, and the build
-fails on a tag that is not, so a new tag goes into `tags.yml` first.
+An engineering post, on how something was built, measured or fixed, takes
+`tags: [engineering]`. Every tag is declared in `tags.yml`, and the build fails
+on a tag that is not, so a new tag goes into `tags.yml` first.
 
 ## Shape
 

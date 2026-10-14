@@ -59,15 +59,7 @@ pub(crate) fn listing_server(pages: Vec<String>) -> String {
 }
 
 fn answer_listing(mut stream: TcpStream, pages: &[String]) -> std::io::Result<()> {
-    let mut request = Vec::new();
-    let mut buf = [0u8; 4096];
-    while !request.windows(4).any(|w| w == b"\r\n\r\n") {
-        let n = stream.read(&mut buf)?;
-        if n == 0 {
-            return Ok(());
-        }
-        request.extend_from_slice(&buf[..n]);
-    }
+    let request = read_head(&mut stream)?;
     let line = String::from_utf8_lossy(&request);
     let target = line.split_whitespace().nth(1).unwrap_or_default();
     let query = target.split_once('?').map_or("", |(_, q)| q);
@@ -93,6 +85,45 @@ fn answer_listing(mut stream: TcpStream, pages: &[String]) -> std::io::Result<()
         body.len()
     )?;
     stream.flush()
+}
+
+/// An HTTP server on `127.0.0.1` that answers its `i`th request with
+/// `responses[i]`, a status line and an XML body, and every request after the
+/// last with the last response.
+///
+/// Returns the server's `http://` URL. The server runs on a detached thread
+/// for the life of the process.
+pub(crate) fn sequence_server(responses: Vec<(&'static str, String)>) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind a local port");
+    let url = format!("http://{}", listener.local_addr().expect("local address"));
+    std::thread::spawn(move || {
+        for (i, mut stream) in listener.incoming().flatten().enumerate() {
+            let (status, body) = &responses[i.min(responses.len() - 1)];
+            let _ = read_head(&mut stream).and_then(|_| {
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\ncontent-type: application/xml\r\n\
+                     content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+            });
+        }
+    });
+    url
+}
+
+/// Read a request up to the end of its headers, and return them.
+fn read_head(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
+    let mut request = Vec::new();
+    let mut buf = [0u8; 4096];
+    while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+        let n = stream.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        request.extend_from_slice(&buf[..n]);
+    }
+    Ok(request)
 }
 
 /// A builder for bucket `b` at `endpoint`, with plain HTTP allowed and

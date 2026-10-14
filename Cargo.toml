@@ -96,7 +96,7 @@ lz4_flex = { version = "0.14.0", default-features = false, features = ["std"] }
 # The checksum of ClickHouse's compressed block framing.
 cityhash-rs = "1.0.1"
 apache-avro = "0.22"
-object_store = "0.14"
+object_store = "0.14.1"
 # spate-s3 decodes listing pages with the decoder object_store uses, so its
 # version and features follow object_store's.
 quick-xml = { version = "0.41.0", features = ["serialize", "overlapped-lists"] }

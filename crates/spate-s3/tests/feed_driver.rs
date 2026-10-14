@@ -704,3 +704,29 @@ fn a_finished_unit_is_acknowledged_before_the_poll_timeout() {
     assert_eq!(report.state, ExitState::Completed);
     assert_eq!(sorted(written_rows(&sink_script)), sorted(recs("w", 30)));
 }
+
+/// A unit naming a zero-byte object whose key ends in `/` is acknowledged
+/// without a read, as the planner leaves such an object out of a plan.
+#[test]
+fn a_zero_byte_folder_marker_unit_is_acknowledged() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let body = SplitDescriptor::new(vec![DescriptorObject {
+        key: format!("{}/", key_of(&data, "folder")),
+        size: 0,
+        etag: None,
+        last_modified_ms: 1,
+    }])
+    .encode()
+    .unwrap();
+    let feed = MemoryFeed::new();
+    drop(feed.publish(Unit::new("folder-marker", body)));
+    let l = launch_on_feed(&data, Arc::new(feed.clone()), |_| {});
+    wait_until(DEADLINE, "the unit settled", || {
+        let c = feed.counts();
+        c.visible == 0 && c.held == 0
+    });
+    stop(&l);
+    let c = feed.counts();
+    assert_eq!((c.dead_lettered, c.acknowledged), (0, 1));
+}

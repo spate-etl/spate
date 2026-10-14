@@ -181,7 +181,8 @@ impl SplitPlanner for S3Planner {
             .as_ref()
             .map(UnaddressableKeys::take)
             .unwrap_or_default();
-        // A page `object_store` requested twice is recorded twice.
+        // XML end-of-line handling decodes keys that differ only in CR, LF
+        // or CRLF to one key, and one key planned twice is one split id twice.
         unaddressable.sort_unstable_by(|a, b| a.key.cmp(&b.key));
         unaddressable.dedup_by(|a, b| a.key == b.key);
         if let Some(m) = &self.metrics {
@@ -512,6 +513,35 @@ mod tests {
         )
     }
 
+    /// A planner at the bucket root over the S3 stub at `url`, with the
+    /// connector that takes unaddressable keys out of its listings.
+    fn filtering_planner(url: &str, handle: Handle, target: u64) -> S3Planner {
+        let keys = UnaddressableKeys::default();
+        let store = crate::test_servers::builder_at(url)
+            .with_access_key_id("AKIDTEST")
+            .with_secret_access_key("secret")
+            .with_http_connector(crate::listing::UnaddressableConnector::new(keys.clone()))
+            .build()
+            .unwrap();
+        let mut p = planner(Arc::new(store), handle, target).with_unaddressable(Some(keys));
+        p.prefix = None;
+        p
+    }
+
+    fn members(plan: &SplitPlan) -> Vec<Vec<String>> {
+        plan.splits
+            .iter()
+            .map(|s| {
+                SplitDescriptor::decode(&s.spec.descriptor)
+                    .unwrap()
+                    .objects
+                    .into_iter()
+                    .map(|o| o.key)
+                    .collect()
+            })
+            .collect()
+    }
+
     /// A listing that holds keys `object_store` cannot address plans every
     /// other object, in splits without them, and plans each such object with
     /// bytes in a split of its own. Regression for #1082 and #1116.
@@ -535,31 +565,11 @@ mod tests {
         let err = p.plan(PlanContext::new(None, 1)).unwrap_err();
         assert!(err.reason.contains("d//dbl.ndjson"), "{}", err.reason);
 
-        let keys = UnaddressableKeys::default();
-        let store = crate::test_servers::builder_at(&url)
-            .with_access_key_id("AKIDTEST")
-            .with_secret_access_key("secret")
-            .with_http_connector(crate::listing::UnaddressableConnector::new(keys.clone()))
-            .build()
-            .unwrap();
-        let mut p =
-            planner(Arc::new(store), rt.handle().clone(), 64 * MB).with_unaddressable(Some(keys));
+        let mut p = filtering_planner(&url, rt.handle().clone(), 64 * MB);
         for attempt in 1..=2 {
             let plan = p.plan(PlanContext::new(None, attempt)).unwrap();
-            let members: Vec<Vec<String>> = plan
-                .splits
-                .iter()
-                .map(|s| {
-                    SplitDescriptor::decode(&s.spec.descriptor)
-                        .unwrap()
-                        .objects
-                        .into_iter()
-                        .map(|o| o.key)
-                        .collect()
-                })
-                .collect();
             assert_eq!(
-                members,
+                members(&plan),
                 [
                     vec!["data/a.ndjson", "data/z.ndjson"],
                     vec!["/data/lead.ndjson"],
@@ -568,6 +578,66 @@ mod tests {
                 "plan {attempt}"
             );
         }
+    }
+
+    /// An unaddressable object above the split target is planned whole, in
+    /// one split.
+    #[test]
+    fn a_large_unaddressable_object_is_planned_whole() {
+        let rt = runtime();
+        let url = crate::test_servers::listing_server(vec![list_page(
+            &[("data/d//big.ndjson", 3 * MB)],
+            None,
+        )]);
+        let mut p = filtering_planner(&url, rt.handle().clone(), MB);
+        let plan = p.plan(PlanContext::new(None, 1)).unwrap();
+        assert_eq!(plan.splits.len(), 1);
+        let desc = SplitDescriptor::decode(&plan.splits[0].spec.descriptor).unwrap();
+        assert!(desc.range.is_none(), "whole object, no byte range");
+    }
+
+    /// An object a failed listing recorded is not planned by the next listing,
+    /// which no longer returns it.
+    #[test]
+    fn a_failed_listing_leaves_nothing_for_the_next_plan() {
+        let rt = runtime();
+        let url = crate::test_servers::sequence_server(vec![
+            (
+                "200 OK",
+                list_page(
+                    &[("data/a.ndjson", 7), ("data/d//gone.ndjson", 7)],
+                    Some("1"),
+                ),
+            ),
+            (
+                "503 Service Unavailable",
+                "<Error><Code>SlowDown</Code></Error>".to_owned(),
+            ),
+            ("200 OK", list_page(&[("data/a.ndjson", 7)], None)),
+        ]);
+        let mut p = filtering_planner(&url, rt.handle().clone(), 64 * MB);
+        let err = p.plan(PlanContext::new(None, 1)).unwrap_err();
+        assert_eq!(err.kind, CoordinationErrorKind::Retryable, "{}", err.reason);
+        let plan = p.plan(PlanContext::new(None, 2)).unwrap();
+        assert_eq!(members(&plan), [vec!["data/a.ndjson"]]);
+    }
+
+    /// Keys that differ only in CR, LF or CRLF decode to one key, which is
+    /// planned once.
+    #[test]
+    fn keys_that_decode_alike_are_planned_once() {
+        let rt = runtime();
+        let url = crate::test_servers::listing_server(vec![list_page(
+            &[
+                ("data/c\rr.ndjson", 7),
+                ("data/c\nr.ndjson", 7),
+                ("data/c\r\nr.ndjson", 7),
+            ],
+            None,
+        )]);
+        let mut p = filtering_planner(&url, rt.handle().clone(), 64 * MB);
+        let plan = p.plan(PlanContext::new(None, 1)).unwrap();
+        assert_eq!(members(&plan), [vec!["data/c\nr.ndjson"]]);
     }
 
     /// A credential endpoint that answers 403 leaves the plan `Retryable`.

@@ -271,8 +271,8 @@ mod tests {
         assert_eq!(keys, ["c-soh/x\u{1}y.ndjson"]);
     }
 
-    /// The filtered page decodes in `object_store`'s list parser, which the
-    /// unfiltered page fails.
+    /// The filtered page keeps the other keys and the continuation token, and
+    /// every key it keeps parses as a `Path`.
     #[test]
     fn filtered_page_lists_in_object_store() {
         let input = page(&["a.ndjson", "d//dbl.ndjson", "z.ndjson"], Some("t"));

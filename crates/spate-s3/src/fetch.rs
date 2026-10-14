@@ -317,6 +317,11 @@ async fn stream_object(
     retries: Option<&spate_core::metrics::Counter>,
     bytes_read: Option<&spate_core::metrics::Counter>,
 ) -> Result<bool, SplitFailure> {
+    // A whole object with no bytes is read without a request, so its key
+    // need not be one the store can address.
+    if entry.size == 0 && range.is_none() {
+        return Ok(true);
+    }
     match pinned_etag {
         Some(etag) => {
             stream_object_ranged(

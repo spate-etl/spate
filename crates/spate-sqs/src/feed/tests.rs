@@ -979,3 +979,28 @@ async fn a_send_fatal_on_its_first_attempt_reads_fatal() {
         FeedErrorKind::Fatal
     );
 }
+
+/// Pins that a retried fail call is bounded by the time left when the retry
+/// is sent.
+#[tokio::test(start_paused = true)]
+async fn a_retried_fail_call_is_bounded_by_the_time_left_at_the_retry() {
+    let (feed, queue) = start(MINUTE);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    queue.ready(Message::new("u"));
+    let d = receive_n(&feed, &park, 1).await.remove(0);
+    let deadline = feed.deadline_of(d.receipt).unwrap();
+    queue.fail_next_visibility_call(CallError::retryable("throttled"));
+    feed.fail(d.receipt, "unreadable").unwrap();
+    until("the first fail call", || queue.visibility().len() == 1).await;
+    tokio::time::advance(Duration::from_millis(200)).await;
+    until("the retry", || queue.visibility().len() == 2).await;
+    let retried_at = Instant::now();
+    assert_eq!(
+        queue.visibility_within(),
+        [
+            Some(deadline - (retried_at - Duration::from_millis(200))),
+            Some(deadline - retried_at)
+        ]
+    );
+}

@@ -692,10 +692,10 @@ impl PipelineConfig {
     /// Reject the framework-reserved `chunk:` key on a non-sink section.
     /// `chunk:` configures the chain terminal, which only sinks have; the
     /// framework peels the key indiscriminately, so a stray `chunk:` under
-    /// `source`/`deserializer` would otherwise be silently swallowed. Split
-    /// out of [`validate`](Self::validate) so `Pipeline::from_config`, which
-    /// skips full validation for minimal programmatic configs, can still
-    /// enforce it.
+    /// `source`/`deserializer`, or under a `feed:` backend built in code,
+    /// would otherwise be silently swallowed. Split out of
+    /// [`validate`](Self::validate) so `Pipeline::from_config`, which skips
+    /// full validation for minimal programmatic configs, can still enforce it.
     pub(crate) fn reject_stray_chunk(&self) -> Result<(), ConfigError> {
         if self.source.resolved_chunk()?.is_some() {
             return Err(ConfigError::Validation(
@@ -707,6 +707,13 @@ impl PipelineConfig {
         {
             return Err(ConfigError::Validation(
                 "`chunk:` is only valid on a sink section, not `deserializer`".into(),
+            ));
+        }
+        if let Some(feed) = &self.feed
+            && feed.backend().resolved_chunk()?.is_some()
+        {
+            return Err(ConfigError::Validation(
+                "`chunk:` is only valid on a sink section, not `feed`".into(),
             ));
         }
         Ok(())

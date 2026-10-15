@@ -202,6 +202,17 @@ mod tests {
         assert!(err.contains("chunk"), "{err}");
     }
 
+    /// Pins that a `chunk:` in a body built in code is refused, as on the YAML path.
+    #[test]
+    fn chunk_under_a_built_backend_is_refused() {
+        let base = "pipeline: { name: demo }\nsource: { memory: {} }\nsink: { memory: {} }\n";
+        let mut cfg = crate::config::PipelineConfig::from_str(base).unwrap();
+        let body = serde_yaml::from_str("chunk: { target_bytes: 1MiB }").unwrap();
+        cfg.feed = Some(FeedSection::new(ComponentConfig::new("memory", body)));
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("not `feed`"), "{err}");
+    }
+
     /// Pins that an error in the backend's body carries its path from the
     /// root, `feed.<backend>.<key>`, on the YAML path and from `new`.
     #[test]

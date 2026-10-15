@@ -16,8 +16,9 @@ unit again when its reader stops before acknowledging it. The
 
 A feed is selected by the pipeline's
 [`feed:` section](../../07-reference/configuration.mdx#feed). Its body is the
-backend's own configuration, documented on its page; `units_held` and
-`attempt_cap` beside it apply whatever the backend.
+backend's own configuration, documented on its page. `units_held` applies
+whatever the backend; `attempt_cap` applies to the in-process feed, and a
+backend that cannot honor it refuses it.
 
 Custom backends implement
 [`Feed`](https://docs.rs/spate-core/latest/spate_core/feed/trait.Feed.html),

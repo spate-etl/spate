@@ -9,8 +9,9 @@ use std::num::{NonZeroU32, NonZeroUsize};
 /// [`Source::configure_feed`](crate::source::Source::configure_feed).
 ///
 /// One key names the backend, with the same single-key shape as `source:`;
-/// its body holds the backend's own keys and is decoded by the backend. The
-/// other keys apply whatever the backend.
+/// its body holds the backend's own keys and is decoded by the backend.
+/// `units_held` applies whatever the backend; `attempt_cap` applies to the
+/// in-process feed, and a backend that cannot honor it refuses it.
 ///
 /// ```yaml
 /// feed:

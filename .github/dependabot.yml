@@ -51,6 +51,17 @@ updates:
         update-types:
           - "version-update:semver-minor"
           - "version-update:semver-major"
+      # spate-s3 decodes listing pages with the quick-xml decoder object_store
+      # runs, so the two must resolve to one copy. object_store requires
+      # quick-xml ^0.41, and a quick-xml bump on its own leaves spate-s3 on a
+      # different decoder with no gate to notice.
+      #
+      # Delete this when object_store moves off ^0.41, and move quick-xml in
+      # that same pull request. Tracked in #1193.
+      - dependency-name: "quick-xml"
+        update-types:
+          - "version-update:semver-minor"
+          - "version-update:semver-major"
 
     # Under Cargo's default `increase-if-necessary`, a manifest edit in a bump
     # signals a dependency moved outside its declared requirement.

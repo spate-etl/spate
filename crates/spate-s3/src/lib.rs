@@ -29,7 +29,7 @@
 //!   range). `coordination.max_in_flight` bounds the working set and
 //!   therefore read parallelism, and `feed.units_held` bounds it on the
 //!   feed path.
-//! - **Progress lives in the coordination store, nowhere else.** Commits
+//! - **Split progress lives in the coordination store.** Commits
 //!   are fenced per-split writes; a lost or stolen split resumes on its
 //!   next owner from the acked watermark, drift-checked against the
 //!   descriptor's ETag pins. Point the pipeline's `coordination:` section
@@ -40,6 +40,8 @@
 //!   store with default tuning, and `store: { memory: {} }` runs that store
 //!   with the section's tuning: correct, but a restart replays the prefix (a
 //!   startup WARN says so). This crate names no concrete backend and has no store feature.
+//!   On the feed path the source acknowledges each finished unit to the
+//!   feed, and a redelivered unit is read again from its start.
 //! - **Bad objects poison their split, not the pipeline.** An object
 //!   deleted after planning, overwritten under its ETag pin, corrupt, or
 //!   unreadable past the retry budget hands its split back (surfaced in

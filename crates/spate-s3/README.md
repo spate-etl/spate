@@ -5,12 +5,16 @@ Coordinated object-storage backfill source for the
 (or S3-compatible) bucket as a pipeline source, across as many instances as
 you care to run.
 
-An elected leader plans the prefix into splits; workers lease them with fenced
-per-split progress in a coordination store; resume is drift-checked against
-ETag pins, so an object rewritten under a running job is detected rather than
-silently half-read; and the job self-terminates when the plan completes. It is
-always coordinated — a single instance is just the one-worker case, which
-means there is no separate uncoordinated path to diverge.
+By default an elected leader plans the prefix into splits; workers lease them
+with fenced per-split progress in a coordination store; resume is drift-checked
+against ETag pins, so an object rewritten under a running job is detected
+rather than silently half-read; and the job self-terminates when the plan
+completes. This path is always coordinated — a single instance is just the
+one-worker case.
+
+With a pipeline `feed:` section the source lists nothing. It reads work units,
+one whole object each, from the feed, acknowledges each finished unit to it,
+and runs until shut down.
 
 Applications should depend on the [`spate`](https://crates.io/crates/spate)
 facade with the `s3` feature.

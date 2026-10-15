@@ -15,6 +15,8 @@ use std::time::Duration;
 pub(crate) struct Message {
     pub(crate) body: String,
     pub(crate) receive_count: u32,
+    /// The `MessageId` to report. Unset, each receive reports a new one.
+    pub(crate) message_id: Option<String>,
 }
 
 impl Message {
@@ -22,11 +24,19 @@ impl Message {
         Message {
             body: body.to_owned(),
             receive_count: 1,
+            message_id: None,
         }
     }
 
     pub(crate) fn redelivered(mut self, receive_count: u32) -> Message {
         self.receive_count = receive_count;
+        self
+    }
+
+    /// The same SQS message as an earlier receive reported as `message_id`,
+    /// as a redelivery is.
+    pub(crate) fn same_message_as(mut self, message_id: &str) -> Message {
+        self.message_id = Some(message_id.to_owned());
         self
     }
 }
@@ -142,7 +152,7 @@ impl ScriptedQueue {
             let n = script.next;
             script.next += 1;
             out.push(Received {
-                message_id: format!("m{n}"),
+                message_id: message.message_id.unwrap_or_else(|| format!("m{n}")),
                 handle: format!("h{n}"),
                 body: message.body,
                 unit_id: Some(format!("u{n}")),

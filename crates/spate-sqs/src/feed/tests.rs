@@ -88,7 +88,7 @@ async fn an_extension_is_clamped_to_the_time_left() {
     until("the fail is sent", || queue.visibility().len() == 1).await;
     tokio::time::advance(HOLD - secs(70)).await;
 
-    queue.ready(Message::new("u").redelivered(2));
+    queue.ready(Message::new("u").redelivered(2).same_message_as("m0"));
     let second = receive_n(&feed, &park, 1).await.remove(0);
     assert_eq!(second.deliveries, 2);
     let received = Instant::now();

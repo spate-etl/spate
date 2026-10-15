@@ -1,12 +1,12 @@
 //! [`SqsFeed`]: the work feed over one SQS standard queue.
 //!
-//! Three tasks on the I/O runtime do the queue's I/O. The receive task long
+//! Four tasks on the I/O runtime do the queue's I/O. The receive task long
 //! polls while the reader wants more units than are buffered. The renewal
 //! task extends, every third of the visibility period, each held unit the
-//! reader marked since the last extension. The settle task sends deletes,
-//! fails and publishes in batches of up to ten. The [`Feed`] methods only
-//! lock the shared state, change it and signal a task, so none of them
-//! waits (INV-2).
+//! reader marked since the last extension. The settle task sends deletes and
+//! fails, and the publish task sends publishes, each in batches of up to
+//! ten. The [`Feed`] methods only lock the shared state, change it and
+//! signal a task, so none of them waits (INV-2).
 //!
 //! # The 12-hour hold
 //!
@@ -170,6 +170,8 @@ struct State {
     deletes: Vec<Settle>,
     fails: Vec<Settle>,
     publishes: Vec<Publish>,
+    /// The batch the publish task is sending, in entry order.
+    sending: Vec<Publish>,
     waker: Option<FeedWaker>,
 }
 
@@ -186,8 +188,10 @@ struct Shared {
     state: Mutex<State>,
     /// Signals the receive task that demand rose.
     receive: Notify,
-    /// Signals the settle task that work was queued.
+    /// Signals the settle task that a delete or fail was queued.
     settle: Notify,
+    /// Signals the publish task that a publish was queued.
+    publish: Notify,
     queue: Arc<dyn Queue>,
     settings: Settings,
 }
@@ -358,6 +362,7 @@ impl SqsFeed {
             state: Mutex::new(State::default()),
             receive: Notify::new(),
             settle: Notify::new(),
+            publish: Notify::new(),
             queue,
             settings: Settings {
                 visibility: config.visibility,
@@ -369,6 +374,7 @@ impl SqsFeed {
             io.spawn(receive_task(Arc::clone(&shared))).abort_handle(),
             io.spawn(renewal_task(Arc::clone(&shared))).abort_handle(),
             io.spawn(settle_task(Arc::clone(&shared))).abort_handle(),
+            io.spawn(publish_task(Arc::clone(&shared))).abort_handle(),
         ];
         SqsFeed { shared, tasks }
     }
@@ -393,6 +399,7 @@ impl SqsFeed {
         st.deletes.clear();
         st.fails.clear();
         st.publishes.clear();
+        st.sending.clear();
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
@@ -596,7 +603,7 @@ impl Feed for SqsFeed {
                 confirmer,
             });
         }
-        self.shared.settle.notify_one();
+        self.shared.publish.notify_one();
         confirmation
     }
 }
@@ -783,10 +790,10 @@ fn entry_result(
     outcome.failed.iter().find(|f| f.id == id).map(Err)
 }
 
-/// Sends queued deletes, fails and publishes.
+/// Sends queued deletes and fails.
 async fn settle_task(shared: Arc<Shared>) {
     loop {
-        let (deletes, fails, publishes) = {
+        let (deletes, mut fails) = {
             let mut st = shared.lock();
             if st.fatal.is_some() || st.abandoned {
                 return;
@@ -794,10 +801,9 @@ async fn settle_task(shared: Arc<Shared>) {
             (
                 std::mem::take(&mut st.deletes),
                 std::mem::take(&mut st.fails),
-                std::mem::take(&mut st.publishes),
             )
         };
-        if deletes.is_empty() && fails.is_empty() && publishes.is_empty() {
+        if deletes.is_empty() && fails.is_empty() {
             shared.settle.notified().await;
             continue;
         }
@@ -817,7 +823,16 @@ async fn settle_task(shared: Arc<Shared>) {
                 return;
             }
         }
-        for chunk in fails.chunks(BATCH_ENTRIES) {
+        while !fails.is_empty() {
+            // The deletes before a fail can take until their own deadlines.
+            // A fail sent past its unit's deadline could reach a message SQS
+            // has handed to another reader.
+            let now = Instant::now();
+            fails.retain(|s| now < s.deadline);
+            let chunk: Vec<Settle> = fails.drain(..fails.len().min(BATCH_ENTRIES)).collect();
+            if chunk.is_empty() {
+                break;
+            }
             let entries: Vec<VisibilityEntry> = chunk
                 .iter()
                 .enumerate()
@@ -827,15 +842,10 @@ async fn settle_task(shared: Arc<Shared>) {
                     seconds: 0,
                 })
                 .collect();
-            let sent = settle_batch(&shared, "failing", chunk, || {
+            let sent = settle_batch(&shared, "failing", &chunk, || {
                 shared.queue.change_visibility_batch(entries.clone())
             });
             if sent.await.is_err() {
-                return;
-            }
-        }
-        for batch in cut(publishes) {
-            if publish_batch(&shared, batch).await.is_err() {
                 return;
             }
         }
@@ -887,39 +897,59 @@ where
     }
 }
 
-/// Publishes in batches of at most ten entries and 1 MiB, in order.
-fn cut(publishes: Vec<Publish>) -> Vec<Vec<Publish>> {
-    let mut batches: Vec<Vec<Publish>> = Vec::new();
-    let mut bytes = 0;
-    for p in publishes {
-        let fits = batches
-            .last()
-            .is_some_and(|b| b.len() < BATCH_ENTRIES && bytes + p.size <= MAX_MESSAGE_BYTES);
-        if !fits {
-            batches.push(Vec::new());
-            bytes = 0;
+/// Sends queued publishes one batch at a time, apart from the settle task,
+/// so that a publish SQS keeps failing holds back no delete or fail.
+async fn publish_task(shared: Arc<Shared>) {
+    loop {
+        let entries = {
+            let mut st = shared.lock();
+            if st.fatal.is_some() || st.abandoned {
+                return;
+            }
+            let batch = next_batch(&mut st.publishes);
+            let entries: Vec<SendEntry> = batch
+                .iter()
+                .enumerate()
+                .map(|(i, p)| SendEntry {
+                    id: i.to_string(),
+                    body: p.body.clone(),
+                    unit_id: p.unit_id.clone(),
+                })
+                .collect();
+            st.sending = batch;
+            entries
+        };
+        if entries.is_empty() {
+            shared.publish.notified().await;
+            continue;
         }
-        bytes += p.size;
-        batches.last_mut().expect("pushed above").push(p);
+        if publish_batch(&shared, entries).await.is_err() {
+            return;
+        }
     }
-    batches
 }
 
-/// Send one batch of publishes and settle each confirmation by its own
-/// entry. A transient failure of the whole call is retried until the feed's
-/// tasks stop, which drops the confirmers and reads as Retryable.
+/// Takes the oldest queued publishes that fit one batch: at most ten entries
+/// and 1 MiB.
+fn next_batch(queued: &mut Vec<Publish>) -> Vec<Publish> {
+    let mut bytes = 0;
+    let n = queued
+        .iter()
+        .take(BATCH_ENTRIES)
+        .take_while(|p| {
+            bytes += p.size;
+            bytes <= MAX_MESSAGE_BYTES
+        })
+        .count();
+    queued.drain(..n).collect()
+}
+
+/// Send the batch in [`State::sending`] and settle each confirmation by its
+/// own entry. A transient failure of the whole call is retried until the
+/// feed stops.
 ///
 /// `Err` when the feed has stopped.
-async fn publish_batch(shared: &Shared, batch: Vec<Publish>) -> Result<(), ()> {
-    let entries: Vec<SendEntry> = batch
-        .iter()
-        .enumerate()
-        .map(|(i, p)| SendEntry {
-            id: i.to_string(),
-            body: p.body.clone(),
-            unit_id: p.unit_id.clone(),
-        })
-        .collect();
+async fn publish_batch(shared: &Shared, entries: Vec<SendEntry>) -> Result<(), ()> {
     let mut backoff = BACKOFF_START;
     loop {
         if shared.stopped() {
@@ -927,6 +957,7 @@ async fn publish_batch(shared: &Shared, batch: Vec<Publish>) -> Result<(), ()> {
         }
         match shared.queue.send_batch(entries.clone()).await {
             Ok(outcome) => {
+                let batch = std::mem::take(&mut shared.lock().sending);
                 for (i, p) in batch.into_iter().enumerate() {
                     match entry_result(&outcome, i) {
                         Some(Ok(())) => p.confirmer.confirm(),
@@ -953,6 +984,7 @@ async fn publish_batch(shared: &Shared, batch: Vec<Publish>) -> Result<(), ()> {
                 } else {
                     FeedErrorKind::Fatal
                 };
+                let batch = std::mem::take(&mut shared.lock().sending);
                 for p in batch {
                     p.confirmer.reject(FeedError::new(kind, e.message.clone()));
                 }

@@ -1,6 +1,8 @@
 use super::*;
+use crate::queue::BoxFuture;
 use crate::scripted::{Failure, Message, ScriptedQueue};
 use spate_core::feed::{FeedPark, wake_channel};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const MINUTE: Duration = Duration::from_secs(60);
 
@@ -429,5 +431,126 @@ async fn a_fatal_receive_is_sticky_and_a_retryable_one_is_returned_once() {
     assert_eq!(
         published.try_outcome().unwrap().unwrap_err().kind,
         FeedErrorKind::Fatal
+    );
+}
+
+/// A [`ScriptedQueue`] whose whole calls can be failed until a flag is
+/// cleared, and which records when each fail and delete was sent.
+#[derive(Debug, Default)]
+struct Gated {
+    inner: ScriptedQueue,
+    /// Fail every `SendMessageBatch` as Retryable.
+    send_down: AtomicBool,
+    /// Fail every `DeleteMessageBatch` as Retryable.
+    delete_down: AtomicBool,
+    /// Fail every `DeleteMessageBatch` as Fatal.
+    delete_fatal: AtomicBool,
+    visibility_at: Mutex<Vec<Instant>>,
+    deletes_at: Mutex<Vec<Instant>>,
+}
+
+impl Queue for Gated {
+    fn receive(&self, r: ReceiveRequest) -> BoxFuture<'_, Result<Vec<Received>, CallError>> {
+        self.inner.receive(r)
+    }
+
+    fn send_batch(&self, e: Vec<SendEntry>) -> BoxFuture<'_, Result<BatchOutcome, CallError>> {
+        if self.send_down.load(Ordering::SeqCst) {
+            return Box::pin(async { Err(CallError::retryable("KMS.ThrottlingException")) });
+        }
+        self.inner.send_batch(e)
+    }
+
+    fn change_visibility_batch(
+        &self,
+        e: Vec<VisibilityEntry>,
+    ) -> BoxFuture<'_, Result<BatchOutcome, CallError>> {
+        self.visibility_at.lock().unwrap().push(Instant::now());
+        self.inner.change_visibility_batch(e)
+    }
+
+    fn delete_batch(&self, e: Vec<DeleteEntry>) -> BoxFuture<'_, Result<BatchOutcome, CallError>> {
+        self.deletes_at.lock().unwrap().push(Instant::now());
+        if self.delete_fatal.load(Ordering::SeqCst) {
+            return Box::pin(async { Err(CallError::fatal("AccessDenied")) });
+        }
+        if self.delete_down.load(Ordering::SeqCst) {
+            return Box::pin(async { Err(CallError::retryable("InternalError")) });
+        }
+        self.inner.delete_batch(e)
+    }
+}
+
+fn start_gated(visibility: Duration) -> (SqsFeed, Arc<Gated>) {
+    let queue = Arc::new(Gated::default());
+    let feed = SqsFeed::start(
+        Arc::clone(&queue) as Arc<dyn Queue>,
+        &config(visibility),
+        &tokio::runtime::Handle::current(),
+    );
+    (feed, queue)
+}
+
+/// Pins that a publish SQS keeps failing holds back no delete or fail: both
+/// are sent before the receipts' deadline while every send fails.
+#[tokio::test(start_paused = true)]
+async fn a_publish_outage_does_not_hold_back_deletes_and_fails() {
+    let (feed, queue) = start_gated(MINUTE);
+    queue.send_down.store(true, Ordering::SeqCst);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    queue.inner.ready(Message::new("a"));
+    queue.inner.ready(Message::new("b"));
+    let got = receive_n(&feed, &park, 2).await;
+    let deadline = feed.deadline_of(got[0].receipt).unwrap();
+    let _publish = feed.publish(Unit::new("p", b"body".to_vec()));
+    settle_tasks().await;
+    feed.acknowledge(got[0].receipt).unwrap();
+    feed.fail(got[1].receipt, "unreadable").unwrap();
+    for _ in 0..30 {
+        tokio::time::advance(Duration::from_secs(5)).await;
+        settle_tasks().await;
+    }
+    assert!(Instant::now() > deadline);
+    let deletes = queue.deletes_at.lock().unwrap().clone();
+    let fails = queue.visibility_at.lock().unwrap().clone();
+    assert_eq!(deletes.len(), 1, "the delete was sent once");
+    assert_eq!(fails.len(), 1, "the fail was sent once");
+    assert!(
+        deletes.iter().chain(&fails).all(|t| *t < deadline),
+        "a delete or fail was sent after the receipts' deadline"
+    );
+}
+
+/// Pins that a fail whose unit's deadline passed while earlier deletes were
+/// retried is dropped unsent.
+#[tokio::test(start_paused = true)]
+async fn a_fail_past_its_deadline_is_dropped_unsent() {
+    let (feed, queue) = start_gated(MINUTE);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    queue.inner.ready(Message::new("failed"));
+    let failed = receive_n(&feed, &park, 1).await.remove(0);
+    tokio::time::advance(Duration::from_secs(30)).await;
+    queue.inner.ready(Message::new("acknowledged"));
+    let acknowledged = receive_n(&feed, &park, 1).await.remove(0);
+    let deadline = feed.deadline_of(failed.receipt).unwrap();
+
+    queue.delete_down.store(true, Ordering::SeqCst);
+    feed.acknowledge(acknowledged.receipt).unwrap();
+    feed.fail(failed.receipt, "unreadable").unwrap();
+    for _ in 0..30 {
+        tokio::time::advance(Duration::from_secs(5)).await;
+        settle_tasks().await;
+    }
+    let deletes = queue.deletes_at.lock().unwrap().clone();
+    assert!(
+        deletes.iter().any(|t| *t > deadline),
+        "the delete was retried past the failed unit's deadline"
+    );
+    let fails = queue.visibility_at.lock().unwrap().clone();
+    assert!(
+        fails.is_empty(),
+        "a fail was sent at {fails:?}, past {deadline:?}"
     );
 }

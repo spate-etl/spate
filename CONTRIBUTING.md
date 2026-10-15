@@ -18,6 +18,30 @@ performance problem, and a proposal. Blank issues are off: each form asks the
 question somebody would have to ask you anyway. A vulnerability is the exception
 and never goes in an issue; see [Security and legal](#security-and-legal).
 
+## Milestones and priorities
+
+A minor release ships every two to four weeks and carries one feature theme.
+Each release has a milestone named by its version. Its description says what the
+release delivers, and the issues under it are the work committed to it. The
+current and next milestones carry a target date. Later ones show the direction
+without a date, and say so where a design is still open.
+
+An issue gets a milestone once it is committed to a release: it is part of the
+release's feature, it breaks that feature, it is a delivery-correctness bug, or
+it fixes a crate the release already changes. `release blocker` marks an issue
+the release cannot ship without. Work on CI, benchmarks and tooling carries no
+milestone unless a release's feature depends on it.
+
+Everything else carries a priority instead: `priority: high`, `priority: medium`
+or `priority: low`. Each release takes its fixes from `priority: high` first. An
+issue that misses its release moves to the next milestone once; if it misses
+that one too, it returns to the backlog with a priority label.
+
+To find something to work on, `good first issue` marks issues scoped for a first
+contribution, and `priority: high` marks the backlog that matters most now.
+Comment on a milestoned issue before starting it, since a maintainer has
+usually planned it.
+
 ## Building and testing
 
 The default suites need a recent stable Rust toolchain and nothing else.

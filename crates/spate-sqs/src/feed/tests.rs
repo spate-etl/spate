@@ -242,7 +242,8 @@ async fn a_renewal_entry_the_queue_refuses_makes_only_its_receipt_gone() {
     }
 }
 
-/// Pins that a delete SQS fails for one entry is dropped, never sent again.
+/// Pins that a delete SQS fails for one entry is dropped, never sent again,
+/// and that an acknowledged receipt is `Gone`.
 #[tokio::test(start_paused = true)]
 async fn a_failed_delete_entry_is_dropped() {
     for index in [1, 2] {
@@ -256,6 +257,9 @@ async fn a_failed_delete_entry_is_dropped() {
         queue.fail_next_delete(vec![failure(index, "ReceiptHandleIsInvalid")]);
         for d in &deliveries {
             feed.acknowledge(d.receipt).unwrap();
+        }
+        for d in &deliveries {
+            assert_eq!(feed.renew(d.receipt).unwrap_err().kind, FeedErrorKind::Gone);
         }
         until("the deletes are sent", || !queue.deletes().is_empty()).await;
         let failed = queue.deletes()[0][index].handle.clone();
@@ -670,4 +674,29 @@ async fn a_batch_shape_failure_refuses_its_publishes_and_stops_the_feed() {
         FeedErrorKind::Refused
     );
     assert_eq!(feed.receive(1).unwrap_err().kind, FeedErrorKind::Fatal);
+}
+
+/// Pins the receipt rules past a deadline: a fail after the visibility lapsed
+/// sends nothing and returns `Gone`, while an acknowledge still queues the
+/// delete.
+#[tokio::test(start_paused = true)]
+async fn past_the_deadline_a_fail_is_gone_and_an_acknowledge_still_deletes() {
+    let (feed, queue) = start(MINUTE);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    queue.ready(Message::new("a"));
+    queue.ready(Message::new("b"));
+    let got = receive_n(&feed, &park, 2).await;
+    tokio::time::advance(MINUTE + Duration::from_secs(1)).await;
+    assert_eq!(
+        feed.fail(got[0].receipt, "late").unwrap_err().kind,
+        FeedErrorKind::Gone
+    );
+    feed.acknowledge(got[1].receipt).unwrap();
+    until("the delete is sent", || queue.deletes().len() == 1).await;
+    settle_tasks().await;
+    assert!(
+        queue.visibility().is_empty(),
+        "a fail past the deadline was sent"
+    );
 }

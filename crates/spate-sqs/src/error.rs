@@ -115,6 +115,15 @@ impl CallError {
             message: message.to_owned(),
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn batch_shape(message: &str) -> CallError {
+        CallError {
+            class: Class::Fatal,
+            batch_shape: true,
+            message: message.to_owned(),
+        }
+    }
 }
 
 /// The typed variants an operation's error has for the Fatal codes. The SDK

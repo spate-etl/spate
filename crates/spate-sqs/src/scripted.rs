@@ -45,6 +45,9 @@ struct Script {
     /// Answer each receive only once its wait has passed.
     end_of_poll: bool,
     receive_error: Option<CallError>,
+    send_errors: VecDeque<CallError>,
+    visibility_errors: VecDeque<CallError>,
+    delete_errors: VecDeque<CallError>,
     send_failures: VecDeque<Vec<Failure>>,
     visibility_failures: VecDeque<Vec<Failure>>,
     delete_failures: VecDeque<Vec<Failure>>,
@@ -58,7 +61,8 @@ struct Script {
 /// A queue that answers from a script and records every call.
 ///
 /// With nothing ready, a receive waits out its long poll in tokio time and
-/// returns nothing. A batch applies every entry the script does not fail.
+/// returns nothing. A batch call fails whole when the script fails it, and
+/// otherwise applies every entry the script does not fail.
 #[derive(Debug, Default)]
 pub(crate) struct ScriptedQueue {
     script: Mutex<Script>,
@@ -79,6 +83,24 @@ impl ScriptedQueue {
 
     pub(crate) fn fail_next_receive(&self, e: CallError) {
         self.lock().receive_error = Some(e);
+    }
+
+    /// Fail the next `SendMessageBatch` whole with `e`, after recording it.
+    /// Each call queues one more failed call.
+    pub(crate) fn fail_next_send_call(&self, e: CallError) {
+        self.lock().send_errors.push_back(e);
+    }
+
+    /// As [`fail_next_send_call`](Self::fail_next_send_call), for
+    /// `ChangeMessageVisibilityBatch`.
+    pub(crate) fn fail_next_visibility_call(&self, e: CallError) {
+        self.lock().visibility_errors.push_back(e);
+    }
+
+    /// As [`fail_next_send_call`](Self::fail_next_send_call), for
+    /// `DeleteMessageBatch`.
+    pub(crate) fn fail_next_delete_call(&self, e: CallError) {
+        self.lock().delete_errors.push_back(e);
     }
 
     pub(crate) fn fail_next_send(&self, failures: Vec<Failure>) {
@@ -177,9 +199,12 @@ impl Queue for ScriptedQueue {
     ) -> BoxFuture<'_, Result<BatchOutcome, CallError>> {
         Box::pin(async move {
             let mut script = self.lock();
-            let failures = script.send_failures.pop_front().unwrap_or_default();
             let ids: Vec<String> = entries.iter().map(|e| e.id.clone()).collect();
             script.sends.push(entries);
+            if let Some(e) = script.send_errors.pop_front() {
+                return Err(e);
+            }
+            let failures = script.send_failures.pop_front().unwrap_or_default();
             Ok(outcome(ids.into_iter(), failures))
         })
     }
@@ -190,9 +215,12 @@ impl Queue for ScriptedQueue {
     ) -> BoxFuture<'_, Result<BatchOutcome, CallError>> {
         Box::pin(async move {
             let mut script = self.lock();
-            let failures = script.visibility_failures.pop_front().unwrap_or_default();
             let ids: Vec<String> = entries.iter().map(|e| e.id.clone()).collect();
             script.visibility.push(entries);
+            if let Some(e) = script.visibility_errors.pop_front() {
+                return Err(e);
+            }
+            let failures = script.visibility_failures.pop_front().unwrap_or_default();
             Ok(outcome(ids.into_iter(), failures))
         })
     }
@@ -203,9 +231,12 @@ impl Queue for ScriptedQueue {
     ) -> BoxFuture<'_, Result<BatchOutcome, CallError>> {
         Box::pin(async move {
             let mut script = self.lock();
-            let failures = script.delete_failures.pop_front().unwrap_or_default();
             let ids: Vec<String> = entries.iter().map(|e| e.id.clone()).collect();
             script.deletes.push(entries);
+            if let Some(e) = script.delete_errors.pop_front() {
+                return Err(e);
+            }
+            let failures = script.delete_failures.pop_front().unwrap_or_default();
             Ok(outcome(ids.into_iter(), failures))
         })
     }

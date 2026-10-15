@@ -587,3 +587,87 @@ async fn a_fatal_delete_rejects_every_held_publish() {
         assert_eq!(kind, FeedErrorKind::Fatal, "publish {i} read {kind:?}");
     }
 }
+
+/// Pins that a delete call the queue fails whole is retried with backoff until
+/// the receipt's deadline, then dropped.
+#[tokio::test(start_paused = true)]
+async fn a_failed_delete_call_is_retried_until_the_deadline_then_dropped() {
+    let (feed, queue) = start(MINUTE);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    queue.ready(Message::new("u"));
+    let delivery = receive_n(&feed, &park, 1).await.remove(0);
+    for _ in 0..100 {
+        queue.fail_next_delete_call(CallError::retryable("InternalError"));
+    }
+    feed.acknowledge(delivery.receipt).unwrap();
+    for _ in 0..12 {
+        tokio::time::advance(Duration::from_secs(5)).await;
+        settle_tasks().await;
+    }
+    let at_deadline = queue.deletes().len();
+    assert!(at_deadline > 1, "the delete was not retried");
+    tokio::time::advance(MINUTE).await;
+    settle_tasks().await;
+    assert_eq!(
+        queue.deletes().len(),
+        at_deadline,
+        "the delete was retried past its deadline"
+    );
+}
+
+/// Pins that an extension call the queue fails whole is sent again at the
+/// next tick without a new renewal.
+#[tokio::test(start_paused = true)]
+async fn a_failed_extension_call_is_sent_again_at_the_next_tick() {
+    let (feed, queue) = start(MINUTE);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    queue.ready(Message::new("u"));
+    let delivery = receive_n(&feed, &park, 1).await.remove(0);
+    feed.renew(delivery.receipt).unwrap();
+    queue.fail_next_visibility_call(CallError::retryable("InternalError"));
+    tokio::time::advance(Duration::from_secs(20)).await;
+    until("the first extension is sent", || {
+        queue.visibility().len() == 1
+    })
+    .await;
+    tokio::time::advance(Duration::from_secs(20)).await;
+    let ticked = Instant::now();
+    until("the extension is sent again", || {
+        queue.visibility().len() == 2
+    })
+    .await;
+    settle_tasks().await;
+    assert_eq!(feed.deadline_of(delivery.receipt), Some(ticked + MINUTE));
+}
+
+/// Pins that a publish call the queue fails whole and transiently is sent
+/// again and confirmed.
+#[tokio::test(start_paused = true)]
+async fn a_failed_publish_call_is_sent_again() {
+    let (feed, queue) = start(MINUTE);
+    queue.fail_next_send_call(CallError::retryable("InternalError"));
+    let mut published = feed.publish(Unit::new("u", "body"));
+    for _ in 0..5 {
+        tokio::time::advance(Duration::from_secs(1)).await;
+        settle_tasks().await;
+    }
+    assert!(published.try_outcome().unwrap().is_ok());
+    assert_eq!(queue.sends().len(), 2);
+}
+
+/// Pins that a publish call failed on a batch-shape code refuses its units
+/// and stops the feed with a Fatal.
+#[tokio::test(start_paused = true)]
+async fn a_batch_shape_failure_refuses_its_publishes_and_stops_the_feed() {
+    let (feed, queue) = start(MINUTE);
+    queue.fail_next_send_call(CallError::batch_shape("BatchRequestTooLong"));
+    let mut published = feed.publish(Unit::new("u", "body"));
+    until("the publish settles", || published.try_outcome().is_some()).await;
+    assert_eq!(
+        published.try_outcome().unwrap().unwrap_err().kind,
+        FeedErrorKind::Refused
+    );
+    assert_eq!(feed.receive(1).unwrap_err().kind, FeedErrorKind::Fatal);
+}

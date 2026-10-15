@@ -68,7 +68,7 @@ The identity a worker runs as needs these actions:
 | Action | On |
 |---|---|
 | `sqs:ReceiveMessage`, `sqs:DeleteMessage`, `sqs:ChangeMessageVisibility` | The queue |
-| `sqs:GetQueueAttributes` | The queue and its dead-letter queue |
+| `sqs:GetQueueAttributes` | The queue |
 | `sqs:SendMessage` | The queue, for a process that publishes units |
 
 The client verifies SQS against the system trust store. When `SSL_CERT_FILE`

@@ -311,9 +311,9 @@ fn a_unit_is_deleted_only_after_its_last_record_is_acknowledged() {
 }
 
 /// Pins that the units of a worker that stops without handing them back
-/// return after its last extension lapses: no earlier than one visibility
-/// period less one renewal period, and within the visibility period plus a
-/// margin. The second worker reads the unit as its second delivery.
+/// return only when their visibility lapses, and within the visibility period
+/// plus a margin after the worker stops. The second worker reads the unit as
+/// its second delivery.
 #[test]
 #[ignore = "requires Docker"]
 fn a_unit_whose_worker_is_killed_mid_read_is_delivered_again() {
@@ -330,6 +330,9 @@ fn a_unit_whose_worker_is_killed_mid_read_is_delivered_again() {
         &feed_yaml(&mq, &url, VISIBILITY, "  units_held: 1\n"),
         |sink| sink.enqueue_global(WriteOutcome::ok().held()),
     );
+    // A's receive comes after the publish, so SQS hides the unit until at
+    // least one visibility period after this instant.
+    let published = Instant::now();
     publish(&a.feed, unit);
     wait_until(DEADLINE, "A holds the unit's write", || {
         a.script.held_writes() == 1
@@ -345,10 +348,12 @@ fn a_unit_whose_worker_is_killed_mid_read_is_delivered_again() {
     );
     let (deliveries, seen) = b.recording.first_seen().unwrap();
     assert_eq!(deliveries, 2, "B reads the unit's second delivery");
-    let after = seen.duration_since(abandoned);
+    let after = seen.duration_since(published);
     assert!(
-        after >= Duration::from_secs(4),
-        "the unit returned {after:?} after A stopped, before A's last extension lapsed"
+        after >= VISIBILITY,
+        "the unit returned {after:?} after it was published, {:?} after A stopped, \
+         before its visibility lapsed",
+        seen.duration_since(abandoned)
     );
     wait_until(
         DEADLINE,

@@ -6,12 +6,14 @@
 
 use crate::client;
 use crate::error::{CallError, Class, classify};
+use crate::startup::QueueAttributes;
 use aws_sdk_sqs::Client;
 use aws_sdk_sqs::types::{
     ChangeMessageVisibilityBatchRequestEntry, DeleteMessageBatchRequestEntry,
     MessageAttributeValue, MessageSystemAttributeName, QueueAttributeName,
     SendMessageBatchRequestEntry,
 };
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
@@ -113,22 +115,39 @@ pub(crate) struct SdkQueue {
 }
 
 impl SdkQueue {
-    /// The queue's ARN: one read that proves the queue exists and the
-    /// credentials reach it.
-    pub(crate) async fn queue_arn(&self) -> Result<String, CallError> {
+    /// The attributes `names` of the queue at `queue_url`, which may be
+    /// another queue than the one this reads, keyed by name.
+    pub(crate) async fn attributes(
+        &self,
+        queue_url: &str,
+        names: &[&str],
+    ) -> Result<HashMap<String, String>, CallError> {
         let out = self
             .client
             .get_queue_attributes()
-            .queue_url(&self.queue_url)
-            .attribute_names(QueueAttributeName::QueueArn)
+            .queue_url(queue_url)
+            .set_attribute_names(Some(
+                names.iter().map(|n| QueueAttributeName::from(*n)).collect(),
+            ))
             .send()
             .await
             .map_err(|e| classify("GetQueueAttributes", &e))?;
         Ok(out
             .attributes()
-            .and_then(|a| a.get(&QueueAttributeName::QueueArn))
-            .cloned()
-            .unwrap_or_default())
+            .into_iter()
+            .flatten()
+            .map(|(name, value)| (name.as_str().to_owned(), value.clone()))
+            .collect())
+    }
+}
+
+impl QueueAttributes for SdkQueue {
+    fn attributes<'a>(
+        &'a self,
+        queue_url: &'a str,
+        names: &'static [&'static str],
+    ) -> BoxFuture<'a, Result<HashMap<String, String>, CallError>> {
+        Box::pin(SdkQueue::attributes(self, queue_url, names))
     }
 }
 
@@ -337,7 +356,10 @@ mod tests {
         let ca = TestCa::new("untrusted");
         let addr = serve_tls(ca.server_config(None), |_| async {}).await;
         let queue = queue_at(&format!("https://{addr}")).await;
-        let e = queue.queue_arn().await.unwrap_err();
+        let e = queue
+            .attributes(&queue.queue_url, &["QueueArn"])
+            .await
+            .unwrap_err();
         assert_eq!(e.class, Class::Fatal, "{}", e.message);
         assert!(e.message.contains("UnknownIssuer"), "{}", e.message);
     }

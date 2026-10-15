@@ -28,10 +28,11 @@ SQS_QUEUE_URL=https://sqs.eu-west-2.amazonaws.com/111122223333/jobs \
   cargo run -p spate --features s3,json,sqs --example s3_sqs_backfill
 ```
 
-`SqsFeed::connect` reads the queue's ARN once, so a missing queue or a
-refused credential fails there, before the pipeline starts. Connecting takes
-at most 30 seconds, every step included; past that it fails as unavailable,
-naming the step it was on.
+`SqsFeed::connect` reads the queue and its dead-letter queue once and runs
+the [startup checks](#startup-checks), so a missing queue, a refused
+credential or a queue the feed cannot dead-letter from fails there, before the
+pipeline starts. Connecting takes at most 30 seconds, every step included;
+past that it fails as unavailable, naming the step it was on.
 
 ## Configuration
 
@@ -68,7 +69,7 @@ The identity a worker runs as needs these actions:
 | Action | On |
 |---|---|
 | `sqs:ReceiveMessage`, `sqs:DeleteMessage`, `sqs:ChangeMessageVisibility` | The queue |
-| `sqs:GetQueueAttributes` | The queue |
+| `sqs:GetQueueAttributes` | The queue and its dead-letter queue |
 | `sqs:SendMessage` | The queue, for a process that publishes units |
 
 The client verifies SQS against the system trust store. When `SSL_CERT_FILE`
@@ -86,6 +87,29 @@ fatal: connecting fails with them, and after startup the feed returns the
 error to every call and the pipeline stops. Throttling, KMS throttling
 included, a 5xx answer, a timeout and a failure to load credentials are
 retried.
+
+## Startup checks
+
+`SqsFeed::connect` refuses a queue it cannot dead-letter from:
+
+- a FIFO queue;
+- a queue with no redrive policy, or one whose policy it cannot read;
+- a dead-letter queue it cannot read, because it does not exist or the
+  identity lacks `sqs:GetQueueAttributes` on it;
+- a dead-letter queue whose `MessageRetentionPeriod` is no longer than the
+  queue's. SQS counts retention from a message's first send, so such a queue
+  can delete a unit as soon as it arrives.
+
+The dead-letter queue is read at the queue URL's host, under the account and
+name its ARN in the redrive policy gives, so the feed needs no
+`sqs:GetQueueUrl`. When either queue reports no `MessageRetentionPeriod`, the
+feed logs a warning and skips the retention comparison. Connecting logs the
+queue's retention, its default visibility timeout, `maxReceiveCount` and the
+dead-letter queue's retention.
+
+The checks run only when the feed connects. A redrive policy removed, or a
+dead-letter queue deleted or shortened, while the pipeline runs goes
+unnoticed (see [Retention](#retention)).
 
 ## Visibility and renewal
 

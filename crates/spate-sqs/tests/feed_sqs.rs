@@ -22,7 +22,7 @@ use spate_core::pipeline::{ExitState, Pipeline, RuntimeOptions, ShutdownHandle};
 use spate_core::sink::{KeyHashRouter, SinkPoolConfig};
 use spate_json::NdjsonFramer;
 use spate_s3::{DescriptorObject, S3Source, SplitDescriptor};
-use spate_sqs::SqsFeed;
+use spate_sqs::{SqsError, SqsFeed};
 use spate_test::{
     BytesPassthrough, PipelineRun, ScriptedResult, SinkScript, TestEncoder, WriteOutcome,
     capture_sink, decode_rows, wait_until,
@@ -453,6 +453,67 @@ fn a_failed_unit_is_set_visible_at_once() {
     feed.acknowledge(again.receipt).unwrap();
     drop(feed);
     io.shutdown_timeout(Duration::from_secs(2));
+}
+
+/// Connect a feed to `queue_url` at the default visibility, on a runtime of
+/// its own, and stop it again.
+fn connect(mq: &ElasticMq, queue_url: &str) -> Result<(), SqsError> {
+    let yaml = feed_yaml(mq, queue_url, Duration::from_secs(60), "");
+    let section: FeedSection = serde_yaml::from_str::<PipelineConfigFeed>(&yaml)
+        .unwrap()
+        .feed;
+    let io = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let connected =
+        SqsFeed::connect_with_static_credentials(&section, io.handle(), "test", "test").map(drop);
+    io.shutdown_timeout(Duration::from_secs(2));
+    connected
+}
+
+/// Pins that `connect` refuses a queue with no redrive policy, since a unit
+/// that keeps failing would then be received forever.
+#[test]
+#[ignore = "requires Docker"]
+fn startup_refuses_a_queue_with_no_redrive_policy() {
+    let mq = ElasticMq::start().unwrap();
+    let queue = mq.create_queue("no-redrive").unwrap();
+    let url = format!("{}{queue}", mq.endpoint());
+    match connect(&mq, &url) {
+        Err(SqsError::Refused(message)) => {
+            assert!(message.contains("redrive"), "{message}");
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}
+
+/// Pins that `connect` refuses a queue whose redrive policy names a
+/// dead-letter queue it cannot read. ElasticMQ answers the read of a deleted
+/// queue with the bare `QueueDoesNotExist` code, which the SDK leaves
+/// untyped.
+#[test]
+#[ignore = "requires Docker"]
+fn startup_refuses_an_unreadable_dead_letter_queue() {
+    let mq = ElasticMq::start().unwrap();
+    let dead = mq.create_queue("lost-dlq").unwrap();
+    let arn = mq.queue_arn(&dead).unwrap();
+    let policy = format!(r#"{{"deadLetterTargetArn":"{arn}","maxReceiveCount":"5"}}"#);
+    let queue = mq
+        .create_queue_with_attributes("lost", &[("RedrivePolicy", &policy)])
+        .unwrap();
+    mq.delete_queue(&dead).unwrap();
+    let url = format!("{}{queue}", mq.endpoint());
+    match connect(&mq, &url) {
+        Err(SqsError::Refused(message)) => {
+            assert!(
+                message.contains("cannot read the dead-letter queue"),
+                "{message}"
+            );
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
 }
 
 /// The `feed:` key of a pipeline file, alone.

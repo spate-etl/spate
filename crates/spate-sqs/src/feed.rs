@@ -24,6 +24,7 @@ use crate::queue::{
     BatchOutcome, DeleteEntry, Queue, ReceiveRequest, Received, SendEntry, UNIT_ATTRIBUTE,
     VisibilityEntry,
 };
+use crate::startup;
 use spate_core::config::FeedSection;
 use spate_core::feed::{
     Confirmation, Confirmer, Delivery, Feed, FeedError, FeedErrorKind, FeedWaker, Receipt, Unit,
@@ -96,6 +97,11 @@ pub(crate) fn extension(visibility: Duration, hold_end: Instant, now: Instant) -
     let left = hold_end.saturating_duration_since(now);
     let ext = Duration::from_secs(visibility.min(left).as_secs());
     (ext >= Duration::from_secs(1)).then_some(ext)
+}
+
+/// A retention in seconds, or `unreported`, for the connect log line.
+fn unreported(seconds: Option<u64>) -> String {
+    seconds.map_or_else(|| "unreported".to_owned(), |s| s.to_string())
 }
 
 /// Whether SQS accepts `c` in a message body or attribute value.
@@ -288,14 +294,18 @@ impl SqsFeed {
     /// start its tasks on `io`, the pipeline's I/O runtime.
     ///
     /// Credentials come from the AWS provider chain. Connecting reads the
-    /// queue's ARN once, so a missing queue or a refused credential fails
-    /// here. The whole call takes at most 30 seconds.
+    /// queue's attributes and its dead-letter queue's once, so a missing
+    /// queue or a refused credential fails here. The whole call takes at
+    /// most 30 seconds.
     ///
     /// # Errors
     ///
-    /// [`SqsError::Config`] for a section the feed cannot read,
+    /// [`SqsError::Config`] for a section the feed cannot read.
     /// [`SqsError::Refused`] when SQS refuses the credentials or the queue,
-    /// and [`SqsError::Unavailable`] when it does not answer in time.
+    /// and for a queue the feed cannot dead-letter from: a FIFO queue, one
+    /// with no redrive policy, or one whose dead-letter queue cannot be read
+    /// or keeps messages no longer than the queue does.
+    /// [`SqsError::Unavailable`] when SQS does not answer in time.
     ///
     /// # Panics
     ///
@@ -358,19 +368,20 @@ impl SqsFeed {
         let step = Mutex::new("starting");
         let connect = async {
             let queue = client::sdk_queue(&config, credentials, &step).await?;
-            *step.lock().unwrap_or_else(PoisonError::into_inner) = "reading the queue's ARN";
-            let arn = queue.queue_arn().await.map_err(|e| match e.class {
-                Class::Fatal => SqsError::Refused(e.message),
-                Class::Retryable => SqsError::Unavailable(e.message),
-            })?;
-            Ok::<_, SqsError>((queue, arn))
+            let checked = startup::check(&queue, &config.queue_url, &step).await?;
+            Ok::<_, SqsError>((queue, checked))
         };
         // `bounded` builds its timeout inside `block_on`: the timer needs the
         // runtime's context.
-        let (queue, arn) = io.block_on(bounded(&step, connect))?;
+        let (queue, checked) = io.block_on(bounded(&step, connect))?;
         tracing::info!(
-            queue = %arn,
+            queue = %checked.arn,
             visibility = ?config.visibility,
+            queue_visibility_timeout = checked.visibility_timeout.as_deref().unwrap_or("unreported"),
+            retention_seconds = %unreported(checked.retention),
+            max_receive_count = checked.max_receive_count,
+            dead_letter_queue = %checked.dead_letter_arn,
+            dead_letter_retention_seconds = %unreported(checked.dead_letter_retention),
             "the SQS feed is connected"
         );
         Ok(Self::start(Arc::new(queue), &config, io))

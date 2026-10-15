@@ -4709,6 +4709,7 @@ dependencies = [
  "rustls",
  "rustls-native-certs",
  "serde",
+ "serde_json",
  "spate-core",
  "spate-json",
  "spate-s3",

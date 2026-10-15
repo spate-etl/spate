@@ -22,6 +22,7 @@ aws-sdk-sqs = { workspace = true }
 aws-smithy-http-client = { workspace = true }
 base64 = { workspace = true }
 humantime-serde = { workspace = true }
+serde_json = { workspace = true }
 # The rustls the SDK's client links, for `tls_rejection!` and root parsing.
 rustls = { workspace = true }
 rustls-native-certs = { workspace = true }

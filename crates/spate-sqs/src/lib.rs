@@ -49,6 +49,7 @@ mod feed;
 mod queue;
 #[cfg(test)]
 mod scripted;
+mod startup;
 
 pub use error::SqsError;
 pub use feed::SqsFeed;

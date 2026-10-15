@@ -554,3 +554,36 @@ async fn a_fail_past_its_deadline_is_dropped_unsent() {
         "a fail was sent at {fails:?}, past {deadline:?}"
     );
 }
+
+/// Pins that a Fatal rejects with Fatal every publish the feed holds: the
+/// batch the publish task is sending and the publishes still queued behind it.
+#[tokio::test(start_paused = true)]
+async fn a_fatal_delete_rejects_every_held_publish() {
+    let (feed, queue) = start_gated(MINUTE);
+    queue.send_down.store(true, Ordering::SeqCst);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    queue.inner.ready(Message::new("a"));
+    let got = receive_n(&feed, &park, 1).await;
+    let mut publishes: Vec<Confirmation> = (0..11)
+        .map(|i| feed.publish(Unit::new(format!("p{i}"), "body")))
+        .collect();
+    settle_tasks().await;
+    assert_eq!(
+        feed.lock().sending.len(),
+        10,
+        "the first batch is being sent"
+    );
+    assert_eq!(feed.lock().publishes.len(), 1, "one publish is queued");
+
+    queue.delete_fatal.store(true, Ordering::SeqCst);
+    feed.acknowledge(got[0].receipt).unwrap();
+    until("every publish settles", || {
+        publishes.iter_mut().all(|c| c.try_outcome().is_some())
+    })
+    .await;
+    for (i, c) in publishes.iter_mut().enumerate() {
+        let kind = c.try_outcome().unwrap().unwrap_err().kind;
+        assert_eq!(kind, FeedErrorKind::Fatal, "publish {i} read {kind:?}");
+    }
+}

@@ -201,15 +201,17 @@ impl Shared {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Make `e` the answer to every later call, reject every queued publish
-    /// with it, and wake the reader.
+    /// Make `e` the answer to every later call, reject with it every publish
+    /// queued or being sent, and wake the reader.
     fn set_fatal(&self, e: &CallError) {
         let error = FeedError::new(FeedErrorKind::Fatal, e.message.clone());
         tracing::error!(error = %e.message, "the SQS feed stopped");
         let (publishes, waker) = {
             let mut st = self.lock();
             st.fatal.get_or_insert(error.clone());
-            (std::mem::take(&mut st.publishes), st.waker.clone())
+            let mut publishes = std::mem::take(&mut st.sending);
+            publishes.append(&mut st.publishes);
+            (publishes, st.waker.clone())
         };
         for p in publishes {
             p.confirmer.reject(error.clone());
@@ -946,7 +948,7 @@ fn next_batch(queued: &mut Vec<Publish>) -> Vec<Publish> {
 
 /// Send the batch in [`State::sending`] and settle each confirmation by its
 /// own entry. A transient failure of the whole call is retried until the
-/// feed stops.
+/// feed stops, and a Fatal anywhere in the feed rejects the batch.
 ///
 /// `Err` when the feed has stopped.
 async fn publish_batch(shared: &Shared, entries: Vec<SendEntry>) -> Result<(), ()> {

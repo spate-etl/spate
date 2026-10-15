@@ -39,7 +39,7 @@ serde_yaml = { workspace = true }
 spate-json = { workspace = true }
 spate-s3 = { workspace = true }
 spate-test = { workspace = true }
-spate-test-support = { workspace = true, features = ["elasticmq"] }
+spate-test-support = { workspace = true, features = ["elasticmq", "tls"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "test-util"] }
 

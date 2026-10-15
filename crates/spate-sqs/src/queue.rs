@@ -277,3 +277,44 @@ impl Queue for SdkQueue {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::SqsFeedConfig;
+    use spate_test_support::{TestCa, serve_tls};
+    use std::time::Duration;
+
+    /// An [`SdkQueue`] over `endpoint`, with a static access key.
+    async fn queue_at(endpoint: &str) -> SdkQueue {
+        let config = SqsFeedConfig {
+            queue_url: format!("{endpoint}/000000000000/jobs"),
+            visibility: Duration::from_secs(60),
+            region: Some("eu-west-2".to_owned()),
+            endpoint: Some(endpoint.to_owned()),
+        };
+        let credentials = aws_sdk_sqs::config::Credentials::new("x", "x", None, None, "test");
+        let step = std::sync::Mutex::new("starting");
+        crate::client::sdk_queue(
+            &config,
+            Some(aws_sdk_sqs::config::SharedCredentialsProvider::new(
+                credentials,
+            )),
+            &step,
+        )
+        .await
+        .unwrap()
+    }
+
+    /// Pins that a server whose certificate the client does not trust fails
+    /// the call as Fatal, with the TLS error in its message.
+    #[tokio::test]
+    async fn a_rejected_tls_handshake_is_fatal() {
+        let ca = TestCa::new("untrusted");
+        let addr = serve_tls(ca.server_config(None), |_| async {}).await;
+        let queue = queue_at(&format!("https://{addr}")).await;
+        let e = queue.queue_arn().await.unwrap_err();
+        assert_eq!(e.class, Class::Fatal, "{}", e.message);
+        assert!(e.message.contains("UnknownIssuer"), "{}", e.message);
+    }
+}

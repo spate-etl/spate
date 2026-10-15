@@ -75,9 +75,6 @@ pub(crate) async fn sdk_queue(
 }
 
 /// The client's timeouts with `read` and `operation`.
-///
-/// A per-call override replaces the client's whole timeout config, so each
-/// one carries the connect timeout too.
 pub(crate) fn timeouts(read: Duration, operation: Duration) -> TimeoutConfig {
     // No attempt timeout: the SDK loads credentials inside an attempt, and a
     // load that timeout cancels starts over on the next one.

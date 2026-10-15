@@ -101,7 +101,7 @@ apache-avro = "0.22"
 object_store = "0.14.1"
 # spate-s3 decodes listing pages with the decoder object_store uses, so its
 # version and features follow object_store's.
-quick-xml = { version = "0.41.0", features = ["serialize", "overlapped-lists"] }
+quick-xml = { version = "0.42.0", features = ["serialize", "overlapped-lists"] }
 # The `server_2_11` default feature gates the limit-marker KV config the lease
 # buckets depend on.
 async-nats = "0.50"

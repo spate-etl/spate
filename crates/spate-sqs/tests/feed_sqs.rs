@@ -516,6 +516,36 @@ fn startup_refuses_an_unreadable_dead_letter_queue() {
     }
 }
 
+/// Pins the fields of the line connecting logs: the queue's default
+/// visibility timeout, both retentions, `maxReceiveCount` and the
+/// dead-letter queue's ARN.
+#[test]
+#[ignore = "requires Docker"]
+fn connecting_logs_what_the_startup_checks_read() {
+    let mq = ElasticMq::start().unwrap();
+    let url = queue_with_dead_letter(&mq, "logged");
+    let mut connected = None;
+    let lines = spate_test::capture_logs(tracing::Level::INFO, || {
+        connected = Some(connect(&mq, &url));
+    });
+    connected.unwrap().unwrap();
+    let line = lines
+        .iter()
+        .find(|l| l.contains("the SQS feed is connected"))
+        .unwrap_or_else(|| panic!("no connect line: {lines:#?}"));
+    for field in [
+        "queue_visibility_timeout",
+        "max_receive_count",
+        "dead_letter_queue",
+        "dead_letter_retention_seconds",
+        ":logged-dlq",
+    ] {
+        assert!(line.contains(field), "{field}: {line}");
+    }
+    // `retention_seconds` and `dead_letter_retention_seconds`.
+    assert_eq!(line.matches("retention_seconds").count(), 2, "{line}");
+}
+
 /// The `feed:` key of a pipeline file, alone.
 #[derive(serde::Deserialize)]
 struct PipelineConfigFeed {

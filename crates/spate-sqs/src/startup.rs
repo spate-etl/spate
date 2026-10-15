@@ -429,6 +429,44 @@ mod tests {
         }
     }
 
+    /// Pins the warning a missing retention logs: one line, naming the queue
+    /// that reported none and both ARNs, saying the comparison is skipped.
+    #[test]
+    fn a_missing_retention_warns_naming_the_queue_that_reported_none() {
+        for (source, dead, reported) in [
+            (
+                None,
+                Some("60"),
+                "the queue reported no MessageRetentionPeriod",
+            ),
+            (
+                Some("1209600"),
+                None,
+                "the dead-letter queue reported no MessageRetentionPeriod",
+            ),
+            (
+                None,
+                None,
+                "neither queue reported a MessageRetentionPeriod",
+            ),
+        ] {
+            let lines = spate_test::capture_logs(tracing::Level::WARN, || {
+                run(&Scripted::pair(source, dead)).unwrap();
+            });
+            assert_eq!(lines.len(), 1, "{lines:?}");
+            let line = &lines[0];
+            for needle in [
+                "WARN",
+                reported,
+                "the dead-letter retention check is skipped",
+                "arn:aws:sqs:elasticmq:000000000000:jobs",
+                DEAD_ARN,
+            ] {
+                assert!(line.contains(needle), "{needle}: {line}");
+            }
+        }
+    }
+
     /// Pins the refusals of the source queue, each by its own message: FIFO,
     /// told by the `.fifo` name in its ARN, no redrive policy, a policy the
     /// feed cannot read, a `maxReceiveCount` that is not a count, and a

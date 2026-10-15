@@ -1374,6 +1374,20 @@ fn a_feed_whose_backend_differs_from_the_section_fails_startup() {
     assert!(err.contains("`memory`") && err.contains("`sqs`"), "{err}");
 }
 
+/// Pins that the runtime builds the in-process feed from the section, so a
+/// key in the `memory` body fails startup naming its path.
+#[test]
+fn a_key_in_the_memory_body_fails_startup() {
+    let mut cfg = test_config(1);
+    cfg.feed = feed_section("memory: { depth: 4 }");
+    let h = start_with_config(cfg, ok_chain);
+    let err = config_error_before_open(h);
+    assert!(
+        err.contains("feed.memory") && err.contains("depth"),
+        "{err}"
+    );
+}
+
 /// `admin.listen: none` runs and drains with no admin server. With no
 /// listener there is no stop channel to signal, and the run has to reach its
 /// drain and its controller join anyway.

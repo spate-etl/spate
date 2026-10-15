@@ -93,7 +93,8 @@ retried.
 `SqsFeed::connect` refuses a queue it cannot dead-letter from:
 
 - a FIFO queue, told by the `.fifo` ending of the name in its ARN;
-- a queue with no redrive policy, or one whose policy it cannot read;
+- a queue with no redrive policy, or one whose policy it cannot read or that
+  names no SQS queue;
 - a dead-letter queue it cannot read, because it does not exist or the
   identity lacks `sqs:GetQueueAttributes` on it;
 - a dead-letter queue whose `MessageRetentionPeriod` is no longer than the
@@ -101,9 +102,9 @@ retried.
   can delete a unit as soon as it arrives. SQS keeps a message for at most 14
   days, so the queue must keep messages for less than that.
 
-The dead-letter queue's URL is built from the queue URL's scheme, host and
-any path ahead of the account, with the account and name from its ARN in the
-redrive policy, so the feed needs no `sqs:GetQueueUrl`. When either queue reports no
+The dead-letter queue's URL is the queue URL with its last segment replaced
+by the dead-letter queue's name from its ARN in the redrive policy, so the feed
+needs no `sqs:GetQueueUrl`. When either queue reports no
 `MessageRetentionPeriod`, the feed logs a warning and skips the retention
 comparison. Connecting logs the queue's retention, its default visibility
 timeout, `maxReceiveCount` and the dead-letter queue's retention.

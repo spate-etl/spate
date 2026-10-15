@@ -15,13 +15,14 @@ use spate_core::config::ConfigError;
 use std::collections::HashMap;
 use url::Url;
 
-/// The attributes read from the queue the feed reads.
+/// The attributes read from the queue the feed reads. SQS refuses the whole
+/// read when it names an attribute the queue does not have, so this names
+/// none of a FIFO queue's own, such as `FifoQueue`.
 const SOURCE_ATTRIBUTES: &[&str] = &[
     "QueueArn",
     "MessageRetentionPeriod",
     "VisibilityTimeout",
     "RedrivePolicy",
-    "FifoQueue",
 ];
 
 /// The attributes read from its dead-letter queue.
@@ -96,7 +97,8 @@ pub(crate) async fn check(
             Class::Retryable => SqsError::Unavailable(e.message),
         })?;
     let arn = source.get("QueueArn").cloned().unwrap_or_default();
-    if source.get("FifoQueue").is_some_and(|v| v == "true") {
+    // SQS requires a FIFO queue's name to end in `.fifo`.
+    if arn.ends_with(".fifo") {
         return Err(SqsError::Refused(format!(
             "the queue {arn} is a FIFO queue; the SQS feed reads standard queues only"
         )));
@@ -221,7 +223,54 @@ mod tests {
     const DEAD_URL: &str = "http://127.0.0.1:9324/000000000000/jobs-dlq";
     const DEAD_ARN: &str = "arn:aws:sqs:elasticmq:000000000000:jobs-dlq";
 
+    /// The attribute names `GetQueueAttributes` accepts on a standard queue.
+    const STANDARD_NAMES: &[&str] = &[
+        "All",
+        "ApproximateNumberOfMessages",
+        "ApproximateNumberOfMessagesDelayed",
+        "ApproximateNumberOfMessagesNotVisible",
+        "CreatedTimestamp",
+        "DelaySeconds",
+        "KmsDataKeyReusePeriodSeconds",
+        "KmsMasterKeyId",
+        "LastModifiedTimestamp",
+        "MaximumMessageSize",
+        "MessageRetentionPeriod",
+        "Policy",
+        "QueueArn",
+        "ReceiveMessageWaitTimeSeconds",
+        "RedriveAllowPolicy",
+        "RedrivePolicy",
+        "SqsManagedSseEnabled",
+        "VisibilityTimeout",
+    ];
+
+    /// The attribute names only a FIFO queue accepts.
+    const FIFO_NAMES: &[&str] = &[
+        "ContentBasedDeduplication",
+        "DeduplicationScope",
+        "FifoQueue",
+        "FifoThroughputLimit",
+    ];
+
+    /// The error SQS answers a read naming an attribute the queue does not
+    /// have with, classified as the feed classifies a real answer.
+    fn invalid_attribute_name(name: &str) -> CallError {
+        use aws_sdk_sqs::config::http::HttpResponse;
+        use aws_sdk_sqs::error::{ErrorMetadata, SdkError};
+        use aws_sdk_sqs::operation::get_queue_attributes::GetQueueAttributesError;
+        let meta = ErrorMetadata::builder()
+            .code("InvalidAttributeName")
+            .message(format!("Unknown Attribute {name}."))
+            .build();
+        let raw = HttpResponse::new(400.try_into().unwrap(), "".into());
+        let e = SdkError::service_error(GetQueueAttributesError::generic(meta), raw);
+        crate::error::classify("GetQueueAttributes", &e)
+    }
+
     /// Attributes per queue URL, or the error reading that queue fails with.
+    /// Like SQS, it fails a read that names an attribute the queue does not
+    /// have, and a queue is FIFO when its `QueueArn` ends in `.fifo`.
     #[derive(Default)]
     struct Scripted {
         queues: HashMap<String, Result<HashMap<String, String>, CallError>>,
@@ -270,11 +319,21 @@ mod tests {
         ) -> BoxFuture<'a, Result<HashMap<String, String>, CallError>> {
             self.read.lock().unwrap().push(queue_url.to_owned());
             let answer = match self.queues.get(queue_url) {
-                Some(Ok(all)) => Ok(all
-                    .iter()
-                    .filter(|(k, _)| names.contains(&k.as_str()))
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect()),
+                Some(Ok(all)) => {
+                    let fifo = all.get("QueueArn").is_some_and(|a| a.ends_with(".fifo"));
+                    let accepted = |name: &&str| {
+                        STANDARD_NAMES.contains(name) || (fifo && FIFO_NAMES.contains(name))
+                    };
+                    let unknown = names.iter().find(|name| !accepted(name));
+                    match unknown {
+                        Some(name) => Err(invalid_attribute_name(name)),
+                        None => Ok(all
+                            .iter()
+                            .filter(|(k, _)| names.contains(&k.as_str()))
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect()),
+                    }
+                }
                 Some(Err(e)) => Err(e.clone()),
                 None => Err(CallError::fatal("QueueDoesNotExist")),
             };
@@ -350,16 +409,22 @@ mod tests {
         }
     }
 
-    /// Pins the refusals of the source queue: FIFO, no redrive policy, and a
-    /// policy the feed cannot read. `maxReceiveCount` is read as a number
-    /// or as a string.
+    /// Pins the refusals of the source queue: FIFO, told by the `.fifo` name
+    /// in its ARN, no redrive policy, and a policy the feed cannot read.
+    /// `maxReceiveCount` is read as a number or as a string.
     #[test]
     fn startup_refuses_a_queue_the_feed_cannot_dead_letter_from() {
         let arn = ("QueueArn", "arn:aws:sqs:elasticmq:000000000000:jobs");
-        let fifo = Scripted::default().queue(SOURCE, &[arn, ("FifoQueue", "true")]);
+        let fifo = Scripted::default().queue(
+            SOURCE,
+            &[
+                ("QueueArn", "arn:aws:sqs:elasticmq:000000000000:jobs.fifo"),
+                ("FifoQueue", "true"),
+            ],
+        );
         assert!(refusal(run(&fifo)).contains("FIFO"));
 
-        let none = Scripted::default().queue(SOURCE, &[arn, ("FifoQueue", "false")]);
+        let none = Scripted::default().queue(SOURCE, &[arn]);
         assert!(refusal(run(&none)).contains("no redrive policy"));
 
         for policy in [

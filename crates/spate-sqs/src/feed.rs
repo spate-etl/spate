@@ -760,7 +760,7 @@ async fn renewal_task(shared: Arc<Shared>) {
                 })
                 .collect();
             let sent_at = Instant::now();
-            match shared.queue.change_visibility_batch(entries).await {
+            match shared.queue.change_visibility_batch(entries, None).await {
                 Ok(outcome) => {
                     let mut st = shared.lock();
                     for (i, (receipt, _, ext)) in chunk.iter().enumerate() {
@@ -858,9 +858,9 @@ async fn settle_task(shared: Arc<Shared>) {
             let now = Instant::now();
             fails.retain(|s| now < s.deadline);
             let chunk: Vec<Settle> = fails.drain(..fails.len().min(BATCH_ENTRIES)).collect();
-            if chunk.is_empty() {
+            let Some(oldest) = chunk.iter().map(|s| s.deadline).min() else {
                 break;
-            }
+            };
             let entries: Vec<VisibilityEntry> = chunk
                 .iter()
                 .enumerate()
@@ -870,8 +870,14 @@ async fn settle_task(shared: Arc<Shared>) {
                     seconds: 0,
                 })
                 .collect();
+            // The SDK retries inside one call, so the call itself is bounded
+            // by the earliest deadline. A request already sent when the bound
+            // ends can still reach SQS after it.
             let sent = settle_batch(&shared, "failing", &chunk, || {
-                shared.queue.change_visibility_batch(entries.clone())
+                let left = oldest.saturating_duration_since(Instant::now());
+                shared
+                    .queue
+                    .change_visibility_batch(entries.clone(), Some(left))
             });
             if sent.await.is_err() {
                 return;

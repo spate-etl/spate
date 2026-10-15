@@ -64,6 +64,7 @@ struct Script {
     receives: Vec<ReceiveRequest>,
     sends: Vec<Vec<SendEntry>>,
     visibility: Vec<Vec<VisibilityEntry>>,
+    visibility_within: Vec<Option<Duration>>,
     deletes: Vec<Vec<DeleteEntry>>,
     next: u64,
 }
@@ -135,6 +136,12 @@ impl ScriptedQueue {
 
     pub(crate) fn visibility(&self) -> Vec<Vec<VisibilityEntry>> {
         self.lock().visibility.clone()
+    }
+
+    /// The bound each `ChangeMessageVisibilityBatch` was given, in call
+    /// order.
+    pub(crate) fn visibility_within(&self) -> Vec<Option<Duration>> {
+        self.lock().visibility_within.clone()
     }
 
     pub(crate) fn deletes(&self) -> Vec<Vec<DeleteEntry>> {
@@ -222,11 +229,13 @@ impl Queue for ScriptedQueue {
     fn change_visibility_batch(
         &self,
         entries: Vec<VisibilityEntry>,
+        within: Option<Duration>,
     ) -> BoxFuture<'_, Result<BatchOutcome, CallError>> {
         Box::pin(async move {
             let mut script = self.lock();
             let ids: Vec<String> = entries.iter().map(|e| e.id.clone()).collect();
             script.visibility.push(entries);
+            script.visibility_within.push(within);
             if let Some(e) = script.visibility_errors.pop_front() {
                 return Err(e);
             }

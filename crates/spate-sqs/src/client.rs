@@ -24,8 +24,8 @@ use std::time::Duration;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The read and operation timeouts of every call but `ReceiveMessage`.
-const READ_TIMEOUT: Duration = Duration::from_secs(5);
-const OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const READ_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// `ReceiveMessage` waits up to 20 s for a message before its reply starts.
 const RECEIVE_READ_TIMEOUT: Duration = Duration::from_secs(25);
@@ -52,15 +52,6 @@ pub(crate) async fn sdk_queue(
         Some(region) => Region::new(region),
         None => chain_region(&http).await?,
     };
-    // No attempt timeout: the SDK loads credentials inside an attempt, and a
-    // load that timeout cancels starts over on the next one.
-    let timeouts = |read, operation| {
-        TimeoutConfig::builder()
-            .connect_timeout(CONNECT_TIMEOUT)
-            .read_timeout(read)
-            .operation_timeout(operation)
-            .build()
-    };
     let mut loader = aws_config::defaults(BehaviorVersion::v2026_01_12())
         .http_client(http)
         .region(region)
@@ -81,6 +72,20 @@ pub(crate) async fn sdk_queue(
         receive_timeouts: aws_sdk_sqs::config::Builder::default()
             .timeout_config(timeouts(RECEIVE_READ_TIMEOUT, RECEIVE_OPERATION_TIMEOUT)),
     })
+}
+
+/// The client's timeouts with `read` and `operation`.
+///
+/// A per-call override replaces the client's whole timeout config, so each
+/// one carries the connect timeout too.
+pub(crate) fn timeouts(read: Duration, operation: Duration) -> TimeoutConfig {
+    // No attempt timeout: the SDK loads credentials inside an attempt, and a
+    // load that timeout cancels starts over on the next one.
+    TimeoutConfig::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .read_timeout(read)
+        .operation_timeout(operation)
+        .build()
 }
 
 /// The region the environment, the shared config file or instance metadata

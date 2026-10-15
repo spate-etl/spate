@@ -121,7 +121,9 @@ is.
 
 A worker fails a unit it cannot read by setting its visibility to zero, so
 the queue hands it out again at once. A unit whose visibility has already
-lapsed is not touched, since it is back in the queue. After
+lapsed is not touched, since it is back in the queue. The visibility change,
+the SDK's retries included, is given up when the unit's visibility lapses; a
+request already sent by then can still reach SQS just after. After
 `maxReceiveCount` receives the queue's redrive policy moves the unit to the
 dead-letter queue. The feed never sends to the dead-letter queue itself.
 

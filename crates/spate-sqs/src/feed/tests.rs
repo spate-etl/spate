@@ -468,9 +468,10 @@ impl Queue for Gated {
     fn change_visibility_batch(
         &self,
         e: Vec<VisibilityEntry>,
+        within: Option<Duration>,
     ) -> BoxFuture<'_, Result<BatchOutcome, CallError>> {
         self.visibility_at.lock().unwrap().push(Instant::now());
-        self.inner.change_visibility_batch(e)
+        self.inner.change_visibility_batch(e, within)
     }
 
     fn delete_batch(&self, e: Vec<DeleteEntry>) -> BoxFuture<'_, Result<BatchOutcome, CallError>> {
@@ -909,4 +910,37 @@ async fn a_publish_retry_stops_once_the_feed_stops() {
         1,
         "the publish task sent again after the feed stopped"
     );
+}
+
+/// Pins that a fail call is bounded by the time left to the earliest
+/// deadline in its batch, and that an extension call is not bounded.
+#[tokio::test(start_paused = true)]
+async fn a_fail_call_is_bounded_by_the_earliest_deadline_in_its_batch() {
+    let (feed, queue) = start(MINUTE);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    queue.ready(Message::new("a"));
+    queue.ready(Message::new("b"));
+    let got = receive_n(&feed, &park, 2).await;
+    // The first tick extends both units, as handed out. Only `a` is renewed
+    // for the second, so `b` holds until an earlier deadline.
+    tokio::time::advance(Duration::from_secs(20)).await;
+    until("the tick extends both units", || {
+        queue.visibility().len() == 1
+    })
+    .await;
+    feed.renew(got[0].receipt).unwrap();
+    tokio::time::advance(Duration::from_secs(20)).await;
+    until("the tick extends `a`", || queue.visibility().len() == 2).await;
+    settle_tasks().await;
+    let a = feed.deadline_of(got[0].receipt).unwrap();
+    let b = feed.deadline_of(got[1].receipt).unwrap();
+    assert!(b < a, "`b` holds until {b:?}, `a` until {a:?}");
+    tokio::time::advance(Duration::from_secs(5)).await;
+    let failed_at = Instant::now();
+    feed.fail(got[0].receipt, "unreadable").unwrap();
+    feed.fail(got[1].receipt, "unreadable").unwrap();
+    until("the fails are sent", || queue.visibility().len() == 3).await;
+    assert_eq!(queue.visibility()[2].len(), 2, "one batch");
+    assert_eq!(queue.visibility_within(), [None, None, Some(b - failed_at)]);
 }

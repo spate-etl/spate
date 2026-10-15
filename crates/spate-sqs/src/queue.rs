@@ -4,6 +4,7 @@
 //! The feed's tasks see only [`Queue`], so a scripted queue in the unit tests
 //! stands in for SQS.
 
+use crate::client;
 use crate::error::{CallError, Class, classify};
 use aws_sdk_sqs::Client;
 use aws_sdk_sqs::types::{
@@ -13,6 +14,7 @@ use aws_sdk_sqs::types::{
 };
 use std::future::Future;
 use std::pin::Pin;
+use std::time::Duration;
 
 /// The String message attribute that carries a unit's id.
 pub(crate) const UNIT_ATTRIBUTE: &str = "spate.unit";
@@ -86,9 +88,12 @@ pub(crate) trait Queue: Send + Sync + std::fmt::Debug + 'static {
     fn send_batch(&self, entries: Vec<SendEntry>)
     -> BoxFuture<'_, Result<BatchOutcome, CallError>>;
 
+    /// A `ChangeMessageVisibilityBatch`. With `within` set, the call and
+    /// its retries end after that long, as a Retryable timeout.
     fn change_visibility_batch(
         &self,
         entries: Vec<VisibilityEntry>,
+        within: Option<Duration>,
     ) -> BoxFuture<'_, Result<BatchOutcome, CallError>>;
 
     fn delete_batch(
@@ -223,6 +228,7 @@ impl Queue for SdkQueue {
     fn change_visibility_batch(
         &self,
         entries: Vec<VisibilityEntry>,
+        within: Option<Duration>,
     ) -> BoxFuture<'_, Result<BatchOutcome, CallError>> {
         Box::pin(async move {
             let mut call = self
@@ -238,6 +244,18 @@ impl Queue for SdkQueue {
                         .build(),
                 )?);
             }
+            // The override sets only timeouts, so the client's retry
+            // config, and with it the attempt count, still applies.
+            let call = call.customize();
+            let call = match within {
+                Some(within) => call.config_override(
+                    aws_sdk_sqs::config::Builder::default().timeout_config(client::timeouts(
+                        client::READ_TIMEOUT,
+                        within.min(client::OPERATION_TIMEOUT),
+                    )),
+                ),
+                None => call,
+            };
             let out = call
                 .send()
                 .await
@@ -316,5 +334,42 @@ mod tests {
         let e = queue.queue_arn().await.unwrap_err();
         assert_eq!(e.class, Class::Fatal, "{}", e.message);
         assert!(e.message.contains("UnknownIssuer"), "{}", e.message);
+    }
+
+    /// Pins that `within` bounds a `ChangeMessageVisibilityBatch` and its
+    /// retries: against a server that never answers, the call fails as
+    /// Retryable once `within` has passed, before the client's 5 s read
+    /// timeout ends a first attempt.
+    #[tokio::test]
+    async fn a_visibility_call_ends_within_its_bound() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut tcp, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let _ = tokio::io::copy(&mut tcp, &mut tokio::io::sink()).await;
+                });
+            }
+        });
+        let queue = queue_at(&format!("http://{addr}")).await;
+        tokio::time::pause();
+        let within = Duration::from_secs(1);
+        let started = tokio::time::Instant::now();
+        let entry = VisibilityEntry {
+            id: "0".to_owned(),
+            handle: "h".to_owned(),
+            seconds: 0,
+        };
+        let e = queue
+            .change_visibility_batch(vec![entry], Some(within))
+            .await
+            .unwrap_err();
+        let elapsed = started.elapsed();
+        assert_eq!(e.class, Class::Retryable, "{}", e.message);
+        assert!(
+            elapsed >= within && elapsed < client::READ_TIMEOUT,
+            "ended after {elapsed:?}: {}",
+            e.message
+        );
     }
 }

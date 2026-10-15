@@ -69,6 +69,7 @@ const KMS_KEY: &[&str] = &[
     "KMS.NotFoundException",
     "KMS.InvalidStateException",
     "KMS.OptInRequired",
+    "KMS.InvalidKeyUsageException",
 ];
 
 /// Whether `code` is `name`, bare or with SQS's `AWS.SimpleQueueService.`
@@ -146,6 +147,7 @@ impl TypedFatal for ReceiveMessageError {
             || self.is_kms_not_found()
             || self.is_kms_invalid_state()
             || self.is_kms_opt_in_required()
+            || self.is_kms_invalid_key_usage()
     }
 }
 
@@ -165,6 +167,7 @@ impl TypedFatal for SendMessageBatchError {
             || self.is_kms_not_found()
             || self.is_kms_invalid_state()
             || self.is_kms_opt_in_required()
+            || self.is_kms_invalid_key_usage()
             || self.typed_batch_shape()
     }
 
@@ -337,8 +340,8 @@ mod tests {
     #[test]
     fn a_kms_key_the_queue_cannot_use_is_fatal() {
         use aws_sdk_sqs::types::error::{
-            KmsAccessDenied, KmsDisabled, KmsInvalidState, KmsNotFound, KmsOptInRequired,
-            KmsThrottled,
+            KmsAccessDenied, KmsDisabled, KmsInvalidKeyUsage, KmsInvalidState, KmsNotFound,
+            KmsOptInRequired, KmsThrottled,
         };
         // Without a code in the metadata, so only the typed check can match.
         macro_rules! typed {
@@ -356,6 +359,7 @@ mod tests {
             ("KMS.NotFoundException", typed!(KmsNotFound)),
             ("KMS.InvalidStateException", typed!(KmsInvalidState)),
             ("KMS.OptInRequired", typed!(KmsOptInRequired)),
+            ("KMS.InvalidKeyUsageException", typed!(KmsInvalidKeyUsage)),
         ];
         for (code, (receive, send)) in cases {
             assert_eq!(

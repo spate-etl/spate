@@ -317,7 +317,7 @@ feed:
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `<backend>` | component | `required` | Exactly one key naming the backend. `memory` is the in-process feed, which takes no keys of its own. Any other name is a backend built in code; its page documents its body. |
+| `<backend>` | component | `required` | Exactly one key naming the backend. `memory` is the in-process feed, which takes no keys of its own. Built from the file alone it has no publisher, so the source reads nothing; to publish to it, code builds a `MemoryFeed`, keeps a handle, and passes it to `Pipeline::feed`. Units from another process need a durable backend. Any other name is a backend built in code; its page documents its body. |
 | `units_held` | integer | `none` | How many units the source holds and reads at once. Unset, the source's own default applies. At least 1. |
 | `attempt_cap` | integer | `10` | The delivery on which the in-process feed moves a failed unit to its dead-letter list. A backend that counts deliveries itself refuses the key. At least 1. |
 

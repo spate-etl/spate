@@ -944,3 +944,38 @@ async fn a_fail_call_is_bounded_by_the_earliest_deadline_in_its_batch() {
     assert_eq!(queue.visibility()[2].len(), 2, "one batch");
     assert_eq!(queue.visibility_within(), [None, None, Some(b - failed_at)]);
 }
+
+/// Pins that a send failed Fatal after the same batch failed Retryable
+/// rejects the batch as Retryable, since SQS may have stored the earlier
+/// attempt.
+#[tokio::test(start_paused = true)]
+async fn a_send_retried_into_a_fatal_reads_retryable() {
+    let (feed, queue) = start(MINUTE);
+    queue.fail_next_send_call(CallError::retryable("read timeout"));
+    queue.fail_next_send_call(CallError::fatal("AccessDenied"));
+    let mut c = feed.publish(Unit::new("p", "body"));
+    until("the first send", || queue.sends().len() == 1).await;
+    tokio::time::advance(Duration::from_millis(200)).await;
+    until("the publish settles", || c.try_outcome().is_some()).await;
+    let kind = c.try_outcome().unwrap().unwrap_err().kind;
+    assert_eq!(queue.sends().len(), 2);
+    assert_eq!(
+        kind,
+        FeedErrorKind::Retryable,
+        "a batch SQS may have stored"
+    );
+}
+
+/// Pins that a batch whose first send fails Fatal is rejected as Fatal.
+#[tokio::test(start_paused = true)]
+async fn a_send_fatal_on_its_first_attempt_reads_fatal() {
+    let (feed, queue) = start(MINUTE);
+    queue.fail_next_send_call(CallError::fatal("AccessDenied"));
+    let mut c = feed.publish(Unit::new("p", "body"));
+    until("the publish settles", || c.try_outcome().is_some()).await;
+    assert_eq!(queue.sends().len(), 1);
+    assert_eq!(
+        c.try_outcome().unwrap().unwrap_err().kind,
+        FeedErrorKind::Fatal
+    );
+}

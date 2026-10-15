@@ -167,7 +167,8 @@ confirmed by its own entry: an entry SQS rejects as the sender's fault is
 refused, and any other failed entry is reported as retryable. When the feed
 stops on a fatal error, the batch it is sending is reported as retryable,
 since SQS may have stored it, and the publishes not yet sent are rejected
-with the error. A delete or
+with the error. A batch whose first send fails on the fatal error is
+rejected with it too. A delete or
 visibility change SQS fails for one entry is dropped, and that unit returns
 to the queue when its visibility lapses.
 

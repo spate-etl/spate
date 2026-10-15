@@ -980,11 +980,14 @@ fn next_batch(queued: &mut Vec<Publish>) -> Vec<Publish> {
 
 /// Send the batch in [`State::sending`] and settle each confirmation by its
 /// own entry. A transient failure of the whole call is retried until the
-/// feed stops, and a Fatal anywhere in the feed rejects the batch.
+/// feed stops, and a Fatal anywhere in the feed rejects the batch. A Fatal
+/// answering a send after a transient failure rejects it as Retryable, since
+/// SQS may have stored an earlier attempt.
 ///
 /// `Err` when the feed has stopped.
 async fn publish_batch(shared: &Shared, entries: Vec<SendEntry>) -> Result<(), ()> {
     let mut backoff = BACKOFF_START;
+    let mut retried = false;
     loop {
         if shared.stopped() {
             return Err(());
@@ -1013,20 +1016,30 @@ async fn publish_batch(shared: &Shared, entries: Vec<SendEntry>) -> Result<(), (
                 return Ok(());
             }
             Err(e) if e.class == Class::Fatal => {
-                let kind = if e.batch_shape {
-                    FeedErrorKind::Refused
+                let error = if e.batch_shape {
+                    FeedError::new(FeedErrorKind::Refused, e.message.clone())
+                } else if retried {
+                    FeedError::new(
+                        FeedErrorKind::Retryable,
+                        format!(
+                            "an earlier send of the unit failed, so SQS may or may not \
+                             have stored it: {}",
+                            e.message
+                        ),
+                    )
                 } else {
-                    FeedErrorKind::Fatal
+                    FeedError::new(FeedErrorKind::Fatal, e.message.clone())
                 };
                 let batch = std::mem::take(&mut shared.lock().sending);
                 for p in batch {
-                    p.confirmer.reject(FeedError::new(kind, e.message.clone()));
+                    p.confirmer.reject(error.clone());
                 }
                 shared.set_fatal(&e);
                 return Err(());
             }
             Err(e) => {
                 tracing::warn!(error = %e.message, "publishing to SQS failed; retrying");
+                retried = true;
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(BACKOFF_MAX);
             }

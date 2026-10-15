@@ -76,6 +76,7 @@ body:
         - Kafka sink (spate-kafka)
         - ClickHouse sink (spate-clickhouse)
         - S3 source (spate-s3)
+        - SQS feed (spate-sqs)
         - JSON deserializer (spate-json)
         - Avro deserializer (spate-avro)
         - Coordination (spate-coordination)

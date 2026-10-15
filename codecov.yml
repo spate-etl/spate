@@ -77,6 +77,9 @@ component_management:
     - component_id: s3
       name: spate-s3
       paths: ["crates/spate-s3/**"]
+    - component_id: sqs
+      name: spate-sqs
+      paths: ["crates/spate-sqs/**"]
     - component_id: clickhouse
       name: spate-clickhouse
       paths: ["crates/spate-clickhouse/**"]

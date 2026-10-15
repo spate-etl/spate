@@ -43,6 +43,10 @@
   color: "0052cc"
   description: "The S3 source"
 
+- name: "crate: spate-sqs"
+  color: "0052cc"
+  description: "The SQS feed backend"
+
 - name: "crate: spate-json"
   color: "0052cc"
   description: "The JSON deserializer"

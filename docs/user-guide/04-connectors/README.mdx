@@ -1,5 +1,5 @@
 ---
-description: "Connectors are the technology-specific edges of a pipeline: Kafka, S3, ClickHouse, Avro, JSON, NATS JetStream, Datagen, and the in-memory test pair."
+description: "Connectors are the technology-specific edges of a pipeline: Kafka, S3, ClickHouse, Avro, JSON, SQS, NATS JetStream, Datagen, and the in-memory test pair."
 ---
 
 # Connectors
@@ -20,6 +20,8 @@ Connectors are grouped by role:
 - **[Formats](formats/README.mdx)** — deserialize payloads into records.
 - **[Coordination stores](coordination/README.mdx)** — back the coordination
   seam a broker-less source scales out through.
+- **[Feeds](feeds/README.mdx)** — carry work units to a source that reads
+  them.
 
 ## The matrix
 
@@ -33,6 +35,7 @@ Connectors are grouped by role:
 | [Avro](formats/avro/README.mdx) | Format (deserializer) | `spate-avro` | `avro` | `deserializer: { avro: ... }` |
 | [JSON](formats/json/README.mdx) | Format (deserializer) | `spate-json` | `json` | `deserializer: { json: ... }` |
 | [NATS JetStream](coordination/nats/README.mdx) | Coordination store | `spate-coordination` | `coordination-nats` | `coordination: { store: { nats: ... } }` |
+| [Amazon SQS](feeds/sqs/README.mdx) | Feed | `spate-sqs` | `sqs` | `feed: { sqs: ... }` |
 | [In-memory](coordination/README.mdx) | Coordination store (solo) | `spate-coordination` | — (linked by each coordinated source) | `coordination: { store: { memory: {} } }` |
 | [Memory / Capture](memory.mdx) | Test source + sink | `spate-test` | — (separate dev-dependency) | `source: { memory: {} }` / `sink: { capture: {} }` (informational) |
 
@@ -94,6 +97,11 @@ the process.
   durably written. A malformed record follows the per-record Skip/Fail policy
   (surfaced in `spate_json_deser_records_dropped_total`); NDJSON isolates errors
   per line.
+- **Amazon SQS (feed)** — a unit is deleted only after every record in it
+  is acknowledged; a unit whose reader stops returns to the queue after its
+  visibility lapses, and a failed one returns at once. The queue's redrive
+  policy moves a unit to its dead-letter queue after `maxReceiveCount`
+  receives. See [the connector page](feeds/sqs/README.mdx).
 - **Memory / Capture (test)** — deterministic, in-process, and honest about
   the same contracts: commits only advance past durably "written" data, so
   tests can assert the at-least-once behavior itself. Not for production.

@@ -1,7 +1,7 @@
 /** The connector inventory the homepage renders. One entry per crate, as the README's table. */
 export type Connector = {
   name: string;
-  role: 'source' | 'sink' | 'source · sink' | 'format' | 'store';
+  role: 'source' | 'sink' | 'source · sink' | 'format' | 'store' | 'feed';
   crate: string;
   feature: string;
   summary: string;
@@ -32,6 +32,14 @@ export const CONNECTORS: Connector[] = [
     feature: 's3',
     summary: 'Coordinated backfill: a leader plans a prefix into splits, workers lease them with fenced progress.',
     docs: '/docs/user-guide/connectors/sources/s3',
+  },
+  {
+    name: 'SQS',
+    role: 'feed',
+    crate: 'spate-sqs',
+    feature: 'sqs',
+    summary: 'Work units in a standard queue, renewed while read and deleted once every record is written.',
+    docs: '/docs/user-guide/connectors/feeds/sqs',
   },
   {
     name: 'Avro',

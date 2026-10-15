@@ -28,6 +28,10 @@
   - changed-files:
       - any-glob-to-any-file: crates/spate-s3/**
 
+"crate: spate-sqs":
+  - changed-files:
+      - any-glob-to-any-file: crates/spate-sqs/**
+
 "crate: spate-json":
   - changed-files:
       - any-glob-to-any-file: crates/spate-json/**

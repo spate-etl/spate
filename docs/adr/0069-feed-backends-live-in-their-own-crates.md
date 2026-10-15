@@ -25,6 +25,10 @@ removed the AWS SDK from the dependency graph.
   `spate-kafka`, each behind a `spate` feature; sources name no backend
 - Both backends inside `spate-s3`, behind features
 - SQS through a thin HTTP client without the AWS SDK
+- `main()` passes the `feed:` section to the backend crate's constructor and
+  hands the feed it returns to `Pipeline::feed`
+- A registry in `spate-core` or the `spate` facade that builds the backend
+  the section names
 
 ## Decision outcome
 
@@ -40,6 +44,13 @@ names no backend, and a new backend touches no source. A pipeline's `feed:`
 section names the backend by its key; the runtime builds the in-process feed
 from it, and `main()` builds any other backend from the section and passes it
 to `Pipeline::feed`.
+
+ADR-0049 rejected an option where `main` decodes the section. Here `main()`
+decodes none of the backend's keys. The backend crate's constructor decodes
+and checks its own section, and `run()` refuses a passed-in feed whose backend
+differs from the section's key. A registry in `spate-core` would name backend crates in
+core, which INV-6 rules out. A registry in the facade would need a hook in
+`spate-core` for the runtime to call, to save `main()` one call.
 
 ### Consequences
 

@@ -2,8 +2,8 @@
 //!
 //! Four tasks on the I/O runtime do the queue's I/O. The receive task long
 //! polls while the reader wants more units than are buffered. The renewal
-//! task extends, every third of the visibility period, each held unit the
-//! reader marked since the last extension. The settle task sends deletes and
+//! task extends, every third of the visibility period, each held unit handed
+//! out or renewed since the last extension. The settle task sends deletes and
 //! fails, and the publish task sends publishes, each in batches of up to
 //! ten. The [`Feed`] methods only lock the shared state, change it and
 //! signal a task, so none of them waits (INV-2).
@@ -149,7 +149,7 @@ struct Held {
     /// `hold_end`.
     deadline: Instant,
     hold_end: Instant,
-    /// Renewed since the last extension.
+    /// Handed out or renewed since the last extension.
     marked: bool,
     /// SQS refused an extension: the receipt no longer holds the message.
     gone: bool,
@@ -470,7 +470,8 @@ impl Feed for SqsFeed {
             }
             let now = Instant::now();
             // A unit this close to its deadline would lapse before the next
-            // renewal could keep it.
+            // renewal could keep it. A unit kept is marked when handed out, so
+            // a tick before the reader's first renew still extends it.
             let State { buffered, held, .. } = &mut *st;
             buffered.retain(|receipt| {
                 let keep = held
@@ -493,6 +494,7 @@ impl Feed for SqsFeed {
                 if let Some(h) = st.held.get_mut(&receipt)
                     && let Some(unit) = h.unit.take()
                 {
+                    h.marked = true;
                     out.push(Delivery::new(unit, Receipt(receipt), h.deliveries));
                 }
             }

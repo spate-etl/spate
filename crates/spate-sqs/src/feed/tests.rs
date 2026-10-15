@@ -535,7 +535,15 @@ async fn a_fail_past_its_deadline_is_dropped_unsent() {
     feed.set_waker(waker);
     queue.inner.ready(Message::new("failed"));
     let failed = receive_n(&feed, &park, 1).await.remove(0);
+    // The tick due at 20 s extends the failed unit, handed out unrenewed, to
+    // 90 s. The acknowledged unit, received at 40 s, holds until 100 s, so
+    // its delete is retried past the failed unit's deadline.
     tokio::time::advance(Duration::from_secs(30)).await;
+    until("the tick extends the failed unit", || {
+        queue.visibility_at.lock().unwrap().len() == 1
+    })
+    .await;
+    tokio::time::advance(Duration::from_secs(10)).await;
     queue.inner.ready(Message::new("acknowledged"));
     let acknowledged = receive_n(&feed, &park, 1).await.remove(0);
     let deadline = feed.deadline_of(failed.receipt).unwrap();
@@ -552,11 +560,8 @@ async fn a_fail_past_its_deadline_is_dropped_unsent() {
         deletes.iter().any(|t| *t > deadline),
         "the delete was retried past the failed unit's deadline"
     );
-    let fails = queue.visibility_at.lock().unwrap().clone();
-    assert!(
-        fails.is_empty(),
-        "a fail was sent at {fails:?}, past {deadline:?}"
-    );
+    let fails = queue.inner.visibility();
+    assert_eq!(fails.len(), 1, "a fail was sent past {deadline:?}: {fails:?}");
 }
 
 /// Pins that a Fatal rejects with Fatal every publish the feed holds: the
@@ -715,4 +720,70 @@ async fn connecting_is_bounded_at_30_seconds_and_names_its_step() {
         panic!("{err:?}");
     };
     assert!(message.contains("reading the queue's ARN"), "{message}");
+}
+
+/// Moves tokio time in 100 ms steps, so each renewal tick runs at its own
+/// instant.
+async fn step(d: Duration) {
+    let n = d.as_millis() / 100;
+    for _ in 0..n {
+        tokio::time::advance(Duration::from_millis(100)).await;
+        settle_tasks().await;
+    }
+}
+
+/// Pins that a unit handed out with one renewal period left is kept when a
+/// tick falls between the hand-out and the reader's first renew.
+#[tokio::test(start_paused = true)]
+async fn a_unit_handed_out_before_a_tick_is_kept_by_its_first_renew() {
+    let (feed, queue) = start(MINUTE); // ticks near 0, 20, 40, 60, 80
+    let (waker, _park) = wake_channel();
+    feed.set_waker(waker);
+    settle_tasks().await;
+    step(Duration::from_millis(19_500)).await;
+    queue.ready(Message::new("u"));
+    assert!(feed.receive(1).unwrap().is_empty());
+    until("buffered", || feed.buffered() == 1).await; // deadline near 79.5 s
+    step(Duration::from_secs(40)).await; // t near 59.5 s, 20 s left
+    let got = feed.receive(1).unwrap();
+    assert_eq!(
+        got.len(),
+        1,
+        "a unit one period from its deadline is handed out"
+    );
+    let d = &got[0];
+    let deadline = feed.deadline_of(d.receipt).unwrap();
+    step(Duration::from_millis(600)).await; // the tick near 60 s runs first
+    let renewed_at = Instant::now();
+    feed.renew(d.receipt).unwrap();
+    step(Duration::from_secs(21)).await;
+    let renew = feed.renew(d.receipt).map_err(|e| e.kind);
+    assert_eq!(
+        renew,
+        Ok(()),
+        "renewed {:?} before its deadline, never extended: {:?}",
+        deadline - renewed_at,
+        queue.visibility()
+    );
+}
+
+/// Pins the drop rule at its boundary: a buffered unit exactly one renewal
+/// period from its deadline is handed out, and one a millisecond closer is
+/// dropped unread.
+#[tokio::test(start_paused = true)]
+async fn a_buffered_unit_under_one_period_from_its_deadline_is_dropped_unread() {
+    let period = MINUTE / 3;
+    for (left, handed_out) in [(period, true), (period - Duration::from_millis(1), false)] {
+        let (feed, queue) = start(MINUTE);
+        let (waker, _park) = wake_channel();
+        feed.set_waker(waker);
+        queue.ready(Message::new("u"));
+        assert!(feed.receive(1).unwrap().is_empty());
+        until("the unit is buffered", || feed.buffered() == 1).await;
+        let deadline = feed.lock().held.values().next().unwrap().deadline;
+        tokio::time::advance(deadline - left - Instant::now()).await;
+        let got = feed.receive(1).unwrap();
+        assert_eq!(got.len() == 1, handed_out, "{left:?} from its deadline");
+        assert_eq!(feed.buffered(), 0);
+    }
 }

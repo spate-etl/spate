@@ -91,8 +91,8 @@ retried.
 
 A worker receives each unit hidden from the other workers for
 `visibility`. Every third of that period the feed extends the visibility of
-each unit its reader renewed since the last extension, back to the full
-period. A worker that stops renewing, because it crashed or its control loop
+each unit handed to its reader or renewed since the last extension, back to
+the full period. A worker that stops renewing, because it crashed or its control loop
 stalled, loses its units at most one visibility period after their last
 extension, and SQS hands them to another worker.
 

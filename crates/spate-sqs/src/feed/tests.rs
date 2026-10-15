@@ -561,11 +561,16 @@ async fn a_fail_past_its_deadline_is_dropped_unsent() {
         "the delete was retried past the failed unit's deadline"
     );
     let fails = queue.inner.visibility();
-    assert_eq!(fails.len(), 1, "a fail was sent past {deadline:?}: {fails:?}");
+    assert_eq!(
+        fails.len(),
+        1,
+        "a fail was sent past {deadline:?}: {fails:?}"
+    );
 }
 
-/// Pins that a Fatal rejects with Fatal every publish the feed holds: the
-/// batch the publish task is sending and the publishes still queued behind it.
+/// Pins how a Fatal settles the publishes the feed holds: the batch the
+/// publish task is sending reads Retryable, since SQS may have stored it, and
+/// the publishes still queued behind it read Fatal.
 #[tokio::test(start_paused = true)]
 async fn a_fatal_delete_rejects_every_held_publish() {
     let (feed, queue) = start_gated(MINUTE);
@@ -593,7 +598,12 @@ async fn a_fatal_delete_rejects_every_held_publish() {
     .await;
     for (i, c) in publishes.iter_mut().enumerate() {
         let kind = c.try_outcome().unwrap().unwrap_err().kind;
-        assert_eq!(kind, FeedErrorKind::Fatal, "publish {i} read {kind:?}");
+        let expected = if i < 10 {
+            FeedErrorKind::Retryable
+        } else {
+            FeedErrorKind::Fatal
+        };
+        assert_eq!(kind, expected, "publish {i} read {kind:?}");
     }
 }
 

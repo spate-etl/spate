@@ -219,18 +219,32 @@ impl Shared {
     }
 
     /// Make `e` the answer to every later call, reject with it every publish
-    /// queued or being sent, and wake the reader.
+    /// still queued, and wake the reader. The batch being sent is rejected
+    /// as Retryable: SQS may have stored it.
     fn set_fatal(&self, e: &CallError) {
         let error = FeedError::new(FeedErrorKind::Fatal, e.message.clone());
         tracing::error!(error = %e.message, "the SQS feed stopped");
-        let (publishes, waker) = {
+        let (sending, queued, waker) = {
             let mut st = self.lock();
             st.fatal.get_or_insert(error.clone());
-            let mut publishes = std::mem::take(&mut st.sending);
-            publishes.append(&mut st.publishes);
-            (publishes, st.waker.clone())
+            (
+                std::mem::take(&mut st.sending),
+                std::mem::take(&mut st.publishes),
+                st.waker.clone(),
+            )
         };
-        for p in publishes {
+        let unknown = FeedError::new(
+            FeedErrorKind::Retryable,
+            format!(
+                "the feed stopped while the unit was being sent, so SQS may or may not \
+                 have stored it: {}",
+                e.message
+            ),
+        );
+        for p in sending {
+            p.confirmer.reject(unknown.clone());
+        }
+        for p in queued {
             p.confirmer.reject(error.clone());
         }
         if let Some(waker) = waker {

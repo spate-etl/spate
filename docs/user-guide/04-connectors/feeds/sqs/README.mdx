@@ -162,7 +162,10 @@ A unit is at most 1 MiB as a message, its body and the `spate.unit`
 attribute counted together; a larger one is refused before it is sent.
 Publishes go out in batches of up to ten units and 1 MiB. Each publish is
 confirmed by its own entry: an entry SQS rejects as the sender's fault is
-refused, and any other failed entry is reported as retryable. A delete or
+refused, and any other failed entry is reported as retryable. When the feed
+stops on a fatal error, the batch it is sending is reported as retryable,
+since SQS may have stored it, and the publishes not yet sent are rejected
+with the error. A delete or
 visibility change SQS fails for one entry is dropped, and that unit returns
 to the queue when its visibility lapses.
 

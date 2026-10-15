@@ -338,8 +338,7 @@ mod tests {
 
     /// Pins that `within` bounds a `ChangeMessageVisibilityBatch` and its
     /// retries: against a server that never answers, the call fails as
-    /// Retryable once `within` has passed, before the client's 5 s read
-    /// timeout ends a first attempt.
+    /// Retryable after `within` and before twice `within`.
     #[tokio::test]
     async fn a_visibility_call_ends_within_its_bound() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -367,7 +366,7 @@ mod tests {
         let elapsed = started.elapsed();
         assert_eq!(e.class, Class::Retryable, "{}", e.message);
         assert!(
-            elapsed >= within && elapsed < client::READ_TIMEOUT,
+            elapsed >= within && elapsed < within * 2,
             "ended after {elapsed:?}: {}",
             e.message
         );

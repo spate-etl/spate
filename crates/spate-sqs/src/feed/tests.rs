@@ -1067,3 +1067,20 @@ async fn a_send_timed_out_then_denied_reads_retryable() {
     assert_eq!(conns.load(Ordering::SeqCst), 2, "{e}");
     assert_eq!(e.kind, FeedErrorKind::Retryable, "{e}");
 }
+
+/// Pins that a batch-shape failure after a retried send keeps Refused.
+#[tokio::test(start_paused = true)]
+async fn a_batch_shape_failure_after_a_retried_send_reads_refused() {
+    let (feed, queue) = start(MINUTE);
+    queue.fail_next_send_call(CallError::retryable("read timeout"));
+    queue.fail_next_send_call(CallError::batch_shape("BatchRequestTooLong"));
+    let mut c = feed.publish(Unit::new("p", "body"));
+    until("the first send", || queue.sends().len() == 1).await;
+    tokio::time::advance(Duration::from_millis(200)).await;
+    until("the publish settles", || c.try_outcome().is_some()).await;
+    assert_eq!(queue.sends().len(), 2);
+    assert_eq!(
+        c.try_outcome().unwrap().unwrap_err().kind,
+        FeedErrorKind::Refused
+    );
+}

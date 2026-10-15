@@ -321,7 +321,7 @@ says so. An in-process feed built from the file alone has no publisher, so the
 run reads nothing. To publish to the in-process feed, code builds a
 `MemoryFeed`, keeps a handle, and passes it to `Pipeline::feed` with
 `feed: { memory: {} }` in the file. Units from another process need a durable
-backend. A run on the feed path never reports its input finished, so it ends
+[feed backend](../../feeds/README.mdx). A run on the feed path never reports its input finished, so it ends
 at a shutdown. Without a `feed:` section the
 source plans splits as described above.
 

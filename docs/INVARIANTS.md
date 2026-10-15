@@ -24,7 +24,10 @@ year ago still means what it said.
 
 - <Anchor id="inv-1" />**INV-1 — delivery is at-least-once.** A source watermark
   is never committed past unacknowledged data, including across rebalances and
-  shutdown. Everything else exists to make this one affordable.
+  shutdown. A unit moved to a dead-letter destination counts as unacknowledged
+  until it is redriven. Data the source system or the feed deletes before it is
+  read, by retention or by an overwrite, is outside the property. Everything
+  else exists to make this one affordable.
 - <Anchor id="inv-2" />**INV-2 — source threads never block on a channel send.**
   Backpressure is `try_send` plus `Source::pause` plus continuing to poll. A
   blocked poll loop gets the consumer evicted from its group, which is a worse

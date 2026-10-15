@@ -18,5 +18,5 @@ so there is no `DOCS` file. The one lane follows the newest release.
 
 ## What a bump runs
 
-`cargo xtask ci-changes` maps this directory to the `spate-test-support`
-container suite.
+`cargo xtask ci-changes` maps this directory to the `spate-sqs` and
+`spate-test-support` container suites.

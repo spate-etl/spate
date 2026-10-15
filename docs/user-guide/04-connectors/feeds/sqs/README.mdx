@@ -1,0 +1,187 @@
+---
+description: "The Amazon SQS feed: work units in a standard queue, renewed while a worker reads them, deleted once read, and dead-lettered by the queue's redrive policy."
+---
+
+# Amazon SQS (feed)
+
+The Amazon SQS feed (`spate-sqs`, feature `sqs` on the `spate` facade) carries
+[work units](../../../07-reference/glossary.mdx#work-unit) in one SQS standard
+queue that every worker of a pipeline reads. A received unit stays hidden from
+the other workers while its reader renews it, is deleted once every record in
+it is acknowledged, and returns to the queue when its reader fails it or
+stops. The queue's redrive policy moves a unit that keeps failing to the
+dead-letter queue. The backend lives in its own crate so that a source names
+no backend ([ADR-0069](../../../../adr/0069-feed-backends-live-in-their-own-crates.md)).
+
+Construct it from the pipeline's opaque section, with the I/O runtime handle,
+and pass it to `Pipeline::feed`:
+
+```rust file=crates/spate/examples/s3_sqs_backfill.rs region=connect
+```
+
+That code comes from
+[`s3_sqs_backfill.rs`](repo:crates/spate/examples/s3_sqs_backfill.rs), which
+reads a staged `file://` backfill through a queue:
+
+```sh
+SQS_QUEUE_URL=https://sqs.eu-west-2.amazonaws.com/111122223333/jobs \
+  cargo run -p spate --features s3,json,sqs --example s3_sqs_backfill
+```
+
+`SqsFeed::connect` reads the queue's ARN once, so a missing queue or a
+refused credential fails there, before the pipeline starts. Connecting takes
+at most 30 seconds, every step included; past that it fails as unavailable,
+naming the step it was on.
+
+## Configuration
+
+The `feed: { sqs: ... }` section deserializes into `SqsFeedConfig`
+([`spate-sqs/src/config.rs`](repo:crates/spate-sqs/src/config.rs)); unknown
+fields are rejected with the offending key.
+
+```yaml file=crates/spate/examples/s3_sqs_backfill.rs region=feed
+```
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `queue_url` | string | `required` | The queue's URL, as `GetQueueUrl` returns it. An `http` or `https` URL. A FIFO queue, whose URL ends in `.fifo`, is refused. |
+| `visibility` | duration | `60s` | How long a received unit stays hidden from other workers without a renewal. Whole seconds from `3s` to `12h`. |
+| `region` | string | `none` | The AWS region. Unset, the region in a `sqs.<region>.amazonaws.com` queue URL applies, then `AWS_REGION`, the shared config file and instance metadata. |
+| `endpoint` | string | `none` | An endpoint in place of the region's, such as a local emulator. `AWS_ENDPOINT_URL` in the environment sets one too. |
+
+`units_held` beside `sqs:` sets how many units a worker holds at once. The
+section's `attempt_cap` is refused on `sqs`, because SQS counts deliveries
+through the queue's `maxReceiveCount`.
+
+## Security (credentials, permissions and TLS)
+
+Credentials come from the AWS SDK's default provider chain: the
+`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN`
+environment variables, a profile in the shared config and credentials files
+(`AWS_PROFILE`, SSO and `credential_process` included), a web identity token
+(IRSA), the container credentials endpoint (ECS task roles, EKS Pod Identity)
+and instance metadata. The section takes no secret of its own. The general
+model is on the [securing hub](../../../03-guides/securing-connections.mdx).
+
+The identity a worker runs as needs these actions:
+
+| Action | On |
+|---|---|
+| `sqs:ReceiveMessage`, `sqs:DeleteMessage`, `sqs:ChangeMessageVisibility` | The queue |
+| `sqs:GetQueueAttributes` | The queue and its dead-letter queue |
+| `sqs:SendMessage` | The queue, for a process that publishes units |
+
+The client verifies SQS against the system trust store. When `SSL_CERT_FILE`
+or `SSL_CERT_DIR` is set, the certificates they name replace the system store.
+If the store yields no certificate the client can parse, it logs a warning and
+uses the Mozilla root bundle compiled into the binary. It goes through the
+proxy that `HTTPS_PROXY`, `HTTP_PROXY` or `ALL_PROXY` names, except for the
+hosts in `NO_PROXY`.
+
+A rejected credential, signature or token, a 401 or 403 answer, a missing
+queue and a rejected TLS handshake are fatal: connecting fails with them, and
+after startup the feed returns the error to every call and the pipeline stops.
+Throttling, a 5xx answer, a timeout and a failure to load credentials are
+retried.
+
+## Visibility and renewal
+
+A worker receives each unit hidden from the other workers for
+`visibility`. Every third of that period the feed extends the visibility of
+each unit its reader renewed since the last extension, back to the full
+period. A worker that stops renewing, because it crashed or its control loop
+stalled, loses its units at most one visibility period after their last
+extension, and SQS hands them to another worker.
+
+The long-poll wait is `visibility / 3` seconds, rounded down and at most 20.
+A unit that arrives at the end of a poll therefore still has two renewal
+periods before its visibility lapses. A unit that is less than one renewal
+period from its lapse when the reader asks for it is dropped unread and
+returns to the queue when it lapses. A visibility under `60s` polls more often
+on an idle queue.
+
+## The 12-hour hold
+
+SQS keeps a message hidden for at most 12 hours from its first receive. The
+feed counts the hold from the message's `ApproximateFirstReceiveTimestamp`,
+less 30 seconds for clock skew, and clamps the first visibility and every
+extension to it.
+
+A unit first received more than 12 h − 30 s − `visibility / 3` earlier, about
+12 hours at the default visibility and about 8 hours at a `12h` visibility, is
+dropped unread at every receive. Each of those receives counts toward
+`maxReceiveCount`, so the unit reaches the dead-letter queue unread. At a
+visibility above about 9 hours, that includes every unit received again after
+its visibility lapsed.
+
+## Failing a unit
+
+A worker fails a unit it cannot read by setting its visibility to zero, so
+the queue hands it out again at once. A unit whose visibility has already
+lapsed is not touched, since it is back in the queue. After
+`maxReceiveCount` receives the queue's redrive policy moves the unit to the
+dead-letter queue. The feed never sends to the dead-letter queue itself.
+
+## Redrive
+
+Every receive counts toward `maxReceiveCount`: a worker failing the unit, a
+worker that stopped with it held, a crash loop around a sink outage, and a
+receive that drops a unit too close to its lapse. Set `maxReceiveCount` above
+the number of such receives a unit can see, or a unit that would have been
+read reaches the dead-letter queue.
+
+## Retention
+
+SQS deletes a message when the queue's retention period ends, counted from
+when it was first sent and kept when the message moves to the dead-letter
+queue. A unit deleted that way is lost, which INV-1 places outside its
+property (see [the invariants](../../../../INVARIANTS.md#inv-1)). A
+dead-letter queue deleted after the pipeline starts loses the units moved to
+it; nothing checks for it while the pipeline runs.
+
+## Stop
+
+A stop does not wait for queued deletes. A delete still queued when the
+pipeline stops is dropped, and its unit returns after one visibility period
+and is read again. A stop can also drop units already received for the
+reader and not yet handed to it, which costs each of them a receive toward
+`maxReceiveCount`.
+
+## Message mapping
+
+| Unit | Message |
+|---|---|
+| Body | The message body, sent as text. A body that is not UTF-8, is empty, or holds a character SQS does not accept is refused before it is sent. |
+| Id | The String message attribute `spate.unit`. A message without it takes its `MessageId` as the unit's id. |
+| Delivery count | `ApproximateReceiveCount`, or 1 when absent. |
+
+A unit is at most 1 MiB as a message, its body and the `spate.unit`
+attribute counted together; a larger one is refused before it is sent.
+Publishes go out in batches of up to ten units and 1 MiB. Each publish is
+confirmed by its own entry: an entry SQS rejects as the sender's fault is
+refused, and any other failed entry is reported as retryable. A delete or
+visibility change SQS fails for one entry is dropped, and that unit returns
+to the queue when its visibility lapses.
+
+## Cost per request
+
+Each unit costs a send, a receive and a delete, each batched up to ten to a
+request, plus one visibility change per renewal period while it is held,
+batched the same way. A worker that wants more units than it holds keeps one
+long poll open, so an idle worker sends a receive every `visibility / 3`
+seconds, at most every 20: three a minute at the default visibility, and
+thirty a minute at `6s`.
+
+## Metrics
+
+The SQS feed registers no metric families of its own.
+
+## Related
+
+- [Feeds](../README.mdx) — the other feed backends.
+- [Work feed](../../../02-concepts/09-work-feed.mdx) — the ack rule and
+  redelivery every backend follows.
+- [`feed:` reference](../../../07-reference/configuration.mdx#feed) — the
+  keys every backend shares.
+- [S3 source](../../sources/s3/README.mdx#reading-from-a-feed) — a source that
+  reads units from a feed.

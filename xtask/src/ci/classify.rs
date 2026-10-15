@@ -224,8 +224,10 @@ pub(crate) fn classify(
                 image_suites.extend(["spate-s3", "spate-test-support"].map(String::from));
                 out.container_pkgs.extend(image_suites.iter().cloned());
             }
+            // The queue the SQS feed's suite runs against, and the shared
+            // helpers' smoke tests.
             if glob(path, "ci/elasticmq/*") {
-                image_suites.insert("spate-test-support".to_string());
+                image_suites.extend(["spate-sqs", "spate-test-support"].map(String::from));
                 out.container_pkgs.extend(image_suites.iter().cloned());
             }
             // The client image `spate-kafka`'s TLS suite runs its clients in.
@@ -479,7 +481,8 @@ mod tests {
                 "spate-clickhouse",
                 "spate-coordination",
                 "spate-kafka",
-                "spate-s3"
+                "spate-s3",
+                "spate-sqs"
             ]
         );
     }
@@ -516,6 +519,7 @@ mod tests {
                 "spate-coordination",
                 "spate-kafka",
                 "spate-s3",
+                "spate-sqs",
                 "spate-test-support"
             ]
         );
@@ -765,7 +769,8 @@ mod tests {
     }
 
     /// A RustFS bump selects the suites that boot RustFS and an ElasticMQ bump
-    /// the shared helpers' suite alone, on a Dependabot pull request too.
+    /// the SQS feed's suite and the shared helpers' suite, on a Dependabot
+    /// pull request too.
     #[test]
     fn a_test_store_image_bump_selects_the_suites_that_boot_it() {
         let ctx = Context {
@@ -779,7 +784,7 @@ mod tests {
             ),
             (
                 "ci/elasticmq/stable/Dockerfile",
-                &["spate-test-support"][..],
+                &["spate-sqs", "spate-test-support"][..],
             ),
         ] {
             assert_eq!(suites(&run(&[image])), expected, "{image}");

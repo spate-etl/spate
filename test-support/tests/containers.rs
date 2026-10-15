@@ -126,3 +126,30 @@ fn elasticmq_one_receive_returns_every_message() {
     bodies.sort();
     assert_eq!(bodies, ["one", "three", "two"]);
 }
+
+/// A queue created with a redrive policy reports it, naming its dead-letter
+/// queue by ARN, and a deleted queue no longer answers.
+#[test]
+#[ignore = "requires Docker"]
+fn elasticmq_reports_a_redrive_policy() {
+    let elasticmq = ElasticMq::start().expect("start ElasticMQ");
+    let dead = elasticmq.create_queue("smoke-dlq").unwrap();
+    let arn = elasticmq.queue_arn(&dead).unwrap();
+    assert!(arn.ends_with(":smoke-dlq"), "{arn}");
+    let policy = format!(r#"{{"deadLetterTargetArn":"{arn}","maxReceiveCount":"5"}}"#);
+    let queue = elasticmq
+        .create_queue_with_attributes("smoke-src", &[("RedrivePolicy", &policy)])
+        .unwrap();
+    let reported = elasticmq
+        .queue_attribute(&queue, "RedrivePolicy")
+        .unwrap()
+        .expect("the queue reports its redrive policy");
+    assert!(reported.contains(&arn), "{reported}");
+    assert!(reported.contains("\"maxReceiveCount\":5"), "{reported}");
+
+    elasticmq.delete_queue(&dead).unwrap();
+    assert!(
+        elasticmq.queue_arn(&dead).is_err(),
+        "a deleted queue answers"
+    );
+}

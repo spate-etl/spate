@@ -20,6 +20,7 @@ spate-json = { workspace = true, optional = true }
 spate-kafka = { workspace = true, optional = true }
 spate-clickhouse = { workspace = true, optional = true }
 spate-s3 = { workspace = true, optional = true }
+spate-sqs = { workspace = true, optional = true }
 
 [dev-dependencies]
 apache-avro = { workspace = true }
@@ -163,6 +164,10 @@ required-features = ["coordination"]
 test = true
 
 [[example]]
+name = "s3_sqs_backfill"
+required-features = ["s3", "json", "sqs"]
+
+[[example]]
 name = "s3_coordinated_backfill"
 required-features = ["s3", "json", "coordination"]
 test = true
@@ -182,6 +187,7 @@ coordination = ["dep:spate-coordination"]
 # Deprecated: v0.4.0 removes it, where a work feed replaces split coordination.
 coordination-nats = ["coordination", "spate-coordination/nats"]
 s3 = ["dep:spate-s3"]
+sqs = ["dep:spate-sqs"]
 datagen = ["dep:spate-datagen"]
 datagen-avro = ["datagen", "spate-datagen/avro"]
 kafka-tls = ["kafka", "spate-kafka/tls"]

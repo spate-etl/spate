@@ -1,0 +1,47 @@
+[package]
+name = "spate-sqs"
+description = "Amazon SQS work-feed backend for the Spate pipeline framework: a source reads units from an SQS standard queue, each received unit's visibility is renewed while it is read, a unit is deleted only once every record in it is acknowledged, and a failed unit returns to the queue for the queue's redrive policy. Applications should depend on the `spate` facade crate with the `sqs` feature."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+# Test-only. Off by default, not enabled by the `spate` facade, and outside
+# the semver surface.
+testing = []
+
+[dependencies]
+aws-config = { workspace = true }
+aws-sdk-sqs = { workspace = true }
+aws-smithy-http-client = { workspace = true }
+base64 = { workspace = true }
+humantime-serde = { workspace = true }
+# The rustls the SDK's client links, for `tls_rejection!` and root parsing.
+rustls = { workspace = true }
+rustls-native-certs = { workspace = true }
+serde = { workspace = true }
+spate-core = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
+tracing = { workspace = true }
+url = { workspace = true }
+webpki-root-certs = { workspace = true }
+
+[dev-dependencies]
+spate-sqs = { path = ".", features = ["testing"] }
+serde_yaml = { workspace = true }
+spate-json = { workspace = true }
+spate-s3 = { workspace = true }
+spate-test = { workspace = true }
+spate-test-support = { workspace = true, features = ["elasticmq"] }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "test-util"] }
+
+[lints]
+workspace = true

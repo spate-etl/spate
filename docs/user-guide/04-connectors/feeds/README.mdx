@@ -1,0 +1,24 @@
+---
+description: "Feed backends carry work units to a feed-reading source: Amazon SQS across processes, and an in-process feed for one instance and tests."
+---
+
+# Feeds
+
+A **feed** carries [work units](../../07-reference/glossary.mdx#work-unit) to a
+source that reads them, holds each unit while a worker reads it, and delivers a
+unit again when its reader stops before acknowledging it. The
+[work feed](../../02-concepts/09-work-feed.mdx) page describes the model.
+
+| Feed | `feed:` key | Feature on `spate` | Summary |
+|---|---|---|---|
+| [Amazon SQS](sqs/README.mdx) | `sqs` | `sqs` | A standard queue shared by every worker. Built in code from the section and passed to `Pipeline::feed`. |
+| In-process | `memory` | none | A feed inside one process, never shared between processes. The runtime builds it from `feed: { memory: {} }`; code that publishes to it builds a `MemoryFeed` and passes it to `Pipeline::feed`. Its body takes no keys. |
+
+A feed is selected by the pipeline's
+[`feed:` section](../../07-reference/configuration.mdx#feed). Its body is the
+backend's own configuration, documented on its page; `units_held` and
+`attempt_cap` beside it apply whatever the backend.
+
+Custom backends implement
+[`Feed`](https://docs.rs/spate-core/latest/spate_core/feed/trait.Feed.html),
+whose module docs state the ack rule every backend follows.

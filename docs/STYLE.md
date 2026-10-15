@@ -139,6 +139,7 @@ Connectors live under `docs/user-guide/04-connectors/`, grouped by role:
   sinks/                write records out        (README.mdx card index + one folder per sink)
   formats/              decode payloads          (README.mdx card index + one folder per format)
   coordination/         back the coordination seam (README.mdx card index + one folder per store)
+  feeds/                carry work units to a source (README.mdx card index + one folder per backend)
   memory.mdx            dual-role test connector — the one deliberate flat-file exception
 ```
 
@@ -154,6 +155,9 @@ Rules:
 - **A coordination store is a connector.** It plugs into a trait seam, ships
   behind its own facade feature, and carries config and metrics like any other,
   so it is documented like any other, under `coordination/`.
+- **A feed backend is a connector.** It plugs into the feed trait, ships
+  behind its own facade feature, and carries config like any other, so it is
+  documented like any other, under `feeds/`.
 - **Each role directory has a `README.mdx` card index**: a table of
   `name · config tag · one-line summary`, one row per connector. Every
   connector in the tree appears in exactly one card index.
@@ -166,7 +170,7 @@ Rules:
 
 Copy `04-connectors/_template.mdx`. The heading order is fixed:
 
-1. `# <Connector> (source|sink|format|coordination store)`, then a
+1. `# <Connector> (source|sink|format|coordination store|feed)`, then a
    one-paragraph summary in the canonical shape: "The X <role> (`crate`,
    feature `f` on the `spate` facade) …".
 2. A construct-it snippet, introduced with the canonical sentence

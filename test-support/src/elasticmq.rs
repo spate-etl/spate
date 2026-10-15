@@ -95,11 +95,36 @@ impl ElasticMq {
     ///
     /// Fails when the API refuses the call or its reply carries no queue URL.
     pub fn create_queue(&self, name: &str) -> Result<String, String> {
-        let reply = call(
-            self.api,
-            "/",
-            &[("Action", "CreateQueue"), ("QueueName", name)],
-        )?;
+        self.create_queue_with_attributes(name, &[])
+    }
+
+    /// Creates the queue `name` with each `(name, value)` queue attribute,
+    /// such as `("RedrivePolicy", …)`, and returns its path as
+    /// [`ElasticMq::create_queue`] does.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the API refuses the call, as it does for a redrive policy
+    /// naming a queue that does not exist, or its reply carries no queue URL.
+    pub fn create_queue_with_attributes(
+        &self,
+        name: &str,
+        attributes: &[(&str, &str)],
+    ) -> Result<String, String> {
+        let keys: Vec<(String, String)> = (1..=attributes.len())
+            .map(|n| {
+                (
+                    format!("Attribute.{n}.Name"),
+                    format!("Attribute.{n}.Value"),
+                )
+            })
+            .collect();
+        let mut params = vec![("Action", "CreateQueue"), ("QueueName", name)];
+        for ((name_key, value_key), (attribute, value)) in keys.iter().zip(attributes) {
+            params.push((name_key.as_str(), attribute));
+            params.push((value_key.as_str(), value));
+        }
+        let reply = call(self.api, "/", &params)?;
         let url = element(&reply, "QueueUrl")
             .ok_or_else(|| format!("no QueueUrl in CreateQueue reply: {reply}"))?;
         let path = url
@@ -107,6 +132,45 @@ impl ElasticMq {
             .and_then(|(_, rest)| rest.find('/').map(|at| &rest[at..]))
             .ok_or_else(|| format!("no path in queue URL {url}"))?;
         Ok(path.to_owned())
+    }
+
+    /// Deletes the queue at `queue`, a path [`ElasticMq::create_queue`]
+    /// returned.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the API refuses the call.
+    pub fn delete_queue(&self, queue: &str) -> Result<(), String> {
+        call(self.api, queue, &[("Action", "DeleteQueue")]).map(drop)
+    }
+
+    /// The value of the queue attribute `name` on `queue`, unescaped, or
+    /// `None` when the server does not report it.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the API refuses the call.
+    pub fn queue_attribute(&self, queue: &str, name: &str) -> Result<Option<String>, String> {
+        let reply = call(
+            self.api,
+            queue,
+            &[("Action", "GetQueueAttributes"), ("AttributeName.1", name)],
+        )?;
+        Ok(reply
+            .split("<Attribute>")
+            .find(|a| element(a, "Name") == Some(name))
+            .and_then(|a| element(a, "Value"))
+            .map(unescape))
+    }
+
+    /// The ARN of `queue`, which a redrive policy names it by.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the API refuses the call or reports no ARN.
+    pub fn queue_arn(&self, queue: &str) -> Result<String, String> {
+        self.queue_attribute(queue, "QueueArn")?
+            .ok_or_else(|| format!("no QueueArn for {queue}"))
     }
 
     /// Sends `body` to the queue at `queue`, a path [`ElasticMq::create_queue`]

@@ -26,7 +26,7 @@ are testing, so adding either is a change inside `ci/`.
 | --- | --- | --- |
 | [`clickhouse`](clickhouse/README.md) | `lts-previous`, `lts`, `stable` | `spate-clickhouse`, and `spate`'s examples tier |
 | [`debian`](debian/README.md) | `trixie` | `spate-kafka`'s `tls_system_ca`, as its vendored OpenSSL client image |
-| [`elasticmq`](elasticmq/README.md) | `stable` | `spate-test-support`'s smoke tests |
+| [`elasticmq`](elasticmq/README.md) | `stable` | `spate-sqs`, and `spate-test-support`'s smoke tests |
 | [`kafka`](kafka/README.md) | `stable` | `spate-kafka`, and `spate`'s end-to-end suites |
 | [`nats`](nats/README.md) | `floor`, `below-floor`, `async` | `spate-coordination`, `spate-s3`'s `coordinated_nats`, and `spate`'s examples tier |
 | [`rust`](rust/README.md) | `stable` | `spate-kafka`'s `tls_system_ca`, as its system OpenSSL builder and client image |

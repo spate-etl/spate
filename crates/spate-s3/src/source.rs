@@ -343,8 +343,7 @@ impl Source for S3Source {
             tracing::warn!(
                 feed = feed.backend(),
                 "the S3 source publishes no units of its own and reads only units published to \
-                 the feed; an in-process feed built from the file alone has no publisher, so the \
-                 run reads nothing until code passes one it publishes to through `Pipeline::feed`"
+                 the feed"
             );
             self.state = State::Feed(Box::new(UnitReader::new(feed, parts, self.units_held)));
             return Ok(());

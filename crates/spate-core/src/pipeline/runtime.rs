@@ -255,10 +255,16 @@ impl<S: Source + 'static> PipelineRuntime<S> {
             (Some(section), given) => {
                 let feed = match given {
                     Some(feed) => feed,
-                    None if section.backend().type_tag() == "memory" => Arc::new(
-                        MemoryFeed::from_section(section)
-                            .map_err(|e| StartError::Config(e.to_string()))?,
-                    ),
+                    None if section.backend().type_tag() == "memory" => {
+                        let feed = MemoryFeed::from_section(section)
+                            .map_err(|e| StartError::Config(e.to_string()))?;
+                        tracing::warn!(
+                            "the in-process feed built from the `feed:` section has no publisher, \
+                             so the source reads nothing unless code passes a feed it publishes \
+                             to through `Pipeline::feed`"
+                        );
+                        Arc::new(feed)
+                    }
                     None => {
                         return Err(StartError::Config(format!(
                             "the `{}` feed backend is built in code: build it from the `feed:` \

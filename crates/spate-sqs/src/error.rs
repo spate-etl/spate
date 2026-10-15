@@ -23,10 +23,11 @@ pub enum SqsError {
     /// The `feed:` section is not one the SQS feed can read.
     #[error(transparent)]
     Config(#[from] ConfigError),
-    /// SQS refused the request, and sending it again fails the same way: a
-    /// rejected credential, a missing permission or queue, a rejected TLS
-    /// handshake.
-    #[error("SQS refused the feed: {0}")]
+    /// The feed cannot start, and starting again fails the same way: SQS
+    /// refused a request, for a rejected credential, a missing permission or
+    /// queue, or a rejected TLS handshake; the TLS context could not be
+    /// built; or the queue failed one of the feed's startup checks.
+    #[error("the SQS feed cannot start: {0}")]
     Refused(String),
     /// SQS did not answer in time, or kept failing transiently. Starting
     /// again later may succeed.

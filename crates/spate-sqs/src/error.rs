@@ -1,9 +1,9 @@
 //! The crate's public error, and SDK errors classified as Fatal or Retryable.
 //!
-//! A credential, permission or TLS rejection, a missing queue and a
-//! malformed batch are Fatal: retrying cannot succeed. Everything else,
-//! throttling, 5xx, timeouts and a failure to load credentials included, is
-//! Retryable.
+//! A credential, permission or TLS rejection, a KMS key the queue cannot
+//! use, a missing queue and a malformed batch are Fatal: retrying cannot
+//! succeed. Everything else, throttling, 5xx, timeouts and a failure to load
+//! credentials included, is Retryable.
 
 use aws_sdk_sqs::config::http::HttpResponse;
 use aws_sdk_sqs::error::{ProvideErrorMetadata, SdkError};
@@ -59,6 +59,16 @@ const REJECTED: &[&str] = &[
     "ExpiredToken",
     "InvalidAddress",
     "InvalidSecurity",
+];
+
+/// Codes for a queue's KMS key that SQS cannot use until an operator changes
+/// the key or its policy. `KMS.ThrottlingException` stays Retryable.
+const KMS_KEY: &[&str] = &[
+    "KMS.AccessDeniedException",
+    "KMS.DisabledException",
+    "KMS.NotFoundException",
+    "KMS.InvalidStateException",
+    "KMS.OptInRequired",
 ];
 
 /// Whether `code` is `name`, bare or with SQS's `AWS.SimpleQueueService.`
@@ -119,7 +129,14 @@ pub(crate) trait TypedFatal {
 
 impl TypedFatal for ReceiveMessageError {
     fn typed_fatal(&self) -> bool {
-        self.is_queue_does_not_exist() || self.is_invalid_address() || self.is_invalid_security()
+        self.is_queue_does_not_exist()
+            || self.is_invalid_address()
+            || self.is_invalid_security()
+            || self.is_kms_access_denied()
+            || self.is_kms_disabled()
+            || self.is_kms_not_found()
+            || self.is_kms_invalid_state()
+            || self.is_kms_opt_in_required()
     }
 }
 
@@ -134,6 +151,11 @@ impl TypedFatal for SendMessageBatchError {
         self.is_queue_does_not_exist()
             || self.is_invalid_address()
             || self.is_invalid_security()
+            || self.is_kms_access_denied()
+            || self.is_kms_disabled()
+            || self.is_kms_not_found()
+            || self.is_kms_invalid_state()
+            || self.is_kms_opt_in_required()
             || self.typed_batch_shape()
     }
 
@@ -209,6 +231,7 @@ where
         || rejected
         || code_in(code, MISSING_QUEUE)
         || code_in(code, REJECTED)
+        || code_in(code, KMS_KEY)
         || typed.is_some_and(TypedFatal::typed_fatal)
     {
         fatal(message, batch_shape)
@@ -297,6 +320,69 @@ mod tests {
         let meta = ErrorMetadata::builder().code("InternalError").build();
         let failed = service(ReceiveMessageError::generic(meta), 500);
         assert_eq!(classify("ReceiveMessage", &failed).class, Class::Retryable);
+    }
+
+    /// Pins that each KMS error an operator must fix is Fatal, as the typed
+    /// variant and as a generic code on `ReceiveMessage` and
+    /// `SendMessageBatch`, and that KMS throttling is Retryable.
+    #[test]
+    fn a_kms_key_the_queue_cannot_use_is_fatal() {
+        use aws_sdk_sqs::types::error::{
+            KmsAccessDenied, KmsDisabled, KmsInvalidState, KmsNotFound, KmsOptInRequired,
+            KmsThrottled,
+        };
+        // Without a code in the metadata, so only the typed check can match.
+        macro_rules! typed {
+            ($ty:ident) => {{
+                let meta = || ErrorMetadata::builder().message("scripted").build();
+                (
+                    ReceiveMessageError::$ty($ty::builder().meta(meta()).build()),
+                    SendMessageBatchError::$ty($ty::builder().meta(meta()).build()),
+                )
+            }};
+        }
+        let cases = [
+            ("KMS.AccessDeniedException", typed!(KmsAccessDenied)),
+            ("KMS.DisabledException", typed!(KmsDisabled)),
+            ("KMS.NotFoundException", typed!(KmsNotFound)),
+            ("KMS.InvalidStateException", typed!(KmsInvalidState)),
+            ("KMS.OptInRequired", typed!(KmsOptInRequired)),
+        ];
+        for (code, (receive, send)) in cases {
+            assert_eq!(
+                classify("ReceiveMessage", &service(receive, 400)).class,
+                Class::Fatal,
+                "typed {code}"
+            );
+            assert_eq!(
+                classify("SendMessageBatch", &service(send, 400)).class,
+                Class::Fatal,
+                "typed {code}"
+            );
+            assert_eq!(
+                classify("ReceiveMessage", &receive_error(code)).class,
+                Class::Fatal,
+                "{code}"
+            );
+            assert_eq!(
+                classify("SendMessageBatch", &batch_error(code)).class,
+                Class::Fatal,
+                "{code}"
+            );
+        }
+        let (receive, send) = typed!(KmsThrottled);
+        assert_eq!(
+            classify("ReceiveMessage", &service(receive, 400)).class,
+            Class::Retryable
+        );
+        assert_eq!(
+            classify("SendMessageBatch", &service(send, 400)).class,
+            Class::Retryable
+        );
+        assert_eq!(
+            classify("SendMessageBatch", &batch_error("KMS.ThrottlingException")).class,
+            Class::Retryable
+        );
     }
 
     /// Pins the matcher: a code matches bare or prefixed, never by suffix.

@@ -79,9 +79,11 @@ proxy that `HTTPS_PROXY`, `HTTP_PROXY` or `ALL_PROXY` names, except for the
 hosts in `NO_PROXY`.
 
 A rejected credential, signature or token, a 401 or 403 answer, a missing
-queue and a rejected TLS handshake are fatal: connecting fails with them, and
-after startup the feed returns the error to every call and the pipeline stops.
-Throttling, a 5xx answer, a timeout and a failure to load credentials are
+queue, a rejected TLS handshake and a KMS key the queue cannot use (access
+denied, disabled, not found, in an invalid state, or needing opt-in) are
+fatal: connecting fails with them, and after startup the feed returns the
+error to every call and the pipeline stops. Throttling, KMS throttling
+included, a 5xx answer, a timeout and a failure to load credentials are
 retried.
 
 ## Visibility and renewal

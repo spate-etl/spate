@@ -717,3 +717,38 @@ fn a_zero_byte_folder_marker_unit_is_acknowledged() {
     let c = feed.counts();
     assert_eq!((c.dead_lettered, c.acknowledged), (0, 1));
 }
+
+/// Pins that a source given a feed or a coordinator in code refuses a
+/// `feed:` section when the runtime offers it.
+#[test]
+#[expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
+fn a_feed_section_is_refused_beside_a_feed_or_coordinator_given_in_code() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let yaml = PipelineYaml::file("s3-feed-section-conflict", &data)
+        .section("feed:\n  memory: {}\n")
+        .build();
+    let config = PipelineConfig::from_str(&yaml).unwrap();
+    let section = config.feed.as_ref().expect("the section parses");
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let source = || {
+        line_framer(S3Source::from_component_config(&config.source, rt.handle().clone()).unwrap())
+    };
+
+    let err = source()
+        .with_feed(Arc::new(MemoryFeed::new()))
+        .configure_feed(section, Arc::new(MemoryFeed::new()))
+        .unwrap_err();
+    assert!(err.to_string().contains("with_feed"), "{err}");
+
+    let (coordinator, _script) = spate_test::scripted_coordinator();
+    let err = source()
+        .with_coordinator(Box::new(coordinator))
+        .configure_feed(section, Arc::new(MemoryFeed::new()))
+        .unwrap_err();
+    assert!(err.to_string().contains("with_coordinator"), "{err}");
+}

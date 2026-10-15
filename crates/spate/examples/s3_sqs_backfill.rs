@@ -12,8 +12,9 @@
 //!
 //! # Run it
 //!
-//! A standard queue with a dead-letter queue, and AWS credentials and a
-//! region in the environment. Against a local ElasticMQ:
+//! A standard queue with a dead-letter queue that keeps messages longer than
+//! the queue, and AWS credentials and a region in the environment. Against a
+//! local ElasticMQ:
 //!
 //! ```sh
 //! docker run --rm -p 9324:9324 "$(cargo xtask container-image --pull elasticmq)"
@@ -30,7 +31,7 @@
 // INDEX-TIER:  bounded-jobs
 // INDEX-GOAL:  read an object-storage backfill's work from a queue
 // INDEX-TECH:  object storage and Amazon SQS
-// INDEX-NEEDS: an SQS queue with a dead-letter queue, and AWS credentials
+// INDEX-NEEDS: an SQS queue and a dead-letter queue with a longer retention, and AWS credentials
 
 // Examples talk to their user on stdout/stderr by design.
 #![allow(clippy::print_stdout, clippy::print_stderr)]

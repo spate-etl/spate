@@ -48,7 +48,7 @@ fields are rejected with the offending key.
 | `queue_url` | string | `required` | The queue's URL, as `GetQueueUrl` returns it. An `http` or `https` URL. A FIFO queue, whose URL ends in `.fifo`, is refused. |
 | `visibility` | duration | `60s` | How long a received unit stays hidden from other workers without a renewal. Whole seconds from `3s` to `12h`. |
 | `region` | string | `none` | The AWS region. Unset, the region in a `sqs.<region>.amazonaws.com` queue URL applies, then `AWS_REGION`, the shared config file and instance metadata. |
-| `endpoint` | string | `none` | An endpoint in place of the region's, such as a local emulator. `AWS_ENDPOINT_URL` in the environment sets one too. |
+| `endpoint` | string | `none` | An endpoint in place of the region's, such as a local emulator or a VPC endpoint. Calls go to this endpoint when it is set, and to the region's otherwise, so a VPC endpoint in `queue_url` is reached only when it is also set here. `AWS_ENDPOINT_URL` in the environment sets one too. |
 
 `units_held` beside `sqs:` sets how many units a worker holds at once. The
 section's `attempt_cap` is refused on `sqs`, because SQS counts deliveries
@@ -92,20 +92,21 @@ retried.
 
 `SqsFeed::connect` refuses a queue it cannot dead-letter from:
 
-- a FIFO queue;
+- a FIFO queue, told by the `.fifo` ending of the name in its ARN;
 - a queue with no redrive policy, or one whose policy it cannot read;
 - a dead-letter queue it cannot read, because it does not exist or the
   identity lacks `sqs:GetQueueAttributes` on it;
 - a dead-letter queue whose `MessageRetentionPeriod` is no longer than the
   queue's. SQS counts retention from a message's first send, so such a queue
-  can delete a unit as soon as it arrives.
+  can delete a unit as soon as it arrives. SQS keeps a message for at most 14
+  days, so the queue must keep messages for less than that.
 
-The dead-letter queue is read at the queue URL's host, under the account and
-name its ARN in the redrive policy gives, so the feed needs no
-`sqs:GetQueueUrl`. When either queue reports no `MessageRetentionPeriod`, the
-feed logs a warning and skips the retention comparison. Connecting logs the
-queue's retention, its default visibility timeout, `maxReceiveCount` and the
-dead-letter queue's retention.
+The dead-letter queue's URL is built from the queue URL's scheme and host,
+with the account and name from its ARN in the redrive policy, so the feed
+needs no `sqs:GetQueueUrl`. When either queue reports no
+`MessageRetentionPeriod`, the feed logs a warning and skips the retention
+comparison. Connecting logs the queue's retention, its default visibility
+timeout, `maxReceiveCount` and the dead-letter queue's retention.
 
 The checks run only when the feed connects. A redrive policy removed, or a
 dead-letter queue deleted or shortened, while the pipeline runs goes

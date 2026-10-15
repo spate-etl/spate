@@ -303,8 +303,9 @@ impl SqsFeed {
     /// [`SqsError::Config`] for a section the feed cannot read.
     /// [`SqsError::Refused`] when SQS refuses the credentials or the queue,
     /// and for a queue the feed cannot dead-letter from: a FIFO queue, one
-    /// with no redrive policy, or one whose dead-letter queue cannot be read
-    /// or keeps messages no longer than the queue does.
+    /// with no redrive policy or one the feed cannot read, or one whose
+    /// dead-letter queue cannot be read or keeps messages no longer than the
+    /// queue does.
     /// [`SqsError::Unavailable`] when SQS does not answer in time.
     ///
     /// # Panics

@@ -5,8 +5,8 @@
 //! dead-letter queue the policy names must be readable and keep messages
 //! longer than the queue does. SQS counts a message's retention from its
 //! first send and keeps that count when the message moves to the dead-letter
-//! queue, so a dead-letter queue that does not outlive the source deletes a
-//! unit as it arrives. The checks run once, at connect.
+//! queue, so a dead-letter queue that does not outlive the source can delete
+//! a unit as soon as it arrives. The checks run once, at connect.
 
 use crate::error::{CallError, Class, SqsError};
 use crate::queue::BoxFuture;
@@ -74,10 +74,10 @@ enum Count {
 /// # Errors
 ///
 /// [`SqsError::Refused`] for a FIFO queue, a missing or unreadable redrive
-/// policy, an unreadable dead-letter queue, or one that keeps messages no
-/// longer than the queue; [`SqsError::Config`] for a dead-letter ARN no
-/// queue URL can be built from; [`SqsError::Unavailable`] when a read keeps
-/// failing transiently.
+/// policy, a dead-letter ARN that is not an SQS queue's, an unreadable
+/// dead-letter queue, or one that keeps messages no longer than the queue;
+/// [`SqsError::Config`] for a `queue_url` that is not a URL;
+/// [`SqsError::Unavailable`] when a read keeps failing transiently.
 pub(crate) async fn check(
     queue: &dyn QueueAttributes,
     queue_url: &str,
@@ -130,7 +130,12 @@ pub(crate) async fn check(
             message: format!("`queue_url` is not a URL: {e}"),
         })
     })?;
-    let dead_letter = dead_letter_url(&source_url, &dead_letter_arn)?;
+    let dead_letter = dead_letter_url(&source_url, &dead_letter_arn).ok_or_else(|| {
+        SqsError::Refused(format!(
+            "the queue {arn} has a redrive policy that names `{dead_letter_arn}`, which is \
+             not an SQS queue ARN (arn:aws:sqs:<region>:<account>:<queue>)"
+        ))
+    })?;
 
     set("reading the dead-letter queue's attributes");
     let dead = queue
@@ -149,22 +154,27 @@ pub(crate) async fn check(
 
     let retention = seconds(&source);
     let dead_letter_retention = seconds(&dead);
-    match (retention, dead_letter_retention) {
+    let unreported = match (retention, dead_letter_retention) {
         (Some(source), Some(dead)) if dead <= source => {
             return Err(SqsError::Refused(format!(
                 "the dead-letter queue {dead_letter_arn} keeps messages for {dead} s, no longer \
                  than the queue {arn} keeps them ({source} s). SQS counts retention from a \
                  message's first send, so a unit moved there could be deleted at once; give \
-                 the dead-letter queue a longer `MessageRetentionPeriod`"
+                 the dead-letter queue a longer `MessageRetentionPeriod`, or the queue a \
+                 shorter one"
             )));
         }
-        (Some(_), Some(_)) => {}
-        _ => tracing::warn!(
+        (Some(_), Some(_)) => None,
+        (None, Some(_)) => Some("the queue reported no MessageRetentionPeriod"),
+        (Some(_), None) => Some("the dead-letter queue reported no MessageRetentionPeriod"),
+        (None, None) => Some("neither queue reported a MessageRetentionPeriod"),
+    };
+    if let Some(unreported) = unreported {
+        tracing::warn!(
             queue = %arn,
             dead_letter_queue = %dead_letter_arn,
-            "the queue reported no MessageRetentionPeriod; the dead-letter retention check \
-             is skipped"
-        ),
+            "{unreported}; the dead-letter retention check is skipped"
+        );
     }
     Ok(Checked {
         arn,
@@ -183,35 +193,25 @@ fn seconds(attributes: &HashMap<String, String>) -> Option<u64> {
 }
 
 /// The URL of the dead-letter queue `arn` names, on the source queue's
-/// scheme, host and port.
+/// scheme, host and port, or `None` when `arn` is not an SQS queue ARN of
+/// six `:`-separated fields.
 ///
 /// SQS requires a dead-letter queue in the source queue's account and
-/// region, so the source's endpoint serves it, VPC endpoints and local
-/// emulators included, and no `sqs:GetQueueUrl` is needed.
-///
-/// # Errors
-///
-/// When `arn` is not an SQS queue ARN of six `:`-separated fields.
-pub(crate) fn dead_letter_url(source: &Url, arn: &str) -> Result<Url, ConfigError> {
+/// region, and routes a read by the client's endpoint, so the source's
+/// endpoint serves it and no `sqs:GetQueueUrl` is needed.
+pub(crate) fn dead_letter_url(source: &Url, arn: &str) -> Option<Url> {
     let fields: Vec<&str> = arn.split(':').collect();
-    let error = || ConfigError::Component {
-        context: "feed.sqs".into(),
-        message: format!(
-            "the queue's redrive policy names `{arn}`, which is not an SQS queue ARN \
-             (arn:aws:sqs:<region>:<account>:<queue>)"
-        ),
-    };
     let [arn_tag, _partition, service, _region, account, name] = fields.as_slice() else {
-        return Err(error());
+        return None;
     };
     if *arn_tag != "arn" || *service != "sqs" || account.is_empty() || name.is_empty() {
-        return Err(error());
+        return None;
     }
     let mut url = source.clone();
     url.set_path(&format!("/{account}/{name}"));
     url.set_query(None);
     url.set_fragment(None);
-    Ok(url)
+    Some(url)
 }
 
 #[cfg(test)]
@@ -380,16 +380,20 @@ mod tests {
             "arn:aws:sqs:eu-west-2:111122223333:jobs-dlq:extra",
             "arn:aws:sqs:eu-west-2::jobs-dlq",
         ] {
-            assert!(dead_letter_url(&url(SOURCE), arn).is_err(), "{arn}");
+            assert!(dead_letter_url(&url(SOURCE), arn).is_none(), "{arn}");
         }
     }
 
     /// Pins the retention comparison: a dead-letter queue that keeps messages
-    /// as long as the source, or less, is refused; a longer one passes.
+    /// as long as the source, or less, is refused; a longer one passes. The
+    /// refusal offers a shorter source retention too, the only fix when both
+    /// queues keep messages for SQS's 14-day maximum.
     #[test]
     fn startup_refuses_a_dead_letter_queue_that_does_not_outlive_the_source() {
         let message = refusal(run(&Scripted::pair(Some("345600"), Some("345600"))));
         assert!(message.contains("no longer"), "{message}");
+        let message = refusal(run(&Scripted::pair(Some("1209600"), Some("1209600"))));
+        assert!(message.contains("or the queue a shorter one"), "{message}");
         let message = refusal(run(&Scripted::pair(Some("345600"), Some("345599"))));
         assert!(message.contains("no longer"), "{message}");
         let checked = run(&Scripted::pair(Some("345600"), Some("1209600"))).unwrap();
@@ -410,8 +414,9 @@ mod tests {
     }
 
     /// Pins the refusals of the source queue: FIFO, told by the `.fifo` name
-    /// in its ARN, no redrive policy, and a policy the feed cannot read.
-    /// `maxReceiveCount` is read as a number or as a string.
+    /// in its ARN, no redrive policy, a policy the feed cannot read, and one
+    /// whose dead-letter ARN is not an SQS queue's. `maxReceiveCount` is read
+    /// as a number or as a string.
     #[test]
     fn startup_refuses_a_queue_the_feed_cannot_dead_letter_from() {
         let arn = ("QueueArn", "arn:aws:sqs:elasticmq:000000000000:jobs");
@@ -431,6 +436,7 @@ mod tests {
             "not json",
             r#"{"maxReceiveCount":5}"#,
             r#"{"deadLetterTargetArn":"arn:aws:sqs:r:1:q","maxReceiveCount":"five"}"#,
+            r#"{"deadLetterTargetArn":"arn:aws:sns:r:1:q","maxReceiveCount":5}"#,
         ] {
             let bad = Scripted::default().queue(SOURCE, &[arn, ("RedrivePolicy", policy)]);
             let message = refusal(run(&bad));
@@ -453,6 +459,12 @@ mod tests {
     fn a_failed_read_is_refused_when_fatal_and_unavailable_when_retryable() {
         let source = Scripted::default().failing(SOURCE, CallError::fatal("AccessDenied"));
         assert!(refusal(run(&source)).contains("AccessDenied"));
+
+        let slow_source = Scripted::default().failing(SOURCE, CallError::retryable("throttled"));
+        match run(&slow_source) {
+            Err(SqsError::Unavailable(message)) => assert!(message.contains("throttled")),
+            other => panic!("expected unavailable, got {other:?}"),
+        }
 
         let dead = Scripted::pair(None, None).failing(DEAD_URL, CallError::fatal("AccessDenied"));
         let message = refusal(run(&dead));

@@ -1084,3 +1084,59 @@ async fn a_batch_shape_failure_after_a_retried_send_reads_refused() {
         FeedErrorKind::Refused
     );
 }
+
+/// Answers every read of a queue with a redrive policy, except a read of the
+/// queue at `url`, which never answers.
+struct Hangs {
+    url: &'static str,
+}
+
+impl startup::QueueAttributes for Hangs {
+    fn attributes<'a>(
+        &'a self,
+        queue_url: &'a str,
+        _names: &'static [&'static str],
+    ) -> BoxFuture<'a, Result<HashMap<String, String>, CallError>> {
+        let hang = queue_url == self.url;
+        Box::pin(async move {
+            if hang {
+                std::future::pending::<()>().await;
+            }
+            Ok(HashMap::from([
+                (
+                    "QueueArn".to_owned(),
+                    "arn:aws:sqs:x:000000000000:jobs".to_owned(),
+                ),
+                (
+                    "RedrivePolicy".to_owned(),
+                    r#"{"deadLetterTargetArn":"arn:aws:sqs:x:000000000000:jobs-dlq","maxReceiveCount":5}"#
+                        .to_owned(),
+                ),
+            ]))
+        })
+    }
+}
+
+/// Pins that the connect bound names the read it was on, for the queue and
+/// for its dead-letter queue.
+#[tokio::test(start_paused = true)]
+async fn the_connect_bound_names_the_read_it_was_on() {
+    for (url, step) in [
+        (
+            "http://h/000000000000/jobs",
+            "while reading the queue's attributes",
+        ),
+        (
+            "http://h/000000000000/jobs-dlq",
+            "while reading the dead-letter queue's attributes",
+        ),
+    ] {
+        let current = Mutex::new("starting");
+        let queue = Hangs { url };
+        let checks = startup::check(&queue, "http://h/000000000000/jobs", &current);
+        match bounded(&current, checks).await {
+            Err(SqsError::Unavailable(message)) => assert!(message.ends_with(step), "{message}"),
+            other => panic!("expected unavailable, got {other:?}"),
+        }
+    }
+}

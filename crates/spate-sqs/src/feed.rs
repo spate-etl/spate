@@ -980,9 +980,10 @@ fn next_batch(queued: &mut Vec<Publish>) -> Vec<Publish> {
 
 /// Send the batch in [`State::sending`] and settle each confirmation by its
 /// own entry. A transient failure of the whole call is retried until the
-/// feed stops, and a Fatal anywhere in the feed rejects the batch. A Fatal
-/// answering a send after a transient failure rejects it as Retryable, since
-/// SQS may have stored an earlier attempt.
+/// feed stops, and a Fatal anywhere in the feed rejects the batch. Each send
+/// is a single attempt, so every retry runs through this loop. A Fatal
+/// answering a send after a transient failure rejects the batch as
+/// Retryable, since SQS may have stored an earlier attempt.
 ///
 /// `Err` when the feed has stopped.
 async fn publish_batch(shared: &Shared, entries: Vec<SendEntry>) -> Result<(), ()> {

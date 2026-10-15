@@ -1004,3 +1004,66 @@ async fn a_retried_fail_call_is_bounded_by_the_time_left_at_the_retry() {
         ]
     );
 }
+
+/// Pins that a send attempt that times out, then one denied with a 403,
+/// rejects the batch as Retryable, since SQS may have stored the first.
+#[tokio::test]
+async fn a_send_timed_out_then_denied_reads_retryable() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let conns = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::clone(&conns);
+    tokio::spawn(async move {
+        while let Ok((mut tcp, _)) = listener.accept().await {
+            let n = seen.fetch_add(1, Ordering::SeqCst);
+            tokio::spawn(async move {
+                if n == 0 {
+                    let _ = tokio::io::copy(&mut tcp, &mut tokio::io::sink()).await;
+                    return;
+                }
+                let mut buf = vec![0u8; 65536];
+                let _ = tcp.read(&mut buf).await;
+                let body = r#"{"__type":"com.amazon.coral.service#AccessDeniedException","message":"denied"}"#;
+                let reply = format!(
+                    "HTTP/1.1 403 Forbidden\r\nContent-Type: application/x-amz-json-1.0\r\n\
+                     x-amzn-query-error: AccessDenied;Sender\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = tcp.write_all(reply.as_bytes()).await;
+                let _ = tokio::io::copy(&mut tcp, &mut tokio::io::sink()).await;
+            });
+        }
+    });
+    let endpoint = format!("http://{addr}");
+    let cfg = SqsFeedConfig {
+        queue_url: format!("{endpoint}/000000000000/jobs"),
+        visibility: MINUTE,
+        region: Some("eu-west-2".to_owned()),
+        endpoint: Some(endpoint),
+    };
+    let credentials = aws_sdk_sqs::config::Credentials::new("x", "x", None, None, "test");
+    let step = std::sync::Mutex::new("starting");
+    let queue = crate::client::sdk_queue(
+        &cfg,
+        Some(aws_sdk_sqs::config::SharedCredentialsProvider::new(
+            credentials,
+        )),
+        &step,
+    )
+    .await
+    .unwrap();
+    // Paused only now: building the client reads the trust store on a
+    // blocking thread.
+    tokio::time::pause();
+    let feed = SqsFeed::start(
+        Arc::new(queue) as Arc<dyn Queue>,
+        &cfg,
+        &tokio::runtime::Handle::current(),
+    );
+    let c = feed.publish(Unit::new("p", "body"));
+    let e = tokio::time::timeout(MINUTE, c).await.unwrap().unwrap_err();
+    assert_eq!(conns.load(Ordering::SeqCst), 2, "{e}");
+    assert_eq!(e.kind, FeedErrorKind::Retryable, "{e}");
+}

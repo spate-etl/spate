@@ -214,7 +214,13 @@ impl Queue for SdkQueue {
                 }
                 call = call.entries(built(message.build())?);
             }
+            // One attempt per call: the feed's own loop retries, and it must
+            // see every failed attempt to know that SQS may hold the unit.
             let out = call
+                .customize()
+                .config_override(aws_sdk_sqs::config::Builder::default().retry_config(
+                    aws_sdk_sqs::config::retry::RetryConfig::standard().with_max_attempts(1),
+                ))
                 .send()
                 .await
                 .map_err(|e| classify("SendMessageBatch", &e))?;

@@ -797,3 +797,116 @@ async fn a_buffered_unit_under_one_period_from_its_deadline_is_dropped_unread() 
         assert_eq!(feed.buffered(), 0);
     }
 }
+
+/// Pins the first deadline to when the receive was sent, so a unit that
+/// arrives at the end of a long poll is not held locally past SQS's lapse.
+#[tokio::test(start_paused = true)]
+async fn the_first_deadline_counts_from_when_the_receive_was_sent() {
+    let (feed, queue) = start(MINUTE);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    queue.answer_at_end_of_poll();
+    queue.ready(Message::new("late"));
+    let sent = Instant::now();
+    assert!(feed.receive(1).unwrap().is_empty());
+    until("the poll is sent", || queue.receives().len() == 1).await;
+    tokio::time::advance(Duration::from_secs(20)).await;
+    until("the unit is buffered", || park.park(Duration::ZERO)).await;
+    let got = feed.receive(1).unwrap();
+    assert_eq!(feed.deadline_of(got[0].receipt), Some(sent + MINUTE));
+}
+
+/// Pins the `set_waker` contract: a receive that takes some units and
+/// leaves others wakes the reader.
+#[tokio::test(start_paused = true)]
+async fn a_receive_that_leaves_units_buffered_wakes_the_reader() {
+    let (feed, queue) = start(MINUTE);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    queue.ready(Message::new("a"));
+    queue.ready(Message::new("b"));
+    assert!(feed.receive(2).unwrap().is_empty());
+    until("both units are buffered", || feed.buffered() == 2).await;
+    assert!(park.park(Duration::ZERO));
+    assert_eq!(feed.receive(1).unwrap().len(), 1);
+    assert!(
+        park.park(Duration::ZERO),
+        "a receive that left a unit buffered did not wake the reader"
+    );
+}
+
+/// Pins that an extension SQS refuses with any other code leaves the
+/// receipt's deadline where it was, so the unit lapses at it.
+#[tokio::test(start_paused = true)]
+async fn a_renewal_entry_refused_with_another_code_keeps_its_deadline() {
+    let (feed, queue) = start(MINUTE);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    queue.ready(Message::new("u"));
+    let delivery = receive_n(&feed, &park, 1).await.remove(0);
+    let deadline = feed.deadline_of(delivery.receipt).unwrap();
+    feed.renew(delivery.receipt).unwrap();
+    queue.fail_next_visibility(vec![failure(0, "InvalidParameterValue")]);
+    tokio::time::advance(Duration::from_secs(20)).await;
+    until("the tick sends the extension", || {
+        queue.visibility().len() == 1
+    })
+    .await;
+    settle_tasks().await;
+    assert_eq!(feed.deadline_of(delivery.receipt), Some(deadline));
+    feed.renew(delivery.receipt).unwrap();
+    tokio::time::advance(MINUTE).await;
+    assert_eq!(
+        feed.renew(delivery.receipt).unwrap_err().kind,
+        FeedErrorKind::Gone
+    );
+}
+
+/// Pins that a receipt marked before its deadline, whose next tick runs only
+/// after the deadline, is not extended and reads as Gone.
+#[tokio::test(start_paused = true)]
+async fn a_marked_receipt_past_its_deadline_is_not_extended() {
+    let (feed, queue) = start(MINUTE);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    queue.ready(Message::new("u"));
+    let d = receive_n(&feed, &park, 1).await.remove(0);
+    settle_tasks().await;
+    feed.renew(d.receipt).unwrap();
+    // One jump past the deadline: the next tick runs after it.
+    tokio::time::advance(MINUTE).await;
+    settle_tasks().await;
+    assert!(
+        queue.visibility().is_empty(),
+        "a lapsed receipt was extended: {:?}",
+        queue.visibility()
+    );
+    assert_eq!(feed.renew(d.receipt).unwrap_err().kind, FeedErrorKind::Gone);
+}
+
+/// Pins that a publish retrying a failed send stops once another task stops
+/// the feed on a Fatal.
+#[tokio::test(start_paused = true)]
+async fn a_publish_retry_stops_once_the_feed_stops() {
+    let (feed, queue) = start(MINUTE);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    queue.ready(Message::new("u"));
+    let d = receive_n(&feed, &park, 1).await.remove(0);
+    queue.fail_next_send_call(CallError::retryable("throttled"));
+    let mut published = feed.publish(Unit::new("p", "body"));
+    until("the first send fails", || queue.sends().len() == 1).await;
+    queue.fail_next_delete_call(CallError::fatal("AccessDenied"));
+    feed.acknowledge(d.receipt).unwrap();
+    until("the publish is rejected", || {
+        published.try_outcome().is_some()
+    })
+    .await;
+    tokio::time::advance(Duration::from_secs(10)).await;
+    settle_tasks().await;
+    assert_eq!(
+        queue.sends().len(),
+        1,
+        "the publish task sent again after the feed stopped"
+    );
+}

@@ -11,6 +11,8 @@
 FROM rust:1.99.0-bookworm@sha256:114c7a4425406451c2866b6aafe69fe29b1b298832db1277d411ac73c82d04d6 AS builder
 WORKDIR /build
 COPY . .
+# The runtime image carries no zlib, so link it into the binary.
+ENV LIBZ_SYS_STATIC=1
 RUN cargo build --release -p spate --example kafka_avro_to_clickhouse --features kafka,clickhouse,avro \
     && cp target/release/examples/kafka_avro_to_clickhouse /build/pipeline
 

@@ -193,8 +193,8 @@ fn seconds(attributes: &HashMap<String, String>) -> Option<u64> {
 }
 
 /// The URL of the dead-letter queue `arn` names, on the source queue's
-/// scheme, host and port, or `None` when `arn` is not an SQS queue ARN of
-/// six `:`-separated fields.
+/// scheme, host, port and any path prefix ahead of `/<account>/<queue>`, or
+/// `None` when `arn` is not an SQS queue ARN of six `:`-separated fields.
 ///
 /// SQS requires a dead-letter queue in the source queue's account and
 /// region, and routes a read by the client's endpoint, so the source's
@@ -207,8 +207,15 @@ pub(crate) fn dead_letter_url(source: &Url, arn: &str) -> Option<Url> {
     if *arn_tag != "arn" || *service != "sqs" || account.is_empty() || name.is_empty() {
         return None;
     }
+    // Keep any path prefix ahead of the source's `/<account>/<queue>`.
+    let mut segments: Vec<&str> = source
+        .path_segments()
+        .map(|s| s.filter(|s| !s.is_empty()).collect())
+        .unwrap_or_default();
+    segments.truncate(segments.len().saturating_sub(2));
+    let prefix: String = segments.iter().map(|s| format!("/{s}")).collect();
     let mut url = source.clone();
-    url.set_path(&format!("/{account}/{name}"));
+    url.set_path(&format!("{prefix}/{account}/{name}"));
     url.set_query(None);
     url.set_fragment(None);
     Some(url)
@@ -356,8 +363,8 @@ mod tests {
         }
     }
 
-    /// Pins that the dead-letter URL keeps the source queue's scheme, host
-    /// and port, and refuses an ARN that is not an SQS queue's.
+    /// Pins that the dead-letter URL keeps the source queue's scheme, host,
+    /// port and path prefix, and refuses an ARN that is not an SQS queue's.
     #[test]
     fn the_dead_letter_url_keeps_the_source_scheme_and_host() {
         let url = |s: &str| Url::parse(s).unwrap();
@@ -373,6 +380,15 @@ mod tests {
             .unwrap()
             .as_str(),
             "https://vpce-0abc-xyz.sqs.eu-west-2.vpce.amazonaws.com/111122223333/jobs-dlq"
+        );
+        assert_eq!(
+            dead_letter_url(
+                &url("http://127.0.0.1:9324/ctx/000000000000/jobs"),
+                DEAD_ARN
+            )
+            .unwrap()
+            .as_str(),
+            "http://127.0.0.1:9324/ctx/000000000000/jobs-dlq"
         );
         for arn in [
             "arn:aws:sns:eu-west-2:111122223333:jobs-dlq",

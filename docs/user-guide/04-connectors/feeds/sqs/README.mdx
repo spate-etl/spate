@@ -101,9 +101,9 @@ retried.
   can delete a unit as soon as it arrives. SQS keeps a message for at most 14
   days, so the queue must keep messages for less than that.
 
-The dead-letter queue's URL is built from the queue URL's scheme and host,
-with the account and name from its ARN in the redrive policy, so the feed
-needs no `sqs:GetQueueUrl`. When either queue reports no
+The dead-letter queue's URL is built from the queue URL's scheme, host and
+any path ahead of the account, with the account and name from its ARN in the
+redrive policy, so the feed needs no `sqs:GetQueueUrl`. When either queue reports no
 `MessageRetentionPeriod`, the feed logs a warning and skips the retention
 comparison. Connecting logs the queue's retention, its default visibility
 timeout, `maxReceiveCount` and the dead-letter queue's retention.

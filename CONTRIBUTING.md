@@ -20,17 +20,17 @@ and never goes in an issue; see [Security and legal](#security-and-legal).
 
 ## Milestones and priorities
 
-A minor release ships every two to four weeks and carries one feature theme.
-Each release has a milestone named by its version. Its description says what the
-release delivers, and the issues under it are the work committed to it. The
-current and next milestones carry a target date. Later ones show the direction
-without a date, and say so where a design is still open.
+A minor release aims to ship every two to four weeks and carries one feature
+theme. Each release has a milestone named by its version. Its description says
+what the release delivers, and the issues under it are the work committed to it.
+The current and next milestones carry a target date. Later ones show the
+direction without a date, and say so where a design is still open.
 
 An issue gets a milestone once it is committed to a release: it is part of the
 release's feature, it breaks that feature, it is a delivery-correctness bug, or
-it fixes a crate the release already changes. `release blocker` marks an issue
-the release cannot ship without. Work on CI, benchmarks and tooling carries no
-milestone unless a release's feature depends on it.
+it is a fix the release takes for a crate it already changes. `release blocker`
+marks an issue the release cannot ship without. Work on CI, benchmarks and
+tooling carries no milestone unless a release depends on it.
 
 Everything else carries a priority instead: `priority: high`, `priority: medium`
 or `priority: low`. Each release takes its fixes from `priority: high` first. An

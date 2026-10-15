@@ -48,6 +48,18 @@ use std::time::{Duration, Instant};
 const OBJECTS: usize = 12;
 const RECORDS_PER_OBJECT: usize = 20;
 
+/// The `feed:` section, kept out of `format!` so the page that transcludes it
+/// shows the text a pipeline file holds.
+const FEED: &str = r#"
+# ANCHOR: feed
+feed:
+  sqs:
+    queue_url: "${SQS_QUEUE_URL}"
+    visibility: 60s
+  units_held: 8
+# ANCHOR_END: feed
+"#;
+
 fn config_yaml(data: &Path) -> String {
     format!(
         r#"
@@ -59,14 +71,7 @@ source:
   s3:
     url: "file://{data}/"
 sink: {{ capture: {{}} }}
-# ANCHOR: feed
-feed:
-  sqs:
-    queue_url: "${{SQS_QUEUE_URL}}"
-    visibility: 60s
-  units_held: 8
-# ANCHOR_END: feed
-"#,
+{FEED}"#,
         data = data.display(),
     )
 }

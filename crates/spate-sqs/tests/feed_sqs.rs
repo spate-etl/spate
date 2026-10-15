@@ -179,7 +179,7 @@ fn launch(data: &Path, feed_section: &str, pre: impl FnOnce(&SinkScript)) -> Wor
         })
         .runtime_options(RuntimeOptions {
             handle_signals: false,
-            max_records: 4,
+            max_records: 1,
             ..RuntimeOptions::default()
         })
         .into_runtime(source)

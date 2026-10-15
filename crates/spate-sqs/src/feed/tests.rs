@@ -59,9 +59,9 @@ fn failure(index: usize, code: &'static str) -> Failure {
     }
 }
 
-/// Pins the clamp to the 12-hour hold, counted from the first receive: as a
-/// pure rule, as a hold computed from the first-receive time, and through a
-/// renewal tick for a unit first received 12 h − 70 s ago.
+/// Pins the clamp to the 12-hour hold, counted from each receive: as a pure
+/// rule, and through renewal ticks for a unit received again 12 h − 70 s after
+/// its first receive, at a 12 h visibility.
 #[tokio::test(start_paused = true)]
 async fn an_extension_is_clamped_to_the_time_left() {
     let now = Instant::now();
@@ -75,74 +75,53 @@ async fn an_extension_is_clamped_to_the_time_left() {
     ] {
         assert_eq!(extension(MINUTE, now + left, now), ext, "left {left:?}");
     }
+    assert_eq!(hold_end(now), now + HOLD - secs(30));
 
-    let wall = UNIX_EPOCH + secs(2_000_000_000);
-    let first_ms = |ago: Duration| {
-        u64::try_from((wall - ago).duration_since(UNIX_EPOCH).unwrap().as_millis()).unwrap()
-    };
-    assert_eq!(
-        hold_end(now, wall, Some(first_ms(HOLD - secs(31)))),
-        now + secs(1)
-    );
-    assert_eq!(hold_end(now, wall, Some(first_ms(HOLD - secs(29)))), now);
-
-    let (feed, queue) = start(MINUTE);
+    let (feed, queue) = start(HOLD);
     let (waker, park) = wake_channel();
     feed.set_waker(waker);
-    queue.ready(Message::new("u").redelivered(2, HOLD - secs(70)));
-    let [delivery] = <[Delivery; 1]>::try_from(receive_n(&feed, &park, 1).await).unwrap();
-    assert_eq!(delivery.deliveries, 2);
-    let receipt = delivery.receipt;
+    queue.ready(Message::new("u"));
+    let first = receive_n(&feed, &park, 1).await.remove(0);
+    feed.fail(first.receipt, "handed back").unwrap();
+    until("the fail is sent", || queue.visibility().len() == 1).await;
+    tokio::time::advance(HOLD - secs(70)).await;
 
-    feed.renew(receipt).unwrap();
-    tokio::time::advance(secs(20)).await;
-    until("the tick extends the unit", || {
-        queue.visibility().len() == 1
-    })
-    .await;
-    let sent: Vec<i32> = queue.visibility()[0].iter().map(|e| e.seconds).collect();
-    assert!(
-        sent == [19] || sent == [20],
-        "the extension sent is {sent:?}, not the 20 s left of the hold"
+    queue.ready(Message::new("u").redelivered(2));
+    let second = receive_n(&feed, &park, 1).await.remove(0);
+    assert_eq!(second.deliveries, 2);
+    let received = Instant::now();
+    assert_eq!(
+        feed.deadline_of(second.receipt),
+        Some(received + HOLD - secs(30)),
+        "the first visibility is clamped to this receive's hold"
     );
 
-    feed.renew(receipt).unwrap();
-    tokio::time::advance(secs(20)).await;
-    settle_tasks().await;
-    assert_eq!(queue.visibility().len(), 1, "no extension past the hold");
-    assert_eq!(feed.renew(receipt).unwrap_err().kind, FeedErrorKind::Gone);
-}
-
-/// Pins that a unit whose hold leaves less than one renewal period is
-/// dropped at every receive and never handed out, while each receive spends
-/// one of the queue's `maxReceiveCount`: at the default visibility for a unit
-/// first received 12 h − 10 s ago, and at a 12 h visibility for one first
-/// received 8 h ago.
-#[tokio::test(start_paused = true)]
-async fn a_unit_first_received_almost_12_hours_ago_is_never_handed_out() {
-    for (visibility, ago) in [
-        (MINUTE, HOLD - Duration::from_secs(10)),
-        (HOLD, Duration::from_secs(8 * 60 * 60)),
-    ] {
-        let (feed, queue) = start(visibility);
-        let (waker, park) = wake_channel();
-        feed.set_waker(waker);
-        queue.repeat(Message::new("u").redelivered(2, ago));
-        assert!(feed.receive(1).unwrap().is_empty());
-        for round in 1..=3 {
-            until("the unit is received", || queue.receives().len() == round).await;
-            until("the unit is buffered", || park.park(Duration::ZERO)).await;
-            assert!(
-                feed.receive(1).unwrap().is_empty(),
-                "a unit {ago:?} past its first receive was handed out at visibility {visibility:?}"
-            );
-        }
-        until("a fourth receive", || queue.receives().len() == 4).await;
-        assert!(
-            queue.visibility().is_empty(),
-            "no extension for a dropped unit"
+    // A renewal period is 4 h at a 12 h visibility.
+    let period = HOLD / 3;
+    for (tick, left) in [(1, 8), (2, 4)] {
+        feed.renew(second.receipt).unwrap();
+        tokio::time::advance(period).await;
+        until("the tick extends the unit", || {
+            queue.visibility().len() == 1 + tick
+        })
+        .await;
+        let sent: Vec<i32> = queue.visibility()[tick].iter().map(|e| e.seconds).collect();
+        let left = left * 60 * 60 - 30;
+        assert_eq!(
+            sent,
+            [left],
+            "tick {tick}: the time left of this receive's hold"
         );
     }
+
+    feed.renew(second.receipt).unwrap();
+    tokio::time::advance(period).await;
+    settle_tasks().await;
+    assert_eq!(queue.visibility().len(), 3, "no extension past the hold");
+    assert_eq!(
+        feed.renew(second.receipt).unwrap_err().kind,
+        FeedErrorKind::Gone
+    );
 }
 
 /// Pins the long-poll wait at a third of the visibility, at most 20 s, so a

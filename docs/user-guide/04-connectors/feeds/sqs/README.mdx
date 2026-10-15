@@ -102,17 +102,17 @@ on an idle queue.
 
 ## The 12-hour hold
 
-SQS keeps a message hidden for at most 12 hours from its first receive. The
-feed counts the hold from the message's `ApproximateFirstReceiveTimestamp`,
-less 30 seconds for clock skew, and clamps the first visibility and every
+SQS keeps a message hidden for at most 12 hours from the receive that issued
+its receipt handle. The feed counts the hold from the moment each receive's
+reply arrives, less 30 seconds, and clamps the first visibility and every
 extension to it.
 
-A unit first received more than 12 h − 30 s − `visibility / 3` earlier, about
-12 hours at the default visibility and about 8 hours at a `12h` visibility, is
-dropped unread at every receive. Each of those receives counts toward
-`maxReceiveCount`, so the unit reaches the dead-letter queue unread. At a
-visibility above about 9 hours, that includes every unit received again after
-its visibility lapsed.
+A reader therefore holds a unit for at most 12 h − 30 s from the receive that
+handed it out. After that its visibility lapses and SQS hands the unit to a
+reader again, under a new hold. At a `12h` visibility, a unit the reader asks
+for more than 12 h − 30 s − `visibility / 3` after its receive, about 8 hours,
+is dropped unread, as any unit less than one renewal period from its lapse
+is.
 
 ## Failing a unit
 

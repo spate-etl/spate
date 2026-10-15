@@ -37,8 +37,6 @@ pub(crate) struct Received {
     pub(crate) unit_id: Option<String>,
     /// `ApproximateReceiveCount`.
     pub(crate) receive_count: Option<String>,
-    /// `ApproximateFirstReceiveTimestamp`, epoch milliseconds.
-    pub(crate) first_receive_ms: Option<String>,
 }
 
 /// One entry of a `SendMessageBatch`.
@@ -161,9 +159,6 @@ impl Queue for SdkQueue {
                 .visibility_timeout(request.visibility)
                 .wait_time_seconds(request.wait)
                 .message_system_attribute_names(MessageSystemAttributeName::ApproximateReceiveCount)
-                .message_system_attribute_names(
-                    MessageSystemAttributeName::ApproximateFirstReceiveTimestamp,
-                )
                 .message_attribute_names(UNIT_ATTRIBUTE)
                 .customize()
                 .config_override(self.receive_timeouts.clone())
@@ -187,9 +182,6 @@ impl Queue for SdkQueue {
                             .and_then(|v| v.string_value())
                             .map(str::to_owned),
                         receive_count: system(&MessageSystemAttributeName::ApproximateReceiveCount),
-                        first_receive_ms: system(
-                            &MessageSystemAttributeName::ApproximateFirstReceiveTimestamp,
-                        ),
                     }
                 })
                 .collect())

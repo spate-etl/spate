@@ -10,9 +10,9 @@
 //!
 //! # The 12-hour hold
 //!
-//! SQS keeps a message hidden for at most 12 hours. The feed counts that
-//! hold from the message's first receive, as `ApproximateFirstReceiveTimestamp`
-//! reports it, less 30 seconds for clock skew, and clamps every deadline and
+//! SQS keeps a message hidden for at most 12 hours from the receive that
+//! issued its receipt handle. The feed counts that hold from the moment each
+//! receive's reply arrives, less 30 seconds, and clamps every deadline and
 //! extension to it. A unit whose deadline is less than one renewal period
 //! away when the reader asks for it is dropped unseen and returns to the
 //! queue at that deadline.
@@ -31,16 +31,18 @@ use spate_core::feed::{
 };
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use tokio::sync::Notify;
 use tokio::task::AbortHandle;
 use tokio::time::{Instant, MissedTickBehavior};
 
-/// How long SQS keeps a message hidden, counted from its first receive.
+/// How long SQS keeps a message hidden, counted from the receive that issued
+/// its receipt handle.
 pub(crate) const HOLD: Duration = Duration::from_secs(12 * 60 * 60);
 
-/// Taken off the hold for skew between this host's clock and SQS's.
-pub(crate) const SKEW: Duration = Duration::from_secs(30);
+/// Taken off the hold for the time between SQS issuing a receipt handle and
+/// the reply reaching this host.
+pub(crate) const MARGIN: Duration = Duration::from_secs(30);
 
 /// Entries per batch call.
 const BATCH_ENTRIES: usize = 10;
@@ -64,21 +66,10 @@ pub(crate) fn wait_seconds(visibility: Duration) -> i32 {
     (visibility.as_secs() / 3).min(MAX_WAIT_SECONDS) as i32
 }
 
-/// When the hold of a message received by a call sent at `sent_at` ends.
-///
-/// `wall` is this host's clock, read after the reply. A message whose
-/// first-receive time is missing or in the future counts as first received
-/// now.
-pub(crate) fn hold_end(
-    sent_at: Instant,
-    wall: SystemTime,
-    first_receive_ms: Option<u64>,
-) -> Instant {
-    let elapsed = first_receive_ms
-        .map(|ms| UNIX_EPOCH + Duration::from_millis(ms))
-        .and_then(|first| wall.duration_since(first).ok())
-        .unwrap_or_default();
-    sent_at + HOLD.saturating_sub(elapsed).saturating_sub(SKEW)
+/// When the hold of a message ends, for a receive whose reply arrived at
+/// `received_at`.
+pub(crate) fn hold_end(received_at: Instant) -> Instant {
+    received_at + HOLD - MARGIN
 }
 
 /// The extension to send at `now` for a unit whose hold ends at `hold_end`:
@@ -641,13 +632,13 @@ async fn receive_task(shared: Arc<Shared>) {
                 if messages.is_empty() {
                     continue;
                 }
-                let wall = SystemTime::now();
+                let hold_end = hold_end(Instant::now());
                 let waker = {
                     let mut st = shared.lock();
                     for m in messages {
                         let receipt = st.next;
                         st.next += 1;
-                        let held = held_from(m, sent_at, wall, settings.visibility);
+                        let held = held_from(m, sent_at, hold_end, settings.visibility);
                         st.held.insert(receipt, held);
                         st.buffered.push_back(receipt);
                     }
@@ -679,15 +670,7 @@ async fn receive_task(shared: Arc<Shared>) {
 }
 
 /// A received message as the feed holds it.
-fn held_from(m: Received, sent_at: Instant, wall: SystemTime, visibility: Duration) -> Held {
-    let first_receive_ms = m.first_receive_ms.as_deref().and_then(|s| s.parse().ok());
-    if first_receive_ms.is_none() {
-        tracing::debug!(
-            message = %m.message_id,
-            "no ApproximateFirstReceiveTimestamp; counting the hold from this receive"
-        );
-    }
-    let hold_end = hold_end(sent_at, wall, first_receive_ms);
+fn held_from(m: Received, sent_at: Instant, hold_end: Instant, visibility: Duration) -> Held {
     let deliveries = m
         .receive_count
         .as_deref()

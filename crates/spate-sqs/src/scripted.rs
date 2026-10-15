@@ -8,15 +8,13 @@ use crate::queue::{
 };
 use std::collections::VecDeque;
 use std::sync::{Mutex, MutexGuard};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 /// A message a receive hands out.
 #[derive(Clone, Debug)]
 pub(crate) struct Message {
     pub(crate) body: String,
     pub(crate) receive_count: u32,
-    /// How long before the receive answers SQS first received it.
-    pub(crate) first_received_ago: Duration,
 }
 
 impl Message {
@@ -24,17 +22,11 @@ impl Message {
         Message {
             body: body.to_owned(),
             receive_count: 1,
-            first_received_ago: Duration::ZERO,
         }
     }
 
-    pub(crate) fn redelivered(
-        mut self,
-        receive_count: u32,
-        first_received_ago: Duration,
-    ) -> Message {
+    pub(crate) fn redelivered(mut self, receive_count: u32) -> Message {
         self.receive_count = receive_count;
-        self.first_received_ago = first_received_ago;
         self
     }
 }
@@ -50,8 +42,6 @@ pub(crate) struct Failure {
 #[derive(Debug, Default)]
 struct Script {
     ready: VecDeque<Message>,
-    /// Answered to every receive once `ready` is empty, its count rising.
-    repeat: Option<Message>,
     /// Answer each receive only once its wait has passed.
     end_of_poll: bool,
     receive_error: Option<CallError>,
@@ -81,10 +71,6 @@ impl ScriptedQueue {
 
     pub(crate) fn ready(&self, message: Message) {
         self.lock().ready.push_back(message);
-    }
-
-    pub(crate) fn repeat(&self, message: Message) {
-        self.lock().repeat = Some(message);
     }
 
     pub(crate) fn answer_at_end_of_poll(&self) {
@@ -123,33 +109,22 @@ impl ScriptedQueue {
         self.lock().deletes.clone()
     }
 
-    /// Up to `max` messages, stamped with their first-receive time now.
+    /// Up to `max` messages.
     fn take(&self, max: usize) -> Vec<Received> {
         let mut script = self.lock();
         let mut out = Vec::new();
         while out.len() < max {
-            let message = match script.ready.pop_front() {
-                Some(message) => message,
-                None => match &mut script.repeat {
-                    Some(repeat) if out.is_empty() => {
-                        let message = repeat.clone();
-                        repeat.receive_count += 1;
-                        message
-                    }
-                    _ => break,
-                },
+            let Some(message) = script.ready.pop_front() else {
+                break;
             };
             let n = script.next;
             script.next += 1;
-            let first = SystemTime::now() - message.first_received_ago;
-            let first_ms = first.duration_since(UNIX_EPOCH).unwrap().as_millis();
             out.push(Received {
                 message_id: format!("m{n}"),
                 handle: format!("h{n}"),
                 body: message.body,
                 unit_id: Some(format!("u{n}")),
                 receive_count: Some(message.receive_count.to_string()),
-                first_receive_ms: Some(first_ms.to_string()),
             });
         }
         out

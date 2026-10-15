@@ -36,8 +36,9 @@
 //!   made visible at once, and the queue's redrive policy moves it to the
 //!   dead-letter queue after `maxReceiveCount` receives. The feed never sends
 //!   to the dead-letter queue itself.
-//! - SQS keeps a message hidden for at most 12 hours from its first receive,
-//!   and the feed clamps every extension to that hold.
+//! - SQS keeps a message hidden for at most 12 hours from the receive that
+//!   issued its receipt handle, and the feed clamps every extension to that
+//!   hold.
 //!
 //! No AWS SDK type appears in this crate's public API.
 

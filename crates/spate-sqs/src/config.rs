@@ -152,6 +152,21 @@ mod tests {
         assert_eq!(config.region_from_url(), None);
     }
 
+    /// Pins the queue URL hosts the region is read from.
+    #[test]
+    fn the_region_is_read_from_every_sqs_host_form() {
+        for (host, region) in [
+            ("sqs.eu-west-2.amazonaws.com", Some("eu-west-2")),
+            ("sqs-fips.us-east-1.amazonaws.com", Some("us-east-1")),
+            ("sqs.cn-north-1.amazonaws.com.cn", Some("cn-north-1")),
+            ("sqs.us-east-2.api.aws", Some("us-east-2")),
+            ("sqs.eu-west-2.example.com", None),
+        ] {
+            let config = parse(&format!("sqs: {{ queue_url: \"https://{host}/1/q\" }}")).unwrap();
+            assert_eq!(config.region_from_url().as_deref(), region, "{host}");
+        }
+    }
+
     /// Pins the visibility range at both ends and the whole-second rule.
     #[test]
     fn visibility_is_whole_seconds_from_3s_to_12h() {

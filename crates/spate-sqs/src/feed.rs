@@ -59,6 +59,23 @@ const BACKOFF_MAX: Duration = Duration::from_secs(5);
 /// How long [`SqsFeed::connect`] may take, every step included.
 const CONNECT_BOUND: Duration = Duration::from_secs(30);
 
+/// `connect` under [`CONNECT_BOUND`]. Past the bound, an
+/// [`SqsError::Unavailable`] naming the step `step` holds.
+async fn bounded<T>(
+    step: &Mutex<&'static str>,
+    connect: impl Future<Output = Result<T, SqsError>>,
+) -> Result<T, SqsError> {
+    match tokio::time::timeout(CONNECT_BOUND, connect).await {
+        Ok(result) => result,
+        Err(_) => {
+            let step = *step.lock().unwrap_or_else(PoisonError::into_inner);
+            Err(SqsError::Unavailable(format!(
+                "connecting took longer than {CONNECT_BOUND:?}, while {step}"
+            )))
+        }
+    }
+}
+
 /// The long-poll wait for `visibility`: at most a third of it, so a message
 /// that arrives at the end of a poll still has two renewal periods left.
 pub(crate) fn wait_seconds(visibility: Duration) -> i32 {
@@ -334,18 +351,9 @@ impl SqsFeed {
             })?;
             Ok::<_, SqsError>((queue, arn))
         };
-        // The timeout is built inside `block_on`: its timer needs the
+        // `bounded` builds its timeout inside `block_on`: the timer needs the
         // runtime's context.
-        let connected = io.block_on(async { tokio::time::timeout(CONNECT_BOUND, connect).await });
-        let (queue, arn) = match connected {
-            Ok(result) => result?,
-            Err(_) => {
-                let step = *step.lock().unwrap_or_else(PoisonError::into_inner);
-                return Err(SqsError::Unavailable(format!(
-                    "connecting took longer than {CONNECT_BOUND:?}, while {step}"
-                )));
-            }
-        };
+        let (queue, arn) = io.block_on(bounded(&step, connect))?;
         tracing::info!(
             queue = %arn,
             visibility = ?config.visibility,

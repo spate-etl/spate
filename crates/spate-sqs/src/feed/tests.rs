@@ -700,3 +700,19 @@ async fn past_the_deadline_a_fail_is_gone_and_an_acknowledge_still_deletes() {
         "a fail past the deadline was sent"
     );
 }
+
+/// Pins the 30 s bound on connecting, and that its error names the step
+/// under way.
+#[tokio::test(start_paused = true)]
+async fn connecting_is_bounded_at_30_seconds_and_names_its_step() {
+    let step = Mutex::new("reading the queue's ARN");
+    let started = Instant::now();
+    let err = bounded::<()>(&step, std::future::pending())
+        .await
+        .unwrap_err();
+    assert_eq!(started.elapsed(), Duration::from_secs(30));
+    let SqsError::Unavailable(message) = err else {
+        panic!("{err:?}");
+    };
+    assert!(message.contains("reading the queue's ARN"), "{message}");
+}

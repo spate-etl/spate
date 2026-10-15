@@ -429,9 +429,10 @@ mod tests {
         }
     }
 
-    /// Pins the refusals of the source queue: FIFO, told by the `.fifo` name
-    /// in its ARN, no redrive policy, a policy the feed cannot read, and one
-    /// whose dead-letter ARN is not an SQS queue's. `maxReceiveCount` is read
+    /// Pins the refusals of the source queue, each by its own message: FIFO,
+    /// told by the `.fifo` name in its ARN, no redrive policy, a policy the
+    /// feed cannot read, a `maxReceiveCount` that is not a count, and a
+    /// dead-letter ARN that is not an SQS queue's. `maxReceiveCount` is read
     /// as a number or as a string.
     #[test]
     fn startup_refuses_a_queue_the_feed_cannot_dead_letter_from() {
@@ -448,15 +449,24 @@ mod tests {
         let none = Scripted::default().queue(SOURCE, &[arn]);
         assert!(refusal(run(&none)).contains("no redrive policy"));
 
-        for policy in [
-            "not json",
-            r#"{"maxReceiveCount":5}"#,
-            r#"{"deadLetterTargetArn":"arn:aws:sqs:r:1:q","maxReceiveCount":"five"}"#,
-            r#"{"deadLetterTargetArn":"arn:aws:sns:r:1:q","maxReceiveCount":5}"#,
+        for (policy, refused) in [
+            ("not json", "a redrive policy the feed cannot read"),
+            (
+                r#"{"maxReceiveCount":5}"#,
+                "a redrive policy the feed cannot read",
+            ),
+            (
+                r#"{"deadLetterTargetArn":"arn:aws:sqs:r:1:q","maxReceiveCount":"five"}"#,
+                "`maxReceiveCount` is not a count",
+            ),
+            (
+                r#"{"deadLetterTargetArn":"arn:aws:sns:r:1:q","maxReceiveCount":5}"#,
+                "not an SQS queue ARN",
+            ),
         ] {
             let bad = Scripted::default().queue(SOURCE, &[arn, ("RedrivePolicy", policy)]);
             let message = refusal(run(&bad));
-            assert!(message.contains("redrive policy"), "{policy}: {message}");
+            assert!(message.contains(refused), "{policy}: {message}");
         }
 
         for count in ["5", r#""5""#] {

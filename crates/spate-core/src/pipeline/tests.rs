@@ -1388,6 +1388,27 @@ fn a_key_in_the_memory_body_fails_startup() {
     );
 }
 
+/// Pins that the runtime offers the `feed:` section before any pipeline
+/// thread is built, so a refused section starts no driver.
+#[test]
+fn a_refused_feed_section_builds_no_pipeline_thread() {
+    let mut cfg = test_config(1);
+    cfg.feed = feed_section("memory: {}");
+    let built = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = Arc::clone(&built);
+    let h = start_with_config(cfg, move |shared, log| {
+        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        ok_chain(shared, log)
+    });
+    let err = config_error_before_open(h);
+    assert!(err.contains("reads no feed"), "{err}");
+    assert_eq!(
+        built.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "no chain may be built before the section is accepted"
+    );
+}
+
 /// `admin.listen: none` runs and drains with no admin server. With no
 /// listener there is no stop channel to signal, and the run has to reach its
 /// drain and its controller join anyway.

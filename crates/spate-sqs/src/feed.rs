@@ -752,7 +752,9 @@ async fn renewal_task(shared: Arc<Shared>) {
                             continue;
                         };
                         match entry_result(&outcome, i) {
-                            Some(Ok(())) => h.deadline = sent_at + *ext,
+                            // `ext` was cut to the hold at the tick, before
+                            // the calls for earlier chunks ran.
+                            Some(Ok(())) => h.deadline = (sent_at + *ext).min(h.hold_end),
                             Some(Err(failure))
                                 if code_is(&failure.code, "ReceiptHandleIsInvalid")
                                     || code_is(&failure.code, "MessageNotInflight") =>

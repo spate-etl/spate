@@ -298,6 +298,29 @@ The estimate gives no total-process memory ceiling.
 The split count still sets how evenly the lanes divide over threads; see
 [Sizing splits against `pipeline.threads`](#sizing-splits-against-pipelinethreads).
 
+## Reading from a feed
+
+A [`feed:` section](../../../07-reference/configuration.mdx#feed) moves the
+source onto the feed path. It reads [work units](../../../07-reference/glossary.mdx#work-unit)
+from the feed the section names, and lists nothing itself. Each unit's body is
+an encoded `SplitDescriptor` naming one whole object, and a unit naming
+anything else is failed back to the feed. Every delivery is read from the
+object's first byte, and the unit is acknowledged once the sink has
+acknowledged every record in it.
+
+```yaml
+feed:
+  memory: {}
+  units_held: 32
+```
+
+`units_held` bounds the units the source holds at once, one lane each, and with
+them its read parallelism. The default is 96. The source publishes no units of
+its own, so the feed carries only the units that code or another process
+publishes, and a startup WARN says so. A run on the feed path never reports
+its input finished, so it ends at a shutdown. Without a `feed:` section the
+source plans splits as described above.
+
 ## Split identity and drift
 
 A split's id digests its sorted member keys **and their ETags** (plus a

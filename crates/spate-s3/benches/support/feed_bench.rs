@@ -361,6 +361,9 @@ impl BenchFeed {
 }
 
 impl Feed for BenchFeed {
+    fn backend(&self) -> &str {
+        self.inner.backend()
+    }
     fn set_waker(&self, waker: FeedWaker) {
         *self.waker.lock().expect("never poisoned") = Some(waker.clone());
         self.inner.set_waker(waker);

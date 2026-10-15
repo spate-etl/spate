@@ -18,8 +18,9 @@ pub use barrier::DrainBarrier;
 use crate::checkpoint::AckIssuer;
 use crate::checkpoint::AckRef;
 #[expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
-use crate::config::{ConfigError, CoordinationSection};
+use crate::config::{ConfigError, CoordinationSection, FeedSection};
 use crate::error::SourceError;
+use crate::feed::Feed;
 use crate::framing::FramingContract;
 use crate::metrics::{Meter, SourceMetrics};
 use crate::record::{PartitionId, RawPayload};
@@ -317,6 +318,31 @@ pub trait Source: Send {
             context: "coordination".into(),
             message: format!(
                 "the source (`{}`) does not use coordination; remove the section",
+                self.component_type()
+            ),
+        })
+    }
+
+    /// Accept the pipeline's `feed:` section and the feed it names. The
+    /// runtime calls this once, before [`open`](Self::open) and before the
+    /// pipeline threads start, and only when the section is present.
+    ///
+    /// A feed-reading source keeps `feed` to read its work units from, and
+    /// reads the section's common keys, such as
+    /// [`units_held`](FeedSection::units_held). The backend's own keys were
+    /// already applied when `feed` was built. The default rejects the
+    /// section, so a source that reads no feed fails at startup when one is
+    /// set.
+    fn configure_feed(
+        &mut self,
+        section: &FeedSection,
+        feed: Arc<dyn Feed>,
+    ) -> Result<(), ConfigError> {
+        let _ = (section, feed);
+        Err(ConfigError::Component {
+            context: "feed".into(),
+            message: format!(
+                "the source (`{}`) reads no feed; remove the `feed:` section",
                 self.component_type()
             ),
         })

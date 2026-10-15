@@ -78,6 +78,9 @@ These top-level sections belong to the framework:
   the in-process store of a solo run, and the coordinator's tuning: `store`, `instance_id`, `lease_duration`,
   `max_in_flight` and the rest
   ([reference](../07-reference/configuration.mdx#coordination)).
+- **`feed`** — the work feed a feed-reading source reads: one backend key,
+  plus `units_held` and `attempt_cap`
+  ([reference](../07-reference/configuration.mdx#feed)).
 
 Only `pipeline`, `source`, and `sink` are required; every other section and
 field has a documented default (`deserializer` is optional entirely, since

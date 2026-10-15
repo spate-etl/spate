@@ -3,18 +3,25 @@
 //! [`MemoryFeed`] keeps its units in memory and nothing across a restart. It
 //! has no lease: a received unit stays held until it is acknowledged or
 //! failed, so it is delivered again only after a [`fail`](Feed::fail). It
-//! counts every delivery of a unit and moves a unit failed on its tenth
-//! delivery to an in-memory dead-letter list. Its [`counts`](MemoryFeed::counts)
-//! are exact.
+//! counts every delivery of a unit and moves a unit failed at its attempt cap,
+//! the tenth delivery unless [`with_attempt_cap`](MemoryFeed::with_attempt_cap)
+//! or a section's `attempt_cap` sets another, to an in-memory dead-letter list.
+//! Its [`counts`](MemoryFeed::counts) are exact.
 
 use super::{
     Confirmation, Delivery, Feed, FeedError, FeedErrorKind, FeedWaker, Receipt, Unit, confirmation,
 };
+use crate::config::{ConfigError, FeedSection};
+use serde::Deserialize;
 use std::collections::{HashMap, VecDeque};
+use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-/// Deliveries after which a failed unit is dead-lettered.
-const ATTEMPT_CAP: u32 = 10;
+/// Deliveries after which a failed unit is dead-lettered, unless set.
+const ATTEMPT_CAP: NonZeroU32 = NonZeroU32::new(10).expect("non-zero");
+
+/// The key that names this backend in a `feed:` section.
+const BACKEND: &str = "memory";
 
 /// What a [`MemoryFeed`] holds at one moment.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -35,12 +42,18 @@ pub struct FeedCounts {
 /// Clones share one feed, so a lister and a reader can each hold one. Units
 /// are delivered in the order they were published, and a failed unit goes
 /// to the back of the queue.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct MemoryFeed {
     state: Arc<Mutex<State>>,
 }
 
-#[derive(Debug, Default)]
+impl Default for MemoryFeed {
+    fn default() -> MemoryFeed {
+        MemoryFeed::with_attempt_cap(ATTEMPT_CAP)
+    }
+}
+
+#[derive(Debug)]
 struct State {
     /// Units waiting to be received, with the deliveries each has had.
     visible: VecDeque<(Unit, u32)>,
@@ -49,6 +62,8 @@ struct State {
     acknowledged: u64,
     next_receipt: u64,
     waker: Option<FeedWaker>,
+    /// The delivery on which a failed unit is dead-lettered.
+    attempt_cap: u32,
 }
 
 impl State {
@@ -60,10 +75,71 @@ impl State {
 }
 
 impl MemoryFeed {
-    /// An empty feed.
+    /// An empty feed that dead-letters a unit failed on its tenth delivery.
     #[must_use]
     pub fn new() -> MemoryFeed {
         MemoryFeed::default()
+    }
+
+    /// An empty feed that dead-letters a unit failed on delivery `cap`.
+    #[must_use]
+    pub fn with_attempt_cap(cap: NonZeroU32) -> MemoryFeed {
+        MemoryFeed {
+            state: Arc::new(Mutex::new(State {
+                visible: VecDeque::new(),
+                held: HashMap::new(),
+                dead: Vec::new(),
+                acknowledged: 0,
+                next_receipt: 0,
+                waker: None,
+                attempt_cap: cap.get(),
+            })),
+        }
+    }
+
+    /// An empty feed built from a `feed: { memory: {} }` section, with the
+    /// section's `attempt_cap`, else 10.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::Component`] when the section names another backend, or
+    /// when the `memory` body holds a key.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use spate_core::config::{ComponentConfig, FeedSection, YamlValue};
+    /// use spate_core::feed::memory::MemoryFeed;
+    /// use std::num::NonZeroU32;
+    ///
+    /// let body = YamlValue::Mapping(Default::default());
+    /// let mut section = FeedSection::new(ComponentConfig::new("memory", body));
+    /// section.attempt_cap = NonZeroU32::new(3);
+    ///
+    /// let feed = MemoryFeed::from_section(&section).unwrap();
+    /// assert_eq!(feed.counts().visible, 0);
+    /// ```
+    pub fn from_section(section: &FeedSection) -> Result<MemoryFeed, ConfigError> {
+        // An empty body: every key the in-process feed takes is a common one.
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Body {}
+
+        let backend = section.backend();
+        if backend.type_tag() != BACKEND {
+            return Err(ConfigError::Component {
+                context: "feed".into(),
+                message: format!(
+                    "the in-process feed is built from `feed: {{ {BACKEND}: {{}} }}`, but the \
+                     section names `{}`",
+                    backend.type_tag()
+                ),
+            });
+        }
+        let _: Option<Body> = backend.deserialize_into()?;
+        Ok(MemoryFeed::with_attempt_cap(
+            section.attempt_cap.unwrap_or(ATTEMPT_CAP),
+        ))
     }
 
     /// The units this feed holds, by state.
@@ -101,6 +177,10 @@ fn gone(receipt: Receipt) -> FeedError {
 }
 
 impl Feed for MemoryFeed {
+    fn backend(&self) -> &str {
+        BACKEND
+    }
+
     fn set_waker(&self, waker: FeedWaker) {
         let mut state = self.lock();
         // A unit published before the waker arrived still needs a wakeup.
@@ -154,7 +234,7 @@ impl Feed for MemoryFeed {
         let Some((unit, deliveries)) = state.held.remove(&receipt) else {
             return Err(gone(receipt));
         };
-        if deliveries >= ATTEMPT_CAP {
+        if deliveries >= state.attempt_cap {
             let id = unit.id.clone();
             state.dead.push(unit);
             // Logged after the guard drops: a subscriber that panics must not
@@ -230,6 +310,46 @@ mod tests {
         );
         assert_eq!(feed.dead_letters(), vec![unit("poison")]);
         assert!(feed.receive(usize::MAX).unwrap().is_empty());
+    }
+
+    /// Pins that the attempt cap a section sets is the delivery that
+    /// dead-letters a failed unit: with `attempt_cap: 3`, failures on
+    /// deliveries 1 and 2 re-queue the unit and the failure on delivery 3
+    /// moves it to the dead-letter list.
+    #[test]
+    fn the_attempt_cap_sets_the_delivery_that_dead_letters() {
+        let section: FeedSection =
+            serde_yaml::from_str("memory: {}\nattempt_cap: 3\n").expect("section");
+        let feed = MemoryFeed::from_section(&section).unwrap();
+        drop(feed.publish(unit("poison")));
+        for i in 1..=2 {
+            let delivery = receive_one(&feed);
+            assert_eq!(delivery.deliveries, i);
+            feed.fail(delivery.receipt, "unreadable").unwrap();
+            assert_eq!(feed.counts().visible, 1, "re-queued after attempt {i}");
+        }
+        let third = receive_one(&feed);
+        assert_eq!(third.deliveries, 3);
+        feed.fail(third.receipt, "unreadable").unwrap();
+        assert_eq!(feed.counts().dead_lettered, 1, "dead-lettered on attempt 3");
+        assert_eq!(feed.counts().visible, 0);
+    }
+
+    /// Pins that `from_section` refuses a section naming another backend, and
+    /// a key in the `memory` body.
+    #[test]
+    fn from_section_refuses_another_backend_and_a_body_key() {
+        let section: FeedSection = serde_yaml::from_str("other: {}\n").expect("section");
+        let err = MemoryFeed::from_section(&section).unwrap_err().to_string();
+        assert!(err.contains("names `other`"), "{err}");
+
+        let section: FeedSection = serde_yaml::from_str("memory: { depth: 4 }\n").expect("section");
+        let err = MemoryFeed::from_section(&section).unwrap_err().to_string();
+        assert!(err.starts_with("feed.memory"), "{err}");
+        assert!(err.contains("depth"), "{err}");
+
+        let bare: FeedSection = serde_yaml::from_str("memory:\n").expect("section");
+        assert!(MemoryFeed::from_section(&bare).is_ok());
     }
 
     /// Pins that acknowledging removes the unit for good, and that its

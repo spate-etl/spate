@@ -200,6 +200,11 @@ impl FeedError {
 /// feed.acknowledge(delivery.receipt).unwrap();
 /// ```
 pub trait Feed: Send + Sync {
+    /// The key that names this backend in a `feed:` section, such as
+    /// `"memory"`. The runtime refuses a feed whose key differs from the
+    /// one the pipeline's [`FeedSection`](crate::config::FeedSection) names.
+    fn backend(&self) -> &str;
+
     /// Hand the backend the waker it signals when a unit becomes ready to
     /// receive, including one that arrived before this call, and after a
     /// [`receive`](Feed::receive) that takes some units and leaves others. A
@@ -394,6 +399,10 @@ mod tests {
     struct EmptyFeed;
 
     impl Feed for EmptyFeed {
+        fn backend(&self) -> &str {
+            "empty"
+        }
+
         fn set_waker(&self, _waker: FeedWaker) {}
 
         fn receive(&self, _max: usize) -> Result<Vec<Delivery>, FeedError> {

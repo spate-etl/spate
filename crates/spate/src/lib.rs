@@ -11,7 +11,7 @@
 //! |---|---|
 //! | `kafka` | [`kafka`] — Kafka source built on `rdkafka` (single consumer, partition-queue lanes) |
 //! | `kafka-tls` | TLS, mTLS and SASL for [`kafka`]; librdkafka is built with a vendored OpenSSL. The [Kafka security section] lists the SASL mechanisms the feature supports. Without it a security property in the `rdkafka` passthrough fails config validation |
-//! | `s3` | [`s3`] — coordinated bounded object-storage (S3) backfill source: the fleet's leader plans the prefix into splits, workers lease them through the coordinator the `coordination:` section configures (solo in-process without one; progress is then ephemeral), and the job self-terminates once the plan is final and every split completes (`refresh_listing` keeps it open) |
+//! | `s3` | [`s3`] — coordinated bounded object-storage (S3) backfill source: the fleet's leader plans the prefix into splits, workers lease them through the coordinator the `coordination:` section configures (solo in-process without one; progress is then ephemeral), and the job self-terminates once the plan is final and every split completes (`refresh_listing` keeps it open). A `feed:` section reads units from the feed it names in place of a plan, and that job never self-terminates |
 //! | `clickhouse` | [`clickhouse`] — ClickHouse sink (RowBinary, dedup tokens, replica rotation) |
 //! | `clickhouse-uuid` | `uuid::Uuid` fields for `UUID` columns (`clickhouse::serde::uuid`) |
 //! | `clickhouse-chrono` | `chrono` fields for `Date`/`DateTime`/`DateTime64`/`Time` columns |

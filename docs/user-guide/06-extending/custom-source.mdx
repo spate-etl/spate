@@ -246,6 +246,12 @@ synchronous, so `poll_events` drives it from the controller thread.
 [Work feed](../02-concepts/09-work-feed.mdx) explains the model behind the
 rules below.
 
+The pipeline file names the feed in its [`feed:` section](../07-reference/configuration.mdx#feed).
+Accept the section in `configure_feed`. The runtime calls it before `open`,
+with the section and the feed it names. Keep the feed, and read the section's
+common keys, such as `units_held`. The default `configure_feed` refuses the
+section, so a source that reads no feed fails at startup when one is set.
+
 Your source follows these rules:
 
 - **Acknowledge a unit only after you have read it to its end and the sink
@@ -299,6 +305,15 @@ To implement a feed backend, keep every method free of waits:
 - Settle each publish through the `Confirmer` from `confirmation()`, and
   confirm only once the unit is stored. A confirmer dropped unsettled reads as
   `Retryable`, because the unit may or may not have been stored.
+
+A backend also answers to its name in the `feed:` section:
+
+- Return your `feed:` key from `backend`. The runtime refuses a feed whose
+  key differs from the one the section names. The scripted test feed returns
+  `"scripted"`.
+- Build the backend from a `FeedSection`, and refuse a section whose key is
+  not yours. Decode your own keys from the section's backend body, and refuse
+  a common key your backend cannot honor.
 
 The in-process feed,
 [`spate-core/src/feed/memory.rs`](repo:crates/spate-core/src/feed/memory.rs),

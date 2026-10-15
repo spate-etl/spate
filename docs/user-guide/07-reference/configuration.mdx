@@ -16,7 +16,8 @@ the offending YAML path). The `source`, `deserializer`, and `sink` sections are
 single-key mappings selecting a component type; their bodies are opaque to the
 framework and deserialized by the component's own factory. The optional
 [`coordination`](#coordination) section configures a coordinated source's
-store and coordinator.
+store and coordinator, and the optional [`feed`](#feed) section names the work
+feed a feed-reading source reads.
 
 ```yaml
 pipeline: { name: orders, threads: 4, io_threads: 2 }
@@ -298,6 +299,34 @@ Every instance of one job runs with the same source body, because the keys that
 shape the work form the job fingerprint and a mismatch is rejected at startup.
 The `coordination:` section may differ per instance, and `instance_id` must.
 Each coordinated source's page marks which of its keys are fingerprinted.
+
+## `feed:` {#feed}
+
+Optional. The [feed](glossary.mdx#feed) a feed-reading source reads its
+[work units](glossary.mdx#work-unit) from. One key names the backend, and its
+body holds that backend's own keys. The other keys apply whatever the backend.
+Set on a source that reads no feed, the section fails startup, and a file
+that sets both `feed:` and [`coordination:`](#coordination) fails to load.
+These keys are checked when the pipeline starts, before the source opens.
+
+```yaml
+feed:
+  memory: {}
+  units_held: 32
+```
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `<backend>` | component | `required` | Exactly one key naming the backend. `memory` is the in-process feed, which takes no keys of its own. Any other name is a backend built in code; its page documents its body. |
+| `units_held` | integer | `none` | How many units the source holds and reads at once. Unset, the source's own default applies. At least 1. |
+| `attempt_cap` | integer | `10` | The delivery on which the in-process feed moves a failed unit to its dead-letter list. A backend that counts deliveries itself refuses the key. At least 1. |
+
+The runtime builds the in-process feed itself from `memory`. Any other backend
+is built in code from the section and passed to `Pipeline::feed`, and the
+runtime refuses a feed whose backend differs from the key the section names. The
+section's backend keys and its `attempt_cap` apply only when a feed is built
+from the section, so a feed passed to `Pipeline::feed` keeps the settings it was
+built with.
 
 ## Code-level knobs (not YAML) {#code-level-knobs-not-yaml}
 

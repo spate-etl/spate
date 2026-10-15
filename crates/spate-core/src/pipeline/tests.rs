@@ -1283,6 +1283,97 @@ fn coordination_section_on_an_uncoordinated_source_fails_startup() {
     assert!(!h.shared.lock().unwrap().opened, "the source must not open");
 }
 
+/// The text of the `StartError::Config` a run returns before its source
+/// opens. Waits for the run under a deadline, so a run that opens the source
+/// and keeps going fails the test there.
+fn config_error_before_open(h: Harness) -> String {
+    wait_for("run() to return", Duration::from_secs(10), || {
+        h.join.is_finished()
+    });
+    let result = h.join.join().unwrap();
+    let Err(err @ StartError::Config(_)) = result else {
+        panic!("expected StartError::Config, got {result:?}");
+    };
+    assert!(!h.shared.lock().unwrap().opened, "the source must not open");
+    err.to_string()
+}
+
+fn ok_chain(shared: Arc<ChainShared>, log: Arc<Mutex<SourceLog>>) -> FakeChain {
+    FakeChain {
+        shared,
+        log,
+        mode: ChainMode::Ok,
+        batches_seen: 0,
+    }
+}
+
+fn feed_section(yaml: &str) -> Option<crate::config::FeedSection> {
+    Some(serde_yaml::from_str(yaml).expect("section"))
+}
+
+/// Pins that the runtime hands a `feed:` section to the source, whose default
+/// `configure_feed` refuses it before the source opens.
+#[test]
+fn a_source_without_a_feed_rejects_the_feed_section() {
+    let mut cfg = test_config(1);
+    cfg.feed = feed_section("memory: {}");
+    let h = start_with_config(cfg, ok_chain);
+    let err = config_error_before_open(h);
+    assert!(err.contains("reads no feed"), "{err}");
+}
+
+/// Pins that `run` refuses a `feed:` section beside a `coordination:`
+/// section, which a programmatic config reaches without validation.
+#[test]
+fn a_feed_section_beside_coordination_fails_startup() {
+    let mut cfg = test_config(1);
+    cfg.feed = feed_section("memory: {}");
+    cfg.coordination = Some(serde_yaml::from_str("store: { memory: {} }").expect("section"));
+    let h = start_with_config(cfg, ok_chain);
+    let err = config_error_before_open(h);
+    assert!(err.contains("keep one"), "{err}");
+}
+
+/// Pins that a section naming a backend other than `memory`, with no feed
+/// passed in, fails startup with the instruction to build it in code.
+#[test]
+fn a_backend_built_in_code_without_a_feed_fails_startup() {
+    let mut cfg = test_config(1);
+    cfg.feed = feed_section("sqs: {}");
+    let h = start_with_config(cfg, ok_chain);
+    let err = config_error_before_open(h);
+    assert!(err.contains("pass it to `Pipeline::feed`"), "{err}");
+}
+
+/// Pins that a feed passed in with no `feed:` section fails startup.
+#[test]
+fn a_feed_given_without_a_feed_section_fails_startup() {
+    let h = start_with(
+        test_config(1),
+        test_options(),
+        |runtime| runtime.with_feed(Arc::new(crate::feed::memory::MemoryFeed::new())),
+        ok_chain,
+    );
+    let err = config_error_before_open(h);
+    assert!(err.contains("no `feed:` section"), "{err}");
+}
+
+/// Pins that a feed passed in whose backend differs from the section's key
+/// fails startup, naming both.
+#[test]
+fn a_feed_whose_backend_differs_from_the_section_fails_startup() {
+    let mut cfg = test_config(1);
+    cfg.feed = feed_section("sqs: {}");
+    let h = start_with(
+        cfg,
+        test_options(),
+        |runtime| runtime.with_feed(Arc::new(crate::feed::memory::MemoryFeed::new())),
+        ok_chain,
+    );
+    let err = config_error_before_open(h);
+    assert!(err.contains("`memory`") && err.contains("`sqs`"), "{err}");
+}
+
 /// `admin.listen: none` runs and drains with no admin server. With no
 /// listener there is no stop channel to signal, and the run has to reach its
 /// drain and its controller join anyway.

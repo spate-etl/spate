@@ -7,6 +7,11 @@
 //! from the last committed position, so duplicates are possible and loss
 //! is not.
 //!
+//! A pipeline `feed:` section selects the feed path. The source reads work
+//! units from the feed the section names, each unit naming one whole object,
+//! and lists nothing itself. That job never self-terminates, so it ends at a
+//! shutdown, and the section's `units_held` bounds its read parallelism.
+//!
 //! # Shape
 //!
 //! - **Work is planned as splits.** The fleet's elected leader lists the
@@ -22,7 +27,8 @@
 //!   record's `i64` offset packs (member ordinal within the split, record
 //!   index within the object, or within the range for a split over a byte
 //!   range). `coordination.max_in_flight` bounds the working set and
-//!   therefore read parallelism.
+//!   therefore read parallelism, and `feed.units_held` bounds it on the
+//!   feed path.
 //! - **Progress lives in the coordination store, nowhere else.** Commits
 //!   are fenced per-split writes; a lost or stolen split resumes on its
 //!   next owner from the acked watermark, drift-checked against the

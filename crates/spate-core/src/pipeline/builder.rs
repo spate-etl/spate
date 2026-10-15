@@ -41,6 +41,7 @@
 //! | `from_config(config)` | [`telemetry::init`](crate::telemetry::init) → [`metrics::install`](crate::metrics::install)`(&`[`metrics_settings`](crate::pipeline::metrics_settings)`(&config))` → `tokio::runtime::Builder` (`io_threads` workers) → [`InflightBudget::new`](crate::backpressure::InflightBudget::new) |
 //! | `.sink(bundle)` | [`SinkBundle::into_parts`](crate::sink::SinkBundle::into_parts) → [`shard_queues`](crate::sink::shard_queues) → [`ShardQueues::with_frame_codec`](crate::sink::ShardQueues::with_frame_codec) when the parts carry a [`frame_codec`](crate::sink::SinkParts::frame_codec) → [`SinkShardMetrics::try_new`](crate::metrics::SinkShardMetrics::try_new) per shard → [`SinkPool::spawn`](crate::sink::SinkPool::spawn) → a boxed drain closure. It also resolves this sink's [`ChunkConfig`] from the YAML `chunk:` block / [`SinkOptions::with_chunk`]. This is the one builder step without a manual-assembly equivalent, since the config layer is what carries `chunk:`. |
 //! | `.chains(f)` | the factory handed to [`PipelineRuntime::new`], with queue/budget/name plumbing pre-threaded per call |
+//! | `.feed(feed)` | [`PipelineRuntime::with_feed`] |
 //! | `.into_runtime(source)` / `.run(source)` | [`PipelineRuntime::new`]`(config, source, factory, `[`SinkRuntime`]`{..}, budget)` + [`PipelineRuntime::with_io_runtime`] |
 //!
 //! # Shutdown and drop ordering
@@ -60,6 +61,7 @@ use super::runtime::{
 };
 use crate::backpressure::InflightBudget;
 use crate::config::{ConfigError, PipelineConfig};
+use crate::feed::Feed;
 use crate::framing::FramingContract;
 use crate::metrics::{
     ComponentLabels, Meter, MetricRole, MetricsHandle, SharedString, SinkShardMetrics,
@@ -349,6 +351,7 @@ pub struct Pipeline {
     sinks: Vec<(String, SinkAssembly)>,
     chains: Option<ChainFactoryFn>,
     options: RuntimeOptions,
+    feed: Option<Arc<dyn Feed>>,
 }
 
 impl std::fmt::Debug for Pipeline {
@@ -424,6 +427,7 @@ impl Pipeline {
             sinks: Vec::new(),
             chains: None,
             options: RuntimeOptions::default(),
+            feed: None,
         })
     }
 
@@ -699,6 +703,23 @@ impl Pipeline {
         self
     }
 
+    /// Hand the source a feed built in code, for the config's `feed:`
+    /// section to name. `run` passes it to [`Source::configure_feed`] with
+    /// the section.
+    ///
+    /// The feed's [`backend`](Feed::backend) must equal the key the section
+    /// names, and the config must have a `feed:` section; `run` fails at
+    /// startup otherwise. The section's backend keys and its `attempt_cap`
+    /// apply only when a feed is built from the section, so a feed passed
+    /// here keeps the settings it was built with. Without this call, `run`
+    /// builds the in-process feed itself for `feed: { memory: {} }` and
+    /// refuses any other backend.
+    #[must_use]
+    pub fn feed(mut self, feed: Arc<dyn Feed>) -> Self {
+        self.feed = Some(feed);
+        self
+    }
+
     /// Finish assembly into a [`PipelineRuntime`], for callers that need
     /// [`shutdown_handle`](PipelineRuntime::shutdown_handle) before a
     /// spawned `run` (tests, embedded pipelines). The I/O runtime moves
@@ -772,7 +793,7 @@ impl Pipeline {
                 named: named.clone(),
             })
         };
-        Ok(PipelineRuntime::new(
+        let runtime = PipelineRuntime::new(
             self.config,
             source,
             chains,
@@ -785,7 +806,11 @@ impl Pipeline {
             self.budget,
         )
         .with_options(self.options)
-        .with_io_runtime(self.io))
+        .with_io_runtime(self.io);
+        Ok(match self.feed {
+            Some(feed) => runtime.with_feed(feed),
+            None => runtime,
+        })
     }
 
     /// [`into_runtime`](Self::into_runtime) + [`PipelineRuntime::run`]:

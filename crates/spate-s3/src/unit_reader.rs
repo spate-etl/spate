@@ -29,13 +29,14 @@ use spate_core::feed::{
 use spate_core::record::PartitionId;
 use spate_core::source::{DrainBarrier, LaneId, SourceEvent};
 use std::collections::BTreeMap;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-/// Units held at once: the reader receives only while it holds fewer. The
-/// read parallelism of the measured runs, until #1090's key replaces it.
+/// Units held at once when the `feed:` section sets no `units_held`. The
+/// reader receives only while it holds fewer.
 const UNITS_HELD: usize = 96;
 
 /// What the reader needs to open a lane, fixed at `open`.
@@ -76,6 +77,8 @@ pub(crate) struct UnitReader {
     /// ends or fails ends the park too.
     waker: FeedWaker,
     parts: LaneParts,
+    /// Units held at once: the reader receives only while it holds fewer.
+    units_held: usize,
     started: bool,
     /// Sequence number of the next delivery, which names its partition,
     /// lane and poison reports.
@@ -101,7 +104,13 @@ impl std::fmt::Debug for UnitReader {
 }
 
 impl UnitReader {
-    pub(crate) fn new(feed: Arc<dyn Feed>, parts: LaneParts) -> UnitReader {
+    /// A reader over `feed` that holds at most `units_held` units, or
+    /// [`UNITS_HELD`] when that is `None`.
+    pub(crate) fn new(
+        feed: Arc<dyn Feed>,
+        parts: LaneParts,
+        units_held: Option<NonZeroUsize>,
+    ) -> UnitReader {
         let (waker, park) = wake_channel();
         feed.set_waker(waker.clone());
         let (poison_tx, poison_rx) = std::sync::mpsc::channel();
@@ -110,6 +119,7 @@ impl UnitReader {
             park,
             waker,
             parts,
+            units_held: units_held.map_or(UNITS_HELD, NonZeroUsize::get),
             started: false,
             next: 0,
             held: BTreeMap::new(),
@@ -145,7 +155,7 @@ impl UnitReader {
         }
         // Receive before parking: a park consumes the feed's signal, and a
         // receive that takes nothing sends none.
-        let room = UNITS_HELD.saturating_sub(self.held.len());
+        let room = self.units_held.saturating_sub(self.held.len());
         if room > 0 {
             let lanes = self.receive(room)?;
             if !lanes.is_empty() {
@@ -468,7 +478,7 @@ mod tests {
             retry_base: Duration::from_millis(1),
             metrics: None,
         };
-        (UnitReader::new(Arc::new(feed), parts), script, rt)
+        (UnitReader::new(Arc::new(feed), parts, None), script, rt)
     }
 
     /// Receive one scripted unit and hold it as `open` does, returning its

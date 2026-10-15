@@ -101,7 +101,8 @@ impl std::fmt::Debug for State {
 /// nothing again on its own: the script decides what the feed does next. A
 /// call with a receipt the feed no longer holds returns
 /// [`Gone`](FeedErrorKind::Gone) and is recorded by
-/// [`FeedScript::gone`].
+/// [`FeedScript::gone`]. Its [`backend`](Feed::backend) key is `scripted`,
+/// so a pipeline it is passed to names `scripted` in its `feed:` section.
 #[derive(Debug)]
 pub struct ScriptedFeed {
     state: Arc<Mutex<State>>,
@@ -304,6 +305,10 @@ impl ScriptedFeed {
 }
 
 impl Feed for ScriptedFeed {
+    fn backend(&self) -> &str {
+        "scripted"
+    }
+
     fn set_waker(&self, waker: FeedWaker) {
         let mut state = self.lock();
         if !state.queued.is_empty() {

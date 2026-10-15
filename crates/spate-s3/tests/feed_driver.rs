@@ -30,23 +30,10 @@ use std::time::Duration;
 use support::spy::{SpyOptions, spying_local_store};
 use support::{
     Launched, PipelineYaml, captured_rows, key_of, launch_customized, line_framer, lines_bytes,
-    recs, sorted, test_options,
+    recs, sorted, stop, test_options, unit_over,
 };
 
 const DEADLINE: Duration = Duration::from_secs(30);
-
-/// A unit whose body is a one-member descriptor over `name` under `data`,
-/// with no ETag pin.
-fn unit_over(data: &Path, name: &str) -> Unit {
-    let object = DescriptorObject {
-        key: key_of(data, name),
-        size: fs::metadata(data.join(name)).map_or(10, |m| m.len()),
-        etag: None,
-        last_modified_ms: 1,
-    };
-    let body = SplitDescriptor::new(vec![object]).encode().unwrap();
-    Unit::new(name, body)
-}
 
 fn stage(data: &Path, name: &str, rows: &[String]) {
     fs::write(data.join(name), lines_bytes(rows)).unwrap();
@@ -63,12 +50,6 @@ fn launch_on_feed(data: &Path, feed: Arc<dyn Feed>, pre: impl FnOnce(&SinkScript
     launch_customized(&yaml, test_options(), pre, move |source, _io| {
         line_framer(source).with_feed(feed)
     })
-}
-
-fn stop(l: &Launched) {
-    l.shutdown.trigger();
-    let report = l.run.wait_exit(DEADLINE).expect("the run exits").unwrap();
-    assert_eq!(report.state, ExitState::Completed);
 }
 
 /// Rows the sink wrote successfully, decoded to strings.
@@ -508,6 +489,9 @@ impl FirstCallRetryable {
 }
 
 impl Feed for FirstCallRetryable {
+    fn backend(&self) -> &str {
+        self.inner.backend()
+    }
     fn set_waker(&self, waker: FeedWaker) {
         self.inner.set_waker(waker);
     }
@@ -568,6 +552,9 @@ struct RetryableReceiveAndRenew {
 }
 
 impl Feed for RetryableReceiveAndRenew {
+    fn backend(&self) -> &str {
+        self.inner.backend()
+    }
     fn set_waker(&self, waker: FeedWaker) {
         self.inner.set_waker(waker);
     }

@@ -469,6 +469,7 @@ pub(crate) fn test_config(threads: usize) -> PipelineConfig {
         sink: Some(ComponentConfig::new("fake", serde_yaml::Value::Null)),
         sinks: None,
         coordination: None,
+        feed: None,
     }
 }
 

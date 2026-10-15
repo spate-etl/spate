@@ -16,15 +16,19 @@ mod support;
 
 use spate_coordination::StoreCoordinator;
 use spate_coordination::store::memory::MemoryStore;
+use spate_core::feed::Feed as _;
+use spate_core::feed::memory::MemoryFeed;
 use spate_core::pipeline::ExitState;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use support::spy::{GetRecord, RangeKind, SpyOptions, StoreSpy, spying_local_store};
 use support::{
-    Launched, PipelineYaml, TEST_LEASE, captured_rows, launch_customized, line_framer, lines_bytes,
-    recs, shared_store, sorted, test_options, test_tuning,
+    Launched, PipelineYaml, TEST_LEASE, captured_rows, launch_customized, launch_with_feed,
+    line_framer, lines_bytes, recs, shared_store, sorted, stop, test_options, test_tuning,
+    unit_over,
 };
 
 /// A bounded backfill over `data`, with the read-window knobs a test needs to
@@ -314,6 +318,49 @@ fn the_memory_store_section_sets_solo_read_parallelism() {
         "twelve in-flight splits must issue twelve concurrent get_opts calls"
     );
     assert_eq!(spy.lists(), 1, "one LIST across twelve lanes");
+}
+
+/// A `feed:` section's `units_held` sets the feed path's read parallelism:
+/// `units_held: 12` over sixteen one-object units puts twelve reads in
+/// flight, below the reader's default of 96, and the feed path never lists.
+#[test]
+fn the_feed_section_sets_read_parallelism() {
+    let staged = stage(16, 20);
+    let yaml = PipelineYaml::file("s3-request-shape-feed", &staged.data)
+        .section("feed:\n  memory: {}\n  units_held: 12\n")
+        .build();
+    let (spy_store, spy) = spying_local_store(SpyOptions {
+        gate_depth: 12,
+        ..SpyOptions::default()
+    });
+    let feed = MemoryFeed::new();
+    for name in staged.names() {
+        drop(feed.publish(unit_over(&staged.data, &name)));
+    }
+    let l = launch_with_feed(
+        &yaml,
+        test_options(),
+        |_| {},
+        Arc::new(feed.clone()),
+        move |source, _| line_framer(source).with_store(spy_store),
+    );
+
+    spate_test::wait_until(
+        Duration::from_secs(60),
+        "every unit is acknowledged",
+        || feed.counts().acknowledged == 16,
+    );
+    stop(&l);
+    assert_eq!(
+        sorted(captured_rows(&l.script)),
+        sorted(staged.expected.clone())
+    );
+    assert_eq!(
+        spy.peak_concurrent_gets(),
+        12,
+        "twelve units held must issue twelve concurrent get_opts calls"
+    );
+    assert_eq!(spy.lists(), 0, "the feed path never lists");
 }
 
 #[test]

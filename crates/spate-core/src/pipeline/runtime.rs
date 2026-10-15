@@ -7,6 +7,8 @@ use crate::admin::{AdminServer, HealthState, HealthThresholds};
 use crate::backpressure::{BackpressureParams, InflightBudget, WatermarkController};
 use crate::checkpoint::Checkpointer;
 use crate::config::{MetricsExporter, PinningMode, PipelineConfig};
+use crate::feed::Feed;
+use crate::feed::memory::MemoryFeed;
 use crate::metrics::{
     self, BackpressureMetrics, CheckpointMetrics, ComponentLabels, E2eBasis, Exporter,
     InflightBudgetMetrics, IoBusySampler, IoRuntimeMetrics, Meter, MetricRole, MetricsHandle,
@@ -107,6 +109,7 @@ pub struct PipelineRuntime<S: Source> {
     shutdown: Arc<AtomicBool>,
     options: RuntimeOptions,
     io: Option<tokio::runtime::Runtime>,
+    feed: Option<Arc<dyn Feed>>,
     io_busy_interval: Duration,
     io_busy_window: Duration,
 }
@@ -139,6 +142,7 @@ impl<S: Source + 'static> PipelineRuntime<S> {
             shutdown: Arc::new(AtomicBool::new(false)),
             options: RuntimeOptions::default(),
             io: None,
+            feed: None,
             io_busy_interval: IO_BUSY_INTERVAL,
             io_busy_window: IoBusySampler::WINDOW,
         }
@@ -182,6 +186,15 @@ impl<S: Source + 'static> PipelineRuntime<S> {
         self
     }
 
+    /// Hand the source a feed built in code, for the config's `feed:`
+    /// section to name; see [`Pipeline::feed`](super::Pipeline::feed) for
+    /// the rules `run` checks.
+    #[must_use]
+    pub fn with_feed(mut self, feed: Arc<dyn Feed>) -> Self {
+        self.feed = Some(feed);
+        self
+    }
+
     /// A handle that triggers a graceful drain.
     #[must_use]
     pub fn shutdown_handle(&self) -> ShutdownHandle {
@@ -216,6 +229,18 @@ impl<S: Source + 'static> PipelineRuntime<S> {
                     .into(),
             ));
         }
+        self.config
+            .reject_feed_with_coordination()
+            .map_err(|e| StartError::Config(e.to_string()))?;
+        if let (Some(section), Some(feed)) = (&self.config.feed, &self.feed) {
+            let named = section.backend().type_tag();
+            if feed.backend() != named {
+                return Err(StartError::Config(format!(
+                    "the feed passed to `Pipeline::feed` is `{}`, but `feed:` names `{named}`",
+                    feed.backend()
+                )));
+            }
+        }
         if let Some(section) = &self.config.coordination {
             tracing::warn!(
                 "the `coordination:` section is deprecated, and v0.4.0 removes it; a work feed \
@@ -225,6 +250,35 @@ impl<S: Source + 'static> PipelineRuntime<S> {
             self.source
                 .configure_coordination(section)
                 .map_err(|e| StartError::Config(e.to_string()))?;
+        }
+        match (&self.config.feed, self.feed.take()) {
+            (Some(section), given) => {
+                let feed = match given {
+                    Some(feed) => feed,
+                    None if section.backend().type_tag() == "memory" => Arc::new(
+                        MemoryFeed::from_section(section)
+                            .map_err(|e| StartError::Config(e.to_string()))?,
+                    ),
+                    None => {
+                        return Err(StartError::Config(format!(
+                            "the `{}` feed backend is built in code: build it from the `feed:` \
+                             section and pass it to `Pipeline::feed`",
+                            section.backend().type_tag()
+                        )));
+                    }
+                };
+                self.source
+                    .configure_feed(section, feed)
+                    .map_err(|e| StartError::Config(e.to_string()))?;
+            }
+            (None, Some(_)) => {
+                return Err(StartError::Config(
+                    "a feed was given with `Pipeline::feed`, but the file has no `feed:` section \
+                     naming it"
+                        .into(),
+                ));
+            }
+            (None, None) => {}
         }
         let pipeline_name = self.config.pipeline.name.clone();
 

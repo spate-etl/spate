@@ -110,8 +110,9 @@ webpki-roots = "1.0.8"
 # The same Mozilla bundle as whole certificates, for a client that takes PEM.
 webpki-root-certs = "1.0.8"
 # spate-sqs's client, internal only (INV-6). Without default features the SDK
-# leaves out its hyper 0.14 client on ring; `default-https-client` is the
-# hyper 1 client on rustls with aws-lc. smithy-rs releases these together.
+# leaves out its legacy hyper client on ring; `default-https-client` is the
+# current hyper client on rustls with aws-lc. smithy-rs releases these
+# together.
 aws-config = { version = "1.12", default-features = false, features = ["default-https-client", "rt-tokio", "sso", "credentials-process"] }
 aws-sdk-sqs = { version = "1.114", default-features = false, features = ["default-https-client", "rt-tokio"] }
 # Builds that client over a trust store spate-sqs assembles.

@@ -12,11 +12,16 @@
 #   platform:  where it happens, when that is the point.
 #   ci:        opt a pull request into a suite its paths would not select.
 #   needs:     what is blocking the issue, not what it is about.
+#   priority:  how soon an issue with no milestone is taken.
 #
 # GitHub's native issue types carry the type axis and the forms set them, so a
 # bug arrives typed rather than labeled. `delivery-correctness` and
 # `performance` are classes of bug with their own triage priority, so they stay
 # as labels below.
+#
+# A milestone commits an issue to a release, and `release blocker` marks one
+# that release cannot ship without. An issue with no milestone carries a
+# `priority:` label in its place.
 #
 
 - name: "crate: spate"
@@ -62,6 +67,14 @@
 - name: "crate: spate-datagen"
   color: "0052cc"
   description: "The synthetic storefront-event source"
+
+- name: "crate: spate-csv"
+  color: "0052cc"
+  description: "The CSV and TSV format: framer, deserializer and encoder"
+
+- name: "crate: spate-lookup"
+  color: "0052cc"
+  description: "In-memory lookup tables and their loaders"
 
 - name: "crate: spate-test"
   color: "0052cc"
@@ -164,11 +177,30 @@
   color: "e99695"
   description: "Waiting on the reporter"
 
+# --------------------------------------------------------------- priority ----
+#
+# Only on an issue with no milestone, one at a time. A milestone replaces the
+# label.
+
+- name: "priority: high"
+  color: "d93f0b"
+  description: "Unmilestoned work to take first"
+
+- name: "priority: medium"
+  color: "fbca04"
+  description: "Unmilestoned work to take when a release has room"
+
+- name: "priority: low"
+  color: "c2e0c6"
+  description: "Unmilestoned work with no pressure behind it"
+
 # ------------------------------------------------------------ unnamespaced ----
 #
 # `delivery-correctness` and `performance` carry the native issue type Bug.
 #
 # `dependencies` is the one label `dependabot.yml` requires.
+#
+# `release blocker` goes only on an issue with a milestone.
 #
 # `affects-performance` is machine-managed: `perf-label.yml` adds it when a
 # pull request's counter deltas cross the advisory thresholds and removes it
@@ -194,3 +226,7 @@
 - name: "release"
   color: "1d76db"
   description: "Automated release pull request"
+
+- name: "release blocker"
+  color: "b60205"
+  description: "The milestone it sits in cannot release until this is fixed"

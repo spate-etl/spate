@@ -28,9 +28,9 @@ pub struct FeedSection {
     /// Units the source holds and reads at once. `None` leaves the source's
     /// own default.
     pub units_held: Option<NonZeroUsize>,
-    /// Deliveries after which the in-process feed moves a failed unit to its
+    /// The delivery on which the in-process feed moves a failed unit to its
     /// dead-letter list. `None` leaves the backend's default. A backend that
-    /// counts deliveries itself refuses the key.
+    /// cannot honor the key refuses it.
     pub attempt_cap: Option<NonZeroU32>,
 }
 

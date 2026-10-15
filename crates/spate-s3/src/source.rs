@@ -200,9 +200,9 @@ impl S3Source {
     /// Test seam: read one-object work units from `feed` in place of
     /// coordinated splits. Each unit's body is a [`SplitDescriptor`] naming
     /// one whole object; a unit naming anything else is failed back to the
-    /// feed. Conflicts with [`with_coordinator`](S3Source::with_coordinator)
-    /// and with a `coordination:` section, and never reports the input
-    /// drained, so the run ends at a shutdown.
+    /// feed. Conflicts with [`with_coordinator`](S3Source::with_coordinator),
+    /// with a `coordination:` section and with a `feed:` section, and never
+    /// reports the input drained, so the run ends at a shutdown.
     ///
     /// Behind the off-by-default `testing` feature, outside the semver
     /// surface.

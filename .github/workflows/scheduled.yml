@@ -366,6 +366,7 @@ jobs:
             echo "::endgroup::"
             fuzzed=$((fuzzed + 1))
           done <targets.txt
+          echo "crashed=${crashed# }" >>"$GITHUB_OUTPUT"
           if [[ "$fuzzed" -ne "$targets" ]]; then
             echo "::error::fuzzed $fuzzed of $targets target(s)"
             exit 1
@@ -405,11 +406,20 @@ jobs:
           # Sanitizer codegen moves between nightlies, and a floating channel
           # can fail to reproduce it.
           NIGHTLY: ${{ steps.rust.outputs.toolchain }}
+          # Space-separated, as the run step's `::error::` line lists them.
+          CRASHED: ${{ steps.run.outputs.crashed }}
         run: |
           set -euo pipefail
           where=$'Build, CI, or the examples\n\nThe `Fuzz targets` job of the nightly scheduled run.'
           version="\`main\` at $SHA"
-          what="A fuzz target exited non-zero on the [nightly run]($RUN_URL). The input that did it is attached to the run as the \`fuzz-artifacts\` artifact, and Output names the target."
+          # Output is cut to its tail, which can miss every crashed target but
+          # the last, so the names go here.
+          if [ -n "$CRASHED" ]; then
+            which="Fuzz target(s) \`${CRASHED// /\`, \`}\` exited"
+          else
+            which="A fuzz target exited"
+          fi
+          what="$which non-zero on the [nightly run]($RUN_URL). Each crashing input is attached to the run as the \`fuzz-artifacts\` artifact. Output is the end of the crashed targets' output, each part headed \`==> <target> <==\`."
           expected="Every target runs for ${MAX_TOTAL_TIME}s without a crash. Reproduce it against the downloaded file with \`cargo +${NIGHTLY} fuzz run <target> <path-to-the-input>\`. A panic on malformed bytes is a bug in the decoder, so the fix goes with a unit test in the crate that owns it. Keep the input under \`fuzz/corpus/<target>/\` so the case stays covered."
           cargo xtask bug-report --out "$RUNNER_TEMP/body.md" \
             --answer components="$where" \
@@ -417,7 +427,7 @@ jobs:
             --answer what="$what" \
             --answer expected="$expected" \
             --answer-file logs="$RUNNER_TEMP/fuzz.log"
-          again="Still failing at $SHA, in the [nightly run]($RUN_URL)."
+          again="Still failing at $SHA. $which non-zero on the [nightly run]($RUN_URL)."
           cargo xtask bug-report --out "$RUNNER_TEMP/comment.md" \
             --answer what="$again" \
             --answer-file logs="$RUNNER_TEMP/fuzz.log"

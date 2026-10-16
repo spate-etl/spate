@@ -23,6 +23,7 @@ openssl-sys = { workspace = true, optional = true }
 rdkafka = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync", "time"] }
 tracing = { workspace = true }
 
@@ -32,6 +33,7 @@ spate-test = { workspace = true }
 spate-test-support = { workspace = true, features = ["tls"] }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
+proptest = { workspace = true }
 serde_yaml = { workspace = true }
 testcontainers = { workspace = true, features = ["blocking"] }
 testcontainers-modules = { workspace = true, features = ["kafka"] }

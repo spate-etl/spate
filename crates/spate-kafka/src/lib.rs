@@ -56,6 +56,7 @@
 mod config;
 mod context;
 mod error;
+mod feed;
 mod lane;
 mod metrics;
 mod security;

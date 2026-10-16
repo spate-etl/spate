@@ -211,9 +211,9 @@ jobs:
           echo "rc=$rc" >>"$GITHUB_OUTPUT"
           exit "$rc"
 
-      # Files only when the scan step fails; a checkout failure would otherwise
-      # file an issue asserting an advisory was found. The body follows the
-      # sections of the bug issue form.
+      # Files only when the scan step fails, so an earlier failure such as the
+      # install does not file an issue for a scan that never ran. The body
+      # follows the sections of the bug issue form.
       - name: Report the failure as an issue
         if: failure() && steps.scan.conclusion == 'failure'
         env:
@@ -261,7 +261,7 @@ jobs:
               '' \
               '### What you expected instead' \
               '' \
-              'No advisory without an entry in the `osv-scanner.toml` beside the manifest that holds it. Triage is one of two things: upgrade the affected package, or add a dated `IgnoredVulns` entry with a written reason. Closing this issue without doing one of them just reopens it tomorrow.' \
+              'No advisory without an entry in the `osv-scanner.toml` beside the manifest that holds it. On exit 1, triage is one of two things: upgrade the affected package, or add a dated `IgnoredVulns` entry with a written reason, and closing this issue without doing one of them just reopens it tomorrow. On any other exit code, the run log shows the error to fix.' \
               '' \
               '### Output' \
               ''

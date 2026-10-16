@@ -1669,6 +1669,8 @@ fn a_busy_io_runtime_reaches_the_exposition() {
 /// holding one of two workers reads about half in the exposition.
 #[test]
 fn one_busy_worker_of_two_reads_half_in_the_exposition() {
+    const WINDOW: Duration = Duration::from_secs(2);
+
     let mut cfg = test_config(1);
     cfg.metrics.exporter = crate::config::MetricsExporter::Prometheus;
     let pipeline_name = cfg.pipeline.name.clone();
@@ -1697,7 +1699,7 @@ fn one_busy_worker_of_two_reads_half_in_the_exposition() {
         |runtime| {
             runtime
                 .with_io_runtime(io)
-                .with_io_busy_sampling(Duration::from_millis(50), Duration::from_secs(2))
+                .with_io_busy_sampling(Duration::from_millis(50), WINDOW)
         },
         |shared, log| FakeChain {
             shared,
@@ -1707,16 +1709,20 @@ fn one_busy_worker_of_two_reads_half_in_the_exposition() {
         },
     );
     // A reading counted against one worker sits near 1 once the window
-    // fills; against two it stays near half for many samples in a row.
-    let in_band = std::cell::Cell::new(0u32);
+    // fills; against two it stays near half for a whole window. The hold is
+    // timed because one render of a shared process's exposition can take
+    // tens of milliseconds, so a count of polls has no fixed duration.
+    let in_band_since = std::cell::Cell::new(None::<Instant>);
     wait_for(
         "the gauge to hold near half",
         Duration::from_secs(15),
         || {
             let half = io_busy_ratio(&handle.render(), &pipeline_name)
                 .is_some_and(|r| (0.3..0.7).contains(&r));
-            in_band.set(if half { in_band.get() + 1 } else { 0 });
-            in_band.get() >= 500
+            in_band_since.set(half.then(|| in_band_since.get().unwrap_or_else(Instant::now)));
+            in_band_since
+                .get()
+                .is_some_and(|since| since.elapsed() >= WINDOW)
         },
     );
 

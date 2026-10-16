@@ -160,6 +160,28 @@ fn a_file_answer_keeps_its_tail_inside_the_log_limit() {
     assert!(body.contains("### Output\n\n```shell\n[earlier lines cut"));
 }
 
+/// A cut log opens on a whole line: the marker is followed by the first line
+/// that fits entirely, never by the end of one cut part way.
+#[test]
+fn a_cut_log_opens_on_a_whole_line() {
+    let log: String = (0..10).map(|i| format!("line {i}\n")).collect();
+    // 7 characters per line; 25 keeps three whole lines and 4 characters of
+    // a fourth.
+    assert_eq!(
+        tail(&log, 25),
+        "[earlier lines cut; the run log has the rest]\nline 7\nline 8\nline 9\n"
+    );
+}
+
+/// Parameterised and non-SGR CSI sequences are removed whole.
+#[test]
+fn strip_ansi_removes_parameterised_and_non_sgr_csi() {
+    assert_eq!(
+        strip_ansi("\u{1b}[38;5;9merror\u{1b}[0m: \u{1b}[1;31mx\u{1b}[K\u{1b}[2J."),
+        "error: x."
+    );
+}
+
 /// An answer to an id the form does not have, a field answered twice, and an
 /// argument with no `=` are refused.
 #[test]
@@ -182,7 +204,7 @@ fn every_answer_a_workflow_gives_is_a_bug_form_field() {
     for entry in fs::read_dir(repo().join(".github/workflows")).unwrap() {
         let path = entry.unwrap().path();
         let text = fs::read_to_string(&path).unwrap();
-        for flag in ["--answer ", "--answer-file "] {
+        for flag in ["--answer ", "--answer-file ", "--answer=", "--answer-file="] {
             for (at, _) in text.match_indices(flag) {
                 let rest = text[at + flag.len()..].trim_start_matches(['$', '"', '\'']);
                 let id = rest.split('=').next().unwrap();

@@ -111,7 +111,12 @@ fn tail(text: &str, max: usize) -> String {
         return text;
     }
     let cut: String = text.chars().skip(count - max).collect();
-    let cut = cut.split_once('\n').map_or(cut.as_str(), |(_, rest)| rest);
+    // A cut just after a newline already opens on a whole line.
+    let cut = if text.chars().nth(count - max - 1) == Some('\n') {
+        cut.as_str()
+    } else {
+        cut.split_once('\n').map_or(cut.as_str(), |(_, rest)| rest)
+    };
     format!("[earlier lines cut; the run log has the rest]\n{cut}")
 }
 

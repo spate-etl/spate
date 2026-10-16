@@ -173,6 +173,16 @@ fn a_cut_log_opens_on_a_whole_line() {
     );
 }
 
+/// A cut that falls on a line start keeps that line.
+#[test]
+fn a_cut_on_a_line_start_keeps_that_line() {
+    let log: String = (0..10).map(|i| format!("line {i}\n")).collect();
+    assert_eq!(
+        tail(&log, 28),
+        "[earlier lines cut; the run log has the rest]\nline 6\nline 7\nline 8\nline 9\n"
+    );
+}
+
 /// Parameterised and non-SGR CSI sequences are removed whole.
 #[test]
 fn strip_ansi_removes_parameterised_and_non_sgr_csi() {

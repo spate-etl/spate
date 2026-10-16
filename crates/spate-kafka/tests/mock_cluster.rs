@@ -255,16 +255,27 @@ fn commit_as(brokers: &str, group: &str, offset: i64) {
 /// offset, never from the reset policy.
 #[test]
 fn a_failed_offset_lookup_starts_from_the_committed_offset() {
+    use rdkafka::types::RDKafkaRespErr::{
+        RD_KAFKA_RESP_ERR_COORDINATOR_LOAD_IN_PROGRESS as LOAD_IN_PROGRESS,
+        RD_KAFKA_RESP_ERR_GROUP_AUTHORIZATION_FAILED as AUTHORIZATION_FAILED,
+    };
+    /// Load-in-progress replies queued for librdkafka's own query. At the
+    /// one-second retry backoff cap they outlast every deadline in the test.
+    const HELD_REPLIES: usize = 1000;
+
     let cluster = MockCluster::new(1).expect("mock cluster");
     cluster.create_topic(TOPIC, 1, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
     produce(&brokers, TOPIC, 6, 1, "d");
     commit_as(&brokers, "lookup-error", 3);
-    // Fails the source's lookup; librdkafka's own query after it succeeds.
-    cluster.request_errors(
-        rdkafka::types::RDKafkaApiKey::OffsetFetch,
-        &[rdkafka::types::RDKafkaRespErr::RD_KAFKA_RESP_ERR_GROUP_AUTHORIZATION_FAILED],
-    );
+    // The first error fails the source's lookup. librdkafka retries its own
+    // query on load-in-progress without limit, so that query is answered only
+    // once the errors are cleared below. A reply that lands between the
+    // source's pause and resume can drop the resume as outdated and leave the
+    // partition paused (librdkafka#5591).
+    let mut errors = vec![AUTHORIZATION_FAILED];
+    errors.extend([LOAD_IN_PROGRESS; HELD_REPLIES]);
+    cluster.request_errors(rdkafka::types::RDKafkaApiKey::OffsetFetch, &errors);
 
     let mut cfg = config(&brokers, "lookup-error");
     cfg.rdkafka
@@ -275,6 +286,7 @@ fn a_failed_offset_lookup_starts_from_the_committed_offset() {
     let lines = spate_test::capture_logs(tracing::Level::WARN, || {
         source.open(SourceCtx::new(cp.handle())).expect("open");
         let mut lanes = await_assignment(&mut source, ASSIGNMENT);
+        cluster.clear_request_errors(rdkafka::types::RDKafkaApiKey::OffsetFetch);
         let rows = drain_lane(&mut source, &mut lanes[0], 3, Duration::from_secs(30));
         let offsets: Vec<i64> = rows.iter().map(|(_, _, o)| *o).collect();
         assert_eq!(offsets, vec![3, 4, 5]);

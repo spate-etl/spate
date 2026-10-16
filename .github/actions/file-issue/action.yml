@@ -1,0 +1,33 @@
+name: File an issue
+description: >
+  Comments on the open issue with exactly this title, or files one under the
+  Bug type. A scheduled job that fails runs this, so a repeat failure adds to
+  one issue instead of filing another. The calling job needs `issues: write`.
+
+inputs:
+  title:
+    description: The issue title, matched exactly against the open issues.
+    required: true
+  body-file:
+    description: The body of a new issue.
+    required: true
+  comment-file:
+    description: >
+      The comment on an open issue. Without one, the comment is a "Still
+      failing" line with the run's URL.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    # Inputs go through `env:`. Interpolating them into the `run:` block
+    # splices the caller's text into generated shell.
+    - env:
+        GH_TOKEN: ${{ github.token }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        TITLE: ${{ inputs.title }}
+        BODY_FILE: ${{ inputs.body-file }}
+        COMMENT_FILE: ${{ inputs.comment-file }}
+      run: '"$GITHUB_ACTION_PATH/file-issue.sh"'
+      shell: bash

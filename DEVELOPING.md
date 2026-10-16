@@ -226,7 +226,7 @@ so does one touching a workspace crate the harness depends on directly.
 The nightly tier in `scheduled.yml` fuzzes each for five minutes, set by
 `MAX_TOTAL_TIME`, and carries `fuzz/corpus` between nights in a cache entry.
 A crash uploads the input as the `fuzz-artifacts` artifact and opens an issue
-titled `A fuzz target found a crashing input`.
+titled `[bug] A fuzz target found a crashing input`.
 
 ## Benchmarks
 

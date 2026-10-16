@@ -81,6 +81,7 @@ pub(crate) struct Tracker {
 }
 
 impl Tracker {
+    #[cfg(test)]
     pub(crate) fn new() -> Tracker {
         Tracker::default()
     }
@@ -121,6 +122,7 @@ impl Tracker {
     }
 
     /// Whether `tp` is owned.
+    #[cfg(test)]
     pub(crate) fn owns(&self, tp: &Tp) -> bool {
         self.partitions.contains_key(tp)
     }
@@ -149,7 +151,7 @@ impl Tracker {
 
     /// Whether `position` was delivered under its partition's current
     /// assignment.
-    fn current(&self, position: &Position) -> bool {
+    pub(crate) fn current(&self, position: &Position) -> bool {
         self.partitions
             .get(&position.tp)
             .is_some_and(|p| p.generation == position.generation)
@@ -206,6 +208,7 @@ impl Tracker {
     /// The offset `tp` may commit: one past the offset delivered last, or its
     /// first unfinished offset where that is lower. `None` before its first
     /// delivery.
+    #[cfg(test)]
     pub(crate) fn commit_point(&self, tp: &Tp) -> Option<i64> {
         self.partitions.get(tp)?.commit_point()
     }
@@ -223,6 +226,58 @@ impl Tracker {
             }
         }
         moved
+    }
+
+    /// Mark `points` as not taken, so the next
+    /// [`take_commits`](Tracker::take_commits) returns them again. For a
+    /// commit that failed. A partition whose point moved since is left as
+    /// it is.
+    pub(crate) fn untake(&mut self, points: &[(Tp, i64)]) {
+        for (tp, point) in points {
+            if let Some(p) = self.partitions.get_mut(tp)
+                && p.taken == Some(*point)
+            {
+                p.taken = None;
+            }
+        }
+    }
+
+    /// The partitions owned now.
+    pub(crate) fn owned(&self) -> impl Iterator<Item = &Tp> {
+        self.partitions.keys()
+    }
+
+    /// Replace every held copy of `offset` of `tp` with the delivery about
+    /// to be made: each held receipt naming it under the current assignment
+    /// is removed, and its copy finished. Returns those receipts, so the
+    /// caller can drop what it keeps for them.
+    ///
+    /// A receipt is valid until a redelivery replaces it, and the copy it
+    /// held must still finish, or the offset would stay unfinished for the
+    /// rest of the assignment. A copy released for a write is not held, and
+    /// finishes when its write is confirmed.
+    pub(crate) fn replace_copies(&mut self, tp: &Tp, offset: i64) -> Vec<Receipt> {
+        let Some(partition) = self.partitions.get_mut(tp) else {
+            return Vec::new();
+        };
+        // Only an offset delivered again has a copy to replace, which is
+        // rare, so the scan of `held` stays off the common path.
+        if !partition.unfinished.contains_key(&offset) {
+            return Vec::new();
+        }
+        let generation = partition.generation;
+        let replaced: Vec<u64> = self
+            .held
+            .iter()
+            .filter(|(_, p)| p.tp == *tp && p.offset == offset && p.generation == generation)
+            .map(|(&receipt, _)| receipt)
+            .collect();
+        for receipt in &replaced {
+            if let Some(position) = self.held.remove(receipt) {
+                self.complete(&position);
+            }
+        }
+        replaced.into_iter().map(Receipt).collect()
     }
 }
 
@@ -363,6 +418,56 @@ mod tests {
         let again = t.deliver(&tp(0), 5).unwrap();
         assert!(t.acknowledge(again));
         assert_eq!(t.commit_point(&tp(0)), Some(6));
+    }
+
+    /// Pins that a redelivery replaces a held copy of the same offset: the
+    /// old receipt is gone, its copy finished, and the offset finishes with
+    /// the new copy. A copy released for a write is left to its write.
+    #[test]
+    fn a_redelivery_replaces_the_held_copy_and_finishes_it() {
+        let mut t = Tracker::new();
+        t.assign([tp(0)]);
+        let old = t.deliver(&tp(0), 5).unwrap();
+        assert_eq!(t.replace_copies(&tp(0), 5), vec![old]);
+        let new = t.deliver(&tp(0), 5).unwrap();
+        assert!(t.held(old).is_none(), "the replaced receipt is gone");
+        assert_eq!(t.commit_point(&tp(0)), Some(5));
+        assert!(t.acknowledge(new));
+        assert_eq!(t.commit_point(&tp(0)), Some(6), "no copy of 5 is left");
+
+        let writing = t.deliver(&tp(0), 6).unwrap();
+        let moving = t.release(writing).unwrap();
+        assert_eq!(t.replace_copies(&tp(0), 6), vec![]);
+        let again = t.deliver(&tp(0), 6).unwrap();
+        assert!(t.acknowledge(again));
+        assert_eq!(t.commit_point(&tp(0)), Some(6), "the write's copy is open");
+        assert!(t.complete(&moving));
+        assert_eq!(t.commit_point(&tp(0)), Some(7));
+
+        assert_eq!(t.replace_copies(&tp(1), 0), vec![], "not owned");
+    }
+
+    /// Pins that a point marked untaken is returned by the next take, and
+    /// that a point which moved since is returned at its new value.
+    #[test]
+    fn an_untaken_point_is_taken_again() {
+        let mut t = Tracker::new();
+        t.assign([tp(0), tp(1)]);
+        let r0 = t.deliver(&tp(0), 3).unwrap();
+        let r1 = t.deliver(&tp(1), 8).unwrap();
+        assert!(t.acknowledge(r0));
+        assert!(t.acknowledge(r1));
+        let mut taken = t.take_commits();
+        taken.sort();
+        assert_eq!(taken, vec![(tp(0), 4), (tp(1), 9)]);
+        t.untake(&taken);
+        let r1 = t.deliver(&tp(1), 9).unwrap();
+        assert!(t.acknowledge(r1));
+        let mut again = t.take_commits();
+        again.sort();
+        assert_eq!(again, vec![(tp(0), 4), (tp(1), 10)]);
+        t.untake(&[(tp(1), 9)]);
+        assert_eq!(t.take_commits(), vec![], "10 was taken after 9 failed");
     }
 
     /// Pins that a held receipt from an earlier assignment leaves the

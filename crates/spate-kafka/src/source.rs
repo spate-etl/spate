@@ -408,7 +408,11 @@ impl KafkaSource {
 /// The start offset to assign for one partition of a committed-offset
 /// lookup, or `None` to keep the committed offset it returned. A partition
 /// whose lookup failed gets `Offset::Stored`, never the reset policy.
-fn start_offset(lookup: KafkaResult<()>, committed: Offset, uncommitted: Offset) -> Option<Offset> {
+pub(crate) fn start_offset(
+    lookup: KafkaResult<()>,
+    committed: Offset,
+    uncommitted: Offset,
+) -> Option<Offset> {
     match (lookup, committed) {
         (Ok(()), Offset::Offset(_)) => None,
         (Ok(()), Offset::Invalid) => Some(uncommitted),

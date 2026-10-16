@@ -13,7 +13,7 @@ mod tls;
 #[cfg(feature = "toxiproxy")]
 mod toxiproxy;
 
-pub use child::run_in_child;
+pub use child::{ChildTest, run_in_child};
 pub use corpus::{fnv1a, pin};
 #[cfg(feature = "elasticmq")]
 pub use elasticmq::{ElasticMq, Message, QUERY_PORT};

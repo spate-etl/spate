@@ -426,7 +426,8 @@ pub(crate) mod tests {
     }
 
     /// rdkafka's producer hands each error event to its context twice in a
-    /// row, which `SinkContext::repeats_previous` depends on.
+    /// row, which `SinkContext::repeats_previous` and the feed's
+    /// `FeedProducerContext::repeats_previous` depend on.
     #[test]
     fn rdkafka_delivers_each_producer_error_twice() {
         use rdkafka::ClientConfig;
@@ -445,7 +446,8 @@ pub(crate) mod tests {
         assert!(
             calls.len() % 2 == 0 && calls.chunks(2).all(|pair| pair[0] == pair[1]),
             "rdkafka no longer repeats error callbacks: delete \
-             `SinkContext::repeats_previous` and this test. Calls: {calls:#?}"
+             `SinkContext::repeats_previous`, `FeedProducerContext::repeats_previous` \
+             and this test. Calls: {calls:#?}"
         );
     }
 }

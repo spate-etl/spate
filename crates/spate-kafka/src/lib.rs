@@ -1,4 +1,4 @@
-//! Kafka source and producer sink for the Spate framework.
+//! Kafka source, producer sink and work feed for the Spate framework.
 //!
 //! # Source
 //!
@@ -47,6 +47,14 @@
 //! See the module docs for topology, delivery semantics, and the
 //! `sink: { kafka: ... }` configuration schema.
 //!
+//! # Feed
+//!
+//! The [`feed`] module is a work feed backend: [`feed::KafkaFeed`] carries
+//! work units on a work topic that every worker reads as one consumer
+//! group, and moves a failed unit to a retry topic, or at the attempt cap to
+//! a dead-letter topic. `main()` builds it from the pipeline's
+//! `feed: { kafka: ... }` section and passes it to `Pipeline::feed`.
+//!
 //! This crate re-exports nothing from `rdkafka`: its types
 //! stay out of public signatures so `rdkafka` major bumps are not breaking
 //! changes here (INV-6; ADR-0011).
@@ -56,7 +64,7 @@
 mod config;
 mod context;
 mod error;
-mod feed;
+pub mod feed;
 mod lane;
 mod metrics;
 mod security;

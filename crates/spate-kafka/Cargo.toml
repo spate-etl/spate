@@ -1,6 +1,6 @@
 [package]
 name = "spate-kafka"
-description = "Kafka source and producer sink for the Spate framework, built on rdkafka: a single consumer per process with partition queues fanned across pipeline threads, and a delivery-report-acknowledged producer sink. Applications should depend on the `spate` facade crate with the `kafka` feature."
+description = "Kafka source, producer sink and work feed for the Spate framework, built on rdkafka: a single consumer per process with partition queues fanned across pipeline threads, a delivery-report-acknowledged producer sink, and a feed backend over work, retry and dead-letter topics. Applications should depend on the `spate` facade crate with the `kafka` feature."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -29,12 +29,15 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 gungraun = { workspace = true }
+spate-json = { workspace = true }
+spate-s3 = { workspace = true }
 spate-test = { workspace = true }
 spate-test-support = { workspace = true, features = ["tls"] }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 proptest = { workspace = true }
 serde_yaml = { workspace = true }
+tempfile = { workspace = true }
 testcontainers = { workspace = true, features = ["blocking"] }
 testcontainers-modules = { workspace = true, features = ["kafka"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

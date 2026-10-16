@@ -250,6 +250,14 @@ impl KafkaFeedConfig {
                 self.delivery_timeout
             )));
         }
+        // librdkafka reads 0 as off, so a positive interval under a
+        // millisecond would silently disable statistics.
+        if !self.statistics_interval.is_zero() && self.statistics_interval.as_millis() == 0 {
+            return Err(error(
+                "`statistics_interval` must be 0s, which disables statistics, or at least 1ms"
+                    .to_owned(),
+            ));
+        }
         for key in self.rdkafka.keys() {
             let name = key.strip_prefix("topic.").unwrap_or(key);
             if let Some((_, why)) = DENYLIST.iter().find(|(owned, _)| *owned == name) {
@@ -259,6 +267,60 @@ impl KafkaFeedConfig {
             }
         }
         crate::security::check_tls_feature(&self.rdkafka, "feed.kafka")
+    }
+
+    /// The consumer's librdkafka configuration: the passthrough, then the
+    /// properties the feed owns, which win.
+    ///
+    /// Takes the OpenSSL env check as an argument: on Linux, cargo exports
+    /// `SSL_CERT_FILE` and `SSL_CERT_DIR` to every process it runs, so a test
+    /// reading them always sees them set.
+    pub(crate) fn consumer_config(&self, openssl_env: bool) -> rdkafka::ClientConfig {
+        let mut cc = self.client_config(openssl_env);
+        cc.set("group.id", &self.group_id);
+        cc.set("group.protocol", "classic");
+        // Eager: a rebalance revokes every partition before it assigns any,
+        // and the tracker relies on that.
+        cc.set("partition.assignment.strategy", "range,roundrobin");
+        cc.set("auto.offset.reset", "earliest");
+        cc.set("enable.auto.commit", "false");
+        cc.set("enable.auto.offset.store", "false");
+        cc.set("enable.partition.eof", "false");
+        cc
+    }
+
+    /// The producer's librdkafka configuration: the passthrough, then the
+    /// properties the feed owns, which win.
+    pub(crate) fn producer_config(&self, openssl_env: bool) -> rdkafka::ClientConfig {
+        let mut cc = self.client_config(openssl_env);
+        cc.set("acks", "all");
+        cc.set("enable.idempotence", "true");
+        cc.set(
+            "message.timeout.ms",
+            self.delivery_timeout.as_millis().to_string(),
+        );
+        cc
+    }
+
+    fn client_config(&self, openssl_env: bool) -> rdkafka::ClientConfig {
+        let mut cc = rdkafka::ClientConfig::new();
+        // rdkafka reads the log facade by default; tracing filters these events.
+        cc.set_log_level(rdkafka::config::RDKafkaLogLevel::Debug);
+        for (k, v) in &self.rdkafka {
+            cc.set(k, v);
+        }
+        crate::security::apply_ca_default(&mut cc, &self.rdkafka, openssl_env);
+        cc.set("bootstrap.servers", &self.brokers);
+        // A write to, or a metadata read of, a missing topic must fail, and
+        // never create the topic with the broker's defaults.
+        cc.set("allow.auto.create.topics", "false");
+        if !self.statistics_interval.is_zero() {
+            cc.set(
+                "statistics.interval.ms",
+                self.statistics_interval.as_millis().to_string(),
+            );
+        }
+        cc
     }
 }
 
@@ -414,6 +476,73 @@ mod tests {
             parse(&format!("{MINIMAL}  delivery_timeout: {timeout}\n"))
                 .unwrap_or_else(|err| panic!("{timeout}: {err}"));
         }
+    }
+
+    /// Pins that a statistics interval under a millisecond is refused, since
+    /// librdkafka would read it as off, and that 0s and 1ms are accepted.
+    #[test]
+    fn a_sub_millisecond_statistics_interval_is_refused() {
+        for interval in ["500us", "999us"] {
+            let err = parse(&format!("{MINIMAL}  statistics_interval: {interval}\n"))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("statistics_interval"), "{interval}: {err}");
+        }
+        for interval in ["0s", "1ms"] {
+            parse(&format!("{MINIMAL}  statistics_interval: {interval}\n"))
+                .unwrap_or_else(|err| panic!("{interval}: {err}"));
+        }
+    }
+
+    /// Pins the properties each client is given: the passthrough, and the
+    /// feed's own settings over it.
+    #[test]
+    fn each_client_gets_the_settings_the_feed_owns() {
+        let config = parse(&format!(
+            "{MINIMAL}  delivery_timeout: 7s\n  statistics_interval: 2s\n  \
+             rdkafka:\n    session.timeout.ms: \"6000\"\n"
+        ))
+        .unwrap();
+        let consumer = config.consumer_config(true);
+        for (key, value) in [
+            ("bootstrap.servers", "localhost:9092"),
+            ("group.id", "workers"),
+            ("group.protocol", "classic"),
+            ("partition.assignment.strategy", "range,roundrobin"),
+            ("auto.offset.reset", "earliest"),
+            ("enable.auto.commit", "false"),
+            ("enable.auto.offset.store", "false"),
+            ("enable.partition.eof", "false"),
+            ("allow.auto.create.topics", "false"),
+            ("statistics.interval.ms", "2000"),
+            ("session.timeout.ms", "6000"),
+        ] {
+            assert_eq!(consumer.get(key), Some(value), "consumer {key}");
+        }
+        assert_eq!(consumer.get("acks"), None);
+
+        let producer = config.producer_config(true);
+        for (key, value) in [
+            ("bootstrap.servers", "localhost:9092"),
+            ("acks", "all"),
+            ("enable.idempotence", "true"),
+            ("message.timeout.ms", "7000"),
+            ("allow.auto.create.topics", "false"),
+            ("statistics.interval.ms", "2000"),
+        ] {
+            assert_eq!(producer.get(key), Some(value), "producer {key}");
+        }
+        assert_eq!(producer.get("group.id"), None);
+
+        let quiet = parse(&format!("{MINIMAL}  statistics_interval: 0s\n")).unwrap();
+        assert_eq!(
+            quiet.consumer_config(true).get("statistics.interval.ms"),
+            None
+        );
+        assert_eq!(
+            quiet.producer_config(true).get("statistics.interval.ms"),
+            None
+        );
     }
 
     /// Pins that `Debug` shows every `rdkafka` key and none of the values.

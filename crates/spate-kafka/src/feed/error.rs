@@ -2,21 +2,21 @@
 
 use spate_core::config::ConfigError;
 
-/// Why the Kafka feed could not be built.
+/// Why [`KafkaFeed::connect`](crate::feed::KafkaFeed::connect) could not
+/// build a feed.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
-pub(crate) enum KafkaFeedError {
+pub enum KafkaFeedError {
     /// The `feed:` section is not one the Kafka feed can read.
     #[error(transparent)]
     Config(#[from] ConfigError),
-    /// The feed cannot start, and starting again fails the same way: the
-    /// brokers refused the credentials, a topic, or the TLS handshake; a
-    /// client could not be built from the configuration, as when its TLS
-    /// context fails; or a topic failed one of the feed's startup checks.
+    /// The feed cannot start, and starting again fails the same way: a
+    /// client could not be built from the configuration, as for a property
+    /// value librdkafka does not accept or a TLS context that fails.
     #[error("the Kafka feed cannot start: {0}")]
     Refused(String),
-    /// The brokers did not answer in time, or kept failing transiently.
-    /// Starting again later may succeed.
+    /// The feed could not start for a reason that may pass, such as a
+    /// thread the system could not start. Starting again later may succeed.
     #[error("Kafka is unavailable: {0}")]
     Unavailable(String),
 }

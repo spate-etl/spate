@@ -351,7 +351,27 @@ fn with_rejection(reason: &str, (age, text): &(Duration, String)) -> String {
 /// and a batch replay costs duplicates, never loss.
 fn classify(code: Option<RDKafkaErrorCode>, reason: &str) -> SinkError {
     use RDKafkaErrorCode as C;
-    let class = match code {
+    let class = report_class(code);
+    let reason = match code {
+        Some(C::UnknownTopicOrPartition) => format!(
+            "{reason} — the topic does not exist (create it, or check the \
+             sink's `topic` field)"
+        ),
+        Some(C::MessageSizeTooLarge) => format!(
+            "{reason} — a message passed the sink's `max_message_bytes` \
+             guard but exceeded the broker/topic `message.max.bytes`; align \
+             the two limits"
+        ),
+        _ => reason.to_string(),
+    };
+    SinkError::Client { class, reason }
+}
+
+/// The class of a failed produce or delivery report, by [`classify`]'s
+/// table.
+pub(crate) fn report_class(code: Option<RDKafkaErrorCode>) -> ErrorClass {
+    use RDKafkaErrorCode as C;
+    match code {
         Some(
             C::UnknownTopicOrPartition
             | C::TopicAuthorizationFailed
@@ -367,20 +387,7 @@ fn classify(code: Option<RDKafkaErrorCode>, reason: &str) -> SinkError {
             | C::InvalidProducerIdMapping,
         ) => ErrorClass::Fatal,
         _ => ErrorClass::Retryable,
-    };
-    let reason = match code {
-        Some(C::UnknownTopicOrPartition) => format!(
-            "{reason} — the topic does not exist (create it, or check the \
-             sink's `topic` field)"
-        ),
-        Some(C::MessageSizeTooLarge) => format!(
-            "{reason} — a message passed the sink's `max_message_bytes` \
-             guard but exceeded the broker/topic `message.max.bytes`; align \
-             the two limits"
-        ),
-        _ => reason.to_string(),
-    };
-    SinkError::Client { class, reason }
+    }
 }
 
 #[cfg(test)]

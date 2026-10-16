@@ -17,6 +17,8 @@ use std::time::{Duration, Instant};
 use testcontainers::{ContainerRequest, ImageExt};
 use testcontainers_modules::kafka::apache::Kafka;
 
+pub(crate) mod feed;
+
 /// A broker on the image `ci/kafka/` pins, pulled by digest.
 pub(crate) fn broker() -> ContainerRequest<Kafka> {
     let (name, tag) = container_image(&["--pull", "kafka"]);

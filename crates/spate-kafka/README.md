@@ -1,14 +1,22 @@
 # spate-kafka
 
-Kafka source for the [Spate](https://github.com/spate-etl/spate)
-framework, built on `rdkafka`: **one consumer per process**, partitions
-split into per-partition queues and fanned across pipeline threads as
-zero-copy lanes. Offsets are stored when checkpoint watermarks advance and
-committed on an interval; rebalances and shutdown share the framework's
+Kafka source, producer sink and work feed for the
+[Spate](https://github.com/spate-etl/spate) framework, built on `rdkafka`.
+The source runs **one consumer per process**, with partitions split into
+per-partition queues and fanned across pipeline threads as zero-copy lanes.
+Offsets are stored when checkpoint watermarks advance and committed on an
+interval; rebalances and shutdown share the framework's
 drain choreography (drain → commit → release).
 
 Key types: `KafkaSource`, `KafkaSourceConfig` (the `source: { kafka: ... }`
 section). No `rdkafka` types appear in public signatures.
+
+The crate also carries the producer sink (`sink::KafkaSink`, the
+`sink: { kafka: ... }` section) and a work feed (`feed::KafkaFeed`, built from
+a `feed: { kafka: ... }` section and passed to `Pipeline::feed`). The feed
+reads units from a work topic as one consumer group, commits a unit's offset
+once every record in it is acknowledged, and moves a failed unit to a retry
+topic, or at the attempt cap to a dead-letter topic, before it commits.
 
 ## Sharp edges worth knowing
 

@@ -7,6 +7,7 @@ mod fault_report;
 mod fault_test;
 mod fuzz;
 mod hooks;
+mod issue_form;
 mod lint;
 
 use std::collections::BTreeSet;

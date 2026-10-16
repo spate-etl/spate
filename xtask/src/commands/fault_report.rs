@@ -12,6 +12,7 @@ use clap::Subcommand;
 use serde::Deserialize;
 
 use super::fault_test::{Kind, ScenarioOutcome, Summary, read_outcomes};
+use super::issue_form::{BUG, Field, MAX_LOG_CHARS, fenced, field, form, section};
 use crate::run::{Error, Outcome};
 
 #[derive(Subcommand)]
@@ -372,31 +373,6 @@ impl RunDir {
     }
 }
 
-/// One field of an issue form.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Field {
-    id: &'static str,
-    label: &'static str,
-    /// The form's `render:` language; the body fences the answer in it.
-    render: Option<&'static str>,
-}
-
-const fn field(id: &'static str, label: &'static str) -> Field {
-    Field {
-        id,
-        label,
-        render: None,
-    }
-}
-
-const fn fenced(id: &'static str, label: &'static str, render: &'static str) -> Field {
-    Field {
-        id,
-        label,
-        render: Some(render),
-    }
-}
-
 /// `.github/ISSUE_TEMPLATE/1-delivery-correctness.yml`, field by field.
 const DELIVERY: [Field; 10] = [
     field("guarantee", "What broke"),
@@ -409,20 +385,6 @@ const DELIVERY: [Field; 10] = [
     field("data", "A sample record"),
     fenced("config", "Pipeline configuration", "yaml"),
     fenced("logs", "Logs", "shell"),
-];
-
-/// `.github/ISSUE_TEMPLATE/2-bug.yml`, field by field.
-const BUG: [Field; 10] = [
-    field("components", "Where"),
-    field("version", "Version"),
-    field("features", "Cargo features"),
-    field("toolchain", "Rust version and platform"),
-    field("what", "What happened"),
-    field("expected", "What you expected instead"),
-    fenced("repro", "Reproduction", "rust"),
-    field("data", "A sample record"),
-    fenced("config", "Configuration", "yaml"),
-    fenced("logs", "Output", "shell"),
 ];
 
 // Answers quoted from the forms' options.
@@ -454,7 +416,6 @@ const PROPERTIES: [&str; 5] = [
 
 /// GitHub rejects an issue body over 65,536 characters; each part is capped
 /// well inside it.
-const MAX_LOG_CHARS: usize = 25_000;
 const MAX_TEXT_CHARS: usize = 2_000;
 const MAX_ITEM_CHARS: usize = 300;
 const MAX_CONFIG_CHARS: usize = 4_000;
@@ -487,40 +448,6 @@ fn render(route: Route, context: &Context, runs: &[RunDir]) -> String {
     let _ = write!(artifacts, "\n\nRun: {}", context.run_url);
     section(&mut body, "Artifacts", None, &artifacts);
     body
-}
-
-fn form<const N: usize>(fields: &[Field; N], answers: [String; N]) -> String {
-    let mut body = String::new();
-    for (field, answer) in fields.iter().zip(answers) {
-        section(&mut body, field.label, field.render, &answer);
-    }
-    body
-}
-
-/// One `###` section; an empty answer reads `_No response_`, as GitHub
-/// renders an unanswered field.
-fn section(body: &mut String, label: &str, render: Option<&str>, answer: &str) {
-    let answer = answer.trim_end();
-    let _ = write!(body, "### {label}\n\n");
-    if answer.is_empty() {
-        body.push_str("_No response_\n\n");
-        return;
-    }
-    match render {
-        Some(lang) => {
-            let fence = fence(answer);
-            let _ = write!(body, "{fence}{lang}\n{answer}\n{fence}\n\n");
-        }
-        None => {
-            let _ = write!(body, "{answer}\n\n");
-        }
-    }
-}
-
-/// A backtick fence longer than any backtick run in `text`.
-fn fence(text: &str) -> String {
-    let longest = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
-    "`".repeat(longest.max(2) + 1)
 }
 
 fn delivery(context: &Context, runs: &[RunDir]) -> String {

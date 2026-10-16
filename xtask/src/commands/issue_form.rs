@@ -1,7 +1,122 @@
 //! Issue bodies laid out as the repository's issue forms: the bug form's
-//! fields, and the `###` sections GitHub renders a form submission as.
+//! fields, the `###` sections GitHub renders a form submission as, and
+//! `cargo xtask bug-report`, which writes a bug-form body from answers given
+//! on the command line.
 
 use std::fmt::Write as _;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use crate::run::{Error, Outcome};
+
+/// The arguments of `cargo xtask bug-report`.
+#[derive(clap::Args)]
+pub(crate) struct BugReport {
+    /// A field's answer, as ID=TEXT, where ID is a field id of
+    /// .github/ISSUE_TEMPLATE/2-bug.yml
+    #[arg(long = "answer", value_name = "ID=TEXT")]
+    answers: Vec<String>,
+    /// A field's answer read from a file, as ID=PATH; past 25,000 characters
+    /// only the tail is kept
+    #[arg(long = "answer-file", value_name = "ID=PATH")]
+    answer_files: Vec<String>,
+    /// Where the body is written
+    #[arg(long, value_name = "PATH")]
+    out: PathBuf,
+}
+
+/// Writes a body laid out as the bug form to `--out`, with a section for each
+/// answered field and none for the rest.
+///
+/// # Errors
+///
+/// An answer not written as `ID=VALUE`, an id that is no field of the form, a
+/// field answered twice, or a file that cannot be read or written.
+pub(crate) fn bug_report(root: &Path, explain: bool, args: &BugReport) -> Outcome {
+    if explain {
+        println!("(renders the body in process)");
+        return Ok(());
+    }
+    let mut answers = Vec::new();
+    for arg in &args.answers {
+        let (id, text) = split(arg)?;
+        answers.push((id, text.to_owned()));
+    }
+    for arg in &args.answer_files {
+        let (id, path) = split(arg)?;
+        let path = root.join(path);
+        let bytes = fs::read(&path).map_err(|e| Error::msg(format!("{}: {e}", path.display())))?;
+        answers.push((id, tail(&String::from_utf8_lossy(&bytes), MAX_LOG_CHARS)));
+    }
+    let body = answered(&BUG, &answers)?;
+    let out = root.join(&args.out);
+    fs::write(&out, body).map_err(|e| Error::msg(format!("{}: {e}", out.display())))
+}
+
+fn split(arg: &str) -> Result<(&str, &str), Error> {
+    arg.split_once('=')
+        .ok_or_else(|| Error::msg(format!("`{arg}` is not written as ID=VALUE")))
+}
+
+/// The sections of `fields` that `answers` answers, in the form's order. A
+/// field with no answer, or an empty one, is left out.
+fn answered(fields: &[Field], answers: &[(&str, String)]) -> Result<String, Error> {
+    for (i, (id, _)) in answers.iter().enumerate() {
+        if !fields.iter().any(|f| f.id == *id) {
+            let ids: Vec<&str> = fields.iter().map(|f| f.id).collect();
+            return Err(Error::msg(format!(
+                "the form has no field `{id}`; its fields are {}",
+                ids.join(", ")
+            )));
+        }
+        if answers[..i].iter().any(|(other, _)| other == id) {
+            return Err(Error::msg(format!("`{id}` is answered twice")));
+        }
+    }
+    let mut body = String::new();
+    for field in fields {
+        if let Some((_, answer)) = answers.iter().find(|(id, _)| *id == field.id)
+            && !answer.trim().is_empty()
+        {
+            section(&mut body, field.label, field.render, answer);
+        }
+    }
+    Ok(body)
+}
+
+/// `text` without its ANSI escapes, cut from the front at a line start to
+/// `max` characters and marked where it was cut.
+fn tail(text: &str, max: usize) -> String {
+    let text = strip_ansi(text);
+    let count = text.chars().count();
+    if count <= max {
+        return text;
+    }
+    let cut: String = text.chars().skip(count - max).collect();
+    let cut = cut.split_once('\n').map_or(cut.as_str(), |(_, rest)| rest);
+    format!("[earlier lines cut; the run log has the rest]\n{cut}")
+}
+
+/// `text` without the CSI escape sequences a colored terminal writes, such
+/// as `ESC[1m`.
+fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' && chars.peek() == Some(&'[') {
+            chars.next();
+            // Parameter and intermediate bytes, up to the final byte in `@..=~`.
+            for c in chars.by_ref() {
+                if ('@'..='~').contains(&c) {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
 
 /// One field of an issue form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

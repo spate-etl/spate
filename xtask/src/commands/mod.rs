@@ -133,6 +133,9 @@ pub(crate) enum Command {
         cmd: HooksCommand,
     },
 
+    /// Write an issue body laid out as the bug form
+    BugReport(issue_form::BugReport),
+
     /// Fuzz targets
     Fuzz {
         #[command(subcommand)]
@@ -334,6 +337,7 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: Command) -> Outcome {
         Command::Hooks { cmd } => match cmd {
             HooksCommand::Install => hooks::install(root, explain),
         },
+        Command::BugReport(args) => issue_form::bug_report(root, explain, &args),
         Command::Fuzz { cmd } => fuzz::dispatch(root, explain, cmd),
         Command::SiteCheck => crate::checks::site_check::check(root, explain),
         Command::Docs { serve } => docs::dispatch(root, explain, serve),

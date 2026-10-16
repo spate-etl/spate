@@ -86,3 +86,86 @@ fn fences_outlast_backticks_in_the_answer() {
     assert_eq!(fence("plain"), "```");
     assert_eq!(fence("a ``` b"), "````");
 }
+
+fn answers(pairs: &[(&'static str, &str)]) -> Vec<(&'static str, String)> {
+    pairs.iter().map(|(id, a)| (*id, (*a).to_owned())).collect()
+}
+
+fn headings(body: &str) -> Vec<&str> {
+    body.lines()
+        .filter_map(|l| l.strip_prefix("### "))
+        .collect()
+}
+
+/// A body has a section for each answered field, in the form's order, and
+/// none for a field left unanswered or answered empty.
+#[test]
+fn unanswered_fields_are_left_out() {
+    let body = answered(
+        &BUG,
+        &answers(&[
+            ("logs", "boom"),
+            ("what", "It failed."),
+            ("components", "Build, CI, or the examples"),
+            ("expected", "  \n"),
+        ]),
+    )
+    .unwrap();
+    assert_eq!(headings(&body), ["Where", "What happened", "Output"]);
+}
+
+/// Each `render:` field's answer sits in a fence of the form's language, and
+/// no other field's answer is fenced.
+#[test]
+fn render_fields_are_fenced_in_the_forms_language() {
+    let form = form_fields(&form_file("2-bug.yml"));
+    for field in &form {
+        let id = BUG.iter().find(|f| f.id == field.id).unwrap().id;
+        let body = answered(&BUG, &answers(&[(id, "a `b` c")])).unwrap();
+        let expected = match &field.render {
+            Some(lang) => format!("### {}\n\n```{lang}\na `b` c\n```\n\n", field.label),
+            None => format!("### {}\n\na `b` c\n\n", field.label),
+        };
+        assert_eq!(body, expected);
+    }
+}
+
+/// A file answer keeps its last lines inside the log limit, without ANSI
+/// escapes, so two of them still fit GitHub's 65,536-character body limit.
+#[test]
+fn a_file_answer_keeps_its_tail_inside_the_log_limit() {
+    let dir = std::env::temp_dir().join(format!("xtask-bug-report-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let log: String = (0..20_000)
+        .map(|i| format!("\u{1b}[1m\u{1b}[31mline {i}\u{1b}[0m\n"))
+        .collect();
+    fs::write(dir.join("log"), &log).unwrap();
+    let out = dir.join("body.md");
+    let args = BugReport {
+        answers: vec!["components=Build, CI, or the examples".to_owned()],
+        answer_files: vec![
+            format!("what={}", dir.join("log").display()),
+            format!("logs={}", dir.join("log").display()),
+        ],
+        out: out.clone(),
+    };
+    bug_report(&dir, false, &args).unwrap();
+    let body = fs::read_to_string(&out).unwrap();
+    fs::remove_dir_all(&dir).unwrap();
+    assert!(body.chars().count() < 65_536, "{}", body.chars().count());
+    assert!(body.contains("\nline 19999\n"));
+    assert!(!body.contains("\nline 0\n"));
+    assert!(!body.contains('\u{1b}'));
+    assert!(body.contains("### Output\n\n```shell\n[earlier lines cut"));
+}
+
+/// An answer to an id the form does not have, a field answered twice, and an
+/// argument with no `=` are refused.
+#[test]
+fn an_answer_the_form_has_no_field_for_is_refused() {
+    assert!(answered(&BUG, &answers(&[("output", "x")])).is_err());
+    assert!(answered(&BUG, &answers(&[("what", "x"), ("what", "y")])).is_err());
+    assert!(split("what").is_err());
+    assert_eq!(split("what=a=b").unwrap(), ("what", "a=b"));
+}

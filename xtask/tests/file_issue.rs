@@ -135,6 +135,9 @@ fn only_an_exact_title_takes_the_comment() {
             &format!("Still failing: {RUN}")
         ]
     );
+    assert!(shim.calls().iter().any(|c| c[..2] == ["issue", "list"]
+        && c.windows(2).any(|w| w == ["--state", "open"])
+        && c.windows(2).any(|w| w == ["--search", "[bug] X in:title"])));
     let near = Shim::new("near", list, 0);
     let out = near.run("[bug] X agai", &body, None);
     assert!(out.status.success());

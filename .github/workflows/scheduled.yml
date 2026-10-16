@@ -93,11 +93,14 @@ jobs:
       - uses: ./.github/actions/setup-rust
         with:
           tools: cargo-about
+      # `tee` streams the output to the run log, so a step killed at its
+      # timeout still shows what it printed, and keeps the copy the issue body
+      # carries.
       - id: regen
         run: |
+          set -o pipefail
           rc=0
-          cargo xtask attribution >"$RUNNER_TEMP/regen.log" 2>&1 || rc=$?
-          cat "$RUNNER_TEMP/regen.log"
+          cargo xtask attribution 2>&1 | tee "$RUNNER_TEMP/regen.log" || rc=$?
           exit "$rc"
 
       # Files only when the regen step fails; a setup failure would otherwise
@@ -154,9 +157,9 @@ jobs:
           tools: cargo-deny
       - id: deny
         run: |
+          set -o pipefail
           rc=0
-          cargo deny --all-features --locked check advisories >"$RUNNER_TEMP/deny.log" 2>&1 || rc=$?
-          cat "$RUNNER_TEMP/deny.log"
+          cargo deny --all-features --locked check advisories 2>&1 | tee "$RUNNER_TEMP/deny.log" || rc=$?
           exit "$rc"
 
       # Files only when the deny step fails; a checkout failure would otherwise
@@ -222,11 +225,11 @@ jobs:
       # advisories, so the code goes to the report step to state.
       - id: scan
         run: |
+          set -o pipefail
           rc=0
           osv-scanner scan source --recursive --no-resolve \
             --format markdown --output-file "$RUNNER_TEMP/osv.md" . \
-            >"$RUNNER_TEMP/osv.log" 2>&1 || rc=$?
-          cat "$RUNNER_TEMP/osv.log"
+            2>&1 | tee "$RUNNER_TEMP/osv.log" || rc=$?
           echo "rc=$rc" >>"$GITHUB_OUTPUT"
           exit "$rc"
 
@@ -352,8 +355,7 @@ jobs:
             echo "::group::$target"
             rc=0
             cargo "+$NIGHTLY" fuzz run "$target" -- \
-              -max_total_time="$MAX_TOTAL_TIME" -print_final_stats=1 >"$log" 2>&1 || rc=$?
-            cat "$log"
+              -max_total_time="$MAX_TOTAL_TIME" -print_final_stats=1 2>&1 | tee "$log" || rc=$?
             if [[ "$rc" -ne 0 ]]; then
               crashed="$crashed $target"
               { echo "==> $target <=="; cat "$log"; } >>"$RUNNER_TEMP/fuzz.log"
@@ -447,17 +449,17 @@ jobs:
       - name: Resolve every direct dependency to its declared floor
         id: resolve
         run: |
+          set -o pipefail
           rc=0
-          cargo generate-lockfile -Z direct-minimal-versions >"$RUNNER_TEMP/floors.log" 2>&1 || rc=$?
-          cat "$RUNNER_TEMP/floors.log"
+          cargo generate-lockfile -Z direct-minimal-versions 2>&1 | tee "$RUNNER_TEMP/floors.log" || rc=$?
           exit "$rc"
       # `--all-targets` holds dev-dependency floors to the same standard. Not
       # `-D warnings`: the minimal graph surfaces other people's deprecations.
       - id: check
         run: |
+          set -o pipefail
           rc=0
-          cargo check --workspace --all-targets --all-features --locked >"$RUNNER_TEMP/floors.log" 2>&1 || rc=$?
-          cat "$RUNNER_TEMP/floors.log"
+          cargo check --workspace --all-targets --all-features --locked 2>&1 | tee "$RUNNER_TEMP/floors.log" || rc=$?
           exit "$rc"
 
       # xtask builds against the committed `Cargo.lock`, which the resolve step
@@ -515,11 +517,11 @@ jobs:
       - name: Bump to the next patch and commit it locally
         id: bump
         run: |
+          set -o pipefail
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml)
           next="${version%.*}.$(( ${version##*.} + 1 ))"
           rc=0
-          cargo xtask release version bump "$next" >"$RUNNER_TEMP/publish.log" 2>&1 || rc=$?
-          cat "$RUNNER_TEMP/publish.log"
+          cargo xtask release version bump "$next" 2>&1 | tee "$RUNNER_TEMP/publish.log" || rc=$?
           if [ "$rc" -ne 0 ]; then
             exit "$rc"
           fi
@@ -532,16 +534,16 @@ jobs:
       # (cargo issue 14249).
       - id: metadata
         run: |
+          set -o pipefail
           rc=0
-          cargo xtask release version check-metadata >"$RUNNER_TEMP/publish.log" 2>&1 || rc=$?
-          cat "$RUNNER_TEMP/publish.log"
+          cargo xtask release version check-metadata 2>&1 | tee "$RUNNER_TEMP/publish.log" || rc=$?
           exit "$rc"
 
       - id: dry-run
         run: |
+          set -o pipefail
           rc=0
-          cargo xtask release package >"$RUNNER_TEMP/publish.log" 2>&1 || rc=$?
-          cat "$RUNNER_TEMP/publish.log"
+          cargo xtask release package 2>&1 | tee "$RUNNER_TEMP/publish.log" || rc=$?
           exit "$rc"
 
       # Gated on the named steps, not `failure()`: a checkout failure would
@@ -748,16 +750,16 @@ jobs:
       # Both steps always run, so one report covers both.
       - id: clippy
         run: |
+          set -o pipefail
           rc=0
-          cargo xtask clippy >"$RUNNER_TEMP/clippy.log" 2>&1 || rc=$?
-          cat "$RUNNER_TEMP/clippy.log"
+          cargo xtask clippy 2>&1 | tee "$RUNNER_TEMP/clippy.log" || rc=$?
           exit "$rc"
         continue-on-error: true
       - id: test
         run: |
+          set -o pipefail
           rc=0
-          cargo xtask test >"$RUNNER_TEMP/test.log" 2>&1 || rc=$?
-          cat "$RUNNER_TEMP/test.log"
+          cargo xtask test 2>&1 | tee "$RUNNER_TEMP/test.log" || rc=$?
           exit "$rc"
         continue-on-error: true
 

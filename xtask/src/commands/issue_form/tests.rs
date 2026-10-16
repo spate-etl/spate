@@ -183,6 +183,18 @@ fn a_cut_on_a_line_start_keeps_that_line() {
     );
 }
 
+/// The cut counts characters: a log of multibyte lines keeps its tail whole
+/// inside the limit.
+#[test]
+fn a_cut_counts_characters_not_bytes() {
+    let log: String = (0..10).map(|i| format!("é—{i}\n")).collect();
+    // 4 characters per line, 7 bytes; 13 characters keeps three whole lines.
+    assert_eq!(
+        tail(&log, 13),
+        "[earlier lines cut; the run log has the rest]\né—7\né—8\né—9\n"
+    );
+}
+
 /// Parameterised and non-SGR CSI sequences are removed whole.
 #[test]
 fn strip_ansi_removes_parameterised_and_non_sgr_csi() {

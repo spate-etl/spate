@@ -97,7 +97,8 @@ impl BatchInflight {
     }
 }
 
-/// Client context for the sink's producers: routes librdkafka logs to
+/// Client context for the sink's producers and the client the feed's
+/// startup checks read metadata through: routes librdkafka logs to
 /// `tracing` (mirroring the source's context), translates delivery
 /// reports into batch countdowns, publishes statistics snapshots
 /// through the slot shared with the writer, and records the latest
@@ -134,13 +135,20 @@ impl SinkContext {
 
     /// Record an error callback's `text` as the latest rejection, arrived at
     /// `now`, when `code` is a SASL authentication failure or the text
-    /// reports a [`tls_rejection`](crate::error::tls_rejection). Any other
-    /// error leaves the record as it is.
+    /// reports a [`tls_rejection`](crate::error::tls_rejection). An
+    /// `Authentication` error whose text says the SASL mechanism handshake
+    /// failed on a local error, such as the connection dropping, is no
+    /// rejection. Any other error leaves the record as it is.
     pub(crate) fn note_error(&self, code: RDKafkaErrorCode, text: &str, now: Instant) {
-        let rejected = matches!(
-            code,
-            RDKafkaErrorCode::Authentication | RDKafkaErrorCode::SaslAuthenticationFailed
-        ) || crate::error::tls_rejection(code, text);
+        let rejected = match code {
+            // librdkafka reports a SASL mechanism handshake that ended on a
+            // local transport failure or timeout under this code too.
+            RDKafkaErrorCode::Authentication => {
+                !text.contains("mechanism handshake failed: Local: ")
+            }
+            RDKafkaErrorCode::SaslAuthenticationFailed => true,
+            _ => crate::error::tls_rejection(code, text),
+        };
         if rejected {
             *self.rejection.lock().expect("rejection lock") = Some((now, text.to_owned()));
         }
@@ -342,6 +350,25 @@ pub(crate) mod tests {
             ctx.rejection_within(t1, window),
             Some((Duration::ZERO, CERTIFICATE_UNVERIFIED.to_owned())),
             "a later error that is not a rejection leaves the record"
+        );
+    }
+
+    /// Pins that a SASL mechanism handshake ended by a dropped connection
+    /// records nothing under `Authentication`, while a refused login under
+    /// the same code is recorded.
+    #[test]
+    fn a_handshake_dropped_locally_is_not_a_rejection() {
+        const DROPPED: &str = "sasl_plaintext://127.0.0.1:63121/bootstrap: SASL PLAIN mechanism \
+            handshake failed: Local: Broker transport failure: broker's supported mechanisms: \
+            (n/a) (after 0ms in state DOWN)";
+        let ctx = SinkContext::detached();
+        let now = Instant::now();
+        ctx.note_error(RDKafkaErrorCode::Authentication, DROPPED, now);
+        assert_eq!(ctx.rejection_within(now, Duration::MAX), None);
+        ctx.note_error(RDKafkaErrorCode::Authentication, SASL_REFUSED, now);
+        assert_eq!(
+            ctx.rejection_within(now, Duration::MAX),
+            Some((Duration::ZERO, SASL_REFUSED.to_owned()))
         );
     }
 

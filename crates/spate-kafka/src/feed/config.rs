@@ -302,6 +302,15 @@ impl KafkaFeedConfig {
         cc
     }
 
+    /// The configuration of the clients the startup checks read through:
+    /// the passthrough, then the shared properties the feed owns, with no
+    /// statistics, which nothing reads from them.
+    pub(crate) fn admin_config(&self, openssl_env: bool) -> rdkafka::ClientConfig {
+        let mut cc = self.client_config(openssl_env);
+        cc.remove("statistics.interval.ms");
+        cc
+    }
+
     fn client_config(&self, openssl_env: bool) -> rdkafka::ClientConfig {
         let mut cc = rdkafka::ClientConfig::new();
         // rdkafka reads the log facade by default; tracing filters these events.
@@ -533,6 +542,16 @@ mod tests {
             assert_eq!(producer.get(key), Some(value), "producer {key}");
         }
         assert_eq!(producer.get("group.id"), None);
+
+        let admin = config.admin_config(true);
+        for (key, value) in [
+            ("bootstrap.servers", "localhost:9092"),
+            ("allow.auto.create.topics", "false"),
+            ("session.timeout.ms", "6000"),
+        ] {
+            assert_eq!(admin.get(key), Some(value), "admin {key}");
+        }
+        assert_eq!(admin.get("statistics.interval.ms"), None);
 
         let quiet = parse(&format!("{MINIMAL}  statistics_interval: 0s\n")).unwrap();
         assert_eq!(

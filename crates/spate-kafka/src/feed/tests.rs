@@ -495,7 +495,14 @@ mod cluster {
     }
 
     fn connect(brokers: &str, group: &str, io: &tokio::runtime::Runtime) -> KafkaFeed {
-        KafkaFeed::connect(&section(brokers, group), io.handle()).unwrap()
+        // The MockCluster answers no request for a topic's configuration.
+        KafkaFeed::connect_with(
+            &section(brokers, group),
+            io.handle(),
+            crate::feed::startup::Scope::Existence,
+            crate::feed::startup::CONNECT_BOUND,
+        )
+        .unwrap()
     }
 
     /// The work-topic partitions `feed` owns.

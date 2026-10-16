@@ -28,6 +28,7 @@ mod metrics;
 mod writer;
 
 pub use config::{Compression, KafkaSink, KafkaSinkConfig, build, from_component_config};
+pub(crate) use context::SinkContext;
 pub use encoder::{
     BytesKeyFn, KafkaBytesEncoder, KafkaEncoder, KafkaJsonEncoder, KafkaMessage, KeyFn,
     MessageEncoder,

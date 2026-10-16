@@ -1,0 +1,3 @@
+**A connection dropped during the SASL handshake in the Kafka sink** (`spate-kafka`)
+
+The Kafka sink no longer takes a connection that drops during the SASL mechanism handshake for a rejected credential. A write whose deliveries time out after such a drop is retryable, and a failed readiness probe no longer names the drop as a rejection by a broker. In previous versions, librdkafka's authentication error for the drop was recorded as a rejection, so a write whose deliveries timed out in the following window was fatal. This could happen when a broker, or a proxy in front of it, restarted while the producer was logging in. A broker that refuses the login, or answers the handshake with a mechanism it does not support, is still a rejection.

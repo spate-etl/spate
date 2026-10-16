@@ -13,6 +13,9 @@ categories.workspace = true
 
 [features]
 tls = ["rdkafka/ssl-vendored", "dep:openssl-sys"]
+# Test-only. Off by default, not enabled by the `spate` facade, and outside
+# the semver surface.
+testing = []
 
 [dependencies]
 bytes = { workspace = true }
@@ -28,6 +31,7 @@ tokio = { workspace = true, features = ["rt", "sync", "time"] }
 tracing = { workspace = true }
 
 [dev-dependencies]
+spate-kafka = { path = ".", features = ["testing"] }
 gungraun = { workspace = true }
 spate-json = { workspace = true }
 spate-s3 = { workspace = true }

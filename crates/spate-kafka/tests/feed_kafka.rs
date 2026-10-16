@@ -1,6 +1,7 @@
 //! The Kafka feed against a real broker, for what the MockCluster does not
 //! model: a member that dies is evicted at the session timeout, where the
-//! mock evicts an unpolled member on a timer of its own.
+//! mock evicts an unpolled member on a timer of its own, and a topic's
+//! configuration, which the mock does not describe.
 //!
 //! Every test needs Docker and is `#[ignore]`d. Run them with:
 //!
@@ -15,14 +16,15 @@ use rdkafka::ClientConfig;
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::client::DefaultClientContext;
 use spate_core::pipeline::ExitState;
+use spate_kafka::feed::{KafkaFeed, KafkaFeedError};
 use spate_test::{WriteOutcome, wait_until};
 use spate_test_support::ChildTest;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use support::broker;
 use support::feed::{
-    DEAD, DEADLINE, RETRY, WORK, committed, data_dir, feed_yaml, launch, produce_raw, recs, sorted,
-    stage, written,
+    DEAD, DEADLINE, RETRY, WORK, committed, data_dir, exists, feed_yaml, launch_with, produce_raw,
+    recs, sorted, stage, written,
 };
 use testcontainers::runners::SyncRunner;
 use testcontainers_modules::kafka::apache::KAFKA_PORT;
@@ -84,9 +86,14 @@ fn worker_a_holds_a_unit_until_it_is_killed() {
     let group = std::env::var(CHILD_GROUP).unwrap();
     let data = PathBuf::from(std::env::var_os(CHILD_DATA).unwrap());
     let marker = PathBuf::from(std::env::var_os(CHILD_MARKER).unwrap());
-    let a = launch(&data, &section(&brokers, &group), |sink| {
-        sink.enqueue_global(WriteOutcome::ok().held());
-    });
+    let a = launch_with(
+        KafkaFeed::connect,
+        &data,
+        &section(&brokers, &group),
+        |sink| {
+            sink.enqueue_global(WriteOutcome::ok().held());
+        },
+    );
     wait_until(DEADLINE, "A holds the unit's write", || {
         a.script.held_writes() == 1
     });
@@ -136,7 +143,12 @@ fn a_unit_whose_worker_is_killed_mid_read_is_delivered_again() {
 
     // B's join waits for A's session to lapse, and B is then assigned the
     // partition at the offset A never committed past.
-    let b = launch(&data, &section(&brokers, &group), |_| {});
+    let b = launch_with(
+        KafkaFeed::connect,
+        &data,
+        &section(&brokers, &group),
+        |_| {},
+    );
     wait_until(SESSION * 5, "B reads the unit", || {
         !b.recording.seen.lock().unwrap().is_empty()
     });
@@ -155,4 +167,165 @@ fn a_unit_whose_worker_is_killed_mid_read_is_delivered_again() {
         },
     );
     assert_eq!(b.stop(), ExitState::Completed);
+}
+
+/// Create each topic of `topics`, one partition each, with its
+/// configuration entries.
+fn create_configured(brokers: &str, topics: &[(String, Vec<(&str, &str)>)]) {
+    let admin: AdminClient<DefaultClientContext> = ClientConfig::new()
+        .set("bootstrap.servers", brokers)
+        .create()
+        .expect("admin client");
+    let new: Vec<NewTopic<'_>> = topics
+        .iter()
+        .map(|(name, entries)| {
+            entries.iter().fold(
+                NewTopic::new(name, 1, TopicReplication::Fixed(1)),
+                |topic, (k, v)| topic.set(k, v),
+            )
+        })
+        .collect();
+    let io = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    for created in io
+        .block_on(admin.create_topics(&new, &AdminOptions::new()))
+        .expect("create topics")
+    {
+        created.expect("topic created");
+    }
+}
+
+/// The retry and dead-letter topics' names for the work topic `work`.
+fn retry_of(work: &str) -> String {
+    format!("{work}-retry")
+}
+
+fn dead_of(work: &str) -> String {
+    format!("{work}-dead")
+}
+
+/// Connect a feed on the work topic `work` and its retry and dead-letter
+/// topics, on a runtime like the pipeline's.
+fn connect_on(brokers: &str, work: &str) -> Result<KafkaFeed, KafkaFeedError> {
+    let section: spate_core::config::FeedSection = serde_yaml::from_str(&format!(
+        "kafka:\n  brokers: \"{brokers}\"\n  group_id: {group}\n  topic: {work}\n  \
+         retry_topic: {retry}\n  dead_letter_topic: {dead}\n  statistics_interval: 0s\n",
+        group = spate_test::unique_name("checked"),
+        retry = retry_of(work),
+        dead = dead_of(work),
+    ))
+    .unwrap();
+    let io = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    KafkaFeed::connect(&section, io.handle())
+}
+
+fn refusal(connected: Result<KafkaFeed, KafkaFeedError>) -> String {
+    match connected {
+        Err(KafkaFeedError::Refused(message)) => message,
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}
+
+/// Pins that connecting refuses a missing work, retry or dead-letter topic
+/// by its role, on a broker that creates a topic on first use, and leaves
+/// the topic missing.
+#[test]
+#[ignore = "requires Docker"]
+fn startup_refuses_a_missing_retry_or_dead_letter_topic() {
+    let container = broker().start().expect("start kafka container");
+    let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
+    let brokers = format!("127.0.0.1:{port}");
+    for (work, role, missing) in [
+        ("no-retry", "retry", retry_of("no-retry")),
+        ("no-dead", "dead-letter", dead_of("no-dead")),
+        ("no-work", "work", "no-work".to_owned()),
+    ] {
+        let present: Vec<(String, Vec<(&str, &str)>)> =
+            [work.to_owned(), retry_of(work), dead_of(work)]
+                .into_iter()
+                .filter(|t| *t != missing)
+                .map(|t| (t, vec![]))
+                .collect();
+        create_configured(&brokers, &present);
+        let message = refusal(connect_on(&brokers, work));
+        assert!(
+            message.contains(&format!("the {role} topic `{missing}` does not exist")),
+            "{message}"
+        );
+        assert!(
+            !exists(&brokers, &missing),
+            "connecting created `{missing}`"
+        );
+    }
+}
+
+/// Pins that connecting refuses a work, retry or dead-letter topic whose
+/// `cleanup.policy` includes `compact`, by its role, and that topics at
+/// `delete` pass, with each topic's policy in the line logged at connect.
+#[test]
+#[ignore = "requires Docker"]
+fn startup_refuses_a_compacted_work_retry_or_dead_letter_topic() {
+    let container = broker().start().expect("start kafka container");
+    let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
+    let brokers = format!("127.0.0.1:{port}");
+    for (work, role, policy) in [
+        ("compacted-work", "work", "compact"),
+        ("compacted-retry", "retry", "compact,delete"),
+        ("compacted-dead", "dead-letter", "compact"),
+    ] {
+        let compacted = match role {
+            "work" => work.to_owned(),
+            "retry" => retry_of(work),
+            _ => dead_of(work),
+        };
+        let topics: Vec<(String, Vec<(&str, &str)>)> =
+            [work.to_owned(), retry_of(work), dead_of(work)]
+                .into_iter()
+                .map(|t| {
+                    let mut entries = vec![];
+                    if t == compacted {
+                        entries.push(("cleanup.policy", policy));
+                    }
+                    (t, entries)
+                })
+                .collect();
+        create_configured(&brokers, &topics);
+        let message = refusal(connect_on(&brokers, work));
+        assert!(
+            message.contains(&format!("the {role} topic `{compacted}` is compacted")),
+            "{message}"
+        );
+    }
+
+    let work = "deleting";
+    create_configured(
+        &brokers,
+        &[
+            (work.to_owned(), vec![]),
+            (retry_of(work), vec![]),
+            (dead_of(work), vec![("cleanup.policy", "delete")]),
+        ],
+    );
+    let mut connected = None;
+    let lines = spate_test::capture_logs(tracing::Level::INFO, || {
+        connected = Some(connect_on(&brokers, work));
+    });
+    connected.unwrap().unwrap();
+    let line = lines
+        .iter()
+        .find(|l| l.contains("the Kafka feed started"))
+        .unwrap_or_else(|| panic!("no connect line: {lines:#?}"));
+    for field in [
+        " cleanup_policy=delete",
+        " retry_cleanup_policy=delete",
+        " dead_letter_cleanup_policy=delete",
+    ] {
+        assert!(line.contains(field), "{field}: {line}");
+    }
 }

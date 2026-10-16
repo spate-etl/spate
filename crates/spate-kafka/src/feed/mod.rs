@@ -32,6 +32,7 @@ mod error;
 mod events;
 mod inflight;
 mod producer;
+mod startup;
 #[cfg(test)]
 mod tests;
 mod write;
@@ -44,17 +45,20 @@ use config::{BACKEND, KafkaFeedConfig};
 use consumer::Driver;
 use inflight::Tracker;
 use producer::FeedProducerContext;
-use rdkafka::config::FromClientConfigAndContext;
+use rdkafka::admin::AdminClient;
+use rdkafka::config::{FromClientConfig, FromClientConfigAndContext};
 use rdkafka::consumer::{BaseConsumer, Consumer};
+use rdkafka::producer::ThreadedProducer;
 use spate_core::config::FeedSection;
 use spate_core::feed::{
     Confirmation, Delivery, Feed, FeedError, FeedErrorKind, FeedWaker, Receipt, Unit, confirmation,
 };
+use startup::TopicAdmin as _;
 use std::collections::{HashMap, VecDeque};
 use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use write::{Destination, Failure, Move, Outgoing, Producer, Write, WriteClass};
 
 /// Units the consumer buffers for the reader before it pauses its
@@ -70,6 +74,14 @@ pub(crate) struct Topics {
 }
 
 impl Topics {
+    fn new(config: &KafkaFeedConfig) -> Topics {
+        Topics {
+            work: Arc::from(config.topic.as_str()),
+            retry: Arc::from(config.retry_topic.as_str()),
+            dead_letter: Arc::from(config.dead_letter_topic.as_str()),
+        }
+    }
+
     /// `name` as one of the feed's topics, sharing its allocation.
     pub(crate) fn of(&self, name: &str) -> Arc<str> {
         [&self.work, &self.retry, &self.dead_letter]
@@ -147,11 +159,7 @@ impl Core {
         Core {
             state: Mutex::new(State::default()),
             stop: AtomicBool::new(false),
-            topics: Topics {
-                work: Arc::from(config.topic.as_str()),
-                retry: Arc::from(config.retry_topic.as_str()),
-                dead_letter: Arc::from(config.dead_letter_topic.as_str()),
-            },
+            topics: Topics::new(config),
             attempt_cap: config.attempt_cap,
         }
     }
@@ -282,22 +290,35 @@ impl std::fmt::Debug for KafkaFeed {
 }
 
 impl KafkaFeed {
-    /// Build the feed a `feed: { kafka: … }` section names and start its
-    /// consumer thread.
+    /// Build the feed a `feed: { kafka: … }` section names, check its topics,
+    /// and start its consumer thread.
     ///
-    /// The feed's consumer and producer connect to the brokers in the
-    /// background, so an unreachable broker does not fail this call. The
-    /// feed runs on threads of its own and does not use the I/O runtime
-    /// handle; the parameter keeps the call shape of the other feed
-    /// backends.
+    /// Connecting reads the metadata and configuration of the work, retry
+    /// and dead-letter topics, on the runtime `io`, before any of the feed's
+    /// clients joins the group. A missing topic or a compacted one fails
+    /// here. The checks take at most 30 seconds. The feed itself runs
+    /// on threads of its own.
     ///
     /// # Errors
     ///
     /// [`KafkaFeedError::Config`] for a section the feed cannot read.
     /// [`KafkaFeedError::Refused`] when librdkafka refuses the client
-    /// configuration, as for a property value it does not accept.
-    /// [`KafkaFeedError::Unavailable`] when the feed's thread cannot be
+    /// configuration, as for a property value it does not accept; when a
+    /// broker rejects the client's credential or either side rejects the
+    /// TLS handshake, naming the rejection, as soon as the client reports
+    /// it; when the cluster refuses a read of a topic as unauthorized or for
+    /// an invalid topic name, or describes no configuration entry for one;
+    /// and for topics the feed cannot run on: a missing work, retry or
+    /// dead-letter topic, or one whose `cleanup.policy` includes `compact`.
+    /// [`KafkaFeedError::Unavailable`] when a read of the topics fails
+    /// otherwise or the checks take longer than 30 seconds, as they do when
+    /// no broker accepts a connection, and when the feed's thread cannot be
     /// started.
+    ///
+    /// # Panics
+    ///
+    /// When called from inside an async context, as
+    /// [`Handle::block_on`](tokio::runtime::Handle::block_on) does.
     ///
     /// # Examples
     ///
@@ -311,22 +332,75 @@ impl KafkaFeed {
     /// ```
     pub fn connect(
         section: &FeedSection,
-        _io: &tokio::runtime::Handle,
+        io: &tokio::runtime::Handle,
+    ) -> Result<KafkaFeed, KafkaFeedError> {
+        Self::connect_with(section, io, startup::Scope::All, startup::CONNECT_BOUND)
+    }
+
+    /// [`connect`](Self::connect) with only the checks that the topics
+    /// exist, for rdkafka's MockCluster, which answers no request for a
+    /// topic's configuration.
+    ///
+    /// # Errors
+    ///
+    /// As [`connect`](Self::connect), less the configuration checks.
+    #[cfg(feature = "testing")]
+    #[doc(hidden)]
+    pub fn connect_without_config_checks(
+        section: &FeedSection,
+        io: &tokio::runtime::Handle,
+    ) -> Result<KafkaFeed, KafkaFeedError> {
+        Self::connect_with(
+            section,
+            io,
+            startup::Scope::Existence,
+            startup::CONNECT_BOUND,
+        )
+    }
+
+    fn connect_with(
+        section: &FeedSection,
+        io: &tokio::runtime::Handle,
+        scope: startup::Scope,
+        bound: Duration,
     ) -> Result<KafkaFeed, KafkaFeedError> {
         let config = KafkaFeedConfig::from_section(section)?;
+        let openssl_env = crate::security::openssl_env_overrides();
+        let admin_config = config.admin_config(openssl_env);
+        let admin = AdminClient::from_config(&admin_config).map_err(|e| {
+            KafkaFeedError::Refused(format!(
+                "creating the admin client: {}",
+                redacted_client_error(&e)
+            ))
+        })?;
+        let reader = ThreadedProducer::from_config_and_context(
+            &admin_config,
+            crate::sink::SinkContext::detached(),
+        )
+        .map_err(|e| {
+            KafkaFeedError::Refused(format!(
+                "creating the metadata client: {}",
+                redacted_client_error(&e)
+            ))
+        })?;
+        let topics = Topics::new(&config);
+        let step = Mutex::new("starting".to_owned());
+        let checked = {
+            let admin = Arc::new(startup::Brokers::new(admin, reader));
+            let watched = Arc::clone(&admin);
+            io.block_on(startup::bounded(
+                &step,
+                bound,
+                move || watched.rejection(),
+                startup::check(&*admin, &topics, scope, &step),
+            ))?
+        };
         let (core, producer, driver) = parts(&config)?;
         let thread = std::thread::Builder::new()
             .name("spate-kafka-feed".to_owned())
             .spawn(move || consumer::run(driver))
             .map_err(|e| KafkaFeedError::Unavailable(format!("starting the feed's thread: {e}")))?;
-        tracing::info!(
-            group_id = %config.group_id,
-            topic = %config.topic,
-            retry_topic = %config.retry_topic,
-            dead_letter_topic = %config.dead_letter_topic,
-            attempt_cap = config.attempt_cap,
-            "the Kafka feed started"
-        );
+        log_started(&config, &checked);
         Ok(KafkaFeed {
             core,
             producer,
@@ -337,6 +411,23 @@ impl KafkaFeed {
     fn lock(&self) -> MutexGuard<'_, State> {
         self.core.lock()
     }
+}
+
+/// Log the INFO line a feed that connected writes: its section and what the
+/// startup checks read, `unreported` where the broker gave no value.
+fn log_started(config: &KafkaFeedConfig, checked: &startup::Checked) {
+    let reported = |v: &Option<String>| v.clone().unwrap_or_else(|| "unreported".to_owned());
+    tracing::info!(
+        group_id = %config.group_id,
+        topic = %config.topic,
+        retry_topic = %config.retry_topic,
+        dead_letter_topic = %config.dead_letter_topic,
+        attempt_cap = config.attempt_cap,
+        cleanup_policy = %reported(&checked.cleanup_policy),
+        retry_cleanup_policy = %reported(&checked.retry_cleanup_policy),
+        dead_letter_cleanup_policy = %reported(&checked.dead_letter_cleanup_policy),
+        "the Kafka feed started"
+    );
 }
 
 /// The feed's shared state, its producer, and its consumer thread's state

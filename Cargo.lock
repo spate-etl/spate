@@ -4655,6 +4655,7 @@ dependencies = [
  "serde_json",
  "spate-core",
  "spate-json",
+ "spate-kafka",
  "spate-s3",
  "spate-test",
  "spate-test-support",

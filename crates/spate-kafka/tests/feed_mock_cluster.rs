@@ -9,15 +9,18 @@
 mod support;
 
 use rdkafka::mocking::{MockCluster, MockCoordinator};
+use rdkafka::types::RDKafkaRespErr;
 use spate_core::feed::{Feed, FeedErrorKind, Receipt, Unit};
 use spate_core::pipeline::ExitState;
+use spate_kafka::feed::KafkaFeedError;
 use spate_test::{WriteOutcome, wait_until};
 use std::io::{Read as _, Write as _};
 use std::net::TcpStream;
 use std::time::{Duration, Instant};
 use support::feed::{
-    COMMIT_PERIOD, DEAD, DEADLINE, RETRY, WORK, committed, data_dir, direct, feed_yaml,
-    high_watermark, launch, produce_raw, publish, read_topic, recs, sorted, stage, written,
+    COMMIT_PERIOD, DEAD, DEADLINE, ON_MOCK, RETRY, WORK, committed, data_dir, direct, exists,
+    feed_yaml, high_watermark, launch, produce_raw, publish, read_topic, recs, sorted, stage,
+    written,
 };
 
 /// A cluster of `brokers` with the work, retry and dead-letter topics, one
@@ -195,13 +198,13 @@ fn a_message_with_no_unit_goes_to_the_dead_letter_topic_at_once() {
 /// Pins that a retry write still queued when librdkafka marks its topic
 /// missing stops the feed: librdkafka fails it with the metadata
 /// response's `UnknownTopicOrPartition`, and the next `receive` and every
-/// later call return Fatal, naming the write. A propagation window shorter
-/// than the delivery timeout keeps the write queued until then.
+/// later call return Fatal, naming the write. The retry topic goes missing
+/// after the feed connects, as a topic deleted while the feed runs does. A
+/// propagation window shorter than the delivery timeout keeps the write
+/// queued until then.
 #[test]
 fn a_failed_write_to_a_missing_retry_topic_makes_the_feed_fatal() {
-    let cluster = MockCluster::new(1).expect("mock cluster");
-    cluster.create_topic(WORK, 1, 1).unwrap();
-    cluster.create_topic(DEAD, 1, 1).unwrap();
+    let cluster = cluster(1);
     let brokers = cluster.bootstrap_servers();
     let group = spate_test::unique_name("missing-retry");
     let worker = direct(&feed_yaml(
@@ -211,6 +214,12 @@ fn a_failed_write_to_a_missing_retry_topic_makes_the_feed_fatal() {
         // librdkafka waits this long before it calls a topic missing.
         "      topic.metadata.propagation.max.ms: \"1000\"\n",
     ));
+    cluster
+        .topic_error(
+            RETRY,
+            RDKafkaRespErr::RD_KAFKA_RESP_ERR_UNKNOWN_TOPIC_OR_PART,
+        )
+        .unwrap();
     publish(&worker.feed, Unit::new("u", b"body".to_vec()));
     let delivery = worker.take("the unit");
     worker.feed.fail(delivery.receipt, "test").unwrap();
@@ -448,4 +457,148 @@ fn a_corrupt_batch_stops_the_feed() {
     });
     let error = error.unwrap();
     assert!(error.reason.contains("Bad message"), "{error}");
+}
+
+/// Pins that connecting refuses a missing retry topic and leaves it
+/// missing. A metadata read of a missing topic by a client that may create
+/// topics creates it with the broker's defaults, so a check that read it
+/// that way would pass and keep the topic.
+#[test]
+fn the_startup_check_does_not_create_a_missing_topic() {
+    let cluster = MockCluster::new(1).expect("mock cluster");
+    cluster.create_topic(WORK, 1, 1).unwrap();
+    cluster.create_topic(DEAD, 1, 1).unwrap();
+    let brokers = cluster.bootstrap_servers();
+    let feed = support::feed::section(&feed_yaml(
+        &brokers,
+        &spate_test::unique_name("uncreated"),
+        "",
+        "",
+    ));
+    let io = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    match ON_MOCK(&feed, io.handle()) {
+        Err(KafkaFeedError::Refused(message)) => assert!(
+            message.contains(&format!("the retry topic `{RETRY}` does not exist")),
+            "{message}"
+        ),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    assert!(
+        !exists(&brokers, RETRY),
+        "connecting created the retry topic"
+    );
+    assert!(exists(&brokers, WORK), "the probe sees an existing topic");
+}
+
+/// One startup attempt on `yaml`, the result's error.
+fn connect_error(yaml: &str) -> KafkaFeedError {
+    let io = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    match ON_MOCK(&support::feed::section(yaml), io.handle()) {
+        Err(e) => e,
+        Ok(feed) => panic!("expected an error, got {feed:?}"),
+    }
+}
+
+/// Pins that a startup read that fails in the client keeps its own error
+/// and names the read, and is not taken for a missing topic. A topic name
+/// with a NUL byte cannot reach librdkafka.
+#[test]
+fn a_failed_startup_read_is_not_a_missing_topic() {
+    let cluster = cluster(1);
+    let yaml = feed_yaml(
+        &cluster.bootstrap_servers(),
+        &spate_test::unique_name("nul"),
+        "",
+        "",
+    )
+    .replace("topic: units\n", "topic: \"units\\0\"\n");
+    let message = match connect_error(&yaml) {
+        KafkaFeedError::Refused(m) | KafkaFeedError::Unavailable(m) => m,
+        other => panic!("expected a failed read, got {other:?}"),
+    };
+    assert!(
+        message.contains("reading the metadata of the work topic") && message.contains("nul"),
+        "{message}"
+    );
+    assert!(!message.contains("does not exist"), "{message}");
+}
+
+/// Pins that an `rdkafka:` value librdkafka does not accept refuses
+/// connecting, before any read of the topics.
+#[test]
+fn a_property_librdkafka_rejects_is_refused() {
+    let cluster = cluster(1);
+    let yaml = feed_yaml(
+        &cluster.bootstrap_servers(),
+        &spate_test::unique_name("rejected"),
+        "",
+        "      socket.timeout.ms: \"soon\"\n",
+    );
+    match connect_error(&yaml) {
+        KafkaFeedError::Refused(message) => assert!(
+            message.contains("creating the admin client") && message.contains("socket.timeout.ms"),
+            "{message}"
+        ),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}
+
+/// Pins that a topic the metadata response reports unauthorized refuses
+/// connecting, naming the read, and is not taken for a missing topic.
+#[test]
+fn an_unauthorized_topic_is_refused() {
+    let cluster = cluster(1);
+    cluster
+        .topic_error(
+            RETRY,
+            RDKafkaRespErr::RD_KAFKA_RESP_ERR_TOPIC_AUTHORIZATION_FAILED,
+        )
+        .unwrap();
+    let yaml = feed_yaml(
+        &cluster.bootstrap_servers(),
+        &spate_test::unique_name("unauthorized"),
+        "",
+        "",
+    );
+    match connect_error(&yaml) {
+        KafkaFeedError::Refused(message) => assert!(
+            message.contains(&format!(
+                "reading the metadata of the retry topic `{RETRY}`"
+            )),
+            "{message}"
+        ),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}
+
+/// Pins that a work topic name longer than librdkafka's 512-byte limit is
+/// an invalid topic name, and connecting refuses it, naming the read.
+#[test]
+fn an_overlong_topic_name_is_refused() {
+    let cluster = cluster(1);
+    let long = "u".repeat(513);
+    let yaml = feed_yaml(
+        &cluster.bootstrap_servers(),
+        &spate_test::unique_name("overlong"),
+        "",
+        "",
+    )
+    .replace("topic: units\n", &format!("topic: {long}\n"));
+    assert!(yaml.contains(&long));
+    match connect_error(&yaml) {
+        KafkaFeedError::Refused(message) => assert!(
+            message.contains("reading the metadata of the work topic")
+                && message.contains("longer than 512 bytes"),
+            "{message}"
+        ),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
 }

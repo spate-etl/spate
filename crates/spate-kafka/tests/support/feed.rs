@@ -3,6 +3,8 @@
 //! readers of committed offsets and of the retry and dead-letter topics.
 
 use rdkafka::ClientConfig;
+use rdkafka::admin::AdminClient;
+use rdkafka::client::DefaultClientContext;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::message::{Headers, Message};
 use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
@@ -15,7 +17,7 @@ use spate_core::ops::chain_owned;
 use spate_core::pipeline::{ExitState, Pipeline, RuntimeOptions, ShutdownHandle};
 use spate_core::sink::{KeyHashRouter, SinkPoolConfig};
 use spate_json::NdjsonFramer;
-use spate_kafka::feed::KafkaFeed;
+use spate_kafka::feed::{KafkaFeed, KafkaFeedError};
 use spate_s3::{DescriptorObject, S3Source, SplitDescriptor};
 use spate_test::{
     BytesPassthrough, PipelineRun, ScriptedResult, SinkScript, TestEncoder, capture_sink,
@@ -24,6 +26,7 @@ use spate_test::{
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::runtime::Handle;
 
 pub(crate) const DEADLINE: Duration = Duration::from_secs(60);
 
@@ -99,10 +102,27 @@ pub(crate) struct Worker {
     pub(crate) shutdown: ShutdownHandle,
 }
 
-/// Launch a worker with one record per source batch and one row per sink
-/// write, so an object's records span several writes. `pre` scripts the sink
-/// before data flows.
+/// How a test connects the feed.
+pub(crate) type Connect = fn(&FeedSection, &Handle) -> Result<KafkaFeed, KafkaFeedError>;
+
+/// Connect as on rdkafka's MockCluster, which answers no request for a
+/// topic's configuration: only the topics' existence is checked.
+pub(crate) const ON_MOCK: Connect = KafkaFeed::connect_without_config_checks;
+
+/// [`launch_with`] connecting as on the MockCluster.
 pub(crate) fn launch(data: &Path, feed_section: &str, pre: impl FnOnce(&SinkScript)) -> Worker {
+    launch_with(ON_MOCK, data, feed_section, pre)
+}
+
+/// Launch a worker with one record per source batch and one row per sink
+/// write, so an object's records span several writes, connecting its feed
+/// with `connect`. `pre` scripts the sink before data flows.
+pub(crate) fn launch_with(
+    connect: Connect,
+    data: &Path,
+    feed_section: &str,
+    pre: impl FnOnce(&SinkScript),
+) -> Worker {
     let yaml = format!(
         "pipeline: {{ name: kafka-feed, threads: 1 }}\nadmin: {{ listen: none }}\n\
          checkpoint: {{ interval: 100ms }}\nmetrics: {{ exporter: none }}\n\
@@ -115,7 +135,7 @@ pub(crate) fn launch(data: &Path, feed_section: &str, pre: impl FnOnce(&SinkScri
     let pipeline = Pipeline::from_config(config).unwrap();
     let section = pipeline.config().feed.clone().unwrap();
     let io = pipeline.io_handle();
-    let feed = Arc::new(KafkaFeed::connect(&section, &io).unwrap());
+    let feed = Arc::new(connect(&section, &io).unwrap());
     let recording = Recording {
         inner: Arc::clone(&feed),
         seen: Arc::default(),
@@ -347,15 +367,21 @@ pub(crate) struct Direct {
     pub(crate) _io: tokio::runtime::Runtime,
 }
 
-pub(crate) fn direct(yaml: &str) -> Direct {
-    let section = serde_yaml::from_str::<PipelineConfigFeed>(yaml)
+/// The `feed:` section of `yaml`, a pipeline file's `feed:` key alone.
+pub(crate) fn section(yaml: &str) -> FeedSection {
+    serde_yaml::from_str::<PipelineConfigFeed>(yaml)
         .unwrap()
-        .feed;
-    let io = tokio::runtime::Builder::new_current_thread()
+        .feed
+}
+
+pub(crate) fn direct(yaml: &str) -> Direct {
+    let section = section(yaml);
+    let io = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
         .enable_all()
         .build()
         .unwrap();
-    let feed = KafkaFeed::connect(&section, io.handle()).unwrap();
+    let feed = ON_MOCK(&section, io.handle()).unwrap();
     let (waker, park) = wake_channel();
     feed.set_waker(waker);
     Direct {
@@ -383,4 +409,22 @@ impl Direct {
         });
         got.unwrap()
     }
+}
+
+/// Whether `topic` exists on the cluster at `brokers`, read with
+/// auto-creation off so the read cannot create it.
+pub(crate) fn exists(brokers: &str, topic: &str) -> bool {
+    let probe: AdminClient<DefaultClientContext> = ClientConfig::new()
+        .set("bootstrap.servers", brokers)
+        .set("allow.auto.create.topics", "false")
+        .create()
+        .expect("admin client");
+    let metadata = probe
+        .inner()
+        .fetch_metadata(None, Duration::from_secs(10))
+        .expect("metadata");
+    metadata
+        .topics()
+        .iter()
+        .any(|t| t.name() == topic && t.error().is_none() && !t.partitions().is_empty())
 }

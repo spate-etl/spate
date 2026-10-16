@@ -12,11 +12,17 @@ pub enum KafkaFeedError {
     Config(#[from] ConfigError),
     /// The feed cannot start, and starting again fails the same way: a
     /// client could not be built from the configuration, as for a property
-    /// value librdkafka does not accept or a TLS context that fails.
+    /// value librdkafka does not accept or a TLS context that fails; a
+    /// broker rejected the client's credential, or either side rejected the
+    /// TLS handshake; the cluster refused a read of a topic as unauthorized
+    /// or for an invalid topic name, or described no configuration entry for
+    /// one; or the topics failed one of the feed's startup checks.
     #[error("the Kafka feed cannot start: {0}")]
     Refused(String),
-    /// The feed could not start for a reason that may pass, such as a
-    /// thread the system could not start. Starting again later may succeed.
+    /// The feed could not start for a reason that may pass: a read of the
+    /// topics failed otherwise, the startup checks took longer than their
+    /// bound, or the system could not start a thread. Starting again later
+    /// may succeed.
     #[error("Kafka is unavailable: {0}")]
     Unavailable(String),
 }

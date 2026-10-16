@@ -33,9 +33,10 @@ KAFKA_BROKERS=localhost:9092 \
   cargo run -p spate --features s3,json,kafka --example s3_kafka_backfill
 ```
 
-`KafkaFeed::connect` builds the feed's consumer and producer and starts the
-thread that polls the consumer. It waits on no broker, so an unreachable
-broker or a missing topic shows only once the pipeline runs.
+`KafkaFeed::connect` checks the feed's topics (see
+[Startup checks](#startup-checks)), then builds the feed's consumer and
+producer and starts the thread that polls the consumer. The checks read from
+the brokers, so an unreachable broker fails the call within 30 seconds.
 
 ## Configuration
 
@@ -64,8 +65,9 @@ the `kafka:` body is refused.
 
 ## The `rdkafka` passthrough and the denylist
 
-One map configures both the feed's consumer and its producer. A property that
-applies to one client only draws a warning from librdkafka in the other.
+One map configures the feed's consumer, its producer, and the two clients
+its startup checks read the topics with. A property that applies to one
+client only draws a warning from librdkafka in the others.
 Properties the feed owns are **rejected at load time with an explanation**,
 under their own name and under `topic.<name>`, which librdkafka reads as the
 same property. Aliases are denied beside the canonical names, because
@@ -85,7 +87,7 @@ passthrough and feed values apply in unspecified order.
 | `transactional.id` | The feed does not use transactions; a write is confirmed by its delivery report. |
 | `message.timeout.ms`, `delivery.timeout.ms` (alias) | Owned by the typed `delivery_timeout` field. |
 | `delivery.report.only.error` | A retry or dead-letter write finishes its offset only once its delivery report confirms it. |
-| `allow.auto.create.topics` | Forced off: a write to a missing topic fails, and never creates the topic with the broker's defaults. |
+| `allow.auto.create.topics` | Forced off: a write to a missing topic, or a startup check's read of one, fails, and never creates the topic with the broker's defaults. |
 | `statistics.interval.ms` | Owned by the typed `statistics_interval` field. |
 | `bootstrap.servers`, `metadata.broker.list` (alias) | Owned by the typed `brokers` field. |
 
@@ -97,17 +99,29 @@ through, and set how long a member that dies keeps its partitions (see
 
 <SecuringKafka />
 
-The feed's consumer treats a SASL authentication failure and a rejected
-handshake as the source does, and the feed stops with the reason. A retry or
-dead-letter write that times out is sent again.
+A SASL authentication failure or a rejected TLS handshake, as listed above,
+fails connecting. `KafkaFeed::connect` returns
+`KafkaFeedError::Refused` as soon as the client reports the rejection,
+naming the read under way and librdkafka's text, such as
+`… SSL handshake failed: … certificate verify failed …` or
+`… SASL authentication error: Authentication failed: Invalid username or password …`.
+A refused or reset connection stays retryable: the checks wait for a broker the
+client can use, and fail with `KafkaFeedError::Unavailable` once their bound
+passes.
+
+Once the feed has connected, its consumer treats a SASL authentication
+failure and a rejected handshake as the source does, and the feed stops with
+the reason. A retry or dead-letter write that times out is sent again.
 
 <LoggingKafka />
 
 ## Topics
 
 Create the three topics before the first worker starts. The feed never
-creates a topic. librdkafka holds a write to a topic it has not yet seen in
-metadata. Once `topic.metadata.propagation.max.ms` (30 s by default) has passed
+creates a topic, and connecting refuses a missing one (see
+[Startup checks](#startup-checks)). A topic can still go missing after the
+feed connects, as when it is deleted while the feed runs. librdkafka holds a
+write to a topic it has not yet seen in metadata. Once `topic.metadata.propagation.max.ms` (30 s by default) has passed
 since the worker first wrote to the topic, the next metadata response that
 lacks it marks the topic missing, and every write still held then stops the
 feed. After that, a publish to the missing work topic is reported to its
@@ -121,7 +135,16 @@ work and retry topics is read by one member of the group.
 Kafka deletes a message when its topic's retention ends, whether or not the
 group has read it. A unit deleted before it is read is lost, which INV-1 places
 outside its property (see [the invariants](../../../../INVARIANTS.md#inv-1)).
-Keep the dead-letter topic's messages at least as long as the work topic's.
+
+A unit moved to the retry or dead-letter topic is a new message, stamped
+when the feed writes it, so each topic's retention counts from the move. The
+work topic's retention does not limit how long a moved unit is kept:
+
+- the retry topic's retention bounds how long a failed unit can wait to be
+  read again. A retry backlog older than that loses the unit;
+- the dead-letter topic's retention is how long a unit that reached the
+  attempt cap waits for someone to inspect it or publish it again. Set it
+  for that window, or to `-1` to keep messages without limit.
 
 Use fresh topics, and a fresh group, for each bounded job. The topics keep no
 record of which job published a unit, so a job that reuses them reads every
@@ -129,6 +152,36 @@ unit an earlier job left unread or uncommitted. The broker drops a group's
 committed offsets once the group has been empty for its
 `offsets.retention.minutes`, and a group whose offsets are gone reads each
 partition again from its earliest retained offset.
+
+## Startup checks
+
+`KafkaFeed::connect` reads the metadata and configuration of the work, retry
+and dead-letter topics before any of the feed's clients joins the group, and
+refuses topics the feed cannot run on:
+
+- a missing work, retry or dead-letter topic;
+- a work, retry or dead-letter topic whose `cleanup.policy` includes
+  `compact`. Compaction keeps only the latest message for each key, and a
+  unit's id is its key, so it can delete a copy of a unit nobody has read.
+
+The checks read through two clients built from `brokers` and the `rdkafka`
+passthrough, one for metadata and an admin client for configuration, with
+`allow.auto.create.topics` off, so reading a missing topic does not create
+it. The client's identity needs the `Describe` and `DescribeConfigs`
+operations on the three topics. A read the cluster refuses as unauthorized,
+or for an invalid topic name, fails with `KafkaFeedError::Refused`. So does a
+topic the cluster describes no configuration entry for, which is what a
+client without `DescribeConfigs` on it receives, and a rejected credential or
+TLS handshake (see [Security](#security-tls-mtls-sasl)). Any other failed
+read fails with `KafkaFeedError::Unavailable`. The checks take at most 30 seconds, and an
+error past that bound names the read under way.
+
+When a topic reports no `cleanup.policy`, the feed logs a warning and skips
+the compaction check for it. Connecting logs each topic's `cleanup.policy`.
+
+The checks run only when the feed connects. A topic compacted later goes
+unnoticed, and a topic deleted later is handled as [Topics](#topics)
+describes.
 
 ## How a unit finishes
 

@@ -1,5 +1,5 @@
 # Every text file is stored and checked out with LF, whatever core.autocrlf says.
 * text=auto eol=lf
 
-# Fuzz inputs are raw bytes; a NUL-free one would otherwise pass as text.
+# Fuzz inputs are raw bytes; text=auto would rewrite CRLF in one that looks like text.
 fuzz/corpus/** -text

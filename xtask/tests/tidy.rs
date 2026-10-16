@@ -62,11 +62,16 @@ fn table() -> Vec<(&'static str, String)> {
     ]
 }
 
-/// The arguments the shellcheck member carries, which are the shell scripts
-/// and git hooks present rather than a list stated anywhere.
+/// The arguments the shellcheck member carries, which are the shell scripts,
+/// git hooks and filing-action script present rather than a list stated
+/// anywhere.
 fn shell_scripts() -> Vec<String> {
     let mut names = Vec::new();
-    for (dir, suffix) in [("scripts", ".sh"), (".githooks", "")] {
+    for (dir, suffix) in [
+        ("scripts", ".sh"),
+        (".githooks", ""),
+        (".github/actions/file-issue", ".sh"),
+    ] {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join(dir);
         let before = names.len();
         names.extend(

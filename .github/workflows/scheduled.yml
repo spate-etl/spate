@@ -230,6 +230,9 @@ jobs:
           osv-scanner scan source --recursive --no-resolve \
             --format markdown --output-file "$RUNNER_TEMP/osv.md" . \
             2>&1 | tee "$RUNNER_TEMP/osv.log" || rc=$?
+          # `--output-file` sends the report to the file alone. Printing it
+          # puts the rows a cut issue body leaves out in the run log.
+          if [ -s "$RUNNER_TEMP/osv.md" ]; then cat "$RUNNER_TEMP/osv.md"; fi
           echo "rc=$rc" >>"$GITHUB_OUTPUT"
           exit "$rc"
 

@@ -262,26 +262,59 @@ fn an_answer_the_form_has_no_field_for_is_refused() {
     assert_eq!(split("what=a=b").unwrap(), ("what", "a=b"));
 }
 
+/// The first line of each `components` answer in a workflow, read from the
+/// `name=$'…'` assignment before the `components="$name"` that passes it.
+fn components_answers(text: &str) -> Vec<String> {
+    let flag = "components=\"$";
+    let answers: Vec<String> = text
+        .match_indices(flag)
+        .map(|(at, _)| {
+            let rest = &text[at + flag.len()..];
+            let name = &rest[..rest.find('"').unwrap()];
+            let assign = format!("{name}=$'");
+            let start = text[..at]
+                .rfind(&assign)
+                .unwrap_or_else(|| panic!("no `{assign}` before the answer"))
+                + assign.len();
+            let value = &text[start..];
+            value[..value.find(['\'', '\\']).unwrap()].to_owned()
+        })
+        .collect();
+    assert_eq!(
+        answers.len(),
+        text.matches("components=").count(),
+        "a `components` answer not passed as `components=\"$name\"`"
+    );
+    answers
+}
+
 /// Every `--answer` and `--answer-file` id a workflow passes is a field of
-/// the bug form, so a typo fails here and not on the night a job fails.
+/// the bug form, and the first line of each `components` answer is one of
+/// that dropdown's options, so a typo fails here and not on the night a job
+/// fails.
 #[test]
 fn every_answer_a_workflow_gives_is_a_bug_form_field() {
-    let ids: Vec<String> = form_fields(&form_file("2-bug.yml"))
-        .into_iter()
-        .map(|f| f.id)
-        .collect();
+    let form = form_fields(&form_file("2-bug.yml"));
+    let options = &form.iter().find(|f| f.id == "components").unwrap().options;
+    let ids: Vec<&str> = form.iter().map(|f| f.id.as_str()).collect();
     let mut seen = 0;
+    let mut wheres = 0;
     for entry in fs::read_dir(repo().join(".github/workflows")).unwrap() {
         let path = entry.unwrap().path();
         let text = fs::read_to_string(&path).unwrap();
+        for answer in components_answers(&text) {
+            assert!(options.contains(&answer), "{}: {answer}", path.display());
+            wheres += 1;
+        }
         for flag in ["--answer ", "--answer-file ", "--answer=", "--answer-file="] {
             for (at, _) in text.match_indices(flag) {
                 let rest = text[at + flag.len()..].trim_start_matches(['$', '"', '\'']);
                 let id = rest.split('=').next().unwrap();
-                assert!(ids.iter().any(|f| f == id), "{}: {id}", path.display());
+                assert!(ids.contains(&id), "{}: {id}", path.display());
                 seen += 1;
             }
         }
     }
     assert!(seen > 0, "no workflow passes an answer");
+    assert!(wheres > 0, "no workflow passes a `components` answer");
 }

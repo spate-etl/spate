@@ -94,36 +94,45 @@ jobs:
         with:
           tools: cargo-about
       - id: regen
-        run: cargo xtask attribution
+        run: |
+          rc=0
+          cargo xtask attribution >"$RUNNER_TEMP/regen.log" 2>&1 || rc=$?
+          cat "$RUNNER_TEMP/regen.log"
+          exit "$rc"
 
       # Files only when the regen step fails; a setup failure would otherwise
       # file an issue asserting the generator broke.
-      - name: Report the failure as an issue
+      - name: Write the issue body
         if: failure() && steps.regen.conclusion == 'failure'
         env:
-          GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          title='Attribution inventory fails to generate'
-          matches=$(gh issue list --state open --search "$title in:title" --json number,title)
-          existing=$(jq -r --arg t "$title" 'map(select(.title == $t)) | .[0].number // empty' <<<"$matches")
-          if [ -n "$existing" ]; then
-            gh issue comment "$existing" --body "Still failing: ${RUN_URL}"
-            exit 0
-          fi
+          where=$'Build, CI, or the examples\n\nThe `Attribution inventory` job of the nightly scheduled run.'
+          version="\`main\` at $SHA"
+          what="\`cargo xtask attribution\` failed on the [nightly run]($RUN_URL)."
+          # Single quotes: the backticks must reach GitHub rather than run as
+          # command substitutions.
           # shellcheck disable=SC2016
-          gh issue create --title "$title" --body "$(
-            printf '%s\n' \
-              '`cargo xtask attribution` failed on the nightly run.' \
-              '' \
-              "Run: ${RUN_URL}" \
-              '' \
-              'The release assembly runs the same command, so a release fails the' \
-              'same way until this is fixed. Reproduce it with' \
-              '`cargo xtask attribution`. If the log shows a network error, rerun' \
-              'the job first.'
-          )"
+          expected='The inventory generates. The release assembly runs the same command, so a release fails the same way until this is fixed. Reproduce it with `cargo xtask attribution`. If the output shows a network error, rerun the job first.'
+          cargo xtask bug-report --out "$RUNNER_TEMP/body.md" \
+            --answer components="$where" \
+            --answer version="$version" \
+            --answer what="$what" \
+            --answer expected="$expected" \
+            --answer-file logs="$RUNNER_TEMP/regen.log"
+          again="Still failing at $SHA, in the [nightly run]($RUN_URL)."
+          cargo xtask bug-report --out "$RUNNER_TEMP/comment.md" \
+            --answer what="$again" \
+            --answer-file logs="$RUNNER_TEMP/regen.log"
+      - name: Report the failure as an issue
+        if: failure() && steps.regen.conclusion == 'failure'
+        uses: ./.github/actions/file-issue
+        with:
+          title: "[bug] Attribution inventory fails to generate"
+          body-file: ${{ runner.temp }}/body.md
+          comment-file: ${{ runner.temp }}/comment.md
 
   advisories:
     name: Advisories (RustSec)
@@ -144,37 +153,45 @@ jobs:
         with:
           tools: cargo-deny
       - id: deny
-        run: cargo deny --all-features --locked check advisories
+        run: |
+          rc=0
+          cargo deny --all-features --locked check advisories >"$RUNNER_TEMP/deny.log" 2>&1 || rc=$?
+          cat "$RUNNER_TEMP/deny.log"
+          exit "$rc"
 
       # Files only when the deny step fails; a checkout failure would otherwise
       # file an issue asserting an advisory was found.
-      - name: Report the failure as an issue
+      - name: Write the issue body
         if: failure() && steps.deny.conclusion == 'failure'
         env:
-          GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          title='Nightly advisory scan is failing'
-          matches=$(gh issue list --state open --search "$title in:title" --json number,title)
-          existing=$(jq -r --arg t "$title" 'map(select(.title == $t)) | .[0].number // empty' <<<"$matches")
-          if [ -n "$existing" ]; then
-            gh issue comment "$existing" --body "Still failing: ${RUN_URL}"
-            exit 0
-          fi
-          # Single quotes: the body's backticks must reach GitHub rather than
-          # run as command substitutions.
+          where=$'Build, CI, or the examples\n\nThe `Advisories (RustSec)` job of the nightly scheduled run.'
+          version="\`main\` at $SHA"
+          what="\`cargo deny check advisories\` failed on the [nightly run]($RUN_URL)."
+          # Single quotes: the backticks must reach GitHub rather than run as
+          # command substitutions.
           # shellcheck disable=SC2016
-          gh issue create --title "$title" --body "$(
-            printf '%s\n' \
-              '`cargo deny check advisories` failed on the nightly run.' \
-              '' \
-              "Run: ${RUN_URL}" \
-              '' \
-              'Triage is one of two things: upgrade the affected crate, or add a' \
-              'dated `ignore` entry to `deny.toml` with a written justification.' \
-              'Closing this issue without doing one of them just reopens it tomorrow.'
-          )"
+          expected='No advisory against a crate in `Cargo.lock` without an `ignore` entry in `deny.toml`. Triage is one of two things: upgrade the affected crate, or add a dated `ignore` entry to `deny.toml` with a written justification. Closing this issue without doing one of them just reopens it tomorrow.'
+          cargo xtask bug-report --out "$RUNNER_TEMP/body.md" \
+            --answer components="$where" \
+            --answer version="$version" \
+            --answer what="$what" \
+            --answer expected="$expected" \
+            --answer-file logs="$RUNNER_TEMP/deny.log"
+          again="Still failing at $SHA, in the [nightly run]($RUN_URL)."
+          cargo xtask bug-report --out "$RUNNER_TEMP/comment.md" \
+            --answer what="$again" \
+            --answer-file logs="$RUNNER_TEMP/deny.log"
+      - name: Report the failure as an issue
+        if: failure() && steps.deny.conclusion == 'failure'
+        uses: ./.github/actions/file-issue
+        with:
+          title: "[bug] Nightly advisory scan is failing"
+          body-file: ${{ runner.temp }}/body.md
+          comment-file: ${{ runner.temp }}/comment.md
 
   osv:
     name: Advisories (OSV)
@@ -207,72 +224,63 @@ jobs:
         run: |
           rc=0
           osv-scanner scan source --recursive --no-resolve \
-            --format markdown --output-file "$RUNNER_TEMP/osv.md" . || rc=$?
+            --format markdown --output-file "$RUNNER_TEMP/osv.md" . \
+            >"$RUNNER_TEMP/osv.log" 2>&1 || rc=$?
+          cat "$RUNNER_TEMP/osv.log"
           echo "rc=$rc" >>"$GITHUB_OUTPUT"
           exit "$rc"
 
-      # Files only when the scan step fails, so an earlier failure such as the
-      # install does not file an issue for a scan that never ran. The body
-      # follows the sections of the bug issue form.
-      - name: Report the failure as an issue
+      # The steps below run only when the scan step fails, so an earlier
+      # failure such as the install does not file an issue for a scan that
+      # never ran. The toolchain is for xtask, which writes the body.
+      - if: failure() && steps.scan.conclusion == 'failure'
+        uses: ./.github/actions/setup-rust
+        with:
+          # The entry ci.yml's `changes` job owns.
+          shared-key: xtask
+          cache-save: never
+      # The report is a markdown table, so it goes under What happened, which
+      # renders markdown. Output is fenced as shell.
+      - name: Write the issue body
         if: failure() && steps.scan.conclusion == 'failure'
         env:
-          GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           SHA: ${{ github.sha }}
           RC: ${{ steps.scan.outputs.rc }}
         run: |
           set -euo pipefail
-          title='[bug] Nightly OSV scan is failing'
-          body="$RUNNER_TEMP/body.md"
-          output() {
+          intro="\`osv-scanner scan source --recursive --no-resolve .\` exited ${RC} on the [nightly run]($RUN_URL). Exit 1 means it reported the advisories below; any other code is an error under Output."
+          report() {
             if [ -s "$RUNNER_TEMP/osv.md" ]; then
               cat "$RUNNER_TEMP/osv.md"
             else
-              echo 'The scan wrote no report. The run log has its output.'
+              echo 'The scan wrote no report.'
             fi
           }
-          matches=$(gh issue list --state open --search "$title in:title" --json number,title)
-          existing=$(jq -r --arg t "$title" 'map(select(.title == $t)) | .[0].number // empty' <<<"$matches")
-          if [ -n "$existing" ]; then
-            {
-              printf 'Still failing at %s, exit %s: %s\n' "$SHA" "$RC" "$RUN_URL"
-              output
-            } >"$body"
-            gh issue comment "$existing" --body-file "$body"
-            exit 0
-          fi
-          # Single quotes: the body's backticks must reach GitHub rather than
-          # run as command substitutions.
+          { printf '%s\n\n' "$intro"; report; } >"$RUNNER_TEMP/what.md"
+          { printf 'Still failing at %s. %s\n\n' "$SHA" "$intro"; report; } >"$RUNNER_TEMP/still.md"
+          where=$'Build, CI, or the examples\n\nThe `Advisories (OSV)` job of the nightly scheduled run.'
+          version="\`main\` at $SHA"
+          # Single quotes: the backticks must reach GitHub rather than run as
+          # command substitutions.
           # shellcheck disable=SC2016
-          {
-            printf '%s\n' \
-              '### Where' \
-              '' \
-              'The `Advisories (OSV)` job of the nightly scheduled run.' \
-              '' \
-              '### Version' \
-              '' \
-              "\`main\` at ${SHA}" \
-              '' \
-              '### What happened' \
-              '' \
-              "\`osv-scanner scan source --recursive --no-resolve .\` exited ${RC}. Exit 1 means it reported the advisories under Output; any other code is an error in the run log. Run: ${RUN_URL}" \
-              '' \
-              '### What you expected instead' \
-              '' \
-              'No advisory without an entry in the `osv-scanner.toml` beside the manifest that holds it. On exit 1, triage is one of two things: upgrade the affected package, or add a dated `IgnoredVulns` entry with a written reason, and closing this issue without doing one of them just reopens it tomorrow. On any other exit code, the run log shows the error to fix.' \
-              '' \
-              '### Output' \
-              ''
-            output
-          } >"$body"
-          # `gh issue create` applies `--type` after creating the issue, so a
-          # refused type would fail the step with the URL unprinted. The type is
-          # set afterwards, and a refusal leaves the issue for a person to fix.
-          url=$(gh issue create --title "$title" --body-file "$body")
-          gh issue edit "$url" --type Bug ||
-            echo "::warning::Could not set the type on $url; set it to Bug by hand."
+          expected='No advisory without an entry in the `osv-scanner.toml` beside the manifest that holds it. On exit 1, triage is one of two things: upgrade the affected package, or add a dated `IgnoredVulns` entry with a written reason, and closing this issue without doing one of them just reopens it tomorrow. On any other exit code, the run log shows the error to fix.'
+          cargo xtask bug-report --out "$RUNNER_TEMP/body.md" \
+            --answer components="$where" \
+            --answer version="$version" \
+            --answer-file what="$RUNNER_TEMP/what.md" \
+            --answer expected="$expected" \
+            --answer-file logs="$RUNNER_TEMP/osv.log"
+          cargo xtask bug-report --out "$RUNNER_TEMP/comment.md" \
+            --answer-file what="$RUNNER_TEMP/still.md" \
+            --answer-file logs="$RUNNER_TEMP/osv.log"
+      - name: Report the failure as an issue
+        if: failure() && steps.scan.conclusion == 'failure'
+        uses: ./.github/actions/file-issue
+        with:
+          title: "[bug] Nightly OSV scan is failing"
+          body-file: ${{ runner.temp }}/body.md
+          comment-file: ${{ runner.temp }}/comment.md
 
   fuzz:
     name: Fuzz targets
@@ -339,12 +347,18 @@ jobs:
           echo "fuzzing $targets target(s) for ${MAX_TOTAL_TIME}s each"
           fuzzed=0
           crashed=""
+          log="$RUNNER_TEMP/fuzz-target.log"
+          : >"$RUNNER_TEMP/fuzz.log"
           while IFS= read -r target; do
             [[ -n "$target" ]] || continue
             echo "::group::$target"
-            if ! cargo "+$NIGHTLY" fuzz run "$target" -- \
-              -max_total_time="$MAX_TOTAL_TIME" -print_final_stats=1; then
+            rc=0
+            cargo "+$NIGHTLY" fuzz run "$target" -- \
+              -max_total_time="$MAX_TOTAL_TIME" -print_final_stats=1 >"$log" 2>&1 || rc=$?
+            cat "$log"
+            if [[ "$rc" -ne 0 ]]; then
               crashed="$crashed $target"
+              { echo "==> $target <=="; cat "$log"; } >>"$RUNNER_TEMP/fuzz.log"
             fi
             echo "::endgroup::"
             fuzzed=$((fuzzed + 1))
@@ -379,45 +393,38 @@ jobs:
 
       # Gated on the run step, not `failure()`: a checkout or build failure
       # would file an issue asserting a crashing input was found.
-      - name: Report the failure as an issue
+      - name: Write the issue body
         if: failure() && steps.run.conclusion == 'failure'
         env:
-          GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SHA: ${{ github.sha }}
           # The reader reproduces under the toolchain the crash was found on.
           # Sanitizer codegen moves between nightlies, and a floating channel
           # can fail to reproduce it.
           NIGHTLY: ${{ steps.rust.outputs.toolchain }}
         run: |
           set -euo pipefail
-          title='A fuzz target found a crashing input'
-          matches=$(gh issue list --state open --search "$title in:title" --json number,title)
-          existing=$(jq -r --arg t "$title" 'map(select(.title == $t)) | .[0].number // empty' <<<"$matches")
-          if [ -n "$existing" ]; then
-            gh issue comment "$existing" --body "Still failing: ${RUN_URL}"
-            exit 0
-          fi
-          # Single quotes: the body's backticks must reach GitHub rather than
-          # run as command substitutions.
-          # shellcheck disable=SC2016
-          gh issue create --title "$title" --body "$(
-            printf '%s\n' \
-              'A fuzz target exited non-zero on the nightly run. The input that' \
-              'did it is attached to the run as the `fuzz-artifacts` artifact,' \
-              'and the run log names the target.' \
-              '' \
-              "Run: ${RUN_URL}" \
-              '' \
-              'Reproduce it against the downloaded file:' \
-              '' \
-              '```sh' \
-              "cargo +${NIGHTLY} fuzz run <target> <path-to-the-input>" \
-              '```' \
-              '' \
-              'A panic on malformed bytes is a bug in the decoder, so the fix' \
-              'goes with a unit test in the crate that owns it. Keep the input' \
-              'under `fuzz/corpus/<target>/` so the case stays covered.'
-          )"
+          where=$'Build, CI, or the examples\n\nThe `Fuzz targets` job of the nightly scheduled run.'
+          version="\`main\` at $SHA"
+          what="A fuzz target exited non-zero on the [nightly run]($RUN_URL). The input that did it is attached to the run as the \`fuzz-artifacts\` artifact, and Output names the target."
+          expected="Every target runs for ${MAX_TOTAL_TIME}s without a crash. Reproduce it against the downloaded file with \`cargo +${NIGHTLY} fuzz run <target> <path-to-the-input>\`. A panic on malformed bytes is a bug in the decoder, so the fix goes with a unit test in the crate that owns it. Keep the input under \`fuzz/corpus/<target>/\` so the case stays covered."
+          cargo xtask bug-report --out "$RUNNER_TEMP/body.md" \
+            --answer components="$where" \
+            --answer version="$version" \
+            --answer what="$what" \
+            --answer expected="$expected" \
+            --answer-file logs="$RUNNER_TEMP/fuzz.log"
+          again="Still failing at $SHA, in the [nightly run]($RUN_URL)."
+          cargo xtask bug-report --out "$RUNNER_TEMP/comment.md" \
+            --answer what="$again" \
+            --answer-file logs="$RUNNER_TEMP/fuzz.log"
+      - name: Report the failure as an issue
+        if: failure() && steps.run.conclusion == 'failure'
+        uses: ./.github/actions/file-issue
+        with:
+          title: "[bug] A fuzz target found a crashing input"
+          body-file: ${{ runner.temp }}/body.md
+          comment-file: ${{ runner.temp }}/comment.md
 
   minimal-versions:
     name: Declared version floors build
@@ -441,37 +448,51 @@ jobs:
           shared-key: minimal-versions
       - name: Resolve every direct dependency to its declared floor
         id: resolve
-        run: cargo generate-lockfile -Z direct-minimal-versions
+        run: |
+          rc=0
+          cargo generate-lockfile -Z direct-minimal-versions >"$RUNNER_TEMP/floors.log" 2>&1 || rc=$?
+          cat "$RUNNER_TEMP/floors.log"
+          exit "$rc"
       # `--all-targets` holds dev-dependency floors to the same standard. Not
       # `-D warnings`: the minimal graph surfaces other people's deprecations.
       - id: check
-        run: cargo check --workspace --all-targets --all-features --locked
+        run: |
+          rc=0
+          cargo check --workspace --all-targets --all-features --locked >"$RUNNER_TEMP/floors.log" 2>&1 || rc=$?
+          cat "$RUNNER_TEMP/floors.log"
+          exit "$rc"
 
-      - name: Report the failure as an issue
+      # xtask builds against the committed `Cargo.lock`, which the resolve step
+      # replaced with the floors.
+      - name: Write the issue body
         if: failure() && (steps.resolve.conclusion == 'failure' || steps.check.conclusion == 'failure')
         env:
-          GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          title='Declared version floors no longer build'
-          matches=$(gh issue list --state open --search "$title in:title" --json number,title)
-          existing=$(jq -r --arg t "$title" 'map(select(.title == $t)) | .[0].number // empty' <<<"$matches")
-          if [ -n "$existing" ]; then
-            gh issue comment "$existing" --body "Still failing: ${RUN_URL}"
-            exit 0
-          fi
-          gh issue create --title "$title" --body "$(
-            printf '%s\n' \
-              'The workspace no longer builds when every direct dependency is' \
-              'resolved to the lowest version its requirement admits.' \
-              '' \
-              "Run: ${RUN_URL}" \
-              '' \
-              'Raise the offending floor in [workspace.dependencies] to a version' \
-              'that builds. Do not lower it back to make this pass: the floor' \
-              'is a promise to consumers, and a green run is what makes it true.'
-          )"
+          git checkout -- Cargo.lock
+          where=$'Build, CI, or the examples\n\nThe `Declared version floors build` job of the nightly scheduled run.'
+          version="\`main\` at $SHA"
+          what="The workspace no longer builds when every direct dependency is resolved to the lowest version its requirement admits, on the [nightly run]($RUN_URL)."
+          expected='Every direct dependency builds at its floor. Raise the offending floor in [workspace.dependencies] to a version that builds. Do not lower it back to make this pass: the floor is a promise to consumers, and a green run is what makes it true.'
+          cargo xtask bug-report --out "$RUNNER_TEMP/body.md" \
+            --answer components="$where" \
+            --answer version="$version" \
+            --answer what="$what" \
+            --answer expected="$expected" \
+            --answer-file logs="$RUNNER_TEMP/floors.log"
+          again="Still failing at $SHA, in the [nightly run]($RUN_URL)."
+          cargo xtask bug-report --out "$RUNNER_TEMP/comment.md" \
+            --answer what="$again" \
+            --answer-file logs="$RUNNER_TEMP/floors.log"
+      - name: Report the failure as an issue
+        if: failure() && (steps.resolve.conclusion == 'failure' || steps.check.conclusion == 'failure')
+        uses: ./.github/actions/file-issue
+        with:
+          title: "[bug] Declared version floors no longer build"
+          body-file: ${{ runner.temp }}/body.md
+          comment-file: ${{ runner.temp }}/comment.md
 
   publish-dry-run:
     name: Publish dry run
@@ -498,7 +519,12 @@ jobs:
         run: |
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml)
           next="${version%.*}.$(( ${version##*.} + 1 ))"
-          cargo xtask release version bump "$next"
+          rc=0
+          cargo xtask release version bump "$next" >"$RUNNER_TEMP/publish.log" 2>&1 || rc=$?
+          cat "$RUNNER_TEMP/publish.log"
+          if [ "$rc" -ne 0 ]; then
+            exit "$rc"
+          fi
           git config user.name 'spate-release[bot]'
           git config user.email 'spate-release[bot]@users.noreply.github.com'
           git commit --all --quiet --message "workspace: simulate the release bump to $next"
@@ -507,58 +533,71 @@ jobs:
       # or license with a warning and exit 0, while the upload rejects it
       # (cargo issue 14249).
       - id: metadata
-        run: cargo xtask release version check-metadata
+        run: |
+          rc=0
+          cargo xtask release version check-metadata >"$RUNNER_TEMP/publish.log" 2>&1 || rc=$?
+          cat "$RUNNER_TEMP/publish.log"
+          exit "$rc"
 
       - id: dry-run
-        run: cargo xtask release package
+        run: |
+          rc=0
+          cargo xtask release package >"$RUNNER_TEMP/publish.log" 2>&1 || rc=$?
+          cat "$RUNNER_TEMP/publish.log"
+          exit "$rc"
 
       # Gated on the named steps, not `failure()`: a checkout failure would
       # file an issue asserting the workspace no longer packages. The bump
       # step gets the neutral title: it runs sed, the rewriters and
       # `cargo update`, so its failures are the tooling or the network, and
       # filing them as a packaging break would be wrong twice a year.
-      - name: Report the failure as an issue
+      - name: Write the issue body
+        id: body
         if: >-
           failure() &&
           (steps.bump.conclusion == 'failure' ||
            steps.metadata.conclusion == 'failure' ||
            steps.dry-run.conclusion == 'failure')
         env:
-          GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SHA: ${{ github.sha }}
           BUMP_FAILED: ${{ steps.bump.conclusion == 'failure' }}
         run: |
           set -euo pipefail
-          # Single quotes throughout: the body's backticks must reach GitHub
-          # rather than run as command substitutions.
-          # shellcheck disable=SC2016
           if [ "$BUMP_FAILED" = "true" ]; then
-            title='Nightly publish rehearsal could not run'
-            body_head='The simulated version bump failed before anything was packaged, so'
-            body_head2='this says nothing about whether the workspace packages. Read the run.'
+            # A bump that stopped part way leaves manifests xtask cannot build.
+            git checkout -- .
+            title='[bug] Nightly publish rehearsal could not run'
+            what="The simulated version bump failed on the [nightly run]($RUN_URL) before anything was packaged, so this says nothing about whether the workspace packages."
           else
-            title='The workspace no longer packages'
-            body_head='`cargo xtask release package` or the upload-metadata'
-            body_head2='check failed on the nightly run, at a simulated next-patch version.'
+            title='[bug] The workspace no longer packages'
+            what="\`cargo xtask release package\` or the upload-metadata check failed on the [nightly run]($RUN_URL), at a simulated next-patch version."
           fi
-          matches=$(gh issue list --state open --search "$title in:title" --json number,title)
-          existing=$(jq -r --arg t "$title" 'map(select(.title == $t)) | .[0].number // empty' <<<"$matches")
-          if [ -n "$existing" ]; then
-            gh issue comment "$existing" --body "Still failing: ${RUN_URL}"
-            exit 0
-          fi
-          # shellcheck disable=SC2016
-          gh issue create --title "$title" --body "$(
-            printf '%s\n' \
-              "$body_head" \
-              "$body_head2" \
-              '' \
-              "Run: ${RUN_URL}" \
-              '' \
-              'A release cannot upload until this is green, and a failure that' \
-              'first appears on release day has already published whatever came' \
-              'before it in the order. Fix it before cutting one.'
-          )"
+          where=$'Build, CI, or the examples\n\nThe `Publish dry run` job of the nightly scheduled run.'
+          version="\`main\` at $SHA"
+          expected='The workspace packages at the next patch version. A release cannot upload until this is green, and a failure that first appears on release day has already published whatever came before it in the order. Fix it before cutting one.'
+          cargo xtask bug-report --out "$RUNNER_TEMP/body.md" \
+            --answer components="$where" \
+            --answer version="$version" \
+            --answer what="$what" \
+            --answer expected="$expected" \
+            --answer-file logs="$RUNNER_TEMP/publish.log"
+          again="Still failing at $SHA, in the [nightly run]($RUN_URL)."
+          cargo xtask bug-report --out "$RUNNER_TEMP/comment.md" \
+            --answer what="$again" \
+            --answer-file logs="$RUNNER_TEMP/publish.log"
+          echo "title=$title" >>"$GITHUB_OUTPUT"
+      - name: Report the failure as an issue
+        if: >-
+          failure() &&
+          (steps.bump.conclusion == 'failure' ||
+           steps.metadata.conclusion == 'failure' ||
+           steps.dry-run.conclusion == 'failure')
+        uses: ./.github/actions/file-issue
+        with:
+          title: ${{ steps.body.outputs.title }}
+          body-file: ${{ runner.temp }}/body.md
+          comment-file: ${{ runner.temp }}/comment.md
 
   docs-build:
     name: Build site for deploy
@@ -706,90 +745,75 @@ jobs:
 
       # Both steps always run, so one report covers both.
       - id: clippy
-        run: cargo xtask clippy
+        run: |
+          rc=0
+          cargo xtask clippy >"$RUNNER_TEMP/clippy.log" 2>&1 || rc=$?
+          cat "$RUNNER_TEMP/clippy.log"
+          exit "$rc"
         continue-on-error: true
       - id: test
-        run: cargo xtask test
+        run: |
+          rc=0
+          cargo xtask test >"$RUNNER_TEMP/test.log" 2>&1 || rc=$?
+          cat "$RUNNER_TEMP/test.log"
+          exit "$rc"
         continue-on-error: true
 
       # continue-on-error reports a failed step's `conclusion` as `success`,
       # so the real result is in `outcome`.
-      - name: Report the failure as an issue
+      - name: Write the issue body
+        id: body
         if: >-
           always() &&
           (steps.clippy.outcome == 'failure' ||
            steps.test.outcome == 'failure')
         env:
-          GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SHA: ${{ github.sha }}
           CLIPPY_FAILED: ${{ steps.clippy.outcome == 'failure' }}
           TEST_OUTCOME: ${{ steps.test.outcome }}
         run: |
           set -euo pipefail
-          # shellcheck disable=SC2016
           if [ "$CLIPPY_FAILED" = "true" ]; then
-            title='Clippy fails on the beta toolchain'
-            body_head='`cargo xtask clippy` failed on beta. Once beta becomes stable this'
-            body_head2='blocks every pull request, because the lint job denies warnings.'
+            title='[bug] Clippy fails on the beta toolchain'
+            log="$RUNNER_TEMP/clippy.log"
+            what="\`cargo xtask clippy\` failed on beta, on the [weekly run]($RUN_URL). Once beta becomes stable this blocks every pull request, because the lint job denies warnings."
             if [ "$TEST_OUTCOME" = "failure" ]; then
-              test_line='`cargo xtask test` also failed on the same run.'
+              what="$what \`cargo xtask test\` also failed on the same run."
             elif [ "$TEST_OUTCOME" = "success" ]; then
-              test_line='`cargo xtask test` passed on the same run.'
+              what="$what \`cargo xtask test\` passed on the same run."
             else
-              test_line="\`cargo xtask test\` outcome on the same run: \`${TEST_OUTCOME}\`."
+              what="$what \`cargo xtask test\` outcome on the same run: \`${TEST_OUTCOME}\`."
             fi
           else
-            title='Tests fail on the beta toolchain'
-            body_head='`cargo xtask test` failed on beta while `cargo xtask clippy` passed.'
-            body_head2='Clippy stops at the check build, so this is codegen, linking or behavior.'
-            test_line=''
+            title='[bug] Tests fail on the beta toolchain'
+            log="$RUNNER_TEMP/test.log"
+            what="\`cargo xtask test\` failed on beta while \`cargo xtask clippy\` passed, on the [weekly run]($RUN_URL). Clippy stops at the check build, so this is codegen, linking or behavior."
           fi
-          matches=$(gh issue list --state open --search "$title in:title" --json number,title)
-          existing=$(jq -r --arg t "$title" 'map(select(.title == $t)) | .[0].number // empty' <<<"$matches")
-          if [ -n "$existing" ]; then
-            gh issue comment "$existing" --body "Still failing: ${RUN_URL}"
-            exit 0
-          fi
-          body_args=("$body_head" "$body_head2")
-          if [ -n "$test_line" ]; then
-            body_args+=("$test_line")
-          fi
-          body_args+=('' "Run: ${RUN_URL}")
-          if [ "$CLIPPY_FAILED" = "true" ]; then
-            # A nonzero status means the build failed before clippy listed anything.
-            clippy_status=0
-            clippy_log=$(cargo xtask clippy --no-deny-warnings 2>&1) || clippy_status=$?
-            # An issue body over 65536 characters is rejected.
-            clippy_log_lines=$(printf '%s\n' "$clippy_log" | wc -l | tr -d ' ')
-            max_lines=200
-            if [ "$clippy_log_lines" -gt "$max_lines" ]; then
-              # A here-string. Through a pipe, `head` exiting early SIGPIPEs
-              # the writer and pipefail fails the step with no issue filed.
-              clippy_log_shown=$(head -n "$max_lines" <<<"$clippy_log")
-              clippy_log_note="Truncated to the first ${max_lines} of ${clippy_log_lines} lines; the run log has the rest."
-            else
-              clippy_log_shown="$clippy_log"
-              clippy_log_note=''
-            fi
-            if [ "$clippy_status" -eq 0 ]; then
-              # shellcheck disable=SC2016
-              lint_intro='Every lint `cargo xtask clippy --no-deny-warnings` finds on beta:'
-            else
-              lint_intro="\`cargo xtask clippy --no-deny-warnings\` still exits ${clippy_status}. The build fails before clippy reaches any lint."
-            fi
-            body_args+=('' "$lint_intro" '' '```' "$clippy_log_shown" '```')
-            if [ -n "$clippy_log_note" ]; then
-              body_args+=('' "$clippy_log_note")
-            fi
-          fi
-          body_args+=(
-            ''
-            'Beta reaches stable within six weeks, at which point this'
-            'blocks every open pull request at once. The run log names the'
-            'release it was found on.'
-          )
-          # shellcheck disable=SC2016
-          gh issue create --title "$title" --body "$(printf '%s\n' "${body_args[@]}")"
+          where=$'Build, CI, or the examples\n\nThe `Build and test on beta` job of the weekly scheduled run.'
+          version="\`main\` at $SHA"
+          expected='Clippy and the tests pass on beta. Beta reaches stable within six weeks, at which point this blocks every open pull request at once. The run log names the release it was found on.'
+          cargo xtask bug-report --out "$RUNNER_TEMP/body.md" \
+            --answer components="$where" \
+            --answer version="$version" \
+            --answer what="$what" \
+            --answer expected="$expected" \
+            --answer-file logs="$log"
+          again="Still failing at $SHA, in the [weekly run]($RUN_URL)."
+          cargo xtask bug-report --out "$RUNNER_TEMP/comment.md" \
+            --answer what="$again" \
+            --answer-file logs="$log"
+          echo "title=$title" >>"$GITHUB_OUTPUT"
+      - name: Report the failure as an issue
+        if: >-
+          always() &&
+          (steps.clippy.outcome == 'failure' ||
+           steps.test.outcome == 'failure')
+        uses: ./.github/actions/file-issue
+        with:
+          title: ${{ steps.body.outputs.title }}
+          body-file: ${{ runner.temp }}/body.md
+          comment-file: ${{ runner.temp }}/comment.md
 
       - name: Fail the job on either outcome
         if: >-
@@ -1110,28 +1134,39 @@ jobs:
       contents: read
       issues: write
     steps:
-      - name: Open or update the tracking issue
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The toolchain is for xtask, which writes the body.
+      - uses: ./.github/actions/setup-rust
+        with:
+          # The entry ci.yml's `changes` job owns.
+          shared-key: xtask
+          cache-save: never
+      - name: Write the issue body
         env:
-          GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SHA: ${{ github.sha }}
           RESULTS: ${{ toJSON(needs) }}
         run: |
           set -euo pipefail
           failed=$(echo "$RESULTS" | jq -r '
             to_entries | map(select(.value.result == "failure")) | .[].key' | sort | tr '\n' ' ')
-          title='Scheduled run is failing'
-          body=$(printf '%s\n' \
-            "Failed jobs: ${failed}" \
-            '' \
-            "Run: ${RUN_URL}" \
-            '' \
-            'The scheduled tier detects the world changing underneath a static' \
-            'tree, so a failure here is usually not caused by the last commit.' \
-            'Check the run before assuming a regression.')
-          matches=$(gh issue list --state open --search "$title in:title" --json number,title)
-          existing=$(jq -r --arg t "$title" 'map(select(.title == $t)) | .[0].number // empty' <<<"$matches")
-          if [ -n "$existing" ]; then
-            gh issue comment "$existing" --body "$body"
-          else
-            gh issue create --title "$title" --body "$body"
-          fi
+          where=$'Build, CI, or the examples\n\nThe scheduled run, in a job that files no issue of its own.'
+          version="\`main\` at $SHA"
+          what="Failed jobs on the [scheduled run]($RUN_URL): ${failed}"
+          expected='Every job passes. The scheduled tier detects the world changing underneath a static tree, so a failure here is usually not caused by the last commit. Check the run before assuming a regression.'
+          cargo xtask bug-report --out "$RUNNER_TEMP/body.md" \
+            --answer components="$where" \
+            --answer version="$version" \
+            --answer what="$what" \
+            --answer expected="$expected"
+          again="Still failing at $SHA. Failed jobs on the [scheduled run]($RUN_URL): ${failed}"
+          cargo xtask bug-report --out "$RUNNER_TEMP/comment.md" \
+            --answer what="$again"
+      - name: Open or update the tracking issue
+        uses: ./.github/actions/file-issue
+        with:
+          title: "[bug] Scheduled run is failing"
+          body-file: ${{ runner.temp }}/body.md
+          comment-file: ${{ runner.temp }}/comment.md

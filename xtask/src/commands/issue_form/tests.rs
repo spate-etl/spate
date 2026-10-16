@@ -169,3 +169,27 @@ fn an_answer_the_form_has_no_field_for_is_refused() {
     assert!(split("what").is_err());
     assert_eq!(split("what=a=b").unwrap(), ("what", "a=b"));
 }
+
+/// Every `--answer` and `--answer-file` id a workflow passes is a field of
+/// the bug form, so a typo fails here and not on the night a job fails.
+#[test]
+fn every_answer_a_workflow_gives_is_a_bug_form_field() {
+    let ids: Vec<String> = form_fields(&form_file("2-bug.yml"))
+        .into_iter()
+        .map(|f| f.id)
+        .collect();
+    let mut seen = 0;
+    for entry in fs::read_dir(repo().join(".github/workflows")).unwrap() {
+        let path = entry.unwrap().path();
+        let text = fs::read_to_string(&path).unwrap();
+        for flag in ["--answer ", "--answer-file "] {
+            for (at, _) in text.match_indices(flag) {
+                let rest = text[at + flag.len()..].trim_start_matches(['$', '"', '\'']);
+                let id = rest.split('=').next().unwrap();
+                assert!(ids.iter().any(|f| f == id), "{}: {id}", path.display());
+                seen += 1;
+            }
+        }
+    }
+    assert!(seen > 0, "no workflow passes an answer");
+}

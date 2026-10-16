@@ -563,13 +563,18 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$BUMP_FAILED" = "true" ]; then
-            # A bump that stopped part way leaves manifests xtask cannot build.
-            git checkout -- .
             title='[bug] Nightly publish rehearsal could not run'
             what="The simulated version bump failed on the [nightly run]($RUN_URL) before anything was packaged, so this says nothing about whether the workspace packages."
           else
             title='[bug] The workspace no longer packages'
             what="\`cargo xtask release package\` or the upload-metadata check failed on the [nightly run]($RUN_URL), at a simulated next-patch version."
+          fi
+          # The title is written before xtask runs, so the filing step has it
+          # when the body cannot be rendered.
+          echo "title=$title" >>"$GITHUB_OUTPUT"
+          if [ "$BUMP_FAILED" = "true" ]; then
+            # A bump that stopped part way leaves manifests xtask cannot build.
+            git checkout -- .
           fi
           where=$'Build, CI, or the examples\n\nThe `Publish dry run` job of the nightly scheduled run.'
           version="\`main\` at $SHA"
@@ -584,7 +589,6 @@ jobs:
           cargo xtask bug-report --out "$RUNNER_TEMP/comment.md" \
             --answer what="$again" \
             --answer-file logs="$RUNNER_TEMP/publish.log"
-          echo "title=$title" >>"$GITHUB_OUTPUT"
       - name: Report the failure as an issue
         if: >-
           failure() &&
@@ -788,6 +792,9 @@ jobs:
             log="$RUNNER_TEMP/test.log"
             what="\`cargo xtask test\` failed on beta while \`cargo xtask clippy\` passed, on the [weekly run]($RUN_URL). Clippy stops at the check build, so this is codegen, linking or behavior."
           fi
+          # The title is written before xtask runs, so the filing step has it
+          # when beta cannot build xtask.
+          echo "title=$title" >>"$GITHUB_OUTPUT"
           where=$'Build, CI, or the examples\n\nThe `Build and test on beta` job of the weekly scheduled run.'
           version="\`main\` at $SHA"
           expected='Clippy and the tests pass on beta. Beta reaches stable within six weeks, at which point this blocks every open pull request at once. The run log names the release it was found on.'
@@ -801,7 +808,6 @@ jobs:
           cargo xtask bug-report --out "$RUNNER_TEMP/comment.md" \
             --answer what="$again" \
             --answer-file logs="$log"
-          echo "title=$title" >>"$GITHUB_OUTPUT"
       - name: Report the failure as an issue
         if: >-
           always() &&
@@ -1162,7 +1168,10 @@ jobs:
           again="Still failing at $SHA. Failed jobs on the [scheduled run]($RUN_URL): ${failed}"
           cargo xtask bug-report --out "$RUNNER_TEMP/comment.md" \
             --answer what="$again"
+      # Runs after a failed body step too, so a toolchain that cannot build
+      # xtask still leaves an issue.
       - name: Open or update the tracking issue
+        if: ${{ !cancelled() }}
         uses: ./.github/actions/file-issue
         with:
           title: "[bug] Scheduled run is failing"

@@ -9,12 +9,14 @@ inputs:
     description: The issue title, matched exactly against the open issues.
     required: true
   body-file:
-    description: The body of a new issue.
+    description: >
+      The body of a new issue. When the file is missing or empty, the body is
+      a line saying so, with the run's URL.
     required: true
   comment-file:
     description: >
-      The comment on an open issue. Without one, the comment is a "Still
-      failing" line with the run's URL.
+      The comment on an open issue. Without one, or when the file is missing
+      or empty, the comment is a "Still failing" line with the run's URL.
     required: false
     default: ""
 

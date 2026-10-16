@@ -11,7 +11,8 @@ use std::num::{NonZeroU32, NonZeroUsize};
 /// One key names the backend, with the same single-key shape as `source:`;
 /// its body holds the backend's own keys and is decoded by the backend.
 /// `units_held` applies whatever the backend; `attempt_cap` applies to the
-/// in-process feed, and a backend that cannot honor it refuses it.
+/// in-process and Kafka feeds, and a backend that cannot honor it refuses
+/// it.
 ///
 /// ```yaml
 /// feed:
@@ -29,9 +30,9 @@ pub struct FeedSection {
     /// Units the source holds and reads at once. `None` leaves the source's
     /// own default.
     pub units_held: Option<NonZeroUsize>,
-    /// The delivery on which the in-process feed moves a failed unit to its
-    /// dead-letter list. `None` leaves the backend's default. A backend that
-    /// cannot honor the key refuses it.
+    /// The delivery on which a failed unit moves to its feed's dead-letter
+    /// destination, on the in-process and Kafka feeds. `None` leaves the
+    /// backend's default. A backend that cannot honor the key refuses it.
     pub attempt_cap: Option<NonZeroU32>,
 }
 

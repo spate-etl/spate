@@ -19,7 +19,7 @@ tree, and never resolves `rdkafka` into its lockfile.
 
 | Feature | Brings in |
 | --- | --- |
-| `kafka` | Kafka source and sink ([`spate-kafka`](https://crates.io/crates/spate-kafka)) |
+| `kafka` | Kafka source, sink and work feed ([`spate-kafka`](https://crates.io/crates/spate-kafka)) |
 | `clickhouse` | ClickHouse sink ([`spate-clickhouse`](https://crates.io/crates/spate-clickhouse)) |
 | `s3` | Coordinated object-storage backfill source ([`spate-s3`](https://crates.io/crates/spate-s3)) |
 | `sqs` | Amazon SQS work feed ([`spate-sqs`](https://crates.io/crates/spate-sqs)) |

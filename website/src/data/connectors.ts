@@ -1,7 +1,7 @@
 /** The connector inventory the homepage renders. One entry per crate, as the README's table. */
 export type Connector = {
   name: string;
-  role: 'source' | 'sink' | 'source · sink' | 'format' | 'store' | 'feed';
+  role: 'source' | 'sink' | 'source · sink' | 'source · sink · feed' | 'format' | 'store' | 'feed';
   crate: string;
   feature: string;
   summary: string;
@@ -11,10 +11,10 @@ export type Connector = {
 export const CONNECTORS: Connector[] = [
   {
     name: 'Kafka',
-    role: 'source · sink',
+    role: 'source · sink · feed',
     crate: 'spate-kafka',
     feature: 'kafka',
-    summary: 'One consumer per process; partitions fan across pipeline threads as zero-copy lanes.',
+    summary: 'One consumer per process; partitions fan across pipeline threads as zero-copy lanes. The feed commits a unit once every record is written.',
     docs: '/docs/user-guide/connectors/sources/kafka',
   },
   {

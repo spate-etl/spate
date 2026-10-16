@@ -31,7 +31,7 @@ builder) with no connectors. Enable what you need:
 
 | Feature | Enables |
 |---|---|
-| `kafka` | `spate::kafka` — Kafka source built on `rdkafka` (single consumer, partition-queue lanes). See [Kafka connector](../04-connectors/sources/kafka/README.mdx). |
+| `kafka` | `spate::kafka` — Kafka source built on `rdkafka` (single consumer, partition-queue lanes), producer sink and work feed. See [Kafka connector](../04-connectors/sources/kafka/README.mdx) and [Kafka feed](../04-connectors/feeds/kafka/README.mdx). |
 | `clickhouse` | `spate::clickhouse` — ClickHouse sink (RowBinary encoding, dedup tokens, replica rotation). See [ClickHouse connector](../04-connectors/sinks/clickhouse/README.mdx). |
 | `clickhouse-uuid` | `uuid::Uuid` fields for `UUID` columns (implies `clickhouse`). |
 | `clickhouse-chrono` | `chrono` fields for `Date`/`DateTime`/`DateTime64`/`Time` columns (implies `clickhouse`). |

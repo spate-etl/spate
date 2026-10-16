@@ -36,6 +36,7 @@ Connectors are grouped by role:
 | [JSON](formats/json/README.mdx) | Format (deserializer) | `spate-json` | `json` | `deserializer: { json: ... }` |
 | [NATS JetStream](coordination/nats/README.mdx) | Coordination store | `spate-coordination` | `coordination-nats` | `coordination: { store: { nats: ... } }` |
 | [Amazon SQS](feeds/sqs/README.mdx) | Feed | `spate-sqs` | `sqs` | `feed: { sqs: ... }` |
+| [Kafka](feeds/kafka/README.mdx) | Feed | `spate-kafka` | `kafka` | `feed: { kafka: ... }` |
 | [In-memory](coordination/README.mdx) | Coordination store (solo) | `spate-coordination` | — (linked by each coordinated source) | `coordination: { store: { memory: {} } }` |
 | [Memory / Capture](memory.mdx) | Test source + sink | `spate-test` | — (separate dev-dependency) | `source: { memory: {} }` / `sink: { capture: {} }` (informational) |
 
@@ -102,6 +103,11 @@ the process.
   visibility lapses, and a failed one returns at once. The queue's redrive
   policy moves a unit to its dead-letter queue after `maxReceiveCount`
   receives. See [the connector page](feeds/sqs/README.mdx).
+- **Kafka (feed)** — a unit's offset is committed only after every record in
+  it is acknowledged, or after the write moving it to the retry or
+  dead-letter topic is confirmed; a unit whose worker stops is read again by
+  the next owner of its partition. The attempt cap counts reported failures
+  only. See [the connector page](feeds/kafka/README.mdx).
 - **Memory / Capture (test)** — deterministic, in-process, and honest about
   the same contracts: commits only advance past durably "written" data, so
   tests can assert the at-least-once behavior itself. Not for production.

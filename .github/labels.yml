@@ -34,7 +34,7 @@
 
 - name: "crate: spate-kafka"
   color: "0052cc"
-  description: "The Kafka source and sink"
+  description: "The Kafka source, sink and feed"
 
 - name: "crate: spate-clickhouse"
   color: "0052cc"

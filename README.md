@@ -160,7 +160,7 @@ ClickHouse pattern).
 
 | Crate | Feature | Role |
 |---|---|---|
-| [`spate-kafka`](https://crates.io/crates/spate-kafka) | `kafka` | Kafka source and sink on `rdkafka`: one consumer per process, partitions fanned across pipeline threads as zero-copy lanes. |
+| [`spate-kafka`](https://crates.io/crates/spate-kafka) | `kafka` | Kafka source, sink and work feed on `rdkafka`: one consumer per process, partitions fanned across pipeline threads as zero-copy lanes; the feed commits a unit's offset once every record is written. |
 | [`spate-clickhouse`](https://crates.io/crates/spate-clickhouse) | `clickhouse` | ClickHouse sink: Native or RowBinary encoded on pipeline threads, one deduplication-tokened `INSERT` per batch, replica rotation. |
 | [`spate-s3`](https://crates.io/crates/spate-s3) | `s3` | Coordinated object-storage backfill source: a leader plans a prefix into splits, workers lease them with fenced progress. |
 | [`spate-sqs`](https://crates.io/crates/spate-sqs) | `sqs` | Amazon SQS work feed: units in a standard queue, renewed while a worker reads them and deleted once every record is written. |

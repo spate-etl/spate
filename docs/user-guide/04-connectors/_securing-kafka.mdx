@@ -1,7 +1,7 @@
 {/*
-  Shared partial: Kafka TLS/mTLS/SASL configuration. Imported by both the
-  Kafka source and Kafka sink pages so the identical security matrix lives in
-  one place. The generic security model lives in
+  Shared partial: Kafka TLS/mTLS/SASL configuration. Imported by the Kafka
+  source, sink and feed pages so the identical security matrix lives in one
+  place. The generic security model lives in
   03-guides/securing-connections.mdx, which links here. Relative links below
   resolve from this file's location (04-connectors/).
 */}
@@ -13,7 +13,7 @@ builds OpenSSL from vendored sources, which adds to the
 Once enabled,
 every security property is set through the connector's raw `rdkafka:`
 passthrough; these keys are **not** on the denylist, and the configuration is
-identical for the Kafka source and the Kafka sink. Setting any security
+identical for every Kafka connector. Setting any security
 property **without** the feature fails fast at config load with an actionable
 message rather than an obscure runtime error. Every `rdkafka:` value renders
 `<redacted>` in the config's `Debug` output; the keys stay visible.

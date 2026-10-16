@@ -168,6 +168,10 @@ name = "s3_sqs_backfill"
 required-features = ["s3", "json", "sqs"]
 
 [[example]]
+name = "s3_kafka_backfill"
+required-features = ["s3", "json", "kafka"]
+
+[[example]]
 name = "s3_coordinated_backfill"
 required-features = ["s3", "json", "coordination"]
 test = true

@@ -64,7 +64,10 @@ A feed counts the deliveries of each unit. A unit that reaches the feed's
 delivery cap without an acknowledgment moves to its dead-letter destination
 and is not delivered again. A unit that fails on every reader, such as one
 naming an object that no longer exists, ends there after a bounded number of
-attempts. The in-process feed keeps its dead letters in memory, with exact
+attempts. A feed that counts only the deliveries its reader reported as failed
+does not count one whose reader stopped first, so a unit that stops every
+reader is delivered again without bound. Each backend's page says which it
+counts. The in-process feed keeps its dead letters in memory, with exact
 counts of the units it holds in each state.
 
 Dead-lettering is a property of the feed. The

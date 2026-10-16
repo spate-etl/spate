@@ -200,10 +200,16 @@ jobs:
       # Each manifest's findings are filtered by the `osv-scanner.toml` in its
       # directory. `--no-resolve` scans the versions a manifest names: resolving
       # a requirements file with no lockfile picks versions no install would.
+      # Exit 1 is a finding. Any other non-zero code is an error such as an
+      # unreachable API or an invalid config, and the report may still list
+      # advisories, so the code goes to the report step to state.
       - id: scan
-        run: >-
-          osv-scanner scan source --recursive --no-resolve
-          --format markdown --output-file "$RUNNER_TEMP/osv.md" .
+        run: |
+          rc=0
+          osv-scanner scan source --recursive --no-resolve \
+            --format markdown --output-file "$RUNNER_TEMP/osv.md" . || rc=$?
+          echo "rc=$rc" >>"$GITHUB_OUTPUT"
+          exit "$rc"
 
       # Files only when the scan step fails; a checkout failure would otherwise
       # file an issue asserting an advisory was found. The body follows the
@@ -214,16 +220,24 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           SHA: ${{ github.sha }}
+          RC: ${{ steps.scan.outputs.rc }}
         run: |
           set -euo pipefail
           title='[bug] Nightly OSV scan is failing'
           body="$RUNNER_TEMP/body.md"
+          output() {
+            if [ -s "$RUNNER_TEMP/osv.md" ]; then
+              cat "$RUNNER_TEMP/osv.md"
+            else
+              echo 'The scan wrote no report. The run log has its output.'
+            fi
+          }
           matches=$(gh issue list --state open --search "$title in:title" --json number,title)
           existing=$(jq -r --arg t "$title" 'map(select(.title == $t)) | .[0].number // empty' <<<"$matches")
           if [ -n "$existing" ]; then
             {
-              printf 'Still failing at %s: %s\n' "$SHA" "$RUN_URL"
-              cat "$RUNNER_TEMP/osv.md"
+              printf 'Still failing at %s, exit %s: %s\n' "$SHA" "$RC" "$RUN_URL"
+              output
             } >"$body"
             gh issue comment "$existing" --body-file "$body"
             exit 0
@@ -243,7 +257,7 @@ jobs:
               '' \
               '### What happened' \
               '' \
-              "\`osv-scanner scan source --recursive --no-resolve .\` reported the advisories under Output. Run: ${RUN_URL}" \
+              "\`osv-scanner scan source --recursive --no-resolve .\` exited ${RC}. Exit 1 means it reported the advisories under Output; any other code is an error in the run log. Run: ${RUN_URL}" \
               '' \
               '### What you expected instead' \
               '' \
@@ -251,9 +265,14 @@ jobs:
               '' \
               '### Output' \
               ''
-            cat "$RUNNER_TEMP/osv.md"
+            output
           } >"$body"
-          gh issue create --title "$title" --body-file "$body"
+          # `gh issue create` applies `--type` after creating the issue, so a
+          # refused type would fail the step with the URL unprinted. The type is
+          # set afterwards, and a refusal leaves the issue for a person to fix.
+          url=$(gh issue create --title "$title" --body-file "$body")
+          gh issue edit "$url" --type Bug ||
+            echo "::warning::Could not set the type on $url; set it to Bug by hand."
 
   fuzz:
     name: Fuzz targets
@@ -1068,7 +1087,7 @@ jobs:
           done <"$out.routes"
 
   # ===========================================================================
-  # Catch-all failure reporting. `attribution`, `advisories`, `fuzz`,
+  # Catch-all failure reporting. `attribution`, `advisories`, `osv`, `fuzz`,
   # `minimal-versions`, `publish-dry-run`, `beta` and `fault-test` file their
   # own issues and are absent from `needs` below so they are not reported twice.
   # ===========================================================================

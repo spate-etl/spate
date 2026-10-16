@@ -17,7 +17,8 @@ pub(crate) struct BugReport {
     #[arg(long = "answer", value_name = "ID=TEXT")]
     answers: Vec<String>,
     /// A field's answer read from a file, as ID=PATH; past 25,000 characters
-    /// only the tail is kept
+    /// only the tail is kept. A field given both an --answer and an
+    /// --answer-file takes the text first and the file after it
     #[arg(long = "answer-file", value_name = "ID=PATH")]
     answer_files: Vec<String>,
     /// Where the body is written
@@ -28,25 +29,42 @@ pub(crate) struct BugReport {
 /// Writes a body laid out as the bug form to `--out`, with a section for each
 /// answered field and none for the rest.
 ///
+/// A field may take one text and one file answer. The text comes first and
+/// only the file part is cut to [`MAX_LOG_CHARS`].
+///
 /// # Errors
 ///
 /// An answer not written as `ID=VALUE`, an id that is no field of the form, a
-/// field answered twice, or a file that cannot be read or written.
+/// field given two texts or two files, or a file that cannot be read or
+/// written.
 pub(crate) fn bug_report(root: &Path, explain: bool, args: &BugReport) -> Outcome {
     if explain {
         println!("(renders the body in process)");
         return Ok(());
     }
-    let mut answers = Vec::new();
+    let mut answers: Vec<(&str, String)> = Vec::new();
     for arg in &args.answers {
         let (id, text) = split(arg)?;
         answers.push((id, text.to_owned()));
     }
+    let mut from_file = Vec::new();
     for arg in &args.answer_files {
         let (id, path) = split(arg)?;
+        if from_file.contains(&id) {
+            return Err(Error::msg(format!("`{id}` is answered by two files")));
+        }
+        from_file.push(id);
         let path = root.join(path);
         let bytes = fs::read(&path).map_err(|e| Error::msg(format!("{}: {e}", path.display())))?;
-        answers.push((id, tail(&String::from_utf8_lossy(&bytes), MAX_LOG_CHARS)));
+        let log = tail(&String::from_utf8_lossy(&bytes), MAX_LOG_CHARS);
+        // A text answer to the same field leads, so the cap cannot cut it.
+        match answers.iter_mut().find(|(other, _)| *other == id) {
+            Some((_, text)) => {
+                text.push_str("\n\n");
+                text.push_str(&log);
+            }
+            None => answers.push((id, log)),
+        }
     }
     let body = answered(&BUG, &answers)?;
     let out = root.join(&args.out);

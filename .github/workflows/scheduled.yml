@@ -240,7 +240,8 @@ jobs:
           shared-key: xtask
           cache-save: never
       # The report is a markdown table, so it goes under What happened, which
-      # renders markdown. Output is fenced as shell.
+      # renders markdown. Output is fenced as shell. The intro is a text
+      # answer so that cutting a long report keeps the run link and exit code.
       - name: Write the issue body
         if: failure() && steps.scan.conclusion == 'failure'
         env:
@@ -250,15 +251,10 @@ jobs:
         run: |
           set -euo pipefail
           intro="\`osv-scanner scan source --recursive --no-resolve .\` exited ${RC} on the [nightly run]($RUN_URL). Exit 1 means it reported the advisories below; any other code is an error under Output."
-          report() {
-            if [ -s "$RUNNER_TEMP/osv.md" ]; then
-              cat "$RUNNER_TEMP/osv.md"
-            else
-              echo 'The scan wrote no report.'
-            fi
-          }
-          { printf '%s\n\n' "$intro"; report; } >"$RUNNER_TEMP/what.md"
-          { printf 'Still failing at %s. %s\n\n' "$SHA" "$intro"; report; } >"$RUNNER_TEMP/still.md"
+          if [ ! -s "$RUNNER_TEMP/osv.md" ]; then
+            echo 'The scan wrote no report.' >"$RUNNER_TEMP/osv.md"
+          fi
+          again="Still failing at $SHA. $intro"
           where=$'Build, CI, or the examples\n\nThe `Advisories (OSV)` job of the nightly scheduled run.'
           version="\`main\` at $SHA"
           # Single quotes: the backticks must reach GitHub rather than run as
@@ -268,11 +264,13 @@ jobs:
           cargo xtask bug-report --out "$RUNNER_TEMP/body.md" \
             --answer components="$where" \
             --answer version="$version" \
-            --answer-file what="$RUNNER_TEMP/what.md" \
+            --answer what="$intro" \
+            --answer-file what="$RUNNER_TEMP/osv.md" \
             --answer expected="$expected" \
             --answer-file logs="$RUNNER_TEMP/osv.log"
           cargo xtask bug-report --out "$RUNNER_TEMP/comment.md" \
-            --answer-file what="$RUNNER_TEMP/still.md" \
+            --answer what="$again" \
+            --answer-file what="$RUNNER_TEMP/osv.md" \
             --answer-file logs="$RUNNER_TEMP/osv.log"
       - name: Report the failure as an issue
         if: failure() && steps.scan.conclusion == 'failure'

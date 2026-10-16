@@ -182,6 +182,54 @@ fn strip_ansi_removes_parameterised_and_non_sgr_csi() {
     );
 }
 
+/// A field answered by both a text and a file keeps the whole text first,
+/// and only the file part is cut to the log limit.
+#[test]
+fn a_text_answer_stays_whole_before_a_cut_file_answer() {
+    let dir = std::env::temp_dir().join(format!("xtask-bug-report-text-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let report: String = (0..5_000).map(|i| format!("| row {i} |\n")).collect();
+    assert!(report.chars().count() > MAX_LOG_CHARS);
+    fs::write(dir.join("report.md"), &report).unwrap();
+    let out = dir.join("body.md");
+    let args = BugReport {
+        answers: vec!["what=It exited 1 on the [run](https://example.invalid/1).".to_owned()],
+        answer_files: vec![format!("what={}", dir.join("report.md").display())],
+        out: out.clone(),
+    };
+    bug_report(&dir, false, &args).unwrap();
+    let body = fs::read_to_string(&out).unwrap();
+    fs::remove_dir_all(&dir).unwrap();
+    assert!(
+        body.starts_with(
+            "### What happened\n\nIt exited 1 on the [run](https://example.invalid/1).\n\n\
+             [earlier lines cut; the run log has the rest]\n"
+        ),
+        "{body:.200}"
+    );
+    assert!(body.contains("\n| row 4999 |\n"));
+    assert!(!body.contains("\n| row 0 |\n"));
+}
+
+/// Two file answers to one field are refused, as two text answers are.
+#[test]
+fn a_field_given_two_files_is_refused() {
+    let dir = std::env::temp_dir().join(format!("xtask-bug-report-twice-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("log"), "boom\n").unwrap();
+    let file = format!("logs={}", dir.join("log").display());
+    let args = BugReport {
+        answers: Vec::new(),
+        answer_files: vec![file.clone(), file],
+        out: dir.join("body.md"),
+    };
+    let result = bug_report(&dir, false, &args);
+    fs::remove_dir_all(&dir).unwrap();
+    assert!(result.is_err());
+}
+
 /// An answer to an id the form does not have, a field answered twice, and an
 /// argument with no `=` are refused.
 #[test]

@@ -49,7 +49,7 @@ use crate::run::{Error, Outcome};
 /// dependency across a major version of the format changes those paths
 /// silently, and the symptom is a report that went quietly blank, so a version
 /// this report was not written against fails here.
-const SCHEMA_VERSION: &str = "6";
+const SCHEMA_VERSION: &str = "7";
 
 /// Instruction counts flag on a percentage increase.
 const IR_THRESHOLD_PCT: f64 = 5.0;
@@ -163,49 +163,39 @@ struct Shard {
 #[derive(Deserialize)]
 struct Profile {
     tool: Option<String>,
-    summaries: Option<ProfileSummaries>,
+    data: Option<ProfileData>,
 }
 
 #[derive(Deserialize)]
-struct ProfileSummaries {
+struct ProfileData {
     total: Option<ProfileTotal>,
 }
 
+/// The aggregate over every part of one tool's run. A tool that extracts no
+/// metrics carries an empty map.
 #[derive(Deserialize)]
 struct ProfileTotal {
-    summary: Option<ToolSummary>,
-}
-
-#[derive(Deserialize)]
-struct ToolSummary {
-    #[serde(rename = "Callgrind")]
-    callgrind: Option<Metrics>,
-    #[serde(rename = "Dhat")]
-    dhat: Option<Metrics>,
+    metrics: Option<Metrics>,
 }
 
 /// One metric's two sides and the comparison between them.
 #[derive(Deserialize)]
 struct MetricDiff {
-    metrics: Option<Sides>,
-    diffs: Option<Diffs>,
+    values: Option<Sides>,
+    change: Option<Change>,
 }
 
-/// Left is the new metric and Right the old one.
+/// The new and the old metric, each a bare JSON number. Either may be absent.
 #[derive(Deserialize)]
 struct Sides {
-    #[serde(rename = "Both")]
-    both: Option<Vec<Box<RawValue>>>,
-    #[serde(rename = "Left")]
-    left: Option<Box<RawValue>>,
-    #[serde(rename = "Right")]
-    right: Option<Box<RawValue>>,
+    new: Option<Box<RawValue>>,
+    old: Option<Box<RawValue>>,
 }
 
 /// Present only when both sides are. The percentage is a string so that it can
 /// carry `inf`, `-inf` and `NaN`.
 #[derive(Deserialize)]
-struct Diffs {
+struct Change {
     diff_pct: String,
 }
 
@@ -294,42 +284,16 @@ struct VersionOnly {
 
 // ── Metric values ──────────────────────────────────────────────────────
 
-/// The value a metric side carries, as the literal the summary holds.
-///
-/// A side is `{"Int": n}` or `{"Float": n}`; anything else is taken whole.
-fn value(raw: &RawValue) -> Option<String> {
-    #[derive(Deserialize)]
-    struct Boxed {
-        #[serde(rename = "Int")]
-        int: Option<Box<RawValue>>,
-        #[serde(rename = "Float")]
-        float: Option<Box<RawValue>>,
-    }
-
-    let text = raw.get();
-    if !text.starts_with('{') {
-        return (text != "null").then(|| text.to_owned());
-    }
-    let boxed: Boxed = serde_json::from_str(text).ok()?;
-    boxed.int.or(boxed.float).map(|v| v.get().to_owned())
-}
-
-/// The new side: the first of `Both`, else `Left`.
+/// The new side, as the literal the summary holds.
 fn new_side(metric: &MetricDiff) -> Option<String> {
-    let sides = metric.metrics.as_ref()?;
-    match &sides.both {
-        Some(both) => both.first().and_then(|v| value(v)),
-        None => sides.left.as_ref().and_then(|v| value(v)),
-    }
+    let new = metric.values.as_ref()?.new.as_ref()?;
+    Some(new.get().to_owned())
 }
 
-/// The old side: the second of `Both`, else `Right`.
+/// The old side, as the literal the summary holds.
 fn old_side(metric: &MetricDiff) -> Option<String> {
-    let sides = metric.metrics.as_ref()?;
-    match &sides.both {
-        Some(both) => both.get(1).and_then(|v| value(v)),
-        None => sides.right.as_ref().and_then(|v| value(v)),
-    }
+    let old = metric.values.as_ref()?.old.as_ref()?;
+    Some(old.get().to_owned())
 }
 
 /// A side as a number, for the absolute comparison.
@@ -353,10 +317,10 @@ fn to_number(pct: &str) -> Result<f64, String> {
 /// `inf` and `-inf` render as infinity symbols and `NaN` as `n/a`, so neither
 /// reaches the rounding below. Everything else rounds to two decimal places.
 fn delta(metric: &MetricDiff, absent: &str) -> Result<String, String> {
-    let Some(diffs) = &metric.diffs else {
+    let Some(change) = &metric.change else {
         return Ok(absent.to_owned());
     };
-    let pct = diffs.diff_pct.as_str();
+    let pct = change.diff_pct.as_str();
     if pct.contains("inf") {
         return Ok(if pct.starts_with('-') {
             "-∞%"
@@ -381,10 +345,10 @@ fn delta(metric: &MetricDiff, absent: &str) -> Result<String, String> {
 /// `+inf` counts as flagged; `-inf` and `NaN` do not, and no comparison means
 /// no baseline to have moved from.
 fn flag_pct_increase(metric: &MetricDiff, threshold: f64) -> Result<bool, String> {
-    let Some(diffs) = &metric.diffs else {
+    let Some(change) = &metric.change else {
         return Ok(false);
     };
-    let pct = diffs.diff_pct.as_str();
+    let pct = change.diff_pct.as_str();
     if pct.contains("inf") {
         return Ok(!pct.starts_with('-'));
     }
@@ -478,17 +442,7 @@ fn tool_metrics(summary: &Summary, tool: Tool) -> Option<&Metrics> {
         .profiles
         .iter()
         .find(|p| p.tool.as_deref() == Some(tool.name()))?;
-    let reported = profile
-        .summaries
-        .as_ref()?
-        .total
-        .as_ref()?
-        .summary
-        .as_ref()?;
-    match tool {
-        Tool::Callgrind => reported.callgrind.as_ref(),
-        Tool::Dhat => reported.dhat.as_ref(),
-    }
+    profile.data.as_ref()?.total.as_ref()?.metrics.as_ref()
 }
 
 fn row<'a>(summary: &'a Summary, base: &str) -> Row<'a> {
@@ -746,48 +700,48 @@ fn regressions(summaries: &[Summary]) -> Result<bool, String> {
 
 /// One summary carrying an instruction count over its threshold and a DHAT
 /// profile over both of its own.
-const HOT: &str = r#"{"version":"6","package_dir":"/w/crates/spate-json","module_path":"decode_gungraun::decode::decode_value","id":"flat_record","profiles":[{"tool":"Callgrind","summaries":{"total":{"summary":{"Callgrind":{"Ir":{"metrics":{"Both":[{"Int":107000},{"Int":100000}]},"diffs":{"diff_pct":"7.0"}}}}}}},{"tool":"DHAT","summaries":{"total":{"summary":{"Dhat":{"TotalBlocks":{"metrics":{"Both":[{"Int":38},{"Int":40}]},"diffs":{"diff_pct":"-5.0"}},"AtTGmaxBytes":{"metrics":{"Both":[{"Int":4342},{"Int":4096}]},"diffs":{"diff_pct":"6.0"}}}}}}}]}"#;
+const HOT: &str = r#"{"version":"7","package_dir":"/w/crates/spate-json","module_path":"decode_gungraun::decode::decode_value","id":"flat_record","profiles":[{"tool":"Callgrind","data":{"total":{"metrics":{"Ir":{"values":{"new":107000,"old":100000},"change":{"diff_pct":"7.0"}}}}}},{"tool":"DHAT","data":{"total":{"metrics":{"TotalBlocks":{"values":{"new":38,"old":40},"change":{"diff_pct":"-5.0"}},"AtTGmaxBytes":{"values":{"new":4342,"old":4096},"change":{"diff_pct":"6.0"}}}}}}]}"#;
 
 /// One summary that moved nothing past a threshold.
-const QUIET: &str = r#"{"version":"6","package_dir":"/w/crates/spate-json","module_path":"decode_gungraun::decode::decode_value","id":"flat_record","profiles":[{"tool":"Callgrind","summaries":{"total":{"summary":{"Callgrind":{"Ir":{"metrics":{"Both":[{"Int":100000},{"Int":99000}]},"diffs":{"diff_pct":"1.0"}}}}}}}]}"#;
+const QUIET: &str = r#"{"version":"7","package_dir":"/w/crates/spate-json","module_path":"decode_gungraun::decode::decode_value","id":"flat_record","profiles":[{"tool":"Callgrind","data":{"total":{"metrics":{"Ir":{"values":{"new":100000,"old":99000},"change":{"diff_pct":"1.0"}}}}}}]}"#;
 
 /// Three jobs of one matrix run. The first two are the same package and the
 /// same bench built two ways, indistinguishable without the stamp; the third
 /// measured no baseline.
 const MATRIX: &str = concat!(
-    r#"{"version":"6","spate_shard":{"package":"spate-json","features":"default","baseline":"main @ 0123456789ab"},"package_dir":"/w/crates/spate-json","module_path":"decode_gungraun::decode::decode_value","id":"flat_record","profiles":[{"tool":"Callgrind","summaries":{"total":{"summary":{"Callgrind":{"Ir":{"metrics":{"Both":[{"Int":100000},{"Int":99000}]},"diffs":{"diff_pct":"1.0"}}}}}}}]}"#,
+    r#"{"version":"7","spate_shard":{"package":"spate-json","features":"default","baseline":"main @ 0123456789ab"},"package_dir":"/w/crates/spate-json","module_path":"decode_gungraun::decode::decode_value","id":"flat_record","profiles":[{"tool":"Callgrind","data":{"total":{"metrics":{"Ir":{"values":{"new":100000,"old":99000},"change":{"diff_pct":"1.0"}}}}}}]}"#,
     "\n",
-    r#"{"version":"6","spate_shard":{"package":"spate-json","features":"default","baseline":"main @ 0123456789ab"},"package_dir":"/w/crates/spate-json","module_path":"decode_gungraun::decode::decode_value","id":"nested_record","profiles":[{"tool":"Callgrind","summaries":{"total":{"summary":{"Callgrind":{"Ir":{"metrics":{"Left":{"Int":211000}}}}}}}}]}"#,
+    r#"{"version":"7","spate_shard":{"package":"spate-json","features":"default","baseline":"main @ 0123456789ab"},"package_dir":"/w/crates/spate-json","module_path":"decode_gungraun::decode::decode_value","id":"nested_record","profiles":[{"tool":"Callgrind","data":{"total":{"metrics":{"Ir":{"values":{"new":211000}}}}}}]}"#,
     "\n",
-    r#"{"version":"6","spate_shard":{"package":"spate-json","features":"simd","baseline":"main @ 0123456789ab"},"package_dir":"/w/crates/spate-json","module_path":"decode_gungraun::decode::decode_value","id":"flat_record","profiles":[{"tool":"Callgrind","summaries":{"total":{"summary":{"Callgrind":{"Ir":{"metrics":{"Both":[{"Int":61000},{"Int":60000}]},"diffs":{"diff_pct":"1.67"}}}}}}}]}"#,
+    r#"{"version":"7","spate_shard":{"package":"spate-json","features":"simd","baseline":"main @ 0123456789ab"},"package_dir":"/w/crates/spate-json","module_path":"decode_gungraun::decode::decode_value","id":"flat_record","profiles":[{"tool":"Callgrind","data":{"total":{"metrics":{"Ir":{"values":{"new":61000,"old":60000},"change":{"diff_pct":"1.67"}}}}}}]}"#,
     "\n",
-    r#"{"version":"6","spate_shard":{"package":"spate-core","features":"default","baseline":""},"package_dir":"/w/crates/spate-core","module_path":"chain_gungraun::chain::forward","id":"one_stage","profiles":[{"tool":"Callgrind","summaries":{"total":{"summary":{"Callgrind":{"Ir":{"metrics":{"Left":{"Int":50000}}}}}}}}]}"#,
+    r#"{"version":"7","spate_shard":{"package":"spate-core","features":"default","baseline":""},"package_dir":"/w/crates/spate-core","module_path":"chain_gungraun::chain::forward","id":"one_stage","profiles":[{"tool":"Callgrind","data":{"total":{"metrics":{"Ir":{"values":{"new":50000}}}}}}]}"#,
     "\n",
 );
 
 /// Two jobs that agree on the compiler.
 const STAMPED: &str = concat!(
-    r#"{"version":"6","spate_shard":{"package":"spate-json","features":"default","baseline":"","rustc":"rustc 1.98.1 (48a229cea 2026-09-01)"},"package_dir":"/w/crates/spate-json","module_path":"decode_gungraun::decode::decode_value","id":"flat_record","profiles":[{"tool":"Callgrind","summaries":{"total":{"summary":{"Callgrind":{"Ir":{"metrics":{"Left":{"Int":100000}}}}}}}}]}"#,
+    r#"{"version":"7","spate_shard":{"package":"spate-json","features":"default","baseline":"","rustc":"rustc 1.98.1 (48a229cea 2026-09-01)"},"package_dir":"/w/crates/spate-json","module_path":"decode_gungraun::decode::decode_value","id":"flat_record","profiles":[{"tool":"Callgrind","data":{"total":{"metrics":{"Ir":{"values":{"new":100000}}}}}}]}"#,
     "\n",
-    r#"{"version":"6","spate_shard":{"package":"spate-core","features":"default","baseline":"","rustc":"rustc 1.98.1 (48a229cea 2026-09-01)"},"package_dir":"/w/crates/spate-core","module_path":"chain_gungraun::chain::forward","id":"one_stage","profiles":[{"tool":"Callgrind","summaries":{"total":{"summary":{"Callgrind":{"Ir":{"metrics":{"Left":{"Int":50000}}}}}}}}]}"#,
+    r#"{"version":"7","spate_shard":{"package":"spate-core","features":"default","baseline":"","rustc":"rustc 1.98.1 (48a229cea 2026-09-01)"},"package_dir":"/w/crates/spate-core","module_path":"chain_gungraun::chain::forward","id":"one_stage","profiles":[{"tool":"Callgrind","data":{"total":{"metrics":{"Ir":{"values":{"new":50000}}}}}}]}"#,
     "\n",
 );
 
 /// Two jobs that disagree about the compiler. Every distinct value is named, so
 /// a split matrix shows as one.
 const SPLIT_RUSTC: &str = concat!(
-    r#"{"version":"6","spate_shard":{"package":"spate-json","features":"default","baseline":"","rustc":"rustc 1.98.1 (48a229cea 2026-09-01)"},"package_dir":"/w/crates/spate-json","module_path":"decode_gungraun::decode::decode_value","id":"flat_record","profiles":[{"tool":"Callgrind","summaries":{"total":{"summary":{"Callgrind":{"Ir":{"metrics":{"Left":{"Int":100000}}}}}}}}]}"#,
+    r#"{"version":"7","spate_shard":{"package":"spate-json","features":"default","baseline":"","rustc":"rustc 1.98.1 (48a229cea 2026-09-01)"},"package_dir":"/w/crates/spate-json","module_path":"decode_gungraun::decode::decode_value","id":"flat_record","profiles":[{"tool":"Callgrind","data":{"total":{"metrics":{"Ir":{"values":{"new":100000}}}}}}]}"#,
     "\n",
-    r#"{"version":"6","spate_shard":{"package":"spate-core","features":"default","baseline":"","rustc":"rustc 1.99.0 (aaaaaaaaa 2026-10-13)"},"package_dir":"/w/crates/spate-core","module_path":"chain_gungraun::chain::forward","id":"one_stage","profiles":[{"tool":"Callgrind","summaries":{"total":{"summary":{"Callgrind":{"Ir":{"metrics":{"Left":{"Int":50000}}}}}}}}]}"#,
+    r#"{"version":"7","spate_shard":{"package":"spate-core","features":"default","baseline":"","rustc":"rustc 1.99.0 (aaaaaaaaa 2026-10-13)"},"package_dir":"/w/crates/spate-core","module_path":"chain_gungraun::chain::forward","id":"one_stage","profiles":[{"tool":"Callgrind","data":{"total":{"metrics":{"Ir":{"values":{"new":50000}}}}}}]}"#,
     "\n",
 );
 
 /// Two jobs that stamped themselves identically, an aggregation bug the report
 /// has to name.
 const COLLIDE: &str = concat!(
-    r#"{"version":"6","spate_shard":{"package":"spate-json","features":"simd","baseline":"main @ 0123456789ab"},"package_dir":"/w/crates/spate-json","module_path":"decode_gungraun::decode::decode_value","id":"flat_record","profiles":[{"tool":"Callgrind","summaries":{"total":{"summary":{"Callgrind":{"Ir":{"metrics":{"Both":[{"Int":61000},{"Int":60000}]},"diffs":{"diff_pct":"1.67"}}}}}}}]}"#,
+    r#"{"version":"7","spate_shard":{"package":"spate-json","features":"simd","baseline":"main @ 0123456789ab"},"package_dir":"/w/crates/spate-json","module_path":"decode_gungraun::decode::decode_value","id":"flat_record","profiles":[{"tool":"Callgrind","data":{"total":{"metrics":{"Ir":{"values":{"new":61000,"old":60000},"change":{"diff_pct":"1.67"}}}}}}]}"#,
     "\n",
-    r#"{"version":"6","spate_shard":{"package":"spate-json","features":"simd","baseline":"main @ 0123456789ab"},"package_dir":"/w/crates/spate-json","module_path":"decode_gungraun::decode::decode_value","id":"flat_record","profiles":[{"tool":"Callgrind","summaries":{"total":{"summary":{"Callgrind":{"Ir":{"metrics":{"Both":[{"Int":62000},{"Int":60000}]},"diffs":{"diff_pct":"3.33"}}}}}}}]}"#,
+    r#"{"version":"7","spate_shard":{"package":"spate-json","features":"simd","baseline":"main @ 0123456789ab"},"package_dir":"/w/crates/spate-json","module_path":"decode_gungraun::decode::decode_value","id":"flat_record","profiles":[{"tool":"Callgrind","data":{"total":{"metrics":{"Ir":{"values":{"new":62000,"old":60000},"change":{"diff_pct":"3.33"}}}}}}]}"#,
     "\n",
 );
 
@@ -795,7 +749,7 @@ const COLLIDE: &str = concat!(
 /// must hold the bare `true` or `false` the label workflow's `case` accepts, and
 /// threshold crossings must mark rows.
 ///
-/// The fixtures pin schema v6, so bumping [`SCHEMA_VERSION`] fails at the
+/// The fixtures pin schema v7, so bumping [`SCHEMA_VERSION`] fails at the
 /// version gate until they are rebuilt.
 pub(crate) fn self_test(explain: bool) -> Outcome {
     if explain {

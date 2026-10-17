@@ -5,19 +5,17 @@ use super::*;
 
 /// One summary object, with `body` spliced in after the version.
 fn summary(body: &str) -> String {
-    format!(r#"{{"version":"6",{body}}}"#)
+    format!(r#"{{"version":"7",{body}}}"#)
 }
 
 /// One callgrind profile holding the metric entries named, in that order.
 fn callgrind_profile(entries: &str) -> String {
-    format!(
-        r#"{{"tool":"Callgrind","summaries":{{"total":{{"summary":{{"Callgrind":{{{entries}}}}}}}}}}}"#
-    )
+    format!(r#"{{"tool":"Callgrind","data":{{"total":{{"metrics":{{{entries}}}}}}}}}"#)
 }
 
 /// One DHAT profile holding the metric entries named, in that order.
 fn dhat_profile(entries: &str) -> String {
-    format!(r#"{{"tool":"DHAT","summaries":{{"total":{{"summary":{{"Dhat":{{{entries}}}}}}}}}}}"#)
+    format!(r#"{{"tool":"DHAT","data":{{"total":{{"metrics":{{{entries}}}}}}}}}"#)
 }
 
 /// A profile list.
@@ -30,16 +28,14 @@ fn callgrind(metrics: &str) -> String {
     profiles(&[callgrind_profile(&format!(r#""Ir":{metrics}"#))])
 }
 
-/// A `Left` side alone: a bench with no comparison.
-fn left(n: u32) -> String {
-    format!(r#"{{"metrics":{{"Left":{{"Int":{n}}}}}}}"#)
+/// A new side alone: a bench with no comparison.
+fn new_only(n: u32) -> String {
+    format!(r#"{{"values":{{"new":{n}}}}}"#)
 }
 
-/// A `Both` comparison with a percentage.
+/// Both sides and the percentage between them.
 fn both(new: &str, old: &str, pct: &str) -> String {
-    format!(
-        r#"{{"metrics":{{"Both":[{{"Int":{new}}},{{"Int":{old}}}]}},"diffs":{{"diff_pct":"{pct}"}}}}"#
-    )
+    format!(r#"{{"values":{{"new":{new},"old":{old}}},"change":{{"diff_pct":"{pct}"}}}}"#)
 }
 
 /// An unstamped summary of `spate-json` carrying one callgrind `Ir` metric.
@@ -57,7 +53,7 @@ fn stamped(shard: &str, module_path: &str, id: &str, n: u32) -> String {
         "{}\n",
         summary(&format!(
             r#""spate_shard":{shard},"module_path":"{module_path}","id":"{id}",{}"#,
-            callgrind(&left(n))
+            callgrind(&new_only(n))
         ))
     )
 }
@@ -142,7 +138,7 @@ A **bold** delta crossed a provisional threshold and syncs the
 #[test]
 fn a_dhat_profile_renders_a_heap_table_and_its_own_fold_block() {
     let text = summary(
-        r#""package_dir":"/w/crates/spate-json","module_path":"b_gungraun::g::case","id":"one","profiles":[{"tool":"Callgrind","summaries":{"total":{"summary":{"Callgrind":{"Ir":{"metrics":{"Both":[{"Int":100},{"Int":100}]},"diffs":{"diff_pct":"0.0"}}}}}}},{"tool":"DHAT","summaries":{"total":{"summary":{"Dhat":{"TotalBlocks":{"metrics":{"Both":[{"Int":38},{"Int":40}]},"diffs":{"diff_pct":"-5.0"}},"AtTGmaxBytes":{"metrics":{"Both":[{"Int":4342},{"Int":4096}]},"diffs":{"diff_pct":"6.0"}}}}}}}]"#,
+        r#""package_dir":"/w/crates/spate-json","module_path":"b_gungraun::g::case","id":"one","profiles":[{"tool":"Callgrind","data":{"total":{"metrics":{"Ir":{"values":{"new":100,"old":100},"change":{"diff_pct":"0.0"}}}}}},{"tool":"DHAT","data":{"total":{"metrics":{"TotalBlocks":{"values":{"new":38,"old":40},"change":{"diff_pct":"-5.0"}},"AtTGmaxBytes":{"values":{"new":4342,"old":4096},"change":{"diff_pct":"6.0"}}}}}}]"#,
     );
     assert_eq!(
         rendered(&text, "base"),
@@ -294,7 +290,7 @@ fn the_heap_block_threshold_is_an_absolute_move_of_more_than_one() {
         (both("41", "40", "0.0"), false),
         (both("42", "40", "0.0"), true),
         (both("38", "40", "0.0"), true),
-        (left(42), false),
+        (new_only(42), false),
     ] {
         let text = dhat_summary(&format!(r#""TotalBlocks":{metric}"#));
         assert_eq!(
@@ -323,7 +319,7 @@ fn the_peak_bytes_threshold_is_a_percentage_increase() {
 #[test]
 fn a_metric_with_no_comparison_never_flags() {
     for shard in [None, Some(r#"{"package":"p","baseline":""}"#)] {
-        let text = ir(r#"{"metrics":{"Left":{"Int":211000}}}"#, shard);
+        let text = ir(r#"{"values":{"new":211000}}"#, shard);
         assert!(!regressions(&parse(&text).unwrap()).unwrap(), "{shard:?}");
     }
 }
@@ -358,16 +354,18 @@ fn the_self_test_line_count_is_an_equality() {
 
 // ── Sides ──────────────────────────────────────────────────────────────
 
-/// The new side is the first of `Both` and the old side the second, and a
-/// missing old side dashes its column while a missing new one is named.
+/// The new side is read from `new` and the old from `old`, in whichever order
+/// the summary holds them, and a missing old side dashes its column while a
+/// missing new one is named.
 #[test]
-fn the_sides_render_from_both_left_and_right() {
+fn the_sides_render_from_new_and_old() {
     let table = [
-        (r#"{"metrics":{"Both":[{"Int":7},{"Int":3}]}}"#, "7", "3"),
-        (r#"{"metrics":{"Left":{"Int":7}}}"#, "7", "—"),
-        (r#"{"metrics":{"Right":{"Int":3}}}"#, "null", "3"),
-        (r#"{"metrics":{"Left":{"Float":0.25}}}"#, "0.25", "—"),
-        (r#"{"metrics":{"Left":{"Int":0}}}"#, "0", "—"),
+        (r#"{"values":{"new":7,"old":3}}"#, "7", "3"),
+        (r#"{"values":{"old":3,"new":7}}"#, "7", "3"),
+        (r#"{"values":{"new":7}}"#, "7", "—"),
+        (r#"{"values":{"old":3}}"#, "null", "3"),
+        (r#"{"values":{"new":0.25}}"#, "0.25", "—"),
+        (r#"{"values":{"new":0}}"#, "0", "—"),
     ];
     for (metrics, new, old) in table {
         let report = rendered(&ir(metrics, None), "baseline");
@@ -386,15 +384,15 @@ fn the_sides_render_from_both_left_and_right() {
 #[test]
 fn a_metric_renders_as_the_literal_the_summary_holds() {
     let table = [
-        ("{\"Int\":4342}", "4342"),
-        ("{\"Float\":4342.0}", "4342.0"),
-        ("{\"Float\":0.5000}", "0.5000"),
-        ("{\"Float\":-0.0}", "-0.0"),
-        ("{\"Int\":18446744073709551615}", "18446744073709551615"),
+        ("4342", "4342"),
+        ("4342.0", "4342.0"),
+        ("0.5000", "0.5000"),
+        ("-0.0", "-0.0"),
+        ("18446744073709551615", "18446744073709551615"),
     ];
     for (literal, want) in table {
         let report = rendered(
-            &ir(&format!(r#"{{"metrics":{{"Left":{literal}}}}}"#), None),
+            &ir(&format!(r#"{{"values":{{"new":{literal}}}}}"#), None),
             "b",
         );
         assert_eq!(
@@ -430,7 +428,7 @@ fn the_shard_column_names_the_package_and_the_feature_arm() {
         let stamp = shard.map_or(String::new(), |s| format!(r#""spate_shard":{s},"#));
         let text = summary(&format!(
             r#"{stamp}"package_dir":"{dir}","module_path":"b_gungraun::g::case","id":"one",{}"#,
-            callgrind(&left(1))
+            callgrind(&new_only(1))
         ));
         assert_eq!(
             ir_rows(&rendered(&text, "baseline")),
@@ -445,7 +443,7 @@ fn the_shard_column_names_the_package_and_the_feature_arm() {
 #[test]
 fn an_empty_stamped_package_is_the_shard_name() {
     let text = summary(
-        r#""spate_shard":{"package":"","features":""},"package_dir":"/w/c/d","module_path":"b_gungraun::g::case","id":"one","profiles":[{"tool":"Callgrind","summaries":{"total":{"summary":{"Callgrind":{"Ir":{"metrics":{"Left":{"Int":1}}}}}}}}]"#,
+        r#""spate_shard":{"package":"","features":""},"package_dir":"/w/c/d","module_path":"b_gungraun::g::case","id":"one","profiles":[{"tool":"Callgrind","data":{"total":{"metrics":{"Ir":{"values":{"new":1}}}}}}]"#,
     );
     assert_eq!(
         ir_rows(&rendered(&text, "baseline")),
@@ -468,7 +466,7 @@ fn the_bench_column_drops_the_bench_file_segment() {
     for (path, id, want) in table {
         let text = summary(&format!(
             r#""package_dir":"/w/c/p","module_path":"{path}"{id},{}"#,
-            callgrind(&left(1))
+            callgrind(&new_only(1))
         ));
         assert_eq!(
             ir_rows(&rendered(&text, "baseline")),
@@ -490,7 +488,7 @@ fn a_shard_with_no_baseline_is_told_apart_from_a_new_bench() {
     ];
     for (baseline, want) in table {
         let text = ir(
-            r#"{"metrics":{"Left":{"Int":1}}}"#,
+            r#"{"values":{"new":1}}"#,
             Some(&format!(r#"{{"package":"p",{baseline}}}"#)),
         );
         assert_eq!(
@@ -506,10 +504,7 @@ fn a_shard_with_no_baseline_is_told_apart_from_a_new_bench() {
 #[test]
 fn an_unstamped_baseline_falls_back_to_the_label() {
     for (label, want) in [("fallback", "*new*"), ("", "*no baseline*")] {
-        let text = ir(
-            r#"{"metrics":{"Left":{"Int":1}}}"#,
-            Some(r#"{"package":"p"}"#),
-        );
+        let text = ir(r#"{"values":{"new":1}}"#, Some(r#"{"package":"p"}"#));
         assert_eq!(
             ir_rows(&rendered(&text, label)),
             [format!("| p | g::case one | 1 | — | {want} |")],
@@ -560,7 +555,7 @@ fn shards_that_disagree_take_a_legend() {
 #[test]
 fn a_single_unmeasured_baseline_names_the_column() {
     let text = ir(
-        r#"{"metrics":{"Left":{"Int":1}}}"#,
+        r#"{"values":{"new":1}}"#,
         Some(r#"{"package":"p","baseline":""}"#),
     );
     let report = rendered(&text, "fallback");
@@ -730,12 +725,14 @@ fn every_distinct_compiler_is_named() {
 fn a_summary_with_no_instruction_count_renders_an_explicit_row() {
     let bodies = [
         r#""profiles":[]"#,
-        r#""profiles":[{"tool":"DHAT","summaries":{"total":{"summary":{"Dhat":{}}}}}]"#,
-        r#""profiles":[{"tool":"Callgrind","summaries":{"total":{"summary":{"Callgrind":{"Dr":{"metrics":{"Left":{"Int":9}}}}}}}}]"#,
-        r#""profiles":[{"tool":"Callgrind","summaries":{"total":{"summary":{}}}}]"#,
-        r#""profiles":[{"tool":"Callgrind","summaries":{}}]"#,
+        r#""profiles":[{"tool":"DHAT","data":{"total":{"metrics":{}}}}]"#,
+        r#""profiles":[{"tool":"DHAT","data":{"total":{"metrics":{"Ir":{"values":{"new":9}}}}}}]"#,
+        r#""profiles":[{"tool":"Callgrind","data":{"total":{"metrics":{"Dr":{"values":{"new":9}}}}}}]"#,
+        r#""profiles":[{"tool":"Callgrind","data":{"total":{"metrics":{}}}}]"#,
+        r#""profiles":[{"tool":"Callgrind","data":{"total":{}}}]"#,
+        r#""profiles":[{"tool":"Callgrind","data":{}}]"#,
         r#""profiles":[{"tool":"Callgrind"}]"#,
-        r#""profiles":[{"summaries":{"total":{"summary":{"Callgrind":{"Ir":{"metrics":{"Left":{"Int":9}}}}}}}}]"#,
+        r#""profiles":[{"data":{"total":{"metrics":{"Ir":{"values":{"new":9}}}}}}]"#,
     ];
     for body in bodies {
         let text = summary(&format!(
@@ -749,11 +746,40 @@ fn a_summary_with_no_instruction_count_renders_an_explicit_row() {
     }
 }
 
+/// A summary carrying every field gungraun writes is read through the ones
+/// this report walks: the tool from `tool`, the metrics from `data.total`, a
+/// one-sided metric with `change` omitted, and a percentage in gungraun's own
+/// float formatting.
+#[test]
+fn a_complete_summary_is_read_through_the_fields_the_report_walks() {
+    let text = r#"{"baselines":[null,"base"],"benchmark_exe":"target/release/deps/decode_gungraun-0123","benchmark_file":"crates/spate-json/benches/decode_gungraun.rs","description":"flat_record","duration_ns":123456789,"function_name":"decode_value","group":"decode","id":"flat_record","kind":"LibraryBenchmark","module_path":"decode_gungraun::decode::decode_value","output_dir":"target/gungraun/spate-json/decode_gungraun/decode/decode_value.flat_record","package_dir":"crates/spate-json","profiles":[{"data":{"parts":[{"metrics":{"Ir":{"change":{"diff_pct":"7","factor":"1.07"},"values":{"new":107000,"old":100000}}},"tool_run":{"new":{"command":"decode_gungraun","part":1,"pid":42,"thread":1},"old":{"command":"decode_gungraun","part":1,"pid":41,"thread":1}}}],"total":{"metrics":{"Ir":{"change":{"diff_pct":"7","factor":"1.07"},"values":{"new":107000,"old":100000}},"I1MissRate":{"values":{"new":0.25}}},"regressions":[]}},"duration_ns":1000,"process_ns":900,"started_at":"2026-10-17T00:00:00Z","tool":"Callgrind"},{"data":{"parts":[],"total":{"metrics":{"TotalBlocks":{"change":{"diff_pct":"-5","factor":"0.95"},"values":{"new":38,"old":40}}},"regressions":[]}},"duration_ns":1000,"process_ns":900,"started_at":"2026-10-17T00:00:00Z","tool":"DHAT"}],"project_root":"/w","started_at":"2026-10-17T00:00:00Z","version":"7"}"#;
+    let report = rendered(text, "base");
+    assert_eq!(
+        ir_rows(&report),
+        [
+            "| spate-json | decode::decode_value flat_record | 107000 | 100000 | **+7%** (over threshold) |"
+        ]
+    );
+    assert_eq!(
+        fold_rows(&report),
+        [
+            "| Ir | 107000 | 100000 | +7% |",
+            "| I1MissRate | 0.25 | — | *new* |"
+        ]
+    );
+    assert!(
+        report.contains(
+            "| spate-json | decode::decode_value flat_record | TotalBlocks | 38 | 40 | **-5%** (over threshold) |"
+        ),
+        "{report}"
+    );
+}
+
 /// The first profile a summary carries for a tool is the one read.
 #[test]
 fn the_first_profile_for_a_tool_is_the_one_read() {
     let text = summary(
-        r#""package_dir":"/w/c/p","module_path":"b_gungraun::g::case","id":"one","profiles":[{"tool":"Callgrind","summaries":{"total":{"summary":{"Callgrind":{"Ir":{"metrics":{"Left":{"Int":1}}}}}}}},{"tool":"Callgrind","summaries":{"total":{"summary":{"Callgrind":{"Ir":{"metrics":{"Left":{"Int":2}}}}}}}}]"#,
+        r#""package_dir":"/w/c/p","module_path":"b_gungraun::g::case","id":"one","profiles":[{"tool":"Callgrind","data":{"total":{"metrics":{"Ir":{"values":{"new":1}}}}}},{"tool":"Callgrind","data":{"total":{"metrics":{"Ir":{"values":{"new":2}}}}}}]"#,
     );
     assert_eq!(
         ir_rows(&rendered(&text, "baseline")),
@@ -806,10 +832,10 @@ fn the_heap_table_is_ordered_and_the_fold_is_not() {
 #[test]
 fn the_fold_keeps_the_summary_order() {
     let text = p_summary(&profiles(&[callgrind_profile(&format!(
-        r#""Ir":{},"Dr":{},"Bc":{},"I1MissRate":{{"metrics":{{"Left":{{"Float":0.5}}}}}}"#,
-        left(1),
-        left(2),
-        left(3),
+        r#""Ir":{},"Dr":{},"Bc":{},"I1MissRate":{{"values":{{"new":0.5}}}}"#,
+        new_only(1),
+        new_only(2),
+        new_only(3),
     ))]));
     let report = rendered(&text, "base");
     assert_eq!(
@@ -837,13 +863,14 @@ fn no_dhat_profile_means_no_heap_table() {
 #[test]
 fn a_drifted_schema_version_is_an_error_naming_it() {
     let table = [
-        (vec![r#""version":"7""#], "v7"),
+        (vec![r#""version":"6""#], "v6"),
+        (vec![r#""version":"8""#], "v8"),
         (
-            vec![r#""version":"7""#, r#""version":"5""#, r#""version":"7""#],
-            "v5 7",
+            vec![r#""version":"6""#, r#""version":"5""#, r#""version":"6""#],
+            "v5 6",
         ),
-        (vec![r#""version":"6""#, r#""version":"7""#], "v7"),
-        (vec![r#""version":6"#], "v6"),
+        (vec![r#""version":"7""#, r#""version":"6""#], "v6"),
+        (vec![r#""version":7"#], "v7"),
         (vec![r#""nothing":0"#], "vnull"),
     ];
     for (versions, want) in table {
@@ -859,7 +886,7 @@ fn a_drifted_schema_version_is_an_error_naming_it() {
         assert_eq!(
             err,
             format!(
-                "gungraun summary schema is {want}, this report is written against v6. \
+                "gungraun summary schema is {want}, this report is written against v7. \
                  Update xtask/src/checks/perf_report.rs against the new schema before \
                  trusting its output"
             ),
@@ -872,17 +899,17 @@ fn a_drifted_schema_version_is_an_error_naming_it() {
 /// drifted and unreadable reports the drift.
 #[test]
 fn the_version_gate_runs_before_the_summary_is_walked() {
-    let err = parse_err(r#"{"version":"7"}"#);
-    assert!(err.starts_with("gungraun summary schema is v7,"), "{err}");
+    let err = parse_err(r#"{"version":"6"}"#);
+    assert!(err.starts_with("gungraun summary schema is v6,"), "{err}");
 }
 
 /// A summary this report cannot walk fails the whole report.
 #[test]
 fn a_summary_that_cannot_be_walked_is_an_error() {
     for text in [
-        r#"{"version":"6"#,
-        r#"{"version":"6","module_path":"a::b"}"#,
-        r#"{"version":"6","profiles":[]}"#,
+        r#"{"version":"7"#,
+        r#"{"version":"7","module_path":"a::b"}"#,
+        r#"{"version":"7","profiles":[]}"#,
         "[1,2]",
     ] {
         let err = parse_err(text);
@@ -916,21 +943,16 @@ fn an_unreadable_percentage_is_an_error() {
     }
 }
 
-/// A side carrying both forms takes the integer, and a null side inside a
-/// comparison dashes its column.
+/// A null or missing side is absent, and a metric with no values at all
+/// renders both columns as absent.
 #[test]
-fn a_side_takes_the_integer_and_a_null_side_is_absent() {
+fn a_null_side_is_absent() {
     let table = [
-        (r#"{"metrics":{"Left":{"Int":7,"Float":9.5}}}"#, "7", "—"),
-        (
-            r#"{"metrics":{"Both":[{"Float":9.5},{"Int":3}]}}"#,
-            "9.5",
-            "3",
-        ),
-        (r#"{"metrics":{"Both":[{"Int":7},null]}}"#, "7", "—"),
-        (r#"{"metrics":{"Both":[null,{"Int":3}]}}"#, "null", "3"),
-        (r#"{"metrics":{"Left":{}}}"#, "null", "—"),
-        (r#"{"metrics":{}}"#, "null", "—"),
+        (r#"{"values":{"new":7,"old":null}}"#, "7", "—"),
+        (r#"{"values":{"new":null,"old":3}}"#, "null", "3"),
+        (r#"{"values":{"new":9.5,"old":3}}"#, "9.5", "3"),
+        (r#"{"values":{}}"#, "null", "—"),
+        (r#"{"values":null}"#, "null", "—"),
         (r#"{}"#, "null", "—"),
     ];
     for (metrics, new, old) in table {
@@ -950,9 +972,9 @@ fn a_side_takes_the_integer_and_a_null_side_is_absent() {
 fn a_repeated_metric_name_collapses_to_one_entry() {
     let text = p_summary(&profiles(&[callgrind_profile(&format!(
         r#""Ir":{},"Dr":{},"Ir":{}"#,
-        left(1),
-        left(9),
-        left(2),
+        new_only(1),
+        new_only(9),
+        new_only(2),
     ))]));
     let report = rendered(&text, "base");
     assert_eq!(ir_rows(&report), ["| p | g::case one | 2 | — | *new* |"]);

@@ -9,10 +9,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 /// One summary whose instruction count crossed its threshold.
-const HOT: &str = r#"{"version":"6","package_dir":"/w/crates/spate-json","module_path":"decode_gungraun::decode::decode_value","id":"flat_record","profiles":[{"tool":"Callgrind","summaries":{"total":{"summary":{"Callgrind":{"Ir":{"metrics":{"Both":[{"Int":107000},{"Int":100000}]},"diffs":{"diff_pct":"7.0"}}}}}}}]}"#;
+const HOT: &str = r#"{"version":"7","package_dir":"/w/crates/spate-json","module_path":"decode_gungraun::decode::decode_value","id":"flat_record","profiles":[{"tool":"Callgrind","data":{"total":{"metrics":{"Ir":{"values":{"new":107000,"old":100000},"change":{"diff_pct":"7.0"}}}}}}]}"#;
 
 /// One summary that moved nothing past a threshold.
-const QUIET: &str = r#"{"version":"6","package_dir":"/w/crates/spate-json","module_path":"decode_gungraun::decode::decode_value","id":"flat_record","profiles":[{"tool":"Callgrind","summaries":{"total":{"summary":{"Callgrind":{"Ir":{"metrics":{"Both":[{"Int":100000},{"Int":99000}]},"diffs":{"diff_pct":"1.0"}}}}}}}]}"#;
+const QUIET: &str = r#"{"version":"7","package_dir":"/w/crates/spate-json","module_path":"decode_gungraun::decode::decode_value","id":"flat_record","profiles":[{"tool":"Callgrind","data":{"total":{"metrics":{"Ir":{"values":{"new":100000,"old":99000},"change":{"diff_pct":"1.0"}}}}}}]}"#;
+
+/// [`HOT`] in the summary layout before the one this report reads.
+const HOT_V6: &str = r#"{"version":"6","package_dir":"/w/crates/spate-json","module_path":"decode_gungraun::decode::decode_value","id":"flat_record","profiles":[{"tool":"Callgrind","summaries":{"total":{"summary":{"Callgrind":{"Ir":{"metrics":{"Both":[{"Int":107000},{"Int":100000}]},"diffs":{"diff_pct":"7.0"}}}}}}}]}"#;
 
 /// The whole report [`HOT`] renders.
 const HOT_REPORT: &str = "\
@@ -270,14 +273,14 @@ fn an_empty_flag_file_name_is_rejected() {
 }
 
 /// A schema this report was not written against is an error naming every
-/// version seen, and no flag file is left for the label to read.
+/// version seen, and no flag file is left for the label to read. A summary in
+/// the layout gungraun wrote before the one this report reads is one such.
 #[test]
 fn a_drifted_schema_is_an_error_and_writes_no_flag() {
     let scratch = Scratch::new("drift");
     let summaries = scratch.summaries(&format!(
-        "{}\n{}\n",
-        HOT.replace(r#""version":"6""#, r#""version":"7""#),
-        HOT.replace(r#""version":"6""#, r#""version":"5""#),
+        "{HOT_V6}\n{}\n{HOT}\n",
+        HOT.replace(r#""version":"7""#, r#""version":"5""#),
     ));
     let out = report(&[
         "--regressions-out",
@@ -287,7 +290,7 @@ fn a_drifted_schema_is_an_error_and_writes_no_flag() {
     assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
     assert_eq!(
         stderr(&out),
-        "xtask: gungraun summary schema is v5 7, this report is written against v6. \
+        "xtask: gungraun summary schema is v5 6, this report is written against v7. \
          Update xtask/src/checks/perf_report.rs against the new schema before trusting \
          its output\n"
     );
@@ -300,7 +303,7 @@ fn a_drifted_schema_is_an_error_and_writes_no_flag() {
 #[test]
 fn a_summary_that_cannot_be_walked_writes_no_flag() {
     let scratch = Scratch::new("malformed");
-    let summaries = scratch.summaries(r#"{"version":"6","#);
+    let summaries = scratch.summaries(r#"{"version":"7","#);
     let out = report(&[
         "--regressions-out",
         &path(&scratch.flag()),
@@ -328,8 +331,8 @@ fn a_report_that_cannot_be_rendered_writes_no_flag() {
     // `Ir` is readable, so the flag pass would succeed; the fold reaches `Dr`,
     // whose percentage it cannot read.
     let summaries = scratch.summaries(&HOT.replace(
-        r#""diffs":{"diff_pct":"7.0"}}"#,
-        r#""diffs":{"diff_pct":"7.0"}},"Dr":{"metrics":{"Both":[{"Int":5},{"Int":4}]},"diffs":{"diff_pct":"abc"}}"#,
+        r#""change":{"diff_pct":"7.0"}}"#,
+        r#""change":{"diff_pct":"7.0"}},"Dr":{"values":{"new":5,"old":4},"change":{"diff_pct":"abc"}}"#,
     ));
     let out = report(&[
         "--regressions-out",

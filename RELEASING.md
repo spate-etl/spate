@@ -169,11 +169,14 @@ with `gh`, `cargo-about` and `cargo-cyclonedx` installed as a release gets
 them, so a packaging problem or a change in those tools surfaces before
 release day. `ci.yml` runs the same rehearsal on a pull request that changes
 the release workflows, `.github/actions/setup-rust/`, `xtask/src/release/`,
-`ci.yml` or `xtask/src/ci/`. That run skips while a release is in flight,
-when `Cargo.toml` is ahead of the newest tag, and rehearses on a re-run once
-the tag exists. The nightly skips the night after a release when nothing has
-merged since the tag. When the derived version is a minor with no post yet,
-the flag commits a stand-in draft post in the rehearsal's worktree.
+`ci.yml` or `xtask/src/ci/`. While a release is in flight, after its
+`release: vX.Y.Z` commit lands and before the publish tags it, that run fails
+in `derive`; a re-run after the tag lands passes. A re-run keeps the run's
+merge commit, so a run made before the release commit landed needs a push, or
+the pull request closed and reopened. The nightly skips the night after a
+release when nothing has merged since the tag. When the derived version is a
+minor with no post yet, the flag commits a stand-in draft post in the
+rehearsal's worktree.
 `scheduled.yml` also generates `THIRD-PARTY.md` nightly, so a generator
 failure surfaces the same way.
 

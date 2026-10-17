@@ -731,6 +731,98 @@ jobs:
           # edit on the zone.
           command: deploy --config website/wrangler.jsonc
 
+  release-verify:
+    name: Verify the latest release
+    runs-on: ubuntu-latest
+    needs: plan
+    if: needs.plan.outputs.nightly == 'true'
+    timeout-minutes: 30
+    # A published release cannot change, so a failure here means `gh`,
+    # crates.io or the GitHub API moved. `finish` makes the same calls, and
+    # this surfaces the change before a release depends on it.
+    permissions:
+      contents: read
+      attestations: read
+      issues: write
+    steps:
+      # Full history for the tags. This checkout holds the composite actions
+      # and the xtask that writes the issue body.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # The rule xtask's `last_tag` applies, so this checks the release the
+      # next one is derived from.
+      - id: tag
+        run: |
+          set -euo pipefail
+          tag=$(git tag --list 'v[0-9]*' --sort=-v:refname | sed -n 1p)
+          if [ -z "$tag" ]; then
+            echo "::error::No vX.Y.Z tag in the checkout, so there is no release to verify."
+            exit 1
+          fi
+          { echo "tag=$tag"; echo "version=${tag#v}"; } | tee -a "$GITHUB_OUTPUT"
+
+      # `verify` refuses any tree but a clean checkout of the tagged commit and
+      # reads the crate set from it. xtask reads the tree it was built in, so
+      # the tag's own xtask has to run.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ steps.tag.outputs.tag }}
+          path: release
+          persist-credentials: false
+      # No shared key: the build lands in `release/target`, which no cache
+      # entry covers.
+      - uses: ./.github/actions/setup-rust
+
+      - id: verify
+        working-directory: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          set -o pipefail
+          rc=0
+          cargo xtask release verify "$VERSION" 2>&1 | tee "$RUNNER_TEMP/verify.log" || rc=$?
+          exit "$rc"
+
+      # Gated on the verify step: a checkout or setup failure would otherwise
+      # file an issue asserting the release no longer verifies.
+      - name: Write the issue body
+        if: failure() && steps.verify.conclusion == 'failure'
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SHA: ${{ github.sha }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          where=$'Build, CI, or the examples\n\nThe `Verify the latest release` job of the nightly scheduled run.'
+          version="\`$TAG\`, from the nightly run at \`main\` $SHA"
+          what="\`cargo xtask release verify $VERSION\` failed against \`$TAG\` on the [nightly run]($RUN_URL)."
+          # Single quotes: the backticks must reach GitHub rather than run as
+          # command substitutions.
+          # shellcheck disable=SC2016
+          expected='The newest release verifies: every crate came from the tagged commit, its provenance and SBOM attestations verify, and the GitHub release is immutable, attested and complete. A published release cannot change, so a failure with nothing changed points at `gh`, crates.io or the GitHub API, which the next release meets in `finish`. Reproduce it from a clean checkout of the tag with `cargo xtask release verify X.Y.Z`. If the output shows a network error, rerun the job first.'
+          cargo xtask bug-report --out "$RUNNER_TEMP/body.md" \
+            --answer components="$where" \
+            --answer version="$version" \
+            --answer what="$what" \
+            --answer expected="$expected" \
+            --answer-file logs="$RUNNER_TEMP/verify.log"
+          again="Still failing against \`$TAG\` at $SHA, in the [nightly run]($RUN_URL)."
+          cargo xtask bug-report --out "$RUNNER_TEMP/comment.md" \
+            --answer what="$again" \
+            --answer-file logs="$RUNNER_TEMP/verify.log"
+      - name: Report the failure as an issue
+        if: failure() && steps.verify.conclusion == 'failure'
+        uses: ./.github/actions/file-issue
+        with:
+          title: "[bug] The latest release no longer verifies"
+          body-file: ${{ runner.temp }}/body.md
+          comment-file: ${{ runner.temp }}/comment.md
+
   # ===========================================================================
   # WEEKLY
   # ===========================================================================
@@ -1131,8 +1223,9 @@ jobs:
 
   # ===========================================================================
   # Catch-all failure reporting. `attribution`, `advisories`, `osv`, `fuzz`,
-  # `minimal-versions`, `publish-dry-run`, `beta` and `fault-test` file their
-  # own issues and are absent from `needs` below so they are not reported twice.
+  # `minimal-versions`, `publish-dry-run`, `release-verify`, `beta` and
+  # `fault-test` file their own issues and are absent from `needs` below so
+  # they are not reported twice.
   # ===========================================================================
   report:
     name: Report scheduled failures

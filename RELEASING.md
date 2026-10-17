@@ -181,7 +181,9 @@ attested and carries every asset. GitHub's attestation of an immutable release
 binds the tag to its git object and to every asset's digest. It needs `gh`
 2.102.0 or later, authenticated, and a clean checkout of the tag, whose
 members are the crates it checks. It fails for 0.2.0 and earlier, which predate
-attestations. To check by hand:
+attestations. `scheduled.yml` runs it nightly against the newest `v*` tag from
+a checkout of that tag, so a `gh`, crates.io or API change that would break
+`finish` surfaces there first. To check by hand:
 
 ```sh
 # Every crate at the new version.

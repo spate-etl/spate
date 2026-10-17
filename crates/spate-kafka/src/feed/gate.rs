@@ -150,6 +150,12 @@ impl Gate {
                     if ledger.caught_up(partition, lwm, hwm) {
                         break;
                     }
+                    #[cfg(test)]
+                    let ledger = {
+                        let mut ledger = ledger;
+                        ledger.gate_waits += 1;
+                        ledger
+                    };
                     drop(
                         self.core
                             .ledger

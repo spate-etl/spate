@@ -816,6 +816,99 @@ fn a_fatal_tombstone_report_stops_the_feed() {
     assert_eq!(st.tracker.take_commits(), vec![(tp(0), 0)]);
 }
 
+/// Pins that an attempt write and a tombstone write the broker refuses for
+/// their content, as a message over the topic's size limit, each stop the
+/// feed naming the write and queue nothing to send again.
+#[test]
+fn a_refused_attempt_or_tombstone_write_stops_the_feed() {
+    let core_a = core(10);
+    core_a.lock().tracker.assign([tp(0)]);
+    let entry = gated(&core_a, 0);
+    let write = admission(&core_a, entry).expect("admitted below the cap");
+    core_a.settle(write, Err(failure(C::MessageSizeTooLarge)));
+    let st = core_a.lock();
+    let reason = &st.fatal.as_ref().expect("the feed stopped").reason;
+    assert!(
+        reason.contains("writing an attempt record to `units-attempts`"),
+        "{reason}"
+    );
+    assert!(st.resends.is_empty());
+    drop(st);
+
+    let core_t = core(10);
+    let position = {
+        let mut st = core_t.lock();
+        st.tracker.assign([tp(0)]);
+        let receipt = st.tracker.deliver(&tp(0), 0).unwrap();
+        st.tracker.release(receipt).unwrap()
+    };
+    let tombstone = Tombstone::new(&core_t.topics.attempt, &identity(&core_t, 0), 0, position);
+    core_t.settle(
+        Write::Tombstone(tombstone),
+        Err(failure(C::MessageSizeTooLarge)),
+    );
+    let st = core_t.lock();
+    let reason = &st.fatal.as_ref().expect("the feed stopped").reason;
+    assert!(
+        reason.contains("writing an attempt record's tombstone to `units-attempts`"),
+        "{reason}"
+    );
+    assert!(st.resends.is_empty());
+}
+
+/// Pins that a write failing again waits longer each time: a tombstone
+/// failed three times is queued with a next wait of 400 ms, 800 ms, then
+/// 1.6 s.
+#[test]
+fn a_write_failing_again_backs_off_further_each_time() {
+    let core = core(10);
+    let position = {
+        let mut st = core.lock();
+        st.tracker.assign([tp(0)]);
+        let receipt = st.tracker.deliver(&tp(0), 0).unwrap();
+        st.tracker.release(receipt).unwrap()
+    };
+    let mut write = Write::Tombstone(Tombstone::new(
+        &core.topics.attempt,
+        &identity(&core, 0),
+        0,
+        position,
+    ));
+    for millis in [400, 800, 1600] {
+        core.settle(write, Err(failure(C::MessageTimedOut)));
+        let (_, mut queued) = core.lock().resends.pop().expect("queued to send again");
+        assert_eq!(
+            queued.backoff_mut().copied(),
+            Some(Duration::from_millis(millis))
+        );
+        write = queued;
+    }
+}
+
+/// Pins that a copy at the gate replaced by a redelivery leaves the buffer
+/// count, which decides when the partitions pause.
+#[test]
+fn a_replaced_copy_at_the_gate_leaves_the_buffer_count() {
+    let core = core(10);
+    let mut st = core.lock();
+    st.tracker.assign([tp(0)]);
+    let first = st.tracker.deliver(&tp(0), 3).unwrap();
+    st.gating.push_back(Gating {
+        receipt: first,
+        unit: Unit::new("u", Vec::new()),
+        identity: identity(&core, 3),
+    });
+    let replaced = st.tracker.replace_copies(&tp(0), 3);
+    st.forget(&replaced);
+    let second = st.tracker.deliver(&tp(0), 3).unwrap();
+    st.gating.push_back(Gating {
+        receipt: second,
+        unit: Unit::new("u", Vec::new()),
+        identity: identity(&core, 3),
+    });
+    assert_eq!(st.held_for_reader(), 1);
+}
+
 /// Run `f` on a thread of its own and report whether it returned within
 /// `limit`.
 fn returns_within(limit: Duration, f: impl FnOnce() + Send + 'static) -> bool {
@@ -918,7 +1011,7 @@ mod cluster {
     //! The feed against rdkafka's in-process MockCluster, where a test reads
     //! the feed's buffer and ownership directly.
 
-    use super::super::attempt::Follower;
+    use super::super::attempt::{self, Follower};
     use super::super::config::KafkaFeedConfig;
     use super::super::consumer::{self, Driver, POLL_BATCH};
     use super::super::gate::Gate;
@@ -1658,6 +1751,12 @@ mod cluster {
                 identity: super::identity(&core, 0),
             });
         }
+        // A new producer's first watermark read can fail before it has met a
+        // broker, which would end the pass before the timeout.
+        producer
+            .client()
+            .fetch_metadata(Some(ATTEMPTS), Duration::from_secs(10))
+            .unwrap();
         let gate = Gate::new(
             Arc::clone(&core),
             Producer::clone(&producer),
@@ -1673,6 +1772,51 @@ mod cluster {
         assert_eq!(st.gating.len(), 1);
         assert_eq!(st.admitting, 0);
         assert!(st.fatal.is_none());
+    }
+
+    /// Pins that a gate pass whose watermark read the broker refuses for
+    /// authorization stops the feed, naming the read.
+    #[test]
+    fn a_refused_watermark_read_in_a_pass_stops_the_feed() {
+        let cluster = cluster_with(0);
+        let brokers = cluster.bootstrap_servers();
+        let group = spate_test::unique_name("refused-watermark");
+        cluster.request_errors(
+            RDKafkaApiKey::ListOffsets,
+            &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_TOPIC_AUTHORIZATION_FAILED; 50],
+        );
+        let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
+        let core = Arc::new(Core::new(&config, TWO));
+        let producer: Producer =
+            rdkafka::config::FromClientConfigAndContext::from_config_and_context(
+                &config.producer_config(false),
+                crate::feed::producer::FeedProducerContext::new(Arc::clone(&core)),
+            )
+            .unwrap();
+        {
+            let mut st = core.lock();
+            st.tracker.assign([super::tp(0)]);
+            let receipt = st.tracker.deliver(&super::tp(0), 0).unwrap();
+            st.gating.push_back(Gating {
+                receipt,
+                unit: Unit::new("u", Vec::new()),
+                identity: super::identity(&core, 0),
+            });
+        }
+        // A new producer's first watermark read can fail before it has met a
+        // broker, which is retryable and would end the pass without a latch.
+        producer
+            .client()
+            .fetch_metadata(Some(ATTEMPTS), Duration::from_secs(10))
+            .unwrap();
+        let gate =
+            Gate::new(Arc::clone(&core), producer, Duration::from_secs(3600)).with_step(STEP * 100);
+        gate.pass();
+        let reason = core.lock().fatal.clone().expect("the feed stopped").reason;
+        assert!(
+            reason.contains("reading the watermarks of `units-attempts`"),
+            "{reason}"
+        );
     }
 
     /// Pins that the follower wakes a gate waiting for it to catch up: the
@@ -1753,9 +1897,9 @@ mod cluster {
     /// Pins that dropping a feed returns while its gate waits for the
     /// follower to catch up: with no follower and a record on each attempt
     /// partition, the gate waits in its catch-up with a step of an hour.
-    /// The stop flag stored outside the state lock, or a missing notify of
-    /// the ledger's condvar, shows here only as a race; `stop` is reviewed
-    /// by reading.
+    /// The drop begins once the gate is parked on the ledger's condvar, so
+    /// a missing notify of it fails here. The stop flag stored outside the
+    /// state lock shows here only as a race; `stop` is reviewed by reading.
     #[test]
     fn a_dropped_feed_wakes_a_gate_waiting_for_the_follower() {
         let cluster = cluster_with(0);
@@ -1804,8 +1948,10 @@ mod cluster {
             });
             core.gate_wake.notify_all();
         }
-        wait_until(DEADLINE, "the gate takes the unit", || {
-            core.lock().admitting == 1
+        // Counted under the ledger's lock that the wait releases, so the
+        // gate is parked on the ledger's condvar once this reads 1.
+        wait_until(DEADLINE, "the gate waits on the ledger", || {
+            attempt::lock(&core.ledger).gate_waits == 1
         });
         let feed = KafkaFeed {
             core,

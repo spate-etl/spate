@@ -253,7 +253,10 @@ fn a_completed_unit_read_again_counts_from_zero() {
 /// it. While the dead-letter topic's leader is down, the reader gets
 /// nothing and the unit's offset stays uncommitted over several commit
 /// periods; once the leader is back, the offset is committed and the
-/// record is tombstoned on the partition the seed landed on.
+/// record is tombstoned on the partition the seed landed on. The window
+/// opens once a unit behind it on the partition is read, which the gate
+/// admits after the capped unit, so it covers commits after the move is
+/// sent.
 #[test]
 fn a_unit_at_the_cap_goes_to_the_dead_letter_topic_unread() {
     let cluster = cluster(2);
@@ -267,7 +270,14 @@ fn a_unit_at_the_cap_goes_to_the_dead_letter_topic_unread() {
     cluster
         .coordinator(MockCoordinator::Group(group.clone()), 1)
         .unwrap();
-    produce_raw(&brokers, WORK, &[(Some(&b"capped"[..]), &b"body"[..])]);
+    produce_raw(
+        &brokers,
+        WORK,
+        &[
+            (Some(&b"capped"[..]), &b"body"[..]),
+            (Some(&b"behind"[..]), &b"body"[..]),
+        ],
+    );
     let seeder: rdkafka::producer::BaseProducer = rdkafka::ClientConfig::new()
         .set("bootstrap.servers", &brokers)
         .set("partitioner", "murmur2")
@@ -286,11 +296,20 @@ fn a_unit_at_the_cap_goes_to_the_dead_letter_topic_unread() {
     cluster.broker_down(2).unwrap();
 
     let worker = direct(&feed_yaml(&brokers, &group, "  attempt_cap: 3\n", ""));
+    let behind = worker.take("the unit behind the capped one");
+    assert_eq!(behind.unit.id, "behind");
+    assert_eq!(behind.deliveries, 1);
     // Elapsed time is the property: the move is held over several commits.
     for _ in 0..8 {
         std::thread::sleep(COMMIT_PERIOD / 2);
         assert!(
-            worker.feed.receive(8).unwrap().is_empty(),
+            worker.feed.receive(8).map_or_else(
+                |e| {
+                    assert_eq!(e.kind, FeedErrorKind::Retryable, "{e}");
+                    true
+                },
+                |got| got.is_empty()
+            ),
             "the unit was read"
         );
         let at = committed(&brokers, &group, WORK);
@@ -307,15 +326,25 @@ fn a_unit_at_the_cap_goes_to_the_dead_letter_topic_unread() {
     assert_eq!(dead[0].key.as_deref(), Some(&b"capped"[..]));
     assert_eq!(dead[0].header("spate.origin"), Some("units/0/0"));
     let partition = seeded[0].0;
+    let capped: Vec<_> = read_attempts(&brokers, ATTEMPT_PARTITIONS, 3)
+        .into_iter()
+        .filter(|(_, id, _)| id == "units/0/0")
+        .collect();
     assert_eq!(
-        read_attempts(&brokers, ATTEMPT_PARTITIONS, 2),
+        capped,
         [
             (partition, "units/0/0".to_owned(), Some(3)),
             (partition, "units/0/0".to_owned(), None),
         ]
     );
     assert!(
-        worker.feed.receive(8).unwrap().is_empty(),
+        worker.feed.receive(8).map_or_else(
+            |e| {
+                assert_eq!(e.kind, FeedErrorKind::Retryable, "{e}");
+                true
+            },
+            |got| got.is_empty()
+        ),
         "the unit was read"
     );
 }

@@ -258,6 +258,10 @@ pub(crate) struct Ledger {
     /// Per partition, one past the last offset read.
     next: Vec<Option<i64>>,
     counts: HashMap<Box<[u8]>, u32>,
+    /// How many waits on the ledger's condvar the gate has begun, counted
+    /// under the ledger's lock just before each.
+    #[cfg(test)]
+    pub(crate) gate_waits: usize,
 }
 
 /// The ledger and the condvar the follower notifies after each record.
@@ -274,6 +278,8 @@ impl Ledger {
         Ledger {
             next: vec![None; partitions.get() as usize],
             counts: HashMap::new(),
+            #[cfg(test)]
+            gate_waits: 0,
         }
     }
 

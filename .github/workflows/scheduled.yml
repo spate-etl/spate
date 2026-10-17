@@ -738,8 +738,10 @@ jobs:
     if: needs.plan.outputs.nightly == 'true'
     timeout-minutes: 30
     # A published release cannot change, so a failure here means `gh`,
-    # crates.io or the GitHub API moved. `finish` makes the same calls, and
-    # this surfaces the change before a release depends on it.
+    # crates.io or the GitHub API moved or was unreachable, the tag's xtask no
+    # longer builds, or the newest tag has no published, immutable release.
+    # `finish` makes most of the same calls, and this surfaces the change
+    # before a release depends on it.
     permissions:
       contents: read
       attestations: read
@@ -776,6 +778,11 @@ jobs:
       # entry covers.
       - uses: ./.github/actions/setup-rust
 
+      # Apart from `verify`, so a build failure files no issue.
+      - name: Build the tag's xtask
+        working-directory: release
+        run: cargo build -p spate-xtask --locked
+
       - id: verify
         working-directory: release
         env:
@@ -787,8 +794,8 @@ jobs:
           cargo xtask release verify "$VERSION" 2>&1 | tee "$RUNNER_TEMP/verify.log" || rc=$?
           exit "$rc"
 
-      # Gated on the verify step: a checkout or setup failure would otherwise
-      # file an issue asserting the release no longer verifies.
+      # Gated on the verify step: a checkout, setup or build failure would
+      # otherwise file an issue asserting the release no longer verifies.
       - name: Write the issue body
         if: failure() && steps.verify.conclusion == 'failure'
         env:
@@ -804,7 +811,7 @@ jobs:
           # Single quotes: the backticks must reach GitHub rather than run as
           # command substitutions.
           # shellcheck disable=SC2016
-          expected='The newest release verifies: every crate came from the tagged commit, its provenance and SBOM attestations verify, and the GitHub release is immutable, attested and complete. A published release cannot change, so a failure with nothing changed points at `gh`, crates.io or the GitHub API, which the next release meets in `finish`. Reproduce it from a clean checkout of the tag with `cargo xtask release verify X.Y.Z`. If the output shows a network error, rerun the job first.'
+          expected='The newest release verifies: every crate came from the tagged commit, its provenance and SBOM attestations verify, and the GitHub release is immutable, attested and complete. A published release cannot change, so a failure with nothing changed points at `gh`, crates.io or the GitHub API, and the next release meets most of the same calls in `finish`. It also fails when the newest tag has no published, immutable release, which a `finish` that stopped between pushing the tag and publishing the release leaves until it is re-run. Reproduce it from a clean checkout of the tag with `cargo xtask release verify X.Y.Z`. If the output shows a network error, rerun the job first.'
           cargo xtask bug-report --out "$RUNNER_TEMP/body.md" \
             --answer components="$where" \
             --answer version="$version" \

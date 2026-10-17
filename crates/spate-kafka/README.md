@@ -14,9 +14,12 @@ section). No `rdkafka` types appear in public signatures.
 The crate also carries the producer sink (`sink::KafkaSink`, the
 `sink: { kafka: ... }` section) and a work feed (`feed::KafkaFeed`, built from
 a `feed: { kafka: ... }` section and passed to `Pipeline::feed`). The feed
-reads units from a work topic as one consumer group, commits a unit's offset
-once every record in it is acknowledged, and moves a failed unit to a retry
-topic, or at the attempt cap to a dead-letter topic, before it commits.
+reads units from a work topic as one consumer group and records each unit's
+attempt on a compacted attempt topic before the unit is read. It commits a
+unit's offset once every record in it is acknowledged and its attempt record
+is tombstoned, and moves a failed unit to a retry topic, or at the attempt cap
+to a dead-letter topic, before it commits. A unit whose recorded attempts
+have reached the cap moves to the dead-letter topic without being read.
 
 ## Sharp edges worth knowing
 

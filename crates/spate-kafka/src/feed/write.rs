@@ -2,6 +2,7 @@
 //! failed unit goes.
 
 use super::Core;
+use super::attempt::{ORIGIN_HEADER, PublishId, encode};
 use super::events::Cause;
 use super::inflight::Position;
 use super::producer::FeedProducerContext;
@@ -9,12 +10,14 @@ use rdkafka::error::{KafkaError, RDKafkaErrorCode};
 use rdkafka::message::{Header, OwnedHeaders};
 use rdkafka::producer::{BaseRecord, ThreadedProducer};
 use spate_core::error::ErrorClass;
-use spate_core::feed::{Confirmer, Unit};
+use spate_core::feed::{Confirmer, Receipt, Unit};
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// The header that carries how many failures were reported for a unit.
+/// The header that carries, on a copy written to the retry or dead-letter
+/// topic, the count of the delivery the copy was written from. The feed
+/// writes it for an operator and never reads it.
 pub(crate) const DELIVERIES_HEADER: &str = "spate.deliveries";
 
 const BACKOFF_START: Duration = Duration::from_millis(200);
@@ -27,6 +30,9 @@ pub(crate) type Producer = ThreadedProducer<FeedProducerContext>;
 #[derive(Debug)]
 pub(crate) struct Outgoing {
     pub(crate) topic: Arc<str>,
+    /// The partition to write to; `None` leaves it to librdkafka's
+    /// partitioner.
+    pub(crate) partition: Option<i32>,
     pub(crate) key: Option<Vec<u8>>,
     pub(crate) payload: Option<Vec<u8>>,
     pub(crate) headers: Vec<(String, Option<Vec<u8>>)>,
@@ -34,21 +40,47 @@ pub(crate) struct Outgoing {
 
 impl Outgoing {
     /// The message for `unit` on `topic`. A `deliveries` of 0 writes no
-    /// count header.
-    pub(crate) fn unit(topic: Arc<str>, unit: &Unit, deliveries: u32) -> Outgoing {
-        let headers = if deliveries == 0 {
-            Vec::new()
-        } else {
-            vec![(
+    /// count header, and an `origin` is written as the `spate.origin`
+    /// header.
+    pub(crate) fn unit(
+        topic: Arc<str>,
+        unit: &Unit,
+        deliveries: u32,
+        origin: Option<&PublishId>,
+    ) -> Outgoing {
+        let mut headers = Vec::new();
+        if deliveries != 0 {
+            headers.push((
                 DELIVERIES_HEADER.to_owned(),
                 Some(deliveries.to_string().into_bytes()),
-            )]
-        };
+            ));
+        }
+        if let Some(origin) = origin {
+            headers.push((ORIGIN_HEADER.to_owned(), Some(origin.as_bytes().to_vec())));
+        }
         Outgoing {
             topic,
+            partition: None,
             key: Some(unit.id.clone().into_bytes()),
             payload: Some(unit.body.clone()),
             headers,
+        }
+    }
+
+    /// The attempt record for `identity` on `partition` of the attempt
+    /// topic `topic`: `attempts`, or a tombstone for `None`.
+    fn attempt_record(
+        topic: &Arc<str>,
+        identity: &PublishId,
+        partition: i32,
+        attempts: Option<u32>,
+    ) -> Outgoing {
+        Outgoing {
+            topic: Arc::clone(topic),
+            partition: Some(partition),
+            key: Some(identity.as_bytes().to_vec()),
+            payload: attempts.map(encode),
+            headers: Vec::new(),
         }
     }
 }
@@ -60,8 +92,20 @@ pub(crate) enum Destination {
     DeadLetter(Cause),
 }
 
+/// What finishes a moved message's offset once the move is confirmed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Finish {
+    /// The confirmed move finishes it.
+    Complete,
+    /// A tombstone of the unit's attempt record, sent once the move is
+    /// confirmed, finishes it when the tombstone is confirmed.
+    Tombstone(PublishId),
+}
+
 /// A write that moves a delivered message to the retry or dead-letter
-/// topic. Its offset finishes when the write is confirmed.
+/// topic. A retry write finishes its offset when it is confirmed. A
+/// dead-letter write of a unit is followed by a tombstone of the unit's
+/// attempt record, and the tombstone's confirmation finishes the offset.
 #[derive(Debug)]
 pub(crate) struct Move {
     pub(crate) message: Outgoing,
@@ -69,8 +113,9 @@ pub(crate) struct Move {
     pub(crate) to: Destination,
     /// The unit's id; `None` for a message that names no unit.
     pub(crate) unit: Option<String>,
-    /// The delivery being moved, counted as the header plus one.
+    /// The count of the delivery being moved.
     pub(crate) deliveries: u32,
+    pub(crate) finish: Finish,
     /// When the first attempt was enqueued.
     pub(crate) started: Instant,
     /// The wait before the next attempt, should this one fail.
@@ -84,6 +129,7 @@ impl Move {
         to: Destination,
         unit: Option<String>,
         deliveries: u32,
+        finish: Finish,
     ) -> Move {
         Move {
             message,
@@ -91,15 +137,82 @@ impl Move {
             to,
             unit,
             deliveries,
+            finish,
             started: Instant::now(),
             backoff: BACKOFF_START,
         }
     }
 }
 
+/// The write of a unit's attempt record before the unit is read. The unit
+/// reaches the reader once the write is confirmed, its receipt held
+/// meanwhile.
+#[derive(Debug)]
+pub(crate) struct Attempt {
+    pub(crate) message: Outgoing,
+    /// The count the record holds, which the delivery is read with.
+    pub(crate) attempts: u32,
+    pub(crate) receipt: Receipt,
+    pub(crate) unit: Unit,
+    pub(crate) identity: PublishId,
+    pub(crate) attempt_partition: i32,
+    pub(crate) started: Instant,
+    pub(crate) backoff: Duration,
+}
+
+impl Attempt {
+    /// The write of `attempts` for `identity` on `partition` of the attempt
+    /// topic `topic`, for the delivery `receipt` of `unit`.
+    pub(crate) fn new(
+        topic: &Arc<str>,
+        identity: PublishId,
+        partition: i32,
+        attempts: u32,
+        receipt: Receipt,
+        unit: Unit,
+    ) -> Attempt {
+        Attempt {
+            message: Outgoing::attempt_record(topic, &identity, partition, Some(attempts)),
+            attempts,
+            receipt,
+            unit,
+            identity,
+            attempt_partition: partition,
+            started: Instant::now(),
+            backoff: BACKOFF_START,
+        }
+    }
+}
+
+/// The tombstone of a unit's attempt record, which finishes the unit's
+/// offset once it is confirmed.
+#[derive(Debug)]
+pub(crate) struct Tombstone {
+    pub(crate) message: Outgoing,
+    pub(crate) position: Position,
+    pub(crate) backoff: Duration,
+}
+
+impl Tombstone {
+    /// The tombstone for `identity` on `partition` of the attempt topic
+    /// `topic`, finishing `position`.
+    pub(crate) fn new(
+        topic: &Arc<str>,
+        identity: &PublishId,
+        partition: i32,
+        position: Position,
+    ) -> Tombstone {
+        Tombstone {
+            message: Outgoing::attempt_record(topic, identity, partition, None),
+            position,
+            backoff: BACKOFF_START,
+        }
+    }
+}
+
 /// One write, carried through librdkafka as the message's delivery opaque.
-/// Each enqueued write gets exactly one report, so a `Move` is completed
-/// or sent again once per attempt and never twice.
+/// Each enqueued write gets exactly one report, so a write is settled once
+/// per attempt and never twice.
 #[derive(Debug)]
 pub(crate) enum Write {
     Publish {
@@ -107,12 +220,37 @@ pub(crate) enum Write {
         confirmer: Confirmer,
     },
     Move(Move),
+    Attempt(Attempt),
+    Tombstone(Tombstone),
 }
 
 impl Write {
-    fn message(&self) -> &Outgoing {
+    pub(crate) fn message(&self) -> &Outgoing {
         match self {
-            Write::Publish { message, .. } | Write::Move(Move { message, .. }) => message,
+            Write::Publish { message, .. }
+            | Write::Move(Move { message, .. })
+            | Write::Attempt(Attempt { message, .. })
+            | Write::Tombstone(Tombstone { message, .. }) => message,
+        }
+    }
+
+    /// The wait before the next attempt of a write the feed sends again;
+    /// `None` for a publish, whose failure goes to its publisher.
+    pub(crate) fn backoff_mut(&mut self) -> Option<&mut Duration> {
+        match self {
+            Write::Publish { .. } => None,
+            Write::Move(Move { backoff, .. })
+            | Write::Attempt(Attempt { backoff, .. })
+            | Write::Tombstone(Tombstone { backoff, .. }) => Some(backoff),
+        }
+    }
+
+    /// What the write carries, for a log line or a latch reason.
+    pub(crate) fn what(&self) -> &'static str {
+        match self {
+            Write::Publish { .. } | Write::Move(_) => "a unit",
+            Write::Attempt(_) => "an attempt record",
+            Write::Tombstone(_) => "an attempt record's tombstone",
         }
     }
 }
@@ -166,17 +304,6 @@ pub(crate) fn next_backoff(backoff: Duration) -> Duration {
     (backoff * 2).min(BACKOFF_MAX)
 }
 
-/// The count of a delivery whose message carries `header` as its
-/// `spate.deliveries` value: the failures reported so far, plus one. An
-/// absent or unreadable header counts no failure.
-pub(crate) fn deliveries_of(header: Option<&[u8]>) -> u32 {
-    header
-        .and_then(|h| std::str::from_utf8(h).ok())
-        .and_then(|h| h.trim().parse::<u32>().ok())
-        .unwrap_or(0)
-        .saturating_add(1)
-}
-
 /// Where a unit failed on delivery `deliveries` goes under `cap`.
 pub(crate) fn route(deliveries: u32, cap: NonZeroU32) -> Destination {
     if deliveries >= cap.get() {
@@ -191,7 +318,7 @@ pub(crate) fn route(deliveries: u32, cap: NonZeroU32) -> Destination {
 pub(crate) fn send(core: &Core, producer: &Producer, write: Box<Write>) {
     // librdkafka copies the key, value and headers at enqueue, and the
     // write itself travels as the opaque, so the record borrows copies.
-    let (topic, key, payload, headers) = {
+    let (topic, partition, key, payload, headers) = {
         let m = write.message();
         let mut headers = OwnedHeaders::new_with_capacity(m.headers.len());
         for (key, value) in &m.headers {
@@ -202,6 +329,7 @@ pub(crate) fn send(core: &Core, producer: &Producer, write: Box<Write>) {
         }
         (
             Arc::clone(&m.topic),
+            m.partition,
             m.key.clone(),
             m.payload.clone(),
             headers,
@@ -209,9 +337,13 @@ pub(crate) fn send(core: &Core, producer: &Producer, write: Box<Write>) {
     };
     let mut record =
         BaseRecord::<[u8], [u8], Box<Write>>::with_opaque_to(&topic, write).headers(headers);
+    if let Some(partition) = partition {
+        record = record.partition(partition);
+    }
     if let Some(key) = &key {
         record = record.key(key.as_slice());
     }
+    // A record with no payload has a null value: a tombstone.
     if let Some(payload) = &payload {
         record = record.payload(payload.as_slice());
     }

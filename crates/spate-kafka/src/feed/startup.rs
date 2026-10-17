@@ -1,10 +1,13 @@
 //! The checks [`KafkaFeed::connect`](crate::feed::KafkaFeed::connect) runs
 //! on the feed's topics before the feed starts.
 //!
-//! The work, retry and dead-letter topics must exist, and none of them may
-//! be compacted. A compacted topic keeps only the latest message per key,
-//! and a unit's id is its key, so compaction can delete a copy of a unit
-//! nobody has read. The checks run once, at connect.
+//! The work, retry, dead-letter and attempt topics must exist. The work,
+//! retry and dead-letter topics may not be compacted: a compacted topic
+//! keeps only the latest message per key, and a unit's id is its key, so
+//! compaction can delete a copy of a unit nobody has read. The attempt
+//! topic must be compacted and nothing else, since time or size retention
+//! would delete the counts of units still in flight, and it must report at
+//! least one partition. The checks run once, at connect.
 //!
 //! A credential or TLS handshake rejected on the way to the cluster refuses
 //! connecting with the rejection's text, as soon as the client reports it.
@@ -18,6 +21,7 @@ use rdkafka::producer::{Producer, ThreadedProducer};
 use spate_core::error::ErrorClass;
 use std::collections::HashMap;
 use std::future::Future;
+use std::num::NonZeroU32;
 use std::pin::Pin;
 use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -53,10 +57,10 @@ impl AdminError {
 
 /// Reads topic metadata and configuration from the cluster.
 pub(crate) trait TopicAdmin: Send + Sync {
-    /// Whether `topic` exists. An error the broker reports for the topic,
-    /// `UnknownTopicOrPartition` for a missing one, is an [`AdminError`]
-    /// with its code.
-    fn metadata<'a>(&'a self, topic: &'a str) -> BoxFuture<'a, Result<(), AdminError>>;
+    /// How many partitions `topic` has, if it exists. An error the broker
+    /// reports for the topic, `UnknownTopicOrPartition` for a missing one,
+    /// is an [`AdminError`] with its code.
+    fn metadata<'a>(&'a self, topic: &'a str) -> BoxFuture<'a, Result<usize, AdminError>>;
 
     /// `topic`'s configuration entries, by name. An entry the broker does
     /// not report is absent, and one it reports with no value is `None`. A
@@ -106,7 +110,7 @@ fn admin_error(e: &KafkaError) -> AdminError {
 }
 
 impl TopicAdmin for Brokers {
-    fn metadata<'a>(&'a self, topic: &'a str) -> BoxFuture<'a, Result<(), AdminError>> {
+    fn metadata<'a>(&'a self, topic: &'a str) -> BoxFuture<'a, Result<usize, AdminError>> {
         // librdkafka refuses a topic name longer than 512 bytes with a NULL
         // handle, which rdkafka's `fetch_metadata` unwraps, panicking the
         // read's thread.
@@ -131,13 +135,13 @@ impl TopicAdmin for Brokers {
                     .map_err(|e| admin_error(&e))
                     .and_then(|metadata| {
                         let found = metadata.topics().iter().find(|t| t.name() == name);
-                        match found.map(|t| t.error()) {
+                        match found.map(|t| (t.error(), t.partitions().len())) {
                             None => Err(AdminError::new(
                                 RDKafkaErrorCode::UnknownTopicOrPartition,
                                 "the metadata response does not list the topic",
                             )),
-                            Some(None) => Ok(()),
-                            Some(Some(err)) => {
+                            Some((None, partitions)) => Ok(partitions),
+                            Some((Some(err), _)) => {
                                 let code = RDKafkaErrorCode::from(err);
                                 Err(AdminError::new(code, code.to_string()))
                             }
@@ -204,13 +208,16 @@ pub(crate) enum Scope {
     Existence,
 }
 
-/// What the checks read, for the log line at connect. `None` where the
-/// broker reported no value.
-#[derive(Debug, Default, PartialEq, Eq)]
+/// What the checks read, for the feed and the log line at connect. `None`
+/// where the broker reported no value, or the scope read no configuration.
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Checked {
     pub(crate) cleanup_policy: Option<String>,
     pub(crate) retry_cleanup_policy: Option<String>,
     pub(crate) dead_letter_cleanup_policy: Option<String>,
+    pub(crate) attempt_cleanup_policy: Option<String>,
+    /// The attempt topic's partition count, which places each record.
+    pub(crate) attempt_partitions: NonZeroU32,
 }
 
 /// Whether `code` means asking again fails the same way, by the table the
@@ -252,11 +259,13 @@ fn classified(admin: &dyn TopicAdmin, doing: &str, e: &AdminError) -> KafkaFeedE
 ///
 /// # Errors
 ///
-/// [`KafkaFeedError::Refused`] for a missing topic, a compacted one, a
-/// read that fails the same way when asked again, a failed read after the
-/// client recorded a rejected credential or TLS handshake, and a topic the
-/// cluster describes no configuration entry for;
-/// [`KafkaFeedError::Unavailable`] for a read that fails otherwise.
+/// [`KafkaFeedError::Refused`] for a missing topic, a compacted work, retry
+/// or dead-letter topic, an attempt topic whose `cleanup.policy` is anything
+/// but `compact` or that reports no partitions, a read that fails the same
+/// way when asked again, a failed read after the client recorded a rejected
+/// credential or TLS handshake, and a topic the cluster describes no
+/// configuration entry for; [`KafkaFeedError::Unavailable`] for a read that
+/// fails otherwise.
 pub(crate) async fn check(
     admin: &dyn TopicAdmin,
     topics: &Topics,
@@ -268,12 +277,18 @@ pub(crate) async fn check(
         ("work", &*topics.work),
         ("retry", &*topics.retry),
         ("dead-letter", &*topics.dead_letter),
+        ("attempt", &*topics.attempt),
     ];
+    let mut attempt_partitions = 0;
     for (role, topic) in named {
         let doing = format!("reading the metadata of the {role} topic `{topic}`");
         set(doing.clone());
         match admin.metadata(topic).await {
-            Ok(()) => {}
+            Ok(partitions) => {
+                if role == "attempt" {
+                    attempt_partitions = partitions;
+                }
+            }
             Err(e) if e.code == RDKafkaErrorCode::UnknownTopicOrPartition => {
                 return Err(KafkaFeedError::Refused(format!(
                     "the {role} topic `{topic}` does not exist; the feed never creates a \
@@ -284,8 +299,24 @@ pub(crate) async fn check(
         }
     }
 
+    let Some(attempt_partitions) = u32::try_from(attempt_partitions)
+        .ok()
+        .and_then(NonZeroU32::new)
+    else {
+        return Err(KafkaFeedError::Refused(format!(
+            "the attempt topic `{}` reports no partitions",
+            topics.attempt
+        )));
+    };
+
     if scope == Scope::Existence {
-        return Ok(Checked::default());
+        return Ok(Checked {
+            cleanup_policy: None,
+            retry_cleanup_policy: None,
+            dead_letter_cleanup_policy: None,
+            attempt_cleanup_policy: None,
+            attempt_partitions,
+        });
     }
 
     let mut read = Vec::with_capacity(named.len());
@@ -312,6 +343,8 @@ pub(crate) async fn check(
         cleanup_policy: entry(0, CLEANUP_POLICY),
         retry_cleanup_policy: entry(1, CLEANUP_POLICY),
         dead_letter_cleanup_policy: entry(2, CLEANUP_POLICY),
+        attempt_cleanup_policy: entry(3, CLEANUP_POLICY),
+        attempt_partitions,
     };
     let policies = [
         &checked.cleanup_policy,
@@ -333,6 +366,22 @@ pub(crate) async fn check(
                  Compaction keeps only the latest message for each key, and a unit's id is \
                  its key, so it can delete a unit nobody has read; set `{CLEANUP_POLICY}` \
                  to `delete`"
+            )));
+        }
+    }
+    match &checked.attempt_cleanup_policy {
+        None => tracing::warn!(
+            topic = &*topics.attempt,
+            "the attempt topic reported no `{CLEANUP_POLICY}`; the compaction check is skipped \
+             for it"
+        ),
+        Some(policy) if policy.trim() == "compact" => {}
+        Some(policy) => {
+            return Err(KafkaFeedError::Refused(format!(
+                "the attempt topic `{}` must be compacted only (`{CLEANUP_POLICY}` is \
+                 `{policy}`). Time or size retention would delete the attempt counts of units \
+                 still in flight; create it with `{CLEANUP_POLICY}=compact`",
+                topics.attempt
             )));
         }
     }
@@ -412,12 +461,14 @@ mod tests {
     const WORK: &str = "units";
     const RETRY: &str = "units-retry";
     const DEAD: &str = "units-dead";
+    const ATTEMPTS: &str = "units-attempts";
 
     fn topics() -> Topics {
         Topics {
             work: Arc::from(WORK),
             retry: Arc::from(RETRY),
             dead_letter: Arc::from(DEAD),
+            attempt: Arc::from(ATTEMPTS),
         }
     }
 
@@ -441,6 +492,8 @@ mod tests {
     #[derive(Default)]
     struct Scripted {
         topics: HashMap<String, HashMap<String, Option<String>>>,
+        /// Partition counts by topic; one where a topic has none here.
+        partitions: HashMap<String, usize>,
         metadata_errors: HashMap<String, AdminError>,
         config_errors: HashMap<String, AdminError>,
         /// A topic whose metadata read (`true`) or configuration read
@@ -451,13 +504,14 @@ mod tests {
     }
 
     impl Scripted {
-        /// The three topics, each with the broker's defaults.
+        /// The four topics, each with the broker's defaults, the attempt
+        /// topic compacted.
         fn all() -> Scripted {
             let mut s = Scripted::default();
-            for t in [WORK, RETRY, DEAD] {
+            for t in [WORK, RETRY, DEAD, ATTEMPTS] {
                 s.topics.insert(t.to_owned(), broker_defaults());
             }
-            s
+            s.entry(ATTEMPTS, CLEANUP_POLICY, Some(Some("compact")))
         }
 
         fn without(mut self, topic: &str) -> Scripted {
@@ -486,11 +540,13 @@ mod tests {
     }
 
     impl TopicAdmin for Scripted {
-        fn metadata<'a>(&'a self, topic: &'a str) -> BoxFuture<'a, Result<(), AdminError>> {
+        fn metadata<'a>(&'a self, topic: &'a str) -> BoxFuture<'a, Result<usize, AdminError>> {
             let hang = self.hangs == Some((topic, true));
             let answer = match self.metadata_errors.get(topic) {
                 Some(e) => Err(e.clone()),
-                None if self.topics.contains_key(topic) => Ok(()),
+                None if self.topics.contains_key(topic) => {
+                    Ok(self.partitions.get(topic).copied().unwrap_or(1))
+                }
                 None => Err(Scripted::missing(topic)),
             };
             Box::pin(async move {
@@ -531,7 +587,7 @@ mod tests {
     fn config() -> crate::feed::config::KafkaFeedConfig {
         let section = serde_yaml::from_str(&format!(
             "kafka:\n  brokers: localhost:9092\n  group_id: workers\n  topic: {WORK}\n  \
-             retry_topic: {RETRY}\n  dead_letter_topic: {DEAD}\n"
+             retry_topic: {RETRY}\n  dead_letter_topic: {DEAD}\n  attempt_topic: {ATTEMPTS}\n"
         ))
         .unwrap();
         crate::feed::config::KafkaFeedConfig::from_section(&section).unwrap()
@@ -556,7 +612,12 @@ mod tests {
     /// that topics the feed can run on pass with what was read.
     #[test]
     fn a_missing_topic_is_refused_by_its_role() {
-        for (topic, role) in [(WORK, "work"), (RETRY, "retry"), (DEAD, "dead-letter")] {
+        for (topic, role) in [
+            (WORK, "work"),
+            (RETRY, "retry"),
+            (DEAD, "dead-letter"),
+            (ATTEMPTS, "attempt"),
+        ] {
             let message = refusal(run(&Scripted::all().without(topic)));
             assert!(
                 message.contains(&format!("the {role} topic `{topic}` does not exist")),
@@ -570,7 +631,81 @@ mod tests {
                 cleanup_policy: Some("delete".into()),
                 retry_cleanup_policy: Some("delete".into()),
                 dead_letter_cleanup_policy: Some("delete".into()),
+                attempt_cleanup_policy: Some("compact".into()),
+                attempt_partitions: NonZeroU32::MIN,
             }
+        );
+    }
+
+    /// Pins the attempt topic's policy check: `compact` alone passes, with
+    /// spaces around it; `delete`, and `compact` beside `delete` in either
+    /// order, are refused naming the topic and the value; an unreported
+    /// policy skips the check with a warning, and the line logged at
+    /// connect shows it as `unreported`.
+    #[test]
+    fn an_attempt_topic_that_is_not_only_compacted_is_refused() {
+        for passing in ["compact", " compact "] {
+            let admin = Scripted::all().entry(ATTEMPTS, CLEANUP_POLICY, Some(Some(passing)));
+            run(&admin).unwrap_or_else(|e| panic!("{passing:?}: {e}"));
+        }
+        for policy in ["delete", "compact,delete", "delete,compact"] {
+            let admin = Scripted::all().entry(ATTEMPTS, CLEANUP_POLICY, Some(Some(policy)));
+            let message = refusal(run(&admin));
+            assert!(
+                message.contains(&format!("the attempt topic `{ATTEMPTS}`")),
+                "{message}"
+            );
+            assert!(
+                message.contains(&format!("`cleanup.policy` is `{policy}`")),
+                "{message}"
+            );
+            assert!(message.contains("cleanup.policy=compact"), "{message}");
+        }
+        for value in [None, Some(None)] {
+            let admin = Scripted::all().entry(ATTEMPTS, CLEANUP_POLICY, value);
+            let mut result = None;
+            let lines = spate_test::capture_logs(tracing::Level::WARN, || {
+                result = Some(run(&admin));
+            });
+            let checked = result.unwrap().unwrap();
+            assert_eq!(checked.attempt_cleanup_policy, None);
+            assert_eq!(lines.len(), 1, "{lines:#?}");
+            assert!(lines[0].contains("the attempt topic"), "{}", lines[0]);
+            let started = spate_test::capture_logs(tracing::Level::INFO, || {
+                crate::feed::log_started(&config(), &checked);
+            });
+            assert!(
+                started[0].contains(" attempt_cleanup_policy=unreported"),
+                "{}",
+                started[0]
+            );
+        }
+    }
+
+    /// Pins that the attempt topic's partition count is read, under both
+    /// scopes, and that a topic reporting none is refused.
+    #[test]
+    fn startup_reads_the_attempt_topics_partition_count() {
+        let mut admin = Scripted::all();
+        admin.partitions.insert(ATTEMPTS.to_owned(), 2);
+        // The work topic's count is not the attempt topic's.
+        admin.partitions.insert(WORK.to_owned(), 5);
+        assert_eq!(run(&admin).unwrap().attempt_partitions.get(), 2);
+        let step = Mutex::new("starting".to_owned());
+        let existence = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(check(&admin, &topics(), Scope::Existence, &step))
+            .unwrap();
+        assert_eq!(existence.attempt_partitions.get(), 2);
+
+        admin.partitions.insert(ATTEMPTS.to_owned(), 0);
+        let message = refusal(run(&admin));
+        assert!(
+            message.contains(&format!(
+                "the attempt topic `{ATTEMPTS}` reports no partitions"
+            )),
+            "{message}"
         );
     }
 
@@ -638,7 +773,12 @@ mod tests {
                 crate::feed::log_started(&config(), &checked);
             });
             assert_eq!(started.len(), 1, "{started:#?}");
-            for needle in [" cleanup_policy=unreported", " retry_cleanup_policy=delete"] {
+            for needle in [
+                " cleanup_policy=unreported",
+                " retry_cleanup_policy=delete",
+                " attempt_cleanup_policy=compact",
+                " attempt_partitions=1",
+            ] {
                 assert!(started[0].contains(needle), "{needle}: {}", started[0]);
             }
         }
@@ -788,7 +928,12 @@ mod tests {
     /// is refused, naming the read and the topic.
     #[test]
     fn a_topic_described_with_no_entries_is_refused() {
-        for (topic, role) in [(WORK, "work"), (RETRY, "retry"), (DEAD, "dead-letter")] {
+        for (topic, role) in [
+            (WORK, "work"),
+            (RETRY, "retry"),
+            (DEAD, "dead-letter"),
+            (ATTEMPTS, "attempt"),
+        ] {
             let mut admin = Scripted::all();
             admin.topics.insert(topic.to_owned(), HashMap::new());
             let message = refusal(run(&admin));
@@ -869,8 +1014,8 @@ mod tests {
     fn connect_to(brokers: &str, rdkafka: &str, limit: Duration) -> Option<KafkaFeedError> {
         let section: spate_core::config::FeedSection = serde_yaml::from_str(&format!(
             "kafka:\n  brokers: \"{brokers}\"\n  group_id: workers\n  topic: {WORK}\n  \
-             retry_topic: {RETRY}\n  dead_letter_topic: {DEAD}\n  statistics_interval: 0s\n  \
-             rdkafka:\n{rdkafka}"
+             retry_topic: {RETRY}\n  dead_letter_topic: {DEAD}\n  attempt_topic: {ATTEMPTS}\n  \
+             statistics_interval: 0s\n  rdkafka:\n{rdkafka}"
         ))
         .unwrap();
         let (tx, rx) = std::sync::mpsc::channel();

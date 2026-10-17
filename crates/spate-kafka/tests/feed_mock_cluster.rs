@@ -1,7 +1,7 @@
 //! The Kafka feed against rdkafka's in-process MockCluster: the S3 source
 //! reads units through a `feed: { kafka: … }` section, and the group's
-//! committed offsets and the retry and dead-letter topics show when a unit
-//! is finished, retried or dead-lettered.
+//! committed offsets and the retry, dead-letter and attempt topics show
+//! when a unit is counted, finished, retried or dead-lettered.
 //!
 //! The mock answers a group's rebalance after `session.timeout.ms - 1000`,
 //! so the members run at a 6 s session timeout.
@@ -18,19 +18,34 @@ use std::io::{Read as _, Write as _};
 use std::net::TcpStream;
 use std::time::{Duration, Instant};
 use support::feed::{
-    COMMIT_PERIOD, DEAD, DEADLINE, ON_MOCK, RETRY, WORK, committed, data_dir, direct, exists,
-    feed_yaml, high_watermark, launch, produce_raw, publish, read_topic, recs, sorted, stage,
-    written,
+    ATTEMPT, ATTEMPT_PARTITIONS, COMMIT_PERIOD, DEAD, DEADLINE, ON_MOCK, RETRY, WORK, committed,
+    data_dir, direct, exists, feed_yaml, high_watermark, launch, produce_raw, publish,
+    read_attempts, read_topic, recs, sorted, stage, written,
 };
 
 /// A cluster of `brokers` with the work, retry and dead-letter topics, one
-/// partition each.
+/// partition each, and the attempt topic with two.
 fn cluster(brokers: i32) -> MockCluster<'static, rdkafka::producer::DefaultProducerContext> {
     let cluster = MockCluster::new(brokers).expect("mock cluster");
     for topic in [WORK, RETRY, DEAD] {
         cluster.create_topic(topic, 1, 1).expect("create topic");
     }
     cluster
+        .create_topic(ATTEMPT, ATTEMPT_PARTITIONS, 1)
+        .expect("create topic");
+    cluster
+}
+
+/// Place every partition of the attempt topic on `broker`.
+fn attempts_on(
+    cluster: &MockCluster<'static, rdkafka::producer::DefaultProducerContext>,
+    broker: i32,
+) {
+    for partition in 0..ATTEMPT_PARTITIONS {
+        cluster
+            .partition_leader(ATTEMPT, partition, Some(broker))
+            .unwrap();
+    }
 }
 
 /// Pins INV-1 on Kafka: while the unit's last write is held over several
@@ -86,6 +101,7 @@ fn the_offset_completes_only_after_the_retry_write_is_confirmed() {
     cluster.partition_leader(WORK, 0, Some(1)).unwrap();
     cluster.partition_leader(DEAD, 0, Some(1)).unwrap();
     cluster.partition_leader(RETRY, 0, Some(2)).unwrap();
+    attempts_on(&cluster, 1);
     cluster
         .coordinator(MockCoordinator::Group(group.clone()), 1)
         .unwrap();
@@ -124,10 +140,12 @@ fn the_offset_completes_only_after_the_retry_write_is_confirmed() {
     assert_eq!(worker.stop(), ExitState::Completed);
 }
 
-/// Pins the cap on the reported count: a unit failed on each delivery is
-/// read with counts 1, 2 and 3, written to the retry topic with the header
-/// at 1 and 2, and on its third failure, at `attempt_cap: 3`, written to
-/// the dead-letter topic with the header at 3. Every offset is committed.
+/// Pins the cap on the recorded count: a unit failed on each delivery is
+/// read with counts 1, 2 and 3, written to the retry topic with the count
+/// header at 1 and 2 and its publish identity in `spate.origin`, and on its
+/// third failure, at `attempt_cap: 3`, written to the dead-letter topic.
+/// Its attempt record holds 1, 2 and 3, then a tombstone, all on the
+/// partition its identity hashes to. Every offset is committed.
 #[test]
 fn a_unit_that_reports_failure_reaches_the_dead_letter_topic_at_the_cap() {
     let cluster = cluster(1);
@@ -151,21 +169,202 @@ fn a_unit_that_reports_failure_reaches_the_dead_letter_topic_at_the_cap() {
     assert_eq!(dead[0].key.as_deref(), Some(&b"poison"[..]));
     assert_eq!(dead[0].payload.as_deref(), Some(&b"not a descriptor"[..]));
     assert_eq!(dead[0].header("spate.deliveries"), Some("3"));
+    assert_eq!(dead[0].header("spate.origin"), Some("units/0/0"));
 
     let retried = read_topic(&brokers, RETRY, 2);
     let counts: Vec<_> = retried
         .iter()
-        .map(|m| m.header("spate.deliveries"))
+        .map(|m| (m.header("spate.deliveries"), m.header("spate.origin")))
         .collect();
-    assert_eq!(counts, [Some("1"), Some("2")]);
+    assert_eq!(
+        counts,
+        [
+            (Some("1"), Some("units/0/0")),
+            (Some("2"), Some("units/0/0"))
+        ]
+    );
     assert_eq!(worker.recording.seen.lock().unwrap().as_slice(), [1, 2, 3]);
 
     wait_until(DEADLINE, "every offset is committed", || {
         committed(&brokers, &group, WORK) == Some(1)
             && committed(&brokers, &group, RETRY) == Some(2)
     });
+    // `units/0/0` hashes to partition 1 of 2.
+    let id = "units/0/0".to_owned();
+    assert_eq!(
+        read_attempts(&brokers, ATTEMPT_PARTITIONS, 4),
+        [
+            (1, id.clone(), Some(1)),
+            (1, id.clone(), Some(2)),
+            (1, id.clone(), Some(3)),
+            (1, id, None),
+        ]
+    );
     assert_eq!(high_watermark(&brokers, DEAD), 1, "dead-lettered once");
     assert_eq!(worker.stop(), ExitState::Completed);
+}
+
+/// Pins that a worker counts from the attempt record a worker before it
+/// wrote: worker A takes the unit and stops gracefully without settling
+/// it, and worker B, in the same group, reads it with 2.
+#[test]
+fn a_restarted_worker_counts_from_the_latest_attempt_record() {
+    let cluster = cluster(1);
+    let brokers = cluster.bootstrap_servers();
+    let group = spate_test::unique_name("restarted");
+    let yaml = feed_yaml(&brokers, &group, "", "");
+    let a = direct(&yaml);
+    publish(&a.feed, Unit::new("u", b"body".to_vec()));
+    assert_eq!(a.take("A reads the unit").deliveries, 1);
+    drop(a);
+
+    let b = direct(&yaml);
+    assert_eq!(b.take("B reads the unit").deliveries, 2);
+}
+
+/// Pins that an acknowledged unit's attempt record is tombstoned: the
+/// unit read again, by a group that never read it, counts from zero.
+#[test]
+fn a_completed_unit_read_again_counts_from_zero() {
+    let cluster = cluster(1);
+    let brokers = cluster.bootstrap_servers();
+    let group = spate_test::unique_name("completed");
+    let a = direct(&feed_yaml(&brokers, &group, "", ""));
+    publish(&a.feed, Unit::new("u", b"body".to_vec()));
+    let delivery = a.take("A reads the unit");
+    assert_eq!(delivery.deliveries, 1);
+    a.feed.acknowledge(delivery.receipt).unwrap();
+    wait_until(DEADLINE, "the unit's offset is committed", || {
+        committed(&brokers, &group, WORK) == Some(1)
+    });
+
+    let again = direct(&feed_yaml(
+        &brokers,
+        &spate_test::unique_name("again"),
+        "",
+        "",
+    ));
+    assert_eq!(again.take("the unit is read again").deliveries, 1);
+}
+
+/// Pins that a unit whose recorded attempts have reached the cap goes to
+/// the dead-letter topic without being read. The record is seeded by a
+/// librdkafka producer set to `partitioner=murmur2`, so librdkafka places
+/// it. While the dead-letter topic's leader is down, the reader gets
+/// nothing and the unit's offset stays uncommitted over several commit
+/// periods; once the leader is back, the offset is committed and the
+/// record is tombstoned on the partition the seed landed on.
+#[test]
+fn a_unit_at_the_cap_goes_to_the_dead_letter_topic_unread() {
+    let cluster = cluster(2);
+    let brokers = cluster.bootstrap_servers();
+    let group = spate_test::unique_name("unread");
+    for topic in [WORK, RETRY] {
+        cluster.partition_leader(topic, 0, Some(1)).unwrap();
+    }
+    attempts_on(&cluster, 1);
+    cluster.partition_leader(DEAD, 0, Some(2)).unwrap();
+    cluster
+        .coordinator(MockCoordinator::Group(group.clone()), 1)
+        .unwrap();
+    produce_raw(&brokers, WORK, &[(Some(&b"capped"[..]), &b"body"[..])]);
+    let seeder: rdkafka::producer::BaseProducer = rdkafka::ClientConfig::new()
+        .set("bootstrap.servers", &brokers)
+        .set("partitioner", "murmur2")
+        .create()
+        .unwrap();
+    seeder
+        .send(
+            rdkafka::producer::BaseRecord::to(ATTEMPT)
+                .key("units/0/0")
+                .payload(r#"{"v":1,"attempts":3}"#),
+        )
+        .map_err(|(e, _)| e)
+        .unwrap();
+    rdkafka::producer::Producer::flush(&seeder, Duration::from_secs(10)).unwrap();
+    let seeded = read_attempts(&brokers, ATTEMPT_PARTITIONS, 1);
+    cluster.broker_down(2).unwrap();
+
+    let worker = direct(&feed_yaml(&brokers, &group, "  attempt_cap: 3\n", ""));
+    // Elapsed time is the property: the move is held over several commits.
+    for _ in 0..8 {
+        std::thread::sleep(COMMIT_PERIOD / 2);
+        assert!(
+            worker.feed.receive(8).unwrap().is_empty(),
+            "the unit was read"
+        );
+        let at = committed(&brokers, &group, WORK);
+        assert!(
+            at.is_none_or(|at| at <= 0),
+            "the group committed {at:?} before the dead-letter write was confirmed"
+        );
+    }
+    cluster.broker_up(2).unwrap();
+    wait_until(DEADLINE, "the unit's offset is committed", || {
+        committed(&brokers, &group, WORK) == Some(1)
+    });
+    let dead = read_topic(&brokers, DEAD, 1);
+    assert_eq!(dead[0].key.as_deref(), Some(&b"capped"[..]));
+    assert_eq!(dead[0].header("spate.origin"), Some("units/0/0"));
+    let partition = seeded[0].0;
+    assert_eq!(
+        read_attempts(&brokers, ATTEMPT_PARTITIONS, 2),
+        [
+            (partition, "units/0/0".to_owned(), Some(3)),
+            (partition, "units/0/0".to_owned(), None),
+        ]
+    );
+    assert!(
+        worker.feed.receive(8).unwrap().is_empty(),
+        "the unit was read"
+    );
+}
+
+/// Pins that each publish starts its own count, whatever the unit's id:
+/// the same unit published twice is delivered twice with 1. The second
+/// publish follows the first copy's read, so the first copy's attempt
+/// record is on the attempt topic, unsettled, when the second is counted.
+#[test]
+fn a_unit_published_twice_counts_each_publish_from_one() {
+    let cluster = cluster(1);
+    let brokers = cluster.bootstrap_servers();
+    let worker = direct(&feed_yaml(
+        &brokers,
+        &spate_test::unique_name("twice"),
+        "",
+        "",
+    ));
+    publish(&worker.feed, Unit::new("same", b"first".to_vec()));
+    let first = worker.take("the first copy");
+    publish(&worker.feed, Unit::new("same", b"second".to_vec()));
+    let second = worker.take("the second copy");
+    assert_eq!(first.unit.body, b"first");
+    assert_eq!(
+        (first.deliveries, second.deliveries),
+        (1, 1),
+        "the second publish counted the first's read"
+    );
+}
+
+/// Pins that a unit published again after its earlier publish was
+/// dead-lettered is read: at `attempt_cap: 1` the first publish fails to
+/// the dead-letter topic, and the second is read with 1.
+#[test]
+fn a_dead_lettered_unit_published_again_is_read() {
+    let cluster = cluster(1);
+    let brokers = cluster.bootstrap_servers();
+    let group = spate_test::unique_name("again-after-dead");
+    let worker = direct(&feed_yaml(&brokers, &group, "  attempt_cap: 1\n", ""));
+    publish(&worker.feed, Unit::new("u", b"first".to_vec()));
+    let first = worker.take("the first publish");
+    worker.feed.fail(first.receipt, "test").unwrap();
+    wait_until(DEADLINE, "the first publish is dead-lettered", || {
+        committed(&brokers, &group, WORK) == Some(1)
+    });
+    publish(&worker.feed, Unit::new("u", b"second".to_vec()));
+    let second = worker.take("the second publish");
+    assert_eq!(second.unit.body, b"second");
+    assert_eq!(second.deliveries, 1);
 }
 
 /// Pins that a message with no key, and one whose key is not UTF-8, go to
@@ -304,9 +503,9 @@ fn a_topic_reported_missing_once_does_not_stop_the_feed() {
 }
 
 /// Pins that a committed-offset lookup the coordinator keeps answering
-/// with "load in progress" does not hold the feed's thread out of `poll`
-/// past `max.poll.interval.ms`: over 20 s of a rebalance, neither member
-/// reports a poll-interval error and neither stops.
+/// with "load in progress" does not hold the feed's consumer thread out of
+/// `poll` past `max.poll.interval.ms`: over 20 s of a rebalance, neither
+/// member reports a poll-interval error and neither stops.
 #[test]
 fn a_stalled_offset_fetch_does_not_exceed_the_max_poll_interval() {
     use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};

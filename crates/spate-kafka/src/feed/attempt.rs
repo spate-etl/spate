@@ -588,6 +588,16 @@ mod tests {
             ),
             "units/3/4"
         );
+        assert_eq!(
+            id(
+                "units-retry",
+                &[
+                    origin(b"units/0/1"),
+                    ("other".to_owned(), Some(b"units/5/5".to_vec())),
+                ]
+            ),
+            "units/0/1"
+        );
         // Parsed, so the identity is written in one form.
         assert_eq!(id("units-retry", &[origin(b"units/01/+4")]), "units/1/4");
         for malformed in [
@@ -662,7 +672,7 @@ mod tests {
         assert!(reason.contains("the attempt follower's poll"), "{reason}");
     }
 
-    /// Pins that an unknown attempt topic or partition latches the feed.
+    /// Pins that `UnknownTopicOrPartition` from a poll latches the feed.
     #[test]
     fn an_unknown_attempt_topic_latches_the_feed() {
         use rdkafka::error::RDKafkaErrorCode as C;

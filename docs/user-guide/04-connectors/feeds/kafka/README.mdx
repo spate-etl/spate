@@ -52,7 +52,7 @@ unknown fields are rejected with the offending key.
 | `brokers` | string | `required` | Comma-separated bootstrap servers. |
 | `group_id` | string | `required` | The consumer group every worker of the pipeline joins. |
 | `topic` | string | `required` | The work topic, where a publish writes a unit. |
-| `retry_topic` | string | `required` | Where a unit failed below the attempt cap is written again. The group reads it beside the work topic. |
+| `retry_topic` | string | `required` | Where a unit failed below the attempt cap is written again. The group reads it beside the work topic. Must differ from `topic`. |
 | `dead_letter_topic` | string | `required` | Where a unit failed at the attempt cap goes, and a message that names no unit. Nothing reads it. |
 | `delivery_timeout` | duration | `30s` | How long one write waits for its delivery report (librdkafka `message.timeout.ms`). A retry or dead-letter write that times out is sent again, and a publish that times out is reported to its caller as retryable. From `1ms` to about 24.8 days. |
 | `statistics_interval` | duration | `5s` | librdkafka's statistics interval for the feed's clients. `0s` disables statistics; a non-zero value under `1ms` is refused. |

@@ -237,6 +237,11 @@ impl KafkaFeedConfig {
                 return Err(error(format!("`{key}` must not be empty")));
             }
         }
+        // A message read from the work topic counts under its own
+        // coordinates, so a retry copy written there would start a new count.
+        if self.retry_topic == self.topic {
+            return Err(error("`retry_topic` must differ from `topic`".to_owned()));
+        }
         if self.delivery_timeout.as_millis() == 0 {
             return Err(error(
                 "`delivery_timeout` must be at least 1ms: librdkafka reads 0 as no timeout, and \
@@ -504,6 +509,19 @@ mod tests {
             parse(&format!("{MINIMAL}  delivery_timeout: {timeout}\n"))
                 .unwrap_or_else(|err| panic!("{timeout}: {err}"));
         }
+    }
+
+    /// Pins that a retry topic named like the work topic is refused: a retry
+    /// copy read from the work topic would count under its own coordinates.
+    #[test]
+    fn a_retry_topic_that_is_the_work_topic_is_refused() {
+        let err = parse(&MINIMAL.replace("units-retry", "units"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("`retry_topic` must differ from `topic`"),
+            "{err}"
+        );
     }
 
     /// Pins that a statistics interval under a millisecond is refused, since

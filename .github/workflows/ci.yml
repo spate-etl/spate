@@ -391,17 +391,27 @@ jobs:
           tools: cargo-about,cargo-cyclonedx
           shared-key: publish
 
-      # The night after a release, before anything merges, `derive` refuses
-      # with "no commits since vX.Y.Z": there is no release to rehearse,
-      # which is not a failure. The tag and the count are xtask's own rules
-      # (`last_tag`, `derive`), so this skips exactly where `derive` would
-      # refuse for that reason. A checkout with no tag does not skip, since
-      # `..HEAD` counts nothing; `derive` fails it instead.
+      # While a release is in flight, `main` holds its `release: vX.Y.Z`
+      # commit and the publish has not yet created the tag, so `derive`
+      # refuses with "a release is half-finished". A pull request run in that
+      # window skips with a notice, comparing `Cargo.toml`'s version with the
+      # newest tag as `derive` does, and a re-run after the tag lands
+      # rehearses. The nightly copy in `scheduled.yml` keeps the refusal, so a
+      # stuck publish still files its issue. The zero-count skip is the
+      # nightly's. It does not fire on a pull request, since the pull
+      # request's own commits are past the tag. A checkout with no tag skips
+      # neither way; `derive` fails it.
       - name: Derive the version to rehearse
         id: version
         run: |
           set -euo pipefail
           tag=$(git tag --list 'v[0-9]*' --sort=-v:refname | sed -n 1p)
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml)
+          if [ -n "$tag" ] && [ "v$version" != "$tag" ]; then
+            echo "::notice::Cargo.toml is at $version and the newest tag is $tag, so a release is in flight. Re-run this job once it is tagged."
+            echo "skip=true" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
           if [ -n "$tag" ] && [ "$(git rev-list --no-merges --count "$tag..HEAD")" = 0 ]; then
             echo "::notice::No commits since $tag, so there is no release to rehearse."
             echo "skip=true" >>"$GITHUB_OUTPUT"

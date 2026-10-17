@@ -40,7 +40,7 @@
 use super::events::Cause;
 use super::inflight::{Position, Tp};
 use super::write::{self, DELIVERIES_HEADER, Destination, Move, Outgoing, Producer, Write};
-use super::{Core, READY_CAPACITY, Ready, State};
+use super::{Core, LatchOnPanic, READY_CAPACITY, Ready, State};
 use crate::context::{Intent, SourceContext};
 use rdkafka::consumer::{BaseConsumer, CommitMode, Consumer};
 use rdkafka::error::{KafkaError, RDKafkaErrorCode};
@@ -57,7 +57,7 @@ use std::time::{Duration, Instant};
 pub(crate) const COMMIT_INTERVAL: Duration = Duration::from_secs(1);
 
 /// The longest one poll waits for a message.
-const POLL_TIMEOUT: Duration = Duration::from_millis(100);
+pub(crate) const POLL_TIMEOUT: Duration = Duration::from_millis(100);
 
 /// Messages taken per pass before the thread serves rebalances, pauses and
 /// commits.
@@ -102,21 +102,12 @@ impl Driver {
     }
 }
 
-/// Latches the feed when the consumer thread unwinds, so the reader stops
-/// instead of waiting on a feed that delivers nothing.
-struct LatchOnPanic(Arc<Core>);
-
-impl Drop for LatchOnPanic {
-    fn drop(&mut self) {
-        if std::thread::panicking() {
-            self.0.latch("the Kafka feed's consumer thread panicked");
-        }
-    }
-}
-
 /// Run the consumer thread until the feed is dropped or latches.
 pub(crate) fn run(mut d: Driver) {
-    let _guard = LatchOnPanic(Arc::clone(&d.core));
+    let _guard = LatchOnPanic {
+        core: Arc::clone(&d.core),
+        thread: "consumer",
+    };
     while !d.core.stopped() && !d.core.latched() {
         d.resend_due();
         d.poll();

@@ -26,6 +26,11 @@
 //! below it to the retry topic with the header raised. A delivery that ends
 //! without a report, as when its worker dies, is not counted.
 
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the attempt gate in the next change reads it")
+)]
+mod attempt;
 mod config;
 mod consumer;
 mod error;
@@ -255,6 +260,23 @@ impl Core {
                     }
                 },
             },
+        }
+    }
+}
+
+/// Latches the feed when one of its threads unwinds, so the reader stops
+/// instead of waiting on a feed that delivers nothing.
+pub(crate) struct LatchOnPanic {
+    pub(crate) core: Arc<Core>,
+    /// The thread's name in the latch reason, as in "the consumer thread".
+    pub(crate) thread: &'static str,
+}
+
+impl Drop for LatchOnPanic {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.core
+                .latch(&format!("the Kafka feed's {} thread panicked", self.thread));
         }
     }
 }

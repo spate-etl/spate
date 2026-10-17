@@ -506,7 +506,8 @@ fn a_waker_set_with_units_buffered_wakes_at_once() {
 /// Pins the gate's two answers: a unit recorded below the cap is admitted
 /// with an attempt write of the recorded count plus one, to its attempt
 /// partition, its receipt still held; a unit recorded at the cap moves to
-/// the dead-letter topic, unread, its receipt released, and its offset
+/// the dead-letter topic, unread, with the recorded count in its
+/// `spate.deliveries` header, its receipt released, and its offset
 /// finishes on a tombstone. Both offsets stay unfinished.
 #[test]
 fn a_unit_is_admitted_below_the_cap_and_dead_lettered_at_it() {
@@ -548,6 +549,13 @@ fn a_unit_is_admitted_below_the_cap_and_dead_lettered_at_it() {
                     .message
                     .headers
                     .contains(&("spate.origin".to_owned(), Some(at_id.as_bytes().to_vec())))
+            );
+            assert!(
+                moving
+                    .message
+                    .headers
+                    .contains(&(DELIVERIES_HEADER.to_owned(), Some(b"3".to_vec()))),
+                "the copy carries the recorded count"
             );
         }
         other => panic!("{other:?}"),

@@ -23,7 +23,7 @@ Signatures, trait contracts, and per-item docs live in the rustdoc:
 |---|---|
 | [spate](https://docs.rs/spate) | The facade — the only crate applications depend on. Feature-forwards the connectors (`kafka`, `clickhouse`, `s3`, `sqs`, `avro`, `json`, `coordination`, `datagen`). |
 | [spate-core](https://docs.rs/spate-core) | The engine: record/ack types, source/sink traits, operator chain, checkpointer, backpressure, pipeline builder and runtime, config, metrics, admin server. |
-| [spate-kafka](https://docs.rs/spate-kafka) | Kafka source (single consumer, split partition queues), producer sink, and work feed over work, retry and dead-letter topics. |
+| [spate-kafka](https://docs.rs/spate-kafka) | Kafka source (single consumer, split partition queues), producer sink, and work feed over work, attempt, retry and dead-letter topics. |
 | [spate-clickhouse](https://docs.rs/spate-clickhouse) | ClickHouse `ShardWriter` with Native and RowBinary encoders. |
 | [spate-s3](https://docs.rs/spate-s3) | Coordinated object-storage backfill source: planned splits, fenced per-split progress. |
 | [spate-sqs](https://docs.rs/spate-sqs) | Amazon SQS work feed: receive, renewal, delete and redrive over one standard queue. |

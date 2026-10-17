@@ -1,6 +1,7 @@
 //! The Kafka feed's test harness: a worker pipeline that reads units through
 //! a `feed: { kafka: … }` section, a feed driven outside a pipeline, and
-//! readers of committed offsets and of the retry and dead-letter topics.
+//! readers of committed offsets and of the retry, dead-letter and attempt
+//! topics.
 
 use rdkafka::ClientConfig;
 use rdkafka::admin::AdminClient;
@@ -33,6 +34,10 @@ pub(crate) const DEADLINE: Duration = Duration::from_secs(60);
 pub(crate) const WORK: &str = "units";
 pub(crate) const RETRY: &str = "units-retry";
 pub(crate) const DEAD: &str = "units-dead";
+pub(crate) const ATTEMPT: &str = "units-attempts";
+
+/// The attempt topic's partition count on the MockCluster.
+pub(crate) const ATTEMPT_PARTITIONS: i32 = 2;
 
 /// The feed's commit interval, read from the outside: several of these pass
 /// in a window that pins an offset as not committed.
@@ -44,7 +49,7 @@ pub(crate) fn feed_yaml(brokers: &str, group: &str, section: &str, body: &str) -
     format!(
         "feed:\n{section}  kafka:\n    brokers: \"{brokers}\"\n    group_id: {group}\n    \
          topic: {WORK}\n    retry_topic: {RETRY}\n    dead_letter_topic: {DEAD}\n    \
-         statistics_interval: 0s\n    rdkafka:\n      session.timeout.ms: \"6000\"\n      \
+         attempt_topic: {ATTEMPT}\n    statistics_interval: 0s\n    rdkafka:\n      session.timeout.ms: \"6000\"\n      \
          heartbeat.interval.ms: \"2000\"\n{body}"
     )
 }
@@ -318,6 +323,41 @@ pub(crate) fn read_topic(brokers: &str, topic: &str, n: usize) -> Vec<Read> {
                     })
                     .unwrap_or_default(),
             });
+        }
+        got.len() >= n
+    });
+    got
+}
+
+/// One attempt record as read back: its partition, its key, and its count,
+/// `None` for a tombstone.
+pub(crate) type AttemptRecord = (i32, String, Option<u32>);
+
+/// The first `n` records of the attempt topic's `partitions` partitions,
+/// read from their start, in offset order within each partition.
+pub(crate) fn read_attempts(brokers: &str, partitions: i32, n: usize) -> Vec<AttemptRecord> {
+    let consumer: BaseConsumer = ClientConfig::new()
+        .set("bootstrap.servers", brokers)
+        .set("group.id", spate_test::unique_name("read-attempts"))
+        .create()
+        .expect("reader");
+    let mut tpl = TopicPartitionList::new();
+    for partition in 0..partitions {
+        tpl.add_partition_offset(ATTEMPT, partition, Offset::Beginning)
+            .unwrap();
+    }
+    consumer.assign(&tpl).unwrap();
+    let mut got = Vec::new();
+    wait_until(DEADLINE, &format!("{n} attempt records"), || {
+        while let Some(message) = consumer.poll(Duration::from_millis(100)) {
+            let message = message.expect("read");
+            let key = String::from_utf8(message.key().expect("keyed").to_vec()).unwrap();
+            let count = message.payload().map(|value| {
+                let record: serde_json::Value = serde_json::from_slice(value).unwrap();
+                assert_eq!(record["v"], 1, "{record}");
+                u32::try_from(record["attempts"].as_u64().unwrap()).unwrap()
+            });
+            got.push((message.partition(), key, count));
         }
         got.len() >= n
     });

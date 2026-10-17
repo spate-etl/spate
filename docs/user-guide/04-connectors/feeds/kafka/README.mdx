@@ -1,5 +1,5 @@
 ---
-description: "The Kafka feed: work units as messages on a work topic one consumer group reads, committed once read, and moved to retry and dead-letter topics on failure."
+description: "The Kafka feed: work units on a work topic one consumer group reads, each read counted on an attempt topic, failed units moved to retry and dead-letter topics."
 ---
 
 # Kafka (feed)
@@ -9,12 +9,16 @@ import LoggingKafka from '../../_logging-kafka.mdx';
 
 The Kafka feed (`spate-kafka`, feature `kafka` on the `spate` facade) carries
 [work units](../../../07-reference/glossary.mdx#work-unit) as messages on a work
-topic that every worker of a pipeline reads as one consumer group. A unit's
-offset is committed once every record in it is acknowledged. A unit its reader
-fails is written to a retry topic, which the group reads beside the work topic,
-or at the attempt cap to a dead-letter topic, and its offset is committed once
-that write is confirmed. A unit whose worker stops is read again by the member
-its partition moves to. The backend lives in the Kafka connector's crate, so a
+topic that every worker of a pipeline reads as one consumer group. Before a
+unit is read, its attempt is recorded on a compacted attempt topic, and a unit
+whose recorded attempts have reached the attempt cap goes to a dead-letter
+topic without being read. A unit's offset is committed once every record in it
+is acknowledged and the tombstone of its attempt record is confirmed. A unit
+its reader fails is written to a retry topic, which the group reads beside the
+work topic, or at the attempt cap to the dead-letter topic, and its offset is
+committed once that write is confirmed, and for the dead-letter topic the
+tombstone after it. A unit whose worker stops is read again by the member its
+partition moves to. The backend lives in the Kafka connector's crate, so a
 source names no backend
 ([ADR-0069](../../../../adr/0069-feed-backends-live-in-their-own-crates.md)).
 
@@ -34,9 +38,12 @@ KAFKA_BROKERS=localhost:9092 \
 ```
 
 `KafkaFeed::connect` checks the feed's topics (see
-[Startup checks](#startup-checks)), then builds the feed's consumer and
-producer and starts the thread that polls the consumer. The checks read from
-the brokers, so an unreachable broker fails the call within 30 seconds.
+[Startup checks](#startup-checks)), then builds the feed's clients and starts
+its three threads: the consumer thread, which polls the group member; the
+follower thread, which reads the attempt topic; and the gate thread, which
+records each unit's attempt before the unit is read (see
+[Counting deliveries](#counting-deliveries)). The checks read from the
+brokers, so an unreachable broker fails the call within 30 seconds.
 
 ## Configuration
 
@@ -53,21 +60,24 @@ unknown fields are rejected with the offending key.
 | `group_id` | string | `required` | The consumer group every worker of the pipeline joins. |
 | `topic` | string | `required` | The work topic, where a publish writes a unit. |
 | `retry_topic` | string | `required` | Where a unit failed below the attempt cap is written again. The group reads it beside the work topic. Must differ from `topic`. |
-| `dead_letter_topic` | string | `required` | Where a unit failed at the attempt cap goes, and a message that names no unit. Nothing reads it. |
-| `delivery_timeout` | duration | `30s` | How long one write waits for its delivery report (librdkafka `message.timeout.ms`). A retry or dead-letter write that times out is sent again, and a publish that times out is reported to its caller as retryable. From `1ms` to about 24.8 days. |
-| `statistics_interval` | duration | `5s` | librdkafka's statistics interval for the feed's clients. `0s` disables statistics; a non-zero value under `1ms` is refused. |
+| `dead_letter_topic` | string | `required` | Where a unit goes at the attempt cap, failed by its reader or moved unread, and a message that names no unit. Nothing reads it. |
+| `attempt_topic` | string | `required` | The compacted topic each unit's attempt is recorded on before the unit is read (see [Topics](#topics)). |
+| `delivery_timeout` | duration | `30s` | How long one write waits for its delivery report (librdkafka `message.timeout.ms`), and the bound on one pass of the gate. An attempt, tombstone, retry or dead-letter write that times out is sent again, and a publish that times out is reported to its caller as retryable. From `1ms` to about 24.8 days. |
+| `statistics_interval` | duration | `5s` | librdkafka's statistics interval for the feed's consumer and producer. The attempt follower sends no statistics. `0s` disables statistics; a non-zero value under `1ms` is refused. |
 | `rdkafka` | string map | `{}` | Raw librdkafka properties for every client of the feed, applied after validation — see below. |
 
 `units_held` beside `kafka:` sets how many units a worker holds at once, and
-`attempt_cap` the delivery on which a failed unit goes to the dead-letter
-topic (see [Counting deliveries](#counting-deliveries)). `attempt_cap` inside
-the `kafka:` body is refused.
+`attempt_cap` the attempt at which a unit goes to the dead-letter topic: a
+unit its reader fails on that attempt or later, and a unit whose recorded
+attempts have reached it, which moves without being read (see
+[Counting deliveries](#counting-deliveries)). `attempt_cap` inside the
+`kafka:` body is refused.
 
 ## The `rdkafka` passthrough and the denylist
 
-One map configures the feed's consumer, its producer, and the two clients
-its startup checks read the topics with. A property that applies to one
-client only draws a warning from librdkafka in the others.
+One map configures the feed's consumer, its attempt follower, its producer,
+and the two clients its startup checks read the topics with. A property that
+applies to one client only draws a warning from librdkafka in the others.
 Properties the feed owns are **rejected at load time with an explanation**,
 under their own name and under `topic.<name>`, which librdkafka reads as the
 same property. Aliases are denied beside the canonical names, because
@@ -82,15 +92,17 @@ passthrough and feed values apply in unspecified order.
 | `enable.auto.commit`, `auto.commit.enable` (alias) | The feed commits each partition up to its first unfinished unit itself. |
 | `enable.auto.offset.store` | The feed decides which offsets may be committed. |
 | `enable.partition.eof` | The feed reads only messages from the consumer. |
-| `acks`, `request.required.acks` (alias) | Forced to `all`: an offset completes once the delivery report confirms its retry or dead-letter write. |
+| `acks`, `request.required.acks` (alias) | Forced to `all`: a unit is read once the delivery report confirms its attempt write, and its offset completes once the report confirms its tombstone or retry write. |
 | `enable.idempotence` | Forced on, so librdkafka's own retries neither reorder nor duplicate a write. |
 | `transactional.id` | The feed does not use transactions; a write is confirmed by its delivery report. |
 | `message.timeout.ms`, `delivery.timeout.ms` (alias) | Owned by the typed `delivery_timeout` field. |
-| `delivery.report.only.error` | A retry or dead-letter write finishes its offset only once its delivery report confirms it. |
+| `delivery.report.only.error` | A unit is read only once its attempt write is confirmed, and its offset finishes only once its tombstone or retry write is, both by their delivery reports. |
 | `allow.auto.create.topics` | Forced off: a write to a missing topic, or a startup check's read of one, fails, and never creates the topic with the broker's defaults. |
 | `statistics.interval.ms` | Owned by the typed `statistics_interval` field. |
 | `bootstrap.servers`, `metadata.broker.list` (alias) | Owned by the typed `brokers` field. |
 
+The attempt follower sets the same group, offset and commit properties the
+consumer does, so the denylist covers it too.
 `session.timeout.ms`, `heartbeat.interval.ms` and `max.poll.interval.ms` pass
 through, and set how long a member that dies keeps its partitions (see
 [No lease](#no-lease)).
@@ -109,15 +121,16 @@ A refused or reset connection stays retryable: the checks wait for a broker the
 client can use, and fail with `KafkaFeedError::Unavailable` once their bound
 passes.
 
-Once the feed has connected, its consumer treats a SASL authentication
-failure and a rejected handshake as the source does, and the feed stops with
-the reason. A retry or dead-letter write that times out is sent again.
+Once the feed has connected, its consumer and its attempt follower treat a
+SASL authentication failure and a rejected handshake as the source does, and
+the feed stops with the reason. An attempt, tombstone, retry or dead-letter
+write that times out is sent again.
 
 <LoggingKafka />
 
 ## Topics
 
-Create the three topics before the first worker starts. The feed never
+Create the four topics before the first worker starts. The feed never
 creates a topic, and connecting refuses a missing one (see
 [Startup checks](#startup-checks)). A topic can still go missing after the
 feed connects, as when it is deleted while the feed runs. librdkafka holds a
@@ -125,9 +138,11 @@ write to a topic it has not yet seen in metadata. Once `topic.metadata.propagati
 since the worker first wrote to the topic, the next metadata response that
 lacks it marks the topic missing, and every write still held then stops the
 feed. After that, a publish to the missing work topic is reported to its
-caller as retryable, and a retry or dead-letter write is sent again until the
-topic exists, with its partition committing nothing past it meanwhile. A write
-that times out while held is handled the same way.
+caller as retryable, and an attempt, tombstone, retry or dead-letter write is
+sent again until the topic exists, with its partition committing nothing past
+it meanwhile. A write that times out while held is handled the same way. A
+deleted attempt topic also stops the feed through its follower, whose read of
+the topic then fails with an error the feed treats as fatal.
 
 The work topic's partitions bound how many workers read at once: each partition of the
 work and retry topics is read by one member of the group.
@@ -146,7 +161,37 @@ work topic's retention does not limit how long a moved unit is kept:
   attempt cap waits for someone to inspect it or publish it again. Set it
   for that window, or to `-1` to keep messages without limit.
 
-Use fresh topics, and a fresh group, for each bounded job. The topics keep no
+The attempt topic holds one record for each unit in flight or waiting to be
+retried, keyed by the unit's publish identity (see
+[Counting deliveries](#counting-deliveries)):
+
+- its `cleanup.policy` is `compact` and nothing else. Time or size retention
+  would delete the count of a unit still in flight, and connecting refuses
+  `delete` and `compact,delete`;
+- its partition count is fixed for its life. The feed places each record by
+  the count it reads at connect, and does not detect a change. Workers
+  started before and after a change count a unit separately, so the unit can
+  be read up to `attempt_cap` more times;
+- `segment.ms` and `delete.retention.ms` keep a worker's start short. Every
+  worker reads the attempt topic from its start before its first unit is
+  read, and the cleaner removes superseded records and tombstones only from
+  closed segments, which `segment.ms` rolls;
+- `delete.retention.ms` must exceed the longest time a worker takes to read
+  the attempt topic. A worker still reading when the cleaner removes a
+  tombstone keeps the count the tombstone cleared;
+- each group and work topic needs an attempt topic of its own, and a work
+  topic that is deleted and created again needs a fresh one. A publish
+  identity names the work topic and the message's position in it, and
+  neither the group nor which incarnation of the topic wrote it.
+
+The attempt follower joins the feed's group by its `group.id` and assigns
+the attempt topic's partitions itself, so it never takes part in a rebalance
+and needs no group ACL beyond the feed's own. The client's identity needs
+`Read`, `Write`, `Describe` and `DescribeConfigs` on the attempt topic.
+
+Use fresh topics, and a fresh group, for each bounded job: the work, attempt,
+retry and dead-letter topics. A continuous job keeps its work topic, and
+needs attempt, retry and dead-letter topics of its own. The topics keep no
 record of which job published a unit, so a job that reuses them reads every
 unit an earlier job left unread or uncommitted. The broker drops a group's
 committed offsets once the group has been empty for its
@@ -155,20 +200,24 @@ partition again from its earliest retained offset.
 
 ## Startup checks
 
-`KafkaFeed::connect` reads the metadata and configuration of the work, retry
-and dead-letter topics before any of the feed's clients joins the group, and
-refuses topics the feed cannot run on:
+`KafkaFeed::connect` reads the metadata and configuration of the work,
+retry, dead-letter and attempt topics before any of the feed's clients joins
+the group, and refuses topics the feed cannot run on:
 
-- a missing work, retry or dead-letter topic;
+- a missing work, retry, dead-letter or attempt topic;
 - a work, retry or dead-letter topic whose `cleanup.policy` includes
   `compact`. Compaction keeps only the latest message for each key, and a
-  unit's id is its key, so it can delete a copy of a unit nobody has read.
+  unit's id is its key, so it can delete a copy of a unit nobody has read;
+- an attempt topic whose `cleanup.policy` is anything but `compact`;
+- an attempt topic that reports no partitions.
 
+The attempt topic's partition count, read here, places each attempt record.
 The checks read through two clients built from `brokers` and the `rdkafka`
 passthrough, one for metadata and an admin client for configuration, with
 `allow.auto.create.topics` off, so reading a missing topic does not create
 it. The client's identity needs the `Describe` and `DescribeConfigs`
-operations on the three topics. A read the cluster refuses as unauthorized,
+operations on the four topics, and `Read` and `Write` on the attempt topic
+once the feed runs. A read the cluster refuses as unauthorized,
 or for an invalid topic name, fails with `KafkaFeedError::Refused`. So does a
 topic the cluster describes no configuration entry for, which is what a
 client without `DescribeConfigs` on it receives, and a rejected credential or
@@ -177,11 +226,12 @@ read fails with `KafkaFeedError::Unavailable`. The checks take at most 30 second
 error past that bound names the read under way.
 
 When a topic reports no `cleanup.policy`, the feed logs a warning and skips
-the compaction check for it. Connecting logs each topic's `cleanup.policy`.
+the policy check for it. Connecting logs each topic's `cleanup.policy` and the
+attempt topic's partition count.
 
-The checks run only when the feed connects. A topic compacted later goes
-unnoticed, and a topic deleted later is handled as [Topics](#topics)
-describes.
+The checks run only when the feed connects. A topic whose policy or partition
+count changes later goes unnoticed, and a topic deleted later is handled as
+[Topics](#topics) describes.
 
 ## How a unit finishes
 
@@ -190,53 +240,88 @@ member before it hands any out. A member starts each partition it is assigned
 at the group's committed offset, or at the earliest offset where none is
 committed.
 
-An offset finishes when the reader acknowledges its unit, or when the write
-that moves the unit to the retry or dead-letter topic is confirmed. Each
-partition commits up to its first unfinished offset, every second and when the
-partition is revoked. A unit still unfinished blocks the commits of its
-partition, so the next owner of the partition reads that unit again and every
-unit read after it.
+An acknowledged unit's offset finishes once the tombstone of its attempt
+record is confirmed. A failed unit's offset finishes once its write to the
+retry topic is confirmed, or, for a write to the dead-letter topic, once the
+tombstone sent after that write is. A unit waiting at the gate, or with its
+attempt write in flight, holds its offset unfinished. Each partition commits
+up to its first unfinished offset, every second and when the partition is
+revoked. A unit still unfinished blocks the commits of its partition, so the
+next owner of the partition reads that unit again and every unit read after
+it.
 
 A rebalance that fails gives up every partition with nothing committed. The
 units read since the last commit are delivered again.
 
 ## Backpressure
 
-The consumer pauses its partitions once it buffers 128 units for the reader,
-and resumes them once the buffer is down to 64. It keeps polling while paused,
-so a slow reader does not cost the member its partitions through
-`max.poll.interval.ms`.
+The consumer pauses its partitions once the feed holds 128 units for the
+reader, counting the units waiting at the gate and those whose attempt write
+is in flight, and resumes them once that count is down to 64. A stalled
+attempt topic therefore pauses the partitions. The consumer keeps polling
+while paused, so a slow reader does not cost the member its partitions
+through `max.poll.interval.ms`.
 
 ## No lease
 
-A unit has no lease. A member keeps its partitions while the feed's thread
-polls and its heartbeats reach the group, whatever the reader is doing. A
-worker whose control plane wedges, so that its reader stops acknowledging and
-failing units, keeps its partitions and their unfinished units until the
-process exits. A worker that dies loses them at the group's session timeout,
-`session.timeout.ms` (librdkafka's default is 45 seconds), and the next owner
-reads them again.
+A unit has no lease. A member keeps its partitions while the feed's consumer
+thread polls and its heartbeats reach the group, whatever the reader is
+doing. A worker whose control plane wedges, so that its reader stops
+acknowledging and failing units, keeps its partitions and their unfinished
+units until the process exits. A worker that dies loses them at the group's
+session timeout, `session.timeout.ms` (librdkafka's default is 45 seconds),
+and the next owner reads them again.
 
 ## Counting deliveries
 
-A delivery's count is the message's `spate.deliveries` header plus one, so a
-unit read from the work topic is delivered with a count of 1. When the reader
-fails a unit below `attempt_cap`, the unit is written to the retry topic with
-the header set to that delivery's count. At or past the cap it is written to
-the dead-letter topic with the same header.
+A unit's attempts are counted under its publish identity:
+`<topic>/<partition>/<offset>` of the work-topic message a publish wrote. A
+unit read from the work topic counts under its own position. A copy the feed
+writes to the retry or dead-letter topic carries the identity in a
+`spate.origin` header, and a retry copy counts under it. A retry copy whose
+header is missing or unreadable counts under its own position, with a
+warning, so its count starts again. Each publish starts its own count,
+whatever the unit's id.
 
-The count is of reported failures. A delivery that ends without a report,
-because its worker died, a rebalance took its partition or the feed stopped,
-is not counted. A unit that kills its worker every time it is read is
-therefore read again without bound, and never reaches the dead-letter topic.
+Before a unit is read, the gate reads the high watermark of the unit's
+attempt partition and waits until the follower has read that partition up to
+it. The gate then writes the recorded count plus one, and the unit reaches
+the reader with that count once the write is confirmed. A unit whose recorded
+attempts have reached `attempt_cap` goes to the dead-letter topic without
+being read. When the reader fails a unit below `attempt_cap`, the unit is
+written to the retry topic. At or past the cap it is written to the
+dead-letter topic.
 
-A failed unit's offset finishes only once its write is confirmed. A retry or
-dead-letter write that fails transiently, or gets no report within
-`delivery_timeout`, is sent again after a backoff from 200 ms up to 5 s, and
-its partition's commits wait for it. A write that retrying cannot fix stops the
-feed and the pipeline: a refused authorization, a message over the topic's size
-limit, or a fenced producer. [Topics](#topics) covers a write to a missing
-topic. A unit written to the retry topic is a new message, so it is read after the units already there.
+Every read counts, including a read whose worker dies and a read cut short by
+a graceful stop or a rebalance. A unit that kills its worker on every read
+reaches the dead-letter topic at the cap. The cap must exceed the stops and
+rebalances a unit can see: under eager assignment, a rolling restart of N
+members can cost a unit up to 2N attempts. Two copies of one publish read at
+the same time, as after a rebalance, can count once between them.
+
+An acknowledged unit's attempt record is tombstoned, so a later read of the
+same message counts from zero. A retry write leaves the record in place. A
+dead-letter write is followed by a tombstone too, so the attempt topic holds
+records only for units in flight or waiting to be retried. That opens a
+window. If a worker crashes within a commit interval after the tombstone is
+confirmed, or loses the partition while the tombstone is in flight, the next
+owner reads the unit again from a count of zero and moves a second copy to
+the dead-letter topic, after at most `attempt_cap` more reads.
+
+A unit's offset finishes only once the write that settles it is confirmed. An
+attempt, tombstone, retry or dead-letter write that fails transiently, or gets
+no report within `delivery_timeout`, is sent again after a backoff from 200 ms
+up to 5 s, and its partition's commits wait for it. An attempt write is sent
+again only while the worker still owns the unit's partition. A write that
+retrying cannot fix stops the feed and the pipeline: a refused authorization,
+a message over the topic's size limit, or a fenced producer. [Topics](#topics)
+covers a write to a missing topic. A unit written to the retry topic is a new
+message, so it is read after the units already there.
+
+A gate pass that cannot read a watermark, or whose follower has not caught
+up within `delivery_timeout`, logs a warning naming the attempt partition and
+tries its units again. A watermark read refused in a way retrying cannot fix,
+and an attempt record the worker cannot read, stop the feed.
 
 A message with no key, or a key that is not UTF-8, names no unit. It goes to
 the dead-letter topic at once, with its key, value and headers as read, and
@@ -248,13 +333,30 @@ format v0 or v1, librdkafka skips its offset, and a commit past it would lose
 the unit. A feed that has stopped commits nothing more, so the next owner of
 the partition reads it again from the last commit.
 
+## What counting costs
+
+Before its read starts, each unit costs a watermark read of its attempt
+partition, the follower's catch-up to that watermark, and one confirmed
+produce. The gate takes every unit waiting at once, and one watermark read
+serves every unit of a partition in that pass. Every worker holds in memory
+the count of each identity with a live record, whichever worker reads the
+unit, and reads the attempt topic from its start when it connects.
+[ADR-0070](../../../../adr/0070-on-kafka-a-units-attempt-is-recorded-before-the-unit-is-read.md)
+gives the measured gate latency and memory per record.
+
 ## Stop
 
-Dropping the feed commits each partition up to its first unfinished offset
-and leaves the group. Units buffered for the reader, units being read and
-writes still waiting for their report are read again by the next owner of
-their partition. A feed that stopped on an error commits nothing more and
-leaves the group at once, so every unit since its last commit is read again.
+Dropping the feed waits up to 1 s for its writes in flight to be confirmed,
+then commits each partition up to its first unfinished offset and leaves the
+group. An acknowledged unit whose tombstone is not confirmed within that
+second is read again after the stop, and that read counts. A dead-letter
+write confirmed during the stop is not followed by a tombstone, so the next
+owner finds the unit's record at the cap and moves another copy to the
+dead-letter topic without reading it. Units waiting at the gate, buffered for
+the reader or being read, and writes still waiting for their report, are read
+again by the next owner of their partition. A feed that stopped on an error
+commits nothing more and leaves the group at once, so every unit since its
+last commit is read again.
 
 ## Message mapping
 
@@ -262,13 +364,26 @@ leaves the group at once, so every unit since its last commit is read again.
 |---|---|
 | Id | The key, as UTF-8. |
 | Body | The value. A message with no value is a unit with an empty body. |
-| Delivery count | The `spate.deliveries` header plus one; 1 when the header is absent or not a number. |
+| Delivery count | The unit's attempt record, written before the read. |
 
 A publish writes the unit to the work topic, partitioned by its key, and is
 confirmed by its delivery report. A unit over librdkafka's `message.max.bytes`
 (1,000,000 bytes by default), or over the topic's limit, is refused. Any other
 failure that retrying can fix is reported as retryable, and one that it cannot
 stops the feed and is reported with the feed's error.
+
+A copy written to the retry or dead-letter topic carries the unit's publish
+identity in `spate.origin`, and the count of the delivery it was written from
+in `spate.deliveries`. The feed writes `spate.deliveries` for an operator
+reading the dead-letter topic, and does not read it.
+
+An attempt record's key is the unit's publish identity, and it lives on
+partition `(murmur2(identity) & 0x7fffffff) % partitions` of the attempt
+topic, where Kafka's Java client and librdkafka's `murmur2` partitioner place
+that key. Its value is the JSON object `{"v":1,"attempts":n}`, and a null
+value is a tombstone. A worker that reads a record at another version, with
+a field it does not know, or that is not that object, stops the feed with an
+error naming the record's offset.
 
 ## Metrics
 
@@ -284,4 +399,7 @@ The Kafka feed registers no metric families of its own.
 - [S3 source](../../sources/s3/README.mdx#reading-from-a-feed) — a source that
   reads units from a feed.
 - [Kafka source](../../sources/kafka/README.mdx) — the consumer whose
-  assignment steps the feed's thread follows.
+  assignment steps the feed's consumer thread follows.
+- [ADR-0070](../../../../adr/0070-on-kafka-a-units-attempt-is-recorded-before-the-unit-is-read.md)
+  — why each unit's attempt is recorded before it is read, and what that
+  costs.

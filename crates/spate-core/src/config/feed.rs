@@ -31,8 +31,10 @@ pub struct FeedSection {
     /// own default.
     pub units_held: Option<NonZeroUsize>,
     /// The delivery on which a failed unit moves to its feed's dead-letter
-    /// destination, on the in-process and Kafka feeds. `None` leaves the
-    /// backend's default. A backend that cannot honor the key refuses it.
+    /// destination, on the in-process and Kafka feeds. The Kafka feed also
+    /// moves a unit whose recorded deliveries have reached it, without
+    /// delivering it again. `None` leaves the backend's default. A backend
+    /// that cannot honor the key refuses it.
     pub attempt_cap: Option<NonZeroU32>,
 }
 

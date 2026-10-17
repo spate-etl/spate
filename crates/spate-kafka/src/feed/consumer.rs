@@ -1,6 +1,7 @@
-//! The feed's consumer thread: it polls the group member, buffers units for
-//! the reader, answers rebalances, pauses on a full buffer, commits, and
-//! sends again the writes that failed.
+//! The feed's consumer thread, one of its three: it polls the group
+//! member, hands each unit to the gate, answers rebalances, pauses when the
+//! feed holds as many units as it buffers, commits, and sends again the
+//! writes that failed.
 //!
 //! # Rebalances
 //!
@@ -37,14 +38,16 @@
 //! ends, and the consumer leaves the group. The next owner of each
 //! partition reads it again from the last commit.
 
+use super::attempt::PublishId;
 use super::events::Cause;
 use super::inflight::{Position, Tp};
-use super::write::{self, DELIVERIES_HEADER, Destination, Move, Outgoing, Producer, Write};
-use super::{Core, LatchOnPanic, READY_CAPACITY, Ready, State};
+use super::write::{self, Destination, Finish, Move, Outgoing, Producer, Tombstone, Write};
+use super::{Core, Gating, LatchOnPanic, READY_CAPACITY, State, Topics};
 use crate::context::{Intent, SourceContext};
 use rdkafka::consumer::{BaseConsumer, CommitMode, Consumer};
 use rdkafka::error::{KafkaError, RDKafkaErrorCode};
 use rdkafka::message::{BorrowedMessage, Headers, Message};
+use rdkafka::producer::Producer as _;
 use rdkafka::{ClientConfig, Offset, TopicPartitionList};
 use spate_core::error::ErrorClass;
 use spate_core::feed::{FeedError, FeedErrorKind, Unit};
@@ -61,7 +64,11 @@ pub(crate) const POLL_TIMEOUT: Duration = Duration::from_millis(100);
 
 /// Messages taken per pass before the thread serves rebalances, pauses and
 /// commits.
-const POLL_BATCH: usize = 64;
+pub(crate) const POLL_BATCH: usize = 64;
+
+/// How long a stopping feed waits for its writes in flight before its last
+/// commit.
+pub(crate) const STOP_SETTLE: Duration = Duration::from_secs(1);
 
 /// The longest the committed-offset read before an assignment may take.
 const COMMITTED_LOOKUP_MAX: Duration = Duration::from_secs(10);
@@ -117,6 +124,16 @@ pub(crate) fn run(mut d: Driver) {
             d.commit_finished();
         }
     }
+    if !d.core.latched() {
+        // Confirmed tombstones finish their offsets before the last commit.
+        // The flush polls the producer from this thread, beside the
+        // producer's own poll thread. Each report is still taken once, and
+        // an error event's two callbacks run on the thread that popped it,
+        // but two pollers' callbacks can interleave on the producer
+        // context's one unpaired-error slot, so within this window a
+        // producer error can be logged twice.
+        let _ = d.producer.flush(STOP_SETTLE);
+    }
     d.commit_finished();
 }
 
@@ -158,7 +175,7 @@ impl Driver {
     fn on_message(&self, message: &BorrowedMessage<'_>) {
         let tp = Tp::new(&self.core.topics().of(message.topic()), message.partition());
         let offset = message.offset();
-        let read = read_message(message);
+        let read = read_message(message, self.core.topics());
         let dead_letter = {
             let mut st = self.core.lock();
             let replaced = st.tracker.replace_copies(&tp, offset);
@@ -169,13 +186,14 @@ impl Driver {
                 return;
             };
             match read {
-                Read::Unit { unit, deliveries } => {
-                    st.ready.push_back(Ready {
+                Read::Unit { unit, identity } => {
+                    st.gating.push_back(Gating {
                         receipt,
                         unit,
-                        deliveries,
+                        identity,
                     });
-                    st.wake();
+                    // Under the state lock the gate checks `gating` under.
+                    self.core.gate_wake.notify_one();
                     None
                 }
                 Read::NoUnit(outgoing) => {
@@ -260,7 +278,7 @@ impl Driver {
         let full = {
             let mut st = self.core.lock();
             st.tracker.assign(tps.iter().cloned());
-            st.ready.len() >= READY_CAPACITY
+            st.held_for_reader() >= READY_CAPACITY
         };
         if full {
             self.pause(tps.clone());
@@ -341,12 +359,14 @@ impl Driver {
         }
     }
 
-    /// Pause every owned partition while the buffer is full, and resume what
-    /// this thread paused once it is down to half.
+    /// Pause every owned partition while the feed holds as many units as
+    /// it buffers, those at the gate and those with their attempt write in
+    /// flight included, and resume what this thread paused once that count
+    /// is down to half.
     pub(crate) fn backpressure(&mut self) {
         let (len, owned): (usize, Vec<Tp>) = {
             let st = self.core.lock();
-            (st.ready.len(), st.tracker.owned().cloned().collect())
+            (st.held_for_reader(), st.tracker.owned().cloned().collect())
         };
         if len >= READY_CAPACITY {
             let more: Vec<Tp> = owned
@@ -424,10 +444,12 @@ pub(crate) fn committed_lookup_timeout(cc: &ClientConfig) -> Duration {
     (max_poll / 4).min(COMMITTED_LOOKUP_MAX)
 }
 
-/// Take the writes due at `now` out of `st`'s resend queue. A move whose
-/// partition was given up since is dropped: its offset was not committed
-/// past, so the next owner reads the unit again and a resend would only add
-/// a copy.
+/// Take the writes due at `now` out of `st`'s resend queue. A move or a
+/// tombstone whose partition was given up since is dropped: its offset was
+/// not committed past, so the next owner reads the unit again and a resend
+/// would only add a copy. An attempt write whose receipt is no longer held
+/// is dropped for the same reason, and gives back its share of
+/// `admitting`.
 pub(crate) fn take_due(st: &mut State, now: Instant) -> Vec<Write> {
     if st.resends.is_empty() {
         return Vec::new();
@@ -436,13 +458,26 @@ pub(crate) fn take_due(st: &mut State, now: Instant) -> Vec<Write> {
         .into_iter()
         .partition(|(at, _)| *at <= now);
     st.resends = later;
-    due.into_iter()
-        .map(|(_, w)| w)
-        .filter(|w| match w {
-            Write::Move(moving) => st.tracker.current(&moving.position),
+    let mut taken = Vec::with_capacity(due.len());
+    for (_, w) in due {
+        let keep = match &w {
+            Write::Move(Move { position, .. }) | Write::Tombstone(Tombstone { position, .. }) => {
+                st.tracker.current(position)
+            }
+            Write::Attempt(attempt) => {
+                let held = st.tracker.held(attempt.receipt).is_some();
+                if !held {
+                    st.admitting = st.admitting.saturating_sub(1);
+                }
+                held
+            }
             Write::Publish { .. } => true,
-        })
-        .collect()
+        };
+        if keep {
+            taken.push(w);
+        }
+    }
+    taken
 }
 
 /// Take the revoked partitions out of the tracker and drop their buffered
@@ -503,13 +538,14 @@ fn tpl_of(tps: &[Tp]) -> TopicPartitionList {
 pub(crate) enum Read {
     Unit {
         unit: Unit,
-        deliveries: u32,
+        /// The publish identity the unit's attempts count under.
+        identity: PublishId,
     },
     /// The message as read, for the dead-letter topic.
     NoUnit(Outgoing),
 }
 
-fn read_message(message: &BorrowedMessage<'_>) -> Read {
+fn read_message(message: &BorrowedMessage<'_>, topics: &Topics) -> Read {
     let headers: Vec<(String, Option<Vec<u8>>)> = message
         .headers()
         .map(|hs| {
@@ -518,32 +554,36 @@ fn read_message(message: &BorrowedMessage<'_>) -> Read {
                 .collect()
         })
         .unwrap_or_default();
-    read(message.topic(), message.key(), message.payload(), headers)
+    read(
+        (message.topic(), message.partition(), message.offset()),
+        message.key(),
+        message.payload(),
+        headers,
+        topics,
+    )
 }
 
-/// The unit a message names: its key as the id, its value as the body, and
-/// its count from the `spate.deliveries` header. A message with no key, or a
-/// key that is not UTF-8, names no unit.
+/// The unit a message names, given the message's topic, partition and
+/// offset in `at`: its key as the id, its value as the body, and the publish
+/// identity its attempts count under. Its count comes from its attempt
+/// record, which the gate reads. A message with no key, or a key that is not
+/// UTF-8, names no unit.
 pub(crate) fn read(
-    topic: &str,
+    at: (&str, i32, i64),
     key: Option<&[u8]>,
     payload: Option<&[u8]>,
     headers: Vec<(String, Option<Vec<u8>>)>,
+    topics: &Topics,
 ) -> Read {
+    let (topic, partition, offset) = at;
     match key.map(std::str::from_utf8) {
-        Some(Ok(id)) => {
-            let header = headers
-                .iter()
-                .rev()
-                .find(|(k, _)| k == DELIVERIES_HEADER)
-                .and_then(|(_, v)| v.as_deref());
-            Read::Unit {
-                unit: Unit::new(id, payload.unwrap_or_default()),
-                deliveries: write::deliveries_of(header),
-            }
-        }
+        Some(Ok(id)) => Read::Unit {
+            unit: Unit::new(id, payload.unwrap_or_default()),
+            identity: PublishId::of_message(topic, partition, offset, &headers, topics),
+        },
         _ => Read::NoUnit(Outgoing {
             topic: Arc::from(topic),
+            partition: None,
             key: key.map(<[u8]>::to_vec),
             payload: payload.map(<[u8]>::to_vec),
             headers,
@@ -560,6 +600,7 @@ fn no_unit_move(core: &Core, mut message: Outgoing, position: Position) -> Move 
         Destination::DeadLetter(Cause::NoUnit),
         None,
         1,
+        Finish::Complete,
     )
 }
 

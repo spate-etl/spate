@@ -104,10 +104,12 @@ the process.
   policy moves a unit to its dead-letter queue after `maxReceiveCount`
   receives. See [the connector page](feeds/sqs/README.mdx).
 - **Kafka (feed)** — a unit's offset is committed only after every record in
-  it is acknowledged, or after the write moving it to the retry or
-  dead-letter topic is confirmed; a unit whose worker stops is read again by
-  the next owner of its partition. The attempt cap counts reported failures
-  only. See [the connector page](feeds/kafka/README.mdx).
+  it is acknowledged and its attempt record is tombstoned, or after the write
+  moving it to the retry or dead-letter topic is confirmed; a unit whose
+  worker stops is read again by the next owner of its partition. The attempt
+  cap counts every read, each recorded before it starts, and a unit at the cap
+  moves to the dead-letter topic unread. See
+  [the connector page](feeds/kafka/README.mdx).
 - **Memory / Capture (test)** — deterministic, in-process, and honest about
   the same contracts: commits only advance past durably "written" data, so
   tests can assert the at-least-once behavior itself. Not for production.

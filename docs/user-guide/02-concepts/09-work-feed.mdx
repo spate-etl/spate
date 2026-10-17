@@ -62,7 +62,7 @@ that cannot tolerate duplicates needs the replay-safe design
 
 A feed counts the deliveries of each unit. A unit that reaches the feed's
 delivery cap without an acknowledgment moves to its dead-letter destination
-and is not delivered again. A unit that fails on every reader, such as one
+and is not delivered again, except in a window its backend's page describes. A unit that fails on every reader, such as one
 naming an object that no longer exists, ends there after a bounded number of
 attempts. A feed that counts only the deliveries its reader reported as failed
 does not count one whose reader stopped first, so a unit that stops every

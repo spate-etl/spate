@@ -9,8 +9,8 @@ use std::time::Duration;
 /// The key that names this backend in a `feed:` section.
 pub(crate) const BACKEND: &str = "kafka";
 
-/// Deliveries after which a failed unit is dead-lettered, unless the section
-/// sets `attempt_cap`.
+/// Attempts at which a unit goes to the dead-letter topic, read or unread,
+/// unless the section sets `attempt_cap`.
 const ATTEMPT_CAP: NonZeroU32 = NonZeroU32::new(10).expect("non-zero");
 
 /// Properties the feed owns, refused in the `rdkafka:` passthrough with the
@@ -60,8 +60,9 @@ const DENYLIST: &[(&str, &str)] = &[
     (
         "acks",
         "forced to `all`: an offset completes once the delivery report \
-         confirms its retry or dead-letter write, so a report under weaker \
-         acks could lose the unit",
+         confirms its tombstone or retry write, and a unit is read once its \
+         attempt write is confirmed, so a report under weaker acks could lose \
+         the unit or its count",
     ),
     (
         "request.required.acks",
@@ -105,9 +106,10 @@ const DENYLIST: &[(&str, &str)] = &[
     ),
     (
         "delivery.report.only.error",
-        "a retry or dead-letter write finishes its offset only once its \
-         delivery report confirms it, so suppressing success reports would \
-         stop the partition's commits",
+        "a unit is read only once its attempt write is confirmed, and its \
+         offset finishes only once its tombstone or retry write is, so \
+         suppressing success reports would stop the partition's reads and \
+         commits",
     ),
 ];
 
@@ -128,6 +130,7 @@ struct Body {
     topic: String,
     retry_topic: String,
     dead_letter_topic: String,
+    attempt_topic: String,
     #[serde(with = "humantime_serde", default = "default_delivery_timeout")]
     delivery_timeout: Duration,
     #[serde(with = "humantime_serde", default = "default_statistics_interval")]
@@ -152,15 +155,20 @@ pub(crate) struct KafkaFeedConfig {
     pub(crate) retry_topic: String,
     /// Where a unit goes at the attempt cap, or a message that names no unit.
     pub(crate) dead_letter_topic: String,
-    /// The bound on every write's wait for its delivery report, and the
-    /// producer's `message.timeout.ms`.
+    /// The compacted topic each unit's attempt is recorded on before it is
+    /// read.
+    pub(crate) attempt_topic: String,
+    /// The bound on every write's wait for its delivery report, the attempt
+    /// and tombstone writes beside the retry and dead-letter ones, and the
+    /// producer's `message.timeout.ms`. It also bounds one pass of the gate.
     pub(crate) delivery_timeout: Duration,
     /// librdkafka's statistics interval. Zero disables statistics.
     pub(crate) statistics_interval: Duration,
     /// Raw librdkafka properties for every feed client.
     pub(crate) rdkafka: BTreeMap<String, String>,
-    /// The delivery on which a failed unit moves to the dead-letter topic,
-    /// from the section's `attempt_cap`.
+    /// The attempt at which a unit moves to the dead-letter topic: a unit
+    /// failed on this attempt or later, or a unit whose recorded attempts
+    /// have reached it, unread. From the section's `attempt_cap`.
     pub(crate) attempt_cap: NonZeroU32,
 }
 
@@ -174,6 +182,7 @@ impl std::fmt::Debug for KafkaFeedConfig {
             topic,
             retry_topic,
             dead_letter_topic,
+            attempt_topic,
             delivery_timeout,
             statistics_interval,
             rdkafka,
@@ -185,6 +194,7 @@ impl std::fmt::Debug for KafkaFeedConfig {
             .field("topic", topic)
             .field("retry_topic", retry_topic)
             .field("dead_letter_topic", dead_letter_topic)
+            .field("attempt_topic", attempt_topic)
             .field("delivery_timeout", delivery_timeout)
             .field("statistics_interval", statistics_interval)
             .field("rdkafka", &redact::map(rdkafka.keys()))
@@ -216,6 +226,7 @@ impl KafkaFeedConfig {
             topic: body.topic,
             retry_topic: body.retry_topic,
             dead_letter_topic: body.dead_letter_topic,
+            attempt_topic: body.attempt_topic,
             delivery_timeout: body.delivery_timeout,
             statistics_interval: body.statistics_interval,
             rdkafka: body.rdkafka,
@@ -232,6 +243,7 @@ impl KafkaFeedConfig {
             ("topic", &self.topic),
             ("retry_topic", &self.retry_topic),
             ("dead_letter_topic", &self.dead_letter_topic),
+            ("attempt_topic", &self.attempt_topic),
         ] {
             if value.trim().is_empty() {
                 return Err(error(format!("`{key}` must not be empty")));
@@ -370,7 +382,8 @@ mod tests {
 
     const MINIMAL: &str = "kafka:\n  brokers: localhost:9092\n  group_id: workers\n  \
                            topic: units\n  retry_topic: units-retry\n  \
-                           dead_letter_topic: units-dead\n";
+                           dead_letter_topic: units-dead\n  \
+                           attempt_topic: units-attempts\n";
 
     fn section(yaml: &str) -> FeedSection {
         serde_yaml::from_str(yaml).unwrap()
@@ -395,6 +408,7 @@ mod tests {
         assert_eq!(config.topic, "units");
         assert_eq!(config.retry_topic, "units-retry");
         assert_eq!(config.dead_letter_topic, "units-dead");
+        assert_eq!(config.attempt_topic, "units-attempts");
         assert_eq!(config.delivery_timeout, Duration::from_secs(30));
         assert_eq!(config.statistics_interval, Duration::from_secs(5));
         assert!(config.rdkafka.is_empty());
@@ -481,16 +495,24 @@ mod tests {
         let err = parse("memory: {}").unwrap_err().to_string();
         assert!(err.contains("names `memory`"), "{err}");
 
-        let err = parse(&MINIMAL.replace("  dead_letter_topic: units-dead\n", ""))
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("dead_letter_topic"), "{err}");
+        for (line, key) in [
+            ("  dead_letter_topic: units-dead\n", "dead_letter_topic"),
+            ("  attempt_topic: units-attempts\n", "attempt_topic"),
+        ] {
+            let err = parse(&MINIMAL.replace(line, "")).unwrap_err().to_string();
+            assert!(err.contains(key), "{err}");
+        }
 
         for empty in ["\"\"", "\"   \""] {
-            let err = parse(&MINIMAL.replace("units-retry", empty))
-                .unwrap_err()
-                .to_string();
-            assert!(err.contains("`retry_topic` must not be empty"), "{err}");
+            for (value, key) in [
+                ("units-retry", "retry_topic"),
+                ("units-attempts", "attempt_topic"),
+            ] {
+                let err = parse(&MINIMAL.replace(value, empty))
+                    .unwrap_err()
+                    .to_string();
+                assert!(err.contains(&format!("`{key}` must not be empty")), "{err}");
+            }
         }
 
         let err = parse(&format!("{MINIMAL}  topics: [a]\n"))

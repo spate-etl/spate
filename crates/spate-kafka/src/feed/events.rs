@@ -7,7 +7,9 @@ use std::time::Duration;
 /// Why a message went to the dead-letter topic.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Cause {
-    /// A unit failed on a delivery at or past the attempt cap.
+    /// A unit failed on a delivery at or past the attempt cap, or a unit
+    /// whose recorded attempts had reached the cap, moved without being
+    /// read.
     AttemptCap,
     /// A message with no key, or a key that is not UTF-8.
     NoUnit,
@@ -25,6 +27,18 @@ impl Cause {
 /// A delivery report arrived, or librdkafka refused a write at enqueue.
 pub(crate) fn delivery_report(ok: bool) {
     tracing::trace!(ok, "a Kafka feed write settled");
+}
+
+/// A unit's attempt record was confirmed `confirmed_in` after its first
+/// send.
+pub(crate) fn attempt_written(confirmed_in: Duration) {
+    tracing::trace!(?confirmed_in, "a unit's attempt was recorded");
+}
+
+/// A tombstone of a unit's attempt record was confirmed, and the unit's
+/// offset finished.
+pub(crate) fn tombstoned() {
+    tracing::trace!("a unit's attempt record was tombstoned");
 }
 
 /// A move to the retry or dead-letter topic was confirmed.

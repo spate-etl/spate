@@ -3,11 +3,11 @@
 //!
 //! A partition's commit point is one past the offset delivered last, or its
 //! first unfinished offset where that is lower. An offset is finished when
-//! the reader acknowledges it, or when the write that moves it to another
-//! topic is confirmed. An offset delivered more than once under one
-//! assignment finishes when every copy has. The tracker is pure and
-//! synchronous; the caller holds it under a lock and never keeps that lock
-//! across a broker call.
+//! the write that settles it is confirmed: the tombstone of an acknowledged
+//! unit's attempt record, or the write that moves it to another topic. An
+//! offset delivered more than once under one assignment finishes when every
+//! copy has. The tracker is pure and synchronous; the caller holds it under
+//! a lock and never keeps that lock across a broker call.
 //!
 //! Each assignment of a partition carries a generation. A receipt names the
 //! generation its delivery was made under, and once the partition is revoked
@@ -171,6 +171,7 @@ impl Tracker {
     /// Finish the offset a held receipt names. `false`, completing nothing,
     /// when the receipt is not held under its partition's current
     /// assignment.
+    #[cfg(test)]
     pub(crate) fn acknowledge(&mut self, receipt: Receipt) -> bool {
         match self.release(receipt) {
             Some(position) => self.complete(&position),

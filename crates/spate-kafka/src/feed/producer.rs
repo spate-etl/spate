@@ -33,7 +33,10 @@ impl FeedProducerContext {
     /// Whether this error callback repeats the previous one, which it then
     /// consumes. rdkafka's producer poll hands each error event to the
     /// context twice in a row on the poll thread;
-    /// `rdkafka_delivers_each_producer_error_twice` pins that.
+    /// `rdkafka_delivers_each_producer_error_twice` pins that. The flush a
+    /// stopping feed runs on its consumer thread is a second poller, whose
+    /// callbacks can interleave with the poll thread's on this one slot, so
+    /// within that flush an error can be logged twice.
     fn repeats_previous(&self, code: Option<RDKafkaErrorCode>, reason: &str) -> bool {
         let mut unpaired = self.unpaired_error.lock().expect("unpaired error lock");
         if unpaired

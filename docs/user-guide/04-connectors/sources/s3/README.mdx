@@ -71,7 +71,7 @@ source:
 | `refresh_listing` | bool | `false` | Re-list on the coordinator's replan interval, planning new objects as additional splits. `true` makes the job **open** (never self-terminates). Part of the job fingerprint. |
 | `prefetch_bytes` | bytes | `8MiB` | Target window size for ETag-pinned ranged GETs; see [read-ahead memory sizing](#read-parallelism-on-a-solo-run). Must be at least `chunk_bytes`; a smaller value fails at load. |
 | `chunk_bytes` | bytes | `512KiB` | Target size of one buffered chunk. Zero fails at load. |
-| `store` | string map | `{}` | Raw `object_store` options, applied on top of the environment — see [the `store` denylist](#the-store-passthrough-and-the-denylist). |
+| `store` | string map | `{}` | Raw `object_store` options, applied on top of the environment. Bucket keys and keys `object_store` does not recognize fail at load — see [the `store` denylist](#the-store-passthrough-and-the-denylist). |
 
 Mind the units on the fingerprinted keys: `MB` and `MiB` parse to
 different byte counts (`64MB` = 64,000,000; `64MiB` = 67,108,864), and
@@ -165,6 +165,18 @@ spelling in the file:
 ```text
 invalid configuration: source.s3.store."Bucket" cannot be overridden: owned by the typed `url` field
 ```
+
+For an `s3://` URL, a key that `object_store` does not recognize as an S3
+option also fails at load. Every spelling and case `object_store` accepts is
+recognized. A misspelled `endpoint` would otherwise leave the client on the
+default AWS endpoint with the configured credentials:
+
+```text
+invalid configuration: source.s3.store."endpont" is not an object_store S3 option
+```
+
+The client for a `file://` URL reads no `store` options, and its keys are not
+checked.
 
 ## Security (credentials and region)
 

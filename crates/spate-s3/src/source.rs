@@ -27,7 +27,7 @@
 
 #![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
 
-use crate::config::S3SourceConfig;
+use crate::config::{S3SourceConfig, s3_store_key};
 use crate::lane::S3Lane;
 use crate::listing::{UnaddressableConnector, UnaddressableKeys};
 use crate::metrics::S3Metrics;
@@ -646,16 +646,16 @@ fn harden_client_defaults(builder: AmazonS3Builder) -> AmazonS3Builder {
         )
 }
 
-/// Overlay the raw `store` passthrough options onto an S3 builder. Keys that
-/// are not recognized object_store configuration are ignored (matching
-/// `parse_url_opts`); a later key wins, so these override any environment
-/// value seeded by [`AmazonS3Builder::from_env`].
+/// Overlay the raw `store` passthrough options onto an S3 builder. A later
+/// key wins, so these override any environment value seeded by
+/// [`AmazonS3Builder::from_env`]. [`S3SourceConfig::validate`] rejects a key
+/// that is not an S3 option, so none is skipped here.
 fn apply_options(
     mut builder: AmazonS3Builder,
     options: &std::collections::BTreeMap<String, String>,
 ) -> AmazonS3Builder {
     for (k, v) in options {
-        if let Ok(key) = k.to_ascii_lowercase().parse::<AmazonS3ConfigKey>() {
+        if let Some(key) = s3_store_key(k) {
             builder = builder.with_config(key, v.clone());
         }
     }
@@ -694,7 +694,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_options_sets_pod_identity_keys_and_ignores_unknown() {
+    fn apply_options_sets_pod_identity_keys() {
         const URI: &str = "http://169.254.170.23/v1/credentials";
         const TOKEN: &str =
             "/var/run/secrets/pods.eks.amazonaws.com/serviceaccount/eks-pod-identity-token";
@@ -703,8 +703,6 @@ mod tests {
             &map(&[
                 ("aws_container_credentials_full_uri", URI),
                 ("aws_container_authorization_token_file", TOKEN),
-                // Not an object_store key; must be ignored, not panic.
-                ("not_a_real_key", "whatever"),
             ]),
         );
         assert_eq!(

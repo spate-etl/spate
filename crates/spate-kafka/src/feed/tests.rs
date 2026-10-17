@@ -1828,6 +1828,58 @@ mod cluster {
         );
     }
 
+    /// Pins that a pass whose watermark read the broker refuses admits
+    /// nothing, including the units of a partition it read before the
+    /// refusal: both units stay at the gate and the feed stops.
+    #[test]
+    fn a_refused_watermark_read_admits_nothing_from_its_pass() {
+        let cluster = cluster_with(0);
+        let brokers = cluster.bootstrap_servers();
+        let group = spate_test::unique_name("refused-pass");
+        let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
+        let core = Arc::new(Core::new(&config, TWO));
+        let producer: Producer =
+            rdkafka::config::FromClientConfigAndContext::from_config_and_context(
+                &config.producer_config(false),
+                crate::feed::producer::FeedProducerContext::new(Arc::clone(&core)),
+            )
+            .unwrap();
+        let on = |partition| {
+            (0..)
+                .find(|&o| super::attempt_partition(&core, &super::identity(&core, o)) == partition)
+                .unwrap()
+        };
+        {
+            let mut st = core.lock();
+            st.tracker.assign([super::tp(0)]);
+            for offset in [on(0), on(1)] {
+                let receipt = st.tracker.deliver(&super::tp(0), offset).unwrap();
+                st.gating.push_back(Gating {
+                    receipt,
+                    unit: Unit::new(format!("u{offset}"), Vec::new()),
+                    identity: super::identity(&core, offset),
+                });
+            }
+        }
+        producer
+            .client()
+            .fetch_metadata(Some(ATTEMPTS), Duration::from_secs(10))
+            .unwrap();
+        // Partition 0's read, which asks for both of its offsets, succeeds;
+        // partition 1's is refused.
+        let mut errors = vec![RDKafkaRespErr::RD_KAFKA_RESP_ERR_NO_ERROR; 2];
+        errors.extend([RDKafkaRespErr::RD_KAFKA_RESP_ERR_TOPIC_AUTHORIZATION_FAILED; 50]);
+        cluster.request_errors(RDKafkaApiKey::ListOffsets, &errors);
+        let gate =
+            Gate::new(Arc::clone(&core), producer, Duration::from_secs(3600)).with_step(STEP * 100);
+        gate.pass();
+        let st = core.lock();
+        let reason = &st.fatal.as_ref().expect("the feed stopped").reason;
+        assert!(reason.contains("partition 1"), "{reason}");
+        assert_eq!(st.gating.len(), 2, "a unit was admitted");
+        assert_eq!(st.admitting, 0);
+    }
+
     /// Pins that an attempt partition with no leader holds back only its own
     /// units: the unit whose attempt partition answers is admitted, and the
     /// unit on the leaderless partition waits at the gate. The attempt topic

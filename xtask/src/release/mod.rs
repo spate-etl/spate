@@ -246,8 +246,8 @@ fn remote(repo: Option<&str>) -> String {
 }
 
 /// Whether a refused pull request listing fails a dry run. With `GH_REPO`
-/// naming the repository, gh needs no default repository, so a refusal is a
-/// real error.
+/// naming the repository, gh does not read the clone's remotes, so a refusal
+/// is a real error.
 fn strict_listing(gh_repo: Option<&str>) -> bool {
     gh_repo.is_some_and(|r| !r.is_empty())
 }

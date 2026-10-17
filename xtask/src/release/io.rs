@@ -1016,8 +1016,9 @@ pub(crate) struct DryForge<'a>(pub(crate) &'a dyn Forge, pub(crate) bool);
 
 impl Forge for DryForge<'_> {
     fn open_pulls(&self) -> Result<Vec<Pull>, Error> {
-        // gh refuses the listing on a clone with no default repository, which
-        // leaves nothing to sweep. `GH_REPO` removes that case, so with `.1`
+        // gh refuses the listing on a clone with no remote on a GitHub host,
+        // such as one whose only remote is a local path. Such a clone has no
+        // pull requests to sweep. `GH_REPO` removes that case, so with `.1`
         // set a refusal is a real error.
         self.0.open_pulls().or_else(|e| {
             if self.1 {

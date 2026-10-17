@@ -136,7 +136,8 @@ struct FakeForge<'a> {
     refuse_bundle: bool,
     /// The one write that fails: `close`, `create`, `merge` or `upload`.
     fails: Option<&'static str>,
-    /// Pull request listings refused, as on a clone with no default repository.
+    /// Pull request listings refused, as on a clone with no remote on a GitHub
+    /// host, such as one whose only remote is a local path.
     reads_fail: bool,
     /// A file whose attestation does not verify.
     unattested: Option<String>,
@@ -1377,7 +1378,7 @@ fn a_dry_assemble_writes_nothing_outside_the_tree() {
 }
 
 /// A strict rehearsal fails on a refused pull request listing, and a lenient
-/// one reads it as empty; neither pushes.
+/// one reads it as empty; the strict one pushes nothing.
 #[test]
 fn a_strict_dry_forge_passes_a_refused_listing_through() {
     let log = Log::default();

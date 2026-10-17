@@ -141,9 +141,9 @@ every pending crate packaged and verify-built, and the SBOMs and `SHA256SUMS`
 staged. `assemble` runs its pull request step against the real open pull
 requests and prints each push, close, open and auto-merge instead of making
 it. With `GH_REPO` set, a pull request listing that `gh` refuses fails the
-rehearsal; without it, as on a clone with no default repository, the listing
-reads as empty. The run stops before attesting
-and prints what a real run would do next. It needs `gh`
+rehearsal. Without it, the listing reads as empty on a clone with no remote on
+a GitHub host, such as one whose only remote is a local path. The run stops
+before attesting and prints what a real run would do next. It needs `gh`
 authenticated, and `curl`, `cargo-about` and `cargo-cyclonedx` on the path;
 the preflight names anything missing. The generator versions in CI come from
 the `taiki-e/install-action` pin, so the inventory a local run produces can

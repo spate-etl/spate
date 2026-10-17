@@ -69,9 +69,10 @@ One map configures the feed's consumer, its producer, and the two clients
 its startup checks read the topics with. A property that applies to one
 client only draws a warning from librdkafka in the others.
 Properties the feed owns are **rejected at load time with an explanation**,
-under their own name and under `topic.<name>`, which librdkafka reads as the
-same property. Aliases are denied beside the canonical names, because
-passthrough and feed values apply in unspecified order.
+under their own name and under `topic.<name>`. librdkafka reads
+`topic.<name>` as `<name>` when `<name>` is a topic-level property, as `acks`
+and `message.timeout.ms` are. Aliases are denied beside the canonical names,
+because passthrough and feed values apply in unspecified order.
 
 | Denied property | Why |
 |---|---|

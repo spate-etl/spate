@@ -58,7 +58,9 @@ use std::time::Duration;
 /// distinct `ClientConfig` keys applied in unspecified order). The aliases
 /// here: `metadata.broker.list` ↔ `bootstrap.servers`,
 /// `delivery.timeout.ms` ↔ `message.timeout.ms`, and
-/// `acks` ↔ `request.required.acks`.
+/// `acks` ↔ `request.required.acks`. librdkafka also reads `topic.<name>`
+/// as the topic property `<name>`, so a key is checked with that prefix
+/// removed.
 const DENYLIST: &[(&str, &str)] = &[
     ("bootstrap.servers", "owned by the typed `brokers` field"),
     (
@@ -355,15 +357,17 @@ impl KafkaSinkConfig {
             return fail(why.to_string());
         }
 
-        for (key, why) in DENYLIST {
-            if self.rdkafka.contains_key(*key) {
+        for key in self.rdkafka.keys() {
+            let name = key.strip_prefix("topic.").unwrap_or(key);
+            if let Some((_, why)) = DENYLIST.iter().find(|(owned, _)| *owned == name) {
                 return fail(format!("rdkafka.\"{key}\" cannot be overridden: {why}"));
             }
         }
         crate::security::check_tls_feature(&self.rdkafka, "sink.kafka")?;
         if self.compression.is_some() {
-            for key in ["compression.codec", "compression.type"] {
-                if self.rdkafka.contains_key(key) {
+            for key in self.rdkafka.keys() {
+                let name = key.strip_prefix("topic.").unwrap_or(key);
+                if matches!(name, "compression.codec" | "compression.type") {
                     return fail(format!(
                         "rdkafka.\"{key}\" conflicts with the typed \
                          `compression` field; set one, not both"
@@ -656,15 +660,47 @@ mod tests {
         );
     }
 
+    /// Pins that every owned property and every alias is refused by name,
+    /// bare and with the `topic.` prefix librdkafka strips.
     #[test]
-    fn denylisted_properties_are_rejected_with_reasons() {
-        for (key, _) in DENYLIST {
-            let body = format!("{}  rdkafka:\n    \"{key}\": \"x\"\n", minimal());
-            let err = parse(&body).unwrap_err();
-            let msg = err.to_string();
-            assert!(msg.contains(key), "error names the key: {msg}");
-            assert!(msg.contains("sink.kafka"), "error names the section: {msg}");
+    fn every_owned_property_and_alias_is_refused() {
+        // Written out: a loop over `DENYLIST` would follow an entry removed
+        // from it.
+        for key in [
+            "bootstrap.servers",
+            "metadata.broker.list",
+            "statistics.interval.ms",
+            "delivery.timeout.ms",
+            "message.timeout.ms",
+            "message.max.bytes",
+            "acks",
+            "request.required.acks",
+            "enable.idempotence",
+            "transactional.id",
+            "delivery.report.only.error",
+            "enable.gapless.guarantee",
+        ] {
+            for written in [key.to_owned(), format!("topic.{key}")] {
+                let body = format!("{}  rdkafka:\n    \"{written}\": \"x\"\n", minimal());
+                let msg = parse(&body).unwrap_err().to_string();
+                assert!(
+                    msg.contains(&format!("\"{written}\" cannot be overridden")),
+                    "{msg}"
+                );
+                assert!(msg.contains("sink.kafka"), "{msg}");
+            }
         }
+    }
+
+    /// Pins that `topic.acks` is refused with the reason `acks` gives, since
+    /// librdkafka writes it to the same setting as the forced `acks=all`.
+    /// Regression for #1207.
+    #[test]
+    fn topic_prefixed_acks_is_refused_as_acks() {
+        let body = format!("{}  rdkafka:\n    topic.acks: \"1\"\n", minimal());
+        let msg = parse(&body).unwrap_err().to_string();
+        assert!(msg.contains("\"topic.acks\""), "{msg}");
+        assert!(msg.contains("forced to `all`"), "{msg}");
     }
 
     /// Regression: `message.timeout.ms` and `delivery.timeout.ms` are one
@@ -870,18 +906,96 @@ mod tests {
         let cfg = parse(&body).unwrap();
         assert_eq!(cfg.client_config().get("compression.codec"), Some("lz4"));
 
-        for key in ["compression.codec", "compression.type"] {
+        for key in [
+            "compression.codec",
+            "compression.type",
+            "topic.compression.codec",
+            "topic.compression.type",
+        ] {
             let body = format!(
                 "{}  compression: lz4\n  rdkafka:\n    \"{key}\": \"gzip\"\n",
                 minimal()
             );
             let msg = parse(&body).unwrap_err().to_string();
-            assert!(msg.contains("conflicts"), "conflict is explained: {msg}");
+            assert!(
+                msg.contains(&format!("\"{key}\" conflicts")),
+                "conflict is explained: {msg}"
+            );
         }
 
         // Without the typed field, the passthrough key is allowed.
         let body = format!("{}  rdkafka:\n    compression.codec: \"gzip\"\n", minimal());
         assert!(parse(&body).is_ok());
+    }
+
+    /// Pins that a refused key is found when it is not the first passthrough
+    /// key. `linger.ms` sorts before `topic.acks` in the `BTreeMap`.
+    #[test]
+    fn owned_key_after_a_permitted_key_is_refused() {
+        let body = format!(
+            "{}  rdkafka:\n    linger.ms: \"5\"\n    topic.acks: \"1\"\n",
+            minimal()
+        );
+        let msg = parse(&body).unwrap_err().to_string();
+        assert!(msg.contains("\"topic.acks\" cannot be overridden"), "{msg}");
+    }
+
+    /// Pins that a compression key conflicting with the typed field is found
+    /// when it is not the first passthrough key. `linger.ms` sorts before
+    /// `topic.compression.type` in the `BTreeMap`.
+    #[test]
+    fn compression_key_after_a_permitted_key_conflicts() {
+        let body = format!(
+            "{}  compression: lz4\n  rdkafka:\n    linger.ms: \"5\"\n    topic.compression.type: \"gzip\"\n",
+            minimal()
+        );
+        let msg = parse(&body).unwrap_err().to_string();
+        assert!(
+            msg.contains("\"topic.compression.type\" conflicts"),
+            "{msg}"
+        );
+    }
+
+    /// Pins that a refused key is found when it is not the last passthrough
+    /// key. `acks` and `compression.type` sort before `linger.ms` in the
+    /// `BTreeMap`.
+    #[test]
+    fn owned_key_before_a_permitted_key_is_refused() {
+        let body = format!(
+            "{}  rdkafka:\n    acks: \"1\"\n    linger.ms: \"5\"\n",
+            minimal()
+        );
+        let msg = parse(&body).unwrap_err().to_string();
+        assert!(msg.contains("\"acks\" cannot be overridden"), "{msg}");
+
+        let body = format!(
+            "{}  compression: lz4\n  rdkafka:\n    compression.type: \"gzip\"\n    linger.ms: \"5\"\n",
+            minimal()
+        );
+        let msg = parse(&body).unwrap_err().to_string();
+        assert!(msg.contains("\"compression.type\" conflicts"), "{msg}");
+    }
+
+    /// Pins that the owned-key check matches whole names: librdkafka's
+    /// `receive.message.max.bytes` ends in the owned `message.max.bytes` and
+    /// is not owned.
+    #[test]
+    fn a_property_ending_in_an_owned_name_is_accepted() {
+        let body = format!(
+            "{}  rdkafka:\n    receive.message.max.bytes: \"100000000\"\n",
+            minimal()
+        );
+        assert!(parse(&body).is_ok());
+    }
+
+    /// Pins that a `topic.`-prefixed compression key is accepted when the
+    /// typed `compression` field is unset.
+    #[test]
+    fn topic_prefixed_compression_without_the_typed_field_is_accepted() {
+        for key in ["topic.compression.codec", "topic.compression.type"] {
+            let body = format!("{}  rdkafka:\n    \"{key}\": \"gzip\"\n", minimal());
+            assert!(parse(&body).is_ok(), "{key}");
+        }
     }
 
     #[test]

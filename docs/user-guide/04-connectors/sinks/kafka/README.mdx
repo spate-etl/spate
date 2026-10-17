@@ -77,8 +77,11 @@ sink:
 The passthrough exists to reach anything librdkafka exposes (client-side
 batching via `linger.ms` / `batch.num.messages`, buffer sizing, security)
 without waiting for a typed field. Properties the sink owns for correctness are
-**rejected at load time with an explanation**; aliases are denied alongside
-canonical names (passthrough and framework values apply in unspecified order).
+**rejected at load time with an explanation**, under their own name and under
+`topic.<name>`. librdkafka reads `topic.<name>` as `<name>` when `<name>` is a
+topic-level property, as `acks` and `message.timeout.ms` are. Aliases are denied
+alongside canonical names (passthrough and framework values apply in unspecified
+order).
 
 | Denied property | Why |
 |---|---|

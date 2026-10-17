@@ -254,6 +254,15 @@ impl KafkaFeedConfig {
         if self.retry_topic == self.topic {
             return Err(error("`retry_topic` must differ from `topic`".to_owned()));
         }
+        // The group reads the work and retry topics, so a dead-letter write
+        // to either is read and written again without end.
+        for (key, value) in [("topic", &self.topic), ("retry_topic", &self.retry_topic)] {
+            if self.dead_letter_topic == *value {
+                return Err(error(format!(
+                    "`dead_letter_topic` must differ from `{key}`"
+                )));
+            }
+        }
         if self.delivery_timeout.as_millis() == 0 {
             return Err(error(
                 "`delivery_timeout` must be at least 1ms: librdkafka reads 0 as no timeout, and \
@@ -542,6 +551,36 @@ mod tests {
             .to_string();
         assert!(
             err.contains("`retry_topic` must differ from `topic`"),
+            "{err}"
+        );
+    }
+
+    /// Pins that a dead-letter topic equal to the work topic or the retry
+    /// topic is refused, naming both keys.
+    #[test]
+    fn a_dead_letter_topic_that_is_the_work_topic_is_refused() {
+        let err =
+            parse(&MINIMAL.replace("dead_letter_topic: units-dead", "dead_letter_topic: units"))
+                .unwrap_err()
+                .to_string();
+        assert!(
+            err.contains("`dead_letter_topic` must differ from `topic`"),
+            "{err}"
+        );
+    }
+
+    /// Pins that a dead-letter topic equal to the retry topic is refused,
+    /// naming both keys.
+    #[test]
+    fn a_dead_letter_topic_that_is_the_retry_topic_is_refused() {
+        let err = parse(&MINIMAL.replace(
+            "dead_letter_topic: units-dead",
+            "dead_letter_topic: units-retry",
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("`dead_letter_topic` must differ from `retry_topic`"),
             "{err}"
         );
     }

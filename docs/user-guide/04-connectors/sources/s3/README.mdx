@@ -166,8 +166,9 @@ spelling in the file:
 invalid configuration: source.s3.store."Bucket" cannot be overridden: owned by the typed `url` field
 ```
 
-For an `s3://` URL, a key that `object_store` does not recognize as an S3
-option also fails at load. Every spelling and case `object_store` accepts is
+For an S3 URL (`s3://`, `s3a://`, or an `https://` URL on an `amazonaws.com`
+or `r2.cloudflarestorage.com` host), a key that `object_store` does not
+recognize as an S3 option also fails at load. Every spelling and case `object_store` accepts is
 recognized. A misspelled `endpoint` would otherwise leave the client on the
 default AWS endpoint with the configured credentials:
 

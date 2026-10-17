@@ -1041,3 +1041,14 @@ fn the_flag_agrees_with_the_markers() {
         );
     }
 }
+
+/// A heap-block count with an old side and no new one fails the report and the
+/// flag, naming the old side.
+#[test]
+fn an_old_block_count_with_no_new_side_is_an_error() {
+    let text = dhat_summary(r#""TotalBlocks":{"values":{"old":40}}"#);
+    let parsed = parse(&text).unwrap();
+    let want = Some("a metric with an old side of `40` carries no new side to compare".to_owned());
+    assert_eq!(render(&parsed, "base").err(), want);
+    assert_eq!(regressions(&parsed).err(), want);
+}

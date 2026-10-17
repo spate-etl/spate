@@ -517,11 +517,17 @@ jobs:
     # toolchain release). The release's tools drift the same way: `gh` comes
     # from the runner image, and `cargo-about` and `cargo-cyclonedx` from the
     # `taiki-e/install-action` pin in setup-rust.
+    # The rehearsal runs every build script and proc macro with this job's
+    # token, so the job holds no write scope. `publish-dry-run-report` files
+    # the issue from the outputs and the log below.
     permissions:
       contents: read
       pull-requests: read
-      issues: write
     timeout-minutes: 60
+    outputs:
+      version-failed: ${{ steps.version.conclusion == 'failure' }}
+      dry-run-failed: ${{ steps.dry-run.conclusion == 'failure' }}
+      next: ${{ steps.version.outputs.next }}
     steps:
       # The full history and tags: `derive` reads the newest tag and counts
       # the commits since it.
@@ -574,34 +580,62 @@ jobs:
           cargo xtask release dry-run --version "$NEXT" --stand-in-post 2>&1 | tee -a "$RUNNER_TEMP/publish.log" || rc=$?
           exit "$rc"
 
-      # Gated on the named steps as well as `failure()`, so a checkout
-      # failure files no issue asserting the release no longer assembles. The
-      # version step gets the neutral title: its failures are the history,
-      # the tooling or the network, before any release step ran. A skipped
-      # night fails no step, so it files nothing.
+      - name: Upload the log
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: publish-log
+          path: ${{ runner.temp }}/publish.log
+          # A skipped night or a failed checkout writes no log.
+          if-no-files-found: ignore
+
+  # Gated on the named steps' outputs as well as the result, so a checkout
+  # failure files no issue asserting the release no longer assembles. The
+  # version step gets the neutral title: its failures are the history, the
+  # tooling or the network, before any release step ran. A skipped night
+  # fails no step, so it files nothing.
+  publish-dry-run-report:
+    name: Report the release dry run
+    runs-on: ubuntu-latest
+    needs: publish-dry-run
+    if: >-
+      always() &&
+      needs.publish-dry-run.result == 'failure' &&
+      (needs.publish-dry-run.outputs.version-failed == 'true' ||
+       needs.publish-dry-run.outputs.dry-run-failed == 'true')
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The toolchain is for xtask, which writes the body.
+      - uses: ./.github/actions/setup-rust
+        with:
+          # The entry ci.yml's `changes` job owns.
+          shared-key: xtask
+          cache-save: never
+      - name: Download the log
+        # No `run-id:` and no `github-token:`: scoped to this run.
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: publish-log
+          path: ${{ runner.temp }}
       - name: Write the issue body
-        id: body
-        if: >-
-          failure() &&
-          (steps.version.conclusion == 'failure' ||
-           steps.dry-run.conclusion == 'failure')
         env:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           SHA: ${{ github.sha }}
-          VERSION_FAILED: ${{ steps.version.conclusion == 'failure' }}
-          NEXT: ${{ steps.version.outputs.next }}
+          VERSION_FAILED: ${{ needs.publish-dry-run.outputs.version-failed }}
+          NEXT: ${{ needs.publish-dry-run.outputs.next }}
         run: |
           set -euo pipefail
           if [ "$VERSION_FAILED" = "true" ]; then
-            title='[bug] Nightly release rehearsal could not run'
             what="Deriving the next version failed on the [nightly run]($RUN_URL) before the rehearsal started, so this says nothing about whether a release would succeed."
           else
-            title='[bug] The nightly release dry run fails'
             what="\`cargo xtask release dry-run --version $NEXT --stand-in-post\` failed on the [nightly run]($RUN_URL). It runs \`assemble\` and \`prepare\` as a release does, and prints the pushes, pull request changes and uploads instead of making them."
           fi
-          # The title is written before xtask runs, so the filing step has it
-          # when the body cannot be rendered.
-          echo "title=$title" >>"$GITHUB_OUTPUT"
           where=$'Build, CI, or the examples\n\nThe `Release dry run` job of the nightly scheduled run.'
           version="\`main\` at $SHA"
           # shellcheck disable=SC2016
@@ -616,14 +650,16 @@ jobs:
           cargo xtask bug-report --out "$RUNNER_TEMP/comment.md" \
             --answer what="$again" \
             --answer-file logs="$RUNNER_TEMP/publish.log"
+      # Runs after a failed download or body step too, so a missing log or a
+      # toolchain that cannot build xtask still leaves an issue.
       - name: Report the failure as an issue
-        if: >-
-          failure() &&
-          (steps.version.conclusion == 'failure' ||
-           steps.dry-run.conclusion == 'failure')
+        if: ${{ !cancelled() }}
         uses: ./.github/actions/file-issue
         with:
-          title: ${{ steps.body.outputs.title }}
+          title: >-
+            ${{ needs.publish-dry-run.outputs.version-failed == 'true'
+              && '[bug] Nightly release rehearsal could not run'
+              || '[bug] The nightly release dry run fails' }}
           body-file: ${{ runner.temp }}/body.md
           comment-file: ${{ runner.temp }}/comment.md
 
@@ -1241,9 +1277,9 @@ jobs:
 
   # ===========================================================================
   # Catch-all failure reporting. `attribution`, `advisories`, `osv`, `fuzz`,
-  # `minimal-versions`, `publish-dry-run`, `release-verify`, `beta` and
-  # `fault-test` file their own issues and are absent from `needs` below so
-  # they are not reported twice.
+  # `minimal-versions`, `publish-dry-run` (through `publish-dry-run-report`),
+  # `release-verify`, `beta` and `fault-test` file their own issues and are
+  # absent from `needs` below so they are not reported twice.
   # ===========================================================================
   report:
     name: Report scheduled failures

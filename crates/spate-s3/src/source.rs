@@ -717,6 +717,19 @@ mod tests {
         );
     }
 
+    /// Every key `validate` accepts reaches the builder, in any case.
+    #[test]
+    fn apply_options_applies_upper_case_keys() {
+        let b = apply_options(
+            AmazonS3Builder::new(),
+            &map(&[("AWS_ENDPOINT_URL", "http://127.0.0.1:9000")]),
+        );
+        assert_eq!(
+            b.get_config_value(&AmazonS3ConfigKey::Endpoint).as_deref(),
+            Some("http://127.0.0.1:9000")
+        );
+    }
+
     /// The S3 listing prefix must be byte-identical to what `parse_url_opts`
     /// produces; planned descriptors and their offsets depend on it.
     #[test]

@@ -205,7 +205,9 @@ impl S3SourceConfig {
                 )));
             }
         }
-        // Only the S3 client reads `store`; every other scheme ignores it.
+        // Only the S3 client's keys are checked. `file://` reads no options,
+        // and with this crate's object_store features any other scheme fails
+        // when the source starts.
         if matches!(
             ObjectStoreScheme::parse(&url),
             Ok((ObjectStoreScheme::AmazonS3, _))
@@ -344,8 +346,8 @@ mod tests {
     }
 
     /// A misspelled key would leave the client on its default, so a typo in
-    /// `endpoint` sends the configured credentials to AWS. Regression for
-    /// #1118.
+    /// `endpoint` sends requests signed with the configured credentials to
+    /// AWS. Regression for #1118.
     #[test]
     fn unrecognized_store_keys_are_rejected() {
         for key in ["endpont", "endpoint_unused", "Endpont"] {
@@ -354,6 +356,42 @@ mod tests {
             assert!(
                 err.to_string().contains(&format!("store.\"{key}\"")),
                 "error names the key as written: {err}"
+            );
+        }
+    }
+
+    /// Every key is checked, including one that sorts after recognized keys,
+    /// as in the #1118 configuration.
+    #[test]
+    fn an_unrecognized_key_after_recognized_ones_is_rejected() {
+        let body = format!(
+            "{}  store:\n    access_key_id: k\n    allow_http: \"true\"\n    endpont: x\n",
+            minimal()
+        );
+        let err = S3SourceConfig::from_component_config(&section(&body)).unwrap_err();
+        assert!(err.to_string().contains("store.\"endpont\""), "{err}");
+    }
+
+    /// The local client reads no `store` options, so a `file://` URL loads
+    /// with a key the S3 client would not recognize.
+    #[test]
+    fn file_url_store_keys_are_not_checked() {
+        let body = "  url: file:///tmp/objects/\n  store:\n    endpont: x\n";
+        S3SourceConfig::from_component_config(&section(body)).unwrap();
+    }
+
+    /// An `https://` URL on an S3 host is checked like `s3://`.
+    #[test]
+    fn https_s3_host_store_keys_are_checked() {
+        for url in [
+            "https://s3.us-east-1.amazonaws.com/bucket/exports/",
+            "https://acct.r2.cloudflarestorage.com/bucket/exports/",
+        ] {
+            let body = format!("  url: {url}\n  store:\n    endpont: x\n");
+            let err = S3SourceConfig::from_component_config(&section(&body)).unwrap_err();
+            assert!(
+                err.to_string().contains("store.\"endpont\""),
+                "{url}: {err}"
             );
         }
     }

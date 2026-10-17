@@ -71,7 +71,7 @@ source:
 | `refresh_listing` | bool | `false` | Re-list on the coordinator's replan interval, planning new objects as additional splits. `true` makes the job **open** (never self-terminates). Part of the job fingerprint. |
 | `prefetch_bytes` | bytes | `8MiB` | Target window size for ETag-pinned ranged GETs; see [read-ahead memory sizing](#read-parallelism-on-a-solo-run). Must be at least `chunk_bytes`; a smaller value fails at load. |
 | `chunk_bytes` | bytes | `512KiB` | Target size of one buffered chunk. Zero fails at load. |
-| `store` | string map | `{}` | Raw `object_store` options, applied on top of the environment. Bucket keys and keys `object_store` does not recognize fail at load — see [the `store` denylist](#the-store-passthrough-and-the-denylist). |
+| `store` | string map | `{}` | Raw `object_store` options, applied on top of the environment. Bucket keys fail at load, and so do keys `object_store` does not recognize under an S3 URL — see [the `store` denylist](#the-store-passthrough-and-the-denylist). |
 
 Mind the units on the fingerprinted keys: `MB` and `MiB` parse to
 different byte counts (`64MB` = 64,000,000; `64MiB` = 67,108,864), and

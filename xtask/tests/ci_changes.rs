@@ -21,7 +21,7 @@ const READS: [&str; 10] = [
 ];
 
 /// The keys the workflow reads, in the order the block writes them.
-const KEYS: [&str; 11] = [
+const KEYS: [&str; 12] = [
     "rust",
     "site",
     "fuzz",
@@ -31,6 +31,7 @@ const KEYS: [&str; 11] = [
     "semver-pkgs",
     "bench",
     "manifests",
+    "release-tooling",
     "bench-shards",
     "clickhouse-lanes",
 ];
@@ -46,6 +47,7 @@ const SITE_ONLY: &str = "rust=false\n\
      semver-pkgs=\n\
      bench=false\n\
      manifests=false\n\
+     release-tooling=false\n\
      bench-shards=[]\n\
      clickhouse-lanes=[]\n";
 
@@ -188,11 +190,7 @@ fn the_github_output_file_gains_the_block_that_was_printed() {
 /// in `KEYS`.
 #[test]
 fn the_workflow_and_the_classifier_agree_on_the_output_keys() {
-    let workflow = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .join(".github/workflows/ci.yml");
-    let text = std::fs::read_to_string(&workflow).unwrap();
+    let text = ci_yml();
 
     let mut seen: Vec<&str> = Vec::new();
     for prefix in ["needs.changes.outputs.", "steps.classify.outputs."] {
@@ -216,6 +214,52 @@ fn the_workflow_and_the_classifier_agree_on_the_output_keys() {
             "the classifier writes {key} and ci.yml reads it nowhere"
         );
     }
+}
+
+/// Every key reaches the `changes` job's `outputs:` mapping, so a job's `if:`
+/// never reads a key the job does not export.
+#[test]
+fn every_key_is_exported_by_the_changes_job() {
+    let text = ci_yml();
+    for key in KEYS {
+        let line = format!("      {key}: ${{{{ steps.classify.outputs.{key} }}}}");
+        assert!(
+            text.lines().any(|l| l == line),
+            "the changes job does not export {key}"
+        );
+    }
+}
+
+/// `CI gate` needs every other job, so a failing job cannot pass the gate.
+#[test]
+fn ci_gate_needs_every_job() {
+    let text = ci_yml();
+    let body = &text[text.find("\njobs:\n").unwrap()..];
+    let jobs: Vec<&str> = body
+        .lines()
+        .filter_map(|l| l.strip_prefix("  ")?.strip_suffix(':'))
+        .filter(|k| !k.starts_with(' ') && !k.starts_with('#') && *k != "ci-gate")
+        .collect();
+    let gate = &body[body.find("\n  ci-gate:\n").unwrap()..];
+    let needs = gate
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("needs: ["))
+        .unwrap()
+        .trim_end_matches(']');
+    let needs: Vec<&str> = needs.split(", ").collect();
+    assert!(!jobs.is_empty());
+    for job in &jobs {
+        assert!(needs.contains(job), "CI gate does not need {job}");
+    }
+}
+
+/// The text of `ci.yml`.
+fn ci_yml() -> String {
+    let workflow = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join(".github/workflows/ci.yml");
+    std::fs::read_to_string(&workflow).unwrap()
 }
 
 /// A directory of this run's own, removed with its contents.

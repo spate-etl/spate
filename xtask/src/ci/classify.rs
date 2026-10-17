@@ -153,8 +153,10 @@ pub(crate) fn is_manifest(path: &str) -> bool {
 }
 
 /// Files that can change whether a release assembles: the release workflows,
-/// the action that installs its tools, and its xtask sequence. The selector
-/// itself is included, so an edit narrowing this gate is itself gated.
+/// the action that installs its tools, and its xtask sequence. The selector's
+/// own files are included, so a change to the selector runs the rehearsal on
+/// its pull request. An edit that drops those entries deselects its own pull
+/// request, so `release_tooling_selects_the_release_rehearsal` pins the list.
 pub(crate) fn is_release_tooling(path: &str) -> bool {
     any_glob(
         path,
@@ -886,12 +888,24 @@ mod tests {
         }
         for path in [
             ".github/workflows/scheduled.yml",
+            ".github/actions/file-issue/action.yml",
             "xtask/src/checks/adr.rs",
             "crates/spate-core/src/lib.rs",
             "docs/a.md",
         ] {
             assert!(!run(&[path]).release_tooling, "{path}");
         }
+    }
+
+    /// A release path selects the rehearsal whatever path the diff lists after it.
+    #[test]
+    fn a_release_path_keeps_the_selection_past_later_paths() {
+        let out = run(&[
+            ".github/actions/setup-rust/action.yml",
+            ".github/workflows/ci.yml",
+            ".github/workflows/scheduled.yml",
+        ]);
+        assert!(out.release_tooling);
     }
 
     /// A Dependabot bump of the tool pin is the change the rehearsal exists

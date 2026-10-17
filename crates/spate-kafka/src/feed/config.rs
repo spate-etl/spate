@@ -263,6 +263,18 @@ impl KafkaFeedConfig {
                 )));
             }
         }
+        // The attempt topic is compacted and the others must not be. Startup
+        // skips that check for a topic that reports no `cleanup.policy`, so it
+        // cannot be relied on to refuse a shared name.
+        for (key, value) in [
+            ("topic", &self.topic),
+            ("retry_topic", &self.retry_topic),
+            ("dead_letter_topic", &self.dead_letter_topic),
+        ] {
+            if self.attempt_topic == *value {
+                return Err(error(format!("`attempt_topic` must differ from `{key}`")));
+            }
+        }
         if self.delivery_timeout.as_millis() == 0 {
             return Err(error(
                 "`delivery_timeout` must be at least 1ms: librdkafka reads 0 as no timeout, and \
@@ -583,6 +595,29 @@ mod tests {
             err.contains("`dead_letter_topic` must differ from `retry_topic`"),
             "{err}"
         );
+    }
+
+    /// Pins that an attempt topic equal to the work, retry or dead-letter
+    /// topic is refused, naming both keys.
+    #[test]
+    fn an_attempt_topic_named_like_another_topic_is_refused() {
+        for (key, other) in [
+            ("topic", "units"),
+            ("retry_topic", "units-retry"),
+            ("dead_letter_topic", "units-dead"),
+        ] {
+            let yaml = MINIMAL.replace(
+                "attempt_topic: units-attempts",
+                &format!("attempt_topic: {other}"),
+            );
+            let err = parse(&yaml)
+                .expect_err(&format!("attempt_topic {other} accepted"))
+                .to_string();
+            assert!(
+                err.contains(&format!("`attempt_topic` must differ from `{key}`")),
+                "{err}"
+            );
+        }
     }
 
     /// Pins that a statistics interval under a millisecond is refused, since

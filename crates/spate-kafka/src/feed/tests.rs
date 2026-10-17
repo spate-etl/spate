@@ -663,8 +663,9 @@ mod cluster {
     }
 
     /// Pins that a panic on the feed's thread while it holds partitions
-    /// stops the feed with a Fatal error, and that dropping the feed then
-    /// returns: the unwind closes the consumer as a normal stop does.
+    /// stops the feed with a Fatal error naming the consumer thread, and
+    /// that dropping the feed then returns: the unwind closes the consumer
+    /// as a normal stop does.
     #[test]
     fn a_panic_on_the_feed_thread_stops_the_feed_and_its_drop_returns() {
         let cluster = cluster_with(0);
@@ -686,9 +687,13 @@ mod cluster {
             producer,
             thread: Some(thread),
         };
-        wait_until(DEADLINE, "the feed stops", || {
-            feed.receive(1)
-                .is_err_and(|e| e.kind == FeedErrorKind::Fatal && e.reason.contains("panicked"))
+        let mut reason = None;
+        wait_until(DEADLINE, "the feed stops", || match feed.receive(1) {
+            Err(e) if e.kind == FeedErrorKind::Fatal => {
+                reason = Some(e.reason);
+                true
+            }
+            _ => false,
         });
         let dropped = returns_within(Duration::from_secs(30), move || drop(feed));
         if !dropped {
@@ -696,6 +701,10 @@ mod cluster {
             std::mem::forget(cluster);
         }
         assert!(dropped, "dropping the feed did not return");
+        assert_eq!(
+            reason.as_deref(),
+            Some("the Kafka feed's consumer thread panicked")
+        );
     }
 
     /// Pins that stopping the feed commits the offsets finished since the

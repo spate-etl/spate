@@ -19,8 +19,7 @@
 //! `{"v":1,"attempts":n}`, holding the absolute count, so a write sent again
 //! after an unknown outcome writes the same value. A null value is a
 //! tombstone: the unit has no attempts recorded. A reader refuses a value at
-//! any other `v`, with a field it does not know, or that is not that object,
-//! rather than read it as some count.
+//! any other `v`, with a field it does not know, or that is not that object.
 
 use super::config::KafkaFeedConfig;
 use super::consumer::{POLL_TIMEOUT, poll_class};
@@ -188,7 +187,7 @@ pub(crate) fn encode(attempts: u32) -> Vec<u8> {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error(
     "the attempt record at offset {offset} of `{topic}` partition {partition} cannot be read \
-     ({reason}); a release this one cannot read wrote it"
+     ({reason}); a newer release or another producer wrote it"
 )]
 pub(crate) struct RecordError {
     topic: String,
@@ -503,6 +502,7 @@ mod tests {
             (br#"{"attempts":3}"#, "not an attempt record"),
             (b"3", "not an attempt record"),
             (b"\xff", "not an attempt record"),
+            (b"[1,3]", "not an attempt record"),
         ] {
             let err = decode("units-attempts", 1, 42, Some(value))
                 .unwrap_err()
@@ -512,7 +512,10 @@ mod tests {
                 err.contains("offset 42 of `units-attempts` partition 1"),
                 "{err}"
             );
-            assert!(err.contains("a release this one cannot read"), "{err}");
+            assert!(
+                err.contains("a newer release or another producer wrote it"),
+                "{err}"
+            );
         }
         let err = record_of("units-attempts", 0, 5, None, Some(&encode(1)))
             .unwrap_err()
@@ -657,6 +660,49 @@ mod tests {
         follower.on_error(&KafkaError::MessageConsumption(C::TopicAuthorizationFailed));
         let reason = follower.core.lock().fatal.clone().unwrap().reason;
         assert!(reason.contains("the attempt follower's poll"), "{reason}");
+    }
+
+    /// Pins that an unknown attempt topic or partition latches the feed.
+    #[test]
+    fn an_unknown_attempt_topic_latches_the_feed() {
+        use rdkafka::error::RDKafkaErrorCode as C;
+        let Ok(follower) = follower(&config()) else {
+            panic!("the follower is refused");
+        };
+        follower.on_error(&KafkaError::MessageConsumption(C::UnknownTopicOrPartition));
+        assert!(follower.core.latched());
+    }
+
+    /// Pins that a TLS rejection reported through the error callback
+    /// latches the feed.
+    #[test]
+    fn a_tls_rejection_latches_the_feed() {
+        use rdkafka::ClientContext;
+        use rdkafka::error::RDKafkaErrorCode as C;
+        let Ok(follower) = follower(&config()) else {
+            panic!("the follower is refused");
+        };
+        follower.consumer.context().error(
+            KafkaError::MessageConsumption(C::SSL),
+            "ssl handshake failed: certificate verify failed",
+        );
+        follower.on_error(&KafkaError::MessageConsumption(C::SSL));
+        assert!(follower.core.latched());
+    }
+
+    /// Pins that `lock` hands out the ledger after a holder panicked.
+    #[test]
+    fn a_poisoned_ledger_still_locks() {
+        let ledger: SharedLedger =
+            Arc::new((Mutex::new(Ledger::new(NonZeroU32::MIN)), Condvar::new()));
+        let held = Arc::clone(&ledger);
+        let _ = std::thread::spawn(move || {
+            let _held = held.0.lock().unwrap();
+            panic!("poisoning the ledger");
+        })
+        .join();
+        lock(&ledger).apply(0, 0, b"a", Entry::Count(1));
+        assert_eq!(lock(&ledger).count(b"a"), 1);
     }
 
     mod cluster {
@@ -831,6 +877,19 @@ mod tests {
                 "{reason}"
             );
             assert!(reason.contains("version 9"), "{reason}");
+        }
+
+        /// Pins that the follower's thread ends once the feed latches while
+        /// the feed is not stopped.
+        #[test]
+        fn the_follower_exits_once_the_feed_latches() {
+            let rig = rig();
+            let (running, _) = Running::start(&rig);
+            running.core.latch("probe");
+            let thread = running.thread.as_ref().unwrap();
+            wait_until(DEADLINE, "the follower exits once the feed latches", || {
+                thread.is_finished()
+            });
         }
     }
 }

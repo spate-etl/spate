@@ -161,9 +161,9 @@ work topic's retention does not limit how long a moved unit is kept:
   attempt cap waits for someone to inspect it or publish it again. Set it
   for that window, or to `-1` to keep messages without limit.
 
-The attempt topic holds one record for each unit in flight or waiting to be
-retried, keyed by the unit's publish identity (see
-[Counting deliveries](#counting-deliveries)):
+The attempt topic holds one record, keyed by the unit's publish identity,
+for each unit in flight or waiting to be retried, and for each unit lost to
+retention after a read (see [Counting deliveries](#counting-deliveries)):
 
 - its `cleanup.policy` is `compact` and nothing else. Time or size retention
   would delete the count of a unit still in flight, and connecting refuses
@@ -301,12 +301,22 @@ the same time, as after a rebalance, can count once between them.
 
 An acknowledged unit's attempt record is tombstoned, so a later read of the
 same message counts from zero. A retry write leaves the record in place. A
-dead-letter write is followed by a tombstone too, so the attempt topic holds
-records only for units in flight or waiting to be retried. That opens a
-window. If a worker crashes within a commit interval after the tombstone is
-confirmed, or loses the partition while the tombstone is in flight, the next
-owner reads the unit again from a count of zero and moves a second copy to
-the dead-letter topic, after at most `attempt_cap` more reads.
+dead-letter write is followed by a tombstone too, which opens a window. If a
+worker crashes within a commit interval after the tombstone is confirmed, or
+loses the partition while the tombstone is in flight, the next owner reads the
+unit again from a count of zero and moves a second copy to the dead-letter
+topic, after at most `attempt_cap` more reads.
+
+The attempt topic therefore holds records for units in flight or waiting to
+be retried. A unit that retention deletes after a read keeps its record too,
+since only an acknowledgment or a confirmed dead-letter write tombstones it,
+and every worker holds that record's count in memory.
+
+An acknowledged unit whose tombstone is not confirmed, because its worker
+stops or loses the partition while the tombstone is in flight, keeps its
+record, and the next owner reads the unit again with its count. A unit
+acknowledged on its `attempt_cap`-th read goes to the dead-letter topic
+without being read.
 
 A unit's offset finishes only once the write that settles it is confirmed. An
 attempt, tombstone, retry or dead-letter write that fails transiently, or gets
@@ -349,7 +359,9 @@ gives the measured gate latency and memory per record.
 Dropping the feed waits up to 1 s for its writes in flight to be confirmed,
 then commits each partition up to its first unfinished offset and leaves the
 group. An acknowledged unit whose tombstone is not confirmed within that
-second is read again after the stop, and that read counts. A dead-letter
+second is read again after the stop, and that read counts. One acknowledged
+on its `attempt_cap`-th read goes to the dead-letter topic without being read
+instead. A dead-letter
 write confirmed during the stop is not followed by a tombstone, so the next
 owner finds the unit's record at the cap and moves another copy to the
 dead-letter topic without reading it. Units waiting at the gate, buffered for

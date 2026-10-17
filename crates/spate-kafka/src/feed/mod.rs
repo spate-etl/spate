@@ -30,10 +30,11 @@
 //! attempt partition up to its high watermark, then writes the recorded
 //! count plus one. The unit reaches the reader with that count once the
 //! write is confirmed, so every read counts, including one whose worker
-//! dies. A unit whose recorded attempts have reached the attempt cap goes
-//! to the dead-letter topic without being read. A unit failed on a delivery
-//! at or past the cap goes to the dead-letter topic, and below it to the
-//! retry topic.
+//! dies. Two copies of one publish at the gate at the same time can read the
+//! same count, so they count once between them. A unit whose recorded
+//! attempts have reached the attempt cap goes to the dead-letter topic
+//! without being read. A unit failed on a delivery at or past the cap goes
+//! to the dead-letter topic, and below it to the retry topic.
 
 mod attempt;
 mod config;

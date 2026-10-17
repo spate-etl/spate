@@ -56,8 +56,10 @@ topic carries its identity in a `spate.origin` header.
 A confirmed dead-letter write is followed by a tombstone of the unit's
 record, and the unit's offset finishes once the tombstone is confirmed. #1091
 left the record in place after a dead-letter write. The maintainer chose the
-tombstone, so the attempt topic holds records only for units in flight or
-waiting to be retried, and accepted the window it opens, stated below.
+tombstone, so the attempt topic holds records for units in flight or waiting
+to be retried, and accepted the window it opens, stated below. A unit that
+retention deletes after a read keeps its record, because only an
+acknowledgment or a confirmed dead-letter write tombstones it.
 
 The follower carries the feed's `group.id` and assigns the attempt topic's
 partitions itself, because librdkafka refuses `assign` on a consumer with no
@@ -68,12 +70,16 @@ group. It never subscribes, so it never takes part in the feed's rebalances.
 - Good, because a unit that kills its worker on every read reaches the
   dead-letter topic at the cap, and its partition moves past it.
 - Good, because every read counts on both backends, as every receive counts on
-  SQS, so the cap means the same on each.
+  SQS, so the cap means the same on each. The one exception is on Kafka, where
+  two copies of one publish read at the same time, as after a rebalance, can
+  count once between them.
 - Bad, because every unit costs, before its read starts, a watermark read of
   its attempt partition, the follower's catch-up to that watermark, and one
   confirmed produce.
 - Bad, because every worker holds in memory the count of each identity with a
   live record, and reads the attempt topic from its start when it connects.
+  That includes the record of a unit lost to retention after a read, which
+  nothing tombstones.
 - Bad, because a graceful stop or a rebalance uses an attempt, so the cap must
   exceed the restarts and rebalances a unit can see. Under eager assignment a
   rolling restart of N members can cost a long unit up to 2N attempts, where
@@ -83,6 +89,11 @@ group. It never subscribes, so it never takes part in the feed's rebalances.
 - Bad, because each bounded job needs four fresh topics, the work, attempt,
   retry and dead-letter topics, and a continuous job needs attempt, retry and
   dead-letter topics of its own.
+- Bad, because the backend keeps the consumer group's ordering. A slow unit
+  holds back its partition's commit point, and each rebalance reads again every
+  unit after it and cuts short every member's units in flight.
+- Bad, because a Kafka feed spreads units across at most as many workers as the
+  work topic has partitions.
 - Bad, because the attempt topic's partition count cannot change. Workers
   started before and after a change count a unit separately, and nothing
   detects the change.

@@ -1366,7 +1366,7 @@ fn a_dry_assemble_writes_nothing_outside_the_tree() {
         let mut workspace = FakeWorkspace::new(&log, &CRATES);
         workspace.version = v("0.2.0");
         let pauses = Pauses::default();
-        let (git, forge) = (DryGit(&git), DryForge(&forge));
+        let (git, forge) = (DryGit(&git), DryForge(&forge, false));
         assemble(&host!(&git, &forge, &registry, &workspace, pauses), "0.3.0").unwrap();
         assert_eq!(
             log.entries(),
@@ -1374,6 +1374,32 @@ fn a_dry_assemble_writes_nothing_outside_the_tree() {
             "reads_fail={reads_fail}"
         );
     }
+}
+
+/// A strict rehearsal fails on a refused pull request listing, and a lenient
+/// one reads it as empty; neither pushes.
+#[test]
+fn a_strict_dry_forge_passes_a_refused_listing_through() {
+    let log = Log::default();
+    let mut forge = FakeForge::new(&log);
+    forge.reads_fail = true;
+
+    let strict = DryForge(&forge, true);
+    assert!(strict.open_pulls().is_err());
+    assert!(strict.pull_for_head("release/v0.3.0").is_err());
+    let lenient = DryForge(&forge, false);
+    assert!(lenient.open_pulls().unwrap().is_empty());
+    assert_eq!(lenient.pull_for_head("release/v0.3.0").unwrap(), None);
+
+    let git = FakeGit::new(&log);
+    let registry = FakeRegistry::default();
+    let mut workspace = FakeWorkspace::new(&log, &CRATES);
+    workspace.version = v("0.2.0");
+    let pauses = Pauses::default();
+    let (git, forge) = (DryGit(&git), DryForge(&forge, true));
+    let err = assemble(&host!(&git, &forge, &registry, &workspace, pauses), "0.3.0").unwrap_err();
+    assert!(err.message.contains("injected: list"), "{}", err.message);
+    assert_eq!(log.entries(), ["generate 0.3.0", "commit release: v0.3.0"]);
 }
 
 /// A rehearsal's git passes the commit through and never tags or pushes.

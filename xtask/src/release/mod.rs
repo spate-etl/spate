@@ -141,7 +141,8 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: ReleaseCommand) -> Outco
                          use `cargo xtask release dry-run`, which makes one in a throwaway worktree",
                     ));
                 }
-                let (git, forge) = (DryGit(&git), DryForge(&forge));
+                let strict = strict_listing(std::env::var("GH_REPO").ok().as_deref());
+                let (git, forge) = (DryGit(&git), DryForge(&forge, strict));
                 sequence::assemble(
                     &Host {
                         git: &git,
@@ -242,6 +243,13 @@ fn remote(repo: Option<&str>) -> String {
         || "origin".to_owned(),
         |r| format!("https://github.com/{r}.git"),
     )
+}
+
+/// Whether a refused pull request listing fails a dry run. With `GH_REPO`
+/// naming the repository, gh needs no default repository, so a refusal is a
+/// real error.
+fn strict_listing(gh_repo: Option<&str>) -> bool {
+    gh_repo.is_some_and(|r| !r.is_empty())
 }
 
 fn head_is_detached(root: &Path) -> Result<bool, Error> {
@@ -475,6 +483,14 @@ mod tests {
             "https://github.com/spate-etl/spate.git"
         );
         assert_eq!(remote(None), "origin");
+    }
+
+    /// Only a non-empty `GH_REPO` makes a refused listing fail a rehearsal.
+    #[test]
+    fn only_a_named_repository_makes_the_listing_strict() {
+        assert!(!strict_listing(None));
+        assert!(!strict_listing(Some("")));
+        assert!(strict_listing(Some("spate-etl/spate")));
     }
 
     fn git(root: &Path, args: &[&str]) {

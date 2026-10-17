@@ -508,92 +508,117 @@ jobs:
           comment-file: ${{ runner.temp }}/comment.md
 
   publish-dry-run:
-    name: Publish dry run
+    name: Release dry run
     runs-on: ubuntu-latest
     needs: plan
     if: needs.plan.outputs.nightly == 'true'
     # The backstop for the manifest-selected gate in ci.yml: a packaging
     # break can arrive with nothing in this repository changing (a yank, a
-    # toolchain release).
+    # toolchain release). The release's tools drift the same way: `gh` comes
+    # from the runner image, and `cargo-about` and `cargo-cyclonedx` from the
+    # `taiki-e/install-action` pin in setup-rust.
     permissions:
       contents: read
+      pull-requests: read
       issues: write
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
+      # The full history and tags: `derive` reads the newest tag and counts
+      # the commits since it.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
       - uses: ./.github/actions/setup-rust
         with:
+          tools: cargo-about,cargo-cyclonedx
           shared-key: publish
 
-      - name: Bump to the next patch and commit it locally
-        id: bump
+      # The night after a release, before anything merges, `derive` refuses
+      # with "no commits since vX.Y.Z": there is no release to rehearse,
+      # which is not a failure. The tag and the count are xtask's own rules
+      # (`last_tag`, `derive`), so this skips exactly where `derive` would
+      # refuse for that reason. A checkout with no tag does not skip, since
+      # `..HEAD` counts nothing; `derive` fails it instead.
+      - name: Derive the version to rehearse
+        id: version
         run: |
-          set -o pipefail
-          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml)
-          next="${version%.*}.$(( ${version##*.} + 1 ))"
+          set -euo pipefail
+          tag=$(git tag --list 'v[0-9]*' --sort=-v:refname | sed -n 1p)
+          if [ -n "$tag" ] && [ "$(git rev-list --no-merges --count "$tag..HEAD")" = 0 ]; then
+            echo "::notice::No commits since $tag, so there is no release to rehearse."
+            echo "skip=true" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
           rc=0
-          cargo xtask release version bump "$next" 2>&1 | tee "$RUNNER_TEMP/publish.log" || rc=$?
+          next=$(cargo xtask release version derive 2>>"$RUNNER_TEMP/publish.log") || rc=$?
+          cat "$RUNNER_TEMP/publish.log" >&2
           if [ "$rc" -ne 0 ]; then
             exit "$rc"
           fi
-          git config user.name 'spate-release[bot]'
-          git config user.email 'spate-release[bot]@users.noreply.github.com'
-          git commit --all --quiet --message "workspace: simulate the release bump to $next"
+          echo "next=$next" >>"$GITHUB_OUTPUT"
+          # This commit is never pushed. A minor release needs its post
+          # committed first (website/blog/README.md), and between minor
+          # releases there is none, so a stand-in draft takes its place.
+          case "$next" in
+            *.0)
+              minor=${next%.0}
+              if ! grep -rqsE "^slug: *[\"']?releases/${minor//./\\.}[\"']? *$" website/blog; then
+                printf -- '---\ntitle: Release rehearsal stand-in\nslug: releases/%s\ndraft: true\n---\n' "$minor" \
+                  >website/blog/rehearsal-stand-in.md
+                git add website/blog/rehearsal-stand-in.md
+                git -c user.name='spate-release[bot]' \
+                  -c user.email='spate-release[bot]@users.noreply.github.com' \
+                  commit --quiet --message "website: stand in for the $minor release post"
+              fi
+              ;;
+          esac
 
-      # Packaging cannot see these: it packages a crate with no description
-      # or license with a warning and exit 0, while the upload rejects it
-      # (cargo issue 14249).
-      - id: metadata
+      - name: Rehearse the release
+        id: dry-run
+        if: steps.version.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          NEXT: ${{ steps.version.outputs.next }}
         run: |
           set -o pipefail
           rc=0
-          cargo xtask release version check-metadata 2>&1 | tee "$RUNNER_TEMP/publish.log" || rc=$?
+          cargo xtask release dry-run --version "$NEXT" 2>&1 | tee -a "$RUNNER_TEMP/publish.log" || rc=$?
           exit "$rc"
 
-      - id: dry-run
-        run: |
-          set -o pipefail
-          rc=0
-          cargo xtask release package 2>&1 | tee "$RUNNER_TEMP/publish.log" || rc=$?
-          exit "$rc"
-
-      # Gated on the named steps, not `failure()`: a checkout failure would
-      # file an issue asserting the workspace no longer packages. The bump
-      # step gets the neutral title: it runs sed, the rewriters and
-      # `cargo update`, so its failures are the tooling or the network, and
-      # filing them as a packaging break would be wrong twice a year.
+      # Gated on the named steps as well as `failure()`, so a checkout
+      # failure files no issue asserting the release no longer assembles. The
+      # version step gets the neutral title: its failures are the history,
+      # the tooling or the network, before any release step ran. A skipped
+      # night fails no step, so it files nothing.
       - name: Write the issue body
         id: body
         if: >-
           failure() &&
-          (steps.bump.conclusion == 'failure' ||
-           steps.metadata.conclusion == 'failure' ||
+          (steps.version.conclusion == 'failure' ||
            steps.dry-run.conclusion == 'failure')
         env:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           SHA: ${{ github.sha }}
-          BUMP_FAILED: ${{ steps.bump.conclusion == 'failure' }}
+          VERSION_FAILED: ${{ steps.version.conclusion == 'failure' }}
+          NEXT: ${{ steps.version.outputs.next }}
         run: |
           set -euo pipefail
-          if [ "$BUMP_FAILED" = "true" ]; then
-            title='[bug] Nightly publish rehearsal could not run'
-            what="The simulated version bump failed on the [nightly run]($RUN_URL) before anything was packaged, so this says nothing about whether the workspace packages."
+          if [ "$VERSION_FAILED" = "true" ]; then
+            title='[bug] Nightly release rehearsal could not run'
+            what="Deriving the next version, or committing its stand-in release post, failed on the [nightly run]($RUN_URL) before the rehearsal started, so this says nothing about whether a release would succeed."
           else
-            title='[bug] The workspace no longer packages'
-            what="\`cargo xtask release package\` or the upload-metadata check failed on the [nightly run]($RUN_URL), at a simulated next-patch version."
+            title='[bug] The nightly release dry run fails'
+            what="\`cargo xtask release dry-run --version $NEXT\` failed on the [nightly run]($RUN_URL). It runs \`assemble\` and \`prepare\` as a release does, and prints the pushes, pull request changes and uploads instead of making them."
           fi
           # The title is written before xtask runs, so the filing step has it
           # when the body cannot be rendered.
           echo "title=$title" >>"$GITHUB_OUTPUT"
-          if [ "$BUMP_FAILED" = "true" ]; then
-            # A bump that stopped part way leaves manifests xtask cannot build.
-            git checkout -- .
-          fi
-          where=$'Build, CI, or the examples\n\nThe `Publish dry run` job of the nightly scheduled run.'
+          where=$'Build, CI, or the examples\n\nThe `Release dry run` job of the nightly scheduled run.'
           version="\`main\` at $SHA"
-          expected='The workspace packages at the next patch version. A release cannot upload until this is green, and a failure that first appears on release day has already published whatever came before it in the order. Fix it before cutting one.'
+          # shellcheck disable=SC2016
+          expected='The release assembles, packages and stages its SBOMs at the version the history derives. A failure here stops the next release in `assemble`, or in `prepare` before anything is published. With nothing changed in this repository, a failure in `gh`, `cargo about` or `cargo cyclonedx` points at the runner image or the `taiki-e/install-action` pin. Reproduce it with `cargo xtask release dry-run --version X.Y.Z`. If the output shows a network error, rerun the job first.'
           cargo xtask bug-report --out "$RUNNER_TEMP/body.md" \
             --answer components="$where" \
             --answer version="$version" \
@@ -607,8 +632,7 @@ jobs:
       - name: Report the failure as an issue
         if: >-
           failure() &&
-          (steps.bump.conclusion == 'failure' ||
-           steps.metadata.conclusion == 'failure' ||
+          (steps.version.conclusion == 'failure' ||
            steps.dry-run.conclusion == 'failure')
         uses: ./.github/actions/file-issue
         with:

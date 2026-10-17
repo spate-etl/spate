@@ -140,7 +140,9 @@ staging in a throwaway git worktree. That covers the real release commit,
 every pending crate packaged and verify-built, and the SBOMs and `SHA256SUMS`
 staged. `assemble` runs its pull request step against the real open pull
 requests and prints each push, close, open and auto-merge instead of making
-it. The run stops before attesting
+it. With `GH_REPO` set, a pull request listing that `gh` refuses fails the
+rehearsal; without it, as on a clone with no default repository, the listing
+reads as empty. The run stops before attesting
 and prints what a real run would do next. It needs `gh`
 authenticated, and `curl`, `cargo-about` and `cargo-cyclonedx` on the path;
 the preflight names anything missing. The generator versions in CI come from
@@ -157,10 +159,14 @@ that a previous release exercised; the last runs inside the real publish. It
 does not attest or verify; only a real release signs with
 `release-build.yml`'s identity.
 
-The same packaging proof also runs continuously: `ci.yml` runs
+The same proof also runs continuously. `ci.yml` runs
 `cargo xtask release package`, the packaging step `prepare` runs, at a
-simulated bump on pushes to `main` that reach a manifest, and `scheduled.yml`
-repeats it nightly, so a packaging problem surfaces before release day.
+simulated bump on pushes to `main` that reach a manifest. `scheduled.yml` runs
+`cargo xtask release dry-run` nightly at the derived version, with `gh`,
+`cargo-about` and `cargo-cyclonedx` installed as a release gets them, so a
+packaging problem or a change in those tools surfaces before release day. It
+skips the night after a release when nothing has merged since the tag, and
+between minor releases it commits a stand-in draft post locally.
 `scheduled.yml` also generates `THIRD-PARTY.md` nightly, so a generator
 failure surfaces the same way.
 

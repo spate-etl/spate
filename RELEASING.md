@@ -167,8 +167,10 @@ simulated bump on pushes to `main` that reach a manifest. `scheduled.yml` runs
 `cargo xtask release dry-run --stand-in-post` nightly at the derived version,
 with `gh`, `cargo-about` and `cargo-cyclonedx` installed as a release gets
 them, so a packaging problem or a change in those tools surfaces before
-release day. It skips the night after a release when nothing has merged since
-the tag. When the derived version is a minor with no post yet, the flag
+release day. `ci.yml` runs the same rehearsal on a pull request that changes
+the release workflows, `.github/actions/setup-rust/` or `xtask/src/release/`.
+The nightly skips the night after a release when nothing has merged since the
+tag. When the derived version is a minor with no post yet, the flag
 commits a stand-in draft post in the rehearsal's worktree. `scheduled.yml`
 also generates `THIRD-PARTY.md` nightly, so a generator failure surfaces the
 same way.

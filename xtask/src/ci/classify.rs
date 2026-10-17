@@ -152,6 +152,23 @@ pub(crate) fn is_manifest(path: &str) -> bool {
     )
 }
 
+/// Files that can change whether a release assembles: the release workflows,
+/// the action that installs its tools, and its xtask sequence. The selector
+/// itself is included, so an edit narrowing this gate is itself gated.
+pub(crate) fn is_release_tooling(path: &str) -> bool {
+    any_glob(
+        path,
+        &[
+            ".github/workflows/release.yml",
+            ".github/workflows/release-build.yml",
+            ".github/actions/setup-rust/*",
+            "xtask/src/release/*",
+            ".github/workflows/ci.yml",
+            "xtask/src/ci/*",
+        ],
+    )
+}
+
 /// Classify a change. Pure: no git, no environment, no filesystem beyond the
 /// graph handed in.
 pub(crate) fn classify(
@@ -173,6 +190,7 @@ pub(crate) fn classify(
         out.fuzz = true;
         out.bench = true;
         out.manifests = true;
+        out.release_tooling = true;
         bench_pkgs = graph.all_bench_pkgs().clone();
         out.container_pkgs = graph.all_container_pkgs().clone();
         out.semver_pkgs = graph.all_semver_pkgs().clone();
@@ -180,6 +198,7 @@ pub(crate) fn classify(
         for path in paths {
             let path = path.as_str();
             out.manifests |= is_manifest(path);
+            out.release_tooling |= is_release_tooling(path);
             match kind_of(path) {
                 Kind::Skip => continue,
                 Kind::SiteOnly => {
@@ -820,7 +839,9 @@ mod tests {
     #[test]
     fn force_all_selects_everything() {
         let out = classify(&[], Event::ForceAll, &Context::default(), &graph(), &[]);
-        assert!(out.rust && out.site && out.fuzz && out.bench && out.manifests);
+        assert!(
+            out.rust && out.site && out.fuzz && out.bench && out.manifests && out.release_tooling
+        );
         assert_eq!(out.container_pkgs, *graph().all_container_pkgs());
         assert_eq!(out.semver_pkgs, *graph().all_semver_pkgs());
     }
@@ -847,6 +868,58 @@ mod tests {
             &lanes,
         );
         assert!(out.clickhouse_lanes.is_empty());
+    }
+
+    /// The release's own tooling and the selector that gates it select the
+    /// release rehearsal, and nothing else under `.github/` or `xtask/` does.
+    #[test]
+    fn release_tooling_selects_the_release_rehearsal() {
+        for path in [
+            ".github/workflows/release.yml",
+            ".github/workflows/release-build.yml",
+            ".github/actions/setup-rust/action.yml",
+            "xtask/src/release/io.rs",
+            ".github/workflows/ci.yml",
+            "xtask/src/ci/classify.rs",
+        ] {
+            assert!(run(&[path]).release_tooling, "{path}");
+        }
+        for path in [
+            ".github/workflows/scheduled.yml",
+            "xtask/src/checks/adr.rs",
+            "crates/spate-core/src/lib.rs",
+            "docs/a.md",
+        ] {
+            assert!(!run(&[path]).release_tooling, "{path}");
+        }
+    }
+
+    /// A Dependabot bump of the tool pin is the change the rehearsal exists
+    /// for, so the bot deferral leaves the selection alone.
+    #[test]
+    fn a_dependabot_tool_bump_keeps_the_release_rehearsal() {
+        let ctx = Context {
+            author: "dependabot[bot]".into(),
+            labels: vec![],
+        };
+        let paths = vec![".github/actions/setup-rust/action.yml".to_string()];
+        let out = classify(&paths, Event::PullRequest, &ctx, &graph(), &[]);
+        assert!(out.release_tooling);
+    }
+
+    /// The selection reaches the `$GITHUB_OUTPUT` block the workflow reads.
+    #[test]
+    fn the_release_selection_reaches_the_output() {
+        for (path, line) in [
+            (
+                ".github/actions/setup-rust/action.yml",
+                "release-tooling=true",
+            ),
+            ("docs/a.md", "release-tooling=false"),
+        ] {
+            let rendered = run(&[path]).to_string();
+            assert!(rendered.lines().any(|l| l == line), "{path}: {rendered}");
+        }
     }
 
     #[test]

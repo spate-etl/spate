@@ -21,7 +21,7 @@ const READS: [&str; 10] = [
 ];
 
 /// The keys the workflow reads, in the order the block writes them.
-const KEYS: [&str; 11] = [
+const KEYS: [&str; 12] = [
     "rust",
     "site",
     "fuzz",
@@ -31,6 +31,7 @@ const KEYS: [&str; 11] = [
     "semver-pkgs",
     "bench",
     "manifests",
+    "release-tooling",
     "bench-shards",
     "clickhouse-lanes",
 ];
@@ -46,6 +47,7 @@ const SITE_ONLY: &str = "rust=false\n\
      semver-pkgs=\n\
      bench=false\n\
      manifests=false\n\
+     release-tooling=false\n\
      bench-shards=[]\n\
      clickhouse-lanes=[]\n";
 

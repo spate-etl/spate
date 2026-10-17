@@ -7,7 +7,10 @@
 //! watermark of each attempt partition they hash to, and waits until the
 //! follower has read those partitions up to it. The ledger then holds every
 //! attempt recorded before the pass began, and each delivery is written
-//! with its recorded count plus one, or moved at the cap. The gate never
+//! with its recorded count plus one, or moved at the cap. A delivery whose
+//! attempt partition's watermark read fails goes back to the gate, and the
+//! rest of the pass goes on without it; the gate then waits one step before
+//! its next pass. The gate never
 //! runs on the consumer's poll thread (INV-2), and it sends nothing under
 //! the state lock: a refused enqueue settles inline, and settling takes
 //! that lock.
@@ -84,8 +87,10 @@ impl Gate {
     }
 
     /// Run one pass: take the deliveries waiting, wait for the follower to
-    /// catch up on their attempt partitions, and admit them. A pass that
-    /// cannot catch up puts its deliveries back for the next.
+    /// catch up on their attempt partitions, and admit them. The deliveries
+    /// of a partition whose watermark read failed go back for the next
+    /// pass, which starts after one step. A pass that cannot catch up puts
+    /// all its deliveries back.
     pub(crate) fn pass(&self) {
         let entries = self.take();
         if entries.is_empty() {
@@ -93,8 +98,38 @@ impl Gate {
         }
         let started = Instant::now();
         match self.catch_up(&entries, started) {
-            Ok(()) => self.admit(entries),
+            Ok(unread) if unread.is_empty() => self.admit(entries),
+            Ok(unread) => {
+                let (back, read): (Vec<Gating>, Vec<Gating>) = entries
+                    .into_iter()
+                    .partition(|e| unread.iter().any(|(p, _)| *p == self.partition(e)));
+                let reasons: Vec<String> = unread.into_iter().map(|(_, r)| r).collect();
+                self.put_back(back, Halt::Behind(reasons.join("; ")));
+                self.admit(read);
+                self.rest();
+            }
             Err(halt) => self.put_back(entries, halt),
+        }
+    }
+
+    /// The attempt partition of `entry`.
+    fn partition(&self, entry: &Gating) -> i32 {
+        partition_of(entry.identity.as_bytes(), self.core.attempt_partitions)
+    }
+
+    /// Wait one step before the next pass, so a watermark read that fails
+    /// at once is not repeated in a busy loop. A stop or a new delivery
+    /// ends the wait early.
+    fn rest(&self) {
+        let st = self.core.lock();
+        // Checked under the state lock, as in `take`.
+        if st.fatal.is_none() && !self.core.stopped() {
+            drop(
+                self.core
+                    .gate_wake
+                    .wait_timeout(st, self.step)
+                    .unwrap_or_else(PoisonError::into_inner),
+            );
         }
     }
 
@@ -122,21 +157,26 @@ impl Gate {
     }
 
     /// Wait until the ledger holds every record written to the attempt
-    /// partitions of `entries` before the pass's watermark reads.
-    fn catch_up(&self, entries: &[Gating], started: Instant) -> Result<(), Halt> {
-        let partitions: BTreeSet<i32> = entries
-            .iter()
-            .map(|e| partition_of(e.identity.as_bytes(), self.core.attempt_partitions))
-            .collect();
+    /// partitions of `entries` before the pass's watermark reads. Returns
+    /// each partition whose watermark read failed in a way retrying can
+    /// fix, with the reason; the others are caught up.
+    fn catch_up(&self, entries: &[Gating], started: Instant) -> Result<Vec<(i32, String)>, Halt> {
+        let partitions: BTreeSet<i32> = entries.iter().map(|e| self.partition(e)).collect();
         let mut marks = Vec::with_capacity(partitions.len());
+        let mut unread = Vec::new();
         for partition in partitions {
             self.check(started, partition)?;
-            let (lwm, hwm) = self
-                .producer
-                .client()
-                .fetch_watermarks(&self.core.topics.attempt, partition, self.step)
-                .map_err(|e| self.watermark_error(partition, &e))?;
-            marks.push((partition, lwm, hwm));
+            match self.producer.client().fetch_watermarks(
+                &self.core.topics.attempt,
+                partition,
+                self.step,
+            ) {
+                Ok((lwm, hwm)) => marks.push((partition, lwm, hwm)),
+                Err(e) => match self.watermark_error(partition, &e) {
+                    Halt::Behind(reason) => unread.push((partition, reason)),
+                    Halt::Ended => return Err(Halt::Ended),
+                },
+            }
         }
         for (partition, lwm, hwm) in marks {
             loop {
@@ -169,7 +209,7 @@ impl Gate {
                 self.check(started, partition)?;
             }
         }
-        Ok(())
+        Ok(unread)
     }
 
     /// `Err` when the feed stopped or latched, or the pass begun at

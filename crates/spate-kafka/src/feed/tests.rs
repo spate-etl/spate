@@ -920,13 +920,14 @@ fn returns_within(limit: Duration, f: impl FnOnce() + Send + 'static) -> bool {
     rx.recv_timeout(limit).is_ok()
 }
 
-/// Pins that a gate pass ends at its first failed watermark read, with the
-/// deliveries it took back at the gate in their order and `admitting`
-/// lowered: a pass over four attempt partitions on an unreachable broker
-/// returns within two steps, where a pass that read on would take four.
+/// Pins that a gate pass reads the watermark of every attempt partition it
+/// needs and puts back the deliveries of each one that fails, in their
+/// order, with `admitting` lowered and the feed still running: a pass over
+/// four attempt partitions on an unreachable broker admits nothing and
+/// returns.
 #[test]
-fn a_gate_pass_ends_at_its_first_watermark_error() {
-    const STEP: Duration = Duration::from_millis(500);
+fn a_gate_pass_puts_back_the_deliveries_of_each_failed_watermark_read() {
+    const STEP: Duration = Duration::from_millis(100);
     let config = unreachable_config("  delivery_timeout: 1h\n");
     let core = Arc::new(Core::new(&config, NonZeroU32::new(4).unwrap()));
     let producer = Producer::from_config_and_context(
@@ -960,8 +961,8 @@ fn a_gate_pass_ends_at_its_first_watermark_error() {
     let gate = super::gate::Gate::new(Arc::clone(&core), producer, config.delivery_timeout)
         .with_step(STEP);
     assert!(
-        returns_within(STEP * 2, move || gate.pass()),
-        "the pass read on after a failed watermark read"
+        returns_within(Duration::from_secs(10), move || gate.pass()),
+        "the pass did not return"
     );
     let st = core.lock();
     assert!(st.fatal.is_none(), "a timed-out read stopped the feed");
@@ -1816,6 +1817,128 @@ mod cluster {
         assert!(
             reason.contains("reading the watermarks of `units-attempts`"),
             "{reason}"
+        );
+    }
+
+    /// Pins that an attempt partition with no leader holds back only its own
+    /// units: the unit whose attempt partition answers is admitted, and the
+    /// unit on the leaderless partition waits at the gate. The attempt topic
+    /// is empty, so the pass needs no follower; the mock broker crashes when
+    /// a follower fetches a partition with no leader.
+    #[test]
+    fn a_leaderless_attempt_partition_holds_back_only_its_own_units() {
+        let cluster = cluster_with(0);
+        let brokers = cluster.bootstrap_servers();
+        let group = spate_test::unique_name("leaderless");
+        let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
+        let core = Arc::new(Core::new(&config, TWO));
+        let producer: Producer =
+            rdkafka::config::FromClientConfigAndContext::from_config_and_context(
+                &config.producer_config(false),
+                crate::feed::producer::FeedProducerContext::new(Arc::clone(&core)),
+            )
+            .unwrap();
+        let on = |partition| {
+            (0..)
+                .find(|&o| super::attempt_partition(&core, &super::identity(&core, o)) == partition)
+                .unwrap()
+        };
+        let (on0, on1) = (on(0), on(1));
+        producer
+            .client()
+            .fetch_metadata(Some(ATTEMPTS), Duration::from_secs(10))
+            .unwrap();
+        cluster.partition_leader(ATTEMPTS, 1, None).unwrap();
+        wait_until(DEADLINE, "partition 1 reports no leader", || {
+            producer
+                .client()
+                .fetch_watermarks(ATTEMPTS, 1, Duration::from_millis(500))
+                .is_err()
+        });
+        {
+            let mut st = core.lock();
+            st.tracker.assign([super::tp(0)]);
+            for offset in [on0, on1] {
+                let receipt = st.tracker.deliver(&super::tp(0), offset).unwrap();
+                st.gating.push_back(Gating {
+                    receipt,
+                    unit: Unit::new(format!("u{offset}"), Vec::new()),
+                    identity: super::identity(&core, offset),
+                });
+            }
+        }
+        let gate = Gate::new(Arc::clone(&core), producer, Duration::from_secs(3600))
+            .with_step(Duration::from_millis(500));
+        // Each wait runs a pass, as the gate thread would.
+        wait_until(DEADLINE, "the unit on partition 0 is buffered", || {
+            gate.pass();
+            core.lock().ready.len() == 1
+        });
+        let st = core.lock();
+        assert_eq!(st.ready[0].unit.id, format!("u{on0}"));
+        let waiting: Vec<_> = st.gating.iter().map(|g| g.unit.id.clone()).collect();
+        assert_eq!(waiting, [format!("u{on1}")]);
+        assert_eq!(st.admitting, 0);
+        assert!(st.fatal.is_none());
+    }
+
+    /// Pins that a pass which put deliveries back for a failed watermark read
+    /// waits before the next pass, and that a stop ends the wait: with a
+    /// step of an hour, the pass is still running once its unit is back at
+    /// the gate, and returns once the feed stops.
+    #[test]
+    fn a_pass_after_a_failed_watermark_read_waits_a_step() {
+        let cluster = cluster_with(0);
+        let brokers = cluster.bootstrap_servers();
+        let group = spate_test::unique_name("gate-rest");
+        let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
+        let core = Arc::new(Core::new(&config, TWO));
+        let producer: Producer =
+            rdkafka::config::FromClientConfigAndContext::from_config_and_context(
+                &config.producer_config(false),
+                crate::feed::producer::FeedProducerContext::new(Arc::clone(&core)),
+            )
+            .unwrap();
+        let offset = (0..)
+            .find(|&o| super::attempt_partition(&core, &super::identity(&core, o)) == 1)
+            .unwrap();
+        cluster.partition_leader(ATTEMPTS, 1, None).unwrap();
+        wait_until(DEADLINE, "partition 1 reports no leader", || {
+            producer
+                .client()
+                .fetch_watermarks(ATTEMPTS, 1, Duration::from_millis(500))
+                .is_err()
+        });
+        {
+            let mut st = core.lock();
+            st.tracker.assign([super::tp(0)]);
+            let receipt = st.tracker.deliver(&super::tp(0), offset).unwrap();
+            st.gating.push_back(Gating {
+                receipt,
+                unit: Unit::new("u", Vec::new()),
+                identity: super::identity(&core, offset),
+            });
+        }
+        let gate = Gate::new(Arc::clone(&core), producer, Duration::from_secs(3600))
+            .with_step(Duration::from_secs(3600));
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            gate.pass();
+            let _ = tx.send(());
+        });
+        wait_until(DEADLINE, "the unit is back at the gate", || {
+            let st = core.lock();
+            st.gating.len() == 1 && st.admitting == 0
+        });
+        // Elapsed time is the property: the pass waits after putting back.
+        assert!(
+            rx.recv_timeout(Duration::from_millis(300)).is_err(),
+            "the pass returned without waiting"
+        );
+        super::super::stop(&core);
+        assert!(
+            rx.recv_timeout(Duration::from_secs(10)).is_ok(),
+            "the stop did not end the wait"
         );
     }
 

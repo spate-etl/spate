@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use clap::Subcommand;
 
 use crate::run::{self, Error, Outcome, Step, Streams};
-use io::{CratesIo, DryForge, DryGit, Gh, Host, LocalWorkspace, ProcessGit, Workspace};
+use io::{CratesIo, DryForge, DryGit, Gh, Git, Host, LocalWorkspace, ProcessGit, Workspace};
 use version::Version;
 
 #[derive(Subcommand)]
@@ -89,6 +89,10 @@ pub(crate) enum ReleaseCommand {
         /// Keep the worktree after a successful run
         #[arg(long)]
         keep: bool,
+        /// When the version is a minor with no post yet, commit a draft
+        /// stand-in post in the worktree first
+        #[arg(long)]
+        stand_in_post: bool,
     },
 }
 
@@ -232,7 +236,11 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: ReleaseCommand) -> Outco
             require_gh(root, GH_EXACT_SIGNER)?;
             sequence::verify(&host, version, &repo)
         }
-        ReleaseCommand::DryRun { version, keep } => dry_run(root, &version, keep),
+        ReleaseCommand::DryRun {
+            version,
+            keep,
+            stand_in_post,
+        } => dry_run(root, &version, keep, stand_in_post),
     }
 }
 
@@ -389,9 +397,10 @@ fn preflight_sbom(root: &Path) -> Outcome {
 }
 
 /// Runs `assemble --dry-run` and `prepare --dry-run` in a detached worktree of
-/// `HEAD`. The worktree is removed after a successful run unless `keep` is set,
+/// `HEAD`. With `stand_in_post`, [`commit_stand_in_post`] runs in the worktree
+/// first. The worktree is removed after a successful run unless `keep` is set,
 /// and kept after a failure.
-fn dry_run(root: &Path, version: &str, keep: bool) -> Outcome {
+fn dry_run(root: &Path, version: &str, keep: bool, stand_in_post: bool) -> Outcome {
     preflight(root, true)?;
     // The worktree is made from HEAD, so uncommitted work would be silently
     // left out of the rehearsal.
@@ -416,33 +425,41 @@ fn dry_run(root: &Path, version: &str, keep: bool) -> Outcome {
     // must not land in a target directory the main checkout shares.
     let target = tree.join("target").to_string_lossy().into_owned();
 
-    let outcome = run::run(
-        root,
-        false,
-        &Step::new(
-            "cargo",
-            [
-                "xtask",
-                "release",
-                "assemble",
-                "--version",
-                version,
-                "--dry-run",
-            ],
-        )
-        .env("CARGO_TARGET_DIR", target.clone())
-        .dir(&tree_arg),
-    )
-    .and_then(|()| {
-        run::run(
-            root,
-            false,
-            &Step::new("cargo", ["xtask", "release", "prepare", "--dry-run"])
-                .env("EXPECTED_SHA", "")
-                .env("CARGO_TARGET_DIR", target)
+    let staged = if stand_in_post {
+        commit_stand_in_post(&tree, version)
+    } else {
+        Ok(())
+    };
+    let outcome = staged
+        .and_then(|()| {
+            run::run(
+                root,
+                false,
+                &Step::new(
+                    "cargo",
+                    [
+                        "xtask",
+                        "release",
+                        "assemble",
+                        "--version",
+                        version,
+                        "--dry-run",
+                    ],
+                )
+                .env("CARGO_TARGET_DIR", target.clone())
                 .dir(&tree_arg),
-        )
-    });
+            )
+        })
+        .and_then(|()| {
+            run::run(
+                root,
+                false,
+                &Step::new("cargo", ["xtask", "release", "prepare", "--dry-run"])
+                    .env("EXPECTED_SHA", "")
+                    .env("CARGO_TARGET_DIR", target)
+                    .dir(&tree_arg),
+            )
+        });
 
     let remove = format!(
         "git worktree remove --force {tree_arg} && rm -rf {}",
@@ -467,6 +484,47 @@ fn dry_run(root: &Path, version: &str, keep: bool) -> Outcome {
         );
     }
     outcome
+}
+
+/// The file a rehearsal's stand-in post is written to, under [`post::BLOG`].
+const STAND_IN: &str = "rehearsal-stand-in.md";
+
+/// The draft post a rehearsal of `version` needs, or `None` when `version` is
+/// a patch or a post under `blog` already carries its slug. The search is the
+/// one `post::required` makes, so the two agree on whether a post exists.
+fn stand_in_post(blog: &Path, version: Version) -> Result<Option<String>, Error> {
+    let Some(slug) = version.post_slug() else {
+        return Ok(None);
+    };
+    if !post::posts_with_slug(blog, &slug)?.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(format!(
+        "---\ntitle: Release rehearsal stand-in\nslug: {slug}\ndraft: true\n---\n"
+    )))
+}
+
+/// Commits [`stand_in_post`]'s post in the checkout at `tree` as the release
+/// identity, or leaves the checkout as it is when `version` needs none. The
+/// commit stays in the throwaway worktree and is never pushed.
+fn commit_stand_in_post(tree: &Path, version: &str) -> Outcome {
+    let parsed =
+        Version::parse(version).ok_or_else(|| Error::msg(format!("'{version}' is not X.Y.Z")))?;
+    let Some(text) = stand_in_post(&tree.join(post::BLOG), parsed)? else {
+        return Ok(());
+    };
+    let path = tree.join(post::BLOG).join(STAND_IN);
+    std::fs::write(&path, text).map_err(|e| Error::msg(format!("{}: {e}", path.display())))?;
+    let relative = format!("{}/{STAND_IN}", post::BLOG);
+    run::quiet(tree, false, &Step::new("git", ["add", "--", &relative]))?;
+    let git = ProcessGit {
+        root: tree,
+        remote: remote(None),
+    };
+    git.commit_all(
+        &format!("website: stand in for the {parsed} release post"),
+        "A rehearsal commit, never pushed. A minor release needs its post committed first.",
+    )
 }
 
 #[cfg(test)]
@@ -504,6 +562,93 @@ mod tests {
             .unwrap();
         assert!(status.success(), "git {args:?}");
     }
+
+    fn post(blog: &Path, name: &str, slug: &str) {
+        std::fs::write(
+            blog.join(name),
+            format!("---\ntitle: t\nslug: {slug}\ndraft: true\n---\n"),
+        )
+        .unwrap();
+    }
+
+    /// A stand-in is written only for a minor that has no post, and the post it
+    /// writes is the one `post::required` then finds. A slug line with a YAML
+    /// comment counts as a post.
+    #[test]
+    fn a_stand_in_post_is_written_only_for_a_minor_without_one() {
+        let scratch = Scratch::new("spate-xtask-stand-in").unwrap();
+        let blog = scratch.dir();
+        post(blog, "a.md", "releases/0.4 # the minor post");
+
+        assert_eq!(stand_in_post(blog, v("0.4.0")).unwrap(), None);
+        assert_eq!(stand_in_post(blog, v("0.5.1")).unwrap(), None);
+        let text = stand_in_post(blog, v("0.5.0")).unwrap().unwrap();
+        std::fs::write(blog.join(STAND_IN), text).unwrap();
+        assert_eq!(
+            post::required(blog, v("0.5.0")).unwrap(),
+            Some(blog.join(STAND_IN))
+        );
+        assert_eq!(stand_in_post(blog, v("0.5.0")).unwrap(), None);
+        assert!(stand_in_post(&blog.join("missing"), v("0.5.0")).is_err());
+    }
+
+    fn v(s: &str) -> Version {
+        Version::parse(s).unwrap()
+    }
+
+    fn head(root: &Path, format: &str) -> String {
+        run::capture(root, &Step::new("git", ["log", "-1", format]))
+            .unwrap()
+            .trim_end()
+            .to_owned()
+    }
+
+    /// The stand-in is committed as the release identity and leaves a clean
+    /// tree; a patch, or a minor whose post exists, commits nothing.
+    #[test]
+    fn a_rehearsal_commits_its_stand_in_post_as_the_release_identity() {
+        let scratch = Scratch::new("spate-xtask-stand-in-commit").unwrap();
+        let root = scratch.dir();
+        let blog = root.join(post::BLOG);
+        std::fs::create_dir_all(&blog).unwrap();
+        post(&blog, "a.md", "releases/0.3");
+        git(root, &["init", "-q"]);
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "base"]);
+        let base = head(root, "--format=%H");
+
+        commit_stand_in_post(root, "0.4.1").unwrap();
+        commit_stand_in_post(root, "0.3.0").unwrap();
+        assert_eq!(head(root, "--format=%H"), base);
+        assert!(commit_stand_in_post(root, "0.4").is_err());
+        assert!(
+            commit_stand_in_post(&blog, "0.4.0").is_err(),
+            "no blog under it"
+        );
+
+        commit_stand_in_post(root, "0.4.0").unwrap();
+        assert_eq!(
+            head(root, "--format=%s"),
+            "website: stand in for the 0.4.0 release post"
+        );
+        assert_eq!(head(root, "--format=%an <%ae>"), BOT);
+        assert_eq!(
+            head(root, "--format=%P"),
+            base,
+            "one commit on top of the base"
+        );
+        assert!(
+            run::capture(root, &Step::new("git", ["status", "--porcelain"]))
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            post::required(&blog, v("0.4.0")).unwrap(),
+            Some(blog.join(STAND_IN))
+        );
+    }
+
+    const BOT: &str = "spate-release[bot] <spate-release[bot]@users.noreply.github.com>";
 
     /// A checked-out branch is an attached head, and `checkout --detach` is not.
     #[test]

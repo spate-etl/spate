@@ -557,23 +557,10 @@ jobs:
             exit "$rc"
           fi
           echo "next=$next" >>"$GITHUB_OUTPUT"
-          # This commit is never pushed. A minor release needs its post
-          # committed first (website/blog/README.md), and between minor
-          # releases there is none, so a stand-in draft takes its place.
-          case "$next" in
-            *.0)
-              minor=${next%.0}
-              if ! grep -rqsE "^slug: *[\"']?releases/${minor//./\\.}[\"']? *$" website/blog; then
-                printf -- '---\ntitle: Release rehearsal stand-in\nslug: releases/%s\ndraft: true\n---\n' "$minor" \
-                  >website/blog/rehearsal-stand-in.md
-                git add website/blog/rehearsal-stand-in.md
-                git -c user.name='spate-release[bot]' \
-                  -c user.email='spate-release[bot]@users.noreply.github.com' \
-                  commit --quiet --message "website: stand in for the $minor release post"
-              fi
-              ;;
-          esac
 
+      # `--stand-in-post` commits a draft post in the rehearsal's worktree
+      # when the version is a minor with no post yet, since a minor release
+      # needs its post committed first (website/blog/README.md).
       - name: Rehearse the release
         id: dry-run
         if: steps.version.outputs.skip != 'true'
@@ -584,7 +571,7 @@ jobs:
         run: |
           set -o pipefail
           rc=0
-          cargo xtask release dry-run --version "$NEXT" 2>&1 | tee -a "$RUNNER_TEMP/publish.log" || rc=$?
+          cargo xtask release dry-run --version "$NEXT" --stand-in-post 2>&1 | tee -a "$RUNNER_TEMP/publish.log" || rc=$?
           exit "$rc"
 
       # Gated on the named steps as well as `failure()`, so a checkout
@@ -607,10 +594,10 @@ jobs:
           set -euo pipefail
           if [ "$VERSION_FAILED" = "true" ]; then
             title='[bug] Nightly release rehearsal could not run'
-            what="Deriving the next version, or committing its stand-in release post, failed on the [nightly run]($RUN_URL) before the rehearsal started, so this says nothing about whether a release would succeed."
+            what="Deriving the next version failed on the [nightly run]($RUN_URL) before the rehearsal started, so this says nothing about whether a release would succeed."
           else
             title='[bug] The nightly release dry run fails'
-            what="\`cargo xtask release dry-run --version $NEXT\` failed on the [nightly run]($RUN_URL). It runs \`assemble\` and \`prepare\` as a release does, and prints the pushes, pull request changes and uploads instead of making them."
+            what="\`cargo xtask release dry-run --version $NEXT --stand-in-post\` failed on the [nightly run]($RUN_URL). It runs \`assemble\` and \`prepare\` as a release does, and prints the pushes, pull request changes and uploads instead of making them."
           fi
           # The title is written before xtask runs, so the filing step has it
           # when the body cannot be rendered.
@@ -618,7 +605,7 @@ jobs:
           where=$'Build, CI, or the examples\n\nThe `Release dry run` job of the nightly scheduled run.'
           version="\`main\` at $SHA"
           # shellcheck disable=SC2016
-          expected='The release assembles, packages and stages its SBOMs at the version the history derives. A failure here stops the next release in `assemble`, or in `prepare` before anything is published. With nothing changed in this repository, a failure in `gh`, `cargo about` or `cargo cyclonedx` points at the runner image or the `taiki-e/install-action` pin. Reproduce it with `cargo xtask release dry-run --version X.Y.Z`. If the output shows a network error, rerun the job first.'
+          expected='The release assembles, packages and stages its SBOMs at the version the history derives. A failure here stops the next release in `assemble`, or in `prepare` before anything is published. With nothing changed in this repository, a failure in `gh`, `cargo about` or `cargo cyclonedx` points at the runner image or the `taiki-e/install-action` pin. To reproduce it, follow "Rehearse it first" in RELEASING.md with `GH_REPO` set and `--stand-in-post` passed, as this job runs it. If the output shows a network error, rerun the job first.'
           cargo xtask bug-report --out "$RUNNER_TEMP/body.md" \
             --answer components="$where" \
             --answer version="$version" \

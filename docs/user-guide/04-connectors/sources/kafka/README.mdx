@@ -93,6 +93,14 @@ error names the id.
 
 <LoggingKafka />
 
+## Compression codecs
+
+The source reads batches compressed with gzip, snappy, lz4 and zstd. A batch
+in a codec or message format librdkafka cannot read fails the pipeline with a
+fatal error, before any record after it is delivered. Retrying would not help:
+librdkafka either fetches the same batch again or skips it. The committed
+offset stays at the batch's first record, and no record past it is lost.
+
 ## How offsets are committed
 
 The framework never uses librdkafka's position-based auto-commit. Instead:

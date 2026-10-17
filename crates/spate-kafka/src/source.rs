@@ -294,6 +294,7 @@ impl KafkaSource {
                 lane_id,
                 PartitionId(u32::try_from(partition).unwrap_or(0)),
                 queue,
+                Arc::clone(consumer.context()),
                 issuer.clone(),
             ));
         }
@@ -703,10 +704,8 @@ impl Source for KafkaSource {
                         self.saw_first_assignment,
                         text.as_deref(),
                     );
-                    let mut reason = match text {
-                        Some(text) => format!("consumer poll: {e}: {text}"),
-                        None => format!("consumer poll: {e}"),
-                    };
+                    let mut reason =
+                        crate::error::poll_reason("consumer poll", &e, text.as_deref());
                     // librdkafka's fencing text does not name the instance.
                     if let rdkafka::error::KafkaError::MessageConsumptionFatal(
                         rdkafka::error::RDKafkaErrorCode::FencedInstanceId,

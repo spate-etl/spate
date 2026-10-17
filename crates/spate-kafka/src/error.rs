@@ -56,7 +56,11 @@ pub(crate) fn classify_consumer_error(code: RDKafkaErrorCode, after_startup: boo
         // an invalid topic name, or a broker/protocol mismatch.
         | C::InvalidTopic
         | C::UnsupportedVersion
-        | C::UnsupportedForMessageFormat => ErrorClass::Fatal,
+        | C::UnsupportedForMessageFormat
+        // A fetched batch this build cannot read: a compression codec
+        // librdkafka was built without, or an unknown message format. A retry
+        // refetches the same batch, or librdkafka skips the message.
+        | C::NotImplemented => ErrorClass::Fatal,
         // A partition that vanished after we already owned it: the topic was
         // deleted. Before startup this is just metadata catching up.
         C::UnknownTopicOrPartition if after_startup => ErrorClass::Fatal,
@@ -87,6 +91,23 @@ pub(crate) fn tls_rejection(code: RDKafkaErrorCode, text: &str) -> bool {
                 .parse::<u8>()
                 .is_ok_and(|alert| TLS_REJECTION_ALERTS.contains(&alert))
         }))
+}
+
+/// The reason a consumer/queue poll error reports: `prefix`, the error, and
+/// the error callback's `text` when known.
+///
+/// An error for a fetched batch this build cannot read also says so, since
+/// its code reads only as "Not implemented".
+pub(crate) fn poll_reason(prefix: &str, err: &KafkaError, text: Option<&str>) -> String {
+    let note = if err.rdkafka_error_code() == Some(RDKafkaErrorCode::NotImplemented) {
+        " (a fetched batch uses a compression codec or message format this build cannot read)"
+    } else {
+        ""
+    };
+    match text {
+        Some(text) => format!("{prefix}: {err}: {text}{note}"),
+        None => format!("{prefix}: {err}{note}"),
+    }
 }
 
 /// Classify a [`KafkaError`] returned by a consumer/queue poll, defaulting to
@@ -177,6 +198,7 @@ mod tests {
             C::InvalidTopic,
             C::UnsupportedVersion,
             C::UnsupportedForMessageFormat,
+            C::NotImplemented,
         ] {
             assert_eq!(
                 classify_consumer_error(code, true),
@@ -334,6 +356,37 @@ mod tests {
         assert_eq!(classify_poll_error(&err, true, None), ErrorClass::Fatal);
         let err = KafkaError::MessageConsumption(C::FencedInstanceId);
         assert_eq!(classify_poll_error(&err, true, None), ErrorClass::Retryable);
+    }
+
+    /// A batch the build cannot decompress fails the poll as fatal.
+    /// Regression for #1253.
+    #[test]
+    fn an_unreadable_batch_is_fatal() {
+        let err = KafkaError::MessageConsumption(C::NotImplemented);
+        assert_eq!(classify_poll_error(&err, true, None), ErrorClass::Fatal);
+    }
+
+    /// A poll reason carries the callback text when known, and only an
+    /// unreadable batch adds the note.
+    #[test]
+    fn a_poll_reason_names_an_unreadable_batch() {
+        let unreadable = KafkaError::MessageConsumption(C::NotImplemented);
+        assert_eq!(
+            poll_reason(
+                "poll",
+                &unreadable,
+                Some("Decompression (codec 0x5) failed")
+            ),
+            "poll: Message consumption error: NotImplemented (Local: Not implemented): \
+             Decompression (codec 0x5) failed (a fetched batch uses a compression codec or \
+             message format this build cannot read)"
+        );
+        for err in [
+            KafkaError::MessageConsumption(C::BadMessage),
+            KafkaError::MessageConsumptionFatal(C::FencedInstanceId),
+        ] {
+            assert_eq!(poll_reason("poll", &err, None), format!("poll: {err}"));
+        }
     }
 
     /// A poll error is fatal on a rejection in its callback text, and keeps

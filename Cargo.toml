@@ -87,7 +87,11 @@ sha2 = "0.11"
 
 # The connector clients below (rdkafka, clickhouse, apache-avro, object_store,
 # async-nats) are internal only, never in public signatures (INV-6).
-rdkafka = "0.39"
+rdkafka = { version = "0.39", features = ["zstd"] }
+# Not used directly. rdkafka-sys takes zstd-sys with its default features, and
+# this floor is the first release rdkafka-sys accepts whose defaults leave out
+# bindgen, which needs libclang on the build host.
+zstd-sys = { version = "2.1", default-features = false }
 openssl-sys = "0.9.108"
 clickhouse = "0.15.3"
 # spate-clickhouse compresses insert blocks with the lz4 codec the client

@@ -21,11 +21,13 @@
 use crate::context::SourceContext;
 use rdkafka::Message;
 use rdkafka::consumer::base_consumer::PartitionQueue;
+use rdkafka::error::KafkaError;
 use rdkafka::message::BorrowedMessage;
 use spate_core::checkpoint::{AckIssuer, AckRef};
 use spate_core::error::SourceError;
 use spate_core::record::{PartitionId, RawPayload};
 use spate_core::source::{LaneId, PayloadBatch, SourceLane};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// One assigned partition's pollable queue.
@@ -36,7 +38,11 @@ pub struct KafkaLane {
     // behind the queue is still alive.
     held: Vec<BorrowedMessage<'static>>,
     queue: PartitionQueue<SourceContext>,
+    context: Arc<SourceContext>,
     issuer: AckIssuer,
+    /// An error the queue returned after the batch's first message. librdkafka
+    /// may queue it once and fetch past it, so the next poll returns it.
+    pending: Option<SourceError>,
 }
 
 impl std::fmt::Debug for KafkaLane {
@@ -54,6 +60,7 @@ impl KafkaLane {
         id: LaneId,
         partition: PartitionId,
         queue: PartitionQueue<SourceContext>,
+        context: Arc<SourceContext>,
         issuer: AckIssuer,
     ) -> Self {
         KafkaLane {
@@ -61,7 +68,26 @@ impl KafkaLane {
             partition,
             held: Vec::new(),
             queue,
+            context,
             issuer,
+            pending: None,
+        }
+    }
+
+    /// The source error for a queue error, read on the thread that polled
+    /// the queue, where librdkafka's error callback left its text.
+    fn poll_error(&self, e: &KafkaError) -> SourceError {
+        let text = e
+            .rdkafka_error_code()
+            .and_then(|code| self.context.take_error(code));
+        SourceError::Client {
+            // Post-startup: a lane exists only once its partition is assigned.
+            class: crate::error::classify_poll_error(e, true, text.as_deref()),
+            reason: crate::error::poll_reason(
+                &format!("partition {} poll", self.partition.0),
+                e,
+                text.as_deref(),
+            ),
         }
     }
 }
@@ -98,17 +124,14 @@ impl SourceLane for KafkaLane {
         timeout: Duration,
     ) -> Result<Option<Self::Batch<'_>>, SourceError> {
         self.held.clear();
+        if let Some(e) = self.pending.take() {
+            return Err(e);
+        }
 
         // First message: block up to `timeout` (idle lanes must not spin).
         match self.queue.poll(timeout) {
             None => return Ok(None),
-            Some(Err(e)) => {
-                // Post-startup: a lane exists only once its partition is assigned.
-                return Err(SourceError::Client {
-                    class: crate::error::classify_poll_error(&e, true, None),
-                    reason: format!("partition {} poll: {e}", self.partition.0),
-                });
-            }
+            Some(Err(e)) => return Err(self.poll_error(&e)),
             Some(Ok(msg)) => {
                 // SAFETY: see `erase_lifetime`; the queue (and through it
                 // the consumer) outlives `held` within this lane.
@@ -122,9 +145,7 @@ impl SourceLane for KafkaLane {
                     self.held.push(unsafe { erase_lifetime(msg) });
                 }
                 Some(Err(e)) => {
-                    // Deliver what we have; a persisting error resurfaces on the next poll.
-                    tracing::debug!(partition = self.partition.0, error = %e,
-                        "queue error while batching; delivering partial batch");
+                    self.pending = Some(self.poll_error(&e));
                     break;
                 }
                 None => break,

@@ -1110,3 +1110,43 @@ fn a_split_partition_never_returns_to_the_main_queue() {
         "main queue delivered {main_queue}, re-split queue delivered {resplit_offset:?}"
     );
 }
+
+/// The source reads zstd-compressed batches in full.
+/// Regression for #1253.
+#[test]
+fn zstd_batches_are_read() {
+    use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
+
+    let cluster = MockCluster::new(1).expect("mock cluster");
+    cluster.create_topic(TOPIC, 1, 1).expect("create topic");
+    let brokers = cluster.bootstrap_servers();
+    let producer: BaseProducer = ClientConfig::new()
+        .set("bootstrap.servers", &brokers)
+        .set("compression.codec", "zstd")
+        .set("linger.ms", "100")
+        .create()
+        .expect("zstd producer");
+    for i in 0..20 {
+        let payload = format!("z-{i}");
+        producer
+            .send(
+                BaseRecord::<[u8], [u8]>::to(TOPIC)
+                    .partition(0)
+                    .payload(payload.as_bytes()),
+            )
+            .map_err(|(e, _)| e)
+            .expect("enqueue");
+    }
+    producer.flush(Duration::from_secs(30)).expect("flush");
+
+    let mut cp = Checkpointer::new();
+    let mut source = KafkaSource::new(config(&brokers, "zstd"));
+    source.open(SourceCtx::new(cp.handle())).expect("open");
+    let mut lanes = await_assignment(&mut source, ASSIGNMENT);
+    cp.begin_epoch(&[lanes[0].partition()], 1);
+
+    let rows = drain_lane(&mut source, &mut lanes[0], 20, Duration::from_secs(30));
+    let offsets: Vec<i64> = rows.iter().map(|(_, _, o)| *o).collect();
+    assert_eq!(offsets, (0..20).collect::<Vec<_>>());
+    assert_eq!(rows[7].0, b"z-7");
+}

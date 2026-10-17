@@ -144,11 +144,7 @@ fn default_statistics_interval() -> Duration {
 }
 
 /// Producer compression codec, applied as librdkafka's
-/// `compression.codec`. Codec availability depends on how librdkafka was
-/// built: the bundled build always has `snappy` and `lz4`, `gzip` via
-/// zlib; `zstd` requires an rdkafka cargo feature the workspace does not
-/// enable. An unavailable codec fails producer creation at startup
-/// (surfaced as a config error), never mid-stream.
+/// `compression.codec`.
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
@@ -161,7 +157,7 @@ pub enum Compression {
     Snappy,
     /// LZ4.
     Lz4,
-    /// Zstandard (requires an rdkafka build with zstd support).
+    /// Zstandard.
     Zstd,
 }
 
@@ -995,6 +991,19 @@ mod tests {
         for key in ["topic.compression.codec", "topic.compression.type"] {
             let body = format!("{}  rdkafka:\n    \"{key}\": \"gzip\"\n", minimal());
             assert!(parse(&body).is_ok(), "{key}");
+        }
+    }
+
+    /// Every `compression` codec builds a producer.
+    #[test]
+    fn every_compression_codec_builds_a_producer() {
+        for codec in ["none", "gzip", "snappy", "lz4", "zstd"] {
+            let cfg = parse(&format!("{}  compression: {codec}\n", minimal())).unwrap();
+            let producer: rdkafka::producer::BaseProducer = cfg
+                .client_config()
+                .create()
+                .unwrap_or_else(|e| panic!("{codec}: {e}"));
+            drop(producer);
         }
     }
 

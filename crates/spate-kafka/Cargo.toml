@@ -29,6 +29,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync", "time"] }
 tracing = { workspace = true }
+zstd-sys = { workspace = true }
 
 [dev-dependencies]
 spate-kafka = { path = ".", features = ["testing"] }

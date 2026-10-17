@@ -201,10 +201,7 @@ impl Driver {
     fn on_error(&self, error: &KafkaError) {
         let code = error.rdkafka_error_code();
         let text = code.and_then(|code| self.consumer.context().take_error(code));
-        let reason = match &text {
-            Some(text) => format!("consumer poll: {error}: {text}"),
-            None => format!("consumer poll: {error}"),
-        };
+        let reason = crate::error::poll_reason("consumer poll", error, text.as_deref());
         match poll_class(error, self.assigned_once, text.as_deref()) {
             ErrorClass::Fatal => {
                 self.core.latch(&reason);

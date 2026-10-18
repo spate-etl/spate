@@ -105,6 +105,7 @@ mod test_servers;
 #[cfg(test)]
 mod testutil;
 mod trim;
+mod unit;
 mod unit_reader;
 
 pub use config::{Compression, S3SourceConfig};

@@ -71,7 +71,7 @@ bytesize = { version = "2.4", features = ["serde"] }
 ouroboros = "0.18.5"
 thiserror = "2.0.18"
 tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.8", default-features = false }
+tracing-subscriber = { version = "0.3.19", default-features = false }
 metrics = "0.24.2"
 metrics-exporter-prometheus = { version = "0.18", default-features = false }
 metrics-process = "2.4"

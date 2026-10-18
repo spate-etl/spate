@@ -80,11 +80,24 @@ impl ChildTest {
                 }
             }
         });
-        let child = ChildTest { child };
         match rx.recv() {
-            Ok(count) if count == "1" => child,
-            Ok(count) => panic!("{command:?} matched {count} tests, not 1"),
-            Err(_) => panic!("{command:?} exited before it started a test"),
+            Ok(count) if count == "1" => ChildTest { child },
+            // A child running no test exits by itself, so it is waited for.
+            // A kill could land while an instrumented build writes its
+            // profile at exit, and the truncated file fails the coverage
+            // merge.
+            Ok(count) if count == "0" => {
+                let status = child.wait().expect("reap the child");
+                panic!("{command:?} matched 0 tests, not 1, and exited with {status}")
+            }
+            Ok(count) => {
+                drop(ChildTest { child });
+                panic!("{command:?} matched {count} tests, not 1")
+            }
+            Err(_) => {
+                let status = child.wait().expect("reap the child");
+                panic!("{command:?} exited with {status} before it started a test")
+            }
         }
     }
 
@@ -176,10 +189,10 @@ mod tests {
         run_in_child("child::tests::no_such_test", |child| child);
     }
 
-    /// A spawned name that matches no test fails, although the child would
-    /// run and exit 0.
+    /// A spawned name that matches no test fails, and the child is reaped
+    /// after it exits 0 by itself, never killed. Regression for #1261.
     #[test]
-    #[should_panic(expected = "matched 0 tests")]
+    #[should_panic(expected = "matched 0 tests, not 1, and exited with exit status: 0")]
     fn a_spawned_name_matching_no_test_fails() {
         let _child = ChildTest::spawn("child::tests::no_such_test", |child| child);
     }

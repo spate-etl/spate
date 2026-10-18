@@ -959,6 +959,37 @@ mod tests {
         );
     }
 
+    /// Pins that a whole unit over a compressed object opens one lane for
+    /// the whole object, whether the codec comes from the key or from the
+    /// configured compression.
+    #[test]
+    fn a_whole_unit_over_a_compressed_object_opens_one_lane() {
+        for (key, compression) in [
+            ("a.ndjson.gz", Compression::Auto),
+            ("a.ndjson", Compression::Gzip),
+        ] {
+            let (mut reader, script, _rt) = reader_holding(3);
+            reader.parts.packing.compression = compression;
+            let object = DescriptorObject {
+                key: key.into(),
+                size: 5 * TARGET,
+                etag: Some("\"etag\"".into()),
+                last_modified_ms: 1,
+            };
+            script.deliver(Unit::new(
+                "a",
+                SplitDescriptor::new(vec![object]).encode().unwrap(),
+            ));
+            start(&mut reader);
+            let lanes = lanes_added(poll(&mut reader));
+            assert_eq!(lanes.len(), 1, "{key} under {compression:?}");
+            assert!(
+                reader.deliveries[&0].pending.is_empty(),
+                "{key} under {compression:?} left a part pending"
+            );
+        }
+    }
+
     /// Pins the room rule: each range in progress takes one of
     /// `units_held`, a held unit's ranges open before anything is received,
     /// oldest unit first, and a unit whose lanes have all retired keeps a
@@ -1316,7 +1347,8 @@ mod tests {
 
     /// Pins that a ranged unit is failed back, naming why, when it is cut on
     /// another byte than the framer's delimiter, when the framer declares
-    /// none, or when its object is compressed.
+    /// none, or when its object is compressed by its key or by the
+    /// configured compression.
     #[test]
     fn a_ranged_unit_the_reader_cannot_read_is_failed_back() {
         let (mut lines, script, _rt) = reader();
@@ -1332,6 +1364,12 @@ mod tests {
         start(&mut none);
         let reason = failed_reason(&mut none, &script, range_unit("a.ndjson", b'\n'));
         assert!(reason.contains("declares no resync delimiter"), "{reason}");
+
+        let (mut gzip, script, _rt) = reader();
+        gzip.parts.packing.compression = Compression::Gzip;
+        start(&mut gzip);
+        let reason = failed_reason(&mut gzip, &script, range_unit("a.ndjson", b'\n'));
+        assert!(reason.contains("decodes as gzip"), "{reason}");
     }
 
     /// Pins that `set_paused` flips the pause flag of the lanes named and of

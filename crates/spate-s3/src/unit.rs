@@ -247,6 +247,26 @@ mod tests {
         assert!(!cursor.is_exhausted());
     }
 
+    /// Pins that the cut marks each range with the framer's delimiter.
+    #[test]
+    fn the_cut_marks_each_range_with_the_framers_delimiter() {
+        let packing = Packing {
+            target_bytes: MIB,
+            compression: Compression::None,
+            delimiter: Some(b'\r'),
+        };
+        let entry = ObjectEntry {
+            key: "a.csv".into(),
+            size: 3 * MIB,
+            etag: Some("\"etag\"".into()),
+            last_modified_ms: 1,
+        };
+        let delimiters: Vec<u8> = parts_of(Arc::new(vec![entry]), packing)
+            .map(|part| part.range.expect("the object is cut").delimiter)
+            .collect();
+        assert_eq!(delimiters, [b'\r'; 3]);
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(64))]
 

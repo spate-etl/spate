@@ -83,6 +83,11 @@ framework values apply in unspecified order.
 `cooperative` strategy is rejected, because the framework relies on eager
 (full) rebalances.
 
+librdkafka reads `topic.auto.offset.reset` as `auto.offset.reset`, and so does
+the source when it starts a partition with no committed offset. A configuration
+that sets both fails at load, because the two keys reach librdkafka in no set
+order.
+
 Static membership is allowed through `group.instance.id`. A member fenced by
 another member with the same `group.instance.id` stops the pipeline, and the
 error names the id.

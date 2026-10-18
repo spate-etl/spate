@@ -1,0 +1,3 @@
+**Breaking:** **The Kafka source reads `topic.auto.offset.reset` as its reset policy** (`spate-kafka`)
+
+A partition with no committed offset starts where `topic.auto.offset.reset` says, as it does under `auto.offset.reset`. In previous versions the source read only `auto.offset.reset` and started such a partition at its end, while librdkafka applied the prefixed value. A new consumer group configured with `topic.auto.offset.reset: earliest` skipped every record already in the topic. A configuration that sets both `auto.offset.reset` and `topic.auto.offset.reset` fails at load. It could load on v0.3.0: remove one of the two keys.

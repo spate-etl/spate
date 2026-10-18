@@ -255,6 +255,28 @@ fn commit_as(brokers: &str, group: &str, offset: i64) {
         .expect("commit");
 }
 
+/// A group with no committed offset starts where `topic.auto.offset.reset`
+/// says. Regression for #1255.
+#[test]
+fn a_topic_prefixed_reset_policy_reads_a_new_group_from_the_start() {
+    let cluster = MockCluster::new(1).expect("mock cluster");
+    cluster.create_topic(TOPIC, 1, 1).expect("create topic");
+    let brokers = cluster.bootstrap_servers();
+    produce(&brokers, TOPIC, 3, 1, "t");
+
+    let mut cfg = config(&brokers, "topic-prefixed-reset");
+    cfg.rdkafka.remove("auto.offset.reset");
+    cfg.rdkafka
+        .insert("topic.auto.offset.reset".into(), "earliest".into());
+    let cp = Checkpointer::new();
+    let mut source = KafkaSource::new(cfg);
+    source.open(SourceCtx::new(cp.handle())).expect("open");
+    let mut lanes = await_assignment(&mut source, ASSIGNMENT);
+    let rows = drain_lane(&mut source, &mut lanes[0], 3, Duration::from_secs(30));
+    let offsets: Vec<i64> = rows.iter().map(|(_, _, o)| *o).collect();
+    assert_eq!(offsets, vec![0, 1, 2]);
+}
+
 /// A failed committed-offset lookup starts the partition from its committed
 /// offset, never from the reset policy.
 #[test]

@@ -236,6 +236,16 @@ impl KafkaSourceConfig {
                 )));
             }
         }
+        if self.rdkafka.contains_key("auto.offset.reset")
+            && self.rdkafka.contains_key("topic.auto.offset.reset")
+        {
+            return Err(ConfigError::Validation(
+                "source.kafka.rdkafka sets both \"auto.offset.reset\" and \
+                 \"topic.auto.offset.reset\": librdkafka reads them as one \
+                 property and applies them in no set order; set one"
+                    .into(),
+            ));
+        }
         crate::security::check_tls_feature(&self.rdkafka, "source.kafka")?;
         if let Some(strategy) = self.rdkafka.get("partition.assignment.strategy")
             && strategy.contains("cooperative")
@@ -252,10 +262,12 @@ impl KafkaSourceConfig {
 
     /// Where a partition with no committed offset starts under
     /// `auto.offset.reset`. `None` for `error`, which only librdkafka applies.
+    /// librdkafka reads `topic.auto.offset.reset` as the same property.
     pub(crate) fn uncommitted_start(&self) -> Option<rdkafka::Offset> {
         let policy = self
             .rdkafka
             .get("auto.offset.reset")
+            .or_else(|| self.rdkafka.get("topic.auto.offset.reset"))
             .map_or("latest", String::as_str);
         match policy.to_ascii_lowercase().as_str() {
             "smallest" | "earliest" | "beginning" => Some(rdkafka::Offset::Beginning),
@@ -377,6 +389,39 @@ mod tests {
             assert_eq!(cfg.uncommitted_start(), start, "{policy}");
         }
         assert_eq!(with_rdkafka(&[]).uncommitted_start(), Some(Offset::End));
+    }
+
+    /// librdkafka reads `topic.auto.offset.reset` as `auto.offset.reset`, so
+    /// the prefixed key gives the same start. Regression for #1255.
+    #[test]
+    fn the_topic_prefixed_reset_policy_maps_to_the_same_start() {
+        use rdkafka::Offset;
+        for (policy, start) in [
+            ("smallest", Some(Offset::Beginning)),
+            ("Earliest", Some(Offset::Beginning)),
+            ("beginning", Some(Offset::Beginning)),
+            ("largest", Some(Offset::End)),
+            ("LATEST", Some(Offset::End)),
+            ("end", Some(Offset::End)),
+            ("error", None),
+        ] {
+            let cfg = with_rdkafka(&[("topic.auto.offset.reset", policy)]);
+            assert_eq!(cfg.uncommitted_start(), start, "{policy}");
+        }
+    }
+
+    /// Both spellings reach librdkafka as one property in no set order, so a
+    /// config that sets both fails at load.
+    #[test]
+    fn both_spellings_of_the_reset_policy_are_refused() {
+        let body = format!(
+            "{}  rdkafka:\n    auto.offset.reset: earliest\n    topic.auto.offset.reset: earliest\n",
+            minimal()
+        );
+        let err = KafkaSourceConfig::from_component_config(&section(&body)).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("\"auto.offset.reset\""), "{msg}");
+        assert!(msg.contains("\"topic.auto.offset.reset\""), "{msg}");
     }
 
     #[test]

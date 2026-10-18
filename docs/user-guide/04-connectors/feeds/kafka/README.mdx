@@ -134,7 +134,7 @@ The work topic's partitions bound how many workers read at once: each partition 
 work and retry topics is read by one member of the group.
 
 The feed reads the codecs the [Kafka source](../../sources/kafka/README.mdx#compression-codecs)
-reads, and a batch it cannot read stops the feed.
+reads, and a batch it cannot read stops the feed in the same cases.
 
 Kafka deletes a message when its topic's retention ends, whether or not the
 group has read it. A unit deleted before it is read is lost, which INV-1 places

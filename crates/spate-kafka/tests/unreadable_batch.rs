@@ -99,6 +99,30 @@ fn produce(broker: &str, records: &[u8]) -> i16 {
     i16::from_be_bytes([resp[at], resp[at + 1]])
 }
 
+fn source_cfg(brokers: &str, group: &str) -> KafkaSourceConfig {
+    let mut cfg = KafkaSourceConfig::new(brokers, TOPIC, group);
+    cfg.startup_timeout = Duration::from_secs(30);
+    cfg.statistics_interval = Duration::from_millis(100);
+    cfg.rdkafka = BTreeMap::from([
+        ("auto.offset.reset".to_string(), "earliest".to_string()),
+        ("session.timeout.ms".to_string(), "6000".to_string()),
+        ("heartbeat.interval.ms".to_string(), "2000".to_string()),
+    ]);
+    cfg
+}
+
+fn offsets_of(
+    batch: Option<<<KafkaSource as Source>::Lane as SourceLane>::Batch<'_>>,
+) -> Option<Vec<i64>> {
+    batch.map(|mut b| {
+        let mut o = Vec::new();
+        while let Some(raw) = b.next_payload() {
+            o.push(raw.offset);
+        }
+        o
+    })
+}
+
 /// A batch with an unknown message format that starts its own fetch, read
 /// by a lane behind the fetcher, fails the lane before any record past it
 /// is delivered, and the watermark stops at the unreadable offset. The
@@ -120,20 +144,11 @@ fn an_unreadable_batch_behind_the_fetcher_fails_the_lane() {
         assert_eq!(produce(&brokers, &batch(2, 0, 0, 1, value.as_bytes())), 0);
     }
 
-    let mut cfg = KafkaSourceConfig::new(&brokers, TOPIC, "unreadable");
-    cfg.startup_timeout = Duration::from_secs(30);
-    cfg.statistics_interval = Duration::from_millis(100);
-    cfg.rdkafka = BTreeMap::from([
-        ("auto.offset.reset".to_string(), "earliest".to_string()),
-        ("session.timeout.ms".to_string(), "6000".to_string()),
-        ("heartbeat.interval.ms".to_string(), "2000".to_string()),
-    ]);
-
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
     let handle = recorder.handle();
     metrics::with_local_recorder(&recorder, || {
         let mut cp = Checkpointer::new();
-        let mut source = KafkaSource::new(cfg);
+        let mut source = KafkaSource::new(source_cfg(&brokers, "unreadable"));
         let meter =
             spate_core::metrics::Meter::with_namespace("kafka", "unreadable", "source", "kafka");
         source
@@ -182,13 +197,7 @@ fn an_unreadable_batch_behind_the_fetcher_fails_the_lane() {
             Err(other) => panic!("{other}"),
             Ok(batch) => panic!(
                 "delivered past the unreadable batch: {:?}",
-                batch.map(|mut b| {
-                    let mut o = Vec::new();
-                    while let Some(raw) = b.next_payload() {
-                        o.push(raw.offset);
-                    }
-                    o
-                })
+                offsets_of(batch)
             ),
         }
 
@@ -199,4 +208,97 @@ fn an_unreadable_batch_behind_the_fetcher_fails_the_lane() {
             [(spate_core::record::PartitionId(0), 1)]
         );
     });
+}
+
+/// An unreadable batch at the end of the partition, read behind record 0,
+/// fails the lane's next poll although nothing follows it.
+#[test]
+fn an_unreadable_batch_at_the_tail_fails_the_next_poll() {
+    let cluster = MockCluster::new(1).expect("mock cluster");
+    cluster.create_topic(TOPIC, 1, 1).expect("create topic");
+    let brokers = cluster.bootstrap_servers();
+    assert_eq!(produce(&brokers, &batch(2, 0, 0, 1, b"good-0")), 0);
+    let mut unreadable = batch(2, 0, -1, 1, b"carrier");
+    unreadable.extend_from_slice(&batch(3, 1, 0, 1, b"unreadable"));
+    assert_eq!(produce(&brokers, &unreadable), 0);
+
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    metrics::with_local_recorder(&recorder, || {
+        let mut cp = Checkpointer::new();
+        let mut source = KafkaSource::new(source_cfg(&brokers, "tail"));
+        let meter = spate_core::metrics::Meter::with_namespace("kafka", "tail", "source", "kafka");
+        source
+            .open(
+                SourceCtx::new(cp.handle())
+                    .with_meter(Some(meter))
+                    .with_partition_detail(true),
+            )
+            .expect("open");
+        let mut lanes = await_assignment(&mut source, Duration::from_secs(30));
+        cp.begin_epoch(&[lanes[0].partition()], 1);
+
+        // One version barrier, record 0 and the error.
+        let queued = r#"spate_kafka_partition_fetch_queue_messages{pipeline="tail",component="source",component_type="kafka",partition="0"} "#;
+        spate_test::wait_until(Duration::from_secs(30), "the fetcher runs ahead", || {
+            source
+                .poll_events(Duration::from_millis(50))
+                .expect("poll_events");
+            handle.render().lines().any(|line| {
+                line.strip_prefix(queued)
+                    .and_then(|n| n.parse::<f64>().ok())
+                    .is_some_and(|n| n >= 3.0)
+            })
+        });
+
+        let first = lanes[0].poll(2, Duration::from_secs(10)).expect("record 0");
+        assert_eq!(offsets_of(first), Some(vec![0]));
+        match lanes[0].poll(2, Duration::from_secs(10)) {
+            Err(SourceError::Client {
+                class: ErrorClass::Fatal,
+                reason,
+            }) => assert!(reason.contains("MagicByte 3"), "{reason}"),
+            Err(other) => panic!("{other}"),
+            Ok(b) => panic!("no error after the unreadable batch: {:?}", offsets_of(b)),
+        }
+    });
+}
+
+/// A batch in a codec this build does not know, read first in a lane's poll,
+/// fails the lane, and the reason names the codec and says why it failed.
+#[test]
+fn an_unknown_codec_first_in_a_poll_names_the_codec() {
+    let cluster = MockCluster::new(1).expect("mock cluster");
+    cluster.create_topic(TOPIC, 1, 1).expect("create topic");
+    let brokers = cluster.bootstrap_servers();
+    let mut unknown = batch(2, 0, 0, 1, b"unknown-codec");
+    // The attributes field: codec id 5, which no librdkafka build knows.
+    unknown[21..23].copy_from_slice(&5i16.to_be_bytes());
+    assert_eq!(produce(&brokers, &unknown), 0);
+
+    let mut cp = Checkpointer::new();
+    let mut source = KafkaSource::new(source_cfg(&brokers, "unknown-codec"));
+    source.open(SourceCtx::new(cp.handle())).expect("open");
+    let mut lanes = await_assignment(&mut source, Duration::from_secs(30));
+    cp.begin_epoch(&[lanes[0].partition()], 1);
+
+    let mut reason = None;
+    spate_test::wait_until(Duration::from_secs(30), "the lane fails", || {
+        source
+            .poll_events(Duration::from_millis(10))
+            .expect("poll_events");
+        match lanes[0].poll(64, Duration::from_millis(200)) {
+            Ok(None) => false,
+            Ok(b) => panic!("delivered an unreadable batch: {:?}", offsets_of(b)),
+            Err(SourceError::Client { class, reason: r }) => {
+                assert_eq!(class, ErrorClass::Fatal, "{r}");
+                reason = Some(r);
+                true
+            }
+            Err(other) => panic!("{other}"),
+        }
+    });
+    let reason = reason.expect("reason");
+    assert!(reason.contains("codec 0x5"), "{reason}");
+    assert!(reason.contains("cannot read"), "{reason}");
 }

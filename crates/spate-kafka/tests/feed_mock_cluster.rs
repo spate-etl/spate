@@ -459,6 +459,31 @@ fn a_corrupt_batch_stops_the_feed() {
     assert!(error.reason.contains("Bad message"), "{error}");
 }
 
+/// Pins that a batch whose codec id this build does not know stops the feed,
+/// with the reason naming the codec and the cause.
+#[test]
+fn an_unknown_codec_stops_the_feed_and_names_it() {
+    let cluster = cluster(1);
+    let brokers = cluster.bootstrap_servers();
+    let first = brokers.split(',').next().unwrap().to_owned();
+    let mut batch = corrupt_batch(b"k", b"body");
+    // The attributes field: codec id 5, which no librdkafka build knows.
+    batch[21..23].copy_from_slice(&5i16.to_be_bytes());
+    assert_eq!(produce_batch(&first, WORK, &batch), 0);
+    let group = spate_test::unique_name("codec");
+    let worker = direct(&feed_yaml(&brokers, &group, "", ""));
+    let mut error = None;
+    wait_until(DEADLINE, "the feed stops on the unknown codec", || {
+        error = worker.feed.receive(1).err();
+        error
+            .as_ref()
+            .is_some_and(|e| e.kind == FeedErrorKind::Fatal)
+    });
+    let error = error.unwrap();
+    assert!(error.reason.contains("codec 0x5"), "{error}");
+    assert!(error.reason.contains("cannot read"), "{error}");
+}
+
 /// Pins that connecting refuses a missing retry topic and leaves it
 /// missing. A metadata read of a missing topic by a client that may create
 /// topics creates it with the broker's defaults, so a check that read it

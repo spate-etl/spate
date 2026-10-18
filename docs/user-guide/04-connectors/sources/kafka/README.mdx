@@ -96,10 +96,16 @@ error names the id.
 ## Compression codecs
 
 The source reads batches compressed with gzip, snappy, lz4 and zstd. A batch
-in a codec or message format librdkafka cannot read fails the pipeline with a
-fatal error, before any record after it is delivered. Retrying would not help:
-librdkafka either fetches the same batch again or skips it. The committed
-offset stays at the batch's first record, and no record past it is lost.
+in a codec librdkafka cannot read fails the pipeline with a fatal error, before
+any record after it is delivered. A retry would fetch the same batch again.
+
+A batch in a message format librdkafka does not know fails the same way when
+the source reads it from its first record. When the committed offset falls
+inside such a batch, librdkafka fetches it again without reporting an error,
+and the partition reads nothing further.
+
+In each case the committed offset does not move past the batch, and no record
+in or after it is lost.
 
 ## How offsets are committed
 

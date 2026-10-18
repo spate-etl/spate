@@ -928,11 +928,10 @@ fn returns_within(limit: Duration, f: impl FnOnce() + Send + 'static) -> bool {
     rx.recv_timeout(limit).is_ok()
 }
 
-/// Pins that a gate pass reads the watermark of every attempt partition it
-/// needs and puts back the deliveries of each one that fails, in their
-/// order, with `admitting` lowered and the feed still running: a pass over
-/// four attempt partitions on an unreachable broker admits nothing and
-/// returns.
+/// Pins that a gate pass whose every watermark read fails puts back each
+/// delivery in its order, with `admitting` lowered and the feed still
+/// running: a pass over four attempt partitions on an unreachable broker
+/// admits nothing and returns.
 #[test]
 fn a_gate_pass_puts_back_the_deliveries_of_each_failed_watermark_read() {
     const STEP: Duration = Duration::from_millis(100);

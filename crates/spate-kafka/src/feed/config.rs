@@ -160,7 +160,8 @@ pub(crate) struct KafkaFeedConfig {
     pub(crate) attempt_topic: String,
     /// The bound on every write's wait for its delivery report, the attempt
     /// and tombstone writes beside the retry and dead-letter ones, and the
-    /// producer's `message.timeout.ms`. It also bounds one pass of the gate.
+    /// producer's `message.timeout.ms`. It also bounds one pass of the gate,
+    /// which can run up to 2 s past it.
     pub(crate) delivery_timeout: Duration,
     /// librdkafka's statistics interval. Zero disables statistics.
     pub(crate) statistics_interval: Duration,

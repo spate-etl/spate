@@ -94,6 +94,11 @@ group. It never subscribes, so it never takes part in the feed's rebalances.
   unit after it and cuts short every member's units in flight.
 - Bad, because a Kafka feed spreads units across at most as many workers as the
   work topic has partitions.
+- Bad, because the units of an attempt partition that cannot be read wait at
+  the gate and count against the 128 units a worker buffers. The units of the
+  other attempt partitions get through until those held units fill the
+  buffer; then every work partition pauses until that partition can be read.
+  Releasing held units and reading their offsets again later is #1258.
 - Bad, because the attempt topic's partition count cannot change. Workers
   started before and after a change count a unit separately, and nothing
   detects the change.

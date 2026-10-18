@@ -11,9 +11,11 @@
 //! attempt partition's watermark read fails, or that the pass reaches its
 //! bound before reading, goes back to the gate, and the rest of the pass
 //! goes on without it; the gate then waits one step before its next pass.
-//! The gate never runs on the consumer's poll thread (INV-2), and it sends
-//! nothing under the state lock: a refused enqueue settles inline, and
-//! settling takes that lock.
+//! A delivery put back counts against the reader's buffer, so an attempt
+//! partition that stays unreadable pauses every work partition once its
+//! deliveries fill that buffer. The gate never runs on the consumer's poll
+//! thread (INV-2), and it sends nothing under the state lock: a refused
+//! enqueue settles inline, and settling takes that lock.
 
 use super::attempt::{self, partition_of};
 use super::events::Cause;
@@ -35,7 +37,8 @@ pub(crate) struct Gate {
     core: Arc<Core>,
     producer: Producer,
     step: Duration,
-    /// The bound on a pass, from the moment it takes its deliveries.
+    /// The bound on a pass, from the moment it takes its deliveries. A pass
+    /// can run up to two steps past it.
     delivery_timeout: Duration,
 }
 
@@ -108,8 +111,9 @@ impl Gate {
     /// catch up on their attempt partitions, and admit them. The deliveries
     /// of a partition whose watermark read failed, or that the pass reached
     /// its bound before reading, go back for the next pass, which starts
-    /// after one step. A pass whose follower does not catch up within its
-    /// bound puts all its deliveries back.
+    /// after one step, and count against the reader's buffer while they
+    /// wait. A pass whose follower does not catch up within its bound puts
+    /// all its deliveries back.
     pub(crate) fn pass(&self) {
         let entries = self.take();
         if entries.is_empty() {
@@ -136,8 +140,8 @@ impl Gate {
     }
 
     /// Wait one step before the next pass, so a watermark read that fails
-    /// at once is not repeated in a busy loop. A stop or a new delivery
-    /// ends the wait early.
+    /// at once is not repeated in a busy loop. A stop, or a delivery that
+    /// arrives while it waits, ends the wait early.
     fn rest(&self) {
         let st = self.core.lock();
         // Checked under the state lock, as in `take`.

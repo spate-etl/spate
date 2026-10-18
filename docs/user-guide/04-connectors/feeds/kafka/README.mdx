@@ -62,7 +62,7 @@ unknown fields are rejected with the offending key.
 | `retry_topic` | string | `required` | Where a unit failed below the attempt cap is written again. The group reads it beside the work topic. Must differ from `topic`. |
 | `dead_letter_topic` | string | `required` | Where a unit goes at the attempt cap, failed by its reader or moved unread, and a message that names no unit. Nothing reads it. Must differ from `topic` and `retry_topic`. |
 | `attempt_topic` | string | `required` | The compacted topic each unit's attempt is recorded on before the unit is read (see [Topics](#topics)). Must differ from `topic`, `retry_topic` and `dead_letter_topic`. |
-| `delivery_timeout` | duration | `30s` | How long one write waits for its delivery report (librdkafka `message.timeout.ms`), and the bound on one pass of the gate. An attempt, tombstone, retry or dead-letter write that times out is sent again, and a publish that times out is reported to its caller as retryable. From `1ms` to about 24.8 days. |
+| `delivery_timeout` | duration | `30s` | How long one write waits for its delivery report (librdkafka `message.timeout.ms`), and the bound on one pass of the gate, which can run up to 2 s past it. An attempt, tombstone, retry or dead-letter write that times out is sent again, and a publish that times out is reported to its caller as retryable. From `1ms` to about 24.8 days. |
 | `statistics_interval` | duration | `5s` | librdkafka's statistics interval for the feed's consumer and producer. The attempt follower sends no statistics. `0s` disables statistics; a non-zero value under `1ms` is refused. |
 | `rdkafka` | string map | `{}` | Raw librdkafka properties for every client of the feed, applied after validation — see below. |
 
@@ -258,9 +258,12 @@ units read since the last commit are delivered again.
 The consumer pauses its partitions once the feed holds 128 units for the
 reader, counting the units waiting at the gate and those whose attempt write
 is in flight, and resumes them once that count is down to 64. A stalled
-attempt topic therefore pauses the partitions. The consumer keeps polling
-while paused, so a slow reader does not cost the member its partitions
-through `max.poll.interval.ms`.
+attempt topic therefore pauses the partitions. So does one attempt partition
+that cannot be read: the units of the other attempt partitions get through
+until its units waiting at the gate fill the 128, and then every work
+partition stays paused until that partition can be read. The consumer keeps
+polling while paused, so a slow reader does not cost the member its
+partitions through `max.poll.interval.ms`.
 
 ## No lease
 
@@ -330,13 +333,15 @@ message, so it is read after the units already there.
 
 A gate pass that cannot read an attempt partition's watermark logs a warning
 naming the partition, admits the units whose attempt partitions it could
-read, and keeps that partition's units at the gate. The next pass starts up
-to 1 s later. A pass that reaches `delivery_timeout` before it has read every
-partition it needs does the same with the partitions it has not read, and its
-warning names them and the partition whose read took longest. A pass whose
-follower has not caught up within `delivery_timeout` logs a warning naming the
-partition and tries all its units again. A watermark read refused in a way retrying cannot fix, and an
-attempt record the worker cannot read, stop the feed.
+read, and keeps that partition's units at the gate, where they count against
+the buffer described under [Backpressure](#backpressure). The next pass starts
+up to 1 s later. A pass that reaches `delivery_timeout` before it has read
+every partition it needs does the same with the partitions it has not read,
+and its warning names them and the partition whose read took longest. A pass
+whose follower has not caught up within `delivery_timeout` logs a warning
+naming the partition and tries all its units again. A watermark read refused
+in a way retrying cannot fix, and an attempt record the worker cannot read,
+stop the feed.
 
 A message with no key, or a key that is not UTF-8, names no unit. It goes to
 the dead-letter topic at once, with its key, value and headers as read, and

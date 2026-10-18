@@ -1960,9 +1960,9 @@ mod cluster {
     }
 
     /// Pins that a pass whose watermark read the broker refuses admits
-    /// nothing, including the units of a partition it read and found caught
-    /// up before the refusal: both units stay at the gate and the feed
-    /// stops.
+    /// nothing, including the units of a partition it read before the
+    /// refusal, whose records the ledger holds: both units stay at the gate
+    /// and the feed stops.
     #[test]
     fn a_refused_watermark_read_admits_nothing_from_its_pass() {
         let cluster = cluster_with(0);

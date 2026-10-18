@@ -218,6 +218,35 @@ mod tests {
         prop_oneof![MIB..=64 * MIB, 16 * GIB..=64 * GIB]
     }
 
+    /// Pins that an object is cut lazily. At a one-byte target the largest
+    /// object the cut accepts has more ranges than memory can hold at once,
+    /// and its cursor still yields the first two.
+    #[test]
+    fn the_cut_yields_one_range_at_a_time() {
+        let packing = Packing {
+            target_bytes: 1,
+            compression: Compression::None,
+            delimiter: Some(b'\n'),
+        };
+        let entry = ObjectEntry {
+            key: "a.ndjson".into(),
+            size: MAX_SUBDIVIDABLE_BYTES,
+            etag: Some("\"etag\"".into()),
+            last_modified_ms: 1,
+        };
+        let mut cursor = parts_of(Arc::new(vec![entry]), packing);
+        let first: Vec<(u64, u64)> = cursor
+            .by_ref()
+            .take(2)
+            .map(|part| {
+                let range = part.range.expect("the object is cut");
+                (range.start, range.end)
+            })
+            .collect();
+        assert_eq!(first, [(0, 1), (1, 2)]);
+        assert!(!cursor.is_exhausted());
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(64))]
 

@@ -2588,19 +2588,23 @@ mod docker {
     //! show: a rebalance held open, which the mock refuses every commit
     //! during, and a compacted attempt topic, which the mock never cleans.
 
-    use super::super::Core;
     use super::super::attempt::{self, Follower};
     use super::super::config::KafkaFeedConfig;
+    use super::super::gate::Gate;
+    use super::super::producer::FeedProducerContext;
+    use super::super::{Core, Gating};
     use super::cluster::{
         acknowledge_first, admission, committed, drive, owns, parts_for, section,
     };
     use crate::feed::KafkaFeed;
     use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
     use rdkafka::client::DefaultClientContext;
+    use rdkafka::config::FromClientConfigAndContext;
     use rdkafka::consumer::{BaseConsumer, Consumer};
     use rdkafka::message::Message;
     use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
     use rdkafka::{ClientConfig, Offset, TopicPartitionList};
+    use spate_core::feed::Unit;
     use spate_test::wait_until;
     use std::num::NonZeroU32;
     use std::sync::Arc;
@@ -2718,8 +2722,48 @@ mod docker {
         producer.flush(Duration::from_secs(30)).unwrap();
     }
 
-    /// Start a follower of `topic` in a feed's group, and wait up to 10 s
-    /// for its ledger to reach the partition's high watermark.
+    /// Run one gate pass over a unit on each attempt partition of `core`,
+    /// with a bound of 10 s, and assert that it admitted every unit.
+    fn gate_admits(config: &KafkaFeedConfig, core: &Arc<Core>) {
+        let producer = super::super::write::Producer::from_config_and_context(
+            &config.producer_config(false),
+            FeedProducerContext::new(Arc::clone(core)),
+        )
+        .unwrap();
+        {
+            let mut st = core.lock();
+            st.tracker.assign([super::tp(0)]);
+            let mut wanted: Vec<i32> = (0..).take(core.attempt_partitions.get() as usize).collect();
+            for offset in 0.. {
+                let identity = super::identity(core, offset);
+                let partition = super::attempt_partition(core, &identity);
+                if let Some(at) = wanted.iter().position(|&p| p == partition) {
+                    wanted.remove(at);
+                    let receipt = st.tracker.deliver(&super::tp(0), offset).unwrap();
+                    st.gating.push_back(Gating {
+                        receipt,
+                        unit: Unit::new(format!("u{offset}"), Vec::new()),
+                        identity,
+                    });
+                }
+                if wanted.is_empty() {
+                    break;
+                }
+            }
+        }
+        Gate::new(Arc::clone(core), producer, Duration::from_secs(10)).pass();
+        let st = core.lock();
+        assert!(
+            st.fatal.is_none(),
+            "{:?}",
+            st.fatal.as_ref().map(|f| &f.reason)
+        );
+        assert!(st.gating.is_empty(), "the gate held back a unit");
+    }
+
+    /// Start a follower of `topic` in a feed's group, wait up to 10 s for
+    /// its ledger to reach the partition's high watermark, and check that a
+    /// gate pass over the partition admits its unit.
     fn follower_catches_up(brokers: &str, topic: &str) {
         let section: spate_core::config::FeedSection = serde_yaml::from_str(&format!(
             "kafka:\n  brokers: \"{brokers}\"\n  group_id: {}\n  topic: units\n  \
@@ -2748,8 +2792,75 @@ mod docker {
                 attempt::lock(&core.ledger).caught_up(0, lwm, hwm)
             },
         );
+        gate_admits(&config, &core);
         crate::feed::stop(&core);
         thread.join().unwrap();
+    }
+
+    /// Pins that a gate pass admits the units of an attempt partition that
+    /// holds no records, with no follower running: one partition never
+    /// written, whose watermarks are both 0, and one whose records were all
+    /// deleted, whose watermarks are both 3.
+    #[test]
+    #[ignore = "requires Docker"]
+    fn a_gate_pass_admits_on_an_empty_or_emptied_attempt_partition() {
+        let (_container, brokers) = start_broker();
+        let io = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let admin: AdminClient<DefaultClientContext> = ClientConfig::new()
+            .set("bootstrap.servers", &brokers)
+            .create()
+            .unwrap();
+        let topic = NewTopic::new("units-attempts", 2, TopicReplication::Fixed(1));
+        for created in io
+            .block_on(admin.create_topics(&[topic], &AdminOptions::new()))
+            .unwrap()
+        {
+            created.unwrap();
+        }
+        let producer: BaseProducer = ClientConfig::new()
+            .set("bootstrap.servers", &brokers)
+            .create()
+            .unwrap();
+        for _ in 0..3 {
+            producer
+                .send(
+                    BaseRecord::to("units-attempts")
+                        .partition(1)
+                        .key("x")
+                        .payload(&attempt::encode(1)),
+                )
+                .map_err(|(e, _)| e)
+                .unwrap();
+        }
+        producer.flush(Duration::from_secs(30)).unwrap();
+        let mut upto = TopicPartitionList::new();
+        upto.add_partition_offset("units-attempts", 1, Offset::Offset(3))
+            .unwrap();
+        for deleted in io
+            .block_on(admin.delete_records(&upto, &AdminOptions::new()))
+            .unwrap()
+            .elements()
+        {
+            deleted.error().unwrap();
+        }
+        wait_until(
+            Duration::from_secs(30),
+            "the partitions read as empty",
+            || {
+                [(0, (0, 0)), (1, (3, 3))].into_iter().all(|(p, marks)| {
+                    producer
+                        .client()
+                        .fetch_watermarks("units-attempts", p, Duration::from_secs(5))
+                        .is_ok_and(|read| read == marks)
+                })
+            },
+        );
+        let config = KafkaFeedConfig::from_section(&section(&brokers, "emptied")).unwrap();
+        let core = Arc::new(Core::new(&config, NonZeroU32::new(2).unwrap()));
+        gate_admits(&config, &core);
     }
 
     /// The offset of the first record a fresh read of `topic` finds.

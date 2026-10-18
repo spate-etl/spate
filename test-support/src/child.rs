@@ -196,4 +196,32 @@ mod tests {
     fn a_spawned_name_matching_no_test_fails() {
         let _child = ChildTest::spawn("child::tests::no_such_test", |child| child);
     }
+
+    /// A spawned filter that matches two tests fails, and the child, which
+    /// could run for ever, is killed.
+    #[test]
+    fn a_spawned_filter_matching_two_tests_kills_the_child() {
+        use std::io::Read as _;
+        let (mut reader, writer) = std::io::pipe().expect("a pipe");
+        let spawned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            ChildTest::spawn("child::tests::a_child_that_waits_to_be_killed", |child| {
+                child
+                    .arg("child::tests::the_named_test_runs_in_the_child")
+                    .env(CHILD, "wait")
+                    .stderr(writer)
+            })
+        }));
+        let message = *spawned
+            .expect_err("two tests match")
+            .downcast::<String>()
+            .expect("a message");
+        assert!(message.contains("matched 2 tests, not 1"), "{message}");
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = reader.read_to_end(&mut Vec::new());
+            let _ = tx.send(());
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(30))
+            .expect("the child's stderr closes once it is killed");
+    }
 }

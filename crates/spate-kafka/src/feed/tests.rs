@@ -1060,6 +1060,28 @@ fn a_delivery_revoked_during_a_pass_is_not_put_back() {
     );
 }
 
+/// Pins that a latched feed's gate thread ends without waiting for a stop.
+#[test]
+fn a_latched_feed_ends_its_gate_thread() {
+    let config = unreachable_config("");
+    let core = Arc::new(Core::new(&config, TWO));
+    let producer = Producer::from_config_and_context(
+        &config.producer_config(false),
+        FeedProducerContext::new(Arc::clone(&core)),
+    )
+    .unwrap();
+    let handle = super::gate::Gate::new(Arc::clone(&core), producer, config.delivery_timeout)
+        .with_step(Duration::from_millis(10))
+        .spawn()
+        .unwrap();
+    core.latch("probe");
+    spate_test::wait_until(Duration::from_secs(10), "the gate thread ends", || {
+        handle.is_finished()
+    });
+    super::stop(&core);
+    handle.join().unwrap();
+}
+
 mod cluster {
     //! The feed against rdkafka's in-process MockCluster, where a test reads
     //! the feed's buffer and ownership directly.
@@ -1984,6 +2006,53 @@ mod cluster {
         assert_eq!(waiting, [format!("u{on1}")]);
         assert_eq!(st.admitting, 0);
         assert!(st.fatal.is_none());
+    }
+
+    /// Pins that a pass which reads every watermark it needs admits its
+    /// units and returns without waiting a step: with a step of an hour, a
+    /// pass over one unit on a partition with a leader returns, and the unit
+    /// is buffered for the reader.
+    #[test]
+    fn a_pass_that_reads_every_watermark_returns_without_waiting() {
+        let cluster = cluster_with(0);
+        let brokers = cluster.bootstrap_servers();
+        let group = spate_test::unique_name("gate-no-rest");
+        let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
+        let core = Arc::new(Core::new(&config, TWO));
+        let producer: Producer =
+            rdkafka::config::FromClientConfigAndContext::from_config_and_context(
+                &config.producer_config(false),
+                crate::feed::producer::FeedProducerContext::new(Arc::clone(&core)),
+            )
+            .unwrap();
+        let offset = (0..)
+            .find(|&o| super::attempt_partition(&core, &super::identity(&core, o)) == 0)
+            .unwrap();
+        wait_until(DEADLINE, "partition 0 reports its watermarks", || {
+            producer
+                .client()
+                .fetch_watermarks(ATTEMPTS, 0, Duration::from_millis(500))
+                .is_ok()
+        });
+        {
+            let mut st = core.lock();
+            st.tracker.assign([super::tp(0)]);
+            let receipt = st.tracker.deliver(&super::tp(0), offset).unwrap();
+            st.gating.push_back(Gating {
+                receipt,
+                unit: Unit::new("u", Vec::new()),
+                identity: super::identity(&core, offset),
+            });
+        }
+        let gate = Gate::new(Arc::clone(&core), producer, Duration::from_secs(3600))
+            .with_step(Duration::from_secs(3600));
+        assert!(
+            returns_within(Duration::from_secs(30), move || gate.pass()),
+            "a pass that read every watermark waited a step"
+        );
+        wait_until(DEADLINE, "the unit is buffered", || {
+            core.lock().ready.len() == 1
+        });
     }
 
     /// Pins that a pass which put deliveries back for a failed watermark read

@@ -334,6 +334,44 @@ mod tests {
     use rdkafka::error::RDKafkaErrorCode as C;
     use std::num::NonZeroU32;
 
+    /// Pins that the wait after a pass that put units back is skipped on a
+    /// feed that stopped or latched before the wait began, whose notify has
+    /// already fired or never fires: with a step of an hour, `rest` returns.
+    #[test]
+    fn the_wait_after_a_partial_pass_is_skipped_once_the_feed_ends() {
+        let section: spate_core::config::FeedSection = serde_yaml::from_str(
+            "kafka:\n  brokers: 127.0.0.1:1\n  group_id: workers\n  topic: units\n  \
+             retry_topic: units-retry\n  dead_letter_topic: units-dead\n  \
+             attempt_topic: units-attempts\n  statistics_interval: 0s\n",
+        )
+        .unwrap();
+        let config = KafkaFeedConfig::from_section(&section).unwrap();
+        for how in ["stopped", "latched"] {
+            let core = Arc::new(Core::new(&config, NonZeroU32::MIN));
+            let producer = Producer::from_config_and_context(
+                &config.producer_config(false),
+                FeedProducerContext::new(Arc::clone(&core)),
+            )
+            .unwrap();
+            let gate = Gate::new(Arc::clone(&core), producer, config.delivery_timeout)
+                .with_step(Duration::from_secs(3600));
+            if how == "stopped" {
+                crate::feed::stop(&core);
+            } else {
+                drop(core.latch("probe"));
+            }
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                gate.rest();
+                let _ = tx.send(());
+            });
+            assert!(
+                rx.recv_timeout(Duration::from_secs(10)).is_ok(),
+                "the gate of a {how} feed waited a step"
+            );
+        }
+    }
+
     /// Pins how a failed watermark read ends a pass: a refusal retrying
     /// cannot fix stops the feed, naming the read, and a timeout leaves the
     /// feed running for the next pass.

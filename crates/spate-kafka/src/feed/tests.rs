@@ -1016,6 +1016,50 @@ fn a_gate_waiting_on_an_unreachable_attempt_partition_lets_the_feed_drop() {
     );
 }
 
+/// Pins that a pass whose watermark read fails does not put back a
+/// delivery whose partition was revoked while the pass ran.
+#[test]
+fn a_delivery_revoked_during_a_pass_is_not_put_back() {
+    let config = unreachable_config("  delivery_timeout: 1h\n");
+    let core = Arc::new(Core::new(&config, TWO));
+    let producer = Producer::from_config_and_context(
+        &config.producer_config(false),
+        FeedProducerContext::new(Arc::clone(&core)),
+    )
+    .unwrap();
+    {
+        let mut st = core.lock();
+        st.tracker.assign([tp(0)]);
+        let receipt = st.tracker.deliver(&tp(0), 0).unwrap();
+        st.gating.push_back(Gating {
+            receipt,
+            unit: Unit::new("u", Vec::new()),
+            identity: identity(&core, 0),
+        });
+    }
+    let gate = super::gate::Gate::new(Arc::clone(&core), producer, config.delivery_timeout)
+        .with_step(Duration::from_secs(1));
+    let pass = std::thread::spawn(move || gate.pass());
+    spate_test::wait_until(
+        Duration::from_secs(10),
+        "the pass takes the delivery",
+        || core.lock().admitting == 1,
+    );
+    super::consumer::commit_revoked(&core, &[tp(0)], |_| {});
+    assert!(
+        core.lock().gating.is_empty(),
+        "the revocation left the queue"
+    );
+    pass.join().unwrap();
+    let st = core.lock();
+    assert!(
+        st.gating.is_empty(),
+        "a delivery revoked during the pass went back to the gate: {} entries, held_for_reader {}",
+        st.gating.len(),
+        st.held_for_reader()
+    );
+}
+
 mod cluster {
     //! The feed against rdkafka's in-process MockCluster, where a test reads
     //! the feed's buffer and ownership directly.

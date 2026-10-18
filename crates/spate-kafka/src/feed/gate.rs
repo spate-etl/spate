@@ -249,7 +249,8 @@ impl Gate {
     }
 
     /// Return `entries` to the front of the gate's queue, in their order,
-    /// and give back their share of `admitting`.
+    /// and give back their share of `admitting`. An entry whose partition
+    /// was given up during the pass is dropped.
     fn put_back(&self, entries: Vec<Gating>, halt: Halt) {
         if let Halt::Behind(reason) = &halt {
             tracing::warn!(
@@ -260,7 +261,9 @@ impl Gate {
         let mut st = self.core.lock();
         st.admitting = st.admitting.saturating_sub(entries.len());
         for entry in entries.into_iter().rev() {
-            st.gating.push_front(entry);
+            if st.tracker.held(entry.receipt).is_some() {
+                st.gating.push_front(entry);
+            }
         }
     }
 

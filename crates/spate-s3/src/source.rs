@@ -333,8 +333,12 @@ impl Source for S3Source {
                 store,
                 handle: self.handle.clone(),
                 issuer: ctx.issuer,
+                packing: Packing {
+                    target_bytes: self.config.split_target_bytes.as_u64(),
+                    compression: self.config.compression,
+                    delimiter: make_framer().resync_delimiter(),
+                },
                 make_framer,
-                compression: self.config.compression,
                 chunk_bytes: self.config.chunk_bytes.as_u64() as usize,
                 range_bytes: self.config.prefetch_bytes.as_u64() as usize,
                 retry_base: RETRY_BASE,

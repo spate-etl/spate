@@ -67,7 +67,7 @@ source:
 |---|---|---|---|
 | `url` | string | `required` | Bucket and prefix to backfill. Every object under the prefix is read. `file://` works for local runs; `memory://` fails at load, because it builds a fresh empty store per component and so cannot be shared. Part of the job fingerprint — byte-identical across every worker of a coordinated job. |
 | `compression` | `auto` \| `none` \| `gzip` \| `zstd` | `auto` | Object codec. `auto` decides per object by extension (`.gz`/`.gzip`, `.zst`/`.zstd`, else uncompressed). Multi-member gzip and multi-frame zstd are read fully; truncated or corrupt streams [poison the split](#object-errors-poison-the-split). Part of the job fingerprint. |
-| `split_target_bytes` | bytes | `64MiB` | Target size of one split — the unit of distribution. Objects pack toward it in listing order with a per-object cost floor of a sixteenth of the target (so ≤ ~16 objects per split). An object above the target is [cut into byte ranges](#large-objects-and-byte-ranges) when it qualifies, and otherwise gets a split of its own. Floor `1MiB`. Part of the job fingerprint. |
+| `split_target_bytes` | bytes | `64MiB` | Target size of one split — the unit of distribution. Objects pack toward it in listing order with a per-object cost floor of a sixteenth of the target (so ≤ ~16 objects per split). An object above the target is [cut into byte ranges](#large-objects-and-byte-ranges) when it qualifies, and otherwise gets a split of its own. Floor `1MiB`. Part of the job fingerprint. On the [feed path](#reading-from-a-feed) it sets the length of the byte ranges a unit is read in. |
 | `refresh_listing` | bool | `false` | Re-list on the coordinator's replan interval, planning new objects as additional splits. `true` makes the job **open** (never self-terminates). Part of the job fingerprint. |
 | `prefetch_bytes` | bytes | `8MiB` | Target window size for ETag-pinned ranged GETs; see [read-ahead memory sizing](#read-parallelism-on-a-solo-run). Must be at least `chunk_bytes`; a smaller value fails at load. |
 | `chunk_bytes` | bytes | `512KiB` | Target size of one buffered chunk. Zero fails at load. |
@@ -316,10 +316,18 @@ The split count still sets how evenly the lanes divide over threads; see
 A [`feed:` section](../../../07-reference/configuration.mdx#feed) moves the
 source onto the feed path. It reads [work units](../../../07-reference/glossary.mdx#work-unit)
 from the feed the section names, and lists nothing itself. Each unit's body is
-an encoded `SplitDescriptor` naming one whole object, and a unit naming
-anything else is failed back to the feed. Every delivery is read from the
-object's first byte, and the unit is acknowledged once the sink has
-acknowledged every record in it.
+an encoded `SplitDescriptor` naming one object, whole or as one byte range of
+it, and a unit naming anything else is failed back to the feed.
+
+A unit naming a whole object that qualifies for cutting under
+[Large objects and byte ranges](#large-objects-and-byte-ranges), with the
+unit's ETag in place of the listing's, is read in those byte ranges, each on a
+lane of its own. A unit naming a byte range is read as that range. It is
+failed back to the feed when the framer's resync delimiter is not the one the
+range was cut on, or when `compression` decodes the object as compressed.
+Each delivery is read from the first byte of each of its reads, so a unit
+delivered again is read again in full. The unit is acknowledged once, after
+the sink has acknowledged every record in every read.
 
 ```yaml
 feed:
@@ -327,8 +335,10 @@ feed:
   units_held: 32
 ```
 
-`units_held` bounds the units the source holds at once, one lane each, and with
-them its read parallelism. The default is 96. The source publishes no units of
+`units_held` bounds the reads the source has in progress at once, one lane
+each, and with them its read parallelism. A unit read in byte ranges counts
+once for each range in progress, and its remaining ranges open as earlier ones
+finish, before the source takes another unit. The default is 96. The source publishes no units of
 its own and reads only the units published to the feed, and a startup WARN
 says so. An in-process feed built from the file alone has no publisher, so the
 run reads nothing. To publish to the in-process feed, code builds a

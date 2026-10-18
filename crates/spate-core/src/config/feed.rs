@@ -27,7 +27,8 @@ use std::num::{NonZeroU32, NonZeroUsize};
 #[non_exhaustive]
 pub struct FeedSection {
     backend: ComponentConfig,
-    /// Units the source holds and reads at once. `None` leaves the source's
+    /// Units the source reads at once, a unit read in several parts
+    /// counting once for each part in progress. `None` leaves the source's
     /// own default.
     pub units_held: Option<NonZeroUsize>,
     /// The delivery on which a failed unit moves to its feed's dead-letter

@@ -29,8 +29,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use support::spy::{SpyOptions, spying_local_store};
 use support::{
-    Launched, PipelineYaml, captured_rows, key_of, launch_customized, line_framer, lines_bytes,
-    recs, sorted, stop, test_options, unit_over,
+    Launched, PipelineYaml, captured_rows, key_of, launch_customized, line_framer, line_starts,
+    lines_bytes, recs, sorted, stop, test_options, unit_over,
 };
 
 const DEADLINE: Duration = Duration::from_secs(30);
@@ -236,11 +236,11 @@ fn a_unit_is_acknowledged_only_after_its_last_record_is_acknowledged() {
     stop(&l);
 }
 
-/// Pins the in-process feed end to end: a unit with rows and a zero-byte
-/// unit are acknowledged, and a unit over a missing object, a unit whose body
-/// names two objects, a unit whose body is not a descriptor and a unit that
-/// names a byte range are failed on every delivery until the feed
-/// dead-letters them.
+/// Pins the in-process feed end to end: a unit with rows, a zero-byte unit
+/// and a unit naming a byte range are acknowledged, the range yielding only
+/// the records that start in it, and a unit over a missing object, a unit
+/// whose body names two objects and a unit whose body is not a descriptor are
+/// failed on every delivery until the feed dead-letters them.
 #[test]
 fn in_process_units_are_acknowledged_or_dead_lettered_at_the_cap() {
     let dir = tempfile::tempdir().unwrap();
@@ -248,7 +248,8 @@ fn in_process_units_are_acknowledged_or_dead_lettered_at_the_cap() {
     let rows = recs("m", 30);
     stage(&data, "rows.ndjson", &rows);
     fs::write(data.join("empty.ndjson"), b"").unwrap();
-    stage(&data, "other.ndjson", &recs("o", 3));
+    let other = recs("o", 3);
+    stage(&data, "other.ndjson", &other);
 
     let feed = MemoryFeed::new();
     let two_members = {
@@ -269,7 +270,8 @@ fn in_process_units_are_acknowledged_or_dead_lettered_at_the_cap() {
         Unit::new("not-a-descriptor", b"{ not a descriptor".to_vec()),
         Unit::new(
             "ranged",
-            support::ranged_spec(&data, "other.ndjson", 0, 12, b'\n').descriptor,
+            support::ranged_spec(&data, "other.ndjson", 0, line_starts(&other)[1], b'\n')
+                .descriptor,
         ),
     ] {
         drop(feed.publish(unit));
@@ -282,21 +284,19 @@ fn in_process_units_are_acknowledged_or_dead_lettered_at_the_cap() {
         c.visible == 0 && c.held == 0
     });
     stop(&l);
-    assert_eq!(counts(feed.counts()), (0, 0, 4, 2));
+    assert_eq!(counts(feed.counts()), (0, 0, 3, 3));
 
     let mut dead: Vec<String> = feed.dead_letters().into_iter().map(|u| u.id).collect();
     dead.sort();
-    assert_eq!(
-        dead,
-        [
-            "missing.ndjson",
-            "not-a-descriptor",
-            "ranged",
-            "two-members"
-        ]
-    );
+    assert_eq!(dead, ["missing.ndjson", "not-a-descriptor", "two-members"]);
     let got = captured_rows(&l.script);
-    assert_eq!(sorted(got), sorted(rows), "the rows unit is read once");
+    let mut want = rows;
+    want.push(other[0].clone());
+    assert_eq!(
+        sorted(got),
+        sorted(want),
+        "the rows unit and the range are each read once"
+    );
 }
 
 /// Pins that a source reading a feed refuses a `coordination:` section when

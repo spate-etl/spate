@@ -4721,6 +4721,7 @@ dependencies = [
  "aws-smithy-http-client",
  "base64 0.22.1",
  "humantime-serde",
+ "object_store",
  "rustls",
  "rustls-native-certs",
  "serde",

@@ -36,6 +36,7 @@ webpki-root-certs = { workspace = true }
 
 [dev-dependencies]
 spate-sqs = { path = ".", features = ["testing"] }
+object_store = { workspace = true }
 serde_yaml = { workspace = true }
 spate-json = { workspace = true }
 spate-s3 = { workspace = true }

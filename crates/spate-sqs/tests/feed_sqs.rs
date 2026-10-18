@@ -138,10 +138,21 @@ struct Worker {
 /// write, so an object's records span several writes. `pre` scripts the sink
 /// before data flows.
 fn launch(data: &Path, feed_section: &str, pre: impl FnOnce(&SinkScript)) -> Worker {
+    launch_with_source(data, "", feed_section, pre)
+}
+
+/// [`launch`] with `source_keys`, each line indented under `s3:`, added to
+/// the source section.
+fn launch_with_source(
+    data: &Path,
+    source_keys: &str,
+    feed_section: &str,
+    pre: impl FnOnce(&SinkScript),
+) -> Worker {
     let yaml = format!(
         "pipeline: {{ name: sqs-feed, threads: 1 }}\nadmin: {{ listen: none }}\n\
          checkpoint: {{ interval: 100ms }}\nmetrics: {{ exporter: none }}\n\
-         source:\n  s3:\n    url: \"file://{}/\"\n\
+         source:\n  s3:\n    url: \"file://{}/\"\n{source_keys}\
          sink: {{ capture: {{ chunk: {{ target_bytes: 64 }} }} }}\n{feed_section}",
         data.display()
     );
@@ -308,6 +319,75 @@ fn a_unit_is_deleted_only_after_its_last_record_is_acknowledged() {
     });
     assert_eq!(written(&worker.script), sorted(rows));
     assert_eq!(worker.stop(), ExitState::Completed);
+}
+
+/// Pins INV-1 on SQS for a unit read in byte ranges: a 1 MiB range target
+/// cuts the unit's object into three ranges, and while the last write is held
+/// the queue never reports the unit gone. Once it succeeds the unit is
+/// deleted with every row written once.
+#[test]
+#[ignore = "requires Docker"]
+fn a_unit_read_in_ranges_is_deleted_after_its_last_range_is_acknowledged() {
+    let mq = ElasticMq::start().unwrap();
+    let url = queue_with_dead_letter(&mq, "ranges");
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    // Ten rows of about 300 KB make an object of about 2.9 MiB.
+    let pad = "p".repeat(300_000);
+    let rows: Vec<String> = (0..10)
+        .map(|i| format!("{{\"k\":\"r-{i}\",\"pad\":\"{pad}\"}}"))
+        .collect();
+    let mut unit = stage(&data, "r.ndjson", &rows);
+    unit.body = with_etag(&unit.body);
+
+    let worker = launch_with_source(
+        &data,
+        "    split_target_bytes: 1MiB\n",
+        &feed_yaml(&mq, &url, VISIBILITY, ""),
+        |sink| {
+            for _ in 1..rows.len() {
+                sink.enqueue_global(WriteOutcome::ok());
+            }
+            sink.enqueue_global(WriteOutcome::ok().held());
+        },
+    );
+    publish(&worker.feed, unit);
+    wait_until(DEADLINE, "the last write is held", || {
+        worker.script.held_writes() == 1
+    });
+
+    // Elapsed time is the property: the hold outlasts two visibility periods.
+    for _ in 0..24 {
+        std::thread::sleep(Duration::from_millis(500));
+        let counts = mq.approximate_counts(path_of(&url)).unwrap();
+        assert_ne!(
+            counts,
+            (0, 0),
+            "the unit was deleted while its last write was held"
+        );
+    }
+    worker.script.release_held();
+    wait_until(DEADLINE, "the unit is deleted", || {
+        mq.approximate_counts(path_of(&url)).unwrap() == (0, 0)
+    });
+    assert_eq!(written(&worker.script), sorted(rows));
+    assert_eq!(worker.stop(), ExitState::Completed);
+}
+
+/// `body` with its one object pinned to the ETag the `file://` store reports,
+/// which a unit needs to be read in ranges.
+fn with_etag(body: &[u8]) -> Vec<u8> {
+    use object_store::ObjectStoreExt as _;
+    let mut descriptor = SplitDescriptor::decode(body).unwrap();
+    let object = &mut descriptor.objects[0];
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let meta = rt
+        .block_on(object_store::local::LocalFileSystem::new().head(&object.key.as_str().into()))
+        .unwrap();
+    object.etag = Some(meta.e_tag.expect("the file store reports an ETag"));
+    descriptor.encode().unwrap()
 }
 
 /// Pins that the units of a worker that stops without handing them back

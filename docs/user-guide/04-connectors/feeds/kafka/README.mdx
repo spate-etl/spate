@@ -350,12 +350,15 @@ stop the feed.
 A message with no key, or a key that is not UTF-8, names no unit. It goes to
 the dead-letter topic at once, with its key, value and headers as read, and
 its offset finishes once that write is confirmed. A message librdkafka reports
-as corrupt, as `check.crcs` detects, stops the feed. For a record batch in
-message format v2, librdkafka reports the error and fetches the same batch
-again, so the feed would read no further on that partition. For a message in
-format v0 or v1, librdkafka skips its offset, and a commit past it would lose
-the unit. A feed that has stopped commits nothing more, so the next owner of
-the partition reads it again from the last commit.
+as corrupt, as `check.crcs` detects, stops the feed. librdkafka does not stop on
+such a message, and reports it again on each fetch that reads it. For a message
+in format v0 or v1, librdkafka skips its offset when the same fetch also returns
+a later readable message, and a commit past it would lose the unit. For a record
+batch in format v2, librdkafka either fetches the same batch again, so the feed
+would read no further on that partition, or moves its fetch position to an
+offset read from the wrong bytes, where `auto.offset.reset` decides what is read
+next. A feed that has stopped commits nothing more, so the next owner of the
+partition reads it again from the last commit.
 
 ## What counting costs
 

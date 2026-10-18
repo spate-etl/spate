@@ -129,6 +129,17 @@ The framework never uses librdkafka's position-based auto-commit. Instead:
   refusal is logged. At-least-once holds either way; the difference is
   replay instead of a clean release.
 
+A message librdkafka reports as corrupt, as `check.crcs` detects, fails the
+source with a fatal error, because librdkafka can read on past it
+([Kafka feed → Counting deliveries](../../feeds/kafka/README.mdx#counting-deliveries)
+says when). Records read before it that the sink has not yet written are not
+acknowledged. After a restart, a partition with a committed offset is read from
+it, and the source stops again at the same message until the group's committed
+offset is moved past it. A partition with no committed offset starts where
+`auto.offset.reset` says: under `earliest` the source stops again at the same
+message, and under `latest`, the default, it starts at the end of the partition
+and never reads the corrupt message or the unwritten records before it.
+
 This is the mechanical heart of at-least-once; see
 [Delivery guarantees](../../../02-concepts/02-delivery-guarantees.mdx).
 

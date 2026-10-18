@@ -22,7 +22,7 @@
 //! any other `v`, with a field it does not know, or that is not that object.
 
 use super::config::KafkaFeedConfig;
-use super::consumer::{POLL_TIMEOUT, poll_class};
+use super::consumer::POLL_TIMEOUT;
 use super::{Core, KafkaFeedError, LatchOnPanic, Topics};
 use crate::context::SourceContext;
 use crate::error::redacted_client_error;
@@ -428,7 +428,7 @@ impl Follower {
         let text = code.and_then(|code| self.consumer.context().take_error(code));
         let reason =
             crate::error::poll_reason("the attempt follower's poll", error, text.as_deref());
-        match poll_class(error, true, text.as_deref()) {
+        match crate::error::classify_poll_error(error, true, text.as_deref()) {
             ErrorClass::Fatal => {
                 self.core.latch(&reason);
             }

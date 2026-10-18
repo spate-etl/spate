@@ -6,7 +6,7 @@
 use super::attempt::{self, Entry, PublishId, decode, partition_of};
 use super::config::KafkaFeedConfig;
 use super::consumer::{
-    Read, commit_moved, commit_revoked, committed_lookup_timeout, poll_class, read, take_due,
+    Read, commit_moved, commit_revoked, committed_lookup_timeout, read, take_due,
 };
 use super::events::Cause;
 use super::gate::admission;
@@ -21,7 +21,6 @@ use super::{Core, Gating, KafkaFeed, Ready};
 use rdkafka::config::FromClientConfigAndContext;
 use rdkafka::error::{KafkaError, RDKafkaErrorCode as C};
 use spate_core::config::FeedSection;
-use spate_core::error::ErrorClass;
 use spate_core::feed::{Feed, FeedError, FeedErrorKind, Receipt, Unit, confirmation, wake_channel};
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -174,17 +173,6 @@ fn a_failed_write_is_classified_by_the_sink_table() {
         );
     }
     assert_eq!(classify(None), WriteClass::Retryable);
-}
-
-/// Pins that a message librdkafka reports as bad stops the feed, and that a
-/// transport error does not.
-#[test]
-fn a_bad_message_stops_the_feed() {
-    let bad = KafkaError::MessageConsumption(C::BadMessage);
-    assert_eq!(poll_class(&bad, true, None), ErrorClass::Fatal);
-    assert_eq!(poll_class(&bad, false, None), ErrorClass::Fatal);
-    let down = KafkaError::MessageConsumption(C::AllBrokersDown);
-    assert_eq!(poll_class(&down, true, None), ErrorClass::Retryable);
 }
 
 /// Pins the bound on the committed-offset read: a quarter of

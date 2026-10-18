@@ -13,6 +13,8 @@ use spate_core::error::{ErrorClass, SourceError};
 use spate_core::source::{PayloadBatch, Source, SourceEvent, SourceLane};
 use spate_kafka::KafkaSource;
 use spate_test_support::container_image;
+use std::io::{Read as _, Write as _};
+use std::net::TcpStream;
 use std::time::{Duration, Instant};
 use testcontainers::{ContainerRequest, ImageExt};
 use testcontainers_modules::kafka::apache::Kafka;
@@ -161,4 +163,165 @@ pub(crate) fn drain_lane(
         }
     }
     got
+}
+
+fn zigzag(buf: &mut Vec<u8>, v: i64) {
+    let mut z = ((v << 1) ^ (v >> 63)) as u64;
+    loop {
+        let b = (z & 0x7f) as u8;
+        z >>= 7;
+        if z == 0 {
+            buf.push(b);
+            break;
+        }
+        buf.push(b | 0x80);
+    }
+}
+
+/// One magic-2 record batch holding one keyed record, with a CRC that does
+/// not match its contents.
+pub(crate) fn corrupt_batch(key: &[u8], value: &[u8]) -> Vec<u8> {
+    let mut rec = vec![0u8];
+    zigzag(&mut rec, 0);
+    zigzag(&mut rec, 0);
+    zigzag(&mut rec, key.len() as i64);
+    rec.extend_from_slice(key);
+    zigzag(&mut rec, value.len() as i64);
+    rec.extend_from_slice(value);
+    zigzag(&mut rec, 0);
+    let mut records = Vec::new();
+    zigzag(&mut records, rec.len() as i64);
+    records.extend_from_slice(&rec);
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+    let mut tail = Vec::new();
+    tail.extend_from_slice(&0i16.to_be_bytes());
+    tail.extend_from_slice(&0i32.to_be_bytes());
+    tail.extend_from_slice(&now.to_be_bytes());
+    tail.extend_from_slice(&now.to_be_bytes());
+    tail.extend_from_slice(&(-1i64).to_be_bytes());
+    tail.extend_from_slice(&(-1i16).to_be_bytes());
+    tail.extend_from_slice(&(-1i32).to_be_bytes());
+    tail.extend_from_slice(&1i32.to_be_bytes());
+    tail.extend_from_slice(&records);
+    let mut batch = Vec::new();
+    batch.extend_from_slice(&0i64.to_be_bytes());
+    batch.extend_from_slice(&((4 + 1 + 4 + tail.len()) as i32).to_be_bytes());
+    batch.extend_from_slice(&(-1i32).to_be_bytes());
+    batch.push(2);
+    batch.extend_from_slice(&0xdead_beefu32.to_be_bytes());
+    batch.extend_from_slice(&tail);
+    batch
+}
+
+/// Send `batch` to partition 0 of `topic` as a version 3 Produce request
+/// and return the partition's error code. A client library would compute
+/// the batch's CRC itself; the mock stores the batch as sent.
+pub(crate) fn produce_batch(broker: &str, topic: &str, batch: &[u8]) -> i16 {
+    let mut b = Vec::new();
+    b.extend_from_slice(&0i16.to_be_bytes());
+    b.extend_from_slice(&3i16.to_be_bytes());
+    b.extend_from_slice(&7i32.to_be_bytes());
+    b.extend_from_slice(&5i16.to_be_bytes());
+    b.extend_from_slice(b"spate");
+    b.extend_from_slice(&(-1i16).to_be_bytes());
+    b.extend_from_slice(&1i16.to_be_bytes());
+    b.extend_from_slice(&10_000i32.to_be_bytes());
+    b.extend_from_slice(&1i32.to_be_bytes());
+    b.extend_from_slice(&(topic.len() as i16).to_be_bytes());
+    b.extend_from_slice(topic.as_bytes());
+    b.extend_from_slice(&1i32.to_be_bytes());
+    b.extend_from_slice(&0i32.to_be_bytes());
+    b.extend_from_slice(&(batch.len() as i32).to_be_bytes());
+    b.extend_from_slice(batch);
+    let mut s = TcpStream::connect(broker).unwrap();
+    s.write_all(&(b.len() as i32).to_be_bytes()).unwrap();
+    s.write_all(&b).unwrap();
+    let mut len = [0u8; 4];
+    s.read_exact(&mut len).unwrap();
+    let mut resp = vec![0u8; usize::try_from(i32::from_be_bytes(len)).unwrap()];
+    s.read_exact(&mut resp).unwrap();
+    let at = 4 + 4 + 2 + topic.len() + 4 + 4;
+    i16::from_be_bytes([resp[at], resp[at + 1]])
+}
+
+/// CRC-32 (IEEE), the checksum of a magic-0/1 message.
+fn crc32_ieee(data: &[u8]) -> u32 {
+    let mut crc = !0u32;
+    for &b in data {
+        crc ^= u32::from(b);
+        for _ in 0..8 {
+            crc = (crc >> 1) ^ (0xedb8_8320 & 0u32.wrapping_sub(crc & 1));
+        }
+    }
+    !crc
+}
+
+/// CRC-32C, the checksum of a magic-2 batch.
+fn crc32c(data: &[u8]) -> u32 {
+    let mut crc = !0u32;
+    for &b in data {
+        crc ^= u32::from(b);
+        for _ in 0..8 {
+            crc = (crc >> 1) ^ (0x82f6_3b78 & 0u32.wrapping_sub(crc & 1));
+        }
+    }
+    !crc
+}
+
+/// A valid magic-2 batch holding one record, whose header reserves
+/// `reserve` offsets in the mock's log.
+pub(crate) fn v2_batch(key: &[u8], value: &[u8], reserve: i32) -> Vec<u8> {
+    let mut rec = vec![0u8];
+    zigzag(&mut rec, 0);
+    zigzag(&mut rec, 0);
+    zigzag(&mut rec, key.len() as i64);
+    rec.extend_from_slice(key);
+    zigzag(&mut rec, value.len() as i64);
+    rec.extend_from_slice(value);
+    zigzag(&mut rec, 0);
+    let mut records = Vec::new();
+    zigzag(&mut records, rec.len() as i64);
+    records.extend_from_slice(&rec);
+    let mut tail = Vec::new();
+    tail.extend_from_slice(&0i16.to_be_bytes());
+    tail.extend_from_slice(&0i32.to_be_bytes());
+    tail.extend_from_slice(&1i64.to_be_bytes());
+    tail.extend_from_slice(&1i64.to_be_bytes());
+    tail.extend_from_slice(&(-1i64).to_be_bytes());
+    tail.extend_from_slice(&(-1i16).to_be_bytes());
+    tail.extend_from_slice(&(-1i32).to_be_bytes());
+    tail.extend_from_slice(&reserve.to_be_bytes());
+    tail.extend_from_slice(&records);
+    let mut batch = Vec::new();
+    batch.extend_from_slice(&0i64.to_be_bytes());
+    batch.extend_from_slice(&((4 + 1 + 4 + tail.len()) as i32).to_be_bytes());
+    batch.extend_from_slice(&0i32.to_be_bytes());
+    batch.push(2);
+    batch.extend_from_slice(&crc32c(&tail).to_be_bytes());
+    batch.extend_from_slice(&tail);
+    batch
+}
+
+/// One magic-1 message at `offset`; `corrupt` gives it a CRC that does
+/// not match its contents.
+pub(crate) fn v1_message(offset: i64, key: &[u8], value: &[u8], corrupt: bool) -> Vec<u8> {
+    let mut body = vec![1u8, 0u8];
+    body.extend_from_slice(&1i64.to_be_bytes());
+    body.extend_from_slice(&(key.len() as i32).to_be_bytes());
+    body.extend_from_slice(key);
+    body.extend_from_slice(&(value.len() as i32).to_be_bytes());
+    body.extend_from_slice(value);
+    let crc = crc32_ieee(&body) ^ u32::from(corrupt);
+    let mut msg = Vec::new();
+    msg.extend_from_slice(&offset.to_be_bytes());
+    msg.extend_from_slice(&((4 + body.len()) as i32).to_be_bytes());
+    msg.extend_from_slice(&crc.to_be_bytes());
+    msg.extend_from_slice(&body);
+    msg
 }

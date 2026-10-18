@@ -8,11 +8,15 @@ use rdkafka::mocking::MockCluster;
 use spate_core::checkpoint::Checkpointer;
 use spate_core::error::{ErrorClass, SourceError};
 use spate_core::record::PartitionId;
-use spate_core::source::{Source, SourceCtx, SourceEvent, SourceLane};
+use spate_core::source::{PayloadBatch, Source, SourceCtx, SourceEvent, SourceLane};
 use spate_kafka::{KafkaSource, KafkaSourceConfig};
+use spate_test::wait_until;
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
-use support::{await_assignment, drain_lane, produce, serve_events};
+use support::{
+    await_assignment, corrupt_batch, drain_lane, produce, produce_batch, serve_events, v1_message,
+    v2_batch,
+};
 
 const TOPIC: &str = "orders";
 
@@ -1149,4 +1153,226 @@ fn zstd_batches_are_read() {
     let offsets: Vec<i64> = rows.iter().map(|(_, _, o)| *o).collect();
     assert_eq!(offsets, (0..20).collect::<Vec<_>>());
     assert_eq!(rows[7].0, b"z-7");
+}
+
+/// A message librdkafka reports as corrupt after a lane poll's first message
+/// ends the batch, which is delivered and acknowledged, and the next poll
+/// fails as Fatal. Nothing at or past the corrupt offset is delivered.
+/// Regression for #1257.
+#[test]
+fn a_corrupt_batch_fails_the_lane() {
+    let cluster = MockCluster::new(1).expect("mock cluster");
+    cluster.create_topic(TOPIC, 1, 1).expect("create topic");
+    let brokers = cluster.bootstrap_servers();
+    produce(&brokers, TOPIC, 1, 1, "before");
+    assert_eq!(
+        produce_batch(&brokers, TOPIC, &corrupt_batch(b"lost", b"body")),
+        0,
+        "the corrupt batch is stored at offset 1"
+    );
+    produce(&brokers, TOPIC, 1, 1, "after");
+
+    let mut cfg = config(&brokers, "corrupt-batch");
+    cfg.rdkafka.insert("check.crcs".into(), "true".into());
+    cfg.statistics_interval = Duration::from_millis(50);
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    metrics::with_local_recorder(&recorder, || {
+        let mut cp = Checkpointer::new();
+        let mut source = KafkaSource::new(cfg);
+        let meter =
+            spate_core::metrics::Meter::with_namespace("kafka", "corrupt-batch", "source", "kafka");
+        source
+            .open(
+                SourceCtx::new(cp.handle())
+                    .with_meter(Some(meter))
+                    .with_partition_detail(true),
+            )
+            .expect("open");
+        let mut lanes = await_assignment(&mut source, ASSIGNMENT);
+        cp.begin_epoch(&[PartitionId(0)], 1);
+        let lane = &mut lanes[0];
+
+        // librdkafka counts a queued error as an entry, and its queue holds
+        // one entry before any data, so three entries are the record at
+        // offset 0 and the corrupt batch's error, and the lane's first poll
+        // meets the error after its first message.
+        let queued = r#"spate_kafka_partition_fetch_queue_messages{pipeline="corrupt-batch",component="source",component_type="kafka",partition="0"} "#;
+        let mut errors = Vec::new();
+        wait_until(ASSIGNMENT, "the record and the error queued", || {
+            serve_events(&mut source, &mut errors);
+            handle
+                .render()
+                .lines()
+                .find_map(|line| line.strip_prefix(queued))
+                .and_then(|n| n.parse::<f64>().ok())
+                .is_some_and(|n| n >= 3.0)
+        });
+
+        let mut batch = lane
+            .poll(64, Duration::from_secs(5))
+            .expect("the poll meeting the error delivers what precedes it")
+            .expect("a batch");
+        let mut offsets = Vec::new();
+        while let Some(raw) = batch.next_payload() {
+            offsets.push(raw.offset);
+        }
+        drop(batch);
+        assert_eq!(offsets, [0]);
+
+        let error = lane
+            .poll(64, Duration::from_secs(5))
+            .expect_err("the next poll fails")
+            .to_string();
+        assert!(
+            error.contains("(Fatal)") && error.contains("BadMessage"),
+            "{error}"
+        );
+
+        drop(lanes);
+        cp.drain();
+        assert_eq!(cp.take_watermarks(), [(PartitionId(0), 1)]);
+    });
+}
+
+/// A v1 message librdkafka skips as corrupt, followed in the same fetch by
+/// a readable one, fails the lane before the readable one is delivered.
+/// Fetch is capped at v11, the last version librdkafka reads v0/v1 data
+/// from. The mock accepts only a payload that opens with a magic-2 batch, so
+/// the v1 messages follow one. Regression for #1257.
+#[test]
+fn a_skipped_v1_message_fails_the_lane() {
+    let cluster = MockCluster::new(1).expect("mock cluster");
+    cluster.create_topic(TOPIC, 1, 1).expect("create topic");
+    cluster
+        .apiversion(rdkafka::types::RDKafkaApiKey::Fetch, Some(0), Some(11))
+        .expect("cap Fetch");
+    let brokers = cluster.bootstrap_servers();
+    let mut payload = v2_batch(b"before", b"body", 3);
+    payload.extend(v1_message(1, b"lost", b"body", true));
+    payload.extend(v1_message(2, b"after", b"body", false));
+    assert_eq!(produce_batch(&brokers, TOPIC, &payload), 0);
+
+    let mut cfg = config(&brokers, "skipped-v1");
+    cfg.rdkafka.insert("check.crcs".into(), "true".into());
+    let mut cp = Checkpointer::new();
+    let mut source = KafkaSource::new(cfg);
+    source.open(SourceCtx::new(cp.handle())).expect("open");
+    let mut lanes = await_assignment(&mut source, ASSIGNMENT);
+    cp.begin_epoch(&[PartitionId(0)], 1);
+    let lane = &mut lanes[0];
+
+    let mut offsets = Vec::new();
+    let mut outcome = None;
+    let mut errors = Vec::new();
+    wait_until(
+        ASSIGNMENT,
+        "a lane poll fails or offset 2 is delivered",
+        || {
+            serve_events(&mut source, &mut errors);
+            match lane.poll(64, Duration::from_millis(200)) {
+                Ok(Some(mut batch)) => {
+                    while let Some(raw) = batch.next_payload() {
+                        offsets.push(raw.offset);
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => outcome = Some(e.to_string()),
+            }
+            outcome.is_some() || offsets.contains(&2)
+        },
+    );
+    let error = outcome.expect("a poll fails");
+    assert!(
+        error.contains("(Fatal)") && error.contains("BadMessage"),
+        "{error}"
+    );
+    assert_eq!(offsets, [0], "delivered offsets");
+    drop(lanes);
+    cp.drain();
+    assert_eq!(cp.take_watermarks(), [(PartitionId(0), 1)]);
+}
+
+/// A fatal fetch error queued behind records ends the lane's batch, and the
+/// next poll returns it. librdkafka queues a `TopicAuthorizationFailed`
+/// fetch error only when the partition's last error differs, so a lane that
+/// dropped it would not see it again until a fetch succeeds or the
+/// partition's fetch restarts after a pause, seek or new assignment.
+#[test]
+fn a_mid_batch_authorization_failure_fails_the_lane() {
+    use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
+    let cluster = MockCluster::new(1).expect("mock cluster");
+    cluster.create_topic(TOPIC, 1, 1).expect("create topic");
+    let brokers = cluster.bootstrap_servers();
+    produce(&brokers, TOPIC, 2, 1, "rec");
+
+    let mut cfg = config(&brokers, "mid-batch-auth");
+    cfg.statistics_interval = Duration::from_millis(50);
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    metrics::with_local_recorder(&recorder, || {
+        let mut cp = Checkpointer::new();
+        let mut source = KafkaSource::new(cfg);
+        let meter = spate_core::metrics::Meter::with_namespace(
+            "kafka",
+            "mid-batch-auth",
+            "source",
+            "kafka",
+        );
+        source
+            .open(
+                SourceCtx::new(cp.handle())
+                    .with_meter(Some(meter))
+                    .with_partition_detail(true),
+            )
+            .expect("open");
+        let mut lanes = await_assignment(&mut source, ASSIGNMENT);
+        cp.begin_epoch(&[PartitionId(0)], 1);
+        let lane = &mut lanes[0];
+
+        let queued = r#"spate_kafka_partition_fetch_queue_messages{pipeline="mid-batch-auth",component="source",component_type="kafka",partition="0"} "#;
+        let entries = || {
+            handle
+                .render()
+                .lines()
+                .find_map(|line| line.strip_prefix(queued))
+                .and_then(|n| n.parse::<f64>().ok())
+                .unwrap_or(0.0)
+        };
+        let mut errors = Vec::new();
+        // One entry before any data, then the two records.
+        wait_until(ASSIGNMENT, "both records queued", || {
+            serve_events(&mut source, &mut errors);
+            entries() >= 3.0
+        });
+        let before = entries();
+        cluster.request_errors(
+            RDKafkaApiKey::Fetch,
+            &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_TOPIC_AUTHORIZATION_FAILED; 1000],
+        );
+        wait_until(ASSIGNMENT, "the error queued behind them", || {
+            serve_events(&mut source, &mut errors);
+            entries() >= before + 1.0
+        });
+
+        let mut batch = lane
+            .poll(64, Duration::from_secs(5))
+            .expect("the poll meeting the error delivers what precedes it")
+            .expect("a batch");
+        let mut offsets = Vec::new();
+        while let Some(raw) = batch.next_payload() {
+            offsets.push(raw.offset);
+        }
+        drop(batch);
+        assert_eq!(offsets, [0, 1]);
+
+        let error = lane
+            .poll(64, Duration::from_secs(5))
+            .expect_err("the next poll fails")
+            .to_string();
+        assert!(
+            error.contains("(Fatal)") && error.contains("TopicAuthorizationFailed"),
+            "{error}"
+        );
+    });
 }

@@ -117,6 +117,15 @@ pub(crate) fn poll_reason(prefix: &str, err: &KafkaError, text: Option<&str>) ->
 /// its code: librdkafka has failed the client. `text` is the error callback's
 /// text for the same event, when known; a [`tls_rejection`] in it is
 /// [`ErrorClass::Fatal`].
+///
+/// [`RDKafkaErrorCode::BadMessage`], a message librdkafka reports as corrupt,
+/// is [`ErrorClass::Fatal`]. librdkafka does not stop on it, and reports it
+/// again on each fetch that reads it. For a message in format v0 or v1 it skips
+/// the offset when the same fetch also returns a later readable message. For a
+/// record batch in format v2 it either fetches the batch again or moves its
+/// fetch position to an offset read from the wrong bytes, where
+/// `auto.offset.reset` decides what is read next. A later delivery from the
+/// partition could then commit past a record nobody read.
 pub(crate) fn classify_poll_error(
     err: &KafkaError,
     after_startup: bool,
@@ -126,6 +135,7 @@ pub(crate) fn classify_poll_error(
         return ErrorClass::Fatal;
     }
     match err.rdkafka_error_code() {
+        Some(RDKafkaErrorCode::BadMessage) => ErrorClass::Fatal,
         Some(code) if text.is_some_and(|text| tls_rejection(code, text)) => ErrorClass::Fatal,
         Some(code) => classify_consumer_error(code, after_startup),
         None => ErrorClass::Retryable,
@@ -387,6 +397,20 @@ mod tests {
         ] {
             assert_eq!(poll_reason("poll", &err, None), format!("poll: {err}"));
         }
+    }
+
+    /// A message librdkafka reports as bad is fatal before and after the
+    /// first assignment, and a transport error is not. Regression for #1257.
+    #[test]
+    fn a_bad_message_poll_error_is_fatal() {
+        let bad = KafkaError::MessageConsumption(C::BadMessage);
+        assert_eq!(classify_poll_error(&bad, true, None), ErrorClass::Fatal);
+        assert_eq!(classify_poll_error(&bad, false, None), ErrorClass::Fatal);
+        let down = KafkaError::MessageConsumption(C::AllBrokersDown);
+        assert_eq!(
+            classify_poll_error(&down, true, None),
+            ErrorClass::Retryable
+        );
     }
 
     /// A poll error is fatal on a rejection in its callback text, and keeps

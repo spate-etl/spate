@@ -14,14 +14,13 @@ use spate_core::feed::{Feed, FeedErrorKind, Receipt, Unit};
 use spate_core::pipeline::ExitState;
 use spate_kafka::feed::KafkaFeedError;
 use spate_test::{WriteOutcome, wait_until};
-use std::io::{Read as _, Write as _};
-use std::net::TcpStream;
 use std::time::{Duration, Instant};
 use support::feed::{
     ATTEMPT, ATTEMPT_PARTITIONS, COMMIT_PERIOD, DEAD, DEADLINE, ON_MOCK, RETRY, WORK, committed,
     data_dir, direct, exists, feed_yaml, high_watermark, launch, produce_raw, publish,
     read_attempts, read_topic, recs, sorted, stage, written,
 };
+use support::{corrupt_batch, produce_batch};
 
 /// A cluster of `brokers` with the work, retry and dead-letter topics, one
 /// partition each, and the attempt topic with two.
@@ -570,91 +569,6 @@ fn a_stalled_offset_fetch_does_not_exceed_the_max_poll_interval() {
             .any(|e| e.to_lowercase().contains("poll interval")),
         "a member exceeded max.poll.interval.ms: {errors:#?}"
     );
-}
-
-fn zigzag(buf: &mut Vec<u8>, v: i64) {
-    let mut z = ((v << 1) ^ (v >> 63)) as u64;
-    loop {
-        let b = (z & 0x7f) as u8;
-        z >>= 7;
-        if z == 0 {
-            buf.push(b);
-            break;
-        }
-        buf.push(b | 0x80);
-    }
-}
-
-/// One magic-2 record batch holding one keyed record, with a CRC that does
-/// not match its contents.
-fn corrupt_batch(key: &[u8], value: &[u8]) -> Vec<u8> {
-    let mut rec = vec![0u8];
-    zigzag(&mut rec, 0);
-    zigzag(&mut rec, 0);
-    zigzag(&mut rec, key.len() as i64);
-    rec.extend_from_slice(key);
-    zigzag(&mut rec, value.len() as i64);
-    rec.extend_from_slice(value);
-    zigzag(&mut rec, 0);
-    let mut records = Vec::new();
-    zigzag(&mut records, rec.len() as i64);
-    records.extend_from_slice(&rec);
-    let now = i64::try_from(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis(),
-    )
-    .unwrap();
-    let mut tail = Vec::new();
-    tail.extend_from_slice(&0i16.to_be_bytes());
-    tail.extend_from_slice(&0i32.to_be_bytes());
-    tail.extend_from_slice(&now.to_be_bytes());
-    tail.extend_from_slice(&now.to_be_bytes());
-    tail.extend_from_slice(&(-1i64).to_be_bytes());
-    tail.extend_from_slice(&(-1i16).to_be_bytes());
-    tail.extend_from_slice(&(-1i32).to_be_bytes());
-    tail.extend_from_slice(&1i32.to_be_bytes());
-    tail.extend_from_slice(&records);
-    let mut batch = Vec::new();
-    batch.extend_from_slice(&0i64.to_be_bytes());
-    batch.extend_from_slice(&((4 + 1 + 4 + tail.len()) as i32).to_be_bytes());
-    batch.extend_from_slice(&(-1i32).to_be_bytes());
-    batch.push(2);
-    batch.extend_from_slice(&0xdead_beefu32.to_be_bytes());
-    batch.extend_from_slice(&tail);
-    batch
-}
-
-/// Send `batch` to partition 0 of `topic` as a version 3 Produce request
-/// and return the partition's error code. A client library would compute
-/// the batch's CRC itself; the mock stores the batch as sent.
-fn produce_batch(broker: &str, topic: &str, batch: &[u8]) -> i16 {
-    let mut b = Vec::new();
-    b.extend_from_slice(&0i16.to_be_bytes());
-    b.extend_from_slice(&3i16.to_be_bytes());
-    b.extend_from_slice(&7i32.to_be_bytes());
-    b.extend_from_slice(&5i16.to_be_bytes());
-    b.extend_from_slice(b"spate");
-    b.extend_from_slice(&(-1i16).to_be_bytes());
-    b.extend_from_slice(&1i16.to_be_bytes());
-    b.extend_from_slice(&10_000i32.to_be_bytes());
-    b.extend_from_slice(&1i32.to_be_bytes());
-    b.extend_from_slice(&(topic.len() as i16).to_be_bytes());
-    b.extend_from_slice(topic.as_bytes());
-    b.extend_from_slice(&1i32.to_be_bytes());
-    b.extend_from_slice(&0i32.to_be_bytes());
-    b.extend_from_slice(&(batch.len() as i32).to_be_bytes());
-    b.extend_from_slice(batch);
-    let mut s = TcpStream::connect(broker).unwrap();
-    s.write_all(&(b.len() as i32).to_be_bytes()).unwrap();
-    s.write_all(&b).unwrap();
-    let mut len = [0u8; 4];
-    s.read_exact(&mut len).unwrap();
-    let mut resp = vec![0u8; usize::try_from(i32::from_be_bytes(len)).unwrap()];
-    s.read_exact(&mut resp).unwrap();
-    let at = 4 + 4 + 2 + topic.len() + 4 + 4;
-    i16::from_be_bytes([resp[at], resp[at + 1]])
 }
 
 /// Pins that a record batch librdkafka reports as corrupt stops the feed,

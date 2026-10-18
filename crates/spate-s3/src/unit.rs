@@ -119,7 +119,10 @@ pub(crate) fn parts_of(object: Arc<Vec<ObjectEntry>>, packing: Packing) -> Curso
 ///
 /// [`Fatal`](spate_core::coordination::CoordinationErrorKind::Fatal) when a
 /// descriptor or an id cannot be built, which no listed object causes.
-#[cfg_attr(not(test), expect(dead_code, reason = "the lister calls it"))]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "no lister builds feed units yet")
+)]
 pub(crate) fn units(
     entries: Vec<ObjectEntry>,
     packing: &Packing,

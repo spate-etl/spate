@@ -4,10 +4,10 @@
 //! A unit's body is a [`SplitDescriptor`] naming one object, whole or one
 //! byte range of it. A whole-object unit over an object the planner would cut
 //! is read in the ranges [`parts_of`] yields, each opened when there is room
-//! for it. Every part opens its own lane and partition and reads from its
-//! first byte, so a redelivery and a duplicate are each read in full. The
-//! reader keys deliveries by a sequence number and lanes by partition, and
-//! never keys anything by unit id.
+//! for it. Every part opens its own lane and partition and resumes from no
+//! committed position, so a redelivery and a duplicate are each read in
+//! full. The reader keys deliveries by a sequence number and lanes by
+//! partition, and never keys anything by unit id.
 //!
 //! Each lane in progress takes one of `units_held`, and a delivery whose
 //! lanes have all retired takes one until its acknowledge settles. The
@@ -472,8 +472,7 @@ impl UnitReader {
         Ok(())
     }
 
-    /// Open a lane that reads `part` of the held `delivery` from its first
-    /// byte.
+    /// Open a lane that reads `part` of the held `delivery` in full.
     fn open(&mut self, delivery: u32, part: Part) -> S3Lane {
         let n = self.next_lane;
         self.next_lane = n.checked_add(1).expect("lane sequence exhausted (u32)");

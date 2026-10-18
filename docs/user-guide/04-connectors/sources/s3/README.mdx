@@ -125,7 +125,9 @@ each, when all of these hold:
 - the listing reports an ETag for it;
 - the framer declares a resync delimiter (see
   [Decoding records](#decoding-records));
-- it is at most 50,000 GiB, the largest object S3 can hold.
+- it is at most 50,000 GiB, the largest object S3 can hold;
+- the S3 client can address its key (see
+  [Object errors poison the split](#object-errors-poison-the-split)).
 
 Any other object at or above the target gets a split of its own, and one lane
 reads it from start to end.
@@ -316,8 +318,8 @@ The split count still sets how evenly the lanes divide over threads; see
 A [`feed:` section](../../../07-reference/configuration.mdx#feed) moves the
 source onto the feed path. It reads [work units](../../../07-reference/glossary.mdx#work-unit)
 from the feed the section names, and lists nothing itself. Every delivery is
-read from its first byte, and the unit is acknowledged once the sink has
-acknowledged every record in it.
+read in full, resuming from no earlier delivery, and the unit is acknowledged
+once the sink has acknowledged every record in it.
 
 ```yaml
 feed:
@@ -341,7 +343,11 @@ stop.
 
 Each range in progress takes one slot of `units_held`. Deliveries received
 alongside a large object wait until all of its ranges have opened, and the
-deliveries held stay at or below `units_held`.
+deliveries held stay at or below `units_held`. A waiting delivery is held
+unread. SQS ends every hold 12 hours after the receive, so a delivery still
+waiting then goes back to the queue unread, one receive closer to
+`maxReceiveCount`. On Kafka a waiting delivery's offset holds back its
+partition's commit point.
 
 `units_held` bounds the lanes the source reads at once, one per whole object or
 range, and with them its read parallelism. The default is 96. The source publishes no units of

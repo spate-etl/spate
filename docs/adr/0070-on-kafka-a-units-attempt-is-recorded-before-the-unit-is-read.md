@@ -5,7 +5,7 @@ description: "The Kafka feed records each unit's attempt on a compacted topic be
 # ADR-0070 — On Kafka, a unit's attempt is recorded before the unit is read
 
 - **Status:** accepted
-- **Date:** 2026-10-17
+- **Date:** 2026-10-18
 - **Supersedes:** [ADR-0027](0027-split-delivery-attempts-and-quarantine.md)
   (which tenancy ends count)
 - **Superseded by:** —

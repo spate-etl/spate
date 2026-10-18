@@ -1040,6 +1040,23 @@ mod tests {
         assert_eq!(delivery_of(&reader, b[0]), 1);
     }
 
+    /// Pins that a lane's end of input is reported through `CommitReady`
+    /// once, and that a later poll with nothing else to report parks.
+    #[test]
+    fn a_lane_at_its_end_of_input_is_reported_once() {
+        let (mut reader, script, _rt) = reader_holding(1);
+        script.deliver(ranged_unit("a", 2));
+        start(&mut reader);
+        let lane = partitions(&lanes_added(poll(&mut reader)));
+        reader.lanes[&lane[0]].tracker.set_terminal(7);
+        reader.commit(&[(lane[0], 6)]).unwrap();
+        match poll(&mut reader) {
+            SourceEvent::CommitReady { partitions } => assert_eq!(partitions, lane),
+            other => panic!("expected CommitReady, got {other:?}"),
+        }
+        assert_idle(poll(&mut reader));
+    }
+
     /// Pins that a unit with more ranges than `units_held` finishes: each
     /// range retires once its terminal watermark is committed, or at once
     /// when it emitted nothing, and the unit is acknowledged once, after

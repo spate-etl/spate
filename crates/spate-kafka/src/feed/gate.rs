@@ -264,6 +264,10 @@ impl Gate {
         if self.late(started)? {
             return Ok(Read::Late);
         }
+        #[cfg(test)]
+        self.core
+            .gate_reads
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let (lwm, hwm) = match self.producer.client().fetch_watermarks(
             &self.core.topics.attempt,
             partition,
@@ -280,6 +284,10 @@ impl Gate {
             if self.late(started)? {
                 return Ok(Read::Late);
             }
+            #[cfg(test)]
+            self.core
+                .gate_reads
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             *mark = match self.list_offset(partition, at) {
                 Ok(offset) => offset,
                 Err(e) => return self.failed(partition, &e),

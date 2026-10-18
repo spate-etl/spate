@@ -209,6 +209,10 @@ pub(crate) struct Core {
     attempt_partitions: NonZeroU32,
     /// The attempt counts the follower reads and the gate answers from.
     ledger: SharedLedger,
+    /// How many watermark calls the gate has begun, counted just before
+    /// each `fetch_watermarks` and each `list_offset`.
+    #[cfg(test)]
+    gate_reads: std::sync::atomic::AtomicUsize,
 }
 
 impl Core {
@@ -221,6 +225,8 @@ impl Core {
             attempt_cap: config.attempt_cap,
             attempt_partitions,
             ledger: Arc::new((Mutex::new(Ledger::new(attempt_partitions)), Condvar::new())),
+            #[cfg(test)]
+            gate_reads: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 

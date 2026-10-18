@@ -1081,6 +1081,72 @@ fn a_latched_feed_ends_its_gate_thread() {
     handle.join().unwrap();
 }
 
+/// Pins that a feed that stops or latches while a pass reads its
+/// watermarks ends the pass before its next read: over four attempt
+/// partitions on an unreachable broker, the pass begins the one read it
+/// was in when the feed ended, and no other.
+#[test]
+fn a_feed_that_ends_during_a_pass_ends_it_before_the_next_read() {
+    // The stop or latch has to land while the first read waits out its
+    // step, so the step is long against the 5 ms poll.
+    const STEP: Duration = Duration::from_secs(2);
+    let config = unreachable_config("  delivery_timeout: 1h\n");
+    for how in ["stopped", "latched"] {
+        let core = Arc::new(Core::new(&config, NonZeroU32::new(4).unwrap()));
+        let producer = Producer::from_config_and_context(
+            &config.producer_config(false),
+            FeedProducerContext::new(Arc::clone(&core)),
+        )
+        .unwrap();
+        let mut seen = std::collections::BTreeSet::new();
+        let mut offsets = Vec::new();
+        for offset in 0.. {
+            if seen.insert(attempt_partition(&core, &identity(&core, offset))) {
+                offsets.push(offset);
+            }
+            if seen.len() == 4 {
+                break;
+            }
+        }
+        {
+            let mut st = core.lock();
+            st.tracker.assign([tp(0)]);
+            for &offset in &offsets {
+                let receipt = st.tracker.deliver(&tp(0), offset).unwrap();
+                st.gating.push_back(Gating {
+                    receipt,
+                    unit: Unit::new("u", Vec::new()),
+                    identity: identity(&core, offset),
+                });
+            }
+        }
+        let gate = super::gate::Gate::new(Arc::clone(&core), producer, config.delivery_timeout)
+            .with_step(STEP);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            gate.pass();
+            let _ = tx.send(());
+        });
+        spate_test::wait_until(Duration::from_secs(10), "the pass begins a read", || {
+            core.gate_reads.load(Ordering::SeqCst) >= 1
+        });
+        if how == "stopped" {
+            super::stop(&core);
+        } else {
+            drop(core.latch("probe"));
+        }
+        assert!(
+            rx.recv_timeout(Duration::from_secs(30)).is_ok(),
+            "the pass of a {how} feed did not return"
+        );
+        assert_eq!(
+            core.gate_reads.load(Ordering::SeqCst),
+            1,
+            "the pass of a {how} feed began a read after the feed ended"
+        );
+    }
+}
+
 mod cluster {
     //! The feed against rdkafka's in-process MockCluster, where a test reads
     //! the feed's buffer and ownership directly.

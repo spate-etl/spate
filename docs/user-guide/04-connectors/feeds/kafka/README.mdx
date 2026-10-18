@@ -331,9 +331,11 @@ message, so it is read after the units already there.
 A gate pass that cannot read an attempt partition's watermark logs a warning
 naming the partition, admits the units whose attempt partitions it could
 read, and keeps that partition's units at the gate. The next pass starts up
-to 1 s later. A pass whose follower has not caught up within
-`delivery_timeout` logs a warning naming the partition and tries all its
-units again. A watermark read refused in a way retrying cannot fix, and an
+to 1 s later. A pass that reaches `delivery_timeout` before it has read every
+partition it needs does the same with the partitions it has not read, and its
+warning names them and the partition whose read took longest. A pass whose
+follower has not caught up within `delivery_timeout` logs a warning naming the
+partition and tries all its units again. A watermark read refused in a way retrying cannot fix, and an
 attempt record the worker cannot read, stop the feed.
 
 A message with no key, or a key that is not UTF-8, names no unit. It goes to

@@ -2180,6 +2180,109 @@ mod cluster {
         assert_eq!(st.gating.len(), 1, "the unit was admitted");
     }
 
+    /// Pins that a pass which reaches its bound while reading watermarks
+    /// keeps what it read: with `delivery_timeout` at 500 ms and attempt
+    /// partition 1 led by a broker that answers after 5 s, the unit on
+    /// partition 0, read first, is admitted, the units on partitions 1 and
+    /// 2 wait at the gate, and the warning names partition 2 as not read
+    /// and partition 1 as the slowest read.
+    #[test]
+    fn a_pass_that_reaches_its_bound_while_reading_admits_what_it_read() {
+        let cluster = MockCluster::new(2).expect("mock cluster");
+        for topic in ["units", "units-retry", "units-dead"] {
+            cluster.create_topic(topic, 1, 1).unwrap();
+            cluster.partition_leader(topic, 0, Some(1)).unwrap();
+        }
+        cluster.create_topic(ATTEMPTS, 3, 1).unwrap();
+        for (partition, leader) in [(0, 1), (1, 2), (2, 1)] {
+            cluster
+                .partition_leader(ATTEMPTS, partition, Some(leader))
+                .unwrap();
+        }
+        let brokers = cluster.bootstrap_servers();
+        let group = spate_test::unique_name("gate-bound-reads");
+        let section: FeedSection = serde_yaml::from_str(&format!(
+            "kafka:\n  brokers: \"{brokers}\"\n  group_id: {group}\n  topic: units\n  \
+             retry_topic: units-retry\n  dead_letter_topic: units-dead\n  \
+             attempt_topic: {ATTEMPTS}\n  statistics_interval: 0s\n  \
+             delivery_timeout: 500ms\n"
+        ))
+        .unwrap();
+        let config = KafkaFeedConfig::from_section(&section).unwrap();
+        let core = Arc::new(Core::new(&config, std::num::NonZeroU32::new(3).unwrap()));
+        let producer: Producer =
+            rdkafka::config::FromClientConfigAndContext::from_config_and_context(
+                &config.producer_config(false),
+                crate::feed::producer::FeedProducerContext::new(Arc::clone(&core)),
+            )
+            .unwrap();
+        let on = |partition| {
+            (0..)
+                .find(|&o| super::attempt_partition(&core, &super::identity(&core, o)) == partition)
+                .unwrap()
+        };
+        let offsets = [on(0), on(1), on(2)];
+        {
+            let mut st = core.lock();
+            st.tracker.assign([super::tp(0)]);
+            let mut sorted = offsets;
+            sorted.sort_unstable();
+            for offset in sorted {
+                let receipt = st.tracker.deliver(&super::tp(0), offset).unwrap();
+                st.gating.push_back(Gating {
+                    receipt,
+                    unit: Unit::new(format!("u{offset}"), Vec::new()),
+                    identity: super::identity(&core, offset),
+                });
+            }
+        }
+        wait_until(
+            DEADLINE,
+            "partitions 0 and 2 report their watermarks",
+            || {
+                [0, 2].into_iter().all(|partition| {
+                    producer
+                        .client()
+                        .fetch_watermarks(ATTEMPTS, partition, Duration::from_millis(500))
+                        .is_ok()
+                })
+            },
+        );
+        cluster
+            .broker_round_trip_time(2, Duration::from_secs(5))
+            .unwrap();
+        let capture = spate_test::LogCapture::new();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(capture.clone())
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .finish();
+        let gate = Gate::new(Arc::clone(&core), producer, config.delivery_timeout)
+            .with_step(Duration::from_secs(1));
+        tracing::subscriber::with_default(subscriber, || gate.pass());
+        let waiting: Vec<String> = core
+            .lock()
+            .gating
+            .iter()
+            .map(|g| g.unit.id.clone())
+            .collect();
+        let mut expected = vec![format!("u{}", offsets[1]), format!("u{}", offsets[2])];
+        expected.sort_unstable();
+        let mut got = waiting.clone();
+        got.sort_unstable();
+        assert_eq!(got, expected, "the units at the gate");
+        wait_until(DEADLINE, "the unit on partition 0 is buffered", || {
+            core.lock().ready.len() == 1
+        });
+        assert_eq!(core.lock().ready[0].unit.id, format!("u{}", offsets[0]));
+        let warning = capture.lines().join("\n");
+        assert!(
+            warning.contains("partitions [2]") && warning.contains("slowest read, of partition 1"),
+            "{warning}"
+        );
+        assert!(!warning.contains("did not catch up"), "{warning}");
+    }
+
     /// Pins that a pass which put deliveries back for a failed watermark read
     /// waits before the next pass, and that a stop ends the wait: with a
     /// step of an hour, the pass is still running once its unit is back at

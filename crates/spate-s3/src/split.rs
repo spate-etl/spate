@@ -535,7 +535,7 @@ impl Packed {
 
 /// Cut `[0, size)` into `ceil(size / target)` contiguous ranges, each
 /// between `target / 2` and `target` bytes long when `size > target`.
-fn tile(size: u64, target: u64, delimiter: u8) -> impl Iterator<Item = SplitRange> {
+pub(crate) fn tile(size: u64, target: u64, delimiter: u8) -> impl Iterator<Item = SplitRange> {
     let n = size.div_ceil(target);
     // u128: `i * size` reaches about 2^71 for the largest object at the 1 MiB
     // target floor.

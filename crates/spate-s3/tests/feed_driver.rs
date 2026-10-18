@@ -1,8 +1,8 @@
-//! The feed read path: the source reads one-object work units from a
-//! scripted feed or the in-process feed, over real `file://` objects, and
-//! the feed observes every acknowledgment, failure, renewal and `Gone`
-//! answer. Each test ends the run with a shutdown, since this path never
-//! reports `Drained`.
+//! The feed read path: the source reads work units naming one object or one
+//! byte range from a scripted feed or the in-process feed, over real
+//! `file://` objects, and the feed observes every acknowledgment, failure,
+//! renewal and `Gone` answer. Each test ends the run with a shutdown, since
+//! this path never reports `Drained`.
 
 mod support;
 
@@ -236,11 +236,12 @@ fn a_unit_is_acknowledged_only_after_its_last_record_is_acknowledged() {
     stop(&l);
 }
 
-/// Pins the in-process feed end to end: a unit with rows and a zero-byte
-/// unit are acknowledged, and a unit over a missing object, a unit whose body
-/// names two objects, a unit whose body is not a descriptor and a unit that
-/// names a byte range are failed on every delivery until the feed
-/// dead-letters them.
+/// Pins the in-process feed end to end: a unit with rows, a zero-byte unit
+/// and a unit naming a byte range cut on the framer's delimiter are
+/// acknowledged, the range read alone. A unit over a missing object, a unit
+/// whose body names two objects, a unit whose body is not a descriptor, a
+/// range cut on another delimiter and a range of a compressed object are
+/// failed on every delivery until the feed dead-letters them.
 #[test]
 fn in_process_units_are_acknowledged_or_dead_lettered_at_the_cap() {
     let dir = tempfile::tempdir().unwrap();
@@ -248,7 +249,15 @@ fn in_process_units_are_acknowledged_or_dead_lettered_at_the_cap() {
     let rows = recs("m", 30);
     stage(&data, "rows.ndjson", &rows);
     fs::write(data.join("empty.ndjson"), b"").unwrap();
-    stage(&data, "other.ndjson", &recs("o", 3));
+    let other = recs("o", 3);
+    stage(&data, "other.ndjson", &other);
+    let gz = {
+        use std::io::Write as _;
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(&lines_bytes(&recs("g", 3))).unwrap();
+        enc.finish().unwrap()
+    };
+    fs::write(data.join("x.ndjson.gz"), &gz).unwrap();
 
     let feed = MemoryFeed::new();
     let two_members = {
@@ -267,9 +276,18 @@ fn in_process_units_are_acknowledged_or_dead_lettered_at_the_cap() {
         unit_over(&data, "missing.ndjson"),
         two_members,
         Unit::new("not-a-descriptor", b"{ not a descriptor".to_vec()),
+        // `recs` rows are 12 bytes, so the range owns `o-0` alone.
         Unit::new(
             "ranged",
             support::ranged_spec(&data, "other.ndjson", 0, 12, b'\n').descriptor,
+        ),
+        Unit::new(
+            "ranged-cr",
+            support::ranged_spec(&data, "other.ndjson", 0, 12, b'\r').descriptor,
+        ),
+        Unit::new(
+            "ranged-gz",
+            support::ranged_spec(&data, "x.ndjson.gz", 0, gz.len() as u64, b'\n').descriptor,
         ),
     ] {
         drop(feed.publish(unit));
@@ -282,7 +300,7 @@ fn in_process_units_are_acknowledged_or_dead_lettered_at_the_cap() {
         c.visible == 0 && c.held == 0
     });
     stop(&l);
-    assert_eq!(counts(feed.counts()), (0, 0, 4, 2));
+    assert_eq!(counts(feed.counts()), (0, 0, 5, 3));
 
     let mut dead: Vec<String> = feed.dead_letters().into_iter().map(|u| u.id).collect();
     dead.sort();
@@ -291,12 +309,19 @@ fn in_process_units_are_acknowledged_or_dead_lettered_at_the_cap() {
         [
             "missing.ndjson",
             "not-a-descriptor",
-            "ranged",
+            "ranged-cr",
+            "ranged-gz",
             "two-members"
         ]
     );
     let got = captured_rows(&l.script);
-    assert_eq!(sorted(got), sorted(rows), "the rows unit is read once");
+    let mut want = rows;
+    want.push(other[0].clone());
+    assert_eq!(
+        sorted(got),
+        sorted(want),
+        "the rows unit and the range are each read once"
+    );
 }
 
 /// Pins that a source reading a feed refuses a `coordination:` section when
@@ -335,6 +360,136 @@ fn a_feed_refuses_coordination_on_the_same_source() {
     };
     assert_eq!(class, ErrorClass::Fatal);
     assert!(reason.contains("coordinator"), "{reason}");
+}
+
+/// The ETag the file store reports for the staged object `name`.
+fn etag_of(data: &Path, name: &str) -> String {
+    use object_store::ObjectStoreExt as _;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let key = key_of(data, name);
+    let meta = rt
+        .block_on(object_store::local::LocalFileSystem::new().head(&key.as_str().into()))
+        .unwrap();
+    meta.e_tag.expect("the file store reports an ETag")
+}
+
+/// Pins that the source over a feed reads a whole-object unit in the byte
+/// ranges its `split_target_bytes` cuts: with a 1 MiB target, a unit over an
+/// object of 1 MiB + 64 KiB with an ETag is read by two ranged lanes, the
+/// second reading from the byte before its range, and every row is written
+/// once.
+#[test]
+fn a_whole_unit_over_a_large_object_is_read_in_ranges() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    // 1,088 lines of 1 KiB: the ranges are [0, 557056) and [557056, 1114112).
+    let pad = "p".repeat(1024 - 20);
+    let rows: Vec<String> = (0..1088)
+        .map(|i| format!("{{\"k\":\"{i:04}\",\"p\":\"{pad}\"}}"))
+        .collect();
+    stage(&data, "big.ndjson", &rows);
+    let mut unit = unit_over(&data, "big.ndjson");
+    let mut descriptor = SplitDescriptor::decode(&unit.body).unwrap();
+    assert_eq!(descriptor.objects[0].size, 1088 * 1024);
+    descriptor.objects[0].etag = Some(etag_of(&data, "big.ndjson"));
+    unit.body = descriptor.encode().unwrap();
+
+    let (feed, script) = scripted_feed();
+    let receipt = script.deliver(unit);
+    let (store, spy) = spying_local_store(SpyOptions::default());
+    let yaml = PipelineYaml::file("s3-feed-ranges", &data).build();
+    let l = launch_customized(
+        &yaml,
+        test_options(),
+        |_| {},
+        move |source, _io| {
+            line_framer(source)
+                .with_store(store)
+                .with_feed(Arc::new(feed))
+        },
+    );
+    wait_until(DEADLINE, "the unit is acknowledged", || {
+        script.acknowledged() == vec![receipt]
+    });
+    stop(&l);
+
+    assert_eq!(
+        sorted(captured_rows(&l.script)),
+        sorted(rows),
+        "each row is written once"
+    );
+    let starts: Vec<u64> = spy
+        .gets()
+        .iter()
+        .filter_map(|g| match g.range {
+            support::spy::RangeKind::Bounded(start, _) => Some(start),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        starts.contains(&0) && starts.contains(&(557_056 - 1)),
+        "no GET opened the second range: {starts:?}"
+    );
+}
+
+/// A framer that declares no resync delimiter.
+#[derive(Default)]
+struct NoResync(support::LineFramer);
+
+impl spate_core::framing::RecordFramer for NoResync {
+    fn push(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        self.0.push(bytes)
+    }
+    fn finish(&mut self) -> std::io::Result<()> {
+        self.0.finish()
+    }
+    fn pop(&mut self) -> Option<Vec<u8>> {
+        self.0.pop()
+    }
+    fn decoded_bytes(&self) -> u64 {
+        self.0.decoded_bytes()
+    }
+}
+
+/// Pins that a source opened over a feed with a framer that declares no
+/// resync delimiter says that it reads large objects whole and fails ranged
+/// units back, and that one whose framer declares a delimiter does not.
+#[test]
+fn a_framer_with_no_delimiter_is_reported_when_the_feed_path_opens() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let config =
+        PipelineConfig::from_str(&PipelineYaml::file("s3-feed-resync", &data).build()).unwrap();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let open_logs = |resync: bool| {
+        let source = S3Source::from_component_config(&config.source, rt.handle().clone()).unwrap();
+        let source = if resync {
+            line_framer(source)
+        } else {
+            source.with_framer(|| Box::new(NoResync::default()))
+        };
+        let mut source = source.with_feed(Arc::new(MemoryFeed::new()));
+        spate_test::capture_logs(tracing::Level::INFO, || {
+            source
+                .open(SourceCtx::new(Checkpointer::new().handle()))
+                .unwrap();
+        })
+    };
+    let said = |lines: &[String]| {
+        lines
+            .iter()
+            .any(|l| l.contains("units naming a byte range are failed back"))
+    };
+    let lines = open_logs(false);
+    assert!(said(&lines), "{lines:#?}");
+    let lines = open_logs(true);
+    assert!(!said(&lines), "{lines:#?}");
 }
 
 /// Launch over `feed` with one record per source batch and one row per sink

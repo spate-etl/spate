@@ -65,7 +65,7 @@ enum State {
     /// first `poll_events`. Boxed: the open state dwarfs `Created` and
     /// lives once per source.
     Open(Box<OpenState>),
-    /// Opened over a feed: units are read one lane per delivery.
+    /// Opened over a feed: units are read one lane per part in progress.
     Feed(Box<UnitReader>),
 }
 
@@ -197,10 +197,11 @@ impl S3Source {
         self
     }
 
-    /// Test seam: read one-object work units from `feed` in place of
-    /// coordinated splits. Each unit's body is a [`SplitDescriptor`] naming
-    /// one whole object; a unit naming anything else is failed back to the
-    /// feed. Conflicts with [`with_coordinator`](S3Source::with_coordinator),
+    /// Test seam: read work units from `feed` in place of coordinated
+    /// splits. Each unit's body is a [`SplitDescriptor`] naming one object,
+    /// whole or one byte range of it; a unit naming anything else is failed
+    /// back to the feed. A whole object that qualifies for byte ranges under
+    /// `split_target_bytes` is read in ranges. Conflicts with [`with_coordinator`](S3Source::with_coordinator),
     /// with a `coordination:` section and with a `feed:` section, and never
     /// reports the input drained, so the run ends at a shutdown.
     ///
@@ -329,12 +330,24 @@ impl Source for S3Source {
                         .into(),
                 });
             }
+            let delimiter = make_framer().resync_delimiter();
+            if delimiter.is_none() {
+                tracing::info!(
+                    "the record framer declares no resync delimiter, so objects above \
+                     split_target_bytes are read whole and units naming a byte range are \
+                     failed back to the feed"
+                );
+            }
             let parts = LaneParts {
                 store,
                 handle: self.handle.clone(),
                 issuer: ctx.issuer,
                 make_framer,
-                compression: self.config.compression,
+                packing: Packing {
+                    target_bytes: self.config.split_target_bytes.as_u64(),
+                    compression: self.config.compression,
+                    delimiter,
+                },
                 chunk_bytes: self.config.chunk_bytes.as_u64() as usize,
                 range_bytes: self.config.prefetch_bytes.as_u64() as usize,
                 retry_base: RETRY_BASE,

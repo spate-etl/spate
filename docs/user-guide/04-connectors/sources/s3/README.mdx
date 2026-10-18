@@ -67,7 +67,7 @@ source:
 |---|---|---|---|
 | `url` | string | `required` | Bucket and prefix to backfill. Every object under the prefix is read. `file://` works for local runs; `memory://` fails at load, because it builds a fresh empty store per component and so cannot be shared. Part of the job fingerprint — byte-identical across every worker of a coordinated job. |
 | `compression` | `auto` \| `none` \| `gzip` \| `zstd` | `auto` | Object codec. `auto` decides per object by extension (`.gz`/`.gzip`, `.zst`/`.zstd`, else uncompressed). Multi-member gzip and multi-frame zstd are read fully; truncated or corrupt streams [poison the split](#object-errors-poison-the-split). Part of the job fingerprint. |
-| `split_target_bytes` | bytes | `64MiB` | Target size of one split — the unit of distribution. Objects pack toward it in listing order with a per-object cost floor of a sixteenth of the target (so ≤ ~16 objects per split). An object above the target is [cut into byte ranges](#large-objects-and-byte-ranges) when it qualifies, and otherwise gets a split of its own. Floor `1MiB`. Part of the job fingerprint. |
+| `split_target_bytes` | bytes | `64MiB` | Target size of one split — the unit of distribution. Objects pack toward it in listing order with a per-object cost floor of a sixteenth of the target (so ≤ ~16 objects per split). An object above the target is [cut into byte ranges](#large-objects-and-byte-ranges) when it qualifies, and otherwise gets a split of its own. On the [feed path](#reading-from-a-feed) nothing packs, and the target sets the size of the byte ranges a whole-object unit is cut into. Floor `1MiB`. Part of the job fingerprint. |
 | `refresh_listing` | bool | `false` | Re-list on the coordinator's replan interval, planning new objects as additional splits. `true` makes the job **open** (never self-terminates). Part of the job fingerprint. |
 | `prefetch_bytes` | bytes | `8MiB` | Target window size for ETag-pinned ranged GETs; see [read-ahead memory sizing](#read-parallelism-on-a-solo-run). Must be at least `chunk_bytes`; a smaller value fails at load. |
 | `chunk_bytes` | bytes | `512KiB` | Target size of one buffered chunk. Zero fails at load. |
@@ -315,10 +315,8 @@ The split count still sets how evenly the lanes divide over threads; see
 
 A [`feed:` section](../../../07-reference/configuration.mdx#feed) moves the
 source onto the feed path. It reads [work units](../../../07-reference/glossary.mdx#work-unit)
-from the feed the section names, and lists nothing itself. Each unit's body is
-an encoded `SplitDescriptor` naming one whole object, and a unit naming
-anything else is failed back to the feed. Every delivery is read from the
-object's first byte, and the unit is acknowledged once the sink has
+from the feed the section names, and lists nothing itself. Every delivery is
+read from its first byte, and the unit is acknowledged once the sink has
 acknowledged every record in it.
 
 ```yaml
@@ -327,8 +325,26 @@ feed:
   units_held: 32
 ```
 
-`units_held` bounds the units the source holds at once, one lane each, and with
-them its read parallelism. The default is 96. The source publishes no units of
+### Work units
+
+A unit's body is an encoded `SplitDescriptor` naming one object, or one byte
+range of one object, and a unit naming anything else is failed back to the
+feed. Nothing packs on the feed path. A whole-object unit is cut into byte
+ranges on the conditions in
+[Large objects and byte ranges](#large-objects-and-byte-ranges), with the ETag
+taken from the unit's descriptor, so a unit with no ETag is read whole on one
+lane. A unit naming a byte range is failed back when its range is cut on a
+delimiter other than the framer's, or when `compression` decodes its object.
+The unit is acknowledged once, after every range has been read and committed.
+An object failure on one range fails the whole unit back, and its other ranges
+stop.
+
+Each range in progress takes one slot of `units_held`. Deliveries received
+alongside a large object wait until all of its ranges have opened, and the
+deliveries held stay at or below `units_held`.
+
+`units_held` bounds the lanes the source reads at once, one per whole object or
+range, and with them its read parallelism. The default is 96. The source publishes no units of
 its own and reads only the units published to the feed, and a startup WARN
 says so. An in-process feed built from the file alone has no publisher, so the
 run reads nothing. To publish to the in-process feed, code builds a

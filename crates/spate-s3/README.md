@@ -12,9 +12,10 @@ rather than silently half-read; and the job self-terminates when the plan
 completes. This path is always coordinated — a single instance is just the
 one-worker case.
 
-With a pipeline `feed:` section the source lists nothing. It reads work units,
-one whole object each, from the feed, acknowledges each finished unit to it,
-and runs until shut down.
+With a pipeline `feed:` section the source lists nothing. It reads work units
+from the feed, each naming one object or one byte range of one object, and
+reads a large object in byte ranges. It acknowledges each finished unit to the
+feed and runs until shut down.
 
 Applications should depend on the [`spate`](https://crates.io/crates/spate)
 facade with the `s3` feature.

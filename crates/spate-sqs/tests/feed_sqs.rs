@@ -13,6 +13,7 @@
 //! so a unit that arrives at the end of a poll still has 2 s above the
 //! threshold under which the feed drops it unseen.
 
+use object_store::ObjectStoreExt as _;
 use spate_core::config::{FeedSection, PipelineConfig};
 use spate_core::feed::{
     Confirmation, Delivery, Feed, FeedError, FeedWaker, Receipt, Unit, wake_channel,
@@ -138,10 +139,20 @@ struct Worker {
 /// write, so an object's records span several writes. `pre` scripts the sink
 /// before data flows.
 fn launch(data: &Path, feed_section: &str, pre: impl FnOnce(&SinkScript)) -> Worker {
+    launch_with_source(data, "", feed_section, pre)
+}
+
+/// [`launch`] with `source_extra` appended to the `s3:` source section.
+fn launch_with_source(
+    data: &Path,
+    source_extra: &str,
+    feed_section: &str,
+    pre: impl FnOnce(&SinkScript),
+) -> Worker {
     let yaml = format!(
         "pipeline: {{ name: sqs-feed, threads: 1 }}\nadmin: {{ listen: none }}\n\
          checkpoint: {{ interval: 100ms }}\nmetrics: {{ exporter: none }}\n\
-         source:\n  s3:\n    url: \"file://{}/\"\n\
+         source:\n  s3:\n    url: \"file://{}/\"\n{source_extra}\
          sink: {{ capture: {{ chunk: {{ target_bytes: 64 }} }} }}\n{feed_section}",
         data.display()
     );
@@ -234,6 +245,23 @@ fn stage(data: &Path, name: &str, rows: &[String]) -> Unit {
     Unit::new(name, SplitDescriptor::new(vec![object]).encode().unwrap())
 }
 
+/// [`stage`], with the ETag the file store reports in the descriptor, so a
+/// unit over an object above `split_target_bytes` is read in ranges.
+fn stage_with_etag(data: &Path, name: &str, rows: &[String]) -> Unit {
+    let unit = stage(data, name, rows);
+    let mut descriptor = SplitDescriptor::decode(&unit.body).unwrap();
+    let object = &mut descriptor.objects[0];
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let path = object_store::path::Path::parse(&object.key).unwrap();
+    let meta = rt
+        .block_on(object_store::local::LocalFileSystem::new().head(&path))
+        .unwrap();
+    object.etag = Some(meta.e_tag.expect("the file store reports an ETag"));
+    Unit::new(name, descriptor.encode().unwrap())
+}
+
 /// `n` records, each longer than the sink's 64-byte chunk target so each
 /// takes a write of its own.
 fn recs(prefix: &str, n: usize) -> Vec<String> {
@@ -307,6 +335,56 @@ fn a_unit_is_deleted_only_after_its_last_record_is_acknowledged() {
         mq.approximate_counts(path_of(&url)).unwrap() == (0, 0)
     });
     assert_eq!(written(&worker.script), sorted(rows));
+    assert_eq!(worker.stop(), ExitState::Completed);
+}
+
+/// Pins INV-1 for a unit read in two byte ranges: while the last write is
+/// held the queue still holds the unit, and once it succeeds the unit is
+/// deleted with every row of both ranges written once.
+#[test]
+#[ignore = "requires Docker"]
+fn a_unit_read_in_ranges_is_deleted_after_its_last_range_is_acknowledged() {
+    let mq = ElasticMq::start().unwrap();
+    let url = queue_with_dead_letter(&mq, "ranged");
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    // 68 lines of 16 KiB: 1 MiB + 64 KiB, two ranges at a 1 MiB target.
+    let pad = "p".repeat(16 * 1024 - 24);
+    let rows: Vec<String> = (0..68)
+        .map(|i| format!("{{\"k\":\"r-{i:04}\",\"pad\":\"{pad}\"}}"))
+        .collect();
+    let unit = stage_with_etag(&data, "r.ndjson", &rows);
+
+    let worker = launch_with_source(
+        &data,
+        "    split_target_bytes: 1MiB\n",
+        &feed_yaml(&mq, &url, VISIBILITY, ""),
+        |sink| {
+            for _ in 1..rows.len() {
+                sink.enqueue_global(WriteOutcome::ok());
+            }
+            sink.enqueue_global(WriteOutcome::ok().held());
+        },
+    );
+    publish(&worker.feed, unit);
+    wait_until(DEADLINE, "the last write is held", || {
+        worker.script.held_writes() == 1 && worker.script.writes().len() == rows.len()
+    });
+    assert_ne!(
+        mq.approximate_counts(path_of(&url)).unwrap(),
+        (0, 0),
+        "the unit was deleted while a range's last write was held"
+    );
+    worker.script.release_held();
+    wait_until(DEADLINE, "the unit is deleted", || {
+        mq.approximate_counts(path_of(&url)).unwrap() == (0, 0)
+    });
+    assert_eq!(
+        written(&worker.script),
+        sorted(rows),
+        "each row written once"
+    );
+    assert_eq!(worker.recording.deliveries(), [1]);
     assert_eq!(worker.stop(), ExitState::Completed);
 }
 

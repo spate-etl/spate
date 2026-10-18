@@ -388,7 +388,7 @@ impl UnitReader {
     /// it finished.
     fn settle_remaining(&self, lane: &LaneState) {
         if let Some(m) = &self.parts.metrics {
-            let done = u64::from(lane.tracker.objects_done());
+            let done = u64::from(lane.tracker.close());
             m.objects_remaining
                 .decrement(1u64.saturating_sub(done) as f64);
         }
@@ -1172,6 +1172,89 @@ mod tests {
         };
         assert_eq!(run(false), 2.0, "one count per lane opened");
         assert_eq!(run(true), 0.0, "each lane takes its count back");
+    }
+
+    /// Pins that a range lane released while it reads, on a poisoned
+    /// sibling or on `Gone`, takes its `objects_remaining` count back once
+    /// when it finishes its range before its drain barrier trips.
+    #[test]
+    fn a_released_range_finishing_before_its_barrier_settles_the_gauge_once() {
+        use object_store::{ObjectStoreExt as _, PutPayload, path::Path};
+        let run = |poison_sibling: bool| {
+            let pipeline = unique_name("reader");
+            let rendered = render_local(|| {
+                let metrics =
+                    S3Metrics::new(&Meter::with_namespace("s3", pipeline.clone(), "src", "s3"));
+                // The lane's fetcher has to run while the test polls the lane.
+                let rt = tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(1)
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let store = object_store::memory::InMemory::new();
+                let body = b"line\n".repeat(40);
+                let size = body.len() as u64;
+                let put = rt
+                    .block_on(store.put(&Path::from("a.ndjson"), PutPayload::from(body)))
+                    .unwrap();
+                let parts = LaneParts {
+                    store: Arc::new(store),
+                    handle: rt.handle().clone(),
+                    issuer: Checkpointer::new().handle(),
+                    make_framer: Arc::new(|| Box::new(TestLineFramer::new(1 << 20))),
+                    packing: Packing {
+                        target_bytes: TARGET,
+                        compression: Compression::Auto,
+                        delimiter: Some(b'\n'),
+                    },
+                    chunk_bytes: 1 << 16,
+                    range_bytes: 1 << 16,
+                    retry_base: Duration::from_millis(1),
+                    metrics: Some(metrics),
+                };
+                let (feed, script) = scripted_feed();
+                let mut reader = UnitReader::new(Arc::new(feed), parts, NonZeroUsize::new(4));
+                let object = DescriptorObject {
+                    key: "a.ndjson".into(),
+                    size,
+                    etag: put.e_tag.clone(),
+                    last_modified_ms: 1,
+                };
+                let receipt = script.deliver(Unit::new(
+                    "a",
+                    SplitDescriptor::new(vec![object]).encode().unwrap(),
+                ));
+                start(&mut reader);
+                let mut lanes = lanes_added(poll(&mut reader));
+                assert_eq!(lanes.len(), 2, "two ranges");
+                let tracker = Arc::clone(&reader.lanes[&lanes[1].partition()].tracker);
+                if poison_sibling {
+                    reader
+                        .poison_tx
+                        .send(PoisonReport {
+                            split: SplitId::new("delivery-0-lane-0").unwrap(),
+                            epoch: LeaseEpoch(u64::from(lanes[0].partition().0)),
+                            kind: PoisonKind::NotFound,
+                            reason: "gone".into(),
+                        })
+                        .unwrap();
+                } else {
+                    script.dead_letter(receipt);
+                }
+                assert_eq!(lanes_revoked(poll(&mut reader)).len(), 2);
+                spate_test::wait_until(
+                    Duration::from_secs(10),
+                    "the released range reaches its end of input",
+                    || {
+                        let _ = lanes[1].poll(1024, Duration::from_millis(10));
+                        tracker.terminal().is_some()
+                    },
+                );
+            });
+            objects_remaining(&rendered, &pipeline)
+        };
+        assert_eq!(run(true), 0.0, "a poisoned sibling");
+        assert_eq!(run(false), 0.0, "a unit answered Gone");
     }
 
     /// Pins that a unit answered `Gone` lets go of every range it opened

@@ -51,14 +51,20 @@ const UNKNOWN: i64 = i64::MIN;
 /// [`SplitProgress::state`].
 const PROGRESS_STATE_VERSION: u32 = 1;
 
+/// The bit of `SplitTracker::objects_done` that marks the split closed.
+const CLOSED: u32 = 1 << 31;
+
 /// Lane→control-plane completion accounting, lock-free.
 ///
 /// `terminal` is one-shot (the end-of-input decision); `objects_done`
 /// counts fully framed member objects so the control plane can settle the
-/// `objects_remaining` gauge when a split closes mid-way.
+/// `objects_remaining` gauge when a split closes mid-way. After
+/// [`close`](Self::close), the lane takes back the count of each object it
+/// framed before the close and the closer takes back the rest.
 #[derive(Debug)]
 pub(crate) struct SplitTracker {
     terminal: AtomicI64,
+    /// The framed count, with [`CLOSED`] set once the split is closed.
     objects_done: AtomicU32,
 }
 
@@ -89,14 +95,23 @@ impl SplitTracker {
         }
     }
 
-    /// Count one member object as fully framed.
-    pub(crate) fn object_done(&self) {
-        self.objects_done.fetch_add(1, Ordering::Relaxed);
+    /// Count one member object as fully framed. Returns whether the lane
+    /// takes the object's count back from `objects_remaining`, which is
+    /// `false` once the split is closed.
+    pub(crate) fn object_done(&self) -> bool {
+        self.objects_done.fetch_add(1, Ordering::Relaxed) & CLOSED == 0
     }
 
     /// Member objects fully framed under this tenancy.
     pub(crate) fn objects_done(&self) -> u32 {
-        self.objects_done.load(Ordering::Relaxed)
+        self.objects_done.load(Ordering::Relaxed) & !CLOSED
+    }
+
+    /// Close the split to counting and return the member objects framed
+    /// before it closed. The caller takes back the count of every other
+    /// member object. Called once per tracker.
+    pub(crate) fn close(&self) -> u32 {
+        self.objects_done.fetch_or(CLOSED, Ordering::Relaxed) & !CLOSED
     }
 }
 
@@ -675,9 +690,11 @@ mod tests {
         let t = SplitTracker::new();
         t.set_terminal(0);
         assert_eq!(t.terminal(), Some(0));
-        t.object_done();
-        t.object_done();
+        assert!(t.object_done());
+        assert!(t.object_done());
         assert_eq!(t.objects_done(), 2);
+        assert_eq!(t.close(), 2);
+        assert!(!t.object_done(), "a closed split's lane takes nothing back");
     }
 
     #[test]

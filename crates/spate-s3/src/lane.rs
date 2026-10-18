@@ -304,10 +304,12 @@ impl S3Lane {
             );
             return;
         }
-        self.tracker.object_done();
+        let counted = self.tracker.object_done();
         if let Some(m) = &self.metrics {
             m.objects_completed.increment(1);
-            m.objects_remaining.decrement(1.0);
+            if counted {
+                m.objects_remaining.decrement(1.0);
+            }
         }
     }
 

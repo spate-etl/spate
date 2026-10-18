@@ -2184,21 +2184,38 @@ mod cluster {
             .client()
             .fetch_metadata(Some(ATTEMPTS), Duration::from_secs(10))
             .unwrap();
-        cluster.request_errors(
-            RDKafkaApiKey::ListOffsets,
-            &[
-                RDKafkaRespErr::RD_KAFKA_RESP_ERR_NOT_LEADER_FOR_PARTITION,
-                RDKafkaRespErr::RD_KAFKA_RESP_ERR_NO_ERROR,
-            ],
-        );
         let gate = Gate::new(
             Arc::clone(&core),
             Producer::clone(&producer),
             Duration::from_millis(500),
         )
         .with_step(STEP);
-        gate.pass();
-        assert_eq!(core.lock().gating.len(), 1, "admitted with an empty ledger");
+        let capture = spate_test::LogCapture::new();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(capture.clone())
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .finish();
+        // librdkafka serves the refusal as the read's error when its reply
+        // is served alone; only a pass that waits for the follower took the
+        // equal watermarks the test is about.
+        tracing::subscriber::with_default(subscriber, || {
+            wait_until(DEADLINE, "a pass waits for the follower", || {
+                cluster.request_errors(
+                    RDKafkaApiKey::ListOffsets,
+                    &[
+                        RDKafkaRespErr::RD_KAFKA_RESP_ERR_NOT_LEADER_FOR_PARTITION,
+                        RDKafkaRespErr::RD_KAFKA_RESP_ERR_NO_ERROR,
+                    ],
+                );
+                gate.pass();
+                assert_eq!(core.lock().gating.len(), 1, "admitted with an empty ledger");
+                capture
+                    .lines()
+                    .iter()
+                    .any(|l| l.contains("did not catch up"))
+            });
+        });
     }
 
     /// Pins that the requests reading equal watermarks again report their

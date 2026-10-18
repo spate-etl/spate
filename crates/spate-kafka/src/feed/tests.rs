@@ -1894,8 +1894,9 @@ mod cluster {
     }
 
     /// Pins that a pass whose watermark read the broker refuses admits
-    /// nothing, including the units of a partition it read before the
-    /// refusal: both units stay at the gate and the feed stops.
+    /// nothing, including the units of a partition it read and found caught
+    /// up before the refusal: both units stay at the gate and the feed
+    /// stops.
     #[test]
     fn a_refused_watermark_read_admits_nothing_from_its_pass() {
         let cluster = cluster_with(0);
@@ -1917,6 +1918,7 @@ mod cluster {
         records.flush(Duration::from_secs(30)).unwrap();
         let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
         let core = Arc::new(Core::new(&config, TWO));
+        attempt::lock(&core.ledger).apply(0, 0, b"other", attempt::Entry::Count(1));
         let producer: Producer =
             rdkafka::config::FromClientConfigAndContext::from_config_and_context(
                 &config.producer_config(false),
@@ -1944,8 +1946,8 @@ mod cluster {
             .client()
             .fetch_metadata(Some(ATTEMPTS), Duration::from_secs(10))
             .unwrap();
-        // Partition 0 holds a record, so its read takes its two requests and
-        // succeeds; partition 1's is refused.
+        // Partition 0 holds a record the ledger has read, so its read takes
+        // its two requests and it is caught up; partition 1's is refused.
         let mut errors = vec![RDKafkaRespErr::RD_KAFKA_RESP_ERR_NO_ERROR; 2];
         errors.extend([RDKafkaRespErr::RD_KAFKA_RESP_ERR_TOPIC_AUTHORIZATION_FAILED; 50]);
         cluster.request_errors(RDKafkaApiKey::ListOffsets, &errors);
@@ -2184,7 +2186,9 @@ mod cluster {
     /// partition 1 led by a broker that answers after 5 s, the unit on
     /// partition 0, read first, is admitted, the units on partitions 1 and
     /// 2 wait at the gate, and the warning names partition 2 as not read
-    /// and partition 1 as the slowest read.
+    /// and partition 1 as the slowest read. Partition 2 holds a record, so
+    /// its watermarks differ and only the check before its first request
+    /// keeps it unread.
     #[test]
     fn a_pass_that_reaches_its_bound_while_reading_admits_what_it_read() {
         let cluster = MockCluster::new(2).expect("mock cluster");
@@ -2199,6 +2203,20 @@ mod cluster {
                 .unwrap();
         }
         let brokers = cluster.bootstrap_servers();
+        let records: BaseProducer = ClientConfig::new()
+            .set("bootstrap.servers", &brokers)
+            .create()
+            .unwrap();
+        records
+            .send(
+                BaseRecord::to(ATTEMPTS)
+                    .partition(2)
+                    .key("other")
+                    .payload(&super::super::attempt::encode(1)),
+            )
+            .map_err(|(e, _)| e)
+            .unwrap();
+        records.flush(Duration::from_secs(30)).unwrap();
         let group = spate_test::unique_name("gate-bound-reads");
         let section: FeedSection = serde_yaml::from_str(&format!(
             "kafka:\n  brokers: \"{brokers}\"\n  group_id: {group}\n  topic: units\n  \
@@ -2280,6 +2298,72 @@ mod cluster {
             "{warning}"
         );
         assert!(!warning.contains("did not catch up"), "{warning}");
+    }
+
+    /// Pins that equal watermarks are read again only before the pass's
+    /// bound: with `delivery_timeout` at 200 ms and attempt partition 0,
+    /// empty, led by a broker that answers after 300 ms, the watermark read
+    /// returns past the bound, the unit waits at the gate, and the warning
+    /// names partition 0 as not read.
+    #[test]
+    fn equal_watermarks_read_past_the_bound_are_not_read_again() {
+        let cluster = MockCluster::new(2).expect("mock cluster");
+        for topic in ["units", "units-retry", "units-dead"] {
+            cluster.create_topic(topic, 1, 1).unwrap();
+            cluster.partition_leader(topic, 0, Some(1)).unwrap();
+        }
+        cluster.create_topic(ATTEMPTS, 1, 1).unwrap();
+        cluster.partition_leader(ATTEMPTS, 0, Some(2)).unwrap();
+        let brokers = cluster.bootstrap_servers();
+        let group = spate_test::unique_name("gate-bound-reread");
+        let section: FeedSection = serde_yaml::from_str(&format!(
+            "kafka:\n  brokers: \"{brokers}\"\n  group_id: {group}\n  topic: units\n  \
+             retry_topic: units-retry\n  dead_letter_topic: units-dead\n  \
+             attempt_topic: {ATTEMPTS}\n  statistics_interval: 0s\n  \
+             delivery_timeout: 200ms\n"
+        ))
+        .unwrap();
+        let config = KafkaFeedConfig::from_section(&section).unwrap();
+        let core = Arc::new(Core::new(&config, std::num::NonZeroU32::MIN));
+        let producer: Producer =
+            rdkafka::config::FromClientConfigAndContext::from_config_and_context(
+                &config.producer_config(false),
+                crate::feed::producer::FeedProducerContext::new(Arc::clone(&core)),
+            )
+            .unwrap();
+        {
+            let mut st = core.lock();
+            st.tracker.assign([super::tp(0)]);
+            let receipt = st.tracker.deliver(&super::tp(0), 0).unwrap();
+            st.gating.push_back(Gating {
+                receipt,
+                unit: Unit::new("u", Vec::new()),
+                identity: super::identity(&core, 0),
+            });
+        }
+        wait_until(DEADLINE, "partition 0 reports its watermarks", || {
+            producer
+                .client()
+                .fetch_watermarks(ATTEMPTS, 0, Duration::from_millis(500))
+                .is_ok()
+        });
+        cluster
+            .broker_round_trip_time(2, Duration::from_millis(300))
+            .unwrap();
+        let capture = spate_test::LogCapture::new();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(capture.clone())
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .finish();
+        let gate = Gate::new(Arc::clone(&core), producer, config.delivery_timeout)
+            .with_step(Duration::from_secs(1));
+        tracing::subscriber::with_default(subscriber, || gate.pass());
+        let st = core.lock();
+        assert_eq!(st.gating.len(), 1, "the unit was admitted");
+        assert!(st.fatal.is_none());
+        let warning = capture.lines().join("\n");
+        assert!(warning.contains("partitions [0]"), "{warning}");
     }
 
     /// Pins that a pass which put deliveries back for a failed watermark read

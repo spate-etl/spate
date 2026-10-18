@@ -1902,6 +1902,20 @@ mod cluster {
         let cluster = cluster_with(0);
         let brokers = cluster.bootstrap_servers();
         let group = spate_test::unique_name("refused-pass");
+        let records: BaseProducer = ClientConfig::new()
+            .set("bootstrap.servers", &brokers)
+            .create()
+            .unwrap();
+        records
+            .send(
+                BaseRecord::to(ATTEMPTS)
+                    .partition(0)
+                    .key("other")
+                    .payload(&super::super::attempt::encode(1)),
+            )
+            .map_err(|(e, _)| e)
+            .unwrap();
+        records.flush(Duration::from_secs(30)).unwrap();
         let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
         let core = Arc::new(Core::new(&config, TWO));
         let producer: Producer =
@@ -1931,8 +1945,8 @@ mod cluster {
             .client()
             .fetch_metadata(Some(ATTEMPTS), Duration::from_secs(10))
             .unwrap();
-        // Partition 0's read, which asks for both of its offsets, succeeds;
-        // partition 1's is refused.
+        // Partition 0 holds a record, so its read takes its two requests and
+        // succeeds; partition 1's is refused.
         let mut errors = vec![RDKafkaRespErr::RD_KAFKA_RESP_ERR_NO_ERROR; 2];
         errors.extend([RDKafkaRespErr::RD_KAFKA_RESP_ERR_TOPIC_AUTHORIZATION_FAILED; 50]);
         cluster.request_errors(RDKafkaApiKey::ListOffsets, &errors);
@@ -2053,6 +2067,117 @@ mod cluster {
         wait_until(DEADLINE, "the unit is buffered", || {
             core.lock().ready.len() == 1
         });
+    }
+
+    /// Pins that a watermark read whose low-watermark request was refused
+    /// does not count its partition as caught up: librdkafka reports such a
+    /// read as two equal watermarks, as it does an empty partition. With
+    /// `NOT_LEADER_FOR_PARTITION` on the first ListOffsets request and a
+    /// record no follower has read, the unit stays at the gate.
+    #[test]
+    fn a_refused_low_watermark_request_keeps_the_unit_at_the_gate() {
+        let cluster = cluster_with(0);
+        let brokers = cluster.bootstrap_servers();
+        let group = spate_test::unique_name("lwm");
+        let records: BaseProducer = ClientConfig::new()
+            .set("bootstrap.servers", &brokers)
+            .create()
+            .unwrap();
+        for partition in 0..2 {
+            records
+                .send(
+                    BaseRecord::to(ATTEMPTS)
+                        .partition(partition)
+                        .key("other")
+                        .payload(&super::super::attempt::encode(1)),
+                )
+                .map_err(|(e, _)| e)
+                .unwrap();
+        }
+        records.flush(Duration::from_secs(30)).unwrap();
+        let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
+        let core = Arc::new(Core::new(&config, TWO));
+        let producer: Producer =
+            rdkafka::config::FromClientConfigAndContext::from_config_and_context(
+                &config.producer_config(false),
+                crate::feed::producer::FeedProducerContext::new(Arc::clone(&core)),
+            )
+            .unwrap();
+        {
+            let mut st = core.lock();
+            st.tracker.assign([super::tp(0)]);
+            let receipt = st.tracker.deliver(&super::tp(0), 0).unwrap();
+            st.gating.push_back(Gating {
+                receipt,
+                unit: Unit::new("u", Vec::new()),
+                identity: super::identity(&core, 0),
+            });
+        }
+        producer
+            .client()
+            .fetch_metadata(Some(ATTEMPTS), Duration::from_secs(10))
+            .unwrap();
+        cluster.request_errors(
+            RDKafkaApiKey::ListOffsets,
+            &[
+                RDKafkaRespErr::RD_KAFKA_RESP_ERR_NOT_LEADER_FOR_PARTITION,
+                RDKafkaRespErr::RD_KAFKA_RESP_ERR_NO_ERROR,
+            ],
+        );
+        let gate = Gate::new(
+            Arc::clone(&core),
+            Producer::clone(&producer),
+            Duration::from_millis(500),
+        )
+        .with_step(STEP);
+        gate.pass();
+        assert_eq!(core.lock().gating.len(), 1, "admitted with an empty ledger");
+    }
+
+    /// Pins that the requests reading equal watermarks again report their
+    /// own refusal: on an empty attempt partition whose watermark read
+    /// succeeds, a refused low-watermark request stops the feed, naming the
+    /// read, and the unit stays at the gate.
+    #[test]
+    fn a_refused_request_reading_equal_watermarks_again_stops_the_feed() {
+        let cluster = cluster_with(0);
+        let brokers = cluster.bootstrap_servers();
+        let group = spate_test::unique_name("refused-reread");
+        let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
+        let core = Arc::new(Core::new(&config, TWO));
+        let producer: Producer =
+            rdkafka::config::FromClientConfigAndContext::from_config_and_context(
+                &config.producer_config(false),
+                crate::feed::producer::FeedProducerContext::new(Arc::clone(&core)),
+            )
+            .unwrap();
+        {
+            let mut st = core.lock();
+            st.tracker.assign([super::tp(0)]);
+            let receipt = st.tracker.deliver(&super::tp(0), 0).unwrap();
+            st.gating.push_back(Gating {
+                receipt,
+                unit: Unit::new("u", Vec::new()),
+                identity: super::identity(&core, 0),
+            });
+        }
+        producer
+            .client()
+            .fetch_metadata(Some(ATTEMPTS), Duration::from_secs(10))
+            .unwrap();
+        let mut errors = vec![RDKafkaRespErr::RD_KAFKA_RESP_ERR_NO_ERROR; 2];
+        errors.extend([RDKafkaRespErr::RD_KAFKA_RESP_ERR_TOPIC_AUTHORIZATION_FAILED; 50]);
+        cluster.request_errors(RDKafkaApiKey::ListOffsets, &errors);
+        let gate =
+            Gate::new(Arc::clone(&core), producer, Duration::from_secs(3600)).with_step(STEP * 100);
+        gate.pass();
+        let st = core.lock();
+        let reason = &st.fatal.as_ref().expect("the feed stopped").reason;
+        assert!(
+            reason.contains("reading the watermarks of `units-attempts`"),
+            "{reason}"
+        );
+        assert_eq!(st.gating.len(), 1, "the unit was admitted");
     }
 
     /// Pins that a pass which put deliveries back for a failed watermark read

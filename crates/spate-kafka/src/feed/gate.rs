@@ -19,14 +19,15 @@ use super::attempt::{self, partition_of};
 use super::events::Cause;
 use super::write::{self, Attempt, Destination, Finish, Move, Outgoing, Producer, Write};
 use super::{Core, Gating, LatchOnPanic};
-use rdkafka::error::KafkaError;
+use rdkafka::error::{IsError as _, KafkaError, KafkaResult, RDKafkaErrorCode};
 use rdkafka::producer::Producer as _;
+use rdkafka::{Offset, TopicPartitionList};
 use spate_core::error::ErrorClass;
 use std::collections::BTreeSet;
 use std::sync::{Arc, PoisonError};
 use std::time::{Duration, Instant};
 
-/// The bound on each of the gate's waits and watermark reads.
+/// The bound on each of the gate's waits and watermark requests.
 pub(crate) const GATE_STEP: Duration = Duration::from_secs(1);
 
 /// The gate thread's state.
@@ -57,7 +58,7 @@ impl Gate {
         }
     }
 
-    /// The gate with `step` as the bound on each wait and watermark read.
+    /// The gate with `step` as the bound on each wait and watermark request.
     #[cfg(test)]
     pub(crate) fn with_step(mut self, step: Duration) -> Gate {
         self.step = step;
@@ -166,11 +167,7 @@ impl Gate {
         let mut unread = Vec::new();
         for partition in partitions {
             self.check(started, partition)?;
-            match self.producer.client().fetch_watermarks(
-                &self.core.topics.attempt,
-                partition,
-                self.step,
-            ) {
+            match self.watermarks(partition) {
                 Ok((lwm, hwm)) => marks.push((partition, lwm, hwm)),
                 Err(e) => match self.watermark_error(partition, &e) {
                     Halt::Behind(reason) => unread.push((partition, reason)),
@@ -210,6 +207,63 @@ impl Gate {
             }
         }
         Ok(unread)
+    }
+
+    /// The low and high watermarks of attempt `partition`, each request
+    /// bounded by a step.
+    ///
+    /// librdkafka reads the two with one ListOffsets request each, and when
+    /// a refused reply is served together with the other's success it
+    /// returns that success's offset as both watermarks. An empty partition
+    /// also reads as two equal watermarks, so equal watermarks are read
+    /// again, each offset on a request of its own.
+    fn watermarks(&self, partition: i32) -> KafkaResult<(i64, i64)> {
+        let (lwm, hwm) = self.producer.client().fetch_watermarks(
+            &self.core.topics.attempt,
+            partition,
+            self.step,
+        )?;
+        if lwm != hwm {
+            return Ok((lwm, hwm));
+        }
+        Ok((
+            self.list_offset(partition, Offset::Beginning)?,
+            self.list_offset(partition, Offset::End)?,
+        ))
+    }
+
+    /// The offset `at` names on attempt `partition`, `Beginning` for the
+    /// low watermark and `End` for the high, read with one ListOffsets
+    /// request, so a refusal is reported as an error.
+    fn list_offset(&self, partition: i32, at: Offset) -> KafkaResult<i64> {
+        let topic = &*self.core.topics.attempt;
+        let mut tpl = TopicPartitionList::new();
+        tpl.add_partition_offset(topic, partition, at)?;
+        let timeout = i32::try_from(self.step.as_millis()).unwrap_or(i32::MAX);
+        // SAFETY: the client pointer is valid while `self.producer` lives,
+        // and `tpl` owns its list until the end of this function.
+        // `rd_kafka_offsets_for_times` writes each result into the list and
+        // keeps neither pointer past the call.
+        let code = unsafe {
+            rdkafka::bindings::rd_kafka_offsets_for_times(
+                self.producer.client().native_ptr(),
+                tpl.ptr(),
+                timeout,
+            )
+        };
+        if code.is_error() {
+            return Err(KafkaError::MetadataFetch(code.into()));
+        }
+        let read = tpl
+            .find_partition(topic, partition)
+            .ok_or(KafkaError::MetadataFetch(RDKafkaErrorCode::BadMessage))?;
+        read.error()?;
+        match read.offset() {
+            Offset::Offset(offset) => Ok(offset),
+            _ => Err(KafkaError::MetadataFetch(
+                RDKafkaErrorCode::OffsetNotAvailable,
+            )),
+        }
     }
 
     /// `Err` when the feed stopped or latched, or the pass begun at

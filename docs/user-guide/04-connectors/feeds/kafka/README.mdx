@@ -351,7 +351,10 @@ the partition reads it again from the last commit.
 Before its read starts, each unit costs a watermark read of its attempt
 partition, the follower's catch-up to that watermark, and one confirmed
 produce. The gate takes every unit waiting at once, and one watermark read
-serves every unit of a partition in that pass. Every worker holds in memory
+serves every unit of a partition in that pass. A partition whose two
+watermarks are equal, as an empty one's are, has them read again with one
+request each, because librdkafka reports a refused low-watermark request that
+way too. Every worker holds in memory
 the count of each identity with a live record, whichever worker reads the
 unit, and reads the attempt topic from its start when it connects.
 [ADR-0070](../../../../adr/0070-on-kafka-a-units-attempt-is-recorded-before-the-unit-is-read.md)

@@ -104,8 +104,9 @@ the source reads it from its first record. When the committed offset falls
 inside such a batch, librdkafka fetches it again without reporting an error,
 and the partition reads nothing further.
 
-In each case the committed offset does not move past the batch, and no record
-in or after it is lost.
+In each case the committed offset does not move past the batch, and a restart
+on the same group reads from it. A partition the group has never committed
+starts under `auto.offset.reset`.
 
 ## How offsets are committed
 

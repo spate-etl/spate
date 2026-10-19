@@ -155,6 +155,13 @@ Kafka deletes a message when its topic's retention ends, whether or not the
 group has read it. A unit deleted before it is read is lost, which INV-1 places
 outside its property (see [the invariants](../../../../INVARIANTS.md#inv-1)).
 
+Create the work topic with `message.timestamp.type=LogAppendTime`, so the
+broker stamps each message as it appends it and retention counts from then. A
+store that publishes storage notifications to the work topic can stamp them
+itself. RustFS writes each event with timestamp 0, and under the default
+`CreateTime` time retention deletes such messages at the broker's next
+retention check, read or not. Connecting refuses any other value.
+
 A unit moved to the retry or dead-letter topic is a new message, stamped
 when the feed writes it, so each topic's retention counts from the move. The
 work topic's retention does not limit how long a moved unit is kept:
@@ -213,7 +220,8 @@ the group, and refuses topics the feed cannot run on:
   `compact`. Compaction keeps only the latest message for each key, and a
   unit's id is its key, so it can delete a copy of a unit nobody has read;
 - an attempt topic whose `cleanup.policy` is anything but `compact`;
-- an attempt topic that reports no partitions.
+- an attempt topic that reports no partitions;
+- a work topic whose `message.timestamp.type` is anything but `LogAppendTime`.
 
 The attempt topic's partition count, read here, places each attempt record.
 The checks read through two clients built from `brokers` and the `rdkafka`
@@ -229,9 +237,10 @@ TLS handshake (see [Security](#security-tls-mtls-sasl)). Any other failed
 read fails with `KafkaFeedError::Unavailable`. The checks take at most 30 seconds, and an
 error past that bound names the read under way.
 
-When a topic reports no `cleanup.policy`, the feed logs a warning and skips
-the policy check for it. Connecting logs each topic's `cleanup.policy` and the
-attempt topic's partition count.
+When a topic reports no `cleanup.policy`, or the work topic no
+`message.timestamp.type`, the feed logs a warning and skips that check.
+Connecting logs each topic's `cleanup.policy`, the work topic's
+`message.timestamp.type` and the attempt topic's partition count.
 
 The checks run only when the feed connects. A topic whose policy or partition
 count changes later goes unnoticed, and a topic deleted later is handled as

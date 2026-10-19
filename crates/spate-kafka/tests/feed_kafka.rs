@@ -62,17 +62,20 @@ fn section_with(brokers: &str, group: &str, extra: &str) -> String {
     )
 }
 
-/// Create the work, retry and dead-letter topics, one partition each, and
-/// the compacted attempt topic. The feed never creates a topic.
+/// Create the work, retry and dead-letter topics, one partition each, the
+/// work topic stamped on append, and the compacted attempt topic. The feed
+/// never creates a topic.
 fn create_topics(brokers: &str) {
     let admin: AdminClient<DefaultClientContext> = ClientConfig::new()
         .set("bootstrap.servers", brokers)
         .create()
         .expect("admin client");
-    let mut topics: Vec<NewTopic<'_>> = [WORK, RETRY, DEAD]
-        .iter()
-        .map(|t| NewTopic::new(t, 1, TopicReplication::Fixed(1)))
-        .collect();
+    let mut topics = vec![
+        NewTopic::new(WORK, 1, TopicReplication::Fixed(1))
+            .set("message.timestamp.type", "LogAppendTime"),
+        NewTopic::new(RETRY, 1, TopicReplication::Fixed(1)),
+        NewTopic::new(DEAD, 1, TopicReplication::Fixed(1)),
+    ];
     topics.push(
         NewTopic::new(ATTEMPT, ATTEMPT_PARTITIONS, TopicReplication::Fixed(1))
             .set("cleanup.policy", "compact"),
@@ -398,7 +401,10 @@ fn startup_refuses_a_compacted_work_retry_or_dead_letter_topic() {
     create_configured(
         &brokers,
         &[
-            (work.to_owned(), vec![]),
+            (
+                work.to_owned(),
+                vec![("message.timestamp.type", "LogAppendTime")],
+            ),
             (retry_of(work), vec![]),
             (dead_of(work), vec![("cleanup.policy", "delete")]),
             compacted_attempts(work),
@@ -418,10 +424,61 @@ fn startup_refuses_a_compacted_work_retry_or_dead_letter_topic() {
         " retry_cleanup_policy=delete",
         " dead_letter_cleanup_policy=delete",
         " attempt_cleanup_policy=compact",
+        " timestamp_type=LogAppendTime",
         " attempt_partitions=1",
     ] {
         assert!(line.contains(field), "{field}: {line}");
     }
+}
+
+/// Pins that connecting refuses a work topic created with the broker's
+/// default `message.timestamp.type`, naming the topic, and that a work topic
+/// stamped on append connects, with its timestamp type in the line logged at
+/// connect.
+#[test]
+#[ignore = "requires Docker"]
+fn startup_refuses_a_notification_topic_without_log_append_time() {
+    let container = broker().start().expect("start kafka container");
+    let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
+    let brokers = format!("127.0.0.1:{port}");
+    let topics_for = |work: &str, entries: Vec<(&'static str, &'static str)>| {
+        vec![
+            (work.to_owned(), entries),
+            (retry_of(work), vec![]),
+            (dead_of(work), vec![]),
+            compacted_attempts(work),
+        ]
+    };
+
+    let work = "stamped-by-producer";
+    create_configured(&brokers, &topics_for(work, vec![]));
+    let message = refusal(connect_on(&brokers, work));
+    assert!(
+        message.contains(&format!(
+            "the work topic `{work}` keeps each message's own timestamp"
+        )),
+        "{message}"
+    );
+    assert!(
+        message.contains("message.timestamp.type=LogAppendTime"),
+        "{message}"
+    );
+
+    let work = "stamped-on-append";
+    create_configured(
+        &brokers,
+        &topics_for(work, vec![("message.timestamp.type", "LogAppendTime")]),
+    );
+    let mut connected = None;
+    let lines = spate_test::capture_logs(tracing::Level::INFO, || {
+        connected = Some(connect_on(&brokers, work));
+    });
+    connected.unwrap().unwrap();
+    let line = lines
+        .iter()
+        .find(|l| l.contains("the Kafka feed started"))
+        .unwrap_or_else(|| panic!("no connect line: {lines:#?}"));
+    assert!(line.contains(" timestamp_type=LogAppendTime"), "{line}");
 }
 
 /// Pins that connecting refuses a missing attempt topic by its role, and

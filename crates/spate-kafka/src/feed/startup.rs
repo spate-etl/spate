@@ -7,7 +7,10 @@
 //! compaction can delete a copy of a unit nobody has read. The attempt
 //! topic must be compacted and nothing else, since time or size retention
 //! would delete the counts of units still in flight, and it must report at
-//! least one partition. The checks run once, at connect.
+//! least one partition. The work topic must stamp each message as the broker
+//! appends it: a store can write storage notifications to it with timestamp
+//! 0, which time retention deletes at its next check, read or not. The
+//! checks run once, at connect.
 //!
 //! A credential or TLS handshake rejected on the way to the cluster refuses
 //! connecting with the rejection's text, as soon as the client reports it.
@@ -36,6 +39,14 @@ const REJECTION_TICK: Duration = Duration::from_millis(50);
 
 /// The configuration entry naming a topic's cleanup policies.
 const CLEANUP_POLICY: &str = "cleanup.policy";
+
+/// The configuration entry naming which timestamp a topic keeps for each
+/// message.
+const TIMESTAMP_TYPE: &str = "message.timestamp.type";
+
+/// The [`TIMESTAMP_TYPE`] under which the broker stamps each message as it
+/// appends it.
+const LOG_APPEND_TIME: &str = "LogAppendTime";
 
 pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -216,6 +227,8 @@ pub(crate) struct Checked {
     pub(crate) retry_cleanup_policy: Option<String>,
     pub(crate) dead_letter_cleanup_policy: Option<String>,
     pub(crate) attempt_cleanup_policy: Option<String>,
+    /// The work topic's `message.timestamp.type`.
+    pub(crate) timestamp_type: Option<String>,
     /// The attempt topic's partition count, which places each record.
     pub(crate) attempt_partitions: NonZeroU32,
 }
@@ -261,11 +274,12 @@ fn classified(admin: &dyn TopicAdmin, doing: &str, e: &AdminError) -> KafkaFeedE
 ///
 /// [`KafkaFeedError::Refused`] for a missing topic, a compacted work, retry
 /// or dead-letter topic, an attempt topic whose `cleanup.policy` is anything
-/// but `compact` or that reports no partitions, a read that fails the same
-/// way when asked again, a failed read after the client recorded a rejected
-/// credential or TLS handshake, and a topic the cluster describes no
-/// configuration entry for; [`KafkaFeedError::Unavailable`] for a read that
-/// fails otherwise.
+/// but `compact` or that reports no partitions, a work topic whose
+/// `message.timestamp.type` is anything but `LogAppendTime`, a read that
+/// fails the same way when asked again, a failed read after the client
+/// recorded a rejected credential or TLS handshake, and a topic the cluster
+/// describes no configuration entry for; [`KafkaFeedError::Unavailable`] for
+/// a read that fails otherwise.
 pub(crate) async fn check(
     admin: &dyn TopicAdmin,
     topics: &Topics,
@@ -315,6 +329,7 @@ pub(crate) async fn check(
             retry_cleanup_policy: None,
             dead_letter_cleanup_policy: None,
             attempt_cleanup_policy: None,
+            timestamp_type: None,
             attempt_partitions,
         });
     }
@@ -344,6 +359,7 @@ pub(crate) async fn check(
         retry_cleanup_policy: entry(1, CLEANUP_POLICY),
         dead_letter_cleanup_policy: entry(2, CLEANUP_POLICY),
         attempt_cleanup_policy: entry(3, CLEANUP_POLICY),
+        timestamp_type: entry(0, TIMESTAMP_TYPE),
         attempt_partitions,
     };
     let policies = [
@@ -382,6 +398,22 @@ pub(crate) async fn check(
                  `{policy}`). Time or size retention would delete the attempt counts of units \
                  still in flight; create it with `{CLEANUP_POLICY}=compact`",
                 topics.attempt
+            )));
+        }
+    }
+    match &checked.timestamp_type {
+        None => tracing::warn!(
+            topic = &*topics.work,
+            "the work topic reported no `{TIMESTAMP_TYPE}`; the timestamp check is skipped"
+        ),
+        Some(kind) if kind == LOG_APPEND_TIME => {}
+        Some(kind) => {
+            return Err(KafkaFeedError::Refused(format!(
+                "the work topic `{}` keeps each message's own timestamp (`{TIMESTAMP_TYPE}` is \
+                 `{kind}`). A store can write storage notifications to it with timestamp 0, \
+                 as RustFS does, and time retention deletes such messages at its next check, \
+                 read or not; create it with `{TIMESTAMP_TYPE}={LOG_APPEND_TIME}`",
+                topics.work
             )));
         }
     }
@@ -477,6 +509,7 @@ mod tests {
     fn broker_defaults() -> HashMap<String, Option<String>> {
         [
             ("cleanup.policy", "delete"),
+            ("message.timestamp.type", "CreateTime"),
             ("retention.ms", "604800000"),
             ("retention.bytes", "-1"),
             ("min.insync.replicas", "1"),
@@ -505,13 +538,14 @@ mod tests {
 
     impl Scripted {
         /// The four topics, each with the broker's defaults, the attempt
-        /// topic compacted.
+        /// topic compacted and the work topic stamped on append.
         fn all() -> Scripted {
             let mut s = Scripted::default();
             for t in [WORK, RETRY, DEAD, ATTEMPTS] {
                 s.topics.insert(t.to_owned(), broker_defaults());
             }
             s.entry(ATTEMPTS, CLEANUP_POLICY, Some(Some("compact")))
+                .entry(WORK, TIMESTAMP_TYPE, Some(Some(LOG_APPEND_TIME)))
         }
 
         fn without(mut self, topic: &str) -> Scripted {
@@ -632,9 +666,60 @@ mod tests {
                 retry_cleanup_policy: Some("delete".into()),
                 dead_letter_cleanup_policy: Some("delete".into()),
                 attempt_cleanup_policy: Some("compact".into()),
+                timestamp_type: Some("LogAppendTime".into()),
                 attempt_partitions: NonZeroU32::MIN,
             }
         );
+    }
+
+    /// Pins the work topic's timestamp check: `CreateTime` on the work topic
+    /// is refused naming the topic, the value and the setting to use, while
+    /// `CreateTime` on the retry, dead-letter and attempt topics passes; an
+    /// unreported value skips the check with a warning, and the line logged
+    /// at connect shows it as `unreported`.
+    #[test]
+    fn a_work_topic_not_stamped_on_append_is_refused() {
+        let admin = Scripted::all().entry(WORK, TIMESTAMP_TYPE, Some(Some("CreateTime")));
+        let message = refusal(run(&admin));
+        assert!(
+            message.contains(&format!("the work topic `{WORK}`")),
+            "{message}"
+        );
+        assert!(
+            message.contains("`message.timestamp.type` is `CreateTime`"),
+            "{message}"
+        );
+        assert!(
+            message.contains("message.timestamp.type=LogAppendTime"),
+            "{message}"
+        );
+
+        let mut others = Scripted::all();
+        for topic in [RETRY, DEAD, ATTEMPTS] {
+            others = others.entry(topic, TIMESTAMP_TYPE, Some(Some("CreateTime")));
+        }
+        let checked = run(&others).unwrap();
+        assert_eq!(checked.timestamp_type.as_deref(), Some("LogAppendTime"));
+
+        for value in [None, Some(None)] {
+            let admin = Scripted::all().entry(WORK, TIMESTAMP_TYPE, value);
+            let mut result = None;
+            let lines = spate_test::capture_logs(tracing::Level::WARN, || {
+                result = Some(run(&admin));
+            });
+            let checked = result.unwrap().unwrap();
+            assert_eq!(checked.timestamp_type, None);
+            assert_eq!(lines.len(), 1, "{lines:#?}");
+            assert!(lines[0].contains("the work topic"), "{}", lines[0]);
+            let started = spate_test::capture_logs(tracing::Level::INFO, || {
+                crate::feed::log_started(&config(), &checked);
+            });
+            assert!(
+                started[0].contains(" timestamp_type=unreported"),
+                "{}",
+                started[0]
+            );
+        }
     }
 
     /// Pins the attempt topic's policy check: `compact` alone passes, with

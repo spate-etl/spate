@@ -2794,10 +2794,12 @@ mod docker {
             .set("bootstrap.servers", &brokers)
             .create()
             .unwrap();
-        let mut topics: Vec<NewTopic<'_>> = ["units", "units-retry", "units-dead"]
-            .iter()
-            .map(|t| NewTopic::new(t, 1, TopicReplication::Fixed(1)))
-            .collect();
+        let mut topics = vec![
+            NewTopic::new("units", 1, TopicReplication::Fixed(1))
+                .set("message.timestamp.type", "LogAppendTime"),
+            NewTopic::new("units-retry", 1, TopicReplication::Fixed(1)),
+            NewTopic::new("units-dead", 1, TopicReplication::Fixed(1)),
+        ];
         topics.push(
             NewTopic::new("units-attempts", 2, TopicReplication::Fixed(1))
                 .set("cleanup.policy", "compact"),

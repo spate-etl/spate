@@ -63,10 +63,12 @@ fn the_attempt_follower_leaves_the_feed_members_assignment_alone() {
         .set("bootstrap.servers", &brokers)
         .create()
         .expect("admin client");
-    let mut topics: Vec<NewTopic<'_>> = [WORK, RETRY, DEAD]
-        .iter()
-        .map(|t| NewTopic::new(t, 1, TopicReplication::Fixed(1)))
-        .collect();
+    let mut topics = vec![
+        NewTopic::new(WORK, 1, TopicReplication::Fixed(1))
+            .set("message.timestamp.type", "LogAppendTime"),
+        NewTopic::new(RETRY, 1, TopicReplication::Fixed(1)),
+        NewTopic::new(DEAD, 1, TopicReplication::Fixed(1)),
+    ];
     topics.push(
         NewTopic::new(ATTEMPT, 2, TopicReplication::Fixed(1)).set("cleanup.policy", "compact"),
     );

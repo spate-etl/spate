@@ -102,7 +102,8 @@ fn create_topics(pipeline: &Pipeline, brokers: &str) -> Result<(), Box<dyn std::
         .set("bootstrap.servers", brokers)
         .create()?;
     let topics = [
-        NewTopic::new("s3-kafka-demo", 3, TopicReplication::Fixed(1)),
+        NewTopic::new("s3-kafka-demo", 3, TopicReplication::Fixed(1))
+            .set("message.timestamp.type", "LogAppendTime"),
         NewTopic::new("s3-kafka-demo-retry", 1, TopicReplication::Fixed(1)),
         NewTopic::new("s3-kafka-demo-dead", 1, TopicReplication::Fixed(1))
             .set("retention.ms", "-1"),

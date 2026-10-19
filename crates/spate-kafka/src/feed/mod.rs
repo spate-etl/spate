@@ -436,9 +436,10 @@ impl KafkaFeed {
     /// Connecting reads the metadata and configuration of the work, retry,
     /// dead-letter and attempt topics, on the runtime `io`, before any of the
     /// feed's clients joins the group. A missing topic, a compacted work,
-    /// retry or dead-letter topic, or an attempt topic that is not compacted
-    /// only, fails here. The checks take at most 30 seconds. The feed itself
-    /// runs on threads of its own.
+    /// retry or dead-letter topic, an attempt topic that is not compacted
+    /// only, or a work topic not stamped with `LogAppendTime`, fails here. The
+    /// checks take at most 30 seconds. The feed itself runs on threads of its
+    /// own.
     ///
     /// # Errors
     ///
@@ -452,8 +453,9 @@ impl KafkaFeed {
     /// and for topics the feed cannot run on: a missing work, retry,
     /// dead-letter or attempt topic, a work, retry or dead-letter topic whose
     /// `cleanup.policy` includes `compact`, an attempt topic whose
-    /// `cleanup.policy` is anything but `compact`, and an attempt topic that
-    /// reports no partitions.
+    /// `cleanup.policy` is anything but `compact`, an attempt topic that
+    /// reports no partitions, and a work topic whose `message.timestamp.type`
+    /// is anything but `LogAppendTime`.
     /// [`KafkaFeedError::Unavailable`] when a read of the topics fails
     /// otherwise or the checks take longer than 30 seconds, as they do when
     /// no broker accepts a connection, and when one of the feed's consumer,
@@ -595,6 +597,7 @@ fn log_started(config: &KafkaFeedConfig, checked: &startup::Checked) {
         retry_cleanup_policy = %reported(&checked.retry_cleanup_policy),
         dead_letter_cleanup_policy = %reported(&checked.dead_letter_cleanup_policy),
         attempt_cleanup_policy = %reported(&checked.attempt_cleanup_policy),
+        timestamp_type = %reported(&checked.timestamp_type),
         attempt_partitions = checked.attempt_partitions,
         "the Kafka feed started"
     );

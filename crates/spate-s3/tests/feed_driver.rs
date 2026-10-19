@@ -908,14 +908,17 @@ fn a_feed_section_is_refused_beside_a_feed_or_coordinator_given_in_code() {
     assert!(err.to_string().contains("with_coordinator"), "{err}");
 }
 
-/// A run over `s3://b/data/` whose store is the directory `root`, so a
+/// A run over `<scheme>://b/data/` whose store is the directory `root`, so a
 /// notification for bucket `b` names the file `root/<key>`.
 fn launch_on_notifications(
+    scheme: &str,
     root: &Path,
     feed: Arc<dyn Feed>,
     pre: impl FnOnce(&SinkScript),
 ) -> Launched {
-    let yaml = PipelineYaml::endpoint("s3-notification-test", "http://127.0.0.1:9").build();
+    let yaml = PipelineYaml::endpoint("s3-notification-test", "http://127.0.0.1:9")
+        .build()
+        .replace("\"s3://b/data/\"", &format!("\"{scheme}://b/data/\""));
     let store = Arc::new(object_store::local::LocalFileSystem::new_with_prefix(root).unwrap());
     launch_customized(&yaml, test_options(), pre, move |source, _io| {
         line_framer(source).with_store(store).with_feed(feed)
@@ -961,7 +964,7 @@ fn a_message_with_two_records_is_acknowledged_after_both_units() {
     ]));
     // Three failures open the sink's breaker, so the first successful write
     // waits out its open window.
-    let l = launch_on_notifications(dir.path(), Arc::new(feed), |sink| {
+    let l = launch_on_notifications("s3", dir.path(), Arc::new(feed), |sink| {
         for _ in 0..3 {
             sink.enqueue_global(WriteOutcome::retryable("sink down"));
         }
@@ -1010,7 +1013,7 @@ fn a_removal_and_a_test_event_are_acknowledged_by_the_reader() {
         }] }))
         .unwrap(),
     ));
-    let l = launch_on_notifications(dir.path(), Arc::new(feed), |_| {});
+    let l = launch_on_notifications("s3", dir.path(), Arc::new(feed), |_| {});
 
     wait_until(DEADLINE, "both units are acknowledged", || {
         script.acknowledged().len() == 2
@@ -1025,5 +1028,28 @@ fn a_removal_and_a_test_event_are_acknowledged_by_the_reader() {
         written_rows(&l.script).is_empty(),
         "a unit with nothing to read was read"
     );
+    stop(&l);
+}
+
+/// Pins that a source given its store under an `s3a://` URL takes the URL's
+/// host as the bucket a notification must name, as it does under `s3://`.
+#[test]
+fn a_notification_under_an_s3a_url_is_read_from_the_urls_bucket() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let rows = recs("s3a", 3);
+    stage(&data, "a.ndjson", &rows);
+    let size = fs::metadata(data.join("a.ndjson")).unwrap().len();
+
+    let (feed, script) = scripted_feed();
+    let receipt = script.deliver(notification(&[("data/a.ndjson", size)]));
+    let l = launch_on_notifications("s3a", dir.path(), Arc::new(feed), |_| {});
+
+    wait_until(DEADLINE, "the notification is acknowledged", || {
+        !script.acknowledged().is_empty()
+    });
+    assert_eq!(script.acknowledged(), vec![receipt]);
+    assert!(script.failed().is_empty(), "{:?}", script.failed());
+    assert_eq!(sorted(written_rows(&l.script)), sorted(rows));
     stop(&l);
 }

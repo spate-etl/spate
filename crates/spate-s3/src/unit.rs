@@ -193,8 +193,9 @@ pub(crate) enum Decoded {
 /// created object of size 0. Every other record becomes one part, its key
 /// form-decoded (`+` is a space, then percent-decoding as UTF-8) and its ETag
 /// quoted. A record for another bucket, for a key outside `scope`'s prefix,
-/// with no size, or with a key that does not decode or that
-/// [`addressable`] refuses fails the whole message, as does any other body.
+/// with no size, or with a key that does not decode fails the whole message,
+/// and so does a key [`addressable`] refuses on an object of one byte or
+/// more, or any other body.
 /// A message with no part left is acknowledged.
 pub(crate) fn decode(body: &[u8], scope: &Scope, packing: Packing) -> Decoded {
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
@@ -701,12 +702,15 @@ mod tests {
     }
 
     /// Pins that a created object of size 0 is acknowledged with no part,
-    /// even under a key `object_store` cannot address.
+    /// even under a key `object_store` cannot address, but not under a key
+    /// that does not decode.
     #[test]
     fn a_size_zero_record_is_acknowledged_without_a_unit() {
         for key in ["data/empty.ndjson", "data//empty.ndjson", "data/folder/"] {
             acknowledged(decoded(&[created(key, 0)]));
         }
+        let reason = failed(decoded(&[created("data/a%zz", 0)]));
+        assert!(reason.contains("malformed `%` escape"), "{reason}");
         let reason = failed(decoded(&[record(
             "ObjectCreated:Put",
             "bucket",
@@ -717,7 +721,8 @@ mod tests {
     }
 
     /// Pins that the S3 test event and a record that creates nothing, for
-    /// any bucket, are acknowledged with no part.
+    /// any bucket, are acknowledged with no part, an event name that only
+    /// begins with `ObjectCreated` included.
     #[test]
     fn a_test_event_and_a_removal_are_acknowledged_without_a_unit() {
         let test_event = serde_json::json!({
@@ -736,6 +741,7 @@ mod tests {
         for event in [
             "ObjectRemoved:Delete",
             "s3:ObjectRemoved:DeleteMarkerCreated",
+            "ObjectCreatedButNot",
         ] {
             acknowledged(decoded(&[record(
                 event,
@@ -767,9 +773,10 @@ mod tests {
         }
     }
 
-    /// Pins that a body that is neither a descriptor nor a notification, or
-    /// a created record the source cannot read, fails the message, and that
-    /// a descriptor still reads.
+    /// Pins that a body that is neither a descriptor nor a notification, a
+    /// body with a descriptor's `v` that does not decode as one, or a created
+    /// record the source cannot read, fails the message, and that a
+    /// descriptor still reads.
     #[test]
     fn an_unknown_notification_shape_is_dead_lettered() {
         for body in [
@@ -793,6 +800,10 @@ mod tests {
         for record in [no_s3, no_name, negative, fractional] {
             failed(decoded(&[record]));
         }
+        for body in [br#"{"v":1,"objects":[]}"#.to_vec(), br#"{"v":2}"#.to_vec()] {
+            let reason = failed(decode(&body, &scope(), packing()));
+            assert!(reason.contains("not a descriptor"), "{reason}");
+        }
         let object = DescriptorObject {
             key: "data/a.ndjson".into(),
             size: 10,
@@ -804,7 +815,8 @@ mod tests {
     }
 
     /// Pins that a notification's ETag is sent quoted, as a listing reports
-    /// it, that a quoted one is kept, and that an absent one stays absent.
+    /// it, that a quoted one is kept, that one with only a leading quote is
+    /// wrapped, and that an absent one stays absent.
     #[test]
     fn an_unquoted_event_etag_is_sent_quoted() {
         let etag = |value: serde_json::Value| {
@@ -818,12 +830,16 @@ mod tests {
             Some("\"abc\"".to_owned())
         );
         assert_eq!(etag(serde_json::json!("\"")), Some("\"\"\"".to_owned()));
+        assert_eq!(
+            etag(serde_json::json!("\"abc")),
+            Some("\"\"abc\"".to_owned())
+        );
         assert_eq!(etag(serde_json::Value::Null), None);
     }
 
     /// Pins that a message's created records give one part each, in record
     /// order, that a qualifying object is cut into ranges, and that
-    /// `eventTime` becomes the object's time.
+    /// `eventTime` becomes the object's time, 0 when absent or unreadable.
     #[test]
     fn a_message_with_several_records_gives_one_part_each() {
         let parts = read(decoded(&[
@@ -862,6 +878,14 @@ mod tests {
             .unwrap()
             .timestamp_millis();
         assert_eq!(cursors[0].object[0].last_modified_ms, expected);
+        for time in [serde_json::Value::Null, serde_json::json!("yesterday")] {
+            let mut record = created("data/a.ndjson", 10);
+            record["eventTime"] = time;
+            let Decoded::Read(cursors) = decoded(&[record]) else {
+                panic!("not read");
+            };
+            assert_eq!(cursors[0].object[0].last_modified_ms, 0);
+        }
     }
 
     proptest! {

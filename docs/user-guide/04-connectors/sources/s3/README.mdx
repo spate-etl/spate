@@ -379,7 +379,8 @@ Each record is decided on its own:
 
 - a record whose `eventName` is not `ObjectCreated:*`, with or without the
   `s3:` prefix, is dropped, whatever its bucket;
-- a created object of size 0 is dropped, since it holds no records;
+- a created object of size 0 is dropped, since it holds no records, even under
+  a key `object_store` cannot read under its own name;
 - every other created record is one part of the message's unit. Its key is
   decoded as `application/x-www-form-urlencoded` (`+` is a space, then
   percent-decoding as UTF-8), so `%2F` and a raw `/` give the same key. Its
@@ -392,8 +393,9 @@ any created record:
 - names a key outside the `url`'s prefix, taken with the `/` the listing
   appends;
 - has no size, or a size that is not a non-negative integer;
-- has a key that does not decode, or that `object_store` cannot read under
-  its own name: an empty, `.` or `..` segment, a control character, or a
+- has a key that does not decode;
+- has a key `object_store` cannot read under its own name, for an object of
+  one byte or more: an empty, `.` or `..` segment, a control character, or a
   leading or trailing `/`.
 
 A body that is neither a notification nor a descriptor is failed back the same
@@ -403,7 +405,10 @@ with its other records. A source whose `url` names the whole bucket
 (`s3://bucket/`) reads every created key in it. The message is acknowledged
 once, after every part of it has been read and committed.
 
-A notification's unit is a unit of its own, with the queue message's id, so an
+A notification names an object, and its read pins the ETag the notification
+carries. An object deleted or overwritten before it is read fails that read on
+every delivery, so the feed dead-letters its message at the cap. A
+notification's unit is a unit of its own, with the queue message's id, so an
 object that both a listing and a notification announce is read twice. A store
 sends no notification for an object written before the bucket's notification
 configuration takes effect; on AWS S3 that window lasted about 161 seconds in

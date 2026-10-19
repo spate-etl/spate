@@ -38,6 +38,12 @@ harness and the rest of the workspace to CI. Use it between edits and before a
 push. A diff that touches a manifest, `Cargo.lock`, `test-support/`, `xtask/`,
 tooling, or Rust outside `crates/` runs everything.
 
+`cargo xtask mutants --since origin/main` runs cargo-mutants over the same diff
+and exits 2 when a mutant survives. Run it before a push: a new condition,
+match arm or bound comes with the test that kills its mutant
+([`CONTRIBUTING.md`](CONTRIBUTING.md)). The container suites do not run under
+it, so a guard only they reach reports as missed and is mutated by hand.
+
 `cargo xtask --help` lists the commands, each with its own `--help`;
 `cargo xtask ci` is what a pull request must pass.
 CI runs the same commands for lint, type check, doctests, the feature matrix,
@@ -194,6 +200,8 @@ closed unfixed). Check the issue afterwards.
 ## Done means
 
 - `cargo xtask ci` green.
+- `cargo xtask mutants --since origin/main` leaves no surviving mutant, or the
+  pull request body names each one that survives and why.
 - Normative docs changed in the *same commit* as the behavior they describe.
 - A **changelog fragment** under `changelog.d/` whenever the change touches
   what a crate ships: a crate's `src/`, `build.rs` or `Cargo.toml`, or the

@@ -13,8 +13,9 @@
 //!
 //! A broker at `KAFKA_BROKERS`, `localhost:9092` by default. The feed never
 //! creates a topic, so `main()` creates the work, retry, dead-letter and
-//! attempt topics first when they are missing, the dead-letter topic keeping
-//! its messages for ever and the attempt topic compacted. Against a local
+//! attempt topics first when they are missing, the work topic stamped with
+//! `LogAppendTime`, the dead-letter topic keeping its messages for ever and
+//! the attempt topic compacted. Against a local
 //! broker:
 //!
 //! ```sh

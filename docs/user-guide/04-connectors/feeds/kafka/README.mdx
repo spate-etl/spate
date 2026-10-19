@@ -157,10 +157,12 @@ outside its property (see [the invariants](../../../../INVARIANTS.md#inv-1)).
 
 Create the work topic with `message.timestamp.type=LogAppendTime`, so the
 broker stamps each message as it appends it and retention counts from then. A
-store that publishes storage notifications to the work topic can stamp them
-itself. RustFS writes each event with timestamp 0, and under the default
-`CreateTime` time retention deletes such messages at the broker's next
-retention check, read or not. Connecting refuses any other value.
+store that publishes storage notifications to the work topic sets each
+message's timestamp itself. Under the default `CreateTime`, a message stamped
+earlier than the topic's retention window is deleted at the broker's next
+retention check, read or not. Connecting refuses any other value. The
+[S3 source](../../sources/s3/README.mdx) states each store's notification
+settings.
 
 A unit moved to the retry or dead-letter topic is a new message, stamped
 when the feed writes it, so each topic's retention counts from the move. The
@@ -242,8 +244,8 @@ When a topic reports no `cleanup.policy`, or the work topic no
 Connecting logs each topic's `cleanup.policy`, the work topic's
 `message.timestamp.type` and the attempt topic's partition count.
 
-The checks run only when the feed connects. A topic whose policy or partition
-count changes later goes unnoticed, and a topic deleted later is handled as
+The checks run only when the feed connects. A topic whose policy, partition
+count or timestamp type changes later goes unnoticed, and a topic deleted later is handled as
 [Topics](#topics) describes.
 
 ## How a unit finishes

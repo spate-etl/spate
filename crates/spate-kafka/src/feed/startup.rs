@@ -674,9 +674,9 @@ mod tests {
 
     /// Pins the work topic's timestamp check: `CreateTime` on the work topic
     /// is refused naming the topic, the value and the setting to use, while
-    /// `CreateTime` on the retry, dead-letter and attempt topics passes; an
-    /// unreported value skips the check with a warning, and the line logged
-    /// at connect shows it as `unreported`.
+    /// the retry, dead-letter and attempt topics pass at the broker's
+    /// `CreateTime` default; an unreported value skips the check with a
+    /// warning, and the line logged at connect shows it as `unreported`.
     #[test]
     fn a_work_topic_not_stamped_on_append_is_refused() {
         let admin = Scripted::all().entry(WORK, TIMESTAMP_TYPE, Some(Some("CreateTime")));
@@ -694,9 +694,13 @@ mod tests {
             "{message}"
         );
 
-        let mut others = Scripted::all();
+        let others = Scripted::all();
         for topic in [RETRY, DEAD, ATTEMPTS] {
-            others = others.entry(topic, TIMESTAMP_TYPE, Some(Some("CreateTime")));
+            assert_eq!(
+                others.topics[topic][TIMESTAMP_TYPE].as_deref(),
+                Some("CreateTime"),
+                "{topic}"
+            );
         }
         let checked = run(&others).unwrap();
         assert_eq!(checked.timestamp_type.as_deref(), Some("LogAppendTime"));
@@ -783,6 +787,7 @@ mod tests {
             .block_on(check(&admin, &topics(), Scope::Existence, &step))
             .unwrap();
         assert_eq!(existence.attempt_partitions.get(), 2);
+        assert_eq!(existence.timestamp_type, None);
 
         admin.partitions.insert(ATTEMPTS.to_owned(), 0);
         let message = refusal(run(&admin));

@@ -148,14 +148,12 @@ costs about half an hour per edit-test cycle. Add your terminal to *System
 Settings → Privacy & Security → Developer Tools* to exempt it.
 
 `cargo xtask mutants [--since REF]` runs cargo-mutants over the diff from the
-merge base of REF (default `origin/main`) and `HEAD`, with the settings in
-`.cargo/mutants.toml` and the `mutants` nextest profile. Untracked files are
-not in the diff. It exits 2 when a mutant survives. The container suites do not
-run under it, so a mutant only they would catch reports as missed. The tool
-replaces function bodies, operators and match guards, and deletes match arms
-and struct-literal fields.
-It does not swap a `match` arm, delete an early `return`, `break` or
-`continue`, or move a constant across its bound; those stay a review step.
+merge base of REF (default `origin/main`) and `HEAD` to the working tree, with
+the settings in `.cargo/mutants.toml` and the `mutants` nextest profile.
+Untracked files are not in the diff, and a renamed file brings only its edited
+lines. It exits 2 when a mutant survives. The container suites do not run under
+it, so a mutant only they would catch reports as missed. The job summary names
+the mutant forms the tool does not generate, which stay a review step.
 
 ### What CI selects, and how to widen it
 

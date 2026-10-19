@@ -1,31 +1,32 @@
 //! `cargo xtask mutants`: cargo-mutants over the diff against a base, with the
 //! survivors written to the job summary on a CI runner.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::run::{self, Error, Outcome, Step, Streams};
 
-/// Where the patch and cargo-mutants' `mutants.out` land, under the root. The
-/// second half must match `output` in `.cargo/mutants.toml`.
+/// Where the patch and cargo-mutants' `mutants.out` land, under the root. It
+/// must match `output` in `.cargo/mutants.toml`.
 const OUT: &str = "target/mutants";
 
 /// The `git diff` flags that keep a user's diff settings out of the patch.
 /// cargo-mutants reads each path after a `b/` prefix and parses plain text, so
 /// a changed prefix, color or an external or textconv driver would leave it
-/// unable to match or parse the patch.
+/// unable to match or parse the patch. A renamed file contributes only its
+/// edited lines.
 const DIFF_FLAGS: [&str; 6] = [
     "--no-ext-diff",
     "--no-textconv",
     "--no-color",
     "--src-prefix=a/",
     "--dst-prefix=b/",
-    "--no-renames",
+    "--find-renames",
 ];
 
 const HEADING: &str = "## Mutants over the diff\n\n";
 
 /// Writes the diff against the merge base of `base` and `HEAD`, runs
-/// cargo-mutants over it, and appends the survivors to `$GITHUB_STEP_SUMMARY`
+/// cargo-mutants over it, and writes the survivors to `$GITHUB_STEP_SUMMARY`
 /// when the runner sets it.
 ///
 /// # Errors
@@ -44,20 +45,30 @@ pub(super) fn run(root: &Path, explain: bool, base: &str, in_place: bool) -> Out
         );
         return run::run(root, true, &step);
     }
-    let dir = out.join("mutants.out");
-    let ran = (|| {
-        let patch = diff_since(root, base)?;
-        clear_report(&dir)?;
-        std::fs::create_dir_all(&out).map_err(|e| Error::msg(format!("{}: {e}", out.display())))?;
-        std::fs::write(&diff, patch).map_err(|e| Error::msg(format!("{}: {e}", diff.display())))?;
+    let summary = std::env::var_os("GITHUB_STEP_SUMMARY").map(|p| Summary::at(p.into()));
+    let ran = prepare(root, base, &out, &diff).and_then(|()| {
+        // A step timeout signals this process before `finish` can write, so
+        // the summary says the run stopped until cargo-mutants returns.
+        if let Some(summary) = &summary {
+            summary.write(&unfinished(
+                "the step stopped before cargo-mutants returned",
+            ));
+        }
         Ok(run::complete(root, &step, Streams::Inherit)?.code)
-    })();
-    let summary_path = std::env::var_os("GITHUB_STEP_SUMMARY");
-    finish(ran, &dir, summary_path.as_deref().map(Path::new))
+    });
+    finish(ran, &out.join("mutants.out"), summary.as_ref())
 }
 
-/// Removes the previous run's report. A run that stops before testing writes
-/// none, and a stale one would be summarised as this run's.
+/// Writes the patch to `diff` and removes the previous run's report under
+/// `out`. A run that stops before testing writes no report, and a stale one
+/// would be summarised as this run's.
+fn prepare(root: &Path, base: &str, out: &Path, diff: &Path) -> Outcome {
+    let patch = diff_since(root, base)?;
+    clear_report(&out.join("mutants.out"))?;
+    std::fs::create_dir_all(out).map_err(|e| Error::msg(format!("{}: {e}", out.display())))?;
+    std::fs::write(diff, patch).map_err(|e| Error::msg(format!("{}: {e}", diff.display())))
+}
+
 fn clear_report(dir: &Path) -> Outcome {
     match std::fs::remove_dir_all(dir) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
@@ -67,28 +78,51 @@ fn clear_report(dir: &Path) -> Outcome {
     }
 }
 
-/// Appends the summary to `summary_path`, when given, and turns the run into
-/// the outcome: cargo-mutants' exit code from the report in `dir`, or the
-/// error that stopped the run before cargo-mutants finished. A failed append
-/// is reported on stderr and leaves the outcome as it was.
-fn finish(ran: Result<i32, Error>, dir: &Path, summary_path: Option<&Path>) -> Outcome {
-    let text = match &ran {
-        Ok(code) => {
-            let read = |name: &str| std::fs::read_to_string(dir.join(name)).unwrap_or_default();
-            summary(*code, &read("missed.txt"), &read("timeout.txt"))
-        }
-        Err(e) => unfinished(&e.message),
-    };
-    if let Some(path) = summary_path {
-        use std::io::Write;
+/// The job summary file. Each write replaces what this run wrote before and
+/// keeps what the file held when the run started.
+struct Summary {
+    path: PathBuf,
+    from: u64,
+}
+
+impl Summary {
+    fn at(path: PathBuf) -> Self {
+        let from = std::fs::metadata(&path).map_or(0, |m| m.len());
+        Self { path, from }
+    }
+
+    /// Writes `text` after what the file held at the start. A failure is
+    /// reported on stderr and is not an error of the run.
+    fn write(&self, text: &str) {
+        use std::io::{Seek, SeekFrom, Write};
         let written = std::fs::OpenOptions::new()
             .create(true)
-            .append(true)
-            .open(path)
-            .and_then(|mut f| f.write_all(text.as_bytes()));
+            .write(true)
+            .truncate(false)
+            .open(&self.path)
+            .and_then(|mut f| {
+                f.set_len(self.from)?;
+                f.seek(SeekFrom::End(0))?;
+                f.write_all(text.as_bytes())
+            });
         if let Err(e) = written {
-            eprintln!("{}: {e}", path.display());
+            eprintln!("{}: {e}", self.path.display());
         }
+    }
+}
+
+/// Writes the summary, when there is one, and turns the run into the outcome:
+/// cargo-mutants' exit code from the report in `dir`, or the error that stopped
+/// the run before cargo-mutants finished.
+fn finish(ran: Result<i32, Error>, dir: &Path, summary: Option<&Summary>) -> Outcome {
+    if let Some(summary) = summary {
+        summary.write(&match &ran {
+            Ok(code) => {
+                let read = |name: &str| std::fs::read_to_string(dir.join(name)).unwrap_or_default();
+                self::summary(*code, &read("missed.txt"), &read("timeout.txt"))
+            }
+            Err(e) => unfinished(&e.message),
+        });
     }
     match ran? {
         0 => Ok(()),
@@ -212,10 +246,65 @@ mod tests {
     }
 
     /// A directory of this test's own, removed with its contents.
-    fn scratch(name: &str) -> std::path::PathBuf {
+    fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("spate-mutants-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp dir");
+        dir
+    }
+
+    /// Runs git in `dir` with an identity and no signing, so a commit needs no
+    /// global configuration.
+    fn git(dir: &Path, args: &[&str]) {
+        let ok = std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .expect("git")
+            .success();
+        assert!(ok, "git {args:?}");
+    }
+
+    /// A repository on branch `topic`, forked from `main`, with one committed,
+    /// one staged, one unstaged and one untracked edit, a file renamed and
+    /// edited on `topic`, and a commit `main` gained after the fork. Its config
+    /// sets every diff option `DIFF_FLAGS` overrides.
+    fn fixture(name: &str) -> PathBuf {
+        let dir = scratch(name);
+        let write = |name: &str, text: &str| std::fs::write(dir.join(name), text).expect("write");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        for (key, value) in [
+            ("diff.mnemonicPrefix", "true"),
+            ("diff.noprefix", "true"),
+            ("diff.renames", "false"),
+            ("color.diff", "always"),
+            ("diff.external", "false"),
+            ("diff.t.textconv", "false"),
+        ] {
+            git(&dir, &["config", key, value]);
+        }
+        std::fs::write(dir.join(".git/info/attributes"), "* diff=t\n").expect("attributes");
+        for name in ["committed", "staged", "unstaged"] {
+            write(name, "base\n");
+        }
+        write("moved", "one\ntwo\nthree\nfour\nfive\n");
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-q", "-m", "base"]);
+        git(&dir, &["branch", "topic"]);
+        write("main-only", "main-later\n");
+        git(&dir, &["add", "main-only"]);
+        git(&dir, &["commit", "-q", "-m", "main moves on"]);
+        git(&dir, &["checkout", "-q", "topic"]);
+        write("committed", "committed-edit\n");
+        git(&dir, &["mv", "moved", "renamed"]);
+        write("renamed", "one\ntwo\nthree-edited\nfour\nfive\n");
+        git(&dir, &["commit", "-q", "-am", "topic"]);
+        write("staged", "staged-edit\n");
+        git(&dir, &["add", "staged"]);
+        write("unstaged", "unstaged-edit\n");
+        write("untracked", "untracked-edit\n");
         dir
     }
 
@@ -239,16 +328,47 @@ mod tests {
         std::fs::remove_dir_all(&dir).expect("remove temp dir");
     }
 
-    /// The summary is appended after what the file already holds, and the
-    /// exit code passes through unchanged.
+    /// Preparing writes the patch and removes a stale report, and stops when
+    /// the report cannot be removed.
     #[test]
-    fn the_report_appends_the_summary_and_keeps_the_exit_code() {
+    fn preparing_writes_the_patch_and_clears_the_last_report() {
+        let dir = fixture("prepare");
+        let out = dir.join("out");
+        let diff = out.join("pr.diff");
+        std::fs::create_dir_all(out.join("mutants.out")).expect("report dir");
+        std::fs::write(out.join("mutants.out/missed.txt"), "stale\n").expect("write");
+        prepare(&dir, "main", &out, &diff).expect("prepared");
+        assert!(!out.join("mutants.out").exists());
+        let patch = std::fs::read_to_string(&diff).expect("patch");
+        assert!(patch.contains("+committed-edit"), "{patch}");
+
+        std::fs::remove_file(&diff).expect("remove patch");
+        std::fs::write(out.join("mutants.out"), "").expect("a file in the way");
+        assert!(prepare(&dir, "main", &out, &diff).is_err());
+        std::fs::remove_dir_all(&dir).expect("remove temp dir");
+    }
+
+    /// The summary lands after what the file held before the run, replaces
+    /// the run's own earlier line, lists survivors and timeouts, and the exit
+    /// code passes through unchanged.
+    #[test]
+    fn the_summary_replaces_the_runs_own_line_and_keeps_the_exit_code() {
         let dir = scratch("report");
         std::fs::write(dir.join("missed.txt"), "a.rs:1:1: replace f\n").expect("write");
+        std::fs::write(dir.join("timeout.txt"), "c.rs:3:3: replace h\n").expect("write");
         let path = dir.join("summary.md");
         std::fs::write(&path, "earlier\n").expect("write");
+        let summary = Summary::at(path.clone());
+        summary.write(&unfinished(
+            "the step stopped before cargo-mutants returned",
+        ));
+        assert!(
+            std::fs::read_to_string(&path)
+                .expect("summary")
+                .contains("did not finish")
+        );
 
-        let err = finish(Ok(2), &dir, Some(&path)).expect_err("survivors exit 2");
+        let err = finish(Ok(2), &dir, Some(&summary)).expect_err("survivors exit 2");
         assert_eq!(err.code, Some(2));
         let text = std::fs::read_to_string(&path).expect("summary");
         assert!(
@@ -256,6 +376,8 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("- `a.rs:1:1: replace f`"), "{text}");
+        assert!(text.contains("- timeout: `c.rs:3:3: replace h`"), "{text}");
+        assert!(!text.contains("did not finish"), "{text}");
 
         assert!(finish(Ok(0), &dir, None).is_ok());
         std::fs::remove_dir_all(&dir).expect("remove temp dir");
@@ -267,8 +389,13 @@ mod tests {
     fn a_failure_before_the_run_is_summarised() {
         let dir = scratch("early");
         let path = dir.join("summary.md");
-        let err = finish(Err(Error::msg("main does not resolve")), &dir, Some(&path))
-            .expect_err("the error passes through");
+        let summary = Summary::at(path.clone());
+        let err = finish(
+            Err(Error::msg("main does not resolve")),
+            &dir,
+            Some(&summary),
+        )
+        .expect_err("the error passes through");
         assert_eq!(err.message, "main does not resolve");
         let text = std::fs::read_to_string(&path).expect("summary");
         assert!(
@@ -283,11 +410,16 @@ mod tests {
     #[test]
     fn a_failed_summary_write_keeps_the_outcome() {
         let dir = scratch("unwritable");
-        // A directory cannot be opened for append.
-        let err = finish(Ok(2), &dir, Some(&dir)).expect_err("survivors exit 2");
+        // A directory cannot be opened for writing.
+        let summary = Summary::at(dir.clone());
+        let err = finish(Ok(2), &dir, Some(&summary)).expect_err("survivors exit 2");
         assert_eq!(err.code, Some(2));
-        let err = finish(Err(Error::msg("main does not resolve")), &dir, Some(&dir))
-            .expect_err("the error passes through");
+        let err = finish(
+            Err(Error::msg("main does not resolve")),
+            &dir,
+            Some(&summary),
+        )
+        .expect_err("the error passes through");
         assert_eq!(err.message, "main does not resolve");
         std::fs::remove_dir_all(&dir).expect("remove temp dir");
     }
@@ -305,59 +437,33 @@ mod tests {
         );
     }
 
+    /// The patch runs from the merge base to the working tree, whatever the
+    /// user's diff settings: what `main` gained after the fork and untracked
+    /// files are not in it, and a renamed file brings only its edited line.
     #[test]
-    fn the_patch_holds_commits_and_staged_and_unstaged_edits() {
-        let dir = std::env::temp_dir().join(format!("spate-mutants-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        let write = |name: &str, text: &str| std::fs::write(dir.join(name), text).expect("write");
-        let git = |args: &[&str]| {
-            let ok = std::process::Command::new("git")
-                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
-                .args(["-c", "commit.gpgsign=false"])
-                .args(args)
-                .current_dir(&dir)
-                .status()
-                .expect("git")
-                .success();
-            assert!(ok, "git {args:?}");
-        };
-        git(&["init", "-q", "-b", "main"]);
-        // Settings that would otherwise change the patch's paths and bytes.
-        for (key, value) in [
-            ("diff.mnemonicPrefix", "true"),
-            ("diff.noprefix", "true"),
-            ("color.diff", "always"),
-            ("diff.external", "false"),
-            ("diff.t.textconv", "false"),
-        ] {
-            git(&["config", key, value]);
-        }
-        std::fs::write(dir.join(".git/info/attributes"), "* diff=t\n").expect("attributes");
-        for name in ["committed", "staged", "unstaged"] {
-            write(name, "base\n");
-        }
-        git(&["add", "."]);
-        git(&["commit", "-q", "-m", "base"]);
-        git(&["checkout", "-q", "-b", "topic"]);
-        write("committed", "committed-edit\n");
-        git(&["commit", "-q", "-am", "topic"]);
-        write("staged", "staged-edit\n");
-        git(&["add", "staged"]);
-        write("unstaged", "unstaged-edit\n");
-        write("untracked", "untracked-edit\n");
-
+    fn the_patch_holds_the_branch_from_the_merge_base_and_nothing_else() {
+        let dir = fixture("patch");
         let patch = diff_since(&dir, "main").expect("a readable diff");
-        for path in ["committed", "staged", "unstaged"] {
+        for path in ["committed", "staged", "unstaged", "renamed"] {
             assert!(
                 patch.contains(&format!("+++ b/{path}\n")),
                 "{path} in {patch}"
             );
         }
         assert!(!patch.contains('\u{1b}'), "{patch}");
-        for hunk in ["+committed-edit", "+staged-edit", "+unstaged-edit"] {
+        for hunk in [
+            "+committed-edit",
+            "+staged-edit",
+            "+unstaged-edit",
+            "+three-edited",
+        ] {
             assert!(patch.contains(hunk), "{hunk} missing from {patch}");
         }
+        assert!(!patch.contains("main-later"), "{patch}");
+        assert!(
+            !patch.contains("+one\n"),
+            "unedited lines of a renamed file: {patch}"
+        );
         assert!(!patch.contains("untracked-edit"), "{patch}");
         assert!(diff_since(&dir, "no-such-ref").is_err());
         std::fs::remove_dir_all(&dir).expect("remove temp dir");

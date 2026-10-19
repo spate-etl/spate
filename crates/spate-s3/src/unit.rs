@@ -376,6 +376,10 @@ fn form_decoded(key: &str) -> Result<String, String> {
             }
             b => out.push(b),
         }
+        // Decoding never makes the key longer. The check turns a loop that
+        // stops advancing `i`, as a cargo-mutants mutant of either step does,
+        // into a panic before it exhausts the test host's memory.
+        debug_assert!(out.len() <= bytes.len());
         i += 1;
     }
     String::from_utf8(out).map_err(|_| format!("the key \"{key}\" does not decode as UTF-8"))

@@ -30,8 +30,10 @@
 //!
 //! - A received unit stays hidden from other readers for the visibility
 //!   period, and the feed extends it every third of that period while the
-//!   reader renews it. A reader that stops renewing loses its units after at
-//!   most one visibility period, and SQS hands them to another reader.
+//!   reader renews it. A unit the feed has received and not yet handed out
+//!   is extended while the reader keeps calling the feed. A reader that stops
+//!   renewing loses its units after at most one visibility period, and SQS
+//!   hands them to another reader.
 //! - A unit is deleted only when the reader acknowledges it. A failed unit is
 //!   made visible at once, and the queue's redrive policy moves it to the
 //!   dead-letter queue after `maxReceiveCount` receives. The feed never sends

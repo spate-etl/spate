@@ -48,9 +48,9 @@ object is one whole unit, which poisons on its first read without a request.
 A notification's key is decoded as `application/x-www-form-urlencoded` (`+` is
 a space, then percent-decoding as UTF-8). A notification becomes a unit only
 for a record whose `eventName` is `ObjectCreated:*`, with or without an `s3:`
-prefix. A record with no `eventName` is dead-lettered. A record whose
-`eventName` is not `ObjectCreated:*` is acknowledged and dropped, whatever its
-bucket. A record for a bucket other than the source's, or for a
+prefix. A record with no `eventName`, or one that is not a string, is
+dead-lettered. A record whose `eventName` is not `ObjectCreated:*` is
+acknowledged and dropped, whatever its bucket. A record for a bucket other than the source's, or for a
 key outside the source's prefix, taken with the `/` the listing appends, is
 dead-lettered. A record whose object size is 0 is acknowledged without a unit,
 whatever its key's `Path` form. A notification is an S3 `Records[]` message,
@@ -103,6 +103,8 @@ ADR-0054 cuts them, and each range in progress counts toward the units it holds
 `an_unknown_notification_shape_is_dead_lettered`,
 `an_unquoted_event_etag_is_sent_quoted`,
 `an_etag_that_cannot_be_a_header_value_is_dead_lettered`,
+`an_empty_object_with_an_unsendable_etag_is_dropped`,
+`a_ranged_descriptor_with_an_unsendable_etag_fails`,
 `a_record_without_an_event_name_fails_its_message` and
 `a_message_with_several_records_gives_one_part_each`.
 `crates/spate-s3/src/unit_reader.rs`:

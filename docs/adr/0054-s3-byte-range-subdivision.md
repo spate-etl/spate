@@ -1,5 +1,5 @@
 ---
-description: "The object-storage planner cuts a large uncompressed object into byte-range splits and packs every other object as before. Supersedes ADR-0033."
+description: "Large uncompressed objects are cut into byte-range splits and the rest pack as before. Supersedes ADR-0033. ADR-0071 supersedes its feed-path packing."
 ---
 
 # ADR-0054 — A large uncompressed object is cut into byte-range splits, and the rest pack as before

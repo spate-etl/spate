@@ -645,8 +645,8 @@ fn build_store(
 /// The bucket `store` reads, from its `Display` of `AmazonS3(<bucket>)`, so
 /// that `object_store` stays the only parser of the source URL. The builder
 /// refuses a missing bucket and builds an empty one from an `https://` URL
-/// with no bucket in it; an empty bucket is `None`, so every notification
-/// fails.
+/// with no bucket in it; an empty bucket is `None`, so every created record
+/// fails its message.
 fn scope_bucket(store: &AmazonS3) -> Option<String> {
     store
         .to_string()

@@ -5,6 +5,8 @@ test_tool = "nextest"
 all_features = true
 additional_cargo_args = ["--locked"]
 additional_cargo_test_args = ["--profile", "mutants"]
+# xtask's tests read this repository's history, so the scratch copy needs it.
+copy_vcs = true
 # `cargo xtask mutants` reads the report from here.
 output = "target/mutants"
 # `testing`-feature test doubles that no shipped path reaches.

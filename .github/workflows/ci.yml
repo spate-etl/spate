@@ -527,6 +527,37 @@ jobs:
           name: junit-nextest
           path: target/nextest/ci/junit.xml
 
+  mutants:
+    name: Mutants over the diff
+    runs-on: ubuntu-latest
+    needs: [changes, lint, workflows]
+    # Pull requests only: the merge queue carries the same diff, and a push has
+    # none to scope a run to.
+    if: github.event_name == 'pull_request' && needs.changes.outputs.rust == 'true'
+    timeout-minutes: 45
+    steps:
+      # Full history: the merge base has to be resolvable.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-rust
+        with:
+          tools: nextest,cargo-mutants
+          # `--in-place` builds into this checkout's `target/`, so the
+          # all-features dev build `lint` owns is reused.
+          shared-key: dev-allfeatures
+          cache-save: never
+      - name: Mutants
+        # Advisory: survivors are listed in the job summary. The step's own
+        # timeout sits below the job's, so a long run ends the step and not
+        # the job, which `ci-gate` would count as cancelled.
+        continue-on-error: true
+        timeout-minutes: 40
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: cargo xtask mutants --since "$BASE_SHA" --in-place
+
   doctests:
     name: Doc tests and rustdoc
     runs-on: ubuntu-latest
@@ -1234,7 +1265,7 @@ jobs:
     # was cancelled, so a run superseded by a newer one for the same commit
     # leaves no lingering `failure` for branch protection to keep blocking on.
     if: ${{ !cancelled() }}
-    needs: [changes, lint, workflows, deny, changelog, semver, semver-baseline, publish-dry-run, release-dry-run, minimal-versions, test, doctests, docsrs, features, msrv, containers, clickhouse-versions, site, loom, alloc-assertions, fuzz, perf-warm, perf-counters, perf-report]
+    needs: [changes, lint, workflows, deny, changelog, semver, semver-baseline, publish-dry-run, release-dry-run, minimal-versions, test, mutants, doctests, docsrs, features, msrv, containers, clickhouse-versions, site, loom, alloc-assertions, fuzz, perf-warm, perf-counters, perf-report]
     steps:
       - name: Evaluate dependency results
         env:

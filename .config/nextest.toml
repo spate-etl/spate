@@ -42,6 +42,12 @@ fail-fast = false
 retries = 0
 slow-timeout = { period = "300s" }
 
+# What cargo-mutants runs, through `.cargo/mutants.toml`. A mutant is decided
+# by its first failing test, so the rest of the suite is not run.
+[profile.mutants]
+fail-fast = true
+slow-timeout = { period = "30s", terminate-after = 4 }
+
 [profile.ci]
 slow-timeout = { period = "60s", terminate-after = 4 }
 failure-output = "immediate-final"

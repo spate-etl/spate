@@ -77,6 +77,12 @@ pub(crate) fn scope_since(root: &Path, base: &str) -> Result<Scope, String> {
     Ok(scope::scope(&paths, &graph::Graph::load(root)?))
 }
 
+/// The merge base of `base` and `HEAD`. `None` when `base` does not resolve or
+/// shares no history with `HEAD`.
+pub(crate) fn merge_base(root: &Path, base: &str) -> Option<String> {
+    event::GitDiff::new(root, classify::Event::PullRequest).merge_base(base, "HEAD")
+}
+
 /// The ClickHouse lanes needing a job beyond the primary one. The lane names
 /// live in the repository's `ci/clickhouse/`, so adding or repointing one
 /// needs no edit here.

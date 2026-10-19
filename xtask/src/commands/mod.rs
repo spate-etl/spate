@@ -9,6 +9,7 @@ mod fuzz;
 mod hooks;
 mod issue_form;
 mod lint;
+mod mutants;
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -79,6 +80,17 @@ pub(crate) enum Command {
         filter: Option<String>,
         #[command(subcommand)]
         cmd: Option<fault_report::FaultTestCommand>,
+    },
+
+    /// cargo-mutants over the diff against REF; survivors exit 2 (needs
+    /// cargo-mutants; untracked files are not in the diff)
+    Mutants {
+        /// The base whose merge base with HEAD starts the diff
+        #[arg(long, value_name = "REF", default_value = "origin/main")]
+        since: String,
+        /// Mutate the checkout itself, for a disposable CI runner
+        #[arg(long)]
+        in_place: bool,
     },
 
     /// Loom concurrency models for the checkpoint and backpressure primitives
@@ -339,6 +351,7 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: Command) -> Outcome {
         },
         Command::BugReport(args) => issue_form::bug_report(root, explain, &args),
         Command::Fuzz { cmd } => fuzz::dispatch(root, explain, cmd),
+        Command::Mutants { since, in_place } => mutants::run(root, explain, &since, in_place),
         Command::SiteCheck => crate::checks::site_check::check(root, explain),
         Command::Docs { serve } => docs::dispatch(root, explain, serve),
         Command::Release { cmd } => crate::release::dispatch(root, explain, cmd),

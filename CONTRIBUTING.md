@@ -64,6 +64,10 @@ invocations of their own.
 affect, which is faster between edits; a change to `spate-core` reaches most of
 the workspace, so it saves little there.
 
+A new condition, match arm or bound comes with the test that kills its
+mutant. CI lists the mutants that survive over a pull request's diff in the
+job summary.
+
 Containers, benchmarks, nextest profiles, fuzzing and the opt-in suites are in
 [`DEVELOPING.md`](DEVELOPING.md).
 

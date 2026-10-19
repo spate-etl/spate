@@ -45,6 +45,7 @@ These sit outside `ci`, by cost or by dependency:
 | `cargo xtask attribution` | `THIRD-PARTY.md` is regenerated at release; the nightly tier checks that it still generates |
 | `cargo xtask fuzz build`, `cargo xtask fuzz run` | Needs a nightly toolchain; the nightly tier fuzzes |
 | `cargo xtask fault-test` | Needs Docker; runs worker processes for minutes; the weekly tier runs it |
+| `cargo xtask mutants` | Runs a package's suite once per mutant; CI runs it on each pull request, advisory |
 
 Three commands omit `--locked`, which everything else passes because CI does.
 `cargo hack --no-dev-deps` rewrites each `Cargo.toml` as it runs and a locked
@@ -145,6 +146,14 @@ already open.
 its first exec** while Gatekeeper scans it. Across this workspace that alone
 costs about half an hour per edit-test cycle. Add your terminal to *System
 Settings → Privacy & Security → Developer Tools* to exempt it.
+
+`cargo xtask mutants [--since REF]` runs cargo-mutants over the diff from the
+merge base of REF (default `origin/main`) and `HEAD`, with the settings in
+`.cargo/mutants.toml` and the `mutants` nextest profile. Untracked files are
+not in the diff. It exits 2 when a mutant survives. The container suites do not
+run under it, so a mutant only they would catch reports as missed. The tool
+does not swap a `match` arm, delete an early `return`, `break` or `continue`,
+or move a constant across its bound; those stay a review step.
 
 ### What CI selects, and how to widen it
 

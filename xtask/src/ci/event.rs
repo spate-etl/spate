@@ -60,7 +60,7 @@ impl<'a> GitDiff<'a> {
         Self { root, event }
     }
 
-    fn merge_base(&self, base: &str, head: &str) -> Option<String> {
+    pub(super) fn merge_base(&self, base: &str, head: &str) -> Option<String> {
         if base.is_empty() || head.is_empty() {
             return None;
         }

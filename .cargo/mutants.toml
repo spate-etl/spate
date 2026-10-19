@@ -1,0 +1,15 @@
+# cargo-mutants configuration, read by `cargo xtask mutants` and by a bare
+# `cargo mutants` run alike.
+
+test_tool = "nextest"
+all_features = true
+additional_cargo_args = ["--locked"]
+additional_cargo_test_args = ["--profile", "mutants"]
+# `cargo xtask mutants` reads the report from here.
+output = "target/mutants"
+# `testing`-feature test doubles that no shipped path reaches.
+exclude_globs = [
+    "crates/spate-clickhouse/src/testing.rs",
+    "crates/spate-s3/src/bench_seams.rs",
+    "crates/spate-s3/src/fuzz_seams.rs",
+]

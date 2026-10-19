@@ -333,7 +333,7 @@ feed:
 
 A unit the lister publishes names one object or one byte range of one object,
 as an encoded `SplitDescriptor`, and a notification message is one unit with
-one part per created object (see [Storage notifications](#storage-notifications)).
+one part per non-empty created object (see [Storage notifications](#storage-notifications)).
 A unit whose body is neither, or a descriptor naming more than one object, is
 failed back to the feed. Nothing packs on the feed path. A whole-object part is
 cut into byte ranges on the conditions in
@@ -406,8 +406,10 @@ with its other records. A source whose `url` names the whole bucket
 once, after every part of it has been read and committed.
 
 A notification names an object, and its read pins the ETag the notification
-carries. An object deleted or overwritten before it is read fails that read on
-every delivery, so the feed dead-letters its message at the cap. A
+carries. An object deleted before it is read fails that read on every delivery,
+so the feed dead-letters its message at the cap. An object overwritten before
+it is read fails the same way when its notification carries an ETag, and is
+read in its new contents when the notification carries none. A
 notification's unit is a unit of its own, with the queue message's id, so an
 object that both a listing and a notification announce is read twice. A store
 sends no notification for an object written before the bucket's notification

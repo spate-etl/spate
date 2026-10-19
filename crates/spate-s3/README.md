@@ -14,7 +14,7 @@ one-worker case.
 
 With a pipeline `feed:` section the source lists nothing. It reads work units
 from the feed, each naming one object or one byte range of one object, and
-storage notifications, one part per created object. It reads a large object in
+storage notifications, one part per non-empty created object. It reads a large object in
 byte ranges. It acknowledges each finished unit to the
 feed and runs until shut down.
 

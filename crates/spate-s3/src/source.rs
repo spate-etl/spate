@@ -203,10 +203,12 @@ impl S3Source {
     /// Test seam: read work units from `feed` in place of coordinated
     /// splits. Each unit's body is a [`SplitDescriptor`] naming one object,
     /// whole or one byte range of it, or a storage notification read as one
-    /// part per created object; any other body is failed back to the feed. A whole object that qualifies for byte ranges under
-    /// `split_target_bytes` is read in ranges. Conflicts with [`with_coordinator`](S3Source::with_coordinator),
-    /// with a `coordination:` section and with a `feed:` section, and never
-    /// reports the input drained, so the run ends at a shutdown.
+    /// part per non-empty created object; any other body is failed back to
+    /// the feed. A whole object that qualifies for byte ranges under
+    /// `split_target_bytes` is read in ranges. Conflicts with
+    /// [`with_coordinator`](S3Source::with_coordinator), with a
+    /// `coordination:` section and with a `feed:` section, and never reports
+    /// the input drained, so the run ends at a shutdown.
     ///
     /// Behind the off-by-default `testing` feature, outside the semver
     /// surface.

@@ -45,23 +45,25 @@ ends with `/`, and a worker addresses it with `Path::parse`
 `Path::parse` rejects or rewrites cannot be read under its own name, so its
 object is one whole unit, which poisons on its first read without a request.
 
-A notification's key is decoded as `application/x-www-form-urlencoded` (`+` is a
-space, then percent-decoding as UTF-8). A notification becomes a unit only for a
-record whose `eventName` is `ObjectCreated:*`, with or without an `s3:` prefix.
-A record that is not `ObjectCreated:*` is acknowledged and dropped, whatever its
-bucket. A record for a bucket other than the source's, or for a key outside the
-source's prefix, taken with the `/` the listing appends, is dead-lettered. A
-record whose object size is 0 is acknowledged without a unit, whatever its
-key's `Path` form. A notification is an S3 `Records[]` message, the S3 test message
-(`"Event": "s3:TestEvent"`), or the same records inside the envelope RustFS
-sends. The test message is acknowledged without a unit. A message that is
-neither a notification nor a unit Spate published is dead-lettered, and so are
-a created record with no size, or a size that is not a non-negative integer,
-a key that does not decode, and, for an object of one byte or more, a key that
-`Path::parse` rejects or whose `Path` form differs from the decoded key. A message is one unit whose created records give one part each,
-acknowledged once after every part has retired under the work-feed record's
-ack rule; a worker reads a part's ranges as ADR-0054 cuts them, and each range
-in progress counts toward the units it holds (the feed-section record).
+A notification's key is decoded as `application/x-www-form-urlencoded` (`+` is
+a space, then percent-decoding as UTF-8). A notification becomes a unit only
+for a record whose `eventName` is `ObjectCreated:*`, with or without an `s3:`
+prefix. A record that is not `ObjectCreated:*` is acknowledged and dropped,
+whatever its bucket. A record for a bucket other than the source's, or for a
+key outside the source's prefix, taken with the `/` the listing appends, is
+dead-lettered. A record whose object size is 0 is acknowledged without a unit,
+whatever its key's `Path` form. A notification is an S3 `Records[]` message,
+the S3 test message (`"Event": "s3:TestEvent"`), or the same records inside the
+envelope RustFS sends. The test message is acknowledged without a unit. A
+message that is neither a notification nor a unit Spate published is
+dead-lettered, and so are a created record with no size, or a size that is not
+a non-negative integer, a key that does not decode, and, for an object of one
+byte or more, a key that `Path::parse` rejects or whose `Path` form differs
+from the decoded key. A message is one unit whose created records of non-empty
+objects give one part each, acknowledged once after every part has retired
+under the work-feed record's ack rule; a worker reads a part's ranges as
+ADR-0054 cuts them, and each range in progress counts toward the units it holds
+(the feed-section record).
 
 ### Consequences
 

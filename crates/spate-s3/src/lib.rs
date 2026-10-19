@@ -9,8 +9,8 @@
 //!
 //! A pipeline `feed:` section selects the feed path. The source reads work
 //! units from the feed the section names, each unit naming one object or one
-//! byte range of one object, and storage notifications, one part per created
-//! object, and lists nothing itself. A whole object that
+//! byte range of one object, and storage notifications, one part per
+//! non-empty created object, and lists nothing itself. A whole object that
 //! qualifies for byte ranges is read in ranges. That job never
 //! self-terminates, so it ends at a shutdown, and the section's `units_held`
 //! bounds its read parallelism, one lane per object or range in progress.

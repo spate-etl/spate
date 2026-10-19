@@ -189,13 +189,13 @@ pub(crate) enum Decoded {
 /// A notification is an S3 `Records[]` message, the same records inside the
 /// `{"EventName","Key","Records"}` envelope, or the S3 test event, which is
 /// acknowledged. Each record whose `eventName` is not `ObjectCreated:*`, with
-/// or without an `s3:` prefix, is dropped whatever its bucket, and so is a
-/// created object of size 0. Every other record becomes one part, its key
-/// form-decoded (`+` is a space, then percent-decoding as UTF-8) and its ETag
-/// quoted. A record for another bucket, for a key outside `scope`'s prefix,
-/// with no size, or with a key that does not decode fails the whole message,
-/// and so does a key [`addressable`] refuses on an object of one byte or
-/// more, or any other body.
+/// or without an `s3:` prefix, is dropped whatever its bucket. A created
+/// record for another bucket, for a key outside `scope`'s prefix, with no
+/// size, or with a key that does not decode fails the whole message, as does
+/// any other body. A created object of size 0 is then dropped. Every other
+/// record becomes one part, its key form-decoded (`+` is a space, then
+/// percent-decoding as UTF-8) and its ETag quoted, unless [`addressable`]
+/// refuses its key, which fails the whole message.
 /// A message with no part left is acknowledged.
 pub(crate) fn decode(body: &[u8], scope: &Scope, packing: Packing) -> Decoded {
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {

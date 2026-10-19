@@ -16,8 +16,8 @@
 //! receive's reply arrives, less 30 seconds, and clamps every deadline and
 //! extension to it. A unit whose deadline is less than one renewal period
 //! away when the reader asks for it is dropped unseen and returns to the
-//! queue at that deadline, as is a buffered unit whose extension SQS refused
-//! because the receipt no longer holds the message.
+//! queue at that deadline. A buffered unit whose extension SQS refused,
+//! because its receipt no longer holds the message, is dropped unseen too.
 
 use crate::client;
 use crate::config::{BACKEND, SqsFeedConfig};

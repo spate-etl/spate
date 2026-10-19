@@ -129,9 +129,10 @@ The long-poll wait is `visibility / 3` seconds, rounded down and at most 20.
 A unit that arrives at the end of a poll therefore still has two renewal
 periods before its visibility lapses. A unit that is less than one renewal
 period from its lapse when the reader asks for it is dropped unread and
-returns to the queue when it lapses. So is a unit not yet handed out whose
-extension SQS refused because the feed no longer holds the message. A visibility under `60s` polls more often
-on an idle queue.
+returns to the queue when it lapses. A unit not yet handed out whose
+extension SQS refused, because its receipt no longer holds the message, is
+dropped unread too. A visibility under `60s` polls more often on an idle
+queue.
 
 ## The 12-hour hold
 

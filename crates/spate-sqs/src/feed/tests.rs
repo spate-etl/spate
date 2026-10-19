@@ -1185,7 +1185,8 @@ async fn a_buffered_unit_is_extended_until_the_reader_takes_it() {
 }
 
 /// Pins that a buffered unit is not extended once the reader stops calling
-/// the feed, so a stalled worker loses it within one visibility period.
+/// the feed, so a stalled worker loses it one visibility period after its
+/// last extension.
 #[tokio::test(start_paused = true)]
 async fn a_buffered_unit_is_not_extended_once_the_reader_stops_calling() {
     let (feed, queue) = start(MINUTE);
@@ -1280,5 +1281,31 @@ async fn a_failed_extension_of_a_buffered_unit_is_sent_again_at_the_next_tick() 
     assert!(
         retried.iter().any(|h| h == "h1"),
         "the failed extension was not sent again: {retried:?}"
+    );
+}
+
+/// Pins that a `receive` answered with a transient receive failure counts as
+/// the reader polling, so its buffered unit is still extended.
+#[tokio::test(start_paused = true)]
+async fn a_receive_answered_with_a_receive_failure_keeps_buffered_units() {
+    let (feed, queue) = start(MINUTE); // ticks near 20, 40, 60, 80
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    queue.ready(Message::new("u"));
+    assert!(feed.receive(2).unwrap().is_empty());
+    until("the unit is buffered", || feed.buffered() == 1).await;
+    assert!(park.park(Duration::ZERO));
+    for _ in 0..2 {
+        // The receive task's next poll fails, and the reader's next
+        // `receive` answers with it, handing out nothing.
+        queue.fail_next_receive(CallError::retryable("InternalError"));
+        step(Duration::from_secs(25)).await;
+        assert_eq!(feed.receive(1).unwrap_err().kind, FeedErrorKind::Retryable);
+    }
+    step(Duration::from_secs(35)).await; // t near 85 s
+    assert_eq!(
+        feed.receive(1).unwrap().len(),
+        1,
+        "the buffered unit lapsed while the reader polled"
     );
 }

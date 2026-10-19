@@ -1,33 +1,39 @@
 //! The feed read path: [`UnitReader`] reads work units from a [`Feed`] and
 //! acknowledges each under the feed's ack rule.
 //!
-//! A unit's body is a [`SplitDescriptor`] naming one object, whole or one
-//! byte range of it. A whole-object unit over an object the planner would cut
-//! is read in the ranges [`parts_of`] yields, each opened when there is room
+//! A unit's body is a [`SplitDescriptor`](crate::split::SplitDescriptor)
+//! naming one object, whole or one byte range of it, or a storage
+//! notification, which [`decode`](crate::unit::decode) reads into one part per
+//! created object. A notification with no object to read is acknowledged, and
+//! one the source cannot read is failed back. A whole-object part over an
+//! object the planner would cut is read in the ranges
+//! [`parts_of`](crate::unit::parts_of) yields, each opened when there is room
 //! for it. Every part opens its own lane and partition and resumes from no
 //! committed position, so a redelivery and a duplicate are each read in
 //! full. The reader keys deliveries by a sequence number and lanes by
 //! partition, and never keys anything by unit id.
 //!
 //! Each lane in progress takes one of `units_held`, and a delivery whose
-//! lanes have all retired takes one until its acknowledge settles. The
-//! pending parts of held deliveries open, oldest delivery first, before the
-//! reader receives again, so the deliveries held never exceed `units_held`.
+//! lanes have all retired, or that has no part, takes one until its
+//! acknowledge settles. The pending parts of held deliveries open, oldest
+//! delivery first, before the reader receives again, so the deliveries held
+//! never exceed `units_held`.
 //!
 //! A lane retires once it has decided end-of-input at the terminal watermark
 //! `T` and the acknowledged watermark `W` that [`commit`](UnitReader::commit)
 //! receives equals `T`, or at once when the lane emitted nothing. A unit is
-//! acknowledged once every part has opened and retired. An object-level
-//! failure on any lane fails the unit back to the feed, which delivers it
-//! again until it dead-letters it.
+//! acknowledged once every part has opened and retired, so a notification
+//! naming several objects is acknowledged once after all of them. An
+//! object-level failure on any lane fails the unit back to the feed, which
+//! delivers it again until it dead-letters it.
 
-use crate::fetch::{FetcherParams, ObjectEntry, run_fetcher};
-use crate::framer::{Codec, FramerFactory};
+use crate::fetch::{FetcherParams, run_fetcher};
+use crate::framer::FramerFactory;
 use crate::lane::S3Lane;
 use crate::metrics::S3Metrics;
-use crate::split::{Packing, SplitDescriptor};
+use crate::split::Packing;
 use crate::split_ctx::{LANE_HANDOFF_CHUNKS, PoisonReport, SplitTracker};
-use crate::unit::{Cursor, Part, parts_of};
+use crate::unit::{Cursor, Decoded, Part, Scope, decode};
 use spate_core::checkpoint::AckIssuer;
 use spate_core::coordination::{LeaseEpoch, SplitId};
 use spate_core::error::SourceError;
@@ -110,6 +116,8 @@ pub(crate) struct UnitReader {
     /// ends or fails ends the park too.
     waker: FeedWaker,
     parts: LaneParts,
+    /// The bucket and prefix a notification's records must name.
+    scope: Scope,
     /// Lanes in progress plus idle deliveries: the reader receives only
     /// while it holds fewer.
     units_held: usize,
@@ -144,10 +152,12 @@ impl std::fmt::Debug for UnitReader {
 
 impl UnitReader {
     /// A reader over `feed` that holds at most `units_held` units, or
-    /// [`UNITS_HELD`] when that is `None`.
+    /// [`UNITS_HELD`] when that is `None`, and reads the notifications whose
+    /// records fall within `scope`.
     pub(crate) fn new(
         feed: Arc<dyn Feed>,
         parts: LaneParts,
+        scope: Scope,
         units_held: Option<NonZeroUsize>,
     ) -> UnitReader {
         let (waker, park) = wake_channel();
@@ -158,6 +168,7 @@ impl UnitReader {
             park,
             waker,
             parts,
+            scope,
             units_held: units_held.map_or(UNITS_HELD, NonZeroUsize::get),
             started: false,
             next_delivery: 0,
@@ -436,9 +447,15 @@ impl UnitReader {
             Err(e) => return Err(feed_error("receiving from the feed", &e)),
         };
         for delivery in deliveries {
-            match parts(&delivery, self.parts.packing) {
-                Ok(cursor) => self.hold(delivery, cursor),
-                Err(reason) => {
+            match decode(&delivery.unit.body, &self.scope, self.parts.packing) {
+                Decoded::Read(cursors) => self.hold(delivery, cursors),
+                // Held with no part, the delivery is acknowledged by the next
+                // sweep, which retries a `Retryable` answer.
+                Decoded::Acknowledge(reason) => {
+                    tracing::debug!(unit = %delivery.unit.id, reason, "acknowledging a unit with nothing to read");
+                    self.hold(delivery, Vec::new());
+                }
+                Decoded::Fail(reason) => {
                     tracing::warn!(unit = %delivery.unit.id, %reason, "failing an unreadable unit");
                     self.fail_unread(delivery.receipt, reason)?;
                 }
@@ -447,8 +464,8 @@ impl UnitReader {
         Ok(())
     }
 
-    /// Hold `delivery` with `cursor` as its pending parts.
-    fn hold(&mut self, delivery: Delivery, cursor: Cursor) {
+    /// Hold `delivery` with `cursors` as its pending parts.
+    fn hold(&mut self, delivery: Delivery, cursors: Vec<Cursor>) {
         let n = self.next_delivery;
         self.next_delivery = n.checked_add(1).expect("delivery sequence exhausted (u32)");
         self.deliveries.insert(
@@ -456,7 +473,7 @@ impl UnitReader {
             HeldUnit {
                 receipt: delivery.receipt,
                 unit: delivery.unit.id,
-                pending: VecDeque::from([cursor]),
+                pending: VecDeque::from(cursors),
                 lanes: BTreeSet::new(),
                 failing: None,
             },
@@ -570,54 +587,11 @@ fn feed_error(doing: &str, e: &FeedError) -> SourceError {
     }
 }
 
-/// The parts of the one object a unit names, or why the unit cannot be
-/// read.
-///
-/// A ranged unit is refused when its delimiter is not the framer's or its
-/// object is compressed, the refusals the coordinated path makes when it
-/// opens a ranged split.
-fn parts(delivery: &Delivery, packing: Packing) -> Result<Cursor, String> {
-    let descriptor = SplitDescriptor::decode(&delivery.unit.body)
-        .map_err(|e| format!("the unit's body is not a descriptor: {}", e.reason))?;
-    let object = match <[ObjectEntry; 1]>::try_from(descriptor.to_entries()) {
-        Ok([object]) => object,
-        Err(entries) => {
-            return Err(format!(
-                "the unit names {} objects; this source reads one object per unit",
-                entries.len()
-            ));
-        }
-    };
-    let Some(range) = descriptor.range else {
-        return Ok(parts_of(Arc::new(vec![object]), packing));
-    };
-    if packing.delimiter != Some(range.delimiter) {
-        return Err(format!(
-            "the unit splits its object on byte {:#04x}, but the source's framer {}",
-            range.delimiter,
-            match packing.delimiter {
-                Some(d) => format!("resyncs on byte {d:#04x}"),
-                None => "declares no resync delimiter".to_owned(),
-            }
-        ));
-    }
-    let codec = Codec::resolve(packing.compression, &object.key);
-    if codec != Codec::Plain {
-        return Err(format!(
-            "the unit names a byte range of \"{}\", which the source decodes as {}; a byte \
-             range needs an uncompressed object",
-            object.key,
-            format!("{codec:?}").to_lowercase()
-        ));
-    }
-    Ok(Cursor::range(Arc::new(vec![object]), range))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::Compression;
-    use crate::split::DescriptorObject;
+    use crate::split::{DescriptorObject, SplitDescriptor};
     use crate::split_ctx::PoisonKind;
     use crate::testutil::TestLineFramer;
     use spate_core::checkpoint::Checkpointer;
@@ -658,7 +632,15 @@ mod tests {
             metrics,
         };
         let units_held = units_held.map(|n| NonZeroUsize::new(n).unwrap());
-        (UnitReader::new(feed, parts, units_held), rt)
+        (UnitReader::new(feed, parts, scope(), units_held), rt)
+    }
+
+    /// The scope of a source over `s3://bucket/data/`.
+    fn scope() -> Scope {
+        Scope {
+            bucket: Some("bucket".to_owned()),
+            prefix: object_store::path::Path::from("data"),
+        }
     }
 
     /// A reader over a scripted feed with the default `units_held`.
@@ -1260,7 +1242,8 @@ mod tests {
                     metrics: Some(metrics),
                 };
                 let (feed, script) = scripted_feed();
-                let mut reader = UnitReader::new(Arc::new(feed), parts, NonZeroUsize::new(4));
+                let mut reader =
+                    UnitReader::new(Arc::new(feed), parts, scope(), NonZeroUsize::new(4));
                 let object = DescriptorObject {
                     key: "a.ndjson".into(),
                     size,

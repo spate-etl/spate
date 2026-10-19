@@ -34,8 +34,9 @@ use crate::metrics::S3Metrics;
 use crate::planner::{S3Planner, job_fingerprint};
 use crate::split::Packing;
 use crate::split_ctx::SplitCtx;
+use crate::unit::Scope;
 use crate::unit_reader::{LaneParts, UnitReader};
-use object_store::aws::{AmazonS3Builder, AmazonS3ConfigKey};
+use object_store::aws::{AmazonS3, AmazonS3Builder, AmazonS3ConfigKey};
 use object_store::{ClientConfigKey, ObjectStore, ObjectStoreScheme};
 use spate_coordination::store::memory::MemoryStore;
 use spate_coordination::{CoordinationConfig, CoordinatorSpec, StoreCoordinator};
@@ -184,7 +185,9 @@ impl S3Source {
 
     /// Test seam: replace the data store built from `config.url` (the URL
     /// still supplies the listing prefix). Lets tests wrap the store with
-    /// failure- or call-counting decorators.
+    /// failure- or call-counting decorators. On the feed path a source given
+    /// its store reads storage notifications only under an `s3://` or
+    /// `s3a://` URL, whose host is the bucket their records must name.
     ///
     /// Behind the off-by-default `testing` feature because it exposes an
     /// `object_store` type, which this crate's public API otherwise avoids
@@ -300,15 +303,19 @@ impl Source for S3Source {
         })?;
 
         let url = parse(&self.config.url)?;
-        let (store, prefix, unaddressable) = match self.store.take() {
-            // Injected store: the URL still names the listing prefix.
+        let (store, prefix, unaddressable, bucket) = match self.store.take() {
+            // Injected store: the URL still names the listing prefix, and the
+            // bucket for notifications is its host under `s3` or `s3a`.
             Some(store) => {
                 let (_, path) =
                     ObjectStoreScheme::parse(&url).map_err(|e| SourceError::Client {
                         class: ErrorClass::Fatal,
                         reason: format!("parsing {}: {e}", self.config.url),
                     })?;
-                (store, path, None)
+                let bucket = matches!(url.scheme(), "s3" | "s3a")
+                    .then(|| url.host_str().map(str::to_owned))
+                    .flatten();
+                (store, path, None, bucket)
             }
             None => {
                 let built =
@@ -316,7 +323,12 @@ impl Source for S3Source {
                         class: ErrorClass::Fatal,
                         reason: format!("building the object store for {}: {e}", self.config.url),
                     })?;
-                (Arc::from(built.store), built.prefix, built.unaddressable)
+                (
+                    Arc::from(built.store),
+                    built.prefix,
+                    built.unaddressable,
+                    built.bucket,
+                )
             }
         };
 
@@ -355,10 +367,19 @@ impl Source for S3Source {
             };
             tracing::warn!(
                 feed = feed.backend(),
-                "the S3 source publishes no units of its own and reads only units published to \
-                 the feed"
+                "the S3 source publishes no units of its own and reads only the units and \
+                 storage notifications published to the feed"
             );
-            self.state = State::Feed(Box::new(UnitReader::new(feed, parts, self.units_held)));
+            let scope = Scope {
+                bucket,
+                prefix: prefix.clone(),
+            };
+            self.state = State::Feed(Box::new(UnitReader::new(
+                feed,
+                parts,
+                scope,
+                self.units_held,
+            )));
             return Ok(());
         }
         // Coordination metrics are constructor-injected (there is no later
@@ -600,6 +621,7 @@ fn build_store(
             store,
             prefix,
             unaddressable: None,
+            bucket: None,
         });
     }
     // Harden the HTTP client (idle-connection recycling, explicit timeouts)
@@ -611,10 +633,22 @@ fn build_store(
         .with_http_connector(UnaddressableConnector::new(unaddressable.clone()))
         .build()?;
     Ok(BuiltStore {
+        bucket: scope_bucket(&store),
         store: Box::new(store),
         prefix: path,
         unaddressable: Some(unaddressable),
     })
+}
+
+/// The bucket `store` reads, from its `Display` of `AmazonS3(<bucket>)`, so
+/// that `object_store` stays the only parser of the source URL.
+fn scope_bucket(store: &AmazonS3) -> Option<String> {
+    store
+        .to_string()
+        .strip_prefix("AmazonS3(")
+        .and_then(|rest| rest.strip_suffix(')'))
+        .filter(|bucket| !bucket.is_empty())
+        .map(str::to_owned)
 }
 
 /// What [`build_store`] returns.
@@ -625,6 +659,9 @@ struct BuiltStore {
     /// The objects the S3 client takes out of each listing; `None` for any
     /// other scheme.
     unaddressable: Option<UnaddressableKeys>,
+    /// The bucket a notification's records must name; `None` for any other
+    /// scheme.
+    bucket: Option<String>,
 }
 
 /// Conservative HTTP-client defaults for the S3 backend, applied *before* the
@@ -752,6 +789,26 @@ mod tests {
         let (_, want) =
             object_store::parse_url_opts(&url, std::iter::empty::<(String, String)>()).unwrap();
         assert_eq!(got, want);
+    }
+
+    /// Pins that the bucket a notification's records must name is the one
+    /// the built S3 store reads, for each URL form `object_store` accepts.
+    /// A change to `AmazonS3`'s `Display` fails here first.
+    #[test]
+    fn the_scope_bucket_is_the_built_stores_for_every_s3_url_form() {
+        for url in [
+            "s3://my-bucket/data/",
+            "s3a://my-bucket/data/",
+            "https://s3.eu-west-2.amazonaws.com/my-bucket/data/",
+            "https://my-bucket.s3.eu-west-2.amazonaws.com/data/",
+        ] {
+            let built = build_store(&Url::parse(url).unwrap(), &BTreeMap::new()).unwrap();
+            assert_eq!(built.bucket.as_deref(), Some("my-bucket"), "{url}");
+            assert_eq!(built.prefix.as_ref(), "data", "{url}");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let file = Url::from_directory_path(dir.path()).unwrap();
+        assert_eq!(build_store(&file, &BTreeMap::new()).unwrap().bucket, None);
     }
 
     #[test]

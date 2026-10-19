@@ -1,7 +1,7 @@
 //! The feed read path: the source reads work units naming one object or one
-//! byte range from a scripted feed or the in-process feed, over real
-//! `file://` objects, and the feed observes every acknowledgment, failure,
-//! renewal and `Gone` answer. Each test ends the run with a shutdown, since
+//! byte range, and storage notifications, from a scripted feed or the
+//! in-process feed, over real files, and the feed observes every
+//! acknowledgment, failure, renewal and `Gone` answer. Each test ends the run with a shutdown, since
 //! this path never reports `Drained`.
 
 mod support;
@@ -906,4 +906,124 @@ fn a_feed_section_is_refused_beside_a_feed_or_coordinator_given_in_code() {
         .configure_feed(section, Arc::new(MemoryFeed::new()))
         .unwrap_err();
     assert!(err.to_string().contains("with_coordinator"), "{err}");
+}
+
+/// A run over `s3://b/data/` whose store is the directory `root`, so a
+/// notification for bucket `b` names the file `root/<key>`.
+fn launch_on_notifications(
+    root: &Path,
+    feed: Arc<dyn Feed>,
+    pre: impl FnOnce(&SinkScript),
+) -> Launched {
+    let yaml = PipelineYaml::endpoint("s3-notification-test", "http://127.0.0.1:9").build();
+    let store = Arc::new(object_store::local::LocalFileSystem::new_with_prefix(root).unwrap());
+    launch_customized(&yaml, test_options(), pre, move |source, _io| {
+        line_framer(source).with_store(store).with_feed(feed)
+    })
+}
+
+/// A notification whose records each create the object of that size under
+/// that key in bucket `b`, with no ETag, so a local file reads unpinned.
+fn notification(objects: &[(&str, u64)]) -> Unit {
+    let records: Vec<serde_json::Value> = objects
+        .iter()
+        .map(|(key, size)| {
+            serde_json::json!({
+                "eventVersion": "2.1",
+                "eventSource": "aws:s3",
+                "eventName": "ObjectCreated:Put",
+                "s3": { "bucket": { "name": "b" }, "object": { "key": key, "size": size } },
+            })
+        })
+        .collect();
+    Unit::new(
+        "notification",
+        serde_json::to_vec(&serde_json::json!({ "Records": records })).unwrap(),
+    )
+}
+
+/// Pins that a notification naming two objects is acknowledged once, only
+/// after the sink has acknowledged every record of both.
+#[test]
+fn a_message_with_two_records_is_acknowledged_after_both_units() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let first = recs("first", 4);
+    let second = recs("second", 6);
+    stage(&data, "first.ndjson", &first);
+    stage(&data, "second.ndjson", &second);
+    let size = |name: &str| fs::metadata(data.join(name)).unwrap().len();
+
+    let (feed, script) = scripted_feed();
+    let receipt = script.deliver(notification(&[
+        ("data/first.ndjson", size("first.ndjson")),
+        ("data/second.ndjson", size("second.ndjson")),
+    ]));
+    // Three failures open the sink's breaker, so the first successful write
+    // waits out its open window.
+    let l = launch_on_notifications(dir.path(), Arc::new(feed), |sink| {
+        for _ in 0..3 {
+            sink.enqueue_global(WriteOutcome::retryable("sink down"));
+        }
+    });
+
+    wait_until(DEADLINE, "the notification is acknowledged", || {
+        !script.acknowledged().is_empty()
+    });
+    // Read at once: an acknowledgment that came before either object's last
+    // record was written finds rows missing here.
+    let mut want = first.clone();
+    want.extend(second.iter().cloned());
+    assert_eq!(
+        sorted(written_rows(&l.script)),
+        sorted(want),
+        "the notification was acknowledged before every record of both objects"
+    );
+    assert_eq!(script.acknowledged(), vec![receipt]);
+    assert!(script.failed().is_empty(), "{:?}", script.failed());
+    stop(&l);
+}
+
+/// Pins that the S3 test event and a notification that creates nothing are
+/// acknowledged without a read.
+#[test]
+fn a_removal_and_a_test_event_are_acknowledged_by_the_reader() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    stage(&data, "kept.ndjson", &recs("kept", 3));
+
+    let (feed, script) = scripted_feed();
+    let test_event = script.deliver(Unit::new(
+        "test-event",
+        serde_json::to_vec(&serde_json::json!({
+            "Service": "Amazon S3",
+            "Event": "s3:TestEvent",
+            "Bucket": "b",
+        }))
+        .unwrap(),
+    ));
+    let removal = script.deliver(Unit::new(
+        "removal",
+        serde_json::to_vec(&serde_json::json!({ "Records": [{
+            "eventName": "ObjectRemoved:Delete",
+            "s3": { "bucket": { "name": "b" }, "object": { "key": "data/kept.ndjson" } },
+        }] }))
+        .unwrap(),
+    ));
+    let l = launch_on_notifications(dir.path(), Arc::new(feed), |_| {});
+
+    wait_until(DEADLINE, "both units are acknowledged", || {
+        script.acknowledged().len() == 2
+    });
+    let mut acknowledged = script.acknowledged();
+    acknowledged.sort();
+    let mut want = vec![test_event, removal];
+    want.sort();
+    assert_eq!(acknowledged, want);
+    assert!(script.failed().is_empty(), "{:?}", script.failed());
+    assert!(
+        written_rows(&l.script).is_empty(),
+        "a unit with nothing to read was read"
+    );
+    stop(&l);
 }

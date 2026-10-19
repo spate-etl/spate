@@ -1,17 +1,22 @@
 //! Work units of the feed path: each names one object, or one byte range of
-//! one object.
+//! one object, and a storage notification names one object per created
+//! record.
 //!
 //! [`parts_of`] decides whether an object is read whole or cut, by the rule
 //! the planner applies to a listing ([`Packing::delimiter_for`] and
 //! [`tile`]), and [`units`] mints one feed unit per part. The reader cuts a
 //! whole-object unit through the same [`Cursor`], so a unit's ranges are the
-//! same whichever side cuts them.
+//! same whichever side cuts them. [`decode`] reads a delivery's body, a
+//! descriptor or a notification, into the parts the reader opens.
 
 use crate::fetch::ObjectEntry;
+use crate::framer::Codec;
 use crate::listing::addressable;
 use crate::split::{
     DescriptorObject, Packing, SplitDescriptor, SplitRange, split_id_for, split_id_for_range, tile,
 };
+use object_store::path::Path;
+use serde::Deserialize;
 use spate_core::coordination::CoordinationError;
 use spate_core::feed::Unit;
 use std::iter::Peekable;
@@ -159,6 +164,244 @@ pub(crate) fn units(
     Ok(out)
 }
 
+/// Where a notification's records must point for the source to read them.
+#[derive(Clone, Debug)]
+pub(crate) struct Scope {
+    /// The source's bucket. `None` matches no record.
+    pub(crate) bucket: Option<String>,
+    /// The source's prefix within the bucket; empty for the whole bucket.
+    pub(crate) prefix: Path,
+}
+
+/// What the reader does with one delivery.
+pub(crate) enum Decoded {
+    /// Read these parts, then acknowledge the delivery once.
+    Read(Vec<Cursor>),
+    /// Acknowledge the delivery with nothing to read, for the reason given.
+    Acknowledge(&'static str),
+    /// Fail the delivery back to the feed, for the reason given.
+    Fail(String),
+}
+
+/// Read a delivery's `body`: a [`SplitDescriptor`] a lister published, or a
+/// storage notification.
+///
+/// A notification is an S3 `Records[]` message, the same records inside the
+/// `{"EventName","Key","Records"}` envelope, or the S3 test event, which is
+/// acknowledged. Each record whose `eventName` is not `ObjectCreated:*`, with
+/// or without an `s3:` prefix, is dropped whatever its bucket, and so is a
+/// created object of size 0. Every other record becomes one part, its key
+/// form-decoded (`+` is a space, then percent-decoding as UTF-8) and its ETag
+/// quoted. A record for another bucket, for a key outside `scope`'s prefix,
+/// with no size, or with a key that does not decode or that
+/// [`addressable`] refuses fails the whole message, as does any other body.
+/// A message with no part left is acknowledged.
+pub(crate) fn decode(body: &[u8], scope: &Scope, packing: Packing) -> Decoded {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return Decoded::Fail(
+            "the unit's body is neither a descriptor nor a storage notification".to_owned(),
+        );
+    };
+    if value.get("v").is_some() {
+        return match descriptor_parts(body, packing) {
+            Ok(cursor) => Decoded::Read(vec![cursor]),
+            Err(reason) => Decoded::Fail(reason),
+        };
+    }
+    if value.get("Event").and_then(serde_json::Value::as_str) == Some("s3:TestEvent") {
+        return Decoded::Acknowledge("a storage test event");
+    }
+    let Some(records) = value.get("Records").and_then(serde_json::Value::as_array) else {
+        return Decoded::Fail(
+            "the unit's body is neither a descriptor nor a storage notification".to_owned(),
+        );
+    };
+    let mut parts = Vec::with_capacity(records.len());
+    for (i, record) in records.iter().enumerate() {
+        match record_part(record, scope, packing) {
+            Ok(Some(cursor)) => parts.push(cursor),
+            Ok(None) => {}
+            Err(reason) => return Decoded::Fail(format!("notification record {i}: {reason}")),
+        }
+    }
+    if parts.is_empty() {
+        Decoded::Acknowledge("a notification that names no object to read")
+    } else {
+        Decoded::Read(parts)
+    }
+}
+
+/// The fields of a notification record the source reads.
+#[derive(Deserialize)]
+struct Record {
+    #[serde(rename = "eventTime", default)]
+    event_time: Option<String>,
+    s3: RecordS3,
+}
+
+#[derive(Deserialize)]
+struct RecordS3 {
+    bucket: RecordBucket,
+    object: RecordObject,
+}
+
+#[derive(Deserialize)]
+struct RecordBucket {
+    name: String,
+}
+
+#[derive(Deserialize)]
+struct RecordObject {
+    key: String,
+    #[serde(default)]
+    size: Option<u64>,
+    #[serde(rename = "eTag", default)]
+    etag: Option<String>,
+}
+
+/// The part one notification record names, `None` for a record dropped
+/// without one, or why the record fails its message.
+fn record_part(
+    record: &serde_json::Value,
+    scope: &Scope,
+    packing: Packing,
+) -> Result<Option<Cursor>, String> {
+    let Some(event) = record.get("eventName").and_then(serde_json::Value::as_str) else {
+        return Err("the record has no `eventName`".to_owned());
+    };
+    if !event
+        .strip_prefix("s3:")
+        .unwrap_or(event)
+        .starts_with("ObjectCreated:")
+    {
+        return Ok(None);
+    }
+    let record =
+        Record::deserialize(record).map_err(|e| format!("the record is unreadable: {e}"))?;
+    let bucket = record.s3.bucket.name;
+    if scope.bucket.as_deref() != Some(bucket.as_str()) {
+        return Err(format!(
+            "the record names the bucket \"{bucket}\", which this source does not read"
+        ));
+    }
+    let key = form_decoded(&record.s3.object.key)?;
+    let prefix = scope.prefix.as_ref();
+    if !prefix.is_empty()
+        && !key
+            .strip_prefix(prefix)
+            .is_some_and(|rest| rest.starts_with('/'))
+    {
+        return Err(format!(
+            "the key \"{key}\" is outside the source's prefix \"{prefix}/\""
+        ));
+    }
+    let Some(size) = record.s3.object.size else {
+        return Err(format!("the record for \"{key}\" has no size"));
+    };
+    // An empty object has no records, and is read without a request.
+    if size == 0 {
+        return Ok(None);
+    }
+    if !addressable(&key) {
+        return Err(format!(
+            "the key \"{key}\" cannot be read under its own name through `object_store`"
+        ));
+    }
+    let last_modified_ms = record
+        .event_time
+        .as_deref()
+        .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+        .map_or(0, |t| t.timestamp_millis());
+    let entry = ObjectEntry {
+        key,
+        size,
+        etag: record.s3.object.etag.map(quoted),
+        last_modified_ms,
+    };
+    Ok(Some(parts_of(Arc::new(vec![entry]), packing)))
+}
+
+/// `etag` in the quoted form a listing reports and `If-Match` compares,
+/// adding the quotes a notification leaves out.
+fn quoted(etag: String) -> String {
+    if etag.len() >= 2 && etag.starts_with('"') && etag.ends_with('"') {
+        etag
+    } else {
+        format!("\"{etag}\"")
+    }
+}
+
+/// `key` decoded as `application/x-www-form-urlencoded`: `+` is a space, and
+/// each `%HH` is a byte, the bytes read as UTF-8.
+fn form_decoded(key: &str) -> Result<String, String> {
+    let hex = |b: u8| char::from(b).to_digit(16);
+    let bytes = key.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => out.push(b' '),
+            b'%' => {
+                let byte = match (
+                    bytes.get(i + 1).copied().and_then(hex),
+                    bytes.get(i + 2).copied().and_then(hex),
+                ) {
+                    (Some(high), Some(low)) => (high * 16 + low) as u8,
+                    _ => return Err(format!("the key \"{key}\" has a malformed `%` escape")),
+                };
+                out.push(byte);
+                i += 2;
+            }
+            b => out.push(b),
+        }
+        i += 1;
+    }
+    String::from_utf8(out).map_err(|_| format!("the key \"{key}\" does not decode as UTF-8"))
+}
+
+/// The parts of the one object a descriptor body names, or why the unit
+/// cannot be read.
+///
+/// A ranged unit is refused when its delimiter is not the framer's or its
+/// object is compressed, the refusals the coordinated path makes when it
+/// opens a ranged split.
+fn descriptor_parts(body: &[u8], packing: Packing) -> Result<Cursor, String> {
+    let descriptor = SplitDescriptor::decode(body)
+        .map_err(|e| format!("the unit's body is not a descriptor: {}", e.reason))?;
+    let object = match <[ObjectEntry; 1]>::try_from(descriptor.to_entries()) {
+        Ok([object]) => object,
+        Err(entries) => {
+            return Err(format!(
+                "the unit names {} objects; this source reads one object per unit",
+                entries.len()
+            ));
+        }
+    };
+    let Some(range) = descriptor.range else {
+        return Ok(parts_of(Arc::new(vec![object]), packing));
+    };
+    if packing.delimiter != Some(range.delimiter) {
+        return Err(format!(
+            "the unit splits its object on byte {:#04x}, but the source's framer {}",
+            range.delimiter,
+            match packing.delimiter {
+                Some(d) => format!("resyncs on byte {d:#04x}"),
+                None => "declares no resync delimiter".to_owned(),
+            }
+        ));
+    }
+    let codec = Codec::resolve(packing.compression, &object.key);
+    if codec != Codec::Plain {
+        return Err(format!(
+            "the unit names a byte range of \"{}\", which the source decodes as {}; a byte \
+             range needs an uncompressed object",
+            object.key,
+            format!("{codec:?}").to_lowercase()
+        ));
+    }
+    Ok(Cursor::range(Arc::new(vec![object]), range))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -268,6 +511,357 @@ mod tests {
             .map(|part| part.range.expect("the object is cut").delimiter)
             .collect();
         assert_eq!(delimiters, [b'\r'; 3]);
+    }
+
+    /// The scope of a source over `s3://bucket/data/`.
+    fn scope() -> Scope {
+        Scope {
+            bucket: Some("bucket".to_owned()),
+            prefix: Path::from("data"),
+        }
+    }
+
+    /// The scope of a source over the whole of `s3://bucket/`.
+    fn whole_bucket() -> Scope {
+        Scope {
+            bucket: Some("bucket".to_owned()),
+            prefix: Path::from(""),
+        }
+    }
+
+    /// The packing of a source whose range target is 100 bytes.
+    fn packing() -> Packing {
+        Packing {
+            target_bytes: 100,
+            compression: Compression::Auto,
+            delimiter: Some(b'\n'),
+        }
+    }
+
+    /// One notification record, as AWS writes it.
+    fn record(event: &str, bucket: &str, key: &str, size: Option<u64>) -> serde_json::Value {
+        serde_json::json!({
+            "eventVersion": "2.1",
+            "eventSource": "aws:s3",
+            "eventTime": "2026-10-19T12:00:00.000Z",
+            "eventName": event,
+            "s3": {
+                "bucket": { "name": bucket },
+                "object": { "key": key, "size": size, "eTag": "0123abcd", "sequencer": "0A1B" },
+            },
+        })
+    }
+
+    /// A created record for `key` in the source's bucket.
+    fn created(key: &str, size: u64) -> serde_json::Value {
+        record("ObjectCreated:Put", "bucket", key, Some(size))
+    }
+
+    fn message(records: &[serde_json::Value]) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({ "Records": records })).unwrap()
+    }
+
+    /// One part as `(key, etag, range)`.
+    type Read = (String, Option<String>, Option<(u64, u64)>);
+
+    /// Every part of every cursor `decoded` reads.
+    fn read(decoded: Decoded) -> Vec<Read> {
+        match decoded {
+            Decoded::Read(cursors) => cursors
+                .into_iter()
+                .flatten()
+                .map(|part| {
+                    let entry = &part.object[0];
+                    (
+                        entry.key.clone(),
+                        entry.etag.clone(),
+                        part.range.map(|r| (r.start, r.end)),
+                    )
+                })
+                .collect(),
+            Decoded::Acknowledge(reason) => panic!("acknowledged: {reason}"),
+            Decoded::Fail(reason) => panic!("failed: {reason}"),
+        }
+    }
+
+    fn keys(decoded: Decoded) -> Vec<String> {
+        read(decoded).into_iter().map(|(key, _, _)| key).collect()
+    }
+
+    fn failed(decoded: Decoded) -> String {
+        match decoded {
+            Decoded::Fail(reason) => reason,
+            Decoded::Read(cursors) => panic!("read {} parts", cursors.len()),
+            Decoded::Acknowledge(reason) => panic!("acknowledged: {reason}"),
+        }
+    }
+
+    fn acknowledged(decoded: Decoded) -> &'static str {
+        match decoded {
+            Decoded::Acknowledge(reason) => reason,
+            Decoded::Read(cursors) => panic!("read {} parts", cursors.len()),
+            Decoded::Fail(reason) => panic!("failed: {reason}"),
+        }
+    }
+
+    fn decoded(records: &[serde_json::Value]) -> Decoded {
+        decode(&message(records), &scope(), packing())
+    }
+
+    /// Pins the key decoding: `+` is a space, `%2F` and a raw `/` give the
+    /// same key, a percent-encoded UTF-8 sequence decodes, and a malformed
+    /// escape or bytes that are not UTF-8 fail the message.
+    #[test]
+    fn a_notification_key_is_form_decoded() {
+        for key in [
+            "data/dir%2Fhello+world.ndjson",
+            "data/dir/hello+world.ndjson",
+            "data%2Fdir%2Fhello%20world.ndjson",
+        ] {
+            assert_eq!(
+                keys(decoded(&[created(key, 10)])),
+                ["data/dir/hello world.ndjson"],
+                "{key}"
+            );
+        }
+        assert_eq!(
+            keys(decoded(&[created("data/caf%C3%A9+%2B.ndjson", 10)])),
+            ["data/café +.ndjson"]
+        );
+        for key in [
+            "data/a%2",
+            "data/a%zz.ndjson",
+            "data/a%+1.ndjson",
+            "data/a%",
+        ] {
+            let reason = failed(decoded(&[created(key, 10)]));
+            assert!(reason.contains("malformed `%` escape"), "{key}: {reason}");
+        }
+        let reason = failed(decoded(&[created("data/%FF.ndjson", 10)]));
+        assert!(reason.contains("does not decode as UTF-8"), "{reason}");
+    }
+
+    /// Pins that a created record is read whether or not its `eventName`
+    /// carries the `s3:` prefix, and that the envelope RustFS sends is read
+    /// as the bare `Records[]` message is.
+    #[test]
+    fn an_event_name_with_or_without_the_s3_prefix_is_accepted() {
+        for event in [
+            "s3:ObjectCreated:Put",
+            "ObjectCreated:Copy",
+            "ObjectCreated:CompleteMultipartUpload",
+        ] {
+            let message = [record(event, "bucket", "data/a.ndjson", Some(10))];
+            assert_eq!(keys(decoded(&message)), ["data/a.ndjson"], "{event}");
+        }
+        let envelope = serde_json::json!({
+            "EventName": "s3:ObjectCreated:Put",
+            "Key": "bucket/data/a.ndjson",
+            "Records": [record("s3:ObjectCreated:Put", "bucket", "data%2Fa.ndjson", Some(10))],
+        });
+        let body = serde_json::to_vec(&envelope).unwrap();
+        assert_eq!(keys(decode(&body, &scope(), packing())), ["data/a.ndjson"]);
+    }
+
+    /// Pins the scope check: a record for another bucket, or for a key
+    /// outside `prefix/` (one that only shares the prefix's characters
+    /// included), fails the whole message, as does any record when the
+    /// source names no bucket; a whole-bucket source reads any key.
+    #[test]
+    fn a_record_for_another_bucket_or_prefix_is_dead_lettered() {
+        let other = record("ObjectCreated:Put", "elsewhere", "data/a.ndjson", Some(10));
+        let reason = failed(decoded(&[created("data/a.ndjson", 10), other]));
+        assert!(reason.contains("notification record 1"), "{reason}");
+        assert!(reason.contains("the bucket \"elsewhere\""), "{reason}");
+        for key in ["other/a.ndjson", "database/a.ndjson", "data"] {
+            let reason = failed(decoded(&[created(key, 10)]));
+            assert!(
+                reason.contains("outside the source's prefix \"data/\""),
+                "{key}: {reason}"
+            );
+        }
+        let nameless = Scope {
+            bucket: None,
+            prefix: Path::from("data"),
+        };
+        let reason = failed(decode(
+            &message(&[created("data/a.ndjson", 10)]),
+            &nameless,
+            packing(),
+        ));
+        assert!(
+            reason.contains("which this source does not read"),
+            "{reason}"
+        );
+        let body = message(&[created("any/where.ndjson", 10)]);
+        assert_eq!(
+            keys(decode(&body, &whole_bucket(), packing())),
+            ["any/where.ndjson"]
+        );
+    }
+
+    /// Pins that a created object of size 0 is acknowledged with no part,
+    /// even under a key `object_store` cannot address.
+    #[test]
+    fn a_size_zero_record_is_acknowledged_without_a_unit() {
+        for key in ["data/empty.ndjson", "data//empty.ndjson", "data/folder/"] {
+            acknowledged(decoded(&[created(key, 0)]));
+        }
+        let reason = failed(decoded(&[record(
+            "ObjectCreated:Put",
+            "bucket",
+            "data/a",
+            None,
+        )]));
+        assert!(reason.contains("has no size"), "{reason}");
+    }
+
+    /// Pins that the S3 test event and a record that creates nothing, for
+    /// any bucket, are acknowledged with no part.
+    #[test]
+    fn a_test_event_and_a_removal_are_acknowledged_without_a_unit() {
+        let test_event = serde_json::json!({
+            "Service": "Amazon S3",
+            "Event": "s3:TestEvent",
+            "Time": "2026-10-19T12:00:00.000Z",
+            "Bucket": "bucket",
+            "RequestId": "5582815E1AEA5ADF",
+            "HostId": "8cLeGAmw098X5cv4Zkwcmo8vvZa3eH3eKxsPzbB9wrR+YstdA6Knx4Ip8EXAMPLE",
+        });
+        acknowledged(decode(
+            &serde_json::to_vec(&test_event).unwrap(),
+            &scope(),
+            packing(),
+        ));
+        for event in [
+            "ObjectRemoved:Delete",
+            "s3:ObjectRemoved:DeleteMarkerCreated",
+        ] {
+            acknowledged(decoded(&[record(
+                event,
+                "elsewhere",
+                "other/a.ndjson",
+                None,
+            )]));
+        }
+        acknowledged(decoded(&[]));
+    }
+
+    /// Pins that a key `Path::parse` rejects or rewrites fails the message,
+    /// including one whose encoded `/` decodes to an empty segment.
+    #[test]
+    fn a_key_path_parse_rejects_or_rewrites_is_dead_lettered() {
+        for key in [
+            "a//b.ndjson",
+            "/a.ndjson",
+            "a/",
+            "a/%2Fb.ndjson",
+            "a/./b.ndjson",
+        ] {
+            let body = message(&[created(key, 10)]);
+            let reason = failed(decode(&body, &whole_bucket(), packing()));
+            assert!(
+                reason.contains("cannot be read under its own name"),
+                "{key}: {reason}"
+            );
+        }
+    }
+
+    /// Pins that a body that is neither a descriptor nor a notification, or
+    /// a created record the source cannot read, fails the message, and that
+    /// a descriptor still reads.
+    #[test]
+    fn an_unknown_notification_shape_is_dead_lettered() {
+        for body in [
+            b"not json".to_vec(),
+            b"{}".to_vec(),
+            br#"{"Records":{}}"#.to_vec(),
+            br#"["Records"]"#.to_vec(),
+        ] {
+            let reason = failed(decode(&body, &scope(), packing()));
+            assert!(
+                reason.contains("neither a descriptor nor a storage notification"),
+                "{reason}"
+            );
+        }
+        let no_s3 = serde_json::json!({ "eventName": "ObjectCreated:Put" });
+        let no_name = serde_json::json!({ "s3": { "bucket": { "name": "bucket" } } });
+        let mut negative = created("data/a.ndjson", 10);
+        negative["s3"]["object"]["size"] = serde_json::json!(-1);
+        let mut fractional = created("data/a.ndjson", 10);
+        fractional["s3"]["object"]["size"] = serde_json::json!(1.5);
+        for record in [no_s3, no_name, negative, fractional] {
+            failed(decoded(&[record]));
+        }
+        let object = DescriptorObject {
+            key: "data/a.ndjson".into(),
+            size: 10,
+            etag: None,
+            last_modified_ms: 1,
+        };
+        let body = SplitDescriptor::new(vec![object]).encode().unwrap();
+        assert_eq!(keys(decode(&body, &scope(), packing())), ["data/a.ndjson"]);
+    }
+
+    /// Pins that a notification's ETag is sent quoted, as a listing reports
+    /// it, that a quoted one is kept, and that an absent one stays absent.
+    #[test]
+    fn an_unquoted_event_etag_is_sent_quoted() {
+        let etag = |value: serde_json::Value| {
+            let mut created = created("data/a.ndjson", 10);
+            created["s3"]["object"]["eTag"] = value;
+            read(decoded(&[created])).remove(0).1
+        };
+        assert_eq!(etag(serde_json::json!("abc")), Some("\"abc\"".to_owned()));
+        assert_eq!(
+            etag(serde_json::json!("\"abc\"")),
+            Some("\"abc\"".to_owned())
+        );
+        assert_eq!(etag(serde_json::json!("\"")), Some("\"\"\"".to_owned()));
+        assert_eq!(etag(serde_json::Value::Null), None);
+    }
+
+    /// Pins that a message's created records give one part each, in record
+    /// order, that a qualifying object is cut into ranges, and that
+    /// `eventTime` becomes the object's time.
+    #[test]
+    fn a_message_with_several_records_gives_one_part_each() {
+        let parts = read(decoded(&[
+            created("data/small.ndjson", 10),
+            created("data/large.ndjson", 300),
+        ]));
+        assert_eq!(
+            parts,
+            [
+                (
+                    "data/small.ndjson".to_owned(),
+                    Some("\"0123abcd\"".to_owned()),
+                    None
+                ),
+                (
+                    "data/large.ndjson".to_owned(),
+                    Some("\"0123abcd\"".to_owned()),
+                    Some((0, 100))
+                ),
+                (
+                    "data/large.ndjson".to_owned(),
+                    Some("\"0123abcd\"".to_owned()),
+                    Some((100, 200))
+                ),
+                (
+                    "data/large.ndjson".to_owned(),
+                    Some("\"0123abcd\"".to_owned()),
+                    Some((200, 300))
+                ),
+            ]
+        );
+        let Decoded::Read(cursors) = decoded(&[created("data/a.ndjson", 10)]) else {
+            panic!("not read");
+        };
+        let expected = chrono::DateTime::parse_from_rfc3339("2026-10-19T12:00:00.000Z")
+            .unwrap()
+            .timestamp_millis();
+        assert_eq!(cursors[0].object[0].last_modified_ms, expected);
     }
 
     proptest! {

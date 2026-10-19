@@ -149,8 +149,9 @@ group. It never subscribes, so it never takes part in the feed's rebalances.
   contract the attempt and tombstone writes follow, and
   [ADR-0018](0018-kafka-sink-forced-durability.md) the forced `acks=all` and
   idempotence they are written under.
-- The work-feed record and the work-unit record describe the feed and the
-  unit this record counts. ADR-0027's `Superseded by` line is set with them.
+- The work-feed record and
+  [the work-unit record](0071-a-work-unit-is-one-object-or-one-byte-range-of-one-object.md)
+  describe the feed and the unit this record counts. ADR-0027's `Superseded by` line is set with them.
 - The backend can move to share groups once librdkafka's share consumer is
   production-ready. Cooperative assignment is the change to revisit when
   rebalance replay costs a deployment too much.

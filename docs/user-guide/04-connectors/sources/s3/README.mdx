@@ -1,11 +1,13 @@
 ---
-description: "The S3 source runs a coordinated, bounded backfill over a bucket prefix, planning objects into leased splits and terminating once every split completes."
+description: "The S3 source reads a bucket prefix as a coordinated, bounded backfill, or reads work units and storage notifications from a feed."
 ---
 
 # S3 (object storage) source
 
 The S3 source (`spate-s3`, feature `s3` on the `spate` facade) runs a
-**coordinated, bounded backfill** over a bucket prefix. It streams every
+**coordinated, bounded backfill** over a bucket prefix, or, with a `feed:`
+section, reads work units and storage notifications from a feed (see
+[Reading from a feed](#reading-from-a-feed)). On a backfill it streams every
 object's records through the pipeline, and it terminates the pipeline
 itself: `run()` returns `ExitState::Completed` once every split of the
 prefix is committed complete. `Completed` is a strong claim here. Every
@@ -329,17 +331,19 @@ feed:
 
 ### Work units
 
-A unit's body is an encoded `SplitDescriptor` naming one object, or one byte
-range of one object, and a unit naming anything else is failed back to the
-feed. Nothing packs on the feed path. A whole-object unit is cut into byte
-ranges on the conditions in
+A unit the lister publishes names one object or one byte range of one object,
+as an encoded `SplitDescriptor`, and a notification message is one unit with
+one part per created object (see [Storage notifications](#storage-notifications)).
+A unit whose body is neither, or a descriptor naming more than one object, is
+failed back to the feed. Nothing packs on the feed path. A whole-object part is
+cut into byte ranges on the conditions in
 [Large objects and byte ranges](#large-objects-and-byte-ranges), with the ETag
-taken from the unit's descriptor, so a unit with no ETag is read whole on one
-lane. A unit naming a byte range is failed back when its range is cut on a
-delimiter other than the framer's, or when `compression` decodes its object.
-The unit is acknowledged once, after every range has been read and committed.
-An object failure on one range fails the whole unit back, and its other ranges
-stop.
+taken from the descriptor or the notification, so a part with no ETag is read
+whole on one lane. A unit naming a byte range is failed back when its range is
+cut on a delimiter other than the framer's, or when `compression` decodes its
+object. The unit is acknowledged once, after every part and range has been read
+and committed. An object failure on one range fails the whole unit back, and its
+other parts and ranges stop.
 
 Each range in progress takes one slot of `units_held`. Deliveries received
 alongside a large object wait until all of its ranges have opened, and the
@@ -350,15 +354,84 @@ waiting then goes back to the queue unread, one receive closer to
 partition's commit point.
 
 `units_held` bounds the lanes the source reads at once, one per whole object or
-range, and with them its read parallelism. The default is 96. The source publishes no units of
-its own and reads only the units published to the feed, and a startup WARN
-says so. An in-process feed built from the file alone has no publisher, so the
+range, and with them its read parallelism. The default is 96. The source
+publishes no units of its own and reads only the units and storage
+notifications published to the feed, and a startup WARN says so. An in-process feed built from the file alone has no publisher, so the
 run reads nothing. To publish to the in-process feed, code builds a
 `MemoryFeed`, keeps a handle, and passes it to `Pipeline::feed` with
 `feed: { memory: {} }` in the file. Units from another process need a durable
 [feed backend](../../feeds/README.mdx). A run on the feed path never reports its input finished, so it ends
 at a shutdown. Without a `feed:` section the
 source plans splits as described above.
+
+### Storage notifications
+
+The source reads the notifications a store publishes to the feed when an
+object is created. A message is one of:
+
+- an S3 `Records[]` message;
+- the same records inside the `{"EventName", "Key", "Records"}` envelope
+  RustFS sends;
+- the S3 test event (`"Event": "s3:TestEvent"`), acknowledged with nothing
+  read.
+
+Each record is decided on its own:
+
+- a record whose `eventName` is not `ObjectCreated:*`, with or without the
+  `s3:` prefix, is dropped, whatever its bucket;
+- a created object of size 0 is dropped, since it holds no records;
+- every other created record is one part of the message's unit. Its key is
+  decoded as `application/x-www-form-urlencoded` (`+` is a space, then
+  percent-decoding as UTF-8), so `%2F` and a raw `/` give the same key. Its
+  ETag is sent quoted in `If-Match`.
+
+The message is failed back to the feed, which dead-letters it at its cap, when
+any created record:
+
+- names a bucket other than the one in the source's `url`;
+- names a key outside the `url`'s prefix, taken with the `/` the listing
+  appends;
+- has no size, or a size that is not a non-negative integer;
+- has a key that does not decode, or that `object_store` cannot read under
+  its own name: an empty, `.` or `..` segment, a control character, or a
+  leading or trailing `/`.
+
+A body that is neither a notification nor a descriptor is failed back the same
+way, and that includes an S3 message inside an SNS envelope. On a store that
+puts several records in one message, one such record dead-letters the message
+with its other records. A source whose `url` names the whole bucket
+(`s3://bucket/`) reads every created key in it. The message is acknowledged
+once, after every part of it has been read and committed.
+
+A notification's unit is a unit of its own, with the queue message's id, so an
+object that both a listing and a notification announce is read twice. A store
+sends no notification for an object written before the bucket's notification
+configuration takes effect; on AWS S3 that window lasted about 161 seconds in
+one measured run ([ADR-0072](../../../../adr/0072-missed-storage-notifications-are-not-reconciled-by-re-listing.md)).
+Spate does not re-list to find a notification the store never sent.
+
+Each store needs its own settings for its notifications to arrive:
+
+- **AWS S3.** The bucket's notification configuration sends
+  `s3:ObjectCreated:*` to the queue
+  ([AWS](https://docs.aws.amazon.com/AmazonS3/latest/userguide/ways-to-add-notification-config-to-bucket.html)).
+  A later `PutBucketNotificationConfiguration` from another tool replaces the
+  bucket's whole configuration, this rule with it
+  ([AWS](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketNotificationConfiguration.html)).
+  The queue's own settings are on the [SQS feed](../../feeds/sqs/README.mdx#storage-notifications)
+  page.
+- **RustFS.** The Kafka notification target needs a `queue_dir`. Without one,
+  an event that fails to send is lost
+  ([RustFS](https://docs.rustfs.com/en/operations/event-notifications)).
+  RustFS writes each event with timestamp 0, so the work topic needs the
+  setting the [Kafka feed](../../feeds/kafka/README.mdx#topics) page states,
+  and the feed refuses a work topic without it.
+- **Ceph RGW.** The notification topic must be persistent, with unlimited
+  `time_to_live` and `max_retries`. A persistent topic whose queue fills while
+  the feed is unreachable fails the store's own writes with 503
+  ([Ceph](https://docs.ceph.com/en/latest/radosgw/notifications/)). How RGW
+  encodes a key in its notifications is unverified, and the source decodes it
+  as it decodes AWS S3's.
 
 ## Split identity and drift
 

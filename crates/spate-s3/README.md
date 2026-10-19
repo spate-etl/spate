@@ -14,7 +14,8 @@ one-worker case.
 
 With a pipeline `feed:` section the source lists nothing. It reads work units
 from the feed, each naming one object or one byte range of one object, and
-reads a large object in byte ranges. It acknowledges each finished unit to the
+storage notifications, one part per created object. It reads a large object in
+byte ranges. It acknowledges each finished unit to the
 feed and runs until shut down.
 
 Applications should depend on the [`spate`](https://crates.io/crates/spate)

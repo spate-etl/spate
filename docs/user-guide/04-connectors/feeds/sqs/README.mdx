@@ -205,6 +205,24 @@ from 200 ms up to 5 s between them. A delete or visibility change SQS fails
 for one entry is dropped, and that unit returns to the queue when its
 visibility lapses.
 
+## Storage notifications
+
+An AWS S3 bucket can send its notifications to the queue, and a source that
+reads them takes each message as one unit. A notification carries no
+`spate.unit` attribute, so its unit's id is the message's `MessageId`. The
+queue receives the bucket's notifications only when
+([AWS](https://docs.aws.amazon.com/AmazonS3/latest/userguide/ways-to-add-notification-config-to-bucket.html)):
+
+- its access policy lets the bucket's account send to it from
+  `s3.amazonaws.com`;
+- an encrypted queue uses a customer managed KMS key whose key policy lets
+  Amazon S3 use it;
+- its maximum message size is at least 64 KB;
+- it is in the bucket's region.
+
+The bucket's side, and which records the source reads, are on the
+[S3 source](../../sources/s3/README.mdx#storage-notifications) page.
+
 ## Cost per request
 
 Each unit costs a send, a receive and a delete, each batched up to ten to a

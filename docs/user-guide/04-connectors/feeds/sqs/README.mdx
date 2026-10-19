@@ -118,9 +118,12 @@ unnoticed (see [Retention](#retention)).
 A worker receives each unit hidden from the other workers for
 `visibility`. Every third of that period the feed extends the visibility of
 each unit handed to its reader or renewed since the last extension, back to
-the full period. A worker that stops renewing, because it crashed or its control loop
-stalled, loses its units at most one visibility period after their last
-extension, and SQS hands them to another worker.
+the full period. Units the feed has received and not yet handed out are
+extended on the same tick while the reader keeps calling the feed, so a unit
+waiting for room in the reader keeps its place. A worker that stops renewing,
+because it crashed or its control loop stalled, loses its units at most one
+visibility period after their last extension, those not yet handed out
+included, and SQS hands them to another worker.
 
 The long-poll wait is `visibility / 3` seconds, rounded down and at most 20.
 A unit that arrives at the end of a poll therefore still has two renewal

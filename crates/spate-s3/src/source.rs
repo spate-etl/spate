@@ -643,13 +643,16 @@ fn build_store(
 }
 
 /// The bucket `store` reads, from its `Display` of `AmazonS3(<bucket>)`, so
-/// that `object_store` stays the only parser of the source URL. A built
-/// store always names one: its builder refuses a missing bucket.
+/// that `object_store` stays the only parser of the source URL. The builder
+/// refuses a missing bucket and builds an empty one from an `https://` URL
+/// with no bucket in it; an empty bucket is `None`, so every notification
+/// fails.
 fn scope_bucket(store: &AmazonS3) -> Option<String> {
     store
         .to_string()
         .strip_prefix("AmazonS3(")
         .and_then(|rest| rest.strip_suffix(')'))
+        .filter(|bucket| !bucket.is_empty())
         .map(str::to_owned)
 }
 
@@ -794,8 +797,9 @@ mod tests {
     }
 
     /// Pins that the bucket a notification's records must name is the one
-    /// the built S3 store reads, for each URL form `object_store` accepts.
-    /// A change to `AmazonS3`'s `Display` fails here first.
+    /// the built S3 store reads, for each URL form `object_store` accepts,
+    /// and that a URL with an empty bucket scopes none. A change to
+    /// `AmazonS3`'s `Display` fails here first.
     #[test]
     fn the_scope_bucket_is_the_built_stores_for_every_s3_url_form() {
         for url in [
@@ -807,6 +811,14 @@ mod tests {
             let built = build_store(&Url::parse(url).unwrap(), &BTreeMap::new()).unwrap();
             assert_eq!(built.bucket.as_deref(), Some("my-bucket"), "{url}");
             assert_eq!(built.prefix.as_ref(), "data", "{url}");
+        }
+        for url in [
+            "https://s3.eu-west-2.amazonaws.com/",
+            "https://s3.eu-west-2.amazonaws.com//data/",
+            "https://.s3.eu-west-2.amazonaws.com/data/",
+        ] {
+            let built = build_store(&Url::parse(url).unwrap(), &BTreeMap::new()).unwrap();
+            assert_eq!(built.bucket, None, "{url} names no bucket");
         }
         let dir = tempfile::tempdir().unwrap();
         let file = Url::from_directory_path(dir.path()).unwrap();

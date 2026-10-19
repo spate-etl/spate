@@ -190,10 +190,10 @@ pub(crate) enum Decoded {
 /// `{"EventName","Key","Records"}` envelope, or the S3 test event, which is
 /// acknowledged. A record with no `eventName` fails the whole message. Each
 /// record whose `eventName` is not `ObjectCreated:*`, with or without an
-/// `s3:` prefix, is dropped whatever its bucket. A created
-/// record for another bucket, for a key outside `scope`'s prefix, with no
-/// size, or with a key that does not decode fails the whole message, as does
-/// any other body. A created object of size 0 is then dropped. Every other
+/// `s3:` prefix, is dropped whatever its bucket. A created record that does
+/// not deserialise, or one for another bucket, for a key outside `scope`'s
+/// prefix, with no size, or with a key that does not decode fails the whole
+/// message, as does any other body. A created object of size 0 is then dropped. Every other
 /// record becomes one part, its key form-decoded (`+` is a space, then
 /// percent-decoding as UTF-8) and its ETag quoted, unless [`addressable`]
 /// refuses its key, which fails the whole message.
@@ -704,7 +704,8 @@ mod tests {
 
     /// Pins that a created object of size 0 is acknowledged with no part,
     /// even under a key `object_store` cannot address, but not under a key
-    /// that does not decode, and that an object of one byte is read.
+    /// that does not decode, for another bucket or outside the prefix, and
+    /// that an object of one byte is read.
     #[test]
     fn a_size_zero_record_is_acknowledged_without_a_unit() {
         for key in ["data/empty.ndjson", "data//empty.ndjson", "data/folder/"] {
@@ -712,6 +713,15 @@ mod tests {
         }
         let reason = failed(decoded(&[created("data/a%zz", 0)]));
         assert!(reason.contains("malformed `%` escape"), "{reason}");
+        let reason = failed(decoded(&[record(
+            "ObjectCreated:Put",
+            "elsewhere",
+            "data/empty.ndjson",
+            Some(0),
+        )]));
+        assert!(reason.contains("the bucket \"elsewhere\""), "{reason}");
+        let reason = failed(decoded(&[created("other/empty.ndjson", 0)]));
+        assert!(reason.contains("outside the source's prefix"), "{reason}");
         assert_eq!(
             keys(decoded(&[created("data/one.ndjson", 1)])),
             ["data/one.ndjson"]

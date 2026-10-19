@@ -56,9 +56,10 @@ whatever its key's `Path` form. A notification is an S3 `Records[]` message,
 the S3 test message (`"Event": "s3:TestEvent"`), or the same records inside the
 envelope RustFS sends. The test message is acknowledged without a unit. A
 message that is neither a notification nor a unit Spate published is
-dead-lettered, and so are a created record with no size, or a size that is not
-a non-negative integer, a key that does not decode, and, for an object of one
-byte or more, a key that `Path::parse` rejects or whose `Path` form differs
+dead-lettered, and so are a created record that lacks a record's fields or
+carries one of the wrong type, a created record with no size, or a size that is
+not a non-negative integer, a key that does not decode, and, for an object of
+one byte or more, a key that `Path::parse` rejects or whose `Path` form differs
 from the decoded key. A message is one unit whose created records of non-empty
 objects give one part each, acknowledged once after every part has retired
 under the work-feed record's ack rule; a worker reads a part's ranges as

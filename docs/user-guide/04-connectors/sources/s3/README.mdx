@@ -390,6 +390,8 @@ Each record is decided on its own:
 The message is failed back to the feed, which dead-letters it at its cap, when
 any created record:
 
+- lacks `s3.bucket.name` or `s3.object.key`, or carries a field of the wrong
+  type;
 - names a bucket other than the one in the source's `url`;
 - names a key outside the `url`'s prefix, taken with the `/` the listing
   appends;
@@ -417,8 +419,9 @@ carries. An object deleted before it is read fails that read on every delivery,
 so the feed dead-letters its message at the cap. An object overwritten before
 it is read fails the same way when its notification carries an ETag, and is
 read in its new contents when the notification carries none. A
-notification's unit is a unit of its own, with the queue message's id, so an
-object that both a listing and a notification announce is read twice. A store
+notification's unit is a unit of its own, with the feed message's id (the SQS
+`MessageId`, or the Kafka message key), so an object that both a listing and a
+notification announce is read twice. A store
 sends no notification for an object written before the bucket's notification
 configuration takes effect; on AWS S3 that window lasted about 161 seconds in
 one measured run ([ADR-0072](../../../../adr/0072-missed-storage-notifications-are-not-reconciled-by-re-listing.md)).

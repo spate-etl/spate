@@ -31,12 +31,39 @@ pub fn http_with_body(
     path: &str,
     body: &str,
 ) -> io::Result<(u16, String)> {
+    http_with_headers(addr, method, path, &[], body)
+}
+
+/// [`http_with_body()`] with `headers` sent after `Host`, each as
+/// `name: value`. A `Host`, `Content-Length` or `Connection` among them is
+/// skipped, since the exchange sets its own.
+///
+/// # Errors
+///
+/// As [`http()`].
+pub fn http_with_headers(
+    addr: SocketAddr,
+    method: &str,
+    path: &str,
+    headers: &[(String, String)],
+    body: &str,
+) -> io::Result<(u16, String)> {
     let mut stream = TcpStream::connect_timeout(&addr, TIMEOUT)?;
     stream.set_read_timeout(Some(TIMEOUT))?;
     stream.set_write_timeout(Some(TIMEOUT))?;
+    let mut head = format!("{method} {path} HTTP/1.1\r\nHost: {addr}\r\n");
+    for (name, value) in headers {
+        if ["host", "content-length", "connection"]
+            .iter()
+            .any(|own| name.eq_ignore_ascii_case(own))
+        {
+            continue;
+        }
+        head.push_str(&format!("{name}: {value}\r\n"));
+    }
     write!(
         stream,
-        "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "{head}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     )?;
     let mut response = String::new();

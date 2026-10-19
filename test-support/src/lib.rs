@@ -17,7 +17,7 @@ pub use child::{ChildTest, run_in_child};
 pub use corpus::{fnv1a, pin};
 #[cfg(feature = "elasticmq")]
 pub use elasticmq::{ElasticMq, Message, QUERY_PORT};
-pub use http::{http, http_with_body};
+pub use http::{http, http_with_body, http_with_headers};
 #[cfg(feature = "rustfs")]
 pub use rustfs::{ACCESS_KEY, REGION, Rustfs, S3_PORT, SECRET_KEY};
 #[cfg(feature = "tls")]

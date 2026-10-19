@@ -4656,6 +4656,7 @@ dependencies = [
  "humantime-serde",
  "metrics",
  "metrics-exporter-prometheus",
+ "object_store",
  "openssl-sys",
  "proptest",
  "rdkafka",

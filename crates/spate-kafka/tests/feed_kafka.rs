@@ -24,8 +24,9 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use support::broker;
 use support::feed::{
-    ATTEMPT, DEAD, DEADLINE, RETRY, WORK, committed, data_dir, exists, feed_yaml, high_watermark,
-    launch_with, produce_raw, read_attempts, recs, sorted, stage, written,
+    ATTEMPT, ATTEMPT_PARTITIONS, DEAD, DEADLINE, WORK, committed, create_topics, data_dir, exists,
+    feed_yaml, high_watermark, launch_with, produce_raw, read_attempts, recs, sorted, stage,
+    written,
 };
 use testcontainers::runners::SyncRunner;
 use testcontainers_modules::kafka::apache::KAFKA_PORT;
@@ -46,9 +47,6 @@ const CHILD_MARKER: &str = "SPATE_FEED_CHILD_MARKER";
 /// The attempt cap the killed worker runs at, when the parent sets one.
 const CHILD_CAP: &str = "SPATE_FEED_CHILD_CAP";
 
-/// The attempt topic's partition count on the broker.
-const ATTEMPT_PARTITIONS: i32 = 2;
-
 /// The `feed:` section both workers run, at the session timeout above.
 fn section(brokers: &str, group: &str) -> String {
     section_with(brokers, group, "")
@@ -60,36 +58,6 @@ fn section_with(brokers: &str, group: &str, extra: &str) -> String {
         "session.timeout.ms: \"6000\"",
         &format!("session.timeout.ms: \"{}\"", SESSION.as_millis()),
     )
-}
-
-/// Create the work, retry and dead-letter topics, one partition each, the
-/// work topic stamped on append, and the compacted attempt topic. The feed
-/// never creates a topic.
-fn create_topics(brokers: &str) {
-    let admin: AdminClient<DefaultClientContext> = ClientConfig::new()
-        .set("bootstrap.servers", brokers)
-        .create()
-        .expect("admin client");
-    let mut topics = vec![
-        NewTopic::new(WORK, 1, TopicReplication::Fixed(1))
-            .set("message.timestamp.type", "LogAppendTime"),
-        NewTopic::new(RETRY, 1, TopicReplication::Fixed(1)),
-        NewTopic::new(DEAD, 1, TopicReplication::Fixed(1)),
-    ];
-    topics.push(
-        NewTopic::new(ATTEMPT, ATTEMPT_PARTITIONS, TopicReplication::Fixed(1))
-            .set("cleanup.policy", "compact"),
-    );
-    let io = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    for created in io
-        .block_on(admin.create_topics(&topics, &AdminOptions::new()))
-        .expect("create topics")
-    {
-        created.expect("topic created");
-    }
 }
 
 /// The child half of `a_unit_whose_worker_is_killed_mid_read_is_delivered_again`:

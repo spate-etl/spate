@@ -4,7 +4,7 @@
 //! topics.
 
 use rdkafka::ClientConfig;
-use rdkafka::admin::AdminClient;
+use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::client::DefaultClientContext;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::message::{Headers, Message};
@@ -36,7 +36,7 @@ pub(crate) const RETRY: &str = "units-retry";
 pub(crate) const DEAD: &str = "units-dead";
 pub(crate) const ATTEMPT: &str = "units-attempts";
 
-/// The attempt topic's partition count on the MockCluster.
+/// The attempt topic's partition count on the MockCluster and the broker.
 pub(crate) const ATTEMPT_PARTITIONS: i32 = 2;
 
 /// The feed's commit interval, read from the outside: several of these pass
@@ -107,6 +107,36 @@ pub(crate) struct Worker {
     pub(crate) shutdown: ShutdownHandle,
 }
 
+/// Create the work, retry and dead-letter topics, one partition each, the
+/// work topic stamped on append, and the compacted attempt topic. The feed
+/// never creates a topic.
+pub(crate) fn create_topics(brokers: &str) {
+    let admin: AdminClient<DefaultClientContext> = ClientConfig::new()
+        .set("bootstrap.servers", brokers)
+        .create()
+        .expect("admin client");
+    let mut topics = vec![
+        NewTopic::new(WORK, 1, TopicReplication::Fixed(1))
+            .set("message.timestamp.type", "LogAppendTime"),
+        NewTopic::new(RETRY, 1, TopicReplication::Fixed(1)),
+        NewTopic::new(DEAD, 1, TopicReplication::Fixed(1)),
+    ];
+    topics.push(
+        NewTopic::new(ATTEMPT, ATTEMPT_PARTITIONS, TopicReplication::Fixed(1))
+            .set("cleanup.policy", "compact"),
+    );
+    let io = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    for created in io
+        .block_on(admin.create_topics(&topics, &AdminOptions::new()))
+        .expect("create topics")
+    {
+        created.expect("topic created");
+    }
+}
+
 /// How a test connects the feed.
 pub(crate) type Connect = fn(&FeedSection, &Handle) -> Result<KafkaFeed, KafkaFeedError>;
 
@@ -119,21 +149,32 @@ pub(crate) fn launch(data: &Path, feed_section: &str, pre: impl FnOnce(&SinkScri
     launch_with(ON_MOCK, data, feed_section, pre)
 }
 
-/// Launch a worker with one record per source batch and one row per sink
-/// write, so an object's records span several writes, connecting its feed
-/// with `connect`. `pre` scripts the sink before data flows.
+/// [`launch_source`] over the files under `data`.
 pub(crate) fn launch_with(
     connect: Connect,
     data: &Path,
     feed_section: &str,
     pre: impl FnOnce(&SinkScript),
 ) -> Worker {
+    let source = format!("  s3:\n    url: \"file://{}/\"\n", data.display());
+    launch_source(connect, &source, feed_section, pre)
+}
+
+/// Launch a worker with one record per source batch and one row per sink
+/// write, so an object's records span several writes, reading the source
+/// `source_yaml` (the `source:` section's body) and connecting its feed
+/// with `connect`. `pre` scripts the sink before data flows.
+pub(crate) fn launch_source(
+    connect: Connect,
+    source_yaml: &str,
+    feed_section: &str,
+    pre: impl FnOnce(&SinkScript),
+) -> Worker {
     let yaml = format!(
         "pipeline: {{ name: kafka-feed, threads: 1 }}\nadmin: {{ listen: none }}\n\
          checkpoint: {{ interval: 100ms }}\nmetrics: {{ exporter: none }}\n\
-         source:\n  s3:\n    url: \"file://{}/\"\n\
-         sink: {{ capture: {{ chunk: {{ target_bytes: 64 }} }} }}\n{feed_section}",
-        data.display()
+         source:\n{source_yaml}\
+         sink: {{ capture: {{ chunk: {{ target_bytes: 64 }} }} }}\n{feed_section}"
     );
     let mut config = PipelineConfig::from_str(&yaml).unwrap();
     config.pipeline.name = spate_test::unique_name(&config.pipeline.name);

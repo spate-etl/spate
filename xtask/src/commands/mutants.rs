@@ -15,9 +15,8 @@ const OUT: &str = "target/mutants";
 ///
 /// # Errors
 ///
-/// When `base` shares no history with `HEAD`, when cargo-mutants is not
-/// installed, and with cargo-mutants' own exit code when it finds a survivor,
-/// a timeout or cannot run.
+/// When `base` shares no history with `HEAD`, and with cargo-mutants' own exit
+/// code when it finds a survivor, a timeout or cannot run.
 pub(super) fn run(root: &Path, explain: bool, base: &str, in_place: bool) -> Outcome {
     let out = root.join(OUT);
     let diff = out.join("pr.diff");
@@ -29,41 +28,45 @@ pub(super) fn run(root: &Path, explain: bool, base: &str, in_place: bool) -> Out
         );
         return run::run(root, true, &step);
     }
-    if !run::on_path("cargo-mutants") {
-        return Err(Error::msg(
-            "cargo-mutants is not installed: cargo install --locked cargo-mutants",
-        ));
-    }
     let patch = diff_since(root, base)?;
-    let report = out.join("mutants.out");
-    // A run that stops before testing leaves no report, and a stale one would
-    // be summarised as this run's.
-    match std::fs::remove_dir_all(&report) {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-            return Err(Error::msg(format!("{}: {e}", report.display())));
-        }
-        _ => {}
-    }
+    let dir = out.join("mutants.out");
+    clear_report(&dir)?;
     std::fs::create_dir_all(&out).map_err(|e| Error::msg(format!("{}: {e}", out.display())))?;
     std::fs::write(&diff, patch).map_err(|e| Error::msg(format!("{}: {e}", diff.display())))?;
-
     let done = run::complete(root, &step, Streams::Inherit)?;
+    let summary_path = std::env::var_os("GITHUB_STEP_SUMMARY");
+    report(done.code, &dir, summary_path.as_deref().map(Path::new))
+}
 
-    if let Ok(path) = std::env::var("GITHUB_STEP_SUMMARY") {
-        let read = |name: &str| std::fs::read_to_string(report.join(name)).unwrap_or_default();
-        let text = summary(done.code, &read("missed.txt"), &read("timeout.txt"));
+/// Removes the previous run's report. A run that stops before testing writes
+/// none, and a stale one would be summarised as this run's.
+fn clear_report(dir: &Path) -> Outcome {
+    match std::fs::remove_dir_all(dir) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            Err(Error::msg(format!("{}: {e}", dir.display())))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Appends the summary of the report in `dir` to `summary_path`, when given,
+/// and turns cargo-mutants' exit `code` into the outcome.
+fn report(code: i32, dir: &Path, summary_path: Option<&Path>) -> Outcome {
+    if let Some(path) = summary_path {
+        let read = |name: &str| std::fs::read_to_string(dir.join(name)).unwrap_or_default();
+        let text = summary(code, &read("missed.txt"), &read("timeout.txt"));
         use std::io::Write;
         std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&path)
+            .open(path)
             .and_then(|mut f| f.write_all(text.as_bytes()))
-            .map_err(|e| Error::msg(format!("{path}: {e}")))?;
+            .map_err(|e| Error::msg(format!("{}: {e}", path.display())))?;
     }
-    if done.code == 0 {
+    if code == 0 {
         Ok(())
     } else {
-        Err(Error::status(done.code))
+        Err(Error::status(code))
     }
 }
 
@@ -177,6 +180,56 @@ mod tests {
             assert!(!text.contains("No surviving mutants."), "{text}");
         }
         assert!(!summary(3, "", "x").contains("did not finish"));
+    }
+
+    /// A directory of this test's own, removed with its contents.
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("spate-mutants-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        dir
+    }
+
+    /// A previous report is removed, a missing one is not an error, and any
+    /// other failure to remove it is.
+    #[test]
+    fn clearing_removes_a_report_and_refuses_what_it_cannot_remove() {
+        let dir = scratch("clear");
+        let report = dir.join("mutants.out");
+        std::fs::create_dir_all(&report).expect("report dir");
+        std::fs::write(report.join("missed.txt"), "stale\n").expect("write");
+        assert!(clear_report(&report).is_ok());
+        assert!(!report.exists());
+        assert!(
+            clear_report(&report).is_ok(),
+            "a missing report is not an error"
+        );
+        let file = dir.join("a-file");
+        std::fs::write(&file, "").expect("write");
+        assert!(clear_report(&file.join("child")).is_err());
+        std::fs::remove_dir_all(&dir).expect("remove temp dir");
+    }
+
+    /// The summary is appended after what the file already holds, and the
+    /// exit code passes through unchanged.
+    #[test]
+    fn the_report_appends_the_summary_and_keeps_the_exit_code() {
+        let dir = scratch("report");
+        std::fs::write(dir.join("missed.txt"), "a.rs:1:1: replace f\n").expect("write");
+        let path = dir.join("summary.md");
+        std::fs::write(&path, "earlier\n").expect("write");
+
+        let err = report(2, &dir, Some(&path)).expect_err("survivors exit 2");
+        assert_eq!(err.code, Some(2));
+        let text = std::fs::read_to_string(&path).expect("summary");
+        assert!(
+            text.starts_with("earlier\n## Mutants over the diff\n"),
+            "{text}"
+        );
+        assert!(text.contains("- `a.rs:1:1: replace f`"), "{text}");
+
+        assert!(report(0, &dir, None).is_ok());
+        std::fs::remove_dir_all(&dir).expect("remove temp dir");
     }
 
     #[test]

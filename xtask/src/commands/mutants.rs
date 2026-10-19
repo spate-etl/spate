@@ -146,8 +146,9 @@ fn summary(code: i32, missed: &str, timeout: &str) -> String {
     }
     text.push_str(
         "\ncargo-mutants replaces function bodies, operators and match guards, and deletes \
-         match arms and struct-literal fields. It does not swap a `match` arm, delete an early `return`, `break` or \
-         `continue`, or move a constant across its bound; those stay a review step.\n",
+         match arms and struct-literal fields. It does not swap a `match` arm, delete an \
+         early `return`, `break` or `continue`, or move a constant across its bound; those \
+         stay a review step.\n",
     );
     text
 }

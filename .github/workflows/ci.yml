@@ -545,7 +545,7 @@ jobs:
         with:
           tools: nextest,cargo-mutants
           # `--in-place` builds into this checkout's `target/`, so the
-          # all-features dev build `lint` owns is reused.
+          # dependencies restored from this entry are reused.
           shared-key: dev-allfeatures
           cache-save: never
       - name: Mutants

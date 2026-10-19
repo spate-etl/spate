@@ -80,6 +80,7 @@
           - scripts/**
           - xtask/**
           - .cargo/config.toml
+          - .cargo/mutants.toml
           - codecov.yml
           - .config/nextest.toml
 

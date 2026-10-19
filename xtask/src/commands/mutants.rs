@@ -9,6 +9,8 @@ use crate::run::{self, Error, Outcome, Step, Streams};
 /// second half must match `output` in `.cargo/mutants.toml`.
 const OUT: &str = "target/mutants";
 
+const HEADING: &str = "## Mutants over the diff\n\n";
+
 /// Writes the diff against the merge base of `base` and `HEAD`, runs
 /// cargo-mutants over it, and appends the survivors to `$GITHUB_STEP_SUMMARY`
 /// when the runner sets it.
@@ -28,14 +30,16 @@ pub(super) fn run(root: &Path, explain: bool, base: &str, in_place: bool) -> Out
         );
         return run::run(root, true, &step);
     }
-    let patch = diff_since(root, base)?;
     let dir = out.join("mutants.out");
-    clear_report(&dir)?;
-    std::fs::create_dir_all(&out).map_err(|e| Error::msg(format!("{}: {e}", out.display())))?;
-    std::fs::write(&diff, patch).map_err(|e| Error::msg(format!("{}: {e}", diff.display())))?;
-    let done = run::complete(root, &step, Streams::Inherit)?;
+    let ran = (|| {
+        let patch = diff_since(root, base)?;
+        clear_report(&dir)?;
+        std::fs::create_dir_all(&out).map_err(|e| Error::msg(format!("{}: {e}", out.display())))?;
+        std::fs::write(&diff, patch).map_err(|e| Error::msg(format!("{}: {e}", diff.display())))?;
+        Ok(run::complete(root, &step, Streams::Inherit)?.code)
+    })();
     let summary_path = std::env::var_os("GITHUB_STEP_SUMMARY");
-    report(done.code, &dir, summary_path.as_deref().map(Path::new))
+    finish(ran, &dir, summary_path.as_deref().map(Path::new))
 }
 
 /// Removes the previous run's report. A run that stops before testing writes
@@ -49,12 +53,18 @@ fn clear_report(dir: &Path) -> Outcome {
     }
 }
 
-/// Appends the summary of the report in `dir` to `summary_path`, when given,
-/// and turns cargo-mutants' exit `code` into the outcome.
-fn report(code: i32, dir: &Path, summary_path: Option<&Path>) -> Outcome {
+/// Appends the summary to `summary_path`, when given, and turns the run into
+/// the outcome: cargo-mutants' exit code from the report in `dir`, or the
+/// error that stopped the run before cargo-mutants finished.
+fn finish(ran: Result<i32, Error>, dir: &Path, summary_path: Option<&Path>) -> Outcome {
+    let text = match &ran {
+        Ok(code) => {
+            let read = |name: &str| std::fs::read_to_string(dir.join(name)).unwrap_or_default();
+            summary(*code, &read("missed.txt"), &read("timeout.txt"))
+        }
+        Err(e) => unfinished(&e.message),
+    };
     if let Some(path) = summary_path {
-        let read = |name: &str| std::fs::read_to_string(dir.join(name)).unwrap_or_default();
-        let text = summary(code, &read("missed.txt"), &read("timeout.txt"));
         use std::io::Write;
         std::fs::OpenOptions::new()
             .create(true)
@@ -63,10 +73,9 @@ fn report(code: i32, dir: &Path, summary_path: Option<&Path>) -> Outcome {
             .and_then(|mut f| f.write_all(text.as_bytes()))
             .map_err(|e| Error::msg(format!("{}: {e}", path.display())))?;
     }
-    if code == 0 {
-        Ok(())
-    } else {
-        Err(Error::status(code))
+    match ran? {
+        0 => Ok(()),
+        code => Err(Error::status(code)),
     }
 }
 
@@ -78,10 +87,19 @@ fn diff_since(root: &Path, base: &str) -> Result<String, Error> {
             "{base} does not resolve or shares no history with HEAD"
         ))
     })?;
-    run::capture(
-        root,
-        &Step::new("git", ["diff", "--no-renames", &merge_base]),
-    )
+    // cargo-mutants reads the paths after a `b/` prefix, so a user's prefix,
+    // color or external-diff settings would leave it matching nothing.
+    let args = [
+        "diff",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-color",
+        "--src-prefix=a/",
+        "--dst-prefix=b/",
+        "--no-renames",
+        &merge_base,
+    ];
+    run::capture(root, &Step::new("git", args))
 }
 
 /// The cargo arguments. Everything else cargo-mutants reads from
@@ -101,14 +119,11 @@ fn mutants_args(diff: &str, in_place: bool) -> Vec<String> {
 /// The job summary for a run that exited `code`, given the contents of
 /// `missed.txt` and `timeout.txt`.
 fn summary(code: i32, missed: &str, timeout: &str) -> String {
-    let mut text = String::from("## Mutants over the diff\n\n");
     // 0, 2 and 3 are the codes of a run that tested every mutant.
     if ![0, 2, 3].contains(&code) {
-        text.push_str(&format!(
-            "The run did not finish: cargo-mutants exited {code}. The step log has the cause.\n"
-        ));
-        return text;
+        return unfinished(&format!("cargo-mutants exited {code}"));
     }
+    let mut text = String::from(HEADING);
     let lines = |s: &'static str, body: &str| {
         body.lines()
             .filter(|l| !l.trim().is_empty())
@@ -122,11 +137,16 @@ fn summary(code: i32, missed: &str, timeout: &str) -> String {
         text.push_str(&listed);
     }
     text.push_str(
-        "\nThe run generates function, operator and return-value mutants. A swapped `match` \
-         arm, a deleted early `return`, `break` or `continue`, and a constant moved across its \
-         bound stay a review step.\n",
+        "\ncargo-mutants replaces function bodies, operators and match guards, and deletes \
+         match arms. It does not swap a `match` arm, delete an early `return`, `break` or \
+         `continue`, or move a constant across its bound; those stay a review step.\n",
     );
     text
+}
+
+/// The job summary for a run that stopped before testing every mutant.
+fn unfinished(cause: &str) -> String {
+    format!("{HEADING}The run did not finish: {cause}. The step log has the detail.\n")
 }
 
 #[cfg(test)]
@@ -219,7 +239,7 @@ mod tests {
         let path = dir.join("summary.md");
         std::fs::write(&path, "earlier\n").expect("write");
 
-        let err = report(2, &dir, Some(&path)).expect_err("survivors exit 2");
+        let err = finish(Ok(2), &dir, Some(&path)).expect_err("survivors exit 2");
         assert_eq!(err.code, Some(2));
         let text = std::fs::read_to_string(&path).expect("summary");
         assert!(
@@ -228,8 +248,39 @@ mod tests {
         );
         assert!(text.contains("- `a.rs:1:1: replace f`"), "{text}");
 
-        assert!(report(0, &dir, None).is_ok());
+        assert!(finish(Ok(0), &dir, None).is_ok());
         std::fs::remove_dir_all(&dir).expect("remove temp dir");
+    }
+
+    /// A run stopped before cargo-mutants finished still writes a summary,
+    /// naming the cause, and returns the same error.
+    #[test]
+    fn a_failure_before_the_run_is_summarised() {
+        let dir = scratch("early");
+        let path = dir.join("summary.md");
+        let err = finish(Err(Error::msg("main does not resolve")), &dir, Some(&path))
+            .expect_err("the error passes through");
+        assert_eq!(err.message, "main does not resolve");
+        let text = std::fs::read_to_string(&path).expect("summary");
+        assert!(
+            text.contains("did not finish: main does not resolve"),
+            "{text}"
+        );
+        assert!(!text.contains("No surviving mutants."), "{text}");
+        std::fs::remove_dir_all(&dir).expect("remove temp dir");
+    }
+
+    /// cargo-mutants writes its report under `output`, and `run` reads it
+    /// under `OUT`; a drift would summarise every run as clean.
+    #[test]
+    fn the_report_directory_is_where_the_config_writes_it() {
+        let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("../.cargo/mutants.toml");
+        let text = std::fs::read_to_string(&config).expect("mutants.toml");
+        let line = format!("output = \"{OUT}\"");
+        assert!(
+            text.lines().any(|l| l == line),
+            "{line} missing from {text}"
+        );
     }
 
     #[test]
@@ -240,6 +291,8 @@ mod tests {
         let write = |name: &str, text: &str| std::fs::write(dir.join(name), text).expect("write");
         let git = |args: &[&str]| {
             let ok = std::process::Command::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(["-c", "commit.gpgsign=false"])
                 .args(args)
                 .current_dir(&dir)
                 .status()
@@ -248,6 +301,14 @@ mod tests {
             assert!(ok, "git {args:?}");
         };
         git(&["init", "-q", "-b", "main"]);
+        // Settings that would otherwise change the patch's paths and bytes.
+        for (key, value) in [
+            ("diff.mnemonicPrefix", "true"),
+            ("diff.noprefix", "true"),
+            ("color.diff", "always"),
+        ] {
+            git(&["config", key, value]);
+        }
         for name in ["committed", "staged", "unstaged"] {
             write(name, "base\n");
         }
@@ -262,6 +323,13 @@ mod tests {
         write("untracked", "untracked-edit\n");
 
         let patch = diff_since(&dir, "main").expect("a readable diff");
+        for path in ["committed", "staged", "unstaged"] {
+            assert!(
+                patch.contains(&format!("+++ b/{path}\n")),
+                "{path} in {patch}"
+            );
+        }
+        assert!(!patch.contains('\u{1b}'), "{patch}");
         for hunk in ["+committed-edit", "+staged-edit", "+unstaged-edit"] {
             assert!(patch.contains(hunk), "{hunk} missing from {patch}");
         }

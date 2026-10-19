@@ -406,6 +406,12 @@ with its other records. A source whose `url` names the whole bucket
 (`s3://bucket/`) reads every created key in it. The message is acknowledged
 once, after every part of it has been read and committed.
 
+The records read for a notification take its `eventTime` as their event time,
+and those read for a listed object take the listing's `LastModified`. A
+notification with no `eventTime`, or one that does not parse, gives its records
+event time 0, which under `metrics.e2e_basis: event` counts their end-to-end
+latency from 1970.
+
 A notification names an object, and its read pins the ETag the notification
 carries. An object deleted before it is read fails that read on every delivery,
 so the feed dead-letters its message at the cap. An object overwritten before

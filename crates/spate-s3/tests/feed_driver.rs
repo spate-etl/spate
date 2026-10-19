@@ -1053,3 +1053,38 @@ fn a_notification_under_an_s3a_url_is_read_from_the_urls_bucket() {
     assert_eq!(sorted(written_rows(&l.script)), sorted(rows));
     stop(&l);
 }
+
+/// Pins that the source hands the reader its URL's prefix: a notification
+/// for an object in the bucket but outside `data/` is failed back unread.
+#[test]
+fn a_notification_outside_the_urls_prefix_is_failed_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let rows = recs("outside", 3);
+    let other = dir.path().join("other");
+    fs::create_dir_all(&other).unwrap();
+    stage(&other, "a.ndjson", &rows);
+    let size = fs::metadata(other.join("a.ndjson")).unwrap().len();
+    drop(data);
+
+    let (feed, script) = scripted_feed();
+    let receipt = script.deliver(notification(&[("other/a.ndjson", size)]));
+    let l = launch_on_notifications("s3", dir.path(), Arc::new(feed), |_| {});
+
+    wait_until(DEADLINE, "the notification is failed back", || {
+        !script.failed().is_empty()
+    });
+    let failed = script.failed();
+    assert_eq!(failed[0].0, receipt);
+    assert!(
+        failed[0].1.contains("outside the source's prefix"),
+        "{}",
+        failed[0].1
+    );
+    assert!(script.acknowledged().is_empty());
+    assert!(
+        written_rows(&l.script).is_empty(),
+        "an object outside the prefix was read"
+    );
+    stop(&l);
+}

@@ -16,7 +16,8 @@
 //! receive's reply arrives, less 30 seconds, and clamps every deadline and
 //! extension to it. A unit whose deadline is less than one renewal period
 //! away when the reader asks for it is dropped unseen and returns to the
-//! queue at that deadline.
+//! queue at that deadline, as is a buffered unit whose extension SQS refused
+//! because the receipt no longer holds the message.
 
 use crate::client;
 use crate::config::{BACKEND, SqsFeedConfig};
@@ -490,6 +491,7 @@ impl Feed for SqsFeed {
         let period = self.shared.settings.period;
         let (out, more, waker) = {
             let mut st = self.lock();
+            st.reader_active = true;
             if let Some(fatal) = &st.fatal {
                 return Err(fatal.clone());
             }
@@ -499,7 +501,6 @@ impl Feed for SqsFeed {
             if st.abandoned {
                 return Ok(Vec::new());
             }
-            st.reader_active = true;
             let now = Instant::now();
             // A unit this close to its deadline would lapse before the next
             // renewal could keep it, and a gone one no longer holds its
@@ -549,10 +550,10 @@ impl Feed for SqsFeed {
 
     fn renew(&self, receipt: Receipt) -> Result<(), FeedError> {
         let mut st = self.lock();
+        st.reader_active = true;
         if let Some(fatal) = &st.fatal {
             return Err(fatal.clone());
         }
-        st.reader_active = true;
         let now = Instant::now();
         match st.held.get_mut(&receipt.0) {
             Some(h) if h.unit.is_none() && !h.gone && now < h.deadline => {
@@ -757,8 +758,9 @@ async fn renewal_task(shared: Arc<Shared>) {
             if st.fatal.is_some() || st.abandoned {
                 return;
             }
-            // A buffered unit is kept only for a reader still polling, so a
-            // stalled worker loses it within one visibility period.
+            // A buffered unit is extended only for a reader still polling, or
+            // to retry a failed extension, so a stalled worker loses it one
+            // visibility period after its last extension.
             let active = std::mem::take(&mut st.reader_active);
             st.held
                 .iter_mut()

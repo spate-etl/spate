@@ -1209,7 +1209,7 @@ async fn a_buffered_unit_is_not_extended_once_the_reader_stops_calling() {
 }
 
 /// Pins that a buffered unit whose extension SQS refuses as no longer held
-/// is dropped unread at the next receive.
+/// is not extended again and is dropped unread at the next receive.
 #[tokio::test(start_paused = true)]
 async fn a_buffered_unit_the_queue_refuses_to_extend_is_dropped_unread() {
     let (feed, queue) = start(MINUTE);
@@ -1222,11 +1222,63 @@ async fn a_buffered_unit_the_queue_refuses_to_extend_is_dropped_unread() {
         queue.visibility().len() == 1
     })
     .await;
-    settle_tasks().await;
+    feed.renew(taken.receipt).unwrap();
+    step(Duration::from_secs(20)).await;
+    let later = extended_handles(&queue.visibility()[1..]);
+    assert!(
+        !later.iter().any(|h| h == "h1"),
+        "a refused unit was extended again: {later:?}"
+    );
     assert_eq!(
         feed.receive(1).unwrap().len(),
         0,
         "a gone unit was handed out"
     );
     assert_eq!(feed.buffered(), 0);
+}
+
+/// Pins that a reader calling only `receive`, with no unit to renew, keeps
+/// its buffered units extended.
+#[tokio::test(start_paused = true)]
+async fn a_reader_that_only_receives_keeps_its_buffered_units() {
+    let (feed, queue) = start(MINUTE);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    for i in 0..4 {
+        queue.ready(Message::new(&format!("u{i}")));
+    }
+    assert!(feed.receive(4).unwrap().is_empty());
+    until("the units are buffered", || feed.buffered() == 4).await;
+    assert!(park.park(Duration::ZERO));
+    for at in [0, 30, 60] {
+        let got = feed.receive(1).unwrap();
+        assert_eq!(got.len(), 1, "nothing handed out at {at} s");
+        step(Duration::from_secs(30)).await;
+    }
+    assert_eq!(
+        feed.receive(1).unwrap().len(),
+        1,
+        "the last buffered unit lapsed"
+    );
+}
+
+/// Pins that a buffered unit whose extension call failed whole is extended
+/// at the next tick, after the reader stopped calling the feed.
+#[tokio::test(start_paused = true)]
+async fn a_failed_extension_of_a_buffered_unit_is_sent_again_at_the_next_tick() {
+    let (feed, queue) = start(MINUTE);
+    let taken = one_taken_one_buffered(&feed, &queue).await;
+    feed.renew(taken.receipt).unwrap();
+    queue.fail_next_visibility_call(CallError::retryable("InternalError"));
+    step(Duration::from_secs(20)).await;
+    until("the first extension is sent", || {
+        queue.visibility().len() == 1
+    })
+    .await;
+    step(Duration::from_secs(20)).await;
+    let retried = extended_handles(&queue.visibility()[1..]);
+    assert!(
+        retried.iter().any(|h| h == "h1"),
+        "the failed extension was not sent again: {retried:?}"
+    );
 }

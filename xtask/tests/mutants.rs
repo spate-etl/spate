@@ -57,3 +57,16 @@ fn an_early_stop_is_written_to_the_step_summary() {
     );
     std::fs::remove_file(&path).expect("remove summary");
 }
+
+/// With no `$GITHUB_STEP_SUMMARY`, the summary goes to stdout.
+#[test]
+fn a_local_run_prints_the_summary() {
+    let got = xtask(&["mutants", "--since", NO_BASE], &[]);
+    let stdout = String::from_utf8_lossy(&got.stdout);
+    assert_eq!(got.status.code(), Some(1), "{stdout}");
+    assert!(stdout.starts_with("## Mutants over the diff\n"), "{stdout}");
+    assert!(
+        stdout.contains(&format!("did not finish: {NO_BASE} does not resolve")),
+        "{stdout}"
+    );
+}

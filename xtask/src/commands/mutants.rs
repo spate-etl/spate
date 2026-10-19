@@ -111,18 +111,21 @@ impl Summary {
     }
 }
 
-/// Writes the summary, when there is one, and turns the run into the outcome:
-/// cargo-mutants' exit code from the report in `dir`, or the error that stopped
-/// the run before cargo-mutants finished.
+/// Writes the summary to the summary file, or to stdout when there is none,
+/// and turns the run into the outcome: cargo-mutants' exit code from the
+/// report in `dir`, or the error that stopped the run before cargo-mutants
+/// finished.
 fn finish(ran: Result<i32, Error>, dir: &Path, summary: Option<&Summary>) -> Outcome {
-    if let Some(summary) = summary {
-        summary.write(&match &ran {
-            Ok(code) => {
-                let read = |name: &str| std::fs::read_to_string(dir.join(name)).unwrap_or_default();
-                self::summary(*code, &read("missed.txt"), &read("timeout.txt"))
-            }
-            Err(e) => unfinished(&e.message),
-        });
+    let text = match &ran {
+        Ok(code) => {
+            let read = |name: &str| std::fs::read_to_string(dir.join(name)).unwrap_or_default();
+            self::summary(*code, &read("missed.txt"), &read("timeout.txt"))
+        }
+        Err(e) => unfinished(&e.message),
+    };
+    match summary {
+        Some(summary) => summary.write(&text),
+        None => print!("{text}"),
     }
     match ran? {
         0 => Ok(()),

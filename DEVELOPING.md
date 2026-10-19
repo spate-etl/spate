@@ -152,8 +152,9 @@ merge base of REF (default `origin/main`) and `HEAD` to the working tree, with
 the settings in `.cargo/mutants.toml` and the `mutants` nextest profile.
 Untracked files are not in the diff, and a renamed file brings only its edited
 lines. It exits 2 when a mutant survives. The container suites do not run under
-it, so a mutant only they would catch reports as missed. The job summary names
-the mutant forms the tool does not generate, which stay a review step.
+it, so a mutant only they would catch reports as missed. Its summary, printed
+at the end of a local run and written to the job summary in CI, names the
+mutant forms the tool does not generate, which stay a review step.
 
 ### What CI selects, and how to widen it
 

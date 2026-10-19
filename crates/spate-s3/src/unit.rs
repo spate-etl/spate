@@ -188,8 +188,9 @@ pub(crate) enum Decoded {
 ///
 /// A notification is an S3 `Records[]` message, the same records inside the
 /// `{"EventName","Key","Records"}` envelope, or the S3 test event, which is
-/// acknowledged. Each record whose `eventName` is not `ObjectCreated:*`, with
-/// or without an `s3:` prefix, is dropped whatever its bucket. A created
+/// acknowledged. A record with no `eventName` fails the whole message. Each
+/// record whose `eventName` is not `ObjectCreated:*`, with or without an
+/// `s3:` prefix, is dropped whatever its bucket. A created
 /// record for another bucket, for a key outside `scope`'s prefix, with no
 /// size, or with a key that does not decode fails the whole message, as does
 /// any other body. A created object of size 0 is then dropped. Every other
@@ -835,6 +836,28 @@ mod tests {
             Some("\"\"abc\"".to_owned())
         );
         assert_eq!(etag(serde_json::Value::Null), None);
+    }
+
+    /// Pins that a dropped record leaves the records after it to be read: a
+    /// removal, an event that creates nothing and an empty object ahead of a
+    /// created object each give the message that object's part alone.
+    #[test]
+    fn a_dropped_record_leaves_the_records_after_it() {
+        for dropped in [
+            record("ObjectRemoved:Delete", "bucket", "data/gone.ndjson", None),
+            record(
+                "ObjectRestore:Completed",
+                "elsewhere",
+                "other/a.ndjson",
+                Some(10),
+            ),
+            created("data/empty.ndjson", 0),
+        ] {
+            assert_eq!(
+                keys(decoded(&[dropped, created("data/a.ndjson", 10)])),
+                ["data/a.ndjson"]
+            );
+        }
     }
 
     /// Pins that a message's created records give one part each, in record

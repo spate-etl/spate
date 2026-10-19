@@ -1,8 +1,8 @@
 //! The feed read path: the source reads work units naming one object or one
 //! byte range, and storage notifications, from a scripted feed or the
 //! in-process feed, over real files, and the feed observes every
-//! acknowledgment, failure, renewal and `Gone` answer. Each test ends the run with a shutdown, since
-//! this path never reports `Drained`.
+//! acknowledgment, failure, renewal and `Gone` answer. Each test ends the
+//! run with a shutdown, since this path never reports `Drained`.
 
 mod support;
 

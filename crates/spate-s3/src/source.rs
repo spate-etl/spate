@@ -643,13 +643,13 @@ fn build_store(
 }
 
 /// The bucket `store` reads, from its `Display` of `AmazonS3(<bucket>)`, so
-/// that `object_store` stays the only parser of the source URL.
+/// that `object_store` stays the only parser of the source URL. A built
+/// store always names one: its builder refuses a missing bucket.
 fn scope_bucket(store: &AmazonS3) -> Option<String> {
     store
         .to_string()
         .strip_prefix("AmazonS3(")
         .and_then(|rest| rest.strip_suffix(')'))
-        .filter(|bucket| !bucket.is_empty())
         .map(str::to_owned)
 }
 

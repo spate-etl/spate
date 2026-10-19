@@ -377,6 +377,7 @@ object is created. A message is one of:
 
 Each record is decided on its own:
 
+- a record with no `eventName` fails the whole message;
 - a record whose `eventName` is not `ObjectCreated:*`, with or without the
   `s3:` prefix, is dropped, whatever its bucket;
 - a created object of size 0 is dropped, since it holds no records, even under

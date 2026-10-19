@@ -239,10 +239,12 @@ pub(crate) fn classify(
                 out.container_pkgs.extend(image_suites.iter().cloned());
             }
             // The S3 store the spate-s3 suites run against, and the queue the
-            // shared helpers start. The fault runs boot RustFS too, outside
+            // shared helpers start. The Kafka feed's notification suite boots
+            // it beside the broker, and the fault runs boot it too, outside
             // the container suites.
             if glob(path, "ci/rustfs/*") {
-                image_suites.extend(["spate-s3", "spate-test-support"].map(String::from));
+                image_suites
+                    .extend(["spate-kafka", "spate-s3", "spate-test-support"].map(String::from));
                 out.container_pkgs.extend(image_suites.iter().cloned());
             }
             // The queue the SQS feed's suite runs against, and the shared
@@ -801,7 +803,7 @@ mod tests {
         for (image, expected) in [
             (
                 "ci/rustfs/stable/Dockerfile",
-                &["spate-s3", "spate-test-support"][..],
+                &["spate-kafka", "spate-s3", "spate-test-support"][..],
             ),
             (
                 "ci/elasticmq/stable/Dockerfile",

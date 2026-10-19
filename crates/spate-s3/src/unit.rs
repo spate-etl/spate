@@ -188,9 +188,10 @@ pub(crate) enum Decoded {
 ///
 /// A notification is an S3 `Records[]` message, the same records inside the
 /// `{"EventName","Key","Records"}` envelope, or the S3 test event, which is
-/// acknowledged. A record with no `eventName` fails the whole message. Each
-/// record whose `eventName` is not `ObjectCreated:*`, with or without an
-/// `s3:` prefix, is dropped whatever its bucket. A created record that does
+/// acknowledged. A record with no `eventName`, or one that is not a string,
+/// fails the whole message. Each record whose `eventName` is not
+/// `ObjectCreated:*`, with or without an `s3:` prefix, is dropped whatever its
+/// bucket. A created record that does
 /// not deserialise, or one for another bucket, for a key outside `scope`'s
 /// prefix, with no size, or with a key that does not decode fails the whole
 /// message, as does any other body. A created object of size 0 is then
@@ -270,7 +271,7 @@ fn record_part(
     packing: Packing,
 ) -> Result<Option<Cursor>, String> {
     let Some(event) = record.get("eventName").and_then(serde_json::Value::as_str) else {
-        return Err("the record has no `eventName`".to_owned());
+        return Err("the record's `eventName` is missing or not a string".to_owned());
     };
     if !event
         .strip_prefix("s3:")
@@ -912,6 +913,41 @@ mod tests {
         assert_eq!(keys(decode(&body, &scope(), packing())), ["data/a.ndjson"]);
     }
 
+    /// Pins that a created object of size 0 is dropped before its ETag is
+    /// checked: an ETag `If-Match` cannot carry on an empty object leaves the
+    /// message's other records to be read.
+    #[test]
+    fn an_empty_object_with_an_unsendable_etag_is_dropped() {
+        let mut empty = created("data/empty.ndjson", 0);
+        empty["s3"]["object"]["eTag"] = serde_json::json!("abc\u{1}");
+        assert_eq!(
+            keys(decoded(&[empty, created("data/a.ndjson", 10)])),
+            ["data/a.ndjson"]
+        );
+    }
+
+    /// Pins that the ETag check covers a descriptor naming a byte range, as
+    /// it does a whole-object descriptor.
+    #[test]
+    fn a_ranged_descriptor_with_an_unsendable_etag_fails() {
+        let object = |etag: &str| DescriptorObject {
+            key: "data/a.ndjson".into(),
+            size: 300,
+            etag: Some(etag.to_owned()),
+            last_modified_ms: 1,
+        };
+        let range = SplitRange::new(0, 100, b'\n');
+        let body = SplitDescriptor::with_range(object("\"abc\u{1}\""), range)
+            .encode()
+            .unwrap();
+        let reason = failed(decode(&body, &scope(), packing()));
+        assert!(reason.contains("cannot be sent in `If-Match`"), "{reason}");
+        let body = SplitDescriptor::with_range(object("\"abc\""), range)
+            .encode()
+            .unwrap();
+        assert_eq!(keys(decode(&body, &scope(), packing())), ["data/a.ndjson"]);
+    }
+
     /// Pins that a record with no `eventName`, or one that is not a string,
     /// fails its message even when its `s3` fields name an object to read.
     #[test]
@@ -926,7 +962,10 @@ mod tests {
             }
             let reason = failed(decoded(&[created("data/b.ndjson", 10), record]));
             assert!(reason.contains("notification record 1"), "{reason}");
-            assert!(reason.contains("no `eventName`"), "{reason}");
+            assert!(
+                reason.contains("`eventName` is missing or not a string"),
+                "{reason}"
+            );
         }
     }
 

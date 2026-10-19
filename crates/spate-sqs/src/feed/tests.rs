@@ -126,6 +126,25 @@ async fn an_extension_is_clamped_to_the_time_left() {
     );
 }
 
+/// Pins a delivery's unit id: the `spate.unit` attribute when the message
+/// carries one, and its `MessageId` when it carries none, as a storage
+/// notification does.
+#[tokio::test(start_paused = true)]
+async fn a_message_without_the_unit_attribute_takes_its_message_id() {
+    let (feed, queue) = start(MINUTE);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    queue.ready(Message::new("published"));
+    queue.ready(
+        Message::new("notified")
+            .without_unit_attribute()
+            .same_message_as("msg-1"),
+    );
+    let got = receive_n(&feed, &park, 2).await;
+    let ids: Vec<&str> = got.iter().map(|d| d.unit.id.as_str()).collect();
+    assert_eq!(ids, ["u0", "msg-1"]);
+}
+
 /// Pins the long-poll wait at a third of the visibility, at most 20 s, so a
 /// unit that arrives at the end of a poll is still handed out.
 #[tokio::test(start_paused = true)]

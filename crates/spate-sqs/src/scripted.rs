@@ -17,6 +17,9 @@ pub(crate) struct Message {
     pub(crate) receive_count: u32,
     /// The `MessageId` to report. Unset, each receive reports a new one.
     pub(crate) message_id: Option<String>,
+    /// Whether the message carries the `spate.unit` attribute, as a unit a
+    /// feed published does and a storage notification does not.
+    unit_attribute: bool,
 }
 
 impl Message {
@@ -25,7 +28,14 @@ impl Message {
             body: body.to_owned(),
             receive_count: 1,
             message_id: None,
+            unit_attribute: true,
         }
+    }
+
+    /// The message with no `spate.unit` attribute.
+    pub(crate) fn without_unit_attribute(mut self) -> Message {
+        self.unit_attribute = false;
+        self
     }
 
     pub(crate) fn redelivered(mut self, receive_count: u32) -> Message {
@@ -162,7 +172,7 @@ impl ScriptedQueue {
                 message_id: message.message_id.unwrap_or_else(|| format!("m{n}")),
                 handle: format!("h{n}"),
                 body: message.body,
-                unit_id: Some(format!("u{n}")),
+                unit_id: message.unit_attribute.then(|| format!("u{n}")),
                 receive_count: Some(message.receive_count.to_string()),
             });
         }

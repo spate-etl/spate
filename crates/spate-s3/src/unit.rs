@@ -1,6 +1,6 @@
-//! Work units of the feed path: each names one object, or one byte range of
-//! one object, and a storage notification names one object per created
-//! record.
+//! Work units of the feed path and their parts: a unit a lister publishes
+//! names one object, or one byte range of one object, and a storage
+//! notification is one unit with one part per non-empty created object.
 //!
 //! [`parts_of`] decides whether an object is read whole or cut, by the rule
 //! the planner applies to a listing ([`Packing::delimiter_for`] and
@@ -100,7 +100,7 @@ impl Iterator for Cursor {
 /// [`Packing::delimiter_for`] accepts the object and its key is
 /// [`addressable`], and the whole object otherwise.
 pub(crate) fn parts_of(object: Arc<Vec<ObjectEntry>>, packing: Packing) -> Cursor {
-    debug_assert_eq!(object.len(), 1, "a unit names one object");
+    debug_assert_eq!(object.len(), 1, "a part names one object");
     let entry = &object[0];
     match packing
         .delimiter_for(entry)
@@ -704,7 +704,7 @@ mod tests {
 
     /// Pins that a created object of size 0 is acknowledged with no part,
     /// even under a key `object_store` cannot address, but not under a key
-    /// that does not decode.
+    /// that does not decode, and that an object of one byte is read.
     #[test]
     fn a_size_zero_record_is_acknowledged_without_a_unit() {
         for key in ["data/empty.ndjson", "data//empty.ndjson", "data/folder/"] {
@@ -712,6 +712,10 @@ mod tests {
         }
         let reason = failed(decoded(&[created("data/a%zz", 0)]));
         assert!(reason.contains("malformed `%` escape"), "{reason}");
+        assert_eq!(
+            keys(decoded(&[created("data/one.ndjson", 1)])),
+            ["data/one.ndjson"]
+        );
         let reason = failed(decoded(&[record(
             "ObjectCreated:Put",
             "bucket",
@@ -816,8 +820,8 @@ mod tests {
     }
 
     /// Pins that a notification's ETag is sent quoted, as a listing reports
-    /// it, that a quoted one is kept, that one with only a leading quote is
-    /// wrapped, and that an absent one stays absent.
+    /// it, that a quoted one is kept, the empty `""` included, that one with
+    /// only a leading quote is wrapped, and that an absent one stays absent.
     #[test]
     fn an_unquoted_event_etag_is_sent_quoted() {
         let etag = |value: serde_json::Value| {
@@ -835,6 +839,7 @@ mod tests {
             etag(serde_json::json!("\"abc")),
             Some("\"\"abc\"".to_owned())
         );
+        assert_eq!(etag(serde_json::json!("\"\"")), Some("\"\"".to_owned()));
         assert_eq!(etag(serde_json::Value::Null), None);
     }
 

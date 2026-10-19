@@ -4,4 +4,4 @@
 # when the line leaves support is a maintainer edit. ../README.md has the
 # account.
 
-FROM clickhouse/clickhouse-server:26.3.45.3@sha256:b93dfc8cb74a58cab1d3086c6a9410fbab48f42cc32dbbf6c83b653c49e01880
+FROM clickhouse/clickhouse-server:26.3.49.3@sha256:4674aa8d14e17b34498484a319ffa6a5aafcc12774795b3b023c1713a9998606

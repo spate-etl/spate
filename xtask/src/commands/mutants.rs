@@ -9,6 +9,19 @@ use crate::run::{self, Error, Outcome, Step, Streams};
 /// second half must match `output` in `.cargo/mutants.toml`.
 const OUT: &str = "target/mutants";
 
+/// The `git diff` flags that keep a user's diff settings out of the patch.
+/// cargo-mutants reads each path after a `b/` prefix and parses plain text, so
+/// a changed prefix, color or an external or textconv driver would leave it
+/// unable to match or parse the patch.
+const DIFF_FLAGS: [&str; 6] = [
+    "--no-ext-diff",
+    "--no-textconv",
+    "--no-color",
+    "--src-prefix=a/",
+    "--dst-prefix=b/",
+    "--no-renames",
+];
+
 const HEADING: &str = "## Mutants over the diff\n\n";
 
 /// Writes the diff against the merge base of `base` and `HEAD`, runs
@@ -25,7 +38,8 @@ pub(super) fn run(root: &Path, explain: bool, base: &str, in_place: bool) -> Out
     let step = Step::new("cargo", mutants_args(&diff.to_string_lossy(), in_place));
     if explain {
         println!(
-            "git diff --no-renames $(git merge-base {base} HEAD) > {}",
+            "git diff {} $(git merge-base {base} HEAD) > {}",
+            DIFF_FLAGS.join(" "),
             diff.display()
         );
         return run::run(root, true, &step);
@@ -55,7 +69,8 @@ fn clear_report(dir: &Path) -> Outcome {
 
 /// Appends the summary to `summary_path`, when given, and turns the run into
 /// the outcome: cargo-mutants' exit code from the report in `dir`, or the
-/// error that stopped the run before cargo-mutants finished.
+/// error that stopped the run before cargo-mutants finished. A failed append
+/// is reported on stderr and leaves the outcome as it was.
 fn finish(ran: Result<i32, Error>, dir: &Path, summary_path: Option<&Path>) -> Outcome {
     let text = match &ran {
         Ok(code) => {
@@ -66,12 +81,14 @@ fn finish(ran: Result<i32, Error>, dir: &Path, summary_path: Option<&Path>) -> O
     };
     if let Some(path) = summary_path {
         use std::io::Write;
-        std::fs::OpenOptions::new()
+        let written = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(path)
-            .and_then(|mut f| f.write_all(text.as_bytes()))
-            .map_err(|e| Error::msg(format!("{}: {e}", path.display())))?;
+            .and_then(|mut f| f.write_all(text.as_bytes()));
+        if let Err(e) = written {
+            eprintln!("{}: {e}", path.display());
+        }
     }
     match ran? {
         0 => Ok(()),
@@ -87,19 +104,10 @@ fn diff_since(root: &Path, base: &str) -> Result<String, Error> {
             "{base} does not resolve or shares no history with HEAD"
         ))
     })?;
-    // cargo-mutants reads the paths after a `b/` prefix, so a user's prefix,
-    // color or external-diff settings would leave it matching nothing.
-    let args = [
-        "diff",
-        "--no-ext-diff",
-        "--no-textconv",
-        "--no-color",
-        "--src-prefix=a/",
-        "--dst-prefix=b/",
-        "--no-renames",
-        &merge_base,
-    ];
-    run::capture(root, &Step::new("git", args))
+    run::capture(
+        root,
+        &Step::new("git", ["diff"]).args(DIFF_FLAGS).arg(&merge_base),
+    )
 }
 
 /// The cargo arguments. Everything else cargo-mutants reads from
@@ -138,7 +146,7 @@ fn summary(code: i32, missed: &str, timeout: &str) -> String {
     }
     text.push_str(
         "\ncargo-mutants replaces function bodies, operators and match guards, and deletes \
-         match arms. It does not swap a `match` arm, delete an early `return`, `break` or \
+         match arms and struct-literal fields. It does not swap a `match` arm, delete an early `return`, `break` or \
          `continue`, or move a constant across its bound; those stay a review step.\n",
     );
     text
@@ -270,6 +278,19 @@ mod tests {
         std::fs::remove_dir_all(&dir).expect("remove temp dir");
     }
 
+    /// A summary that cannot be written leaves the run's own outcome intact.
+    #[test]
+    fn a_failed_summary_write_keeps_the_outcome() {
+        let dir = scratch("unwritable");
+        // A directory cannot be opened for append.
+        let err = finish(Ok(2), &dir, Some(&dir)).expect_err("survivors exit 2");
+        assert_eq!(err.code, Some(2));
+        let err = finish(Err(Error::msg("main does not resolve")), &dir, Some(&dir))
+            .expect_err("the error passes through");
+        assert_eq!(err.message, "main does not resolve");
+        std::fs::remove_dir_all(&dir).expect("remove temp dir");
+    }
+
     /// cargo-mutants writes its report under `output`, and `run` reads it
     /// under `OUT`; a drift would summarise every run as clean.
     #[test]
@@ -306,9 +327,12 @@ mod tests {
             ("diff.mnemonicPrefix", "true"),
             ("diff.noprefix", "true"),
             ("color.diff", "always"),
+            ("diff.external", "false"),
+            ("diff.t.textconv", "false"),
         ] {
             git(&["config", key, value]);
         }
+        std::fs::write(dir.join(".git/info/attributes"), "* diff=t\n").expect("attributes");
         for name in ["committed", "staged", "unstaged"] {
             write(name, "base\n");
         }

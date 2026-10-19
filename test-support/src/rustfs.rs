@@ -126,7 +126,10 @@ impl Rustfs {
             .with_env_var("RUSTFS_NOTIFY_KAFKA_ENABLE_PRIMARY", "on")
             .with_env_var("RUSTFS_NOTIFY_KAFKA_BROKERS_PRIMARY", BROKER_FROM_INSIDE)
             .with_env_var("RUSTFS_NOTIFY_KAFKA_TOPIC_PRIMARY", topic)
-            .with_env_var("RUSTFS_NOTIFY_KAFKA_QUEUE_DIR_PRIMARY", "/tmp/rustfs-notify")
+            .with_env_var(
+                "RUSTFS_NOTIFY_KAFKA_QUEUE_DIR_PRIMARY",
+                "/tmp/rustfs-notify",
+            )
             .with_host_config_modifier(move |host| {
                 host.network_mode = Some(mode.clone());
                 host.publish_all_ports = Some(false);

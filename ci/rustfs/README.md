@@ -12,6 +12,9 @@ container suites and the fault runs in `faults/` start it through
 `spate_test_support::Rustfs`, which sets a fixed access key pair through
 `RUSTFS_ACCESS_KEY` and `RUSTFS_SECRET_KEY` and reaches the S3 API on port
 9000. The server refuses unsigned requests, so every client signs.
+spate-kafka's notification suite starts it with `Rustfs::start_notifying`
+inside the broker container's network namespace, where RustFS publishes each
+created object's notification to a Kafka topic.
 
 ## Why one lane
 

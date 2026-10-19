@@ -30,7 +30,7 @@ are testing, so adding either is a change inside `ci/`.
 | [`kafka`](kafka/README.md) | `stable` | `spate-kafka`, and `spate`'s end-to-end suites |
 | [`nats`](nats/README.md) | `floor`, `below-floor`, `async` | `spate-coordination`, `spate-s3`'s `coordinated_nats`, and `spate`'s examples tier |
 | [`rust`](rust/README.md) | `stable` | `spate-kafka`'s `tls_system_ca`, as its system OpenSSL builder and client image |
-| [`rustfs`](rustfs/README.md) | `stable` | `spate-s3`, `spate-test-support`'s smoke test, and `spate-faults`, in the weekly fault run |
+| [`rustfs`](rustfs/README.md) | `stable` | `spate-s3`, `spate-kafka`'s notification suite, `spate-test-support`'s smoke test, and `spate-faults`, in the weekly fault run |
 | [`toxiproxy`](toxiproxy/README.md) | `stable` | `spate-faults`, in the weekly fault run |
 
 A service's own README carries what is specific to it: which release lines it

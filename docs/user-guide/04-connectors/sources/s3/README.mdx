@@ -434,9 +434,12 @@ Each store needs its own settings for its notifications to arrive:
 - **Ceph RGW.** The notification topic must be persistent, with unlimited
   `time_to_live` and `max_retries`. A persistent topic whose queue fills while
   the feed is unreachable fails the store's own writes with 503
-  ([Ceph](https://docs.ceph.com/en/latest/radosgw/notifications/)). How RGW
-  encodes a key in its notifications is unverified, and the source decodes it
-  as it decodes AWS S3's.
+  ([Ceph](https://docs.ceph.com/en/latest/radosgw/notifications/)). Three
+  things the source relies on are unverified on RGW: how it encodes a key,
+  which the source decodes as it decodes AWS S3's; whether its Kafka messages
+  carry a key, which the Kafka feed takes as the unit's id; and the `size` it
+  reports for an object written by a multipart upload, since the source drops
+  a record of size 0 unread.
 
 ## Split identity and drift
 

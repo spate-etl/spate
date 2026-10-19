@@ -1439,6 +1439,33 @@ mod tests {
         assert_eq!(reader.lanes.len(), 1, "a range of the failing unit opened");
     }
 
+    /// Pins that a unit with nothing to read is held with no part: it takes
+    /// one of `units_held` until the sweep acknowledges it, and a
+    /// `Retryable` answer is tried again.
+    #[test]
+    fn a_unit_with_nothing_to_read_is_acknowledged_by_the_sweep() {
+        let (inner, script) = scripted_feed();
+        let feed = Arc::new(Refusing::new(inner));
+        *feed.acknowledge.lock().unwrap() = Some(FeedErrorKind::Retryable);
+        let (mut reader, _rt) = reader_over(feed.clone(), Some(1), None);
+        let test_event = br#"{"Service":"Amazon S3","Event":"s3:TestEvent","Bucket":"bucket"}"#;
+        let a = script.deliver(Unit::new("test-event", test_event.to_vec()));
+        start(&mut reader);
+        assert_idle(poll(&mut reader));
+        script.deliver(descriptor_unit(0));
+        assert_idle(poll(&mut reader));
+        assert!(script.acknowledged().is_empty());
+        assert_eq!(
+            script.delivered().len(),
+            1,
+            "received while a unit with nothing to read waits on its acknowledge"
+        );
+        *feed.acknowledge.lock().unwrap() = None;
+        let lanes = lanes_added(poll(&mut reader));
+        assert_eq!(script.acknowledged(), vec![a], "acknowledged by the sweep");
+        assert_eq!(lanes.len(), 1);
+    }
+
     /// Pins that a `receive` answered `Retryable` is tried again on the next
     /// poll and stops nothing.
     #[test]

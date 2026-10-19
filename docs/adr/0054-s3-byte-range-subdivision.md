@@ -7,7 +7,7 @@ description: "The object-storage planner cuts a large uncompressed object into b
 - **Status:** accepted
 - **Date:** 2026-10-01
 - **Supersedes:** [ADR-0033](0033-s3-split-packing.md)
-- **Superseded by:** —
+- **Superseded by:** [ADR-0071](0071-a-work-unit-is-one-object-or-one-byte-range-of-one-object.md), for packing on the feed path
 
 ## Context and problem statement
 

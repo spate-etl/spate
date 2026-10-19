@@ -69,10 +69,11 @@ notified. Informative, with no pass criterion. Measured by
 spate-etl/ingestbench `queue-arms` at 7475b28 against spate b7a9a9ce; results
 at fc958df. One rep of three completed: 27,144 objects, each notified once and
 read once, with event latency 0.83 s at p50, 1.16 s at p90, 3.25 s at p99 and
-5.69 s at most. In the second rep S3 sent no notification for the objects
-copied in the first 161 s after the bucket's notification configuration was
-written, about 16,000 objects; neither the queue nor its dead-letter queue held
-them afterwards. The third rep was not run. Objects written before a
+5.69 s at most. In the second rep S3 sent no notification for the 16,000
+objects copied in the first 160 s of the copy, which began at least 21 s after
+the bucket's notification configuration was written, so for at least 181 s
+after the write; neither the queue nor its dead-letter queue held them
+afterwards. The bound on the write comes from the operator machine's clock. The third rep was not run. Objects written before a
 notification configuration takes effect reach the feed only through a lister
 run. It does not establish delivery for any other store, nor loss under fault.
 

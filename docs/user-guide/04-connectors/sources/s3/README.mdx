@@ -380,8 +380,9 @@ Each record is decided on its own:
 - a record with no `eventName` fails the whole message;
 - a record whose `eventName` is not `ObjectCreated:*`, with or without the
   `s3:` prefix, is dropped, whatever its bucket;
-- a created object of size 0 is dropped, since it holds no records, even under
-  a key `object_store` cannot read under its own name;
+- a created object of size 0 in the source's bucket, under its prefix and
+  with a key that decodes, is dropped, since it holds no records, even under a
+  key `object_store` cannot read under its own name;
 - every other created record is one part of the message's unit. Its key is
   decoded as `application/x-www-form-urlencoded` (`+` is a space, then
   percent-decoding as UTF-8), so `%2F` and a raw `/` give the same key. Its
@@ -398,11 +399,14 @@ any created record:
 - has no size, or a size that is not a non-negative integer;
 - has a key that does not decode;
 - has a key `object_store` cannot read under its own name, for an object of
-  one byte or more: an empty, `.` or `..` segment, a control character, or a
-  leading or trailing `/`.
+  one byte or more: an empty, `.` or `..` segment, an ASCII control
+  character, or a leading or trailing `/`;
+- has an ETag holding a control byte other than a tab, which `If-Match`
+  cannot carry, for an object of one byte or more.
 
 A body that is neither a notification nor a descriptor is failed back the same
-way, and that includes an S3 message inside an SNS envelope. On a store that
+way, and that includes an S3 message inside an SNS envelope. So is a
+descriptor whose ETag `If-Match` cannot carry. On a store that
 puts several records in one message, one such record dead-letters the message
 with its other records. A source whose `url` names the whole bucket
 (`s3://bucket/`) reads every created key in it. The message is acknowledged
@@ -423,8 +427,8 @@ notification's unit is a unit of its own, with the feed message's id (the SQS
 `MessageId`, or the Kafka message key), so an object that both a listing and a
 notification announce is read twice. A store
 sends no notification for an object written before the bucket's notification
-configuration takes effect; on AWS S3 that window lasted about 161 seconds in
-one measured run ([ADR-0072](../../../../adr/0072-missed-storage-notifications-are-not-reconciled-by-re-listing.md)).
+configuration takes effect; on AWS S3 that window lasted at least 181 seconds
+after the configuration was written, in one measured run ([ADR-0072](../../../../adr/0072-missed-storage-notifications-are-not-reconciled-by-re-listing.md)).
 Spate does not re-list to find a notification the store never sent.
 
 Each store needs its own settings for its notifications to arrive:
@@ -443,15 +447,13 @@ Each store needs its own settings for its notifications to arrive:
   RustFS writes each event with timestamp 0, so the work topic needs the
   setting the [Kafka feed](../../feeds/kafka/README.mdx#topics) page states,
   and the feed refuses a work topic without it.
-- **Ceph RGW.** The notification topic must be persistent, with unlimited
-  `time_to_live` and `max_retries`. A persistent topic whose queue fills while
-  the feed is unreachable fails the store's own writes with 503
-  ([Ceph](https://docs.ceph.com/en/latest/radosgw/notifications/)). Three
-  things the source relies on are unverified on RGW: how it encodes a key,
-  which the source decodes as it decodes AWS S3's; whether its Kafka messages
-  carry a key, which the Kafka feed takes as the unit's id; and the `size` it
-  reports for an object written by a multipart upload, since the source drops
-  a record of size 0 unread.
+- **Ceph RGW.** The source does not read RGW's notifications. RGW sends them
+  over HTTP, AMQP or Kafka, never to SQS
+  ([Ceph](https://docs.ceph.com/en/latest/radosgw/notifications/)), and it
+  produces each Kafka message without a key, which the
+  [Kafka feed](../../feeds/kafka/README.mdx#counting-deliveries) dead-letters.
+  RGW also writes a record's key unencoded, and the source decodes every key,
+  so a key holding `+` or `%` decodes to another key.
 
 ## Split identity and drift
 

@@ -193,11 +193,12 @@ pub(crate) enum Decoded {
 /// `s3:` prefix, is dropped whatever its bucket. A created record that does
 /// not deserialise, or one for another bucket, for a key outside `scope`'s
 /// prefix, with no size, or with a key that does not decode fails the whole
-/// message, as does any other body. A created object of size 0 is then dropped. Every other
-/// record becomes one part, its key form-decoded (`+` is a space, then
-/// percent-decoding as UTF-8) and its ETag quoted, unless [`addressable`]
-/// refuses its key, which fails the whole message.
-/// A message with no part left is acknowledged.
+/// message, as does any other body. A created object of size 0 is then
+/// dropped. Every other record becomes one part, its key form-decoded (`+` is
+/// a space, then percent-decoding as UTF-8) and its ETag quoted, unless
+/// [`addressable`] refuses its key or its ETag cannot be an `If-Match` value,
+/// either of which fails the whole message. A message with no part left is
+/// acknowledged.
 pub(crate) fn decode(body: &[u8], scope: &Scope, packing: Packing) -> Decoded {
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
         return Decoded::Fail(
@@ -309,6 +310,17 @@ fn record_part(
             "the key \"{key}\" cannot be read under its own name through `object_store`"
         ));
     }
+    if record
+        .s3
+        .object
+        .etag
+        .as_deref()
+        .is_some_and(|etag| !sendable(etag))
+    {
+        return Err(format!(
+            "the record for \"{key}\" has an ETag that cannot be sent in `If-Match`"
+        ));
+    }
     let last_modified_ms = record
         .event_time
         .as_deref()
@@ -331,6 +343,13 @@ fn quoted(etag: String) -> String {
     } else {
         format!("\"{etag}\"")
     }
+}
+
+/// Whether `etag` can be an `If-Match` header value: `http` refuses a
+/// control byte other than a tab, and `object_store` panics building a
+/// request with a refused header.
+fn sendable(etag: &str) -> bool {
+    etag.bytes().all(|b| b == b'\t' || (b >= 0x20 && b != 0x7f))
 }
 
 /// `key` decoded as `application/x-www-form-urlencoded`: `+` is a space, and
@@ -379,6 +398,12 @@ fn descriptor_parts(body: &[u8], packing: Packing) -> Result<Cursor, String> {
             ));
         }
     };
+    if object.etag.as_deref().is_some_and(|etag| !sendable(etag)) {
+        return Err(format!(
+            "the unit's ETag for \"{}\" cannot be sent in `If-Match`",
+            object.key
+        ));
+    }
     let Some(range) = descriptor.range else {
         return Ok(parts_of(Arc::new(vec![object]), packing));
     };
@@ -851,6 +876,58 @@ mod tests {
         );
         assert_eq!(etag(serde_json::json!("\"\"")), Some("\"\"".to_owned()));
         assert_eq!(etag(serde_json::Value::Null), None);
+    }
+
+    /// Pins that an ETag `If-Match` cannot carry fails the message, from a
+    /// notification or a descriptor, and that a tab, a space, `~` and a
+    /// non-ASCII character are sent.
+    #[test]
+    fn an_etag_that_cannot_be_a_header_value_is_dead_lettered() {
+        let with_etag = |etag: &str| {
+            let mut created = created("data/a.ndjson", 10);
+            created["s3"]["object"]["eTag"] = serde_json::json!(etag);
+            decoded(&[created])
+        };
+        for etag in ["abc\u{1}", "abc\u{1f}", "abc\u{7f}", "a\nb"] {
+            let reason = failed(with_etag(etag));
+            assert!(reason.contains("cannot be sent in `If-Match`"), "{reason}");
+        }
+        for etag in ["a\tb", "a b", "a~b", "a\u{e9}b"] {
+            assert_eq!(keys(with_etag(etag)), ["data/a.ndjson"], "{etag:?}");
+        }
+        let object = |etag: &str| DescriptorObject {
+            key: "data/a.ndjson".into(),
+            size: 10,
+            etag: Some(etag.to_owned()),
+            last_modified_ms: 1,
+        };
+        let body = SplitDescriptor::new(vec![object("\"abc\u{1}\"")])
+            .encode()
+            .unwrap();
+        let reason = failed(decode(&body, &scope(), packing()));
+        assert!(reason.contains("cannot be sent in `If-Match`"), "{reason}");
+        let body = SplitDescriptor::new(vec![object("\"abc\"")])
+            .encode()
+            .unwrap();
+        assert_eq!(keys(decode(&body, &scope(), packing())), ["data/a.ndjson"]);
+    }
+
+    /// Pins that a record with no `eventName`, or one that is not a string,
+    /// fails its message even when its `s3` fields name an object to read.
+    #[test]
+    fn a_record_without_an_event_name_fails_its_message() {
+        for name in [None, Some(serde_json::json!(1))] {
+            let mut record = created("data/a.ndjson", 10);
+            match name {
+                None => {
+                    record.as_object_mut().unwrap().remove("eventName");
+                }
+                Some(value) => record["eventName"] = value,
+            }
+            let reason = failed(decoded(&[created("data/b.ndjson", 10), record]));
+            assert!(reason.contains("notification record 1"), "{reason}");
+            assert!(reason.contains("no `eventName`"), "{reason}");
+        }
     }
 
     /// Pins that a dropped record leaves the records after it to be read: a

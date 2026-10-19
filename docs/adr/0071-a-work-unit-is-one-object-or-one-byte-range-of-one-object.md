@@ -48,8 +48,9 @@ object is one whole unit, which poisons on its first read without a request.
 A notification's key is decoded as `application/x-www-form-urlencoded` (`+` is
 a space, then percent-decoding as UTF-8). A notification becomes a unit only
 for a record whose `eventName` is `ObjectCreated:*`, with or without an `s3:`
-prefix. A record that is not `ObjectCreated:*` is acknowledged and dropped,
-whatever its bucket. A record for a bucket other than the source's, or for a
+prefix. A record with no `eventName` is dead-lettered. A record whose
+`eventName` is not `ObjectCreated:*` is acknowledged and dropped, whatever its
+bucket. A record for a bucket other than the source's, or for a
 key outside the source's prefix, taken with the `/` the listing appends, is
 dead-lettered. A record whose object size is 0 is acknowledged without a unit,
 whatever its key's `Path` form. A notification is an S3 `Records[]` message,
@@ -60,7 +61,9 @@ dead-lettered, and so are a created record that lacks a record's fields or
 carries one of the wrong type, a created record with no size, or a size that is
 not a non-negative integer, a key that does not decode, and, for an object of
 one byte or more, a key that `Path::parse` rejects or whose `Path` form differs
-from the decoded key. A message is one unit whose created records of non-empty
+from the decoded key, or an ETag holding a control byte other than a tab, which
+`If-Match` cannot carry. A unit Spate published with such an ETag is
+dead-lettered the same way. A message is one unit whose created records of non-empty
 objects give one part each, acknowledged once after every part has retired
 under the work-feed record's ack rule; a worker reads a part's ranges as
 ADR-0054 cuts them, and each range in progress counts toward the units it holds
@@ -98,8 +101,12 @@ ADR-0054 cuts them, and each range in progress counts toward the units it holds
 `a_test_event_and_a_removal_are_acknowledged_without_a_unit`,
 `a_key_path_parse_rejects_or_rewrites_is_dead_lettered`,
 `an_unknown_notification_shape_is_dead_lettered`,
-`an_unquoted_event_etag_is_sent_quoted` and
+`an_unquoted_event_etag_is_sent_quoted`,
+`an_etag_that_cannot_be_a_header_value_is_dead_lettered`,
+`a_record_without_an_event_name_fails_its_message` and
 `a_message_with_several_records_gives_one_part_each`.
+`crates/spate-s3/src/unit_reader.rs`:
+`a_unit_with_nothing_to_read_is_acknowledged_by_the_sweep`.
 `crates/spate-s3/tests/feed_driver.rs`:
 `a_message_with_two_records_is_acknowledged_after_both_units` and
 `a_removal_and_a_test_event_are_acknowledged_by_the_reader`.

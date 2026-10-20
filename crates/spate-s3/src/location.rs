@@ -294,7 +294,9 @@ pub(crate) async fn read_object(
     let mut body = Vec::new();
     let mut stream = got.into_stream();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| read_error(location, object, &e))?;
+        // A body failing mid-stream is a transport error, never a refused
+        // read, so it carries no permission hint.
+        let chunk = chunk.map_err(|e| io_error(location, object, &e))?;
         if body.len() + chunk.len() > LOCATION_OBJECT_MAX_BYTES as usize {
             return Err(location.fatal(
                 object,
@@ -863,7 +865,7 @@ mod tests {
             .split_once("s3://ops/jobs/a/: ")
             .map(|(_, text)| text)
             .expect("the store's text follows the location");
-        assert_eq!(text.chars().count(), ERROR_TEXT_MAX_CHARS + 1, "{text}");
+        assert_eq!(text.chars().count(), 512 + 1, "{text}");
         assert!(text.ends_with("é…"), "{text}");
     }
 

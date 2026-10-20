@@ -674,6 +674,7 @@ impl PipelineConfig {
         }
         self.reject_stray_chunk()?;
         self.reject_feed_with_coordination()?;
+        self.reject_location_on_memory()?;
         // Resolve every declared sink's `chunk:` block now, so a malformed
         // block is rejected at load, including for a `sinks:` entry this
         // binary never installs (nothing later would resolve it).
@@ -726,6 +727,24 @@ impl PipelineConfig {
         if self.feed.is_some() && self.coordination.is_some() {
             return Err(ConfigError::Validation(
                 "`feed:` and `coordination:` both divide the source's work; keep one".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Reject a `location` on the in-process feed, whose job is always
+    /// bounded and keeps no state outside the process. Split out of
+    /// [`validate`](Self::validate) so the runtime, which a programmatic
+    /// config reaches without validation, enforces it too.
+    pub(crate) fn reject_location_on_memory(&self) -> Result<(), ConfigError> {
+        if let Some(feed) = &self.feed
+            && feed.location.is_some()
+            && feed.backend().type_tag() == "memory"
+        {
+            return Err(ConfigError::Validation(
+                "`feed.location` names where a bounded job on a durable feed keeps its state; \
+                 the in-process `memory` feed takes none, so remove it"
+                    .into(),
             ));
         }
         Ok(())

@@ -232,6 +232,9 @@ impl<S: Source + 'static> PipelineRuntime<S> {
         self.config
             .reject_feed_with_coordination()
             .map_err(|e| StartError::Config(e.to_string()))?;
+        self.config
+            .reject_location_on_memory()
+            .map_err(|e| StartError::Config(e.to_string()))?;
         if let (Some(section), Some(feed)) = (&self.config.feed, &self.feed) {
             let named = section.backend().type_tag();
             if feed.backend() != named {

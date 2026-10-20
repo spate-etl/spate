@@ -1334,6 +1334,43 @@ fn a_feed_section_beside_coordination_fails_startup() {
     assert!(err.contains("keep one"), "{err}");
 }
 
+/// Pins that `run` refuses a `location` on the in-process feed it builds,
+/// before the source is offered the section.
+#[test]
+fn a_memory_feed_with_a_location_is_refused() {
+    let mut cfg = test_config(1);
+    cfg.feed = feed_section("memory: {}\nlocation: s3://ops/jobs/backfill-1/");
+    let h = start_with_config(cfg, ok_chain);
+    let err = config_error_before_open(h);
+    assert!(
+        err.contains("`feed.location`") && err.contains("`memory`"),
+        "{err}"
+    );
+    assert!(
+        !err.contains("s3://ops"),
+        "the location must not print: {err}"
+    );
+}
+
+/// Pins that `run` refuses a `location` on an in-process feed passed in
+/// through `Pipeline::feed`, which skips building the feed from the section.
+#[test]
+fn a_memory_feed_passed_in_with_a_location_is_refused() {
+    let mut cfg = test_config(1);
+    cfg.feed = feed_section("memory: {}\nlocation: s3://ops/jobs/backfill-1/");
+    let h = start_with(
+        cfg,
+        test_options(),
+        |runtime| runtime.with_feed(Arc::new(crate::feed::memory::MemoryFeed::new())),
+        ok_chain,
+    );
+    let err = config_error_before_open(h);
+    assert!(
+        err.contains("`feed.location`") && err.contains("`memory`"),
+        "{err}"
+    );
+}
+
 /// Pins that a section naming a backend other than `memory`, with no feed
 /// passed in, fails startup with the instruction to build it in code.
 #[test]

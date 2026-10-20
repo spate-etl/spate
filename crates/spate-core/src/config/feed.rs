@@ -1,7 +1,7 @@
 //! The `feed:` section: the work feed a feed-reading source reads from, and
 //! the keys every backend shares.
 
-use super::ComponentConfig;
+use super::{ComponentConfig, redact};
 use serde::Deserialize;
 use std::num::{NonZeroU32, NonZeroUsize};
 
@@ -12,7 +12,8 @@ use std::num::{NonZeroU32, NonZeroUsize};
 /// its body holds the backend's own keys and is decoded by the backend.
 /// `units_held` applies whatever the backend; `attempt_cap` applies to the
 /// in-process and Kafka feeds, and a backend that cannot honor it refuses
-/// it.
+/// it. `location` names where a bounded job's state lives; the in-process
+/// feed refuses it.
 ///
 /// ```yaml
 /// feed:
@@ -23,7 +24,7 @@ use std::num::{NonZeroU32, NonZeroUsize};
 /// Construct one in code with [`FeedSection::new`] and set the optional
 /// fields. The struct is `#[non_exhaustive]` so new keys can be added
 /// without breaking callers.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 #[non_exhaustive]
 pub struct FeedSection {
     backend: ComponentConfig,
@@ -36,6 +37,30 @@ pub struct FeedSection {
     /// delivering it again. `None` leaves the backend's default. A backend
     /// that cannot honor the key refuses it.
     pub attempt_cap: Option<NonZeroU32>,
+    /// The object-store prefix where a bounded job's lister keeps the state
+    /// every worker reads. `None` for a continuous job. The source that
+    /// reads it defines what the prefix holds.
+    pub location: Option<String>,
+}
+
+// Hand-written: a location URL can carry credentials in its userinfo or
+// query. The destructure lists every field so a new one cannot reach `Debug`
+// unredacted.
+impl std::fmt::Debug for FeedSection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let FeedSection {
+            backend,
+            units_held,
+            attempt_cap,
+            location,
+        } = self;
+        f.debug_struct("FeedSection")
+            .field("backend", backend)
+            .field("units_held", units_held)
+            .field("attempt_cap", attempt_cap)
+            .field("location", &location.as_deref().map(redact::url))
+            .finish()
+    }
 }
 
 impl FeedSection {
@@ -61,6 +86,7 @@ impl FeedSection {
             backend,
             units_held: None,
             attempt_cap: None,
+            location: None,
         }
     }
 
@@ -96,6 +122,14 @@ impl<'de> Deserialize<'de> for FeedSection {
             })
             .transpose()?
             .flatten();
+        let location = keys
+            .remove("location")
+            .map(|v| {
+                Option::<String>::deserialize(v)
+                    .map_err(|e| D::Error::custom(format!("location: {e}")))
+            })
+            .transpose()?
+            .flatten();
         // Every key left names a backend, so a misspelled common key shows up
         // here as a second backend.
         if keys.len() != 1 {
@@ -110,8 +144,8 @@ impl<'de> Deserialize<'de> for FeedSection {
                 "`feed:` names no backend; add one, e.g. `memory: {}`".to_owned()
             } else {
                 format!(
-                    "`feed:` must name exactly one backend beside `units_held` and \
-                     `attempt_cap`; found {}",
+                    "`feed:` must name exactly one backend beside `units_held`, \
+                     `attempt_cap` and `location`; found {}",
                     found.join(", ")
                 )
             }));
@@ -131,6 +165,7 @@ impl<'de> Deserialize<'de> for FeedSection {
             backend,
             units_held,
             attempt_cap,
+            location,
         })
     }
 }
@@ -150,19 +185,29 @@ mod tests {
     }
 
     /// Pins that the backend is the one key left beside the common keys, and
-    /// that both common keys are read.
+    /// that every common key is read.
     #[test]
     fn one_backend_sits_beside_the_common_keys() {
-        let s = parse("units_held: 12\nattempt_cap: 3\nmemory: { x: 7 }\n").unwrap();
+        let s =
+            parse("units_held: 12\nattempt_cap: 3\nlocation: s3://ops/jobs/a/\nmemory: { x: 7 }\n")
+                .unwrap();
         assert_eq!(s.backend().type_tag(), "memory");
         assert_eq!(s.units_held, NonZeroUsize::new(12));
         assert_eq!(s.attempt_cap, NonZeroU32::new(3));
+        assert_eq!(s.location.as_deref(), Some("s3://ops/jobs/a/"));
         let body: Body = s.backend().deserialize_into().unwrap();
         assert_eq!(body.x, 7);
 
-        let bare = parse("memory: {}\n").unwrap();
+        let bare = parse("memory: {}\nlocation: null\n").unwrap();
         assert_eq!(bare.units_held, None);
         assert_eq!(bare.attempt_cap, None);
+        assert_eq!(bare.location, None);
+
+        let built = FeedSection::new(ComponentConfig::new(
+            "memory",
+            serde_yaml::Value::Mapping(Default::default()),
+        ));
+        assert_eq!(built.location, None);
     }
 
     /// Pins the error for a section with no backend key.
@@ -186,6 +231,47 @@ mod tests {
     fn a_misspelled_common_key_is_refused_by_name() {
         let err = parse("memory: {}\nunit_held: 4\n").unwrap_err().to_string();
         assert!(err.contains("`unit_held`"), "{err}");
+
+        let err = parse("memory: {}\nlocaton: s3://ops/a/\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("`locaton`"), "{err}");
+        assert!(err.contains("`location`"), "{err}");
+    }
+
+    /// Pins that a `location` that is not a string is refused under its own
+    /// key.
+    #[test]
+    fn a_location_that_is_not_a_string_is_refused() {
+        let err = parse("memory: {}\nlocation: [1]\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.starts_with("location: "), "{err}");
+    }
+
+    /// Pins that `Debug` shows the location without its userinfo or query.
+    #[test]
+    fn a_section_debug_redacts_the_location() {
+        let s = parse("memory: {}\nlocation: s3://u:secret@ops/jobs/a?x=1\n").unwrap();
+        let shown = format!("{s:?}");
+        assert!(shown.contains("ops/jobs/a"), "{shown}");
+        assert!(!shown.contains("secret"), "{shown}");
+        assert!(!shown.contains("x=1"), "{shown}");
+    }
+
+    /// Pins that loading a file refuses a `location` beside the in-process
+    /// feed, naming the rule.
+    #[test]
+    fn a_memory_feed_with_a_location_is_refused_at_load() {
+        let yaml = "pipeline: { name: demo }\nsource: { memory: {} }\nsink: { memory: {} }\n\
+                    feed: { memory: {}, location: s3://ops/jobs/a/ }\n";
+        let err = crate::config::PipelineConfig::from_str(yaml)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("`feed.location`") && err.contains("`memory`"),
+            "{err}"
+        );
     }
 
     /// Pins that `units_held: 0` is refused.

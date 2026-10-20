@@ -1535,6 +1535,8 @@ mod tests {
             entry("data/b", 3, "small"),
             entry("data/c", 7, "first"),
             entry("data/c", 7, "second"),
+            entry("data/d", 2, "small"),
+            entry("data/d", 8, "big"),
         ]);
         let kept: Vec<(&str, u64, &str)> = kept
             .iter()
@@ -1545,7 +1547,8 @@ mod tests {
             [
                 ("data/b", 9, "big"),
                 ("data/a", 1, "a"),
-                ("data/c", 7, "first")
+                ("data/c", 7, "first"),
+                ("data/d", 8, "big")
             ]
         );
     }

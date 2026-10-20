@@ -410,11 +410,28 @@ impl S3Source {
         let endpoint = [AmazonS3ConfigKey::Endpoint, AmazonS3ConfigKey::S3Endpoint]
             .iter()
             .any(|key| options.get_config_value(key).is_some());
+        // An `https://` source URL names its store by host, and an `s3://`
+        // location's store reaches that host only through a set endpoint;
+        // with none it goes to AWS, signed with the source's credentials.
+        let source_by_host = Url::parse(&self.config.url).is_ok_and(|u| {
+            matches!(u.scheme(), "https" | "http")
+                && !u
+                    .host_str()
+                    .is_some_and(|h| h == "amazonaws.com" || h.ends_with(".amazonaws.com"))
+        });
+        if source_by_host && !endpoint {
+            return Err(refuse(
+                "the source's `url` names a store other than AWS by its host, which an `s3://` \
+                 location does not carry; set that store's endpoint under the source's `store`"
+                    .into(),
+            ));
+        }
         if virtual_hosted && endpoint {
             return Err(refuse(
-                "the source's `store` sends virtual-hosted requests to a set `endpoint`, which \
-                 names one bucket whatever the location names; remove `location` or \
-                 `virtual_hosted_style_request`"
+                "the source's `store` or the environment sends virtual-hosted requests to a \
+                 set endpoint, which names one bucket whatever the location names; remove \
+                 `location`, or `virtual_hosted_style_request` from `store` and \
+                 `AWS_VIRTUAL_HOSTED_STYLE_REQUEST` from the environment"
                     .into(),
             ));
         }
@@ -1141,6 +1158,8 @@ mod tests {
             "  endpoint: \"https://b.store.example\"\n  virtual_hosted_style_request: \"True\"\n",
             "  endpoint: \"https://b.store.example\"\n  virtual_hosted_style_request: \"1\"\n",
             "  aws_endpoint_url_s3: \"https://b.store.example\"\n  virtual_hosted_style_request: \"yes\"\n",
+            "  endpoint: \"https://b.store.example\"\n  virtual_hosted_style_request: \"on\"\n",
+            "  endpoint: \"https://b.store.example\"\n  virtual_hosted_style_request: \"Y\"\n",
         ] {
             let (source, _rt) = source_with_store(store);
             let err = source
@@ -1149,6 +1168,10 @@ mod tests {
                 .to_string();
             assert!(
                 err.contains("virtual_hosted_style_request"),
+                "{store}: {err}"
+            );
+            assert!(
+                err.contains("AWS_VIRTUAL_HOSTED_STYLE_REQUEST"),
                 "{store}: {err}"
             );
         }
@@ -1160,6 +1183,44 @@ mod tests {
             let (source, _rt) = source_with_store(store);
             source.parse_location("s3://elsewhere/jobs/a/").unwrap();
         }
+    }
+
+    /// Pins that an S3 location beside a source named by a non-AWS host is
+    /// refused unless `store` sets that store's endpoint, so its requests
+    /// never go to AWS signed with the source's credentials.
+    #[test]
+    fn a_location_beside_a_source_named_by_another_host_needs_an_endpoint() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let source = |store: &str| {
+            let body =
+                format!("url: \"https://0123abcd.r2.cloudflarestorage.com/data/events/\"\n{store}");
+            S3Source::from_component_config(
+                &spate_test::component_config("s3", &body),
+                rt.handle().clone(),
+            )
+            .unwrap()
+        };
+        let err = source("")
+            .parse_location("s3://ops/jobs/a/")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("endpoint"), "{err}");
+        source("store:\n  endpoint: \"https://0123abcd.r2.cloudflarestorage.com\"\n")
+            .parse_location("s3://ops/jobs/a/")
+            .unwrap();
+        let aws = S3Source::from_component_config(
+            &spate_test::component_config(
+                "s3",
+                "url: \"https://data.s3.eu-west-2.amazonaws.com/events/\"\n",
+            ),
+            rt.handle().clone(),
+        )
+        .unwrap();
+        aws.parse_location("s3://ops/jobs/a/").unwrap();
     }
 
     /// Pins that an S3 location is refused when a `store` key is not an S3

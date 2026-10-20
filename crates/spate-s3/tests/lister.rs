@@ -514,6 +514,32 @@ fn a_location_failing_every_read_reports_the_last_error_at_the_window() {
     assert!(warned >= 2, "one WARN per failed read: {lines:#?}");
 }
 
+/// Pins that a read in flight at the window, after an earlier read failed,
+/// ends the wait naming that failure.
+#[test]
+fn an_unanswered_read_after_a_failed_one_names_the_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let (store, hooks) = location_store();
+    hooks.fail_next_gets(1);
+    let (feed, _script) = scripted_feed();
+    let clock = TestClock::frozen();
+    let l = launch_worker(
+        &data,
+        feed,
+        Some(LOCATION),
+        Some(store),
+        Some(Arc::clone(&clock)),
+    );
+    wait_for_gets(&hooks, 1);
+    hooks.hang_gets();
+    clock.advance(POLL);
+    wait_for_gets(&hooks, 2);
+    clock.advance(WINDOW);
+    let reason = failure_reason(&exit(&l));
+    assert!(reason.contains("connection reset"), "{reason}");
+}
+
 /// Pins that a read finding nothing clears an earlier read's failure, so a
 /// wait whose last reads found no fingerprint reports "none appeared".
 #[test]

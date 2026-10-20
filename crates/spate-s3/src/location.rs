@@ -52,7 +52,10 @@ impl Location {
     ///
     /// A [`ConfigError`] naming the key, with the value redacted, for an
     /// empty value, one that is not a URL, one with userinfo, a query or a
-    /// fragment, any scheme but `s3`, `s3a` and `file`, and a location at or
+    /// fragment, any scheme but `s3`, `s3a` and `file`, an `s3` or `s3a`
+    /// location naming no bucket, a `file` location naming a host, a prefix
+    /// with an empty segment, a control character or bytes that are not
+    /// UTF-8, and a location at or
     /// under the source's prefix in the same bucket.
     pub(crate) fn parse(location: &str, source_url: &str) -> Result<Location, ConfigError> {
         let refuse = |why: String| ConfigError::Component {
@@ -100,9 +103,20 @@ impl Location {
         if url.scheme() != "file" && url.host_str().is_none_or(str::is_empty) {
             return Err(refuse("names no bucket".into()));
         }
+        if url.scheme() == "file" && url.host_str().is_some_and(|h| !h.is_empty()) {
+            return Err(refuse(
+                "names a host; write a local path as file:///<path>".into(),
+            ));
+        }
+        // With the scheme and host checked, only the path fails here.
         // `object_store`'s own error quotes the URL, so it stays out.
-        let (_, prefix) = ObjectStoreScheme::parse(&url)
-            .map_err(|_| refuse("names no object store the source opens".into()))?;
+        let (_, prefix) = ObjectStoreScheme::parse(&url).map_err(|_| {
+            refuse(
+                "has a prefix with an empty segment, a control character or bytes that are not \
+                 UTF-8"
+                    .into(),
+            )
+        })?;
         if let Some((source_root, source_prefix)) = Url::parse(source_url)
             .ok()
             .and_then(|u| Some((root(&u)?, ObjectStoreScheme::parse(&u).ok()?.1)))
@@ -256,7 +270,13 @@ pub(crate) async fn read_object(
     let got = match store.get(object).await {
         Ok(got) => got,
         // Checked before `classify`, which reads a missing object as fatal.
-        Err(object_store::Error::NotFound { .. }) => return Ok(None),
+        // A missing bucket answers 404 as well and never fills, so it stays
+        // a failed read; `object_store` keeps the store's code only in text.
+        Err(e @ object_store::Error::NotFound { .. })
+            if !e.to_string().contains("<Code>NoSuchBucket</Code>") =>
+        {
+            return Ok(None);
+        }
         Err(e) => return Err(read_error(location, object, &e)),
     };
     if got.meta.size > LOCATION_OBJECT_MAX_BYTES {
@@ -314,17 +334,23 @@ pub(crate) fn read_error(
     error_with(location, object, e, hint)
 }
 
+/// [`reason`] cut to [`ERROR_TEXT_MAX_CHARS`], with `…` where it was cut.
+pub(crate) fn bounded_reason(e: &object_store::Error) -> String {
+    let mut text = reason(e);
+    if let Some((cut, _)) = text.char_indices().nth(ERROR_TEXT_MAX_CHARS) {
+        text.truncate(cut);
+        text.push('…');
+    }
+    text
+}
+
 fn error_with(
     location: &Location,
     object: &Path,
     e: &object_store::Error,
     hint: &str,
 ) -> SourceError {
-    let mut text = reason(e);
-    if let Some((cut, _)) = text.char_indices().nth(ERROR_TEXT_MAX_CHARS) {
-        text.truncate(cut);
-        text.push('…');
-    }
+    let text = bounded_reason(e);
     SourceError::Client {
         class: classify(e),
         reason: format!(
@@ -363,7 +389,10 @@ pub(crate) async fn await_fingerprint(
     let object = location.fingerprint();
     // The last retryable read error, so a timeout reports what kept the
     // fingerprint from being read.
-    let mut last_error: Option<SourceError>;
+    let mut last_error: Option<SourceError> = None;
+    // Whether any read has completed, so a read in flight at the deadline is
+    // reported as the store's silence only when no read was answered.
+    let mut answered = false;
     let timed_out = |last_error: &Option<SourceError>| match last_error {
         Some(e) => location.fatal(
             &object,
@@ -391,6 +420,9 @@ pub(crate) async fn await_fingerprint(
                 Either::Right(((), pending)) => {
                     next = tick;
                     if clock.now() >= deadline {
+                        if answered {
+                            return Err(timed_out(&last_error));
+                        }
                         return Err(location.fatal(
                             &object,
                             format_args!("the store answered no read of it within {window:?}"),
@@ -403,6 +435,7 @@ pub(crate) async fn await_fingerprint(
                 }
             }
         };
+        answered = true;
         match outcome {
             Ok(Some(stored)) => return compare(location, mine, &stored),
             Ok(None) => last_error = None,
@@ -574,6 +607,21 @@ mod tests {
         for location in ["s3:///jobs/a/", "s3a:///jobs/a/"] {
             let err = refused(location, SOURCE);
             assert!(err.contains("no bucket"), "{location}: {err}");
+        }
+    }
+
+    /// Pins that a `file` location naming a host, and a prefix
+    /// `object_store` cannot read as a path, are refused for that cause.
+    #[test]
+    fn a_location_whose_host_or_prefix_the_store_cannot_read_is_refused() {
+        assert!(refused("file://host/jobs/a/", SOURCE).contains("names a host"));
+        for location in [
+            "s3://ops/jobs//a/",
+            "s3://ops/jobs/%01/a/",
+            "s3://ops/jobs/%FF/a/",
+        ] {
+            let err = refused(location, SOURCE);
+            assert!(err.contains("empty segment"), "{location}: {err}");
         }
     }
 
@@ -799,6 +847,48 @@ mod tests {
         let shown = read_error(&location, &location.fingerprint(), &huge).to_string();
         assert!(shown.len() < 1024, "{} bytes", shown.len());
         assert!(shown.ends_with('…'), "{shown}");
+    }
+
+    /// Pins the cut at exactly 512 characters of multibyte text, which a cut
+    /// by bytes would split mid-character.
+    #[test]
+    fn a_store_error_is_cut_at_512_characters() {
+        let location = accepted("s3://ops/jobs/a/");
+        let long = object_store::Error::Generic {
+            store: "S3",
+            source: "é".repeat(600).into(),
+        };
+        let shown = read_error(&location, &location.fingerprint(), &long).to_string();
+        let text = shown
+            .split_once("s3://ops/jobs/a/: ")
+            .map(|(_, text)| text)
+            .expect("the store's text follows the location");
+        assert_eq!(text.chars().count(), ERROR_TEXT_MAX_CHARS + 1, "{text}");
+        assert!(text.ends_with("é…"), "{text}");
+    }
+
+    /// Pins that a missing bucket fails the read, apart from a missing
+    /// object, which reads as absent.
+    #[tokio::test]
+    async fn a_missing_bucket_fails_the_read() {
+        let store = HookStore {
+            get: Some(|path| {
+                Some(Err(object_store::Error::NotFound {
+                    path: path.to_string(),
+                    source: "404 Not Found: <Error><Code>NoSuchBucket</Code></Error>".into(),
+                }))
+            }),
+            ..HookStore::default()
+        };
+        let location = accepted("s3://opps/jobs/a/");
+        let err = read_object(&store, &location, &location.fingerprint())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("NoSuchBucket"), "{err}");
+        let empty = HookStore::default();
+        let read = read_object(&empty, &location, &location.fingerprint()).await;
+        assert!(matches!(read, Ok(None)), "{read:?}");
     }
 
     /// Pins that an object exactly at the cap is read.

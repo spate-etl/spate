@@ -5,9 +5,9 @@
 //! It writes no end marker and keeps no checkpoint. Reached only through
 //! the `testing`-gated `S3Source::list_once`.
 
-use crate::error::{classify, reason};
+use crate::error::classify;
 use crate::fetch::ObjectEntry;
-use crate::location::{Location, compare, io_error, read_error, read_object};
+use crate::location::{Location, bounded_reason, compare, io_error, read_error, read_object};
 use crate::split::Packing;
 use crate::unit::units;
 use futures_util::StreamExt as _;
@@ -63,7 +63,7 @@ impl Lister {
         while let Some(meta) = listing.next().await {
             let meta = meta.map_err(|e| SourceError::Client {
                 class: classify(&e),
-                reason: format!("listing {}: {}", self.prefix, reason(&e)),
+                reason: format!("listing {}: {}", self.prefix, bounded_reason(&e)),
             })?;
             let entry = ObjectEntry {
                 key: meta.location.to_string(),
@@ -256,6 +256,27 @@ mod tests {
             .to_string();
         assert!(err.contains("read as absent twice"), "{err}");
         assert_eq!(store.creates.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    /// Pins that a 403 on the end marker's HEAD, a read, names
+    /// `s3:ListBucket`.
+    #[test]
+    fn a_refused_end_marker_read_names_s3_list_bucket() {
+        let store = HookStore {
+            get: Some(|path| {
+                Some(Err(object_store::Error::PermissionDenied {
+                    path: path.to_string(),
+                    source: "403 Forbidden".into(),
+                }))
+            }),
+            ..HookStore::default()
+        };
+        let location = Location::parse("s3://ops/jobs/a/", "s3://data/events/").unwrap();
+        let err = runtime()
+            .block_on(delete_end(&store, &location))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("s3:ListBucket"), "{err}");
     }
 
     /// Pins that a location with no end marker logs no delete.

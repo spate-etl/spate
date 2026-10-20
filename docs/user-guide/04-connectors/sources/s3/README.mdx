@@ -484,9 +484,9 @@ a bounded job reads `fingerprint` every five seconds until it appears, and
 compares it with its own before it receives a unit. A worker whose fingerprint
 differs fails startup, and the error prints both. A worker that finds none
 within five minutes exits non-zero. A read the store fails retryably is logged
-at WARN and tried again at the next step. The exit error names the last read's
-failure when that read failed, and says so when the store answered no read
-before the window passed. While it waits a worker holds no unit and reports not ready on
+at WARN and tried again at the next step. The exit error names the last
+failed read's error, says "none appeared" when the reads found nothing, and
+says the store answered no read when it answered none within the window. While it waits a worker holds no unit and reports not ready on
 `/readyz`, and a shutdown ends the wait within one step, a read in flight
 included. On a feed that records an attempt before a unit is read, such as the
 [Kafka feed](../../feeds/kafka/README.mdx#counting-deliveries), the feed
@@ -504,8 +504,13 @@ On every store, write the location as `s3://<bucket>/<prefix>` or
 `file://`. Each of these is refused at startup:
 
 - any other form, an `https://` URL and `memory://` included;
+- an `s3://` or `s3a://` location naming no bucket, a `file://` location
+  naming a host, and a prefix with an empty segment, a control character or
+  bytes that are not UTF-8;
 - a location carrying userinfo, a query or a fragment; credentials go under
   `store`;
+- an S3 location beside a source `url` that names a store other than AWS by
+  its `https://` host, unless `store` sets that store's endpoint;
 - an S3 location when `store` or the environment sends virtual-hosted requests
   to a set endpoint, which then addresses one bucket whatever the location
   names;

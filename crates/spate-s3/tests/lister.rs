@@ -1,0 +1,752 @@
+//! A bounded feed job's location: a worker compares the lister's job
+//! fingerprint before it receives a unit, and the one-pass lister writes the
+//! fingerprint, deletes an earlier end marker and publishes the listing.
+//! Every timed rule runs on a test clock the test advances.
+
+mod support;
+
+use spate_core::checkpoint::Checkpointer;
+use spate_core::clock::tokio::TestClock;
+use spate_core::config::{FeedSection, PipelineConfig};
+use spate_core::feed::{Confirmation, Delivery, Feed, FeedError, FeedWaker, Receipt, Unit};
+use spate_core::pipeline::{ExitReport, ExitState};
+use spate_core::source::{Source, SourceCtx, SourceEvent};
+use spate_s3::{S3Source, SplitDescriptor, split_id_for, split_id_for_range};
+use spate_test::{ScriptedFeed, scripted_feed, wait_until};
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use support::location::{LocationHooks, OnCreate, location_store};
+use support::spy::{SpyOptions, spying_local_store};
+use support::{
+    Launched, PipelineYaml, launch_with_feed, line_framer, lines_bytes, recs, stop, test_options,
+    unit_over,
+};
+
+const DEADLINE: Duration = Duration::from_secs(30);
+const WINDOW: Duration = Duration::from_secs(5 * 60);
+const POLL: Duration = Duration::from_secs(5);
+const LOCATION: &str = "s3://ops/jobs/backfill-1/";
+const FINGERPRINT_KEY: &str = "jobs/backfill-1/fingerprint";
+
+fn data_dir(dir: &tempfile::TempDir) -> PathBuf {
+    let data = dir.path().join("data");
+    fs::create_dir_all(&data).unwrap();
+    data
+}
+
+/// The job fingerprint of a source over `data` with the suite's 1 MiB
+/// target, written out by hand.
+fn fingerprint(data: &Path, compression: &str, delimiter: &str) -> String {
+    format!(
+        "spate-s3:feed1:d2:url=file://{}/:compression={compression}:target=1048576:\
+         delim={delimiter}",
+        data.display()
+    )
+}
+
+/// A worker over `data` on a scripted feed whose section names `location`,
+/// with the location store and clock injected.
+fn launch_worker(
+    data: &Path,
+    feed: ScriptedFeed,
+    location: Option<&str>,
+    store: Option<Arc<dyn object_store::ObjectStore>>,
+    clock: Option<Arc<TestClock>>,
+) -> Launched {
+    let mut section = "feed:\n  scripted: {}\n".to_owned();
+    if let Some(location) = location {
+        section.push_str(&format!("  location: {location}\n"));
+    }
+    let yaml = PipelineYaml::file("s3-job-location", data)
+        .section(&section)
+        .build();
+    launch_with_feed(
+        &yaml,
+        test_options(),
+        |_| {},
+        Arc::new(feed),
+        move |source, _io| {
+            let mut source = line_framer(source);
+            if let Some(store) = store {
+                source = source.with_location_store(store);
+            }
+            if let Some(clock) = clock {
+                source = source.with_clock(clock);
+            }
+            source
+        },
+    )
+}
+
+fn exit(l: &Launched) -> ExitReport {
+    l.run
+        .wait_exit(DEADLINE)
+        .expect("the run exits")
+        .expect("the run starts")
+}
+
+fn failure_reason(report: &ExitReport) -> String {
+    match &report.state {
+        ExitState::Failed(failure) => failure.reason.clone(),
+        other => panic!("expected a failed run, got {other:?}"),
+    }
+}
+
+/// Wait until the location store has answered `n` reads in all.
+fn wait_for_gets(hooks: &LocationHooks, n: usize) {
+    wait_until(DEADLINE, &format!("{n} location reads"), || {
+        hooks.gets() >= n
+    });
+}
+
+/// Pins the end-to-end refusal through a pipeline file: a worker whose
+/// fingerprint differs from the lister's in compression fails startup with
+/// exit code 1, naming the location and both fingerprints, before it
+/// receives a unit. The location is a `file://` prefix the source builds a
+/// store for itself.
+#[test]
+fn a_worker_with_another_fingerprint_refuses_to_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    fs::write(data.join("a.ndjson"), lines_bytes(&recs("a", 5))).unwrap();
+    let jobs = dir.path().join("jobs").join("a");
+    fs::create_dir_all(&jobs).unwrap();
+    let theirs = fingerprint(&data, "Zstd", "0a");
+    fs::write(jobs.join("fingerprint"), &theirs).unwrap();
+    let location = format!("file://{}/", jobs.display());
+    let (feed, script) = scripted_feed();
+    script.deliver(unit_over(&data, "a.ndjson"));
+
+    let l = launch_worker(&data, feed, Some(&location), None, None);
+    let report = exit(&l);
+    assert_eq!(report.exit_code(), 1);
+    let reason = failure_reason(&report);
+    assert!(reason.contains(&location), "{reason}");
+    assert!(reason.contains(&theirs), "{reason}");
+    assert!(
+        reason.contains(&fingerprint(&data, "Auto", "0a")),
+        "{reason}"
+    );
+    assert!(script.delivered().is_empty(), "nothing was received");
+}
+
+/// Pins the window's boundary: one poll short of the window the worker is
+/// still reading, and at the window it fails naming the location and the
+/// window, having received nothing.
+#[test]
+fn a_worker_exits_when_no_fingerprint_appears_within_a_settling_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let (store, hooks) = location_store();
+    let (feed, script) = scripted_feed();
+    script.deliver(unit_over(&data, "a.ndjson"));
+    let clock = TestClock::frozen();
+
+    let l = launch_worker(
+        &data,
+        feed,
+        Some(LOCATION),
+        Some(store),
+        Some(Arc::clone(&clock)),
+    );
+    wait_for_gets(&hooks, 1);
+    let mut reads = 1;
+    clock.advance_stepped(WINDOW - POLL, POLL, || {
+        reads += 1;
+        wait_for_gets(&hooks, reads);
+    });
+    assert!(l.run.wait_exit(Duration::ZERO).is_none(), "still waiting");
+    clock.advance(POLL);
+    let report = exit(&l);
+    let reason = failure_reason(&report);
+    assert!(
+        reason.contains(LOCATION) && reason.contains("300s"),
+        "{reason}"
+    );
+    assert_eq!(hooks.gets(), reads, "no read at the window itself");
+    assert!(script.delivered().is_empty(), "nothing was received");
+}
+
+/// Pins that a fingerprint the lister writes inside the window lets the
+/// worker start and read its units.
+#[test]
+fn a_fingerprint_written_within_the_window_lets_the_worker_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    fs::write(data.join("a.ndjson"), lines_bytes(&recs("a", 5))).unwrap();
+    let (store, hooks) = location_store();
+    let (feed, script) = scripted_feed();
+    let receipt = script.deliver(unit_over(&data, "a.ndjson"));
+    let clock = TestClock::frozen();
+
+    let l = launch_worker(
+        &data,
+        feed,
+        Some(LOCATION),
+        Some(store),
+        Some(Arc::clone(&clock)),
+    );
+    wait_for_gets(&hooks, 1);
+    clock.advance(POLL);
+    wait_for_gets(&hooks, 2);
+    hooks.seed(FINGERPRINT_KEY, fingerprint(&data, "Auto", "0a").as_bytes());
+    clock.advance(POLL);
+    wait_until(DEADLINE, "the unit is acknowledged", || {
+        script.acknowledged() == vec![receipt]
+    });
+    stop(&l);
+}
+
+/// Pins that a fingerprint read the store never answers is abandoned at the
+/// window.
+#[test]
+fn a_fingerprint_read_that_never_answers_ends_at_the_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let (store, hooks) = location_store();
+    hooks.hang_gets();
+    let (feed, _script) = scripted_feed();
+    let clock = TestClock::frozen();
+
+    let l = launch_worker(
+        &data,
+        feed,
+        Some(LOCATION),
+        Some(store),
+        Some(Arc::clone(&clock)),
+    );
+    wait_for_gets(&hooks, 1);
+    clock.advance(WINDOW);
+    let reason = failure_reason(&exit(&l));
+    assert!(reason.contains("300s"), "{reason}");
+}
+
+/// Pins that a retryable read error is retried at the next poll.
+#[test]
+fn a_transient_location_error_is_retried_within_the_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    fs::write(data.join("a.ndjson"), lines_bytes(&recs("a", 5))).unwrap();
+    let (store, hooks) = location_store();
+    hooks.seed(FINGERPRINT_KEY, fingerprint(&data, "Auto", "0a").as_bytes());
+    hooks.fail_next_gets(1);
+    let (feed, script) = scripted_feed();
+    let receipt = script.deliver(unit_over(&data, "a.ndjson"));
+    let clock = TestClock::frozen();
+
+    let l = launch_worker(
+        &data,
+        feed,
+        Some(LOCATION),
+        Some(store),
+        Some(Arc::clone(&clock)),
+    );
+    wait_for_gets(&hooks, 1);
+    clock.advance(POLL);
+    wait_until(DEADLINE, "the unit is acknowledged", || {
+        script.acknowledged() == vec![receipt]
+    });
+    stop(&l);
+}
+
+/// Pins that a stop during the wait ends the run at the next poll, before
+/// the window and with nothing received.
+#[test]
+fn a_stop_during_the_fingerprint_wait_ends_the_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let (store, hooks) = location_store();
+    let (feed, script) = scripted_feed();
+    script.deliver(unit_over(&data, "a.ndjson"));
+    let clock = TestClock::frozen();
+
+    let l = launch_worker(
+        &data,
+        feed,
+        Some(LOCATION),
+        Some(store),
+        Some(Arc::clone(&clock)),
+    );
+    wait_for_gets(&hooks, 1);
+    l.shutdown.trigger();
+    clock.advance(POLL);
+    let report = exit(&l);
+    assert_eq!(report.state, ExitState::Completed);
+    assert!(script.delivered().is_empty(), "nothing was received");
+}
+
+/// Pins the INFO line naming the location and the window when the wait
+/// starts, and that the source becomes ready once the fingerprint matches.
+#[test]
+fn the_fingerprint_wait_logs_the_location_and_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let yaml = PipelineYaml::file("s3-job-location-log", &data).build();
+    let config = PipelineConfig::from_str(&yaml).unwrap();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let (store, hooks) = location_store();
+    let clock = TestClock::frozen();
+    let mut source =
+        line_framer(S3Source::from_component_config(&config.source, rt.handle().clone()).unwrap())
+            .with_location_store(store)
+            .with_clock(Arc::clone(&clock) as Arc<dyn spate_core::clock::tokio::Clock>);
+    let mut section = FeedSection::new(spate_test::component_config("scripted", "{}"));
+    section.location = Some(LOCATION.to_owned());
+    let (feed, _script) = scripted_feed();
+    source.configure_feed(&section, Arc::new(feed)).unwrap();
+
+    let writer = {
+        let hooks = hooks.clone();
+        let clock = Arc::clone(&clock);
+        let fp = fingerprint(&data, "Auto", "0a");
+        std::thread::spawn(move || {
+            wait_for_gets(&hooks, 1);
+            hooks.seed(FINGERPRINT_KEY, fp.as_bytes());
+            clock.advance(POLL);
+        })
+    };
+    let lines = spate_test::capture_logs(tracing::Level::INFO, || {
+        source
+            .open(SourceCtx::new(Checkpointer::new().handle()))
+            .unwrap();
+    });
+    writer.join().unwrap();
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("waiting for the job fingerprint")
+                && l.contains(LOCATION)
+                && l.contains("300s")),
+        "{lines:#?}"
+    );
+    assert!(matches!(
+        source.poll_events(Duration::from_millis(10)).unwrap(),
+        SourceEvent::LanesAssigned(_)
+    ));
+}
+
+/// Pins that a job whose `feed:` section names no location reads nothing
+/// outside its data prefix and starts at once. This holds without the job
+/// location; it guards the continuous path against the change.
+#[test]
+fn a_continuous_job_reads_no_marker_or_fingerprint() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    fs::write(data.join("a.ndjson"), lines_bytes(&recs("a", 5))).unwrap();
+    let (store, spy) = spying_local_store(SpyOptions::default());
+    let (feed, script) = scripted_feed();
+    let receipt = script.deliver(unit_over(&data, "a.ndjson"));
+    let yaml = PipelineYaml::file("s3-continuous", &data)
+        .section("feed:\n  scripted: {}\n")
+        .build();
+    let l = launch_with_feed(
+        &yaml,
+        test_options(),
+        |_| {},
+        Arc::new(feed),
+        move |source, _io| line_framer(source).with_store(store),
+    );
+    wait_until(DEADLINE, "the unit is acknowledged", || {
+        script.acknowledged() == vec![receipt]
+    });
+    stop(&l);
+    let prefix = data.display().to_string();
+    let prefix = prefix.trim_start_matches('/');
+    for get in spy.gets() {
+        assert!(
+            get.key.starts_with(prefix),
+            "read outside the data prefix: {}",
+            get.key
+        );
+    }
+    assert_eq!(spy.lists(), 0, "a worker never lists");
+}
+
+/// A source over `data` for a lister run, with `extra` source keys.
+fn lister_source(data: &Path, rt: &tokio::runtime::Runtime, extra: &str) -> S3Source {
+    let body = format!(
+        "url: \"file://{}/\"\nsplit_target_bytes: 1MiB\n{extra}",
+        data.display()
+    );
+    let section = spate_test::component_config("s3", &body);
+    line_framer(S3Source::from_component_config(&section, rt.handle().clone()).unwrap())
+}
+
+fn runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap()
+}
+
+fn section(backend: &str, location: Option<&str>) -> FeedSection {
+    let mut section = FeedSection::new(spate_test::component_config(backend, "{}"));
+    section.location = location.map(str::to_owned);
+    section
+}
+
+/// A file location under `dir`, outside the data prefix.
+fn file_location(dir: &tempfile::TempDir) -> (String, PathBuf) {
+    let path = dir.path().join("jobs").join("a");
+    (format!("file://{}/", path.display()), path)
+}
+
+/// A feed that notes, at its first publish, whether the location holds an
+/// end marker and a fingerprint, then publishes to a scripted feed.
+struct Observing {
+    inner: ScriptedFeed,
+    location: PathBuf,
+    first: Mutex<Option<(bool, bool)>>,
+}
+
+impl Feed for Observing {
+    fn backend(&self) -> &str {
+        self.inner.backend()
+    }
+    fn set_waker(&self, waker: FeedWaker) {
+        self.inner.set_waker(waker);
+    }
+    fn receive(&self, max: usize) -> Result<Vec<Delivery>, FeedError> {
+        self.inner.receive(max)
+    }
+    fn renew(&self, receipt: Receipt) -> Result<(), FeedError> {
+        self.inner.renew(receipt)
+    }
+    fn acknowledge(&self, receipt: Receipt) -> Result<(), FeedError> {
+        self.inner.acknowledge(receipt)
+    }
+    fn fail(&self, receipt: Receipt, reason: &str) -> Result<(), FeedError> {
+        self.inner.fail(receipt, reason)
+    }
+    fn publish(&self, unit: Unit) -> Confirmation {
+        self.first.lock().unwrap().get_or_insert_with(|| {
+            (
+                self.location.join("end").exists(),
+                self.location.join("fingerprint").exists(),
+            )
+        });
+        self.inner.publish(unit)
+    }
+}
+
+/// Pins that a lister run deletes the end marker an earlier run left, and
+/// writes its fingerprint, before its first publish, and logs the delete.
+#[test]
+fn a_lister_run_deletes_an_earlier_marker_before_its_first_publish() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    fs::write(data.join("a.ndjson"), lines_bytes(&recs("a", 5))).unwrap();
+    let (location, path) = file_location(&dir);
+    fs::create_dir_all(&path).unwrap();
+    fs::write(path.join("end"), b"run=earlier\n").unwrap();
+    let rt = runtime();
+    let (inner, script) = scripted_feed();
+    let feed = Arc::new(Observing {
+        inner,
+        location: path.clone(),
+        first: Mutex::new(None),
+    });
+
+    let lines = spate_test::capture_logs(tracing::Level::INFO, || {
+        lister_source(&data, &rt, "")
+            .list_once(
+                &section("scripted", Some(&location)),
+                Arc::clone(&feed) as Arc<dyn Feed>,
+            )
+            .unwrap();
+    });
+    assert_eq!(script.published().len(), 1);
+    assert_eq!(
+        *feed.first.lock().unwrap(),
+        Some((false, true)),
+        "at the first publish the marker is gone and the fingerprint is there"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("deleted the end marker") && l.contains(&location)),
+        "{lines:#?}"
+    );
+}
+
+/// Pins that a first lister run on a location that does not exist yet
+/// creates its fingerprint and publishes.
+#[test]
+fn a_first_lister_run_on_an_empty_file_location_starts() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    fs::write(data.join("a.ndjson"), lines_bytes(&recs("a", 5))).unwrap();
+    let (location, path) = file_location(&dir);
+    let rt = runtime();
+    let (feed, script) = scripted_feed();
+    lister_source(&data, &rt, "")
+        .list_once(&section("scripted", Some(&location)), Arc::new(feed))
+        .unwrap();
+    assert_eq!(script.published().len(), 1);
+    assert_eq!(
+        fs::read_to_string(path.join("fingerprint")).unwrap(),
+        fingerprint(&data, "Auto", "0a")
+    );
+}
+
+/// Pins that a lister finding another fingerprint, differing in the
+/// delimiter, refuses before it publishes and leaves the location as it was.
+#[test]
+fn a_lister_with_another_fingerprint_refuses_to_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    fs::write(data.join("a.ndjson"), lines_bytes(&recs("a", 5))).unwrap();
+    let (location, path) = file_location(&dir);
+    fs::create_dir_all(&path).unwrap();
+    let theirs = fingerprint(&data, "Auto", "09");
+    fs::write(path.join("fingerprint"), &theirs).unwrap();
+    fs::write(path.join("end"), b"run=earlier\n").unwrap();
+    let rt = runtime();
+    let (feed, script) = scripted_feed();
+    let err = lister_source(&data, &rt, "")
+        .list_once(&section("scripted", Some(&location)), Arc::new(feed))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains(&theirs), "{err}");
+    assert!(err.contains(&fingerprint(&data, "Auto", "0a")), "{err}");
+    assert!(script.published().is_empty());
+    assert_eq!(
+        fs::read_to_string(path.join("fingerprint")).unwrap(),
+        theirs
+    );
+    assert_eq!(fs::read(path.join("end")).unwrap(), b"run=earlier\n");
+}
+
+/// Pins that a re-run whose compression changed refuses the earlier run's
+/// location.
+#[test]
+fn a_rerun_with_a_changed_configuration_refuses_the_earlier_location() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    fs::write(data.join("a.ndjson"), lines_bytes(&recs("a", 5))).unwrap();
+    let (location, _) = file_location(&dir);
+    let rt = runtime();
+    let (feed, _) = scripted_feed();
+    lister_source(&data, &rt, "")
+        .list_once(&section("scripted", Some(&location)), Arc::new(feed))
+        .unwrap();
+    let (feed, script) = scripted_feed();
+    let err = lister_source(&data, &rt, "compression: none\n")
+        .list_once(&section("scripted", Some(&location)), Arc::new(feed))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("compression=None"), "{err}");
+    assert!(script.published().is_empty());
+}
+
+/// Pins that a lister finding its own fingerprint publishes and leaves it
+/// as it was.
+#[test]
+fn a_lister_finding_its_own_fingerprint_proceeds() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    fs::write(data.join("a.ndjson"), lines_bytes(&recs("a", 5))).unwrap();
+    let (store, hooks) = location_store();
+    let mine = fingerprint(&data, "Auto", "0a");
+    hooks.seed(FINGERPRINT_KEY, mine.as_bytes());
+    let rt = runtime();
+    let (feed, script) = scripted_feed();
+    lister_source(&data, &rt, "")
+        .with_location_store(store)
+        .list_once(&section("scripted", Some(LOCATION)), Arc::new(feed))
+        .unwrap();
+    assert_eq!(script.published().len(), 1);
+    assert_eq!(hooks.read(FINGERPRINT_KEY).unwrap(), mine.as_bytes());
+}
+
+/// Pins that the lister writes its fingerprint with a conditional create,
+/// and on `AlreadyExists` compares the stored one and proceeds.
+#[test]
+fn a_lister_whose_fingerprint_write_reports_already_exists_compares_the_stored_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    fs::write(data.join("a.ndjson"), lines_bytes(&recs("a", 5))).unwrap();
+    let (store, hooks) = location_store();
+    hooks.on_next_create(OnCreate::StoreThenAlreadyExists);
+    let rt = runtime();
+    let (feed, script) = scripted_feed();
+    lister_source(&data, &rt, "")
+        .with_location_store(store)
+        .list_once(&section("scripted", Some(LOCATION)), Arc::new(feed))
+        .unwrap();
+    assert_eq!(hooks.creates(), 1, "one conditional create");
+    assert_eq!(script.published().len(), 1);
+}
+
+/// Pins that a fingerprint reported present but read as absent is created
+/// again.
+#[test]
+fn a_lister_recreates_a_fingerprint_missing_after_already_exists() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    fs::write(data.join("a.ndjson"), lines_bytes(&recs("a", 5))).unwrap();
+    let (store, hooks) = location_store();
+    hooks.on_next_create(OnCreate::AlreadyExistsOnce);
+    let rt = runtime();
+    let (feed, script) = scripted_feed();
+    lister_source(&data, &rt, "")
+        .with_location_store(store)
+        .list_once(&section("scripted", Some(LOCATION)), Arc::new(feed))
+        .unwrap();
+    assert_eq!(hooks.creates(), 2);
+    assert_eq!(
+        hooks.read(FINGERPRINT_KEY).unwrap(),
+        fingerprint(&data, "Auto", "0a").as_bytes()
+    );
+    assert_eq!(script.published().len(), 1);
+}
+
+/// Pins that a store client with conditional put turned off fails the
+/// lister, naming the setting.
+#[test]
+fn a_lister_whose_location_refuses_conditional_put_names_the_setting() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let (store, hooks) = location_store();
+    hooks.on_next_create(OnCreate::NotImplemented);
+    let rt = runtime();
+    let (feed, script) = scripted_feed();
+    let err = lister_source(&data, &rt, "")
+        .with_location_store(store)
+        .list_once(&section("scripted", Some(LOCATION)), Arc::new(feed))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("aws_conditional_put"), "{err}");
+    assert!(script.published().is_empty());
+}
+
+/// Pins that a lister on a durable feed with no location refuses before it
+/// sends any request.
+#[test]
+fn a_lister_on_a_durable_feed_without_a_location_refuses() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    fs::write(data.join("a.ndjson"), lines_bytes(&recs("a", 5))).unwrap();
+    let (data_store, spy) = spying_local_store(SpyOptions::default());
+    let (store, hooks) = location_store();
+    let rt = runtime();
+    let (feed, script) = scripted_feed();
+    let err = lister_source(&data, &rt, "")
+        .with_store(data_store)
+        .with_location_store(store)
+        .list_once(&section("scripted", None), Arc::new(feed))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("`feed.location`"), "{err}");
+    assert!(script.published().is_empty());
+    assert_eq!(spy.lists(), 0);
+    assert!(spy.gets().is_empty());
+    assert_eq!(hooks.requests(), 0);
+}
+
+/// Pins the published units: one whole unit per small object and ranges
+/// tiling a large one, with the ids the public derivations mint, and
+/// nothing from the location.
+#[test]
+fn a_lister_run_publishes_one_unit_per_listed_part() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    fs::write(data.join("a.ndjson"), lines_bytes(&recs("a", 5))).unwrap();
+    fs::write(data.join("b.ndjson"), lines_bytes(&recs("b", 7))).unwrap();
+    let big: Vec<String> = (0..40_000)
+        .map(|i| format!("{{\"row\":{i:08},\"pad\":\"{}\"}}", "x".repeat(48)))
+        .collect();
+    fs::write(data.join("big.ndjson"), lines_bytes(&big)).unwrap();
+    let big_size = fs::metadata(data.join("big.ndjson")).unwrap().len();
+    assert!(
+        big_size > 2 << 20,
+        "the big object spans several 1 MiB ranges"
+    );
+    let (location, _) = file_location(&dir);
+    let rt = runtime();
+    let (feed, script) = scripted_feed();
+    lister_source(&data, &rt, "")
+        .list_once(&section("scripted", Some(&location)), Arc::new(feed))
+        .unwrap();
+
+    let mut by_key: BTreeMap<String, Vec<(String, SplitDescriptor)>> = BTreeMap::new();
+    for unit in script.published() {
+        let descriptor = SplitDescriptor::decode(&unit.body).unwrap();
+        assert_eq!(descriptor.objects.len(), 1);
+        let key = descriptor.objects[0].key.clone();
+        by_key.entry(key).or_default().push((unit.id, descriptor));
+    }
+    let names: Vec<&str> = by_key
+        .keys()
+        .map(|k| k.rsplit('/').next().unwrap())
+        .collect();
+    assert_eq!(names, ["a.ndjson", "b.ndjson", "big.ndjson"]);
+    for (key, units) in &by_key {
+        let object = &units[0].1.objects[0];
+        let etag = object.etag.as_deref();
+        if key.ends_with("big.ndjson") {
+            let mut next = 0;
+            for (id, descriptor) in units {
+                let range = descriptor.range.expect("the big object is read in ranges");
+                assert_eq!(range.start, next);
+                assert_eq!(
+                    id,
+                    split_id_for_range(key, etag.unwrap(), range)
+                        .unwrap()
+                        .as_str()
+                );
+                next = range.end;
+            }
+            assert_eq!(next, big_size, "the ranges tile the object");
+            assert!(units.len() >= 2);
+        } else {
+            assert_eq!(units.len(), 1, "{key} is one whole unit");
+            let (id, descriptor) = &units[0];
+            assert_eq!(descriptor.range, None);
+            assert_eq!(id, split_id_for([(key.as_str(), etag)]).unwrap().as_str());
+        }
+    }
+}
+
+/// Pins the store behaviour the lister's conditional create rests on: a
+/// second create of one key reports `AlreadyExists`.
+#[test]
+#[ignore = "requires Docker"]
+fn a_second_conditional_create_at_the_location_reports_already_exists() {
+    use object_store::{ObjectStoreExt as _, PutMode, PutPayload};
+    let gw = support::rustfs::Gateway::start("job-location");
+    let key = object_store::path::Path::from("jobs/a/fingerprint");
+    gw.rt.block_on(async {
+        gw.client
+            .put_opts(
+                &key,
+                PutPayload::from_static(b"first"),
+                PutMode::Create.into(),
+            )
+            .await
+            .expect("the first create");
+        let second = gw
+            .client
+            .put_opts(
+                &key,
+                PutPayload::from_static(b"second"),
+                PutMode::Create.into(),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(second, object_store::Error::AlreadyExists { .. }),
+            "{second:?}"
+        );
+        let stored = gw.client.get(&key).await.unwrap().bytes().await.unwrap();
+        assert_eq!(&stored[..], b"first");
+    });
+}

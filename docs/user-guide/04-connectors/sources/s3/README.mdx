@@ -67,10 +67,10 @@ source:
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `url` | string | `required` | Bucket and prefix to backfill. Every object under the prefix is read. `file://` works for local runs; `memory://` fails at load, because it builds a fresh empty store per component and so cannot be shared. Part of the job fingerprint — byte-identical across every worker of a coordinated job. |
+| `url` | string | `required` | Bucket and prefix to backfill. Every object under the prefix is read. `file://` works for local runs; `memory://` fails at load, because it builds a fresh empty store per component and so cannot be shared. Part of the job fingerprint — byte-identical across every worker of a coordinated job or a [bounded feed job](#bounded-jobs-and-the-job-location). |
 | `compression` | `auto` \| `none` \| `gzip` \| `zstd` | `auto` | Object codec. `auto` decides per object by extension (`.gz`/`.gzip`, `.zst`/`.zstd`, else uncompressed). Multi-member gzip and multi-frame zstd are read fully; truncated or corrupt streams [poison the split](#object-errors-poison-the-split). Part of the job fingerprint. |
 | `split_target_bytes` | bytes | `64MiB` | Target size of one split — the unit of distribution. Objects pack toward it in listing order with a per-object cost floor of a sixteenth of the target (so ≤ ~16 objects per split). An object above the target is [cut into byte ranges](#large-objects-and-byte-ranges) when it qualifies, and otherwise gets a split of its own. On the [feed path](#reading-from-a-feed) nothing packs, and the target sets the size of the byte ranges a whole-object unit is cut into. Floor `1MiB`. Part of the job fingerprint. |
-| `refresh_listing` | bool | `false` | Re-list on the coordinator's replan interval, planning new objects as additional splits. `true` makes the job **open** (never self-terminates). Part of the job fingerprint. |
+| `refresh_listing` | bool | `false` | Re-list on the coordinator's replan interval, planning new objects as additional splits. `true` makes the job **open** (never self-terminates). Part of a coordinated job's fingerprint; the feed path never reads it. |
 | `prefetch_bytes` | bytes | `8MiB` | Target window size for ETag-pinned ranged GETs; see [read-ahead memory sizing](#read-parallelism-on-a-solo-run). Must be at least `chunk_bytes`; a smaller value fails at load. |
 | `chunk_bytes` | bytes | `512KiB` | Target size of one buffered chunk. Zero fails at load. |
 | `store` | string map | `{}` | Raw `object_store` options, applied on top of the environment. Bucket keys fail at load, and so do keys `object_store` does not recognize under an S3 URL — see [the `store` denylist](#the-store-passthrough-and-the-denylist). |
@@ -223,9 +223,10 @@ from the environment):
       aws_container_authorization_token_file: "${AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE}"
 ```
 
-A listing or object read the store answers with `401` or `403`, and a
-client-configuration error, fail the pipeline immediately, because no peer
-would fare better. The error names the status.
+A listing, an object read, or a read or write at the
+[job location](#bounded-jobs-and-the-job-location) the store answers with
+`401` or `403`, and a client-configuration error, fail the pipeline
+immediately, because no peer would fare better. The error names the status.
 
 A TLS rejection by the store or by the credential endpoint fails the pipeline
 the same way. That covers a certificate that fails verification, including one
@@ -455,6 +456,59 @@ Each store needs its own settings for its notifications to arrive:
   [Kafka feed](../../feeds/kafka/README.mdx#counting-deliveries) dead-letters.
   RGW also writes a record's key unencoded, and the source decodes every key,
   so a key holding `+` or `%` decodes to another key.
+
+### Bounded jobs and the job location
+
+A job on a durable feed is bounded when its `feed:` section names a
+[`location`](../../../07-reference/configuration.mdx#feed), and continuous when
+it names none. A bounded job's lister keeps its state at the
+[job location](../../../07-reference/glossary.mdx#job-location), and every
+worker reads it there. A continuous job's workers read nothing outside the
+source's prefix. The in-process feed refuses a `location`.
+
+```yaml
+feed:
+  sqs:
+    queue_url: https://sqs.eu-west-2.amazonaws.com/123456789012/events-backfill-0042
+  location: s3://ops-bucket/spate-jobs/events-backfill-0042/
+```
+
+The location is a prefix, and `…/events-backfill-0042` names the same one.
+It holds the job fingerprint in an object named `fingerprint`, which the job's
+lister creates before it publishes a unit, and the lister's end marker and
+checkpoint beside it. A new job takes a new location.
+
+The fingerprint covers the unit format version, `url`, `compression`,
+`split_target_bytes` and the framer's resync delimiter. At startup a worker of
+a bounded job reads `fingerprint` every five seconds until it appears, and
+compares it with its own before it receives a unit. A worker whose fingerprint
+differs fails startup, and the error prints both. A worker that finds none
+within five minutes exits non-zero. While it waits it holds no unit and
+reports not ready on `/readyz`, and a shutdown ends the wait. On a feed that
+records an attempt before a unit is read, such as the
+[Kafka feed](../../feeds/kafka/README.mdx#counting-deliveries), a refused
+worker has already spent an attempt on each unit the feed readied for it, so a
+worker that keeps restarting into the refusal moves those units toward the
+dead-letter destination.
+
+The location's store is built from its URL with the source's `store` options
+and the environment, so it shares the source's endpoint, region and
+credentials, and may sit in another bucket. On RustFS, Ceph RGW and Garage,
+write it as `s3://<bucket>/<prefix>`, with the endpoint under `store`; an
+`https://` location on another host is refused at startup. A location at or
+under the source's prefix in the same bucket is refused at startup, since the
+source would read its objects. It also belongs outside the prefix of any
+notification rule that publishes to the job's feed, where each write to it
+arrives as a message the source dead-letters; nothing checks that.
+
+Workers need read access to the location. The lister needs to read, write and
+delete there. It creates `fingerprint` only when absent, so a lister whose
+`store` sets `aws_conditional_put: disabled` fails. Run one lister per location:
+the conditional create refuses a second lister with another fingerprint on a
+store that honors `If-None-Match`, and the CI suite checks that on RustFS only.
+The location needs read-after-write and read-after-delete consistency, which
+means `consistency_mode = "consistent"` on Garage and one zone on Ceph RGW. A
+`file://` location serves the processes of one host.
 
 ## Split identity and drift
 

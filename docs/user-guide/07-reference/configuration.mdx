@@ -328,7 +328,7 @@ feed:
 | `<backend>` | component | `required` | Exactly one key naming the backend. `memory` is the in-process feed, which takes no keys of its own. Built from the file alone it has no publisher, so the source reads nothing, and a startup WARN says so. To publish to it, code builds a `MemoryFeed`, keeps a handle, and passes it to `Pipeline::feed`. Units from another process need a durable backend. Any other name is a backend built in code; its page under [Feeds](../04-connectors/feeds/README.mdx) documents its body. |
 | `units_held` | integer | `none` | How many units the source holds and reads at once. A source that reads one unit in parts can count each part in progress against it, and its page says so. Unset, the source's own default applies. At least 1. |
 | `attempt_cap` | integer | `10` | The delivery on which the in-process feed moves a failed unit to its dead-letter list, and the [Kafka feed](../04-connectors/feeds/kafka/README.mdx) moves it to its dead-letter destination. That feed also moves a unit whose recorded deliveries have reached the cap, without delivering it again. A backend that cannot honor the key refuses it. At least 1. |
-| `location` | string | `none` | A job location, an object-store prefix, for a source that reads one. The in-process feed refuses it. |
+| `location` | string | `none` | A [job location](glossary.mdx#job-location), an object-store prefix, for a source that reads one. A job on a durable feed that names one is bounded, and one that names none is continuous. That source's page says what the prefix holds. The in-process feed refuses it. |
 
 The runtime builds the in-process feed itself from `memory`. Any other backend
 is built in code from the section and passed to `Pipeline::feed`, and the

@@ -40,6 +40,8 @@ zstd = { workspace = true }
 
 [dev-dependencies]
 spate-s3 = { path = ".", features = ["testing"] }
+# `clock::tokio::TestClock`, which the job location tests advance.
+spate-core = { workspace = true, features = ["testing"] }
 spate-coordination = { workspace = true, features = ["nats"] }
 spate-bench = { workspace = true }
 spate-test = { workspace = true }

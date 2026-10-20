@@ -151,6 +151,19 @@ its own, and outputs concatenated in seal order form a legal body. The
 [budget](#budget--in-flight-bytes) and `max_bytes` count the bytes before the
 codec.
 
+### Job location
+
+Where a bounded feed job keeps the state every instance of it reads, named by
+the `feed:` section's `location` key: the job fingerprint its lister writes,
+and the lister's end marker and checkpoint. A job on a durable [feed](#feed)
+that names one is **bounded**, and its [work units](#work-unit) come from its
+lister. A job that names none is **continuous**, and its instances read no
+job location. A job on the in-process feed names none.
+
+*Connector mapping:*
+[S3 source](../04-connectors/sources/s3/README.mdx#bounded-jobs-and-the-job-location)
+— an object-store prefix outside the source's prefix.
+
 ### Lane
 
 The data-plane unit of a source (`SourceLane`): one pollable stream pinned

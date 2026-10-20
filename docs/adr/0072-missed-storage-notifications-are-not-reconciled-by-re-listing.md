@@ -46,7 +46,7 @@ cost per listing, and is added only when a deployment needs it.
   broker's next retention check. The Kafka feed refuses at connect a work topic
   whose reported `message.timestamp.type` is not `LogAppendTime`, and warns
   about and skips one that reports none. It checks every Kafka work topic,
-  since no Kafka job names a per-job location (the job-location record) and
+  since no Kafka job names a per-job location ([the job-location record](0073-a-per-job-location-holds-the-listers-checkpoint-end-marker-and-fingerprint.md)) and
   every one is continuous.
 - Neutral, because a seen-set can be added later behind its own trait without
   changing the feed.

@@ -7,8 +7,10 @@
 //! What is here splits in two. `url`, `compression`, `split_target_bytes`
 //! and `refresh_listing` shape the **work itself**: they feed the job
 //! fingerprint and must be byte-equal across every instance of a
-//! coordinated job. `prefetch_bytes`, `chunk_bytes` and `store` are how
-//! *this* instance reads that work, and may differ per replica.
+//! coordinated job. A bounded feed job's fingerprint covers the same keys
+//! except `refresh_listing`, which the feed path never reads.
+//! `prefetch_bytes`, `chunk_bytes` and `store` are how *this* instance reads
+//! that work, and may differ per replica.
 
 use bytesize::ByteSize;
 use object_store::ObjectStoreScheme;
@@ -94,7 +96,8 @@ pub struct S3SourceConfig {
     /// byte ranges of at most the target when it is uncompressed, has an ETag
     /// and is at most 50,000 GiB, and the framer declares a resync delimiter;
     /// any other object at or above the target gets a split of its own. Part of the job fingerprint: every instance
-    /// of a coordinated job must agree on it. Default 64 MiB.
+    /// of a coordinated job or a bounded feed job must agree on it. Default
+    /// 64 MiB.
     #[serde(default = "default_split_target_bytes")]
     pub split_target_bytes: ByteSize,
     /// Re-list the prefix on the coordinator's replan interval, planning

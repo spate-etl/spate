@@ -17,7 +17,9 @@
 //!
 //! A source given a feed, by the pipeline's `feed:` section or through the
 //! `testing`-gated `with_feed`, reads work units through
-//! `unit_reader::UnitReader` in place of all of the above.
+//! `unit_reader::UnitReader` in place of all of the above. When the section
+//! names a `location`, `open` first waits for the lister's job fingerprint
+//! there and refuses a mismatch.
 //!
 //! No coordination backend appears in this crate's public API or in its
 //! cargo features. The store comes from the `coordination:` section through
@@ -30,6 +32,7 @@
 use crate::config::{S3SourceConfig, s3_store_key};
 use crate::lane::S3Lane;
 use crate::listing::{UnaddressableConnector, UnaddressableKeys};
+use crate::location::{Location, SETTLING_WINDOW, await_fingerprint, feed_fingerprint};
 use crate::metrics::S3Metrics;
 use crate::planner::{S3Planner, job_fingerprint};
 use crate::split::Packing;
@@ -40,6 +43,7 @@ use object_store::aws::{AmazonS3, AmazonS3Builder, AmazonS3ConfigKey};
 use object_store::{ClientConfigKey, ObjectStore, ObjectStoreScheme};
 use spate_coordination::store::memory::MemoryStore;
 use spate_coordination::{CoordinationConfig, CoordinatorSpec, StoreCoordinator};
+use spate_core::clock::tokio::{Clock, SystemClock};
 use spate_core::config::{ComponentConfig, ConfigError, CoordinationSection, FeedSection};
 use spate_core::coordination::driver::CoordinationDriver;
 use spate_core::coordination::{PlanFinality, SplitCoordinator};
@@ -97,6 +101,13 @@ pub struct S3Source {
     feed: Option<Arc<dyn Feed>>,
     /// The `feed:` section's `units_held`.
     units_held: Option<NonZeroUsize>,
+    /// The `feed:` section's `location`, for a bounded job.
+    location: Option<Location>,
+    /// A location store injected via the `testing`-gated
+    /// `with_location_store` seam.
+    location_store: Option<Arc<dyn ObjectStore>>,
+    /// Times the wait for the job fingerprint.
+    clock: Arc<dyn Clock>,
     state: State,
 }
 
@@ -129,6 +140,9 @@ impl S3Source {
             store: None,
             feed: None,
             units_held: None,
+            location: None,
+            location_store: None,
+            clock: Arc::new(SystemClock),
             state: State::Created,
         }
     }
@@ -207,8 +221,9 @@ impl S3Source {
     /// the feed. A whole object that qualifies for byte ranges under
     /// `split_target_bytes` is read in ranges. Conflicts with
     /// [`with_coordinator`](S3Source::with_coordinator), with a
-    /// `coordination:` section and with a `feed:` section, and never reports
-    /// the input drained, so the run ends at a shutdown.
+    /// `coordination:` section and with a `feed:` section, reads no job
+    /// location, and never reports the input drained, so the run ends at a
+    /// shutdown.
     ///
     /// Behind the off-by-default `testing` feature, outside the semver
     /// surface.
@@ -220,6 +235,156 @@ impl S3Source {
     pub fn with_feed(mut self, feed: Arc<dyn Feed>) -> S3Source {
         self.feed = Some(feed);
         self
+    }
+
+    /// Test seam: replace the store built from the `feed:` section's
+    /// `location` (the location still names the prefix within it).
+    ///
+    /// Behind the off-by-default `testing` feature, outside the semver
+    /// surface.
+    #[cfg(feature = "testing")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_location_store(mut self, store: Arc<dyn ObjectStore>) -> S3Source {
+        self.location_store = Some(store);
+        self
+    }
+
+    /// Test seam: time the wait for the job fingerprint on `clock`.
+    ///
+    /// Behind the off-by-default `testing` feature, outside the semver
+    /// surface.
+    #[cfg(feature = "testing")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> S3Source {
+        self.clock = clock;
+        self
+    }
+
+    /// Test seam: list the prefix once and publish one unit per object or
+    /// byte range to `feed`, blocking the calling thread on the I/O handle.
+    ///
+    /// With a `location` in `section` it first creates the job fingerprint
+    /// there, or compares the one already there, and deletes an earlier end
+    /// marker. It writes no end marker. The lister run's entry point
+    /// replaces it.
+    ///
+    /// Behind the off-by-default `testing` feature, outside the semver
+    /// surface.
+    ///
+    /// # Errors
+    ///
+    /// Fatal for a durable feed with no `location`, a source with no framer,
+    /// another fingerprint at the location, a store that cannot create an
+    /// object conditionally, and a publish the feed does not confirm.
+    #[cfg(feature = "testing")]
+    #[doc(hidden)]
+    pub fn list_once(
+        mut self,
+        section: &FeedSection,
+        feed: Arc<dyn Feed>,
+    ) -> Result<(), SourceError> {
+        let fatal = |reason: String| SourceError::Client {
+            class: ErrorClass::Fatal,
+            reason,
+        };
+        let location = section
+            .location
+            .as_deref()
+            .map(|location| Location::parse(location, &self.config.url))
+            .transpose()
+            .map_err(|e| fatal(e.to_string()))?;
+        if location.is_none() && section.backend().type_tag() != "memory" {
+            return Err(fatal(format!(
+                "a lister on the `{}` feed runs a bounded job, which keeps its fingerprint at \
+                 a job location; set `feed.location`",
+                section.backend().type_tag()
+            )));
+        }
+        let make_framer = self.framer.clone().ok_or_else(|| {
+            fatal("S3Source has no record framer; supply one with `with_framer(...)`".into())
+        })?;
+        self.config.validate().map_err(|e| fatal(e.to_string()))?;
+        let (store, prefix, _, _) = self.data_store()?;
+        let delimiter = make_framer().resync_delimiter();
+        let location = match location {
+            Some(location) => Some((self.location_store(&location)?, location)),
+            None => None,
+        };
+        let lister = crate::lister::Lister {
+            store,
+            prefix,
+            packing: Packing {
+                target_bytes: self.config.split_target_bytes.as_u64(),
+                compression: self.config.compression,
+                delimiter,
+            },
+            feed,
+            location,
+            fingerprint: feed_fingerprint(
+                &self.config.url,
+                self.config.compression,
+                self.config.split_target_bytes.as_u64(),
+                delimiter,
+            ),
+        };
+        self.handle.block_on(lister.run())
+    }
+}
+
+impl S3Source {
+    /// The store the source reads: the injected one, or one built from
+    /// `config.url`. Returns it with the listing prefix, the unaddressable
+    /// keys its client takes out of listings, and the bucket a
+    /// notification's records must name.
+    fn data_store(&mut self) -> Result<DataStore, SourceError> {
+        let url = parse(&self.config.url)?;
+        Ok(match self.store.take() {
+            // Injected store: the URL still names the listing prefix, and the
+            // bucket for notifications is its host under `s3` or `s3a`.
+            Some(store) => {
+                let (_, path) =
+                    ObjectStoreScheme::parse(&url).map_err(|e| SourceError::Client {
+                        class: ErrorClass::Fatal,
+                        reason: format!("parsing {}: {e}", self.config.url),
+                    })?;
+                let bucket = matches!(url.scheme(), "s3" | "s3a")
+                    .then(|| url.host_str().map(str::to_owned))
+                    .flatten();
+                (store, path, None, bucket)
+            }
+            None => {
+                let built =
+                    build_store(&url, &self.config.store).map_err(|e| SourceError::Client {
+                        class: ErrorClass::Fatal,
+                        reason: format!("building the object store for {}: {e}", self.config.url),
+                    })?;
+                (
+                    Arc::from(built.store),
+                    built.prefix,
+                    built.unaddressable,
+                    built.bucket,
+                )
+            }
+        })
+    }
+
+    /// The store holding `location`: the injected one, or one built from its
+    /// URL with the source's `store` options and the environment.
+    fn location_store(&self, location: &Location) -> Result<Arc<dyn ObjectStore>, SourceError> {
+        if let Some(store) = &self.location_store {
+            return Ok(Arc::clone(store));
+        }
+        build_store(location.url(), &self.config.store)
+            .map(|built| Arc::from(built.store))
+            .map_err(|e| SourceError::Client {
+                class: ErrorClass::Fatal,
+                reason: format!(
+                    "building the object store for the job location {}: {e}",
+                    location.shown()
+                ),
+            })
     }
 }
 
@@ -278,6 +443,11 @@ impl Source for S3Source {
                     .into(),
             });
         }
+        self.location = section
+            .location
+            .as_deref()
+            .map(|location| Location::parse(location, &self.config.url))
+            .transpose()?;
         self.feed = Some(feed);
         self.units_held = section.units_held;
         Ok(())
@@ -304,35 +474,7 @@ impl Source for S3Source {
             reason: e.to_string(),
         })?;
 
-        let url = parse(&self.config.url)?;
-        let (store, prefix, unaddressable, bucket) = match self.store.take() {
-            // Injected store: the URL still names the listing prefix, and the
-            // bucket for notifications is its host under `s3` or `s3a`.
-            Some(store) => {
-                let (_, path) =
-                    ObjectStoreScheme::parse(&url).map_err(|e| SourceError::Client {
-                        class: ErrorClass::Fatal,
-                        reason: format!("parsing {}: {e}", self.config.url),
-                    })?;
-                let bucket = matches!(url.scheme(), "s3" | "s3a")
-                    .then(|| url.host_str().map(str::to_owned))
-                    .flatten();
-                (store, path, None, bucket)
-            }
-            None => {
-                let built =
-                    build_store(&url, &self.config.store).map_err(|e| SourceError::Client {
-                        class: ErrorClass::Fatal,
-                        reason: format!("building the object store for {}: {e}", self.config.url),
-                    })?;
-                (
-                    Arc::from(built.store),
-                    built.prefix,
-                    built.unaddressable,
-                    built.bucket,
-                )
-            }
-        };
+        let (store, prefix, unaddressable, bucket) = self.data_store()?;
 
         let metrics = ctx.meter.as_ref().map(S3Metrics::new);
         if let Some(feed) = self.feed.take() {
@@ -351,6 +493,28 @@ impl Source for S3Source {
                      split_target_bytes are read whole and units naming a byte range are \
                      failed back to the feed"
                 );
+            }
+            if let Some(location) = &self.location {
+                let location_store = self.location_store(location)?;
+                let mine = feed_fingerprint(
+                    &self.config.url,
+                    self.config.compression,
+                    self.config.split_target_bytes.as_u64(),
+                    delimiter,
+                );
+                tracing::info!(
+                    location = %location.shown(),
+                    window = ?SETTLING_WINDOW,
+                    "waiting for the job fingerprint at the job location"
+                );
+                self.handle.block_on(await_fingerprint(
+                    location_store.as_ref(),
+                    location,
+                    &mine,
+                    self.clock.as_ref(),
+                    &ctx.stop,
+                    SETTLING_WINDOW,
+                ))?;
             }
             let parts = LaneParts {
                 store,
@@ -647,7 +811,7 @@ fn build_store(
 /// refuses a missing bucket and builds an empty one from an `https://` URL
 /// with no bucket in it; an empty bucket is `None`, so every created record
 /// fails its message.
-fn scope_bucket(store: &AmazonS3) -> Option<String> {
+pub(crate) fn scope_bucket(store: &AmazonS3) -> Option<String> {
     store
         .to_string()
         .strip_prefix("AmazonS3(")
@@ -655,6 +819,16 @@ fn scope_bucket(store: &AmazonS3) -> Option<String> {
         .filter(|bucket| !bucket.is_empty())
         .map(str::to_owned)
 }
+
+/// The store the source reads, its listing prefix, the unaddressable keys
+/// its client takes out of listings, and the bucket a notification's records
+/// must name.
+type DataStore = (
+    Arc<dyn ObjectStore>,
+    object_store::path::Path,
+    Option<UnaddressableKeys>,
+    Option<String>,
+);
 
 /// What [`build_store`] returns.
 struct BuiltStore {

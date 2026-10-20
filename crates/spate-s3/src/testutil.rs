@@ -1,4 +1,4 @@
-//! Test-only framer shared across the crate's unit tests.
+//! Test-only framer and store wrapper shared across the crate's unit tests.
 //!
 //! `spate-s3` ships no record framer of its own; production wires the format's
 //! framer via [`S3Source::with_framer`](crate::S3Source::with_framer). The
@@ -86,5 +86,102 @@ impl RecordFramer for TestLineFramer {
 
     fn resync_delimiter(&self) -> Option<u8> {
         Some(b'\n')
+    }
+}
+
+/// Answers a GET for the path, or `None` to read the inner store.
+pub(crate) type GetHook =
+    fn(&object_store::path::Path) -> Option<object_store::Result<object_store::GetResult>>;
+
+/// An in-memory store whose GETs and listing order a test can override.
+#[derive(Debug, Default)]
+pub(crate) struct HookStore {
+    pub(crate) inner: object_store::memory::InMemory,
+    /// Answers a GET in place of `inner` when it returns `Some`.
+    pub(crate) get: Option<GetHook>,
+    /// Lists in reverse key order, which no store's listing follows.
+    pub(crate) reverse_list: bool,
+}
+
+impl std::fmt::Display for HookStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "HookStore({})", self.inner)
+    }
+}
+
+#[async_trait::async_trait]
+impl object_store::ObjectStore for HookStore {
+    async fn put_opts(
+        &self,
+        location: &object_store::path::Path,
+        payload: object_store::PutPayload,
+        opts: object_store::PutOptions,
+    ) -> object_store::Result<object_store::PutResult> {
+        self.inner.put_opts(location, payload, opts).await
+    }
+
+    async fn put_multipart_opts(
+        &self,
+        location: &object_store::path::Path,
+        opts: object_store::PutMultipartOptions,
+    ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+        self.inner.put_multipart_opts(location, opts).await
+    }
+
+    async fn get_opts(
+        &self,
+        location: &object_store::path::Path,
+        options: object_store::GetOptions,
+    ) -> object_store::Result<object_store::GetResult> {
+        if let Some(answer) = self.get.and_then(|get| get(location)) {
+            return answer;
+        }
+        self.inner.get_opts(location, options).await
+    }
+
+    fn delete_stream(
+        &self,
+        locations: futures_util::stream::BoxStream<
+            'static,
+            object_store::Result<object_store::path::Path>,
+        >,
+    ) -> futures_util::stream::BoxStream<'static, object_store::Result<object_store::path::Path>>
+    {
+        self.inner.delete_stream(locations)
+    }
+
+    fn list(
+        &self,
+        prefix: Option<&object_store::path::Path>,
+    ) -> futures_util::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+    {
+        use futures_util::StreamExt as _;
+        let listing = self.inner.list(prefix);
+        if !self.reverse_list {
+            return listing;
+        }
+        futures_util::stream::once(async move {
+            let mut all: Vec<_> = listing.collect().await;
+            all.reverse();
+            futures_util::stream::iter(all)
+        })
+        .flatten()
+        .boxed()
+    }
+
+    async fn list_with_delimiter(
+        &self,
+        prefix: Option<&object_store::path::Path>,
+    ) -> object_store::Result<object_store::ListResult> {
+        self.inner.list_with_delimiter(prefix).await
+    }
+
+    async fn copy_opts(
+        &self,
+        from: &object_store::path::Path,
+        to: &object_store::path::Path,
+        options: object_store::CopyOptions,
+    ) -> object_store::Result<()> {
+        self.inner.copy_opts(from, to, options).await
     }
 }

@@ -114,7 +114,8 @@ pub(crate) fn parts_of(object: Arc<Vec<ObjectEntry>>, packing: Packing) -> Curso
     }
 }
 
-/// One feed unit per part of each listed object, in listing order.
+/// The feed units of one listed object, one per part, minted as the
+/// iterator is drawn, so an object cut into many ranges holds one at a time.
 ///
 /// A whole part's id is [`split_id_for`] over its key and ETag, and a range
 /// part's is [`split_id_for_range`], so an id depends only on the key, the
@@ -122,46 +123,45 @@ pub(crate) fn parts_of(object: Arc<Vec<ObjectEntry>>, packing: Packing) -> Curso
 ///
 /// # Errors
 ///
-/// [`Fatal`](spate_core::coordination::CoordinationErrorKind::Fatal) when a
-/// descriptor or an id cannot be built, which no listed object causes.
+/// An item is [`Fatal`](spate_core::coordination::CoordinationErrorKind::Fatal)
+/// when a descriptor or an id cannot be built, which no listed object causes.
 #[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "no lister builds feed units yet")
+    not(feature = "testing"),
+    expect(
+        dead_code,
+        reason = "only the `testing`-gated `S3Source::list_once` lists for the feed"
+    )
 )]
 pub(crate) fn units(
-    entries: Vec<ObjectEntry>,
-    packing: &Packing,
-) -> Result<Vec<Unit>, CoordinationError> {
-    let mut out = Vec::with_capacity(entries.len());
-    for entry in entries {
-        let object = DescriptorObject {
-            key: entry.key.clone(),
-            size: entry.size,
-            etag: entry.etag.clone(),
-            last_modified_ms: entry.last_modified_ms,
+    entry: ObjectEntry,
+    packing: Packing,
+) -> impl Iterator<Item = Result<Unit, CoordinationError>> {
+    let object = DescriptorObject {
+        key: entry.key.clone(),
+        size: entry.size,
+        etag: entry.etag.clone(),
+        last_modified_ms: entry.last_modified_ms,
+    };
+    parts_of(Arc::new(vec![entry]), packing).map(move |part| {
+        let (id, descriptor) = match part.range {
+            None => (
+                split_id_for([(object.key.as_str(), object.etag.as_deref())])?,
+                SplitDescriptor::new(vec![object.clone()]),
+            ),
+            Some(range) => (
+                split_id_for_range(
+                    &object.key,
+                    object
+                        .etag
+                        .as_deref()
+                        .expect("an object is cut only when it has an ETag"),
+                    range,
+                )?,
+                SplitDescriptor::with_range(object.clone(), range),
+            ),
         };
-        for part in parts_of(Arc::new(vec![entry]), *packing) {
-            let (id, descriptor) = match part.range {
-                None => (
-                    split_id_for([(object.key.as_str(), object.etag.as_deref())])?,
-                    SplitDescriptor::new(vec![object.clone()]),
-                ),
-                Some(range) => (
-                    split_id_for_range(
-                        &object.key,
-                        object
-                            .etag
-                            .as_deref()
-                            .expect("an object is cut only when it has an ETag"),
-                        range,
-                    )?,
-                    SplitDescriptor::with_range(object.clone(), range),
-                ),
-            };
-            out.push(Unit::new(id.as_str(), descriptor.encode()?));
-        }
-    }
-    Ok(out)
+        Ok(Unit::new(id.as_str(), descriptor.encode()?))
+    })
 }
 
 /// Where a notification's records must point for the source to read them.
@@ -1081,8 +1081,16 @@ mod tests {
                 })
                 .collect();
             let entries: Vec<ObjectEntry> = listing.iter().map(|(e, _)| e.clone()).collect();
-            let got = units(entries.clone(), &packing).unwrap();
-            let again = units(entries.clone(), &packing).unwrap();
+            let units_of = |entries: &[ObjectEntry]| {
+                entries
+                    .iter()
+                    .cloned()
+                    .flat_map(|e| units(e, packing))
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap()
+            };
+            let got = units_of(&entries);
+            let again = units_of(&entries);
             prop_assert_eq!(&got, &again, "units differ between two calls");
 
             let mut seen = 0;
@@ -1139,7 +1147,7 @@ mod tests {
                     ..e.clone()
                 })
                 .collect();
-            let other = units(retagged, &packing).unwrap();
+            let other = units_of(&retagged);
             for (a, b) in got.iter().zip(&other) {
                 let tagged = SplitDescriptor::decode(&a.body).unwrap().objects[0].etag.is_some();
                 if tagged {

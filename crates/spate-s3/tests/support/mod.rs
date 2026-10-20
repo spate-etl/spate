@@ -3,6 +3,7 @@
 #![allow(dead_code)]
 #![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
 
+pub(crate) mod location;
 pub(crate) mod rustfs;
 pub(crate) mod s3_stub;
 pub(crate) mod spy;

@@ -14,6 +14,9 @@
 //! qualifies for byte ranges is read in ranges. That job never
 //! self-terminates, so it ends at a shutdown, and the section's `units_held`
 //! bounds its read parallelism, one lane per object or range in progress.
+//! When the section names a `location`, the job is bounded: the source waits
+//! for the job fingerprint its lister writes there, and refuses to start when
+//! it differs from its own.
 //!
 //! # Shape
 //!
@@ -96,7 +99,10 @@ mod framer;
 #[doc(hidden)]
 pub mod fuzz_seams;
 mod lane;
+#[cfg(feature = "testing")]
+mod lister;
 mod listing;
+mod location;
 mod metrics;
 mod offset;
 mod planner;

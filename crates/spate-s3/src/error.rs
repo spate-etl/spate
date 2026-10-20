@@ -23,7 +23,10 @@ use spate_core::error::ErrorClass;
 pub(crate) fn classify(e: &object_store::Error) -> ErrorClass {
     use object_store::Error as E;
     match e {
-        _ if list_rejected(e) || spate_core::tls_rejection!(rustls, e).is_some() => {
+        _ if list_rejected(e)
+            || delete_rejected(e)
+            || spate_core::tls_rejection!(rustls, e).is_some() =>
+        {
             ErrorClass::Fatal
         }
         E::NotFound { .. }
@@ -86,6 +89,19 @@ fn list_rejected(e: &object_store::Error) -> bool {
                     .strip_prefix("Server returned non-2xx status code: ")
                     .is_some_and(|code| code.starts_with("401 ") || code.starts_with("403 "))
             })
+}
+
+/// Whether `e` is a `DeleteObjects` entry the store refused with
+/// `AccessDenied`. The request itself answers 200, and `object_store` reports
+/// the entry as `Generic` with a private error type, so this matches its
+/// message.
+fn delete_rejected(e: &object_store::Error) -> bool {
+    let object_store::Error::Generic { source, .. } = e else {
+        return false;
+    };
+    let text = source.to_string();
+    text.starts_with("DeleteObjects request failed for key ")
+        && text.ends_with("(code: AccessDenied)")
 }
 
 /// `e`'s message, with the TLS rejection behind it appended.

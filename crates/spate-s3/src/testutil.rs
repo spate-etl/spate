@@ -135,6 +135,9 @@ pub(crate) struct HookStore {
     pub(crate) reverse_list: bool,
     /// Answers every conditional create `AlreadyExists` without storing.
     pub(crate) creates_exist: bool,
+    /// Stores every conditional create over an existing object, as a store
+    /// that ignores `If-None-Match` does.
+    pub(crate) creates_overwrite: bool,
     /// Conditional creates so far.
     pub(crate) creates: std::sync::atomic::AtomicUsize,
     /// The offset of each offset listing, in order.
@@ -175,6 +178,7 @@ impl object_store::ObjectStore for HookStore {
             }
             None => {}
         }
+        let mut opts = opts;
         if matches!(opts.mode, object_store::PutMode::Create) {
             self.creates
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -183,6 +187,9 @@ impl object_store::ObjectStore for HookStore {
                     path: location.to_string(),
                     source: "scripted".into(),
                 });
+            }
+            if self.creates_overwrite {
+                opts.mode = object_store::PutMode::Overwrite;
             }
         }
         let put = self.inner.put_opts(location, payload, opts).await?;

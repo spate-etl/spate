@@ -25,7 +25,7 @@ use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt as _, PutMode, PutPayload};
 use spate_core::error::{ErrorClass, SourceError};
 use spate_core::feed::{Confirmation, Feed};
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 /// The most publishes the lister leaves unconfirmed at once. At least one
@@ -34,7 +34,8 @@ pub(crate) const LISTER_IN_FLIGHT: usize = 32;
 
 /// The most listed keys between two checkpoint writes: the largest
 /// `ListObjectsV2` page AWS returns. A store whose pages hold at most this
-/// many keys sees at most one write per page.
+/// many keys sees at most one write per page, and one more when the listing
+/// ends.
 pub(crate) const CHECKPOINT_EVERY: usize = 1000;
 
 /// One lister run over a listing prefix.
@@ -67,10 +68,13 @@ enum Fingerprint {
 }
 
 impl Lister {
-    /// Write the fingerprint, then delete a checkpoint beside a fingerprint
-    /// it created or read the one beside a fingerprint it matched, delete an
-    /// earlier end marker, then publish every listed object's units in the
-    /// order the store lists them, after the checkpoint when there is one.
+    /// Read the fingerprint and compare it, or delete a checkpoint and create
+    /// the fingerprint when there is none, read the checkpoint beside a
+    /// fingerprint it matched, delete an earlier end marker, then publish
+    /// every listed object's units in the order the store lists them, after
+    /// the checkpoint when there is one. An object the S3 client cannot
+    /// address is published once its page is fetched, ahead of the keys
+    /// listed before it on that page.
     ///
     /// # Errors
     ///
@@ -82,23 +86,32 @@ impl Lister {
     pub(crate) async fn run(self) -> Result<(), SourceError> {
         let mut start = None;
         if let Some((store, location)) = &self.location {
-            let found = write_fingerprint(store.as_ref(), location, &self.fingerprint).await?;
+            // Decided by the read, since a store that ignores `If-None-Match`
+            // answers a create over an existing object 200.
+            let found = match read_object(store.as_ref(), location, &location.fingerprint()).await?
+            {
+                Some(stored) => {
+                    compare(location, &self.fingerprint, &stored)?;
+                    Fingerprint::Matched
+                }
+                None => {
+                    // A checkpoint beside no fingerprint is not this job's. It
+                    // goes before the create, so a run that stops between the
+                    // two never leaves it beside a fingerprint.
+                    if self.resume {
+                        delete_checkpoint(store.as_ref(), location).await?;
+                    }
+                    write_fingerprint(store.as_ref(), location, &self.fingerprint).await?
+                }
+            };
             if !self.resume {
                 tracing::warn!(
                     location = %location.shown(),
                     "the store does not list keys after an offset in its own order, so this \
                      lister run keeps no checkpoint and lists the whole prefix"
                 );
-            } else {
-                match found {
-                    // A checkpoint beside no fingerprint is not this job's,
-                    // and a run that stops before its first write would
-                    // otherwise resume from it.
-                    Fingerprint::Created => delete_checkpoint(store.as_ref(), location).await?,
-                    Fingerprint::Matched => {
-                        start = read_checkpoint(store.as_ref(), location, &self.prefix).await?;
-                    }
-                }
+            } else if let Fingerprint::Matched = found {
+                start = read_checkpoint(store.as_ref(), location, &self.prefix).await?;
             }
             // Before the first publish, so no worker of this run can read a
             // marker an earlier run left.
@@ -116,6 +129,7 @@ impl Lister {
         let mut written = start;
         let mut candidate: Option<Path> = None;
         let mut since_write = 0;
+        let mut unaddressable_seen = HashSet::new();
         while let Some(meta) = listing.next().await {
             let meta = meta.map_err(|e| SourceError::Client {
                 class: classify(&e),
@@ -123,7 +137,8 @@ impl Lister {
             })?;
             // `object_store` fetches a page before it yields the page's first
             // key, so every unaddressable object up to this page is recorded.
-            self.publish_unaddressable(&mut pending).await?;
+            self.publish_unaddressable(&mut pending, &mut unaddressable_seen)
+                .await?;
             if since_write >= self.checkpoint_every && candidate != written {
                 settle_all(&mut pending).await?;
                 self.write_checkpoint(candidate.as_ref()).await?;
@@ -148,7 +163,8 @@ impl Lister {
                 candidate = Some(meta.location);
             }
         }
-        self.publish_unaddressable(&mut pending).await?;
+        self.publish_unaddressable(&mut pending, &mut unaddressable_seen)
+            .await?;
         settle_all(&mut pending).await?;
         if candidate.is_some() && candidate != written {
             self.write_checkpoint(candidate.as_ref()).await?;
@@ -180,17 +196,22 @@ impl Lister {
     }
 
     /// Publish each object the S3 client took out of the listing so far, one
-    /// whole unit each, which poisons on its first read.
+    /// whole unit each, which poisons on its first read. A key in `seen` was
+    /// published from an earlier page and is not published again.
     async fn publish_unaddressable(
         &self,
         pending: &mut VecDeque<(String, Confirmation)>,
+        seen: &mut HashSet<String>,
     ) -> Result<(), SourceError> {
         let Some(keys) = &self.unaddressable else {
             return Ok(());
         };
         for entry in largest_per_key(keys.take()) {
             if entry.size == 0 {
-                tracing::debug!(key = %entry.key, "not publishing an empty object whose key the store cannot address");
+                tracing::debug!(key = ?entry.key, "not publishing an empty object whose key the store cannot address");
+                continue;
+            }
+            if !seen.insert(entry.key.clone()) {
                 continue;
             }
             self.publish(entry, pending).await?;
@@ -221,11 +242,15 @@ impl Lister {
 /// records.
 fn largest_per_key(entries: Vec<ObjectEntry>) -> Vec<ObjectEntry> {
     let mut kept: Vec<ObjectEntry> = Vec::with_capacity(entries.len());
+    let mut at: HashMap<String, usize> = HashMap::with_capacity(entries.len());
     for entry in entries {
-        match kept.iter_mut().find(|k| k.key == entry.key) {
-            Some(k) if entry.size > k.size => *k = entry,
+        match at.get(&entry.key) {
+            Some(&i) if entry.size > kept[i].size => kept[i] = entry,
             Some(_) => {}
-            None => kept.push(entry),
+            None => {
+                at.insert(entry.key.clone(), kept.len());
+                kept.push(entry);
+            }
         }
     }
     kept
@@ -313,8 +338,9 @@ async fn read_checkpoint(
         return Err(location.fatal(
             &object,
             format_args!(
-                "it holds {shown:?}, which is not a key under the listing prefix {prefix:?}; \
-                 delete it and the lister lists the prefix from the start"
+                "it holds {shown:?}, which is not a key under the listing prefix {:?}; \
+                 delete it and the lister lists the prefix from the start",
+                prefix.as_ref()
             ),
         ));
     };
@@ -332,10 +358,21 @@ async fn delete_checkpoint(
     location: &Location,
 ) -> Result<(), SourceError> {
     let object = location.checkpoint();
-    match store.delete(&object).await {
-        Ok(()) | Err(object_store::Error::NotFound { .. }) => Ok(()),
-        Err(e) => Err(io_error(location, &object, &e)),
+    match store.head(&object).await {
+        Ok(_) => {}
+        Err(object_store::Error::NotFound { .. }) => return Ok(()),
+        Err(e) => return Err(read_error(location, &object, &e)),
     }
+    match store.delete(&object).await {
+        // Gone already: what the delete was for.
+        Ok(()) | Err(object_store::Error::NotFound { .. }) => {}
+        Err(e) => return Err(io_error(location, &object, &e)),
+    }
+    tracing::info!(
+        location = %location.shown(),
+        "deleted a checkpoint beside no job fingerprint; the lister lists the whole prefix"
+    );
+    Ok(())
 }
 
 /// Delete the end marker, if there is one.
@@ -939,15 +976,16 @@ mod tests {
     }
 
     /// Pins that an object of size 0 is not published and never becomes the
-    /// checkpoint, while a one-byte object is, that an empty last object
-    /// leaves the checkpoint unwritten at the end, and that a listing of
-    /// empty objects alone publishes and writes nothing.
+    /// checkpoint, while a one-byte object is, that an empty object leaves
+    /// the checkpoint unwritten after it, and that a listing of empty objects
+    /// alone publishes and writes nothing.
     #[test]
     fn a_zero_byte_object_is_skipped_and_never_checkpointed() {
         let rt = runtime();
         let job = Job::new();
         rt.block_on(async {
             job.put("data/a", b"row\n").await;
+            job.put("data/a0", b"").await;
             job.put("data/b", b"\n").await;
             job.put("data/x", b"").await;
         });
@@ -955,6 +993,8 @@ mod tests {
         rt.block_on(job.lister(Arc::clone(&feed) as Arc<dyn Feed>, 1).run())
             .unwrap();
         assert_eq!(feed.keys(), ["data/a", "data/b"]);
+        // No write repeats the key before an empty object, mid-listing or at
+        // the end.
         assert_eq!(job.checkpoint_writes(), ["data/a", "data/b"]);
 
         let empty = Job::new();
@@ -1072,6 +1112,9 @@ mod tests {
             assert!(feed.keys().is_empty(), "{body:?}");
             if body == b"data/a\nb" {
                 assert!(text.contains("a\\nb"), "{text}");
+            }
+            if body == b"other/x" {
+                assert!(text.contains("prefix \"data\""), "{text}");
             }
         }
     }
@@ -1392,9 +1435,10 @@ mod tests {
     }
 
     /// Pins that each object the S3 client cannot address and that has bytes
-    /// is published once as one whole unit, the largest of the keys that
-    /// decode alike, before the checkpoint after it is written, and that
-    /// none becomes the checkpoint.
+    /// is published once as one whole unit, though keys that decode alike
+    /// span two pages, before the checkpoint after it is written, that one on
+    /// a last page holding no other key is published, and that none becomes
+    /// the checkpoint.
     #[test]
     fn an_unaddressable_key_with_bytes_is_published_and_never_checkpointed() {
         let rt = runtime();
@@ -1404,14 +1448,12 @@ mod tests {
                 Some("1"),
             ),
             list_page(
-                &[
-                    ("data/a\rb", 3),
-                    ("data/a\r\nb", 9),
-                    ("data/e/", 0),
-                    ("data/z", 7),
-                ],
-                None,
+                &[("data/a\r\nb", 9), ("data/e\nf/", 0), ("data/z", 7)],
+                Some("2"),
             ),
+            // No addressable key: only the drain after the listing ends
+            // publishes this page.
+            list_page(&[("data/a\rb", 3), ("data/q//r", 5)], None),
         ]);
         let keys = UnaddressableKeys::default();
         let store = crate::test_servers::builder_at(&url)
@@ -1425,7 +1467,9 @@ mod tests {
         let mut lister = job.lister(Arc::clone(&feed) as Arc<dyn Feed>, 2);
         lister.store = Arc::new(store);
         lister.unaddressable = Some(keys);
-        rt.block_on(lister.run()).unwrap();
+        let lines = spate_test::capture_logs(tracing::Level::DEBUG, || {
+            rt.block_on(lister.run()).unwrap();
+        });
 
         assert_eq!(
             feed.keys(),
@@ -1434,16 +1478,27 @@ mod tests {
                 "data/a",
                 "data/b",
                 "data/a\nb",
-                "data/z"
+                "data/z",
+                "data/q//r"
             ]
         );
+        // The empty object's key is logged escaped, on one line.
+        assert!(
+            lines.iter().any(|l| l.contains("data/e\\nf/")),
+            "{lines:#?}"
+        );
+        assert!(!lines.iter().any(|l| l.starts_with("f/")), "{lines:#?}");
         let published = feed.published.lock().unwrap().clone();
         let crlf: Vec<u64> = published
             .iter()
             .filter(|(_, key, _)| key == "data/a\nb")
             .map(|(_, _, size)| *size)
             .collect();
-        assert_eq!(crlf, [9], "one whole unit, the largest");
+        assert_eq!(
+            crlf,
+            [9],
+            "one whole unit, from the first page that lists it"
+        );
         let (dbl, _, _) = published
             .iter()
             .find(|(_, key, _)| key == "data/d//x.ndjson")
@@ -1492,6 +1547,187 @@ mod tests {
                 ("data/a", 1, "a"),
                 ("data/c", 7, "first")
             ]
+        );
+    }
+
+    /// Pins that a run whose fingerprint create was stored but answered with
+    /// an error leaves no earlier checkpoint for the next run to resume from.
+    #[test]
+    fn a_lost_fingerprint_create_reply_leaves_no_foreign_checkpoint() {
+        let rt = runtime();
+        let job = Job::with_ops(HookStore {
+            put: Some(|path| {
+                (path.filename() == Some("fingerprint")).then(|| {
+                    PutAnswer::StoreThenFail(object_store::Error::Generic {
+                        store: "S3",
+                        source: "connection reset".into(),
+                    })
+                })
+            }),
+            ..HookStore::default()
+        });
+        rt.block_on(async {
+            job.put_rows(&["data/a", "data/b", "data/c"]).await;
+            job.seed_checkpoint(b"data/b").await;
+        });
+        let feed = KeyedFeed::confirming(&job.events);
+        let err = rt
+            .block_on(job.lister(feed, CHECKPOINT_EVERY).run())
+            .unwrap_err();
+        assert_eq!(class(&err), ErrorClass::Retryable, "{err}");
+
+        let again = job.rerun();
+        let feed = KeyedFeed::confirming(&again.events);
+        rt.block_on(
+            again
+                .lister(Arc::clone(&feed) as Arc<dyn Feed>, CHECKPOINT_EVERY)
+                .run(),
+        )
+        .unwrap();
+        assert_eq!(feed.keys(), ["data/a", "data/b", "data/c"]);
+    }
+
+    /// Pins that a lister resumes on a store that applies a conditional
+    /// create over an existing object, and that it sends no create there.
+    #[test]
+    fn a_store_that_ignores_conditional_create_still_resumes() {
+        let rt = runtime();
+        let job = Job::with_ops(HookStore {
+            creates_overwrite: true,
+            ..HookStore::default()
+        });
+        rt.block_on(async {
+            job.put_rows(&["data/a", "data/b", "data/c"]).await;
+            job.matched().await;
+            job.seed_checkpoint(b"data/b").await;
+        });
+        let feed = KeyedFeed::confirming(&job.events);
+        rt.block_on(
+            job.lister(Arc::clone(&feed) as Arc<dyn Feed>, CHECKPOINT_EVERY)
+                .run(),
+        )
+        .unwrap();
+        assert_eq!(feed.keys(), ["data/c"]);
+        assert_eq!(job.ops.creates.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    /// Pins that a checkpoint found beside no fingerprint is deleted with a
+    /// log line naming the location.
+    #[test]
+    fn a_deleted_foreign_checkpoint_is_logged() {
+        let rt = runtime();
+        let job = Job::new();
+        rt.block_on(async {
+            job.put_rows(&["data/a"]).await;
+            job.seed_checkpoint(b"data/a").await;
+        });
+        let lister = job.lister(KeyedFeed::confirming(&job.events), CHECKPOINT_EVERY);
+        let lines = spate_test::capture_logs(tracing::Level::INFO, || {
+            rt.block_on(lister.run()).unwrap();
+        });
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("deleted a checkpoint") && l.contains(LOCATION)),
+            "{lines:#?}"
+        );
+    }
+
+    /// Pins that a store refusing the checkpoint delete with `AccessDenied`,
+    /// which S3 reports inside a 200 `DeleteObjects` reply, fails the run
+    /// as fatal.
+    #[test]
+    fn a_refused_checkpoint_delete_is_fatal() {
+        let endpoint = crate::test_servers::sequence_server(vec![(
+            "200 OK",
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+             <DeleteResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
+             <Error><Key>jobs/a/checkpoint</Key><Code>AccessDenied</Code>\
+             <Message>Access Denied</Message></Error></DeleteResult>"
+                .to_owned(),
+        )]);
+        let store = crate::test_servers::store_at(&endpoint);
+        let location = Location::parse(LOCATION, "s3://data/events/").unwrap();
+        let err = runtime()
+            .block_on(store.delete(&location.checkpoint()))
+            .map_err(|e| io_error(&location, &location.checkpoint(), &e))
+            .unwrap_err();
+        assert_eq!(class(&err), ErrorClass::Fatal, "{err}");
+    }
+
+    /// A source over the S3 stub at `endpoint`, its location in `ops`.
+    fn stub_source(rt: &tokio::runtime::Runtime, endpoint: &str) -> crate::source::S3Source {
+        let yaml = format!(
+            "url: \"s3://b/data/\"\nsplit_target_bytes: 1MiB\nstore:\n  endpoint: \"{endpoint}\"\n  \
+             allow_http: \"true\"\n  access_key_id: \"AKIDTEST\"\n  secret_access_key: \"secret\"\n  \
+             region: \"us-east-1\"\n"
+        );
+        crate::source::S3Source::from_component_config(
+            &spate_test::component_config("s3", &yaml),
+            rt.handle().clone(),
+        )
+        .unwrap()
+        .with_framer(|| Box::new(crate::testutil::TestLineFramer::new(1 << 20)))
+    }
+
+    fn scripted_section() -> spate_core::config::FeedSection {
+        let mut section =
+            spate_core::config::FeedSection::new(spate_test::component_config("scripted", "{}"));
+        section.location = Some(LOCATION.to_owned());
+        section
+    }
+
+    /// Pins that `list_once` over the S3 client publishes the objects its
+    /// connector takes out of a listing page.
+    #[test]
+    fn list_once_publishes_the_objects_the_s3_client_cannot_address() {
+        let rt = runtime();
+        let endpoint = crate::test_servers::listing_server(vec![list_page(
+            &[("data/a", 7), ("data/d//dbl.ndjson", 7)],
+            None,
+        )]);
+        let job = Job::new();
+        let (feed, script) = spate_test::scripted_feed();
+        stub_source(&rt, &endpoint)
+            .with_location_store(Arc::clone(&job.ops) as Arc<dyn ObjectStore>)
+            .list_once(&scripted_section(), Arc::new(feed))
+            .unwrap();
+        let keys: Vec<String> = script
+            .published()
+            .iter()
+            .map(|u| {
+                SplitDescriptor::decode(&u.body).unwrap().objects[0]
+                    .key
+                    .clone()
+            })
+            .collect();
+        assert_eq!(keys, ["data/d//dbl.ndjson", "data/a"]);
+    }
+
+    /// Pins the cadence `list_once` gives the lister: over 1,001 keys the
+    /// checkpoint is written before the 1,001st and at the end.
+    #[test]
+    fn list_once_writes_the_checkpoint_once_per_thousand_keys() {
+        let rt = runtime();
+        let data = Arc::new(object_store::memory::InMemory::new());
+        let keys: Vec<String> = (0..1001).map(|i| format!("data/k{i:04}")).collect();
+        rt.block_on(async {
+            for key in &keys {
+                data.put(&Path::from(key.as_str()), PutPayload::from_static(b"row\n"))
+                    .await
+                    .unwrap();
+            }
+        });
+        let job = Job::new();
+        let (feed, _) = spate_test::scripted_feed();
+        stub_source(&rt, "http://127.0.0.1:1")
+            .with_store(data)
+            .with_location_store(Arc::clone(&job.ops) as Arc<dyn ObjectStore>)
+            .list_once(&scripted_section(), Arc::new(feed))
+            .unwrap();
+        assert_eq!(
+            job.checkpoint_writes(),
+            [keys[999].clone(), keys[1000].clone()]
         );
     }
 }

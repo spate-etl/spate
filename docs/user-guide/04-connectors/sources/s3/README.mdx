@@ -485,14 +485,15 @@ named `end` there before its first publish. A new job takes a new location.
 
 The lister's checkpoint is the object named `checkpoint` there. It holds the
 last listed key for which the feed has confirmed every unit of it and of every
-key listed before it, by a successful entry in an SQS `SendMessageBatch`
-response or a successful Kafka delivery report. The lister rewrites it at most
-once every 1,000 listed keys and once when its listing ends. A run whose
-location holds `checkpoint` beside its own fingerprint lists only the keys
-after it, through `ListObjectsV2`'s `StartAfter`, and logs the key at INFO. A
-run that creates the fingerprint deletes a `checkpoint` it finds and lists the
-whole prefix. A run that stops publishes the units after the last checkpoint
-again. A lister on a `file://` source, or on an S3 directory bucket
+key listed before it; the [SQS](../../feeds/sqs/README.mdx#message-mapping)
+and [Kafka](../../feeds/kafka/README.mdx#message-mapping) feed pages say when
+a publish is confirmed. The lister rewrites it at most once every 1,000 listed
+keys and once when its listing ends. A run whose location holds `checkpoint`
+beside its own fingerprint lists only the keys after it, through
+`ListObjectsV2`'s `StartAfter`, and logs the key at INFO. A run that finds no
+fingerprint deletes a `checkpoint` it finds, logs that at INFO, creates the
+fingerprint and lists the whole prefix. A run that stops publishes the units
+after the last checkpoint again. A lister on a `file://` source, or on an S3 directory bucket
 (`aws_s3_express`, or `AWS_S3_EXPRESS` in the environment), keeps no
 checkpoint and logs a WARN: every run lists the prefix from the start.
 
@@ -505,8 +506,9 @@ directory prefix (`q/r` beside `q/r/s`) skips that directory. Its listings can
 also end early; see [Testing](#testing).
 
 :::danger
-A run at a location that holds `checkpoint` never reads the keys up to it. A
-re-run of a finished job publishes only keys added since. A job whose feed lost
+A run at a location that holds the job's fingerprint and a `checkpoint` never
+reads the keys up to the checkpoint. A re-run of a finished job publishes only
+keys added since. A job whose feed lost
 its units, such as a purged queue or a new queue or topic at the same location,
 never reads its keys up to the checkpoint. If the store's list order may have
 changed since `checkpoint` was written, such as across a store upgrade, stop

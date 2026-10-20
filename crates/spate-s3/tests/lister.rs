@@ -771,7 +771,8 @@ fn a_lister_run_deletes_an_earlier_marker_before_its_first_publish() {
 }
 
 /// Pins that a first lister run on a location that does not exist yet
-/// creates its fingerprint and publishes.
+/// creates its fingerprint and publishes, and over a `file://` source keeps
+/// no checkpoint.
 #[test]
 fn a_first_lister_run_on_an_empty_file_location_starts() {
     let dir = tempfile::tempdir().unwrap();
@@ -788,6 +789,28 @@ fn a_first_lister_run_on_an_empty_file_location_starts() {
         fs::read_to_string(path.join("fingerprint")).unwrap(),
         fingerprint(&data, "Auto", "0a")
     );
+    assert!(!path.join("checkpoint").exists());
+}
+
+/// Pins that a lister over a store given to `with_store` under a `file://`
+/// URL keeps no checkpoint, since that store's offset listing walks
+/// unsorted.
+#[test]
+fn a_lister_over_an_injected_store_under_a_file_url_keeps_no_checkpoint() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    fs::write(data.join("a.ndjson"), lines_bytes(&recs("a", 5))).unwrap();
+    let (data_store, _) = spying_local_store(SpyOptions::default());
+    let (location, path) = file_location(&dir);
+    let rt = runtime();
+    let (feed, script) = scripted_feed();
+    lister_source(&data, &rt, "")
+        .with_store(data_store)
+        .list_once(&section("scripted", Some(&location)), Arc::new(feed))
+        .unwrap();
+    assert_eq!(script.published().len(), 1);
+    assert!(path.join("fingerprint").exists());
+    assert!(!path.join("checkpoint").exists());
 }
 
 /// Pins that a lister finding another fingerprint, differing in the

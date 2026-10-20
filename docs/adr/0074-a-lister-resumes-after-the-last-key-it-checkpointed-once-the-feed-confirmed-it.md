@@ -58,10 +58,14 @@ key, and never compares two keys to decide order.
 
 The checkpoint is one key, in the `checkpoint` object at the job's location
 ([ADR-0073](0073-a-per-job-location-holds-the-listers-checkpoint-end-marker-and-fingerprint.md)).
-A run that creates the job fingerprint deletes a checkpoint it finds; a run
-that matches it reads the checkpoint and refuses one that is not a key under
-the listing prefix. The in-process feed refuses a location. The lister skips
-every zero-byte object, which holds no records, and never checkpoints at one.
+A run that finds no job fingerprint deletes a checkpoint it finds before it
+creates the fingerprint, so a run that stops between the two leaves no
+checkpoint beside a fingerprint. A run whose fingerprint matches the one it
+reads then reads the checkpoint, and refuses one that is not a key under the
+listing prefix. The read, never the create's answer, decides which, since
+Garage applies a conditional create over an existing object and answers 200.
+The in-process feed refuses a location. The lister skips every zero-byte
+object, which holds no records, and never checkpoints at one.
 It publishes each object the connector took out of a page whole, as
 [ADR-0071](0071-a-work-unit-is-one-object-or-one-byte-range-of-one-object.md)
 decides for a key `Path::parse` rejects or rewrites, and never checkpoints at
@@ -103,6 +107,8 @@ prefix from the start every run. SeaweedFS is unsupported for resume.
 `a_zero_byte_object_is_skipped_and_never_checkpointed`,
 `a_resume_lists_after_the_checkpoint_byte_for_byte`,
 `a_lister_that_creates_the_fingerprint_lists_from_the_start`,
+`a_lost_fingerprint_create_reply_leaves_no_foreign_checkpoint`,
+`a_store_that_ignores_conditional_create_still_resumes`,
 `a_lister_that_cannot_resume_reads_and_writes_no_checkpoint` and
 `an_unaddressable_key_with_bytes_is_published_and_never_checkpointed`.
 `crates/spate-s3/src/source.rs`:

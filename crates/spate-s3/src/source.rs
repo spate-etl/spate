@@ -203,7 +203,7 @@ impl S3Source {
     /// its store reads storage notifications only under an `s3://` or
     /// `s3a://` URL, whose host is the bucket their records must name. A
     /// lister over a store given here resumes from its checkpoint as over the
-    /// S3 client.
+    /// S3 client, except under a `file://` URL, where it keeps none.
     ///
     /// Behind the off-by-default `testing` feature because it exposes an
     /// `object_store` type, which this crate's public API otherwise avoids
@@ -372,7 +372,10 @@ impl S3Source {
                 let bucket = matches!(url.scheme(), "s3" | "s3a")
                     .then(|| url.host_str().map(str::to_owned))
                     .flatten();
-                (store, path, None, bucket, true)
+                // A `file://` URL stands for `LocalFileSystem`, whose offset
+                // listing walks unsorted.
+                let resumable = url.scheme() != "file";
+                (store, path, None, bucket, resumable)
             }
             None => {
                 let built =

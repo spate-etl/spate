@@ -359,7 +359,7 @@ mod tests {
         );
         for shown in [err.to_string(), format!("{err:?}")] {
             assert!(
-                !shown.contains("hunter2") && !shown.contains("hunter3"),
+                !shown.contains("hunter2") && !shown.contains("ops/jobs/a"),
                 "the location must not print: {shown}"
             );
         }

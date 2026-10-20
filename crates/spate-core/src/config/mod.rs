@@ -732,8 +732,8 @@ impl PipelineConfig {
         Ok(())
     }
 
-    /// Reject a `location` on the in-process feed, whose job is always
-    /// bounded and keeps no state outside the process. Split out of
+    /// Reject a `location` on the in-process feed, which keeps no state
+    /// outside the process. Split out of
     /// [`validate`](Self::validate) so the runtime, which a programmatic
     /// config reaches without validation, enforces it too.
     pub(crate) fn reject_location_on_memory(&self) -> Result<(), ConfigError> {

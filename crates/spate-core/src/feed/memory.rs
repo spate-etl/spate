@@ -345,13 +345,24 @@ mod tests {
     }
 
     /// Pins that `from_section` refuses a `location`, which a caller can set
-    /// on a section built in code.
+    /// on a section built in code, as the `feed` component error its
+    /// `# Errors` names, without printing the value.
     #[test]
     fn from_section_refuses_a_location() {
         let mut section: FeedSection = serde_yaml::from_str("memory: {}\n").expect("section");
-        section.location = Some("s3://ops/jobs/a/".to_owned());
-        let err = MemoryFeed::from_section(&section).unwrap_err().to_string();
-        assert!(err.contains("`location`"), "{err}");
+        section.location = Some("s3://u:hunter2@ops/jobs/a/?X-Amz-Signature=hunter3".to_owned());
+        let err = MemoryFeed::from_section(&section).unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::Component { context, message }
+                if context == "feed" && message.contains("`location`")),
+            "{err:?}"
+        );
+        for shown in [err.to_string(), format!("{err:?}")] {
+            assert!(
+                !shown.contains("hunter2") && !shown.contains("hunter3"),
+                "the location must not print: {shown}"
+            );
+        }
     }
 
     /// Pins that `from_section` refuses a section naming another backend, and

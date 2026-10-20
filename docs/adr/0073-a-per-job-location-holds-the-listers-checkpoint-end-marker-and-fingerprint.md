@@ -59,7 +59,13 @@ like any other.
 - Good, because a bounded job on SQS and one on Kafka keep their state the
   same way.
 - Bad, because the lister needs write and delete access to the location, and
-  every worker read access, possibly in a bucket other than the source's.
+  every worker read access, possibly in a bucket other than the source's. On
+  AWS S3 that read access includes `s3:ListBucket`, without which an absent
+  fingerprint reads as 403 and a worker started before its lister fails at
+  once.
+- Bad, because the location shares the source's `store` options, so a source
+  whose `store` sends virtual-hosted requests to a set endpoint cannot name an
+  S3 location, and the source refuses one.
 - Bad, because a marker from an earlier run still ends a worker whose new
   lister has not deleted it within one settling window. INV-1 holds, since the
   late lister's units stay unacknowledged in the feed.
@@ -73,9 +79,11 @@ like any other.
 - Bad, because a bounded job's workers exit non-zero when the lister has not
   written the fingerprint within one settling window of their start. The
   window is 5 minutes until the bounded-job record adds its key.
-- Bad, because on the Kafka feed a refused start has already recorded an
-  attempt on each unit the feed readied for the worker, up to 128, so a worker
-  restarting into the refusal moves those units toward the dead-letter topic.
+- Bad, because on the Kafka feed a waiting worker's units are charged an
+  attempt as the feed readies them, and each rebalance of the group during the
+  wait charges them again, so a fleet started well before its lister, or a
+  worker restarting into a refusal, can move the head of each partition to the
+  dead-letter topic unread.
 - Bad, because the location needs read-after-write and read-after-delete
   consistency on one store: Garage with `consistency_mode = "consistent"`, and
   one Ceph RGW zone.

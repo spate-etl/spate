@@ -1,6 +1,6 @@
 //! The job location of a bounded feed job: an object-store prefix holding
-//! the job fingerprint, the end marker and the lister's checkpoint, which
-//! the lister writes and every worker reads.
+//! the job fingerprint, which the lister writes and every worker reads, and
+//! the name of the end marker a lister run deletes before it publishes.
 //!
 //! [`Location::parse`] checks the `feed:` section's `location` against the
 //! source URL. [`feed_fingerprint`] is the identity a worker and the lister
@@ -9,6 +9,7 @@
 use crate::config::Compression;
 use crate::error::{classify, reason};
 use bytes::Bytes;
+use futures_util::StreamExt as _;
 use futures_util::future::{Either, select};
 use object_store::aws::AmazonS3Builder;
 use object_store::path::Path;
@@ -22,7 +23,6 @@ use std::time::Duration;
 use url::Url;
 
 /// How long a worker waits for the lister's fingerprint before it exits.
-/// The settling window's default.
 pub(crate) const SETTLING_WINDOW: Duration = Duration::from_secs(5 * 60);
 
 /// The step between a waiting worker's reads of the fingerprint.
@@ -51,9 +51,10 @@ impl Location {
     /// # Errors
     ///
     /// A [`ConfigError`] naming the key, with the value redacted, for an
-    /// empty value, one that is not a URL, a `memory://` URL, a scheme the
-    /// source cannot build a store for, and a location at or under the
-    /// source's prefix in the same bucket.
+    /// empty value, one that is not a URL, one with userinfo or a query, a
+    /// `memory://` URL, a scheme the source cannot build a store for, an S3
+    /// URL whose bucket the S3 client cannot parse, and a location at or
+    /// under the source's prefix in the same bucket.
     pub(crate) fn parse(location: &str, source_url: &str) -> Result<Location, ConfigError> {
         let refuse = |why: String| ConfigError::Component {
             context: "feed".into(),
@@ -66,8 +67,18 @@ impl Location {
             });
         }
         let url = Url::parse(location).map_err(|e| refuse(format!("is not a URL: {e}")))?;
+        // The location's store reads neither, and `object_store` quotes the
+        // whole URL in its errors.
+        if !url.username().is_empty() || url.password().is_some() || url.query().is_some() {
+            return Err(refuse(
+                "carries userinfo or a query, which the location's store does not read; set \
+                 credentials under the source's `store`"
+                    .into(),
+            ));
+        }
+        // `object_store`'s own error quotes the URL, so it stays out.
         let (scheme, prefix) = ObjectStoreScheme::parse(&url)
-            .map_err(|e| refuse(format!("names no object store: {e}")))?;
+            .map_err(|_| refuse("names no object store the source opens".into()))?;
         match scheme {
             ObjectStoreScheme::AmazonS3 | ObjectStoreScheme::Local => {}
             ObjectStoreScheme::Memory => {
@@ -83,6 +94,11 @@ impl Location {
                         .into(),
                 ));
             }
+        }
+        if matches!(scheme, ObjectStoreScheme::AmazonS3) && root(&url).is_none() {
+            return Err(refuse(
+                "the S3 client finds no bucket in it; write s3://<bucket>/<prefix>".into(),
+            ));
         }
         if let Some((source_root, source_prefix)) = Url::parse(source_url)
             .ok()
@@ -109,7 +125,7 @@ impl Location {
         self.prefix.clone().join("fingerprint")
     }
 
-    /// The end marker a lister run writes after its last confirmed publish.
+    /// The end marker, which a lister run deletes before its first publish.
     #[cfg_attr(
         not(feature = "testing"),
         expect(
@@ -249,18 +265,39 @@ pub(crate) async fn read_object(
             ),
         ));
     }
-    got.bytes()
-        .await
-        .map(Some)
-        .map_err(|e| io_error(location, object, &e))
+    // `meta.size` comes from the response's `content-length`, which a chunked
+    // body need not honour, so the body is counted as it arrives.
+    let mut body = Vec::new();
+    let mut stream = got.into_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| io_error(location, object, &e))?;
+        if body.len() + chunk.len() > LOCATION_OBJECT_MAX_BYTES as usize {
+            return Err(location.fatal(
+                object,
+                format_args!(
+                    "its body runs past the {LOCATION_OBJECT_MAX_BYTES} bytes a job location \
+                     object holds"
+                ),
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(Some(Bytes::from(body)))
 }
 
 /// An `object_store` failure on `object`, classed by [`classify`].
 pub(crate) fn io_error(location: &Location, object: &Path, e: &object_store::Error) -> SourceError {
+    // AWS S3 answers a read of an absent object 403 to a caller without
+    // `s3:ListBucket`, so a location written later looks like a refusal.
+    let hint = if matches!(e, object_store::Error::PermissionDenied { .. }) {
+        "; on AWS S3 an absent object reads as 403 without `s3:ListBucket` on its bucket"
+    } else {
+        ""
+    };
     SourceError::Client {
         class: classify(e),
         reason: format!(
-            "{} at the job location {}: {}",
+            "{} at the job location {}: {}{hint}",
             object_name(object),
             location.shown(),
             reason(e)
@@ -272,8 +309,8 @@ pub(crate) fn io_error(location: &Location, object: &Path, e: &object_store::Err
 /// `mine`.
 ///
 /// Reads at each [`FINGERPRINT_POLL`] step of `clock` until a fingerprint is
-/// there, `window` has passed, or `stop` is set, which is checked before each
-/// read. A read still in flight at the deadline is abandoned.
+/// there, `window` has passed, or `stop` is set. The stop and the deadline
+/// are checked at each step, a read in flight included, which is abandoned.
 ///
 /// # Errors
 ///
@@ -294,33 +331,58 @@ pub(crate) async fn await_fingerprint(
     // not shift every later read.
     let mut next = start;
     let object = location.fingerprint();
-    let timed_out = || {
-        location.fatal(
+    // The last retryable read error, so a timeout reports what kept the
+    // fingerprint from being read.
+    let mut last_error: Option<SourceError> = None;
+    let timed_out = |last_error: &Option<SourceError>| match last_error {
+        Some(e) => location.fatal(
+            &object,
+            format_args!("no read succeeded within {window:?}; the last failed: {e}"),
+        ),
+        None => location.fatal(
             &object,
             format_args!(
                 "none appeared within {window:?}; the job's lister writes it before its first \
                  publish, so start the lister, or check that it names this location"
             ),
-        )
+        ),
     };
     loop {
         if stop.is_set() {
             return Ok(());
         }
-        let read = Box::pin(read_object(store, location, &object));
-        match select(read, clock.sleep_until(deadline)).await {
-            Either::Left((Ok(Some(stored)), _)) => return compare(location, mine, &stored),
-            Either::Left((Ok(None), _)) => {}
-            Either::Left((Err(e), _)) if is_retryable(&e) => {
-                tracing::debug!(error = %e, "reading the job fingerprint; retrying");
+        let mut read = Box::pin(read_object(store, location, &object));
+        // A read in flight is checked against the stop and the deadline at
+        // each poll step, so neither waits on a store that does not answer.
+        let outcome = loop {
+            let tick = (next + FINGERPRINT_POLL).min(deadline);
+            match select(read, clock.sleep_until(tick)).await {
+                Either::Left((outcome, _)) => break outcome,
+                Either::Right(((), pending)) => {
+                    next = tick;
+                    if clock.now() >= deadline {
+                        return Err(timed_out(&last_error));
+                    }
+                    if stop.is_set() {
+                        return Ok(());
+                    }
+                    read = pending;
+                }
             }
-            Either::Left((Err(e), _)) => return Err(e),
-            Either::Right(((), _)) => return Err(timed_out()),
+        };
+        match outcome {
+            Ok(Some(stored)) => return compare(location, mine, &stored),
+            Ok(None) => last_error = None,
+            Err(e) if is_retryable(&e) => {
+                tracing::warn!(error = %e, "reading the job fingerprint failed; retrying");
+                last_error = Some(e);
+            }
+            Err(e) => return Err(e),
         }
         next = (next + FINGERPRINT_POLL).min(deadline);
         clock.sleep_until(next).await;
         if clock.now() >= deadline {
-            return Err(timed_out());
+            return Err(timed_out(&last_error));
         }
     }
 }
@@ -403,16 +465,15 @@ mod tests {
     }
 
     /// Pins that a location on a scheme the source builds no store for is
-    /// refused naming the key and without its userinfo, and that `s3://`,
-    /// `s3a://`, an AWS `https://` URL and `file://` are accepted.
+    /// refused naming the key, and that `s3://`, `s3a://`, an AWS
+    /// `https://` URL and `file://` are accepted.
     #[test]
     fn a_location_on_a_scheme_the_source_cannot_build_is_refused() {
-        let err = refused("https://u:secret@store:9000/ops/jobs/a/", SOURCE);
+        let err = refused("https://store:9000/ops/jobs/a/", SOURCE);
         assert!(
             err.contains("`location`") && err.contains("endpoint"),
             "{err}"
         );
-        assert!(!err.contains("secret"), "{err}");
         for location in [
             "s3://ops/jobs/a/",
             "s3a://ops/jobs/a/",
@@ -443,6 +504,63 @@ mod tests {
         assert!(refused("s3://data-bucket/jobs/a/", "s3://data-bucket/").contains("outside"));
         assert!(refused("file:///data/events/jobs/", "file:///data/events/").contains("outside"));
         Location::parse("file:///data/jobs/", "file:///data/events/").unwrap();
+    }
+
+    /// Pins that a location carrying userinfo or a query is refused without
+    /// printing either, and that a scheme `object_store` does not recognise
+    /// is refused without its error, which quotes the URL.
+    #[test]
+    fn a_location_with_credentials_in_it_is_refused_without_printing_them() {
+        for location in [
+            "s3://user:hunter2@ops/jobs/a/",
+            "s3://ops/jobs/a/?X-Amz-Signature=tok3n",
+            "sftp://user:hunter2@ops-host/jobs/a/?sig=tok3n",
+        ] {
+            let err = refused(location, SOURCE);
+            assert!(err.contains("`location`"), "{err}");
+            assert!(!err.contains("hunter2") && !err.contains("tok3n"), "{err}");
+        }
+        assert!(refused("s3://user:hunter2@ops/jobs/a/", SOURCE).contains("userinfo"));
+        assert!(refused("sftp://ops-host/jobs/a/", SOURCE).contains("names no object store"));
+    }
+
+    /// Pins that an S3 URL whose bucket the S3 client cannot parse is
+    /// refused when the location is parsed, before any store is built.
+    #[test]
+    fn an_s3_url_with_no_bucket_the_client_parses_is_refused() {
+        for location in [
+            "https://s3.amazonaws.com/ops/jobs/a/",
+            "https://ops.s3-eu-west-1.amazonaws.com/jobs/a/",
+        ] {
+            let err = refused(location, SOURCE);
+            assert!(err.contains("no bucket"), "{location}: {err}");
+        }
+    }
+
+    /// Pins the same-bucket refusal across the S3 URL forms that name one
+    /// bucket, which a comparison of raw hosts would miss.
+    #[test]
+    fn a_location_naming_the_source_bucket_in_another_form_is_refused() {
+        for (location, source) in [
+            (
+                "https://data-bucket.s3.eu-west-2.amazonaws.com/events/jobs/a/",
+                "s3://data-bucket/events/",
+            ),
+            (
+                "https://s3.eu-west-2.amazonaws.com/data-bucket/events/jobs/a/",
+                "s3://data-bucket/events/",
+            ),
+            (
+                "s3://data-bucket/events/jobs/a/",
+                "https://data-bucket.s3.eu-west-2.amazonaws.com/events/",
+            ),
+        ] {
+            let err = refused(location, source);
+            assert!(
+                err.contains("outside the prefix"),
+                "{location} vs {source}: {err}"
+            );
+        }
     }
 
     /// Pins that a location with and without a trailing `/` names the same
@@ -493,6 +611,45 @@ mod tests {
         assert!(
             err.contains("4097 bytes") && err.contains("fingerprint"),
             "{err}"
+        );
+    }
+
+    /// Pins that a body running past the cap is refused as it arrives, when
+    /// the response's `content-length` understates it.
+    #[tokio::test]
+    async fn a_body_past_the_cap_is_refused_whatever_its_stated_length() {
+        let store = HookStore {
+            get: Some(|path| {
+                let meta = object_store::ObjectMeta {
+                    location: path.clone(),
+                    last_modified: chrono::Utc::now(),
+                    size: 10,
+                    e_tag: None,
+                    version: None,
+                };
+                let chunks = (0..4).map(|_| Ok(bytes::Bytes::from(vec![b'x'; 2048])));
+                Some(Ok(object_store::GetResult {
+                    payload: object_store::GetResultPayload::Stream(Box::pin(
+                        futures_util::stream::iter(chunks),
+                    )),
+                    range: 0..meta.size,
+                    meta,
+                    attributes: Default::default(),
+                    extensions: Default::default(),
+                }))
+            }),
+            ..HookStore::default()
+        };
+        let location = accepted("s3://ops/jobs/a/");
+        let err = read_object(&store, &location, &location.fingerprint())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("runs past"), "{err}");
+        assert!(
+            err.len() < 400,
+            "the error quotes the body: {} bytes",
+            err.len()
         );
     }
 

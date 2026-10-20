@@ -154,8 +154,8 @@ codec.
 ### Job location
 
 Where a bounded feed job keeps the state every instance of it reads, named by
-the `feed:` section's `location` key: the job fingerprint its lister writes,
-and the lister's end marker and checkpoint. A job on a durable [feed](#feed)
+the `feed:` section's `location` key, such as the job fingerprint its lister
+writes. A job on a durable [feed](#feed)
 that names one is **bounded**, and its [work units](#work-unit) come from its
 lister. A job that names none is **continuous**, and its instances read no
 job location. A job on the in-process feed names none.

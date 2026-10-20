@@ -99,8 +99,12 @@ pub(crate) struct HookStore {
     pub(crate) inner: object_store::memory::InMemory,
     /// Answers a GET in place of `inner` when it returns `Some`.
     pub(crate) get: Option<GetHook>,
-    /// Lists in reverse key order, which no store's listing follows.
+    /// Lists in reverse key order.
     pub(crate) reverse_list: bool,
+    /// Answers every conditional create `AlreadyExists` without storing.
+    pub(crate) creates_exist: bool,
+    /// Conditional creates so far.
+    pub(crate) creates: std::sync::atomic::AtomicUsize,
 }
 
 impl std::fmt::Display for HookStore {
@@ -117,6 +121,16 @@ impl object_store::ObjectStore for HookStore {
         payload: object_store::PutPayload,
         opts: object_store::PutOptions,
     ) -> object_store::Result<object_store::PutResult> {
+        if matches!(opts.mode, object_store::PutMode::Create) {
+            self.creates
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.creates_exist {
+                return Err(object_store::Error::AlreadyExists {
+                    path: location.to_string(),
+                    source: "scripted".into(),
+                });
+            }
+        }
         self.inner.put_opts(location, payload, opts).await
     }
 

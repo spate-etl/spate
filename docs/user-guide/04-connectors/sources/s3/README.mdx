@@ -461,10 +461,10 @@ Each store needs its own settings for its notifications to arrive:
 
 A job on a durable feed is bounded when its `feed:` section names a
 [`location`](../../../07-reference/configuration.mdx#feed), and continuous when
-it names none. A bounded job's lister keeps its state at the
-[job location](../../../07-reference/glossary.mdx#job-location), and every
-worker reads it there. A continuous job's workers read nothing outside the
-source's prefix. The in-process feed refuses a `location`.
+it names none. Every worker of a bounded job reads the job fingerprint at the
+[job location](../../../07-reference/glossary.mdx#job-location) before it
+reads a unit. A continuous job's workers read no job location. The in-process
+feed refuses a `location`.
 
 ```yaml
 feed:
@@ -474,41 +474,59 @@ feed:
 ```
 
 The location is a prefix, and `…/events-backfill-0042` names the same one.
-It holds the job fingerprint in an object named `fingerprint`, which the job's
-lister creates before it publishes a unit, and the lister's end marker and
-checkpoint beside it. A new job takes a new location.
+The job fingerprint is the object named `fingerprint` there, which the job's
+lister creates before it publishes a unit. A lister run also deletes an object
+named `end` there before its first publish. A new job takes a new location.
 
 The fingerprint covers the unit format version, `url`, `compression`,
 `split_target_bytes` and the framer's resync delimiter. At startup a worker of
 a bounded job reads `fingerprint` every five seconds until it appears, and
 compares it with its own before it receives a unit. A worker whose fingerprint
 differs fails startup, and the error prints both. A worker that finds none
-within five minutes exits non-zero. While it waits it holds no unit and
-reports not ready on `/readyz`, and a shutdown ends the wait. On a feed that
-records an attempt before a unit is read, such as the
-[Kafka feed](../../feeds/kafka/README.mdx#counting-deliveries), a refused
-worker has already spent an attempt on each unit the feed readied for it, so a
-worker that keeps restarting into the refusal moves those units toward the
-dead-letter destination.
+within five minutes exits non-zero. A read the store fails retryably is logged
+at WARN and tried again at the next step, and the exit error names the last
+such failure. While it waits a worker holds no unit and reports not ready on
+`/readyz`, and a shutdown ends the wait within one step, a read in flight
+included. On a feed that records an attempt before a unit is read, such as the
+[Kafka feed](../../feeds/kafka/README.mdx#counting-deliveries), the feed
+spends an attempt on each unit it readies for a waiting worker, and each
+rebalance of the group during the wait spends another. A fleet started well
+before its lister, or a worker restarting into a refusal, can move the head of
+each partition to the dead-letter destination unread.
 
 The location's store is built from its URL with the source's `store` options
-and the environment, so it shares the source's endpoint, region and
-credentials, and may sit in another bucket. On RustFS, Ceph RGW and Garage,
-write it as `s3://<bucket>/<prefix>`, with the endpoint under `store`; an
-`https://` location on another host is refused at startup. A location at or
-under the source's prefix in the same bucket is refused at startup, since the
-source would read its objects. It also belongs outside the prefix of any
-notification rule that publishes to the job's feed, where each write to it
-arrives as a message the source dead-letters; nothing checks that.
+and the environment, so it shares the endpoint, region and credentials those
+give the source, and may sit in another bucket. A region the source takes from
+an `https://` `url` does not reach an `s3://` location; set it under `store`.
+On RustFS, Ceph RGW and Garage, write it as `s3://<bucket>/<prefix>`, with the
+endpoint under `store`. Each of these is refused at startup:
+
+- a location carrying userinfo or a query; credentials go under `store`;
+- an `https://` location on a host other than AWS's, and an S3 URL whose
+  bucket the S3 client cannot parse, such as `https://s3.amazonaws.com/<bucket>/`;
+- an S3 location when `store` sets `virtual_hosted_style_request` with an
+  `endpoint`, which then addresses one bucket whatever the location names;
+- an S3 location when a `store` key is not an S3 option, under a `file://`
+  `url` as well;
+- a location at or under the source's prefix in the same bucket, since the
+  source would read its objects.
+
+The location also belongs outside the prefix of any notification rule that
+publishes to the job's feed, where each write to it arrives as a message the
+source dead-letters; nothing checks that.
 
 Workers need read access to the location. The lister needs to read, write and
-delete there. It creates `fingerprint` only when absent, so a lister whose
-`store` sets `aws_conditional_put: disabled` fails. Run one lister per location:
-the conditional create refuses a second lister with another fingerprint on a
-store that honors `If-None-Match`, and the CI suite checks that on RustFS only.
-The location needs read-after-write and read-after-delete consistency, which
-means `consistency_mode = "consistent"` on Garage and one zone on Ceph RGW. A
-`file://` location serves the processes of one host.
+delete there. On AWS S3 that read access includes `s3:ListBucket` on the
+location's bucket: without it a read of an absent object answers `403`, so a
+worker started before its lister fails at once and a lister fails on the absent
+end marker. The error says so. The lister creates `fingerprint` only when
+absent, so a lister whose `store` sets `aws_conditional_put: disabled` fails.
+Run one lister per location: the conditional create refuses a second lister
+with another fingerprint on a store that honors `If-None-Match`, and the CI
+suite checks that on RustFS only. The location needs read-after-write and
+read-after-delete consistency, which means `consistency_mode = "consistent"`
+on Garage and one zone on Ceph RGW. A `file://` location serves the processes
+of one host.
 
 ## Split identity and drift
 

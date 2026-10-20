@@ -7,7 +7,7 @@ mod support;
 
 use spate_core::checkpoint::Checkpointer;
 use spate_core::clock::tokio::TestClock;
-use spate_core::config::{FeedSection, PipelineConfig};
+use spate_core::config::{ConfigError, FeedSection, PipelineConfig};
 use spate_core::feed::{Confirmation, Delivery, Feed, FeedError, FeedWaker, Receipt, Unit};
 use spate_core::pipeline::{ExitReport, ExitState};
 use spate_core::source::{Source, SourceCtx, SourceEvent};
@@ -276,6 +276,167 @@ fn a_stop_during_the_fingerprint_wait_ends_the_run() {
     let report = exit(&l);
     assert_eq!(report.state, ExitState::Completed);
     assert!(script.delivered().is_empty(), "nothing was received");
+}
+
+/// Pins that a worker's own `compression` enters the fingerprint it
+/// compares: one set to `none` refuses a job fingerprinted with `auto`.
+#[test]
+fn a_worker_with_its_own_compression_refuses_the_listers_fingerprint() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    fs::write(data.join("a.ndjson"), lines_bytes(&recs("a", 5))).unwrap();
+    let jobs = dir.path().join("jobs").join("a");
+    fs::create_dir_all(&jobs).unwrap();
+    fs::write(jobs.join("fingerprint"), fingerprint(&data, "Auto", "0a")).unwrap();
+    let location = format!("file://{}/", jobs.display());
+    let (feed, script) = scripted_feed();
+    script.deliver(unit_over(&data, "a.ndjson"));
+    let yaml = PipelineYaml::file("s3-job-location-compression", &data)
+        .source("compression", "none")
+        .section(&format!(
+            "feed:\n  scripted: {{}}\n  location: {location}\n"
+        ))
+        .build();
+    let l = launch_with_feed(
+        &yaml,
+        test_options(),
+        |_| {},
+        Arc::new(feed),
+        |s, _| line_framer(s),
+    );
+    let reason = failure_reason(&exit(&l));
+    assert!(reason.contains("compression=None"), "{reason}");
+    assert!(script.delivered().is_empty(), "nothing was received");
+}
+
+/// Pins that `configure_feed` refuses a location under the source's prefix
+/// as a `feed` component error naming the key.
+#[test]
+fn configure_feed_refuses_a_location_under_the_source_prefix() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let rt = runtime();
+    let mut source = lister_source(&data, &rt, "");
+    let (feed, _script) = scripted_feed();
+    let err = source
+        .configure_feed(
+            &section(
+                "scripted",
+                Some(&format!("file://{}/jobs/a/", data.display())),
+            ),
+            Arc::new(feed),
+        )
+        .expect_err("a location under the source prefix is refused");
+    assert!(
+        matches!(&err, ConfigError::Component { context, .. } if context == "feed"),
+        "{err:?}"
+    );
+    assert!(err.to_string().contains("outside the prefix"), "{err}");
+}
+
+/// Pins that the fingerprint reads keep a fixed schedule from the wait's
+/// start: after reads at 0 s and a late 7 s, the third falls at 10 s.
+#[test]
+fn a_late_wakeup_does_not_shift_the_next_fingerprint_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let (store, hooks) = location_store();
+    let (feed, _script) = scripted_feed();
+    let clock = TestClock::frozen();
+    let l = launch_worker(
+        &data,
+        feed,
+        Some(LOCATION),
+        Some(store),
+        Some(Arc::clone(&clock)),
+    );
+    wait_for_gets(&hooks, 1);
+    clock.advance(Duration::from_secs(7));
+    wait_for_gets(&hooks, 2);
+    clock.advance(Duration::from_secs(3));
+    wait_for_gets(&hooks, 3);
+    l.shutdown.trigger();
+    clock.advance(POLL);
+    assert_eq!(exit(&l).state, ExitState::Completed);
+}
+
+/// Pins that a shutdown ends the wait while a read is in flight that the
+/// store never answers, at the next poll step and well before the window.
+#[test]
+fn a_stop_during_a_read_that_never_answers_ends_the_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let (store, hooks) = location_store();
+    hooks.hang_gets();
+    let (feed, script) = scripted_feed();
+    script.deliver(unit_over(&data, "a.ndjson"));
+    let clock = TestClock::frozen();
+    let l = launch_worker(
+        &data,
+        feed,
+        Some(LOCATION),
+        Some(store),
+        Some(Arc::clone(&clock)),
+    );
+    wait_for_gets(&hooks, 1);
+    l.shutdown.trigger();
+    clock.advance(POLL);
+    assert_eq!(exit(&l).state, ExitState::Completed);
+    assert!(script.delivered().is_empty(), "nothing was received");
+}
+
+/// Pins that a wait whose every read fails retryably ends at the window
+/// with the last read's error, logged at WARN as each read fails.
+#[test]
+fn a_location_failing_every_read_reports_the_last_error_at_the_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let yaml = PipelineYaml::file("s3-job-location-failing", &data).build();
+    let config = PipelineConfig::from_str(&yaml).unwrap();
+    let rt = runtime();
+    let (store, hooks) = location_store();
+    hooks.fail_next_gets(usize::MAX);
+    let clock = TestClock::frozen();
+    let mut source =
+        line_framer(S3Source::from_component_config(&config.source, rt.handle().clone()).unwrap())
+            .with_location_store(store)
+            .with_clock(Arc::clone(&clock) as Arc<dyn spate_core::clock::tokio::Clock>);
+    let (feed, _script) = scripted_feed();
+    source
+        .configure_feed(&section("scripted", Some(LOCATION)), Arc::new(feed))
+        .unwrap();
+    let stepper = {
+        let hooks = hooks.clone();
+        let clock = Arc::clone(&clock);
+        std::thread::spawn(move || {
+            let mut reads = 1;
+            wait_for_gets(&hooks, reads);
+            clock.advance_stepped(WINDOW, POLL, || {
+                reads += 1;
+                if reads <= 60 {
+                    wait_for_gets(&hooks, reads);
+                }
+            });
+        })
+    };
+    let mut err = None;
+    let lines = spate_test::capture_logs(tracing::Level::WARN, || {
+        err = source
+            .open(SourceCtx::new(Checkpointer::new().handle()))
+            .err();
+    });
+    stepper.join().unwrap();
+    let err = err.expect("the wait fails at the window").to_string();
+    assert!(
+        err.contains("no read succeeded") && err.contains("connection reset"),
+        "{err}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("reading the job fingerprint failed")),
+        "{lines:#?}"
+    );
 }
 
 /// Pins the INFO line naming the location and the window when the wait

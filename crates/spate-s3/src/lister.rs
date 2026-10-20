@@ -44,9 +44,9 @@ impl Lister {
     ///
     /// # Errors
     ///
-    /// Fatal when the location holds another fingerprint, when its store
-    /// cannot create an object conditionally, and when a publish settles
-    /// other than confirmed; a listing or location error carries its class.
+    /// Fatal when the location holds another fingerprint and when its store
+    /// cannot create an object conditionally. A publish the feed refuses, a
+    /// listing error and a location error carry their own class.
     pub(crate) async fn run(self) -> Result<(), SourceError> {
         if let Some((store, location)) = &self.location {
             write_fingerprint(store.as_ref(), location, &self.fingerprint).await?;
@@ -239,6 +239,38 @@ mod tests {
             })
             .collect();
         assert_eq!(published, ["data/c", "data/b", "data/a"]);
+    }
+
+    /// Pins that a fingerprint reported present and then read as absent on
+    /// both passes fails the lister after exactly two conditional creates.
+    #[test]
+    fn a_fingerprint_absent_after_two_refused_creates_fails_the_lister() {
+        let store = HookStore {
+            creates_exist: true,
+            ..HookStore::default()
+        };
+        let location = Location::parse("s3://ops/jobs/a/", "s3://data/events/").unwrap();
+        let err = runtime()
+            .block_on(write_fingerprint(&store, &location, "mine"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("read as absent twice"), "{err}");
+        assert_eq!(store.creates.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    /// Pins that a location with no end marker logs no delete.
+    #[test]
+    fn a_location_with_no_end_marker_logs_no_delete() {
+        let store = HookStore::default();
+        let location = Location::parse("s3://ops/jobs/a/", "s3://data/events/").unwrap();
+        let rt = runtime();
+        let lines = spate_test::capture_logs(tracing::Level::INFO, || {
+            rt.block_on(delete_end(&store, &location)).unwrap();
+        });
+        assert!(
+            !lines.iter().any(|l| l.contains("deleted the end marker")),
+            "{lines:#?}"
+        );
     }
 
     /// A feed that leaves every publish unsettled until the test settles it,

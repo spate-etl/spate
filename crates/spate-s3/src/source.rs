@@ -276,8 +276,9 @@ impl S3Source {
     /// # Errors
     ///
     /// Fatal for a durable feed with no `location`, a source with no framer,
-    /// another fingerprint at the location, a store that cannot create an
-    /// object conditionally, and a publish the feed does not confirm.
+    /// another fingerprint at the location, and a store that cannot create
+    /// an object conditionally. A publish the feed refuses keeps the class
+    /// the feed gave it.
     #[cfg(feature = "testing")]
     #[doc(hidden)]
     pub fn list_once(
@@ -292,7 +293,7 @@ impl S3Source {
         let location = section
             .location
             .as_deref()
-            .map(|location| Location::parse(location, &self.config.url))
+            .map(|location| self.parse_location(location))
             .transpose()
             .map_err(|e| fatal(e.to_string()))?;
         if location.is_none() && section.backend().type_tag() != "memory" {
@@ -368,6 +369,51 @@ impl S3Source {
                 )
             }
         })
+    }
+
+    /// Parse the `feed:` section's `location` against this source's `url`
+    /// and `store` options, which also build the location's store.
+    ///
+    /// Beyond [`Location::parse`], an S3 location is refused when a `store`
+    /// key is not an S3 option, since load checks the keys against the
+    /// source URL's scheme only, and when the options or the environment ask
+    /// for virtual-hosted requests on a set endpoint, which then addresses
+    /// the source's bucket whatever the location names.
+    fn parse_location(&self, location: &str) -> Result<Location, ConfigError> {
+        let parsed = Location::parse(location, &self.config.url)?;
+        if !matches!(
+            ObjectStoreScheme::parse(parsed.url()),
+            Ok((ObjectStoreScheme::AmazonS3, _))
+        ) {
+            return Ok(parsed);
+        }
+        let refuse = |why: String| ConfigError::Component {
+            context: "feed".into(),
+            message: format!("`location` {}: {why}", parsed.shown()),
+        };
+        if let Some(key) = self.config.store.keys().find(|k| s3_store_key(k).is_none()) {
+            return Err(refuse(format!(
+                "source.s3.store.\"{key}\" is not an object_store S3 option, and the \
+                 location's store is built from it"
+            )));
+        }
+        let options = apply_options(AmazonS3Builder::from_env(), &self.config.store);
+        let virtual_hosted = options
+            .get_config_value(&AmazonS3ConfigKey::VirtualHostedStyleRequest)
+            .is_some_and(|v| v == "true");
+        if virtual_hosted
+            && options
+                .get_config_value(&AmazonS3ConfigKey::Endpoint)
+                .is_some()
+        {
+            return Err(refuse(
+                "the source's `store` sends virtual-hosted requests to a set `endpoint`, which \
+                 names one bucket whatever the location names; remove `location` or \
+                 `virtual_hosted_style_request`"
+                    .into(),
+            ));
+        }
+        Ok(parsed)
     }
 
     /// The store holding `location`: the injected one, or one built from its
@@ -446,7 +492,7 @@ impl Source for S3Source {
         self.location = section
             .location
             .as_deref()
-            .map(|location| Location::parse(location, &self.config.url))
+            .map(|location| self.parse_location(location))
             .transpose()?;
         self.feed = Some(feed);
         self.units_held = section.units_held;
@@ -1029,5 +1075,79 @@ mod tests {
         let (_, want) =
             object_store::parse_url_opts(&url, std::iter::empty::<(String, String)>()).unwrap();
         assert_eq!(got, want, "file:// delegates to parse_url_opts unchanged");
+    }
+
+    fn source_with_store(store: &str) -> (S3Source, tokio::runtime::Runtime) {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let body = format!("url: \"file:///tmp/spate-location/data/\"\nstore:\n{store}");
+        let source = S3Source::from_component_config(
+            &spate_test::component_config("s3", &body),
+            rt.handle().clone(),
+        )
+        .unwrap();
+        (source, rt)
+    }
+
+    /// Pins that the location's store is built with the source's `store`
+    /// options: an `s3://` location reaches the endpoint they name, which
+    /// answers 403.
+    #[test]
+    fn the_location_store_uses_the_source_store_options() {
+        let endpoint = crate::test_servers::status_server("403 Forbidden");
+        let (source, rt) = source_with_store(&format!(
+            "  endpoint: \"{endpoint}\"\n  allow_http: \"true\"\n  access_key_id: \"AKIDTEST\"\n  \
+             secret_access_key: \"test\"\n  region: \"us-east-1\"\n"
+        ));
+        let location = source.parse_location("s3://ops/jobs/a/").unwrap();
+        let store = source.location_store(&location).unwrap();
+        let err = rt
+            .block_on(crate::location::read_object(
+                store.as_ref(),
+                &location,
+                &location.fingerprint(),
+            ))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("403") && err.contains("s3:ListBucket"),
+            "{err}"
+        );
+    }
+
+    /// Pins that an S3 location is refused when the source's `store` sends
+    /// virtual-hosted requests to a set endpoint, which names one bucket.
+    #[test]
+    fn a_location_beside_a_virtual_hosted_endpoint_is_refused() {
+        let (source, _rt) = source_with_store(
+            "  endpoint: \"https://b.store.example\"\n  virtual_hosted_style_request: \"true\"\n",
+        );
+        let err = source
+            .parse_location("s3://elsewhere/jobs/a/")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("virtual_hosted_style_request"), "{err}");
+        let (source, _rt) = source_with_store("  endpoint: \"https://store.example\"\n");
+        source.parse_location("s3://elsewhere/jobs/a/").unwrap();
+    }
+
+    /// Pins that an S3 location is refused when a `store` key is not an S3
+    /// option, which load checks only against an S3 source URL.
+    #[test]
+    fn an_s3_location_refuses_a_store_key_the_s3_client_does_not_know() {
+        let (source, _rt) = source_with_store("  endpont: \"http://127.0.0.1:9000\"\n");
+        let err = source
+            .parse_location("s3://ops/jobs/a/")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("\"endpont\""), "{err}");
+        let (source, _rt) = source_with_store("  endpont: \"http://127.0.0.1:9000\"\n");
+        let dir = tempfile::tempdir().unwrap();
+        source
+            .parse_location(&format!("file://{}/jobs/a/", dir.path().display()))
+            .unwrap();
     }
 }

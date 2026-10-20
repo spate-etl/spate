@@ -10,7 +10,8 @@ engine promises.
 ## Before you start
 
 Outside contributors need an issue assigned to them before they open a pull
-request:
+request. An outside contributor is anyone without write access to the
+repository.
 
 1. Find an open issue, or open one with the forms below.
 2. Comment that you would like to work on it and how you plan to approach it.
@@ -19,24 +20,36 @@ request:
 
 The maintainer decides. An issue may be planned for a release in progress, or
 may be waiting on a design decision. A pull request that is not linked to an
-issue assigned to its author is closed with a pointer to this section. A
-maintainer should comment on or review a pull request within a few days, though
-it can take longer.
-
-You can hold at most three assigned issues at a time. An assignment lapses 14
-days after it is made, or on the target date of the issue's milestone if that
-comes first, unless a pull request for it is open by then. Comment on the issue
-to release it earlier, or to ask for more time.
+issue assigned to its author is closed with a pointer to this section.
 
 Two kinds of change need no issue: a minor typo or documentation fix whose
 author has checked it against the source for accuracy, and a pull request from
-a maintainer. A larger documentation change goes through an issue like any
-other change.
+a maintainer or from Dependabot. A larger documentation change goes through an
+issue like any other change.
+
+A maintainer should comment on or review a pull request within a few days,
+though it can take longer.
 
 The issue forms cover a delivery guarantee that did not hold, an ordinary bug, a
 performance problem, and a proposal. Blank issues are off: each form asks the
 question somebody would have to ask you anyway. A vulnerability is the exception
 and never goes in an issue; see [Security and legal](#security-and-legal).
+
+### Keeping an assignment
+
+You can hold at most three assigned issues at a time.
+
+An assignment ends 14 days after it is made, or on the target date of the
+issue's milestone if that comes first. It never ends sooner than 7 days after it
+is made. An open pull request for the issue keeps the assignment.
+
+When a milestone passes its target date, its open issues move on as described
+under [Milestones and priorities](#milestones-and-priorities). An assignment
+with no open pull request ends then, or 7 days after it was made if that is
+later. You can comment on the issue to ask for it again.
+
+A maintainer removes the assignee and leaves a comment when an assignment ends.
+You can comment on the issue to release it earlier, or to ask for more time.
 
 ## Milestones and priorities
 

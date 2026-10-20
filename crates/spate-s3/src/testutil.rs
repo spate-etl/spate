@@ -93,18 +93,62 @@ impl RecordFramer for TestLineFramer {
 pub(crate) type GetHook =
     fn(&object_store::path::Path) -> Option<object_store::Result<object_store::GetResult>>;
 
-/// An in-memory store whose GETs and listing order a test can override.
+/// How a [`PutHook`] answers a PUT.
+#[derive(Debug)]
+pub(crate) enum PutAnswer {
+    /// Store nothing and fail.
+    Fail(object_store::Error),
+    /// Store the object, then fail as a lost reply would.
+    StoreThenFail(object_store::Error),
+}
+
+/// Answers a PUT for the path, or `None` to write the inner store.
+pub(crate) type PutHook = fn(&object_store::path::Path) -> Option<PutAnswer>;
+
+/// One write a [`HookStore`] took, or one event a test's feed records beside
+/// them, in the order they happened.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Event {
+    /// A stored PUT, with its body.
+    Put(String, Vec<u8>),
+    /// A DELETE.
+    Delete(String),
+    /// A unit published, by id.
+    Published(String),
+    /// A unit confirmed, by id.
+    Confirmed(String),
+}
+
+/// A log of [`Event`]s shared between a store and a feed.
+pub(crate) type EventLog = std::sync::Arc<std::sync::Mutex<Vec<Event>>>;
+
+/// An in-memory store whose GETs, PUTs and listing order a test can
+/// override.
 #[derive(Debug, Default)]
 pub(crate) struct HookStore {
     pub(crate) inner: object_store::memory::InMemory,
     /// Answers a GET in place of `inner` when it returns `Some`.
     pub(crate) get: Option<GetHook>,
+    /// Answers a PUT in place of `inner` when it returns `Some`.
+    pub(crate) put: Option<PutHook>,
     /// Lists in reverse key order.
     pub(crate) reverse_list: bool,
     /// Answers every conditional create `AlreadyExists` without storing.
     pub(crate) creates_exist: bool,
     /// Conditional creates so far.
     pub(crate) creates: std::sync::atomic::AtomicUsize,
+    /// The offset of each offset listing, in order.
+    pub(crate) offsets: std::sync::Mutex<Vec<object_store::path::Path>>,
+    /// Where stored PUTs and DELETEs are logged.
+    pub(crate) events: Option<EventLog>,
+}
+
+impl HookStore {
+    fn log(&self, event: Event) {
+        if let Some(events) = &self.events {
+            events.lock().unwrap().push(event);
+        }
+    }
 }
 
 impl std::fmt::Display for HookStore {
@@ -121,6 +165,16 @@ impl object_store::ObjectStore for HookStore {
         payload: object_store::PutPayload,
         opts: object_store::PutOptions,
     ) -> object_store::Result<object_store::PutResult> {
+        let body: Vec<u8> = payload.iter().flat_map(|b| b.iter().copied()).collect();
+        match self.put.and_then(|put| put(location)) {
+            Some(PutAnswer::Fail(e)) => return Err(e),
+            Some(PutAnswer::StoreThenFail(e)) => {
+                self.inner.put_opts(location, payload, opts).await?;
+                self.log(Event::Put(location.to_string(), body));
+                return Err(e);
+            }
+            None => {}
+        }
         if matches!(opts.mode, object_store::PutMode::Create) {
             self.creates
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -131,7 +185,9 @@ impl object_store::ObjectStore for HookStore {
                 });
             }
         }
-        self.inner.put_opts(location, payload, opts).await
+        let put = self.inner.put_opts(location, payload, opts).await?;
+        self.log(Event::Put(location.to_string(), body));
+        Ok(put)
     }
 
     async fn put_multipart_opts(
@@ -161,7 +217,16 @@ impl object_store::ObjectStore for HookStore {
         >,
     ) -> futures_util::stream::BoxStream<'static, object_store::Result<object_store::path::Path>>
     {
-        self.inner.delete_stream(locations)
+        use futures_util::StreamExt as _;
+        let events = self.events.clone();
+        self.inner
+            .delete_stream(locations)
+            .inspect(move |deleted| {
+                if let (Some(events), Ok(path)) = (&events, deleted) {
+                    events.lock().unwrap().push(Event::Delete(path.to_string()));
+                }
+            })
+            .boxed()
     }
 
     fn list(
@@ -181,6 +246,16 @@ impl object_store::ObjectStore for HookStore {
         })
         .flatten()
         .boxed()
+    }
+
+    fn list_with_offset(
+        &self,
+        prefix: Option<&object_store::path::Path>,
+        offset: &object_store::path::Path,
+    ) -> futures_util::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+    {
+        self.offsets.lock().unwrap().push(offset.clone());
+        self.inner.list_with_offset(prefix, offset)
     }
 
     async fn list_with_delimiter(

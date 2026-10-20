@@ -43,7 +43,7 @@ drives the feed from the controller thread and waits only by parking on the
 `FeedPark` the backend signals, for at most its poll timeout, so INV-2 holds.
 
 The trait also publishes a unit and reports through a `Confirmation` when the
-feed has stored it, which the lister (the lister-resume record) and a worker
+feed has stored it, which the lister ([the lister-resume record](0074-a-lister-resumes-after-the-last-key-it-checkpointed-once-the-feed-confirmed-it.md)) and a worker
 re-enqueueing a unit (the notification-read record) use. Methods take `&self`,
 so one `Arc<dyn Feed>` serves a reader and a publisher. Every operation carries
 only `spate-core` and `std` types. No rdkafka delivery result, AWS SDK error or

@@ -1,6 +1,7 @@
 //! The job location of a bounded feed job: an object-store prefix holding
-//! the job fingerprint, which the lister writes and every worker reads, and
-//! the name of the end marker a lister run deletes before it publishes.
+//! the job fingerprint, which the lister writes and every worker reads, the
+//! lister's checkpoint, and the end marker a lister run deletes before it
+//! publishes.
 //!
 //! [`Location::parse`] checks the `feed:` section's `location` against the
 //! source URL. [`feed_fingerprint`] is the identity a worker and the lister
@@ -28,8 +29,9 @@ pub(crate) const SETTLING_WINDOW: Duration = Duration::from_secs(5 * 60);
 /// The step between a waiting worker's reads of the fingerprint.
 pub(crate) const FINGERPRINT_POLL: Duration = Duration::from_secs(5);
 
-/// The largest object a location read accepts. Every object here is a few
-/// hundred bytes, so a larger one is not this job's.
+/// The largest object a location read accepts. Every object here is a
+/// fingerprint or one object key, at most a few kilobytes, so a larger one is
+/// not this job's.
 pub(crate) const LOCATION_OBJECT_MAX_BYTES: u64 = 4096;
 
 /// What every feed fingerprint starts with, so a foreign object at the
@@ -154,6 +156,19 @@ impl Location {
         self.prefix.clone().join("end")
     }
 
+    /// The lister's checkpoint: the last listed key whose units, and those of
+    /// every key listed before it, the feed has confirmed.
+    #[cfg_attr(
+        not(feature = "testing"),
+        expect(
+            dead_code,
+            reason = "only the `testing`-gated `S3Source::list_once` lists for the feed"
+        )
+    )]
+    pub(crate) fn checkpoint(&self) -> Path {
+        self.prefix.clone().join("checkpoint")
+    }
+
     /// The location for messages, without userinfo or query.
     pub(crate) fn shown(&self) -> impl fmt::Display + '_ {
         redact::url(self.url.as_str())
@@ -196,7 +211,7 @@ fn root(url: &Url) -> Option<Root> {
 }
 
 /// Whether `path`'s segments begin with every segment of `prefix`.
-fn starts_with(path: &Path, prefix: &Path) -> bool {
+pub(crate) fn starts_with(path: &Path, prefix: &Path) -> bool {
     let mut parts = path.parts();
     prefix.parts().all(|want| parts.next() == Some(want))
 }
@@ -650,8 +665,10 @@ mod tests {
         let without = accepted("s3://ops/jobs/a");
         assert_eq!(with.fingerprint(), without.fingerprint());
         assert_eq!(with.end(), without.end());
+        assert_eq!(with.checkpoint(), without.checkpoint());
         assert_eq!(with.fingerprint().as_ref(), "jobs/a/fingerprint");
         assert_eq!(with.end().as_ref(), "jobs/a/end");
+        assert_eq!(with.checkpoint().as_ref(), "jobs/a/checkpoint");
     }
 
     /// Pins that an object above the cap is refused from its size, before

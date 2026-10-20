@@ -71,7 +71,7 @@ like any other.
   late lister's units stay unacknowledged in the feed.
 - Bad, because a new job pointed at an earlier job's location by mistake
   publishes only the keys listed after that job's checkpoint once the
-  lister-resume record lands. Until then such a lister lists the whole prefix.
+  [lister-resume record](0074-a-lister-resumes-after-the-last-key-it-checkpointed-once-the-feed-confirmed-it.md) lands. Until then such a lister lists the whole prefix.
 - Bad, because a lister upgraded across a unit format change cannot resume a
   job, which restarts at a new location, and a `Stalled` job whose fix changed
   the compression, range target, framer or unit format re-reads the whole

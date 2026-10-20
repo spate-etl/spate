@@ -201,7 +201,9 @@ impl S3Source {
     /// still supplies the listing prefix). Lets tests wrap the store with
     /// failure- or call-counting decorators. On the feed path a source given
     /// its store reads storage notifications only under an `s3://` or
-    /// `s3a://` URL, whose host is the bucket their records must name.
+    /// `s3a://` URL, whose host is the bucket their records must name. A
+    /// lister over a store given here resumes from its checkpoint as over the
+    /// S3 client.
     ///
     /// Behind the off-by-default `testing` feature because it exposes an
     /// `object_store` type, which this crate's public API otherwise avoids
@@ -267,7 +269,12 @@ impl S3Source {
     ///
     /// With a `location` in `section` it first creates the job fingerprint
     /// there, or compares the one already there, and deletes an earlier end
-    /// marker. It writes no end marker. The lister run's entry point
+    /// marker. Beside a fingerprint it compared, it reads the lister's
+    /// checkpoint and lists only the keys after it. It rewrites the
+    /// checkpoint at most once per [`CHECKPOINT_EVERY`] listed keys and once
+    /// at the end, each time after the feed confirmed every unit published
+    /// before it. Over a `file://` store or an S3 directory bucket it keeps
+    /// no checkpoint. It writes no end marker. The lister run's entry point
     /// replaces it.
     ///
     /// Behind the off-by-default `testing` feature, outside the semver
@@ -275,10 +282,14 @@ impl S3Source {
     ///
     /// # Errors
     ///
-    /// Fatal for a durable feed with no `location`, a source with no framer,
-    /// another fingerprint at the location, and a store that cannot create
-    /// an object conditionally. A publish the feed refuses keeps the class
-    /// the feed gave it.
+    /// Fatal for a durable feed with no `location`, the in-process feed with
+    /// one, a source with no framer, another fingerprint at the location, a
+    /// checkpoint that is not a key under the listing prefix, and a store
+    /// that cannot create an object conditionally. A publish the feed refuses
+    /// keeps the class the feed gave it, and a failed checkpoint read or write
+    /// the class of its store error.
+    ///
+    /// [`CHECKPOINT_EVERY`]: crate::lister::CHECKPOINT_EVERY
     #[cfg(feature = "testing")]
     #[doc(hidden)]
     pub fn list_once(
@@ -303,11 +314,16 @@ impl S3Source {
                 section.backend().type_tag()
             )));
         }
+        if location.is_some() && section.backend().type_tag() == "memory" {
+            return Err(fatal(
+                "the in-process feed keeps no job location; remove `feed.location`".into(),
+            ));
+        }
         let make_framer = self.framer.clone().ok_or_else(|| {
             fatal("S3Source has no record framer; supply one with `with_framer(...)`".into())
         })?;
         self.config.validate().map_err(|e| fatal(e.to_string()))?;
-        let (store, prefix, _, _) = self.data_store()?;
+        let (store, prefix, unaddressable, _, resume) = self.data_store()?;
         let delimiter = make_framer().resync_delimiter();
         let location = match location {
             Some(location) => Some((self.location_store(&location)?, location)),
@@ -323,6 +339,9 @@ impl S3Source {
             },
             feed,
             location,
+            resume,
+            checkpoint_every: crate::lister::CHECKPOINT_EVERY,
+            unaddressable,
             fingerprint: feed_fingerprint(
                 &self.config.url,
                 self.config.compression,
@@ -337,8 +356,8 @@ impl S3Source {
 impl S3Source {
     /// The store the source reads: the injected one, or one built from
     /// `config.url`. Returns it with the listing prefix, the unaddressable
-    /// keys its client takes out of listings, and the bucket a
-    /// notification's records must name.
+    /// keys its client takes out of listings, the bucket a notification's
+    /// records must name, and whether a lister can resume over it.
     fn data_store(&mut self) -> Result<DataStore, SourceError> {
         let url = parse(&self.config.url)?;
         Ok(match self.store.take() {
@@ -353,7 +372,7 @@ impl S3Source {
                 let bucket = matches!(url.scheme(), "s3" | "s3a")
                     .then(|| url.host_str().map(str::to_owned))
                     .flatten();
-                (store, path, None, bucket)
+                (store, path, None, bucket, true)
             }
             None => {
                 let built =
@@ -366,6 +385,7 @@ impl S3Source {
                     built.prefix,
                     built.unaddressable,
                     built.bucket,
+                    built.resumable,
                 )
             }
         })
@@ -398,15 +418,7 @@ impl S3Source {
             )));
         }
         let options = apply_options(AmazonS3Builder::from_env(), &self.config.store);
-        // `object_store` reads the flag with these spellings, in any case.
-        let virtual_hosted = options
-            .get_config_value(&AmazonS3ConfigKey::VirtualHostedStyleRequest)
-            .is_some_and(|v| {
-                matches!(
-                    v.to_ascii_lowercase().as_str(),
-                    "1" | "true" | "on" | "yes" | "y"
-                )
-            });
+        let virtual_hosted = flag_set(&options, AmazonS3ConfigKey::VirtualHostedStyleRequest);
         let endpoint = [AmazonS3ConfigKey::Endpoint, AmazonS3ConfigKey::S3Endpoint]
             .iter()
             .any(|key| options.get_config_value(key).is_some());
@@ -542,7 +554,7 @@ impl Source for S3Source {
             reason: e.to_string(),
         })?;
 
-        let (store, prefix, unaddressable, bucket) = self.data_store()?;
+        let (store, prefix, unaddressable, bucket, _) = self.data_store()?;
 
         let metrics = ctx.meter.as_ref().map(S3Metrics::new);
         if let Some(feed) = self.feed.take() {
@@ -856,6 +868,9 @@ fn build_store(
             prefix,
             unaddressable: None,
             bucket: None,
+            // `LocalFileSystem` walks a directory unsorted and skips the keys
+            // at or before an offset, so a resume there loses keys.
+            resumable: false,
         });
     }
     // Harden the HTTP client (idle-connection recycling, explicit timeouts)
@@ -863,7 +878,12 @@ fn build_store(
     // still wins; see `harden_client_defaults`.
     let builder = harden_client_defaults(AmazonS3Builder::from_env().with_url(url.as_str()));
     let unaddressable = UnaddressableKeys::default();
-    let store = apply_options(builder, options)
+    let builder = apply_options(builder, options);
+    // `object_store` sends no `start-after` to an S3 directory bucket. It
+    // lists the whole prefix and skips the keys at or before the offset,
+    // and a directory bucket does not list in key order.
+    let resumable = !flag_set(&builder, AmazonS3ConfigKey::S3Express);
+    let store = builder
         .with_http_connector(UnaddressableConnector::new(unaddressable.clone()))
         .build()?;
     Ok(BuiltStore {
@@ -871,6 +891,18 @@ fn build_store(
         store: Box::new(store),
         prefix: path,
         unaddressable: Some(unaddressable),
+        resumable,
+    })
+}
+
+/// Whether `builder` holds `key` set to true, in any of the spellings
+/// `object_store` reads as true.
+fn flag_set(builder: &AmazonS3Builder, key: AmazonS3ConfigKey) -> bool {
+    builder.get_config_value(&key).is_some_and(|v| {
+        matches!(
+            v.to_ascii_lowercase().as_str(),
+            "1" | "true" | "on" | "yes" | "y"
+        )
     })
 }
 
@@ -889,13 +921,14 @@ pub(crate) fn scope_bucket(store: &AmazonS3) -> Option<String> {
 }
 
 /// The store the source reads, its listing prefix, the unaddressable keys
-/// its client takes out of listings, and the bucket a notification's records
-/// must name.
+/// its client takes out of listings, the bucket a notification's records
+/// must name, and whether a lister can resume over the store.
 type DataStore = (
     Arc<dyn ObjectStore>,
     object_store::path::Path,
     Option<UnaddressableKeys>,
     Option<String>,
+    bool,
 );
 
 /// What [`build_store`] returns.
@@ -909,6 +942,9 @@ struct BuiltStore {
     /// The bucket a notification's records must name; `None` for any other
     /// scheme.
     bucket: Option<String>,
+    /// Whether `object_store` lists after an offset with `start-after`,
+    /// which a lister needs to resume from its checkpoint.
+    resumable: bool,
 }
 
 /// Conservative HTTP-client defaults for the S3 backend, applied *before* the
@@ -1065,6 +1101,25 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = Url::from_directory_path(dir.path()).unwrap();
         assert_eq!(build_store(&file, &BTreeMap::new()).unwrap().bucket, None);
+    }
+
+    /// Pins which built stores a lister resumes over: the S3 client of a
+    /// general-purpose bucket, and neither one with `aws_s3_express` set nor
+    /// a `file://` store. Building sends nothing.
+    #[test]
+    fn only_an_s3_client_without_s3_express_resumes() {
+        let built = build_store(&Url::parse("s3://b/data/").unwrap(), &BTreeMap::new()).unwrap();
+        assert!(built.resumable);
+        let express = BTreeMap::from([("aws_s3_express".to_owned(), "true".to_owned())]);
+        let built = build_store(
+            &Url::parse("s3://b--usw2-az1--x-s3/data/").unwrap(),
+            &express,
+        )
+        .unwrap();
+        assert!(!built.resumable);
+        let dir = tempfile::tempdir().unwrap();
+        let file = Url::from_directory_path(dir.path()).unwrap();
+        assert!(!build_store(&file, &BTreeMap::new()).unwrap().resumable);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! A RustFS S3 store in a container, the real-S3-API fixture shared by the
 //! Docker-gated suites, with one bucket and a signed client for seeding.
 
-use object_store::aws::AmazonS3Builder;
+use object_store::aws::{AmazonS3, AmazonS3Builder, AwsAuthorizer, AwsCredential};
 use object_store::path::Path as StorePath;
 use object_store::{ObjectStore, ObjectStoreExt as _, PutPayload};
 use spate_test_support::{ACCESS_KEY, REGION, Rustfs, SECRET_KEY};
@@ -64,18 +64,59 @@ impl Gateway {
             .await;
         });
     }
+
+    /// The bucket's client as its concrete type, for its paginated listing.
+    pub(crate) fn s3(&self) -> AmazonS3 {
+        builder(&self.rustfs, &self.bucket)
+            .build()
+            .expect("client builds")
+    }
+
+    /// PUT `body` at the raw `key`, which `object_store`'s `Path` cannot
+    /// hold, such as a folder marker ending in `/`. `key` is sent as written,
+    /// so it must need no percent-encoding.
+    pub(crate) fn put_raw(&self, key: &str, body: &str) {
+        let endpoint = self.rustfs.endpoint();
+        let path = format!("/{}/{key}", self.bucket);
+        let mut request = object_store::client::HttpRequest::new(body.to_owned().into());
+        *request.method_mut() = "PUT".parse().unwrap();
+        *request.uri_mut() = format!("{endpoint}{path}").parse().unwrap();
+        let credential = AwsCredential {
+            key_id: ACCESS_KEY.to_owned(),
+            secret_key: SECRET_KEY.to_owned(),
+            token: None,
+        };
+        AwsAuthorizer::new(&credential, "s3", REGION)
+            .try_authorize(&mut request, None)
+            .expect("sign the PUT");
+        let headers: Vec<(String, String)> = request
+            .headers()
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.to_str().unwrap().to_owned()))
+            .collect();
+        // The signature covers `Host`, which the exchange sets to the address.
+        let addr = endpoint
+            .strip_prefix("http://")
+            .and_then(|a| a.parse().ok())
+            .expect("the endpoint is http://<address>");
+        let (status, reply) =
+            spate_test_support::http_with_headers(addr, "PUT", &path, &headers, body)
+                .expect("send the PUT");
+        assert_eq!(status, 200, "PUT {key}: {reply}");
+    }
 }
 
 /// A signed `object_store` client for seeding and assertions.
 fn build_client(rustfs: &Rustfs, bucket: &str) -> Arc<dyn ObjectStore> {
-    let store = AmazonS3Builder::new()
+    Arc::new(builder(rustfs, bucket).build().expect("client builds"))
+}
+
+fn builder(rustfs: &Rustfs, bucket: &str) -> AmazonS3Builder {
+    AmazonS3Builder::new()
         .with_endpoint(rustfs.endpoint())
         .with_allow_http(true)
         .with_bucket_name(bucket)
         .with_region(REGION)
         .with_access_key_id(ACCESS_KEY)
         .with_secret_access_key(SECRET_KEY)
-        .build()
-        .expect("client builds");
-    Arc::new(store)
 }

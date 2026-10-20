@@ -30,6 +30,7 @@ const WINDOW: Duration = Duration::from_secs(5 * 60);
 const POLL: Duration = Duration::from_secs(5);
 const LOCATION: &str = "s3://ops/jobs/backfill-1/";
 const FINGERPRINT_KEY: &str = "jobs/backfill-1/fingerprint";
+const CHECKPOINT_KEY: &str = "jobs/backfill-1/checkpoint";
 
 fn data_dir(dir: &tempfile::TempDir) -> PathBuf {
     let data = dir.path().join("data");
@@ -801,6 +802,7 @@ fn a_lister_with_another_fingerprint_refuses_to_start() {
     let theirs = fingerprint(&data, "Auto", "09");
     fs::write(path.join("fingerprint"), &theirs).unwrap();
     fs::write(path.join("end"), b"run=earlier\n").unwrap();
+    fs::write(path.join("checkpoint"), b"earlier/key").unwrap();
     let rt = runtime();
     let (feed, script) = scripted_feed();
     let err = lister_source(&data, &rt, "")
@@ -815,6 +817,7 @@ fn a_lister_with_another_fingerprint_refuses_to_start() {
         theirs
     );
     assert_eq!(fs::read(path.join("end")).unwrap(), b"run=earlier\n");
+    assert_eq!(fs::read(path.join("checkpoint")).unwrap(), b"earlier/key");
 }
 
 /// Pins that a re-run whose compression changed refuses the earlier run's
@@ -944,6 +947,103 @@ fn a_lister_on_a_durable_feed_without_a_location_refuses() {
     assert_eq!(hooks.requests(), 0);
 }
 
+/// A lister source over `s3://data-bucket/data/`, reading `data` and keeping
+/// its job location in `location`.
+fn resuming_source(
+    rt: &tokio::runtime::Runtime,
+    data: &Arc<dyn object_store::ObjectStore>,
+    location: &Arc<dyn object_store::ObjectStore>,
+) -> S3Source {
+    let section = spate_test::component_config(
+        "s3",
+        "url: \"s3://data-bucket/data/\"\nsplit_target_bytes: 1MiB\n",
+    );
+    line_framer(S3Source::from_component_config(&section, rt.handle().clone()).unwrap())
+        .with_store(Arc::clone(data))
+        .with_location_store(Arc::clone(location))
+}
+
+/// The key of each published unit, in publish order.
+fn published_keys(script: &spate_test::FeedScript) -> Vec<String> {
+    script
+        .published()
+        .iter()
+        .map(|u| {
+            SplitDescriptor::decode(&u.body).unwrap().objects[0]
+                .key
+                .clone()
+        })
+        .collect()
+}
+
+/// Pins resume end to end through `list_once`: a second run lists only the
+/// keys after the checkpoint the first left, and a run after the operator
+/// deletes the checkpoint lists the whole prefix.
+#[test]
+fn a_lister_resumes_after_its_checkpoint() {
+    use object_store::{ObjectStoreExt as _, PutPayload};
+    let rt = runtime();
+    let data: Arc<dyn object_store::ObjectStore> = Arc::new(object_store::memory::InMemory::new());
+    let put = |key: &str| {
+        rt.block_on(data.put(
+            &object_store::path::Path::from(key),
+            PutPayload::from_static(b"row\n"),
+        ))
+        .unwrap();
+    };
+    put("data/a");
+    put("data/b");
+    let (location, hooks) = location_store();
+    let section = section("scripted", Some(LOCATION));
+
+    let (feed, script) = scripted_feed();
+    resuming_source(&rt, &data, &location)
+        .list_once(&section, Arc::new(feed))
+        .unwrap();
+    assert_eq!(published_keys(&script), ["data/a", "data/b"]);
+    assert_eq!(hooks.read(CHECKPOINT_KEY).unwrap(), b"data/b");
+
+    put("data/c");
+    put("data/d");
+    let (feed, script) = scripted_feed();
+    resuming_source(&rt, &data, &location)
+        .list_once(&section, Arc::new(feed))
+        .unwrap();
+    assert_eq!(published_keys(&script), ["data/c", "data/d"]);
+    assert_eq!(hooks.read(CHECKPOINT_KEY).unwrap(), b"data/d");
+
+    rt.block_on(location.delete(&object_store::path::Path::from(CHECKPOINT_KEY)))
+        .unwrap();
+    let (feed, script) = scripted_feed();
+    resuming_source(&rt, &data, &location)
+        .list_once(&section, Arc::new(feed))
+        .unwrap();
+    assert_eq!(
+        published_keys(&script),
+        ["data/a", "data/b", "data/c", "data/d"]
+    );
+}
+
+/// Pins that a lister on the in-process feed refuses a job location, which
+/// that feed has no use for, before it sends any request.
+#[test]
+fn a_lister_on_the_memory_feed_with_a_location_refuses() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    fs::write(data.join("a.ndjson"), lines_bytes(&recs("a", 5))).unwrap();
+    let (store, hooks) = location_store();
+    let rt = runtime();
+    let (feed, script) = scripted_feed();
+    let err = lister_source(&data, &rt, "")
+        .with_location_store(store)
+        .list_once(&section("memory", Some(LOCATION)), Arc::new(feed))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("`feed.location`"), "{err}");
+    assert!(script.published().is_empty());
+    assert_eq!(hooks.requests(), 0);
+}
+
 /// Pins the published units: one whole unit per small object and ranges
 /// tiling a large one, with the ids the public derivations mint, and
 /// nothing from the location.
@@ -1041,4 +1141,133 @@ fn a_second_conditional_create_at_the_location_reports_already_exists() {
         let stored = gw.client.get(&key).await.unwrap().bytes().await.unwrap();
         assert_eq!(&stored[..], b"first");
     });
+}
+
+/// Pins resume against a real S3 API: after each chosen key the store
+/// returned, a lister run publishes exactly the keys the store lists after
+/// it, across a page boundary that falls on a zero-byte folder marker and
+/// for keys that are directory prefixes, carry characters URL encoding
+/// changes, or follow a key since deleted.
+#[test]
+#[ignore = "requires Docker"]
+fn resume_after_each_returned_key_publishes_the_rest() {
+    use futures_util::StreamExt as _;
+    use object_store::list::{PaginatedListOptions, PaginatedListStore as _};
+    use object_store::path::Path as StorePath;
+    use object_store::{ObjectStoreExt as _, PutPayload};
+    let gw = support::rustfs::Gateway::start("lister-resume");
+    let named = [
+        "data/a-c",
+        "data/a/b/y",
+        "data/a/c",
+        "data/amp&eq=.ndjson",
+        "data/plus+.ndjson",
+        "data/q/r",
+        "data/q/r/s",
+        "data/sp ace.ndjson",
+        "data/x/1.ndjson",
+        "data/x/2.ndjson",
+        "data/\u{e9}.ndjson",
+    ];
+    // Eight named keys sort before the folder marker, so 991 fillers make
+    // it the 1,000th key and the last of the first page.
+    let fillers: Vec<String> = (0..991).map(|i| format!("data/f{i:04}")).collect();
+    gw.rt.block_on(async {
+        for key in named
+            .iter()
+            .copied()
+            .chain(fillers.iter().map(String::as_str))
+        {
+            gw.client
+                .put(
+                    &StorePath::parse(key).unwrap(),
+                    PutPayload::from_static(b"row\n"),
+                )
+                .await
+                .unwrap_or_else(|e| panic!("RustFS refused {key}: {e}"));
+        }
+    });
+    gw.put_raw("data/x/", "");
+
+    let first = gw
+        .rt
+        .block_on(
+            gw.s3()
+                .list_paginated(Some("data/"), PaginatedListOptions::default()),
+        )
+        .unwrap();
+    let last = first.result.objects.last().unwrap();
+    assert_eq!(
+        first.result.objects.len(),
+        1000,
+        "RustFS pages hold 1,000 keys"
+    );
+    assert_eq!((last.location.as_ref(), last.size), ("data/x", 0));
+    assert!(first.page_token.is_some());
+
+    // The store's own order, with the empty marker dropped as the lister
+    // drops it.
+    let listed: Vec<String> = gw.rt.block_on(async {
+        gw.client
+            .list(Some(&StorePath::from("data")))
+            .map(|meta| meta.unwrap())
+            .filter(|meta| futures_util::future::ready(meta.size > 0))
+            .map(|meta| meta.location.to_string())
+            .collect()
+            .await
+    });
+    for key in named
+        .iter()
+        .copied()
+        .chain(fillers.iter().map(String::as_str))
+    {
+        assert!(listed.iter().any(|k| k == key), "RustFS lists {key}");
+    }
+    assert_eq!(listed.len(), named.len() + fillers.len());
+
+    let section = section("scripted", Some(&format!("s3://{}/jobs/a/", gw.bucket)));
+    let rt = runtime();
+    let source = || {
+        let body = format!(
+            "url: \"s3://{}/data/\"\nsplit_target_bytes: 1MiB\nstore:\n{}\n",
+            gw.bucket,
+            gw.store_options_yaml()
+        );
+        let config = spate_test::component_config("s3", &body);
+        line_framer(S3Source::from_component_config(&config, rt.handle().clone()).unwrap())
+    };
+    let (feed, script) = scripted_feed();
+    source().list_once(&section, Arc::new(feed)).unwrap();
+    assert_eq!(published_keys(&script), listed);
+
+    let checkpoint = StorePath::from("jobs/a/checkpoint");
+    let page_two_first = listed.iter().position(|k| k == "data/x/1.ndjson").unwrap();
+    let mut after: Vec<&str> = named.to_vec();
+    after.push(fillers.last().unwrap());
+    after.push(&listed[page_two_first - 1]);
+    for key in after {
+        gw.rt
+            .block_on(gw.client.put(&checkpoint, PutPayload::from(key.to_owned())))
+            .unwrap();
+        let (feed, script) = scripted_feed();
+        source().list_once(&section, Arc::new(feed)).unwrap();
+        let at = listed.iter().position(|k| k == key).unwrap();
+        assert_eq!(published_keys(&script), listed[at + 1..], "after {key}");
+    }
+
+    // A checkpoint naming a key since deleted resumes after its place.
+    gw.rt.block_on(async {
+        gw.client
+            .put(&checkpoint, PutPayload::from_static(b"data/q/r"))
+            .await
+            .unwrap();
+        gw.client
+            .delete(&StorePath::from("data/q/r"))
+            .await
+            .unwrap();
+    });
+    let (feed, script) = scripted_feed();
+    source().list_once(&section, Arc::new(feed)).unwrap();
+    let at = listed.iter().position(|k| k == "data/q/r").unwrap();
+    assert_eq!(published_keys(&script), listed[at + 1..]);
 }

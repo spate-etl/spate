@@ -346,6 +346,11 @@ object. The unit is acknowledged once, after every part and range has been read
 and committed. An object failure on one range fails the whole unit back, and its
 other parts and ranges stop.
 
+The lister publishes no unit for an object of size 0, which holds no records.
+An object whose key the S3 client cannot address is one whole unit, which
+poisons on its first read and names the key; one with no bytes, such as a
+folder marker `dir/`, gets none.
+
 Each range in progress takes one slot of `units_held`. Deliveries received
 alongside a large object wait until all of its ranges have opened, and the
 deliveries held stay at or below `units_held`. A waiting delivery is held
@@ -478,6 +483,37 @@ The job fingerprint is the object named `fingerprint` there, which the job's
 lister creates before it publishes a unit. A lister run also deletes an object
 named `end` there before its first publish. A new job takes a new location.
 
+The lister's checkpoint is the object named `checkpoint` there. It holds the
+last listed key for which the feed has confirmed every unit of it and of every
+key listed before it, by a successful entry in an SQS `SendMessageBatch`
+response or a successful Kafka delivery report. The lister rewrites it at most
+once every 1,000 listed keys and once when its listing ends. A run whose
+location holds `checkpoint` beside its own fingerprint lists only the keys
+after it, through `ListObjectsV2`'s `StartAfter`, and logs the key at INFO. A
+run that creates the fingerprint deletes a `checkpoint` it finds and lists the
+whole prefix. A run that stops publishes the units after the last checkpoint
+again. A lister on a `file://` source, or on an S3 directory bucket
+(`aws_s3_express`, or `AWS_S3_EXPRESS` in the environment), keeps no
+checkpoint and logs a WARN: every run lists the prefix from the start.
+
+Resume finds every key while the store lists keys in the same order in the run
+that wrote `checkpoint` and in the run that resumes from it. AWS S3
+general-purpose buckets list in UTF-8 byte order; the CI suite checks resume on
+RustFS only. Resume is unsupported on SeaweedFS, where it skips keys: SeaweedFS
+lists in directory-tree order, so a resume after a key that is also a
+directory prefix (`q/r` beside `q/r/s`) skips that directory. Its listings can
+also end early; see [Testing](#testing).
+
+:::danger
+A run at a location that holds `checkpoint` never reads the keys up to it. A
+re-run of a finished job publishes only keys added since. A job whose feed lost
+its units, such as a purged queue or a new queue or topic at the same location,
+never reads its keys up to the checkpoint. If the store's list order may have
+changed since `checkpoint` was written, such as across a store upgrade, stop
+the lister, delete `checkpoint`, and start it again. To start a job over,
+delete the whole location prefix.
+:::
+
 The fingerprint covers the unit format version, `url`, `compression`,
 `split_target_bytes` and the framer's resync delimiter. At startup a worker of
 a bounded job reads `fingerprint` every five seconds until it appears, and
@@ -527,7 +563,8 @@ Workers need read access to the location. The lister needs to read, write and
 delete there. On AWS S3 that read access includes `s3:ListBucket` on the
 location's bucket: without it a read of an absent object answers `403`, so a
 worker started before its lister fails at once and a lister fails on the absent
-end marker. The error says so. The lister creates `fingerprint` only when
+checkpoint or end marker. The error says so. Write access at the location
+decides where a lister run resumes. The lister creates `fingerprint` only when
 absent, so a lister whose `store` sets `aws_conditional_put: disabled` fails.
 Run one lister per location: the conditional create refuses a second lister
 with another fingerprint on a store that honors `If-None-Match`, and the CI

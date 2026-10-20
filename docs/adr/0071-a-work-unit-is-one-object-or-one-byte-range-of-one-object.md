@@ -16,7 +16,7 @@ pack small objects first-fit into up to ten open bins, about sixteen objects to
 a split, and cut a qualifying large object into byte ranges. A storage
 notification names one object. The unit's size sets the replay cost in the
 work-feed record, the queue requests per object, and what the lister's
-checkpoint waits on in the lister-resume record.
+checkpoint waits on in [the lister-resume record](0074-a-lister-resumes-after-the-last-key-it-checkpointed-once-the-feed-confirmed-it.md).
 
 ## Considered options
 

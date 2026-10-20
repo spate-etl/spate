@@ -1,13 +1,23 @@
 //! A one-pass lister for a bounded feed job: it writes the job fingerprint
 //! at the job location, deletes an end marker an earlier run left there,
-//! then publishes one unit per part of each listed object.
+//! then publishes one unit per part of each listed object, after the
+//! lister's checkpoint when the location holds one.
 //!
-//! It writes no end marker and keeps no checkpoint. Reached only through
-//! the `testing`-gated `S3Source::list_once`.
+//! The checkpoint is the last listed key whose units, and those of every key
+//! listed before it, the feed has confirmed. The lister rewrites it at most
+//! once each [`CHECKPOINT_EVERY`] listed keys and once at the end. It
+//! publishes nothing for an object of size 0, publishes each object whose key
+//! the S3 client cannot address as one whole unit, and checkpoints at
+//! neither. It writes no end marker. Reached only through the
+//! `testing`-gated `S3Source::list_once`.
 
 use crate::error::classify;
 use crate::fetch::ObjectEntry;
-use crate::location::{Location, bounded_reason, compare, io_error, read_error, read_object};
+use crate::listing::{UnaddressableKeys, addressable};
+use crate::location::{
+    LOCATION_OBJECT_MAX_BYTES, Location, bounded_reason, compare, io_error, read_error,
+    read_object, starts_with,
+};
 use crate::split::Packing;
 use crate::unit::units;
 use futures_util::StreamExt as _;
@@ -22,6 +32,11 @@ use std::sync::Arc;
 /// SQS send batch of 10.
 pub(crate) const LISTER_IN_FLIGHT: usize = 32;
 
+/// The most listed keys between two checkpoint writes: the largest
+/// `ListObjectsV2` page AWS returns. A store whose pages hold at most this
+/// many keys sees at most one write per page.
+pub(crate) const CHECKPOINT_EVERY: usize = 1000;
+
 /// One lister run over a listing prefix.
 pub(crate) struct Lister {
     /// The store the source reads.
@@ -34,62 +49,185 @@ pub(crate) struct Lister {
     pub(crate) feed: Arc<dyn Feed>,
     /// The job location and its store; `None` on the in-process feed.
     pub(crate) location: Option<(Arc<dyn ObjectStore>, Location)>,
+    /// Whether `store` lists the keys after an offset with `start-after`.
+    /// Without it the run keeps no checkpoint.
+    pub(crate) resume: bool,
+    /// The most listed keys between two checkpoint writes.
+    pub(crate) checkpoint_every: usize,
+    /// The objects the S3 client takes out of `store`'s listing pages.
+    pub(crate) unaddressable: Option<UnaddressableKeys>,
     /// The job fingerprint this run writes.
     pub(crate) fingerprint: String,
 }
 
+/// What the fingerprint write found at the location.
+enum Fingerprint {
+    Created,
+    Matched,
+}
+
 impl Lister {
-    /// Write the fingerprint, delete an earlier end marker, then publish
-    /// every listed object's units in the order the store lists them.
+    /// Write the fingerprint, then delete a checkpoint beside a fingerprint
+    /// it created or read the one beside a fingerprint it matched, delete an
+    /// earlier end marker, then publish every listed object's units in the
+    /// order the store lists them, after the checkpoint when there is one.
     ///
     /// # Errors
     ///
-    /// Fatal when the location holds another fingerprint and when its store
-    /// cannot create an object conditionally. A publish the feed refuses, a
-    /// listing error and a location error carry their own class.
+    /// Fatal when the location holds another fingerprint, when its store
+    /// cannot create an object conditionally, and when the checkpoint is not
+    /// a key under the listing prefix. A publish the feed refuses, a listing
+    /// error, a location error and a failed checkpoint read or write carry
+    /// their own class.
     pub(crate) async fn run(self) -> Result<(), SourceError> {
+        let mut start = None;
         if let Some((store, location)) = &self.location {
-            write_fingerprint(store.as_ref(), location, &self.fingerprint).await?;
+            let found = write_fingerprint(store.as_ref(), location, &self.fingerprint).await?;
+            if !self.resume {
+                tracing::warn!(
+                    location = %location.shown(),
+                    "the store does not list keys after an offset in its own order, so this \
+                     lister run keeps no checkpoint and lists the whole prefix"
+                );
+            } else {
+                match found {
+                    // A checkpoint beside no fingerprint is not this job's,
+                    // and a run that stops before its first write would
+                    // otherwise resume from it.
+                    Fingerprint::Created => delete_checkpoint(store.as_ref(), location).await?,
+                    Fingerprint::Matched => {
+                        start = read_checkpoint(store.as_ref(), location, &self.prefix).await?;
+                    }
+                }
+            }
             // Before the first publish, so no worker of this run can read a
             // marker an earlier run left.
             delete_end(store.as_ref(), location).await?;
         }
-        self.publish_listing().await
+        self.publish_listing(start).await
     }
 
-    async fn publish_listing(&self) -> Result<(), SourceError> {
+    async fn publish_listing(&self, start: Option<Path>) -> Result<(), SourceError> {
         let mut pending: VecDeque<(String, Confirmation)> = VecDeque::new();
-        let mut listing = self.store.list(Some(&self.prefix));
+        let mut listing = match &start {
+            Some(after) => self.store.list_with_offset(Some(&self.prefix), after),
+            None => self.store.list(Some(&self.prefix)),
+        };
+        let mut written = start;
+        let mut candidate: Option<Path> = None;
+        let mut since_write = 0;
         while let Some(meta) = listing.next().await {
             let meta = meta.map_err(|e| SourceError::Client {
                 class: classify(&e),
                 reason: format!("listing {}: {}", self.prefix, bounded_reason(&e)),
             })?;
+            // `object_store` fetches a page before it yields the page's first
+            // key, so every unaddressable object up to this page is recorded.
+            self.publish_unaddressable(&mut pending).await?;
+            if since_write >= self.checkpoint_every && candidate != written {
+                settle_all(&mut pending).await?;
+                self.write_checkpoint(candidate.as_ref()).await?;
+                written.clone_from(&candidate);
+                since_write = 0;
+            }
+            since_write += 1;
+            if meta.size == 0 {
+                tracing::debug!(key = %meta.location, "not publishing an empty object");
+                continue;
+            }
             let entry = ObjectEntry {
                 key: meta.location.to_string(),
                 size: meta.size,
                 etag: meta.e_tag,
                 last_modified_ms: meta.last_modified.timestamp_millis(),
             };
-            for unit in units(entry, self.packing) {
-                let unit = unit.map_err(|e| SourceError::Client {
-                    class: ErrorClass::Fatal,
-                    reason: format!("minting a unit: {e}"),
-                })?;
-                if pending.len() == LISTER_IN_FLIGHT
-                    && let Some(oldest) = pending.pop_front()
-                {
-                    settle(oldest).await?;
-                }
-                let id = unit.id.clone();
-                pending.push_back((id, self.feed.publish(unit)));
+            let fits =
+                addressable(&entry.key) && entry.key.len() as u64 <= LOCATION_OBJECT_MAX_BYTES;
+            self.publish(entry, &mut pending).await?;
+            if fits {
+                candidate = Some(meta.location);
             }
         }
-        while let Some(oldest) = pending.pop_front() {
-            settle(oldest).await?;
+        self.publish_unaddressable(&mut pending).await?;
+        settle_all(&mut pending).await?;
+        if candidate.is_some() && candidate != written {
+            self.write_checkpoint(candidate.as_ref()).await?;
         }
         Ok(())
     }
+
+    /// Publish every part of `entry`, settling the oldest publish first when
+    /// [`LISTER_IN_FLIGHT`] are unconfirmed.
+    async fn publish(
+        &self,
+        entry: ObjectEntry,
+        pending: &mut VecDeque<(String, Confirmation)>,
+    ) -> Result<(), SourceError> {
+        for unit in units(entry, self.packing) {
+            let unit = unit.map_err(|e| SourceError::Client {
+                class: ErrorClass::Fatal,
+                reason: format!("minting a unit: {e}"),
+            })?;
+            if pending.len() == LISTER_IN_FLIGHT
+                && let Some(oldest) = pending.pop_front()
+            {
+                settle(oldest).await?;
+            }
+            let id = unit.id.clone();
+            pending.push_back((id, self.feed.publish(unit)));
+        }
+        Ok(())
+    }
+
+    /// Publish each object the S3 client took out of the listing so far, one
+    /// whole unit each, which poisons on its first read.
+    async fn publish_unaddressable(
+        &self,
+        pending: &mut VecDeque<(String, Confirmation)>,
+    ) -> Result<(), SourceError> {
+        let Some(keys) = &self.unaddressable else {
+            return Ok(());
+        };
+        for entry in largest_per_key(keys.take()) {
+            if entry.size == 0 {
+                tracing::debug!(key = %entry.key, "not publishing an empty object whose key the store cannot address");
+                continue;
+            }
+            self.publish(entry, pending).await?;
+        }
+        Ok(())
+    }
+
+    /// Overwrite the checkpoint with `key`.
+    async fn write_checkpoint(&self, key: Option<&Path>) -> Result<(), SourceError> {
+        let (Some((store, location)), Some(key)) = (&self.location, key) else {
+            return Ok(());
+        };
+        if !self.resume {
+            return Ok(());
+        }
+        let object = location.checkpoint();
+        store
+            .put(&object, PutPayload::from(key.as_ref().to_owned()))
+            .await
+            .map_err(|e| io_error(location, &object, &e))?;
+        Ok(())
+    }
+}
+
+/// `entries` in their order with one entry per key, the largest. XML
+/// end-of-line handling decodes keys that differ only in CR, LF or CRLF to
+/// one key, and an empty one must not hide one with records.
+fn largest_per_key(entries: Vec<ObjectEntry>) -> Vec<ObjectEntry> {
+    let mut kept: Vec<ObjectEntry> = Vec::with_capacity(entries.len());
+    for entry in entries {
+        match kept.iter_mut().find(|k| k.key == entry.key) {
+            Some(k) if entry.size > k.size => *k = entry,
+            Some(_) => {}
+            None => kept.push(entry),
+        }
+    }
+    kept
 }
 
 async fn settle((id, confirmation): (String, Confirmation)) -> Result<(), SourceError> {
@@ -99,12 +237,20 @@ async fn settle((id, confirmation): (String, Confirmation)) -> Result<(), Source
     })
 }
 
+/// Settle every pending publish, oldest first.
+async fn settle_all(pending: &mut VecDeque<(String, Confirmation)>) -> Result<(), SourceError> {
+    while let Some(oldest) = pending.pop_front() {
+        settle(oldest).await?;
+    }
+    Ok(())
+}
+
 /// Create the fingerprint object, or compare the one already there.
 async fn write_fingerprint(
     store: &dyn ObjectStore,
     location: &Location,
     mine: &str,
-) -> Result<(), SourceError> {
+) -> Result<Fingerprint, SourceError> {
     let object = location.fingerprint();
     // A second pass covers a fingerprint deleted between the refused
     // create and the read.
@@ -117,10 +263,10 @@ async fn write_fingerprint(
             )
             .await;
         match put {
-            Ok(_) => return Ok(()),
+            Ok(_) => return Ok(Fingerprint::Created),
             Err(object_store::Error::AlreadyExists { .. }) => {
                 if let Some(stored) = read_object(store, location, &object).await? {
-                    return compare(location, mine, &stored);
+                    return compare(location, mine, &stored).map(|()| Fingerprint::Matched);
                 }
             }
             Err(object_store::Error::NotImplemented { .. }) => {
@@ -139,6 +285,56 @@ async fn write_fingerprint(
         "it was reported present and then read as absent twice; another lister is writing \
          this location",
     ))
+}
+
+/// Read the checkpoint, the key to list after, or `None` when there is none.
+///
+/// # Errors
+///
+/// Fatal for a body that is not UTF-8, not a key `object_store` addresses
+/// under its own name, or not a key under `prefix`.
+async fn read_checkpoint(
+    store: &dyn ObjectStore,
+    location: &Location,
+    prefix: &Path,
+) -> Result<Option<Path>, SourceError> {
+    let object = location.checkpoint();
+    let Some(body) = read_object(store, location, &object).await? else {
+        return Ok(None);
+    };
+    let key = std::str::from_utf8(&body)
+        .ok()
+        .filter(|key| addressable(key))
+        .and_then(|key| Path::parse(key).ok())
+        .filter(|key| starts_with(key, prefix) && key.parts().count() > prefix.parts().count());
+    let Some(key) = key else {
+        let shown = String::from_utf8_lossy(&body);
+        return Err(location.fatal(
+            &object,
+            format_args!(
+                "it holds {shown:?}, which is not a key under the listing prefix {prefix:?}; \
+                 delete it and the lister lists the prefix from the start"
+            ),
+        ));
+    };
+    tracing::info!(
+        location = %location.shown(),
+        key = ?key.as_ref(),
+        "resuming the listing after the lister's checkpoint"
+    );
+    Ok(Some(key))
+}
+
+/// Delete the checkpoint, if there is one.
+async fn delete_checkpoint(
+    store: &dyn ObjectStore,
+    location: &Location,
+) -> Result<(), SourceError> {
+    let object = location.checkpoint();
+    match store.delete(&object).await {
+        Ok(()) | Err(object_store::Error::NotFound { .. }) => Ok(()),
+        Err(e) => Err(io_error(location, &object, &e)),
+    }
 }
 
 /// Delete the end marker, if there is one.
@@ -208,6 +404,9 @@ mod tests {
             packing: packing(),
             feed,
             location: None,
+            resume: true,
+            checkpoint_every: CHECKPOINT_EVERY,
+            unaddressable: None,
             fingerprint: String::new(),
         }
     }
@@ -252,7 +451,8 @@ mod tests {
         let location = Location::parse("s3://ops/jobs/a/", "s3://data/events/").unwrap();
         let err = runtime()
             .block_on(write_fingerprint(&store, &location, "mine"))
-            .unwrap_err()
+            .err()
+            .unwrap()
             .to_string();
         assert!(err.contains("read as absent twice"), "{err}");
         assert_eq!(store.creates.load(std::sync::atomic::Ordering::SeqCst), 2);
@@ -360,5 +560,905 @@ mod tests {
         rt.block_on(run).unwrap().unwrap();
         assert_eq!(*feed.published.lock().unwrap(), total);
         assert_eq!(*feed.most_held.lock().unwrap(), LISTER_IN_FLIGHT);
+    }
+
+    use crate::listing::UnaddressableConnector;
+    use crate::split::SplitRange;
+    use crate::testutil::{Event, EventLog, PutAnswer};
+    use spate_core::feed::FeedErrorKind;
+    use std::collections::HashSet;
+
+    const LOCATION: &str = "s3://ops/jobs/a/";
+    const CHECKPOINT: &str = "jobs/a/checkpoint";
+
+    /// What a [`KeyedFeed`] does with a publish.
+    #[derive(Clone, Copy)]
+    enum Reply {
+        Confirm,
+        Reject(FeedErrorKind),
+        Hold,
+    }
+
+    /// A feed that answers each publish by its unit's key and range, and
+    /// logs every publish and confirmation to a shared event log.
+    struct KeyedFeed {
+        events: EventLog,
+        reply: fn(&str, Option<SplitRange>) -> Reply,
+        /// Each published unit's id, key and object size, in publish order.
+        published: Mutex<Vec<(String, String, u64)>>,
+        /// Each held unit's id and confirmer, in publish order.
+        held: Mutex<Vec<(String, Confirmer)>>,
+    }
+
+    impl KeyedFeed {
+        fn new(events: &EventLog, reply: fn(&str, Option<SplitRange>) -> Reply) -> Arc<KeyedFeed> {
+            Arc::new(KeyedFeed {
+                events: Arc::clone(events),
+                reply,
+                published: Mutex::new(Vec::new()),
+                held: Mutex::new(Vec::new()),
+            })
+        }
+
+        fn confirming(events: &EventLog) -> Arc<KeyedFeed> {
+            KeyedFeed::new(events, |_, _| Reply::Confirm)
+        }
+
+        /// The published keys, one per object, in publish order.
+        fn keys(&self) -> Vec<String> {
+            let mut keys: Vec<String> = Vec::new();
+            for (_, key, _) in self.published.lock().unwrap().iter() {
+                if keys.last() != Some(key) {
+                    keys.push(key.clone());
+                }
+            }
+            keys
+        }
+
+        fn confirm(&self, id: String, confirmer: Confirmer) {
+            self.events.lock().unwrap().push(Event::Confirmed(id));
+            confirmer.confirm();
+        }
+
+        /// Confirm the newest held unit; `false` when none is held.
+        fn confirm_newest(&self) -> bool {
+            let newest = self.held.lock().unwrap().pop();
+            match newest {
+                Some((id, confirmer)) => {
+                    self.confirm(id, confirmer);
+                    true
+                }
+                None => false,
+            }
+        }
+    }
+
+    impl Feed for KeyedFeed {
+        fn backend(&self) -> &str {
+            "keyed"
+        }
+        fn set_waker(&self, _waker: FeedWaker) {}
+        fn receive(&self, _max: usize) -> Result<Vec<Delivery>, FeedError> {
+            Ok(Vec::new())
+        }
+        fn renew(&self, _receipt: Receipt) -> Result<(), FeedError> {
+            Ok(())
+        }
+        fn acknowledge(&self, _receipt: Receipt) -> Result<(), FeedError> {
+            Ok(())
+        }
+        fn fail(&self, _receipt: Receipt, _reason: &str) -> Result<(), FeedError> {
+            Ok(())
+        }
+        fn publish(&self, unit: Unit) -> Confirmation {
+            let descriptor = SplitDescriptor::decode(&unit.body).unwrap();
+            let key = descriptor.objects[0].key.clone();
+            let size = descriptor.objects[0].size;
+            self.events
+                .lock()
+                .unwrap()
+                .push(Event::Published(unit.id.clone()));
+            self.published
+                .lock()
+                .unwrap()
+                .push((unit.id.clone(), key.clone(), size));
+            let (confirmer, confirmation) = confirmation();
+            match (self.reply)(&key, descriptor.range) {
+                Reply::Confirm => self.confirm(unit.id, confirmer),
+                Reply::Reject(kind) => confirmer.reject(FeedError::new(kind, "scripted")),
+                Reply::Hold => self.held.lock().unwrap().push((unit.id, confirmer)),
+            }
+            confirmation
+        }
+    }
+
+    /// A bounded job: a data store under `data/`, a location store at
+    /// [`LOCATION`] logging its writes, and the log they share with a feed.
+    struct Job {
+        data: Arc<HookStore>,
+        ops: Arc<HookStore>,
+        events: EventLog,
+    }
+
+    impl Job {
+        fn new() -> Job {
+            Job::with_ops(HookStore::default())
+        }
+
+        fn with_ops(ops: HookStore) -> Job {
+            let events = EventLog::default();
+            Job {
+                data: Arc::new(HookStore::default()),
+                ops: Arc::new(HookStore {
+                    events: Some(Arc::clone(&events)),
+                    ..ops
+                }),
+                events,
+            }
+        }
+
+        /// The same data and location objects behind stores with no hooks
+        /// and a fresh log.
+        fn rerun(&self) -> Job {
+            let events = EventLog::default();
+            Job {
+                data: Arc::clone(&self.data),
+                ops: Arc::new(HookStore {
+                    inner: self.ops.inner.fork(),
+                    events: Some(Arc::clone(&events)),
+                    ..HookStore::default()
+                }),
+                events,
+            }
+        }
+
+        fn lister(&self, feed: Arc<dyn Feed>, every: usize) -> Lister {
+            let location = Location::parse(LOCATION, "s3://data/events/").unwrap();
+            Lister {
+                store: Arc::clone(&self.data) as Arc<dyn ObjectStore>,
+                prefix: Path::from("data"),
+                packing: packing(),
+                feed,
+                location: Some((Arc::clone(&self.ops) as Arc<dyn ObjectStore>, location)),
+                resume: true,
+                checkpoint_every: every,
+                unaddressable: None,
+                fingerprint: "fp".to_owned(),
+            }
+        }
+
+        /// Write `body` at the raw `key` in the data store.
+        async fn put(&self, key: &str, body: &[u8]) {
+            self.data
+                .inner
+                .put(&Path::parse(key).unwrap(), PutPayload::from(body.to_vec()))
+                .await
+                .unwrap();
+        }
+
+        async fn put_rows(&self, keys: &[&str]) {
+            for key in keys {
+                self.put(key, b"row\n").await;
+            }
+        }
+
+        /// Store this job's fingerprint, so a lister run matches it.
+        async fn matched(&self) {
+            self.ops
+                .inner
+                .put(
+                    &Path::from("jobs/a/fingerprint"),
+                    PutPayload::from_static(b"fp"),
+                )
+                .await
+                .unwrap();
+        }
+
+        async fn seed_checkpoint(&self, body: &[u8]) {
+            self.ops
+                .inner
+                .put(&Path::from(CHECKPOINT), PutPayload::from(body.to_vec()))
+                .await
+                .unwrap();
+        }
+
+        async fn checkpoint(&self) -> Option<String> {
+            match self.ops.inner.get(&Path::from(CHECKPOINT)).await {
+                Ok(got) => Some(String::from_utf8(got.bytes().await.unwrap().to_vec()).unwrap()),
+                Err(object_store::Error::NotFound { .. }) => None,
+                Err(e) => panic!("{e}"),
+            }
+        }
+
+        /// Every checkpoint body written, in order.
+        fn checkpoint_writes(&self) -> Vec<String> {
+            self.events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter_map(|event| match event {
+                    Event::Put(path, body) if path == CHECKPOINT => {
+                        Some(String::from_utf8(body.clone()).unwrap())
+                    }
+                    _ => None,
+                })
+                .collect()
+        }
+    }
+
+    fn class(err: &SourceError) -> ErrorClass {
+        match err {
+            SourceError::Client { class, .. } => *class,
+            other => panic!("expected a client error, got {other:?}"),
+        }
+    }
+
+    /// Pins the commit rule: with a checkpoint written before every key and
+    /// the feed confirming later units first, each write names a key whose
+    /// units, its four ranges included, and every earlier key's units were
+    /// confirmed before the write.
+    #[test]
+    fn every_checkpoint_write_names_a_key_whose_listing_prefix_is_confirmed() {
+        let rt = runtime();
+        let job = Job::new();
+        let rows: Vec<u8> = (0..25)
+            .flat_map(|i| format!("row-{i:03}\n").into_bytes())
+            .collect();
+        assert_eq!(rows.len(), 200);
+        rt.block_on(async {
+            job.put("data/a", b"row\n").await;
+            job.put("data/b", &rows).await;
+            job.put("data/c", b"row\n").await;
+        });
+        let feed = KeyedFeed::new(&job.events, |_, _| Reply::Hold);
+        let mut lister = job.lister(Arc::clone(&feed) as Arc<dyn Feed>, 1);
+        lister.packing.target_bytes = 64;
+        let run = rt.spawn(lister.run());
+        while !run.is_finished() {
+            spate_test::wait_until(DEADLINE, "a held unit or the run's end", || {
+                !feed.held.lock().unwrap().is_empty() || run.is_finished()
+            });
+            feed.confirm_newest();
+        }
+        rt.block_on(run).unwrap().unwrap();
+
+        let published = feed.published.lock().unwrap().clone();
+        assert_eq!(
+            published
+                .iter()
+                .filter(|(_, key, _)| key == "data/b")
+                .count(),
+            4,
+            "data/b is read in four ranges"
+        );
+        let events = job.events.lock().unwrap().clone();
+        let mut confirmed = HashSet::new();
+        let mut written = Vec::new();
+        for event in &events {
+            match event {
+                Event::Confirmed(id) => {
+                    confirmed.insert(id.clone());
+                }
+                Event::Put(path, body) if path == CHECKPOINT => {
+                    let key = String::from_utf8(body.clone()).unwrap();
+                    for (id, unit_key, _) in &published {
+                        if *unit_key <= key {
+                            assert!(confirmed.contains(id), "{id} of {unit_key} before {key}");
+                        }
+                    }
+                    written.push(key);
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(written, ["data/a", "data/b", "data/c"]);
+    }
+
+    /// Pins that a unit the feed refuses holds the checkpoint at the key
+    /// before its own, and fails the run with the refusal's class.
+    #[test]
+    fn a_failed_batch_entry_holds_the_checkpoint_before_its_key() {
+        let rt = runtime();
+        let job = Job::new();
+        rt.block_on(job.put_rows(&["data/a", "data/b", "data/c", "data/d"]));
+        let feed = KeyedFeed::new(&job.events, |key, _| match key {
+            "data/c" => Reply::Reject(FeedErrorKind::Refused),
+            _ => Reply::Confirm,
+        });
+        let err = rt.block_on(job.lister(feed, 2).run()).unwrap_err();
+        assert_eq!(class(&err), ErrorClass::Fatal, "{err}");
+        assert_eq!(rt.block_on(job.checkpoint()).as_deref(), Some("data/b"));
+    }
+
+    /// Pins that a unit whose publish times out holds the checkpoint at the
+    /// key before its own, though a later key's unit was confirmed first.
+    #[test]
+    fn a_timed_out_produce_holds_the_checkpoint() {
+        let rt = runtime();
+        let job = Job::new();
+        rt.block_on(job.put_rows(&["data/a", "data/b", "data/c", "data/d", "data/e"]));
+        let feed = KeyedFeed::new(&job.events, |key, _| match key {
+            "data/c" => Reply::Hold,
+            _ => Reply::Confirm,
+        });
+        let run = rt.spawn(job.lister(Arc::clone(&feed) as Arc<dyn Feed>, 2).run());
+        spate_test::wait_until(DEADLINE, "data/d is confirmed while data/c is held", || {
+            feed.keys().contains(&"data/d".to_owned())
+        });
+        let (_, held) = feed.held.lock().unwrap().pop().unwrap();
+        held.reject(FeedError::new(
+            FeedErrorKind::Retryable,
+            "message timed out",
+        ));
+        let err = rt.block_on(run).unwrap().unwrap_err();
+        assert_eq!(class(&err), ErrorClass::Retryable, "{err}");
+        assert_eq!(rt.block_on(job.checkpoint()).as_deref(), Some("data/b"));
+        assert_eq!(job.checkpoint_writes(), ["data/b"]);
+    }
+
+    /// Pins that a key read in ranges is checkpointed only once every range
+    /// is confirmed: a refused last range holds the checkpoint at the key
+    /// before it.
+    #[test]
+    fn every_range_of_a_key_is_confirmed_before_it_is_checkpointed() {
+        let rt = runtime();
+        let rows: Vec<u8> = (0..25)
+            .flat_map(|i| format!("row-{i:03}\n").into_bytes())
+            .collect();
+        for (reply, want) in [
+            (
+                (|_: &str, range: Option<SplitRange>| match range {
+                    Some(r) if r.end == 200 => Reply::Reject(FeedErrorKind::Refused),
+                    _ => Reply::Confirm,
+                }) as fn(&str, Option<SplitRange>) -> Reply,
+                "data/a",
+            ),
+            (|_, _| Reply::Confirm, "data/b"),
+        ] {
+            let job = Job::new();
+            rt.block_on(async {
+                job.put("data/a", b"row\n").await;
+                job.put("data/b", &rows).await;
+            });
+            let feed = KeyedFeed::new(&job.events, reply);
+            let mut lister = job.lister(Arc::clone(&feed) as Arc<dyn Feed>, 1);
+            lister.packing.target_bytes = 64;
+            let _ = rt.block_on(lister.run());
+            assert_eq!(
+                feed.published
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|(_, key, _)| key == "data/b")
+                    .count(),
+                4
+            );
+            assert_eq!(rt.block_on(job.checkpoint()).as_deref(), Some(want));
+        }
+    }
+
+    /// Pins that an object of size 0 is not published and never becomes the
+    /// checkpoint, while a one-byte object is, and that a listing of empty
+    /// objects alone publishes and writes nothing.
+    #[test]
+    fn a_zero_byte_object_is_skipped_and_never_checkpointed() {
+        let rt = runtime();
+        let job = Job::new();
+        rt.block_on(async {
+            job.put("data/a", b"row\n").await;
+            job.put("data/b", b"\n").await;
+            job.put("data/x", b"").await;
+        });
+        let feed = KeyedFeed::confirming(&job.events);
+        rt.block_on(
+            job.lister(Arc::clone(&feed) as Arc<dyn Feed>, CHECKPOINT_EVERY)
+                .run(),
+        )
+        .unwrap();
+        assert_eq!(feed.keys(), ["data/a", "data/b"]);
+        assert_eq!(rt.block_on(job.checkpoint()).as_deref(), Some("data/b"));
+
+        let empty = Job::new();
+        rt.block_on(async {
+            empty.put("data/x", b"").await;
+            empty.put("data/y", b"").await;
+        });
+        let feed = KeyedFeed::confirming(&empty.events);
+        rt.block_on(empty.lister(Arc::clone(&feed) as Arc<dyn Feed>, 1).run())
+            .unwrap();
+        assert!(feed.keys().is_empty());
+        assert_eq!(rt.block_on(empty.checkpoint()), None);
+    }
+
+    /// Pins the write cadence: before every `checkpoint_every`-th next key
+    /// and once at the end.
+    #[test]
+    fn the_checkpoint_is_written_once_per_interval_of_listed_keys() {
+        let rt = runtime();
+        let job = Job::new();
+        rt.block_on(job.put_rows(&["data/a", "data/b", "data/c", "data/d", "data/e"]));
+        let feed = KeyedFeed::confirming(&job.events);
+        rt.block_on(job.lister(feed, 2).run()).unwrap();
+        assert_eq!(job.checkpoint_writes(), ["data/b", "data/d", "data/e"]);
+    }
+
+    /// Pins that the checkpoint is the last key in the store's listing
+    /// order, which the lister does not sort.
+    #[test]
+    fn the_checkpoint_is_the_last_key_listed() {
+        let rt = runtime();
+        let job = Job {
+            data: Arc::new(HookStore {
+                reverse_list: true,
+                ..HookStore::default()
+            }),
+            ..Job::new()
+        };
+        rt.block_on(job.put_rows(&["data/a", "data/b", "data/c"]));
+        let feed = KeyedFeed::confirming(&job.events);
+        rt.block_on(
+            job.lister(Arc::clone(&feed) as Arc<dyn Feed>, CHECKPOINT_EVERY)
+                .run(),
+        )
+        .unwrap();
+        assert_eq!(feed.keys(), ["data/c", "data/b", "data/a"]);
+        assert_eq!(rt.block_on(job.checkpoint()).as_deref(), Some("data/a"));
+    }
+
+    /// Pins that a resume lists after the checkpoint's own bytes, for keys
+    /// `Path::from` would encode, and writes the listed key's bytes back.
+    #[test]
+    fn a_resume_lists_after_the_checkpoint_byte_for_byte() {
+        let rt = runtime();
+        let long = format!("data/{}", "k".repeat(1019));
+        let long_next = format!("{long}2");
+        assert_eq!(long.len(), 1024);
+        for (first, second) in [
+            ("data/a#1", "data/a#2"),
+            ("data/\u{e9}1", "data/\u{e9}2"),
+            (long.as_str(), long_next.as_str()),
+        ] {
+            let job = Job::new();
+            rt.block_on(async {
+                job.put_rows(&[first, second]).await;
+                job.matched().await;
+                job.seed_checkpoint(first.as_bytes()).await;
+            });
+            let feed = KeyedFeed::confirming(&job.events);
+            rt.block_on(
+                job.lister(Arc::clone(&feed) as Arc<dyn Feed>, CHECKPOINT_EVERY)
+                    .run(),
+            )
+            .unwrap();
+            assert_eq!(
+                *job.data.offsets.lock().unwrap(),
+                [Path::parse(first).unwrap()]
+            );
+            assert_eq!(feed.keys(), [second]);
+            assert_eq!(rt.block_on(job.checkpoint()).as_deref(), Some(second));
+        }
+    }
+
+    /// Pins that a checkpoint that is not a key the lister could have
+    /// written, under its listing prefix, fails the run before it publishes,
+    /// quoting the body with its control characters escaped.
+    #[test]
+    fn a_checkpoint_that_is_not_an_addressable_key_under_the_prefix_is_fatal() {
+        let rt = runtime();
+        for body in [
+            &b"\xff"[..],
+            b"data//b",
+            b"data/x/",
+            b"data/a\nb",
+            b"other/x",
+            b"data",
+        ] {
+            let job = Job::new();
+            rt.block_on(async {
+                job.put_rows(&["data/a", "data/b"]).await;
+                job.matched().await;
+                job.seed_checkpoint(body).await;
+            });
+            let feed = KeyedFeed::confirming(&job.events);
+            let err = rt
+                .block_on(
+                    job.lister(Arc::clone(&feed) as Arc<dyn Feed>, CHECKPOINT_EVERY)
+                        .run(),
+                )
+                .unwrap_err();
+            assert_eq!(class(&err), ErrorClass::Fatal, "{err}");
+            let text = err.to_string();
+            assert!(text.contains("checkpoint"), "{text}");
+            assert!(!text.contains('\n'), "{text}");
+            assert!(feed.keys().is_empty(), "{body:?}");
+            if body == b"data/a\nb" {
+                assert!(text.contains("a\\nb"), "{text}");
+            }
+        }
+    }
+
+    /// Pins that a 403 reading the checkpoint names `s3:ListBucket`.
+    #[test]
+    fn a_refused_checkpoint_read_names_s3_list_bucket() {
+        let rt = runtime();
+        let job = Job::with_ops(HookStore {
+            get: Some(|path| {
+                (path.filename() == Some("checkpoint")).then(|| {
+                    Err(object_store::Error::PermissionDenied {
+                        path: path.to_string(),
+                        source: "403 Forbidden".into(),
+                    })
+                })
+            }),
+            ..HookStore::default()
+        });
+        rt.block_on(job.matched());
+        let feed = KeyedFeed::confirming(&job.events);
+        let err = rt
+            .block_on(job.lister(feed, CHECKPOINT_EVERY).run())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("s3:ListBucket"), "{err}");
+    }
+
+    /// Pins that a refused checkpoint write fails the run, naming the
+    /// checkpoint.
+    #[test]
+    fn a_failed_checkpoint_write_fails_the_run() {
+        let rt = runtime();
+        let job = Job::with_ops(HookStore {
+            put: Some(|path| {
+                (path.filename() == Some("checkpoint")).then(|| {
+                    PutAnswer::Fail(object_store::Error::PermissionDenied {
+                        path: path.to_string(),
+                        source: "403 Forbidden".into(),
+                    })
+                })
+            }),
+            ..HookStore::default()
+        });
+        rt.block_on(job.put_rows(&["data/a"]));
+        let feed = KeyedFeed::confirming(&job.events);
+        let err = rt
+            .block_on(job.lister(feed, CHECKPOINT_EVERY).run())
+            .unwrap_err();
+        assert_eq!(class(&err), ErrorClass::Fatal, "{err}");
+        assert!(
+            err.to_string().contains("checkpoint at the job location"),
+            "{err}"
+        );
+    }
+
+    /// Pins that a checkpoint stored with its reply lost fails the run as
+    /// retryable, and the next run resumes after the stored key.
+    #[test]
+    fn a_checkpoint_written_with_its_reply_lost_resumes_after_it() {
+        let rt = runtime();
+        let job = Job::with_ops(HookStore {
+            put: Some(|path| {
+                (path.filename() == Some("checkpoint")).then(|| {
+                    PutAnswer::StoreThenFail(object_store::Error::Generic {
+                        store: "test",
+                        source: "connection reset".into(),
+                    })
+                })
+            }),
+            ..HookStore::default()
+        });
+        rt.block_on(job.put_rows(&["data/a", "data/b", "data/c"]));
+        let feed = KeyedFeed::confirming(&job.events);
+        let err = rt.block_on(job.lister(feed, 2).run()).unwrap_err();
+        assert_eq!(class(&err), ErrorClass::Retryable, "{err}");
+
+        let again = job.rerun();
+        assert_eq!(rt.block_on(again.checkpoint()).as_deref(), Some("data/b"));
+        let feed = KeyedFeed::confirming(&again.events);
+        rt.block_on(again.lister(Arc::clone(&feed) as Arc<dyn Feed>, 2).run())
+            .unwrap();
+        assert_eq!(feed.keys(), ["data/c"]);
+    }
+
+    /// Pins that a run after one whose last unit the feed refused publishes
+    /// exactly the keys after the checkpoint the first run left.
+    #[test]
+    fn a_rejected_unit_holds_the_checkpoint_and_a_resumed_run_publishes_from_it() {
+        let rt = runtime();
+        let job = Job::new();
+        rt.block_on(job.put_rows(&["data/a", "data/b", "data/c", "data/d"]));
+        let feed = KeyedFeed::new(&job.events, |key, _| match key {
+            "data/d" => Reply::Reject(FeedErrorKind::Refused),
+            _ => Reply::Confirm,
+        });
+        rt.block_on(job.lister(feed, 2).run()).unwrap_err();
+        assert_eq!(rt.block_on(job.checkpoint()).as_deref(), Some("data/b"));
+
+        let feed = KeyedFeed::confirming(&job.events);
+        rt.block_on(job.lister(Arc::clone(&feed) as Arc<dyn Feed>, 2).run())
+            .unwrap();
+        assert_eq!(feed.keys(), ["data/c", "data/d"]);
+    }
+
+    /// Pins the cap on a checkpoint key: a key of the location's object cap
+    /// is checkpointed and read back, and one byte longer is published but
+    /// never checkpointed.
+    #[test]
+    fn a_key_above_the_location_cap_is_never_checkpointed() {
+        let rt = runtime();
+        let cap = LOCATION_OBJECT_MAX_BYTES as usize;
+        let at_cap = format!("data/{}", "k".repeat(cap - 5));
+        let over_cap = format!("data/{}", "k".repeat(cap - 4));
+        for (long, want) in [(&at_cap, at_cap.as_str()), (&over_cap, "data/a")] {
+            let job = Job::new();
+            rt.block_on(job.put_rows(&["data/a", long]));
+            let feed = KeyedFeed::confirming(&job.events);
+            rt.block_on(
+                job.lister(Arc::clone(&feed) as Arc<dyn Feed>, CHECKPOINT_EVERY)
+                    .run(),
+            )
+            .unwrap();
+            assert_eq!(feed.keys(), ["data/a", long.as_str()]);
+            assert_eq!(rt.block_on(job.checkpoint()).as_deref(), Some(want));
+
+            let feed = KeyedFeed::confirming(&job.events);
+            rt.block_on(job.lister(feed, CHECKPOINT_EVERY).run())
+                .unwrap();
+        }
+    }
+
+    /// Pins that a lister over a store it cannot resume on reads no
+    /// checkpoint, writes none, publishes every key and warns once.
+    #[test]
+    fn a_lister_that_cannot_resume_reads_and_writes_no_checkpoint() {
+        let rt = runtime();
+        let job = Job::new();
+        rt.block_on(async {
+            job.put_rows(&["data/a", "data/b", "data/c"]).await;
+            job.matched().await;
+            job.seed_checkpoint(b"data/b").await;
+        });
+        let feed = KeyedFeed::confirming(&job.events);
+        let mut lister = job.lister(Arc::clone(&feed) as Arc<dyn Feed>, 1);
+        lister.resume = false;
+        let lines = spate_test::capture_logs(tracing::Level::INFO, || {
+            rt.block_on(lister.run()).unwrap();
+        });
+        assert_eq!(feed.keys(), ["data/a", "data/b", "data/c"]);
+        assert_eq!(rt.block_on(job.checkpoint()).as_deref(), Some("data/b"));
+        assert!(job.checkpoint_writes().is_empty());
+        assert!(job.data.offsets.lock().unwrap().is_empty());
+        let warned: Vec<&String> = lines
+            .iter()
+            .filter(|l| l.contains("keeps no checkpoint"))
+            .collect();
+        assert_eq!(warned.len(), 1, "{lines:#?}");
+        assert!(
+            warned[0].contains("WARN") && warned[0].contains(LOCATION),
+            "{lines:#?}"
+        );
+    }
+
+    /// Pins that a lister creating the fingerprint deletes a checkpoint it
+    /// finds before its first publish, and lists from the start.
+    #[test]
+    fn a_lister_that_creates_the_fingerprint_lists_from_the_start() {
+        let rt = runtime();
+        let job = Job::new();
+        rt.block_on(async {
+            job.put_rows(&["data/a", "data/b", "data/c"]).await;
+            job.seed_checkpoint(b"data/b").await;
+        });
+        let feed = KeyedFeed::confirming(&job.events);
+        rt.block_on(
+            job.lister(Arc::clone(&feed) as Arc<dyn Feed>, CHECKPOINT_EVERY)
+                .run(),
+        )
+        .unwrap();
+        assert_eq!(feed.keys(), ["data/a", "data/b", "data/c"]);
+        let events = job.events.lock().unwrap().clone();
+        let deleted = events
+            .iter()
+            .position(|e| *e == Event::Delete(CHECKPOINT.to_owned()))
+            .expect("the checkpoint is deleted");
+        let first = events
+            .iter()
+            .position(|e| matches!(e, Event::Published(_)))
+            .unwrap();
+        assert!(deleted < first, "{events:#?}");
+    }
+
+    /// Pins that a resumed run logs the location and the key it resumes
+    /// after.
+    #[test]
+    fn a_resumed_lister_logs_the_checkpoint_it_resumes_after() {
+        let rt = runtime();
+        let job = Job::new();
+        rt.block_on(async {
+            job.put_rows(&["data/a", "data/b"]).await;
+            job.matched().await;
+            job.seed_checkpoint(b"data/a").await;
+        });
+        let lister = job.lister(KeyedFeed::confirming(&job.events), CHECKPOINT_EVERY);
+        let lines = spate_test::capture_logs(tracing::Level::INFO, || {
+            rt.block_on(lister.run()).unwrap();
+        });
+        assert!(
+            lines.iter().any(|l| l.contains("resuming the listing")
+                && l.contains(LOCATION)
+                && l.contains("\"data/a\"")),
+            "{lines:#?}"
+        );
+    }
+
+    /// Pins that a run with no checkpoint logs no resume.
+    #[test]
+    fn a_lister_with_no_checkpoint_logs_no_resume() {
+        let rt = runtime();
+        let job = Job::new();
+        rt.block_on(async {
+            job.put_rows(&["data/a"]).await;
+            job.matched().await;
+        });
+        let lister = job.lister(KeyedFeed::confirming(&job.events), CHECKPOINT_EVERY);
+        let lines = spate_test::capture_logs(tracing::Level::INFO, || {
+            rt.block_on(lister.run()).unwrap();
+        });
+        assert!(
+            !lines.iter().any(|l| l.contains("resuming the listing")),
+            "{lines:#?}"
+        );
+    }
+
+    /// Pins that an empty listing ends without a checkpoint.
+    #[test]
+    fn an_empty_listing_writes_no_checkpoint() {
+        let rt = runtime();
+        let job = Job::new();
+        rt.block_on(job.matched());
+        rt.block_on(job.lister(KeyedFeed::confirming(&job.events), 1).run())
+            .unwrap();
+        assert!(job.checkpoint_writes().is_empty());
+        assert_eq!(rt.block_on(job.checkpoint()), None);
+    }
+
+    /// Pins that a one-key listing checkpoints that key.
+    #[test]
+    fn a_one_key_listing_checkpoints_that_key() {
+        let rt = runtime();
+        let job = Job::new();
+        rt.block_on(job.put_rows(&["data/a"]));
+        rt.block_on(
+            job.lister(KeyedFeed::confirming(&job.events), CHECKPOINT_EVERY)
+                .run(),
+        )
+        .unwrap();
+        assert_eq!(job.checkpoint_writes(), ["data/a"]);
+    }
+
+    /// Pins that a checkpoint at the last key publishes nothing and leaves
+    /// the checkpoint as it was.
+    #[test]
+    fn a_checkpoint_at_the_last_key_publishes_nothing() {
+        let rt = runtime();
+        let job = Job::new();
+        rt.block_on(async {
+            job.put_rows(&["data/a", "data/b"]).await;
+            job.matched().await;
+            job.seed_checkpoint(b"data/b").await;
+        });
+        let feed = KeyedFeed::confirming(&job.events);
+        rt.block_on(job.lister(Arc::clone(&feed) as Arc<dyn Feed>, 1).run())
+            .unwrap();
+        assert!(feed.keys().is_empty());
+        assert_eq!(*job.data.offsets.lock().unwrap(), [Path::from("data/b")]);
+        assert!(job.checkpoint_writes().is_empty());
+    }
+
+    /// Pins that a checkpoint naming a key since deleted resumes after it.
+    #[test]
+    fn a_checkpoint_at_a_deleted_key_resumes_after_it() {
+        let rt = runtime();
+        let job = Job::new();
+        rt.block_on(async {
+            job.put_rows(&["data/a", "data/c"]).await;
+            job.matched().await;
+            job.seed_checkpoint(b"data/b").await;
+        });
+        let feed = KeyedFeed::confirming(&job.events);
+        rt.block_on(
+            job.lister(Arc::clone(&feed) as Arc<dyn Feed>, CHECKPOINT_EVERY)
+                .run(),
+        )
+        .unwrap();
+        assert_eq!(feed.keys(), ["data/c"]);
+        assert_eq!(rt.block_on(job.checkpoint()).as_deref(), Some("data/c"));
+    }
+
+    fn list_page(objects: &[(&str, u64)], token: Option<&str>) -> String {
+        let contents: String = objects
+            .iter()
+            .map(|(key, size)| {
+                format!(
+                    "<Contents><Key>{key}</Key><LastModified>2026-10-11T13:38:17.000Z\
+                     </LastModified><ETag>&quot;e&quot;</ETag><Size>{size}</Size></Contents>"
+                )
+            })
+            .collect();
+        let next = token.map_or_else(String::new, |t| {
+            format!("<NextContinuationToken>{t}</NextContinuationToken>")
+        });
+        format!(
+            "<ListBucketResult><IsTruncated>{}</IsTruncated>{contents}{next}</ListBucketResult>",
+            token.is_some()
+        )
+    }
+
+    /// Pins that each object the S3 client cannot address and that has bytes
+    /// is published once as one whole unit, the largest of the keys that
+    /// decode alike, before the checkpoint after it is written, and that
+    /// none becomes the checkpoint.
+    #[test]
+    fn an_unaddressable_key_with_bytes_is_published_and_never_checkpointed() {
+        let rt = runtime();
+        let url = crate::test_servers::listing_server(vec![
+            list_page(
+                &[("data/a", 7), ("data/d//x.ndjson", 7), ("data/b", 7)],
+                Some("1"),
+            ),
+            list_page(
+                &[
+                    ("data/a\rb", 3),
+                    ("data/a\r\nb", 9),
+                    ("data/e/", 0),
+                    ("data/z", 7),
+                ],
+                None,
+            ),
+        ]);
+        let keys = UnaddressableKeys::default();
+        let store = crate::test_servers::builder_at(&url)
+            .with_access_key_id("AKIDTEST")
+            .with_secret_access_key("secret")
+            .with_http_connector(UnaddressableConnector::new(keys.clone()))
+            .build()
+            .unwrap();
+        let job = Job::new();
+        let feed = KeyedFeed::confirming(&job.events);
+        let mut lister = job.lister(Arc::clone(&feed) as Arc<dyn Feed>, 2);
+        lister.store = Arc::new(store);
+        lister.unaddressable = Some(keys);
+        rt.block_on(lister.run()).unwrap();
+
+        assert_eq!(
+            feed.keys(),
+            [
+                "data/d//x.ndjson",
+                "data/a",
+                "data/b",
+                "data/a\nb",
+                "data/z"
+            ]
+        );
+        let published = feed.published.lock().unwrap().clone();
+        let crlf: Vec<u64> = published
+            .iter()
+            .filter(|(_, key, _)| key == "data/a\nb")
+            .map(|(_, _, size)| *size)
+            .collect();
+        assert_eq!(crlf, [9], "one whole unit, the largest");
+        let (dbl, _, _) = published
+            .iter()
+            .find(|(_, key, _)| key == "data/d//x.ndjson")
+            .unwrap();
+        assert_eq!(job.checkpoint_writes(), ["data/b", "data/z"]);
+        let events = job.events.lock().unwrap().clone();
+        let confirmed = events
+            .iter()
+            .position(|e| *e == Event::Confirmed(dbl.clone()))
+            .unwrap();
+        let first_write = events
+            .iter()
+            .position(|e| matches!(e, Event::Put(path, _) if path == CHECKPOINT))
+            .unwrap();
+        assert!(confirmed < first_write, "{events:#?}");
     }
 }

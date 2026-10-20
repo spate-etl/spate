@@ -12,8 +12,8 @@ use std::num::{NonZeroU32, NonZeroUsize};
 /// its body holds the backend's own keys and is decoded by the backend.
 /// `units_held` applies whatever the backend; `attempt_cap` applies to the
 /// in-process and Kafka feeds, and a backend that cannot honor it refuses
-/// it. `location` names where a bounded job's state lives; the in-process
-/// feed refuses it.
+/// it. `location` names a job location for a source that reads one; the
+/// in-process feed refuses it.
 ///
 /// ```yaml
 /// feed:
@@ -37,9 +37,10 @@ pub struct FeedSection {
     /// delivering it again. `None` leaves the backend's default. A backend
     /// that cannot honor the key refuses it.
     pub attempt_cap: Option<NonZeroU32>,
-    /// The object-store prefix where a bounded job's lister keeps the state
-    /// every worker reads. `None` for a continuous job. The source that
-    /// reads it defines what the prefix holds.
+    /// A job location, an object-store prefix, for a source that reads
+    /// one; that source defines what the prefix holds. `None` when the
+    /// section names none.
+    /// The in-process feed refuses one.
     pub location: Option<String>,
 }
 
@@ -272,6 +273,17 @@ mod tests {
             err.contains("`feed.location`") && err.contains("`memory`"),
             "{err}"
         );
+    }
+
+    /// Pins that loading a file keeps a `location` beside a backend other
+    /// than the in-process feed.
+    #[test]
+    fn a_location_beside_a_durable_backend_loads() {
+        let yaml = "pipeline: { name: demo }\nsource: { memory: {} }\nsink: { memory: {} }\n\
+                    feed: { sqs: {}, location: s3://ops/jobs/a/ }\n";
+        let cfg = crate::config::PipelineConfig::from_str(yaml).expect("loads");
+        let feed = cfg.feed.expect("feed section");
+        assert_eq!(feed.location.as_deref(), Some("s3://ops/jobs/a/"));
     }
 
     /// Pins that `units_held: 0` is refused.

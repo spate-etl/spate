@@ -102,8 +102,9 @@ impl MemoryFeed {
     ///
     /// # Errors
     ///
-    /// [`ConfigError::Component`] when the section names another backend, or
-    /// when the `memory` body holds a key.
+    /// [`ConfigError::Component`] when the section names another backend,
+    /// when the `memory` body holds a key, or when the section sets
+    /// `location`.
     ///
     /// # Examples
     ///
@@ -137,6 +138,14 @@ impl MemoryFeed {
             });
         }
         let _: Option<Body> = backend.deserialize_into()?;
+        if section.location.is_some() {
+            return Err(ConfigError::Component {
+                context: "feed".into(),
+                message: "the in-process feed keeps no state outside the process, so it takes \
+                          no `location`"
+                    .into(),
+            });
+        }
         Ok(MemoryFeed::with_attempt_cap(
             section.attempt_cap.unwrap_or(ATTEMPT_CAP),
         ))
@@ -333,6 +342,16 @@ mod tests {
         feed.fail(third.receipt, "unreadable").unwrap();
         assert_eq!(feed.counts().dead_lettered, 1, "dead-lettered on attempt 3");
         assert_eq!(feed.counts().visible, 0);
+    }
+
+    /// Pins that `from_section` refuses a `location`, which a caller can set
+    /// on a section built in code.
+    #[test]
+    fn from_section_refuses_a_location() {
+        let mut section: FeedSection = serde_yaml::from_str("memory: {}\n").expect("section");
+        section.location = Some("s3://ops/jobs/a/".to_owned());
+        let err = MemoryFeed::from_section(&section).unwrap_err().to_string();
+        assert!(err.contains("`location`"), "{err}");
     }
 
     /// Pins that `from_section` refuses a section naming another backend, and

@@ -1371,6 +1371,17 @@ fn a_memory_feed_passed_in_with_a_location_is_refused() {
     );
 }
 
+/// Pins that `run` passes a `location` beside a backend other than the
+/// in-process feed on to the feed checks that follow.
+#[test]
+fn a_location_beside_a_durable_backend_is_not_refused() {
+    let mut cfg = test_config(1);
+    cfg.feed = feed_section("sqs: {}\nlocation: s3://ops/jobs/backfill-1/");
+    let h = start_with_config(cfg, ok_chain);
+    let err = config_error_before_open(h);
+    assert!(err.contains("pass it to `Pipeline::feed`"), "{err}");
+}
+
 /// Pins that a section naming a backend other than `memory`, with no feed
 /// passed in, fails startup with the instruction to build it in code.
 #[test]

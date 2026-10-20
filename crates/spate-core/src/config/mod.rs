@@ -742,9 +742,7 @@ impl PipelineConfig {
             && feed.backend().type_tag() == "memory"
         {
             return Err(ConfigError::Validation(
-                "`feed.location` names where a bounded job on a durable feed keeps its state; \
-                 the in-process `memory` feed takes none, so remove it"
-                    .into(),
+                "the in-process `memory` feed takes no `feed.location`; remove it".into(),
             ));
         }
         Ok(())

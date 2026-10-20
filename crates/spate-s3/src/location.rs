@@ -51,9 +51,8 @@ impl Location {
     /// # Errors
     ///
     /// A [`ConfigError`] naming the key, with the value redacted, for an
-    /// empty value, one that is not a URL, one with userinfo or a query, a
-    /// `memory://` URL, a scheme the source cannot build a store for, an S3
-    /// URL whose bucket the S3 client cannot parse, and a location at or
+    /// empty value, one that is not a URL, one with userinfo, a query or a
+    /// fragment, any scheme but `s3`, `s3a` and `file`, and a location at or
     /// under the source's prefix in the same bucket.
     pub(crate) fn parse(location: &str, source_url: &str) -> Result<Location, ConfigError> {
         let refuse = |why: String| ConfigError::Component {
@@ -67,39 +66,43 @@ impl Location {
             });
         }
         let url = Url::parse(location).map_err(|e| refuse(format!("is not a URL: {e}")))?;
-        // The location's store reads neither, and `object_store` quotes the
-        // whole URL in its errors.
-        if !url.username().is_empty() || url.password().is_some() || url.query().is_some() {
+        // The location's store reads none of these, `object_store` quotes the
+        // whole URL in its errors, and a fragment would silently name a
+        // shorter prefix.
+        if !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
             return Err(refuse(
-                "carries userinfo or a query, which the location's store does not read; set \
-                 credentials under the source's `store`"
+                "carries userinfo, a query or a fragment, which name nothing in the location's \
+                 store; set credentials under the source's `store`"
                     .into(),
             ));
         }
-        // `object_store`'s own error quotes the URL, so it stays out.
-        let (scheme, prefix) = ObjectStoreScheme::parse(&url)
-            .map_err(|_| refuse("names no object store the source opens".into()))?;
-        match scheme {
-            ObjectStoreScheme::AmazonS3 | ObjectStoreScheme::Local => {}
-            ObjectStoreScheme::Memory => {
+        // Only these forms name the bucket in the same place for every
+        // store; an `https://` URL's bucket depends on how its host is read.
+        match url.scheme() {
+            "s3" | "s3a" | "file" => {}
+            "memory" => {
                 return Err(refuse(
                     "memory:// creates a new empty store per component and cannot be shared".into(),
                 ));
             }
             _ => {
                 return Err(refuse(
-                    "the source opens s3://, s3a://, an AWS https:// URL or file://; on another \
-                     S3-compatible store, write s3://<bucket>/<prefix> and set the endpoint \
-                     under the source's `store`"
+                    "write it as s3://<bucket>/<prefix>, s3a://<bucket>/<prefix> or file://, with \
+                     the endpoint and region under the source's `store`"
                         .into(),
                 ));
             }
         }
-        if matches!(scheme, ObjectStoreScheme::AmazonS3) && root(&url).is_none() {
-            return Err(refuse(
-                "the S3 client finds no bucket in it; write s3://<bucket>/<prefix>".into(),
-            ));
+        if url.scheme() != "file" && url.host_str().is_none_or(str::is_empty) {
+            return Err(refuse("names no bucket".into()));
         }
+        // `object_store`'s own error quotes the URL, so it stays out.
+        let (_, prefix) = ObjectStoreScheme::parse(&url)
+            .map_err(|_| refuse("names no object store the source opens".into()))?;
         if let Some((source_root, source_prefix)) = Url::parse(source_url)
             .ok()
             .and_then(|u| Some((root(&u)?, ObjectStoreScheme::parse(&u).ok()?.1)))
@@ -242,8 +245,9 @@ pub(crate) fn compare(location: &Location, mine: &str, stored: &[u8]) -> Result<
 ///
 /// # Errors
 ///
-/// Fatal for an object above [`LOCATION_OBJECT_MAX_BYTES`], refused before
-/// its body is read; otherwise classed by [`classify`].
+/// Fatal for an object above [`LOCATION_OBJECT_MAX_BYTES`]: refused from its
+/// stated size before its body is read, or once its body runs past the cap
+/// when the stated size understates it. Otherwise classed by [`classify`].
 pub(crate) async fn read_object(
     store: &dyn ObjectStore,
     location: &Location,
@@ -253,7 +257,7 @@ pub(crate) async fn read_object(
         Ok(got) => got,
         // Checked before `classify`, which reads a missing object as fatal.
         Err(object_store::Error::NotFound { .. }) => return Ok(None),
-        Err(e) => return Err(io_error(location, object, &e)),
+        Err(e) => return Err(read_error(location, object, &e)),
     };
     if got.meta.size > LOCATION_OBJECT_MAX_BYTES {
         return Err(location.fatal(
@@ -270,7 +274,7 @@ pub(crate) async fn read_object(
     let mut body = Vec::new();
     let mut stream = got.into_stream();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| io_error(location, object, &e))?;
+        let chunk = chunk.map_err(|e| read_error(location, object, &e))?;
         if body.len() + chunk.len() > LOCATION_OBJECT_MAX_BYTES as usize {
             return Err(location.fatal(
                 object,
@@ -285,22 +289,48 @@ pub(crate) async fn read_object(
     Ok(Some(Bytes::from(body)))
 }
 
+/// The most of a store's error text a location error carries. A store can
+/// answer an error with a body of any size, which `object_store` quotes.
+const ERROR_TEXT_MAX_CHARS: usize = 512;
+
 /// An `object_store` failure on `object`, classed by [`classify`].
 pub(crate) fn io_error(location: &Location, object: &Path, e: &object_store::Error) -> SourceError {
-    // AWS S3 answers a read of an absent object 403 to a caller without
-    // `s3:ListBucket`, so a location written later looks like a refusal.
+    error_with(location, object, e, "")
+}
+
+/// [`io_error`] for a read, which on AWS S3 a 403 can mean the object is
+/// absent: AWS answers a read of an absent object 403 to a caller without
+/// `s3:ListBucket`.
+pub(crate) fn read_error(
+    location: &Location,
+    object: &Path,
+    e: &object_store::Error,
+) -> SourceError {
     let hint = if matches!(e, object_store::Error::PermissionDenied { .. }) {
         "; on AWS S3 an absent object reads as 403 without `s3:ListBucket` on its bucket"
     } else {
         ""
     };
+    error_with(location, object, e, hint)
+}
+
+fn error_with(
+    location: &Location,
+    object: &Path,
+    e: &object_store::Error,
+    hint: &str,
+) -> SourceError {
+    let mut text = reason(e);
+    if let Some((cut, _)) = text.char_indices().nth(ERROR_TEXT_MAX_CHARS) {
+        text.truncate(cut);
+        text.push('…');
+    }
     SourceError::Client {
         class: classify(e),
         reason: format!(
-            "{} at the job location {}: {}{hint}",
+            "{} at the job location {}: {text}{hint}",
             object_name(object),
             location.shown(),
-            reason(e)
         ),
     }
 }
@@ -333,7 +363,7 @@ pub(crate) async fn await_fingerprint(
     let object = location.fingerprint();
     // The last retryable read error, so a timeout reports what kept the
     // fingerprint from being read.
-    let mut last_error: Option<SourceError> = None;
+    let mut last_error: Option<SourceError>;
     let timed_out = |last_error: &Option<SourceError>| match last_error {
         Some(e) => location.fatal(
             &object,
@@ -361,7 +391,10 @@ pub(crate) async fn await_fingerprint(
                 Either::Right(((), pending)) => {
                     next = tick;
                     if clock.now() >= deadline {
-                        return Err(timed_out(&last_error));
+                        return Err(location.fatal(
+                            &object,
+                            format_args!("the store answered no read of it within {window:?}"),
+                        ));
                     }
                     if stop.is_set() {
                         return Ok(());
@@ -464,20 +497,28 @@ mod tests {
         }
     }
 
-    /// Pins that a location on a scheme the source builds no store for is
-    /// refused naming the key, and that `s3://`, `s3a://`, an AWS
-    /// `https://` URL and `file://` are accepted.
+    /// Pins that a location on any scheme but `s3`, `s3a` and `file` is
+    /// refused naming the forms it takes, `https://` included, and that those
+    /// three are accepted.
     #[test]
     fn a_location_on_a_scheme_the_source_cannot_build_is_refused() {
-        let err = refused("https://store:9000/ops/jobs/a/", SOURCE);
-        assert!(
-            err.contains("`location`") && err.contains("endpoint"),
-            "{err}"
-        );
+        for location in [
+            "https://store:9000/ops/jobs/a/",
+            "https://ops.s3.eu-west-2.amazonaws.com/jobs/a/",
+            "https://0123abcd.r2.cloudflarestorage.com/ops/jobs/a/",
+            "http://store:9000/ops/jobs/a/",
+            "gs://ops/jobs/a/",
+            "sftp://ops-host/jobs/a/",
+        ] {
+            let err = refused(location, SOURCE);
+            assert!(
+                err.contains("`location`") && err.contains("s3://<bucket>/<prefix>"),
+                "{location}: {err}"
+            );
+        }
         for location in [
             "s3://ops/jobs/a/",
             "s3a://ops/jobs/a/",
-            "https://ops.s3.eu-west-2.amazonaws.com/jobs/a/",
             "file:///var/spate/jobs/a/",
         ] {
             Location::parse(location, SOURCE).unwrap();
@@ -514,6 +555,7 @@ mod tests {
         for location in [
             "s3://user:hunter2@ops/jobs/a/",
             "s3://hunter2@ops/jobs/a/",
+            "s3://:hunter2@ops/jobs/a/",
             "s3://ops/jobs/a/?X-Amz-Signature=tok3n",
             "sftp://user:hunter2@ops-host/jobs/a/?sig=tok3n",
         ] {
@@ -522,45 +564,31 @@ mod tests {
             assert!(!err.contains("hunter2") && !err.contains("tok3n"), "{err}");
         }
         assert!(refused("s3://user:hunter2@ops/jobs/a/", SOURCE).contains("userinfo"));
-        assert!(refused("sftp://ops-host/jobs/a/", SOURCE).contains("names no object store"));
+        assert!(refused("s3://ops/jobs/run#1/", SOURCE).contains("fragment"));
     }
 
-    /// Pins that an S3 URL whose bucket the S3 client cannot parse is
-    /// refused when the location is parsed, before any store is built.
+    /// Pins that an S3 location that names no bucket is refused when the
+    /// location is parsed, before any store is built.
     #[test]
     fn an_s3_url_with_no_bucket_the_client_parses_is_refused() {
-        for location in [
-            "https://s3.amazonaws.com/ops/jobs/a/",
-            "https://ops.s3-eu-west-1.amazonaws.com/jobs/a/",
-        ] {
+        for location in ["s3:///jobs/a/", "s3a:///jobs/a/"] {
             let err = refused(location, SOURCE);
             assert!(err.contains("no bucket"), "{location}: {err}");
         }
     }
 
-    /// Pins the same-bucket refusal across the S3 URL forms that name one
-    /// bucket, which a comparison of raw hosts would miss.
+    /// Pins the same-bucket refusal against a source URL that names its
+    /// bucket in an `https://` form, which a comparison of raw hosts would
+    /// miss.
     #[test]
     fn a_location_naming_the_source_bucket_in_another_form_is_refused() {
-        for (location, source) in [
-            (
-                "https://data-bucket.s3.eu-west-2.amazonaws.com/events/jobs/a/",
-                "s3://data-bucket/events/",
-            ),
-            (
-                "https://s3.eu-west-2.amazonaws.com/data-bucket/events/jobs/a/",
-                "s3://data-bucket/events/",
-            ),
-            (
-                "s3://data-bucket/events/jobs/a/",
-                "https://data-bucket.s3.eu-west-2.amazonaws.com/events/",
-            ),
+        for source in [
+            "https://data-bucket.s3.eu-west-2.amazonaws.com/events/",
+            "https://s3.eu-west-2.amazonaws.com/data-bucket/events/",
         ] {
-            let err = refused(location, source);
-            assert!(
-                err.contains("outside the prefix"),
-                "{location} vs {source}: {err}"
-            );
+            let err = refused("s3://data-bucket/events/jobs/a/", source);
+            assert!(err.contains("outside the prefix"), "{source}: {err}");
+            Location::parse("s3://data-bucket/elsewhere/jobs/a/", source).unwrap();
         }
     }
 
@@ -687,6 +715,90 @@ mod tests {
             .unwrap()
             .expect("the object is there");
         assert_eq!(read.len() as u64, LOCATION_OBJECT_MAX_BYTES);
+    }
+
+    /// Pins that a body failing mid-stream keeps the store's class, so the
+    /// wait retries a reset read.
+    #[tokio::test]
+    async fn a_body_failing_mid_stream_is_retryable() {
+        let store = HookStore {
+            get: Some(|path| {
+                let meta = object_store::ObjectMeta {
+                    location: path.clone(),
+                    last_modified: chrono::Utc::now(),
+                    size: 64,
+                    e_tag: None,
+                    version: None,
+                };
+                let chunks = [
+                    Ok(bytes::Bytes::from_static(b"spate-s3:")),
+                    Err(object_store::Error::Generic {
+                        store: "scripted",
+                        source: "connection reset".into(),
+                    }),
+                ];
+                Some(Ok(object_store::GetResult {
+                    payload: object_store::GetResultPayload::Stream(Box::pin(
+                        futures_util::stream::iter(chunks),
+                    )),
+                    range: 0..meta.size,
+                    meta,
+                    attributes: Default::default(),
+                    extensions: Default::default(),
+                }))
+            }),
+            ..HookStore::default()
+        };
+        let location = accepted("s3://ops/jobs/a/");
+        let err = read_object(&store, &location, &location.fingerprint())
+            .await
+            .unwrap_err();
+        assert!(is_retryable(&err), "{err}");
+    }
+
+    /// Pins that the `s3:ListBucket` hint rides on a read's 403 only: never
+    /// on another read error, and never on a refused write.
+    #[test]
+    fn only_a_refused_read_names_s3_list_bucket() {
+        let location = accepted("s3://ops/jobs/a/");
+        let object = location.fingerprint();
+        let denied = || object_store::Error::PermissionDenied {
+            path: "jobs/a/fingerprint".into(),
+            source: "403 Forbidden".into(),
+        };
+        let reset = object_store::Error::Generic {
+            store: "S3",
+            source: "connection reset".into(),
+        };
+        assert!(
+            read_error(&location, &object, &denied())
+                .to_string()
+                .contains("s3:ListBucket")
+        );
+        assert!(
+            !read_error(&location, &object, &reset)
+                .to_string()
+                .contains("s3:ListBucket")
+        );
+        assert!(
+            !io_error(&location, &object, &denied())
+                .to_string()
+                .contains("s3:ListBucket")
+        );
+    }
+
+    /// Pins that a store's error text reaches a location error cut to a
+    /// bound, whatever the size of the store's answer.
+    #[test]
+    fn a_store_error_of_any_size_is_cut_to_a_bound() {
+        let location = accepted("s3://ops/jobs/a/");
+        let huge = object_store::Error::Generic {
+            store: "S3",
+            source: "x".repeat(1 << 20).into(),
+        };
+        let shown = read_error(&location, &location.fingerprint(), &huge).to_string();
+        assert!(shown.len() < 1024, "{} bytes", shown.len());
+        assert!(shown.ends_with('…'), "{shown}");
     }
 
     /// Pins that an object exactly at the cap is read.

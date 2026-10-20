@@ -398,14 +398,19 @@ impl S3Source {
             )));
         }
         let options = apply_options(AmazonS3Builder::from_env(), &self.config.store);
+        // `object_store` reads the flag with these spellings, in any case.
         let virtual_hosted = options
             .get_config_value(&AmazonS3ConfigKey::VirtualHostedStyleRequest)
-            .is_some_and(|v| v == "true");
-        if virtual_hosted
-            && options
-                .get_config_value(&AmazonS3ConfigKey::Endpoint)
-                .is_some()
-        {
+            .is_some_and(|v| {
+                matches!(
+                    v.to_ascii_lowercase().as_str(),
+                    "1" | "true" | "on" | "yes" | "y"
+                )
+            });
+        let endpoint = [AmazonS3ConfigKey::Endpoint, AmazonS3ConfigKey::S3Endpoint]
+            .iter()
+            .any(|key| options.get_config_value(key).is_some());
+        if virtual_hosted && endpoint {
             return Err(refuse(
                 "the source's `store` sends virtual-hosted requests to a set `endpoint`, which \
                  names one bucket whatever the location names; remove `location` or \
@@ -1119,7 +1124,9 @@ mod tests {
     }
 
     /// Pins that an S3 location is refused when the source's `store` sends
-    /// virtual-hosted requests to a set endpoint, which names one bucket.
+    /// virtual-hosted requests to a set endpoint, which names one bucket,
+    /// under every spelling and endpoint key `object_store` reads, and is kept
+    /// with an endpoint alone or virtual-hosted requests alone.
     #[test]
     fn a_location_beside_a_virtual_hosted_endpoint_is_refused() {
         let (source, _rt) = source_with_store(
@@ -1130,8 +1137,29 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("virtual_hosted_style_request"), "{err}");
-        let (source, _rt) = source_with_store("  endpoint: \"https://store.example\"\n");
-        source.parse_location("s3://elsewhere/jobs/a/").unwrap();
+        for store in [
+            "  endpoint: \"https://b.store.example\"\n  virtual_hosted_style_request: \"True\"\n",
+            "  endpoint: \"https://b.store.example\"\n  virtual_hosted_style_request: \"1\"\n",
+            "  aws_endpoint_url_s3: \"https://b.store.example\"\n  virtual_hosted_style_request: \"yes\"\n",
+        ] {
+            let (source, _rt) = source_with_store(store);
+            let err = source
+                .parse_location("s3://elsewhere/jobs/a/")
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("virtual_hosted_style_request"),
+                "{store}: {err}"
+            );
+        }
+        for store in [
+            "  endpoint: \"https://store.example\"\n",
+            "  virtual_hosted_style_request: \"true\"\n",
+            "  endpoint: \"https://store.example\"\n  virtual_hosted_style_request: \"false\"\n",
+        ] {
+            let (source, _rt) = source_with_store(store);
+            source.parse_location("s3://elsewhere/jobs/a/").unwrap();
+        }
     }
 
     /// Pins that an S3 location is refused when a `store` key is not an S3

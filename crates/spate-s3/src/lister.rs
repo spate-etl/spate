@@ -7,7 +7,7 @@
 
 use crate::error::{classify, reason};
 use crate::fetch::ObjectEntry;
-use crate::location::{Location, compare, io_error, read_object};
+use crate::location::{Location, compare, io_error, read_error, read_object};
 use crate::split::Packing;
 use crate::unit::units;
 use futures_util::StreamExt as _;
@@ -147,7 +147,7 @@ async fn delete_end(store: &dyn ObjectStore, location: &Location) -> Result<(), 
     match store.head(&end).await {
         Ok(_) => {}
         Err(object_store::Error::NotFound { .. }) => return Ok(()),
-        Err(e) => return Err(io_error(location, &end, &e)),
+        Err(e) => return Err(read_error(location, &end, &e)),
     }
     match store.delete(&end).await {
         // Gone already: what the delete was for.

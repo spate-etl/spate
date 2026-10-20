@@ -221,7 +221,10 @@ fn a_fingerprint_read_that_never_answers_ends_at_the_window() {
     wait_for_gets(&hooks, 1);
     clock.advance(WINDOW);
     let reason = failure_reason(&exit(&l));
-    assert!(reason.contains("300s"), "{reason}");
+    assert!(
+        reason.contains("answered no read") && reason.contains("300s"),
+        "{reason}"
+    );
 }
 
 /// Pins that a retryable read error is retried at the next poll.
@@ -385,11 +388,13 @@ fn a_stop_during_a_read_that_never_answers_ends_the_run() {
     assert!(script.delivered().is_empty(), "nothing was received");
 }
 
-/// A test clock that notes any wakeup asked for at an instant already past.
+/// A test clock that counts wakeups and notes any asked for at an instant
+/// already reached.
 #[derive(Debug)]
 struct PastWakeups {
     inner: Arc<TestClock>,
     asked: std::sync::atomic::AtomicBool,
+    wakeups: std::sync::atomic::AtomicUsize,
 }
 
 impl spate_core::clock::tokio::Clock for PastWakeups {
@@ -398,15 +403,18 @@ impl spate_core::clock::tokio::Clock for PastWakeups {
     }
 
     fn sleep_until(&self, deadline: tokio::time::Instant) -> spate_core::clock::tokio::Sleep {
-        if deadline < self.inner.now() {
+        if deadline <= self.inner.now() {
             self.asked.store(true, std::sync::atomic::Ordering::SeqCst);
         }
+        self.wakeups
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.inner.sleep_until(deadline)
     }
 }
 
-/// Pins that a read in flight is checked at the next poll step, never at an
-/// instant already past, which would spin while the store does not answer.
+/// Pins that a read in flight is checked at each next poll step, never at
+/// an instant already reached, which would spin while the store does not
+/// answer: the wait re-arms past the first step, then ends on the stop.
 #[test]
 fn a_read_in_flight_is_checked_at_the_next_step_only() {
     let dir = tempfile::tempdir().unwrap();
@@ -418,6 +426,7 @@ fn a_read_in_flight_is_checked_at_the_next_step_only() {
     let clock = Arc::new(PastWakeups {
         inner: Arc::clone(&test_clock),
         asked: std::sync::atomic::AtomicBool::new(false),
+        wakeups: std::sync::atomic::AtomicUsize::new(0),
     });
     let yaml = PipelineYaml::file("s3-job-location-steps", &data)
         .section(&format!(
@@ -439,12 +448,16 @@ fn a_read_in_flight_is_checked_at_the_next_step_only() {
         )
     };
     wait_for_gets(&hooks, 1);
+    test_clock.advance(POLL);
+    wait_until(DEADLINE, "the wait re-arms past the first step", || {
+        clock.wakeups.load(std::sync::atomic::Ordering::SeqCst) >= 2
+    });
     l.shutdown.trigger();
     test_clock.advance(POLL);
     assert_eq!(exit(&l).state, ExitState::Completed);
     assert!(
         !clock.asked.load(std::sync::atomic::Ordering::SeqCst),
-        "the wait asked for a wakeup already past"
+        "the wait asked for a wakeup already reached"
     );
 }
 
@@ -494,12 +507,41 @@ fn a_location_failing_every_read_reports_the_last_error_at_the_window() {
         err.contains("no read succeeded") && err.contains("connection reset"),
         "{err}"
     );
-    assert!(
-        lines
-            .iter()
-            .any(|l| l.contains("reading the job fingerprint failed")),
-        "{lines:#?}"
+    let warned = lines
+        .iter()
+        .filter(|l| l.contains("reading the job fingerprint failed"))
+        .count();
+    assert!(warned >= 2, "one WARN per failed read: {lines:#?}");
+}
+
+/// Pins that a read finding nothing clears an earlier read's failure, so a
+/// wait whose last reads found no fingerprint reports "none appeared".
+#[test]
+fn a_read_finding_nothing_clears_an_earlier_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let (store, hooks) = location_store();
+    hooks.fail_next_gets(1);
+    let (feed, _script) = scripted_feed();
+    let clock = TestClock::frozen();
+    let l = launch_worker(
+        &data,
+        feed,
+        Some(LOCATION),
+        Some(store),
+        Some(Arc::clone(&clock)),
     );
+    wait_for_gets(&hooks, 1);
+    let mut reads = 1;
+    clock.advance_stepped(WINDOW, POLL, || {
+        reads += 1;
+        if reads <= 60 {
+            wait_for_gets(&hooks, reads);
+        }
+    });
+    let reason = failure_reason(&exit(&l));
+    assert!(reason.contains("none appeared"), "{reason}");
+    assert!(!reason.contains("connection reset"), "{reason}");
 }
 
 /// Pins the INFO line naming the location and the window when the wait

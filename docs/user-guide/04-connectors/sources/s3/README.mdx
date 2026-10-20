@@ -484,8 +484,9 @@ a bounded job reads `fingerprint` every five seconds until it appears, and
 compares it with its own before it receives a unit. A worker whose fingerprint
 differs fails startup, and the error prints both. A worker that finds none
 within five minutes exits non-zero. A read the store fails retryably is logged
-at WARN and tried again at the next step, and the exit error names the last
-such failure. While it waits a worker holds no unit and reports not ready on
+at WARN and tried again at the next step. The exit error names the last read's
+failure when that read failed, and says so when the store answered no read
+before the window passed. While it waits a worker holds no unit and reports not ready on
 `/readyz`, and a shutdown ends the wait within one step, a read in flight
 included. On a feed that records an attempt before a unit is read, such as the
 [Kafka feed](../../feeds/kafka/README.mdx#counting-deliveries), the feed
@@ -498,14 +499,16 @@ The location's store is built from its URL with the source's `store` options
 and the environment, so it shares the endpoint, region and credentials those
 give the source, and may sit in another bucket. A region the source takes from
 an `https://` `url` does not reach an `s3://` location; set it under `store`.
-On RustFS, Ceph RGW and Garage, write it as `s3://<bucket>/<prefix>`, with the
-endpoint under `store`. Each of these is refused at startup:
+On every store, write the location as `s3://<bucket>/<prefix>` or
+`s3a://<bucket>/<prefix>`, with the endpoint and region under `store`, or as
+`file://`. Each of these is refused at startup:
 
-- a location carrying userinfo or a query; credentials go under `store`;
-- an `https://` location on a host other than AWS's, and an S3 URL whose
-  bucket the S3 client cannot parse, such as `https://s3.amazonaws.com/<bucket>/`;
-- an S3 location when `store` sets `virtual_hosted_style_request` with an
-  `endpoint`, which then addresses one bucket whatever the location names;
+- any other form, an `https://` URL and `memory://` included;
+- a location carrying userinfo, a query or a fragment; credentials go under
+  `store`;
+- an S3 location when `store` or the environment sends virtual-hosted requests
+  to a set endpoint, which then addresses one bucket whatever the location
+  names;
 - an S3 location when a `store` key is not an S3 option, under a `file://`
   `url` as well;
 - a location at or under the source's prefix in the same bucket, since the

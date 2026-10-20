@@ -1024,6 +1024,47 @@ fn a_lister_resumes_after_its_checkpoint() {
     );
 }
 
+/// Pins resume at a `file://` location, whose store answers a delete of an
+/// absent object `NotFound`: a first run over an injected data store lists
+/// everything and leaves the checkpoint, and the next lists after it.
+#[test]
+fn a_lister_resumes_at_a_file_location() {
+    use object_store::{ObjectStoreExt as _, PutPayload};
+    let dir = tempfile::tempdir().unwrap();
+    let (location, path) = file_location(&dir);
+    let rt = runtime();
+    let data: Arc<dyn object_store::ObjectStore> = Arc::new(object_store::memory::InMemory::new());
+    let put = |key: &str| {
+        rt.block_on(data.put(
+            &object_store::path::Path::from(key),
+            PutPayload::from_static(b"row\n"),
+        ))
+        .unwrap();
+    };
+    put("data/a");
+    let source = || {
+        let section = spate_test::component_config(
+            "s3",
+            "url: \"s3://data-bucket/data/\"\nsplit_target_bytes: 1MiB\n",
+        );
+        line_framer(S3Source::from_component_config(&section, rt.handle().clone()).unwrap())
+            .with_store(Arc::clone(&data))
+    };
+    let (feed, script) = scripted_feed();
+    source()
+        .list_once(&section("scripted", Some(&location)), Arc::new(feed))
+        .unwrap();
+    assert_eq!(published_keys(&script), ["data/a"]);
+    assert_eq!(fs::read(path.join("checkpoint")).unwrap(), b"data/a");
+
+    put("data/b");
+    let (feed, script) = scripted_feed();
+    source()
+        .list_once(&section("scripted", Some(&location)), Arc::new(feed))
+        .unwrap();
+    assert_eq!(published_keys(&script), ["data/b"]);
+}
+
 /// Pins that a lister on the in-process feed refuses a job location, which
 /// that feed has no use for, before it sends any request.
 #[test]

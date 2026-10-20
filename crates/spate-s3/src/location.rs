@@ -378,15 +378,15 @@ mod tests {
         assert!(
             feed_fingerprint(SOURCE, Compression::Auto, 64 << 20, None).ends_with(":delim=none")
         );
-        let secret = feed_fingerprint(
-            "s3://user:secret@data-bucket/events/?token=x",
+        let redacted = feed_fingerprint(
+            "s3://user:hunter2@data-bucket/events/?token=x",
             Compression::Auto,
             64 << 20,
             Some(b'\n'),
         );
         assert!(
-            !secret.contains("secret") && !secret.contains("token=x"),
-            "{secret}"
+            !redacted.contains("hunter2") && !redacted.contains("token=x"),
+            "{redacted}"
         );
     }
 

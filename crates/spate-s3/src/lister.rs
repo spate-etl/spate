@@ -215,9 +215,10 @@ impl Lister {
     }
 }
 
-/// `entries` in their order with one entry per key, the largest. XML
-/// end-of-line handling decodes keys that differ only in CR, LF or CRLF to
-/// one key, and an empty one must not hide one with records.
+/// `entries` in their order with one entry per key, the largest, or the
+/// first of the largest. XML end-of-line handling decodes keys that differ
+/// only in CR, LF or CRLF to one key, and an empty one must not hide one with
+/// records.
 fn largest_per_key(entries: Vec<ObjectEntry>) -> Vec<ObjectEntry> {
     let mut kept: Vec<ObjectEntry> = Vec::with_capacity(entries.len());
     for entry in entries {
@@ -938,8 +939,9 @@ mod tests {
     }
 
     /// Pins that an object of size 0 is not published and never becomes the
-    /// checkpoint, while a one-byte object is, and that a listing of empty
-    /// objects alone publishes and writes nothing.
+    /// checkpoint, while a one-byte object is, that an empty last object
+    /// leaves the checkpoint unwritten at the end, and that a listing of
+    /// empty objects alone publishes and writes nothing.
     #[test]
     fn a_zero_byte_object_is_skipped_and_never_checkpointed() {
         let rt = runtime();
@@ -950,13 +952,10 @@ mod tests {
             job.put("data/x", b"").await;
         });
         let feed = KeyedFeed::confirming(&job.events);
-        rt.block_on(
-            job.lister(Arc::clone(&feed) as Arc<dyn Feed>, CHECKPOINT_EVERY)
-                .run(),
-        )
-        .unwrap();
+        rt.block_on(job.lister(Arc::clone(&feed) as Arc<dyn Feed>, 1).run())
+            .unwrap();
         assert_eq!(feed.keys(), ["data/a", "data/b"]);
-        assert_eq!(rt.block_on(job.checkpoint()).as_deref(), Some("data/b"));
+        assert_eq!(job.checkpoint_writes(), ["data/a", "data/b"]);
 
         let empty = Job::new();
         rt.block_on(async {
@@ -1460,5 +1459,39 @@ mod tests {
             .position(|e| matches!(e, Event::Put(path, _) if path == CHECKPOINT))
             .unwrap();
         assert!(confirmed < first_write, "{events:#?}");
+    }
+
+    fn entry(key: &str, size: u64, etag: &str) -> ObjectEntry {
+        ObjectEntry {
+            key: key.to_owned(),
+            size,
+            etag: Some(etag.to_owned()),
+            last_modified_ms: 0,
+        }
+    }
+
+    /// Pins that entries sharing a key collapse to the largest whichever
+    /// comes first, to the first of equal ones, and keep their order.
+    #[test]
+    fn largest_per_key_keeps_the_largest_entry_in_page_order() {
+        let kept = largest_per_key(vec![
+            entry("data/b", 9, "big"),
+            entry("data/a", 1, "a"),
+            entry("data/b", 3, "small"),
+            entry("data/c", 7, "first"),
+            entry("data/c", 7, "second"),
+        ]);
+        let kept: Vec<(&str, u64, &str)> = kept
+            .iter()
+            .map(|e| (e.key.as_str(), e.size, e.etag.as_deref().unwrap()))
+            .collect();
+        assert_eq!(
+            kept,
+            [
+                ("data/b", 9, "big"),
+                ("data/a", 1, "a"),
+                ("data/c", 7, "first")
+            ]
+        );
     }
 }

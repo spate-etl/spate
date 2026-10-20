@@ -513,6 +513,7 @@ mod tests {
     fn a_location_with_credentials_in_it_is_refused_without_printing_them() {
         for location in [
             "s3://user:hunter2@ops/jobs/a/",
+            "s3://hunter2@ops/jobs/a/",
             "s3://ops/jobs/a/?X-Amz-Signature=tok3n",
             "sftp://user:hunter2@ops-host/jobs/a/?sig=tok3n",
         ] {
@@ -651,6 +652,41 @@ mod tests {
             "the error quotes the body: {} bytes",
             err.len()
         );
+    }
+
+    /// Pins that a body exactly at the cap, arriving in several chunks, is
+    /// read whole.
+    #[tokio::test]
+    async fn a_body_at_the_cap_in_several_chunks_is_read() {
+        let store = HookStore {
+            get: Some(|path| {
+                let half = LOCATION_OBJECT_MAX_BYTES / 2;
+                let meta = object_store::ObjectMeta {
+                    location: path.clone(),
+                    last_modified: chrono::Utc::now(),
+                    size: LOCATION_OBJECT_MAX_BYTES,
+                    e_tag: None,
+                    version: None,
+                };
+                let chunks = (0..2).map(move |_| Ok(bytes::Bytes::from(vec![b'x'; half as usize])));
+                Some(Ok(object_store::GetResult {
+                    payload: object_store::GetResultPayload::Stream(Box::pin(
+                        futures_util::stream::iter(chunks),
+                    )),
+                    range: 0..meta.size,
+                    meta,
+                    attributes: Default::default(),
+                    extensions: Default::default(),
+                }))
+            }),
+            ..HookStore::default()
+        };
+        let location = accepted("s3://ops/jobs/a/");
+        let read = read_object(&store, &location, &location.fingerprint())
+            .await
+            .unwrap()
+            .expect("the object is there");
+        assert_eq!(read.len() as u64, LOCATION_OBJECT_MAX_BYTES);
     }
 
     /// Pins that an object exactly at the cap is read.

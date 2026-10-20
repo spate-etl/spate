@@ -385,6 +385,69 @@ fn a_stop_during_a_read_that_never_answers_ends_the_run() {
     assert!(script.delivered().is_empty(), "nothing was received");
 }
 
+/// A test clock that notes any wakeup asked for at an instant already past.
+#[derive(Debug)]
+struct PastWakeups {
+    inner: Arc<TestClock>,
+    asked: std::sync::atomic::AtomicBool,
+}
+
+impl spate_core::clock::tokio::Clock for PastWakeups {
+    fn now(&self) -> tokio::time::Instant {
+        self.inner.now()
+    }
+
+    fn sleep_until(&self, deadline: tokio::time::Instant) -> spate_core::clock::tokio::Sleep {
+        if deadline < self.inner.now() {
+            self.asked.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        self.inner.sleep_until(deadline)
+    }
+}
+
+/// Pins that a read in flight is checked at the next poll step, never at an
+/// instant already past, which would spin while the store does not answer.
+#[test]
+fn a_read_in_flight_is_checked_at_the_next_step_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let (store, hooks) = location_store();
+    hooks.hang_gets();
+    let (feed, _script) = scripted_feed();
+    let test_clock = TestClock::frozen();
+    let clock = Arc::new(PastWakeups {
+        inner: Arc::clone(&test_clock),
+        asked: std::sync::atomic::AtomicBool::new(false),
+    });
+    let yaml = PipelineYaml::file("s3-job-location-steps", &data)
+        .section(&format!(
+            "feed:\n  scripted: {{}}\n  location: {LOCATION}\n"
+        ))
+        .build();
+    let l = {
+        let clock = Arc::clone(&clock);
+        launch_with_feed(
+            &yaml,
+            test_options(),
+            |_| {},
+            Arc::new(feed),
+            move |s, _| {
+                line_framer(s)
+                    .with_location_store(store)
+                    .with_clock(clock as Arc<dyn spate_core::clock::tokio::Clock>)
+            },
+        )
+    };
+    wait_for_gets(&hooks, 1);
+    l.shutdown.trigger();
+    test_clock.advance(POLL);
+    assert_eq!(exit(&l).state, ExitState::Completed);
+    assert!(
+        !clock.asked.load(std::sync::atomic::Ordering::SeqCst),
+        "the wait asked for a wakeup already past"
+    );
+}
+
 /// Pins that a wait whose every read fails retryably ends at the window
 /// with the last read's error, logged at WARN as each read fails.
 #[test]

@@ -4,16 +4,6 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
-ignore = [
-    # The advisory's patched range covers only `webpki-roots` 1.x, so it also
-    # reports the 0.26.11 wrapper, which has no root store of its own and
-    # re-exports `TLS_SERVER_ROOTS` from its 1.x dependency. Ignoring the ID
-    # also silences it for 1.x, so the `[bans]` entry for `webpki-roots`
-    # refuses the affected 1.x range in its place. cargo-deny warns
-    # `advisory-not-detected` once the database stops reporting the wrapper;
-    # remove both entries then.
-    { id = "RUSTSEC-2026-0381", reason = "reports the 0.26.11 wrapper; affected 1.x releases are banned under [bans]" },
-]
 
 [licenses]
 version = 2
@@ -44,11 +34,6 @@ wildcards = "deny"
 # A `*` on a registry dependency, and a versionless path dependency under
 # `[dependencies]` of a published crate, are still refused.
 allow-wildcard-paths = true
-deny = [
-    # Stands in for the advisory ignored under `[advisories]`. These releases
-    # bundle a distrusted root.
-    { crate = "webpki-roots:>=1.0.0, <1.0.10", reason = "bundles a distrusted root" },
-]
 
 [sources]
 unknown-registry = "deny"

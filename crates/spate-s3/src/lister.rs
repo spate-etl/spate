@@ -1036,6 +1036,10 @@ mod tests {
                     "message timed out",
                 ));
                 rejected += 1;
+                assert!(
+                    rejected <= LISTER_PUBLISH_ATTEMPTS,
+                    "published past the budget"
+                );
             }
         }
         assert_eq!(rejected, LISTER_PUBLISH_ATTEMPTS);
@@ -2249,6 +2253,33 @@ mod tests {
             })
             .collect();
         assert_eq!(keys, ["data/d//dbl.ndjson", "data/a"]);
+    }
+
+    /// Pins that the end marker's log line counts each object the S3 client
+    /// cannot address, here one on the listing's last page, after the last
+    /// key the listing yields.
+    #[test]
+    fn the_marker_log_counts_the_objects_the_s3_client_cannot_address() {
+        let rt = runtime();
+        let endpoint = crate::test_servers::listing_server(vec![
+            list_page(&[("data/a", 7)], Some("1")),
+            list_page(&[("data/d//dbl.ndjson", 7)], None),
+        ]);
+        let job = Job::new();
+        let (feed, script) = spate_test::scripted_feed();
+        let lines = spate_test::capture_logs(tracing::Level::INFO, || {
+            stub_source(&rt, &endpoint)
+                .with_location_store(Arc::clone(&job.ops) as Arc<dyn ObjectStore>)
+                .list_once(&scripted_section(), Arc::new(feed))
+                .unwrap();
+        });
+        assert_eq!(script.published().len(), 2);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("wrote the end marker") && l.contains("units=2")),
+            "{lines:#?}"
+        );
     }
 
     /// Pins the cadence `list_once` gives the lister: over 1,001 keys the

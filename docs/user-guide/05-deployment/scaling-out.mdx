@@ -1,5 +1,5 @@
 ---
-description: "Dividing one source's work across identical replicas, natively or through the coordination layer, and its costs."
+description: "Dividing one source's work across identical replicas, natively, through a work feed or through the coordination layer, and its costs."
 ---
 
 # Scaling out
@@ -13,6 +13,7 @@ depends on the source:
 |---|---|
 | Brokered | Native: the source's own group protocol divides the work across replicas. Nothing extra to deploy. |
 | Coordinated | Native via the [coordination seam](../02-concepts/07-source-coordination.mdx): the elected leader plans the work into splits once, and replicas lease the splits it assigns them, hand them back on reassignment, and take over dead workers' splits — all with fenced per-split commits. Deploy a [coordination store](../04-connectors/coordination/README.mdx) and run N replicas. |
+| Fed | Every replica reads a [work feed](../02-concepts/09-work-feed.mdx) directly. A bounded job's units come from one [lister](../07-reference/glossary.mdx#lister) run per job. See [Deploying a fed fleet](#deploying-a-fed-fleet). |
 | Custom | Bring a planner and hand the source a coordinator. See [custom sources](../06-extending/custom-source.mdx#coordination-aware-sources). |
 
 :::note Connector specifics
@@ -22,6 +23,42 @@ Which kind each shipped source is, and how to wire it:
 (coordinated) ·
 [Datagen source](../04-connectors/sources/datagen/README.mdx#delivery-semantics)
 (neither, since every replica generates its own stream from offset 0).
+:::
+
+## Deploying a fed fleet
+
+Every worker replica runs the same binary with the same pipeline file and
+reads the feed directly. No replica is elected, and none needs a persistent
+volume.
+
+- **A bounded job has one lister run.** The lister is a run of the workers'
+  binary in lister mode, started once per job. It lists the input once,
+  publishes its units to the feed, keeps its checkpoint at the
+  [job location](../07-reference/glossary.mdx#job-location), and writes an end
+  marker there once the feed has confirmed every unit it published. Worker
+  replicas never list. A lister run that fails writes no end marker, and
+  started again it resumes after its checkpoint.
+- **Run one lister per job.** Two lister runs over one input publish every
+  unit twice, and nothing detects it. The duplicates double the job's reads.
+- **A continuous job has no lister.** Storage notifications publish its units.
+- **A solo instance on the in-process feed lists for itself**, since no other
+  process can reach that feed. It keeps nothing across a restart, so a
+  restarted instance lists and reads its input from the beginning.
+
+On Kubernetes:
+
+- **The lister as a `Job`.** One completion per job. A failed pod started
+  again resumes after the checkpoint.
+- **A bounded job's workers as a `Job`**, with `parallelism` set to the fleet
+  size. A `Deployment` restarts each worker that exits, and each restart waits
+  up to a settling window for the job fingerprint.
+- **Continuous workers as a `Deployment`.**
+- **`terminationGracePeriodSeconds` > drain timeout**, as for any pipeline
+  (see [Graceful shutdown](../03-guides/graceful-shutdown.mdx)).
+
+:::note Connector specifics
+[S3 source](../04-connectors/sources/s3/README.mdx#the-lister-run) (the
+lister run and its entry point)
 :::
 
 The rest of this page is about the coordinated case: what a fleet does, what it

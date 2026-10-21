@@ -16,8 +16,6 @@ mod support;
 
 use spate_coordination::StoreCoordinator;
 use spate_coordination::store::memory::MemoryStore;
-use spate_core::feed::Feed as _;
-use spate_core::feed::memory::MemoryFeed;
 use spate_core::pipeline::ExitState;
 use std::collections::BTreeMap;
 use std::fs;
@@ -322,7 +320,8 @@ fn the_memory_store_section_sets_solo_read_parallelism() {
 
 /// A `feed:` section's `units_held` sets the feed path's read parallelism:
 /// `units_held: 12` over sixteen one-object units puts twelve reads in
-/// flight, below the reader's default of 96, and the feed path never lists.
+/// flight, below the reader's default of 96. A solo instance on the
+/// in-process feed lists the prefix into that feed once.
 #[test]
 fn the_feed_section_sets_read_parallelism() {
     let staged = stage(16, 20);
@@ -333,34 +332,57 @@ fn the_feed_section_sets_read_parallelism() {
         gate_depth: 12,
         ..SpyOptions::default()
     });
-    let feed = MemoryFeed::new();
+    let l = launch_customized(
+        &yaml,
+        test_options(),
+        |_| {},
+        move |source, _| line_framer(source).with_store(spy_store),
+    );
+
+    spate_test::wait_until(Duration::from_secs(60), "every row is written", || {
+        sorted(captured_rows(&l.script)) == sorted(staged.expected.clone())
+    });
+    stop(&l);
+    assert_eq!(
+        spy.peak_concurrent_gets(),
+        12,
+        "twelve units held must issue twelve concurrent get_opts calls"
+    );
+    assert_eq!(spy.lists(), 1, "the solo instance lists the prefix once");
+}
+
+/// Pins that a worker on a durable feed issues no listing: it reads only
+/// the units published to the feed.
+#[test]
+fn a_worker_on_a_durable_feed_issues_no_listing() {
+    let staged = stage(4, 5);
+    let yaml = PipelineYaml::file("s3-request-shape-worker", &staged.data)
+        .section("feed:\n  scripted: {}\n")
+        .build();
+    let (spy_store, spy) = spying_local_store(SpyOptions::default());
+    let (feed, script) = spate_test::scripted_feed();
     for name in staged.names() {
-        drop(feed.publish(unit_over(&staged.data, &name)));
+        script.deliver(unit_over(&staged.data, &name));
     }
     let l = launch_with_feed(
         &yaml,
         test_options(),
         |_| {},
-        Arc::new(feed.clone()),
+        Arc::new(feed),
         move |source, _| line_framer(source).with_store(spy_store),
     );
 
     spate_test::wait_until(
         Duration::from_secs(60),
         "every unit is acknowledged",
-        || feed.counts().acknowledged == 16,
+        || script.acknowledged().len() == 4,
     );
     stop(&l);
     assert_eq!(
         sorted(captured_rows(&l.script)),
         sorted(staged.expected.clone())
     );
-    assert_eq!(
-        spy.peak_concurrent_gets(),
-        12,
-        "twelve units held must issue twelve concurrent get_opts calls"
-    );
-    assert_eq!(spy.lists(), 0, "the feed path never lists");
+    assert_eq!(spy.lists(), 0, "a worker on a durable feed never lists");
 }
 
 #[test]

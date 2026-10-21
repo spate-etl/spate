@@ -99,7 +99,6 @@ mod framer;
 #[doc(hidden)]
 pub mod fuzz_seams;
 mod lane;
-#[cfg(feature = "testing")]
 mod lister;
 mod listing;
 mod location;

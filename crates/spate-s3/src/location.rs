@@ -145,26 +145,12 @@ impl Location {
     }
 
     /// The end marker, which a lister run deletes before its first publish.
-    #[cfg_attr(
-        not(feature = "testing"),
-        expect(
-            dead_code,
-            reason = "only the `testing`-gated `S3Source::list_once` lists for the feed"
-        )
-    )]
     pub(crate) fn end(&self) -> Path {
         self.prefix.clone().join("end")
     }
 
     /// The lister's checkpoint: the last listed key whose units, and those of
     /// every key listed before it, the feed has confirmed.
-    #[cfg_attr(
-        not(feature = "testing"),
-        expect(
-            dead_code,
-            reason = "only the `testing`-gated `S3Source::list_once` lists for the feed"
-        )
-    )]
     pub(crate) fn checkpoint(&self) -> Path {
         self.prefix.clone().join("checkpoint")
     }

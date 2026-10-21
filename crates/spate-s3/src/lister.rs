@@ -1,16 +1,18 @@
-//! A one-pass lister for a bounded feed job: it compares the job fingerprint
-//! at the job location, or creates it when there is none after deleting a
-//! checkpoint there, deletes an end marker an earlier run left, then
-//! publishes one unit per part of each listed object, after the lister's
-//! checkpoint when it matched the fingerprint.
+//! The one-pass lister of a feed job: it compares the job fingerprint at the
+//! job location, or creates it when there is none after deleting a
+//! checkpoint there, deletes an end marker an earlier run left, publishes
+//! one unit per part of each listed object, after the lister's checkpoint
+//! when it matched the fingerprint, and writes the end marker once the feed
+//! has confirmed every unit. On the in-process feed it has no location and
+//! only publishes.
 //!
 //! The checkpoint is the last listed key whose units, and those of every key
 //! listed before it, the feed has confirmed. The lister rewrites it at most
 //! once each [`CHECKPOINT_EVERY`] listed keys and once at the end. It
 //! publishes nothing for an object of size 0, publishes each object whose key
 //! the S3 client cannot address as one whole unit, and checkpoints at
-//! neither. It writes no end marker. Reached only through the
-//! `testing`-gated `S3Source::list_once`.
+//! neither. A fleet runs it through `S3Source::list`, and a solo instance on
+//! the in-process feed from `S3Source::open`.
 
 use crate::error::classify;
 use crate::fetch::ObjectEntry;
@@ -25,13 +27,22 @@ use futures_util::StreamExt as _;
 use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt as _, PutMode, PutPayload};
 use spate_core::error::{ErrorClass, SourceError};
-use spate_core::feed::{Confirmation, Feed};
+use spate_core::feed::{Confirmation, Feed, FeedErrorKind, Unit};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
+use std::time::Duration;
 
 /// The most publishes the lister leaves unconfirmed at once. At least one
 /// SQS send batch of 10.
 pub(crate) const LISTER_IN_FLIGHT: usize = 32;
+
+/// The most times the lister publishes one unit the feed rejects as
+/// retryable, the first publish included, before the run fails.
+pub(crate) const PUBLISH_ATTEMPTS: u32 = 5;
+
+/// The wait before the first publish again of a unit the feed rejected as
+/// retryable. It doubles before each later one.
+pub(crate) const PUBLISH_RETRY_BASE: Duration = Duration::from_secs(1);
 
 /// How many keys the lister lists after a checkpoint write before it writes a
 /// moved checkpoint again, ahead of the next key: the largest `ListObjectsV2`
@@ -57,6 +68,9 @@ pub(crate) struct Lister {
     /// How many keys are listed after a checkpoint write before a moved
     /// checkpoint is written again.
     pub(crate) checkpoint_every: usize,
+    /// The wait before the first publish again of a unit the feed rejected
+    /// as retryable.
+    pub(crate) retry_base: Duration,
     /// The objects the S3 client takes out of `store`'s listing pages.
     pub(crate) unaddressable: Option<UnaddressableKeys>,
     /// The job fingerprint this run writes.
@@ -77,7 +91,8 @@ impl Lister {
     /// the checkpoint when there is one. An object the S3 client cannot
     /// address is published before the next key the listing yields after its
     /// page is fetched, or when the listing ends, ahead of any key listed
-    /// before it on that page.
+    /// before it on that page. Once the feed has confirmed every unit, write
+    /// the end marker.
     ///
     /// # Errors
     ///
@@ -119,11 +134,15 @@ impl Lister {
             // marker an earlier run left.
             delete_end(store.as_ref(), location).await?;
         }
-        self.publish_listing(start).await
+        self.publish_listing(start).await?;
+        if let Some((store, location)) = &self.location {
+            write_end(store.as_ref(), location).await?;
+        }
+        Ok(())
     }
 
     async fn publish_listing(&self, start: Option<Path>) -> Result<(), SourceError> {
-        let mut pending: VecDeque<(String, Confirmation)> = VecDeque::new();
+        let mut pending: VecDeque<(Unit, Confirmation)> = VecDeque::new();
         let mut listing = match &start {
             Some(after) => self.store.list_with_offset(Some(&self.prefix), after),
             None => self.store.list(Some(&self.prefix)),
@@ -142,7 +161,7 @@ impl Lister {
             self.publish_unaddressable(&mut pending, &mut unaddressable_seen)
                 .await?;
             if since_write >= self.checkpoint_every && candidate != written {
-                settle_all(&mut pending).await?;
+                self.settle_all(&mut pending).await?;
                 self.write_checkpoint(candidate.as_ref()).await?;
                 written.clone_from(&candidate);
                 since_write = 0;
@@ -167,7 +186,7 @@ impl Lister {
         }
         self.publish_unaddressable(&mut pending, &mut unaddressable_seen)
             .await?;
-        settle_all(&mut pending).await?;
+        self.settle_all(&mut pending).await?;
         if candidate.is_some() && candidate != written {
             self.write_checkpoint(candidate.as_ref()).await?;
         }
@@ -179,7 +198,7 @@ impl Lister {
     async fn publish(
         &self,
         entry: ObjectEntry,
-        pending: &mut VecDeque<(String, Confirmation)>,
+        pending: &mut VecDeque<(Unit, Confirmation)>,
     ) -> Result<(), SourceError> {
         for unit in units(entry, self.packing) {
             let unit = unit.map_err(|e| SourceError::Client {
@@ -189,10 +208,10 @@ impl Lister {
             if pending.len() == LISTER_IN_FLIGHT
                 && let Some(oldest) = pending.pop_front()
             {
-                settle(oldest).await?;
+                self.settle(oldest).await?;
             }
-            let id = unit.id.clone();
-            pending.push_back((id, self.feed.publish(unit)));
+            let confirmation = self.feed.publish(unit.clone());
+            pending.push_back((unit, confirmation));
         }
         Ok(())
     }
@@ -202,7 +221,7 @@ impl Lister {
     /// published from an earlier page and is not published again.
     async fn publish_unaddressable(
         &self,
-        pending: &mut VecDeque<(String, Confirmation)>,
+        pending: &mut VecDeque<(Unit, Confirmation)>,
         seen: &mut HashSet<String>,
     ) -> Result<(), SourceError> {
         let Some(keys) = &self.unaddressable else {
@@ -258,19 +277,53 @@ fn largest_per_key(entries: Vec<ObjectEntry>) -> Vec<ObjectEntry> {
     kept
 }
 
-async fn settle((id, confirmation): (String, Confirmation)) -> Result<(), SourceError> {
-    confirmation.await.map_err(|e| SourceError::Client {
-        class: e.class(),
-        reason: format!("publishing unit {id}: {e}"),
-    })
-}
-
-/// Settle every pending publish, oldest first.
-async fn settle_all(pending: &mut VecDeque<(String, Confirmation)>) -> Result<(), SourceError> {
-    while let Some(oldest) = pending.pop_front() {
-        settle(oldest).await?;
+impl Lister {
+    /// Wait for `unit`'s publish to settle. A retryable rejection publishes
+    /// the unit again after a backoff, up to [`PUBLISH_ATTEMPTS`] attempts.
+    async fn settle(
+        &self,
+        (unit, mut confirmation): (Unit, Confirmation),
+    ) -> Result<(), SourceError> {
+        let mut attempt = 1;
+        let mut backoff = self.retry_base;
+        loop {
+            let e = match confirmation.await {
+                Ok(()) => return Ok(()),
+                Err(e) => e,
+            };
+            if e.kind != FeedErrorKind::Retryable || attempt == PUBLISH_ATTEMPTS {
+                return Err(SourceError::Client {
+                    class: e.class(),
+                    reason: format!(
+                        "publishing unit {} (attempt {attempt} of {PUBLISH_ATTEMPTS}): {e}",
+                        unit.id
+                    ),
+                });
+            }
+            tracing::warn!(
+                unit = %unit.id,
+                attempt,
+                error = %e,
+                retry_in = ?backoff,
+                "the feed rejected a unit's publish as retryable; publishing it again"
+            );
+            tokio::time::sleep(backoff).await;
+            backoff *= 2;
+            attempt += 1;
+            confirmation = self.feed.publish(unit.clone());
+        }
     }
-    Ok(())
+
+    /// Settle every pending publish, oldest first.
+    async fn settle_all(
+        &self,
+        pending: &mut VecDeque<(Unit, Confirmation)>,
+    ) -> Result<(), SourceError> {
+        while let Some(oldest) = pending.pop_front() {
+            self.settle(oldest).await?;
+        }
+        Ok(())
+    }
 }
 
 /// Create the fingerprint object, or compare the one already there.
@@ -377,6 +430,23 @@ async fn delete_checkpoint(
     Ok(())
 }
 
+/// Write the end marker, holding an id fresh to this run so a later run's
+/// marker never reads as this one's.
+async fn write_end(store: &dyn ObjectStore, location: &Location) -> Result<(), SourceError> {
+    let end = location.end();
+    let run = uuid::Uuid::new_v4().simple().to_string();
+    store
+        .put(&end, PutPayload::from(run.clone()))
+        .await
+        .map_err(|e| io_error(location, &end, &e))?;
+    tracing::info!(
+        location = %location.shown(),
+        run,
+        "wrote the end marker after the feed confirmed every unit this run published"
+    );
+    Ok(())
+}
+
 /// Delete the end marker, if there is one.
 async fn delete_end(store: &dyn ObjectStore, location: &Location) -> Result<(), SourceError> {
     let end = location.end();
@@ -446,6 +516,7 @@ mod tests {
             location: None,
             resume: true,
             checkpoint_every: CHECKPOINT_EVERY,
+            retry_base: Duration::ZERO,
             unaddressable: None,
             fingerprint: String::new(),
         }
@@ -762,6 +833,7 @@ mod tests {
                 location: Some((Arc::clone(&self.ops) as Arc<dyn ObjectStore>, location)),
                 resume: true,
                 checkpoint_every: every,
+                retry_base: Duration::ZERO,
                 unaddressable: None,
                 fingerprint: "fp".to_owned(),
             }
@@ -910,8 +982,9 @@ mod tests {
         assert_eq!(rt.block_on(job.checkpoint()).as_deref(), Some("data/b"));
     }
 
-    /// Pins that a unit whose publish times out holds the checkpoint at the
-    /// key before its own, though a later key's unit was confirmed first.
+    /// Pins that a unit whose publish times out at every attempt holds the
+    /// checkpoint at the key before its own, though a later key's unit was
+    /// confirmed first, and that the run fails at the attempt cap.
     #[test]
     fn a_timed_out_produce_holds_the_checkpoint() {
         let rt = runtime();
@@ -925,13 +998,22 @@ mod tests {
         spate_test::wait_until(DEADLINE, "data/d is confirmed while data/c is held", || {
             feed.keys().contains(&"data/d".to_owned())
         });
-        let (_, held) = feed.held.lock().unwrap().pop().unwrap();
-        held.reject(FeedError::new(
-            FeedErrorKind::Retryable,
-            "message timed out",
-        ));
+        for attempt in 1..=PUBLISH_ATTEMPTS {
+            spate_test::wait_until(DEADLINE, &format!("attempt {attempt} is held"), || {
+                !feed.held.lock().unwrap().is_empty()
+            });
+            let (_, held) = feed.held.lock().unwrap().pop().unwrap();
+            held.reject(FeedError::new(
+                FeedErrorKind::Retryable,
+                "message timed out",
+            ));
+        }
+        spate_test::wait_until(DEADLINE, "the run ends at the attempt cap", || {
+            run.is_finished()
+        });
         let err = rt.block_on(run).unwrap().unwrap_err();
         assert_eq!(class(&err), ErrorClass::Retryable, "{err}");
+        assert!(err.to_string().contains("attempt 5 of 5"), "{err}");
         assert_eq!(rt.block_on(job.checkpoint()).as_deref(), Some("data/b"));
         assert_eq!(job.checkpoint_writes(), ["data/b"]);
     }
@@ -1171,6 +1253,149 @@ mod tests {
             err.to_string().contains("checkpoint at the job location"),
             "{err}"
         );
+    }
+
+    /// Whether the job location holds an end marker.
+    async fn has_end(job: &Job) -> bool {
+        match job.ops.inner.head(&Path::from("jobs/a/end")).await {
+            Ok(_) => true,
+            Err(object_store::Error::NotFound { .. }) => false,
+            Err(e) => panic!("{e}"),
+        }
+    }
+
+    /// Pins that the end marker is written once, after the last
+    /// confirmation, with a body that names a run fresh to each run.
+    #[test]
+    fn the_end_marker_follows_the_last_confirmation_and_names_its_run() {
+        let rt = runtime();
+        let job = Job::new();
+        rt.block_on(job.put_rows(&["data/a", "data/b", "data/c"]));
+        let end_of = |job: &Job| {
+            let events = job.events.lock().unwrap();
+            let end = events
+                .iter()
+                .position(|e| matches!(e, Event::Put(path, _) if path == "jobs/a/end"))
+                .expect("an end marker write");
+            let last_confirmed = events
+                .iter()
+                .rposition(|e| matches!(e, Event::Confirmed(_)))
+                .expect("a confirmation");
+            assert!(last_confirmed < end, "{events:?}");
+            let Event::Put(_, body) = &events[end] else {
+                unreachable!()
+            };
+            body.clone()
+        };
+        rt.block_on(
+            job.lister(KeyedFeed::confirming(&job.events), CHECKPOINT_EVERY)
+                .run(),
+        )
+        .unwrap();
+        let first = end_of(&job);
+        let other = Job::new();
+        rt.block_on(other.put_rows(&["data/a", "data/b", "data/c"]));
+        rt.block_on(
+            other
+                .lister(KeyedFeed::confirming(&other.events), CHECKPOINT_EVERY)
+                .run(),
+        )
+        .unwrap();
+        let second = end_of(&other);
+        assert_eq!(first.len(), 32, "{first:?}");
+        assert_ne!(first, second, "two runs wrote one marker body");
+    }
+
+    /// Pins that a retryable rejection is published again after the base
+    /// backoff and the run then ends with its end marker.
+    #[tokio::test(start_paused = true)]
+    async fn a_retryable_rejection_is_published_again_after_a_backoff() {
+        let job = Job::new();
+        job.put_rows(&["data/a"]).await;
+        let (feed, script) = spate_test::scripted_feed();
+        script.refuse_next_publish(FeedErrorKind::Retryable);
+        let started = tokio::time::Instant::now();
+        Lister {
+            retry_base: PUBLISH_RETRY_BASE,
+            ..job.lister(Arc::new(feed), CHECKPOINT_EVERY)
+        }
+        .run()
+        .await
+        .unwrap();
+        assert_eq!(started.elapsed(), PUBLISH_RETRY_BASE);
+        let ids: Vec<_> = script.published().into_iter().map(|u| u.id).collect();
+        assert_eq!(ids.len(), 2, "{ids:?}");
+        assert_eq!(ids[0], ids[1]);
+        assert!(has_end(&job).await);
+    }
+
+    /// Pins that a unit the feed rejects as retryable at every attempt fails
+    /// the run after [`PUBLISH_ATTEMPTS`] publishes, waiting 1, 2, 4 and 8 s
+    /// between them, and that the run writes no end marker.
+    #[tokio::test(start_paused = true)]
+    async fn a_unit_rejected_at_every_attempt_withholds_the_end_marker() {
+        let job = Job::new();
+        job.put_rows(&["data/a"]).await;
+        let (feed, script) = spate_test::scripted_feed();
+        for _ in 0..PUBLISH_ATTEMPTS {
+            script.refuse_next_publish(FeedErrorKind::Retryable);
+        }
+        let started = tokio::time::Instant::now();
+        let err = Lister {
+            retry_base: PUBLISH_RETRY_BASE,
+            ..job.lister(Arc::new(feed), CHECKPOINT_EVERY)
+        }
+        .run()
+        .await
+        .unwrap_err();
+        assert_eq!(class(&err), ErrorClass::Retryable, "{err}");
+        assert_eq!(script.published().len(), PUBLISH_ATTEMPTS as usize);
+        assert_eq!(started.elapsed(), Duration::from_secs(1 + 2 + 4 + 8));
+        assert!(!has_end(&job).await);
+    }
+
+    /// Pins that a rejection that is not retryable fails the run at its
+    /// first publish, with no end marker.
+    #[test]
+    fn a_refused_rejection_is_not_retried() {
+        let rt = runtime();
+        let job = Job::new();
+        rt.block_on(job.put_rows(&["data/a"]));
+        let (feed, script) = spate_test::scripted_feed();
+        script.refuse_next_publish(FeedErrorKind::Refused);
+        let err = rt
+            .block_on(job.lister(Arc::new(feed), CHECKPOINT_EVERY).run())
+            .unwrap_err();
+        assert_eq!(class(&err), ErrorClass::Fatal, "{err}");
+        assert_eq!(script.published().len(), 1);
+        assert!(!rt.block_on(has_end(&job)));
+    }
+
+    /// Pins that a refused end marker write fails the run, naming the end
+    /// marker's object.
+    #[test]
+    fn a_failed_end_marker_write_fails_the_run() {
+        let rt = runtime();
+        let job = Job::with_ops(HookStore {
+            put: Some(|path| {
+                (path.filename() == Some("end")).then(|| {
+                    PutAnswer::Fail(object_store::Error::PermissionDenied {
+                        path: path.to_string(),
+                        source: "403 Forbidden".into(),
+                    })
+                })
+            }),
+            ..HookStore::default()
+        });
+        rt.block_on(job.put_rows(&["data/a"]));
+        let err = rt
+            .block_on(
+                job.lister(KeyedFeed::confirming(&job.events), CHECKPOINT_EVERY)
+                    .run(),
+            )
+            .unwrap_err();
+        assert_eq!(class(&err), ErrorClass::Fatal, "{err}");
+        assert!(err.to_string().contains("end"), "{err}");
     }
 
     /// Pins that a checkpoint stored with its reply lost fails the run as
@@ -1790,10 +2015,10 @@ mod tests {
         section
     }
 
-    /// Pins that `list_once` over the S3 client publishes the objects its
+    /// Pins that `list` over the S3 client publishes the objects its
     /// connector takes out of a listing page.
     #[test]
-    fn list_once_publishes_the_objects_the_s3_client_cannot_address() {
+    fn a_lister_run_publishes_the_objects_the_s3_client_cannot_address() {
         let rt = runtime();
         let endpoint = crate::test_servers::listing_server(vec![list_page(
             &[("data/a", 7), ("data/d//dbl.ndjson", 7)],
@@ -1803,7 +2028,7 @@ mod tests {
         let (feed, script) = spate_test::scripted_feed();
         stub_source(&rt, &endpoint)
             .with_location_store(Arc::clone(&job.ops) as Arc<dyn ObjectStore>)
-            .list_once(&scripted_section(), Arc::new(feed))
+            .list(&scripted_section(), Arc::new(feed))
             .unwrap();
         let keys: Vec<String> = script
             .published()
@@ -1817,10 +2042,10 @@ mod tests {
         assert_eq!(keys, ["data/d//dbl.ndjson", "data/a"]);
     }
 
-    /// Pins the cadence `list_once` gives the lister: over 1,001 keys the
+    /// Pins the cadence `list` gives the lister: over 1,001 keys the
     /// checkpoint is written before the 1,001st and at the end.
     #[test]
-    fn list_once_writes_the_checkpoint_once_per_thousand_keys() {
+    fn a_lister_run_writes_the_checkpoint_once_per_thousand_keys() {
         let rt = runtime();
         let data = Arc::new(object_store::memory::InMemory::new());
         let keys: Vec<String> = (0..1001).map(|i| format!("data/k{i:04}")).collect();
@@ -1836,7 +2061,7 @@ mod tests {
         stub_source(&rt, "http://127.0.0.1:1")
             .with_store(data)
             .with_location_store(Arc::clone(&job.ops) as Arc<dyn ObjectStore>)
-            .list_once(&scripted_section(), Arc::new(feed))
+            .list(&scripted_section(), Arc::new(feed))
             .unwrap();
         assert_eq!(
             job.checkpoint_writes(),

@@ -320,8 +320,9 @@ The split count still sets how evenly the lanes divide over threads; see
 
 A [`feed:` section](../../../07-reference/configuration.mdx#feed) moves the
 source onto the feed path. It reads [work units](../../../07-reference/glossary.mdx#work-unit)
-from the feed the section names, and lists nothing itself. Every delivery is
-read in full, resuming from no earlier delivery, and the unit is acknowledged
+from the feed the section names. On a durable feed it lists nothing itself,
+and on the in-process feed it lists the prefix into that feed itself. Every
+delivery is read in full, resuming from no earlier delivery, and the unit is acknowledged
 once the sink has acknowledged every record in it.
 
 ```yaml
@@ -360,15 +361,21 @@ waiting then goes back to the queue unread, one receive closer to
 partition's commit point.
 
 `units_held` bounds the lanes the source reads at once, one per whole object or
-range, and with them its read parallelism. The default is 96. The source
-publishes no units of its own and reads only the units and storage
-notifications published to the feed, and a startup WARN says so. An in-process feed built from the file alone has no publisher, so the
-run reads nothing. To publish to the in-process feed, code builds a
-`MemoryFeed`, keeps a handle, and passes it to `Pipeline::feed` with
-`feed: { memory: {} }` in the file. Units from another process need a durable
-[feed backend](../../feeds/README.mdx). A run on the feed path never reports its input finished, so it ends
-at a shutdown. Without a `feed:` section the
-source plans splits as described above.
+range, and with them its read parallelism. The default is 96.
+
+On a durable [feed backend](../../feeds/README.mdx) the source publishes no
+units of its own and reads only the units and storage notifications published
+to the feed, and a startup WARN says so. A [lister run](#the-lister-run)
+publishes a bounded job's units. On the in-process feed, `feed: { memory: {} }`,
+the source starts its own lister when it opens, since no other process can
+reach that feed. The in-process feed keeps nothing across a restart and its
+lister keeps no checkpoint, so a restarted run lists and reads the prefix from
+the beginning, and a startup WARN says so. That feed holds every listed unit in
+memory until the unit is read. A failed lister fails the pipeline. Code that
+passes a `MemoryFeed` to `Pipeline::feed` and publishes to it gets the
+lister's units as well as its own. A run on the feed path never reports its
+input finished, so it ends at a shutdown. Without a `feed:` section the source
+plans splits as described above.
 
 ### Storage notifications
 
@@ -481,7 +488,25 @@ feed:
 The location is a prefix, and `…/events-backfill-0042` names the same one.
 The job fingerprint is the object named `fingerprint` there, which the job's
 lister creates before it publishes a unit. A lister run also deletes an object
-named `end` there before its first publish. A new job takes a new location.
+named `end` there before its first publish, and writes it once the feed has
+confirmed every unit the run published. A new job takes a new location.
+
+#### The lister run
+
+A bounded job's lister is a run of the workers' binary in lister mode, started
+once per job. Worker replicas never list. In lister mode the binary builds the
+feed from the `feed:` section, calls `S3Source::list` with the section and the
+feed, and builds no sink. `S3Source::list` refuses the in-process feed and a
+section with no `location`. A feed backend whose workers join a group offers a
+feed that only publishes for the lister, such as the
+[Kafka feed's](../../feeds/kafka/README.mdx) `KafkaFeed::publisher`.
+
+The run writes `end` once the feed has confirmed every unit it published, and
+`end` holds an id fresh to that run. A publish the feed rejects as retryable is
+published again after 1, 2, 4 and 8 seconds. A unit still rejected at its fifth
+publish, or one the feed refuses, fails the run, which then writes no `end`.
+Running it again resumes after its checkpoint. Two lister runs over one prefix
+publish every unit twice, and nothing detects it.
 
 The lister's checkpoint is the object named `checkpoint` there. It holds the
 last listed key for which the feed has confirmed every unit of it and of every

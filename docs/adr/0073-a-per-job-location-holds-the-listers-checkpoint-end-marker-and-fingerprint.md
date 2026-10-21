@@ -11,8 +11,8 @@ description: "A bounded feed job keeps its lister's checkpoint, end marker and f
 
 ## Context and problem statement
 
-On the feed path a fleet's lister runs apart from its workers (the lister-run
-record), and a bounded job ends on the lister's end marker (the bounded-job
+On the feed path a fleet's lister runs apart from its workers ([the lister-run
+record](0075-the-lister-runs-once-per-job-apart-from-the-worker-replicas.md)), and a bounded job ends on the lister's end marker (the bounded-job
 record). A queued message reaches one SQS worker or one Kafka partition owner,
 so the feed cannot carry a marker every worker sees. An object outlives its
 run, so a re-run can find the previous run's marker. Under coordination a job

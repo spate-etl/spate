@@ -1,14 +1,20 @@
-//! A bounded feed job's location: a worker compares the lister's job
-//! fingerprint before it receives a unit, and the one-pass lister writes the
-//! fingerprint, deletes an earlier end marker and publishes the listing.
-//! Every timed rule runs on a test clock the test advances.
+//! A bounded feed job's location and its lister run: a worker compares the
+//! lister's job fingerprint before it receives a unit, and the one-pass
+//! lister writes the fingerprint, deletes an earlier end marker, publishes
+//! the listing and writes its end marker. A solo instance on the in-process
+//! feed lists for itself. Every timed rule runs on a test clock the test
+//! advances.
 
 mod support;
 
 use spate_core::checkpoint::Checkpointer;
 use spate_core::clock::tokio::TestClock;
 use spate_core::config::{ConfigError, FeedSection, PipelineConfig};
-use spate_core::feed::{Confirmation, Delivery, Feed, FeedError, FeedWaker, Receipt, Unit};
+use spate_core::error::{ErrorClass, SourceError};
+use spate_core::feed::memory::MemoryFeed;
+use spate_core::feed::{
+    Confirmation, Delivery, Feed, FeedError, FeedErrorKind, FeedWaker, Receipt, Unit,
+};
 use spate_core::pipeline::{ExitReport, ExitState};
 use spate_core::source::{Source, SourceCtx, SourceEvent};
 use spate_s3::{S3Source, SplitDescriptor, split_id_for, split_id_for_range};
@@ -21,8 +27,8 @@ use std::time::Duration;
 use support::location::{LocationHooks, OnCreate, location_store};
 use support::spy::{SpyOptions, spying_local_store};
 use support::{
-    Launched, PipelineYaml, launch_with_feed, line_framer, lines_bytes, recs, stop, test_options,
-    unit_over,
+    Launched, PipelineYaml, captured_rows, launch_customized, launch_with_feed, line_framer,
+    lines_bytes, recs, sorted, stop, test_options, unit_over,
 };
 
 const DEADLINE: Duration = Duration::from_secs(30);
@@ -750,7 +756,7 @@ fn a_lister_run_deletes_an_earlier_marker_before_its_first_publish() {
 
     let lines = spate_test::capture_logs(tracing::Level::INFO, || {
         lister_source(&data, &rt, "")
-            .list_once(
+            .list(
                 &section("scripted", Some(&location)),
                 Arc::clone(&feed) as Arc<dyn Feed>,
             )
@@ -782,7 +788,7 @@ fn a_first_lister_run_on_an_empty_file_location_starts() {
     let rt = runtime();
     let (feed, script) = scripted_feed();
     lister_source(&data, &rt, "")
-        .list_once(&section("scripted", Some(&location)), Arc::new(feed))
+        .list(&section("scripted", Some(&location)), Arc::new(feed))
         .unwrap();
     assert_eq!(script.published().len(), 1);
     assert_eq!(
@@ -806,7 +812,7 @@ fn a_lister_over_an_injected_store_under_a_file_url_keeps_no_checkpoint() {
     let (feed, script) = scripted_feed();
     lister_source(&data, &rt, "")
         .with_store(data_store)
-        .list_once(&section("scripted", Some(&location)), Arc::new(feed))
+        .list(&section("scripted", Some(&location)), Arc::new(feed))
         .unwrap();
     assert_eq!(script.published().len(), 1);
     assert!(path.join("fingerprint").exists());
@@ -829,7 +835,7 @@ fn a_lister_with_another_fingerprint_refuses_to_start() {
     let rt = runtime();
     let (feed, script) = scripted_feed();
     let err = lister_source(&data, &rt, "")
-        .list_once(&section("scripted", Some(&location)), Arc::new(feed))
+        .list(&section("scripted", Some(&location)), Arc::new(feed))
         .unwrap_err()
         .to_string();
     assert!(err.contains(&theirs), "{err}");
@@ -854,11 +860,11 @@ fn a_rerun_with_a_changed_configuration_refuses_the_earlier_location() {
     let rt = runtime();
     let (feed, _) = scripted_feed();
     lister_source(&data, &rt, "")
-        .list_once(&section("scripted", Some(&location)), Arc::new(feed))
+        .list(&section("scripted", Some(&location)), Arc::new(feed))
         .unwrap();
     let (feed, script) = scripted_feed();
     let err = lister_source(&data, &rt, "compression: none\n")
-        .list_once(&section("scripted", Some(&location)), Arc::new(feed))
+        .list(&section("scripted", Some(&location)), Arc::new(feed))
         .unwrap_err()
         .to_string();
     assert!(err.contains("compression=None"), "{err}");
@@ -879,7 +885,7 @@ fn a_lister_finding_its_own_fingerprint_proceeds() {
     let (feed, script) = scripted_feed();
     lister_source(&data, &rt, "")
         .with_location_store(store)
-        .list_once(&section("scripted", Some(LOCATION)), Arc::new(feed))
+        .list(&section("scripted", Some(LOCATION)), Arc::new(feed))
         .unwrap();
     assert_eq!(script.published().len(), 1);
     assert_eq!(hooks.read(FINGERPRINT_KEY).unwrap(), mine.as_bytes());
@@ -898,7 +904,7 @@ fn a_lister_whose_fingerprint_write_reports_already_exists_compares_the_stored_o
     let (feed, script) = scripted_feed();
     lister_source(&data, &rt, "")
         .with_location_store(store)
-        .list_once(&section("scripted", Some(LOCATION)), Arc::new(feed))
+        .list(&section("scripted", Some(LOCATION)), Arc::new(feed))
         .unwrap();
     assert_eq!(hooks.creates(), 1, "one conditional create");
     assert_eq!(script.published().len(), 1);
@@ -917,7 +923,7 @@ fn a_lister_recreates_a_fingerprint_missing_after_already_exists() {
     let (feed, script) = scripted_feed();
     lister_source(&data, &rt, "")
         .with_location_store(store)
-        .list_once(&section("scripted", Some(LOCATION)), Arc::new(feed))
+        .list(&section("scripted", Some(LOCATION)), Arc::new(feed))
         .unwrap();
     assert_eq!(hooks.creates(), 2);
     assert_eq!(
@@ -939,7 +945,7 @@ fn a_lister_whose_location_refuses_conditional_put_names_the_setting() {
     let (feed, script) = scripted_feed();
     let err = lister_source(&data, &rt, "")
         .with_location_store(store)
-        .list_once(&section("scripted", Some(LOCATION)), Arc::new(feed))
+        .list(&section("scripted", Some(LOCATION)), Arc::new(feed))
         .unwrap_err()
         .to_string();
     assert!(err.contains("aws_conditional_put"), "{err}");
@@ -960,7 +966,7 @@ fn a_lister_on_a_durable_feed_without_a_location_refuses() {
     let err = lister_source(&data, &rt, "")
         .with_store(data_store)
         .with_location_store(store)
-        .list_once(&section("scripted", None), Arc::new(feed))
+        .list(&section("scripted", None), Arc::new(feed))
         .unwrap_err()
         .to_string();
     assert!(err.contains("`feed.location`"), "{err}");
@@ -999,7 +1005,7 @@ fn published_keys(script: &spate_test::FeedScript) -> Vec<String> {
         .collect()
 }
 
-/// Pins resume end to end through `list_once`: a second run lists only the
+/// Pins resume end to end through `list`: a second run lists only the
 /// keys after the checkpoint the first left, and a run after the operator
 /// deletes the checkpoint lists the whole prefix.
 #[test]
@@ -1021,7 +1027,7 @@ fn a_lister_resumes_after_its_checkpoint() {
 
     let (feed, script) = scripted_feed();
     resuming_source(&rt, &data, &location)
-        .list_once(&section, Arc::new(feed))
+        .list(&section, Arc::new(feed))
         .unwrap();
     assert_eq!(published_keys(&script), ["data/a", "data/b"]);
     assert_eq!(hooks.read(CHECKPOINT_KEY).unwrap(), b"data/b");
@@ -1030,7 +1036,7 @@ fn a_lister_resumes_after_its_checkpoint() {
     put("data/d");
     let (feed, script) = scripted_feed();
     resuming_source(&rt, &data, &location)
-        .list_once(&section, Arc::new(feed))
+        .list(&section, Arc::new(feed))
         .unwrap();
     assert_eq!(published_keys(&script), ["data/c", "data/d"]);
     assert_eq!(hooks.read(CHECKPOINT_KEY).unwrap(), b"data/d");
@@ -1039,7 +1045,7 @@ fn a_lister_resumes_after_its_checkpoint() {
         .unwrap();
     let (feed, script) = scripted_feed();
     resuming_source(&rt, &data, &location)
-        .list_once(&section, Arc::new(feed))
+        .list(&section, Arc::new(feed))
         .unwrap();
     assert_eq!(
         published_keys(&script),
@@ -1075,7 +1081,7 @@ fn a_lister_resumes_at_a_file_location() {
     };
     let (feed, script) = scripted_feed();
     source()
-        .list_once(&section("scripted", Some(&location)), Arc::new(feed))
+        .list(&section("scripted", Some(&location)), Arc::new(feed))
         .unwrap();
     assert_eq!(published_keys(&script), ["data/a"]);
     assert_eq!(fs::read(path.join("checkpoint")).unwrap(), b"data/a");
@@ -1083,29 +1089,148 @@ fn a_lister_resumes_at_a_file_location() {
     put("data/b");
     let (feed, script) = scripted_feed();
     source()
-        .list_once(&section("scripted", Some(&location)), Arc::new(feed))
+        .list(&section("scripted", Some(&location)), Arc::new(feed))
         .unwrap();
     assert_eq!(published_keys(&script), ["data/b"]);
 }
 
-/// Pins that a lister on the in-process feed refuses a job location, which
-/// that feed has no use for, before it sends any request.
+/// Pins that a lister run refuses the in-process feed, which only the
+/// instance that holds it reads and which that instance lists into itself,
+/// before it sends any request.
 #[test]
-fn a_lister_on_the_memory_feed_with_a_location_refuses() {
+fn a_lister_run_on_the_in_process_feed_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let data = data_dir(&dir);
     fs::write(data.join("a.ndjson"), lines_bytes(&recs("a", 5))).unwrap();
     let (store, hooks) = location_store();
     let rt = runtime();
     let (feed, script) = scripted_feed();
-    let err = lister_source(&data, &rt, "")
-        .with_location_store(store)
-        .list_once(&section("memory", Some(LOCATION)), Arc::new(feed))
-        .unwrap_err()
-        .to_string();
-    assert!(err.contains("`feed.location`"), "{err}");
+    let feed: Arc<dyn Feed> = Arc::new(feed);
+    for location in [None, Some(LOCATION)] {
+        let err = lister_source(&data, &rt, "")
+            .with_location_store(Arc::clone(&store))
+            .list(&section("memory", location), Arc::clone(&feed))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("in-process feed"), "{err}");
+    }
     assert!(script.published().is_empty());
     assert_eq!(hooks.requests(), 0);
+}
+
+/// Pins that a lister run publishes a unit for every listed object and,
+/// once the feed confirmed them all, writes an end marker that names its
+/// run.
+#[test]
+fn a_lister_run_publishes_every_unit_and_an_end_marker() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    fs::write(data.join("a.ndjson"), lines_bytes(&recs("a", 5))).unwrap();
+    fs::write(data.join("b.ndjson"), lines_bytes(&recs("b", 7))).unwrap();
+    let (location, path) = file_location(&dir);
+    let rt = runtime();
+    let (feed, script) = scripted_feed();
+    lister_source(&data, &rt, "")
+        .list(&section("scripted", Some(&location)), Arc::new(feed))
+        .unwrap();
+    let mut names: Vec<String> = script
+        .published()
+        .iter()
+        .map(|unit| {
+            SplitDescriptor::decode(&unit.body).unwrap().objects[0]
+                .key
+                .clone()
+        })
+        .map(|key| key.rsplit('/').next().unwrap().to_owned())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["a.ndjson", "b.ndjson"]);
+    let end = fs::read_to_string(path.join("end")).expect("an end marker");
+    assert!(
+        end.len() == 32 && end.bytes().all(|b| b.is_ascii_hexdigit()),
+        "{end:?}"
+    );
+}
+
+/// Pins that a unit the feed refuses fails the lister run, which leaves
+/// no end marker at the job location.
+#[test]
+fn a_refused_unit_withholds_the_end_marker() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    fs::write(data.join("a.ndjson"), lines_bytes(&recs("a", 5))).unwrap();
+    fs::write(data.join("b.ndjson"), lines_bytes(&recs("b", 7))).unwrap();
+    let (location, path) = file_location(&dir);
+    let rt = runtime();
+    let (feed, script) = scripted_feed();
+    script.refuse_next_publish(FeedErrorKind::Refused);
+    let err = lister_source(&data, &rt, "")
+        .list(&section("scripted", Some(&location)), Arc::new(feed))
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            SourceError::Client {
+                class: ErrorClass::Fatal,
+                ..
+            }
+        ),
+        "{err}"
+    );
+    assert!(path.join("fingerprint").exists());
+    assert!(!path.join("end").exists());
+}
+
+/// Pins that a solo instance on the in-process feed lists the prefix into
+/// that feed itself, and that a run started again over the same prefix
+/// lists and reads every object from the beginning.
+#[test]
+fn a_restarted_solo_run_lists_from_the_beginning() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    fs::write(data.join("a.ndjson"), lines_bytes(&recs("a", 5))).unwrap();
+    fs::write(data.join("b.ndjson"), lines_bytes(&recs("b", 3))).unwrap();
+    let rows = sorted([recs("a", 5), recs("b", 3)].concat());
+    let yaml = PipelineYaml::file("s3-solo-restart", &data)
+        .section("feed:\n  memory: {}\n")
+        .build();
+    for run in 1..=2 {
+        let l = launch_customized(
+            &yaml,
+            test_options(),
+            |_| {},
+            |source, _| line_framer(source),
+        );
+        wait_until(DEADLINE, &format!("run {run} writes every row"), || {
+            sorted(captured_rows(&l.script)) == rows
+        });
+        stop(&l);
+    }
+}
+
+/// Pins the startup WARN of a solo instance on the in-process feed: it
+/// lists and reads the prefix from the beginning.
+#[test]
+fn a_solo_run_warns_that_it_lists_from_the_beginning() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    fs::write(data.join("a.ndjson"), lines_bytes(&recs("a", 5))).unwrap();
+    let rt = runtime();
+    let mut source = lister_source(&data, &rt, "");
+    source
+        .configure_feed(&section("memory", None), Arc::new(MemoryFeed::new()))
+        .unwrap();
+    let lines = spate_test::capture_logs(tracing::Level::WARN, || {
+        source
+            .open(SourceCtx::new(Checkpointer::new().handle()))
+            .unwrap();
+    });
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("lists and reads the prefix from the beginning")),
+        "{lines:#?}"
+    );
 }
 
 /// Pins the published units: one whole unit per small object and ranges
@@ -1130,7 +1255,7 @@ fn a_lister_run_publishes_one_unit_per_listed_part() {
     let rt = runtime();
     let (feed, script) = scripted_feed();
     lister_source(&data, &rt, "")
-        .list_once(&section("scripted", Some(&location)), Arc::new(feed))
+        .list(&section("scripted", Some(&location)), Arc::new(feed))
         .unwrap();
 
     let mut by_key: BTreeMap<String, Vec<(String, SplitDescriptor)>> = BTreeMap::new();
@@ -1301,7 +1426,7 @@ fn resume_after_each_returned_key_publishes_the_rest() {
         line_framer(S3Source::from_component_config(&config, rt.handle().clone()).unwrap())
     };
     let (feed, script) = scripted_feed();
-    source().list_once(&section, Arc::new(feed)).unwrap();
+    source().list(&section, Arc::new(feed)).unwrap();
     assert_eq!(published_keys(&script), listed);
 
     let checkpoint = StorePath::from("jobs/a/checkpoint");
@@ -1314,7 +1439,7 @@ fn resume_after_each_returned_key_publishes_the_rest() {
             .block_on(gw.client.put(&checkpoint, PutPayload::from(key.to_owned())))
             .unwrap();
         let (feed, script) = scripted_feed();
-        source().list_once(&section, Arc::new(feed)).unwrap();
+        source().list(&section, Arc::new(feed)).unwrap();
         let at = listed.iter().position(|k| k == key).unwrap();
         assert_eq!(published_keys(&script), listed[at + 1..], "after {key}");
     }
@@ -1331,7 +1456,7 @@ fn resume_after_each_returned_key_publishes_the_rest() {
             .unwrap();
     });
     let (feed, script) = scripted_feed();
-    source().list_once(&section, Arc::new(feed)).unwrap();
+    source().list(&section, Arc::new(feed)).unwrap();
     let at = listed.iter().position(|k| k == "data/q/r").unwrap();
     assert_eq!(published_keys(&script), listed[at + 1..]);
 }

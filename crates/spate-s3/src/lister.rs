@@ -33,10 +33,10 @@ use std::sync::Arc;
 /// SQS send batch of 10.
 pub(crate) const LISTER_IN_FLIGHT: usize = 32;
 
-/// How many listed keys pass between two points where the lister writes the
-/// checkpoint if it moved: the largest `ListObjectsV2` page AWS returns. A
-/// store whose pages hold at most this many keys sees at most one write per
-/// page, and one more when the listing ends.
+/// How many keys the lister lists after a checkpoint write before it writes a
+/// moved checkpoint again, ahead of the next key: the largest `ListObjectsV2`
+/// page AWS returns. A store whose pages hold at most this many keys sees at
+/// most one write per page, and one more when the listing ends.
 pub(crate) const CHECKPOINT_EVERY: usize = 1000;
 
 /// One lister run over a listing prefix.
@@ -54,8 +54,8 @@ pub(crate) struct Lister {
     /// Whether `store` lists the keys after an offset with `start-after`.
     /// Without it the run keeps no checkpoint.
     pub(crate) resume: bool,
-    /// How many listed keys pass between two points where the checkpoint is
-    /// written if it moved.
+    /// How many keys are listed after a checkpoint write before a moved
+    /// checkpoint is written again.
     pub(crate) checkpoint_every: usize,
     /// The objects the S3 client takes out of `store`'s listing pages.
     pub(crate) unaddressable: Option<UnaddressableKeys>,
@@ -1254,7 +1254,17 @@ mod tests {
     #[test]
     fn a_lister_that_cannot_resume_reads_and_writes_no_checkpoint() {
         let rt = runtime();
-        let job = Job::new();
+        let job = Job::with_ops(HookStore {
+            get: Some(|path| {
+                assert_ne!(
+                    path.filename(),
+                    Some("checkpoint"),
+                    "the checkpoint is read"
+                );
+                None
+            }),
+            ..HookStore::default()
+        });
         rt.block_on(async {
             job.put_rows(&["data/a", "data/b", "data/c"]).await;
             job.matched().await;
@@ -1326,7 +1336,8 @@ mod tests {
             rt.block_on(lister.run()).unwrap();
         });
         assert!(
-            lines.iter().any(|l| l.contains("resuming the listing")
+            lines.iter().any(|l| l.contains("INFO")
+                && l.contains("resuming the listing")
                 && l.contains(LOCATION)
                 && l.contains("\"data/a\"")),
             "{lines:#?}"
@@ -1831,5 +1842,105 @@ mod tests {
             job.checkpoint_writes(),
             [keys[999].clone(), keys[1000].clone()]
         );
+    }
+
+    /// Pins that the S3 client's own reply to a `DeleteObjects` entry refused
+    /// with `AccessDenied` classifies as fatal, so a change to the text
+    /// `object_store` gives that entry fails here.
+    #[test]
+    fn the_s3_clients_refused_delete_entry_is_fatal() {
+        let endpoint = crate::test_servers::sequence_server(vec![(
+            "200 OK",
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+             <DeleteResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
+             <Error><Key>jobs/a/checkpoint</Key><Code>AccessDenied</Code>\
+             <Message>Access Denied</Message></Error></DeleteResult>"
+                .to_owned(),
+        )]);
+        let store = crate::test_servers::store_at(&endpoint);
+        let e = runtime()
+            .block_on(store.delete(&Path::from(CHECKPOINT)))
+            .unwrap_err();
+        assert_eq!(crate::error::classify(&e), ErrorClass::Fatal, "{e}");
+    }
+
+    /// Pins that a lister that cannot resume warns that it keeps no
+    /// checkpoint on a run that creates the fingerprint too.
+    #[test]
+    fn a_lister_that_cannot_resume_warns_at_a_new_location() {
+        let rt = runtime();
+        let job = Job::new();
+        rt.block_on(job.put_rows(&["data/a"]));
+        let mut lister = job.lister(KeyedFeed::confirming(&job.events), CHECKPOINT_EVERY);
+        lister.resume = false;
+        let lines = spate_test::capture_logs(tracing::Level::INFO, || {
+            rt.block_on(lister.run()).unwrap();
+        });
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("WARN") && l.contains("keeps no checkpoint")),
+            "{lines:#?}"
+        );
+        assert!(job.checkpoint_writes().is_empty());
+    }
+
+    /// Pins that a refused read of a checkpoint beside no fingerprint fails
+    /// the run before it creates the fingerprint or publishes.
+    #[test]
+    fn a_refused_checkpoint_head_beside_no_fingerprint_fails_the_run() {
+        let rt = runtime();
+        let job = Job::with_ops(HookStore {
+            get: Some(|path| {
+                (path.filename() == Some("checkpoint")).then(|| {
+                    Err(object_store::Error::PermissionDenied {
+                        path: path.to_string(),
+                        source: "403 Forbidden".into(),
+                    })
+                })
+            }),
+            ..HookStore::default()
+        });
+        rt.block_on(job.put_rows(&["data/a"]));
+        let feed = KeyedFeed::confirming(&job.events);
+        let err = rt
+            .block_on(
+                job.lister(Arc::clone(&feed) as Arc<dyn Feed>, CHECKPOINT_EVERY)
+                    .run(),
+            )
+            .unwrap_err();
+        assert_eq!(class(&err), ErrorClass::Fatal, "{err}");
+        assert!(feed.keys().is_empty());
+        assert!(
+            rt.block_on(job.ops.inner.head(&Path::from("jobs/a/fingerprint")))
+                .is_err()
+        );
+    }
+
+    /// Pins that a checkpoint gone between its read and its delete, deleted
+    /// by another run, leaves the run listing the whole prefix.
+    #[test]
+    fn a_checkpoint_deleted_before_its_delete_lands_is_accepted() {
+        let rt = runtime();
+        let job = Job::with_ops(HookStore {
+            delete: Some(|path| {
+                (path.filename() == Some("checkpoint")).then(|| object_store::Error::NotFound {
+                    path: path.to_string(),
+                    source: "deleted by another run".into(),
+                })
+            }),
+            ..HookStore::default()
+        });
+        rt.block_on(async {
+            job.put_rows(&["data/a", "data/b"]).await;
+            job.seed_checkpoint(b"data/a").await;
+        });
+        let feed = KeyedFeed::confirming(&job.events);
+        rt.block_on(
+            job.lister(Arc::clone(&feed) as Arc<dyn Feed>, CHECKPOINT_EVERY)
+                .run(),
+        )
+        .unwrap();
+        assert_eq!(feed.keys(), ["data/a", "data/b"]);
     }
 }

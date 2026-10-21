@@ -270,10 +270,11 @@ impl S3Source {
     /// Test seam: list the prefix once and publish one unit per object or
     /// byte range to `feed`, blocking the calling thread on the I/O handle.
     ///
-    /// With a `location` in `section` it first creates the job fingerprint
-    /// there, or compares the one already there, and deletes an earlier end
-    /// marker. Beside a fingerprint it compared, it reads the lister's
-    /// checkpoint and lists only the keys after it. It rewrites the
+    /// With a `location` in `section` it first compares the job fingerprint
+    /// there, or, when there is none, deletes a checkpoint it finds and
+    /// creates the fingerprint, then deletes an earlier end marker. Beside a
+    /// fingerprint it compared, it reads the lister's checkpoint and lists
+    /// only the keys after it. It rewrites the
     /// checkpoint at most once per [`CHECKPOINT_EVERY`] listed keys and once
     /// at the end, each time after the feed confirmed every unit published
     /// before it. Over a `file://` store or an S3 directory bucket it keeps

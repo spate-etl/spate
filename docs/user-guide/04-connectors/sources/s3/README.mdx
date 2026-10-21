@@ -508,13 +508,13 @@ also end early; see [Testing](#testing).
 :::danger
 A run at a location that holds the job's fingerprint and a `checkpoint` never
 reads the keys up to the checkpoint. A re-run of a finished job publishes the
-keys added since, and again each object the S3 client cannot address that lists
-after the last checkpointed key. A job whose feed lost its units, such as a
-purged queue or a new queue or topic at the same location, never reads its keys
-up to the checkpoint. If the store's list order may have changed since
-`checkpoint` was written, such as across a store upgrade, stop the lister,
-delete `checkpoint`, and start it again. To start a job over, delete the whole
-location prefix.
+keys that list after the checkpoint, and again each object the S3 client cannot
+address that lists after it; a key added since that lists before the checkpoint
+is never read. A job whose feed lost its units, such as a purged queue or a new
+queue or topic at the same location, never reads its keys up to the checkpoint.
+If the store's list order may have changed since `checkpoint` was written, such
+as across a store upgrade, stop the lister, delete `checkpoint`, and start it
+again. To start a job over, delete the whole location prefix.
 :::
 
 The fingerprint covers the unit format version, `url`, `compression`,

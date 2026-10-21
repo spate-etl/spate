@@ -82,10 +82,11 @@ prefix from the start every run. SeaweedFS is unsupported for resume.
   no single newest message.
 - Bad, because a crash re-publishes every unit after the last checkpoint,
   including units the feed had already confirmed.
-- Bad, because a re-run at a finished job's location publishes the keys added
-  since, and again each object the connector took out of a page after the last
-  checkpointed key, and a job whose feed lost its units, such as a purged
-  queue, never reads the keys up to the checkpoint again.
+- Bad, because a re-run at a finished job's location publishes only the keys
+  that list after the checkpoint, and again each object the connector took out
+  of a page after it, so a key added since that lists before the checkpoint
+  is never read. A job whose feed lost its units, such as a purged queue,
+  never reads the keys up to the checkpoint again.
 - Bad, because a store whose order changes between two listings (a SeaweedFS
   SQL filer upgraded across its byte-order fix) loses the keys that moved
   ahead of the checkpoint. An operator who upgrades the store during a job

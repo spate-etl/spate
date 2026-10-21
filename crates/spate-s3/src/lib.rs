@@ -10,13 +10,15 @@
 //! A pipeline `feed:` section selects the feed path. The source reads work
 //! units from the feed the section names, each unit naming one object or one
 //! byte range of one object, and storage notifications, one part per
-//! non-empty created object, and lists nothing itself. A whole object that
-//! qualifies for byte ranges is read in ranges. That job never
-//! self-terminates, so it ends at a shutdown, and the section's `units_held`
-//! bounds its read parallelism, one lane per object or range in progress.
-//! When the section names a `location`, the job is bounded: the source waits
-//! for the job fingerprint its lister writes there, and refuses to start when
-//! it differs from its own.
+//! non-empty created object. On a durable feed it lists nothing itself: a
+//! separate lister run, [`S3Source::list_once`], lists the prefix once per
+//! job and publishes its units. On the in-process feed the run lists its own
+//! prefix into the feed. A whole object that qualifies for byte ranges is
+//! read in ranges. That job never self-terminates, so it ends at a shutdown,
+//! and the section's `units_held` bounds its read parallelism, one lane per
+//! object or range in progress. When the section names a `location`, the job
+//! is bounded: the source waits for the job fingerprint its lister writes
+//! there, and refuses to start when it differs from its own.
 //!
 //! # Shape
 //!
@@ -99,7 +101,6 @@ mod framer;
 #[doc(hidden)]
 pub mod fuzz_seams;
 mod lane;
-#[cfg(feature = "testing")]
 mod lister;
 mod listing;
 mod location;

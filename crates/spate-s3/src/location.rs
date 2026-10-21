@@ -1,7 +1,7 @@
 //! The job location of a bounded feed job: an object-store prefix holding
 //! the job fingerprint, which the lister writes and every worker reads, the
 //! lister's checkpoint, and the end marker a lister run deletes before it
-//! publishes.
+//! publishes and writes once the feed confirmed every unit of the run.
 //!
 //! [`Location::parse`] checks the `feed:` section's `location` against the
 //! source URL. [`feed_fingerprint`] is the identity a worker and the lister
@@ -30,8 +30,8 @@ pub(crate) const SETTLING_WINDOW: Duration = Duration::from_secs(5 * 60);
 pub(crate) const FINGERPRINT_POLL: Duration = Duration::from_secs(5);
 
 /// The largest object a location read accepts. Every object here is a
-/// fingerprint or one object key, at most a few kilobytes, so a larger one is
-/// not this job's.
+/// fingerprint, one object key or an end marker, at most a few kilobytes, so
+/// a larger one is not this job's.
 pub(crate) const LOCATION_OBJECT_MAX_BYTES: u64 = 4096;
 
 /// What every feed fingerprint starts with, so a foreign object at the
@@ -144,27 +144,15 @@ impl Location {
         self.prefix.clone().join("fingerprint")
     }
 
-    /// The end marker, which a lister run deletes before its first publish.
-    #[cfg_attr(
-        not(feature = "testing"),
-        expect(
-            dead_code,
-            reason = "only the `testing`-gated `S3Source::list_once` lists for the feed"
-        )
-    )]
+    /// The end marker, which a lister run deletes before its first publish
+    /// and writes after the feed confirmed every unit of the run and the
+    /// last checkpoint.
     pub(crate) fn end(&self) -> Path {
         self.prefix.clone().join("end")
     }
 
     /// The lister's checkpoint: the last listed key whose units, and those of
     /// every key listed before it, the feed has confirmed.
-    #[cfg_attr(
-        not(feature = "testing"),
-        expect(
-            dead_code,
-            reason = "only the `testing`-gated `S3Source::list_once` lists for the feed"
-        )
-    )]
     pub(crate) fn checkpoint(&self) -> Path {
         self.prefix.clone().join("checkpoint")
     }

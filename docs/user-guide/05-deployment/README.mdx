@@ -35,9 +35,10 @@ what it moves.
 ## [Scaling out](scaling-out.mdx)
 
 Several identical replicas dividing one source's work: brokered sources that
-divide it natively, and the coordination layer for those that cannot. Covers
-Kubernetes patterns (plain Deployments, pod-name instance ids), lease tuning,
-and the failure-mode table.
+divide it natively, feed-reading sources whose lister run fills a shared
+feed, and the coordination layer for those that cannot. Covers Kubernetes
+patterns (plain Deployments, pod-name instance ids, the lister run as a Job),
+lease tuning, and the failure-mode table.
 
 ## Related reading
 

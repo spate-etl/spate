@@ -12,11 +12,13 @@ rather than silently half-read; and the job self-terminates when the plan
 completes. This path is always coordinated — a single instance is just the
 one-worker case.
 
-With a pipeline `feed:` section the source lists nothing. It reads work units
-from the feed, each naming one object or one byte range of one object, and
-storage notifications, one part per non-empty created object. It reads a large object in
-byte ranges. It acknowledges each finished unit to the
-feed and runs until shut down.
+With a pipeline `feed:` section the source reads work units from the feed,
+each naming one object or one byte range of one object, and storage
+notifications, one part per non-empty created object. It reads a large object
+in byte ranges. It acknowledges each finished unit to the feed and runs until
+shut down. On a durable feed the source lists nothing, and a separate lister
+run, `S3Source::list_once`, lists the prefix once per job and publishes its
+units. On the in-process feed the run lists its own prefix.
 
 Applications should depend on the [`spate`](https://crates.io/crates/spate)
 facade with the `s3` feature.

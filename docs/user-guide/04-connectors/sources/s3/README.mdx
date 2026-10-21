@@ -320,7 +320,10 @@ The split count still sets how evenly the lanes divide over threads; see
 
 A [`feed:` section](../../../07-reference/configuration.mdx#feed) moves the
 source onto the feed path. It reads [work units](../../../07-reference/glossary.mdx#work-unit)
-from the feed the section names, and lists nothing itself. Every delivery is
+from the feed the section names. On a durable feed it lists nothing itself,
+and a [lister run](#the-lister-run) publishes the job's units. On the
+in-process feed the run lists the prefix itself; see
+[A solo run on the in-process feed](#a-solo-run-on-the-in-process-feed). Every delivery is
 read in full, resuming from no earlier delivery, and the unit is acknowledged
 once the sink has acknowledged every record in it.
 
@@ -360,15 +363,33 @@ waiting then goes back to the queue unread, one receive closer to
 partition's commit point.
 
 `units_held` bounds the lanes the source reads at once, one per whole object or
-range, and with them its read parallelism. The default is 96. The source
-publishes no units of its own and reads only the units and storage
-notifications published to the feed, and a startup WARN says so. An in-process feed built from the file alone has no publisher, so the
-run reads nothing. To publish to the in-process feed, code builds a
-`MemoryFeed`, keeps a handle, and passes it to `Pipeline::feed` with
-`feed: { memory: {} }` in the file. Units from another process need a durable
-[feed backend](../../feeds/README.mdx). A run on the feed path never reports its input finished, so it ends
-at a shutdown. Without a `feed:` section the
-source plans splits as described above.
+range, and with them its read parallelism. The default is 96. On a durable
+feed the source publishes no units of its own and reads only the units and
+storage notifications published to the feed, and a startup WARN says so. On
+the in-process feed the run lists the prefix into that feed, and code may also
+publish to a `MemoryFeed` it keeps a handle to and passes to `Pipeline::feed`
+with `feed: { memory: {} }` in the file. Units from another process need a
+durable [feed backend](../../feeds/README.mdx). A run on the feed path never
+reports its input finished, so it ends at a shutdown. A lister run ends once
+it has published the listing. Without a `feed:` section the source plans
+splits as described above.
+
+### A solo run on the in-process feed
+
+A run whose `feed:` section names `memory` lists its own prefix into the
+in-process feed when it opens, and reads units while the listing runs. A
+listing that fails fails the run, whatever the store error.
+
+:::warning A solo run lists from the beginning after a restart
+The in-process feed keeps nothing across a restart, and a solo run keeps no
+checkpoint, so a restarted run lists and reads the whole prefix again, and a
+startup WARN says so. Two solo instances, on one host or several, each list
+and read the whole prefix. The listing publishes as fast as the store lists,
+and the in-process feed holds one unit for each listed part not yet read, in
+memory and outside `units_held`. A single instance that must resume reads a
+durable feed with a `location`, filled by a separate
+[lister run](#the-lister-run).
+:::
 
 ### Storage notifications
 
@@ -481,7 +502,12 @@ feed:
 The location is a prefix, and `…/events-backfill-0042` names the same one.
 The job fingerprint is the object named `fingerprint` there, which the job's
 lister creates before it publishes a unit. A lister run also deletes an object
-named `end` there before its first publish. A new job takes a new location.
+named `end` there before its first publish, and writes `end` once the feed has
+confirmed every unit of the run and the last checkpoint is written. `end`
+holds `run=` and an id fresh to that run. A run that fails writes none, except
+when its write of `end` reached the store and the reply was lost; the next run
+deletes that one before it publishes. Workers do not read `end`. A new job
+takes a new location.
 
 The lister's checkpoint is the object named `checkpoint` there. It holds the
 last listed key for which the feed has confirmed every unit of it and of every
@@ -575,6 +601,39 @@ suite checks that on RustFS only. The location needs read-after-write and
 read-after-delete consistency, which means `consistency_mode = "consistent"`
 on Garage and one zone on Ceph RGW. A `file://` location serves the processes
 of one host.
+
+### The lister run
+
+A bounded job's units come from one lister run per job: the same binary,
+started once in place of a worker, that lists the prefix, publishes its units,
+writes `end` and exits. `main()` starts it with
+[`S3Source::list_once`](https://docs.rs/spate-s3/latest/spate_s3/struct.S3Source.html#method.list_once),
+whose rustdoc example is a binary that runs the lister when its first argument
+is `list`. The run reads the source and `feed:` sections of the workers' own
+pipeline file and builds no sink. It refuses the in-process feed, a section
+with no `location`, a feed other than the one the section names, and a call
+from async code.
+
+A unit the feed rejects as retryable is published again, up to five attempts,
+after waits of 200 ms, 400 ms, 800 ms and 1.6 s. A unit the feed refuses, or
+still rejects after the fifth attempt, fails the run, and the error names its
+object. A failed run returns its error, so a binary that returns it from
+`main()` exits non-zero, and the next run resumes after the checkpoint.
+
+The lister adds no timeout of its own. Each request to the store is bounded by
+`object_store`'s retries, about three minutes, and each publish by its feed
+backend's own limits. Bound the run as a whole where it is deployed, such as
+a Kubernetes Job's `activeDeadlineSeconds`.
+
+Two lister runs over one prefix:
+
+- at two locations publish every unit twice, and nothing detects it;
+- at one location with one fingerprint, the later run resumes after the
+  checkpoint the earlier wrote, or lists the whole prefix when both start
+  before either writes one, and the first to finish writes `end` while the
+  other may still hold units the feed has not confirmed;
+- at one location with two fingerprints, the later run is refused on a store
+  that honors `If-None-Match`.
 
 ## Split identity and drift
 

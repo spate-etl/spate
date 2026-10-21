@@ -13,7 +13,7 @@ unit again when its reader stops before acknowledging it. The
 |---|---|---|---|
 | [Amazon SQS](sqs/README.mdx) | `sqs` | `sqs` | A standard queue shared by every worker. Built in code from the section and passed to `Pipeline::feed`. |
 | [Kafka](kafka/README.mdx) | `kafka` | `kafka` | A work topic one consumer group reads, with attempt, retry and dead-letter topics. Built in code from the section and passed to `Pipeline::feed`. |
-| In-process | `memory` | none | A feed inside one process, never shared between processes. The runtime builds it from `feed: { memory: {} }`; code that publishes to it builds a `MemoryFeed` and passes it to `Pipeline::feed`. Its body takes no keys. |
+| In-process | `memory` | none | A feed inside one process, never shared between processes. The runtime builds it from `feed: { memory: {} }`, and a source that lists its own input publishes to it; code that publishes to it builds a `MemoryFeed` and passes it to `Pipeline::feed`. Its body takes no keys. |
 
 A feed is selected by the pipeline's
 [`feed:` section](../../07-reference/configuration.mdx#feed). Its body is the

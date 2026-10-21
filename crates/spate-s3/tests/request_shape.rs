@@ -16,9 +16,10 @@ mod support;
 
 use spate_coordination::StoreCoordinator;
 use spate_coordination::store::memory::MemoryStore;
-use spate_core::feed::Feed as _;
 use spate_core::feed::memory::MemoryFeed;
+use spate_core::feed::{Confirmation, Delivery, Feed, FeedError, FeedWaker, Receipt, Unit};
 use spate_core::pipeline::ExitState;
+use spate_test::ScriptedFeed;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
@@ -26,9 +27,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use support::spy::{GetRecord, RangeKind, SpyOptions, StoreSpy, spying_local_store};
 use support::{
-    Launched, PipelineYaml, TEST_LEASE, captured_rows, launch_customized, launch_with_feed,
-    line_framer, lines_bytes, recs, shared_store, sorted, stop, test_options, test_tuning,
-    unit_over,
+    Launched, PipelineYaml, TEST_LEASE, captured_rows, fingerprint, launch_customized,
+    launch_with_feed, line_framer, lines_bytes, recs, shared_store, sorted, stop, test_options,
+    test_tuning, unit_over,
 };
 
 /// A bounded backfill over `data`, with the read-window knobs a test needs to
@@ -322,7 +323,8 @@ fn the_memory_store_section_sets_solo_read_parallelism() {
 
 /// A `feed:` section's `units_held` sets the feed path's read parallelism:
 /// `units_held: 12` over sixteen one-object units puts twelve reads in
-/// flight, below the reader's default of 96, and the feed path never lists.
+/// flight, below the reader's default of 96, and the solo run on the
+/// in-process feed lists the prefix once.
 #[test]
 fn the_feed_section_sets_read_parallelism() {
     let staged = stage(16, 20);
@@ -334,9 +336,6 @@ fn the_feed_section_sets_read_parallelism() {
         ..SpyOptions::default()
     });
     let feed = MemoryFeed::new();
-    for name in staged.names() {
-        drop(feed.publish(unit_over(&staged.data, &name)));
-    }
     let l = launch_with_feed(
         &yaml,
         test_options(),
@@ -360,7 +359,81 @@ fn the_feed_section_sets_read_parallelism() {
         12,
         "twelve units held must issue twelve concurrent get_opts calls"
     );
-    assert_eq!(spy.lists(), 0, "the feed path never lists");
+    assert_eq!(spy.lists(), 1, "the solo run lists the prefix once");
+}
+
+/// A scripted feed that reports the backend `tag`, standing in for a
+/// durable feed the default lane does not run.
+struct Tagged {
+    inner: ScriptedFeed,
+    tag: &'static str,
+}
+
+impl Feed for Tagged {
+    fn backend(&self) -> &str {
+        self.tag
+    }
+    fn set_waker(&self, waker: FeedWaker) {
+        self.inner.set_waker(waker);
+    }
+    fn receive(&self, max: usize) -> Result<Vec<Delivery>, FeedError> {
+        self.inner.receive(max)
+    }
+    fn renew(&self, receipt: Receipt) -> Result<(), FeedError> {
+        self.inner.renew(receipt)
+    }
+    fn acknowledge(&self, receipt: Receipt) -> Result<(), FeedError> {
+        self.inner.acknowledge(receipt)
+    }
+    fn fail(&self, receipt: Receipt, reason: &str) -> Result<(), FeedError> {
+        self.inner.fail(receipt, reason)
+    }
+    fn publish(&self, unit: Unit) -> Confirmation {
+        self.inner.publish(unit)
+    }
+}
+
+/// A worker on a durable feed, continuous or bounded, reads the units
+/// delivered to it and never lists.
+#[test]
+fn a_worker_on_a_durable_feed_issues_no_listing() {
+    for (tag, bounded) in [("sqs", false), ("kafka", true)] {
+        let staged = stage(1, 20);
+        let jobs = staged._dir.path().join("jobs");
+        let mut section = format!("feed:\n  {tag}: {{}}\n");
+        if bounded {
+            fs::create_dir_all(&jobs).unwrap();
+            fs::write(
+                jobs.join("fingerprint"),
+                fingerprint(&staged.data, "Auto", "0a"),
+            )
+            .unwrap();
+            section.push_str(&format!("  location: file://{}/\n", jobs.display()));
+        }
+        let yaml = PipelineYaml::file("s3-request-shape-worker", &staged.data)
+            .section(&section)
+            .build();
+        let (spy_store, spy) = spying_local_store(SpyOptions::default());
+        let (inner, script) = spate_test::scripted_feed();
+        let receipt = script.deliver(unit_over(&staged.data, &staged.names()[0]));
+        let l = launch_with_feed(
+            &yaml,
+            test_options(),
+            |_| {},
+            Arc::new(Tagged { inner, tag }),
+            move |source, _| line_framer(source).with_store(spy_store),
+        );
+        spate_test::wait_until(Duration::from_secs(30), "the unit is acknowledged", || {
+            script.acknowledged() == vec![receipt]
+        });
+        stop(&l);
+        assert_eq!(
+            sorted(captured_rows(&l.script)),
+            sorted(staged.expected.clone()),
+            "{tag}"
+        );
+        assert_eq!(spy.lists(), 0, "a worker on {tag} never lists");
+    }
 }
 
 #[test]

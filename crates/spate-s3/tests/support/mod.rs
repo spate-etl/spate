@@ -382,6 +382,16 @@ pub(crate) fn stop(l: &Launched) {
     assert_eq!(report.state, ExitState::Completed);
 }
 
+/// The job fingerprint of a source over `data` with the suite's 1 MiB
+/// target, written out by hand.
+pub(crate) fn fingerprint(data: &Path, compression: &str, delimiter: &str) -> String {
+    format!(
+        "spate-s3:feed1:d2:url=file://{}/:compression={compression}:target=1048576:\
+         delim={delimiter}",
+        data.display()
+    )
+}
+
 /// A unit whose body is a one-member descriptor over `name` under `data`,
 /// with no ETag pin.
 pub(crate) fn unit_over(data: &Path, name: &str) -> Unit {

@@ -189,6 +189,19 @@ releasing the split to the fleet; a live owner that cannot reach the
 store self-fences after one full lease. Leases provide *liveness*;
 correctness comes from the [fencing token](#fencing-token).
 
+### Lister
+
+The one run per bounded job that lists the job's input once, publishes its
+[work units](#work-unit) to the [feed](#feed) and exits. A fleet's workers
+never list. The lister keeps its checkpoint at the
+[job location](#job-location), and writes an end marker there once the feed
+has confirmed every unit. A solo run on the in-process feed lists its own
+input.
+
+*Connector mapping:*
+[S3 source](../04-connectors/sources/s3/README.mdx#the-lister-run)
+— `S3Source::list_once`.
+
 ### Quarantine
 
 Where poison [splits](#split) go: a split whose tenancies keep ending in

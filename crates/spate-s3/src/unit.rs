@@ -125,13 +125,6 @@ pub(crate) fn parts_of(object: Arc<Vec<ObjectEntry>>, packing: Packing) -> Curso
 ///
 /// An item is [`Fatal`](spate_core::coordination::CoordinationErrorKind::Fatal)
 /// when a descriptor or an id cannot be built, which no listed object causes.
-#[cfg_attr(
-    not(feature = "testing"),
-    expect(
-        dead_code,
-        reason = "only the `testing`-gated `S3Source::list_once` lists for the feed"
-    )
-)]
 pub(crate) fn units(
     entry: ObjectEntry,
     packing: Packing,

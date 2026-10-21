@@ -11,7 +11,7 @@ description: "The S3 lister checkpoints a key once the feed confirmed every unit
 
 ## Context and problem statement
 
-The S3 source's lister (the lister-run record) walks a prefix and publishes
+The S3 source's lister ([the lister-run record](0075-the-lister-runs-once-per-job-apart-from-the-worker-replicas.md)) walks a prefix and publishes
 units to the feed. A lister that stops has to resume without losing a key.
 `ListObjectsV2` takes `StartAfter`, and `object_store` sends it on every page
 beside the continuation token. Stores differ in list order: SeaweedFS walks its

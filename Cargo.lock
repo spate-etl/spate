@@ -4723,6 +4723,7 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+ "uuid",
  "zstd",
 ]
 

@@ -8,6 +8,7 @@
 //! it keeps in flight are all invisible to the metrics layer, which counts
 //! bytes rather than requests.
 
+use futures_util::StreamExt as _;
 use futures_util::stream::BoxStream;
 use object_store::local::LocalFileSystem;
 use object_store::path::Path;
@@ -76,6 +77,11 @@ pub(crate) struct SpyOptions {
     /// Latency injected into every GET, for runs that must outlive a
     /// coordination tick.
     pub(crate) hold: Duration,
+    /// Yield this many entries of each listing, then hold the rest until
+    /// [`StoreSpy::release_lists`].
+    pub(crate) list_gate: Option<usize>,
+    /// Fail every listing with a generic store error.
+    pub(crate) list_fails: bool,
 }
 
 impl Default for SpyOptions {
@@ -84,6 +90,8 @@ impl Default for SpyOptions {
             gate_depth: 0,
             gate_deadline: Duration::from_secs(10),
             hold: Duration::ZERO,
+            list_gate: None,
+            list_fails: false,
         }
     }
 }
@@ -108,11 +116,15 @@ pub(crate) fn spying_local_store(options: SpyOptions) -> (Arc<dyn ObjectStore>, 
             open: watch::channel(false).0,
             deadline: options.gate_deadline,
         }),
+        released: Arc::new(watch::channel(false).0),
+        held_lists: Arc::new(AtomicUsize::new(0)),
     };
     let store = SpyStore {
         inner: LocalFileSystem::new(),
         spy: spy.clone(),
         hold: options.hold,
+        list_gate: options.list_gate,
+        list_fails: options.list_fails,
     };
     (Arc::new(store), spy)
 }
@@ -123,6 +135,10 @@ pub(crate) struct StoreSpy {
     lists: Arc<AtomicUsize>,
     gets: Arc<Mutex<Vec<GetRecord>>>,
     depth: Arc<Depth>,
+    /// Latches true once gated listings may go on.
+    released: Arc<watch::Sender<bool>>,
+    /// Listings waiting at the gate now.
+    held_lists: Arc<AtomicUsize>,
 }
 
 impl StoreSpy {
@@ -150,6 +166,17 @@ impl StoreSpy {
     /// Open the gate for every GET held at it and every later one.
     pub(crate) fn open_gate(&self) {
         self.depth.open.send_replace(true);
+    }
+
+    /// Let every gated listing yield its remaining entries.
+    pub(crate) fn release_lists(&self) {
+        self.released.send_replace(true);
+    }
+
+    /// Listings waiting at the gate now. A listing dropped while it waits
+    /// counts out.
+    pub(crate) fn held_lists(&self) -> usize {
+        self.held_lists.load(Ordering::SeqCst)
     }
 }
 
@@ -205,11 +232,22 @@ impl Drop for InFlight {
     }
 }
 
+/// Counts a listing out of the gate when its wait ends or is dropped.
+struct HeldList(Arc<AtomicUsize>);
+
+impl Drop for HeldList {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 #[derive(Debug)]
 struct SpyStore {
     inner: LocalFileSystem,
     spy: StoreSpy,
     hold: Duration,
+    list_gate: Option<usize>,
+    list_fails: bool,
 }
 
 impl fmt::Display for SpyStore {
@@ -266,7 +304,37 @@ impl ObjectStore for SpyStore {
 
     fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
         self.spy.lists.fetch_add(1, Ordering::Relaxed);
-        self.inner.list(prefix)
+        if self.list_fails {
+            return futures_util::stream::once(async {
+                Err(object_store::Error::Generic {
+                    store: "spy",
+                    source: "listing refused by the spy".into(),
+                })
+            })
+            .boxed();
+        }
+        let listing = self.inner.list(prefix);
+        let Some(gate) = self.list_gate else {
+            return listing;
+        };
+        let released = self.spy.released.subscribe();
+        let held = Arc::clone(&self.spy.held_lists);
+        listing
+            .enumerate()
+            .then(move |(i, entry)| {
+                let mut released = released.clone();
+                let held = Arc::clone(&held);
+                async move {
+                    if i >= gate {
+                        held.fetch_add(1, Ordering::SeqCst);
+                        let _held = HeldList(held);
+                        // An error means the spy is gone, and the test with it.
+                        let _ = released.wait_for(|go| *go).await;
+                    }
+                    entry
+                }
+            })
+            .boxed()
     }
 
     async fn list_with_delimiter(&self, prefix: Option<&Path>) -> object_store::Result<ListResult> {

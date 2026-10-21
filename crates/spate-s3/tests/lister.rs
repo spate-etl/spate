@@ -1,7 +1,8 @@
 //! A bounded feed job's location: a worker compares the lister's job
 //! fingerprint before it receives a unit, and the one-pass lister writes the
-//! fingerprint, deletes an earlier end marker and publishes the listing.
-//! Every timed rule runs on a test clock the test advances.
+//! fingerprint, deletes an earlier end marker, publishes the listing and
+//! writes the end marker. A solo run on the in-process feed runs the lister
+//! itself. Every timed rule runs on a test clock the test advances.
 
 mod support;
 
@@ -21,8 +22,8 @@ use std::time::Duration;
 use support::location::{LocationHooks, OnCreate, location_store};
 use support::spy::{SpyOptions, spying_local_store};
 use support::{
-    Launched, PipelineYaml, launch_with_feed, line_framer, lines_bytes, recs, stop, test_options,
-    unit_over,
+    Launched, PipelineYaml, captured_rows, fingerprint, launch_customized, launch_with_feed,
+    line_framer, lines_bytes, recs, sorted, stop, test_options, unit_over,
 };
 
 const DEADLINE: Duration = Duration::from_secs(30);
@@ -36,16 +37,6 @@ fn data_dir(dir: &tempfile::TempDir) -> PathBuf {
     let data = dir.path().join("data");
     fs::create_dir_all(&data).unwrap();
     data
-}
-
-/// The job fingerprint of a source over `data` with the suite's 1 MiB
-/// target, written out by hand.
-fn fingerprint(data: &Path, compression: &str, delimiter: &str) -> String {
-    format!(
-        "spate-s3:feed1:d2:url=file://{}/:compression={compression}:target=1048576:\
-         delim={delimiter}",
-        data.display()
-    )
 }
 
 /// A worker over `data` on a scripted feed whose section names `location`,
@@ -1334,4 +1325,379 @@ fn resume_after_each_returned_key_publishes_the_rest() {
     source().list_once(&section, Arc::new(feed)).unwrap();
     let at = listed.iter().position(|k| k == "data/q/r").unwrap();
     assert_eq!(published_keys(&script), listed[at + 1..]);
+}
+
+/// The key a published unit names.
+fn unit_key(unit: &Unit) -> String {
+    SplitDescriptor::decode(&unit.body).unwrap().objects[0]
+        .key
+        .clone()
+}
+
+/// The end marker's body at a file location, if there is one.
+fn end_marker(location: &Path) -> Option<String> {
+    fs::read_to_string(location.join("end")).ok()
+}
+
+/// Whether `body` is an end marker: `run=`, 32 lowercase hex digits and a
+/// newline.
+fn is_marker(body: &str) -> bool {
+    body.strip_prefix("run=")
+        .and_then(|rest| rest.strip_suffix('\n'))
+        .is_some_and(|id| {
+            id.len() == 32
+                && id
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        })
+}
+
+fn client_error(err: &spate_core::error::SourceError) -> (spate_core::error::ErrorClass, &str) {
+    match err {
+        spate_core::error::SourceError::Client { class, reason } => (*class, reason),
+        other => panic!("expected a client error, got {other:?}"),
+    }
+}
+
+/// Pins a lister run end to end through `list_once`: it publishes one unit
+/// per listed object, receives nothing, writes an end marker of at most the
+/// location's object cap, and logs the marker with the location and the
+/// unit count.
+#[test]
+fn a_lister_run_publishes_every_unit_and_an_end_marker() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    fs::write(data.join("a.ndjson"), lines_bytes(&recs("a", 5))).unwrap();
+    fs::write(data.join("b.ndjson"), lines_bytes(&recs("b", 5))).unwrap();
+    let (location, path) = file_location(&dir);
+    let rt = runtime();
+    let (feed, script) = scripted_feed();
+    script.deliver(unit_over(&data, "a.ndjson"));
+    let lines = spate_test::capture_logs(tracing::Level::INFO, || {
+        lister_source(&data, &rt, "")
+            .list_once(&section("scripted", Some(&location)), Arc::new(feed))
+            .unwrap();
+    });
+    let mut keys: Vec<String> = script.published().iter().map(unit_key).collect();
+    keys.sort();
+    assert_eq!(keys.len(), 2);
+    assert!(
+        keys[0].ends_with("a.ndjson") && keys[1].ends_with("b.ndjson"),
+        "{keys:?}"
+    );
+    assert!(
+        script.delivered().is_empty(),
+        "a lister run receives nothing"
+    );
+    let end = end_marker(&path).expect("an end marker");
+    assert!(is_marker(&end), "{end:?}");
+    assert!(end.len() <= 4096);
+    assert!(
+        lines.iter().any(|l| l.contains("INFO")
+            && l.contains("end marker")
+            && l.contains(&location)
+            && l.contains("units=2")),
+        "{lines:#?}"
+    );
+}
+
+/// Pins that a lister run whose unit the feed refuses fails as fatal,
+/// naming the refused object, and leaves no end marker, though an earlier
+/// run at the location left one.
+#[test]
+fn a_refused_unit_withholds_the_end_marker() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    fs::write(data.join("a.ndjson"), lines_bytes(&recs("a", 5))).unwrap();
+    fs::write(data.join("b.ndjson"), lines_bytes(&recs("b", 5))).unwrap();
+    let (location, path) = file_location(&dir);
+    let rt = runtime();
+    let (feed, script) = scripted_feed();
+    let feed: Arc<dyn Feed> = Arc::new(feed);
+    lister_source(&data, &rt, "")
+        .list_once(&section("scripted", Some(&location)), Arc::clone(&feed))
+        .unwrap();
+    assert!(end_marker(&path).is_some(), "the first run leaves a marker");
+
+    script.refuse_next_publish(spate_core::feed::FeedErrorKind::Refused);
+    let err = lister_source(&data, &rt, "")
+        .list_once(&section("scripted", Some(&location)), feed)
+        .unwrap_err();
+    let (class, reason) = client_error(&err);
+    assert_eq!(class, spate_core::error::ErrorClass::Fatal, "{err}");
+    let refused = unit_key(&script.published()[2]);
+    assert!(reason.contains(&refused), "{reason}");
+    assert_eq!(end_marker(&path), None);
+}
+
+/// Pins that a lister run refuses the in-process feed before any store
+/// request.
+#[test]
+fn a_lister_run_refuses_the_in_process_feed() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    fs::write(data.join("a.ndjson"), lines_bytes(&recs("a", 5))).unwrap();
+    let rt = runtime();
+    let (store, hooks) = location_store();
+    let feed = spate_core::feed::memory::MemoryFeed::new();
+    let err = lister_source(&data, &rt, "")
+        .with_location_store(store)
+        .list_once(&section("memory", None), Arc::new(feed.clone()))
+        .unwrap_err();
+    let (class, reason) = client_error(&err);
+    assert_eq!(class, spate_core::error::ErrorClass::Fatal, "{err}");
+    assert!(reason.contains("durable feed"), "{reason}");
+    assert_eq!(feed.counts().visible, 0, "nothing is published");
+    assert_eq!(hooks.requests(), 0);
+}
+
+/// Pins that a lister run refuses a feed other than the one the section
+/// names, naming both, before any store request.
+#[test]
+fn a_lister_run_refuses_a_feed_the_section_does_not_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    fs::write(data.join("a.ndjson"), lines_bytes(&recs("a", 5))).unwrap();
+    let rt = runtime();
+    let (store, hooks) = location_store();
+    let feed = spate_core::feed::memory::MemoryFeed::new();
+    let err = lister_source(&data, &rt, "")
+        .with_location_store(store)
+        .list_once(&section("scripted", Some(LOCATION)), Arc::new(feed.clone()))
+        .unwrap_err();
+    let (class, reason) = client_error(&err);
+    assert_eq!(class, spate_core::error::ErrorClass::Fatal, "{err}");
+    assert!(
+        reason.contains("`scripted`") && reason.contains("`memory`"),
+        "{reason}"
+    );
+    assert_eq!(feed.counts().visible, 0, "nothing is published");
+    assert_eq!(hooks.requests(), 0);
+}
+
+/// Pins that a lister run called from inside an async context refuses,
+/// where blocking on the I/O handle would panic.
+#[test]
+fn a_lister_run_called_from_async_code_refuses() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    fs::write(data.join("a.ndjson"), lines_bytes(&recs("a", 5))).unwrap();
+    let (location, _) = file_location(&dir);
+    let rt = runtime();
+    let source = lister_source(&data, &rt, "");
+    let (feed, script) = scripted_feed();
+    let caller = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let err = caller
+        .block_on(async { source.list_once(&section("scripted", Some(&location)), Arc::new(feed)) })
+        .unwrap_err();
+    let (class, reason) = client_error(&err);
+    assert_eq!(class, spate_core::error::ErrorClass::Fatal, "{err}");
+    assert!(reason.contains("async context"), "{reason}");
+    assert!(script.published().is_empty());
+}
+
+/// Pins that a lister run on a source given a coordinator refuses before
+/// it publishes.
+#[test]
+#[expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
+fn a_lister_run_given_a_coordinator_refuses() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    fs::write(data.join("a.ndjson"), lines_bytes(&recs("a", 5))).unwrap();
+    let (location, path) = file_location(&dir);
+    let rt = runtime();
+    let (coordinator, _) = spate_test::scripted_coordinator();
+    let (feed, script) = scripted_feed();
+    let err = lister_source(&data, &rt, "")
+        .with_coordinator(Box::new(coordinator))
+        .list_once(&section("scripted", Some(&location)), Arc::new(feed))
+        .unwrap_err();
+    let (class, reason) = client_error(&err);
+    assert_eq!(class, spate_core::error::ErrorClass::Fatal, "{err}");
+    assert!(reason.contains("with_coordinator"), "{reason}");
+    assert!(script.published().is_empty());
+    assert!(!path.exists(), "no location request");
+}
+
+/// A solo pipeline on the in-process feed the runtime builds from the
+/// file, over `data` behind `store`.
+fn launch_solo(data: &Path, store: Arc<dyn object_store::ObjectStore>) -> Launched {
+    let yaml = PipelineYaml::file("s3-solo-lister", data)
+        .section("feed:\n  memory: {}\n")
+        .build();
+    launch_customized(
+        &yaml,
+        test_options(),
+        |_| {},
+        move |source, _io| line_framer(source).with_store(store),
+    )
+}
+
+/// Pins that a solo run on the in-process feed lists its prefix once and
+/// reads it, and that a restart lists and reads the whole prefix again.
+#[test]
+fn a_restarted_solo_run_lists_from_the_beginning() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let a = recs("a", 5);
+    let b = recs("b", 5);
+    fs::write(data.join("a.ndjson"), lines_bytes(&a)).unwrap();
+
+    let (store, spy) = spying_local_store(SpyOptions::default());
+    let l = launch_solo(&data, store);
+    wait_until(DEADLINE, "the first run reads a.ndjson", || {
+        sorted(captured_rows(&l.script)) == sorted(a.clone())
+    });
+    stop(&l);
+    assert_eq!(spy.lists(), 1);
+
+    fs::write(data.join("b.ndjson"), lines_bytes(&b)).unwrap();
+    let (store, spy) = spying_local_store(SpyOptions::default());
+    let l = launch_solo(&data, store);
+    let both: Vec<String> = a.iter().chain(&b).cloned().collect();
+    wait_until(DEADLINE, "the restart reads both objects", || {
+        sorted(captured_rows(&l.script)) == sorted(both.clone())
+    });
+    stop(&l);
+    assert_eq!(spy.lists(), 1);
+}
+
+/// Pins that a solo run on the in-process feed warns once that it lists the
+/// prefix from the beginning after a restart, in place of the warning that
+/// it publishes nothing, and that a run on another feed does not.
+#[test]
+fn a_solo_run_warns_that_it_lists_from_the_beginning() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    fs::write(data.join("a.ndjson"), lines_bytes(&recs("a", 5))).unwrap();
+    let rt = runtime();
+    let solo = "lists and reads the prefix from the beginning";
+    for (backend, feed) in [
+        (
+            "memory",
+            Arc::new(spate_core::feed::memory::MemoryFeed::new()) as Arc<dyn Feed>,
+        ),
+        ("scripted", Arc::new(scripted_feed().0) as Arc<dyn Feed>),
+    ] {
+        let mut source = lister_source(&data, &rt, "");
+        source
+            .configure_feed(&section(backend, None), feed)
+            .unwrap();
+        let lines = spate_test::capture_logs(tracing::Level::WARN, || {
+            source
+                .open(SourceCtx::new(Checkpointer::new().handle()))
+                .unwrap();
+        });
+        let warned = lines.iter().filter(|l| l.contains(solo)).count();
+        let silent = lines
+            .iter()
+            .any(|l| l.contains("publishes no units of its own"));
+        if backend == "memory" {
+            assert_eq!(warned, 1, "{lines:#?}");
+            assert!(!silent, "{lines:#?}");
+        } else {
+            assert_eq!(warned, 0, "{lines:#?}");
+            assert!(silent, "{lines:#?}");
+        }
+        assert!(!lines.iter().any(|l| l.contains("EPHEMERAL")), "{lines:#?}");
+    }
+}
+
+/// Pins that a solo run reads a listed unit while its listing is still
+/// running, and reads every row once after the listing ends.
+#[test]
+fn a_solo_run_reads_while_it_lists() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let a = recs("a", 5);
+    let b = recs("b", 5);
+    fs::write(data.join("a.ndjson"), lines_bytes(&a)).unwrap();
+    fs::write(data.join("b.ndjson"), lines_bytes(&b)).unwrap();
+    let (store, spy) = spying_local_store(SpyOptions {
+        list_gate: Some(1),
+        ..SpyOptions::default()
+    });
+    let feed = spate_core::feed::memory::MemoryFeed::new();
+    let yaml = PipelineYaml::file("s3-solo-lister", &data)
+        .section("feed:\n  memory: {}\n")
+        .build();
+    let l = launch_with_feed(
+        &yaml,
+        test_options(),
+        |_| {},
+        Arc::new(feed.clone()),
+        move |source, _io| line_framer(source).with_store(store),
+    );
+    wait_until(
+        DEADLINE,
+        "the first unit is read while the listing is held",
+        || feed.counts().acknowledged == 1 && spy.held_lists() == 1,
+    );
+    spy.release_lists();
+    wait_until(DEADLINE, "both units are read", || {
+        feed.counts().acknowledged == 2
+    });
+    stop(&l);
+    let both: Vec<String> = a.iter().chain(&b).cloned().collect();
+    assert_eq!(sorted(captured_rows(&l.script)), sorted(both));
+}
+
+/// Pins that a solo run stops at a shutdown while its listing never ends.
+#[test]
+fn a_solo_run_stops_while_its_lister_lists() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    fs::write(data.join("a.ndjson"), lines_bytes(&recs("a", 5))).unwrap();
+    let (store, spy) = spying_local_store(SpyOptions {
+        list_gate: Some(0),
+        ..SpyOptions::default()
+    });
+    let l = launch_solo(&data, store);
+    wait_until(DEADLINE, "the listing is held", || spy.held_lists() == 1);
+    stop(&l);
+}
+
+/// Pins that dropping a solo source ends its lister, though the I/O runtime
+/// lives on.
+#[test]
+fn a_dropped_solo_source_stops_its_lister() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    fs::write(data.join("a.ndjson"), lines_bytes(&recs("a", 5))).unwrap();
+    let rt = runtime();
+    let (store, spy) = spying_local_store(SpyOptions {
+        list_gate: Some(0),
+        ..SpyOptions::default()
+    });
+    let mut source = lister_source(&data, &rt, "").with_store(store);
+    source
+        .configure_feed(
+            &section("memory", None),
+            Arc::new(spate_core::feed::memory::MemoryFeed::new()),
+        )
+        .unwrap();
+    source
+        .open(SourceCtx::new(Checkpointer::new().handle()))
+        .unwrap();
+    wait_until(DEADLINE, "the listing is held", || spy.held_lists() == 1);
+    drop(source);
+    wait_until(DEADLINE, "the listing is dropped", || spy.held_lists() == 0);
+}
+
+/// Pins that a solo run whose listing fails ends as failed, naming the
+/// listing, though the store error is retryable.
+#[test]
+fn a_failed_solo_listing_fails_the_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    fs::write(data.join("a.ndjson"), lines_bytes(&recs("a", 5))).unwrap();
+    let (store, _spy) = spying_local_store(SpyOptions {
+        list_fails: true,
+        ..SpyOptions::default()
+    });
+    let l = launch_solo(&data, store);
+    let reason = failure_reason(&exit(&l));
+    assert!(reason.contains("listing"), "{reason}");
 }

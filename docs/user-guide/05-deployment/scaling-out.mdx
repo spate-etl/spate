@@ -1,5 +1,5 @@
 ---
-description: "Dividing one source's work across identical replicas, natively or through the coordination layer, and its costs."
+description: "Dividing one source's work across identical replicas: natively, through a work feed one lister run fills, or through the coordination layer, and its costs."
 ---
 
 # Scaling out
@@ -12,6 +12,7 @@ depends on the source:
 | Source kind | Scale-out story |
 |---|---|
 | Brokered | Native: the source's own group protocol divides the work across replicas. Nothing extra to deploy. |
+| Feed-reading | Workers read [work units](../07-reference/glossary.mdx#work-unit) from a durable [feed](../04-connectors/feeds/README.mdx) that one [lister](../07-reference/glossary.mdx#lister) run per job fills. Nothing elects a leader. See [Reading from a feed](#reading-from-a-feed). |
 | Coordinated | Native via the [coordination seam](../02-concepts/07-source-coordination.mdx): the elected leader plans the work into splits once, and replicas lease the splits it assigns them, hand them back on reassignment, and take over dead workers' splits — all with fenced per-split commits. Deploy a [coordination store](../04-connectors/coordination/README.mdx) and run N replicas. |
 | Custom | Bring a planner and hand the source a coordinator. See [custom sources](../06-extending/custom-source.mdx#coordination-aware-sources). |
 
@@ -19,9 +20,39 @@ depends on the source:
 Which kind each shipped source is, and how to wire it:
 [Kafka source](../04-connectors/sources/kafka/README.mdx) (brokered) ·
 [S3 source](../04-connectors/sources/s3/README.mdx#scaling-out-and-the-solo-default)
-(coordinated) ·
+(coordinated, or [feed-reading](../04-connectors/sources/s3/README.mdx#reading-from-a-feed)) ·
 [Datagen source](../04-connectors/sources/datagen/README.mdx#delivery-semantics)
 (neither, since every replica generates its own stream from offset 0).
+:::
+
+## Reading from a feed
+
+Every worker runs one binary and one pipeline file, keeps no volume and never
+lists. The job's [lister](../07-reference/glossary.mdx#lister) is a run of the
+same binary in lister mode: it reads the workers' pipeline file, builds no
+sink, lists the input once, publishes its units to the feed and exits. Its
+checkpoint sits at the [job location](../07-reference/glossary.mdx#job-location),
+so no process needs a volume. Nothing elects a leader, and nothing fences a
+second lister run, so run one per job.
+
+On Kubernetes:
+
+- **The lister run as a `Job`.** The pod's exit status reports the run, a
+  failed run exits non-zero, and the Job's restart policy and back-off limit
+  run it again, each run resuming after the checkpoint. Set
+  `activeDeadlineSeconds`, since a lister waits out an outage of its feed or
+  store with no deadline of its own.
+- **Continuous workers as a `Deployment`.**
+
+Start the lister first, or the workers at most one settling window (five
+minutes) before it: a worker of a bounded job exits when no job fingerprint
+appears at the job location within that window. On a feed that charges a
+delivery attempt to a worker waiting for the fingerprint, start the lister
+first.
+
+:::note Connector specifics
+[S3 source](../04-connectors/sources/s3/README.mdx#the-lister-run): the lister
+run and its end marker.
 :::
 
 The rest of this page is about the coordinated case: what a fleet does, what it

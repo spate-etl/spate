@@ -72,6 +72,9 @@ The identity a worker runs as needs these actions:
 | `sqs:GetQueueAttributes` | The queue and its dead-letter queue |
 | `sqs:SendMessage` | The queue, for a process that publishes units |
 
+A [lister run](../../sources/s3/README.mdx#the-lister-run) publishes units and
+receives none, so it needs only `sqs:GetQueueAttributes` and `sqs:SendMessage`.
+
 The client verifies SQS against the system trust store. When `SSL_CERT_FILE`
 or `SSL_CERT_DIR` is set, the certificates they name replace the system store.
 If the store yields no certificate the client can parse, it logs a warning and

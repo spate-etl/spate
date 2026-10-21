@@ -66,9 +66,11 @@ marks an issue the release cannot ship without. Work on CI, benchmarks and
 tooling carries no milestone unless a release depends on it.
 
 Everything else carries a priority instead: `priority: high`, `priority: medium`
-or `priority: low`. Each release takes its fixes from `priority: high` first. An
-issue that misses its release moves to the next milestone once; if it misses
-that one too, it returns to the backlog with a priority label.
+or `priority: low`. A maintainer sets the milestone or the priority when the
+issue is opened, so every open issue carries one of the two. Each release takes
+its fixes from `priority: high` first. An issue that misses its release moves to
+the next milestone once; if it misses that one too, it returns to the backlog
+with a priority label.
 
 To find something to work on, `good first issue` marks issues scoped for a first
 contribution, and `priority: high` marks the backlog that matters most now.

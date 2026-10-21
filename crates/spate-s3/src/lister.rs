@@ -1,7 +1,8 @@
-//! A one-pass lister for a bounded feed job: it writes the job fingerprint
-//! at the job location, deletes an end marker an earlier run left there,
-//! then publishes one unit per part of each listed object, after the
-//! lister's checkpoint when the location holds one.
+//! A one-pass lister for a bounded feed job: it compares the job fingerprint
+//! at the job location, or creates it when there is none after deleting a
+//! checkpoint there, deletes an end marker an earlier run left, then
+//! publishes one unit per part of each listed object, after the lister's
+//! checkpoint when it matched the fingerprint.
 //!
 //! The checkpoint is the last listed key whose units, and those of every key
 //! listed before it, the feed has confirmed. The lister rewrites it at most
@@ -32,10 +33,10 @@ use std::sync::Arc;
 /// SQS send batch of 10.
 pub(crate) const LISTER_IN_FLIGHT: usize = 32;
 
-/// The most listed keys between two checkpoint writes: the largest
-/// `ListObjectsV2` page AWS returns. A store whose pages hold at most this
-/// many keys sees at most one write per page, and one more when the listing
-/// ends.
+/// How many listed keys pass between two points where the lister writes the
+/// checkpoint if it moved: the largest `ListObjectsV2` page AWS returns. A
+/// store whose pages hold at most this many keys sees at most one write per
+/// page, and one more when the listing ends.
 pub(crate) const CHECKPOINT_EVERY: usize = 1000;
 
 /// One lister run over a listing prefix.
@@ -53,7 +54,8 @@ pub(crate) struct Lister {
     /// Whether `store` lists the keys after an offset with `start-after`.
     /// Without it the run keeps no checkpoint.
     pub(crate) resume: bool,
-    /// The most listed keys between two checkpoint writes.
+    /// How many listed keys pass between two points where the checkpoint is
+    /// written if it moved.
     pub(crate) checkpoint_every: usize,
     /// The objects the S3 client takes out of `store`'s listing pages.
     pub(crate) unaddressable: Option<UnaddressableKeys>,
@@ -73,8 +75,9 @@ impl Lister {
     /// fingerprint it matched, delete an earlier end marker, then publish
     /// every listed object's units in the order the store lists them, after
     /// the checkpoint when there is one. An object the S3 client cannot
-    /// address is published once its page is fetched, ahead of the keys
-    /// listed before it on that page.
+    /// address is published before the next key the listing yields after its
+    /// page is fetched, or when the listing ends, ahead of any key listed
+    /// before it on that page.
     ///
     /// # Errors
     ///
@@ -97,10 +100,9 @@ impl Lister {
                 None => {
                     // A checkpoint beside no fingerprint is not this job's. It
                     // goes before the create, so a run that stops between the
-                    // two never leaves it beside a fingerprint.
-                    if self.resume {
-                        delete_checkpoint(store.as_ref(), location).await?;
-                    }
+                    // two never leaves it beside a fingerprint, and a run that
+                    // keeps none still deletes it for a later run that does.
+                    delete_checkpoint(store.as_ref(), location).await?;
                     write_fingerprint(store.as_ref(), location, &self.fingerprint).await?
                 }
             };
@@ -1362,7 +1364,8 @@ mod tests {
         assert_eq!(rt.block_on(job.checkpoint()), None);
     }
 
-    /// Pins that a one-key listing checkpoints that key.
+    /// Pins that a one-key listing at a fresh location checkpoints that key,
+    /// and sends no checkpoint delete there.
     #[test]
     fn a_one_key_listing_checkpoints_that_key() {
         let rt = runtime();
@@ -1374,6 +1377,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(job.checkpoint_writes(), ["data/a"]);
+        let events = job.events.lock().unwrap().clone();
+        assert!(
+            !events.contains(&Event::Delete(CHECKPOINT.to_owned())),
+            "{events:#?}"
+        );
     }
 
     /// Pins that a checkpoint at the last key publishes nothing and leaves
@@ -1614,48 +1622,139 @@ mod tests {
         assert_eq!(job.ops.creates.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
-    /// Pins that a checkpoint found beside no fingerprint is deleted with a
-    /// log line naming the location.
+    /// Pins that a checkpoint found beside no fingerprint is deleted with an
+    /// INFO line naming the location, by a run that keeps a checkpoint and by
+    /// one that keeps none.
     #[test]
     fn a_deleted_foreign_checkpoint_is_logged() {
         let rt = runtime();
-        let job = Job::new();
+        for resume in [true, false] {
+            let job = Job::new();
+            rt.block_on(async {
+                job.put_rows(&["data/a"]).await;
+                job.seed_checkpoint(b"data/a").await;
+            });
+            let mut lister = job.lister(KeyedFeed::confirming(&job.events), CHECKPOINT_EVERY);
+            lister.resume = resume;
+            let lines = spate_test::capture_logs(tracing::Level::INFO, || {
+                rt.block_on(lister.run()).unwrap();
+            });
+            assert!(
+                lines.iter().any(|l| l.contains("INFO")
+                    && l.contains("deleted a checkpoint")
+                    && l.contains(LOCATION)),
+                "{lines:#?}"
+            );
+            let events = job.events.lock().unwrap().clone();
+            assert!(
+                events.contains(&Event::Delete(CHECKPOINT.to_owned())),
+                "resume {resume}: {events:#?}"
+            );
+        }
+    }
+
+    /// The error S3 gives for one key a `DeleteObjects` request refused.
+    fn refused_delete(path: &Path) -> object_store::Error {
+        object_store::Error::Generic {
+            store: "S3",
+            source: format!(
+                "DeleteObjects request failed for key {path}: Access Denied (code: AccessDenied)"
+            )
+            .into(),
+        }
+    }
+
+    /// Pins that a refused delete of a checkpoint found beside no
+    /// fingerprint fails the run as fatal before it creates the fingerprint
+    /// or publishes, and leaves the checkpoint in place.
+    #[test]
+    fn a_refused_checkpoint_delete_is_fatal() {
+        let rt = runtime();
+        let job = Job::with_ops(HookStore {
+            delete: Some(|path| {
+                (path.filename() == Some("checkpoint")).then(|| refused_delete(path))
+            }),
+            ..HookStore::default()
+        });
         rt.block_on(async {
             job.put_rows(&["data/a"]).await;
             job.seed_checkpoint(b"data/a").await;
         });
-        let lister = job.lister(KeyedFeed::confirming(&job.events), CHECKPOINT_EVERY);
-        let lines = spate_test::capture_logs(tracing::Level::INFO, || {
-            rt.block_on(lister.run()).unwrap();
-        });
+        let feed = KeyedFeed::confirming(&job.events);
+        let err = rt
+            .block_on(
+                job.lister(Arc::clone(&feed) as Arc<dyn Feed>, CHECKPOINT_EVERY)
+                    .run(),
+            )
+            .unwrap_err();
+        assert_eq!(class(&err), ErrorClass::Fatal, "{err}");
+        assert!(feed.keys().is_empty());
         assert!(
-            lines
-                .iter()
-                .any(|l| l.contains("deleted a checkpoint") && l.contains(LOCATION)),
-            "{lines:#?}"
+            rt.block_on(job.ops.inner.head(&Path::from("jobs/a/fingerprint")))
+                .is_err()
+        );
+        assert_eq!(rt.block_on(job.checkpoint()).as_deref(), Some("data/a"));
+    }
+
+    /// Pins that a refused delete of an earlier end marker fails the run as
+    /// fatal before it publishes, and leaves the marker in place.
+    #[test]
+    fn a_refused_end_marker_delete_fails_the_run() {
+        let rt = runtime();
+        let job = Job::with_ops(HookStore {
+            delete: Some(|path| (path.filename() == Some("end")).then(|| refused_delete(path))),
+            ..HookStore::default()
+        });
+        rt.block_on(async {
+            job.put_rows(&["data/a"]).await;
+            job.matched().await;
+            job.ops
+                .inner
+                .put(
+                    &Path::from("jobs/a/end"),
+                    PutPayload::from_static(b"run=earlier\n"),
+                )
+                .await
+                .unwrap();
+        });
+        let feed = KeyedFeed::confirming(&job.events);
+        let err = rt
+            .block_on(
+                job.lister(Arc::clone(&feed) as Arc<dyn Feed>, CHECKPOINT_EVERY)
+                    .run(),
+            )
+            .unwrap_err();
+        assert_eq!(class(&err), ErrorClass::Fatal, "{err}");
+        assert!(feed.keys().is_empty());
+        assert!(
+            rt.block_on(job.ops.inner.head(&Path::from("jobs/a/end")))
+                .is_ok()
         );
     }
 
-    /// Pins that a store refusing the checkpoint delete with `AccessDenied`,
-    /// which S3 reports inside a 200 `DeleteObjects` reply, fails the run
-    /// as fatal.
+    /// Pins that an empty unaddressable object does not hide one whose key
+    /// decodes alike and that lists with bytes on a later page.
     #[test]
-    fn a_refused_checkpoint_delete_is_fatal() {
-        let endpoint = crate::test_servers::sequence_server(vec![(
-            "200 OK",
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
-             <DeleteResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
-             <Error><Key>jobs/a/checkpoint</Key><Code>AccessDenied</Code>\
-             <Message>Access Denied</Message></Error></DeleteResult>"
-                .to_owned(),
-        )]);
-        let store = crate::test_servers::store_at(&endpoint);
-        let location = Location::parse(LOCATION, "s3://data/events/").unwrap();
-        let err = runtime()
-            .block_on(store.delete(&location.checkpoint()))
-            .map_err(|e| io_error(&location, &location.checkpoint(), &e))
-            .unwrap_err();
-        assert_eq!(class(&err), ErrorClass::Fatal, "{err}");
+    fn an_empty_unaddressable_key_does_not_hide_a_later_one_with_bytes() {
+        let rt = runtime();
+        let url = crate::test_servers::listing_server(vec![
+            list_page(&[("data/a", 7), ("data/e\rf", 0)], Some("1")),
+            list_page(&[("data/e\r\nf", 4), ("data/z", 7)], None),
+        ]);
+        let keys = UnaddressableKeys::default();
+        let store = crate::test_servers::builder_at(&url)
+            .with_access_key_id("AKIDTEST")
+            .with_secret_access_key("secret")
+            .with_http_connector(UnaddressableConnector::new(keys.clone()))
+            .build()
+            .unwrap();
+        let job = Job::new();
+        let feed = KeyedFeed::confirming(&job.events);
+        let mut lister = job.lister(Arc::clone(&feed) as Arc<dyn Feed>, CHECKPOINT_EVERY);
+        lister.store = Arc::new(store);
+        lister.unaddressable = Some(keys);
+        rt.block_on(lister.run()).unwrap();
+        assert_eq!(feed.keys(), ["data/a", "data/e\nf", "data/z"]);
     }
 
     /// A source over the S3 stub at `endpoint`, its location in `ops`.

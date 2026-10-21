@@ -62,8 +62,8 @@ A run that finds no job fingerprint deletes a checkpoint it finds before it
 creates the fingerprint, so a run that stops between the two leaves no
 checkpoint beside a fingerprint. A run whose fingerprint matches the one it
 reads then reads the checkpoint, and refuses one that is not a key under the
-listing prefix. The read, never the create's answer, decides which, since
-Garage applies a conditional create over an existing object and answers 200.
+listing prefix. The read decides which, since Garage applies a conditional
+create over an existing object and answers 200.
 The in-process feed refuses a location. The lister skips every zero-byte
 object, which holds no records, and never checkpoints at one.
 It publishes each object the connector took out of a page whole, as
@@ -82,9 +82,10 @@ prefix from the start every run. SeaweedFS is unsupported for resume.
   no single newest message.
 - Bad, because a crash re-publishes every unit after the last checkpoint,
   including units the feed had already confirmed.
-- Bad, because a re-run at a finished job's location publishes only the keys
-  added since, and a job whose feed lost its units, such as a purged queue,
-  never reads the keys up to the checkpoint again.
+- Bad, because a re-run at a finished job's location publishes the keys added
+  since, and again each object the connector took out of a page after the last
+  checkpointed key, and a job whose feed lost its units, such as a purged
+  queue, never reads the keys up to the checkpoint again.
 - Bad, because a store whose order changes between two listings (a SeaweedFS
   SQL filer upgraded across its byte-order fix) loses the keys that moved
   ahead of the checkpoint. An operator who upgrades the store during a job

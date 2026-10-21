@@ -507,13 +507,14 @@ also end early; see [Testing](#testing).
 
 :::danger
 A run at a location that holds the job's fingerprint and a `checkpoint` never
-reads the keys up to the checkpoint. A re-run of a finished job publishes only
-keys added since. A job whose feed lost
-its units, such as a purged queue or a new queue or topic at the same location,
-never reads its keys up to the checkpoint. If the store's list order may have
-changed since `checkpoint` was written, such as across a store upgrade, stop
-the lister, delete `checkpoint`, and start it again. To start a job over,
-delete the whole location prefix.
+reads the keys up to the checkpoint. A re-run of a finished job publishes the
+keys added since, and again each object the S3 client cannot address that lists
+after the last checkpointed key. A job whose feed lost its units, such as a
+purged queue or a new queue or topic at the same location, never reads its keys
+up to the checkpoint. If the store's list order may have changed since
+`checkpoint` was written, such as across a store upgrade, stop the lister,
+delete `checkpoint`, and start it again. To start a job over, delete the whole
+location prefix.
 :::
 
 The fingerprint covers the unit format version, `url`, `compression`,
@@ -564,8 +565,8 @@ source dead-letters; nothing checks that.
 Workers need read access to the location. The lister needs to read, write and
 delete there. On AWS S3 that read access includes `s3:ListBucket` on the
 location's bucket: without it a read of an absent object answers `403`, so a
-worker started before its lister fails at once and a lister fails on the absent
-checkpoint or end marker. The error says so. Write access at the location
+worker started before its lister fails at once and a lister at a new location
+fails on the absent fingerprint. The error says so. Write access at the location
 decides where a lister run resumes. The lister creates `fingerprint` only when
 absent, so a lister whose `store` sets `aws_conditional_put: disabled` fails.
 Run one lister per location: the conditional create refuses a second lister

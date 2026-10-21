@@ -105,6 +105,10 @@ pub(crate) enum PutAnswer {
 /// Answers a PUT for the path, or `None` to write the inner store.
 pub(crate) type PutHook = fn(&object_store::path::Path) -> Option<PutAnswer>;
 
+/// Answers a DELETE for the path with an error, or `None` to delete from
+/// the inner store.
+pub(crate) type DeleteHook = fn(&object_store::path::Path) -> Option<object_store::Error>;
+
 /// One write a [`HookStore`] took, or one event a test's feed records beside
 /// them, in the order they happened.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -131,6 +135,8 @@ pub(crate) struct HookStore {
     pub(crate) get: Option<GetHook>,
     /// Answers a PUT in place of `inner` when it returns `Some`.
     pub(crate) put: Option<PutHook>,
+    /// Answers a DELETE in place of `inner` when it returns `Some`.
+    pub(crate) delete: Option<DeleteHook>,
     /// Lists in reverse key order.
     pub(crate) reverse_list: bool,
     /// Answers every conditional create `AlreadyExists` without storing.
@@ -226,6 +232,13 @@ impl object_store::ObjectStore for HookStore {
     {
         use futures_util::StreamExt as _;
         let events = self.events.clone();
+        let hook = self.delete;
+        let locations = locations
+            .map(move |location| match (hook, location) {
+                (Some(hook), Ok(path)) => hook(&path).map_or(Ok(path), Err),
+                (_, location) => location,
+            })
+            .boxed();
         self.inner
             .delete_stream(locations)
             .inspect(move |deleted| {

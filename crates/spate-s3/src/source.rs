@@ -203,7 +203,10 @@ impl S3Source {
     /// its store reads storage notifications only under an `s3://` or
     /// `s3a://` URL, whose host is the bucket their records must name. A
     /// lister over a store given here resumes from its checkpoint as over the
-    /// S3 client, except under a `file://` URL, where it keeps none.
+    /// S3 client, except under a `file://` URL, where it keeps none. Under any
+    /// other URL the store must list the keys after an offset in its own
+    /// listing order, as `InMemory` and the S3 client do and
+    /// `LocalFileSystem` does not.
     ///
     /// Behind the off-by-default `testing` feature because it exposes an
     /// `object_store` type, which this crate's public API otherwise avoids

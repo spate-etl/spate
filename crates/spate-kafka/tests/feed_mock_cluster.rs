@@ -12,13 +12,13 @@ use rdkafka::mocking::{MockCluster, MockCoordinator};
 use rdkafka::types::RDKafkaRespErr;
 use spate_core::feed::{Feed, FeedErrorKind, Receipt, Unit};
 use spate_core::pipeline::ExitState;
-use spate_kafka::feed::KafkaFeedError;
+use spate_kafka::feed::{KafkaFeed, KafkaFeedError};
 use spate_test::{WriteOutcome, wait_until};
 use std::time::{Duration, Instant};
 use support::feed::{
     ATTEMPT, ATTEMPT_PARTITIONS, COMMIT_PERIOD, DEAD, DEADLINE, ON_MOCK, RETRY, WORK, committed,
     data_dir, direct, exists, feed_yaml, high_watermark, launch, produce_raw, publish,
-    read_attempts, read_topic, recs, sorted, stage, written,
+    read_attempts, read_topic, recs, section, sorted, stage, written,
 };
 use support::{corrupt_batch, produce_batch};
 
@@ -372,6 +372,61 @@ fn a_unit_published_twice_counts_each_publish_from_one() {
         (1, 1),
         "the second publish counted the first's read"
     );
+}
+
+/// A feed built with `KafkaFeed::publisher` on `yaml`'s section, with the
+/// runtime it took.
+fn publisher(yaml: &str) -> (KafkaFeed, tokio::runtime::Runtime) {
+    let io = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let feed =
+        KafkaFeed::publisher_without_config_checks(&section(yaml), io.handle()).expect("publisher");
+    (feed, io)
+}
+
+/// Pins that a unit published on a feed that only publishes is confirmed
+/// and read by a worker in the section's group, with its id and body.
+#[test]
+fn a_publish_on_a_publishing_feed_is_confirmed() {
+    let cluster = cluster(1);
+    let brokers = cluster.bootstrap_servers();
+    let yaml = feed_yaml(&brokers, &spate_test::unique_name("publisher"), "", "");
+    let (lister, _io) = publisher(&yaml);
+    publish(&lister, Unit::new("u", b"body".to_vec()));
+    let worker = direct(&yaml);
+    let got = worker.take("the published unit");
+    assert_eq!(
+        (got.unit.id.as_str(), got.unit.body.as_slice()),
+        ("u", &b"body"[..])
+    );
+    assert_eq!(got.deliveries, 1);
+}
+
+/// Pins that a feed that only publishes refuses each call that reads or
+/// settles a unit as Fatal, naming the constructor a worker uses.
+#[test]
+fn a_publishing_feed_refuses_to_read() {
+    let cluster = cluster(1);
+    let brokers = cluster.bootstrap_servers();
+    let (lister, _io) = publisher(&feed_yaml(
+        &brokers,
+        &spate_test::unique_name("publisher-read"),
+        "",
+        "",
+    ));
+    let errors = [
+        lister.receive(1).unwrap_err(),
+        lister.renew(Receipt(1)).unwrap_err(),
+        lister.acknowledge(Receipt(1)).unwrap_err(),
+        lister.fail(Receipt(1), "test").unwrap_err(),
+    ];
+    for e in errors {
+        assert_eq!(e.kind, FeedErrorKind::Fatal, "{e}");
+        assert!(e.to_string().contains("KafkaFeed::connect"), "{e}");
+    }
 }
 
 /// Pins that a unit published again after its earlier publish was

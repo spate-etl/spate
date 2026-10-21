@@ -456,6 +456,7 @@ fn idle_feed() -> KafkaFeed {
         thread: None,
         gate: None,
         follower: None,
+        publish_only: false,
     }
 }
 
@@ -1425,6 +1426,7 @@ mod cluster {
             thread: Some(thread),
             gate: None,
             follower: None,
+            publish_only: false,
         };
         let mut reason = None;
         wait_until(DEADLINE, "the feed stops", || match feed.receive(1) {
@@ -1463,6 +1465,7 @@ mod cluster {
             thread: None,
             gate: None,
             follower: None,
+            publish_only: false,
         };
         let admission = admission(&config, &core, &producer, STEP);
         drive(&mut d, "the unit is buffered", |d| {
@@ -1815,6 +1818,7 @@ mod cluster {
             thread: Some(std::thread::spawn(move || consumer::run(d))),
             gate: Some(gate),
             follower: Some(follower),
+            publish_only: false,
         };
         wait_until(DEADLINE, "the consumer owns its partitions", || {
             owned(&feed) == 1
@@ -2562,6 +2566,7 @@ mod cluster {
             thread: None,
             gate: Some(gate),
             follower: Some(follower),
+            publish_only: false,
         };
         wait_until(DEADLINE, "the unit is buffered", || buffered(&feed) == 1);
         assert_eq!(core.lock().ready[0].deliveries, 1);
@@ -2637,6 +2642,7 @@ mod cluster {
             thread: None,
             gate: Some(gate),
             follower: None,
+            publish_only: false,
         };
         let dropped = returns_within(Duration::from_secs(10), move || drop(feed));
         if !dropped {
@@ -2670,6 +2676,7 @@ mod cluster {
             thread: None,
             gate: None,
             follower: None,
+            publish_only: false,
         });
         let delivery = feed.receive(1).unwrap().pop().unwrap();
         cluster.broker_down(1).unwrap();

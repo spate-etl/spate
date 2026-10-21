@@ -45,6 +45,12 @@ records each unit's attempt before the unit is read (see
 [Counting deliveries](#counting-deliveries)). The checks read from the
 brokers, so an unreachable broker fails the call within 30 seconds.
 
+A process that only publishes, such as a lister run, builds its feed with
+`KafkaFeed::publisher`. It runs the same startup checks and builds the
+producer, starts none of the three threads, and never joins the group, so it
+takes no partition from the workers. Its `receive`, `renew`, `acknowledge` and
+`fail` return a Fatal error.
+
 ## Configuration
 
 The `feed: { kafka: ... }` section deserializes into `KafkaFeedConfig`
@@ -213,9 +219,9 @@ partition again from its earliest retained offset.
 
 ## Startup checks
 
-`KafkaFeed::connect` reads the metadata and configuration of the work,
-retry, dead-letter and attempt topics before any of the feed's clients joins
-the group, and refuses topics the feed cannot run on:
+`KafkaFeed::connect` and `KafkaFeed::publisher` read the metadata and
+configuration of the work, retry, dead-letter and attempt topics before any of
+the feed's clients joins the group, and refuse topics the feed cannot run on:
 
 - a missing work, retry, dead-letter or attempt topic;
 - a work, retry or dead-letter topic whose `cleanup.policy` includes

@@ -7,7 +7,9 @@
 //! unit's attempt before the unit reaches the reader. One producer writes
 //! publishes, attempt records and their tombstones, retries and dead
 //! letters. The [`Feed`] methods lock the shared state, change it, and hand
-//! any write to the producer, so none of them waits on I/O (INV-2).
+//! any write to the producer, so none of them waits on I/O (INV-2). A feed
+//! built with [`KafkaFeed::publisher`] runs none of the three threads and
+//! only publishes.
 //!
 //! # Offsets
 //!
@@ -418,6 +420,9 @@ pub struct KafkaFeed {
     thread: Option<std::thread::JoinHandle<()>>,
     gate: Option<std::thread::JoinHandle<()>>,
     follower: Option<std::thread::JoinHandle<()>>,
+    /// Built by [`KafkaFeed::publisher`]: it holds no member of the group,
+    /// and every call but `publish` is refused.
+    publish_only: bool,
 }
 
 impl std::fmt::Debug for KafkaFeed {
@@ -505,43 +510,92 @@ impl KafkaFeed {
         )
     }
 
+    /// Connect a feed that only publishes: the startup checks
+    /// [`connect`](Self::connect) runs, and a producer, with no consumer,
+    /// gate or follower. It never joins the section's `group_id`, so a
+    /// lister run beside the workers takes no partition from them.
+    ///
+    /// A publish is written and confirmed as on a feed from `connect`.
+    /// `receive`, `renew`, `acknowledge` and `fail` return a
+    /// [`Fatal`](FeedErrorKind::Fatal) error.
+    ///
+    /// # Errors
+    ///
+    /// As [`connect`](Self::connect), less the failures to start the
+    /// consumer, gate and follower threads.
+    ///
+    /// # Panics
+    ///
+    /// When called from inside an async context, as
+    /// [`Handle::block_on`](tokio::runtime::Handle::block_on) does.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use spate_core::config::FeedSection;
+    /// use spate_kafka::feed::KafkaFeed;
+    ///
+    /// # fn run(section: &FeedSection, io: &tokio::runtime::Handle) -> Result<(), Box<dyn std::error::Error>> {
+    /// let feed = KafkaFeed::publisher(section, io)?;
+    /// # Ok(()) }
+    /// ```
+    pub fn publisher(
+        section: &FeedSection,
+        io: &tokio::runtime::Handle,
+    ) -> Result<KafkaFeed, KafkaFeedError> {
+        Self::publisher_with(section, io, startup::Scope::All, startup::CONNECT_BOUND)
+    }
+
+    /// [`publisher`](Self::publisher) with only the checks that the topics
+    /// exist, for rdkafka's MockCluster.
+    ///
+    /// # Errors
+    ///
+    /// As [`publisher`](Self::publisher), less the configuration checks.
+    #[cfg(feature = "testing")]
+    #[doc(hidden)]
+    pub fn publisher_without_config_checks(
+        section: &FeedSection,
+        io: &tokio::runtime::Handle,
+    ) -> Result<KafkaFeed, KafkaFeedError> {
+        Self::publisher_with(
+            section,
+            io,
+            startup::Scope::Existence,
+            startup::CONNECT_BOUND,
+        )
+    }
+
+    fn publisher_with(
+        section: &FeedSection,
+        io: &tokio::runtime::Handle,
+        scope: startup::Scope,
+        bound: Duration,
+    ) -> Result<KafkaFeed, KafkaFeedError> {
+        let (config, checked) = check(section, io, scope, bound)?;
+        let core = Arc::new(Core::new(&config, checked.attempt_partitions));
+        let producer = producer(&config, &core, crate::security::openssl_env_overrides())?;
+        tracing::info!(
+            topic = %config.topic,
+            "the Kafka feed started, publishing only"
+        );
+        Ok(KafkaFeed {
+            core,
+            producer,
+            thread: None,
+            gate: None,
+            follower: None,
+            publish_only: true,
+        })
+    }
+
     fn connect_with(
         section: &FeedSection,
         io: &tokio::runtime::Handle,
         scope: startup::Scope,
         bound: Duration,
     ) -> Result<KafkaFeed, KafkaFeedError> {
-        let config = KafkaFeedConfig::from_section(section)?;
-        let openssl_env = crate::security::openssl_env_overrides();
-        let admin_config = config.admin_config(openssl_env);
-        let admin = AdminClient::from_config(&admin_config).map_err(|e| {
-            KafkaFeedError::Refused(format!(
-                "creating the admin client: {}",
-                redacted_client_error(&e)
-            ))
-        })?;
-        let reader = ThreadedProducer::from_config_and_context(
-            &admin_config,
-            crate::sink::SinkContext::detached(),
-        )
-        .map_err(|e| {
-            KafkaFeedError::Refused(format!(
-                "creating the metadata client: {}",
-                redacted_client_error(&e)
-            ))
-        })?;
-        let topics = Topics::new(&config);
-        let step = Mutex::new("starting".to_owned());
-        let checked = {
-            let admin = Arc::new(startup::Brokers::new(admin, reader));
-            let watched = Arc::clone(&admin);
-            io.block_on(startup::bounded(
-                &step,
-                bound,
-                move || watched.rejection(),
-                startup::check(&*admin, &topics, scope, &step),
-            ))?
-        };
+        let (config, checked) = check(section, io, scope, bound)?;
         let (core, producer, driver) = parts(&config, checked.attempt_partitions)?;
         let follower = Follower::new(&config, Arc::clone(&core))?
             .spawn()
@@ -556,6 +610,7 @@ impl KafkaFeed {
             thread: None,
             gate: None,
             follower: Some(follower),
+            publish_only: false,
         };
         let gate = gate::Gate::new(
             Arc::clone(&feed.core),
@@ -580,6 +635,48 @@ impl KafkaFeed {
     fn lock(&self) -> MutexGuard<'_, State> {
         self.core.lock()
     }
+}
+
+/// Read the section and run the startup checks on the topics, bounded by
+/// `bound`, before any client joins the group.
+fn check(
+    section: &FeedSection,
+    io: &tokio::runtime::Handle,
+    scope: startup::Scope,
+    bound: Duration,
+) -> Result<(KafkaFeedConfig, startup::Checked), KafkaFeedError> {
+    let config = KafkaFeedConfig::from_section(section)?;
+    let openssl_env = crate::security::openssl_env_overrides();
+    let admin_config = config.admin_config(openssl_env);
+    let admin = AdminClient::from_config(&admin_config).map_err(|e| {
+        KafkaFeedError::Refused(format!(
+            "creating the admin client: {}",
+            redacted_client_error(&e)
+        ))
+    })?;
+    let reader = ThreadedProducer::from_config_and_context(
+        &admin_config,
+        crate::sink::SinkContext::detached(),
+    )
+    .map_err(|e| {
+        KafkaFeedError::Refused(format!(
+            "creating the metadata client: {}",
+            redacted_client_error(&e)
+        ))
+    })?;
+    let topics = Topics::new(&config);
+    let step = Mutex::new("starting".to_owned());
+    let checked = {
+        let admin = Arc::new(startup::Brokers::new(admin, reader));
+        let watched = Arc::clone(&admin);
+        io.block_on(startup::bounded(
+            &step,
+            bound,
+            move || watched.rejection(),
+            startup::check(&*admin, &topics, scope, &step),
+        ))?
+    };
+    Ok((config, checked))
 }
 
 /// Log the INFO line a feed that connected writes: its section and what the
@@ -612,16 +709,7 @@ fn parts(
 ) -> Result<(Arc<Core>, Producer, Driver), KafkaFeedError> {
     let openssl_env = crate::security::openssl_env_overrides();
     let core = Arc::new(Core::new(config, attempt_partitions));
-    let producer = Producer::from_config_and_context(
-        &config.producer_config(openssl_env),
-        FeedProducerContext::new(Arc::clone(&core)),
-    )
-    .map_err(|e| {
-        KafkaFeedError::Refused(format!(
-            "creating the producer: {}",
-            redacted_client_error(&e)
-        ))
-    })?;
+    let producer = producer(config, &core, openssl_env)?;
     let consumer_config = config.consumer_config(openssl_env);
     let lookup_timeout = consumer::committed_lookup_timeout(&consumer_config);
     let consumer =
@@ -643,6 +731,24 @@ fn parts(
         lookup_timeout,
     );
     Ok((core, producer, driver))
+}
+
+/// The feed's one producer, whose delivery reports settle into `core`.
+fn producer(
+    config: &KafkaFeedConfig,
+    core: &Arc<Core>,
+    openssl_env: bool,
+) -> Result<Producer, KafkaFeedError> {
+    Producer::from_config_and_context(
+        &config.producer_config(openssl_env),
+        FeedProducerContext::new(Arc::clone(core)),
+    )
+    .map_err(|e| {
+        KafkaFeedError::Refused(format!(
+            "creating the producer: {}",
+            redacted_client_error(&e)
+        ))
+    })
 }
 
 impl Drop for KafkaFeed {
@@ -679,6 +785,16 @@ pub(crate) fn stop(core: &Core) {
     core.ledger.1.notify_all();
 }
 
+/// The error every call but `publish` returns on a feed that only
+/// publishes.
+fn publish_only() -> FeedError {
+    FeedError::new(
+        FeedErrorKind::Fatal,
+        "this Kafka feed only publishes, since it was built with `KafkaFeed::publisher`; a \
+         worker builds its feed with `KafkaFeed::connect`",
+    )
+}
+
 fn gone(receipt: Receipt) -> FeedError {
     FeedError::new(
         FeedErrorKind::Gone,
@@ -700,6 +816,9 @@ impl Feed for KafkaFeed {
     }
 
     fn receive(&self, max: usize) -> Result<Vec<Delivery>, FeedError> {
+        if self.publish_only {
+            return Err(publish_only());
+        }
         let mut st = self.lock();
         if let Some(fatal) = &st.fatal {
             return Err(fatal.clone());
@@ -726,6 +845,9 @@ impl Feed for KafkaFeed {
     }
 
     fn renew(&self, receipt: Receipt) -> Result<(), FeedError> {
+        if self.publish_only {
+            return Err(publish_only());
+        }
         let mut st = self.lock();
         if let Some(fatal) = &st.fatal {
             return Err(fatal.clone());
@@ -738,6 +860,9 @@ impl Feed for KafkaFeed {
     }
 
     fn acknowledge(&self, receipt: Receipt) -> Result<(), FeedError> {
+        if self.publish_only {
+            return Err(publish_only());
+        }
         let tombstone = {
             let mut st = self.lock();
             if let Some(fatal) = &st.fatal {
@@ -767,6 +892,9 @@ impl Feed for KafkaFeed {
     }
 
     fn fail(&self, receipt: Receipt, reason: &str) -> Result<(), FeedError> {
+        if self.publish_only {
+            return Err(publish_only());
+        }
         let moving = {
             let mut st = self.lock();
             if let Some(fatal) = &st.fatal {

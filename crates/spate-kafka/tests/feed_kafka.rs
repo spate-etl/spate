@@ -16,6 +16,8 @@ mod support;
 use rdkafka::ClientConfig;
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::client::DefaultClientContext;
+use rdkafka::consumer::{BaseConsumer, Consumer};
+use spate_core::feed::{Feed, Unit, wake_channel};
 use spate_core::pipeline::ExitState;
 use spate_kafka::feed::{KafkaFeed, KafkaFeedError};
 use spate_test::{WriteOutcome, wait_until};
@@ -25,8 +27,8 @@ use std::time::{Duration, Instant};
 use support::broker;
 use support::feed::{
     ATTEMPT, ATTEMPT_PARTITIONS, DEAD, DEADLINE, WORK, committed, create_topics, data_dir, exists,
-    feed_yaml, high_watermark, launch_with, produce_raw, read_attempts, recs, sorted, stage,
-    written,
+    feed_yaml, high_watermark, launch_with, produce_raw, publish, read_attempts, recs, sorted,
+    stage, written,
 };
 use testcontainers::runners::SyncRunner;
 use testcontainers_modules::kafka::apache::KAFKA_PORT;
@@ -541,4 +543,48 @@ fn a_confirmed_write_is_below_the_next_high_watermark() {
             delivered.offset
         );
     }
+}
+
+/// Pins that a feed built with `KafkaFeed::publisher` passes the topic
+/// configuration checks and holds no member of the group: a worker in the
+/// same group reads the unit it publishes, and the group has one member.
+#[test]
+#[ignore = "requires Docker"]
+fn a_publishing_feed_joins_no_group() {
+    let container = broker().start().expect("start kafka container");
+    let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
+    let brokers = format!("127.0.0.1:{port}");
+    create_topics(&brokers);
+    let group = spate_test::unique_name("publisher");
+    let parsed = support::feed::section(&section(&brokers, &group));
+    let io = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let worker = KafkaFeed::connect(&parsed, io.handle()).expect("connect");
+    let (waker, park) = wake_channel();
+    worker.set_waker(waker);
+    let lister = KafkaFeed::publisher(&parsed, io.handle()).expect("publisher");
+
+    publish(&lister, Unit::new("u", b"body".to_vec()));
+    let mut delivery = None;
+    wait_until(DEADLINE, "the worker reads the published unit", || {
+        delivery = worker.receive(1).ok().and_then(|mut got| got.pop());
+        if delivery.is_none() {
+            park.park(Duration::from_millis(100));
+        }
+        delivery.is_some()
+    });
+    assert_eq!(delivery.unwrap().unit.body, b"body");
+
+    let probe: BaseConsumer = ClientConfig::new()
+        .set("bootstrap.servers", &brokers)
+        .create()
+        .expect("probe");
+    let groups = probe
+        .fetch_group_list(Some(&group), Duration::from_secs(10))
+        .expect("group list");
+    let members: Vec<_> = groups.groups().iter().map(|g| g.members().len()).collect();
+    assert_eq!(members, [1], "the group's members");
 }

@@ -896,14 +896,22 @@ fn a_feed_section_is_refused_beside_a_feed_or_coordinator_given_in_code() {
 
     let err = source()
         .with_feed(Arc::new(MemoryFeed::new()))
-        .configure_feed(section, Arc::new(MemoryFeed::new()), spate_core::feed::FeedOrigin::Section)
+        .configure_feed(
+            section,
+            Arc::new(MemoryFeed::new()),
+            spate_core::feed::FeedOrigin::Section,
+        )
         .unwrap_err();
     assert!(err.to_string().contains("with_feed"), "{err}");
 
     let (coordinator, _script) = spate_test::scripted_coordinator();
     let err = source()
         .with_coordinator(Box::new(coordinator))
-        .configure_feed(section, Arc::new(MemoryFeed::new()), spate_core::feed::FeedOrigin::Section)
+        .configure_feed(
+            section,
+            Arc::new(MemoryFeed::new()),
+            spate_core::feed::FeedOrigin::Section,
+        )
         .unwrap_err();
     assert!(err.to_string().contains("with_coordinator"), "{err}");
 }

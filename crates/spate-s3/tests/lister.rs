@@ -590,7 +590,11 @@ fn the_fingerprint_wait_logs_the_location_and_window() {
     section.location = Some(LOCATION.to_owned());
     let (feed, _script) = scripted_feed();
     source
-        .configure_feed(&section, Arc::new(feed), spate_core::feed::FeedOrigin::Section)
+        .configure_feed(
+            &section,
+            Arc::new(feed),
+            spate_core::feed::FeedOrigin::Section,
+        )
         .unwrap();
 
     let writer = {
@@ -1610,7 +1614,11 @@ fn a_solo_run_warns_that_it_lists_from_the_beginning() {
     ] {
         let mut source = lister_source(&data, &rt, "");
         source
-            .configure_feed(&section(backend, None), feed, spate_core::feed::FeedOrigin::Section)
+            .configure_feed(
+                &section(backend, None),
+                feed,
+                spate_core::feed::FeedOrigin::Section,
+            )
             .unwrap();
         let lines = spate_test::capture_logs(tracing::Level::WARN, || {
             source

@@ -2167,6 +2167,27 @@ mod tests {
         assert!(is_marker(&job.end().await.unwrap()));
     }
 
+    /// Pins that a retryable rejection logs its retry at DEBUG and at no
+    /// higher level.
+    #[test]
+    fn a_retry_logs_at_debug() {
+        let rt = runtime();
+        let job = Job::new();
+        rt.block_on(job.put_rows(&["data/a"]));
+        let (feed, script) = spate_test::scripted_feed();
+        script.refuse_next_publish(FeedErrorKind::Retryable);
+        let lister = job.lister(Arc::new(feed), CHECKPOINT_EVERY);
+        let lines = spate_test::capture_logs(tracing::Level::DEBUG, || {
+            rt.block_on(lister.run()).unwrap();
+        });
+        let retries: Vec<&String> = lines
+            .iter()
+            .filter(|l| l.contains("publishing it again"))
+            .collect();
+        assert_eq!(retries.len(), 1, "{lines:#?}");
+        assert!(retries[0].contains("DEBUG"), "{lines:#?}");
+    }
+
     /// Pins that a unit the feed rejects as retryable on every attempt fails
     /// the run as retryable after the last attempt, naming its key, and
     /// leaves no end marker.
@@ -2287,6 +2308,51 @@ mod tests {
                 .any(|l| l.contains("wrote the end marker") && l.contains("units=2")),
             "{lines:#?}"
         );
+    }
+
+    /// Pins that the end marker's log line counts an object the S3 client
+    /// cannot address on a page that also yields a key, which the lister
+    /// publishes before that key.
+    #[test]
+    fn the_marker_log_counts_an_unaddressable_object_beside_a_key() {
+        let rt = runtime();
+        let endpoint = crate::test_servers::listing_server(vec![list_page(
+            &[("data/a", 7), ("data/d//dbl.ndjson", 7)],
+            None,
+        )]);
+        let job = Job::new();
+        let (feed, script) = spate_test::scripted_feed();
+        let lines = spate_test::capture_logs(tracing::Level::INFO, || {
+            stub_source(&rt, &endpoint)
+                .with_location_store(Arc::clone(&job.ops) as Arc<dyn ObjectStore>)
+                .list_once(&scripted_section(), Arc::new(feed))
+                .unwrap();
+        });
+        assert_eq!(script.published().len(), 2);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("wrote the end marker") && l.contains("units=2")),
+            "{lines:#?}"
+        );
+    }
+
+    /// Pins that a listing the store refuses fails `list_once` as fatal,
+    /// the class of its store error, and leaves no end marker.
+    #[test]
+    fn a_refused_listing_fails_the_lister_run_as_fatal() {
+        let rt = runtime();
+        let endpoint = crate::test_servers::status_server("403 Forbidden");
+        let job = Job::new();
+        let (feed, script) = spate_test::scripted_feed();
+        let err = stub_source(&rt, &endpoint)
+            .with_location_store(Arc::clone(&job.ops) as Arc<dyn ObjectStore>)
+            .list_once(&scripted_section(), Arc::new(feed))
+            .unwrap_err();
+        assert_eq!(class(&err), ErrorClass::Fatal, "{err}");
+        assert!(err.to_string().contains("listing"), "{err}");
+        assert!(script.published().is_empty());
+        assert_eq!(rt.block_on(job.end()), None);
     }
 
     /// Pins the cadence `list_once` gives the lister: over 1,001 keys the

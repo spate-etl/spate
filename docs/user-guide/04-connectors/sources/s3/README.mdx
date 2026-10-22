@@ -320,8 +320,10 @@ The split count still sets how evenly the lanes divide over threads; see
 
 A [`feed:` section](../../../07-reference/configuration.mdx#feed) moves the
 source onto the feed path. It reads [work units](../../../07-reference/glossary.mdx#work-unit)
-from the feed the section names. On a durable feed it lists nothing itself,
-and a [lister run](#the-lister-run) publishes the job's units. On the
+from the feed the section names. On a durable feed it lists nothing itself:
+a bounded job's units come from a [lister run](#the-lister-run), and a
+continuous job's from [storage notifications](#storage-notifications) or
+code. On the
 in-process feed the run lists the prefix itself; see
 [A solo run on the in-process feed](#a-solo-run-on-the-in-process-feed). Every delivery is
 read in full, resuming from no earlier delivery, and the unit is acknowledged
@@ -595,9 +597,10 @@ worker started before its lister fails at once and a lister at a new location
 fails on the absent fingerprint. The error says so. Write access at the location
 decides where a lister run resumes. The lister creates `fingerprint` only when
 absent, so a lister whose `store` sets `aws_conditional_put: disabled` fails.
-Run one lister per location: the conditional create refuses a second lister
-with another fingerprint on a store that honors `If-None-Match`, and the CI
-suite checks that on RustFS only. The location needs read-after-write and
+Run one lister per location: a second lister with another fingerprint is
+refused when it reads the first's fingerprint, and, when both read before
+either wrote one, by the conditional create on a store that honors
+`If-None-Match`, which the CI suite checks on RustFS only. The location needs read-after-write and
 read-after-delete consistency, which means `consistency_mode = "consistent"`
 on Garage and one zone on Ceph RGW. A `file://` location serves the processes
 of one host.

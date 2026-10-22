@@ -1770,3 +1770,49 @@ fn a_panicked_solo_lister_fails_the_run() {
     let reason = failure_reason(&exit(&l));
     assert!(reason.contains("lister ended"), "{reason}");
 }
+
+/// Pins that a listing failed by a retryable store error fails a lister
+/// run as retryable, the class of its store error.
+#[test]
+fn a_retryable_listing_error_fails_the_lister_run_as_retryable() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    fs::write(data.join("a.ndjson"), lines_bytes(&recs("a", 5))).unwrap();
+    let rt = runtime();
+    let (data_store, _spy) = spying_local_store(SpyOptions {
+        list_fails: true,
+        ..SpyOptions::default()
+    });
+    let (store, _hooks) = location_store();
+    let (feed, script) = scripted_feed();
+    let err = lister_source(&data, &rt, "")
+        .with_store(data_store)
+        .with_location_store(store)
+        .list_once(&section("scripted", Some(LOCATION)), Arc::new(feed))
+        .unwrap_err();
+    let (class, reason) = client_error(&err);
+    assert_eq!(class, spate_core::error::ErrorClass::Retryable, "{err}");
+    assert!(reason.contains("listing"), "{reason}");
+    assert!(script.published().is_empty());
+}
+
+/// Pins that a lister run refuses a `location` that does not parse as
+/// fatal, before any store request.
+#[test]
+fn a_lister_run_refuses_a_location_that_does_not_parse() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    fs::write(data.join("a.ndjson"), lines_bytes(&recs("a", 5))).unwrap();
+    let rt = runtime();
+    let (store, hooks) = location_store();
+    let (feed, script) = scripted_feed();
+    let err = lister_source(&data, &rt, "")
+        .with_location_store(store)
+        .list_once(&section("scripted", Some("no scheme here")), Arc::new(feed))
+        .unwrap_err();
+    let (class, reason) = client_error(&err);
+    assert_eq!(class, spate_core::error::ErrorClass::Fatal, "{err}");
+    assert!(reason.contains("is not a URL"), "{reason}");
+    assert!(script.published().is_empty());
+    assert_eq!(hooks.requests(), 0);
+}

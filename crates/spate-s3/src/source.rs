@@ -310,7 +310,9 @@ impl S3Source {
     /// `feed` other than the one `section` names, a source given a
     /// coordinator, and a call from a thread in a Tokio runtime context:
     /// async code, a `spawn_blocking` closure, or a thread holding a
-    /// `Handle::enter` guard. Fatal too for a source with no framer, another
+    /// `Handle::enter` guard. Fatal too for a source with no framer, a source
+    /// configuration that fails validation, a store the source or its
+    /// location cannot build from its URL and `store` options, another
     /// fingerprint at the location, a checkpoint that is not a key under the
     /// listing prefix, and a store that cannot create an object
     /// conditionally. A publish the feed refuses, or still rejects as

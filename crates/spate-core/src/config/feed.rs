@@ -14,8 +14,8 @@ use std::time::Duration;
 /// `units_held` applies whatever the backend; `attempt_cap` applies to the
 /// in-process and Kafka feeds, and a backend that cannot honor it refuses
 /// it. `location` names a job location for a source that reads one, and
-/// `settling_window` sets how long a job with a location waits on an empty
-/// feed before it ends; the in-process feed refuses both.
+/// `settling_window` is the settling window of a source that ends a job
+/// with a location; the in-process feed refuses both.
 ///
 /// ```yaml
 /// feed:
@@ -44,10 +44,12 @@ pub struct FeedSection {
     /// section names none.
     /// The in-process feed refuses one.
     pub location: Option<String>,
-    /// How long a job with a `location` waits for its lister's fingerprint,
-    /// and how long its feed must read empty before the job ends. `None`
-    /// leaves [`DEFAULT_SETTLING_WINDOW`](crate::feed::DEFAULT_SETTLING_WINDOW).
-    /// The in-process feed refuses one.
+    /// The settling window of a job with a `location`, for a source that ends
+    /// one through an [`EndCheck`](crate::feed::EndCheck): how long the feed
+    /// must read empty before the job ends. The source's page says what else
+    /// it bounds. `None` leaves
+    /// [`DEFAULT_SETTLING_WINDOW`](crate::feed::DEFAULT_SETTLING_WINDOW). The
+    /// in-process feed refuses one.
     pub settling_window: Option<Duration>,
 }
 

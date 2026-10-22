@@ -749,10 +749,10 @@ impl PipelineConfig {
         Ok(())
     }
 
-    /// Reject a `feed.settling_window` on the in-process feed, which ends a
-    /// job with no window, and one outside 20 s to 24 h: shorter than the
-    /// interval between the end check's reads, or long enough to overflow a
-    /// deadline. Split out of [`validate`](Self::validate) so the runtime,
+    /// Reject a `feed.settling_window` on the in-process feed, whose exact
+    /// counts need no window, and one outside 20 s to 24 h: shorter than the
+    /// longest gap between the end check's reads, or long enough to overflow
+    /// a deadline. Split out of [`validate`](Self::validate) so the runtime,
     /// which a programmatic config reaches without validation, enforces it
     /// too.
     pub(crate) fn reject_bad_settling_window(&self) -> Result<(), ConfigError> {
@@ -765,8 +765,8 @@ impl PipelineConfig {
         };
         if feed.backend().type_tag() == "memory" {
             return Err(ConfigError::Validation(
-                "the in-process `memory` feed ends a job with no settling window; remove \
-                 `feed.settling_window`"
+                "the in-process `memory` feed counts its units exactly and takes no settling \
+                 window; remove `feed.settling_window`"
                     .into(),
             ));
         }

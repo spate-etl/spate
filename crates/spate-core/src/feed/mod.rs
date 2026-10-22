@@ -145,7 +145,7 @@ pub enum FeedErrorKind {
 }
 
 /// Error from a feed backend.
-#[derive(Clone, Debug, thiserror::Error)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("feed error ({kind:?}): {reason}")]
 #[non_exhaustive]
 pub struct FeedError {

@@ -7,6 +7,7 @@
 //! own clock.
 
 use super::{Depth, DepthOf, FeedError};
+use crate::error::ErrorClass;
 use std::time::{Duration, Instant};
 
 /// The longest gap between two reads of the feed inside a settling window,
@@ -26,7 +27,8 @@ pub enum MarkerRead {
     Present(String),
     /// No marker exists.
     Absent,
-    /// The read failed and may succeed later.
+    /// The read failed and may succeed later. A source ends its run itself
+    /// on a read that cannot succeed.
     Failed,
 }
 
@@ -60,6 +62,9 @@ pub enum EndOutcome {
     Completed,
     /// The feed's dead-letter destination holds units, counted here.
     Stalled(Depth),
+    /// A read of the feed's depth failed with an error that sending it again
+    /// cannot clear, such as a missing permission.
+    Failed(FeedError),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -112,10 +117,13 @@ enum Phase {
 /// destination decides between [`Completed`](EndOutcome::Completed) and
 /// [`Stalled`](EndOutcome::Stalled).
 ///
-/// A non-empty read, a failed read, a read taken or answered later than
-/// that bound, or a [`restart`](EndCheck::restart) sends a windowed check
-/// back to its marker read, 15 s after its previous read at most. A failed
-/// dead-letter read is retried 15 s later and ends nothing. The source calls `restart` whenever its reader holds
+/// A non-empty read, a read that fails retryably, a read taken or answered
+/// later than that bound, a marker read answered later than it included, or
+/// a [`restart`](EndCheck::restart) sends a windowed check back to its marker
+/// read, 15 s after its previous read at most. A dead-letter read that fails
+/// retryably is retried 15 s later and ends nothing. A depth read that fails
+/// with a [`Fatal`](ErrorClass::Fatal) class ends the check
+/// [`Failed`](EndOutcome::Failed). The source calls `restart` whenever its reader holds
 /// any work, so every read that counts was answered while it held none.
 ///
 /// ```
@@ -152,6 +160,9 @@ pub struct EndCheck {
     /// When the last read of the feed or the marker was requested, so a
     /// restart waits 15 s from it.
     last_request: Option<Instant>,
+    /// The run whose marker last opened a window, so a window reopened on
+    /// the same run is not announced again.
+    announced: Option<String>,
 }
 
 impl EndCheck {
@@ -165,6 +176,7 @@ impl EndCheck {
             phase: Phase::Opening { due: now },
             pending: None,
             last_request: None,
+            announced: None,
         }
     }
 
@@ -178,6 +190,7 @@ impl EndCheck {
             phase: Phase::Opening { due: now },
             pending: None,
             last_request: None,
+            announced: None,
         }
     }
 
@@ -192,7 +205,7 @@ impl EndCheck {
         {
             tracing::info!(
                 gap = ?now - last,
-                "the feed went unread longer than the read interval; restarting the settling window"
+                "the feed went unread longer than the read interval; restarting the end check"
             );
             self.reopen(now);
         }
@@ -228,6 +241,14 @@ impl EndCheck {
         let Some(requested) = self.take_pending(Read::Marker) else {
             return;
         };
+        if now > requested + END_CHECK_INTERVAL {
+            tracing::info!(
+                late = ?now - requested,
+                "an end marker read answered after the read interval; restarting the end check"
+            );
+            self.reopen(now);
+            return;
+        }
         let window = self.window.unwrap_or_default();
         let closing = match &self.phase {
             Phase::Closing { run } => Some(run.clone()),
@@ -244,7 +265,7 @@ impl EndCheck {
                         "a newer lister run's end marker replaced the window's; \
                          opening a new settling window"
                     );
-                } else {
+                } else if self.announced.as_deref() != Some(seen.as_str()) {
                     tracing::info!(
                         run = %seen,
                         window = ?window,
@@ -252,6 +273,7 @@ impl EndCheck {
                          the settling window"
                     );
                 }
+                self.announced = Some(seen.clone());
                 self.phase = Phase::Window {
                     run: seen,
                     start: requested,
@@ -260,6 +282,7 @@ impl EndCheck {
                 };
             }
             (MarkerRead::Absent, closing) => {
+                self.announced = None;
                 if closing.is_some() {
                     tracing::info!(
                         "the end marker is gone at the settling window's end; waiting for a \
@@ -288,6 +311,9 @@ impl EndCheck {
         self.pending = None;
         let due = requested + READ_EVERY;
         match (of, read) {
+            (_, Err(e)) if e.class() == ErrorClass::Fatal => {
+                self.phase = Phase::Ended(EndOutcome::Failed(e));
+            }
             (DepthOf::DeadLetters, Ok(depth)) if depth.is_empty() => {
                 self.phase = Phase::Ended(EndOutcome::Completed);
             }
@@ -299,13 +325,12 @@ impl EndCheck {
                 self.phase = Phase::DeadLetters { due };
             }
             (DepthOf::Feed, Err(e)) => {
-                tracing::warn!(error = %e, "reading the feed's depth failed; restarting the settling window");
+                tracing::warn!(error = %e, "reading the feed's depth failed; restarting the end check");
                 self.reopen(due);
             }
             (DepthOf::Feed, Ok(depth)) if !depth.is_empty() => {
-                if matches!(self.phase, Phase::Window { .. }) {
-                    tracing::info!(%depth, "the feed is not empty; restarting the settling window");
-                }
+                // Every interval while peers still read, so not at INFO.
+                tracing::debug!(%depth, "the feed is not empty; restarting the end check");
                 self.reopen(due);
             }
             (DepthOf::Feed, Ok(_))
@@ -313,7 +338,7 @@ impl EndCheck {
             {
                 tracing::info!(
                     late = ?now - requested,
-                    "a depth read answered after the read interval; restarting the settling window"
+                    "a depth read answered after the read interval; restarting the end check"
                 );
                 self.reopen(now);
             }
@@ -335,14 +360,18 @@ impl EndCheck {
     }
 
     /// Send the check back to its opening read, because the reader holds
-    /// work. Any outstanding read's answer is then ignored. A windowed check
-    /// reads again 15 s after its last read; an exact one at once.
+    /// work. A windowed check reads again 15 s after its last read; an exact
+    /// one at once. A check that has ended stays ended.
+    ///
+    /// Drop every read outstanding when calling it. The check tells answers
+    /// apart only by kind, so an answer reported once the next read of its
+    /// kind has started counts as that read's.
     pub fn restart(&mut self, now: Instant) {
         if matches!(self.phase, Phase::Ended(_)) {
             return;
         }
         if !matches!(self.phase, Phase::Opening { .. }) {
-            tracing::info!("the reader took work; restarting the settling window");
+            tracing::info!("the reader took work; restarting the end check");
         }
         self.pending = None;
         let due = match (self.window, self.last_request) {
@@ -382,7 +411,11 @@ impl EndCheck {
         match (&self.phase, self.window) {
             (Phase::Opening { .. }, None) => self.phase = Phase::Receiving,
             (Phase::Window { run, start, .. }, Some(window)) => {
-                self.phase = if requested >= *start + window {
+                // A window too long to add to an instant never closes.
+                let closes = start
+                    .checked_add(window)
+                    .is_some_and(|end| requested >= end);
+                self.phase = if closes {
                     Phase::Closing { run: run.clone() }
                 } else {
                     Phase::Window {
@@ -522,6 +555,11 @@ mod tests {
             EndAction::ReadDepth(DepthOf::Feed)
         );
         check.depth_read(at(start, 45), failed());
+        assert_eq!(
+            check.next(at(start, 59)),
+            EndAction::Wait(Some(at(start, 60))),
+            "a failed read is followed 15 s after its request"
+        );
         assert_eq!(check.next(at(start, 60)), EndAction::ReadMarker);
         assert!(check.outcome().is_none());
     }
@@ -711,9 +749,45 @@ mod tests {
         );
         let restarted = logs(|| check.restart(start));
         assert!(
-            restarted.contains("INFO") && restarted.contains("restarting the settling window"),
+            restarted.contains("INFO") && restarted.contains("restarting the end check"),
             "{restarted}"
         );
+
+        // The same run's marker opening the window again is not announced
+        // again; a busy feed restarts the check at DEBUG only.
+        assert_eq!(check.next(at(start, 15)), EndAction::ReadMarker);
+        let again = logs(|| check.marker_read(at(start, 15), present("run-a")));
+        assert!(again.is_empty(), "{again}");
+        assert_eq!(
+            check.next(at(start, 15)),
+            EndAction::ReadDepth(DepthOf::Feed)
+        );
+        let busy = logs(|| check.depth_read(at(start, 15), visible(1)));
+        assert!(!busy.contains("INFO") && !busy.contains("WARN"), "{busy}");
+
+        // An absent marker is no failure; a failed read warns.
+        assert_eq!(check.next(at(start, 30)), EndAction::ReadMarker);
+        let absent = logs(|| check.marker_read(at(start, 30), MarkerRead::Absent));
+        assert!(!absent.contains("WARN"), "{absent}");
+        assert_eq!(check.next(at(start, 45)), EndAction::ReadMarker);
+        let failed = logs(|| check.marker_read(at(start, 45), MarkerRead::Failed));
+        assert!(
+            failed.contains("WARN") && failed.contains("reading the end marker failed"),
+            "{failed}"
+        );
+    }
+
+    /// Pins that an exact check's wording names no settling window, which
+    /// the in-process feed does not have.
+    #[test]
+    fn an_exact_check_logs_no_settling_window() {
+        let start = Instant::now();
+        let mut check = EndCheck::exact(start);
+        assert_eq!(check.next(start), EndAction::ReadDepth(DepthOf::Feed));
+        let failed = logs(|| check.depth_read(start, failed()));
+        assert!(failed.contains("restarting the end check"), "{failed}");
+        let shown = failed + &logs(|| check.restart(start));
+        assert!(!shown.contains("settling window"), "{shown}");
     }
 
     /// Pins that no window opens before a marker is found: the feed is not
@@ -759,11 +833,12 @@ mod tests {
         empty_reads(&mut check, start, 0, 60);
         assert_eq!(check.next(at(start, 60)), EndAction::ReadMarker);
         check.marker_read(at(start, 60), present("a"));
-        assert_eq!(check.next(at(start, 60)), EndAction::Receive);
-        check.received(at(start, 61), true);
+        assert_eq!(check.next(at(start, 62)), EndAction::Receive);
+        check.received(at(start, 62), true);
         assert_eq!(
-            check.next(at(start, 61)),
-            EndAction::Wait(Some(at(start, 75)))
+            check.next(at(start, 62)),
+            EndAction::Wait(Some(at(start, 75))),
+            "15 s from the closing marker read, the last read of the marker or feed"
         );
         assert_eq!(check.next(at(start, 75)), EndAction::ReadMarker);
     }
@@ -850,6 +925,103 @@ mod tests {
         assert_eq!(
             finish(&mut check, start, empty()),
             EndAction::Ended(EndOutcome::Completed)
+        );
+    }
+
+    /// Pins that a depth read failing with a fatal class ends the check
+    /// `Failed` with that error, for the feed and for its dead letters, and
+    /// that a retryable failure does not.
+    #[test]
+    fn a_fatal_depth_read_ends_the_check_failed() {
+        let start = Instant::now();
+        let fatal = FeedError::new(FeedErrorKind::Fatal, "access denied");
+        let mut check = opened(start, "a");
+        assert_eq!(check.next(start), EndAction::ReadDepth(DepthOf::Feed));
+        check.depth_read(start, Err(fatal.clone()));
+        assert_eq!(
+            check.next(start),
+            EndAction::Ended(EndOutcome::Failed(fatal.clone()))
+        );
+
+        let mut check = EndCheck::exact(start);
+        assert_eq!(check.next(start), EndAction::ReadDepth(DepthOf::Feed));
+        check.depth_read(start, empty());
+        assert_eq!(check.next(start), EndAction::Receive);
+        check.received(start, false);
+        assert_eq!(
+            check.next(start),
+            EndAction::ReadDepth(DepthOf::DeadLetters)
+        );
+        check.depth_read(start, Err(fatal.clone()));
+        assert_eq!(check.outcome(), Some(&EndOutcome::Failed(fatal)));
+
+        let mut check = opened(start, "a");
+        assert_eq!(check.next(start), EndAction::ReadDepth(DepthOf::Feed));
+        check.depth_read(start, failed());
+        assert!(check.outcome().is_none());
+    }
+
+    /// Pins that a marker read answered more than 20 s after its request
+    /// restarts the check: a closing read that comes back late does not pass
+    /// on to the receive.
+    #[test]
+    fn a_marker_read_answered_late_restarts_the_check() {
+        let start = Instant::now();
+        let mut check = opened(start, "a");
+        empty_reads(&mut check, start, 0, 60);
+        assert_eq!(check.next(at(start, 60)), EndAction::ReadMarker);
+        check.marker_read(at(start, 81), present("a"));
+        assert_eq!(check.next(at(start, 81)), EndAction::ReadMarker);
+
+        // At 20 s it is on time.
+        let mut check = opened(start, "a");
+        empty_reads(&mut check, start, 0, 60);
+        assert_eq!(check.next(at(start, 60)), EndAction::ReadMarker);
+        check.marker_read(at(start, 80), present("a"));
+        assert_eq!(check.next(at(start, 80)), EndAction::Receive);
+    }
+
+    /// Pins that an exact check takes an empty read answered late, since its
+    /// counts are exact and it has no window to keep.
+    #[test]
+    fn an_exact_check_takes_a_read_answered_late() {
+        let start = Instant::now();
+        let mut check = EndCheck::exact(start);
+        assert_eq!(check.next(start), EndAction::ReadDepth(DepthOf::Feed));
+        check.depth_read(at(start, 100), empty());
+        assert_eq!(check.next(at(start, 100)), EndAction::Receive);
+    }
+
+    /// Pins that a restart after the check has ended keeps its outcome.
+    #[test]
+    fn a_restart_after_the_end_keeps_the_outcome() {
+        let start = Instant::now();
+        let mut check = EndCheck::exact(start);
+        assert_eq!(check.next(start), EndAction::ReadDepth(DepthOf::Feed));
+        check.depth_read(start, empty());
+        assert_eq!(
+            finish(&mut check, start, empty()),
+            EndAction::Ended(EndOutcome::Completed)
+        );
+        check.restart(at(start, 1));
+        assert_eq!(
+            check.next(at(start, 1)),
+            EndAction::Ended(EndOutcome::Completed)
+        );
+    }
+
+    /// Pins that a window too long to add to an instant never closes, and
+    /// does not panic.
+    #[test]
+    fn a_window_too_long_for_an_instant_never_closes() {
+        let start = Instant::now();
+        let mut check = EndCheck::windowed(Duration::MAX, start);
+        assert_eq!(check.next(start), EndAction::ReadMarker);
+        check.marker_read(start, present("a"));
+        empty_reads(&mut check, start, 0, 45);
+        assert_eq!(
+            check.next(at(start, 60)),
+            EndAction::ReadDepth(DepthOf::Feed)
         );
     }
 

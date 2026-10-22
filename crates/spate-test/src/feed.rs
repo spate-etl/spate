@@ -471,7 +471,8 @@ mod tests {
     }
 
     /// Pins that with no scripted answer the feed reports its own queue, held
-    /// set and dead letters, exactly.
+    /// set and dead letters, exactly, each count told apart by a different
+    /// number.
     #[test]
     fn a_scripted_feed_reports_depth_from_its_own_state() {
         let (feed, script) = scripted_feed();
@@ -484,15 +485,25 @@ mod tests {
         };
         assert!(read(DepthOf::Feed).is_empty());
         let held = script.deliver(unit("held"));
-        let dead = script.deliver(unit("dead"));
-        script.deliver(unit("queued"));
+        let dead: Vec<Receipt> = ["dead-1", "dead-2", "dead-3"]
+            .into_iter()
+            .map(|id| script.deliver(unit(id)))
+            .collect();
+        script.deliver(unit("queued-1"));
+        script.deliver(unit("queued-2"));
         let got = feed.receive(1).unwrap();
         assert_eq!(got[0].receipt, held);
-        script.dead_letter(dead);
+        for receipt in dead {
+            script.dead_letter(receipt);
+        }
         let depth = read(DepthOf::Feed);
-        assert_eq!((depth.visible, depth.in_flight), (1, 1));
+        assert_eq!(
+            (depth.visible, depth.in_flight, depth.delayed, depth.unsent),
+            (2, 1, 0, 0)
+        );
         assert!(!depth.approximate);
-        assert_eq!(read(DepthOf::DeadLetters).visible, 1);
+        let dead = read(DepthOf::DeadLetters);
+        assert_eq!((dead.visible, dead.in_flight), (3, 0));
         assert_eq!(script.depth_reads(DepthOf::Feed), 2);
         assert_eq!(script.depth_reads(DepthOf::DeadLetters), 1);
     }

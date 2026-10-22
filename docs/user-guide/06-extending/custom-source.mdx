@@ -286,9 +286,11 @@ Your source follows these rules:
 - **End a bounded job through an `EndCheck`.** While your reader holds no
   unit, ask it what to read next, start that read without waiting on it, and
   report each answer with the instant from your clock. Call `restart` as soon
-  as the reader holds work again. Report `Drained` on `Completed`, and fail the
-  run on `Stalled`. A feed whose `read_depth` returns `None` cannot end a
-  bounded job, so refuse it in `open`.
+  as the reader holds work again, and drop every read outstanding: the check
+  tells answers apart only by kind. Report `Drained` on `Completed`, and fail
+  the run on `Stalled` or `Failed`, and on a marker read that cannot succeed.
+  A feed whose `read_depth` returns `None` cannot end a bounded job, so refuse
+  it in `open`.
 
 The scripted feed in `spate-test` lets a test play the feed's side. This
 reader, from [`spate-test/tests/feed.rs`](repo:crates/spate-test/tests/feed.rs),
@@ -321,7 +323,7 @@ To implement a feed backend, keep every method free of waits:
 - Answer `read_depth` if your backend can count what it holds and what it has
   dead-lettered. Read the counts on your own task and settle the
   `DepthReporter` from `depth_reading()`. Set `approximate` when the counts
-  are estimates, and count in `unsent` the acknowledgements and failures you
+  are estimates, and count in `unsent` the acknowledgments and failures you
   have accepted and not yet applied. The default returns `None`, and such a
   feed serves continuous jobs only.
 

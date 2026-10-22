@@ -151,8 +151,8 @@ impl MemoryFeed {
         if section.settling_window.is_some() {
             return Err(ConfigError::Component {
                 context: "feed".into(),
-                message: "the in-process feed ends a job with no settling window, so it takes \
-                          no `settling_window`"
+                message: "the in-process feed counts its units exactly, so it takes no \
+                          `settling_window`"
                     .into(),
             });
         }
@@ -418,9 +418,10 @@ mod tests {
         );
     }
 
-    /// Pins that the depth the feed reports agrees with its counts: visible
-    /// units as visible, held ones as in flight, and the dead-letter list's
-    /// length, each exact and settled at once.
+    /// Pins that the depth the feed reports agrees with its counts, each
+    /// count told apart by a different number: two visible units, one held
+    /// as in flight, and three on the dead-letter list, exact and settled at
+    /// once.
     #[test]
     fn the_depth_a_memory_feed_reports_matches_its_counts() {
         let feed = MemoryFeed::with_attempt_cap(NonZeroU32::new(1).expect("non-zero"));
@@ -435,23 +436,36 @@ mod tests {
         assert!(empty.is_empty() && !empty.approximate, "{empty}");
         assert!(read(DepthOf::DeadLetters).is_empty());
 
-        for id in ["dead", "held", "visible"] {
+        for id in [
+            "dead-1",
+            "dead-2",
+            "dead-3",
+            "held",
+            "visible-1",
+            "visible-2",
+        ] {
             drop(feed.publish(unit(id)));
         }
-        let dead = receive_one_of(&feed, "dead");
-        feed.fail(dead.receipt, "unreadable").unwrap();
+        for id in ["dead-1", "dead-2", "dead-3"] {
+            let dead = receive_one_of(&feed, id);
+            feed.fail(dead.receipt, "unreadable").unwrap();
+        }
         let _held = receive_one_of(&feed, "held");
 
         let counts = feed.counts();
         let depth = read(DepthOf::Feed);
         assert_eq!(
             (depth.visible, depth.in_flight, depth.delayed, depth.unsent),
-            (counts.visible, counts.held, 0, 0)
+            (2, 1, 0, 0)
         );
-        assert_eq!((depth.visible, depth.in_flight), (1, 1));
+        assert_eq!(
+            (depth.visible, depth.in_flight),
+            (counts.visible, counts.held)
+        );
         let dead = read(DepthOf::DeadLetters);
+        assert_eq!(dead.visible, 3);
         assert_eq!(dead.visible, counts.dead_lettered);
-        assert_eq!(dead.visible, 1);
+        assert_eq!((dead.delayed, dead.in_flight, dead.unsent), (0, 0, 0));
         assert!(!dead.approximate);
     }
 

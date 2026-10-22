@@ -21,8 +21,8 @@ use std::time::Duration;
 /// It writes each unit to the work topic through one producer with the
 /// settings the feed owns, `acks=all` and idempotence included, and a
 /// publish's [`Confirmation`] resolves on the write's delivery report. It
-/// joins no group, starts no thread of its own and writes no attempt
-/// record, so it takes no partition from the workers and charges no unit an
+/// joins no group, starts none of the feed's consumer, gate and follower
+/// threads, and writes no attempt record, so it takes no partition from the workers and charges no unit an
 /// attempt. No method waits on I/O.
 ///
 /// It reads no unit: [`receive`](Feed::receive) fails as Fatal, and
@@ -30,8 +30,8 @@ use std::time::Duration;
 /// [`fail`](Feed::fail) name no delivery. Passed to `Pipeline::feed` as a
 /// worker's feed, it fails the worker at its first read.
 ///
-/// A broker that rejects the client's credential or TLS handshake after
-/// connecting, or a fatal producer error such as a refused idempotent
+/// A credential a broker rejects, or a TLS handshake either side rejects,
+/// after connecting, or a fatal producer error such as a refused idempotent
 /// producer id, stops the handle with the reason, and every later publish
 /// fails with it. Dropping the handle reports each publish it has not
 /// confirmed to its caller as retryable; a unit published again after a
@@ -62,8 +62,8 @@ impl KafkaFeedPublisher {
     ///
     /// # Errors
     ///
-    /// As [`KafkaFeed::connect`](super::KafkaFeed::connect), except that no
-    /// thread is started: [`KafkaFeedError::Config`] for a section the feed
+    /// As [`KafkaFeed::connect`](super::KafkaFeed::connect), less the
+    /// failure to start the feed's own threads: [`KafkaFeedError::Config`] for a section the feed
     /// cannot read, [`KafkaFeedError::Refused`] for a client configuration
     /// librdkafka refuses, a rejected credential or TLS handshake, a refused
     /// topic read and topics the feed cannot run on, and

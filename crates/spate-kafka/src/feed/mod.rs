@@ -338,11 +338,16 @@ impl Core {
 
     fn failed(&self, mut write: Write, failure: Failure) {
         if let Write::Publish { confirmer, .. } = write {
-            let error = match write::classify(failure.code) {
-                WriteClass::Refused => FeedError::new(FeedErrorKind::Refused, failure.reason),
-                WriteClass::Fatal => self.latch(&failure.reason),
-                WriteClass::Retryable => FeedError::new(FeedErrorKind::Retryable, failure.reason),
-            };
+            let error =
+                match write::classify(failure.code) {
+                    WriteClass::Refused => FeedError::new(FeedErrorKind::Refused, failure.reason),
+                    WriteClass::Fatal => self.latch(&failure.reason),
+                    // A fatal producer error latches before librdkafka purges
+                    // the queue, so a publish purged by it reports the cause.
+                    WriteClass::Retryable => self.lock().fatal.clone().unwrap_or_else(|| {
+                        FeedError::new(FeedErrorKind::Retryable, failure.reason)
+                    }),
+                };
             confirmer.reject(error);
             return;
         }

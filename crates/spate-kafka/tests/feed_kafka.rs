@@ -17,7 +17,7 @@ use rdkafka::ClientConfig;
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::client::DefaultClientContext;
 use spate_core::pipeline::ExitState;
-use spate_kafka::feed::{KafkaFeed, KafkaFeedError};
+use spate_kafka::feed::{KafkaFeed, KafkaFeedError, KafkaFeedPublisher};
 use spate_test::{WriteOutcome, wait_until};
 use spate_test_support::ChildTest;
 use std::path::PathBuf;
@@ -541,4 +541,81 @@ fn a_confirmed_write_is_below_the_next_high_watermark() {
             delivered.offset
         );
     }
+}
+
+/// Create the work topic `work` with `entries` and its retry, dead-letter
+/// and compacted attempt topics, one partition each.
+fn create_topics_of(brokers: &str, work: &str, entries: &[(&str, &str)]) {
+    let admin: AdminClient<DefaultClientContext> = ClientConfig::new()
+        .set("bootstrap.servers", brokers)
+        .create()
+        .expect("admin client");
+    let retry = format!("{work}-retry");
+    let dead = format!("{work}-dead");
+    let attempts = format!("{work}-attempts");
+    let topics = [
+        entries.iter().fold(
+            NewTopic::new(work, 1, TopicReplication::Fixed(1)),
+            |topic, (k, v)| topic.set(k, v),
+        ),
+        NewTopic::new(&retry, 1, TopicReplication::Fixed(1)),
+        NewTopic::new(&dead, 1, TopicReplication::Fixed(1)),
+        NewTopic::new(&attempts, 1, TopicReplication::Fixed(1)).set("cleanup.policy", "compact"),
+    ];
+    let io = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    for created in io
+        .block_on(admin.create_topics(&topics, &AdminOptions::new()))
+        .expect("create topics")
+    {
+        created.expect("topic created");
+    }
+}
+
+/// Pins that `KafkaFeedPublisher::connect` runs the configuration checks
+/// under the connect bound: it refuses a compacted work topic by its role,
+/// and connects and publishes on topics a worker accepts.
+#[test]
+#[ignore = "requires Docker"]
+fn the_publisher_runs_the_configuration_checks_at_connect() {
+    let container = broker().start().expect("start kafka container");
+    let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
+    let brokers = format!("127.0.0.1:{port}");
+    let io = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let connect = |work: &str| {
+        let section: spate_core::config::FeedSection = serde_yaml::from_str(&format!(
+            "kafka:\n  brokers: \"{brokers}\"\n  group_id: {group}\n  topic: {work}\n  \
+             retry_topic: {work}-retry\n  dead_letter_topic: {work}-dead\n  \
+             attempt_topic: {work}-attempts\n  statistics_interval: 0s\n",
+            group = spate_test::unique_name("publisher"),
+        ))
+        .unwrap();
+        KafkaFeedPublisher::connect(&section, io.handle())
+    };
+
+    create_topics_of(&brokers, "pub-compacted", &[("cleanup.policy", "compact")]);
+    match connect("pub-compacted") {
+        Err(KafkaFeedError::Refused(message)) => assert!(
+            message.contains("the work topic `pub-compacted` is compacted"),
+            "{message}"
+        ),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+
+    create_topics_of(
+        &brokers,
+        "pub-good",
+        &[("message.timestamp.type", "LogAppendTime")],
+    );
+    let publisher = connect("pub-good").expect("connect");
+    support::feed::publish_to(
+        &publisher,
+        spate_core::feed::Unit::new("u", b"body".to_vec()),
+    );
 }

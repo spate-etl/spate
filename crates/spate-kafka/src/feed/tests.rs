@@ -494,6 +494,8 @@ fn a_publisher_answers_the_receive_side() {
     let (waker, park) = wake_channel();
     publisher.set_waker(waker);
     assert!(!park.park(Duration::ZERO), "woken");
+    publisher.core().latch("x");
+    assert!(!park.park(Duration::ZERO), "a latch woke the waker");
 }
 
 /// Pins that a publisher whose feed latched refuses every later publish
@@ -591,6 +593,10 @@ fn a_fatal_producer_error_latches_the_feed_with_its_cause() {
         C::OutOfOrderSequenceNumber,
         C::InvalidProducerEpoch,
         C::InvalidProducerIdMapping,
+        C::UnknownProducerId,
+        C::Fenced,
+        C::Inconsistent,
+        C::GaplessGuarantee,
     ] {
         let publisher = idle_publisher();
         report_error(&publisher, code, text);
@@ -618,6 +624,49 @@ fn a_fatal_producer_error_latches_the_feed_with_its_cause() {
     );
 }
 
+/// Pins that a publish whose enqueue librdkafka refuses inline as fatal
+/// settles Fatal and latches the core it was published through, so the
+/// publish path holds no state lock across the send.
+#[test]
+fn an_inline_fatal_enqueue_settles_without_deadlock() {
+    use rdkafka::producer::Producer as _;
+    use rdkafka::types::RDKafkaRespErr;
+    let config = unreachable_config("");
+    let owner = Arc::new(Core::new(&config, TWO));
+    let producer = Arc::new(
+        Producer::from_config_and_context(
+            &config.producer_config(false),
+            FeedProducerContext::new(Arc::clone(&owner)),
+        )
+        .unwrap(),
+    );
+    // SAFETY: the pointer is a live client owned by `producer`, and the
+    // reason is a NUL-terminated literal.
+    let raised = unsafe {
+        rdkafka::bindings::rd_kafka_test_fatal_error(
+            producer.client().native_ptr(),
+            RDKafkaRespErr::RD_KAFKA_RESP_ERR_CLUSTER_AUTHORIZATION_FAILED,
+            c"by test".as_ptr(),
+        )
+    };
+    assert_eq!(raised, RDKafkaRespErr::RD_KAFKA_RESP_ERR_NO_ERROR);
+    // A core no callback has latched yet, as between librdkafka raising the
+    // fatal error and the poll thread reporting it.
+    let fresh = Arc::new(Core::new(&config, TWO));
+    let (core, sender) = (Arc::clone(&fresh), Arc::clone(&producer));
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut confirmation =
+            super::publish_unit(&core, &sender, &Unit::new("u", b"body".to_vec()));
+        let _ = tx.send(confirmation.try_outcome());
+    });
+    let outcome = rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("publish_unit did not return: the state lock is held across the send");
+    let err = outcome.expect("settled inline").unwrap_err();
+    assert_eq!(err.kind, FeedErrorKind::Fatal, "{}", err.reason);
+    assert!(fresh.latched());
+}
 /// Pins that the publisher refuses a section a worker refuses, with the
 /// worker's error, before it builds any client.
 #[test]
@@ -3055,8 +3104,67 @@ mod cluster {
         );
     }
 
-    /// Pins the publisher's start line: its own message and work topic, and
-    /// no group.
+    /// The error a publish gets once `publisher` latched on its producer's
+    /// fatal error.
+    fn latched_reason(publisher: &KafkaFeedPublisher) -> spate_core::feed::FeedError {
+        wait_until(DEADLINE, "the publisher latches", || {
+            publisher.core().latched()
+        });
+        let err = settled(publisher.publish(Unit::new("later", b"body".to_vec()))).unwrap_err();
+        assert_eq!(err.kind, FeedErrorKind::Fatal, "{}", err.reason);
+        err
+    }
+
+    /// Pins that a retried batch the cluster answers with
+    /// `UNKNOWN_PRODUCER_ID`, which librdkafka makes fatal for an idempotent
+    /// producer, stops the publisher with the cause.
+    #[test]
+    fn a_fatal_unknown_producer_id_latches_the_publisher_with_its_cause() {
+        let cluster = cluster_with(0);
+        let io = io();
+        let publisher = connect_publisher(&cluster.bootstrap_servers(), "", &io);
+        settled(publisher.publish(Unit::new("warm", b"body".to_vec()))).unwrap();
+        cluster.request_errors(
+            RDKafkaApiKey::Produce,
+            &[
+                RDKafkaRespErr::RD_KAFKA_RESP_ERR_NOT_ENOUGH_REPLICAS,
+                RDKafkaRespErr::RD_KAFKA_RESP_ERR_UNKNOWN_PRODUCER_ID,
+            ],
+        );
+        let first = settled(publisher.publish(Unit::new("a", b"body".to_vec())));
+        assert!(first.is_err(), "{first:?}");
+        let err = latched_reason(&publisher);
+        assert!(
+            err.reason.contains("the feed's producer stopped"),
+            "{}",
+            err.reason
+        );
+    }
+
+    /// Pins that a producer id request answered `INVALID_PRODUCER_EPOCH`,
+    /// which librdkafka raises as a fatal error under `Fenced`, stops the
+    /// publisher with the cause.
+    #[test]
+    fn a_fenced_producer_id_latches_the_publisher_with_its_cause() {
+        let cluster = cluster_with(0);
+        cluster.request_errors(
+            RDKafkaApiKey::InitProducerId,
+            &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_INVALID_PRODUCER_EPOCH],
+        );
+        let io = io();
+        let publisher = connect_publisher(&cluster.bootstrap_servers(), "", &io);
+        let first = settled(publisher.publish(Unit::new("a", b"body".to_vec())));
+        assert!(first.is_err(), "{first:?}");
+        let err = latched_reason(&publisher);
+        assert!(
+            err.reason.contains("the feed's producer stopped"),
+            "{}",
+            err.reason
+        );
+    }
+
+    /// Pins the publisher's start line: its own message, the work topic and
+    /// the two values its checks read of it, and no group.
     #[test]
     fn a_publisher_logs_its_own_start_line() {
         let cluster = cluster_with(0);
@@ -3069,7 +3177,9 @@ mod cluster {
             lines
                 .iter()
                 .any(|l| l.contains("the Kafka feed's publisher started")
-                    && l.contains("topic=units")),
+                    && l.contains("topic=units")
+                    && l.contains("cleanup_policy=unreported")
+                    && l.contains("timestamp_type=unreported")),
             "{lines:#?}"
         );
         assert!(
@@ -3445,4 +3555,31 @@ mod docker {
         std::thread::sleep(Duration::from_secs(6));
         follower_catches_up(&brokers, "tombstone-tail");
     }
+}
+
+/// Pins that a broker certificate the client fails to verify after connect
+/// stops a publish-only handle with the rejection's text.
+#[test]
+fn a_certificate_the_client_rejects_latches_the_publisher() {
+    let publisher = idle_publisher();
+    report_error(
+        &publisher,
+        C::SSL,
+        "ssl://127.0.0.1:9093/bootstrap: SSL handshake failed: error:0A000086:SSL routines::\
+         certificate verify failed: broker certificate could not be verified, verify that \
+         ssl.ca.location is correctly configured or root CA certificates are installed \
+         (after 9ms in state SSL_HANDSHAKE)",
+    );
+    let err = publisher
+        .publish(Unit::new("u", b"body".to_vec()))
+        .try_outcome()
+        .expect("settled")
+        .unwrap_err();
+    assert_eq!(err.kind, FeedErrorKind::Fatal);
+    assert!(
+        err.reason
+            .starts_with("the client's credential or TLS handshake was rejected: "),
+        "{}",
+        err.reason
+    );
 }

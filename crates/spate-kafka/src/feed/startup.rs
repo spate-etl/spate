@@ -1371,6 +1371,21 @@ mod tests {
             assert!(message.contains("Authentication failed"), "{message}");
         }
 
+        /// Pins that `KafkaFeedPublisher::connect` checks under the connect
+        /// bound: a broker refusing the SASL login refuses it with the
+        /// broker's text.
+        #[test]
+        fn the_public_publisher_connect_refuses_a_wrong_sasl_password() {
+            let brokers = refuses_sasl_login().to_string();
+            let message = refused_with_text(connect_with_to(
+                &brokers,
+                SASL_PLAIN,
+                LONG,
+                |section, io, _| crate::feed::KafkaFeedPublisher::connect(section, io).err(),
+            ));
+            assert!(message.contains("Authentication failed"), "{message}");
+        }
+
         /// Pins that connecting to a broker that answers the handshake with
         /// `handshake_failure` refuses with librdkafka's text, without
         /// waiting out the bound.

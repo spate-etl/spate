@@ -73,7 +73,9 @@ impl ClientContext for FeedProducerContext {
     /// error before it purges the queue, so the latch is in place when the
     /// purged writes settle and every later publish fails with the cause.
     /// rdkafka reports a fatal error under its cause's code, so the codes
-    /// librdkafka makes fatal for an idempotent producer are named here.
+    /// librdkafka makes fatal for an idempotent producer are named here,
+    /// `Fenced` among them, the code librdkafka gives a producer id refused
+    /// for an old epoch.
     fn error(&self, error: rdkafka::error::KafkaError, reason: &str) {
         let code = error.rdkafka_error_code();
         if self.repeats_previous(code, reason) {
@@ -86,7 +88,11 @@ impl ClientContext for FeedProducerContext {
                 | RDKafkaErrorCode::ClusterAuthorizationFailed
                 | RDKafkaErrorCode::OutOfOrderSequenceNumber
                 | RDKafkaErrorCode::InvalidProducerEpoch
-                | RDKafkaErrorCode::InvalidProducerIdMapping,
+                | RDKafkaErrorCode::InvalidProducerIdMapping
+                | RDKafkaErrorCode::UnknownProducerId
+                | RDKafkaErrorCode::Fenced
+                | RDKafkaErrorCode::Inconsistent
+                | RDKafkaErrorCode::GaplessGuarantee,
             ) => {
                 self.core
                     .latch(&format!("the feed's producer stopped: {reason}"));

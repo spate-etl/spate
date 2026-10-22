@@ -45,37 +45,6 @@ records each unit's attempt before the unit is read (see
 [Counting deliveries](#counting-deliveries)). The checks read from the
 brokers, so an unreachable broker fails the call within 30 seconds.
 
-## A publish-only handle
-
-`KafkaFeedPublisher::connect` builds a handle that writes units to the work
-topic and reads none, for a process that only publishes, such as a lister run
-(see [Reading from a feed](../../sources/s3/README.mdx#reading-from-a-feed)).
-It reads the workers' own `feed: { kafka: … }` section and refuses any section
-a worker refuses, so every key stays required. Its writes use `brokers`,
-`topic`, `delivery_timeout`, `statistics_interval` and the `rdkafka`
-passthrough, and the other three topic names serve its checks. Connecting runs
-the [startup checks](#startup-checks) a worker runs, then builds one producer
-with the settings the feed owns. The handle joins no group, starts none of the
-feed's three threads and writes no attempt record, so it takes no partition
-from the workers and charges no unit an attempt.
-
-A publish is confirmed by its delivery report and fails as
-[Message mapping](#message-mapping) describes. A credential or TLS handshake a
-broker rejects after connecting stops the handle with the reason, and so does
-a fatal producer error such as a refused idempotent producer id; every later
-publish fails with it. Dropping the handle reports each publish it has not
-confirmed to its caller as retryable. A caller that publishes such a unit
-again can leave two copies on the work topic, and both are read.
-
-The handle's identity needs the `Describe` and `DescribeConfigs` operations on
-the four topics, and `Write` on the work topic. It needs no `Read` and no
-group ACL.
-
-Connecting logs `the Kafka feed's publisher started` with the work topic, its
-`cleanup.policy` and its `message.timestamp.type`. Passed to `Pipeline::feed`
-as a worker's feed, the handle fails the worker at its first read, with an
-error naming `KafkaFeed::connect`.
-
 ## Configuration
 
 The `feed: { kafka: ... }` section deserializes into `KafkaFeedConfig`
@@ -160,6 +129,38 @@ the same way through its producer. An attempt, tombstone, retry or dead-letter
 write that times out is sent again.
 
 <LoggingKafka />
+
+## A publish-only handle
+
+`KafkaFeedPublisher::connect` builds a handle that writes units to the work
+topic and reads none, for a process that only publishes, such as a lister run
+(see [Reading from a feed](../../sources/s3/README.mdx#reading-from-a-feed)).
+It reads the workers' own `feed: { kafka: … }` section and refuses any section
+a worker refuses, so every key stays required. Its writes use `brokers`,
+`topic`, `delivery_timeout`, `statistics_interval` and the `rdkafka`
+passthrough, and the other three topic names serve its checks. Connecting runs
+the [startup checks](#startup-checks) a worker runs, then builds one producer
+with the settings the feed owns. The handle joins no group, starts none of the
+feed's three threads and writes no attempt record, so it takes no partition
+from the workers and charges no unit an attempt.
+
+A publish is confirmed by its delivery report and fails as
+[Message mapping](#message-mapping) describes. A credential a broker rejects,
+or a TLS handshake either side rejects, after connecting stops the handle with
+the reason, and so does a fatal producer error such as a refused idempotent
+producer id; every later publish fails with it. Dropping the handle reports
+each publish it has not confirmed to its caller as retryable. A caller that
+publishes such a unit again can leave two copies on the work topic, and both
+are read.
+
+The handle's identity needs the `Describe` and `DescribeConfigs` operations on
+the four topics, and `Write` on the work topic. It needs no `Read` and no
+group ACL.
+
+Connecting logs `the Kafka feed's publisher started` with the work topic, its
+`cleanup.policy` and its `message.timestamp.type`. Passed to `Pipeline::feed`
+as a worker's feed, the handle fails the worker at its first read, with an
+error naming `KafkaFeed::connect`.
 
 ## Topics
 

@@ -872,3 +872,30 @@ fn a_publisher_refuses_an_unauthorized_work_topic() {
         other => panic!("expected a refusal, got {other:?}"),
     }
 }
+
+/// Pins that the publish in flight when the cluster refuses the
+/// publisher's idempotent producer id fails with the refusal's cause.
+#[test]
+fn the_publish_in_flight_at_a_fatal_producer_error_names_its_cause() {
+    let cluster = cluster(1);
+    cluster.request_errors(
+        rdkafka::types::RDKafkaApiKey::InitProducerId,
+        &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_CLUSTER_AUTHORIZATION_FAILED],
+    );
+    let (publisher, io) = publisher_on_mock(&feed_yaml(
+        &cluster.bootstrap_servers(),
+        &spate_test::unique_name("publisher-in-flight-fatal"),
+        "",
+        "",
+    ));
+    let publisher = publisher.unwrap();
+    let err = io
+        .block_on(publisher.publish(Unit::new("a", b"body".to_vec())))
+        .unwrap_err();
+    assert_eq!(err.kind, FeedErrorKind::Fatal, "{}", err.reason);
+    assert!(
+        err.reason.contains("Cluster authorization failed"),
+        "{}",
+        err.reason
+    );
+}

@@ -5,7 +5,7 @@ description: "A fleet's S3 lister is a one-shot run of the workers' own binary t
 # ADR-0075 — The lister runs once per job, apart from the worker replicas
 
 - **Status:** accepted
-- **Date:** 2026-10-21
+- **Date:** 2026-10-22
 - **Supersedes:** —
 - **Superseded by:** —
 

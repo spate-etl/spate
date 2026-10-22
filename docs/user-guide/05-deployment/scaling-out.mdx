@@ -40,8 +40,8 @@ On Kubernetes:
 - **The lister run as a `Job`.** The pod's exit status reports the run, a
   failed run exits non-zero, and the Job's restart policy and back-off limit
   run it again, each run resuming after the checkpoint. Set
-  `activeDeadlineSeconds`, since a lister waits out an outage of its feed or
-  store with no deadline of its own.
+  `activeDeadlineSeconds` to bound the run as a whole, since the lister adds
+  no deadline of its own beyond its feed's and store's limits.
 - **Continuous workers as a `Deployment`.**
 
 Start the lister first, or the workers at most one settling window (five

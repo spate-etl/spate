@@ -298,20 +298,24 @@ impl S3Source {
     /// doubles each attempt.
     ///
     /// Blocks the calling thread on the I/O handle until the run ends, so it
-    /// is called from a plain thread, such as `main`'s. A process stopped
+    /// is called from a plain thread outside any Tokio runtime context, such
+    /// as `main`'s. A process stopped
     /// mid-run leaves no marker unless its write was sent, and the next run
     /// at the location resumes after the checkpoint.
     ///
     /// # Errors
     ///
-    /// Fatal, before any store request, for the in-process feed, a durable
-    /// feed with no `location`, a `feed` other than the one `section` names,
-    /// a source given a coordinator, and a call from inside an async
-    /// context. Fatal too for a source with no framer, another fingerprint at
-    /// the location, a checkpoint that is not a key under the listing prefix,
-    /// and a store that cannot create an object conditionally. A publish the
-    /// feed refuses, or still rejects as retryable after the last attempt,
-    /// keeps the class the feed gave it, and a failed location read or write
+    /// Fatal, before any store request, for a `location` that does not
+    /// parse, the in-process feed, a durable feed with no `location`, a
+    /// `feed` other than the one `section` names, a source given a
+    /// coordinator, and a call from a thread in a Tokio runtime context:
+    /// async code, a `spawn_blocking` closure, or a thread holding a
+    /// `Handle::enter` guard. Fatal too for a source with no framer, another
+    /// fingerprint at the location, a checkpoint that is not a key under the
+    /// listing prefix, and a store that cannot create an object
+    /// conditionally. A publish the feed refuses, or still rejects as
+    /// retryable after the last attempt, keeps the class the feed gave it,
+    /// and a failed listing of the prefix or a failed location read or write
     /// the class of its store error.
     ///
     /// # Examples
@@ -406,7 +410,8 @@ impl S3Source {
         if tokio::runtime::Handle::try_current().is_ok() {
             return Err(fatal(
                 "a lister run blocks its thread until it ends, so it is called from a plain \
-                 thread such as `main`'s, outside any async context"
+                 thread such as `main`'s, outside any Tokio runtime context: no async code, \
+                 `spawn_blocking` closure or `Handle::enter` guard"
                     .into(),
             ));
         }

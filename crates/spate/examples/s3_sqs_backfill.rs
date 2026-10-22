@@ -119,7 +119,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pipeline = pipeline.feed(Arc::clone(&feed) as Arc<dyn Feed>);
     // ANCHOR_END: connect
 
-    // A lister run publishes these through `S3Source::list_once`; here
+    // This job names no `location`, so no lister run publishes its units;
     // `main()` publishes them by hand.
     for o in 0..OBJECTS {
         let confirmation = feed.publish(unit_over(&data, &format!("obj-{o:02}.ndjson"))?);

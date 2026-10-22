@@ -1475,8 +1475,9 @@ fn a_lister_run_refuses_a_feed_the_section_does_not_name() {
     assert_eq!(hooks.requests(), 0);
 }
 
-/// Pins that a lister run called from inside an async context refuses,
-/// where blocking on the I/O handle would panic.
+/// Pins that a lister run called from a thread in a Tokio runtime context
+/// refuses: from async code, where blocking on the I/O handle would panic,
+/// from a `spawn_blocking` closure and under a `Handle::enter` guard.
 #[test]
 fn a_lister_run_called_from_async_code_refuses() {
     let dir = tempfile::tempdir().unwrap();
@@ -1484,18 +1485,37 @@ fn a_lister_run_called_from_async_code_refuses() {
     fs::write(data.join("a.ndjson"), lines_bytes(&recs("a", 5))).unwrap();
     let (location, _) = file_location(&dir);
     let rt = runtime();
+    let caller = runtime();
+    let refused = |outcome: Result<(), spate_core::error::SourceError>,
+                   script: &spate_test::FeedScript| {
+        let err = outcome.unwrap_err();
+        let (class, reason) = client_error(&err);
+        assert_eq!(class, spate_core::error::ErrorClass::Fatal, "{err}");
+        assert!(reason.contains("Tokio runtime context"), "{reason}");
+        assert!(script.published().is_empty());
+    };
+
     let source = lister_source(&data, &rt, "");
     let (feed, script) = scripted_feed();
-    let caller = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .unwrap();
-    let err = caller
-        .block_on(async { source.list_once(&section("scripted", Some(&location)), Arc::new(feed)) })
-        .unwrap_err();
-    let (class, reason) = client_error(&err);
-    assert_eq!(class, spate_core::error::ErrorClass::Fatal, "{err}");
-    assert!(reason.contains("async context"), "{reason}");
-    assert!(script.published().is_empty());
+    let section_here = section("scripted", Some(&location));
+    let outcome = caller.block_on(async { source.list_once(&section_here, Arc::new(feed)) });
+    refused(outcome, &script);
+
+    let source = lister_source(&data, &rt, "");
+    let (feed, script) = scripted_feed();
+    let section_here = section("scripted", Some(&location));
+    let outcome = caller.block_on(async move {
+        tokio::task::spawn_blocking(move || source.list_once(&section_here, Arc::new(feed)))
+            .await
+            .unwrap()
+    });
+    refused(outcome, &script);
+
+    let source = lister_source(&data, &rt, "");
+    let (feed, script) = scripted_feed();
+    let _guard = caller.handle().enter();
+    let outcome = source.list_once(&section("scripted", Some(&location)), Arc::new(feed));
+    refused(outcome, &script);
 }
 
 /// Pins that a lister run on a source given a coordinator refuses before
@@ -1700,4 +1720,53 @@ fn a_failed_solo_listing_fails_the_run() {
     let l = launch_solo(&data, store);
     let reason = failure_reason(&exit(&l));
     assert!(reason.contains("listing"), "{reason}");
+}
+
+/// The in-process feed, except that a publish panics.
+struct PanickingPublish(spate_core::feed::memory::MemoryFeed);
+
+impl Feed for PanickingPublish {
+    fn backend(&self) -> &str {
+        self.0.backend()
+    }
+    fn set_waker(&self, waker: FeedWaker) {
+        self.0.set_waker(waker);
+    }
+    fn receive(&self, max: usize) -> Result<Vec<Delivery>, FeedError> {
+        self.0.receive(max)
+    }
+    fn renew(&self, receipt: Receipt) -> Result<(), FeedError> {
+        self.0.renew(receipt)
+    }
+    fn acknowledge(&self, receipt: Receipt) -> Result<(), FeedError> {
+        self.0.acknowledge(receipt)
+    }
+    fn fail(&self, receipt: Receipt, reason: &str) -> Result<(), FeedError> {
+        self.0.fail(receipt, reason)
+    }
+    fn publish(&self, _unit: Unit) -> Confirmation {
+        panic!("the feed panics on publish");
+    }
+}
+
+/// Pins that a solo run whose lister task panics ends as failed, naming
+/// the lister, and does not go on reading an empty feed.
+#[test]
+fn a_panicked_solo_lister_fails_the_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    fs::write(data.join("a.ndjson"), lines_bytes(&recs("a", 5))).unwrap();
+    let (store, _spy) = spying_local_store(SpyOptions::default());
+    let yaml = PipelineYaml::file("s3-solo-lister", &data)
+        .section("feed:\n  memory: {}\n")
+        .build();
+    let l = launch_with_feed(
+        &yaml,
+        test_options(),
+        |_| {},
+        Arc::new(PanickingPublish(spate_core::feed::memory::MemoryFeed::new())),
+        move |source, _io| line_framer(source).with_store(store),
+    );
+    let reason = failure_reason(&exit(&l));
+    assert!(reason.contains("lister ended"), "{reason}");
 }

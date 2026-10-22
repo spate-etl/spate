@@ -611,8 +611,9 @@ writes `end` and exits. `main()` starts it with
 whose rustdoc example is a binary that runs the lister when its first argument
 is `list`. The run reads the source and `feed:` sections of the workers' own
 pipeline file and builds no sink. It refuses the in-process feed, a section
-with no `location`, a feed other than the one the section names, and a call
-from async code.
+with no `location`, a feed other than the one the section names, a source
+given a coordinator, and a call from a thread in a Tokio runtime context,
+such as async code or a `spawn_blocking` closure.
 
 A unit the feed rejects as retryable is published again, up to five attempts,
 after waits of 200 ms, 400 ms, 800 ms and 1.6 s. A unit the feed refuses, or
@@ -621,9 +622,11 @@ object. A failed run returns its error, so a binary that returns it from
 `main()` exits non-zero, and the next run resumes after the checkpoint.
 
 The lister adds no timeout of its own. Each request to the store is bounded by
-`object_store`'s retries, about three minutes, and each publish by its feed
-backend's own limits. Bound the run as a whole where it is deployed, such as
-a Kubernetes Job's `activeDeadlineSeconds`.
+`object_store`'s retries, about three minutes. A publish waits as long as its
+[feed backend](../../feeds/README.mdx) keeps trying it, which has no bound on
+a backend that retries a transient failure until it stops. Bound the run as a
+whole where it is deployed, such as a Kubernetes Job's
+`activeDeadlineSeconds`.
 
 Two lister runs over one prefix:
 
@@ -632,7 +635,9 @@ Two lister runs over one prefix:
   checkpoint the earlier wrote, or lists the whole prefix when both start
   before either writes one, and the first to finish writes `end` while the
   other may still hold units the feed has not confirmed;
-- at one location with two fingerprints, the later run is refused on a store
+- at one location with two fingerprints, the later run is refused when it
+  reads the earlier's fingerprint, on any store; when both read before either
+  wrote one, the conditional create refuses the later run only on a store
   that honors `If-None-Match`.
 
 ## Split identity and drift

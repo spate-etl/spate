@@ -45,7 +45,8 @@ feed from the `feed:` section
 the source and `feed:` sections of the workers' own pipeline file and builds
 no sink. It refuses the in-process feed, a durable feed with no location, a
 feed other than the one the section names, a source given a coordinator, and
-a call from async code.
+a call from a thread in a Tokio runtime context, the rule
+`Pipeline::from_config` applies.
 
 The run writes the end marker, `run=` and a uuid v4 fresh to the run, after
 the feed has confirmed every unit and the last checkpoint is written. The
@@ -76,8 +77,10 @@ startup WARN says so.
   after the earlier's checkpoint, or lists the whole prefix when both start
   before either writes one, and the first to finish writes the end marker
   while the other may still hold units the feed has not confirmed. At one
-  location with two fingerprints the conditional create refuses the later run
-  where the store honors `If-None-Match`.
+  location with two fingerprints the later run is refused when it reads the
+  earlier's fingerprint, on any store; when both read before either wrote
+  one, the conditional create refuses the later run only where the store
+  honors `If-None-Match`.
 - Bad, because a solo run on the in-process feed holds one unit for each
   listed part not yet read, in memory and outside `units_held`, and lists from
   the beginning after a restart.
@@ -113,7 +116,7 @@ startup WARN says so.
 `a_failed_solo_listing_fails_the_run`.
 `crates/spate-s3/tests/request_shape.rs`:
 `a_worker_on_a_durable_feed_issues_no_listing`. Nothing fences a second
-lister run beyond the conditional create of the fingerprint.
+lister run beyond the fingerprint's read and its conditional create.
 
 ## More information
 

@@ -156,6 +156,11 @@ impl Lister {
                 "wrote the end marker at the job location after the feed confirmed every unit \
                  of this lister run"
             );
+        } else {
+            tracing::info!(
+                units = published,
+                "listed the prefix into the feed, which confirmed every unit"
+            );
         }
         Ok(())
     }
@@ -264,7 +269,9 @@ impl Lister {
                 Err(e)
                     if e.kind == FeedErrorKind::Retryable && attempt < LISTER_PUBLISH_ATTEMPTS =>
                 {
-                    tracing::warn!(
+                    // Per retry, so DEBUG; a unit that exhausts its attempts
+                    // fails the run with the feed's error.
+                    tracing::debug!(
                         key = ?key,
                         attempt,
                         error = %e,
@@ -2407,5 +2414,53 @@ mod tests {
         )
         .unwrap();
         assert_eq!(feed.keys(), ["data/a", "data/b"]);
+    }
+
+    /// Pins that a solo run on the in-process feed over the S3 client
+    /// publishes the objects its connector takes out of a listing page.
+    #[test]
+    fn a_solo_run_publishes_the_objects_the_s3_client_cannot_address() {
+        use spate_core::source::{Source as _, SourceCtx};
+        let rt = runtime();
+        let endpoint = crate::test_servers::listing_server(vec![list_page(
+            &[("data/a", 7), ("data/d//dbl.ndjson", 7)],
+            None,
+        )]);
+        let feed = spate_core::feed::memory::MemoryFeed::new();
+        let mut source = stub_source(&rt, &endpoint);
+        source
+            .configure_feed(
+                &spate_core::config::FeedSection::new(spate_test::component_config("memory", "{}")),
+                Arc::new(feed.clone()),
+            )
+            .unwrap();
+        source
+            .open(SourceCtx::new(
+                spate_core::checkpoint::Checkpointer::new().handle(),
+            ))
+            .unwrap();
+        spate_test::wait_until(DEADLINE, "both objects are published", || {
+            feed.counts().visible == 2
+        });
+    }
+
+    /// Pins that a lister run with no location, a solo run's, logs at INFO
+    /// how many units it published once the feed confirmed them.
+    #[test]
+    fn a_solo_listing_logs_its_unit_count_when_it_ends() {
+        let rt = runtime();
+        let job = Job::new();
+        rt.block_on(job.put_rows(&["data/a", "data/b", "data/c"]));
+        let mut lister = job.lister(KeyedFeed::confirming(&job.events), CHECKPOINT_EVERY);
+        lister.location = None;
+        let lines = spate_test::capture_logs(tracing::Level::INFO, || {
+            rt.block_on(lister.run()).unwrap();
+        });
+        assert!(
+            lines.iter().any(|l| l.contains("INFO")
+                && l.contains("listed the prefix")
+                && l.contains("units=3")),
+            "{lines:#?}"
+        );
     }
 }

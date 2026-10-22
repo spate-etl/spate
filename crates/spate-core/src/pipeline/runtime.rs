@@ -261,11 +261,6 @@ impl<S: Source + 'static> PipelineRuntime<S> {
                     None if section.backend().type_tag() == "memory" => {
                         let feed = MemoryFeed::from_section(section)
                             .map_err(|e| StartError::Config(e.to_string()))?;
-                        tracing::warn!(
-                            "the in-process feed built from the `feed:` section has no publisher, \
-                             so the source reads nothing unless code passes a feed it publishes \
-                             to through `Pipeline::feed`"
-                        );
                         Arc::new(feed)
                     }
                     None => {

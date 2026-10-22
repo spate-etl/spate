@@ -712,8 +712,8 @@ impl Pipeline {
     /// startup otherwise. The section's backend keys and its `attempt_cap`
     /// apply only when a feed is built from the section, so a feed passed
     /// here keeps the settings it was built with. Without this call, `run`
-    /// builds the in-process feed itself for `feed: { memory: {} }`, which
-    /// nothing can publish to, and refuses any other backend. To publish to
+    /// builds the in-process feed itself for `feed: { memory: {} }` and
+    /// refuses any other backend. To publish to
     /// the in-process feed, keep a handle to a `MemoryFeed` and pass it here.
     #[must_use]
     pub fn feed(mut self, feed: Arc<dyn Feed>) -> Self {

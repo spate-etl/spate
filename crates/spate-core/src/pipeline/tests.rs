@@ -1457,6 +1457,51 @@ fn a_refused_feed_section_builds_no_pipeline_thread() {
     );
 }
 
+/// A second registered dispatcher. With one live dispatcher, tracing-core
+/// caches a callsite's interest from whichever thread reaches it first, and
+/// other tests reach the feed arm on threads with no subscriber.
+static BYSTANDER: std::sync::LazyLock<tracing::Dispatch> = std::sync::LazyLock::new(|| {
+    use tracing_subscriber::layer::SubscriberExt;
+    tracing::Dispatch::new(
+        tracing_subscriber::registry().with(tracing_subscriber::filter::LevelFilter::OFF),
+    )
+});
+
+/// Pins that a `feed: { memory: {} }` section the source refuses fails
+/// startup with the error alone and logs no WARN.
+#[test]
+fn a_refused_feed_section_fails_startup_without_a_warning() {
+    use tracing_subscriber::layer::SubscriberExt;
+    std::sync::LazyLock::force(&BYSTANDER);
+    let mut cfg = test_config(1);
+    cfg.feed = feed_section("memory: {}");
+    let (source, shared, _script) = FakeSource::new();
+    let chain_shared = Arc::new(ChainShared::default());
+    let (sink, _drained) = test_sink();
+    let log = Arc::clone(&shared);
+    let runtime = PipelineRuntime::new(
+        cfg,
+        source,
+        move |_thread| {
+            Box::new(ok_chain(Arc::clone(&chain_shared), Arc::clone(&log)))
+                as Box<dyn RunnableChain>
+        },
+        sink,
+        Arc::new(crate::backpressure::InflightBudget::new()),
+    )
+    .with_options(test_options());
+    let warnings = Warnings::default();
+    let subscriber = tracing_subscriber::registry().with(warnings.clone());
+    let result = tracing::subscriber::with_default(subscriber, || runtime.run());
+    let Err(err @ StartError::Config(_)) = result else {
+        panic!("expected StartError::Config, got {result:?}");
+    };
+    assert!(err.to_string().contains("reads no feed"), "{err}");
+    assert!(!shared.lock().unwrap().opened, "the source must not open");
+    let warnings = warnings.0.lock().unwrap().clone();
+    assert!(warnings.is_empty(), "{warnings:#?}");
+}
+
 /// `admin.listen: none` runs and drains with no admin server. With no
 /// listener there is no stop channel to signal, and the run has to reach its
 /// drain and its controller join anyway.

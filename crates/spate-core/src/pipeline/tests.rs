@@ -1502,6 +1502,41 @@ fn a_refused_feed_section_fails_startup_without_a_warning() {
     assert!(warnings.is_empty(), "{warnings:#?}");
 }
 
+/// Pins that a `feed: { memory: {} }` section the source accepts starts and
+/// completes the run with no WARN from the runtime.
+#[test]
+fn an_accepted_in_process_feed_section_starts_without_a_warning() {
+    use tracing_subscriber::layer::SubscriberExt;
+    std::sync::LazyLock::force(&BYSTANDER);
+    let mut cfg = test_config(1);
+    cfg.feed = feed_section("memory: {}");
+    let (source, shared, script) = FakeSource::new();
+    shared.lock().unwrap().accept_feed = true;
+    script.lock().unwrap().push_back(Script::Drained);
+    let chain_shared = Arc::new(ChainShared::default());
+    let (sink, _drained) = test_sink();
+    let log = Arc::clone(&shared);
+    let runtime = PipelineRuntime::new(
+        cfg,
+        source,
+        move |_thread| {
+            Box::new(ok_chain(Arc::clone(&chain_shared), Arc::clone(&log)))
+                as Box<dyn RunnableChain>
+        },
+        sink,
+        Arc::new(crate::backpressure::InflightBudget::new()),
+    )
+    .with_options(test_options());
+    let warnings = Warnings::default();
+    let subscriber = tracing_subscriber::registry().with(warnings.clone());
+    let report = tracing::subscriber::with_default(subscriber, || runtime.run())
+        .expect("the source accepts the section");
+    assert_eq!(report.state, ExitState::Completed);
+    assert!(shared.lock().unwrap().opened, "the source opens");
+    let warnings = warnings.0.lock().unwrap().clone();
+    assert!(warnings.is_empty(), "{warnings:#?}");
+}
+
 /// `admin.listen: none` runs and drains with no admin server. With no
 /// listener there is no stop channel to signal, and the run has to reach its
 /// drain and its controller join anyway.

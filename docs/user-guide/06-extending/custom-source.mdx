@@ -251,6 +251,9 @@ Accept the section in `configure_feed`. The runtime calls it before `open`,
 with the section and the feed it names. Keep the feed, and read the section's
 common keys, such as `units_held`. The default `configure_feed` refuses the
 section, so a source that reads no feed fails at startup when one is set.
+The runtime builds the in-process feed for `feed: { memory: {} }` and logs
+nothing about who publishes to it, since only the source knows. A source that
+does not publish to the feed it reads says so in its own log when it opens.
 
 Your source follows these rules:
 

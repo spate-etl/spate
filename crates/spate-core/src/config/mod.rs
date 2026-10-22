@@ -675,6 +675,7 @@ impl PipelineConfig {
         self.reject_stray_chunk()?;
         self.reject_feed_with_coordination()?;
         self.reject_location_on_memory()?;
+        self.reject_bad_settling_window()?;
         // Resolve every declared sink's `chunk:` block now, so a malformed
         // block is rejected at load, including for a `sinks:` entry this
         // binary never installs (nothing later would resolve it).
@@ -744,6 +745,39 @@ impl PipelineConfig {
             return Err(ConfigError::Validation(
                 "the in-process `memory` feed takes no `feed.location`; remove it".into(),
             ));
+        }
+        Ok(())
+    }
+
+    /// Reject a `feed.settling_window` on the in-process feed, which ends a
+    /// job with no window, and one outside 20 s to 24 h: shorter than the
+    /// interval between the end check's reads, or long enough to overflow a
+    /// deadline. Split out of [`validate`](Self::validate) so the runtime,
+    /// which a programmatic config reaches without validation, enforces it
+    /// too.
+    pub(crate) fn reject_bad_settling_window(&self) -> Result<(), ConfigError> {
+        const CEILING: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+        let Some(feed) = &self.feed else {
+            return Ok(());
+        };
+        let Some(window) = feed.settling_window else {
+            return Ok(());
+        };
+        if feed.backend().type_tag() == "memory" {
+            return Err(ConfigError::Validation(
+                "the in-process `memory` feed ends a job with no settling window; remove \
+                 `feed.settling_window`"
+                    .into(),
+            ));
+        }
+        let floor = crate::feed::END_CHECK_INTERVAL;
+        if window < floor || window > CEILING {
+            return Err(ConfigError::Validation(format!(
+                "`feed.settling_window` must be from {} to {}; found {}",
+                humantime_serde::re::humantime::format_duration(floor),
+                humantime_serde::re::humantime::format_duration(CEILING),
+                humantime_serde::re::humantime::format_duration(window)
+            )));
         }
         Ok(())
     }

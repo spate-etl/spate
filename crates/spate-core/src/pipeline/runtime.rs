@@ -7,7 +7,7 @@ use crate::admin::{AdminServer, HealthState, HealthThresholds};
 use crate::backpressure::{BackpressureParams, InflightBudget, WatermarkController};
 use crate::checkpoint::Checkpointer;
 use crate::config::{MetricsExporter, PinningMode, PipelineConfig};
-use crate::feed::Feed;
+use crate::feed::{Feed, FeedOrigin};
 use crate::feed::memory::MemoryFeed;
 use crate::metrics::{
     self, BackpressureMetrics, CheckpointMetrics, ComponentLabels, E2eBasis, Exporter,
@@ -235,6 +235,9 @@ impl<S: Source + 'static> PipelineRuntime<S> {
         self.config
             .reject_location_on_memory()
             .map_err(|e| StartError::Config(e.to_string()))?;
+        self.config
+            .reject_bad_settling_window()
+            .map_err(|e| StartError::Config(e.to_string()))?;
         if let (Some(section), Some(feed)) = (&self.config.feed, &self.feed) {
             let named = section.backend().type_tag();
             if feed.backend() != named {
@@ -256,12 +259,12 @@ impl<S: Source + 'static> PipelineRuntime<S> {
         }
         match (&self.config.feed, self.feed.take()) {
             (Some(section), given) => {
-                let feed = match given {
-                    Some(feed) => feed,
+                let (feed, origin) = match given {
+                    Some(feed) => (feed, FeedOrigin::Given),
                     None if section.backend().type_tag() == "memory" => {
                         let feed = MemoryFeed::from_section(section)
                             .map_err(|e| StartError::Config(e.to_string()))?;
-                        Arc::new(feed)
+                        (Arc::new(feed) as Arc<dyn Feed>, FeedOrigin::Section)
                     }
                     None => {
                         return Err(StartError::Config(format!(
@@ -272,7 +275,7 @@ impl<S: Source + 'static> PipelineRuntime<S> {
                     }
                 };
                 self.source
-                    .configure_feed(section, feed)
+                    .configure_feed(section, feed, origin)
                     .map_err(|e| StartError::Config(e.to_string()))?;
             }
             (None, Some(_)) => {

@@ -51,6 +51,8 @@ pub(crate) struct SourceLog {
     /// When set, `configure_feed` accepts the section, as a feed-reading
     /// source does; otherwise it refuses it as the trait default does.
     pub(crate) accept_feed: bool,
+    /// The origin `configure_feed` was handed.
+    pub(crate) feed_origin: Option<crate::feed::FeedOrigin>,
 }
 
 pub(crate) enum Script {
@@ -264,8 +266,10 @@ impl Source for FakeSource {
         &mut self,
         section: &crate::config::FeedSection,
         feed: Arc<dyn crate::feed::Feed>,
+        origin: crate::feed::FeedOrigin,
     ) -> Result<(), crate::config::ConfigError> {
         let _ = (section, feed);
+        self.shared.lock().unwrap().feed_origin = Some(origin);
         if self.shared.lock().unwrap().accept_feed {
             return Ok(());
         }

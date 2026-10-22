@@ -6,10 +6,12 @@
 //! counts every delivery of a unit and moves a unit failed at its attempt cap,
 //! the tenth delivery unless [`with_attempt_cap`](MemoryFeed::with_attempt_cap)
 //! or a section's `attempt_cap` sets another, to an in-memory dead-letter list.
-//! Its [`counts`](MemoryFeed::counts) are exact.
+//! Its [`counts`](MemoryFeed::counts) are exact, and so is the depth it
+//! reports through [`read_depth`](Feed::read_depth).
 
 use super::{
-    Confirmation, Delivery, Feed, FeedError, FeedErrorKind, FeedWaker, Receipt, Unit, confirmation,
+    Confirmation, Delivery, Depth, DepthOf, DepthReading, Feed, FeedError, FeedErrorKind,
+    FeedWaker, Receipt, Unit, confirmation, depth_reading,
 };
 use crate::config::{ConfigError, FeedSection};
 use serde::Deserialize;
@@ -104,7 +106,7 @@ impl MemoryFeed {
     ///
     /// [`ConfigError::Component`] when the section names another backend,
     /// when the `memory` body holds a key, or when the section sets
-    /// `location`.
+    /// `location` or `settling_window`.
     ///
     /// # Examples
     ///
@@ -143,6 +145,14 @@ impl MemoryFeed {
                 context: "feed".into(),
                 message: "the in-process feed keeps no state outside the process, so it takes \
                           no `location`"
+                    .into(),
+            });
+        }
+        if section.settling_window.is_some() {
+            return Err(ConfigError::Component {
+                context: "feed".into(),
+                message: "the in-process feed ends a job with no settling window, so it takes \
+                          no `settling_window`"
                     .into(),
             });
         }
@@ -270,6 +280,27 @@ impl Feed for MemoryFeed {
         confirmer.confirm();
         confirmation
     }
+
+    fn read_depth(&self, of: DepthOf) -> Option<DepthReading> {
+        let state = self.lock();
+        let depth = match of {
+            DepthOf::DeadLetters => {
+                let mut depth = Depth::new("the in-process dead-letter list", false);
+                depth.visible = state.dead.len() as u64;
+                depth
+            }
+            DepthOf::Feed => {
+                let mut depth = Depth::new("the in-process feed", false);
+                depth.visible = state.visible.len() as u64;
+                depth.in_flight = state.held.len() as u64;
+                depth
+            }
+        };
+        drop(state);
+        let (reporter, reading) = depth_reading();
+        reporter.report(Ok(depth));
+        Some(reading)
+    }
 }
 
 #[cfg(test)]
@@ -280,6 +311,13 @@ mod tests {
 
     fn unit(id: &str) -> Unit {
         Unit::new(id, id.as_bytes().to_vec())
+    }
+
+    /// Receive the next unit, which must be `id`.
+    fn receive_one_of(feed: &MemoryFeed, id: &str) -> Delivery {
+        let delivery = feed.receive(1).unwrap().remove(0);
+        assert_eq!(delivery.unit.id, id);
+        delivery
     }
 
     fn receive_one(feed: &MemoryFeed) -> Delivery {
@@ -363,6 +401,58 @@ mod tests {
                 "the location must not print: {shown}"
             );
         }
+    }
+
+    /// Pins that `from_section` refuses a `settling_window`, which a caller
+    /// can set on a section built in code, as the `feed` component error its
+    /// `# Errors` names.
+    #[test]
+    fn from_section_refuses_a_settling_window() {
+        let mut section: FeedSection = serde_yaml::from_str("memory: {}\n").expect("section");
+        section.settling_window = Some(Duration::from_secs(60));
+        let err = MemoryFeed::from_section(&section).unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::Component { context, message }
+                if context == "feed" && message.contains("`settling_window`")),
+            "{err:?}"
+        );
+    }
+
+    /// Pins that the depth the feed reports agrees with its counts: visible
+    /// units as visible, held ones as in flight, and the dead-letter list's
+    /// length, each exact and settled at once.
+    #[test]
+    fn the_depth_a_memory_feed_reports_matches_its_counts() {
+        let feed = MemoryFeed::with_attempt_cap(NonZeroU32::new(1).expect("non-zero"));
+        let read = |of| {
+            feed.read_depth(of)
+                .expect("the in-process feed reports depth")
+                .try_outcome()
+                .expect("settled at once")
+                .expect("read")
+        };
+        let empty = read(DepthOf::Feed);
+        assert!(empty.is_empty() && !empty.approximate, "{empty}");
+        assert!(read(DepthOf::DeadLetters).is_empty());
+
+        for id in ["dead", "held", "visible"] {
+            drop(feed.publish(unit(id)));
+        }
+        let dead = receive_one_of(&feed, "dead");
+        feed.fail(dead.receipt, "unreadable").unwrap();
+        let _held = receive_one_of(&feed, "held");
+
+        let counts = feed.counts();
+        let depth = read(DepthOf::Feed);
+        assert_eq!(
+            (depth.visible, depth.in_flight, depth.delayed, depth.unsent),
+            (counts.visible, counts.held, 0, 0)
+        );
+        assert_eq!((depth.visible, depth.in_flight), (1, 1));
+        let dead = read(DepthOf::DeadLetters);
+        assert_eq!(dead.visible, counts.dead_lettered);
+        assert_eq!(dead.visible, 1);
+        assert!(!dead.approximate);
     }
 
     /// Pins that `from_section` refuses a section naming another backend, and

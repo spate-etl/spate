@@ -1371,6 +1371,74 @@ fn a_memory_feed_passed_in_with_a_location_is_refused() {
     );
 }
 
+/// Pins that `run` refuses a `settling_window` on an in-process feed passed
+/// in through `Pipeline::feed`, which skips building the feed from the
+/// section.
+#[test]
+fn a_memory_feed_passed_in_with_a_settling_window_is_refused() {
+    let mut cfg = test_config(1);
+    cfg.feed = feed_section("memory: {}\nsettling_window: 1m");
+    let h = start_with(
+        cfg,
+        test_options(),
+        |runtime| runtime.with_feed(Arc::new(crate::feed::memory::MemoryFeed::new())),
+        ok_chain,
+    );
+    let err = config_error_before_open(h);
+    assert!(
+        err.contains("`feed.settling_window`") && err.contains("`memory`"),
+        "{err}"
+    );
+}
+
+/// Pins that `run` refuses a settling window below the floor set on a
+/// section built in code, which skips the load-time check.
+#[test]
+fn a_zero_settling_window_passed_in_is_refused() {
+    let mut cfg = test_config(1);
+    let mut section = feed_section("sqs: {}\nlocation: s3://ops/jobs/backfill-1/").unwrap();
+    section.settling_window = Some(Duration::ZERO);
+    cfg.feed = Some(section);
+    let h = start_with_config(cfg, ok_chain);
+    let err = config_error_before_open(h);
+    assert!(err.contains("`feed.settling_window`"), "{err}");
+}
+
+/// Pins the origin `run` hands `configure_feed`: `Section` for the in-process
+/// feed it builds from the section, `Given` for a feed passed to
+/// `Pipeline::feed`.
+#[test]
+fn the_source_learns_where_its_feed_came_from() {
+    use crate::feed::FeedOrigin;
+    for (given, origin) in [(false, FeedOrigin::Section), (true, FeedOrigin::Given)] {
+        let mut cfg = test_config(1);
+        cfg.feed = feed_section("memory: {}");
+        let (source, shared, script) = FakeSource::new();
+        shared.lock().unwrap().accept_feed = true;
+        script.lock().unwrap().push_back(Script::Drained);
+        let chain_shared = Arc::new(ChainShared::default());
+        let (sink, _drained) = test_sink();
+        let log = Arc::clone(&shared);
+        let mut runtime = PipelineRuntime::new(
+            cfg,
+            source,
+            move |_thread| {
+                Box::new(ok_chain(Arc::clone(&chain_shared), Arc::clone(&log)))
+                    as Box<dyn RunnableChain>
+            },
+            sink,
+            Arc::new(crate::backpressure::InflightBudget::new()),
+        )
+        .with_options(test_options());
+        if given {
+            runtime = runtime.with_feed(Arc::new(crate::feed::memory::MemoryFeed::new()));
+        }
+        let report = runtime.run().expect("the source accepts the section");
+        assert_eq!(report.state, ExitState::Completed);
+        assert_eq!(shared.lock().unwrap().feed_origin, Some(origin), "given: {given}");
+    }
+}
+
 /// Pins that `run` passes a `location` beside a backend other than the
 /// in-process feed on to the feed checks that follow.
 #[test]

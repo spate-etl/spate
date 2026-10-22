@@ -320,6 +320,7 @@ fn configure_feed_refuses_a_location_under_the_source_prefix() {
                 Some(&format!("file://{}/jobs/a/", data.display())),
             ),
             Arc::new(feed),
+            spate_core::feed::FeedOrigin::Section,
         )
         .expect_err("a location under the source prefix is refused");
     assert!(
@@ -471,7 +472,11 @@ fn a_location_failing_every_read_reports_the_last_error_at_the_window() {
             .with_clock(Arc::clone(&clock) as Arc<dyn spate_core::clock::tokio::Clock>);
     let (feed, _script) = scripted_feed();
     source
-        .configure_feed(&section("scripted", Some(LOCATION)), Arc::new(feed))
+        .configure_feed(
+            &section("scripted", Some(LOCATION)),
+            Arc::new(feed),
+            spate_core::feed::FeedOrigin::Section,
+        )
         .unwrap();
     let stepper = {
         let hooks = hooks.clone();
@@ -584,7 +589,9 @@ fn the_fingerprint_wait_logs_the_location_and_window() {
     let mut section = FeedSection::new(spate_test::component_config("scripted", "{}"));
     section.location = Some(LOCATION.to_owned());
     let (feed, _script) = scripted_feed();
-    source.configure_feed(&section, Arc::new(feed)).unwrap();
+    source
+        .configure_feed(&section, Arc::new(feed), spate_core::feed::FeedOrigin::Section)
+        .unwrap();
 
     let writer = {
         let hooks = hooks.clone();
@@ -1603,7 +1610,7 @@ fn a_solo_run_warns_that_it_lists_from_the_beginning() {
     ] {
         let mut source = lister_source(&data, &rt, "");
         source
-            .configure_feed(&section(backend, None), feed)
+            .configure_feed(&section(backend, None), feed, spate_core::feed::FeedOrigin::Section)
             .unwrap();
         let lines = spate_test::capture_logs(tracing::Level::WARN, || {
             source
@@ -1696,6 +1703,7 @@ fn a_dropped_solo_source_stops_its_lister() {
         .configure_feed(
             &section("memory", None),
             Arc::new(spate_core::feed::memory::MemoryFeed::new()),
+            spate_core::feed::FeedOrigin::Section,
         )
         .unwrap();
     source

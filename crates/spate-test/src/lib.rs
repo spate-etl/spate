@@ -64,7 +64,7 @@
 //! ```
 //!
 //! To test a source that reads a work feed, script its deliveries,
-//! redeliveries and publish outcomes with [`scripted_feed`].
+//! redeliveries, publish outcomes and depth reads with [`scripted_feed`].
 //!
 //! For failure-path testing, script the sink
 //! ([`SinkScript::enqueue_for`]) and the deserializer

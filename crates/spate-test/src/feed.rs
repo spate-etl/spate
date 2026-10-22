@@ -2,14 +2,14 @@
 //!
 //! [`scripted_feed`] pairs a [`Feed`] implementation with a [`FeedScript`]
 //! handle. The test scripts deliveries, redeliveries, duplicates,
-//! dead-lettering and publish outcomes, the source under test reads through
-//! the trait, and the script observes every acknowledgement, failure,
-//! renewal and publish. There is no queue and no clock, and behavior is
-//! deterministic.
+//! dead-lettering, publish outcomes and depth reads, the source under test
+//! reads through the trait, and the script observes every acknowledgement,
+//! failure, renewal, publish and depth read. There is no queue and no clock,
+//! and behavior is deterministic.
 
 use spate_core::feed::{
-    Confirmation, Confirmer, Delivery, Feed, FeedError, FeedErrorKind, FeedWaker, Receipt, Unit,
-    confirmation,
+    Confirmation, Confirmer, Delivery, Depth, DepthOf, DepthReading, Feed, FeedError,
+    FeedErrorKind, FeedWaker, Receipt, Unit, confirmation, depth_reading,
 };
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -37,6 +37,12 @@ struct State {
     publish_outcomes: VecDeque<FeedErrorKind>,
     hold_publishes: bool,
     held_publishes: Vec<(Unit, Confirmer)>,
+    /// Scripted answers to depth reads of the feed, served first.
+    feed_depths: VecDeque<Result<Depth, FeedError>>,
+    /// Scripted answers to depth reads of the dead-letter destination.
+    dead_letter_depths: VecDeque<Result<Depth, FeedError>>,
+    feed_depth_reads: usize,
+    dead_letter_depth_reads: usize,
     waker: Option<FeedWaker>,
 }
 
@@ -242,6 +248,57 @@ impl FeedScript {
         state.wake();
     }
 
+    /// Answer the next unscripted depth read of `of` with `answer`, ahead
+    /// of the depth the feed's own state gives (repeat to script a
+    /// sequence). A read with no scripted answer left reports the units
+    /// queued as visible and the units held as in flight, or, for
+    /// [`DeadLetters`](DepthOf::DeadLetters), the units
+    /// [`dead_letter`](Self::dead_letter) moved as visible, all exact.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use spate_core::feed::{Depth, DepthOf, Feed, FeedError, FeedErrorKind, Unit};
+    ///
+    /// let (feed, script) = spate_test::scripted_feed();
+    /// let mut peer_held = Depth::new("the scripted feed", true);
+    /// peer_held.in_flight = 1;
+    /// script.answer_depth(DepthOf::Feed, Ok(peer_held.clone()));
+    /// script.answer_depth(
+    ///     DepthOf::Feed,
+    ///     Err(FeedError::new(FeedErrorKind::Retryable, "throttled")),
+    /// );
+    ///
+    /// let read = |of| feed.read_depth(of).unwrap().try_outcome().unwrap();
+    /// assert_eq!(read(DepthOf::Feed).unwrap(), peer_held);
+    /// assert_eq!(read(DepthOf::Feed).unwrap_err().kind, FeedErrorKind::Retryable);
+    ///
+    /// // With the script spent, the feed reports its own state.
+    /// let receipt = script.deliver(Unit::new("a", b"a".to_vec()));
+    /// script.dead_letter(receipt);
+    /// assert!(read(DepthOf::Feed).unwrap().is_empty());
+    /// assert_eq!(read(DepthOf::DeadLetters).unwrap().visible, 1);
+    /// assert_eq!(script.depth_reads(DepthOf::Feed), 3);
+    /// ```
+    pub fn answer_depth(&self, of: DepthOf, answer: Result<Depth, FeedError>) {
+        let mut state = self.lock();
+        match of {
+            DepthOf::DeadLetters => state.dead_letter_depths.push_back(answer),
+            _ => state.feed_depths.push_back(answer),
+        }
+        state.wake();
+    }
+
+    /// How many depth reads of `of` the feed has answered.
+    #[must_use]
+    pub fn depth_reads(&self, of: DepthOf) -> usize {
+        let state = self.lock();
+        match of {
+            DepthOf::DeadLetters => state.dead_letter_depth_reads,
+            _ => state.feed_depth_reads,
+        }
+    }
+
     /// Every delivery `receive` handed out, in order.
     #[must_use]
     pub fn delivered(&self) -> Vec<Delivery> {
@@ -371,6 +428,32 @@ impl Feed for ScriptedFeed {
         }
         confirmation
     }
+
+    fn read_depth(&self, of: DepthOf) -> Option<DepthReading> {
+        let mut state = self.lock();
+        let answer = match of {
+            DepthOf::DeadLetters => {
+                state.dead_letter_depth_reads += 1;
+                state.dead_letter_depths.pop_front().unwrap_or_else(|| {
+                    let mut depth = Depth::new("the scripted dead-letter destination", false);
+                    depth.visible = state.dead_lettered.len() as u64;
+                    Ok(depth)
+                })
+            }
+            _ => {
+                state.feed_depth_reads += 1;
+                state.feed_depths.pop_front().unwrap_or_else(|| {
+                    let mut depth = Depth::new("the scripted feed", false);
+                    depth.visible = state.queued.len() as u64;
+                    depth.in_flight = state.held.len() as u64;
+                    Ok(depth)
+                })
+            }
+        };
+        let (reporter, reading) = depth_reading();
+        reporter.report(answer);
+        Some(reading)
+    }
 }
 
 #[cfg(test)]
@@ -385,6 +468,60 @@ mod tests {
 
     fn kind(result: Result<(), FeedError>) -> FeedErrorKind {
         result.unwrap_err().kind
+    }
+
+    /// Pins that with no scripted answer the feed reports its own queue, held
+    /// set and dead letters, exactly.
+    #[test]
+    fn a_scripted_feed_reports_depth_from_its_own_state() {
+        let (feed, script) = scripted_feed();
+        let read = |of| {
+            feed.read_depth(of)
+                .expect("the scripted feed reports depth")
+                .try_outcome()
+                .expect("settled at once")
+                .expect("read")
+        };
+        assert!(read(DepthOf::Feed).is_empty());
+        let held = script.deliver(unit("held"));
+        let dead = script.deliver(unit("dead"));
+        script.deliver(unit("queued"));
+        let got = feed.receive(1).unwrap();
+        assert_eq!(got[0].receipt, held);
+        script.dead_letter(dead);
+        let depth = read(DepthOf::Feed);
+        assert_eq!((depth.visible, depth.in_flight), (1, 1));
+        assert!(!depth.approximate);
+        assert_eq!(read(DepthOf::DeadLetters).visible, 1);
+        assert_eq!(script.depth_reads(DepthOf::Feed), 2);
+        assert_eq!(script.depth_reads(DepthOf::DeadLetters), 1);
+    }
+
+    /// Pins that scripted depth answers are served in order per destination
+    /// before the feed's own state, and that scripting one wakes the reader.
+    #[test]
+    fn a_scripted_depth_answer_sequence_is_served_in_order() {
+        let (feed, script) = scripted_feed();
+        let (waker, park) = wake_channel();
+        feed.set_waker(waker);
+        let mut first = Depth::new("q", true);
+        first.delayed = 3;
+        script.answer_depth(DepthOf::Feed, Ok(first.clone()));
+        assert!(park.park(Duration::ZERO), "scripting did not wake the reader");
+        script.answer_depth(
+            DepthOf::Feed,
+            Err(FeedError::new(FeedErrorKind::Fatal, "gone")),
+        );
+        let mut dead = Depth::new("dlq", true);
+        dead.visible = 2;
+        script.answer_depth(DepthOf::DeadLetters, Ok(dead.clone()));
+
+        let read = |of| feed.read_depth(of).unwrap().try_outcome().unwrap();
+        assert_eq!(read(DepthOf::DeadLetters).unwrap(), dead);
+        assert_eq!(read(DepthOf::Feed).unwrap(), first);
+        assert_eq!(read(DepthOf::Feed).unwrap_err().kind, FeedErrorKind::Fatal);
+        assert!(read(DepthOf::Feed).unwrap().is_empty());
+        assert!(read(DepthOf::DeadLetters).unwrap().is_empty());
     }
 
     /// Pins that a redelivery lapses the old receipt, counts the delivery,

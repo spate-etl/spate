@@ -49,7 +49,7 @@ use spate_core::config::{ComponentConfig, ConfigError, CoordinationSection, Feed
 use spate_core::coordination::driver::CoordinationDriver;
 use spate_core::coordination::{PlanFinality, SplitCoordinator};
 use spate_core::error::{ErrorClass, SourceError};
-use spate_core::feed::Feed;
+use spate_core::feed::{Feed, FeedOrigin};
 use spate_core::framing::{FramingContract, RecordFramer};
 use spate_core::metrics::CoordinationMetrics;
 use spate_core::record::PartitionId;
@@ -608,6 +608,7 @@ impl Source for S3Source {
         &mut self,
         section: &FeedSection,
         feed: Arc<dyn Feed>,
+        _origin: FeedOrigin,
     ) -> Result<(), ConfigError> {
         if self.feed.is_some() {
             return Err(ConfigError::Component {

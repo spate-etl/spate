@@ -2498,6 +2498,7 @@ mod tests {
             .configure_feed(
                 &spate_core::config::FeedSection::new(spate_test::component_config("memory", "{}")),
                 Arc::new(feed.clone()),
+                spate_core::feed::FeedOrigin::Section,
             )
             .unwrap();
         source

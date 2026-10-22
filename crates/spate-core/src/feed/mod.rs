@@ -34,6 +34,15 @@
 //! and leaves others, so the source parks on the paired [`FeedPark`] between
 //! polls. A `receive` that takes nothing sends no signal. Methods take
 //! `&self`, so one `Arc<dyn Feed>` serves a reader and a publisher at once.
+//!
+//! # Ending a bounded job
+//!
+//! A backend that can count what it holds answers
+//! [`read_depth`](Feed::read_depth) with a [`DepthReading`], checked like a
+//! [`Confirmation`]. A source ends a bounded job through an [`EndCheck`]: the
+//! feed and the reader must stay empty over a settling window of reads at
+//! most [`END_CHECK_INTERVAL`] apart, and the feed's dead-letter destination
+//! decides between a completed and a stalled job.
 
 use crate::error::ErrorClass;
 use std::fmt;
@@ -42,7 +51,14 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+mod end_check;
 pub mod memory;
+
+pub use end_check::{END_CHECK_INTERVAL, EndAction, EndCheck, EndOutcome, MarkerRead};
+
+/// The settling window a bounded job waits out when its `feed:` section sets
+/// none: five minutes.
+pub const DEFAULT_SETTLING_WINDOW: Duration = Duration::from_secs(5 * 60);
 
 /// One unit of work: an identity and an opaque body the source decodes.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -261,6 +277,157 @@ pub trait Feed: Send + Sync {
     /// the feed has stored the unit or refused it. A unit published twice is
     /// delivered twice.
     fn publish(&self, unit: Unit) -> Confirmation;
+
+    /// Count what the feed, or its dead-letter destination, holds. The
+    /// returned [`DepthReading`] settles once the backend has read the
+    /// counts. Never waits.
+    ///
+    /// `None` means the backend cannot count, and a source that ends a
+    /// bounded job on this feed refuses it. The default returns `None`.
+    fn read_depth(&self, of: DepthOf) -> Option<DepthReading> {
+        let _ = of;
+        None
+    }
+}
+
+/// Where the feed handed to
+/// [`Source::configure_feed`](crate::source::Source::configure_feed) came
+/// from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FeedOrigin {
+    /// The runtime built it from the `feed:` section, so only the pipeline
+    /// holds it.
+    Section,
+    /// Code passed it to `Pipeline::feed`, and may keep a handle that
+    /// publishes into it.
+    Given,
+}
+
+/// What a [`read_depth`](Feed::read_depth) counts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DepthOf {
+    /// The units the feed holds for its readers.
+    Feed,
+    /// The units the feed has moved to its dead-letter destination.
+    DeadLetters,
+}
+
+/// The counts one [`read_depth`](Feed::read_depth) found.
+///
+/// Every count is `0` in a feed that holds nothing. A backend whose counts
+/// are estimates sets [`approximate`](Depth::approximate).
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Depth {
+    /// What was read: the queue, topic or list, for logs and errors. Carries
+    /// no credential.
+    pub what: String,
+    /// Units ready to be received.
+    pub visible: u64,
+    /// Units the feed will make visible later.
+    pub delayed: u64,
+    /// Units received by a reader and not yet acknowledged or failed.
+    pub in_flight: u64,
+    /// Acknowledges and fails this instance handed the backend that the
+    /// backend has not yet applied.
+    pub unsent: u64,
+    /// Whether the counts are estimates that can lag the feed.
+    pub approximate: bool,
+}
+
+impl Depth {
+    /// A reading of `what` with every count `0`. Backends outside this crate
+    /// build it here and set the counts, as the struct is
+    /// `#[non_exhaustive]`.
+    #[must_use]
+    pub fn new(what: impl Into<String>, approximate: bool) -> Depth {
+        Depth {
+            what: what.into(),
+            visible: 0,
+            delayed: 0,
+            in_flight: 0,
+            unsent: 0,
+            approximate,
+        }
+    }
+
+    /// Whether every count is `0`.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        // Compared one by one: a sum could wrap to zero.
+        self.visible == 0 && self.delayed == 0 && self.in_flight == 0 && self.unsent == 0
+    }
+}
+
+impl fmt::Display for Depth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}: {} visible, {} delayed, {} in flight, {} unsent",
+            self.what, self.visible, self.delayed, self.in_flight, self.unsent
+        )?;
+        if self.approximate {
+            f.write_str(" (approximate)")?;
+        }
+        Ok(())
+    }
+}
+
+/// The backend's half of a [`DepthReading`]: settles one read.
+///
+/// Dropping it unsettled resolves the reading as
+/// [`Retryable`](FeedErrorKind::Retryable).
+#[derive(Debug)]
+pub struct DepthReporter(tokio::sync::oneshot::Sender<Result<Depth, FeedError>>);
+
+impl DepthReporter {
+    /// Report the counts read, or why they could not be read.
+    pub fn report(self, outcome: Result<Depth, FeedError>) {
+        // A dropped `DepthReading` means nobody is waiting for the outcome.
+        let _ = self.0.send(outcome);
+    }
+}
+
+/// The outcome of one [`read_depth`](Feed::read_depth), once the backend
+/// reports it.
+///
+/// Checked from a synchronous loop with
+/// [`try_outcome`](DepthReading::try_outcome).
+#[derive(Debug)]
+pub struct DepthReading {
+    rx: tokio::sync::oneshot::Receiver<Result<Depth, FeedError>>,
+    // The settled outcome, kept so a check after settling repeats it.
+    outcome: Option<Result<Depth, FeedError>>,
+}
+
+impl DepthReading {
+    /// The outcome if the backend has settled the read, `None` while it is
+    /// pending. Never waits. Once settled, every later call returns the same
+    /// outcome.
+    pub fn try_outcome(&mut self) -> Option<Result<Depth, FeedError>> {
+        if self.outcome.is_none() {
+            use tokio::sync::oneshot::error::TryRecvError;
+            self.outcome = match self.rx.try_recv() {
+                Ok(outcome) => Some(outcome),
+                Err(TryRecvError::Empty) => None,
+                Err(TryRecvError::Closed) => Some(Err(FeedError::new(
+                    FeedErrorKind::Retryable,
+                    "the feed dropped a depth read before settling it",
+                ))),
+            };
+        }
+        self.outcome.clone()
+    }
+}
+
+/// A depth read's two halves: the backend settles the [`DepthReporter`], and
+/// the source checks the [`DepthReading`].
+#[must_use]
+pub fn depth_reading() -> (DepthReporter, DepthReading) {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    (DepthReporter(tx), DepthReading { rx, outcome: None })
 }
 
 /// Wakes a reader parked on the paired [`FeedPark`].
@@ -442,6 +609,55 @@ mod tests {
         assert_eq!(
             confirmation.try_outcome().unwrap().unwrap_err().kind,
             FeedErrorKind::Refused
+        );
+        assert!(feed.read_depth(DepthOf::Feed).is_none());
+    }
+
+    /// Pins that a backend that does not override `read_depth` reports no
+    /// depth, for the feed and its dead letters alike.
+    #[test]
+    fn a_feed_reports_no_depth_by_default() {
+        assert!(EmptyFeed.read_depth(DepthOf::Feed).is_none());
+        assert!(EmptyFeed.read_depth(DepthOf::DeadLetters).is_none());
+    }
+
+    /// Pins that a depth read whose backend drops the reporter reads as
+    /// Retryable, and that a settled read repeats its outcome.
+    #[test]
+    fn a_depth_reading_settles_once_and_repeats() {
+        let (reporter, mut reading) = depth_reading();
+        assert!(reading.try_outcome().is_none());
+        drop(reporter);
+        let kind = reading.try_outcome().unwrap().unwrap_err().kind;
+        assert_eq!(kind, FeedErrorKind::Retryable);
+
+        let (reporter, mut reading) = depth_reading();
+        let mut depth = Depth::new("q", true);
+        depth.delayed = 2;
+        reporter.report(Ok(depth.clone()));
+        assert_eq!(reading.try_outcome().unwrap().unwrap(), depth);
+        assert_eq!(reading.try_outcome().unwrap().unwrap(), depth);
+    }
+
+    /// Pins that a depth reads as empty only when every count is zero, with
+    /// no sum that could wrap, and how it prints.
+    #[test]
+    fn a_depth_is_empty_only_with_every_count_zero() {
+        let mut depth = Depth::new("q", false);
+        assert!(depth.is_empty());
+        depth.visible = u64::MAX;
+        depth.delayed = 1;
+        assert!(!depth.is_empty());
+        let mut depth = Depth::new("q", true);
+        depth.unsent = 1;
+        assert!(!depth.is_empty());
+        assert_eq!(
+            depth.to_string(),
+            "q: 0 visible, 0 delayed, 0 in flight, 1 unsent (approximate)"
+        );
+        assert_eq!(
+            Depth::new("q", false).to_string(),
+            "q: 0 visible, 0 delayed, 0 in flight, 0 unsent"
         );
     }
 

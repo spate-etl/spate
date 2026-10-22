@@ -20,7 +20,7 @@ use crate::checkpoint::AckRef;
 #[expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
 use crate::config::{ConfigError, CoordinationSection, FeedSection};
 use crate::error::SourceError;
-use crate::feed::Feed;
+use crate::feed::{Feed, FeedOrigin};
 use crate::framing::FramingContract;
 use crate::metrics::{Meter, SourceMetrics};
 use crate::record::{PartitionId, RawPayload};
@@ -330,15 +330,17 @@ pub trait Source: Send {
     /// A feed-reading source keeps `feed` to read its work units from, and
     /// reads the section's common keys, such as
     /// [`units_held`](FeedSection::units_held). The backend's own keys were
-    /// already applied when `feed` was built. The default rejects the
-    /// section, so a source that reads no feed fails at startup when one is
-    /// set.
+    /// already applied when `feed` was built. `origin` says whether code
+    /// passed `feed` in, and so may publish into it outside the pipeline.
+    /// The default rejects the section, so a source that reads no feed fails
+    /// at startup when one is set.
     fn configure_feed(
         &mut self,
         section: &FeedSection,
         feed: Arc<dyn Feed>,
+        origin: FeedOrigin,
     ) -> Result<(), ConfigError> {
-        let _ = (section, feed);
+        let _ = (section, feed, origin);
         Err(ConfigError::Component {
             context: "feed".into(),
             message: format!(

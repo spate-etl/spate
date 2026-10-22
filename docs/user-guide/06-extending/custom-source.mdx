@@ -248,9 +248,12 @@ rules below.
 
 The pipeline file names the feed in its [`feed:` section](../07-reference/configuration.mdx#feed).
 Accept the section in `configure_feed`. The runtime calls it before `open`,
-with the section and the feed it names. Keep the feed, and read the section's
-common keys, such as `units_held`. The default `configure_feed` refuses the
-section, so a source that reads no feed fails at startup when one is set.
+with the section, the feed it names, and the feed's `FeedOrigin`: `Section`
+when the runtime built the feed, `Given` when code passed it to
+`Pipeline::feed` and may still publish into it. Keep the feed, and read the
+section's common keys, such as `units_held`. The default `configure_feed`
+refuses the section, so a source that reads no feed fails at startup when one
+is set.
 The runtime builds the in-process feed for `feed: { memory: {} }` and logs
 nothing about who publishes to it, since only the source knows. A source that
 does not publish to the feed it reads says so in its own log when it opens.
@@ -280,6 +283,12 @@ Your source follows these rules:
   it reaches the end of its input or cannot read its unit, after making that
   state visible to the control plane. The park then ends at once, so
   `poll_events` sees the lane's end without waiting out the `timeout`.
+- **End a bounded job through an `EndCheck`.** While your reader holds no
+  unit, ask it what to read next, start that read without waiting on it, and
+  report each answer with the instant from your clock. Call `restart` as soon
+  as the reader holds work again. Report `Drained` on `Completed`, and fail the
+  run on `Stalled`. A feed whose `read_depth` returns `None` cannot end a
+  bounded job, so refuse it in `open`.
 
 The scripted feed in `spate-test` lets a test play the feed's side. This
 reader, from [`spate-test/tests/feed.rs`](repo:crates/spate-test/tests/feed.rs),
@@ -290,9 +299,10 @@ renewal answers `Gone`:
 ```
 
 `FeedScript` also scripts a duplicate delivery (`deliver` with an id already
-delivered), a dead letter, and a publish that is refused or held until the
-test confirms it. It records every acknowledgment, failure, renewal and
-`Gone` answer for the test to assert on.
+delivered), a dead letter, a publish that is refused or held until the test
+confirms it, and the answers to depth reads (`answer_depth`). It records every
+acknowledgment, failure, renewal, depth read and `Gone` answer for the test to
+assert on.
 
 To implement a feed backend, keep every method free of waits:
 
@@ -308,6 +318,12 @@ To implement a feed backend, keep every method free of waits:
 - Settle each publish through the `Confirmer` from `confirmation()`, and
   confirm only once the unit is stored. A confirmer dropped unsettled reads as
   `Retryable`, because the unit may or may not have been stored.
+- Answer `read_depth` if your backend can count what it holds and what it has
+  dead-lettered. Read the counts on your own task and settle the
+  `DepthReporter` from `depth_reading()`. Set `approximate` when the counts
+  are estimates, and count in `unsent` the acknowledgements and failures you
+  have accepted and not yet applied. The default returns `None`, and such a
+  feed serves continuous jobs only.
 
 A backend also answers to its name in the `feed:` section:
 

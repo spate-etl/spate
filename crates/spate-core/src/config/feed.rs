@@ -4,6 +4,7 @@
 use super::{ComponentConfig, redact};
 use serde::Deserialize;
 use std::num::{NonZeroU32, NonZeroUsize};
+use std::time::Duration;
 
 /// The pipeline's `feed:` section, handed to the source through
 /// [`Source::configure_feed`](crate::source::Source::configure_feed).
@@ -12,8 +13,9 @@ use std::num::{NonZeroU32, NonZeroUsize};
 /// its body holds the backend's own keys and is decoded by the backend.
 /// `units_held` applies whatever the backend; `attempt_cap` applies to the
 /// in-process and Kafka feeds, and a backend that cannot honor it refuses
-/// it. `location` names a job location for a source that reads one; the
-/// in-process feed refuses it.
+/// it. `location` names a job location for a source that reads one, and
+/// `settling_window` sets how long a job with a location waits on an empty
+/// feed before it ends; the in-process feed refuses both.
 ///
 /// ```yaml
 /// feed:
@@ -42,6 +44,11 @@ pub struct FeedSection {
     /// section names none.
     /// The in-process feed refuses one.
     pub location: Option<String>,
+    /// How long a job with a `location` waits for its lister's fingerprint,
+    /// and how long its feed must read empty before the job ends. `None`
+    /// leaves [`DEFAULT_SETTLING_WINDOW`](crate::feed::DEFAULT_SETTLING_WINDOW).
+    /// The in-process feed refuses one.
+    pub settling_window: Option<Duration>,
 }
 
 // Hand-written: a location URL can carry credentials in its userinfo or
@@ -54,12 +61,14 @@ impl std::fmt::Debug for FeedSection {
             units_held,
             attempt_cap,
             location,
+            settling_window,
         } = self;
         f.debug_struct("FeedSection")
             .field("backend", backend)
             .field("units_held", units_held)
             .field("attempt_cap", attempt_cap)
             .field("location", &location.as_deref().map(redact::url))
+            .field("settling_window", settling_window)
             .finish()
     }
 }
@@ -88,6 +97,7 @@ impl FeedSection {
             units_held: None,
             attempt_cap: None,
             location: None,
+            settling_window: None,
         }
     }
 
@@ -97,6 +107,15 @@ impl FeedSection {
     #[must_use]
     pub fn backend(&self) -> &ComponentConfig {
         &self.backend
+    }
+
+    /// The section's `settling_window`, or
+    /// [`DEFAULT_SETTLING_WINDOW`](crate::feed::DEFAULT_SETTLING_WINDOW) when
+    /// it sets none.
+    #[must_use]
+    pub fn settling_window_or_default(&self) -> Duration {
+        self.settling_window
+            .unwrap_or(crate::feed::DEFAULT_SETTLING_WINDOW)
     }
 }
 
@@ -131,6 +150,15 @@ impl<'de> Deserialize<'de> for FeedSection {
             })
             .transpose()?
             .flatten();
+        let settling_window = keys
+            .remove("settling_window")
+            .map(|v| {
+                humantime_serde::Serde::<Option<Duration>>::deserialize(v)
+                    .map(humantime_serde::Serde::into_inner)
+                    .map_err(|e| D::Error::custom(format!("settling_window: {e}")))
+            })
+            .transpose()?
+            .flatten();
         // Every key left names a backend, so a misspelled common key shows up
         // here as a second backend.
         if keys.len() != 1 {
@@ -146,7 +174,7 @@ impl<'de> Deserialize<'de> for FeedSection {
             } else {
                 format!(
                     "`feed:` must name exactly one backend beside `units_held`, \
-                     `attempt_cap` and `location`; found {}",
+                     `attempt_cap`, `location` and `settling_window`; found {}",
                     found.join(", ")
                 )
             }));
@@ -167,6 +195,7 @@ impl<'de> Deserialize<'de> for FeedSection {
             units_held,
             attempt_cap,
             location,
+            settling_window,
         })
     }
 }
@@ -189,26 +218,31 @@ mod tests {
     /// that every common key is read.
     #[test]
     fn one_backend_sits_beside_the_common_keys() {
-        let s =
-            parse("units_held: 12\nattempt_cap: 3\nlocation: s3://ops/jobs/a/\nmemory: { x: 7 }\n")
-                .unwrap();
+        let s = parse(
+            "units_held: 12\nattempt_cap: 3\nlocation: s3://ops/jobs/a/\n\
+             settling_window: 2m 30s\nmemory: { x: 7 }\n",
+        )
+        .unwrap();
         assert_eq!(s.backend().type_tag(), "memory");
         assert_eq!(s.units_held, NonZeroUsize::new(12));
         assert_eq!(s.attempt_cap, NonZeroU32::new(3));
         assert_eq!(s.location.as_deref(), Some("s3://ops/jobs/a/"));
+        assert_eq!(s.settling_window, Some(Duration::from_secs(150)));
         let body: Body = s.backend().deserialize_into().unwrap();
         assert_eq!(body.x, 7);
 
-        let bare = parse("memory: {}\nlocation: null\n").unwrap();
+        let bare = parse("memory: {}\nlocation: null\nsettling_window: null\n").unwrap();
         assert_eq!(bare.units_held, None);
         assert_eq!(bare.attempt_cap, None);
         assert_eq!(bare.location, None);
+        assert_eq!(bare.settling_window, None);
 
         let built = FeedSection::new(ComponentConfig::new(
             "memory",
             serde_yaml::Value::Mapping(Default::default()),
         ));
         assert_eq!(built.location, None);
+        assert_eq!(built.settling_window, None);
     }
 
     /// Pins the error for a section with no backend key.
@@ -238,6 +272,90 @@ mod tests {
             .to_string();
         assert!(err.contains("`locaton`"), "{err}");
         assert!(err.contains("`location`"), "{err}");
+
+        let err = parse("memory: {}\nsettling_windw: 5m\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("`settling_windw`"), "{err}");
+        assert!(err.contains("`settling_window`"), "{err}");
+    }
+
+    /// Pins that a `settling_window` that is not a duration is refused under
+    /// its own key.
+    #[test]
+    fn a_settling_window_that_is_not_a_duration_is_refused() {
+        for value in ["[1]", "lots", "5"] {
+            let err = parse(&format!("memory: {{}}\nsettling_window: {value}\n"))
+                .unwrap_err()
+                .to_string();
+            assert!(err.starts_with("settling_window: "), "{value}: {err}");
+        }
+    }
+
+    /// Pins that a section with no `settling_window` reads as five minutes,
+    /// and one that sets it reads as its value.
+    #[test]
+    fn an_absent_settling_window_reads_as_five_minutes() {
+        let s = parse("sqs: {}\n").unwrap();
+        assert_eq!(s.settling_window_or_default(), Duration::from_secs(300));
+        let s = parse("sqs: {}\nsettling_window: 90s\n").unwrap();
+        assert_eq!(s.settling_window_or_default(), Duration::from_secs(90));
+    }
+
+    fn load(feed: &str) -> Result<crate::config::PipelineConfig, String> {
+        let yaml = format!(
+            "pipeline: {{ name: demo }}\nsource: {{ memory: {{}} }}\nsink: {{ memory: {{}} }}\n\
+             feed: {feed}\n"
+        );
+        crate::config::PipelineConfig::from_str(&yaml).map_err(|e| e.to_string())
+    }
+
+    /// Pins that loading a file refuses a zero `settling_window`.
+    #[test]
+    fn a_zero_settling_window_is_refused() {
+        let err = load("{ sqs: {}, settling_window: 0s }").unwrap_err();
+        assert!(err.contains("`feed.settling_window`"), "{err}");
+    }
+
+    /// Pins the window's floor at one read interval: 20 s loads, 19 s is
+    /// refused.
+    #[test]
+    fn a_settling_window_below_the_floor_is_refused() {
+        let cfg = load("{ sqs: {}, settling_window: 20s }").expect("the floor loads");
+        assert_eq!(
+            cfg.feed.unwrap().settling_window,
+            Some(Duration::from_secs(20))
+        );
+        let err = load("{ sqs: {}, settling_window: 19s 999ms }").unwrap_err();
+        assert!(
+            err.contains("`feed.settling_window`") && err.contains("20s"),
+            "{err}"
+        );
+    }
+
+    /// Pins the window's ceiling at a day: `24h` loads, a second more and a
+    /// value that would overflow a deadline are refused.
+    #[test]
+    fn a_settling_window_above_a_day_is_refused() {
+        load("{ sqs: {}, settling_window: 24h }").expect("a day loads");
+        for value in ["24h 1s", "1000000years"] {
+            let err = load(&format!("{{ sqs: {{}}, settling_window: {value} }}")).unwrap_err();
+            assert!(
+                err.contains("`feed.settling_window`") && err.contains("1day"),
+                "{value}: {err}"
+            );
+        }
+    }
+
+    /// Pins that loading a file refuses a `settling_window` beside the
+    /// in-process feed, naming the rule.
+    #[test]
+    fn a_memory_feed_with_a_settling_window_is_refused() {
+        let err = load("{ memory: {}, settling_window: 1m }").unwrap_err();
+        assert!(
+            err.contains("`feed.settling_window`") && err.contains("`memory`"),
+            "{err}"
+        );
     }
 
     /// Pins that a `location` that is not a string is refused under its own
@@ -253,9 +371,11 @@ mod tests {
     /// Pins that `Debug` shows the location without its userinfo or query.
     #[test]
     fn a_section_debug_redacts_the_location() {
-        let s = parse("memory: {}\nlocation: s3://u:secret@ops/jobs/a?x=1\n").unwrap();
+        let s = parse("memory: {}\nlocation: s3://u:secret@ops/jobs/a?x=1\nsettling_window: 1m\n")
+            .unwrap();
         let shown = format!("{s:?}");
         assert!(shown.contains("ops/jobs/a"), "{shown}");
+        assert!(shown.contains("settling_window: Some(60s)"), "{shown}");
         assert!(!shown.contains("secret"), "{shown}");
         assert!(!shown.contains("x=1"), "{shown}");
     }

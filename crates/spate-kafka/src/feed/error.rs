@@ -3,7 +3,9 @@
 use spate_core::config::ConfigError;
 
 /// Why [`KafkaFeed::connect`](crate::feed::KafkaFeed::connect) could not
-/// build a feed.
+/// build a feed, or
+/// [`KafkaFeedPublisher::connect`](crate::feed::KafkaFeedPublisher::connect)
+/// a publisher.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum KafkaFeedError {

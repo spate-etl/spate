@@ -134,22 +134,11 @@ impl SinkContext {
     }
 
     /// Record an error callback's `text` as the latest rejection, arrived at
-    /// `now`, when `code` is a SASL authentication failure or the text
-    /// reports a [`tls_rejection`](crate::error::tls_rejection). An
-    /// `Authentication` error whose text says the SASL mechanism handshake
-    /// failed on a local error, such as the connection dropping, is no
-    /// rejection. Any other error leaves the record as it is.
+    /// `now`, when `code` and `text` report a
+    /// [`rejection`](crate::error::rejection). Any other error leaves the
+    /// record as it is.
     pub(crate) fn note_error(&self, code: RDKafkaErrorCode, text: &str, now: Instant) {
-        let rejected = match code {
-            // librdkafka reports a SASL mechanism handshake that ended on a
-            // local transport failure or timeout under this code too.
-            RDKafkaErrorCode::Authentication => {
-                !text.contains("mechanism handshake failed: Local: ")
-            }
-            RDKafkaErrorCode::SaslAuthenticationFailed => true,
-            _ => crate::error::tls_rejection(code, text),
-        };
-        if rejected {
+        if crate::error::rejection(code, text) {
             *self.rejection.lock().expect("rejection lock") = Some((now, text.to_owned()));
         }
     }

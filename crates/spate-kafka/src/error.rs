@@ -70,6 +70,20 @@ pub(crate) fn classify_consumer_error(code: RDKafkaErrorCode, after_startup: boo
     }
 }
 
+/// Whether an error callback's `code` and `text` report a rejection: a SASL
+/// authentication failure or a [`tls_rejection`]. An `Authentication` error
+/// whose text says the SASL mechanism handshake failed on a local error, such
+/// as the connection dropping, is no rejection.
+pub(crate) fn rejection(code: RDKafkaErrorCode, text: &str) -> bool {
+    match code {
+        // librdkafka reports a SASL mechanism handshake that ended on a
+        // local transport failure or timeout under this code too.
+        RDKafkaErrorCode::Authentication => !text.contains("mechanism handshake failed: Local: "),
+        RDKafkaErrorCode::SaslAuthenticationFailed => true,
+        _ => tls_rejection(code, text),
+    }
+}
+
 /// Whether an error callback's `code` and `text` report a TLS handshake the
 /// client or the broker rejected.
 ///

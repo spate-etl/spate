@@ -1,5 +1,6 @@
-//! The checks [`KafkaFeed::connect`](crate::feed::KafkaFeed::connect) runs
-//! on the feed's topics before the feed starts.
+//! The checks [`KafkaFeed::connect`](crate::feed::KafkaFeed::connect) and
+//! [`KafkaFeedPublisher::connect`](crate::feed::KafkaFeedPublisher::connect)
+//! run on the feed's topics before the feed starts.
 //!
 //! The work, retry, dead-letter and attempt topics must exist. The work,
 //! retry and dead-letter topics may not be compacted: a compacted topic
@@ -1102,6 +1103,34 @@ mod tests {
     /// `rdkafka`, under a bound of `limit`, on a thread of its own. `None`
     /// when nothing came back within [`DEADLINE`].
     fn connect_to(brokers: &str, rdkafka: &str, limit: Duration) -> Option<KafkaFeedError> {
+        connect_with_to(brokers, rdkafka, limit, |section, io, limit| {
+            crate::feed::KafkaFeed::connect_with(section, io, Scope::All, limit).err()
+        })
+    }
+
+    /// `KafkaFeedPublisher::connect` as [`connect_to`] runs the feed's.
+    #[cfg(feature = "tls")]
+    fn connect_publisher_to(
+        brokers: &str,
+        rdkafka: &str,
+        limit: Duration,
+    ) -> Option<KafkaFeedError> {
+        connect_with_to(brokers, rdkafka, limit, |section, io, limit| {
+            crate::feed::KafkaFeedPublisher::connect_with(section, io, Scope::All, limit).err()
+        })
+    }
+
+    /// [`connect_to`] with the constructor `connect`.
+    fn connect_with_to(
+        brokers: &str,
+        rdkafka: &str,
+        limit: Duration,
+        connect: fn(
+            &spate_core::config::FeedSection,
+            &tokio::runtime::Handle,
+            Duration,
+        ) -> Option<KafkaFeedError>,
+    ) -> Option<KafkaFeedError> {
         let section: spate_core::config::FeedSection = serde_yaml::from_str(&format!(
             "kafka:\n  brokers: \"{brokers}\"\n  group_id: workers\n  topic: {WORK}\n  \
              retry_topic: {RETRY}\n  dead_letter_topic: {DEAD}\n  attempt_topic: {ATTEMPTS}\n  \
@@ -1111,9 +1140,7 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let io = multi_thread();
-            let connected =
-                crate::feed::KafkaFeed::connect_with(&section, io.handle(), Scope::All, limit);
-            let _ = tx.send(connected.err());
+            let _ = tx.send(connect(&section, io.handle(), limit));
         });
         rx.recv_timeout(DEADLINE)
             .unwrap_or_else(|_| panic!("connect did not return within {DEADLINE:?}"))
@@ -1214,6 +1241,85 @@ mod tests {
         }
     }
 
+    /// A broker that answers ApiVersions, accepts the SASL `PLAIN`
+    /// mechanism, and refuses the login with `SASL_AUTHENTICATION_FAILED`,
+    /// as a broker does for a wrong password. Returns its address.
+    #[cfg(feature = "tls")]
+    fn refuses_sasl_login() -> std::net::SocketAddr {
+        use std::io::{Read, Write};
+        fn string(body: &mut Vec<u8>, s: &str) {
+            body.extend_from_slice(&(s.len() as i16).to_be_bytes());
+            body.extend_from_slice(s.as_bytes());
+        }
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { return };
+                std::thread::spawn(move || {
+                    loop {
+                        let mut len = [0u8; 4];
+                        if s.read_exact(&mut len).is_err() {
+                            return;
+                        }
+                        let mut req = vec![0u8; u32::from_be_bytes(len) as usize];
+                        if s.read_exact(&mut req).is_err() {
+                            return;
+                        }
+                        let key = i16::from_be_bytes([req[0], req[1]]);
+                        let ver = i16::from_be_bytes([req[2], req[3]]);
+                        let mut body = req[4..8].to_vec();
+                        match (key, ver) {
+                            (18, v) if v > 0 => {
+                                body.extend_from_slice(&35i16.to_be_bytes());
+                                body.extend_from_slice(&0i32.to_be_bytes());
+                            }
+                            (18, _) => {
+                                body.extend_from_slice(&0i16.to_be_bytes());
+                                let apis: [(i16, i16, i16); 4] =
+                                    [(18, 0, 0), (17, 0, 1), (36, 0, 0), (3, 0, 0)];
+                                body.extend_from_slice(&(apis.len() as i32).to_be_bytes());
+                                for (k, lo, hi) in apis {
+                                    body.extend_from_slice(&k.to_be_bytes());
+                                    body.extend_from_slice(&lo.to_be_bytes());
+                                    body.extend_from_slice(&hi.to_be_bytes());
+                                }
+                            }
+                            // SaslHandshake: no error, the one mechanism.
+                            (17, _) => {
+                                body.extend_from_slice(&0i16.to_be_bytes());
+                                body.extend_from_slice(&1i32.to_be_bytes());
+                                string(&mut body, "PLAIN");
+                            }
+                            // SaslAuthenticate v0: SASL_AUTHENTICATION_FAILED,
+                            // its message, and no auth bytes.
+                            (36, _) => {
+                                body.extend_from_slice(&58i16.to_be_bytes());
+                                string(
+                                    &mut body,
+                                    "Authentication failed: Invalid username or password",
+                                );
+                                body.extend_from_slice(&0i32.to_be_bytes());
+                            }
+                            _ => return,
+                        }
+                        let mut frame = (body.len() as u32).to_be_bytes().to_vec();
+                        frame.extend_from_slice(&body);
+                        if s.write_all(&frame).is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        addr
+    }
+
+    /// The passthrough of a client that logs in with SASL `PLAIN`.
+    #[cfg(feature = "tls")]
+    const SASL_PLAIN: &str = "    security.protocol: sasl_plaintext\n    sasl.mechanism: PLAIN\n    \
+                              sasl.username: u\n    sasl.password: wrong\n";
+
     #[cfg(feature = "tls")]
     mod rejected_handshake {
         use super::*;
@@ -1232,6 +1338,37 @@ mod tests {
                 }
                 other => panic!("expected a refusal, got {other:?}"),
             }
+        }
+
+        fn refused_with_text(got: Option<KafkaFeedError>) -> String {
+            match got {
+                Some(KafkaFeedError::Refused(message)) => {
+                    assert!(
+                        message.starts_with("reading the metadata of the work topic `units`: "),
+                        "{message}"
+                    );
+                    message
+                }
+                other => panic!("expected a refusal, got {other:?}"),
+            }
+        }
+
+        /// Pins that a broker refusing the SASL login refuses connecting the
+        /// feed with the broker's text, without waiting out the bound.
+        #[test]
+        fn a_wrong_sasl_password_refuses_the_feed_at_connect() {
+            let brokers = refuses_sasl_login().to_string();
+            let message = refused_with_text(connect_to(&brokers, SASL_PLAIN, LONG));
+            assert!(message.contains("Authentication failed"), "{message}");
+        }
+
+        /// Pins that a broker refusing the SASL login refuses connecting the
+        /// publisher with the broker's text, without waiting out the bound.
+        #[test]
+        fn a_wrong_sasl_password_refuses_the_publisher_at_connect() {
+            let brokers = refuses_sasl_login().to_string();
+            let message = refused_with_text(connect_publisher_to(&brokers, SASL_PLAIN, LONG));
+            assert!(message.contains("Authentication failed"), "{message}");
         }
 
         /// Pins that connecting to a broker that answers the handshake with

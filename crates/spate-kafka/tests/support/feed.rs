@@ -18,7 +18,7 @@ use spate_core::ops::chain_owned;
 use spate_core::pipeline::{ExitState, Pipeline, RuntimeOptions, ShutdownHandle};
 use spate_core::sink::{KeyHashRouter, SinkPoolConfig};
 use spate_json::NdjsonFramer;
-use spate_kafka::feed::{KafkaFeed, KafkaFeedError};
+use spate_kafka::feed::{KafkaFeed, KafkaFeedError, KafkaFeedPublisher};
 use spate_s3::{DescriptorObject, S3Source, SplitDescriptor};
 use spate_test::{
     BytesPassthrough, PipelineRun, ScriptedResult, SinkScript, TestEncoder, capture_sink,
@@ -277,6 +277,11 @@ pub(crate) fn recs(prefix: &str, n: usize) -> Vec<String> {
 }
 
 pub(crate) fn publish(feed: &KafkaFeed, unit: Unit) {
+    publish_to(feed, unit);
+}
+
+/// Publish `unit` through any feed and wait for its confirmation.
+pub(crate) fn publish_to(feed: &dyn Feed, unit: Unit) {
     let mut confirmation = feed.publish(unit);
     wait_until(DEADLINE, "the publish settles", || {
         confirmation.try_outcome().is_some()
@@ -415,6 +420,40 @@ pub(crate) fn high_watermark(brokers: &str, topic: &str) -> i64 {
         .fetch_watermarks(topic, 0, Duration::from_secs(10))
         .expect("watermarks")
         .1
+}
+
+/// How many messages the first `partitions` partitions of `topic` hold
+/// between them.
+pub(crate) fn high_watermarks(brokers: &str, topic: &str, partitions: i32) -> i64 {
+    let consumer: BaseConsumer = ClientConfig::new()
+        .set("bootstrap.servers", brokers)
+        .create()
+        .expect("watermark reader");
+    (0..partitions)
+        .map(|partition| {
+            consumer
+                .fetch_watermarks(topic, partition, Duration::from_secs(10))
+                .expect("watermarks")
+                .1
+        })
+        .sum()
+}
+
+/// A publish-only handle connected as on the MockCluster, with the runtime
+/// it connected on.
+pub(crate) fn publisher_on_mock(
+    yaml: &str,
+) -> (
+    Result<KafkaFeedPublisher, KafkaFeedError>,
+    tokio::runtime::Runtime,
+) {
+    let io = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let publisher = KafkaFeedPublisher::connect_without_config_checks(&section(yaml), io.handle());
+    (publisher, io)
 }
 
 /// Produce `messages` to partition 0 of `topic` as given, key included.

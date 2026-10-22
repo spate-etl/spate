@@ -17,7 +17,7 @@ use super::write::{
     self, Attempt, DELIVERIES_HEADER, Destination, Failure, Finish, Move, Outgoing, Tombstone,
     Write, WriteClass, classify, route,
 };
-use super::{Core, Gating, KafkaFeed, Ready};
+use super::{Core, Gating, KafkaFeed, KafkaFeedError, KafkaFeedPublisher, Ready};
 use rdkafka::config::FromClientConfigAndContext;
 use rdkafka::error::{KafkaError, RDKafkaErrorCode as C};
 use spate_core::config::FeedSection;
@@ -457,6 +457,186 @@ fn idle_feed() -> KafkaFeed {
         gate: None,
         follower: None,
     }
+}
+
+/// A publisher whose producer reaches no broker, over `config`.
+fn idle_publisher_over(config: &KafkaFeedConfig) -> KafkaFeedPublisher {
+    let core = Arc::new(Core::new(config, TWO));
+    let producer = Producer::from_config_and_context(
+        &config.producer_config(false),
+        FeedProducerContext::new(Arc::clone(&core)),
+    )
+    .unwrap();
+    KafkaFeedPublisher::from_parts(core, producer)
+}
+
+fn idle_publisher() -> KafkaFeedPublisher {
+    idle_publisher_over(&unreachable_config(""))
+}
+
+/// Pins the publisher's receive side: it names the `kafka` backend,
+/// refuses a read as Fatal naming the worker's constructor, names no
+/// delivery for a receipt, and keeps no waker.
+#[test]
+fn a_publisher_answers_the_receive_side() {
+    let publisher = idle_publisher();
+    assert_eq!(publisher.backend(), "kafka");
+    let err = publisher.receive(8).unwrap_err();
+    assert_eq!(err.kind, FeedErrorKind::Fatal);
+    assert!(err.reason.contains("KafkaFeed::connect"), "{}", err.reason);
+    for outcome in [
+        publisher.renew(Receipt(1)),
+        publisher.acknowledge(Receipt(1)),
+        publisher.fail(Receipt(1), "why"),
+    ] {
+        assert_eq!(outcome.unwrap_err().kind, FeedErrorKind::Gone);
+    }
+    let (waker, park) = wake_channel();
+    publisher.set_waker(waker);
+    assert!(!park.park(Duration::ZERO), "woken");
+}
+
+/// Pins that a publisher whose feed latched refuses every later publish
+/// at once with the latched error.
+#[test]
+fn a_latched_publisher_refuses_every_later_publish() {
+    let publisher = idle_publisher();
+    publisher.core().latch("x");
+    let mut confirmation = publisher.publish(Unit::new("u", b"body".to_vec()));
+    let err = confirmation.try_outcome().expect("settled").unwrap_err();
+    assert_eq!(err.kind, FeedErrorKind::Fatal);
+    assert_eq!(err.reason, "x");
+}
+
+/// Pins that a publisher's `Debug` prints no passthrough value.
+#[cfg(feature = "tls")]
+#[test]
+fn a_publishers_debug_prints_no_rdkafka_value() {
+    let publisher = idle_publisher_over(&unreachable_config(
+        "  rdkafka:\n    security.protocol: sasl_plaintext\n    sasl.mechanism: PLAIN\n    \
+         sasl.username: u\n    sasl.password: hunter2\n",
+    ));
+    let shown = format!("{publisher:?}");
+    assert!(!shown.contains("hunter2"), "{shown}");
+    assert!(shown.contains("units"), "{shown}");
+}
+
+/// Hand the producer context of `publisher` one error callback, as
+/// rdkafka's poll does.
+fn report_error(publisher: &KafkaFeedPublisher, code: C, text: &str) {
+    use rdkafka::client::ClientContext as _;
+    use rdkafka::producer::Producer as _;
+    publisher
+        .producer()
+        .context()
+        .error(KafkaError::Global(code), text);
+}
+
+/// Pins that a rejected credential or TLS handshake the producer reports
+/// after connect stops the feed, and a later publish fails Fatal with the
+/// rejection's text.
+#[test]
+fn a_rejection_the_feed_producer_reports_latches_the_feed() {
+    for (code, text) in [
+        (
+            C::Authentication,
+            "SASL authentication error: Authentication failed: Invalid username or password",
+        ),
+        (
+            C::SSL,
+            "ssl://127.0.0.1:9093/bootstrap: SSL handshake failed: ssl/tls alert handshake \
+             failure: SSL alert number 40 (after 0ms in state SSL_HANDSHAKE)",
+        ),
+    ] {
+        let publisher = idle_publisher();
+        report_error(&publisher, code, text);
+        assert!(publisher.core().latched(), "{code:?}");
+        let err = publisher
+            .publish(Unit::new("u", b"body".to_vec()))
+            .try_outcome()
+            .expect("settled")
+            .unwrap_err();
+        assert_eq!(err.kind, FeedErrorKind::Fatal);
+        assert!(err.reason.ends_with(text), "{}", err.reason);
+    }
+}
+
+/// Pins that a SASL mechanism handshake that failed on a local error, such
+/// as a dropped connection, does not stop the feed.
+#[test]
+fn a_local_sasl_handshake_failure_does_not_latch_the_feed() {
+    let publisher = idle_publisher();
+    report_error(
+        &publisher,
+        C::Authentication,
+        "SASL mechanism handshake failed: Local: Broker transport failure",
+    );
+    assert!(!publisher.core().latched());
+}
+
+/// Pins that a fatal producer error stops the feed with its cause, so a
+/// later publish fails Fatal naming it, for librdkafka's fatal code and for
+/// the cause's code rdkafka reports it under.
+#[test]
+fn a_fatal_producer_error_latches_the_feed_with_its_cause() {
+    let text = "Failed to acquire idempotence PID from broker 127.0.0.1:9092/1: Broker: \
+                Cluster authorization failed";
+    for code in [
+        C::Fatal,
+        C::ClusterAuthorizationFailed,
+        C::OutOfOrderSequenceNumber,
+        C::InvalidProducerEpoch,
+        C::InvalidProducerIdMapping,
+    ] {
+        let publisher = idle_publisher();
+        report_error(&publisher, code, text);
+        let err = publisher
+            .publish(Unit::new("u", b"body".to_vec()))
+            .try_outcome()
+            .expect("settled")
+            .unwrap_err();
+        assert_eq!(err.kind, FeedErrorKind::Fatal, "{code:?}");
+        assert!(
+            err.reason.contains("Cluster authorization failed"),
+            "{}",
+            err.reason
+        );
+    }
+    let publisher = idle_publisher();
+    report_error(
+        &publisher,
+        C::BrokerTransportFailure,
+        "127.0.0.1:9092/1: Disconnected",
+    );
+    assert!(
+        !publisher.core().latched(),
+        "a transport failure stopped the feed"
+    );
+}
+
+/// Pins that the publisher refuses a section a worker refuses, with the
+/// worker's error, before it builds any client.
+#[test]
+fn a_publisher_refuses_the_section_a_worker_refuses() {
+    let section: FeedSection = serde_yaml::from_str(
+        "kafka:\n  brokers: 127.0.0.1:1\n  group_id: workers\n  topic: units\n  \
+         retry_topic: units\n  dead_letter_topic: units-dead\n  \
+         attempt_topic: units-attempts\n",
+    )
+    .unwrap();
+    let io = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let worker = KafkaFeed::connect(&section, io.handle()).unwrap_err();
+    let publisher = KafkaFeedPublisher::connect(&section, io.handle()).unwrap_err();
+    assert!(matches!(worker, KafkaFeedError::Config(_)), "{worker}");
+    assert!(
+        matches!(publisher, KafkaFeedError::Config(_)),
+        "{publisher}"
+    );
+    assert_eq!(worker.to_string(), publisher.to_string());
 }
 
 /// Buffer one unit of partition 0 for `feed`'s reader.
@@ -2735,6 +2915,165 @@ mod cluster {
                 "{held} units held"
             );
         }
+    }
+
+    use super::super::KafkaFeedPublisher;
+
+    /// A publisher on `brokers` with `rdkafka` appended to its passthrough,
+    /// checking only that the topics exist.
+    fn connect_publisher(
+        brokers: &str,
+        rdkafka: &str,
+        io: &tokio::runtime::Runtime,
+    ) -> KafkaFeedPublisher {
+        KafkaFeedPublisher::connect_with(
+            &section_with(brokers, "publisher", rdkafka),
+            io.handle(),
+            crate::feed::startup::Scope::Existence,
+            crate::feed::startup::CONNECT_BOUND,
+        )
+        .unwrap()
+    }
+
+    fn io() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    /// The outcome of `confirmation`, waiting for it under the deadline.
+    fn settled(
+        mut confirmation: spate_core::feed::Confirmation,
+    ) -> Result<(), spate_core::feed::FeedError> {
+        let mut got = None;
+        wait_until(DEADLINE, "the publish settles", || {
+            got = confirmation.try_outcome();
+            got.is_some()
+        });
+        got.unwrap()
+    }
+
+    fn work_high_watermark(brokers: &str) -> i64 {
+        let probe: BaseConsumer = ClientConfig::new()
+            .set("bootstrap.servers", brokers)
+            .create()
+            .unwrap();
+        probe
+            .fetch_watermarks("units", 0, Duration::from_secs(10))
+            .unwrap()
+            .1
+    }
+
+    /// Pins that a publish too large for the producer is refused, and that
+    /// the publisher goes on publishing.
+    #[test]
+    fn a_publish_too_large_for_the_producer_is_refused() {
+        let cluster = cluster_with(0);
+        let io = io();
+        let publisher = connect_publisher(
+            &cluster.bootstrap_servers(),
+            "    message.max.bytes: \"1000\"\n",
+            &io,
+        );
+        let err = settled(publisher.publish(Unit::new("big", vec![b'x'; 2000]))).unwrap_err();
+        assert_eq!(err.kind, FeedErrorKind::Refused, "{}", err.reason);
+        settled(publisher.publish(Unit::new("small", b"body".to_vec()))).unwrap();
+    }
+
+    /// Pins that a publish the cluster refuses as unauthorized stops the
+    /// publisher, and a later publish fails Fatal without reaching the work
+    /// topic.
+    #[test]
+    fn a_fatal_publish_latches_the_publisher() {
+        let cluster = cluster_with(0);
+        let brokers = cluster.bootstrap_servers();
+        let io = io();
+        let publisher = connect_publisher(&brokers, "", &io);
+        cluster.request_errors(
+            RDKafkaApiKey::Produce,
+            &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_TOPIC_AUTHORIZATION_FAILED],
+        );
+        let err = settled(publisher.publish(Unit::new("a", b"body".to_vec()))).unwrap_err();
+        assert_eq!(err.kind, FeedErrorKind::Fatal, "{}", err.reason);
+        let err = settled(publisher.publish(Unit::new("b", b"body".to_vec()))).unwrap_err();
+        assert_eq!(err.kind, FeedErrorKind::Fatal, "{}", err.reason);
+        assert_eq!(work_high_watermark(&brokers), 0);
+    }
+
+    /// Pins that dropping a publisher with a publish in flight settles that
+    /// publish as retryable, within the deadline.
+    #[test]
+    fn dropping_a_publisher_with_a_publish_in_flight_settles_it() {
+        let cluster = cluster_with(0);
+        let io = io();
+        let publisher = connect_publisher(&cluster.bootstrap_servers(), "", &io);
+        cluster.request_errors(
+            RDKafkaApiKey::Produce,
+            &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_NOT_ENOUGH_REPLICAS; 100],
+        );
+        let mut confirmation = publisher.publish(Unit::new("a", b"body".to_vec()));
+        assert!(
+            confirmation.try_outcome().is_none(),
+            "settled before the drop"
+        );
+        assert!(
+            returns_within(DEADLINE, move || drop(publisher)),
+            "the drop did not return"
+        );
+        let err = confirmation.try_outcome().expect("settled").unwrap_err();
+        assert_eq!(err.kind, FeedErrorKind::Retryable, "{}", err.reason);
+    }
+
+    /// Pins that a publisher whose idempotent producer id the cluster
+    /// refuses stops with the cause, and a later publish names it.
+    #[test]
+    fn a_publisher_without_write_is_fatal_with_its_cause() {
+        let cluster = cluster_with(0);
+        cluster.request_errors(
+            RDKafkaApiKey::InitProducerId,
+            &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_CLUSTER_AUTHORIZATION_FAILED],
+        );
+        let io = io();
+        let publisher = connect_publisher(&cluster.bootstrap_servers(), "", &io);
+        let first = settled(publisher.publish(Unit::new("a", b"body".to_vec())));
+        assert!(first.is_err(), "{first:?}");
+        wait_until(DEADLINE, "the publisher latches", || {
+            publisher.core().latched()
+        });
+        let err = settled(publisher.publish(Unit::new("b", b"body".to_vec()))).unwrap_err();
+        assert_eq!(err.kind, FeedErrorKind::Fatal, "{}", err.reason);
+        assert!(
+            err.reason.contains("Cluster authorization failed"),
+            "{}",
+            err.reason
+        );
+    }
+
+    /// Pins the publisher's start line: its own message and work topic, and
+    /// no group.
+    #[test]
+    fn a_publisher_logs_its_own_start_line() {
+        let cluster = cluster_with(0);
+        let io = io();
+        let mut publisher = None;
+        let lines = spate_test::capture_logs(tracing::Level::INFO, || {
+            publisher = Some(connect_publisher(&cluster.bootstrap_servers(), "", &io));
+        });
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("the Kafka feed's publisher started")
+                    && l.contains("topic=units")),
+            "{lines:#?}"
+        );
+        assert!(
+            !lines
+                .iter()
+                .any(|l| l.contains("the Kafka feed started") || l.contains("group_id")),
+            "{lines:#?}"
+        );
     }
 }
 

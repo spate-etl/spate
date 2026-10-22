@@ -45,6 +45,37 @@ records each unit's attempt before the unit is read (see
 [Counting deliveries](#counting-deliveries)). The checks read from the
 brokers, so an unreachable broker fails the call within 30 seconds.
 
+## A publish-only handle
+
+`KafkaFeedPublisher::connect` builds a handle that writes units to the work
+topic and reads none, for a process that only publishes, such as a lister run
+(see [Reading from a feed](../../sources/s3/README.mdx#reading-from-a-feed)).
+It reads the workers' own `feed: { kafka: … }` section and refuses any section
+a worker refuses, so every key stays required. Its writes use `brokers`,
+`topic`, `delivery_timeout`, `statistics_interval` and the `rdkafka`
+passthrough, and the other three topic names serve its checks. Connecting runs
+the [startup checks](#startup-checks) a worker runs, then builds one producer
+with the settings the feed owns. The handle joins no group, starts none of the
+feed's three threads and writes no attempt record, so it takes no partition
+from the workers and charges no unit an attempt.
+
+A publish is confirmed by its delivery report and fails as
+[Message mapping](#message-mapping) describes. A credential or TLS handshake a
+broker rejects after connecting stops the handle with the reason, and so does
+a fatal producer error such as a refused idempotent producer id; every later
+publish fails with it. Dropping the handle reports each publish it has not
+confirmed to its caller as retryable. A caller that publishes such a unit
+again can leave two copies on the work topic, and both are read.
+
+The handle's identity needs the `Describe` and `DescribeConfigs` operations on
+the four topics, and `Write` on the work topic. It needs no `Read` and no
+group ACL.
+
+Connecting logs `the Kafka feed's publisher started` with the work topic, its
+`cleanup.policy` and its `message.timestamp.type`. Passed to `Pipeline::feed`
+as a worker's feed, the handle fails the worker at its first read, with an
+error naming `KafkaFeed::connect`.
+
 ## Configuration
 
 The `feed: { kafka: ... }` section deserializes into `KafkaFeedConfig`
@@ -113,8 +144,8 @@ through, and set how long a member that dies keeps its partitions (see
 <SecuringKafka />
 
 A SASL authentication failure or a rejected TLS handshake, as listed above,
-fails connecting. `KafkaFeed::connect` returns
-`KafkaFeedError::Refused` as soon as the client reports the rejection,
+fails connecting. `KafkaFeed::connect` and `KafkaFeedPublisher::connect`
+return `KafkaFeedError::Refused` as soon as the client reports the rejection,
 naming the read under way and librdkafka's text, such as
 `… SSL handshake failed: … certificate verify failed …` or
 `… SASL authentication error: Authentication failed: Invalid username or password …`.
@@ -122,9 +153,10 @@ A refused or reset connection stays retryable: the checks wait for a broker the
 client can use, and fail with `KafkaFeedError::Unavailable` once their bound
 passes.
 
-Once the feed has connected, its consumer and its attempt follower treat a
-SASL authentication failure and a rejected handshake as the source does, and
-the feed stops with the reason. An attempt, tombstone, retry or dead-letter
+Once the feed has connected, its consumer, its attempt follower and its
+producer treat a SASL authentication failure and a rejected handshake as the
+source does, and the feed stops with the reason. A publish-only handle stops
+the same way through its producer. An attempt, tombstone, retry or dead-letter
 write that times out is sent again.
 
 <LoggingKafka />
@@ -213,9 +245,10 @@ partition again from its earliest retained offset.
 
 ## Startup checks
 
-`KafkaFeed::connect` reads the metadata and configuration of the work,
-retry, dead-letter and attempt topics before any of the feed's clients joins
-the group, and refuses topics the feed cannot run on:
+`KafkaFeed::connect`, and `KafkaFeedPublisher::connect` for a
+[publish-only handle](#a-publish-only-handle), read the metadata and
+configuration of the work, retry, dead-letter and attempt topics before any of
+the feed's clients joins the group, and refuse topics the feed cannot run on:
 
 - a missing work, retry, dead-letter or attempt topic;
 - a work, retry or dead-letter topic whose `cleanup.policy` includes
@@ -237,12 +270,15 @@ topic the cluster describes no configuration entry for, which is what a
 client without `DescribeConfigs` on it receives, and a rejected credential or
 TLS handshake (see [Security](#security-tls-mtls-sasl)). Any other failed
 read fails with `KafkaFeedError::Unavailable`. The checks take at most 30 seconds, and an
-error past that bound names the read under way.
+error past that bound names the read under way. A publish-only handle's
+identity needs these operations on the four topics too, and `Write` on the
+work topic (see [A publish-only handle](#a-publish-only-handle)).
 
 When a topic reports no `cleanup.policy`, or the work topic no
 `message.timestamp.type`, the feed logs a warning and skips that check.
-Connecting logs each topic's `cleanup.policy`, the work topic's
-`message.timestamp.type` and the attempt topic's partition count.
+A worker's feed logs at connect each topic's `cleanup.policy`, the work
+topic's `message.timestamp.type` and the attempt topic's partition count; a
+publish-only handle logs its own line.
 
 The checks run only when the feed connects. A topic whose policy, partition
 count or timestamp type changes later goes unnoticed, and a topic deleted later is handled as

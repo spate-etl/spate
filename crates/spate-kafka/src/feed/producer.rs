@@ -68,11 +68,36 @@ impl ClientContext for FeedProducerContext {
         }
     }
 
+    /// Log the error, and stop the feed on a fatal producer error or a
+    /// [`rejection`](crate::error::rejection). librdkafka raises a fatal
+    /// error before it purges the queue, so the latch is in place when the
+    /// purged writes settle and every later publish fails with the cause.
+    /// rdkafka reports a fatal error under its cause's code, so the codes
+    /// librdkafka makes fatal for an idempotent producer are named here.
     fn error(&self, error: rdkafka::error::KafkaError, reason: &str) {
-        if self.repeats_previous(error.rdkafka_error_code(), reason) {
+        let code = error.rdkafka_error_code();
+        if self.repeats_previous(code, reason) {
             return;
         }
         tracing::warn!(target: "librdkafka", %error, "{reason}");
+        match code {
+            Some(
+                RDKafkaErrorCode::Fatal
+                | RDKafkaErrorCode::ClusterAuthorizationFailed
+                | RDKafkaErrorCode::OutOfOrderSequenceNumber
+                | RDKafkaErrorCode::InvalidProducerEpoch
+                | RDKafkaErrorCode::InvalidProducerIdMapping,
+            ) => {
+                self.core
+                    .latch(&format!("the feed's producer stopped: {reason}"));
+            }
+            Some(code) if crate::error::rejection(code, reason) => {
+                self.core.latch(&format!(
+                    "the client's credential or TLS handshake was rejected: {reason}"
+                ));
+            }
+            _ => {}
+        }
     }
 }
 

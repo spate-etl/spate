@@ -53,7 +53,9 @@
 //! work units on a work topic that every worker reads as one consumer
 //! group, and moves a failed unit to a retry topic, or at the attempt cap to
 //! a dead-letter topic. `main()` builds it from the pipeline's
-//! `feed: { kafka: ... }` section and passes it to `Pipeline::feed`.
+//! `feed: { kafka: ... }` section and passes it to `Pipeline::feed`. A
+//! process that only publishes, such as a lister run, builds a
+//! [`feed::KafkaFeedPublisher`] from the same section, which joins no group.
 //!
 //! This crate re-exports nothing from `rdkafka`: its types
 //! stay out of public signatures so `rdkafka` major bumps are not breaking

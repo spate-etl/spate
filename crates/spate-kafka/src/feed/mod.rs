@@ -44,12 +44,14 @@ mod events;
 mod gate;
 mod inflight;
 mod producer;
+mod publisher;
 mod startup;
 #[cfg(test)]
 mod tests;
 mod write;
 
 pub use error::KafkaFeedError;
+pub use publisher::KafkaFeedPublisher;
 
 use crate::context::SourceContext;
 use crate::error::redacted_client_error;
@@ -412,6 +414,9 @@ impl Drop for LatchOnPanic {
 /// finished are delivered again to the next owner of their partition. A
 /// feed that stopped on a Fatal error commits nothing more, so every unit
 /// since its last commit is delivered again.
+///
+/// A process that only publishes, such as a lister run, builds a
+/// [`KafkaFeedPublisher`], which joins no group.
 pub struct KafkaFeed {
     core: Arc<Core>,
     producer: Producer,
@@ -512,36 +517,7 @@ impl KafkaFeed {
         bound: Duration,
     ) -> Result<KafkaFeed, KafkaFeedError> {
         let config = KafkaFeedConfig::from_section(section)?;
-        let openssl_env = crate::security::openssl_env_overrides();
-        let admin_config = config.admin_config(openssl_env);
-        let admin = AdminClient::from_config(&admin_config).map_err(|e| {
-            KafkaFeedError::Refused(format!(
-                "creating the admin client: {}",
-                redacted_client_error(&e)
-            ))
-        })?;
-        let reader = ThreadedProducer::from_config_and_context(
-            &admin_config,
-            crate::sink::SinkContext::detached(),
-        )
-        .map_err(|e| {
-            KafkaFeedError::Refused(format!(
-                "creating the metadata client: {}",
-                redacted_client_error(&e)
-            ))
-        })?;
-        let topics = Topics::new(&config);
-        let step = Mutex::new("starting".to_owned());
-        let checked = {
-            let admin = Arc::new(startup::Brokers::new(admin, reader));
-            let watched = Arc::clone(&admin);
-            io.block_on(startup::bounded(
-                &step,
-                bound,
-                move || watched.rejection(),
-                startup::check(&*admin, &topics, scope, &step),
-            ))?
-        };
+        let checked = check_topics(&config, io, scope, bound)?;
         let (core, producer, driver) = parts(&config, checked.attempt_partitions)?;
         let follower = Follower::new(&config, Arc::clone(&core))?
             .spawn()
@@ -603,13 +579,51 @@ fn log_started(config: &KafkaFeedConfig, checked: &startup::Checked) {
     );
 }
 
-/// The feed's shared state, its producer, and its consumer thread's state
-/// with the consumer subscribed, before the thread starts.
-/// `attempt_partitions` is the attempt topic's partition count.
-fn parts(
+/// Run the startup checks over the topics `config` names, on the runtime
+/// `io`, under `bound`, with the rejection watch over the checking clients,
+/// which are dropped when it returns.
+fn check_topics(
+    config: &KafkaFeedConfig,
+    io: &tokio::runtime::Handle,
+    scope: startup::Scope,
+    bound: Duration,
+) -> Result<startup::Checked, KafkaFeedError> {
+    let openssl_env = crate::security::openssl_env_overrides();
+    let admin_config = config.admin_config(openssl_env);
+    let admin = AdminClient::from_config(&admin_config).map_err(|e| {
+        KafkaFeedError::Refused(format!(
+            "creating the admin client: {}",
+            redacted_client_error(&e)
+        ))
+    })?;
+    let reader = ThreadedProducer::from_config_and_context(
+        &admin_config,
+        crate::sink::SinkContext::detached(),
+    )
+    .map_err(|e| {
+        KafkaFeedError::Refused(format!(
+            "creating the metadata client: {}",
+            redacted_client_error(&e)
+        ))
+    })?;
+    let topics = Topics::new(config);
+    let step = Mutex::new("starting".to_owned());
+    let admin = Arc::new(startup::Brokers::new(admin, reader));
+    let watched = Arc::clone(&admin);
+    io.block_on(startup::bounded(
+        &step,
+        bound,
+        move || watched.rejection(),
+        startup::check(&*admin, &topics, scope, &step),
+    ))
+}
+
+/// The feed's shared state and its producer, built with the settings the
+/// feed owns. `attempt_partitions` is the attempt topic's partition count.
+fn producer_parts(
     config: &KafkaFeedConfig,
     attempt_partitions: NonZeroU32,
-) -> Result<(Arc<Core>, Producer, Driver), KafkaFeedError> {
+) -> Result<(Arc<Core>, Producer), KafkaFeedError> {
     let openssl_env = crate::security::openssl_env_overrides();
     let core = Arc::new(Core::new(config, attempt_partitions));
     let producer = Producer::from_config_and_context(
@@ -622,6 +636,18 @@ fn parts(
             redacted_client_error(&e)
         ))
     })?;
+    Ok((core, producer))
+}
+
+/// The feed's shared state, its producer, and its consumer thread's state
+/// with the consumer subscribed, before the thread starts.
+/// `attempt_partitions` is the attempt topic's partition count.
+fn parts(
+    config: &KafkaFeedConfig,
+    attempt_partitions: NonZeroU32,
+) -> Result<(Arc<Core>, Producer, Driver), KafkaFeedError> {
+    let openssl_env = crate::security::openssl_env_overrides();
+    let (core, producer) = producer_parts(config, attempt_partitions)?;
     let consumer_config = config.consumer_config(openssl_env);
     let lookup_timeout = consumer::committed_lookup_timeout(&consumer_config);
     let consumer =
@@ -819,17 +845,25 @@ impl Feed for KafkaFeed {
     }
 
     fn publish(&self, unit: Unit) -> Confirmation {
-        let (confirmer, confirmation) = confirmation();
-        if let Some(fatal) = &self.lock().fatal {
-            confirmer.reject(fatal.clone());
-            return confirmation;
-        }
-        let message = Outgoing::unit(Arc::clone(&self.core.topics.work), &unit, 0, None);
-        write::send(
-            &self.core,
-            &self.producer,
-            Box::new(Write::Publish { message, confirmer }),
-        );
-        confirmation
+        publish_unit(&self.core, &self.producer, &unit)
     }
+}
+
+/// Write `unit` to the work topic. The confirmation settles on the write's
+/// delivery report, or at once with the latched error of a feed that
+/// stopped. The state lock is released before the send, since a refused
+/// enqueue settles inline and settling takes it.
+fn publish_unit(core: &Core, producer: &Producer, unit: &Unit) -> Confirmation {
+    let (confirmer, confirmation) = confirmation();
+    if let Some(fatal) = &core.lock().fatal {
+        confirmer.reject(fatal.clone());
+        return confirmation;
+    }
+    let message = Outgoing::unit(Arc::clone(&core.topics.work), unit, 0, None);
+    write::send(
+        core,
+        producer,
+        Box::new(Write::Publish { message, confirmer }),
+    );
+    confirmation
 }

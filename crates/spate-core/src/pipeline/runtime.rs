@@ -7,8 +7,8 @@ use crate::admin::{AdminServer, HealthState, HealthThresholds};
 use crate::backpressure::{BackpressureParams, InflightBudget, WatermarkController};
 use crate::checkpoint::Checkpointer;
 use crate::config::{MetricsExporter, PinningMode, PipelineConfig};
-use crate::feed::{Feed, FeedOrigin};
 use crate::feed::memory::MemoryFeed;
+use crate::feed::{Feed, FeedOrigin};
 use crate::metrics::{
     self, BackpressureMetrics, CheckpointMetrics, ComponentLabels, E2eBasis, Exporter,
     InflightBudgetMetrics, IoBusySampler, IoRuntimeMetrics, Meter, MetricRole, MetricsHandle,

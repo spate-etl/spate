@@ -284,8 +284,7 @@ pub trait Feed: Send + Sync {
     ///
     /// `None` means the backend cannot count, and a source that ends a
     /// bounded job on this feed refuses it. The default returns `None`.
-    fn read_depth(&self, of: DepthOf) -> Option<DepthReading> {
-        let _ = of;
+    fn read_depth(&self, _of: DepthOf) -> Option<DepthReading> {
         None
     }
 }

@@ -507,7 +507,10 @@ mod tests {
         let mut first = Depth::new("q", true);
         first.delayed = 3;
         script.answer_depth(DepthOf::Feed, Ok(first.clone()));
-        assert!(park.park(Duration::ZERO), "scripting did not wake the reader");
+        assert!(
+            park.park(Duration::ZERO),
+            "scripting did not wake the reader"
+        );
         script.answer_depth(
             DepthOf::Feed,
             Err(FeedError::new(FeedErrorKind::Fatal, "gone")),

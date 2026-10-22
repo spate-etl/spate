@@ -67,7 +67,9 @@ enum Read {
 enum Phase {
     /// Waiting to open a window: read the marker on a windowed feed, the
     /// feed itself on an exact one.
-    Opening { due: Instant },
+    Opening {
+        due: Instant,
+    },
     /// A window opened by a read of `run`'s marker at `start`; the next read
     /// of the feed is due at `due`.
     Window {
@@ -76,11 +78,15 @@ enum Phase {
         due: Instant,
     },
     /// The window has passed with every read empty; the marker is read again.
-    Closing { run: String },
+    Closing {
+        run: String,
+    },
     /// One receive that must take nothing.
     Receiving,
     /// The dead-letter destination's read, due at `due`.
-    DeadLetters { due: Instant },
+    DeadLetters {
+        due: Instant,
+    },
     Ended(EndOutcome),
 }
 
@@ -548,6 +554,11 @@ mod tests {
         empty_reads(&mut check, start, 0, 60);
         assert_eq!(check.next(at(start, 60)), EndAction::ReadMarker);
         check.marker_read(at(start, 60), MarkerRead::Absent);
+        assert_eq!(
+            check.next(at(start, 60)),
+            EndAction::Wait(Some(at(start, 80))),
+            "an absent marker is read again one interval later"
+        );
         assert_eq!(check.next(at(start, 80)), EndAction::ReadMarker);
         check.marker_read(at(start, 80), MarkerRead::Absent);
         assert!(check.outcome().is_none());
@@ -557,7 +568,84 @@ mod tests {
         empty_reads(&mut check, start, 0, 60);
         assert_eq!(check.next(at(start, 60)), EndAction::ReadMarker);
         check.marker_read(at(start, 60), MarkerRead::Failed);
+        assert_eq!(
+            check.next(at(start, 60)),
+            EndAction::Wait(Some(at(start, 80))),
+            "a failed marker read is retried one interval later"
+        );
         assert_eq!(check.next(at(start, 80)), EndAction::ReadMarker);
+    }
+
+    /// Pins that an answer of a kind the check did not ask for is ignored and
+    /// leaves the outstanding read outstanding.
+    #[test]
+    fn an_answer_nothing_asked_for_is_ignored() {
+        let start = Instant::now();
+        let mut check = opened(start, "a");
+        assert_eq!(check.next(start), EndAction::ReadDepth(DepthOf::Feed));
+        check.marker_read(start, present("b"));
+        check.received(start, true);
+        assert_eq!(check.next(start), EndAction::Wait(None));
+        check.depth_read(start, empty());
+        assert_eq!(
+            check.next(start),
+            EndAction::Wait(Some(at(start, 20))),
+            "the window on run a carries on"
+        );
+        // With nothing outstanding, a depth answer is ignored too.
+        check.depth_read(start, visible(1));
+        assert_eq!(
+            check.next(at(start, 20)),
+            EndAction::ReadDepth(DepthOf::Feed)
+        );
+    }
+
+    /// Everything the check logs while `f` runs, as text.
+    fn logs(f: impl FnOnce()) -> String {
+        #[derive(Clone, Default)]
+        struct Buf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Buf {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let buf = Buf::default();
+        let writer = buf.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, f);
+        let bytes = buf.0.lock().unwrap().clone();
+        String::from_utf8(bytes).unwrap()
+    }
+
+    /// Pins the transitions an operator sees at INFO: a window opening with
+    /// its run, and a restart once a window is open. A restart before any
+    /// window opens, as every poll of a busy reader makes, logs nothing.
+    #[test]
+    fn the_check_logs_a_window_opening_and_its_restart() {
+        let start = Instant::now();
+        let mut check = EndCheck::windowed(WINDOW, start);
+        let quiet = logs(|| check.restart(start));
+        assert!(quiet.is_empty(), "{quiet}");
+        assert_eq!(check.next(start), EndAction::ReadMarker);
+        let opened = logs(|| check.marker_read(start, present("run-a")));
+        assert!(
+            opened.contains("INFO")
+                && opened.contains("end marker found")
+                && opened.contains("run-a"),
+            "{opened}"
+        );
+        let restarted = logs(|| check.restart(start));
+        assert!(
+            restarted.contains("INFO") && restarted.contains("restarting the settling window"),
+            "{restarted}"
+        );
     }
 
     /// Pins that no marker at the start opens no window: the feed is not read

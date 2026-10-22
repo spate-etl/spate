@@ -1404,6 +1404,37 @@ fn a_zero_settling_window_passed_in_is_refused() {
     assert!(err.contains("`feed.settling_window`"), "{err}");
 }
 
+/// Pins that `Source::configure_feed`'s default refuses the section, naming
+/// the source, so a source that reads no feed fails at startup.
+#[test]
+fn the_default_configure_feed_refuses_the_section() {
+    struct NoFeed(FakeSource);
+    impl Source for NoFeed {
+        type Lane = FakeLane;
+        fn open(&mut self, ctx: SourceCtx) -> Result<(), SourceError> {
+            self.0.open(ctx)
+        }
+        fn poll_events(&mut self, timeout: Duration) -> Result<SourceEvent<FakeLane>, SourceError> {
+            self.0.poll_events(timeout)
+        }
+        fn commit(&mut self, watermarks: &[(PartitionId, i64)]) -> Result<(), SourceError> {
+            self.0.commit(watermarks)
+        }
+    }
+    let (inner, _shared, _script) = FakeSource::new();
+    let mut source = NoFeed(inner);
+    let section = feed_section("memory: {}").unwrap();
+    let err = source
+        .configure_feed(
+            &section,
+            Arc::new(crate::feed::memory::MemoryFeed::new()),
+            crate::feed::FeedOrigin::Section,
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("reads no feed"), "{err}");
+}
+
 /// Pins the origin `run` hands `configure_feed`: `Section` for the in-process
 /// feed it builds from the section, `Given` for a feed passed to
 /// `Pipeline::feed`.
@@ -1435,7 +1466,11 @@ fn the_source_learns_where_its_feed_came_from() {
         }
         let report = runtime.run().expect("the source accepts the section");
         assert_eq!(report.state, ExitState::Completed);
-        assert_eq!(shared.lock().unwrap().feed_origin, Some(origin), "given: {given}");
+        assert_eq!(
+            shared.lock().unwrap().feed_origin,
+            Some(origin),
+            "given: {given}"
+        );
     }
 }
 

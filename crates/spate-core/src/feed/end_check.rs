@@ -81,12 +81,13 @@ enum Phase {
     Opening {
         due: Instant,
     },
-    /// A window opened by a read of `run`'s marker at `start`; the next read
-    /// of the feed is due at `due`, and must be taken within
-    /// [`END_CHECK_INTERVAL`] of `last`, the window's last read.
+    /// A window opened by a read of `run`'s marker. It spans from `start`,
+    /// its first read of the feed, unset until that read. The next read is
+    /// due at `due`, and must be taken within [`END_CHECK_INTERVAL`] of
+    /// `last`, the window's last read.
     Window {
         run: String,
-        start: Instant,
+        start: Option<Instant>,
         last: Instant,
         due: Instant,
     },
@@ -105,11 +106,12 @@ enum Phase {
 
 /// Decides when a bounded job on a feed has ended.
 ///
-/// A windowed check opens a window on a read of the end marker. Inside it
-/// the feed is read every 15 s, each read taken within
-/// [`END_CHECK_INTERVAL`] of the one before and answered within it of its
-/// request, and every read must find the feed empty. A read requested at or after the window's end that
-/// finds it empty is followed by a second read of the marker: the same run
+/// A windowed check opens a window on a read of the end marker. The window
+/// spans from its first read of the feed. Inside it the feed is read every
+/// 15 s, each read taken within [`END_CHECK_INTERVAL`] of the one before and
+/// answered within it of its request, and every read must find the feed
+/// empty. A read requested a window or more after the first that finds it
+/// empty is followed by a second read of the marker: the same run
 /// passes, another run opens a new window, and no marker restarts the
 /// check. An exact check, for a feed whose counts are exact and whose lister
 /// has finished, reads the feed once with no window or marker. Either way
@@ -276,7 +278,7 @@ impl EndCheck {
                 self.announced = Some(seen.clone());
                 self.phase = Phase::Window {
                     run: seen,
-                    start: requested,
+                    start: None,
                     last: requested,
                     due: now,
                 };
@@ -411,7 +413,9 @@ impl EndCheck {
         match (&self.phase, self.window) {
             (Phase::Opening { .. }, None) => self.phase = Phase::Receiving,
             (Phase::Window { run, start, .. }, Some(window)) => {
-                // A window too long to add to an instant never closes.
+                // The window spans the feed's reads, so its first read starts
+                // it. A window too long to add to an instant never closes.
+                let start = start.unwrap_or(requested);
                 let closes = start
                     .checked_add(window)
                     .is_some_and(|end| requested >= end);
@@ -420,7 +424,7 @@ impl EndCheck {
                 } else {
                     Phase::Window {
                         run: run.clone(),
-                        start: *start,
+                        start: Some(start),
                         last: requested,
                         due: requested + READ_EVERY,
                     }
@@ -495,8 +499,9 @@ mod tests {
         check.next(now)
     }
 
-    /// Pins that a window opened by a marker read ends one window later: five
-    /// empty reads at 0, 15, 30, 45 and 60 s, then the closing marker read.
+    /// Pins that a window ends one window after its first read of the feed:
+    /// five empty reads at 0, 15, 30, 45 and 60 s, then the closing marker
+    /// read.
     #[test]
     fn a_window_ends_one_window_after_its_opening_marker_read() {
         let start = Instant::now();
@@ -673,9 +678,9 @@ mod tests {
         assert_eq!(check.next(at(start, 75)), EndAction::ReadMarker);
     }
 
-    /// Pins that the schedule counts from a marker read's request: an answer
-    /// noticed late neither moves the window's start nor delays the next
-    /// read.
+    /// Pins that a marker read's schedule counts from its request, so an
+    /// answer noticed late does not delay the next read, and that the window
+    /// counts from its first read of the feed.
     #[test]
     fn a_marker_answer_noticed_late_keeps_the_schedule() {
         let start = Instant::now();
@@ -687,14 +692,36 @@ mod tests {
             EndAction::Wait(Some(at(start, 15)))
         );
         assert_eq!(check.next(at(start, 15)), EndAction::ReadMarker);
-        // Answered at 25 s, and the first read of the feed taken at 30 s.
+        // Answered at 25 s, and the first read of the feed taken at 30 s:
+        // that read starts the window.
         check.marker_read(at(start, 25), present("a"));
         empty_reads(&mut check, start, 30, 75);
         assert_eq!(
             check.next(at(start, 75)),
-            EndAction::ReadMarker,
-            "the window runs from the marker read at 15 s, so the read at 75 s closes it"
+            EndAction::Wait(Some(at(start, 90))),
+            "the read at 75 s is short of a window after the first read"
         );
+        empty_reads(&mut check, start, 90, 90);
+        assert_eq!(check.next(at(start, 90)), EndAction::ReadMarker);
+    }
+
+    /// Pins that a window at the 20 s floor spans 20 s of reads even when its
+    /// marker read was answered at the 20 s bound: the first read of the feed
+    /// starts it, and the read 20 s or more later closes it.
+    #[test]
+    fn a_window_spans_its_reads_from_the_first() {
+        let start = Instant::now();
+        let mut check = EndCheck::windowed(END_CHECK_INTERVAL, start);
+        assert_eq!(check.next(start), EndAction::ReadMarker);
+        check.marker_read(at(start, 20), present("a"));
+        empty_reads(&mut check, start, 20, 35);
+        assert_eq!(
+            check.next(at(start, 35)),
+            EndAction::Wait(Some(at(start, 50))),
+            "15 s of reads do not close a 20 s window"
+        );
+        empty_reads(&mut check, start, 50, 50);
+        assert_eq!(check.next(at(start, 50)), EndAction::ReadMarker);
     }
 
     /// Pins that an answer of a kind the check did not ask for is ignored and

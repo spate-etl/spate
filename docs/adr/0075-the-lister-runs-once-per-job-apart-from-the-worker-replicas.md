@@ -90,6 +90,9 @@ startup WARN says so.
 - Neutral, because `a_timed_out_produce_holds_the_checkpoint`, which ADR-0074's
   Confirmation names, rejects the held unit on every attempt until the retry
   budget is spent.
+- Neutral, because on the Kafka feed the lister run publishes through
+  `KafkaFeedPublisher`, which joins no consumer group, so it takes no
+  partition from the workers and charges no unit an attempt.
 - Neutral, because the work-feed record removes coordination, after which a
   solo run on the in-process feed is the only way the S3 source lists for
   itself.

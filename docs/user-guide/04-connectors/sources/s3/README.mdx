@@ -613,7 +613,10 @@ writes `end` and exits. `main()` starts it with
 [`S3Source::list_once`](https://docs.rs/spate-s3/latest/spate_s3/struct.S3Source.html#method.list_once),
 whose rustdoc example is a binary that runs the lister when its first argument
 is `list`. The run reads the source and `feed:` sections of the workers' own
-pipeline file and builds no sink. It refuses the in-process feed, a section
+pipeline file and builds no sink. Build its feed with the backend's
+publish-only handle where it has one, such as the Kafka feed's
+[publish-only handle](../../feeds/kafka/README.mdx#a-publish-only-handle),
+which joins no group the workers read. It refuses the in-process feed, a section
 with no `location`, a feed other than the one the section names, a source
 given a coordinator, and a call from a thread in a Tokio runtime context,
 such as async code or a `spawn_blocking` closure.

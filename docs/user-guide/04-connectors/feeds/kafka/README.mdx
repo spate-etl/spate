@@ -134,7 +134,7 @@ write that times out is sent again.
 
 `KafkaFeedPublisher::connect` builds a handle that writes units to the work
 topic and reads none, for a process that only publishes, such as a lister run
-(see [Reading from a feed](../../sources/s3/README.mdx#reading-from-a-feed)).
+(see [The lister run](../../sources/s3/README.mdx#the-lister-run)).
 It reads the workers' own `feed: { kafka: … }` section and refuses any section
 a worker refuses, so every key stays required. Its writes use `brokers`,
 `topic`, `delivery_timeout`, `statistics_interval` and the `rdkafka`

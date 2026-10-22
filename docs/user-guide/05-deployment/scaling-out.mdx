@@ -48,7 +48,9 @@ Start the lister first, or the workers at most one settling window (five
 minutes) before it: a worker of a bounded job exits when no job fingerprint
 appears at the job location within that window. On a feed that charges a
 delivery attempt to a worker waiting for the fingerprint, start the lister
-first.
+first. A lister run builds its feed with the backend's publish-only handle
+where it has one, so it joins no group the workers read and is charged no
+attempt.
 
 :::note Connector specifics
 [S3 source](../04-connectors/sources/s3/README.mdx#the-lister-run): the lister

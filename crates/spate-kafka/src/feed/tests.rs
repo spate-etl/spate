@@ -543,6 +543,10 @@ fn a_rejection_the_feed_producer_reports_latches_the_feed() {
             "SASL authentication error: Authentication failed: Invalid username or password",
         ),
         (
+            C::SaslAuthenticationFailed,
+            "Broker: SASL Authentication failed: Invalid username or password",
+        ),
+        (
             C::SSL,
             "ssl://127.0.0.1:9093/bootstrap: SSL handshake failed: ssl/tls alert handshake \
              failure: SSL alert number 40 (after 0ms in state SSL_HANDSHAKE)",

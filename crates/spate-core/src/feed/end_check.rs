@@ -223,9 +223,11 @@ impl EndCheck {
     /// Report the end marker read that [`next`](Self::next) asked for. An
     /// answer nothing asked for is ignored.
     pub fn marker_read(&mut self, now: Instant, read: MarkerRead) {
-        if !self.take_pending(Read::Marker) {
+        // The window and the next read count from the request, so an answer
+        // the source notices late does not shift them.
+        let Some(requested) = self.take_pending(Read::Marker) else {
             return;
-        }
+        };
         let window = self.window.unwrap_or_default();
         let closing = match &self.phase {
             Phase::Closing { run } => Some(run.clone()),
@@ -252,8 +254,8 @@ impl EndCheck {
                 }
                 self.phase = Phase::Window {
                     run: seen,
-                    start: now,
-                    last: now,
+                    start: requested,
+                    last: requested,
                     due: now,
                 };
             }
@@ -265,13 +267,13 @@ impl EndCheck {
                     );
                 }
                 self.phase = Phase::Opening {
-                    due: now + READ_EVERY,
+                    due: requested + READ_EVERY,
                 };
             }
             (MarkerRead::Failed, _) => {
                 tracing::warn!("reading the end marker failed; reading it again");
                 self.phase = Phase::Opening {
-                    due: now + READ_EVERY,
+                    due: requested + READ_EVERY,
                 };
             }
         }
@@ -322,7 +324,7 @@ impl EndCheck {
     /// Report whether the receive that [`next`](Self::next) asked for took a
     /// unit. One that did restarts the check.
     pub fn received(&mut self, now: Instant, took: bool) {
-        if !self.take_pending(Read::Receive) {
+        if self.take_pending(Read::Receive).is_none() {
             return;
         }
         if took {
@@ -359,13 +361,15 @@ impl EndCheck {
         }
     }
 
-    fn take_pending(&mut self, read: Read) -> bool {
+    /// Take the outstanding read if it is `read`, returning when it was
+    /// requested.
+    fn take_pending(&mut self, read: Read) -> Option<Instant> {
         match self.pending {
-            Some((pending, _)) if pending == read => {
+            Some((pending, requested)) if pending == read => {
                 self.pending = None;
-                true
+                Some(requested)
             }
-            _ => false,
+            _ => None,
         }
     }
 
@@ -614,6 +618,30 @@ mod tests {
             "a failed marker read is retried 15 s later"
         );
         assert_eq!(check.next(at(start, 75)), EndAction::ReadMarker);
+    }
+
+    /// Pins that the schedule counts from a marker read's request: an answer
+    /// noticed late neither moves the window's start nor delays the next
+    /// read.
+    #[test]
+    fn a_marker_answer_noticed_late_keeps_the_schedule() {
+        let start = Instant::now();
+        let mut check = EndCheck::windowed(WINDOW, start);
+        assert_eq!(check.next(start), EndAction::ReadMarker);
+        check.marker_read(at(start, 10), MarkerRead::Absent);
+        assert_eq!(
+            check.next(at(start, 10)),
+            EndAction::Wait(Some(at(start, 15)))
+        );
+        assert_eq!(check.next(at(start, 15)), EndAction::ReadMarker);
+        // Answered at 25 s, and the first read of the feed taken at 30 s.
+        check.marker_read(at(start, 25), present("a"));
+        empty_reads(&mut check, start, 30, 75);
+        assert_eq!(
+            check.next(at(start, 75)),
+            EndAction::ReadMarker,
+            "the window runs from the marker read at 15 s, so the read at 75 s closes it"
+        );
     }
 
     /// Pins that an answer of a kind the check did not ask for is ignored and

@@ -9,8 +9,14 @@
 use super::{Depth, DepthOf, FeedError};
 use std::time::{Duration, Instant};
 
-/// The longest gap between two reads of the feed inside a settling window.
+/// The longest gap between two reads of the feed inside a settling window,
+/// and between a read and its answer.
 pub const END_CHECK_INTERVAL: Duration = Duration::from_secs(20);
+
+/// The step between scheduled reads. Shorter than [`END_CHECK_INTERVAL`], so
+/// a read taken on a poll that comes a little after its time still falls
+/// within the bound.
+const READ_EVERY: Duration = Duration::from_secs(15);
 
 /// What a read of a bounded job's end marker found.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -71,10 +77,12 @@ enum Phase {
         due: Instant,
     },
     /// A window opened by a read of `run`'s marker at `start`; the next read
-    /// of the feed is due at `due`.
+    /// of the feed is due at `due`, and must be taken within
+    /// [`END_CHECK_INTERVAL`] of `last`, the window's last read.
     Window {
         run: String,
         start: Instant,
+        last: Instant,
         due: Instant,
     },
     /// The window has passed with every read empty; the marker is read again.
@@ -93,8 +101,9 @@ enum Phase {
 /// Decides when a bounded job on a feed has ended.
 ///
 /// A windowed check opens a window on a read of the end marker. Inside it
-/// the feed is read at most [`END_CHECK_INTERVAL`] apart, and every read
-/// must find it empty. A read requested at or after the window's end that
+/// the feed is read every 15 s, each read taken within
+/// [`END_CHECK_INTERVAL`] of the one before and answered within it of its
+/// request, and every read must find the feed empty. A read requested at or after the window's end that
 /// finds it empty is followed by a second read of the marker: the same run
 /// passes, another run opens a new window, and no marker restarts the
 /// check. An exact check, for a feed whose counts are exact and whose lister
@@ -103,11 +112,10 @@ enum Phase {
 /// destination decides between [`Completed`](EndOutcome::Completed) and
 /// [`Stalled`](EndOutcome::Stalled).
 ///
-/// A non-empty read, a failed read, a read answered more than one interval
-/// after it was requested, or a [`restart`](EndCheck::restart) sends a
-/// windowed check back to its marker read, at most one interval after its
-/// previous read. A failed dead-letter read is retried one interval later
-/// and ends nothing. The source calls `restart` whenever its reader holds
+/// A non-empty read, a failed read, a read taken or answered later than
+/// that bound, or a [`restart`](EndCheck::restart) sends a windowed check
+/// back to its marker read, 15 s after its previous read at most. A failed
+/// dead-letter read is retried 15 s later and ends nothing. The source calls `restart` whenever its reader holds
 /// any work, so every read that counts was answered while it held none.
 ///
 /// ```
@@ -115,17 +123,17 @@ enum Phase {
 /// use std::time::{Duration, Instant};
 ///
 /// let start = Instant::now();
-/// let mut check = EndCheck::windowed(Duration::from_secs(20), start);
+/// let mut check = EndCheck::windowed(Duration::from_secs(30), start);
 /// assert_eq!(check.next(start), EndAction::ReadMarker);
 /// check.marker_read(start, MarkerRead::Present("run-a".into()));
 ///
 /// let empty = || Ok(Depth::new("queue", false));
-/// for at in [0, 20] {
+/// for at in [0, 15, 30] {
 ///     let now = start + Duration::from_secs(at);
 ///     assert_eq!(check.next(now), EndAction::ReadDepth(DepthOf::Feed));
 ///     check.depth_read(now, empty());
 /// }
-/// let now = start + Duration::from_secs(20);
+/// let now = start + Duration::from_secs(30);
 /// assert_eq!(check.next(now), EndAction::ReadMarker);
 /// check.marker_read(now, MarkerRead::Present("run-a".into()));
 /// assert_eq!(check.next(now), EndAction::Receive);
@@ -142,7 +150,7 @@ pub struct EndCheck {
     /// The read outstanding, and when it was requested.
     pending: Option<(Read, Instant)>,
     /// When the last read of the feed or the marker was requested, so a
-    /// restart waits out one interval from it.
+    /// restart waits 15 s from it.
     last_request: Option<Instant>,
 }
 
@@ -178,6 +186,15 @@ impl EndCheck {
     pub fn next(&mut self, now: Instant) -> EndAction {
         if self.pending.is_some() {
             return EndAction::Wait(None);
+        }
+        if let Phase::Window { last, .. } = self.phase
+            && now > last + END_CHECK_INTERVAL
+        {
+            tracing::info!(
+                gap = ?now - last,
+                "the feed went unread longer than the read interval; restarting the settling window"
+            );
+            self.reopen(now);
         }
         let read = match &self.phase {
             Phase::Ended(outcome) => return EndAction::Ended(outcome.clone()),
@@ -236,6 +253,7 @@ impl EndCheck {
                 self.phase = Phase::Window {
                     run: seen,
                     start: now,
+                    last: now,
                     due: now,
                 };
             }
@@ -247,13 +265,13 @@ impl EndCheck {
                     );
                 }
                 self.phase = Phase::Opening {
-                    due: now + END_CHECK_INTERVAL,
+                    due: now + READ_EVERY,
                 };
             }
             (MarkerRead::Failed, _) => {
                 tracing::warn!("reading the end marker failed; reading it again");
                 self.phase = Phase::Opening {
-                    due: now + END_CHECK_INTERVAL,
+                    due: now + READ_EVERY,
                 };
             }
         }
@@ -266,7 +284,7 @@ impl EndCheck {
             return;
         };
         self.pending = None;
-        let due = requested + END_CHECK_INTERVAL;
+        let due = requested + READ_EVERY;
         match (of, read) {
             (DepthOf::DeadLetters, Ok(depth)) if depth.is_empty() => {
                 self.phase = Phase::Ended(EndOutcome::Completed);
@@ -288,7 +306,9 @@ impl EndCheck {
                 }
                 self.reopen(due);
             }
-            (DepthOf::Feed, Ok(_)) if self.window.is_some() && now > due => {
+            (DepthOf::Feed, Ok(_))
+                if self.window.is_some() && now > requested + END_CHECK_INTERVAL =>
+            {
                 tracing::info!(
                     late = ?now - requested,
                     "a depth read answered after the read interval; restarting the settling window"
@@ -314,7 +334,7 @@ impl EndCheck {
 
     /// Send the check back to its opening read, because the reader holds
     /// work. Any outstanding read's answer is then ignored. A windowed check
-    /// reads again one interval after its last read; an exact one at once.
+    /// reads again 15 s after its last read; an exact one at once.
     pub fn restart(&mut self, now: Instant) {
         if matches!(self.phase, Phase::Ended(_)) {
             return;
@@ -324,7 +344,7 @@ impl EndCheck {
         }
         self.pending = None;
         let due = match (self.window, self.last_request) {
-            (Some(_), Some(last)) => (last + END_CHECK_INTERVAL).max(now),
+            (Some(_), Some(last)) => (last + READ_EVERY).max(now),
             _ => now,
         };
         self.phase = Phase::Opening { due };
@@ -364,7 +384,8 @@ impl EndCheck {
                     Phase::Window {
                         run: run.clone(),
                         start: *start,
-                        due: requested + END_CHECK_INTERVAL,
+                        last: requested,
+                        due: requested + READ_EVERY,
                     }
                 };
             }
@@ -402,7 +423,7 @@ mod tests {
         MarkerRead::Present(run.into())
     }
 
-    /// Opens a window on `run` at `now` and returns the check.
+    /// Opens a window on `run` at `start` and returns the check.
     fn opened(start: Instant, run: &str) -> EndCheck {
         let mut check = EndCheck::windowed(WINDOW, start);
         assert_eq!(check.next(start), EndAction::ReadMarker);
@@ -411,10 +432,10 @@ mod tests {
     }
 
     /// Answers every empty read of the feed due from `from` to `to`, in
-    /// interval steps, and returns how many it answered.
+    /// 15-second steps, and returns how many it answered.
     fn empty_reads(check: &mut EndCheck, start: Instant, from: u64, to: u64) -> usize {
         let mut reads = 0;
-        for secs in (from..=to).step_by(20) {
+        for secs in (from..=to).step_by(15) {
             let now = at(start, secs);
             assert_eq!(
                 check.next(now),
@@ -437,13 +458,13 @@ mod tests {
         check.next(now)
     }
 
-    /// Pins that a window opened by a marker read ends one window later: four
-    /// empty reads at 0, 20, 40 and 60 s, then the closing marker read.
+    /// Pins that a window opened by a marker read ends one window later: five
+    /// empty reads at 0, 15, 30, 45 and 60 s, then the closing marker read.
     #[test]
     fn a_window_ends_one_window_after_its_opening_marker_read() {
         let start = Instant::now();
         let mut check = opened(start, "a");
-        assert_eq!(empty_reads(&mut check, start, 0, 40), 3);
+        assert_eq!(empty_reads(&mut check, start, 0, 45), 4);
         assert_eq!(
             check.next(at(start, 59)),
             EndAction::Wait(Some(at(start, 60)))
@@ -463,26 +484,26 @@ mod tests {
     fn a_nonzero_read_restarts_the_window() {
         let start = Instant::now();
         let mut check = opened(start, "a");
-        empty_reads(&mut check, start, 0, 20);
+        empty_reads(&mut check, start, 0, 15);
         assert_eq!(
-            check.next(at(start, 40)),
+            check.next(at(start, 30)),
             EndAction::ReadDepth(DepthOf::Feed)
         );
-        check.depth_read(at(start, 40), visible(1));
+        check.depth_read(at(start, 30), visible(1));
         assert_eq!(
-            check.next(at(start, 59)),
-            EndAction::Wait(Some(at(start, 60)))
+            check.next(at(start, 44)),
+            EndAction::Wait(Some(at(start, 45)))
         );
-        assert_eq!(check.next(at(start, 60)), EndAction::ReadMarker);
-        check.marker_read(at(start, 60), present("a"));
-        empty_reads(&mut check, start, 60, 100);
+        assert_eq!(check.next(at(start, 45)), EndAction::ReadMarker);
+        check.marker_read(at(start, 45), present("a"));
+        empty_reads(&mut check, start, 45, 90);
         assert_eq!(
-            check.next(at(start, 120)),
+            check.next(at(start, 105)),
             EndAction::ReadDepth(DepthOf::Feed),
-            "the window counts from the marker read at 60 s"
+            "the window counts from the marker read at 45 s"
         );
-        check.depth_read(at(start, 120), empty());
-        assert_eq!(check.next(at(start, 120)), EndAction::ReadMarker);
+        check.depth_read(at(start, 105), empty());
+        assert_eq!(check.next(at(start, 105)), EndAction::ReadMarker);
     }
 
     /// Pins that a failed read of the feed restarts the window and ends
@@ -491,31 +512,30 @@ mod tests {
     fn a_failed_read_restarts_the_window() {
         let start = Instant::now();
         let mut check = opened(start, "a");
-        empty_reads(&mut check, start, 0, 40);
+        empty_reads(&mut check, start, 0, 30);
         assert_eq!(
-            check.next(at(start, 60)),
+            check.next(at(start, 45)),
             EndAction::ReadDepth(DepthOf::Feed)
         );
-        check.depth_read(at(start, 60), failed());
-        assert_eq!(check.next(at(start, 80)), EndAction::ReadMarker);
+        check.depth_read(at(start, 45), failed());
+        assert_eq!(check.next(at(start, 60)), EndAction::ReadMarker);
         assert!(check.outcome().is_none());
     }
 
-    /// Pins that an empty read answered more than one interval after it was
-    /// requested leaves a gap in the window and restarts it.
+    /// Pins the answer bound: an empty read answered more than 20 s after it
+    /// was requested restarts the window, and one answered at 20 s does not.
     #[test]
     fn a_read_answered_late_restarts_the_window() {
         let start = Instant::now();
         let mut check = opened(start, "a");
-        empty_reads(&mut check, start, 0, 20);
+        empty_reads(&mut check, start, 0, 15);
         assert_eq!(
-            check.next(at(start, 40)),
+            check.next(at(start, 30)),
             EndAction::ReadDepth(DepthOf::Feed)
         );
-        check.depth_read(at(start, 65), empty());
-        assert_eq!(check.next(at(start, 65)), EndAction::ReadMarker);
+        check.depth_read(at(start, 51), empty());
+        assert_eq!(check.next(at(start, 51)), EndAction::ReadMarker);
 
-        // An answer exactly one interval late is still on time.
         let mut check = opened(start, "a");
         assert_eq!(check.next(start), EndAction::ReadDepth(DepthOf::Feed));
         check.depth_read(at(start, 20), empty());
@@ -523,6 +543,31 @@ mod tests {
             check.next(at(start, 20)),
             EndAction::ReadDepth(DepthOf::Feed)
         );
+    }
+
+    /// Pins the gap bound: a read taken more than 20 s after the window's last
+    /// one, as a clock that jumped or a poll that stalled gives, restarts the
+    /// window from a marker read, and one taken at 20 s does not.
+    #[test]
+    fn a_read_taken_after_a_gap_restarts_the_window() {
+        let start = Instant::now();
+        let mut check = opened(start, "a");
+        empty_reads(&mut check, start, 0, 15);
+        assert_eq!(check.next(at(start, 36)), EndAction::ReadMarker);
+        assert!(check.outcome().is_none());
+
+        let mut check = opened(start, "a");
+        empty_reads(&mut check, start, 0, 15);
+        assert_eq!(
+            check.next(at(start, 35)),
+            EndAction::ReadDepth(DepthOf::Feed),
+            "20 s after the last read is within the bound"
+        );
+
+        // A jump of a whole window cannot close it.
+        let mut check = opened(start, "a");
+        empty_reads(&mut check, start, 0, 0);
+        assert_eq!(check.next(at(start, 60)), EndAction::ReadMarker);
     }
 
     /// Pins that a closing marker naming another run opens a new window on
@@ -534,19 +579,14 @@ mod tests {
         empty_reads(&mut check, start, 0, 60);
         assert_eq!(check.next(at(start, 60)), EndAction::ReadMarker);
         check.marker_read(at(start, 60), present("b"));
-        assert_eq!(
-            check.next(at(start, 60)),
-            EndAction::ReadDepth(DepthOf::Feed)
-        );
-        check.depth_read(at(start, 60), empty());
-        empty_reads(&mut check, start, 80, 120);
+        empty_reads(&mut check, start, 60, 120);
         assert_eq!(check.next(at(start, 120)), EndAction::ReadMarker);
         check.marker_read(at(start, 120), present("b"));
         assert_eq!(check.next(at(start, 120)), EndAction::Receive);
     }
 
     /// Pins that a marker gone at the window's end ends nothing, and the
-    /// check waits for a marker.
+    /// check reads it again 15 s later.
     #[test]
     fn an_absent_closing_marker_does_not_end() {
         let start = Instant::now();
@@ -556,11 +596,11 @@ mod tests {
         check.marker_read(at(start, 60), MarkerRead::Absent);
         assert_eq!(
             check.next(at(start, 60)),
-            EndAction::Wait(Some(at(start, 80))),
-            "an absent marker is read again one interval later"
+            EndAction::Wait(Some(at(start, 75))),
+            "an absent marker is read again 15 s later"
         );
-        assert_eq!(check.next(at(start, 80)), EndAction::ReadMarker);
-        check.marker_read(at(start, 80), MarkerRead::Absent);
+        assert_eq!(check.next(at(start, 75)), EndAction::ReadMarker);
+        check.marker_read(at(start, 75), MarkerRead::Absent);
         assert!(check.outcome().is_none());
 
         // A failed closing read ends nothing either.
@@ -570,10 +610,10 @@ mod tests {
         check.marker_read(at(start, 60), MarkerRead::Failed);
         assert_eq!(
             check.next(at(start, 60)),
-            EndAction::Wait(Some(at(start, 80))),
-            "a failed marker read is retried one interval later"
+            EndAction::Wait(Some(at(start, 75))),
+            "a failed marker read is retried 15 s later"
         );
-        assert_eq!(check.next(at(start, 80)), EndAction::ReadMarker);
+        assert_eq!(check.next(at(start, 75)), EndAction::ReadMarker);
     }
 
     /// Pins that an answer of a kind the check did not ask for is ignored and
@@ -589,13 +629,13 @@ mod tests {
         check.depth_read(start, empty());
         assert_eq!(
             check.next(start),
-            EndAction::Wait(Some(at(start, 20))),
+            EndAction::Wait(Some(at(start, 15))),
             "the window on run a carries on"
         );
         // With nothing outstanding, a depth answer is ignored too.
         check.depth_read(start, visible(1));
         assert_eq!(
-            check.next(at(start, 20)),
+            check.next(at(start, 15)),
             EndAction::ReadDepth(DepthOf::Feed)
         );
     }
@@ -648,20 +688,20 @@ mod tests {
         );
     }
 
-    /// Pins that no marker at the start opens no window: the feed is not read
-    /// until a marker is found.
+    /// Pins that no window opens before a marker is found: the feed is not
+    /// read until a marker is.
     #[test]
     fn no_window_opens_before_a_marker_is_found() {
         let start = Instant::now();
         let mut check = EndCheck::windowed(WINDOW, start);
-        for secs in [0, 20, 40] {
+        for secs in [0, 15, 30] {
             assert_eq!(check.next(at(start, secs)), EndAction::ReadMarker);
             check.marker_read(at(start, secs), MarkerRead::Absent);
         }
-        assert_eq!(check.next(at(start, 60)), EndAction::ReadMarker);
-        check.marker_read(at(start, 60), present("a"));
+        assert_eq!(check.next(at(start, 45)), EndAction::ReadMarker);
+        check.marker_read(at(start, 45), present("a"));
         assert_eq!(
-            check.next(at(start, 60)),
+            check.next(at(start, 45)),
             EndAction::ReadDepth(DepthOf::Feed)
         );
     }
@@ -672,7 +712,7 @@ mod tests {
     fn the_closing_marker_is_read_after_the_last_depth_read() {
         let start = Instant::now();
         let mut check = opened(start, "a");
-        empty_reads(&mut check, start, 0, 40);
+        empty_reads(&mut check, start, 0, 45);
         assert_eq!(
             check.next(at(start, 60)),
             EndAction::ReadDepth(DepthOf::Feed)
@@ -683,7 +723,7 @@ mod tests {
     }
 
     /// Pins that a receive taking a unit after the closing marker restarts
-    /// the check, and that a restart waits one interval from the last read.
+    /// the check, and that a restart waits 15 s from the last read.
     #[test]
     fn a_receive_that_takes_a_unit_restarts_the_window() {
         let start = Instant::now();
@@ -695,9 +735,9 @@ mod tests {
         check.received(at(start, 61), true);
         assert_eq!(
             check.next(at(start, 61)),
-            EndAction::Wait(Some(at(start, 80)))
+            EndAction::Wait(Some(at(start, 75)))
         );
-        assert_eq!(check.next(at(start, 80)), EndAction::ReadMarker);
+        assert_eq!(check.next(at(start, 75)), EndAction::ReadMarker);
     }
 
     /// Pins that a restart drops the outstanding read: its answer is ignored.
@@ -710,13 +750,13 @@ mod tests {
         check.depth_read(at(start, 5), empty());
         assert_eq!(
             check.next(at(start, 5)),
-            EndAction::Wait(Some(at(start, 20)))
+            EndAction::Wait(Some(at(start, 15)))
         );
-        assert_eq!(check.next(at(start, 20)), EndAction::ReadMarker);
+        assert_eq!(check.next(at(start, 15)), EndAction::ReadMarker);
     }
 
-    /// Pins that a failed dead-letter read is retried one interval later and
-    /// ends the job neither way.
+    /// Pins that a failed dead-letter read is retried 15 s later and ends
+    /// the job neither way.
     #[test]
     fn a_failed_dead_letter_read_neither_drains_nor_stalls() {
         let start = Instant::now();
@@ -726,14 +766,14 @@ mod tests {
         check.marker_read(at(start, 60), present("a"));
         assert_eq!(
             finish(&mut check, at(start, 60), failed()),
-            EndAction::Wait(Some(at(start, 80)))
+            EndAction::Wait(Some(at(start, 75)))
         );
         assert!(check.outcome().is_none());
         assert_eq!(
-            check.next(at(start, 80)),
+            check.next(at(start, 75)),
             EndAction::ReadDepth(DepthOf::DeadLetters)
         );
-        check.depth_read(at(start, 80), empty());
+        check.depth_read(at(start, 75), empty());
         assert_eq!(check.outcome(), Some(&EndOutcome::Completed));
     }
 
@@ -802,7 +842,7 @@ mod tests {
             let mut depth = Depth::new("queue", true);
             set(&mut depth);
             check.depth_read(start, Ok(depth));
-            assert_eq!(check.next(at(start, 20)), EndAction::ReadMarker);
+            assert_eq!(check.next(at(start, 15)), EndAction::ReadMarker);
         }
     }
 }

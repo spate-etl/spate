@@ -585,6 +585,21 @@ mod tests {
             check.next(at(start, 20)),
             EndAction::ReadDepth(DepthOf::Feed)
         );
+        // The read that would close the window, answered late, opens a new
+        // window from the next marker read and does not pass to the receive.
+        let mut check = opened(start, "a");
+        empty_reads(&mut check, start, 0, 45);
+        assert_eq!(
+            check.next(at(start, 60)),
+            EndAction::ReadDepth(DepthOf::Feed)
+        );
+        check.depth_read(at(start, 81), empty());
+        assert_eq!(check.next(at(start, 81)), EndAction::ReadMarker);
+        check.marker_read(at(start, 81), present("a"));
+        assert_eq!(
+            check.next(at(start, 81)),
+            EndAction::ReadDepth(DepthOf::Feed)
+        );
     }
 
     /// Pins the gap bound: a read taken more than 20 s after the window's last

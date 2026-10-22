@@ -175,6 +175,18 @@ of [Metrics](../../METRICS.md).
   there. `spate_pipeline_io_busy_ratio` near 1, averaged over the last 5
   minutes (since start while shorter), shows that case.
 
+- **Dead-lettered work units** — on a pipeline that reads a
+  [work feed](../02-concepts/09-work-feed.mdx), alert when the feed's
+  dead-letter destination holds any unit, using the feed's own monitoring.
+  Spate reads that destination only at the end of a bounded job, and a job
+  with no job location never reads it, so no Spate metric reports a unit
+  moving there while a job runs.
+
+  :::note Connector specifics
+  Where each feed keeps its dead letters:
+  [feeds](../04-connectors/feeds/README.mdx).
+  :::
+
 For alerting on skipped records (schema drift, poison messages), replica and
 shard health, and queue saturation, use the `*_dropped_total`,
 `spate_sink_replica_healthy`, `spate_sink_shard_healthy` (0 = no circuit-closed

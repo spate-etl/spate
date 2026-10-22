@@ -282,8 +282,8 @@ pub(crate) struct Drove {
 impl Run {
     /// Runs the pipeline to its end and reports what it did.
     ///
-    /// The coordinated arm ends on its own when the plan completes. The feed
-    /// path never drains, so the feed arm waits until every unit is
+    /// The coordinated arm ends on its own when the plan completes. A feed job
+    /// with no location never drains, so the feed arm waits until every unit is
     /// acknowledged, then triggers shutdown and wakes the reader through the
     /// waker the feed was handed, so the run pays no poll timeout after its
     /// last unit.

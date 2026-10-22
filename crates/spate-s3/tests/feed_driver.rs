@@ -1,8 +1,9 @@
 //! The feed read path: the source reads work units naming one object or one
 //! byte range, and storage notifications, from a scripted feed or the
 //! in-process feed, over real files, and the feed observes every
-//! acknowledgment, failure, renewal and `Gone` answer. Each test ends the
-//! run with a shutdown, since this path never reports `Drained`.
+//! acknowledgment, failure, renewal and `Gone` answer. Each run attaches its
+//! feed with `with_feed`, a job with no end check, so each test ends it with a
+//! shutdown.
 
 mod support;
 
@@ -671,6 +672,10 @@ impl Feed for FirstCallRetryable {
     fn publish(&self, unit: Unit) -> Confirmation {
         self.inner.publish(unit)
     }
+
+    fn read_depth(&self, of: spate_core::feed::DepthOf) -> Option<spate_core::feed::DepthReading> {
+        self.inner.read_depth(of)
+    }
 }
 
 /// Pins that an `acknowledge` or `fail` answered `Retryable` is sent again:
@@ -736,6 +741,10 @@ impl Feed for RetryableReceiveAndRenew {
     }
     fn publish(&self, unit: Unit) -> Confirmation {
         self.inner.publish(unit)
+    }
+
+    fn read_depth(&self, of: spate_core::feed::DepthOf) -> Option<spate_core::feed::DepthReading> {
+        self.inner.read_depth(of)
     }
 }
 

@@ -157,8 +157,12 @@ Where a bounded feed job keeps the state every instance of it reads, named by
 the `feed:` section's `location` key, such as the job fingerprint its lister
 writes. A job on a durable [feed](#feed)
 that names one is **bounded**, and its [work units](#work-unit) come from its
-lister. A job that names none is **continuous**, and its instances read no
-job location. A job on the in-process feed names none.
+lister. A bounded job ends once its lister's end marker holds over a
+[settling window](#settling-window) of empty reads of the feed. A job that
+names none is **continuous**, its instances read no job location, and it ends
+at a shutdown. A job on the in-process feed names none; one on the feed the
+runtime built ends once its own lister has finished and the feed reads empty,
+and one given a feed in code ends at a shutdown.
 
 *Connector mapping:*
 [S3 source](../04-connectors/sources/s3/README.mdx#bounded-jobs-and-the-job-location)
@@ -195,8 +199,8 @@ The one run per bounded job that lists the job's input once, publishes its
 [work units](#work-unit) to the [feed](#feed) and exits. A fleet's workers
 never list. The lister keeps its checkpoint at the
 [job location](#job-location), and writes an end marker there once the feed
-has confirmed every unit. A solo run on the in-process feed lists its own
-input.
+has confirmed every unit. Every worker reads that marker to end the job. A
+solo run on the in-process feed lists its own input.
 
 *Connector mapping:*
 [S3 source](../04-connectors/sources/s3/README.mdx#the-lister-run)
@@ -301,6 +305,13 @@ seals when `batch.max_rows`, `batch.max_bytes`, or `batch.linger` trips, then
 writes it via the `ShardWriter`. The framework delivers the batch's
 acknowledgments only after the writer returns `Ok`, the durable-ack point, and
 fails them if the batch is abandoned.
+
+### Settling window
+
+How long a bounded feed job's [feed](#feed) must read empty, between two reads
+of its [lister](#lister)'s end marker naming the same run, before the job
+ends: five minutes unless the `feed:` section's `settling_window` sets another.
+The same span bounds a worker's wait for the job fingerprint at startup.
 
 ### Shard
 

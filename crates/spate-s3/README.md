@@ -15,8 +15,11 @@ one-worker case.
 With a pipeline `feed:` section the source reads work units from the feed,
 each naming one object or one byte range of one object, and storage
 notifications, one part per non-empty created object. It reads a large object
-in byte ranges. It acknowledges each finished unit to the feed and runs until
-shut down. On a durable feed the source lists nothing: a bounded job's units
+in byte ranges. It acknowledges each finished unit to the feed. A bounded job,
+one whose section names a `location`, ends once the lister's end marker holds
+over a settling window in which the feed reads empty, and ends with an error
+when the feed's dead-letter destination then holds units; any other job runs
+until shut down. On a durable feed the source lists nothing: a bounded job's units
 come from a separate lister run, `S3Source::list_once`, once per job, and a
 continuous job's from storage notifications or code. On the in-process feed
 the run lists its own prefix.

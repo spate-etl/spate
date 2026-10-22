@@ -6,8 +6,8 @@
 //! The objects are a local directory (`file://`), so the only thing to stand
 //! up is a broker. A unit's offset is committed only once every record in
 //! its object is written, and a unit whose worker dies is read again by the
-//! group member its partition moves to. The feed path never ends on its own,
-//! so this demo stops itself once every row is written.
+//! group member its partition moves to. A job with no `location` never ends on
+//! its own, so this demo stops itself once every row is written.
 //!
 //! # Run it
 //!

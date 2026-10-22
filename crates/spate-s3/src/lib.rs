@@ -15,11 +15,14 @@
 //! [`S3Source::list_once`], once per job, and a continuous job's from storage
 //! notifications or code. On the in-process feed the run lists its own prefix
 //! into the feed. A whole object that qualifies for byte ranges is
-//! read in ranges. That job never self-terminates, so it ends at a shutdown,
-//! and the section's `units_held` bounds its read parallelism, one lane per
-//! object or range in progress. When the section names a `location`, the job
-//! is bounded: the source waits for the job fingerprint its lister writes
-//! there, and refuses to start when it differs from its own.
+//! read in ranges. The section's `units_held` bounds its read parallelism,
+//! one lane per object or range in progress. When the section names a
+//! `location`, the job is bounded: the source waits for the job fingerprint
+//! its lister writes there, refuses to start when it differs from its own,
+//! and ends once the lister's end marker holds over a settling window in
+//! which the feed reads empty. A solo run on the in-process feed the runtime
+//! built ends once its listing is read. Any other job on a feed ends at a
+//! shutdown.
 //!
 //! # Shape
 //!
@@ -101,6 +104,7 @@ mod framer;
 #[cfg(feature = "testing")]
 #[doc(hidden)]
 pub mod fuzz_seams;
+mod job_end;
 mod lane;
 mod lister;
 mod listing;

@@ -26,9 +26,15 @@
 //! naming several objects is acknowledged once after all of them. An
 //! object-level failure on any lane fails the unit back to the feed, which
 //! delivers it again until it dead-letters it.
+//!
+//! A bounded job's reader holds a [`JobEnd`]. Each poll that finds the reader
+//! holding no delivery, lane or unsent request advances its end check, and
+//! each poll that finds it holding any sends the check back to its start, so
+//! the job ends only on reads taken while this worker had nothing in hand.
 
 use crate::fetch::{FetcherParams, run_fetcher};
 use crate::framer::FramerFactory;
+use crate::job_end::JobEnd;
 use crate::lane::S3Lane;
 use crate::metrics::S3Metrics;
 use crate::split::Packing;
@@ -139,6 +145,9 @@ pub(crate) struct UnitReader {
     unsent_fails: Vec<(Receipt, String)>,
     poison_tx: std::sync::mpsc::Sender<PoisonReport>,
     poison_rx: std::sync::mpsc::Receiver<PoisonReport>,
+    /// The end check of a bounded job; `None` on a job that runs until a
+    /// shutdown.
+    end: Option<JobEnd>,
 }
 
 impl std::fmt::Debug for UnitReader {
@@ -153,15 +162,20 @@ impl std::fmt::Debug for UnitReader {
 impl UnitReader {
     /// A reader over `feed` that holds at most `units_held` units, or
     /// [`UNITS_HELD`] when that is `None`, and reads the notifications whose
-    /// records fall within `scope`.
+    /// records fall within `scope`. With `end`, the reader reports `Drained`
+    /// once that check passes.
     pub(crate) fn new(
         feed: Arc<dyn Feed>,
         parts: LaneParts,
         scope: Scope,
         units_held: Option<NonZeroUsize>,
+        mut end: Option<JobEnd>,
     ) -> UnitReader {
         let (waker, park) = wake_channel();
         feed.set_waker(waker.clone());
+        if let Some(end) = &mut end {
+            end.set_waker(waker.clone());
+        }
         let (poison_tx, poison_rx) = std::sync::mpsc::channel();
         UnitReader {
             feed,
@@ -180,13 +194,22 @@ impl UnitReader {
             unsent_fails: Vec::new(),
             poison_tx,
             poison_rx,
+            end,
+        }
+    }
+
+    /// Record that the solo run's lister has published the whole prefix.
+    pub(crate) fn lister_finished(&mut self) {
+        if let Some(end) = &mut self.end {
+            end.lister_finished();
         }
     }
 
     /// Surface at most one controller event, waiting on the feed for at
     /// most `timeout` when there is nothing to report.
     ///
-    /// Never reports `Drained`, so the run ends at a shutdown.
+    /// Reports `Drained` once a bounded job's end check passes, holding no
+    /// lane; a job with no end check ends at a shutdown.
     pub(crate) fn poll_events(
         &mut self,
         timeout: Duration,
@@ -196,6 +219,11 @@ impl UnitReader {
             return Ok(SourceEvent::LanesAssigned(Vec::new()));
         }
         self.settle()?;
+        if self.holds_work()
+            && let Some(end) = &mut self.end
+        {
+            end.busy();
+        }
         if !self.revoked.is_empty() {
             let lanes = std::mem::take(&mut self.revoked);
             let barrier = DrainBarrier::new(lanes.len());
@@ -230,8 +258,31 @@ impl UnitReader {
         if !partitions.is_empty() {
             return Ok(SourceEvent::CommitReady { partitions });
         }
+        if !self.holds_work()
+            && let Some(mut end) = self.end.take()
+        {
+            let feed = Arc::clone(&self.feed);
+            let ended = end.idle(feed.as_ref(), || {
+                let room = self.room();
+                self.receive(room)
+            });
+            self.end = Some(end);
+            if ended? {
+                return Ok(SourceEvent::Drained);
+            }
+        }
         self.park.park(timeout);
         Ok(SourceEvent::Idle)
+    }
+
+    /// Whether the reader holds a delivery, a lane, a lane on its way out or
+    /// a fail the feed has not taken.
+    fn holds_work(&self) -> bool {
+        !(self.deliveries.is_empty()
+            && self.lanes.is_empty()
+            && self.revoked.is_empty()
+            && self.retired.is_empty()
+            && self.unsent_fails.is_empty())
     }
 
     /// Record acknowledged watermarks, retire each lane that ended at the
@@ -437,15 +488,18 @@ impl UnitReader {
     }
 
     /// Receive up to `room` deliveries and hold each readable one.
-    fn receive(&mut self, room: usize) -> Result<(), SourceError> {
+    /// Receive up to `room` units and hold or fail each. Returns how many
+    /// the feed handed over.
+    fn receive(&mut self, room: usize) -> Result<usize, SourceError> {
         let deliveries = match self.feed.receive(room) {
             Ok(deliveries) => deliveries,
             Err(e) if e.kind == FeedErrorKind::Retryable => {
                 tracing::warn!(error = %e, "receiving from the feed failed; retrying");
-                return Ok(());
+                return Ok(0);
             }
             Err(e) => return Err(feed_error("receiving from the feed", &e)),
         };
+        let taken = deliveries.len();
         for delivery in deliveries {
             match decode(&delivery.unit.body, &self.scope, self.parts.packing) {
                 Decoded::Read(cursors) => self.hold(delivery, cursors),
@@ -461,7 +515,7 @@ impl UnitReader {
                 }
             }
         }
-        Ok(())
+        Ok(taken)
     }
 
     /// Hold `delivery` with `cursors` as its pending parts.
@@ -632,7 +686,7 @@ mod tests {
             metrics,
         };
         let units_held = units_held.map(|n| NonZeroUsize::new(n).unwrap());
-        (UnitReader::new(feed, parts, scope(), units_held), rt)
+        (UnitReader::new(feed, parts, scope(), units_held, None), rt)
     }
 
     /// The scope of a source over `s3://bucket/data/`.
@@ -716,6 +770,33 @@ mod tests {
         fn publish(&self, unit: Unit) -> Confirmation {
             self.inner.publish(unit)
         }
+
+        fn read_depth(
+            &self,
+            of: spate_core::feed::DepthOf,
+        ) -> Option<spate_core::feed::DepthReading> {
+            self.inner.read_depth(of)
+        }
+    }
+
+    /// Give `reader` the end check of a solo run whose lister has finished:
+    /// the job ends on the first poll that finds the reader holding nothing
+    /// and the feed empty.
+    fn end_solo(reader: &mut UnitReader, rt: &tokio::runtime::Runtime) {
+        let mut end = JobEnd::new(
+            crate::job_end::Finish::Solo { finished: true },
+            spate_core::clock::tokio::TestClock::frozen(),
+            rt.handle().clone(),
+            spate_core::source::StopSignal::default(),
+        );
+        end.set_waker(reader.waker.clone());
+        reader.end = Some(end);
+    }
+
+    /// Poll until the reader reports `Drained`, at most `polls` times, and
+    /// whether it did.
+    fn drains_within(reader: &mut UnitReader, polls: usize) -> bool {
+        (0..polls).any(|_| matches!(poll(reader), SourceEvent::Drained))
     }
 
     /// Receive one scripted unit and hold it with one lane, as `open` does,
@@ -754,6 +835,69 @@ mod tests {
             },
         );
         (partition, receipt, tracker)
+    }
+
+    /// Pins that a reader holding a lane never drains, though the feed reads
+    /// empty, and drains once the lane has retired and its unit is
+    /// acknowledged.
+    #[test]
+    fn a_reader_holding_a_lane_does_not_drain_on_an_empty_feed() {
+        let (feed, script) = scripted_feed();
+        let (mut reader, rt) = reader_over(Arc::new(feed), None, None);
+        end_solo(&mut reader, &rt);
+        start(&mut reader);
+        let (p, receipt, _tracker) = hold_one(&mut reader, &script);
+        for _ in 0..8 {
+            script.answer_depth(
+                spate_core::feed::DepthOf::Feed,
+                Ok(spate_core::feed::Depth::new("empty", false)),
+            );
+        }
+        assert!(!drains_within(&mut reader, 8), "drained holding a lane");
+        finish(&mut reader, p, 3);
+        assert!(drains_within(&mut reader, 8));
+        assert_eq!(script.acknowledged(), vec![receipt]);
+    }
+
+    /// Pins that a reader whose acknowledge the feed answered `Retryable`
+    /// still holds the unit and does not drain, and drains once the
+    /// acknowledge goes through.
+    #[test]
+    fn a_retryable_acknowledge_keeps_the_reader_from_draining() {
+        let (inner, script) = scripted_feed();
+        let feed = Arc::new(Refusing::new(inner));
+        let (mut reader, rt) = reader_over(Arc::clone(&feed) as Arc<dyn Feed>, None, None);
+        end_solo(&mut reader, &rt);
+        start(&mut reader);
+        let (p, receipt, _tracker) = hold_one(&mut reader, &script);
+        *feed.acknowledge.lock().unwrap() = Some(FeedErrorKind::Retryable);
+        finish(&mut reader, p, 3);
+        assert!(
+            !drains_within(&mut reader, 8),
+            "drained before the acknowledge"
+        );
+        *feed.acknowledge.lock().unwrap() = None;
+        assert!(drains_within(&mut reader, 8));
+        assert_eq!(script.acknowledged(), vec![receipt]);
+    }
+
+    /// Pins that a reader holding a fail the feed answered `Retryable`, for
+    /// a unit it could not read, does not drain until the fail goes
+    /// through.
+    #[test]
+    fn an_unsent_fail_keeps_the_reader_from_draining() {
+        let (inner, script) = scripted_feed();
+        let feed = Arc::new(Refusing::new(inner));
+        let (mut reader, rt) = reader_over(Arc::clone(&feed) as Arc<dyn Feed>, None, None);
+        end_solo(&mut reader, &rt);
+        start(&mut reader);
+        *feed.fail.lock().unwrap() = Some(FeedErrorKind::Retryable);
+        let receipt = script.deliver(Unit::new("unreadable", b"not a unit".to_vec()));
+        assert!(!drains_within(&mut reader, 8), "drained holding a fail");
+        *feed.fail.lock().unwrap() = None;
+        assert!(drains_within(&mut reader, 8));
+        assert_eq!(script.failed().len(), 1);
+        assert_eq!(script.failed()[0].0, receipt);
     }
 
     /// Pins INV-1 in `commit`: with end-of-input decided at `T`, a
@@ -1243,7 +1387,7 @@ mod tests {
                 };
                 let (feed, script) = scripted_feed();
                 let mut reader =
-                    UnitReader::new(Arc::new(feed), parts, scope(), NonZeroUsize::new(4));
+                    UnitReader::new(Arc::new(feed), parts, scope(), NonZeroUsize::new(4), None);
                 let object = DescriptorObject {
                     key: "a.ndjson".into(),
                     size,

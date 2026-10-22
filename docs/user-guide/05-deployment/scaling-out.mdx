@@ -42,10 +42,17 @@ On Kubernetes:
   run it again, each run resuming after the checkpoint. Set
   `activeDeadlineSeconds` to bound the run as a whole, since the lister adds
   no deadline of its own beyond its feed's and store's limits.
+- **A bounded job's workers with a fixed count**, as a `Job` with a fixed
+  `parallelism` or a `Deployment` with fixed replicas, or under a scaler whose
+  minimum is one. A bounded job's workers end it themselves, each exiting zero
+  once [its end check](../02-concepts/09-work-feed.mdx#how-a-bounded-job-ends)
+  passes, so a `Job` reports the job's outcome. A scaler that removes every
+  worker when the feed reads empty ends the job with no exit status, and a unit
+  a stopped worker held then has no reader when the feed delivers it again.
 - **Continuous workers as a `Deployment`.**
 
 Start the lister first, or the workers at most one settling window (five
-minutes) before it: a worker of a bounded job exits when no job fingerprint
+minutes unless `settling_window` sets another) before it: a worker of a bounded job exits when no job fingerprint
 appears at the job location within that window. On a feed that charges a
 delivery attempt to a worker waiting for the fingerprint, start the lister
 first. A lister run builds its feed with the backend's publish-only handle

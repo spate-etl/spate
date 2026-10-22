@@ -730,6 +730,9 @@ impl Feed for Observing {
         });
         self.inner.publish(unit)
     }
+    fn read_depth(&self, of: spate_core::feed::DepthOf) -> Option<spate_core::feed::DepthReading> {
+        self.inner.read_depth(of)
+    }
 }
 
 /// Pins that a lister run deletes the end marker an earlier run left, and
@@ -1762,6 +1765,10 @@ impl Feed for PanickingPublish {
     }
     fn publish(&self, _unit: Unit) -> Confirmation {
         panic!("the feed panics on publish");
+    }
+
+    fn read_depth(&self, of: spate_core::feed::DepthOf) -> Option<spate_core::feed::DepthReading> {
+        self.0.read_depth(of)
     }
 }
 

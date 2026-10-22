@@ -7,8 +7,8 @@
 //! up is the queue. A unit is deleted from the queue only once every record
 //! in its object is written, and a unit whose worker dies returns to the
 //! queue after the visibility period, for this process or another to read.
-//! The feed path never ends on its own, so this demo stops itself once every
-//! row is written.
+//! A job with no `location` never ends on its own, so this demo stops itself
+//! once every row is written.
 //!
 //! # Run it
 //!

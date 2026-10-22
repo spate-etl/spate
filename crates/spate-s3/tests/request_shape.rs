@@ -391,6 +391,10 @@ impl Feed for Tagged {
     fn publish(&self, unit: Unit) -> Confirmation {
         self.inner.publish(unit)
     }
+
+    fn read_depth(&self, of: spate_core::feed::DepthOf) -> Option<spate_core::feed::DepthReading> {
+        self.inner.read_depth(of)
+    }
 }
 
 /// A worker on a durable feed, continuous or bounded, reads the units

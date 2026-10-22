@@ -74,6 +74,41 @@ Dead-lettering is a property of the feed. The
 [record-level error policies](04-error-handling.mdx) still decide what happens
 to an individual record that fails inside a unit that is read.
 
+## How a bounded job ends
+
+A job whose `feed:` section names a job location is bounded: a lister run
+publishes its units once, and the job ends when every one of them is read. No
+worker can tell that from its own units, since a peer may hold a unit the feed
+delivers again if that peer stops, and a feed's counts can be estimates. A
+bounded job ends on three checks, in order:
+
+1. The end marker the lister run writes at the job location names the same
+   run at the start and at the end of a settling window, five minutes unless
+   [`settling_window`](../07-reference/configuration.mdx#feed) sets another.
+2. Over the window, every read of the feed, at most 20 seconds apart, finds no
+   unit ready, delayed or held by any reader, and the worker holds none
+   itself. A read that finds one, a read that fails, a read that comes late or
+   a unit the worker takes starts the window again.
+3. The feed's dead-letter destination is empty. When it holds units the job
+   is stalled: it fails with an error that starts `bounded feed job stalled:`
+   and names the destination and its count, and the process exits non-zero.
+
+Every worker runs the check and keeps receiving until it passes, idle or not,
+so a unit a stopped peer held still has a reader when the feed delivers it
+again. A solo run on the in-process feed the runtime built has exact counts and
+its own lister, so it ends once its listing is read and the feed is empty, with
+no window. A run given an in-process feed in code runs until a shutdown, since
+code may publish to it after the listing.
+
+A unit the feed itself deletes before anyone reads it, at the end of the feed's
+retention, leaves no trace, and the job can end over it. A bounded job cannot
+share its feed with storage notifications: notifications keep the window from
+closing, and an object both announce is read twice.
+
+:::note Connector specifics
+Re-running a stalled job: [S3](../04-connectors/sources/s3/README.mdx#how-a-bounded-job-ends).
+:::
+
 ## How the control plane waits
 
 The control plane drives the feed synchronously, and no call to the feed waits
@@ -99,6 +134,8 @@ while it holds fewer.
 - [`feed:` section](../07-reference/configuration.mdx#feed) — naming a feed
   in the pipeline file.
 - [Feeds](../04-connectors/feeds/README.mdx) — the feed backends.
+- [Error handling](04-error-handling.mdx#a-stalled-feed-job) — a bounded job
+  that ends with dead letters.
 - [Delivery guarantees](02-delivery-guarantees.mdx) — the watermark path an
   acknowledgment waits on.
 - [Source coordination](07-source-coordination.mdx) — the leased-split model

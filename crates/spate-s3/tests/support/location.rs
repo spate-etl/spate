@@ -85,6 +85,16 @@ impl LocationHooks {
             .unwrap();
     }
 
+    /// Delete the object at `key` directly, uncounted.
+    pub(crate) fn remove(&self, key: &str) {
+        self.0
+            .inner
+            .delete(&Path::from(key))
+            .now_or_never()
+            .expect("an in-memory delete completes at once")
+            .unwrap();
+    }
+
     /// The bytes at `key`, read directly, uncounted.
     pub(crate) fn read(&self, key: &str) -> Option<Vec<u8>> {
         let got = self

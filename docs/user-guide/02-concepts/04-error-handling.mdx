@@ -6,7 +6,7 @@ description: "The error taxonomy of retryable, record-level, and fatal failures,
 
 Spate sorts every failure into one of three classes, gives you exactly two
 policies for the record-level class, and surfaces all of it through
-metrics. There are no dead-letter queues and no silent drops.
+metrics. A record has no dead-letter queue, and nothing is dropped silently.
 
 ## The taxonomy
 
@@ -49,11 +49,32 @@ The stage comes from
 [Your first pipeline](../01-getting-started/03-first-pipeline.mdx) runs that
 example end to end.
 
-There is deliberately no dead-letter queue in v1: the target environments
-have no owned destination for one, and a half-owned one is worse than none.
+There is deliberately no dead-letter queue for records: the target
+environments have no owned destination for one, and a half-owned one is worse
+than none. A work feed's dead-letter destination holds units, not records, and
+the [section below](#a-stalled-feed-job) covers it.
 If you need one, an `inspect`/`flat_map` stage that writes failures to your
 own side channel is the extension point. See
 [Custom operators](../06-extending/custom-operators.mdx).
+
+## A stalled feed job
+
+A [work feed](09-work-feed.mdx) moves a unit that keeps failing to its
+dead-letter destination, and stops delivering it. A bounded job reads that
+destination once its feed has stayed empty over the settling window. When it
+holds units the job is stalled: the pipeline fails with an error that starts
+`bounded feed job stalled:` and names the destination and its count, and the
+process exits non-zero. A stalled job never reports success over a unit it did
+not read. A restart does not help, since the units sit in the dead-letter
+destination; fix what made them fail, then re-run the job with them.
+
+A job that runs until a shutdown, with no job location, never reads its
+dead-letter destination. Alert on that destination's depth in the feed's own
+monitoring, as [Monitoring](../05-deployment/monitoring.mdx) describes.
+
+:::note Connector specifics
+Re-running a stalled job: [S3](../04-connectors/sources/s3/README.mdx#how-a-bounded-job-ends).
+:::
 
 ## Everything is surfaced through metrics
 

@@ -371,9 +371,12 @@ storage notifications published to the feed, and a startup WARN says so. On
 the in-process feed the run lists the prefix into that feed, and code may also
 publish to a `MemoryFeed` it keeps a handle to and passes to `Pipeline::feed`
 with `feed: { memory: {} }` in the file. Units from another process need a
-durable [feed backend](../../feeds/README.mdx). A run on the feed path never
-reports its input finished, so it ends at a shutdown. A lister run ends once
-it has published the listing. Without a `feed:` section the source plans
+durable [feed backend](../../feeds/README.mdx). A bounded job ends on its own,
+as [How a bounded job ends](#how-a-bounded-job-ends) describes, and so does a
+solo run on the in-process feed the runtime built, once its listing is read. A
+run given a `MemoryFeed` in code, and any job on a durable feed with no
+`location`, ends at a shutdown. A lister run ends once it has published the
+listing. Without a `feed:` section the source plans
 splits as described above.
 
 ### A solo run on the in-process feed
@@ -385,7 +388,12 @@ listing that fails fails the run, whatever the store error.
 :::warning A solo run lists from the beginning after a restart
 The in-process feed keeps nothing across a restart, and a solo run keeps no
 checkpoint, so a restarted run lists and reads the whole prefix again, and a
-startup WARN says so. Two solo instances, on one host or several, each list
+startup WARN says so. A solo run on the in-process feed the runtime built ends
+by itself once its listing is published and every unit is read, with no
+settling window; when the in-process dead-letter list then holds a unit it
+fails as a [stalled job](#how-a-bounded-job-ends). A run given a `MemoryFeed`
+in code ends at a shutdown, since code may publish to it after the listing.
+Two solo instances, on one host or several, each list
 and read the whole prefix. The listing publishes as fast as the store lists,
 and the in-process feed holds one unit for each listed part not yet read, in
 memory and outside `units_held`. A single instance that must resume reads a
@@ -508,7 +516,8 @@ named `end` there before its first publish, and writes `end` once the feed has
 confirmed every unit of the run and the last checkpoint is written. `end`
 holds `run=` and an id fresh to that run. A run that fails writes none, except
 when its write of `end` reached the store and the reply was lost; the next run
-deletes that one before it publishes. Workers do not read `end`. A new job
+deletes that one before it publishes. Every worker reads `end` to end the job,
+as [How a bounded job ends](#how-a-bounded-job-ends) describes. A new job
 takes a new location.
 
 The lister's checkpoint is the object named `checkpoint` there. It holds the
@@ -550,7 +559,8 @@ The fingerprint covers the unit format version, `url`, `compression`,
 a bounded job reads `fingerprint` every five seconds until it appears, and
 compares it with its own before it receives a unit. A worker whose fingerprint
 differs fails startup, and the error prints both. A worker that finds none
-within five minutes exits non-zero. A read the store fails retryably is logged
+within one settling window, five minutes unless the `feed:` section's
+`settling_window` sets another, exits non-zero. A read the store fails retryably is logged
 at WARN and tried again at the next step. The exit error names the last
 failed read's error, says "none appeared" when the reads found nothing, and
 says the store answered no read when it answered none within the window. While it waits a worker holds no unit and reports not ready on
@@ -605,6 +615,48 @@ read-after-delete consistency, which means `consistency_mode = "consistent"`
 on Garage and one zone on Ceph RGW. A `file://` location serves the processes
 of one host.
 
+### How a bounded job ends
+
+A worker of a bounded job ends the job once all three hold:
+
+- the object `end` names the same lister run at the start and at the end of a
+  settling window, five minutes unless the `feed:` section's
+  [`settling_window`](../../../07-reference/configuration.mdx#feed) sets
+  another;
+- every read of the feed's depth over the window, at most 20 seconds apart,
+  finds no unit ready, delayed or held by any worker, and the worker holds
+  none and has no acknowledgement in flight;
+- the feed's dead-letter destination is empty, read once after the window.
+
+Each worker decides on its own reads and exits zero. A read that finds a unit,
+a read that fails or comes late, a unit the worker takes, or an `end` that
+changes or disappears starts the window again from a new read of `end`. The
+worker reads `end` only at the start and the end of a window, and its feed
+every 15 seconds within one, so that no two reads fall more than 20 seconds
+apart. A feed that cannot report its depth fails a
+bounded job at startup. The [work feed](../../../02-concepts/09-work-feed.mdx#how-a-bounded-job-ends)
+page states the rule, and each [feed's page](../../feeds/README.mdx) how it
+reads its depth.
+
+When the dead-letter destination holds units, the job ends **stalled**: the
+run fails with an error that starts `bounded feed job stalled:` and names the
+destination and its count, and the process exits non-zero. To re-run a stalled
+job, fix what made its units fail, then start a new job at the same location on
+a fresh queue or topics, with its own dead-letter destination. Copy the dead
+letters into the new job's feed by hand before you start its lister. The
+lister resumes after the checkpoint and publishes only the keys listed after
+it, and the workers read both. A copied unit that arrives after the new job's
+workers have seen its `end` over a settling window of empty reads is left
+unread. A re-run whose fix changes the fingerprint, such as a new
+`compression`, `split_target_bytes` or framer, takes a new location, lists the
+whole prefix and needs no copied units.
+
+A bounded job cannot share its feed with storage notifications, and nothing
+checks that. Notifications keep the window from closing until they stop for a
+whole window, and an object both the lister and a notification announce is
+read twice. A unit the feed deletes at the end of its retention, before any
+worker reads it, leaves no trace, and the job can end over it.
+
 ### The lister run
 
 A bounded job's units come from one lister run per job: the same binary,
@@ -640,7 +692,9 @@ Two lister runs over one prefix:
 - at one location with one fingerprint, the later run resumes after the
   checkpoint the earlier wrote, or lists the whole prefix when both start
   before either writes one, and the first to finish writes `end` while the
-  other may still hold units the feed has not confirmed;
+  other may still hold units the feed has not confirmed, so the workers can
+  end the job while those units are still on their way to the feed, where
+  they stay unread;
 - at one location with two fingerprints, the later run is refused when it
   reads the earlier's fingerprint, on any store; when both read before either
   wrote one, the conditional create refuses the later run only on a store

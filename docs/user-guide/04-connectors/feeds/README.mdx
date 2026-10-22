@@ -13,14 +13,15 @@ unit again when its reader stops before acknowledging it. The
 |---|---|---|---|
 | [Amazon SQS](sqs/README.mdx) | `sqs` | `sqs` | A standard queue shared by every worker. Built in code from the section and passed to `Pipeline::feed`. |
 | [Kafka](kafka/README.mdx) | `kafka` | `kafka` | A work topic one consumer group reads, with attempt, retry and dead-letter topics. Built in code from the section and passed to `Pipeline::feed`. |
-| In-process | `memory` | none | A feed inside one process, never shared between processes. The runtime builds it from `feed: { memory: {} }`, and a source that lists its own input publishes to it; code that publishes to it builds a `MemoryFeed` and passes it to `Pipeline::feed`. Its body takes no keys. |
+| In-process | `memory` | none | A feed inside one process, never shared between processes. The runtime builds it from `feed: { memory: {} }`, and a source that lists its own input publishes to it; code that publishes to it builds a `MemoryFeed` and passes it to `Pipeline::feed`, and that run ends only at a shutdown. Its body takes no keys. |
 
 A feed is selected by the pipeline's
 [`feed:` section](../../07-reference/configuration.mdx#feed). Its body is the
 backend's own configuration, documented on its page. `units_held` applies
 whatever the backend; `attempt_cap` applies to the in-process and Kafka
 feeds, and a backend that cannot honor it refuses it. `location` names a job
-location for a source that reads one, and the in-process feed refuses it.
+location for a source that reads one, and `settling_window` times the end of a
+job that names one; the in-process feed refuses both.
 
 Custom backends implement
 [`Feed`](https://docs.rs/spate-core/latest/spate_core/feed/trait.Feed.html),

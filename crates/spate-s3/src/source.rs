@@ -19,7 +19,10 @@
 //! `testing`-gated `with_feed`, reads work units through
 //! `unit_reader::UnitReader` in place of all of the above. When the section
 //! names a `location`, `open` first waits for the lister's job fingerprint
-//! there and refuses a mismatch.
+//! there and refuses a mismatch, and the job ends on the lister's end marker
+//! once the feed reads empty over a settling window. A solo run on the
+//! in-process feed the runtime built ends once its lister has finished and
+//! the feed reads empty.
 //!
 //! No coordination backend appears in this crate's public API or in its
 //! cargo features. The store comes from the `coordination:` section through
@@ -30,9 +33,10 @@
 #![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
 
 use crate::config::{S3SourceConfig, s3_store_key};
+use crate::job_end::{Finish, JobEnd, no_depth};
 use crate::lane::S3Lane;
 use crate::listing::{UnaddressableConnector, UnaddressableKeys};
-use crate::location::{Location, SETTLING_WINDOW, await_fingerprint, feed_fingerprint};
+use crate::location::{Location, await_fingerprint, feed_fingerprint};
 use crate::metrics::S3Metrics;
 use crate::planner::{S3Planner, job_fingerprint};
 use crate::split::Packing;
@@ -49,7 +53,7 @@ use spate_core::config::{ComponentConfig, ConfigError, CoordinationSection, Feed
 use spate_core::coordination::driver::CoordinationDriver;
 use spate_core::coordination::{PlanFinality, SplitCoordinator};
 use spate_core::error::{ErrorClass, SourceError};
-use spate_core::feed::{Feed, FeedOrigin};
+use spate_core::feed::{DepthOf, Feed, FeedOrigin};
 use spate_core::framing::{FramingContract, RecordFramer};
 use spate_core::metrics::CoordinationMetrics;
 use spate_core::record::PartitionId;
@@ -107,11 +111,17 @@ pub struct S3Source {
     /// A location store injected via the `testing`-gated
     /// `with_location_store` seam.
     location_store: Option<Arc<dyn ObjectStore>>,
-    /// Times the wait for the job fingerprint.
+    /// Times the wait for the job fingerprint and the end check.
     clock: Arc<dyn Clock>,
+    /// The `feed:` section's settling window, or its default.
+    settling_window: Duration,
     /// Whether `open` runs a lister into the feed: set by a `feed:` section
     /// naming the in-process feed, which no other process can publish to.
     solo_lister: bool,
+    /// Whether the solo run ends once its lister has finished: only on the
+    /// in-process feed the runtime built, since code holding a `MemoryFeed`
+    /// it passed in may publish into it after the listing.
+    solo_ends: bool,
     /// The solo run's lister, while it runs.
     lister_task: Option<tokio::task::JoinHandle<Result<(), SourceError>>>,
     state: State,
@@ -149,7 +159,9 @@ impl S3Source {
             location: None,
             location_store: None,
             clock: Arc::new(SystemClock),
+            settling_window: spate_core::feed::DEFAULT_SETTLING_WINDOW,
             solo_lister: false,
+            solo_ends: false,
             lister_task: None,
             state: State::Created,
         }
@@ -263,7 +275,8 @@ impl S3Source {
         self
     }
 
-    /// Test seam: time the wait for the job fingerprint on `clock`.
+    /// Test seam: time the wait for the job fingerprint and the end check on
+    /// `clock`.
     ///
     /// Behind the off-by-default `testing` feature, outside the semver
     /// surface.
@@ -608,7 +621,7 @@ impl Source for S3Source {
         &mut self,
         section: &FeedSection,
         feed: Arc<dyn Feed>,
-        _origin: FeedOrigin,
+        origin: FeedOrigin,
     ) -> Result<(), ConfigError> {
         if self.feed.is_some() {
             return Err(ConfigError::Component {
@@ -631,9 +644,21 @@ impl Source for S3Source {
             .as_deref()
             .map(|location| self.parse_location(location))
             .transpose()?;
+        let memory = section.backend().type_tag() == "memory";
+        if section.settling_window.is_some() && self.location.is_none() && !memory {
+            return Err(ConfigError::Component {
+                context: "feed".into(),
+                message: "`settling_window` times the end of a bounded job, and a job on a \
+                          durable feed is bounded only with a `location`; set `location`, or \
+                          remove `settling_window`"
+                    .into(),
+            });
+        }
         self.feed = Some(feed);
         self.units_held = section.units_held;
-        self.solo_lister = section.backend().type_tag() == "memory";
+        self.settling_window = section.settling_window_or_default();
+        self.solo_lister = memory;
+        self.solo_ends = memory && origin == FeedOrigin::Section;
         Ok(())
     }
 
@@ -678,6 +703,7 @@ impl Source for S3Source {
                      failed back to the feed"
                 );
             }
+            let mut finish = None;
             if let Some(location) = &self.location {
                 let location_store = self.location_store(location)?;
                 let mine = feed_fingerprint(
@@ -688,7 +714,7 @@ impl Source for S3Source {
                 );
                 tracing::info!(
                     location = %location.shown(),
-                    window = ?SETTLING_WINDOW,
+                    window = ?self.settling_window,
                     "waiting for the job fingerprint at the job location"
                 );
                 self.handle.block_on(await_fingerprint(
@@ -697,9 +723,29 @@ impl Source for S3Source {
                     &mine,
                     self.clock.as_ref(),
                     &ctx.stop,
-                    SETTLING_WINDOW,
+                    self.settling_window,
                 ))?;
+                finish = Some(Finish::Marker {
+                    store: location_store,
+                    location: location.clone(),
+                    window: self.settling_window,
+                });
+            } else if self.solo_ends {
+                finish = Some(Finish::Solo { finished: false });
             }
+            // Asked once here, so a feed that cannot count fails the job at
+            // its start, never at its end.
+            if finish.is_some() && feed.read_depth(DepthOf::Feed).is_none() {
+                return Err(no_depth(feed.as_ref()));
+            }
+            let end = finish.map(|finish| {
+                JobEnd::new(
+                    finish,
+                    Arc::clone(&self.clock),
+                    self.handle.clone(),
+                    ctx.stop.clone(),
+                )
+            });
             let lister_store = Arc::clone(&store);
             let parts = LaneParts {
                 store,
@@ -754,6 +800,7 @@ impl Source for S3Source {
                 parts,
                 scope,
                 self.units_held,
+                end,
             )));
             return Ok(());
         }
@@ -839,7 +886,12 @@ impl Source for S3Source {
             // Fatal whatever the class: the solo lister runs once, so a run
             // whose listing failed would never read the rest of the prefix.
             let reason = match outcome {
-                Ok(Ok(())) => None,
+                Ok(Ok(())) => {
+                    if let State::Feed(reader) = &mut self.state {
+                        reader.lister_finished();
+                    }
+                    None
+                }
                 Ok(Err(e)) => Some(format!("the solo run's lister failed: {e}")),
                 Err(e) => Some(format!("the solo run's lister ended: {e}")),
             };

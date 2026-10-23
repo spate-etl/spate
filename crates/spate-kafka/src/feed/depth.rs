@@ -607,6 +607,46 @@ mod tests {
         assert!(e.reason.contains("`work` partition 9"), "{e}");
     }
 
+    /// Pins that serving the depth client hands its queued events to the
+    /// context: a statistics event, queued every 10 ms here, reaches it only
+    /// through a serve.
+    #[test]
+    fn serving_the_depth_client_drains_its_events() {
+        use rdkafka::ClientConfig;
+        use rdkafka::consumer::Consumer as _;
+        use rdkafka::mocking::MockCluster;
+        let cluster = MockCluster::new(1).expect("mock cluster");
+        let consumer = ClientConfig::new()
+            .set("bootstrap.servers", cluster.bootstrap_servers())
+            .set("group.id", "depth-serve")
+            .set("statistics.interval.ms", "10")
+            .create_with_context(crate::context::SourceContext::default())
+            .unwrap();
+        let reads = Brokers { consumer };
+        spate_test::wait_until(
+            std::time::Duration::from_secs(10),
+            "a statistics event reaches the context",
+            || {
+                reads.serve();
+                reads.consumer.context().stats.lock().unwrap().is_some()
+            },
+        );
+    }
+
+    /// Pins the topics a whole-request failure names: each once, in the
+    /// order the request lists them.
+    #[test]
+    fn a_request_names_each_of_its_topics_once() {
+        let (work, retry): (Arc<str>, Arc<str>) = (Arc::from("units"), Arc::from("units-retry"));
+        let partitions = [
+            (Arc::clone(&work), 0),
+            (Arc::clone(&retry), 0),
+            (Arc::clone(&work), 1),
+        ];
+        assert_eq!(named(&partitions), "`units` and `units-retry`");
+        assert_eq!(named(&partitions[..1]), "`units`");
+    }
+
     /// Pins that a topic whose metadata lists no partitions, as an unknown
     /// topic's does, fails the read as Retryable, so it never reads as
     /// drained.

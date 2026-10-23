@@ -1,17 +1,24 @@
-import {existsSync, readdirSync} from 'node:fs';
+import {existsSync, readdirSync, readFileSync} from 'node:fs';
 import path from 'node:path';
 
 import {expect, test} from '../fixtures';
+import {ROUTES} from '../helpers/routes';
 import {githubUrl, SOURCE_REF} from '../../../src/repoUrl';
 
 const REPO_ROOT = path.resolve(__dirname, '../../../..');
 const EDIT_BASE = `${githubUrl}/edit/${SOURCE_REF}/`;
 
-/** The post files the blog preset publishes, by its `exclude` list. */
+/**
+ * The post files a production build publishes: the blog preset's `exclude`
+ * list applied, and a `draft: true` post left out.
+ */
 function postFiles(): string[] {
-  return readdirSync(path.join(REPO_ROOT, 'website/blog')).filter(
-    (name) => /\.mdx?$/.test(name) && name !== 'README.md' && !name.startsWith('_'),
-  );
+  const dir = path.join(REPO_ROOT, 'website/blog');
+  return readdirSync(dir).filter((name) => {
+    if (!/\.mdx?$/.test(name) || name === 'README.md' || name.startsWith('_')) return false;
+    const frontMatter = /^---\n([\s\S]*?)\n---/.exec(readFileSync(path.join(dir, name), 'utf8'))?.[1] ?? '';
+    return !/^draft:\s*true\s*$/m.test(frontMatter);
+  });
 }
 
 /**
@@ -20,7 +27,7 @@ function postFiles(): string[] {
  */
 test("every blog post's edit link names its source file", async ({page}) => {
   const posts: string[] = [];
-  let list: string | null = '/blog';
+  let list: string | null = ROUTES.blog;
   while (list !== null) {
     const response = await page.goto(list);
     expect(response?.status(), `GET ${list}`).toBe(200);

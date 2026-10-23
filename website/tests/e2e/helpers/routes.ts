@@ -5,9 +5,10 @@
  * own; `clickdoomPost` is the one built page carrying an `<hr>`;
  * `architecture` and `multiSink` carry the concept figures, `releasePost03`
  * the grouped bar chart, and `compressionPost` two charts and an animated
- * figure; `engineeringTag` lists the posts tagged `engineering`. Paths are
- * checked against the built output, not derived from the source tree —
- * Docusaurus strips numeric directory prefixes.
+ * figure; `engineeringTag` lists the posts tagged `engineering`, and `blog`
+ * is the first page of the post list. Paths are checked against the built
+ * output, not derived from the source tree — Docusaurus strips numeric
+ * directory prefixes.
  */
 export const ROUTES = {
   home: '/',
@@ -22,6 +23,7 @@ export const ROUTES = {
   releasePost03: '/blog/releases/0.3',
   compressionPost: '/blog/compression-on-the-pipeline-threads',
   engineeringTag: '/blog/tags/engineering',
+  blog: '/blog',
 } as const;
 
 export type RouteName = keyof typeof ROUTES;

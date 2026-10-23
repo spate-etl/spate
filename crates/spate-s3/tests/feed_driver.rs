@@ -28,6 +28,7 @@ use std::fs;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use support::scripted_store::{HeadAnswer, ScriptedStore};
 use support::spy::{SpyOptions, spying_local_store};
 use support::{
     Launched, PipelineYaml, captured_rows, key_of, launch_customized, line_framer, lines_bytes,
@@ -1104,4 +1105,312 @@ fn a_notification_outside_the_urls_prefix_is_failed_back() {
         "an object outside the prefix was read"
     );
     stop(&l);
+}
+
+/// A run over `s3://b/data/` that reads the directory `root` through `store`,
+/// with 64 KiB windows.
+fn launch_on_store(
+    store: Arc<ScriptedStore>,
+    feed: Arc<dyn Feed>,
+    pre: impl FnOnce(&SinkScript),
+) -> Launched {
+    let yaml = PipelineYaml::endpoint("s3-overwrite-test", "http://127.0.0.1:9")
+        .source("chunk_bytes", "64KiB")
+        .source("prefetch_bytes", "64KiB")
+        .build();
+    launch_customized(&yaml, test_options(), pre, move |source, _io| {
+        line_framer(source).with_store(store).with_feed(feed)
+    })
+}
+
+/// A notification in bucket `b` creating `data/<name>` at `size` bytes,
+/// pinned to `etag` sent without its quotes, as S3 sends it, after
+/// `re_enqueues` re-enqueues.
+fn pinned_notification(name: &str, size: u64, etag: &str, re_enqueues: u32) -> Unit {
+    let record = serde_json::json!({
+        "eventName": "ObjectCreated:Put",
+        "spateReEnqueues": re_enqueues,
+        "s3": {
+            "bucket": { "name": "b" },
+            "object": {
+                "key": format!("data/{name}"),
+                "size": size,
+                "eTag": etag.trim_matches('"'),
+            },
+        },
+    });
+    Unit::new(
+        "notification",
+        serde_json::to_vec(&serde_json::json!({ "Records": [record] })).unwrap(),
+    )
+}
+
+/// The key, ETag, size and re-enqueue count a re-enqueued unit's body names.
+fn re_enqueued(unit: &Unit) -> (String, String, u64, u64) {
+    let body: serde_json::Value = serde_json::from_slice(&unit.body).unwrap();
+    let record = &body["Records"][0];
+    let object = &record["s3"]["object"];
+    (
+        object["key"].as_str().unwrap().to_owned(),
+        object["eTag"].as_str().unwrap().to_owned(),
+        object["size"].as_u64().unwrap(),
+        record["spateReEnqueues"].as_u64().unwrap(),
+    )
+}
+
+fn size_of(data: &Path, name: &str) -> u64 {
+    fs::metadata(data.join(name)).unwrap().len()
+}
+
+/// Pins that a notification unit whose object was overwritten before its
+/// read publishes, under its own id, a unit for the key at the object's
+/// current ETag and size with a re-enqueue count of 1; that the old unit is
+/// renewed and not acknowledged until the feed confirms that publish; and
+/// that the run writes exactly the object's current rows.
+#[test]
+fn a_412_re_enqueues_the_key_at_its_current_etag_before_acknowledging() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    stage(&data, "a.ndjson", &recs("old", 4));
+    let (old_etag, old_size) = (etag_of(&data, "a.ndjson"), size_of(&data, "a.ndjson"));
+    let current = recs("current", 7);
+    stage(&data, "a.ndjson", &current);
+    let (etag, size) = (etag_of(&data, "a.ndjson"), size_of(&data, "a.ndjson"));
+    assert_ne!(etag, old_etag);
+
+    let (feed, script) = scripted_feed();
+    script.hold_publishes();
+    let first = script.deliver(pinned_notification("a.ndjson", old_size, &old_etag, 0));
+    let store = ScriptedStore::new(dir.path());
+    let l = launch_on_store(Arc::clone(&store), Arc::new(feed), |_| {});
+
+    wait_until(DEADLINE, "the key is re-enqueued", || {
+        script.published().len() == 1
+    });
+    let published = &script.published()[0];
+    assert_eq!(published.id, "notification");
+    assert_eq!(
+        re_enqueued(published),
+        ("data/a.ndjson".to_owned(), etag, size, 1)
+    );
+    let renewed = renewals_of(&script, first);
+    wait_until(DEADLINE, "the old unit is renewed while it waits", || {
+        renewals_of(&script, first) >= renewed + 2
+    });
+    assert!(script.acknowledged().is_empty(), "acknowledged before the publish settled");
+
+    script.confirm_held_publishes();
+    wait_until(DEADLINE, "both units are acknowledged", || {
+        script.acknowledged().len() == 2
+    });
+    stop(&l);
+    assert_eq!(script.acknowledged()[0], first);
+    assert!(script.failed().is_empty(), "{:?}", script.failed());
+    assert_eq!(sorted(written_rows(&l.script)), sorted(current));
+    assert_eq!(store.heads(), 1);
+}
+
+/// Pins that an object overwritten while its read is under way delivers the
+/// records read before the overwrite, and that its unit is acknowledged only
+/// after the sink has acknowledged them.
+#[test]
+fn a_412_mid_read_acknowledges_only_after_emitted_records_are_acknowledged() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let old = recs("old", 10_000);
+    stage(&data, "a.ndjson", &old);
+    let (etag, size) = (etag_of(&data, "a.ndjson"), size_of(&data, "a.ndjson"));
+    assert!(size > 2 * 64 * 1024, "the read takes more than two windows");
+
+    let (feed, script) = scripted_feed();
+    let first = script.deliver(pinned_notification("a.ndjson", size, &etag, 0));
+    let store = ScriptedStore::new(dir.path());
+    store.hold_get(2);
+    let l = launch_on_store(Arc::clone(&store), Arc::new(feed), |sink| {
+        sink.enqueue_global(WriteOutcome::ok().held());
+    });
+    wait_until(DEADLINE, "the second window's GET is held", || store.holding());
+    let current = recs("current", 3);
+    stage(&data, "a.ndjson", &current);
+    store.release();
+
+    wait_until(DEADLINE, "the key is re-enqueued", || {
+        script.published().len() == 1
+    });
+    wait_until(DEADLINE, "the first write is held", || {
+        l.script.held_writes() == 1
+    });
+    let renewed = renewals_of(&script, first);
+    wait_until(DEADLINE, "the old unit is renewed while its records are held", || {
+        renewals_of(&script, first) >= renewed + 2
+    });
+    assert!(
+        !script.acknowledged().contains(&first),
+        "acknowledged before the sink acknowledged its records"
+    );
+    l.script.release_held();
+    wait_until(DEADLINE, "the old unit is acknowledged", || {
+        script.acknowledged().contains(&first)
+    });
+    wait_until(DEADLINE, "the re-enqueued unit is acknowledged", || {
+        script.acknowledged().len() == 2
+    });
+    stop(&l);
+    assert!(script.failed().is_empty(), "{:?}", script.failed());
+    let rows = written_rows(&l.script);
+    let read_old: Vec<String> = rows.iter().filter(|r| r.contains("old-")).cloned().collect();
+    assert!(!read_old.is_empty() && read_old.len() < old.len(), "{}", read_old.len());
+    assert_eq!(
+        sorted(read_old.clone()),
+        sorted(old[..read_old.len()].to_vec()),
+        "the old rows written are the ones before the overwrite"
+    );
+    let read_current: Vec<String> = rows.into_iter().filter(|r| r.contains("current-")).collect();
+    assert_eq!(sorted(read_current), sorted(current));
+}
+
+/// Pins that on the in-process feed an overwritten notification unit is
+/// acknowledged, never failed back toward its dead-letter cap, and the
+/// object's current rows are read through the unit it re-enqueued.
+#[test]
+fn a_412_notification_unit_is_acknowledged_without_dead_lettering() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    stage(&data, "a.ndjson", &recs("old", 4));
+    let (old_etag, old_size) = (etag_of(&data, "a.ndjson"), size_of(&data, "a.ndjson"));
+    let current = recs("current", 5);
+    stage(&data, "a.ndjson", &current);
+
+    let feed = MemoryFeed::with_attempt_cap(std::num::NonZeroU32::new(1).unwrap());
+    rt_block_on(feed.publish(pinned_notification("a.ndjson", old_size, &old_etag, 0))).unwrap();
+    let store = ScriptedStore::new(dir.path());
+    let l = launch_on_store(store, Arc::new(feed.clone()), |_| {});
+    wait_until(DEADLINE, "both units are acknowledged", || {
+        feed.counts().acknowledged == 2
+    });
+    stop(&l);
+    assert!(feed.dead_letters().is_empty());
+    assert_eq!(sorted(written_rows(&l.script)), sorted(current));
+}
+
+/// Pins that a unit at the re-enqueue cap whose object was overwritten is
+/// acknowledged with no re-enqueue and no rows read.
+#[test]
+fn a_unit_at_the_re_enqueue_cap_412s_and_is_acknowledged() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    stage(&data, "a.ndjson", &recs("old", 4));
+    let (old_etag, old_size) = (etag_of(&data, "a.ndjson"), size_of(&data, "a.ndjson"));
+    stage(&data, "a.ndjson", &recs("current", 5));
+
+    let (feed, script) = scripted_feed();
+    let first = script.deliver(pinned_notification("a.ndjson", old_size, &old_etag, 10));
+    let l = launch_on_store(ScriptedStore::new(dir.path()), Arc::new(feed), |_| {});
+    wait_until(DEADLINE, "the unit is acknowledged", || {
+        script.acknowledged() == vec![first]
+    });
+    stop(&l);
+    assert!(script.published().is_empty());
+    assert!(script.failed().is_empty(), "{:?}", script.failed());
+    assert!(written_rows(&l.script).is_empty());
+}
+
+/// Pins that the HEAD after a 412 is classified as the read is: a 404 fails
+/// the unit back naming the key, and a 403 fails the pipeline naming it,
+/// with no re-enqueue either way.
+#[test]
+fn a_head_after_a_412_classifies_404_and_403_as_the_read_does() {
+    for answer in [HeadAnswer::NotFound, HeadAnswer::Denied] {
+        let dir = tempfile::tempdir().unwrap();
+        let data = data_dir(&dir);
+        stage(&data, "a.ndjson", &recs("old", 4));
+        let (old_etag, old_size) = (etag_of(&data, "a.ndjson"), size_of(&data, "a.ndjson"));
+        stage(&data, "a.ndjson", &recs("current", 5));
+
+        let (feed, script) = scripted_feed();
+        let first = script.deliver(pinned_notification("a.ndjson", old_size, &old_etag, 0));
+        let store = ScriptedStore::new(dir.path());
+        store.answer_head(answer);
+        let l = launch_on_store(Arc::clone(&store), Arc::new(feed), |_| {});
+        match answer {
+            HeadAnswer::NotFound => {
+                wait_until(DEADLINE, "the unit is failed back", || {
+                    !script.failed().is_empty()
+                });
+                stop(&l);
+                let (receipt, reason) = &script.failed()[0];
+                assert_eq!(*receipt, first);
+                assert!(reason.contains("data/a.ndjson"), "{reason}");
+            }
+            HeadAnswer::Denied => {
+                let report = l.run.wait_exit(DEADLINE).expect("the run exits").unwrap();
+                let ExitState::Failed(failure) = report.state else {
+                    panic!("a 403 on the HEAD must fail the pipeline: {:?}", report.state);
+                };
+                assert!(failure.reason.contains("data/a.ndjson"), "{}", failure.reason);
+                assert!(script.acknowledged().is_empty());
+            }
+        }
+        assert!(script.published().is_empty(), "{answer:?}");
+        assert_eq!(store.heads(), 1, "{answer:?}");
+    }
+}
+
+/// Pins that a lister's unit over an object overwritten under its pin is
+/// failed back without a HEAD or a re-enqueue.
+#[test]
+fn a_412_on_a_lister_unit_is_failed_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    stage(&data, "a.ndjson", &recs("old", 4));
+    let object = DescriptorObject {
+        key: "data/a.ndjson".to_owned(),
+        size: size_of(&data, "a.ndjson"),
+        etag: Some(etag_of(&data, "a.ndjson")),
+        last_modified_ms: 1,
+    };
+    stage(&data, "a.ndjson", &recs("current", 5));
+
+    let (feed, script) = scripted_feed();
+    let first = script.deliver(Unit::new(
+        "listed",
+        SplitDescriptor::new(vec![object]).encode().unwrap(),
+    ));
+    let store = ScriptedStore::new(dir.path());
+    let l = launch_on_store(Arc::clone(&store), Arc::new(feed), |_| {});
+    wait_until(DEADLINE, "the unit is failed back", || {
+        !script.failed().is_empty()
+    });
+    stop(&l);
+    assert_eq!(script.failed()[0].0, first);
+    assert!(script.published().is_empty());
+    assert_eq!(store.heads(), 0);
+}
+
+/// Pins that a unit waiting on an unsettled re-enqueue is not acknowledged
+/// at shutdown.
+#[test]
+fn a_412_unit_with_an_unsettled_publish_is_not_acknowledged_at_shutdown() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    stage(&data, "a.ndjson", &recs("old", 4));
+    let (old_etag, old_size) = (etag_of(&data, "a.ndjson"), size_of(&data, "a.ndjson"));
+    stage(&data, "a.ndjson", &recs("current", 5));
+
+    let (feed, script) = scripted_feed();
+    script.hold_publishes();
+    script.deliver(pinned_notification("a.ndjson", old_size, &old_etag, 0));
+    let l = launch_on_store(ScriptedStore::new(dir.path()), Arc::new(feed), |_| {});
+    wait_until(DEADLINE, "the key is re-enqueued", || {
+        script.published().len() == 1
+    });
+    stop(&l);
+    assert!(script.acknowledged().is_empty());
+}
+
+fn rt_block_on<F: std::future::Future>(f: F) -> F::Output {
+    tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap()
+        .block_on(f)
 }

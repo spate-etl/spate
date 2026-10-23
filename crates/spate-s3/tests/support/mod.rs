@@ -6,6 +6,7 @@
 pub(crate) mod location;
 pub(crate) mod rustfs;
 pub(crate) mod s3_stub;
+pub(crate) mod scripted_store;
 pub(crate) mod spy;
 
 use object_store::ObjectStoreExt as _;

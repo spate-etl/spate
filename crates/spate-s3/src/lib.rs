@@ -60,7 +60,9 @@
 //!   `spate_s3_source_objects_failed_total{reason}`); at the attempt cap
 //!   the split is quarantined. A bounded job with quarantined splits ends
 //!   **failed**, never silently incomplete. A rejected object read and a
-//!   client-configuration error are immediately fatal.
+//!   client-configuration error are immediately fatal. On the feed path a
+//!   notification unit's object overwritten under its pin is re-enqueued at
+//!   its current ETag instead.
 //! - **Records are framed, not decoded, here.** The source is
 //!   format-agnostic: it streams object bytes (after gzip/zstd decompression)
 //!   through a [`RecordFramer`](spate_core::framing::RecordFramer) *you supply*

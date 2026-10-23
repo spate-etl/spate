@@ -15,8 +15,13 @@
 //!   and the sink has acknowledged every record in it.
 //! - A unit read in several parts is acknowledged once, after every part
 //!   meets that rule.
-//! - A unit whose read stops before its end leaves the feed through
-//!   redelivery, until the feed moves it to its dead-letter destination.
+//! - A unit whose input was replaced while it was read may be acknowledged
+//!   once a unit naming the input's current state is stored in the feed and
+//!   the sink has acknowledged every record read from it. Past the source's
+//!   re-enqueue cap it is acknowledged without one, and the source counts it.
+//! - Otherwise, a unit whose read stops before its end leaves the feed
+//!   through redelivery, until the feed moves it to its dead-letter
+//!   destination.
 //!
 //! A feed delivers a unit at least once. A second delivery of a unit the
 //! worker already holds, under a new [`Receipt`], is read again from its

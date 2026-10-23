@@ -276,7 +276,11 @@ TLS handshake (see [Security](#security-tls-mtls-sasl)). Any other failed
 read fails with `KafkaFeedError::Unavailable`. The checks take at most 30 seconds, and an
 error past that bound names the read under way. A publish-only handle's
 identity needs these operations on the four topics too, and `Write` on the
-work topic (see [A publish-only handle](#a-publish-only-handle)).
+work topic (see [A publish-only handle](#a-publish-only-handle)). A worker
+whose source publishes units, such as the
+[S3 source](../../sources/s3/README.mdx#reading-a-notifications-object)
+re-enqueueing an overwritten object, needs `Write` on the work topic as well.
+Each unit published there starts its own delivery count.
 
 When a topic reports no `cleanup.policy`, or the work topic no
 `message.timestamp.type`, the feed logs a warning and skips that check.

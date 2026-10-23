@@ -223,10 +223,26 @@ from the environment):
       aws_container_authorization_token_file: "${AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE}"
 ```
 
-A listing, an object read, or a read or write at the
-[job location](#bounded-jobs-and-the-job-location) the store answers with
+A listing, an object read, the HEAD after an overwrite, or a read or write at
+the [job location](#bounded-jobs-and-the-job-location) the store answers with
 `401` or `403`, and a client-configuration error, fail the pipeline
 immediately, because no peer would fare better. The error names the status.
+
+A worker that reads [storage notifications](#storage-notifications) needs
+these permissions besides `s3:GetObject`:
+
+- `s3:ListBucket` on the bucket, so that an object deleted before its read
+  answers `404`. Without it AWS S3 answers `403`, which fails the pipeline.
+- `s3:GetObjectVersion` on a versioned bucket, since a notification from one
+  names a version and the read sends it. Without it every such unit fails the
+  pipeline. It can be scoped to the source's prefix, and it lets anyone who
+  can write to the feed have a past version of an object there read.
+- The feed's send permission, for the unit it re-enqueues after an
+  overwrite. The [SQS feed](../../feeds/sqs/README.mdx#security-credentials-permissions-and-tls)
+  and [Kafka feed](../../feeds/kafka/README.mdx#startup-checks) pages name it.
+
+RustFS and Ceph RGW have not been tested with a role that lacks list
+permission.
 
 A TLS rejection by the store or by the credential endpoint fails the pipeline
 the same way. That covers a certificate that fails verification, including one
@@ -327,7 +343,9 @@ code. On the
 in-process feed the run lists the prefix itself; see
 [A solo run on the in-process feed](#a-solo-run-on-the-in-process-feed). Every delivery is
 read in full, resuming from no earlier delivery, and the unit is acknowledged
-once the sink has acknowledged every record in it.
+once the sink has acknowledged every record in it. A notification unit whose
+object is overwritten while it is read is the exception, as
+[Reading a notification's object](#reading-a-notifications-object) describes.
 
 ```yaml
 feed:
@@ -349,7 +367,9 @@ whole on one lane. A unit naming a byte range is failed back when its range is
 cut on a delimiter other than the framer's, or when `compression` decodes its
 object. The unit is acknowledged once, after every part and range has been read
 and committed. An object failure on one range fails the whole unit back, and its
-other parts and ranges stop.
+other parts and ranges stop. An overwrite of a notification unit's object
+stops that object's ranges and re-enqueues the object once, as
+[Reading a notification's object](#reading-a-notifications-object) describes.
 
 The lister publishes no unit for an object of size 0, which holds no records.
 An object whose key the S3 client cannot address is one whole unit, which
@@ -366,8 +386,9 @@ partition's commit point.
 
 `units_held` bounds the lanes the source reads at once, one per whole object or
 range, and with them its read parallelism. The default is 96. On a durable
-feed the source publishes no units of its own and reads only the units and
-storage notifications published to the feed, and a startup WARN says so. On
+feed the source lists nothing. It reads the units and storage notifications
+published to the feed, and publishes only the notification unit it
+re-enqueues after an overwrite; a startup WARN says so. On
 the in-process feed the run lists the prefix into that feed, and code may also
 publish to a `MemoryFeed` it keeps a handle to and passes to `Pipeline::feed`
 with `feed: { memory: {} }` in the file. Units from another process need a
@@ -451,7 +472,9 @@ with its other records. A source whose `url` names the whole bucket
 once, after every part of it has been read and committed.
 
 The records read for a notification take its `eventTime` as their event time,
-and those read for a listed object take the listing's `LastModified`. A
+and those read for a listed object take the listing's `LastModified`. The
+records of a unit the source re-enqueued take the `LastModified` its HEAD
+reported. A
 notification with no `eventTime`, or one that does not parse, gives its records
 event time 0, which under `metrics.e2e_basis: event` counts their end-to-end
 latency from 1970.
@@ -459,11 +482,13 @@ latency from 1970.
 A notification names an object, and its read pins the ETag the notification
 carries. An object deleted before it is read fails that read on every delivery,
 so the feed dead-letters its message at the cap. An object overwritten before
-it is read fails the same way when its notification carries an ETag, and is
-read in its new contents when the notification carries none. A
+or during its read is re-enqueued at its current ETag when its notification
+carries an ETag, and is read in its new contents when the notification carries
+none. A
 notification's unit is a unit of its own, with the feed message's id (the SQS
 `MessageId`, or the Kafka message key), so an object that both a listing and a
-notification announce is read twice. A store
+notification announce is read twice. A unit the source re-enqueues keeps the
+id of the unit it replaces. A store
 sends no notification for an object written before the bucket's notification
 configuration takes effect; on AWS S3 that window lasted at least 181 seconds
 after the configuration was written, in one measured run ([ADR-0072](../../../../adr/0072-missed-storage-notifications-are-not-reconciled-by-re-listing.md)).
@@ -492,6 +517,53 @@ Each store needs its own settings for its notifications to arrive:
   [Kafka feed](../../feeds/kafka/README.mdx#counting-deliveries) dead-letters.
   RGW also writes a record's key unencoded, and the source decodes every key,
   so a key holding `+` or `%` decodes to another key.
+
+#### Reading a notification's object
+
+A notification unit's object may have changed since the store sent the event.
+Its read handles each case as the
+[notification-read record](../../../../adr/0077-a-notification-units-read-classifies-a-deleted-or-overwritten-object.md)
+decides:
+
+- A `404` fails the unit back, and the feed dead-letters it at its cap.
+- A `401` or `403` fails the pipeline, as for any object read.
+- A record whose `versionId` is a string other than `""` and `"null"` names a
+  version, and the read sends that version with the ETag pin. An absent or
+  JSON null `versionId`, `""` and `"null"` read the key. A `versionId` longer
+  than 1,024 bytes, or holding a space or a control byte, fails the message.
+  A failed precondition on a read that names a version fails the unit back.
+- A failed precondition (`412`) on a read that names no version means the
+  object was overwritten. The read stops, and the source sends a HEAD for the
+  key. It publishes a notification unit for the key at the ETag and size the
+  HEAD reports, under the old unit's id, with a re-enqueue count one higher
+  than the old unit's. On SQS the new unit goes to the queue, and on Kafka to
+  the work topic. The old unit is acknowledged once the feed has stored the
+  new one and the sink has acknowledged every record read from the old one.
+- A HEAD that answers `404` is handled as a `404` on the read, and one that
+  answers `401` or `403` as a `403`. A HEAD that reports the ETag the read was
+  pinned to fails the unit back. A HEAD that reports size 0 acknowledges the
+  unit with nothing published.
+- A publish the feed refuses, or cannot confirm, fails the old unit back, and
+  its next delivery reads the object again.
+
+An object overwritten while it is read delivers the records read before the
+overwrite, and the rest of that version is never read. Each `412` costs one
+HEAD and one feed message. A key overwritten faster than it is read is
+re-enqueued on every overwrite up to the cap, and its last version is read once
+for each unit still in the chain. Two notifications for one overwritten key
+start two chains.
+
+:::danger An overwrite can be dropped at the re-enqueue cap
+A unit whose re-enqueue count has reached the cap is acknowledged on a `412`
+without a re-enqueue, and counted in `spate_s3_source_overwrites_dropped_total`.
+The cap is the `feed:` section's `attempt_cap`, 10 when the section sets none;
+the SQS feed refuses `attempt_cap`, so a job on SQS caps at 10. The key's later
+versions arrive through their own notifications, but a version written by an
+overwrite that sent no notification is lost.
+:::
+
+Units from a lister keep the classification in
+[Object errors poison the split](#object-errors-poison-the-split).
 
 ### Bounded jobs and the job location
 
@@ -849,7 +921,9 @@ is not planned.
 There is no skip-an-object mode; the reasoning is in
 [ADR-0035](../../../../adr/0035-s3-poison-policy.md), which also covers why
 credential and configuration failures fail the pipeline instead. Quarantine
-lets the rest of the backfill finish first.
+lets the rest of the backfill finish first. An overwrite of a notification
+unit's object is re-enqueued instead, as
+[Reading a notification's object](#reading-a-notifications-object) describes.
 
 ## Testing
 
@@ -886,8 +960,11 @@ noted per family.
 | `spate_s3_source_objects_remaining` | gauge | | Objects not yet completed across **this worker's currently-held splits** (rises on split gain, falls per completed object, settles on split close). A cut object counts once per range. Fleet totals come from the `spate_coordination_*` split gauges, not from summing this. |
 | `spate_s3_source_bytes_read_total` | counter | | Bytes read from the store, as stored (pre-decompression), including the bytes a byte-range split reads around its range and drops. |
 | `spate_s3_source_bytes_decoded_total` | counter | | Bytes after decompression; for a byte-range split, the bytes of the records it owns. Equals `bytes_read` for uncompressed objects read whole; the ratio is the effective compression. |
-| `spate_s3_source_get_retries_total` | counter | | Object GET attempts beyond the first (transient failures, resumed with ranged reads). A rising rate means a flaky store or network; an exhausted attempt budget poisons the split rather than failing the pipeline. |
-| `spate_s3_source_objects_failed_total` | counter | `reason` | Objects, or byte ranges of one, that poisoned their split: `not_found` (deleted after planning, or a key that is not a valid object path), `etag_drift` (overwritten under the `If-Match` pin, or content shorter than committed progress), `undecodable` (corrupt/truncated content, over the per-object record limit, or unverifiable without an ETag), `retries_exhausted`. Each report hands the split back; quarantine at the attempt cap shows up in `spate_coordination_splits_quarantined`. |
+| `spate_s3_source_get_retries_total` | counter | | Object GET and HEAD attempts beyond the first (transient failures, resumed with ranged reads). A rising rate means a flaky store or network; an exhausted attempt budget poisons the split rather than failing the pipeline. |
+| `spate_s3_source_objects_failed_total` | counter | `reason` | Objects, or byte ranges of one, that poisoned their split: `not_found` (deleted after planning, or a key that is not a valid object path), `etag_drift` (overwritten under the `If-Match` pin, or content shorter than committed progress; a notification unit's re-enqueued overwrite is counted in `objects_overwritten_total` instead), `undecodable` (corrupt/truncated content, over the per-object record limit, or unverifiable without an ETag), `retries_exhausted`. Each report hands the split back; quarantine at the attempt cap shows up in `spate_coordination_splits_quarantined`. |
+
+| `spate_s3_source_objects_overwritten_total` | counter | | Objects a notification unit's read found overwritten under its ETag pin, once per object and delivery, whether re-enqueued or not. See [Reading a notification's object](#reading-a-notifications-object). |
+| `spate_s3_source_overwrites_dropped_total` | counter | | Of those, the objects whose unit was at the re-enqueue cap and was acknowledged without a re-enqueue. A non-zero value means an overwrite may have been dropped. |
 
 A coordinated run adds the framework's `spate_coordination_*` families. See
 [Metrics](../../../../METRICS.md).

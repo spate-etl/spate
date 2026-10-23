@@ -1,5 +1,6 @@
 //! Entry points into code that reads bytes this process did not write: the
-//! composite offset codec, the object framer, and the trim of a ranged read.
+//! composite offset codec, the object framer, the trim of a ranged read, and
+//! the decoder of a feed delivery's body.
 //!
 //! Follows the rules [`bench_seams`](crate::bench_seams) states.
 
@@ -111,4 +112,98 @@ pub fn read_range(
         pos = window_end;
     }
     Some(owned)
+}
+
+/// One part a delivery's body decodes to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DecodedPart {
+    /// The object key.
+    pub key: String,
+    /// The ETag sent in `If-Match`, quoted.
+    pub etag: Option<String>,
+    /// The byte range read, `None` for the whole object.
+    pub range: Option<(u64, u64)>,
+    /// The object version a notification names.
+    pub version: Option<String>,
+    /// The re-enqueue count a notification carries; 0 for a descriptor.
+    pub re_enqueues: u32,
+}
+
+/// What the source does with a delivery's body.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DecodedUnit {
+    /// Read these parts.
+    Read(Vec<DecodedPart>),
+    /// Acknowledge it with nothing to read.
+    Acknowledge,
+    /// Fail it back to the feed.
+    Fail,
+}
+
+/// Decode `body` as the source over `bucket` and `prefix` does, with no
+/// object cut into ranges, so the parts number at most one per record.
+#[must_use]
+pub fn decode_unit(body: &[u8], bucket: &str, prefix: &str) -> DecodedUnit {
+    let scope = crate::unit::Scope {
+        bucket: Some(bucket.to_owned()),
+        prefix: object_store::path::Path::from(prefix),
+    };
+    let packing = crate::split::Packing {
+        target_bytes: u64::MAX,
+        compression: Compression::None,
+        delimiter: None,
+    };
+    match crate::unit::decode(body, &scope, packing) {
+        crate::unit::Decoded::Read(cursors) => DecodedUnit::Read(
+            cursors
+                .into_iter()
+                .flatten()
+                .map(|part| {
+                    let (version, re_enqueues) = match part.origin {
+                        crate::unit::Origin::Notification {
+                            version,
+                            re_enqueues,
+                        } => (version, re_enqueues),
+                        crate::unit::Origin::Lister => (None, 0),
+                    };
+                    DecodedPart {
+                        key: part.object[0].key.clone(),
+                        etag: part.object[0].etag.clone(),
+                        range: part.range.map(|r| (r.start, r.end)),
+                        version,
+                        re_enqueues,
+                    }
+                })
+                .collect(),
+        ),
+        crate::unit::Decoded::Acknowledge(_) => DecodedUnit::Acknowledge,
+        crate::unit::Decoded::Fail(_) => DecodedUnit::Fail,
+    }
+}
+
+/// The body of the unit a worker re-enqueues for `key` in `bucket` after an
+/// overwrite, at the ETag, size and time a HEAD reported, counting
+/// `re_enqueues`.
+#[must_use]
+pub fn re_enqueue_body(
+    bucket: &str,
+    key: &str,
+    etag: Option<&str>,
+    size: u64,
+    last_modified_ms: i64,
+    re_enqueues: u32,
+) -> Vec<u8> {
+    let overwrite = crate::fetch::Overwrite {
+        key: key.to_owned(),
+        etag: etag.map(str::to_owned),
+        size,
+        last_modified_ms,
+    };
+    crate::unit::re_enqueue_body(bucket, &overwrite, re_enqueues)
+}
+
+/// `etag` in the quoted form `If-Match` compares.
+#[must_use]
+pub fn quoted(etag: &str) -> String {
+    crate::unit::quoted(etag.to_owned())
 }

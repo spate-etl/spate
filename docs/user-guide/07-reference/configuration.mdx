@@ -308,7 +308,8 @@ Optional. The [feed](glossary.mdx#feed) a feed-reading source reads its
 body holds that backend's own keys. `units_held` applies whatever the backend;
 `attempt_cap` applies to the in-process feed and the
 [Kafka feed](../04-connectors/feeds/kafka/README.mdx), and a backend that
-cannot honor it refuses it. `location` names a job location for a source
+cannot honor it refuses it; a source that re-enqueues units caps them at it,
+and its page says so. `location` names a job location for a source
 that reads one, and `settling_window` times the end of a job that names one;
 the in-process feed refuses both. Set on a source that reads no feed, the section fails startup, and a file
 that sets both `feed:` and [`coordination:`](#coordination) fails to load.
@@ -329,17 +330,18 @@ feed:
 |---|---|---|---|
 | `<backend>` | component | `required` | Exactly one key naming the backend. `memory` is the in-process feed, which takes no keys of its own. It holds units within this process. A source that lists its own input publishes to it, and its page says so; code can publish to it by keeping a `MemoryFeed` handle and passing it to `Pipeline::feed`, and such a run ends only at a shutdown. Units from another process need a durable backend. Any other name is a backend built in code; its page under [Feeds](../04-connectors/feeds/README.mdx) documents its body. |
 | `units_held` | integer | `none` | How many units the source holds and reads at once. A source that reads one unit in parts can count each part in progress against it, and its page says so. Unset, the source's own default applies. At least 1. |
-| `attempt_cap` | integer | `10` | The delivery on which the in-process feed moves a failed unit to its dead-letter list, and the [Kafka feed](../04-connectors/feeds/kafka/README.mdx) moves it to its dead-letter destination. That feed also moves a unit whose recorded deliveries have reached the cap, without delivering it again. A backend that cannot honor the key refuses it. At least 1. |
+| `attempt_cap` | integer | `10` | The delivery on which the in-process feed moves a failed unit to its dead-letter list, and the [Kafka feed](../04-connectors/feeds/kafka/README.mdx) moves it to its dead-letter destination. That feed also moves a unit whose recorded deliveries have reached the cap, without delivering it again. A backend that cannot honor the key refuses it. A source that re-enqueues units caps their re-enqueues at it, and its page says so. At least 1. |
 | `location` | string | `none` | A [job location](glossary.mdx#job-location), an object-store prefix, for a source that reads one. A job on a durable feed that names one is bounded, and one that names none is continuous. That source's page says what the prefix holds. The in-process feed refuses it. |
 | `settling_window` | duration | `5m` | The [settling window](glossary.mdx#settling-window) of a bounded job: how long a worker waits for its lister's job fingerprint at startup, and how long the feed must read empty between two reads of the lister's end marker before the job [ends](../02-concepts/09-work-feed.mdx#how-a-bounded-job-ends). From `20s` to `24h`; a backend whose counts settle more slowly refuses a shorter one, and its page says so. Refused on the in-process feed, which ends a job with no window, and by a source on a durable feed with no `location`. |
 
 The runtime builds the in-process feed itself from `memory`. Any other backend
 is built in code from the section and passed to `Pipeline::feed`, and the
 runtime refuses a feed whose backend differs from the key the section names. The
-section's backend keys and its `attempt_cap` apply only when a feed is built
-from the section, so a feed passed to `Pipeline::feed` keeps the settings it was
-built with. `units_held`, `location` and `settling_window` apply to every feed,
-since the source reads them.
+section's backend keys, and `attempt_cap` as the feed's delivery cap, apply
+only when a feed is built from the section, so a feed passed to
+`Pipeline::feed` keeps the settings it was built with. `units_held`, `location`
+and `settling_window` apply to every feed, since the source reads them, and so
+does `attempt_cap` as the re-enqueue cap of a source that re-enqueues units.
 
 ## Code-level knobs (not YAML) {#code-level-knobs-not-yaml}
 

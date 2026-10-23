@@ -13,7 +13,7 @@ use std::time::Duration;
 /// its body holds the backend's own keys and is decoded by the backend.
 /// `units_held` applies whatever the backend; `attempt_cap` applies to the
 /// in-process and Kafka feeds, and a backend that cannot honor it refuses
-/// it. `location` names a job location for a source that reads one, and
+/// it; a source that re-enqueues units caps them at it. `location` names a job location for a source that reads one, and
 /// `settling_window` is the settling window of a source that ends a job
 /// with a location; the in-process feed refuses both.
 ///
@@ -37,7 +37,8 @@ pub struct FeedSection {
     /// destination, on the in-process and Kafka feeds. The Kafka feed also
     /// moves a unit whose recorded deliveries have reached it, without
     /// delivering it again. `None` leaves the backend's default. A backend
-    /// that cannot honor the key refuses it.
+    /// that cannot honor the key refuses it. A source that re-enqueues units
+    /// caps their re-enqueues at it.
     pub attempt_cap: Option<NonZeroU32>,
     /// A job location, an object-store prefix, for a source that reads
     /// one; that source defines what the prefix holds. `None` when the

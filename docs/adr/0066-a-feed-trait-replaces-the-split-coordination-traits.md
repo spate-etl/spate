@@ -44,7 +44,7 @@ drives the feed from the controller thread and waits only by parking on the
 
 The trait also publishes a unit and reports through a `Confirmation` when the
 feed has stored it, which the lister ([the lister-resume record](0074-a-lister-resumes-after-the-last-key-it-checkpointed-once-the-feed-confirmed-it.md)) and a worker
-re-enqueueing a unit (the notification-read record) use. Methods take `&self`,
+re-enqueueing a unit ([the notification-read record](0077-a-notification-units-read-classifies-a-deleted-or-overwritten-object.md)) use. Methods take `&self`,
 so one `Arc<dyn Feed>` serves a reader and a publisher. Every operation carries
 only `spate-core` and `std` types. No rdkafka delivery result, AWS SDK error or
 `object_store` type appears in a public signature, so INV-6 holds.

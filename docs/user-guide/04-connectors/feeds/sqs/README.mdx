@@ -70,7 +70,8 @@ The identity a worker runs as needs these actions:
 |---|---|
 | `sqs:ReceiveMessage`, `sqs:DeleteMessage`, `sqs:ChangeMessageVisibility` | The queue |
 | `sqs:GetQueueAttributes` | The queue and its dead-letter queue |
-| `sqs:SendMessage` | The queue, for a process that publishes units |
+| `sqs:SendMessage` | The queue, for a process that publishes units, a worker whose source re-enqueues units included |
+| `kms:Decrypt`, and `kms:GenerateDataKey` for a process that sends | The queue's key, when a customer-managed KMS key encrypts the queue |
 
 A [lister run](../../sources/s3/README.mdx#the-lister-run) publishes units and
 receives none, so it needs only `sqs:GetQueueAttributes` and `sqs:SendMessage`.

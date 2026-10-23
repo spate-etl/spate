@@ -130,7 +130,8 @@ received unit from other readers only while its holder renews it, and
 delivers it again once the renewals stop. A unit that reaches the feed's
 delivery cap moves to its dead-letter destination. A source acknowledges a
 unit only after reading it to its end and after the sink has acknowledged
-every record in it. The in-process feed (`MemoryFeed`) serves one instance and
+every record in it, or, when the unit's input was replaced while it was read,
+once the feed holds a unit naming the input's current state. The in-process feed (`MemoryFeed`) serves one instance and
 keeps nothing across a restart.
 
 ### Fencing token

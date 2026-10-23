@@ -262,7 +262,10 @@ Your source follows these rules:
 
 - **Acknowledge a unit only after you have read it to its end and the sink
   has acknowledged every record in it.** A unit you read in several parts is
-  acknowledged once, after every part meets that rule.
+  acknowledged once, after every part meets that rule. A unit whose input was
+  replaced while you read it may instead be acknowledged once a unit naming
+  the input's current state is stored in the feed and the sink has
+  acknowledged every record you read from it.
 - **Fail a unit you cannot read.** The feed delivers it again, and moves it to
   its dead-letter destination at its delivery cap.
 - **Key the units you hold by `Receipt`.** A second delivery of a unit you

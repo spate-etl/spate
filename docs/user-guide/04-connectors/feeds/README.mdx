@@ -19,7 +19,8 @@ A feed is selected by the pipeline's
 [`feed:` section](../../07-reference/configuration.mdx#feed). Its body is the
 backend's own configuration, documented on its page. `units_held` applies
 whatever the backend; `attempt_cap` applies to the in-process and Kafka
-feeds, and a backend that cannot honor it refuses it. `location` names a job
+feeds, and a backend that cannot honor it refuses it; a source that
+re-enqueues units caps them at it. `location` names a job
 location for a source that reads one, and `settling_window` times the end of a
 job that names one; the in-process feed refuses both.
 

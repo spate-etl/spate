@@ -107,6 +107,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "s3_unit_decode"
+path = "fuzz_targets/s3_unit_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "s3_split_id"
 path = "fuzz_targets/s3_split_id.rs"
 test = false

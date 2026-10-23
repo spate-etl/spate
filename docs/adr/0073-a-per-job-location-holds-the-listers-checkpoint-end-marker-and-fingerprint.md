@@ -12,8 +12,8 @@ description: "A bounded feed job keeps its lister's checkpoint, end marker and f
 ## Context and problem statement
 
 On the feed path a fleet's lister runs apart from its workers ([the lister-run
-record](0075-the-lister-runs-once-per-job-apart-from-the-worker-replicas.md)), and a bounded job ends on the lister's end marker (the bounded-job
-record). A queued message reaches one SQS worker or one Kafka partition owner,
+record](0075-the-lister-runs-once-per-job-apart-from-the-worker-replicas.md)), and a bounded job ends on the lister's end marker ([the bounded-job
+record](0076-a-bounded-job-on-a-feed-ends-on-an-empty-feed-and-a-checked-dead-letter-destination.md)). A queued message reaches one SQS worker or one Kafka partition owner,
 so the feed cannot carry a marker every worker sees. An object outlives its
 run, so a re-run can find the previous run's marker. Under coordination a job
 name kept two jobs apart on one store, and workers compared a job fingerprint
@@ -46,8 +46,8 @@ The location is a prefix holding three objects, `fingerprint`, `end` and
 page and the end marker is deleted and written on its own. It is a common
 `feed:` key beside `units_held`, because the S3 source receives only the
 section and each durable backend refuses a key it does not know. A worker
-compares no store timestamp. It takes a marker as the end only as the
-bounded-job record states, on one run's marker present at the start and the
+compares no store timestamp. It takes a marker as the end only as [the
+bounded-job record](0076-a-bounded-job-on-a-feed-ends-on-an-empty-feed-and-a-checked-dead-letter-destination.md) states, on one run's marker present at the start and the
 end of a settling window, so a marker from an earlier run waits one window
 like any other.
 
@@ -78,7 +78,7 @@ like any other.
   prefix.
 - Bad, because a bounded job's workers exit non-zero when the lister has not
   written the fingerprint within one settling window of their start. The
-  window is 5 minutes until the bounded-job record adds its key.
+  window is 5 minutes until [the bounded-job record](0076-a-bounded-job-on-a-feed-ends-on-an-empty-feed-and-a-checked-dead-letter-destination.md) adds its key.
 - Bad, because on the Kafka feed a waiting worker's units are charged an
   attempt as the feed readies them, and each rebalance of the group during the
   wait charges them again, so a fleet started well before its lister, or a

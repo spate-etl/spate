@@ -16,10 +16,10 @@ use spate_kafka::feed::KafkaFeedError;
 use spate_test::{WriteOutcome, wait_until};
 use std::time::{Duration, Instant};
 use support::feed::{
-    ATTEMPT, ATTEMPT_PARTITIONS, COMMIT_PERIOD, DEAD, DEADLINE, ON_MOCK, RETRY, WORK, committed,
-    data_dir, direct, exists, feed_yaml, high_watermark, high_watermarks, launch, produce_raw,
-    publish, publish_to, publisher_on_mock, read_attempts, read_topic, recs, sorted, stage,
-    written,
+    ATTEMPT, ATTEMPT_PARTITIONS, COMMIT_PERIOD, DEAD, DEADLINE, ON_MOCK, RETRY, WORK,
+    bounded_section, committed, data_dir, direct, exists, feed_yaml, high_watermark,
+    high_watermarks, launch, launch_bounded, list_once, produce_raw, publish, publish_to,
+    publisher_on_mock, read_attempts, read_topic, recs, run_to_exit, sorted, stage, written,
 };
 use support::{corrupt_batch, produce_batch};
 
@@ -897,5 +897,81 @@ fn the_publish_in_flight_at_a_fatal_producer_error_names_its_cause() {
         err.reason.contains("Cluster authorization failed"),
         "{}",
         err.reason
+    );
+}
+
+/// Pins that a bounded job on Kafka ends `Completed` once its unit is read
+/// and committed and the group's lag stays zero over the window, read
+/// through a consumer that never joins the group.
+#[test]
+fn a_bounded_job_on_kafka_ends_completed() {
+    let cluster = cluster(1);
+    let brokers = cluster.bootstrap_servers();
+    let group = spate_test::unique_name("bounded");
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let rows = recs("b", 2);
+    let _unit = stage(&data, "b.ndjson", &rows);
+    let section = bounded_section(&brokers, &group, &dir);
+    list_once(publisher_on_mock(&section), &data, &section);
+
+    let clock = spate_core::clock::tokio::TestClock::frozen();
+    let worker = launch_bounded(ON_MOCK, &data, &section, &clock);
+    wait_until(DEADLINE, "the unit is read and committed", || {
+        written(&worker.script) == sorted(rows.clone())
+            && committed(&brokers, &group, WORK) == Some(1)
+    });
+    let report = run_to_exit(&worker, &clock);
+    assert_eq!(report.state, ExitState::Completed);
+    assert_eq!(report.exit_code(), 0);
+}
+
+/// Pins that a bounded job whose lister published nothing ends
+/// `Completed`: partitions with no commit read from their log start.
+#[test]
+fn a_bounded_job_that_published_nothing_ends_completed() {
+    let cluster = cluster(1);
+    let brokers = cluster.bootstrap_servers();
+    let group = spate_test::unique_name("empty");
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let section = bounded_section(&brokers, &group, &dir);
+    list_once(publisher_on_mock(&section), &data, &section);
+
+    let clock = spate_core::clock::tokio::TestClock::frozen();
+    let worker = launch_bounded(ON_MOCK, &data, &section, &clock);
+    let report = run_to_exit(&worker, &clock);
+    assert_eq!(report.state, ExitState::Completed);
+}
+
+/// Pins that a message with no unit, which goes to the dead-letter topic at
+/// once, ends a bounded job `Stalled`, naming the dead-letter topic.
+#[test]
+fn a_message_with_no_unit_ends_a_bounded_job_stalled() {
+    let cluster = cluster(1);
+    let brokers = cluster.bootstrap_servers();
+    let group = spate_test::unique_name("no-unit-bounded");
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let section = bounded_section(&brokers, &group, &dir);
+    list_once(publisher_on_mock(&section), &data, &section);
+    produce_raw(&brokers, WORK, &[(None, b"keyless")]);
+
+    let clock = spate_core::clock::tokio::TestClock::frozen();
+    let worker = launch_bounded(ON_MOCK, &data, &section, &clock);
+    wait_until(
+        DEADLINE,
+        "the message is dead-lettered and committed",
+        || high_watermark(&brokers, DEAD) == 1 && committed(&brokers, &group, WORK) == Some(1),
+    );
+    let report = run_to_exit(&worker, &clock);
+    assert_eq!(report.exit_code(), 1);
+    let ExitState::Failed(failure) = &report.state else {
+        panic!("expected a failed run, got {:?}", report.state);
+    };
+    assert!(
+        failure.reason.contains("bounded feed job stalled") && failure.reason.contains(DEAD),
+        "{}",
+        failure.reason
     );
 }

@@ -60,7 +60,7 @@ unknown fields are rejected with the offending key.
 | `group_id` | string | `required` | The consumer group every worker of the pipeline joins. |
 | `topic` | string | `required` | The work topic, where a publish writes a unit. |
 | `retry_topic` | string | `required` | Where a unit failed below the attempt cap is written again. The group reads it beside the work topic. Must differ from `topic`. |
-| `dead_letter_topic` | string | `required` | Where a unit goes at the attempt cap, failed by its reader or moved unread, and a message that names no unit. Nothing reads it. Must differ from `topic` and `retry_topic`. |
+| `dead_letter_topic` | string | `required` | Where a unit goes at the attempt cap, failed by its reader or moved unread, and a message that names no unit. A bounded job reads its end offsets, as [Ending a bounded job](#ending-a-bounded-job) describes. Must differ from `topic` and `retry_topic`. |
 | `attempt_topic` | string | `required` | The compacted topic each unit's attempt is recorded on before the unit is read (see [Topics](#topics)). Must differ from `topic`, `retry_topic` and `dead_letter_topic`. |
 | `delivery_timeout` | duration | `30s` | How long one write waits for its delivery report (librdkafka `message.timeout.ms`), and the bound on one pass of the gate, which can run up to 2 s past it. An attempt, tombstone, retry or dead-letter write that times out is sent again, and a publish that times out is reported to its caller as retryable. From `1ms` to about 24.8 days. |
 | `statistics_interval` | duration | `5s` | librdkafka's statistics interval for the feed's consumer and producer. The attempt follower sends no statistics. `0s` disables statistics; a non-zero value under `1ms` is refused. |
@@ -304,6 +304,36 @@ it.
 
 A rebalance that fails gives up every partition with nothing committed. The
 units read since the last commit are delivered again.
+
+## Ending a bounded job
+
+A [bounded job](../../sources/s3/README.mdx#how-a-bounded-job-ends) reads the
+feed's depth on a thread of the feed's own, through a consumer that carries the
+feed's `group_id` and never joins the group, so the reads take nothing from the
+member's poll interval. One read takes the group's committed offset on every
+partition of the work and retry topics, in one `OffsetFetch` request, and
+then each partition's log start and end offsets. The depth is the sum of each
+partition's end offset less its committed offset. A partition with no commit,
+or with a commit below its log start, counts from its log start, so a
+partition that never held a unit, or whose records retention deleted unread,
+reads as drained. The committed offsets are read first: a unit failed between
+the two reads has its retry write confirmed before its work offset is
+committed, so it shows on the retry topic's end offset either way. Kafka's
+offsets are exact, so the window guards only against a peer still holding a
+unit.
+
+Once the window passes, the worker reads the dead-letter topic's end offsets,
+and any partition above zero fails the job as stalled, naming the topic. The
+end offset stays where it is when retention deletes the record, so a unit
+dead-lettered at any point in the job counts. Give each bounded job fresh work,
+retry, dead-letter and attempt topics: a dead-letter topic an earlier job
+wrote fails a later job as stalled.
+
+The reads need `Describe` on the work, retry and dead-letter topics, which the
+[startup checks](#startup-checks) already need, and `Describe` on the feed's
+group, which the `Read` a member needs on the group includes. An
+authorization failure fails the job; any other failed read starts the window
+again, or reads the dead-letter topic again 15 seconds later.
 
 ## Backpressure
 

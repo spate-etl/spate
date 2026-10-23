@@ -24,9 +24,9 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use support::broker;
 use support::feed::{
-    ATTEMPT, ATTEMPT_PARTITIONS, DEAD, DEADLINE, WORK, committed, create_topics, data_dir, exists,
-    feed_yaml, high_watermark, launch_with, produce_raw, read_attempts, recs, sorted, stage,
-    written,
+    ATTEMPT, ATTEMPT_PARTITIONS, DEAD, DEADLINE, WORK, bounded_section, committed, create_topics,
+    data_dir, exists, feed_yaml, high_watermark, launch_bounded, launch_with, list_once,
+    produce_raw, read_attempts, recs, run_to_exit, sorted, stage, written,
 };
 use testcontainers::runners::SyncRunner;
 use testcontainers_modules::kafka::apache::KAFKA_PORT;
@@ -618,4 +618,156 @@ fn the_publisher_runs_the_configuration_checks_at_connect() {
         &publisher,
         spate_core::feed::Unit::new("u", b"body".to_vec()),
     );
+}
+
+/// A publish-only handle on `brokers`, with the configuration checks, and
+/// the runtime it runs on.
+fn publisher_on(
+    section_yaml: &str,
+) -> (
+    Result<KafkaFeedPublisher, KafkaFeedError>,
+    tokio::runtime::Runtime,
+) {
+    let io = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let publisher = KafkaFeedPublisher::connect(&support::feed::section(section_yaml), io.handle());
+    (publisher, io)
+}
+
+/// Pins that a dead-letter record ends a bounded job `Stalled` even once
+/// retention, here `DeleteRecords`, has removed it: the dead-letter read
+/// counts the topic's end offset, which the deletion leaves in place.
+#[test]
+#[ignore = "requires Docker"]
+fn a_dead_letter_topic_entry_ends_the_job_stalled() {
+    use rdkafka::TopicPartitionList;
+    let container = broker().start().expect("start kafka container");
+    let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
+    let brokers = format!("127.0.0.1:{port}");
+    create_topics(&brokers);
+    let group = spate_test::unique_name("dead-bounded");
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let section = bounded_section(&brokers, &group, &dir);
+    list_once(publisher_on(&section), &data, &section);
+    produce_raw(&brokers, WORK, &[(None, b"keyless")]);
+
+    let clock = spate_core::clock::tokio::TestClock::frozen();
+    let worker = launch_bounded(KafkaFeed::connect, &data, &section, &clock);
+    wait_until(
+        DEADLINE,
+        "the message is dead-lettered and committed",
+        || high_watermark(&brokers, DEAD) == 1 && committed(&brokers, &group, WORK) == Some(1),
+    );
+    let admin: AdminClient<DefaultClientContext> = ClientConfig::new()
+        .set("bootstrap.servers", &brokers)
+        .create()
+        .expect("admin client");
+    let mut before = TopicPartitionList::new();
+    before
+        .add_partition_offset(DEAD, 0, rdkafka::Offset::Offset(1))
+        .unwrap();
+    let io = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    io.block_on(admin.delete_records(&before, &AdminOptions::new()))
+        .expect("delete records");
+    let report = run_to_exit(&worker, &clock);
+    assert_eq!(report.exit_code(), 1);
+    let ExitState::Failed(failure) = &report.state else {
+        panic!("expected a failed run, got {:?}", report.state);
+    };
+    assert!(
+        failure.reason.contains("bounded feed job stalled") && failure.reason.contains(DEAD),
+        "{}",
+        failure.reason
+    );
+}
+
+/// Pins that the committed offsets a worker reads through its consumer
+/// outside the group cover every member's partitions: two workers share a
+/// two-partition work topic, and each ends `Completed` only once both
+/// partitions are committed.
+#[test]
+#[ignore = "requires Docker"]
+fn a_bounded_job_ends_once_every_workers_partitions_are_committed() {
+    let container = broker().start().expect("start kafka container");
+    let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
+    let brokers = format!("127.0.0.1:{port}");
+    create_two_partition_work(&brokers);
+    let group = spate_test::unique_name("two-workers");
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let mut rows = Vec::new();
+    for name in ["a", "b", "c", "d"] {
+        let r = recs(name, 2);
+        let _unit = stage(&data, &format!("{name}.ndjson"), &r);
+        rows.extend(r);
+    }
+    let section = bounded_section(&brokers, &group, &dir);
+    list_once(publisher_on(&section), &data, &section);
+    assert!(
+        (0..2).all(|p| high_watermark_of(&brokers, WORK, p) > 0),
+        "the units span both partitions"
+    );
+
+    let clock_a = spate_core::clock::tokio::TestClock::frozen();
+    let clock_b = spate_core::clock::tokio::TestClock::frozen();
+    let a = launch_bounded(KafkaFeed::connect, &data, &section, &clock_a);
+    let b = launch_bounded(KafkaFeed::connect, &data, &section, &clock_b);
+    wait_until(DEADLINE, "every row is written once between them", || {
+        let mut both = written(&a.script);
+        both.extend(written(&b.script));
+        sorted(both) == sorted(rows.clone())
+    });
+    let ra = std::thread::spawn({
+        let clock = std::sync::Arc::clone(&clock_a);
+        move || run_to_exit(&a, &clock).state
+    });
+    let rb = run_to_exit(&b, &clock_b).state;
+    assert_eq!(rb, ExitState::Completed);
+    assert_eq!(ra.join().unwrap(), ExitState::Completed);
+}
+
+/// Create the topics with a two-partition work topic.
+fn create_two_partition_work(brokers: &str) {
+    let admin: AdminClient<DefaultClientContext> = ClientConfig::new()
+        .set("bootstrap.servers", brokers)
+        .create()
+        .expect("admin client");
+    let topics = [
+        NewTopic::new(WORK, 2, TopicReplication::Fixed(1))
+            .set("message.timestamp.type", "LogAppendTime"),
+        NewTopic::new(support::feed::RETRY, 1, TopicReplication::Fixed(1)),
+        NewTopic::new(DEAD, 1, TopicReplication::Fixed(1)),
+        NewTopic::new(ATTEMPT, ATTEMPT_PARTITIONS, TopicReplication::Fixed(1))
+            .set("cleanup.policy", "compact"),
+    ];
+    let io = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    for created in io
+        .block_on(admin.create_topics(&topics, &AdminOptions::new()))
+        .expect("create topics")
+    {
+        created.expect("topic created");
+    }
+}
+
+/// The high watermark of `topic` partition `partition`.
+fn high_watermark_of(brokers: &str, topic: &str, partition: i32) -> i64 {
+    use rdkafka::consumer::{BaseConsumer, Consumer};
+    let consumer: BaseConsumer = ClientConfig::new()
+        .set("bootstrap.servers", brokers)
+        .create()
+        .expect("consumer");
+    consumer
+        .fetch_watermarks(topic, partition, Duration::from_secs(10))
+        .expect("watermarks")
+        .1
 }

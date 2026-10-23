@@ -12,7 +12,8 @@ use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
 use rdkafka::{Offset, TopicPartitionList};
 use spate_core::config::{FeedSection, PipelineConfig};
 use spate_core::feed::{
-    Confirmation, Delivery, Feed, FeedError, FeedErrorKind, FeedWaker, Receipt, Unit, wake_channel,
+    Confirmation, Delivery, DepthOf, DepthReading, Feed, FeedError, FeedErrorKind, FeedWaker,
+    Receipt, Unit, wake_channel,
 };
 use spate_core::ops::chain_owned;
 use spate_core::pipeline::{ExitState, Pipeline, RuntimeOptions, ShutdownHandle};
@@ -25,6 +26,7 @@ use spate_test::{
     decode_rows, wait_until,
 };
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::runtime::Handle;
@@ -54,12 +56,20 @@ pub(crate) fn feed_yaml(brokers: &str, group: &str, section: &str, body: &str) -
     )
 }
 
-/// A [`Feed`] that passes every call to the Kafka feed and records each
-/// delivery's count.
+/// A [`Feed`] that passes every call to the Kafka feed, records each
+/// delivery's count, and counts the reads of the feed's depth.
 #[derive(Clone)]
 pub(crate) struct Recording {
     pub(crate) inner: Arc<KafkaFeed>,
     pub(crate) seen: Arc<Mutex<Vec<u32>>>,
+    pub(crate) depth_reads: Arc<AtomicUsize>,
+}
+
+impl Recording {
+    /// Reads of the feed's depth, the startup probe included.
+    pub(crate) fn depth_reads(&self) -> usize {
+        self.depth_reads.load(Ordering::SeqCst)
+    }
 }
 
 impl Feed for Recording {
@@ -94,6 +104,13 @@ impl Feed for Recording {
 
     fn publish(&self, unit: Unit) -> Confirmation {
         self.inner.publish(unit)
+    }
+
+    fn read_depth(&self, of: DepthOf) -> Option<DepthReading> {
+        if of == DepthOf::Feed {
+            self.depth_reads.fetch_add(1, Ordering::SeqCst);
+        }
+        self.inner.read_depth(of)
     }
 }
 
@@ -170,12 +187,28 @@ pub(crate) fn launch_source(
     feed_section: &str,
     pre: impl FnOnce(&SinkScript),
 ) -> Worker {
-    let yaml = format!(
+    launch_customized(connect, source_yaml, feed_section, pre, |source| source)
+}
+
+/// The pipeline file a worker over `source_yaml` reads.
+pub(crate) fn pipeline_yaml(source_yaml: &str, feed_section: &str) -> String {
+    format!(
         "pipeline: {{ name: kafka-feed, threads: 1 }}\nadmin: {{ listen: none }}\n\
          checkpoint: {{ interval: 100ms }}\nmetrics: {{ exporter: none }}\n\
          source:\n{source_yaml}\
          sink: {{ capture: {{ chunk: {{ target_bytes: 64 }} }} }}\n{feed_section}"
-    );
+    )
+}
+
+/// [`launch_source`], with `customize` applied to the source.
+pub(crate) fn launch_customized(
+    connect: Connect,
+    source_yaml: &str,
+    feed_section: &str,
+    pre: impl FnOnce(&SinkScript),
+    customize: impl FnOnce(S3Source) -> S3Source,
+) -> Worker {
+    let yaml = pipeline_yaml(source_yaml, feed_section);
     let mut config = PipelineConfig::from_str(&yaml).unwrap();
     config.pipeline.name = spate_test::unique_name(&config.pipeline.name);
     let pipeline = Pipeline::from_config(config).unwrap();
@@ -185,10 +218,13 @@ pub(crate) fn launch_source(
     let recording = Recording {
         inner: Arc::clone(&feed),
         seen: Arc::default(),
+        depth_reads: Arc::default(),
     };
-    let source = S3Source::from_component_config(&pipeline.config().source, io)
-        .unwrap()
-        .with_framer(|| Box::new(NdjsonFramer::new(1 << 20)));
+    let source = customize(
+        S3Source::from_component_config(&pipeline.config().source, io)
+            .unwrap()
+            .with_framer(|| Box::new(NdjsonFramer::new(1 << 20))),
+    );
     let mut pool = SinkPoolConfig::default();
     pool.batch.max_rows = 1;
     pool.batch.linger = Duration::from_millis(10);
@@ -547,4 +583,84 @@ pub(crate) fn exists(brokers: &str, topic: &str) -> bool {
         .topics()
         .iter()
         .any(|t| t.name() == topic && t.error().is_none() && !t.partitions().is_empty())
+}
+
+/// The step a bounded job's end check reads the feed at.
+pub(crate) const STEP: Duration = Duration::from_secs(15);
+
+/// The `feed:` section of a bounded job for `group` on `brokers`, at a
+/// `file://` location under `dir`.
+pub(crate) fn bounded_section(brokers: &str, group: &str, dir: &tempfile::TempDir) -> String {
+    let location = format!(
+        "  location: \"file://{}/\"\n",
+        dir.path().join("jobs").display()
+    );
+    feed_yaml(brokers, group, &location, "")
+}
+
+/// Run the job's lister once through `publisher`, a publish-only handle and
+/// the runtime it runs on: publish a unit per object under `data` and write
+/// the fingerprint and end marker.
+pub(crate) fn list_once(
+    publisher: (
+        Result<KafkaFeedPublisher, KafkaFeedError>,
+        tokio::runtime::Runtime,
+    ),
+    data: &Path,
+    section_yaml: &str,
+) {
+    let (publisher, io) = publisher;
+    let source = format!("  s3:\n    url: \"file://{}/\"\n", data.display());
+    let config = PipelineConfig::from_str(&pipeline_yaml(&source, section_yaml)).unwrap();
+    S3Source::from_component_config(&config.source, io.handle().clone())
+        .unwrap()
+        .with_framer(|| Box::new(NdjsonFramer::new(1 << 20)))
+        .list_once(config.feed.as_ref().unwrap(), Arc::new(publisher.unwrap()))
+        .unwrap();
+}
+
+/// A bounded worker over `data`, connected with `connect`, whose end check
+/// runs on `clock`.
+pub(crate) fn launch_bounded(
+    connect: Connect,
+    data: &Path,
+    section_yaml: &str,
+    clock: &Arc<spate_core::clock::tokio::TestClock>,
+) -> Worker {
+    let source = format!("  s3:\n    url: \"file://{}/\"\n", data.display());
+    let clock = Arc::clone(clock);
+    launch_customized(
+        connect,
+        &source,
+        section_yaml,
+        |_| {},
+        move |s| s.with_clock(clock),
+    )
+}
+
+/// Step `clock` until the worker exits, waiting after each step for its
+/// next depth read. The run hands its report out once, so this keeps it.
+///
+/// # Panics
+///
+/// When the worker has not exited after 80 steps.
+pub(crate) fn run_to_exit(
+    worker: &Worker,
+    clock: &spate_core::clock::tokio::TestClock,
+) -> spate_core::pipeline::ExitReport {
+    for _ in 0..80 {
+        let reads = worker.recording.depth_reads();
+        clock.advance(STEP);
+        let mut exit = None;
+        wait_until(DEADLINE, "the next depth read or the end", || {
+            if exit.is_none() {
+                exit = worker.run.wait_exit(Duration::ZERO);
+            }
+            exit.is_some() || worker.recording.depth_reads() > reads
+        });
+        if let Some(report) = exit {
+            return report.unwrap();
+        }
+    }
+    panic!("the job never ended");
 }

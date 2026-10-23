@@ -1,10 +1,11 @@
 //! [`KafkaFeed`]: the work feed over a work topic, a retry topic, a
 //! dead-letter topic and a compacted attempt topic.
 //!
-//! The feed runs three threads. The consumer thread reads the work and
+//! The feed runs four threads. The consumer thread reads the work and
 //! retry topics as a member of the feed's group. The follower thread reads
 //! the attempt topic into memory. The gate thread records each delivered
-//! unit's attempt before the unit reaches the reader. One producer writes
+//! unit's attempt before the unit reaches the reader. The depth thread
+//! answers a bounded job's depth reads. One producer writes
 //! publishes, attempt records and their tombstones, retries and dead
 //! letters. The [`Feed`] methods lock the shared state, change it, and hand
 //! any write to the producer, so none of them waits on I/O (INV-2).
@@ -39,6 +40,7 @@
 mod attempt;
 mod config;
 mod consumer;
+mod depth;
 mod error;
 mod events;
 mod gate;
@@ -66,7 +68,8 @@ use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::producer::ThreadedProducer;
 use spate_core::config::FeedSection;
 use spate_core::feed::{
-    Confirmation, Delivery, Feed, FeedError, FeedErrorKind, FeedWaker, Receipt, Unit, confirmation,
+    Confirmation, Delivery, DepthOf, DepthReading, DepthReporter, Feed, FeedError, FeedErrorKind,
+    FeedWaker, Receipt, Unit, confirmation, depth_reading,
 };
 use startup::TopicAdmin as _;
 use std::collections::{HashMap, VecDeque};
@@ -420,14 +423,20 @@ impl Drop for LatchOnPanic {
 /// feed that stopped on a Fatal error commits nothing more, so every unit
 /// since its last commit is delivered again.
 ///
+/// [`read_depth`](Feed::read_depth) reports the group's lag on the work and
+/// retry topics, or the sum of the dead-letter topic's end offsets, read on
+/// a thread of the feed's own through a consumer that never joins the group.
+///
 /// A process that only publishes, such as a lister run, builds a
-/// [`KafkaFeedPublisher`], which joins no group.
+/// [`KafkaFeedPublisher`], which joins no group and reports no depth.
 pub struct KafkaFeed {
     core: Arc<Core>,
     producer: Producer,
     thread: Option<std::thread::JoinHandle<()>>,
     gate: Option<std::thread::JoinHandle<()>>,
     follower: Option<std::thread::JoinHandle<()>>,
+    /// Hands depth reads to the depth thread, which ends once this drops.
+    depth: Option<Mutex<std::sync::mpsc::Sender<(DepthOf, DepthReporter)>>>,
 }
 
 impl std::fmt::Debug for KafkaFeed {
@@ -537,6 +546,7 @@ impl KafkaFeed {
             thread: None,
             gate: None,
             follower: Some(follower),
+            depth: None,
         };
         let gate = gate::Gate::new(
             Arc::clone(&feed.core),
@@ -554,6 +564,7 @@ impl KafkaFeed {
                     KafkaFeedError::Unavailable(format!("starting the feed's consumer thread: {e}"))
                 })?,
         );
+        feed.depth = Some(Mutex::new(start_depth(&config, &feed.core)?));
         log_started(&config, &checked);
         Ok(feed)
     }
@@ -561,6 +572,39 @@ impl KafkaFeed {
     fn lock(&self) -> MutexGuard<'_, State> {
         self.core.lock()
     }
+}
+
+/// Start the depth thread, detached: it ends once the feed drops the
+/// returned sender, after any read in flight.
+fn start_depth(
+    config: &KafkaFeedConfig,
+    core: &Arc<Core>,
+) -> Result<std::sync::mpsc::Sender<(DepthOf, DepthReporter)>, KafkaFeedError> {
+    let openssl_env = crate::security::openssl_env_overrides();
+    // The feed's group, never subscribed: it reads the group's committed
+    // offsets without joining the group.
+    let consumer = BaseConsumer::from_config_and_context(
+        &config.consumer_config(openssl_env),
+        SourceContext::default(),
+    )
+    .map_err(|e| {
+        KafkaFeedError::Refused(format!(
+            "creating the depth reader: {}",
+            redacted_client_error(&e)
+        ))
+    })?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    let core = Arc::clone(core);
+    std::thread::Builder::new()
+        .name("spate-kafka-feed-depth".to_owned())
+        .spawn(move || {
+            let brokers = depth::Brokers { consumer };
+            depth::run(&core, &brokers, &rx);
+        })
+        .map_err(|e| {
+            KafkaFeedError::Unavailable(format!("starting the feed's depth thread: {e}"))
+        })?;
+    Ok(tx)
 }
 
 /// Log the INFO line a feed that connected writes: its section and what the
@@ -851,6 +895,19 @@ impl Feed for KafkaFeed {
 
     fn publish(&self, unit: Unit) -> Confirmation {
         publish_unit(&self.core, &self.producer, &unit)
+    }
+
+    fn read_depth(&self, of: DepthOf) -> Option<DepthReading> {
+        let (reporter, reading) = depth_reading();
+        if let Some(depth) = &self.depth {
+            // A depth thread that has ended drops the reporter, and the
+            // reading settles Retryable.
+            let _ = depth
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .send((of, reporter));
+        }
+        Some(reading)
     }
 }
 

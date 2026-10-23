@@ -261,7 +261,9 @@ const config: Config = {
           // A post without a truncation marker lists in full; the list page
           // should show openings.
           onUntruncatedBlogPosts: 'throw',
-          editUrl: `${githubUrl}/edit/${SOURCE_REF}/website/blog/`,
+          // The plugin appends the blog's path from the site directory, so the
+          // base stops at website/.
+          editUrl: `${githubUrl}/edit/${SOURCE_REF}/website/`,
         },
         sitemap: {
           // Docusaurus reads the date from git for docs pages; the rest carry

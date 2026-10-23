@@ -1941,4 +1941,346 @@ mod tests {
         *feed.receive.lock().unwrap() = None;
         assert_eq!(lanes_added(poll(&mut reader)).len(), 1);
     }
+
+    // ------------------------------------------------------ overwrites --
+
+    /// A notification body naming each `(key, size)` under `data/`, pinned
+    /// to an ETag and carrying `re_enqueues`.
+    fn pinned_notification(objects: &[(&str, u64)], re_enqueues: u32) -> Vec<u8> {
+        let records: Vec<serde_json::Value> = objects
+            .iter()
+            .map(|(key, size)| {
+                serde_json::json!({
+                    "eventName": "ObjectCreated:Put",
+                    "spateReEnqueues": re_enqueues,
+                    "s3": {
+                        "bucket": { "name": "bucket" },
+                        "object": { "key": format!("data/{key}"), "size": size, "eTag": "old" },
+                    },
+                })
+            })
+            .collect();
+        serde_json::to_vec(&serde_json::json!({ "Records": records })).unwrap()
+    }
+
+    /// Report from the lane on `partition` that `data/<key>` was overwritten
+    /// to `size` bytes.
+    fn report_overwrite(reader: &UnitReader, partition: PartitionId, key: &str, size: u64) {
+        reader
+            .poison_tx
+            .send(PoisonReport {
+                split: SplitId::new("overwritten").unwrap(),
+                epoch: LeaseEpoch(u64::from(partition.0)),
+                kind: PoisonKind::EtagDrift,
+                reason: "overwritten".into(),
+                overwrite: Some(Box::new(Overwrite {
+                    key: format!("data/{key}"),
+                    etag: Some("\"new\"".into()),
+                    size,
+                    last_modified_ms: 1_000,
+                })),
+            })
+            .unwrap();
+    }
+
+    /// The key, ETag and re-enqueue count a published unit's body names.
+    fn re_enqueued(unit: &Unit) -> (String, Option<String>, u32) {
+        let Decoded::Read(cursors) = decode(&unit.body, &scope(), crate::split::Packing {
+            target_bytes: u64::MAX,
+            compression: Compression::None,
+            delimiter: None,
+        }) else {
+            panic!("the published unit is not read");
+        };
+        let part = cursors.into_iter().flatten().next().unwrap();
+        let Origin::Notification { re_enqueues, .. } = part.origin else {
+            panic!("the published unit is not a notification");
+        };
+        (part.object[0].key.clone(), part.object[0].etag.clone(), re_enqueues)
+    }
+
+    /// Deliver a pinned notification for `objects` at `re_enqueues`, start
+    /// `reader`, and return the receipt and the lanes it opens.
+    fn open_notification(
+        reader: &mut UnitReader,
+        script: &FeedScript,
+        objects: &[(&str, u64)],
+        re_enqueues: u32,
+    ) -> (Receipt, Vec<PartitionId>) {
+        let receipt = script.deliver(Unit::new("n", pinned_notification(objects, re_enqueues)));
+        start(reader);
+        (receipt, partitions(&lanes_added(poll(reader))))
+    }
+
+    /// Pins that a unit cut short by an overwrite, whose lane has retired,
+    /// waits for the feed to confirm its re-enqueue, renewed and never
+    /// failed, and is acknowledged on the poll after the confirmation.
+    #[test]
+    fn a_412_unit_waits_for_its_publish_after_its_records_commit() {
+        let (mut reader, script, _rt) = reader();
+        script.hold_publishes();
+        let (receipt, lanes) = open_notification(&mut reader, &script, &[("a.ndjson", 10)], 0);
+        report_overwrite(&reader, lanes[0], "a.ndjson", 20);
+        poll(&mut reader);
+        assert_eq!(script.published().len(), 1);
+        finish(&mut reader, lanes[0], 3);
+        for _ in 0..3 {
+            poll(&mut reader);
+        }
+        assert!(script.acknowledged().is_empty(), "acknowledged before the publish settled");
+        assert!(script.renewed().contains(&receipt));
+        script.confirm_held_publishes();
+        poll(&mut reader);
+        assert_eq!(script.acknowledged(), vec![receipt]);
+        assert!(script.failed().is_empty());
+        assert_eq!(
+            re_enqueued(&script.published()[0]),
+            ("data/a.ndjson".to_owned(), Some("\"new\"".to_owned()), 1)
+        );
+        assert_eq!(script.published()[0].id, "n", "the re-enqueue keeps the unit's id");
+    }
+
+    /// Pins that a unit whose re-enqueue the feed confirmed still waits for
+    /// its lane to retire, and is acknowledged once it does.
+    #[test]
+    fn a_412_unit_waits_for_its_records_after_its_publish_is_confirmed() {
+        let (mut reader, script, _rt) = reader_holding(1);
+        let (receipt, lanes) = open_notification(&mut reader, &script, &[("a.ndjson", 10)], 0);
+        report_overwrite(&reader, lanes[0], "a.ndjson", 20);
+        for _ in 0..3 {
+            poll(&mut reader);
+        }
+        assert_eq!(script.published().len(), 1);
+        assert!(script.acknowledged().is_empty(), "acknowledged before its lane retired");
+        finish(&mut reader, lanes[0], 3);
+        assert_eq!(script.acknowledged(), vec![receipt]);
+        assert!(script.failed().is_empty());
+    }
+
+    /// Pins that two ranges of one key that both report the overwrite
+    /// publish one re-enqueue.
+    #[test]
+    fn two_ranges_of_one_key_that_412_publish_once() {
+        let (mut reader, script, _rt) = reader();
+        let (receipt, lanes) =
+            open_notification(&mut reader, &script, &[("a.ndjson", 2 * TARGET)], 0);
+        assert_eq!(lanes.len(), 2);
+        report_overwrite(&reader, lanes[0], "a.ndjson", 20);
+        report_overwrite(&reader, lanes[1], "a.ndjson", 20);
+        poll(&mut reader);
+        assert_eq!(script.published().len(), 1);
+        finish(&mut reader, lanes[0], 0);
+        finish(&mut reader, lanes[1], 2);
+        assert_eq!(script.acknowledged(), vec![receipt]);
+    }
+
+    /// Pins that an overwrite drops the key's ranges not yet opened.
+    #[test]
+    fn an_overwrite_drops_the_keys_unopened_ranges() {
+        let (mut reader, script, _rt) = reader_holding(1);
+        let (receipt, lanes) =
+            open_notification(&mut reader, &script, &[("a.ndjson", 3 * TARGET)], 0);
+        assert_eq!(lanes.len(), 1);
+        report_overwrite(&reader, lanes[0], "a.ndjson", 20);
+        poll(&mut reader);
+        finish(&mut reader, lanes[0], 2);
+        assert_eq!(script.acknowledged(), vec![receipt]);
+        assert_eq!(script.published().len(), 1);
+    }
+
+    /// Pins that an overwrite of one record's key leaves the unit's other
+    /// record read, and that the unit is acknowledged once both settle.
+    #[test]
+    fn a_412_on_one_record_leaves_the_other_record_read() {
+        let (mut reader, script, _rt) = reader();
+        let (receipt, lanes) =
+            open_notification(&mut reader, &script, &[("a.ndjson", 10), ("b.ndjson", 10)], 0);
+        assert_eq!(lanes.len(), 2);
+        report_overwrite(&reader, lanes[0], "a.ndjson", 20);
+        poll(&mut reader);
+        finish(&mut reader, lanes[0], 1);
+        assert!(script.acknowledged().is_empty(), "the other record is unread");
+        finish(&mut reader, lanes[1], 4);
+        assert_eq!(script.acknowledged(), vec![receipt]);
+        assert_eq!(script.published().len(), 1);
+    }
+
+    /// Pins that a poison on another part fails a unit back after an
+    /// overwrite of one of its keys was re-enqueued.
+    #[test]
+    fn a_poison_on_another_part_fails_an_overwritten_unit_back() {
+        let (mut reader, script, _rt) = reader();
+        let (receipt, lanes) =
+            open_notification(&mut reader, &script, &[("a.ndjson", 10), ("b.ndjson", 10)], 0);
+        report_overwrite(&reader, lanes[0], "a.ndjson", 20);
+        poll(&mut reader);
+        reader
+            .poison_tx
+            .send(PoisonReport {
+                split: SplitId::new("gone").unwrap(),
+                epoch: LeaseEpoch(u64::from(lanes[1].0)),
+                kind: PoisonKind::NotFound,
+                reason: "gone".into(),
+                overwrite: None,
+            })
+            .unwrap();
+        poll(&mut reader);
+        assert_eq!(script.failed().len(), 1);
+        assert_eq!(script.failed()[0].0, receipt);
+        assert!(script.acknowledged().is_empty());
+        assert_eq!(script.published().len(), 1);
+    }
+
+    /// Pins that a re-enqueue the feed refuses, or cannot confirm, fails the
+    /// unit back, never acknowledged.
+    #[test]
+    fn a_refused_or_retryable_re_enqueue_fails_the_unit_back() {
+        for kind in [FeedErrorKind::Refused, FeedErrorKind::Retryable] {
+            let (mut reader, script, _rt) = reader();
+            script.refuse_next_publish(kind);
+            let (receipt, lanes) =
+                open_notification(&mut reader, &script, &[("a.ndjson", 10)], 0);
+            report_overwrite(&reader, lanes[0], "a.ndjson", 20);
+            assert_eq!(lanes_revoked(poll(&mut reader)), [LaneId(lanes[0].0)], "{kind:?}");
+            assert_eq!(script.failed().len(), 1, "{kind:?}");
+            assert_eq!(script.failed()[0].0, receipt, "{kind:?}");
+            assert!(script.acknowledged().is_empty(), "{kind:?}");
+        }
+    }
+
+    /// Pins that a re-enqueue the feed answers `Fatal` fails the reader.
+    #[test]
+    fn a_fatal_re_enqueue_stops_the_reader() {
+        let (mut reader, script, _rt) = reader();
+        script.refuse_next_publish(FeedErrorKind::Fatal);
+        let (_, lanes) = open_notification(&mut reader, &script, &[("a.ndjson", 10)], 0);
+        report_overwrite(&reader, lanes[0], "a.ndjson", 20);
+        let e = reader.poll_events(Duration::ZERO).unwrap_err();
+        assert!(e.to_string().contains("re-enqueueing an overwritten object"), "{e}");
+    }
+
+    /// Pins that a re-enqueue confirmed after the feed delivered its unit
+    /// again acknowledges nothing, and the reader keeps polling.
+    #[test]
+    fn a_re_enqueue_confirmed_after_its_unit_lapsed_acknowledges_nothing() {
+        let (mut reader, script, _rt) = reader_holding(1);
+        script.hold_publishes();
+        let (receipt, lanes) = open_notification(&mut reader, &script, &[("a.ndjson", 10)], 0);
+        report_overwrite(&reader, lanes[0], "a.ndjson", 20);
+        poll(&mut reader);
+        script.redeliver(receipt);
+        assert_eq!(lanes_revoked(poll(&mut reader)).len(), 1);
+        script.confirm_held_publishes();
+        for _ in 0..4 {
+            reader.poll_events(Duration::ZERO).unwrap();
+        }
+        assert!(!script.acknowledged().contains(&receipt));
+    }
+
+    /// Pins the cap's bound: a unit one below the cap re-enqueues at the cap,
+    /// and a unit at 2 re-enqueues at 3.
+    #[test]
+    fn a_unit_one_below_the_cap_re_enqueues_at_the_cap() {
+        let cap = crate::source::DEFAULT_RE_ENQUEUE_CAP;
+        for (count, want) in [(cap - 1, cap), (2, 3)] {
+            let (mut reader, script, _rt) = reader();
+            let (_, lanes) = open_notification(&mut reader, &script, &[("a.ndjson", 10)], count);
+            report_overwrite(&reader, lanes[0], "a.ndjson", 20);
+            poll(&mut reader);
+            assert_eq!(script.published().len(), 1, "{count}");
+            assert_eq!(re_enqueued(&script.published()[0]).2, want);
+        }
+    }
+
+    /// Pins that a unit at the cap, or at `u32::MAX`, publishes nothing on
+    /// an overwrite, is acknowledged once its lane retires, is counted in
+    /// both counters, and is named in a WARN.
+    #[test]
+    fn a_unit_at_the_re_enqueue_cap_is_counted() {
+        for count in [crate::source::DEFAULT_RE_ENQUEUE_CAP, u32::MAX] {
+            let pipeline = unique_name("reader");
+            let mut lines = Vec::new();
+            let rendered = render_local(|| {
+                let metrics =
+                    S3Metrics::new(&Meter::with_namespace("s3", pipeline.clone(), "src", "s3"));
+                let (feed, script) = scripted_feed();
+                let (mut reader, _rt) = reader_over(Arc::new(feed), None, Some(metrics));
+                let (receipt, lanes) =
+                    open_notification(&mut reader, &script, &[("a.ndjson", 10)], count);
+                report_overwrite(&reader, lanes[0], "a.ndjson", 20);
+                lines = spate_test::capture_logs(tracing::Level::WARN, || {
+                    poll(&mut reader);
+                });
+                assert!(script.published().is_empty(), "{count}");
+                finish(&mut reader, lanes[0], 3);
+                assert_eq!(script.acknowledged(), vec![receipt], "{count}");
+            });
+            let value = |name: &str| {
+                metric_value(&rendered, name, &[("pipeline", pipeline.as_str())])
+                    .expect("the counter is registered")
+            };
+            assert_eq!(value("spate_s3_overwrites_dropped_total"), 1.0, "{count}");
+            assert_eq!(value("spate_s3_objects_overwritten_total"), 1.0, "{count}");
+            assert!(
+                lines.iter().any(|l| l.contains("re-enqueue cap") && l.contains("data/a.ndjson")),
+                "{lines:#?}"
+            );
+        }
+    }
+
+    /// Pins that an overwrite reported by both ranges of one key is counted
+    /// once, never as an `etag_drift` failure, and that `objects_remaining`
+    /// takes back both ranges once the unit is acknowledged, leaving only
+    /// the lane of the re-enqueued unit the scripted feed delivers back.
+    #[test]
+    fn a_412_truncation_is_counted_once_per_key() {
+        let pipeline = unique_name("reader");
+        let mut held = 0;
+        let rendered = render_local(|| {
+            let metrics =
+                S3Metrics::new(&Meter::with_namespace("s3", pipeline.clone(), "src", "s3"));
+            let (feed, script) = scripted_feed();
+            let (mut reader, _rt) = reader_over(Arc::new(feed), None, Some(metrics));
+            let (receipt, lanes) =
+                open_notification(&mut reader, &script, &[("a.ndjson", 2 * TARGET)], 0);
+            report_overwrite(&reader, lanes[0], "a.ndjson", 20);
+            report_overwrite(&reader, lanes[1], "a.ndjson", 20);
+            poll(&mut reader);
+            finish(&mut reader, lanes[0], 0);
+            finish(&mut reader, lanes[1], 2);
+            assert_eq!(script.acknowledged(), vec![receipt]);
+            held = reader.lanes.len();
+        });
+        let labels = [("pipeline", pipeline.as_str())];
+        assert_eq!(
+            metric_value(&rendered, "spate_s3_objects_overwritten_total", &labels),
+            Some(1.0)
+        );
+        assert_eq!(
+            metric_value(&rendered, "spate_s3_overwrites_dropped_total", &labels),
+            Some(0.0)
+        );
+        assert_eq!(
+            metric_value(
+                &rendered,
+                "spate_s3_objects_failed_total",
+                &[("pipeline", pipeline.as_str()), ("reason", "etag_drift")]
+            ),
+            Some(0.0)
+        );
+        assert_eq!(objects_remaining(&rendered, &pipeline), held as f64);
+    }
+
+    /// Pins that an object overwritten to no bytes is acknowledged without a
+    /// re-enqueue, since it holds no record.
+    #[test]
+    fn an_overwrite_to_size_0_is_acknowledged_without_a_re_enqueue() {
+        let (mut reader, script, _rt) = reader();
+        let (receipt, lanes) = open_notification(&mut reader, &script, &[("a.ndjson", 10)], 0);
+        report_overwrite(&reader, lanes[0], "a.ndjson", 0);
+        poll(&mut reader);
+        finish(&mut reader, lanes[0], 3);
+        assert_eq!(script.acknowledged(), vec![receipt]);
+        assert!(script.published().is_empty());
+    }
 }

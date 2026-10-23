@@ -1006,4 +1006,65 @@ mod tests {
         );
         assert!(r.tracker.terminal().is_none(), "idle is not end-of-input");
     }
+
+    fn overwrite() -> ChunkMsg {
+        ChunkMsg::LaneFailed(SplitFailure::Overwritten(Box::new(crate::fetch::Overwrite {
+            key: "p/a.ndjson".into(),
+            etag: Some("\"new\"".into()),
+            size: 10,
+            last_modified_ms: 2_000,
+        })))
+    }
+
+    /// Pins that an overwrite with nothing framed reports the overwrite,
+    /// never poisons, and ends the lane at its start.
+    #[test]
+    fn an_overwrite_with_nothing_framed_ends_at_the_start() {
+        let mut r = rig(None);
+        start(&r, 0, "p/a.ndjson");
+        send(&r, overwrite());
+        drop(r.tx.take());
+        assert!(poll_batch(&mut r.lane, 512).is_none());
+        assert_eq!(r.tracker.terminal(), Some(0));
+        let report = r.poison_rx.try_recv().expect("an overwrite report");
+        assert_eq!(report.overwrite.expect("the overwrite").key, "p/a.ndjson");
+        assert!(r.poison_rx.try_recv().is_err(), "one report");
+    }
+
+    /// Pins that an overwrite keeps the records framed before it, drops the
+    /// unterminated tail, and ends the lane one past the last record
+    /// emitted, with every later poll idle.
+    #[test]
+    fn an_overwrite_emits_the_framed_records_and_ends_after_them() {
+        let mut r = rig(None);
+        start(&r, 0, "p/a.ndjson");
+        send(&r, ChunkMsg::Chunk(bytes::Bytes::from_static(b"a1\na2\na3")));
+        send(&r, overwrite());
+        drop(r.tx.take());
+        let records = poll_batch(&mut r.lane, 512).expect("the framed records");
+        let bytes: Vec<&[u8]> = records.iter().map(|(_, b)| b.as_slice()).collect();
+        assert_eq!(bytes, [b"a1".as_slice(), b"a2".as_slice()]);
+        assert!(r.tracker.terminal().is_none(), "decided before the batch was pushed");
+        assert!(poll_batch(&mut r.lane, 512).is_none());
+        assert_eq!(r.tracker.terminal(), Some(records[1].0 + 1));
+        assert!(poll_batch(&mut r.lane, 512).is_none());
+        assert!(poll_batch(&mut r.lane, 512).is_none());
+        let report = r.poison_rx.try_recv().expect("an overwrite report");
+        assert!(report.overwrite.is_some());
+    }
+
+    /// Pins that records framed before an overwrite drain across polls when
+    /// they exceed one batch.
+    #[test]
+    fn an_overwrite_drains_its_framed_records_across_batches() {
+        let mut r = rig(None);
+        start(&r, 0, "p/a.ndjson");
+        send(&r, ChunkMsg::Chunk(bytes::Bytes::from_static(b"a1\na2\na3\n")));
+        send(&r, overwrite());
+        drop(r.tx.take());
+        assert_eq!(poll_batch(&mut r.lane, 2).expect("two records").len(), 2);
+        assert_eq!(poll_batch(&mut r.lane, 2).expect("one record").len(), 1);
+        assert!(poll_batch(&mut r.lane, 2).is_none());
+        assert!(r.tracker.terminal().is_some());
+    }
 }

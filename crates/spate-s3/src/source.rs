@@ -1275,6 +1275,40 @@ mod tests {
         );
     }
 
+    /// Pins that the `feed:` section's `attempt_cap` caps re-enqueues, and
+    /// that a section without one, or a feed given through `with_feed`,
+    /// caps them at [`DEFAULT_RE_ENQUEUE_CAP`].
+    #[test]
+    fn the_feed_sections_attempt_cap_caps_re_enqueues() {
+        use spate_core::config::FeedSection;
+        use spate_core::feed::{FeedOrigin, memory::MemoryFeed};
+        use spate_core::source::Source as _;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let source = || {
+            S3Source::from_component_config(
+                &spate_test::component_config("s3", "url: \"s3://b/data/\"\n"),
+                rt.handle().clone(),
+            )
+            .unwrap()
+        };
+        let configured = |cap: Option<u32>| {
+            let mut section = FeedSection::new(spate_test::component_config("memory", "{}"));
+            section.attempt_cap = cap.and_then(NonZeroU32::new);
+            let mut source = source();
+            source
+                .configure_feed(&section, Arc::new(MemoryFeed::new()), FeedOrigin::Section)
+                .unwrap();
+            source.re_enqueue_cap
+        };
+        assert_eq!(configured(Some(2)), 2);
+        assert_eq!(configured(None), DEFAULT_RE_ENQUEUE_CAP);
+        let given = source().with_feed(Arc::new(MemoryFeed::new()));
+        assert_eq!(given.re_enqueue_cap, DEFAULT_RE_ENQUEUE_CAP);
+        assert_eq!(DEFAULT_RE_ENQUEUE_CAP, 10);
+    }
+
     /// Every key `validate` accepts reaches the builder, in any case.
     #[test]
     fn apply_options_applies_upper_case_keys() {

@@ -2051,4 +2051,420 @@ mod tests {
             fetched
         );
     }
+
+    // ------------------------------------------- notification reads --
+
+    /// One request a [`HeadStore`] saw: `(if_match, version, head)`.
+    type Seen = (Option<String>, Option<String>, bool);
+
+    /// An in-memory store that records each request's `If-Match`, version
+    /// and HEAD flag, fails one GET with a failed precondition, and answers
+    /// HEADs from a script.
+    #[derive(Debug)]
+    struct HeadStore {
+        inner: InMemory,
+        /// The GET, counted from 1 and HEADs not counted, that answers 412.
+        precondition_on: u32,
+        gets: AtomicU32,
+        /// Answers for the HEADs, in order; the inner store answers once
+        /// the script is spent.
+        heads: std::sync::Mutex<std::collections::VecDeque<object_store::Result<ObjectMeta>>>,
+        seen: std::sync::Mutex<Vec<Seen>>,
+    }
+
+    use object_store::ObjectMeta;
+
+    impl HeadStore {
+        fn new(inner: InMemory, precondition_on: u32) -> HeadStore {
+            HeadStore {
+                inner,
+                precondition_on,
+                gets: AtomicU32::new(0),
+                heads: std::sync::Mutex::new(std::collections::VecDeque::new()),
+                seen: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn head_answers(self, answers: Vec<object_store::Result<ObjectMeta>>) -> HeadStore {
+            *self.heads.lock().unwrap() = answers.into();
+            self
+        }
+
+        fn seen(&self) -> Vec<Seen> {
+            self.seen.lock().unwrap().clone()
+        }
+
+        fn heads(&self) -> usize {
+            self.seen().iter().filter(|(_, _, head)| *head).count()
+        }
+    }
+
+    impl fmt::Display for HeadStore {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "HeadStore")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ObjectStore for HeadStore {
+        async fn put_opts(
+            &self,
+            location: &Path,
+            payload: PutPayload,
+            opts: object_store::PutOptions,
+        ) -> object_store::Result<object_store::PutResult> {
+            self.inner.put_opts(location, payload, opts).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &Path,
+            opts: object_store::PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+            self.inner.put_multipart_opts(location, opts).await
+        }
+
+        async fn get_opts(
+            &self,
+            location: &Path,
+            options: GetOptions,
+        ) -> object_store::Result<GetResult> {
+            self.seen.lock().unwrap().push((
+                options.if_match.clone(),
+                options.version.clone(),
+                options.head,
+            ));
+            if options.head {
+                let scripted = self.heads.lock().unwrap().pop_front();
+                if let Some(answer) = scripted {
+                    let meta = answer?;
+                    return Ok(GetResult {
+                        payload: GetResultPayload::Stream(Box::pin(futures_util::stream::empty())),
+                        range: 0..meta.size,
+                        meta,
+                        attributes: Default::default(),
+                        extensions: Default::default(),
+                    });
+                }
+                return self.inner.get_opts(location, options).await;
+            }
+            if self.gets.fetch_add(1, Ordering::Relaxed) + 1 == self.precondition_on {
+                return Err(object_store::Error::Precondition {
+                    path: location.to_string(),
+                    source: "overwritten".into(),
+                });
+            }
+            self.inner.get_opts(location, options).await
+        }
+
+        fn delete_stream(
+            &self,
+            locations: futures_util::stream::BoxStream<'static, object_store::Result<Path>>,
+        ) -> futures_util::stream::BoxStream<'static, object_store::Result<Path>> {
+            self.inner.delete_stream(locations)
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&Path>,
+        ) -> futures_util::stream::BoxStream<'static, object_store::Result<ObjectMeta>> {
+            self.inner.list(prefix)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&Path>,
+        ) -> object_store::Result<object_store::ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy_opts(
+            &self,
+            from: &Path,
+            to: &Path,
+            options: object_store::CopyOptions,
+        ) -> object_store::Result<()> {
+            self.inner.copy_opts(from, to, options).await
+        }
+    }
+
+    fn notified(version: Option<&str>) -> Origin {
+        Origin::Notification {
+            version: version.map(str::to_owned),
+            re_enqueues: 0,
+        }
+    }
+
+    fn meta(etag: Option<&str>, size: u64) -> ObjectMeta {
+        ObjectMeta {
+            location: Path::from("k"),
+            last_modified: chrono::DateTime::from_timestamp_millis(1_760_000_000_000).unwrap(),
+            size,
+            e_tag: etag.map(str::to_owned),
+            version: None,
+        }
+    }
+
+    /// A 30-byte object `k` and its listed entry, the ETag the store reports.
+    async fn thirty_bytes() -> (InMemory, ObjectEntry) {
+        let store = seeded(&[("k", b"0123456789abcdefghijABCDEFGHIJ")]).await;
+        let listed = list_all(&(Arc::new(store.clone()) as Arc<dyn ObjectStore>), None)
+            .await
+            .unwrap();
+        (store, listed[0].clone())
+    }
+
+    /// Drive a fetcher over the one `entry` of a unit from `origin`, in
+    /// 10-byte windows, and collect its message stream.
+    async fn fetch_from(
+        store: Arc<HeadStore>,
+        entry: ObjectEntry,
+        origin: Origin,
+        retries: Option<spate_core::metrics::Counter>,
+    ) -> Vec<ChunkMsg> {
+        let (tx, mut rx) = mpsc::channel(64);
+        let task = tokio::spawn(run_fetcher(FetcherParams {
+            split: SplitId::new("s3-test").unwrap(),
+            store,
+            slice: Arc::new(vec![entry]),
+            start_ordinal: 0,
+            resume_etag: None,
+            chunk_bytes: 64,
+            range_bytes: 10,
+            tx,
+            pause: Arc::new(AtomicBool::new(false)),
+            stop: Arc::new(AtomicBool::new(false)),
+            retry_base: Duration::from_millis(1),
+            retries,
+            range: None,
+            bytes_read: None,
+            origin,
+        }));
+        let mut msgs = Vec::new();
+        while let Some(m) = rx.recv().await {
+            msgs.push(m);
+        }
+        task.await.unwrap();
+        msgs
+    }
+
+    fn last_failure(msgs: Vec<ChunkMsg>) -> SplitFailure {
+        match msgs.into_iter().last() {
+            Some(ChunkMsg::LaneFailed(failure)) => failure,
+            other => panic!("the read did not fail: {other:?}"),
+        }
+    }
+
+    /// Pins that a notification unit naming a version sends it on every
+    /// window of a pinned read and on an unpinned read.
+    #[tokio::test]
+    async fn a_notification_unit_with_a_version_id_reads_that_version() {
+        let (inner, entry) = thirty_bytes().await;
+        let store = Arc::new(HeadStore::new(inner.clone(), 0));
+        let msgs = fetch_from(Arc::clone(&store), entry.clone(), notified(Some("v1")), None).await;
+        assert_eq!(assembled(&msgs)[0].1.len(), 30);
+        let seen = store.seen();
+        assert_eq!(seen.len(), 3, "{seen:?}");
+        for (if_match, version, head) in seen {
+            assert_eq!(if_match, entry.etag);
+            assert_eq!(version.as_deref(), Some("v1"));
+            assert!(!head);
+        }
+
+        let store = Arc::new(HeadStore::new(inner, 0));
+        let unpinned = ObjectEntry {
+            etag: None,
+            ..entry
+        };
+        fetch_from(Arc::clone(&store), unpinned, notified(Some("v1")), None).await;
+        assert_eq!(store.seen(), [(None, Some("v1".to_owned()), false)]);
+    }
+
+    /// Pins that a notification whose `versionId` is absent, null, `""` or
+    /// `"null"` reads the key, as a lister's unit does.
+    #[tokio::test]
+    async fn a_null_or_absent_version_id_reads_by_key() {
+        let (inner, entry) = thirty_bytes().await;
+        let scope = crate::unit::Scope {
+            bucket: Some("bucket".to_owned()),
+            prefix: Path::from(""),
+        };
+        let packing = crate::split::Packing {
+            target_bytes: 1 << 20,
+            compression: crate::config::Compression::None,
+            delimiter: Some(b'\n'),
+        };
+        let mut origins = vec![Origin::Lister];
+        for version in [None, Some(serde_json::Value::Null), Some("".into()), Some("null".into())] {
+            let mut object = serde_json::json!({ "key": "k", "size": 30 });
+            if let Some(version) = version {
+                object["versionId"] = version;
+            }
+            let body = serde_json::json!({ "Records": [{
+                "eventName": "ObjectCreated:Put",
+                "s3": { "bucket": { "name": "bucket" }, "object": object },
+            }]});
+            let crate::unit::Decoded::Read(cursors) =
+                crate::unit::decode(&serde_json::to_vec(&body).unwrap(), &scope, packing)
+            else {
+                panic!("the notification is not read");
+            };
+            origins.extend(cursors.into_iter().flatten().map(|part| part.origin));
+        }
+        assert_eq!(origins.len(), 5);
+        for origin in origins {
+            let store = Arc::new(HeadStore::new(inner.clone(), 0));
+            fetch_from(Arc::clone(&store), entry.clone(), origin.clone(), None).await;
+            let seen = store.seen();
+            assert!(!seen.is_empty());
+            assert!(seen.iter().all(|(_, version, _)| version.is_none()), "{origin:?}: {seen:?}");
+        }
+    }
+
+    /// Pins that a failed precondition mid-read of a notification unit with
+    /// no version HEADs the key once and ends the lane's stream with the
+    /// overwrite at the content the HEAD reports, after the windows already
+    /// read.
+    #[tokio::test]
+    async fn a_412_on_a_notification_read_heads_the_key_and_reports_the_overwrite() {
+        let (inner, entry) = thirty_bytes().await;
+        let store =
+            Arc::new(HeadStore::new(inner, 2).head_answers(vec![Ok(meta(Some("new"), 99))]));
+        let msgs = fetch_from(Arc::clone(&store), entry, notified(None), None).await;
+        let chunks: Vec<&[u8]> = msgs
+            .iter()
+            .filter_map(|m| match m {
+                ChunkMsg::Chunk(b) => Some(b.as_ref()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(chunks, [b"0123456789".as_slice()]);
+        assert_eq!(store.heads(), 1);
+        let SplitFailure::Overwritten(overwrite) = last_failure(msgs) else {
+            panic!("not an overwrite");
+        };
+        assert_eq!(
+            *overwrite,
+            Overwrite {
+                key: "k".to_owned(),
+                etag: Some("\"new\"".to_owned()),
+                size: 99,
+                last_modified_ms: 1_760_000_000_000,
+            }
+        );
+    }
+
+    /// Pins that a failed precondition on a lister's unit or on a read that
+    /// names a version poisons the split as `EtagDrift` without a HEAD.
+    #[tokio::test]
+    async fn a_412_on_a_lister_or_versioned_read_poisons_without_a_head() {
+        for origin in [Origin::Lister, notified(Some("v1"))] {
+            let (inner, entry) = thirty_bytes().await;
+            let store = Arc::new(HeadStore::new(inner, 1));
+            let msgs = fetch_from(Arc::clone(&store), entry, origin.clone(), None).await;
+            assert_eq!(store.heads(), 0, "{origin:?}");
+            assert!(
+                matches!(last_failure(msgs), SplitFailure::Poison(PoisonKind::EtagDrift, _)),
+                "{origin:?}"
+            );
+        }
+    }
+
+    /// Pins that a HEAD reporting the ETag the read was pinned to poisons
+    /// the split as `EtagDrift`, since a unit at that ETag fails the same
+    /// way.
+    #[tokio::test]
+    async fn a_head_reporting_the_pinned_etag_poisons_the_read() {
+        let (inner, entry) = thirty_bytes().await;
+        let pinned = entry.etag.clone().unwrap();
+        let store = Arc::new(
+            HeadStore::new(inner, 1)
+                .head_answers(vec![Ok(meta(Some(pinned.trim_matches('"')), 30))]),
+        );
+        let entry = ObjectEntry {
+            etag: Some(crate::unit::quoted(pinned.clone())),
+            ..entry
+        };
+        let msgs = fetch_from(Arc::clone(&store), entry, notified(None), None).await;
+        assert_eq!(store.heads(), 1);
+        assert!(matches!(
+            last_failure(msgs),
+            SplitFailure::Poison(PoisonKind::EtagDrift, _)
+        ));
+    }
+
+    /// Pins that a HEAD answering no ETag reports an overwrite that reads
+    /// unpinned.
+    #[tokio::test]
+    async fn a_head_reporting_no_etag_reports_an_unpinned_overwrite() {
+        let (inner, entry) = thirty_bytes().await;
+        let store = Arc::new(HeadStore::new(inner, 1).head_answers(vec![Ok(meta(None, 7))]));
+        let msgs = fetch_from(store, entry, notified(None), None).await;
+        let SplitFailure::Overwritten(overwrite) = last_failure(msgs) else {
+            panic!("not an overwrite");
+        };
+        assert_eq!((overwrite.etag, overwrite.size), (None, 7));
+    }
+
+    /// Pins that a HEAD after a 412 is classified as a read is: 404 poisons
+    /// the split as `NotFound`, and 403 fails the pipeline.
+    #[tokio::test]
+    async fn a_head_after_a_412_classifies_404_and_403_as_a_read_does() {
+        let (inner, entry) = thirty_bytes().await;
+        let store = Arc::new(HeadStore::new(inner.clone(), 1).head_answers(vec![Err(
+            object_store::Error::NotFound {
+                path: "k".into(),
+                source: "gone".into(),
+            },
+        )]));
+        let msgs = fetch_from(store, entry.clone(), notified(None), None).await;
+        assert!(matches!(
+            last_failure(msgs),
+            SplitFailure::Poison(PoisonKind::NotFound, _)
+        ));
+        let store = Arc::new(HeadStore::new(inner, 1).head_answers(vec![Err(
+            object_store::Error::PermissionDenied {
+                path: "k".into(),
+                source: "denied".into(),
+            },
+        )]));
+        let msgs = fetch_from(store, entry, notified(None), None).await;
+        assert!(matches!(last_failure(msgs), SplitFailure::Fatal(_)));
+    }
+
+    /// Pins that a transient HEAD failure after a 412 is retried and counted
+    /// in `get_retries`, and that a HEAD failing past the attempt budget
+    /// poisons the split as `RetriesExhausted`.
+    #[tokio::test(start_paused = true)]
+    async fn a_retryable_head_after_a_412_is_retried() {
+        let transient = || object_store::Error::Generic {
+            store: "head",
+            source: "503".into(),
+        };
+        let (inner, entry) = thirty_bytes().await;
+        let retried = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let store = Arc::new(
+            HeadStore::new(inner.clone(), 1)
+                .head_answers(vec![Err(transient()), Ok(meta(Some("new"), 30))]),
+        );
+        let msgs = fetch_from(
+            Arc::clone(&store),
+            entry.clone(),
+            notified(None),
+            Some(spate_core::metrics::Counter::from_arc(Arc::clone(&retried))),
+        )
+        .await;
+        assert!(matches!(last_failure(msgs), SplitFailure::Overwritten(_)));
+        assert_eq!(store.heads(), 2);
+        assert_eq!(retried.load(Ordering::Relaxed), 1);
+
+        let failing = (0..MAX_ATTEMPTS).map(|_| Err(transient())).collect();
+        let store = Arc::new(HeadStore::new(inner, 1).head_answers(failing));
+        let msgs = fetch_from(Arc::clone(&store), entry, notified(None), None).await;
+        assert!(matches!(
+            last_failure(msgs),
+            SplitFailure::Poison(PoisonKind::RetriesExhausted, _)
+        ));
+        assert_eq!(store.heads(), MAX_ATTEMPTS as usize);
+    }
 }

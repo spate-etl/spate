@@ -14,9 +14,11 @@
 //! threshold under which the feed drops it unseen.
 
 use object_store::ObjectStoreExt as _;
+use spate_core::clock::tokio::TestClock;
 use spate_core::config::{FeedSection, PipelineConfig};
 use spate_core::feed::{
-    Confirmation, Delivery, Feed, FeedError, FeedWaker, Receipt, Unit, wake_channel,
+    Confirmation, Delivery, DepthOf, DepthReading, Feed, FeedError, FeedWaker, Receipt, Unit,
+    wake_channel,
 };
 use spate_core::ops::chain_owned;
 use spate_core::pipeline::{ExitState, Pipeline, RuntimeOptions, ShutdownHandle};
@@ -30,6 +32,7 @@ use spate_test::{
 };
 use spate_test_support::ElasticMq;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -66,11 +69,13 @@ fn feed_yaml(mq: &ElasticMq, queue_url: &str, visibility: Duration, extra: &str)
 }
 
 /// A [`Feed`] that passes every call to the SQS feed and records each
-/// delivery's count and when the reader took it.
+/// delivery's count and when the reader took it, and counts the reads of the
+/// queue's depth.
 #[derive(Clone)]
 struct Recording {
     inner: Arc<SqsFeed>,
     seen: Arc<Mutex<Vec<(u32, Instant)>>>,
+    depth_reads: Arc<AtomicUsize>,
 }
 
 impl Recording {
@@ -78,7 +83,13 @@ impl Recording {
         Recording {
             inner,
             seen: Arc::default(),
+            depth_reads: Arc::default(),
         }
+    }
+
+    /// Reads of the queue's depth, the startup probe included.
+    fn depth_reads(&self) -> usize {
+        self.depth_reads.load(Ordering::SeqCst)
     }
 
     fn deliveries(&self) -> Vec<u32> {
@@ -124,6 +135,13 @@ impl Feed for Recording {
     fn publish(&self, unit: Unit) -> Confirmation {
         self.inner.publish(unit)
     }
+
+    fn read_depth(&self, of: DepthOf) -> Option<DepthReading> {
+        if of == DepthOf::Feed {
+            self.depth_reads.fetch_add(1, Ordering::SeqCst);
+        }
+        self.inner.read_depth(of)
+    }
 }
 
 /// A pipeline reading `data` through the SQS feed its `feed:` section names.
@@ -149,13 +167,29 @@ fn launch_with_source(
     feed_section: &str,
     pre: impl FnOnce(&SinkScript),
 ) -> Worker {
-    let yaml = format!(
+    launch_customized(data, source_extra, feed_section, pre, |source| source)
+}
+
+/// The pipeline file every worker and lister run reads.
+fn pipeline_yaml(data: &Path, source_extra: &str, feed_section: &str) -> String {
+    format!(
         "pipeline: {{ name: sqs-feed, threads: 1 }}\nadmin: {{ listen: none }}\n\
          checkpoint: {{ interval: 100ms }}\nmetrics: {{ exporter: none }}\n\
          source:\n  s3:\n    url: \"file://{}/\"\n{source_extra}\
          sink: {{ capture: {{ chunk: {{ target_bytes: 64 }} }} }}\n{feed_section}",
         data.display()
-    );
+    )
+}
+
+/// [`launch_with_source`], with `customize` applied to the source.
+fn launch_customized(
+    data: &Path,
+    source_extra: &str,
+    feed_section: &str,
+    pre: impl FnOnce(&SinkScript),
+    customize: impl FnOnce(S3Source) -> S3Source,
+) -> Worker {
+    let yaml = pipeline_yaml(data, source_extra, feed_section);
     let mut config = PipelineConfig::from_str(&yaml).unwrap();
     config.pipeline.name = spate_test::unique_name(&config.pipeline.name);
     let pipeline = Pipeline::from_config(config).unwrap();
@@ -164,9 +198,11 @@ fn launch_with_source(
     let feed =
         Arc::new(SqsFeed::connect_with_static_credentials(&section, &io, "test", "test").unwrap());
     let recording = Recording::new(Arc::clone(&feed));
-    let source = S3Source::from_component_config(&pipeline.config().source, io)
-        .unwrap()
-        .with_framer(|| Box::new(NdjsonFramer::new(1 << 20)));
+    let source = customize(
+        S3Source::from_component_config(&pipeline.config().source, io)
+            .unwrap()
+            .with_framer(|| Box::new(NdjsonFramer::new(1 << 20))),
+    );
     let mut pool = SinkPoolConfig::default();
     pool.batch.max_rows = 1;
     pool.batch.linger = Duration::from_millis(10);
@@ -628,4 +664,267 @@ fn connecting_logs_what_the_startup_checks_read() {
 #[derive(serde::Deserialize)]
 struct PipelineConfigFeed {
     feed: FeedSection,
+}
+
+/// The step a bounded job's end check reads the queue at.
+const STEP: Duration = Duration::from_secs(15);
+
+/// Steps in the default five-minute settling window.
+const STEPS: usize = 20;
+
+/// The `feed:` section of a bounded job at a `file://` location under
+/// `dir`, outside the data prefix.
+fn bounded_yaml(mq: &ElasticMq, url: &str, dir: &tempfile::TempDir) -> (String, PathBuf) {
+    let jobs = dir.path().join("jobs");
+    let extra = format!("  location: \"file://{}/\"\n", jobs.display());
+    (feed_yaml(mq, url, VISIBILITY, &extra), jobs)
+}
+
+/// Run the job's lister once: publish a unit per object under `data` to
+/// the queue and write the fingerprint and the end marker at the location.
+fn list_once(data: &Path, feed_section: &str) {
+    let config = PipelineConfig::from_str(&pipeline_yaml(data, "", feed_section)).unwrap();
+    let section = config.feed.clone().unwrap();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let feed =
+        SqsFeed::connect_with_static_credentials(&section, rt.handle(), "test", "test").unwrap();
+    S3Source::from_component_config(&config.source, rt.handle().clone())
+        .unwrap()
+        .with_framer(|| Box::new(NdjsonFramer::new(1 << 20)))
+        .list_once(&section, Arc::new(feed))
+        .unwrap();
+}
+
+/// Launch a bounded worker whose end check runs on `clock`.
+fn launch_bounded(data: &Path, feed_section: &str, clock: &Arc<TestClock>) -> Worker {
+    let clock = Arc::clone(clock);
+    launch_customized(
+        data,
+        "",
+        feed_section,
+        |_| {},
+        move |source| source.with_clock(clock),
+    )
+}
+
+/// Wait until the worker has read the queue's depth `n` times, the startup
+/// probe included.
+fn wait_for_reads(worker: &Worker, n: usize) {
+    wait_until(DEADLINE, &format!("{n} depth reads"), || {
+        worker.recording.depth_reads() >= n
+    });
+}
+
+/// Advance `steps` steps, waiting after each for one more depth read, from
+/// `reads` already taken. Returns the count.
+fn step_reads(worker: &Worker, clock: &TestClock, mut reads: usize, steps: usize) -> usize {
+    for _ in 0..steps {
+        clock.advance(STEP);
+        reads += 1;
+        wait_for_reads(worker, reads);
+    }
+    reads
+}
+
+fn running(worker: &Worker) -> bool {
+    worker.run.wait_exit(Duration::ZERO).is_none()
+}
+
+/// Advance one step and wait until the worker takes one more depth read
+/// than `reads`, or exits. Returns its exit report once it has exited; the
+/// run hands its report out once, so this keeps it.
+fn step_or_exit(
+    worker: &Worker,
+    clock: &TestClock,
+    reads: usize,
+) -> Option<spate_core::pipeline::ExitReport> {
+    clock.advance(STEP);
+    let mut exit = None;
+    wait_until(DEADLINE, "the next depth read or the end", || {
+        if exit.is_none() {
+            exit = worker.run.wait_exit(Duration::ZERO);
+        }
+        exit.is_some() || worker.recording.depth_reads() > reads
+    });
+    exit.map(|report| report.expect("the run starts"))
+}
+
+/// Pins that a bounded job on SQS waits for its lister's end marker: with
+/// the marker gone the worker reads its unit and keeps running, taking no
+/// depth read, and once the marker is back it ends `Completed` one window of
+/// empty reads later.
+#[test]
+#[ignore = "requires Docker"]
+fn a_bounded_job_waits_for_the_end_marker() {
+    let mq = ElasticMq::start().unwrap();
+    let url = queue_with_dead_letter(&mq, "marker");
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let rows = recs("m", 2);
+    let _unit = stage(&data, "m.ndjson", &rows);
+    let (section, jobs) = bounded_yaml(&mq, &url, &dir);
+    list_once(&data, &section);
+    let end = jobs.join("end");
+    let marker = std::fs::read(&end).expect("the lister wrote the end marker");
+    std::fs::remove_file(&end).unwrap();
+
+    let clock = TestClock::frozen();
+    let worker = launch_bounded(&data, &section, &clock);
+    wait_until(DEADLINE, "the unit is read and deleted", || {
+        written(&worker.script) == sorted(rows.clone())
+            && mq.approximate_counts(path_of(&url)).unwrap() == (0, 0)
+    });
+    let probe = 1;
+    clock.advance(STEP * STEPS as u32);
+    assert!(running(&worker), "no marker, no end");
+    assert_eq!(worker.recording.depth_reads(), probe, "no window opened");
+
+    std::fs::write(&end, marker).unwrap();
+    clock.advance(STEP);
+    wait_for_reads(&worker, probe + 1);
+    step_reads(&worker, &clock, probe + 1, STEPS - 1);
+    assert!(running(&worker), "one step short of the window");
+    clock.advance(STEP);
+    let report = worker
+        .run
+        .wait_exit(DEADLINE)
+        .expect("the run exits")
+        .unwrap();
+    assert_eq!(report.state, ExitState::Completed);
+    assert_eq!(report.exit_code(), 0);
+}
+
+/// Pins that a unit SQS moved to the dead-letter queue ends a bounded job
+/// `Stalled`: once the queue reads empty over the window, the dead-letter
+/// queue's count fails the run with exit code 1, naming it.
+#[test]
+#[ignore = "requires Docker"]
+fn a_dead_lettered_unit_ends_the_job_stalled() {
+    let mq = ElasticMq::start().unwrap();
+    let url = queue_with_dead_letter(&mq, "stalled");
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let _unit = stage(&data, "gone.ndjson", &recs("g", 1));
+    let (section, _jobs) = bounded_yaml(&mq, &url, &dir);
+    list_once(&data, &section);
+    // The unit now names an object that is gone, so every read fails it.
+    std::fs::remove_file(data.join("gone.ndjson")).unwrap();
+
+    let clock = TestClock::frozen();
+    let worker = launch_bounded(&data, &section, &clock);
+    let dead = format!("{}-dlq", path_of(&url));
+    wait_until(DEADLINE, "the unit moves to the dead-letter queue", || {
+        mq.approximate_counts(&dead).unwrap() == (1, 0)
+            && mq.approximate_counts(path_of(&url)).unwrap() == (0, 0)
+    });
+    // The worker reads the queue each step while the unit is held, so the
+    // window opens on whichever read finds it empty.
+    let first = worker.recording.depth_reads();
+    let report = loop {
+        let reads = worker.recording.depth_reads();
+        if let Some(report) = step_or_exit(&worker, &clock, reads) {
+            break report;
+        }
+        assert!(reads < first + 4 * STEPS, "the job never ended");
+    };
+    assert_eq!(report.exit_code(), 1);
+    let ExitState::Failed(failure) = &report.state else {
+        panic!("expected a failed run, got {:?}", report.state);
+    };
+    assert!(
+        failure.reason.contains("bounded feed job stalled")
+            && failure.reason.contains("stalled-dlq")
+            && failure.reason.contains("1 visible"),
+        "{}",
+        failure.reason
+    );
+}
+
+/// Pins that an idle worker stays to the end: while a stopped peer holds
+/// the job's last unit the worker keeps reading the queue past a whole
+/// window, reads the unit when SQS delivers it again, and ends `Completed`
+/// one window after the queue reads empty.
+#[test]
+#[ignore = "requires Docker"]
+fn an_idle_worker_reads_a_unit_redelivered_after_its_owner_dies() {
+    let mq = ElasticMq::start().unwrap();
+    let url = queue_with_dead_letter(&mq, "owner");
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let rows = recs("o", 2);
+    let _unit = stage(&data, "o.ndjson", &rows);
+    let (section, _jobs) = bounded_yaml(&mq, &url, &dir);
+    list_once(&data, &section);
+
+    // The owner takes the unit and stops as a crashed worker would.
+    let config = PipelineConfig::from_str(&pipeline_yaml(&data, "", &section)).unwrap();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let owner = SqsFeed::connect_with_static_credentials(
+        config.feed.as_ref().unwrap(),
+        rt.handle(),
+        "test",
+        "test",
+    )
+    .unwrap();
+    let (waker, park) = wake_channel();
+    owner.set_waker(waker);
+    let mut taken = Vec::new();
+    wait_until(DEADLINE, "the owner takes the unit", || {
+        taken.extend(owner.receive(1).unwrap());
+        park.park(Duration::from_millis(100));
+        !taken.is_empty()
+    });
+    owner.abandon();
+
+    let clock = TestClock::frozen();
+    let worker = launch_bounded(&data, &section, &clock);
+    wait_for_reads(&worker, 2);
+    let reads = step_reads(&worker, &clock, 2, STEPS);
+    assert!(
+        running(&worker),
+        "the worker stands by while a peer holds a unit"
+    );
+    wait_until(DEADLINE, "the unit is delivered again and read", || {
+        worker.recording.deliveries().contains(&2)
+            && written(&worker.script) == sorted(rows.clone())
+            && mq.approximate_counts(path_of(&url)).unwrap() == (0, 0)
+    });
+    let report = loop {
+        let now = worker.recording.depth_reads();
+        if let Some(report) = step_or_exit(&worker, &clock, now) {
+            break report;
+        }
+        assert!(now < reads + 4 * STEPS, "the job never ended");
+    };
+    assert_eq!(report.state, ExitState::Completed);
+}
+
+/// Pins that a delayed message keeps a bounded job running: the queue's
+/// delayed count holds the window open past a whole window.
+#[test]
+#[ignore = "requires Docker"]
+fn a_delayed_unit_keeps_the_job_running() {
+    let mq = ElasticMq::start().unwrap();
+    let url = queue_with_dead_letter(&mq, "delayed");
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let (section, _jobs) = bounded_yaml(&mq, &url, &dir);
+    list_once(&data, &section);
+    mq.send_delayed(path_of(&url), "later", Duration::from_secs(900))
+        .unwrap();
+
+    let clock = TestClock::frozen();
+    let worker = launch_bounded(&data, &section, &clock);
+    wait_for_reads(&worker, 2);
+    step_reads(&worker, &clock, 2, STEPS + 2);
+    assert!(running(&worker), "a delayed unit holds the window open");
+    assert_eq!(worker.stop(), ExitState::Completed);
 }

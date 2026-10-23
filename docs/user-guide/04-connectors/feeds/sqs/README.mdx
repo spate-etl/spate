@@ -100,6 +100,10 @@ retried.
   names no SQS queue;
 - a dead-letter queue it cannot read, because it does not exist or the
   identity lacks `sqs:GetQueueAttributes` on it;
+- a queue or dead-letter queue that does not report
+  `ApproximateNumberOfMessages`, `ApproximateNumberOfMessagesDelayed` and
+  `ApproximateNumberOfMessagesNotVisible` as numbers, which a bounded job's
+  [end check](#ending-a-bounded-job) reads;
 - a dead-letter queue whose `MessageRetentionPeriod` is no longer than the
   queue's. SQS counts retention from a message's first send, so such a queue
   can delete a unit as soon as it arrives. SQS keeps a message for at most 14
@@ -178,6 +182,39 @@ queue. A unit deleted that way is lost, which INV-1 places outside its
 property (see [the invariants](../../../../INVARIANTS.md#inv-1)). A
 dead-letter queue deleted after the pipeline starts loses the units moved to
 it; nothing checks for it while the pipeline runs.
+
+## Ending a bounded job
+
+A [bounded job](../../sources/s3/README.mdx#how-a-bounded-job-ends) reads the
+queue's depth from `GetQueueAttributes`: `ApproximateNumberOfMessages` as
+ready, `ApproximateNumberOfMessagesDelayed` as delayed, and
+`ApproximateNumberOfMessagesNotVisible` as received and not yet deleted. The
+feed adds the deletes and fails it has accepted and not yet sent. A worker
+reads them every 15 seconds over the settling window, and the window starts
+again on any read that is not all zeros. Once the window passes, the worker
+reads the dead-letter queue's three counts, and any message there fails the
+job as stalled, naming the dead-letter queue.
+
+SQS's counts are estimates, and AWS documents them as taking up to a minute
+after the producers stop to settle, so `sqs` refuses a `settling_window`
+below `1m`. ElasticMQ, which the CI suite runs against, reports exact counts,
+so no test checks the window against counts that lag. A read SQS fails
+transiently starts the window again; one it refuses, such as for a missing
+permission, fails the job. The reads need `sqs:GetQueueAttributes` on both
+queues, which [the startup checks](#startup-checks) already need.
+
+The dead-letter queue is read only after the window passes. A unit moved there
+earlier in the job and deleted at the end of the dead-letter queue's retention,
+counted from the unit's first send, leaves no trace, and the job ends
+completed over it. Keep a bounded job shorter than the dead-letter queue's
+retention, and alert on the dead-letter queue's
+`ApproximateNumberOfMessagesVisible` in CloudWatch: Spate does not see a
+message move there while a job runs, and a job with no `location` never reads
+the dead-letter queue at all.
+
+Give each bounded job a queue and a dead-letter queue of its own. A dead-letter
+queue that holds an earlier job's messages fails a later job as stalled, and a
+queue that also receives storage notifications keeps the window from closing.
 
 ## Stop
 

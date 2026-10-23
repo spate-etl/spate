@@ -41,6 +41,11 @@
 //! - SQS keeps a message hidden for at most 12 hours from the receive that
 //!   issued its receipt handle, and the feed clamps every extension to that
 //!   hold.
+//! - [`read_depth`](spate_core::feed::Feed::read_depth) reports the queue's
+//!   or the dead-letter queue's approximate message counts, which a bounded
+//!   job's end check reads. The queue's depth also counts the deletes and
+//!   fails the feed has accepted and not yet sent. A `feed:` section that
+//!   sets `settling_window` below one minute is refused.
 //!
 //! No AWS SDK type appears in this crate's public API.
 

@@ -188,6 +188,46 @@ impl ElasticMq {
         .map(drop)
     }
 
+    /// Sends `body` to `queue` hidden for `delay`, whole seconds up to 900,
+    /// as SQS's `DelaySeconds` does.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the API refuses the call.
+    pub fn send_delayed(&self, queue: &str, body: &str, delay: Duration) -> Result<(), String> {
+        let seconds = delay.as_secs().to_string();
+        call(
+            self.api,
+            queue,
+            &[
+                ("Action", "SendMessage"),
+                ("MessageBody", body),
+                ("DelaySeconds", &seconds),
+            ],
+        )
+        .map(drop)
+    }
+
+    /// The approximate number of delayed messages on `queue`.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the API refuses the call or the reply lacks the count.
+    pub fn approximate_delayed(&self, queue: &str) -> Result<u64, String> {
+        let name = "ApproximateNumberOfMessagesDelayed";
+        let reply = call(
+            self.api,
+            queue,
+            &[("Action", "GetQueueAttributes"), ("AttributeName.1", name)],
+        )?;
+        reply
+            .split("<Attribute>")
+            .find(|a| element(a, "Name") == Some(name))
+            .and_then(|a| element(a, "Value"))
+            .and_then(|v| v.parse().ok())
+            .ok_or_else(|| format!("no {name} in GetQueueAttributes reply: {reply}"))
+    }
+
     /// Receives up to ten messages from `queue` without waiting. Each stays
     /// in flight, and invisible to other receives, until deleted or until the
     /// queue's visibility timeout passes.

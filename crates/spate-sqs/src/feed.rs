@@ -26,11 +26,11 @@ use crate::queue::{
     BatchOutcome, DeleteEntry, Queue, ReceiveRequest, Received, SendEntry, UNIT_ATTRIBUTE,
     VisibilityEntry,
 };
-use crate::startup;
+use crate::startup::{self, COUNT_ATTRIBUTES, QueueAttributes, counts};
 use spate_core::config::FeedSection;
 use spate_core::feed::{
-    Confirmation, Confirmer, Delivery, Feed, FeedError, FeedErrorKind, FeedWaker, Receipt, Unit,
-    confirmation,
+    Confirmation, Confirmer, Delivery, Depth, DepthOf, DepthReading, Feed, FeedError,
+    FeedErrorKind, FeedWaker, Receipt, Unit, confirmation, depth_reading,
 };
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -196,6 +196,8 @@ struct State {
     next: u64,
     deletes: Vec<Settle>,
     fails: Vec<Settle>,
+    /// Deletes and fails the settle task has taken and not finished sending.
+    settling: usize,
     publishes: Vec<Publish>,
     /// The batch the publish task is sending, in entry order.
     sending: Vec<Publish>,
@@ -220,6 +222,10 @@ struct Shared {
     /// Signals the publish task that a publish was queued.
     publish: Notify,
     queue: Arc<dyn Queue>,
+    /// Reads the counts a depth read reports.
+    attributes: Arc<dyn QueueAttributes>,
+    queue_url: String,
+    dead_letter_url: String,
     settings: Settings,
 }
 
@@ -283,6 +289,8 @@ impl Shared {
 pub struct SqsFeed {
     shared: Arc<Shared>,
     tasks: Vec<AbortHandle>,
+    /// Runs each depth read.
+    io: tokio::runtime::Handle,
 }
 
 impl std::fmt::Debug for SqsFeed {
@@ -391,12 +399,22 @@ impl SqsFeed {
             dead_letter_retention_seconds = %unreported(checked.dead_letter_retention),
             "the SQS feed is connected"
         );
-        Ok(Self::start(Arc::new(queue), &config, io))
+        let queue = Arc::new(queue);
+        Ok(Self::start(
+            Arc::clone(&queue) as Arc<dyn Queue>,
+            queue,
+            checked.dead_letter_url,
+            &config,
+            io,
+        ))
     }
 
-    /// Start the feed's tasks over `queue` on `io`.
+    /// Start the feed's tasks over `queue` on `io`, reading counts through
+    /// `attributes`.
     fn start(
         queue: Arc<dyn Queue>,
+        attributes: Arc<dyn QueueAttributes>,
+        dead_letter_url: String,
         config: &SqsFeedConfig,
         io: &tokio::runtime::Handle,
     ) -> SqsFeed {
@@ -406,6 +424,9 @@ impl SqsFeed {
             settle: Notify::new(),
             publish: Notify::new(),
             queue,
+            attributes,
+            queue_url: config.queue_url.clone(),
+            dead_letter_url,
             settings: Settings {
                 visibility: config.visibility,
                 period: config.renewal_period(),
@@ -418,7 +439,11 @@ impl SqsFeed {
             io.spawn(settle_task(Arc::clone(&shared))).abort_handle(),
             io.spawn(publish_task(Arc::clone(&shared))).abort_handle(),
         ];
-        SqsFeed { shared, tasks }
+        SqsFeed {
+            shared,
+            tasks,
+            io: io.clone(),
+        }
     }
 
     /// Stop the feed as a crashed worker would: its tasks end, and buffered
@@ -653,6 +678,52 @@ impl Feed for SqsFeed {
         self.shared.publish.notify_one();
         confirmation
     }
+
+    fn read_depth(&self, of: DepthOf) -> Option<DepthReading> {
+        let (reporter, reading) = depth_reading();
+        let (url, what, unsent) = match of {
+            DepthOf::DeadLetters => {
+                let url = self.shared.dead_letter_url.clone();
+                let what = format!("the dead-letter queue {url}");
+                (url, what, 0)
+            }
+            _ => {
+                let unsent = {
+                    let st = self.lock();
+                    st.deletes.len() + st.fails.len() + st.settling
+                };
+                let url = self.shared.queue_url.clone();
+                let what = format!("the queue {url}");
+                (url, what, unsent as u64)
+            }
+        };
+        let attributes = Arc::clone(&self.shared.attributes);
+        // Detached: the reporter settles the reading, or reads as Retryable
+        // when the runtime drops the task.
+        drop(self.io.spawn(async move {
+            let outcome = match attributes.attributes(&url, COUNT_ATTRIBUTES).await {
+                Ok(read) => counts(&read)
+                    .map(|c| {
+                        let mut depth = Depth::new(what.as_str(), true);
+                        depth.visible = c.visible;
+                        depth.delayed = c.delayed;
+                        depth.in_flight = c.not_visible;
+                        depth.unsent = unsent;
+                        depth
+                    })
+                    .map_err(|e| FeedError::new(FeedErrorKind::Fatal, format!("{e}: {what}"))),
+                Err(e) => Err(FeedError::new(
+                    match e.class {
+                        Class::Fatal => FeedErrorKind::Fatal,
+                        Class::Retryable => FeedErrorKind::Retryable,
+                    },
+                    format!("reading the counts of {what}: {}", e.message),
+                )),
+            };
+            reporter.report(outcome);
+        }));
+        Some(reading)
+    }
 }
 
 /// Long polls while the reader wants more units than are buffered.
@@ -854,6 +925,7 @@ async fn settle_task(shared: Arc<Shared>) {
             if st.fatal.is_some() || st.abandoned {
                 return;
             }
+            st.settling = st.deletes.len() + st.fails.len();
             (
                 std::mem::take(&mut st.deletes),
                 std::mem::take(&mut st.fails),
@@ -911,6 +983,7 @@ async fn settle_task(shared: Arc<Shared>) {
                 return;
             }
         }
+        shared.lock().settling = 0;
     }
 }
 

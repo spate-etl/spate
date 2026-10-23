@@ -23,6 +23,8 @@ it to `Pipeline::feed`.
 - A unit is deleted only once every record in it is acknowledged.
 - A failed unit is made visible at once, and the queue's redrive policy moves a
   unit that keeps failing to its dead-letter queue.
+- A bounded job reads the queue's and the dead-letter queue's approximate
+  message counts to decide when it has ended.
 
 The [SQS feed page](https://spate.kainth.dev/docs/user-guide/connectors/feeds/sqs)
 covers configuration, permissions, the 12-hour hold and cost per request.

@@ -39,7 +39,11 @@ spate-sqs = { path = ".", features = ["testing"] }
 object_store = { workspace = true }
 serde_yaml = { workspace = true }
 spate-json = { workspace = true }
-spate-s3 = { workspace = true }
+# `testing`: `S3Source::with_clock`, so a bounded job's end check runs on a
+# test clock.
+spate-s3 = { workspace = true, features = ["testing"] }
+# `testing`: `TestClock`.
+spate-core = { workspace = true, features = ["testing"] }
 spate-test = { workspace = true }
 spate-test-support = { workspace = true, features = ["elasticmq", "tls"] }
 tempfile = { workspace = true }

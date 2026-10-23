@@ -108,6 +108,21 @@ fn elasticmq_sends_receives_and_deletes() {
     assert_eq!(elasticmq.approximate_counts(&queue).unwrap(), (0, 0));
 }
 
+/// ElasticMQ counts a message sent with a delay as delayed, neither visible
+/// nor in flight, which the SQS feed's end check reads.
+#[test]
+#[ignore = "requires Docker"]
+fn elasticmq_reports_a_delayed_message() {
+    let elasticmq = ElasticMq::start().unwrap();
+    let queue = elasticmq.create_queue("delayed").unwrap();
+    assert_eq!(elasticmq.approximate_delayed(&queue).unwrap(), 0);
+    elasticmq
+        .send_delayed(&queue, "later", std::time::Duration::from_secs(900))
+        .unwrap();
+    assert_eq!(elasticmq.approximate_delayed(&queue).unwrap(), 1);
+    assert_eq!(elasticmq.approximate_counts(&queue).unwrap(), (0, 0));
+}
+
 /// One receive returns every visible message, up to ten.
 #[test]
 #[ignore = "requires Docker"]

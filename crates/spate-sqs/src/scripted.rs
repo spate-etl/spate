@@ -6,7 +6,8 @@ use crate::queue::{
     BatchOutcome, BoxFuture, DeleteEntry, EntryFailure, Queue, ReceiveRequest, Received, SendEntry,
     VisibilityEntry,
 };
-use std::collections::VecDeque;
+use crate::startup::QueueAttributes;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -76,6 +77,11 @@ struct Script {
     visibility: Vec<Vec<VisibilityEntry>>,
     visibility_within: Vec<Option<Duration>>,
     deletes: Vec<Vec<DeleteEntry>>,
+    /// Each queue's message counts, or the error a read of them fails with.
+    /// A queue with neither reports all three as `0`.
+    counts: HashMap<String, Result<[u64; 3], CallError>>,
+    /// The queue URL of each attribute read, in order.
+    attribute_reads: Vec<String>,
     next: u64,
 }
 
@@ -92,6 +98,24 @@ pub(crate) struct ScriptedQueue {
 impl ScriptedQueue {
     fn lock(&self) -> MutexGuard<'_, Script> {
         self.script.lock().unwrap()
+    }
+
+    /// Report the queue at `url` as holding `visible`, `delayed` and
+    /// `not_visible` messages.
+    pub(crate) fn set_counts(&self, url: &str, visible: u64, delayed: u64, not_visible: u64) {
+        self.lock()
+            .counts
+            .insert(url.to_owned(), Ok([visible, delayed, not_visible]));
+    }
+
+    /// Fail every attribute read of the queue at `url` with `e`.
+    pub(crate) fn fail_attributes(&self, url: &str, e: CallError) {
+        self.lock().counts.insert(url.to_owned(), Err(e));
+    }
+
+    /// The queue URL of each attribute read, in order.
+    pub(crate) fn attribute_reads(&self) -> Vec<String> {
+        self.lock().attribute_reads.clone()
     }
 
     pub(crate) fn ready(&self, message: Message) {
@@ -268,5 +292,31 @@ impl Queue for ScriptedQueue {
             let failures = script.delete_failures.pop_front().unwrap_or_default();
             Ok(outcome(ids.into_iter(), failures))
         })
+    }
+}
+
+impl QueueAttributes for ScriptedQueue {
+    fn attributes<'a>(
+        &'a self,
+        queue_url: &'a str,
+        names: &'static [&'static str],
+    ) -> BoxFuture<'a, Result<HashMap<String, String>, CallError>> {
+        let answer = {
+            let mut script = self.lock();
+            script.attribute_reads.push(queue_url.to_owned());
+            match script.counts.get(queue_url).cloned().unwrap_or(Ok([0; 3])) {
+                Ok([visible, delayed, not_visible]) => Ok([
+                    ("ApproximateNumberOfMessages", visible),
+                    ("ApproximateNumberOfMessagesDelayed", delayed),
+                    ("ApproximateNumberOfMessagesNotVisible", not_visible),
+                ]
+                .into_iter()
+                .filter(|(name, _)| names.contains(name))
+                .map(|(name, n)| (name.to_owned(), n.to_string()))
+                .collect()),
+                Err(e) => Err(e),
+            }
+        };
+        Box::pin(async move { answer })
     }
 }

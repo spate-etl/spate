@@ -20,7 +20,8 @@ use spate_test::wait_until;
 use spate_test_support::{ACCESS_KEY, REGION, Rustfs, S3_PORT, SECRET_KEY};
 use support::broker;
 use support::feed::{
-    DEADLINE, WORK, committed, create_topics, feed_yaml, launch_source, recs, written,
+    DEADLINE, WORK, committed, create_topics, feed_yaml, high_watermark, launch_source, recs,
+    written,
 };
 use testcontainers::ImageExt;
 use testcontainers::core::IntoContainerPort;
@@ -104,6 +105,96 @@ fn a_key_with_reserved_and_non_ascii_bytes_reads_its_object() {
     wait_until(DEADLINE, "the notification's offset is committed", || {
         committed(&brokers, &group, WORK) == Some(1)
     });
+    assert_eq!(worker.stop(), ExitState::Completed);
+    drop(rustfs);
+}
+
+/// Pins the overwrite path against a store: an object written twice before
+/// the worker starts sends two notifications, the first one's read fails its
+/// precondition, the worker re-enqueues the key at its current ETag through
+/// the work topic, and the sink holds the second version's rows once for each
+/// of the two units that name it and none of the first's.
+#[test]
+#[ignore = "requires Docker"]
+fn an_object_overwritten_before_its_read_is_read_at_its_new_etag() {
+    // Declared first, the broker is dropped last; see the test above.
+    let kafka = broker()
+        .with_mapped_port(0, KAFKA_PORT)
+        .with_mapped_port(0, S3_PORT.tcp())
+        .start()
+        .expect("start kafka container");
+    let brokers = format!(
+        "127.0.0.1:{}",
+        kafka.get_host_port_ipv4(KAFKA_PORT).expect("broker port")
+    );
+    let s3_port = kafka.get_host_port_ipv4(S3_PORT).expect("S3 port");
+    create_topics(&brokers);
+    let rustfs = Rustfs::start_notifying(kafka.id(), s3_port, WORK).expect("start RustFS");
+    rustfs.create_bucket(BUCKET).expect("create bucket");
+    rustfs
+        .put_bucket_notification(BUCKET)
+        .expect("configure notifications");
+
+    let store = AmazonS3Builder::new()
+        .with_endpoint(rustfs.endpoint())
+        .with_allow_http(true)
+        .with_bucket_name(BUCKET)
+        .with_region(REGION)
+        .with_access_key_id(ACCESS_KEY)
+        .with_secret_access_key(SECRET_KEY)
+        .build()
+        .expect("S3 client");
+    let lines = |rows: &[String]| {
+        let mut body = Vec::new();
+        for row in rows {
+            body.extend_from_slice(row.as_bytes());
+            body.push(b'\n');
+        }
+        body
+    };
+    let first = recs("first", 3);
+    let second = recs("second", 5);
+    let path = Path::parse("dir/overwritten.ndjson").unwrap();
+    let io = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    io.block_on(store.put(&path, lines(&first).into()))
+        .expect("put the first version");
+    io.block_on(store.put(&path, lines(&second).into()))
+        .expect("put the second version");
+    wait_until(DEADLINE, "both notifications reach the work topic", || {
+        high_watermark(&brokers, WORK) == 2
+    });
+
+    let group = spate_test::unique_name("overwritten");
+    let source = format!(
+        "  s3:\n    url: \"s3://{BUCKET}/\"\n    store:\n      endpoint: \"{}\"\n      \
+         allow_http: \"true\"\n      access_key_id: \"{ACCESS_KEY}\"\n      \
+         secret_access_key: \"{SECRET_KEY}\"\n      region: \"{REGION}\"\n",
+        rustfs.endpoint()
+    );
+    let worker = launch_source(
+        KafkaFeed::connect,
+        &source,
+        &feed_yaml(&brokers, &group, "", ""),
+        |_| {},
+    );
+
+    let mut want: Vec<String> = second.iter().chain(&second).cloned().collect();
+    want.sort();
+    wait_until(
+        DEADLINE,
+        "the second version is written once per unit naming it",
+        || written(&worker.script) == want,
+    );
+    wait_until(
+        DEADLINE,
+        "the notifications and the re-enqueue are committed",
+        || committed(&brokers, &group, WORK) == Some(3),
+    );
+    assert_eq!(written(&worker.script), want);
+    assert_eq!(high_watermark(&brokers, WORK), 3);
     assert_eq!(worker.stop(), ExitState::Completed);
     drop(rustfs);
 }

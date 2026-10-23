@@ -1631,7 +1631,7 @@ fn a_solo_run_warns_that_it_lists_from_the_beginning() {
         let warned = lines.iter().filter(|l| l.contains(solo)).count();
         let silent = lines
             .iter()
-            .any(|l| l.contains("publishes no units of its own"));
+            .any(|l| l.contains("reads the units and storage notifications published to it"));
         if backend == "memory" {
             assert_eq!(warned, 1, "{lines:#?}");
             assert!(!silent, "{lines:#?}");

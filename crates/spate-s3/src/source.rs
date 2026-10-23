@@ -58,13 +58,18 @@ use spate_core::framing::{FramingContract, RecordFramer};
 use spate_core::metrics::CoordinationMetrics;
 use spate_core::record::PartitionId;
 use spate_core::source::{LaneId, Source, SourceCtx, SourceEvent};
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::sync::Arc;
 use std::time::Duration;
 use url::Url;
 
 /// First backoff step for fetcher-internal GET retries.
 const RETRY_BASE: Duration = Duration::from_millis(200);
+
+/// Re-enqueues of an overwritten key a notification unit carries before the
+/// unit is acknowledged without one, when the `feed:` section sets no
+/// `attempt_cap`. The SQS feed refuses that key, so it always uses this.
+pub(crate) const DEFAULT_RE_ENQUEUE_CAP: u32 = 10;
 
 /// Where the source is in its lifecycle.
 enum State {
@@ -106,6 +111,10 @@ pub struct S3Source {
     feed: Option<Arc<dyn Feed>>,
     /// The `feed:` section's `units_held`.
     units_held: Option<NonZeroUsize>,
+    /// How many times a notification unit's key is re-enqueued after an
+    /// overwrite before the unit is acknowledged without one: the `feed:`
+    /// section's `attempt_cap`, or [`DEFAULT_RE_ENQUEUE_CAP`].
+    re_enqueue_cap: u32,
     /// The `feed:` section's `location`, for a bounded job.
     location: Option<Location>,
     /// A location store injected via the `testing`-gated
@@ -156,6 +165,7 @@ impl S3Source {
             store: None,
             feed: None,
             units_held: None,
+            re_enqueue_cap: DEFAULT_RE_ENQUEUE_CAP,
             location: None,
             location_store: None,
             clock: Arc::new(SystemClock),
@@ -656,6 +666,9 @@ impl Source for S3Source {
         }
         self.feed = Some(feed);
         self.units_held = section.units_held;
+        self.re_enqueue_cap = section
+            .attempt_cap
+            .map_or(DEFAULT_RE_ENQUEUE_CAP, NonZeroU32::get);
         self.settling_window = section.settling_window_or_default();
         self.solo_lister = memory;
         self.solo_ends = memory && origin == FeedOrigin::Section;
@@ -766,6 +779,7 @@ impl Source for S3Source {
                 range_bytes: self.config.prefetch_bytes.as_u64() as usize,
                 retry_base: RETRY_BASE,
                 metrics,
+                re_enqueue_cap: self.re_enqueue_cap,
             };
             if self.solo_lister {
                 tracing::warn!(
@@ -792,8 +806,9 @@ impl Source for S3Source {
             } else {
                 tracing::warn!(
                     feed = feed.backend(),
-                    "the S3 source publishes no units of its own and reads only the units and \
-                     storage notifications published to the feed"
+                    "the S3 source lists nothing on this feed: it reads the units and storage \
+                     notifications published to it, and publishes only a notification unit it \
+                     re-enqueues after an overwrite"
                 );
             }
             let scope = Scope {

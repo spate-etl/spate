@@ -27,6 +27,7 @@ use crate::lane::S3Lane;
 use crate::metrics::S3Metrics;
 use crate::offset::Position;
 use crate::split::SplitDescriptor;
+use crate::unit::Origin;
 use serde::{Deserialize, Serialize};
 use spate_core::checkpoint::AckIssuer;
 #[expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
@@ -158,6 +159,10 @@ pub(crate) struct PoisonReport {
     pub(crate) kind: PoisonKind,
     /// Human-readable cause, naming the object.
     pub(crate) reason: String,
+    /// What the key holds after an overwrite cut a notification unit's read
+    /// short. The lane emits what it framed, ends cleanly, and is not
+    /// poisoned; `None` for every other report.
+    pub(crate) overwrite: Option<Box<crate::fetch::Overwrite>>,
 }
 
 /// The opaque resume payload written into [`SplitProgress::state`]: the
@@ -429,6 +434,9 @@ impl SplitSource for SplitCtx {
             retries: self.metrics.as_ref().map(|m| m.get_retries.clone()),
             range: descriptor.range,
             bytes_read: self.metrics.as_ref().map(|m| m.bytes_read.clone()),
+            // A coordinated split is a lister's, so a failed precondition
+            // poisons it.
+            origin: Origin::Lister,
         })));
 
         let remaining_at_open = (objects.len() as u64).saturating_sub(u64::from(start_ordinal));

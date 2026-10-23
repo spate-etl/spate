@@ -27,6 +27,14 @@
 //! object-level failure on any lane fails the unit back to the feed, which
 //! delivers it again until it dead-letters it.
 //!
+//! A notification unit whose key was overwritten while it was read is the
+//! exception. The key's remaining parts are dropped, and the reader publishes
+//! a notification unit for the key at its current ETag, with a re-enqueue
+//! count one higher, under the old unit's id. The old unit is acknowledged
+//! once the feed confirms that publish and every part has retired. At the
+//! re-enqueue cap the reader publishes nothing and counts the key. A publish
+//! the feed refuses, or cannot confirm, fails the unit back.
+//!
 //! A bounded job's reader holds a [`JobEnd`]. Each poll that finds the reader
 //! holding no delivery, lane or unsent request advances its end check, and
 //! each poll that finds it holding any sends the check back to its start, so
@@ -38,13 +46,15 @@ use crate::job_end::JobEnd;
 use crate::lane::S3Lane;
 use crate::metrics::S3Metrics;
 use crate::split::Packing;
+use crate::fetch::Overwrite;
 use crate::split_ctx::{LANE_HANDOFF_CHUNKS, PoisonReport, SplitTracker};
-use crate::unit::{Cursor, Decoded, Part, Scope, decode};
+use crate::unit::{Cursor, Decoded, Origin, Part, Scope, decode, re_enqueue_body};
 use spate_core::checkpoint::AckIssuer;
 use spate_core::coordination::{LeaseEpoch, SplitId};
 use spate_core::error::SourceError;
 use spate_core::feed::{
-    Delivery, Feed, FeedError, FeedErrorKind, FeedPark, FeedWaker, Receipt, wake_channel,
+    Confirmation, Delivery, Feed, FeedError, FeedErrorKind, FeedPark, FeedWaker, Receipt, Unit,
+    wake_channel,
 };
 use spate_core::record::PartitionId;
 use spate_core::source::{DrainBarrier, LaneId, SourceEvent};
@@ -72,6 +82,9 @@ pub(crate) struct LaneParts {
     pub(crate) range_bytes: usize,
     pub(crate) retry_base: Duration,
     pub(crate) metrics: Option<S3Metrics>,
+    /// The re-enqueue count at which an overwritten notification unit is
+    /// acknowledged without a re-enqueue.
+    pub(crate) re_enqueue_cap: u32,
 }
 
 /// One delivery the reader holds.
@@ -86,12 +99,30 @@ struct HeldUnit {
     /// A lane hit poison, and this reason waits for a `fail` the feed
     /// accepts.
     failing: Option<String>,
+    /// The keys an overwrite cut short, each with its re-enqueue.
+    overwritten: BTreeMap<String, ReEnqueue>,
+}
+
+/// The re-enqueue of one overwritten key.
+enum ReEnqueue {
+    /// Published, and the feed has not confirmed it.
+    Publishing(Confirmation),
+    /// Confirmed, or not published: the object was emptied, or the unit was
+    /// at the re-enqueue cap.
+    Done,
 }
 
 impl HeldUnit {
-    /// Every part has opened and retired, so the unit can be acknowledged.
+    /// Every part has opened and retired, and every re-enqueue is
+    /// confirmed, so the unit can be acknowledged.
     fn finished(&self) -> bool {
-        self.failing.is_none() && self.pending.is_empty() && self.lanes.is_empty()
+        self.failing.is_none()
+            && self.pending.is_empty()
+            && self.lanes.is_empty()
+            && !self
+                .overwritten
+                .values()
+                .any(|r| matches!(r, ReEnqueue::Publishing(_)))
     }
 
     /// The delivery holds no lane and has no part to open. It still takes
@@ -112,6 +143,9 @@ struct LaneState {
     last_committed: Option<i64>,
     /// The lane's end-of-input has been reported through `CommitReady`.
     hinted: bool,
+    /// The re-enqueue count of the lane's notification unit, 0 for a
+    /// lister's.
+    re_enqueues: u32,
 }
 
 /// Reads work units from a feed, one lane per part in progress.
@@ -335,6 +369,10 @@ impl UnitReader {
     /// unit still held.
     fn settle(&mut self) -> Result<(), SourceError> {
         while let Ok(report) = self.poison_rx.try_recv() {
+            if let Some(overwrite) = report.overwrite {
+                self.on_overwrite(PartitionId(report.epoch.0 as u32), *overwrite);
+                continue;
+            }
             if let Some(m) = &self.parts.metrics {
                 m.objects_failed(report.kind).increment(1);
             }
@@ -353,6 +391,7 @@ impl UnitReader {
             );
             held.failing = Some(report.reason);
         }
+        self.check_re_enqueues()?;
         let failing: Vec<u32> = self
             .deliveries
             .iter()
@@ -416,6 +455,87 @@ impl UnitReader {
                     tracing::warn!(%receipt, error = %e, "renewing a held unit failed; retrying");
                 }
                 Err(e) => return Err(feed_error("renewing a held unit", &e)),
+            }
+        }
+        Ok(())
+    }
+
+    /// Handle a lane's report that `overwrite.key` was overwritten while
+    /// the lane on `partition` read it: drop the key's unopened parts, and
+    /// re-enqueue the key once per delivery unless the unit is at the cap.
+    fn on_overwrite(&mut self, partition: PartitionId, overwrite: Overwrite) {
+        let Some(lane) = self.lanes.get(&partition) else {
+            return;
+        };
+        let re_enqueues = lane.re_enqueues;
+        let Some(held) = self.deliveries.get_mut(&lane.delivery) else {
+            return;
+        };
+        // A failing unit is read again from its start, and a key already
+        // re-enqueued by another of its ranges needs no second unit.
+        if held.failing.is_some() || held.overwritten.contains_key(&overwrite.key) {
+            return;
+        }
+        held.pending.retain(|cursor| cursor.key() != overwrite.key);
+        if let Some(m) = &self.parts.metrics {
+            m.objects_overwritten.increment(1);
+        }
+        let re_enqueue = if overwrite.size == 0 {
+            // An empty object has no records to read.
+            ReEnqueue::Done
+        } else if re_enqueues >= self.parts.re_enqueue_cap {
+            if let Some(m) = &self.parts.metrics {
+                m.overwrites_dropped.increment(1);
+            }
+            tracing::warn!(
+                unit = %held.unit,
+                key = %overwrite.key,
+                re_enqueues,
+                "an object was overwritten while it was read, and its unit is at the \
+                 re-enqueue cap; acknowledging it without a re-enqueue"
+            );
+            ReEnqueue::Done
+        } else {
+            let bucket = self
+                .scope
+                .bucket
+                .as_deref()
+                .expect("a notification unit names the source's bucket");
+            let body = re_enqueue_body(bucket, &overwrite, re_enqueues + 1);
+            tracing::info!(
+                unit = %held.unit,
+                key = %overwrite.key,
+                etag = overwrite.etag.as_deref().unwrap_or(""),
+                re_enqueues = re_enqueues + 1,
+                "an object was overwritten while it was read; re-enqueueing it at its \
+                 current ETag"
+            );
+            ReEnqueue::Publishing(self.feed.publish(Unit::new(held.unit.clone(), body)))
+        };
+        held.overwritten.insert(overwrite.key, re_enqueue);
+    }
+
+    /// Settle every re-enqueue the feed has answered. A refused or
+    /// unconfirmed publish fails its unit back, so the unit is read again;
+    /// a fatal answer fails the pipeline.
+    fn check_re_enqueues(&mut self) -> Result<(), SourceError> {
+        for held in self.deliveries.values_mut() {
+            for re_enqueue in held.overwritten.values_mut() {
+                let ReEnqueue::Publishing(confirmation) = re_enqueue else {
+                    continue;
+                };
+                match confirmation.try_outcome() {
+                    None => {}
+                    Some(Ok(())) => *re_enqueue = ReEnqueue::Done,
+                    Some(Err(e)) if e.kind == FeedErrorKind::Fatal => {
+                        return Err(feed_error("re-enqueueing an overwritten object", &e));
+                    }
+                    Some(Err(e)) => {
+                        held.failing.get_or_insert_with(|| {
+                            format!("re-enqueueing an overwritten object failed: {e}")
+                        });
+                    }
+                }
             }
         }
         Ok(())
@@ -542,6 +662,7 @@ impl UnitReader {
                 pending: VecDeque::from(cursors),
                 lanes: BTreeSet::new(),
                 failing: None,
+                overwritten: BTreeMap::new(),
             },
         );
     }
@@ -567,6 +688,10 @@ impl UnitReader {
         let tracker = Arc::new(SplitTracker::new());
         let pause = Arc::new(AtomicBool::new(false));
         let (tx, rx) = mpsc::channel(LANE_HANDOFF_CHUNKS);
+        let re_enqueues = match &part.origin {
+            Origin::Notification { re_enqueues, .. } => *re_enqueues,
+            Origin::Lister => 0,
+        };
         // Detached: the fetcher exits when the lane drops its receiver.
         drop(parts.handle.spawn(run_fetcher(FetcherParams {
             split: split.clone(),
@@ -584,6 +709,7 @@ impl UnitReader {
             retries: parts.metrics.as_ref().map(|m| m.get_retries.clone()),
             range: part.range,
             bytes_read: parts.metrics.as_ref().map(|m| m.bytes_read.clone()),
+            origin: part.origin,
         })));
         if let Some(m) = &parts.metrics {
             m.objects_remaining.increment(1.0);
@@ -614,6 +740,7 @@ impl UnitReader {
                 tracker,
                 last_committed: None,
                 hinted: false,
+                re_enqueues,
             },
         );
         self.deliveries
@@ -696,6 +823,7 @@ mod tests {
             range_bytes: 1 << 16,
             retry_base: Duration::from_millis(1),
             metrics,
+            re_enqueue_cap: crate::source::DEFAULT_RE_ENQUEUE_CAP,
         };
         let units_held = units_held.map(|n| NonZeroUsize::new(n).unwrap());
         (UnitReader::new(feed, parts, scope(), units_held, None), rt)
@@ -833,6 +961,7 @@ mod tests {
                 pending: VecDeque::new(),
                 lanes: BTreeSet::from([partition]),
                 failing: None,
+                overwritten: BTreeMap::new(),
             },
         );
         reader.lanes.insert(
@@ -844,6 +973,7 @@ mod tests {
                 tracker: Arc::clone(&tracker),
                 last_committed: None,
                 hinted: false,
+                re_enqueues: 0,
             },
         );
         (partition, receipt, tracker)
@@ -1064,6 +1194,7 @@ mod tests {
             range_bytes: 1 << 16,
             retry_base: Duration::from_millis(1),
             metrics: None,
+            re_enqueue_cap: crate::source::DEFAULT_RE_ENQUEUE_CAP,
         };
         let (feed, _script) = scripted_feed();
         let mut reader = UnitReader::new(Arc::new(feed), parts, scope(), None, Some(end));
@@ -1510,6 +1641,7 @@ mod tests {
                             epoch: LeaseEpoch(u64::from(lanes[0].0)),
                             kind: PoisonKind::NotFound,
                             reason: "gone".into(),
+                            overwrite: None,
                         })
                         .unwrap();
                     let revoked = lanes_revoked(poll(&mut reader));
@@ -1566,6 +1698,7 @@ mod tests {
                     range_bytes: 1 << 16,
                     retry_base: Duration::from_millis(1),
                     metrics: Some(metrics),
+                    re_enqueue_cap: crate::source::DEFAULT_RE_ENQUEUE_CAP,
                 };
                 let (feed, script) = scripted_feed();
                 let mut reader =
@@ -1592,6 +1725,7 @@ mod tests {
                             epoch: LeaseEpoch(u64::from(lanes[0].partition().0)),
                             kind: PoisonKind::NotFound,
                             reason: "gone".into(),
+                            overwrite: None,
                         })
                         .unwrap();
                 } else {
@@ -1757,6 +1891,7 @@ mod tests {
                 epoch: LeaseEpoch(u64::from(range.0)),
                 kind: PoisonKind::NotFound,
                 reason: "gone".into(),
+                overwrite: None,
             })
             .unwrap();
         finish(&mut reader, whole, 5);

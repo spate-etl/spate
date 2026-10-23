@@ -20,6 +20,10 @@
 //!   overwritten, corrupt, or unreadable objects) are reported through the
 //!   [`PoisonReport`] side channel instead and the lane goes quiescent;
 //!   only instance-level failures (credentials, wiring) return `Err`.
+//! - **An overwrite ends the lane cleanly.** A notification unit's object
+//!   overwritten under its pin is reported at once, and the lane emits the
+//!   records it framed before the failure, then decides end-of-input, so
+//!   the terminal watermark is one past the last record emitted.
 
 use crate::config::Compression;
 use crate::fetch::{ChunkMsg, SplitFailure};
@@ -129,6 +133,9 @@ pub struct S3Lane {
     /// The split hit poison: everything undelivered was discarded and
     /// every later poll idles with `Ok(None)` until the lane is retired.
     poisoned: bool,
+    /// The current object was overwritten under its pin: its framed records
+    /// drain, its unframed bytes are dropped, and it is not counted complete.
+    truncated: bool,
     /// One past the last emitted record's offset, which becomes the terminal
     /// watermark `T` once end-of-input is observed. Starts at the resume watermark
     /// (0 fresh), so a tenancy that emits nothing terminates exactly where
@@ -194,6 +201,7 @@ impl S3Lane {
             poison_tx,
             waker: waker.into(),
             poisoned: false,
+            truncated: false,
             watermark_candidate,
             failed: None,
             metrics,
@@ -223,9 +231,27 @@ impl S3Lane {
             epoch: self.epoch,
             kind,
             reason,
+            overwrite: None,
         });
         // The report is only read between control-plane waits; wake so the
         // control plane handles it at once.
+        self.waker.wake();
+    }
+
+    /// Report that the current object was overwritten under its pin, and
+    /// end it once its framed records drain. The fetcher sends nothing more,
+    /// so the closed channel then takes the clean end-of-input path.
+    fn overwritten(&mut self, overwrite: Box<crate::fetch::Overwrite>) {
+        self.truncated = true;
+        self.pending_end = false;
+        // The receiver disappearing (shutdown) makes the report moot.
+        let _ = self.poison_tx.send(PoisonReport {
+            split: self.split.clone(),
+            epoch: self.epoch,
+            kind: PoisonKind::EtagDrift,
+            reason: format!("\"{}\" was overwritten while it was read", overwrite.key),
+            overwrite: Some(overwrite),
+        });
         self.waker.wake();
     }
 
@@ -394,6 +420,10 @@ impl S3Lane {
                 self.poison(kind, reason);
                 Ok(())
             }
+            ChunkMsg::LaneFailed(SplitFailure::Overwritten(overwrite)) => {
+                self.overwritten(overwrite);
+                Ok(())
+            }
             ChunkMsg::LaneFailed(SplitFailure::Fatal(e)) => {
                 let (class, reason) = match e {
                     SourceError::Client { class, reason } => (class, reason),
@@ -464,6 +494,12 @@ impl SourceLane for S3Lane {
             self.drain_framer(max_records)?;
             if self.pending_end && !self.poisoned && self.framer.queued() == 0 {
                 self.finalize_object();
+            }
+            if self.truncated && self.framer.queued() == 0 {
+                // The bytes after the last framed record belong to a version
+                // the store no longer holds; nothing frames them.
+                self.truncated = false;
+                self.current = None;
             }
             if self.poisoned {
                 return Ok(None);

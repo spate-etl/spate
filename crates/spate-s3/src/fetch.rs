@@ -32,15 +32,21 @@
 //! credentials/configuration failures stay fatal for the pipeline. An
 //! object whose store returns no ETag cannot be resumed mid-stream safely
 //! and poisons the split on a mid-object break instead.
+//!
+//! A failed precondition on a notification unit that names no version is
+//! an overwrite ([`is_overwrite`](crate::error::is_overwrite)). The fetcher
+//! HEADs the key and reports its current content as
+//! [`SplitFailure::Overwritten`], so the reader can re-enqueue the key.
 
 use crate::error::classify;
 use crate::split::SplitRange;
 use crate::split_ctx::PoisonKind;
 use crate::trim::RangeTrim;
+use crate::unit::{Origin, quoted};
 use bytes::Bytes;
 use futures_util::StreamExt as _;
 use object_store::path::Path;
-use object_store::{GetOptions, GetRange, ObjectStore};
+use object_store::{GetOptions, GetRange, ObjectStore, ObjectStoreExt as _};
 use spate_core::coordination::SplitId;
 use spate_core::error::{ErrorClass, SourceError};
 use std::sync::Arc;
@@ -94,6 +100,10 @@ pub(crate) enum SplitFailure {
     /// Instance- or configuration-level failure (credentials, permissions,
     /// client misconfiguration): terminal for the pipeline.
     Fatal(SourceError),
+    /// A notification unit's key was overwritten under its ETag pin. The
+    /// records framed before the failure stand, and the reader re-enqueues
+    /// the key at the content the HEAD found.
+    Overwritten(Box<Overwrite>),
 }
 
 impl std::fmt::Display for SplitFailure {
@@ -101,8 +111,23 @@ impl std::fmt::Display for SplitFailure {
         match self {
             SplitFailure::Poison(_, reason) => write!(f, "split poisoned: {reason}"),
             SplitFailure::Fatal(e) => write!(f, "{e}"),
+            SplitFailure::Overwritten(o) => write!(f, "\"{}\" was overwritten", o.key),
         }
     }
+}
+
+/// The content a key holds after an overwrite cut its read short, as a HEAD
+/// reports it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Overwrite {
+    /// The key read.
+    pub(crate) key: String,
+    /// The current ETag, quoted, or `None` when the store sent none.
+    pub(crate) etag: Option<String>,
+    /// The current size in bytes.
+    pub(crate) size: u64,
+    /// The current last-modified time (ms since epoch).
+    pub(crate) last_modified_ms: i64,
 }
 
 /// Collect and sort the full listing under `prefix`. Memory is
@@ -164,6 +189,9 @@ pub(crate) struct FetcherParams {
     /// `spate_s3_source_bytes_read_total`, counting the bytes a ranged read
     /// fetches and trims; the lane counts the bytes it forwards.
     pub(crate) bytes_read: Option<spate_core::metrics::Counter>,
+    /// Where the split's unit came from: a notification may name a version
+    /// to read, and a failed precondition on one is an overwrite.
+    pub(crate) origin: Origin,
 }
 
 /// How many attempts one object GET, and in the planner one prefix
@@ -192,6 +220,7 @@ pub(crate) async fn run_fetcher(params: FetcherParams) {
         retries,
         range,
         bytes_read,
+        origin,
     } = params;
 
     for (ordinal, entry) in slice.iter().enumerate().skip(start_ordinal as usize) {
@@ -240,6 +269,7 @@ pub(crate) async fn run_fetcher(params: FetcherParams) {
             retry_base,
             retries.as_ref(),
             bytes_read.as_ref(),
+            &origin,
         )
         .await
         {
@@ -316,6 +346,7 @@ async fn stream_object(
     retry_base: Duration,
     retries: Option<&spate_core::metrics::Counter>,
     bytes_read: Option<&spate_core::metrics::Counter>,
+    origin: &Origin,
 ) -> Result<bool, SplitFailure> {
     // A whole object with no bytes is read without a request, so its key
     // need not be one the store can address.
@@ -337,6 +368,7 @@ async fn stream_object(
                 retry_base,
                 retries,
                 bytes_read,
+                origin,
             )
             .await
         }
@@ -357,6 +389,7 @@ async fn stream_object(
                 pause,
                 retry_base,
                 retries,
+                origin,
             )
             .await
         }
@@ -389,6 +422,7 @@ async fn stream_object_ranged(
     retry_base: Duration,
     retries: Option<&spate_core::metrics::Counter>,
     bytes_read: Option<&spate_core::metrics::Counter>,
+    origin: &Origin,
 ) -> Result<bool, SplitFailure> {
     let path = object_path(split, entry)?;
     let window = range_bytes.max(1) as u64;
@@ -410,28 +444,24 @@ async fn stream_object_ranged(
         let options = GetOptions {
             if_match: Some(etag.to_owned()),
             range: Some(GetRange::Bounded(delivered..end)),
+            version: version_of(origin),
             ..Default::default()
         };
         // One bounded request, drained fully into memory at network speed. The
         // connection is released here, *before* the possibly-long hand-off
         // below, so backpressure never leaves an idle S3 body open.
-        let buffered = match store.get_opts(&path, options).await {
-            Ok(result) => match result.bytes().await {
-                Ok(bytes) => bytes,
-                Err(e) => {
-                    retry_or_fail(
-                        split,
-                        entry,
-                        &e,
-                        delivered,
-                        &mut attempt,
-                        retry_base,
-                        retries,
-                    )
-                    .await?;
-                    continue;
-                }
-            },
+        let fetched = match store.get_opts(&path, options).await {
+            Ok(result) => result.bytes().await,
+            Err(e) => Err(e),
+        };
+        let buffered = match fetched {
+            Ok(bytes) => bytes,
+            Err(e) if crate::error::is_overwrite(&e, origin) => {
+                return Err(
+                    head_after_overwrite(split, store, &path, entry, etag, retry_base, retries)
+                        .await,
+                );
+            }
             Err(e) => {
                 retry_or_fail(
                     split,
@@ -508,6 +538,7 @@ async fn stream_object_streaming(
     pause: &AtomicBool,
     retry_base: Duration,
     retries: Option<&spate_core::metrics::Counter>,
+    origin: &Origin,
 ) -> Result<bool, SplitFailure> {
     let path = object_path(split, entry)?;
     let mut delivered: u64 = 0;
@@ -517,7 +548,10 @@ async fn stream_object_streaming(
         // In this fallback `delivered` is always 0: a mid-object stream error
         // is fatal below (no ETag to pin a resumed read), so a retry never
         // resumes partway, and every GET re-reads the whole object un-ranged.
-        let options = GetOptions::default();
+        let options = GetOptions {
+            version: version_of(origin),
+            ..Default::default()
+        };
         let result = match store.get_opts(&path, options).await {
             Ok(r) => r,
             Err(e) => {
@@ -596,6 +630,64 @@ async fn stream_object_streaming(
                     continue 'attempts;
                 }
                 None => return Ok(true),
+            }
+        }
+    }
+}
+
+/// The object version a part from `origin` reads, `None` for the key.
+fn version_of(origin: &Origin) -> Option<String> {
+    match origin {
+        Origin::Notification { version, .. } => version.clone(),
+        Origin::Lister => None,
+    }
+}
+
+/// HEAD `path` after a read pinned to `pinned` failed its precondition, and
+/// report what the key holds now.
+///
+/// A HEAD answering the pinned ETag poisons the split as `EtagDrift`, since
+/// re-enqueueing at the same content would fail the same way. Any other
+/// answer, an absent ETag included, is [`SplitFailure::Overwritten`]. A HEAD
+/// that fails is classified as a read is: 404 poisons, 401 and 403 are
+/// fatal, and a transient failure is retried on the read's budget.
+async fn head_after_overwrite(
+    split: &SplitId,
+    store: &Arc<dyn ObjectStore>,
+    path: &Path,
+    entry: &ObjectEntry,
+    pinned: &str,
+    retry_base: Duration,
+    retries: Option<&spate_core::metrics::Counter>,
+) -> SplitFailure {
+    let mut attempt = 0;
+    loop {
+        match store.head(path).await {
+            Ok(meta) => {
+                let etag = meta.e_tag.map(quoted);
+                if etag.as_deref() == Some(pinned) {
+                    return SplitFailure::Poison(
+                        PoisonKind::EtagDrift,
+                        format!(
+                            "split {split}: reading \"{}\" failed its precondition, and the \
+                             object still reports the ETag {pinned} it was pinned to",
+                            entry.key
+                        ),
+                    );
+                }
+                return SplitFailure::Overwritten(Box::new(Overwrite {
+                    key: entry.key.clone(),
+                    etag,
+                    size: meta.size,
+                    last_modified_ms: meta.last_modified.timestamp_millis(),
+                }));
+            }
+            Err(e) => {
+                if let Err(failure) =
+                    retry_or_fail(split, entry, &e, 0, &mut attempt, retry_base, retries).await
+                {
+                    return failure;
+                }
             }
         }
     }
@@ -691,7 +783,7 @@ async fn retry_or_fail(
 mod tests {
     use super::*;
     use object_store::memory::InMemory;
-    use object_store::{GetResult, GetResultPayload, ObjectStoreExt as _, PutPayload};
+    use object_store::{GetResult, GetResultPayload, PutPayload};
     use std::fmt;
     use std::sync::atomic::AtomicU32;
 
@@ -990,6 +1082,7 @@ mod tests {
             retries: None,
             range: None,
             bytes_read: None,
+            origin: Origin::Lister,
         };
         let task = tokio::spawn(run_fetcher(params));
         let mut msgs = Vec::new();
@@ -1201,6 +1294,7 @@ mod tests {
             retries: None,
             range: None,
             bytes_read: None,
+            origin: Origin::Lister,
         };
         tokio::spawn(run_fetcher(params));
         let mut saw_poison = false;
@@ -1238,6 +1332,7 @@ mod tests {
             retries: None,
             range: None,
             bytes_read: None,
+            origin: Origin::Lister,
         };
         tokio::spawn(run_fetcher(params));
         let mut saw_poison = false;
@@ -1274,6 +1369,7 @@ mod tests {
             retries: None,
             range: None,
             bytes_read: None,
+            origin: Origin::Lister,
         };
         tokio::spawn(run_fetcher(params));
         // Paused before the first send: nothing arrives. On paused time the
@@ -1314,6 +1410,7 @@ mod tests {
             retries: None,
             range: None,
             bytes_read: None,
+            origin: Origin::Lister,
         };
         let task = tokio::spawn(run_fetcher(params));
         drop(rx);
@@ -1376,6 +1473,7 @@ mod tests {
             retries: None,
             range: None,
             bytes_read: None,
+            origin: Origin::Lister,
         };
         let task = tokio::spawn(run_fetcher(params));
         // On paused time the sleep returns only once the fetcher is parked.
@@ -1490,6 +1588,7 @@ mod tests {
             retries: None,
             range: None,
             bytes_read: None,
+            origin: Origin::Lister,
         };
         let task = tokio::spawn(run_fetcher(params));
         let mut msgs = Vec::new();
@@ -1528,6 +1627,7 @@ mod tests {
             retries: None,
             range: None,
             bytes_read: None,
+            origin: Origin::Lister,
         };
         let task = tokio::spawn(run_fetcher(params));
         // Parked on the pause: nothing arrives. On paused time the sleep
@@ -1579,6 +1679,7 @@ mod tests {
             retries: None,
             range: None,
             bytes_read: None,
+            origin: Origin::Lister,
         };
         let task = tokio::spawn(run_fetcher(params));
         // Take the first object's start and one data chunk, leaving the
@@ -1715,6 +1816,7 @@ mod tests {
             retries: None,
             range,
             bytes_read: None,
+            origin: Origin::Lister,
         }));
         let tracker = Arc::new(SplitTracker::new());
         let (poison_tx, poison_rx) = std::sync::mpsc::channel();
@@ -1926,6 +2028,7 @@ mod tests {
             retries: None,
             range: Some(SplitRange::new(8, 21, b'\n')),
             bytes_read: Some(spate_core::metrics::Counter::from_arc(Arc::clone(&trimmed))),
+            origin: Origin::Lister,
         }));
         let mut msgs = Vec::new();
         while let Some(m) = rx.recv().await {

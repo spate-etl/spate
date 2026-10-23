@@ -28,8 +28,14 @@ pub(crate) struct S3Metrics {
     /// object read whole this equals `bytes_read`; the bytes a byte-range
     /// read trims count in `bytes_read` alone.
     pub(crate) bytes_decoded: Counter,
-    /// Object GET attempts beyond the first (transient failures).
+    /// Object GET and HEAD attempts beyond the first (transient failures).
     pub(crate) get_retries: Counter,
+    /// Keys whose read an overwrite cut short in a notification unit, once
+    /// per key and delivery, whether or not the key was re-enqueued.
+    pub(crate) objects_overwritten: Counter,
+    /// Of those, the keys acknowledged at the re-enqueue cap without a
+    /// re-enqueue.
+    pub(crate) overwrites_dropped: Counter,
     /// Objects that poisoned their split, by bounded reason, with one
     /// pre-registered handle per [`PoisonKind`].
     objects_failed_not_found: Counter,
@@ -58,6 +64,8 @@ impl S3Metrics {
             bytes_read: meter.counter("bytes_read_total", &[]),
             bytes_decoded: meter.counter("bytes_decoded_total", &[]),
             get_retries: meter.counter("get_retries_total", &[]),
+            objects_overwritten: meter.counter("objects_overwritten_total", &[]),
+            overwrites_dropped: meter.counter("overwrites_dropped_total", &[]),
             objects_failed_not_found: failed(PoisonKind::NotFound.reason_label()),
             objects_failed_etag_drift: failed(PoisonKind::EtagDrift.reason_label()),
             objects_failed_undecodable: failed(PoisonKind::Undecodable.reason_label()),

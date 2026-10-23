@@ -7,9 +7,11 @@
 //! [`tile`]), and [`units`] mints one feed unit per part. The reader cuts a
 //! whole-object unit through the same [`Cursor`], so a unit's ranges are the
 //! same whichever side cuts them. [`decode`] reads a delivery's body, a
-//! descriptor or a notification, into the parts the reader opens.
+//! descriptor or a notification, into the parts the reader opens, and
+//! [`re_enqueue_body`] writes the notification a worker publishes for a key
+//! overwritten while it was read.
 
-use crate::fetch::ObjectEntry;
+use crate::fetch::{ObjectEntry, Overwrite};
 use crate::framer::Codec;
 use crate::listing::addressable;
 use crate::split::{
@@ -22,12 +24,31 @@ use spate_core::feed::Unit;
 use std::iter::Peekable;
 use std::sync::Arc;
 
+/// Where a part's unit came from, which decides how a failed read of it is
+/// handled.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Origin {
+    /// A descriptor a lister published.
+    Lister,
+    /// A storage notification, or a unit a worker re-enqueued after an
+    /// overwrite.
+    Notification {
+        /// The object version the record names. `None` reads the key.
+        version: Option<String>,
+        /// How many times the key's unit has been re-enqueued after an
+        /// overwrite.
+        re_enqueues: u32,
+    },
+}
+
 /// One part of a unit: the object, whole or in one byte range.
 pub(crate) struct Part {
     /// The one object the part reads, shared by every part of the object.
     pub(crate) object: Arc<Vec<ObjectEntry>>,
     /// The byte range read, or `None` for the whole object.
     pub(crate) range: Option<SplitRange>,
+    /// Where the part's unit came from.
+    pub(crate) origin: Origin,
 }
 
 /// The parts of one object, yielded lazily so an object cut into many
@@ -39,32 +60,42 @@ pub(crate) struct Cursor {
     ranges: Option<Peekable<Box<dyn Iterator<Item = SplitRange> + Send>>>,
     /// The whole part is still to yield.
     whole: bool,
+    /// Where the unit came from, given to every part.
+    origin: Origin,
 }
 
 impl Cursor {
     /// A cursor yielding `object` whole, once.
-    fn whole(object: Arc<Vec<ObjectEntry>>) -> Cursor {
+    fn whole(object: Arc<Vec<ObjectEntry>>, origin: Origin) -> Cursor {
         Cursor {
             object,
             ranges: None,
             whole: true,
+            origin,
         }
     }
 
     /// A cursor yielding the one byte `range` of `object`.
-    pub(crate) fn range(object: Arc<Vec<ObjectEntry>>, range: SplitRange) -> Cursor {
-        Cursor::ranges(object, Box::new(std::iter::once(range)))
+    fn range(object: Arc<Vec<ObjectEntry>>, range: SplitRange, origin: Origin) -> Cursor {
+        Cursor::ranges(object, Box::new(std::iter::once(range)), origin)
     }
 
     fn ranges(
         object: Arc<Vec<ObjectEntry>>,
         ranges: Box<dyn Iterator<Item = SplitRange> + Send>,
+        origin: Origin,
     ) -> Cursor {
         Cursor {
             object,
             ranges: Some(ranges.peekable()),
             whole: false,
+            origin,
         }
+    }
+
+    /// The key of the one object the cursor reads.
+    pub(crate) fn key(&self) -> &str {
+        &self.object[0].key
     }
 
     /// Whether every part has been yielded.
@@ -92,14 +123,16 @@ impl Iterator for Cursor {
         Some(Part {
             object: Arc::clone(&self.object),
             range,
+            origin: self.origin.clone(),
         })
     }
 }
 
 /// The parts of the one object in `object`: the ranges [`tile`] cuts when
 /// [`Packing::delimiter_for`] accepts the object and its key is
-/// [`addressable`], and the whole object otherwise.
-pub(crate) fn parts_of(object: Arc<Vec<ObjectEntry>>, packing: Packing) -> Cursor {
+/// [`addressable`], and the whole object otherwise. Every part carries
+/// `origin`.
+pub(crate) fn parts_of(object: Arc<Vec<ObjectEntry>>, packing: Packing, origin: Origin) -> Cursor {
     debug_assert_eq!(object.len(), 1, "a part names one object");
     let entry = &object[0];
     match packing
@@ -108,9 +141,9 @@ pub(crate) fn parts_of(object: Arc<Vec<ObjectEntry>>, packing: Packing) -> Curso
     {
         Some(delimiter) => {
             let ranges = tile(entry.size, packing.target_bytes, delimiter);
-            Cursor::ranges(object, Box::new(ranges))
+            Cursor::ranges(object, Box::new(ranges), origin)
         }
-        None => Cursor::whole(object),
+        None => Cursor::whole(object, origin),
     }
 }
 
@@ -135,7 +168,7 @@ pub(crate) fn units(
         etag: entry.etag.clone(),
         last_modified_ms: entry.last_modified_ms,
     };
-    parts_of(Arc::new(vec![entry]), packing).map(move |part| {
+    parts_of(Arc::new(vec![entry]), packing, Origin::Lister).map(move |part| {
         let (id, descriptor) = match part.range {
             None => (
                 split_id_for([(object.key.as_str(), object.etag.as_deref())])?,
@@ -193,6 +226,15 @@ pub(crate) enum Decoded {
 /// [`addressable`] refuses its key or its ETag cannot be an `If-Match` value,
 /// either of which fails the whole message. A message with no part left is
 /// acknowledged.
+///
+/// A record names a version when its `versionId` is a string other than `""`
+/// and `"null"`, and the part reads that version; absent, JSON null, `""` and
+/// `"null"` read the key. A `versionId` that is not a string, is longer than
+/// [`MAX_VERSION_BYTES`], or holds a space or a control byte fails the whole
+/// message. A record's `spateReEnqueues`, which only a unit
+/// [`re_enqueue_body`] wrote carries, is how many times its key was
+/// re-enqueued; absent or null is 0, and any value other than a `u32` fails
+/// the whole message.
 pub(crate) fn decode(body: &[u8], scope: &Scope, packing: Packing) -> Decoded {
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
         return Decoded::Fail(
@@ -228,11 +270,19 @@ pub(crate) fn decode(body: &[u8], scope: &Scope, packing: Packing) -> Decoded {
     }
 }
 
+/// The longest `versionId` a notification record may carry.
+pub(crate) const MAX_VERSION_BYTES: usize = 1024;
+
+/// The field of a re-enqueued unit's record that counts its re-enqueues.
+const RE_ENQUEUES: &str = "spateReEnqueues";
+
 /// The fields of a notification record the source reads.
 #[derive(Deserialize)]
 struct Record {
     #[serde(rename = "eventTime", default)]
     event_time: Option<String>,
+    #[serde(rename = "spateReEnqueues", default)]
+    re_enqueues: Option<u32>,
     s3: RecordS3,
 }
 
@@ -254,6 +304,8 @@ struct RecordObject {
     size: Option<u64>,
     #[serde(rename = "eTag", default)]
     etag: Option<String>,
+    #[serde(rename = "versionId", default)]
+    version_id: Option<String>,
 }
 
 /// The part one notification record names, `None` for a record dropped
@@ -315,6 +367,25 @@ fn record_part(
             "the record for \"{key}\" has an ETag that cannot be sent in `If-Match`"
         ));
     }
+    let version = match record.s3.object.version_id {
+        // Ceph RGW writes `""` for a bucket without versioning, and `"null"`
+        // names an object stored without a version id.
+        Some(version) if version.is_empty() || version == "null" => None,
+        Some(version) if version.len() > MAX_VERSION_BYTES => {
+            return Err(format!(
+                "the record for \"{key}\" has a `versionId` longer than {MAX_VERSION_BYTES} bytes"
+            ));
+        }
+        // A space is signed as `%20` but sent as `+` in the query, so the
+        // store would refuse the request as unauthorised and fail the
+        // pipeline. A control byte cannot be a version either.
+        Some(version) if version.bytes().any(|b| b == b' ' || b.is_ascii_control()) => {
+            return Err(format!(
+                "the record for \"{key}\" has a `versionId` holding a space or a control byte"
+            ));
+        }
+        version => version,
+    };
     let last_modified_ms = record
         .event_time
         .as_deref()
@@ -326,12 +397,64 @@ fn record_part(
         etag: record.s3.object.etag.map(quoted),
         last_modified_ms,
     };
-    Ok(Some(parts_of(Arc::new(vec![entry]), packing)))
+    let origin = Origin::Notification {
+        version,
+        re_enqueues: record.re_enqueues.unwrap_or(0),
+    };
+    Ok(Some(parts_of(Arc::new(vec![entry]), packing, origin)))
+}
+
+/// The body of the unit a worker publishes for `key` in `bucket` after the
+/// key was overwritten while it was read: one `ObjectCreated:Put` record at
+/// the content `overwrite` names, counting `re_enqueues`.
+///
+/// [`decode`] reads it as a notification: its key form-encoded, its ETag
+/// quoted when the store gave one, and no `versionId`. The body is ASCII
+/// when the ETag is, as one read from a header always is.
+pub(crate) fn re_enqueue_body(
+    bucket: &str,
+    overwrite: &Overwrite,
+    re_enqueues: u32,
+) -> Vec<u8> {
+    let mut object = serde_json::json!({
+        "key": form_encoded(&overwrite.key),
+        "size": overwrite.size,
+    });
+    if let Some(etag) = &overwrite.etag {
+        object["eTag"] = etag.as_str().into();
+    }
+    let mut record = serde_json::json!({
+        "eventName": "ObjectCreated:Put",
+        RE_ENQUEUES: re_enqueues,
+        "s3": { "bucket": { "name": bucket }, "object": object },
+    });
+    if let Some(time) = chrono::DateTime::from_timestamp_millis(overwrite.last_modified_ms) {
+        record["eventTime"] = time
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+            .into();
+    }
+    let body = serde_json::json!({ "Records": [record] });
+    serde_json::to_vec(&body).expect("a JSON value always serialises")
+}
+
+/// `key` encoded as `application/x-www-form-urlencoded`, the inverse of
+/// [`form_decoded`]: every byte other than an ASCII letter, a digit, `-`,
+/// `.`, `_`, `~` and `/` is written `%HH`.
+fn form_encoded(key: &str) -> String {
+    let mut out = String::with_capacity(key.len());
+    for b in key.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~' | b'/') {
+            out.push(char::from(b));
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
 }
 
 /// `etag` in the quoted form a listing reports and `If-Match` compares,
 /// adding the quotes a notification leaves out.
-fn quoted(etag: String) -> String {
+pub(crate) fn quoted(etag: String) -> String {
     if etag.len() >= 2 && etag.starts_with('"') && etag.ends_with('"') {
         etag
     } else {
@@ -403,7 +526,7 @@ fn descriptor_parts(body: &[u8], packing: Packing) -> Result<Cursor, String> {
         ));
     }
     let Some(range) = descriptor.range else {
-        return Ok(parts_of(Arc::new(vec![object]), packing));
+        return Ok(parts_of(Arc::new(vec![object]), packing, Origin::Lister));
     };
     if packing.delimiter != Some(range.delimiter) {
         return Err(format!(
@@ -424,7 +547,7 @@ fn descriptor_parts(body: &[u8], packing: Packing) -> Result<Cursor, String> {
             format!("{codec:?}").to_lowercase()
         ));
     }
-    Ok(Cursor::range(Arc::new(vec![object]), range))
+    Ok(Cursor::range(Arc::new(vec![object]), range, Origin::Lister))
 }
 
 #[cfg(test)]
@@ -505,7 +628,7 @@ mod tests {
             etag: Some("\"etag\"".into()),
             last_modified_ms: 1,
         };
-        let mut cursor = parts_of(Arc::new(vec![entry]), packing);
+        let mut cursor = parts_of(Arc::new(vec![entry]), packing, Origin::Lister);
         let first: Vec<(u64, u64)> = cursor
             .by_ref()
             .take(2)
@@ -532,7 +655,7 @@ mod tests {
             etag: Some("\"etag\"".into()),
             last_modified_ms: 1,
         };
-        let delimiters: Vec<u8> = parts_of(Arc::new(vec![entry]), packing)
+        let delimiters: Vec<u8> = parts_of(Arc::new(vec![entry]), packing, Origin::Lister)
             .map(|part| part.range.expect("the object is cut").delimiter)
             .collect();
         assert_eq!(delimiters, [b'\r'; 3]);
@@ -1148,5 +1271,147 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The origin of every part `decoded` reads.
+    fn origins(decoded: Decoded) -> Vec<Origin> {
+        match decoded {
+            Decoded::Read(cursors) => cursors.into_iter().flatten().map(|p| p.origin).collect(),
+            Decoded::Acknowledge(reason) => panic!("acknowledged: {reason}"),
+            Decoded::Fail(reason) => panic!("failed: {reason}"),
+        }
+    }
+
+    fn with_field(field: &str, value: serde_json::Value) -> serde_json::Value {
+        let mut record = created("data/a.ndjson", 10);
+        match field {
+            "versionId" => record["s3"]["object"]["versionId"] = value,
+            _ => record[field] = value,
+        }
+        record
+    }
+
+    /// Pins the `versionId` rule: a string other than `""` and `"null"`
+    /// names the version read; absent, JSON null, `""` and `"null"` read the
+    /// key; a number, a space, a control byte or a string over the bound
+    /// fails the message.
+    #[test]
+    fn a_version_id_decodes_by_the_notification_rule() {
+        let version = |origins: Vec<Origin>| match &origins[..] {
+            [Origin::Notification { version, .. }] => version.clone(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            version(origins(decoded(&[with_field("versionId", "3HL4kqtJ".into())]))),
+            Some("3HL4kqtJ".to_owned())
+        );
+        assert_eq!(version(origins(decoded(&[created("data/a.ndjson", 10)]))), None);
+        for absent in [serde_json::Value::Null, "".into(), "null".into()] {
+            let record = with_field("versionId", absent.clone());
+            assert_eq!(version(origins(decoded(&[record]))), None, "{absent}");
+        }
+        let longest = "v".repeat(MAX_VERSION_BYTES);
+        assert_eq!(
+            version(origins(decoded(&[with_field("versionId", longest.clone().into())]))),
+            Some(longest)
+        );
+        for refused in [
+            serde_json::json!(7),
+            "a b".into(),
+            "a\u{1}b".into(),
+            "a\u{7f}b".into(),
+            "v".repeat(MAX_VERSION_BYTES + 1).into(),
+        ] {
+            let reason = failed(decoded(&[with_field("versionId", refused.clone())]));
+            assert!(reason.starts_with("notification record 0: "), "{refused}: {reason}");
+        }
+    }
+
+    /// Pins the re-enqueue count: absent and null are 0, a `u32` is read as
+    /// given, and any other value fails the message.
+    #[test]
+    fn a_re_enqueue_count_decodes_by_the_notification_rule() {
+        let count = |origins: Vec<Origin>| match &origins[..] {
+            [Origin::Notification { re_enqueues, .. }] => *re_enqueues,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(count(origins(decoded(&[created("data/a.ndjson", 10)]))), 0);
+        assert_eq!(
+            count(origins(decoded(&[with_field(RE_ENQUEUES, serde_json::Value::Null)]))),
+            0
+        );
+        for n in [0, 7, u32::MAX] {
+            assert_eq!(count(origins(decoded(&[with_field(RE_ENQUEUES, n.into())]))), n);
+        }
+        for refused in [
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+            serde_json::json!("3"),
+            serde_json::json!(4_294_967_296_u64),
+        ] {
+            let reason = failed(decoded(&[with_field(RE_ENQUEUES, refused.clone())]));
+            assert!(reason.contains("the record is unreadable"), "{refused}: {reason}");
+        }
+    }
+
+    /// Pins that a re-enqueued unit's body decodes to a notification part
+    /// for the key at the HEAD's ETag and size, with the count it was given
+    /// and the HEAD's time, whatever bytes the key holds, and that the body
+    /// is printable ASCII.
+    #[test]
+    fn a_re_enqueued_unit_decodes_to_the_key_and_the_heads_etag_and_size() {
+        for key in [
+            "data/a b.ndjson",
+            "data/a+b.ndjson",
+            "data/a%b.ndjson",
+            "data/é.ndjson",
+            "data/\u{FFFE}.ndjson",
+            "data/a~b-c_d.e",
+        ] {
+            let overwrite = Overwrite {
+                key: key.to_owned(),
+                etag: Some("\"0123abcd\"".to_owned()),
+                size: 1234,
+                last_modified_ms: 1_760_000_000_123,
+            };
+            let body = re_enqueue_body("bucket", &overwrite, 4);
+            assert!(
+                body.iter().all(|&b| (0x20..0x7f).contains(&b)),
+                "{key}: {}",
+                String::from_utf8_lossy(&body)
+            );
+            let decoded = decode(&body, &scope(), packing());
+            let Decoded::Read(cursors) = decoded else {
+                panic!("{key}: not read");
+            };
+            let parts: Vec<Part> = cursors.into_iter().flatten().collect();
+            let entry = &parts[0].object[0];
+            assert_eq!(entry.key, key);
+            assert_eq!(entry.etag.as_deref(), Some("\"0123abcd\""));
+            assert_eq!(entry.size, 1234);
+            assert_eq!(entry.last_modified_ms, 1_760_000_000_123);
+            assert_eq!(
+                parts[0].origin,
+                Origin::Notification {
+                    version: None,
+                    re_enqueues: 4
+                },
+                "{key}"
+            );
+        }
+    }
+
+    /// Pins that a re-enqueued unit for a key the HEAD reported without an
+    /// ETag decodes to a part that reads unpinned.
+    #[test]
+    fn a_re_enqueued_unit_without_an_etag_reads_unpinned() {
+        let overwrite = Overwrite {
+            key: "data/a.ndjson".to_owned(),
+            etag: None,
+            size: 10,
+            last_modified_ms: 0,
+        };
+        let body = re_enqueue_body("bucket", &overwrite, 1);
+        assert_eq!(read(decode(&body, &scope(), packing())), [("data/a.ndjson".to_owned(), None, None)]);
     }
 }

@@ -10,14 +10,15 @@ mod support;
 use spate_core::clock::tokio::TestClock;
 use spate_core::feed::memory::MemoryFeed;
 use spate_core::feed::{
-    Confirmation, Delivery, Depth, DepthOf, Feed, FeedError, FeedErrorKind, FeedWaker, Receipt,
-    Unit,
+    Confirmation, Delivery, Depth, DepthOf, DepthReading, DepthReporter, Feed, FeedError,
+    FeedErrorKind, FeedWaker, Receipt, Unit, depth_reading,
 };
 use spate_core::pipeline::{ExitReport, ExitState};
 use spate_test::{FeedScript, ScriptedFeed, scripted_feed, wait_until};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use support::location::{LocationHooks, location_store};
 use support::{
@@ -53,6 +54,17 @@ fn launch_bounded(
     extra: &str,
 ) -> Launched {
     hooks.seed(FINGERPRINT_KEY, fingerprint(data, "Auto", "0a").as_bytes());
+    launch_unlisted(data, feed, store, clock, extra)
+}
+
+/// [`launch_bounded`] before any lister run has written the fingerprint.
+fn launch_unlisted(
+    data: &Path,
+    feed: Arc<dyn Feed>,
+    store: Arc<dyn object_store::ObjectStore>,
+    clock: &Arc<TestClock>,
+    extra: &str,
+) -> Launched {
     let yaml = PipelineYaml::file("s3-job-end", data)
         .section(&format!(
             "feed:\n  scripted: {{}}\n  location: {LOCATION}\n{extra}"
@@ -73,10 +85,9 @@ fn launch_bounded(
 }
 
 /// Depth reads of `of` the end check has taken: the worker's startup also
-/// asks the feed's depth once, to refuse a feed that cannot count.
+/// asks each depth once, to refuse a feed that cannot count.
 fn check_reads(script: &FeedScript, of: DepthOf) -> usize {
-    let probe = usize::from(of == DepthOf::Feed);
-    script.depth_reads(of).saturating_sub(probe)
+    script.depth_reads(of).saturating_sub(1)
 }
 
 /// Wait until the end check has taken `n` depth reads of `of`.
@@ -359,14 +370,14 @@ fn a_failed_dead_letter_read_does_not_end_the_job_completed() {
     let (store, hooks) = location_store();
     hooks.seed(END_KEY, RUN_A.as_bytes());
     let (feed, script) = scripted_feed();
-    script.answer_depth(
-        DepthOf::DeadLetters,
-        Err(FeedError::new(FeedErrorKind::Retryable, "throttled")),
-    );
     let clock = TestClock::frozen();
     let l = launch_bounded(&data, Arc::new(feed), &hooks, store, &clock, "");
 
     wait_for_reads(&script, DepthOf::Feed, 1);
+    script.answer_depth(
+        DepthOf::DeadLetters,
+        Err(FeedError::new(FeedErrorKind::Retryable, "throttled")),
+    );
     step_reads(&clock, &script, 1, STEPS);
     wait_for_reads(&script, DepthOf::DeadLetters, 1);
     assert!(running(&l), "a failed dead-letter read ends nothing");
@@ -398,7 +409,8 @@ fn exactly_one_dead_letter_ends_the_job_stalled() {
     assert!(
         reason.contains("bounded feed job stalled")
             && reason.contains("the scripted dead-letter destination")
-            && reason.contains("1 visible"),
+            && reason.contains("1 visible")
+            && reason.contains("copy them into a re-run's feed"),
         "{reason}"
     );
 }
@@ -538,6 +550,32 @@ fn a_settling_window_key_sets_the_fingerprint_wait() {
     assert!(reason.contains("60s"), "{reason}");
 }
 
+/// Pins that `settling_window` sets the end check's window: with `1m` the
+/// job ends after four steps of 15 s, where the default window takes twenty.
+#[test]
+fn a_settling_window_key_sets_the_end_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let (store, hooks) = location_store();
+    hooks.seed(END_KEY, RUN_A.as_bytes());
+    let (feed, script) = scripted_feed();
+    let clock = TestClock::frozen();
+    let l = launch_bounded(
+        &data,
+        Arc::new(feed),
+        &hooks,
+        store,
+        &clock,
+        "  settling_window: 1m\n",
+    );
+
+    wait_for_reads(&script, DepthOf::Feed, 1);
+    step_reads(&clock, &script, 1, 3);
+    assert!(running(&l), "one step short of the window");
+    clock.advance(STEP);
+    assert_eq!(exit(&l).state, ExitState::Completed);
+}
+
 /// Pins that `settling_window` on a durable feed with no location, where no
 /// job ends, is refused at startup naming the key.
 #[test]
@@ -616,32 +654,68 @@ fn a_fatal_depth_read_fails_the_job() {
     assert!(reason.contains("access denied to the queue"), "{reason}");
 }
 
-/// A feed that delegates to a scripted one but cannot count.
-struct Uncounted(ScriptedFeed);
+/// A feed that delegates to a scripted one. It counts only what `counts`
+/// names, its receives fail retryably while `throttled` is set, and with
+/// `pending` its dead-letter reads wait there until the test settles them.
+struct Wrapped {
+    inner: ScriptedFeed,
+    counts: &'static [DepthOf],
+    throttled: Arc<AtomicBool>,
+    pending: Option<Arc<Mutex<Vec<DepthReporter>>>>,
+}
 
-impl Feed for Uncounted {
-    fn backend(&self) -> &str {
-        self.0.backend()
-    }
-    fn set_waker(&self, waker: FeedWaker) {
-        self.0.set_waker(waker);
-    }
-    fn receive(&self, max: usize) -> Result<Vec<Delivery>, FeedError> {
-        self.0.receive(max)
-    }
-    fn renew(&self, receipt: Receipt) -> Result<(), FeedError> {
-        self.0.renew(receipt)
-    }
-    fn acknowledge(&self, receipt: Receipt) -> Result<(), FeedError> {
-        self.0.acknowledge(receipt)
-    }
-    fn fail(&self, receipt: Receipt, reason: &str) -> Result<(), FeedError> {
-        self.0.fail(receipt, reason)
-    }
-    fn publish(&self, unit: Unit) -> Confirmation {
-        self.0.publish(unit)
+impl Wrapped {
+    fn new(inner: ScriptedFeed, counts: &'static [DepthOf]) -> Wrapped {
+        Wrapped {
+            inner,
+            counts,
+            throttled: Arc::default(),
+            pending: None,
+        }
     }
 }
+
+impl Feed for Wrapped {
+    fn backend(&self) -> &str {
+        self.inner.backend()
+    }
+    fn set_waker(&self, waker: FeedWaker) {
+        self.inner.set_waker(waker);
+    }
+    fn receive(&self, max: usize) -> Result<Vec<Delivery>, FeedError> {
+        if self.throttled.load(Ordering::SeqCst) {
+            return Err(FeedError::new(FeedErrorKind::Retryable, "throttled"));
+        }
+        self.inner.receive(max)
+    }
+    fn renew(&self, receipt: Receipt) -> Result<(), FeedError> {
+        self.inner.renew(receipt)
+    }
+    fn acknowledge(&self, receipt: Receipt) -> Result<(), FeedError> {
+        self.inner.acknowledge(receipt)
+    }
+    fn fail(&self, receipt: Receipt, reason: &str) -> Result<(), FeedError> {
+        self.inner.fail(receipt, reason)
+    }
+    fn publish(&self, unit: Unit) -> Confirmation {
+        self.inner.publish(unit)
+    }
+    fn read_depth(&self, of: DepthOf) -> Option<DepthReading> {
+        if !self.counts.contains(&of) {
+            return None;
+        }
+        if of == DepthOf::DeadLetters
+            && let Some(pending) = &self.pending
+        {
+            let (reporter, reading) = depth_reading();
+            pending.lock().unwrap().push(reporter);
+            return Some(reading);
+        }
+        self.inner.read_depth(of)
+    }
+}
+
+const BOTH: &[DepthOf] = &[DepthOf::Feed, DepthOf::DeadLetters];
 
 /// Pins that a bounded job on a feed that reports no depth fails at its
 /// start, naming the backend, before it receives a unit.
@@ -653,7 +727,14 @@ fn a_feed_that_reports_no_depth_fails_a_bounded_job_at_open() {
     let (feed, script) = scripted_feed();
     script.deliver(Unit::new("u", b"x".to_vec()));
     let clock = TestClock::frozen();
-    let l = launch_bounded(&data, Arc::new(Uncounted(feed)), &hooks, store, &clock, "");
+    let l = launch_bounded(
+        &data,
+        Arc::new(Wrapped::new(feed, &[])),
+        &hooks,
+        store,
+        &clock,
+        "",
+    );
     let report = exit(&l);
     assert_eq!(report.exit_code(), 1);
     let reason = failure_reason(&report);
@@ -662,6 +743,188 @@ fn a_feed_that_reports_no_depth_fails_a_bounded_job_at_open() {
         "{reason}"
     );
     assert!(script.delivered().is_empty(), "nothing was received");
+}
+
+/// Pins that a feed that cannot count fails a bounded job before the
+/// fingerprint wait: no lister run has written one, the clock never moves,
+/// and the run still exits naming the backend.
+#[test]
+fn a_feed_that_reports_no_depth_fails_before_the_fingerprint_wait() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let (store, _hooks) = location_store();
+    let (feed, _script) = scripted_feed();
+    let clock = TestClock::frozen();
+    let l = launch_unlisted(&data, Arc::new(Wrapped::new(feed, &[])), store, &clock, "");
+    let reason = failure_reason(&exit(&l));
+    assert!(
+        reason.contains("`scripted` feed reports no depth"),
+        "{reason}"
+    );
+}
+
+/// Pins that a feed that counts its units but not its dead letters fails a
+/// bounded job at its start, before any window.
+#[test]
+fn a_feed_that_cannot_count_its_dead_letters_fails_at_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let (store, hooks) = location_store();
+    hooks.seed(END_KEY, RUN_A.as_bytes());
+    let (feed, script) = scripted_feed();
+    let clock = TestClock::frozen();
+    let feed = Wrapped::new(feed, &[DepthOf::Feed]);
+    let l = launch_bounded(&data, Arc::new(feed), &hooks, store, &clock, "");
+    let reason = failure_reason(&exit(&l));
+    assert!(
+        reason.contains("`scripted` feed reports no depth"),
+        "{reason}"
+    );
+    assert_eq!(check_reads(&script, DepthOf::Feed), 0, "no window opened");
+}
+
+/// Pins that a dead-letter read the feed refuses for good fails the run
+/// naming the dead-letter destination.
+#[test]
+fn a_fatal_dead_letter_read_names_the_destination() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let (store, hooks) = location_store();
+    hooks.seed(END_KEY, RUN_A.as_bytes());
+    let (feed, script) = scripted_feed();
+    let clock = TestClock::frozen();
+    let l = launch_bounded(&data, Arc::new(feed), &hooks, store, &clock, "");
+
+    wait_for_reads(&script, DepthOf::Feed, 1);
+    script.answer_depth(
+        DepthOf::DeadLetters,
+        Err(FeedError::new(FeedErrorKind::Fatal, "access denied")),
+    );
+    step_reads(&clock, &script, 1, STEPS);
+    let reason = failure_reason(&exit(&l));
+    assert!(
+        reason.contains("dead-letter destination") && reason.contains("access denied"),
+        "{reason}"
+    );
+}
+
+/// Pins that a closing receive the feed answers `Retryable` restarts the
+/// check: the window's last read lags a unit that has arrived, the receive
+/// fails, and the worker reads the end marker again where it would have
+/// ended `Completed` over the unit.
+#[test]
+fn a_failed_closing_receive_restarts_the_check() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let (store, hooks) = location_store();
+    hooks.seed(END_KEY, RUN_A.as_bytes());
+    let (inner, script) = scripted_feed();
+    let feed = Wrapped::new(inner, BOTH);
+    let throttled = Arc::clone(&feed.throttled);
+    let clock = TestClock::frozen();
+    let l = launch_bounded(&data, Arc::new(feed), &hooks, store, &clock, "");
+
+    wait_for_reads(&script, DepthOf::Feed, 1);
+    step_reads(&clock, &script, 1, STEPS - 1);
+    // An approximate count can lag a unit that has arrived.
+    script.answer_depth(DepthOf::Feed, Ok(Depth::new("the scripted feed", true)));
+    throttled.store(true, Ordering::SeqCst);
+    let unit = script.deliver(Unit::new("late", b"x".to_vec()));
+    let gets = hooks.gets();
+    clock.advance(STEP);
+    wait_until(DEADLINE, "the closing marker read", || hooks.gets() > gets);
+    // A restarted window reads again one step after its last read.
+    clock.advance(STEP);
+    let mut exited = None;
+    wait_until(DEADLINE, "the run ends or reads the marker again", || {
+        exited = l.run.wait_exit(Duration::ZERO);
+        exited.is_some() || hooks.gets() >= gets + 2
+    });
+    assert!(
+        exited.is_none(),
+        "the job ended over an unread unit: {exited:?}"
+    );
+    assert!(!script.delivered().iter().any(|d| d.receipt == unit));
+    stop(&l);
+}
+
+/// Pins that a unit the reader's own receive takes and fails back in the
+/// same poll restarts the check: it arrives while the dead-letter read is
+/// outstanding, and the worker reads the end marker again where it would
+/// have ended `Completed`.
+#[test]
+fn a_unit_failed_back_in_the_poll_that_took_it_restarts_the_check() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let (store, hooks) = location_store();
+    hooks.seed(END_KEY, RUN_A.as_bytes());
+    let (inner, script) = scripted_feed();
+    let pending = Arc::new(Mutex::new(Vec::new()));
+    let feed = Wrapped {
+        pending: Some(Arc::clone(&pending)),
+        ..Wrapped::new(inner, BOTH)
+    };
+    let clock = TestClock::frozen();
+    let l = launch_bounded(&data, Arc::new(feed), &hooks, store, &clock, "");
+
+    wait_for_reads(&script, DepthOf::Feed, 1);
+    step_reads(&clock, &script, 1, STEPS);
+    // The startup probe's reading is the first.
+    wait_until(DEADLINE, "the dead-letter read starts", || {
+        pending.lock().unwrap().len() == 2
+    });
+    let receipt = script.deliver(Unit::new("unreadable", b"not a unit".to_vec()));
+    wait_until(DEADLINE, "the unit is failed back", || {
+        script.failed().iter().any(|(r, _)| *r == receipt)
+    });
+    let gets = hooks.gets();
+    for reporter in pending.lock().unwrap().drain(..) {
+        reporter.report(Ok(Depth::new(
+            "the scripted dead-letter destination",
+            false,
+        )));
+    }
+    // A restarted window reads again one step after its last read.
+    clock.advance(STEP);
+    let mut exited = None;
+    wait_until(DEADLINE, "the run ends or reads the marker again", || {
+        exited = l.run.wait_exit(Duration::ZERO);
+        exited.is_some() || hooks.gets() > gets
+    });
+    assert!(
+        exited.is_none(),
+        "the job ended over a failed unit: {exited:?}"
+    );
+    stop(&l);
+}
+
+/// Pins that `configure_feed` takes `settling_window` on an in-process feed
+/// section built in code: its refusal of a window with no location is for
+/// durable feeds, and the core refuses the key on `memory`.
+#[test]
+fn configure_feed_takes_a_settling_window_on_the_in_process_feed() {
+    use spate_core::config::{ComponentConfig, FeedSection, PipelineConfig, YamlValue};
+    use spate_core::feed::FeedOrigin;
+    use spate_core::source::Source as _;
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let config =
+        PipelineConfig::from_str(&PipelineYaml::file("s3-memory-window", &data).build()).unwrap();
+    let mut section = FeedSection::new(ComponentConfig::new(
+        "memory",
+        YamlValue::Mapping(Default::default()),
+    ));
+    section.settling_window = Some(Duration::from_secs(60));
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let mut source =
+        spate_s3::S3Source::from_component_config(&config.source, rt.handle().clone()).unwrap();
+    source
+        .configure_feed(&section, Arc::new(MemoryFeed::new()), FeedOrigin::Section)
+        .expect("the S3 source leaves the in-process feed's window to the core");
 }
 
 fn launch_solo(data: &Path, extra: &str, clock: &Arc<TestClock>) -> Launched {
@@ -714,7 +977,8 @@ fn a_solo_job_with_a_dead_lettered_unit_ends_stalled() {
     assert!(
         reason.contains("bounded feed job stalled")
             && reason.contains("the in-process dead-letter list")
-            && reason.contains("1 visible"),
+            && reason.contains("1 visible")
+            && reason.contains("run the job again"),
         "{reason}"
     );
 }

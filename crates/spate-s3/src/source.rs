@@ -703,6 +703,16 @@ impl Source for S3Source {
                      failed back to the feed"
                 );
             }
+            // Each depth is asked once here, before the fingerprint wait, so a
+            // feed that cannot count fails the job at its start, never at its
+            // end.
+            if (self.location.is_some() || self.solo_ends)
+                && [DepthOf::Feed, DepthOf::DeadLetters]
+                    .into_iter()
+                    .any(|of| feed.read_depth(of).is_none())
+            {
+                return Err(no_depth(feed.as_ref()));
+            }
             let mut finish = None;
             if let Some(location) = &self.location {
                 let location_store = self.location_store(location)?;
@@ -732,11 +742,6 @@ impl Source for S3Source {
                 });
             } else if self.solo_ends {
                 finish = Some(Finish::Solo { finished: false });
-            }
-            // Asked once here, so a feed that cannot count fails the job at
-            // its start, never at its end.
-            if finish.is_some() && feed.read_depth(DepthOf::Feed).is_none() {
-                return Err(no_depth(feed.as_ref()));
             }
             let end = finish.map(|finish| {
                 JobEnd::new(

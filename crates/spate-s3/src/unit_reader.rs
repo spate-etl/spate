@@ -240,7 +240,13 @@ impl UnitReader {
         let mut opened = self.open_pending();
         let room = self.room();
         if room > 0 {
-            self.receive(room)?;
+            // A unit taken and failed straight back leaves nothing held, and
+            // the feed still holds it.
+            if self.receive(room)?.is_some_and(|took| took > 0)
+                && let Some(end) = &mut self.end
+            {
+                end.busy();
+            }
             opened.extend(self.open_pending());
         }
         if !opened.is_empty() {
@@ -271,6 +277,10 @@ impl UnitReader {
                 return Ok(SourceEvent::Drained);
             }
         }
+        let timeout = self
+            .end
+            .as_ref()
+            .map_or(timeout, |end| end.park_within(timeout));
         self.park.park(timeout);
         Ok(SourceEvent::Idle)
     }
@@ -487,15 +497,14 @@ impl UnitReader {
         opened
     }
 
-    /// Receive up to `room` deliveries and hold each readable one.
     /// Receive up to `room` units and hold or fail each. Returns how many
-    /// the feed handed over.
-    fn receive(&mut self, room: usize) -> Result<usize, SourceError> {
+    /// the feed handed over, or `None` when the receive failed retryably.
+    fn receive(&mut self, room: usize) -> Result<Option<usize>, SourceError> {
         let deliveries = match self.feed.receive(room) {
             Ok(deliveries) => deliveries,
             Err(e) if e.kind == FeedErrorKind::Retryable => {
                 tracing::warn!(error = %e, "receiving from the feed failed; retrying");
-                return Ok(0);
+                return Ok(None);
             }
             Err(e) => return Err(feed_error("receiving from the feed", &e)),
         };
@@ -515,7 +524,7 @@ impl UnitReader {
                 }
             }
         }
-        Ok(taken)
+        Ok(Some(taken))
     }
 
     /// Hold `delivery` with `cursors` as its pending parts.
@@ -898,6 +907,176 @@ mod tests {
         assert!(drains_within(&mut reader, 8));
         assert_eq!(script.failed().len(), 1);
         assert_eq!(script.failed()[0].0, receipt);
+    }
+
+    /// Give `reader` the end check of a job with a 60 s window over an end
+    /// marker that names one run, its reads on a runtime of their own, and
+    /// poll until the window has opened with one read of the feed.
+    fn end_windowed(
+        reader: &mut UnitReader,
+        script: &FeedScript,
+    ) -> (
+        Arc<spate_core::clock::tokio::TestClock>,
+        tokio::runtime::Runtime,
+    ) {
+        use object_store::ObjectStoreExt as _;
+        let io = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let store: Arc<dyn object_store::ObjectStore> =
+            Arc::new(object_store::memory::InMemory::new());
+        let location =
+            crate::location::Location::parse("s3://ops/jobs/a/", "s3://data/events/").unwrap();
+        io.block_on(store.put(
+            &location.end(),
+            b"run=0123456789abcdef0123456789abcdef\n".to_vec().into(),
+        ))
+        .unwrap();
+        let clock = spate_core::clock::tokio::TestClock::frozen();
+        let mut end = JobEnd::new(
+            crate::job_end::Finish::Marker {
+                store,
+                location,
+                window: Duration::from_secs(60),
+            },
+            Arc::clone(&clock) as Arc<dyn spate_core::clock::tokio::Clock>,
+            io.handle().clone(),
+            spate_core::source::StopSignal::default(),
+        );
+        end.set_waker(reader.waker.clone());
+        reader.end = Some(end);
+        start(reader);
+        spate_test::wait_until(Duration::from_secs(30), "the window opens", || {
+            poll(reader);
+            script.depth_reads(spate_core::feed::DepthOf::Feed) == 1
+        });
+        (clock, io)
+    }
+
+    /// Pins that a poll finding the reader holding only a retired lane
+    /// restarts the window: 15 s on, the reader reads the end marker again,
+    /// where an unbroken window would read the feed.
+    #[test]
+    fn a_retired_lane_restarts_the_end_window() {
+        let (feed, script) = scripted_feed();
+        let (mut reader, _rt) = reader_over(Arc::new(feed), None, None);
+        let (clock, _io) = end_windowed(&mut reader, &script);
+        let (p, _receipt, _tracker) = hold_one(&mut reader, &script);
+        finish(&mut reader, p, 3);
+        assert!(reader.deliveries.is_empty() && reader.lanes.is_empty());
+        assert_eq!(lanes_retired(poll(&mut reader)).len(), 1);
+        clock.advance(Duration::from_secs(15));
+        poll(&mut reader);
+        assert_eq!(
+            script.depth_reads(spate_core::feed::DepthOf::Feed),
+            1,
+            "the window went on over the retired lane"
+        );
+    }
+
+    /// Pins that a poll finding the reader holding only a revoked lane, for
+    /// a unit it failed back to the feed, restarts the window.
+    #[test]
+    fn a_revoked_lane_restarts_the_end_window() {
+        let (feed, script) = scripted_feed();
+        let (mut reader, _rt) = reader_over(Arc::new(feed), None, None);
+        let (clock, _io) = end_windowed(&mut reader, &script);
+        let (p, _receipt, _tracker) = hold_one(&mut reader, &script);
+        let d = delivery_of(&reader, p);
+        reader.deliveries.get_mut(&d).unwrap().failing = Some("unreadable".into());
+        assert_eq!(lanes_revoked(poll(&mut reader)).len(), 1);
+        assert!(reader.deliveries.is_empty() && reader.lanes.is_empty());
+        clock.advance(Duration::from_secs(15));
+        poll(&mut reader);
+        assert_eq!(
+            script.depth_reads(spate_core::feed::DepthOf::Feed),
+            1,
+            "the window went on over the revoked lane"
+        );
+    }
+
+    /// Holds every GET of a [`gated_get`] store until a test opens it.
+    static GATE: (Mutex<bool>, std::sync::Condvar) = (Mutex::new(false), std::sync::Condvar::new());
+
+    fn gated_get(
+        _: &object_store::path::Path,
+    ) -> Option<object_store::Result<object_store::GetResult>> {
+        let (open, opened) = &GATE;
+        let mut open = open.lock().unwrap();
+        while !*open {
+            open = opened.wait(open).unwrap();
+        }
+        None
+    }
+
+    /// Pins that a reader built with an end check hands it the reader's
+    /// waker: a marker read that finishes while the reader is parked ends
+    /// the park.
+    #[test]
+    fn a_finished_marker_read_ends_the_readers_park() {
+        use object_store::ObjectStoreExt as _;
+        *GATE.0.lock().unwrap() = false;
+        let io = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let store = crate::testutil::HookStore {
+            get: Some(gated_get),
+            ..Default::default()
+        };
+        let location =
+            crate::location::Location::parse("s3://ops/jobs/a/", "s3://data/events/").unwrap();
+        io.block_on(store.inner.put(
+            &location.end(),
+            b"run=0123456789abcdef0123456789abcdef\n".to_vec().into(),
+        ))
+        .unwrap();
+        let end = JobEnd::new(
+            crate::job_end::Finish::Marker {
+                store: Arc::new(store),
+                location,
+                window: Duration::from_secs(60),
+            },
+            spate_core::clock::tokio::TestClock::frozen(),
+            io.handle().clone(),
+            spate_core::source::StopSignal::default(),
+        );
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let parts = LaneParts {
+            store: Arc::new(object_store::memory::InMemory::new()),
+            handle: rt.handle().clone(),
+            issuer: Checkpointer::new().handle(),
+            make_framer: Arc::new(|| Box::new(TestLineFramer::new(1 << 20))),
+            packing: Packing {
+                target_bytes: TARGET,
+                compression: Compression::Auto,
+                delimiter: Some(b'\n'),
+            },
+            chunk_bytes: 1 << 16,
+            range_bytes: 1 << 16,
+            retry_base: Duration::from_millis(1),
+            metrics: None,
+        };
+        let (feed, _script) = scripted_feed();
+        let mut reader = UnitReader::new(Arc::new(feed), parts, scope(), None, Some(end));
+        start(&mut reader);
+        // Starts the marker read, held at the gate, and takes any signal
+        // already sent.
+        poll(&mut reader);
+        {
+            let (open, opened) = &GATE;
+            *open.lock().unwrap() = true;
+            opened.notify_all();
+        }
+        assert!(
+            reader.park.park(Duration::from_secs(30)),
+            "the marker read did not wake the reader"
+        );
     }
 
     /// Pins INV-1 in `commit`: with end-of-input decided at `T`, a

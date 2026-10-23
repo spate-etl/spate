@@ -10,16 +10,16 @@
 //! and the reader only checks its outcome, so no poll waits on it.
 
 use crate::location::{Location, read_end};
-use futures_util::FutureExt as _;
 use object_store::ObjectStore;
 use spate_core::clock::tokio::Clock;
 use spate_core::error::{ErrorClass, SourceError};
 use spate_core::feed::{
-    DepthReading, EndAction, EndCheck, EndOutcome, Feed, FeedWaker, MarkerRead,
+    DepthOf, DepthReading, EndAction, EndCheck, EndOutcome, Feed, FeedWaker, MarkerRead,
 };
 use spate_core::source::StopSignal;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use tokio::sync::oneshot;
 
 /// What tells a job that its lister has finished.
 pub(crate) enum Finish {
@@ -44,8 +44,14 @@ pub(crate) struct JobEnd {
     stop: StopSignal,
     /// Signalled when a marker read finishes, so the reader's park ends.
     waker: Option<FeedWaker>,
-    marker_read: Option<tokio::task::JoinHandle<Result<Option<String>, SourceError>>>,
+    /// The marker read's answer, sent before its task signals the waker.
+    marker_read: Option<oneshot::Receiver<Result<Option<String>, SourceError>>>,
     depth_read: Option<DepthReading>,
+    /// What the last depth read asked for, so a failure names it.
+    depth_of: Option<DepthOf>,
+    /// When the check's next read falls due, so the reader's park ends by
+    /// then. `None` while a read is outstanding or the reader holds work.
+    due: Option<Instant>,
 }
 
 impl JobEnd {
@@ -64,7 +70,17 @@ impl JobEnd {
             waker: None,
             marker_read: None,
             depth_read: None,
+            depth_of: None,
+            due: None,
         }
+    }
+
+    /// The longest the reader may park: `timeout`, cut short at the check's
+    /// next read.
+    pub(crate) fn park_within(&self, timeout: Duration) -> Duration {
+        self.due.map_or(timeout, |due| {
+            timeout.min(due.saturating_duration_since(self.clock.now().into_std()))
+        })
     }
 
     /// Hand over the waker a finished marker read signals.
@@ -84,6 +100,7 @@ impl JobEnd {
     /// drop any read outstanding, as `EndCheck::restart` asks. A marker read
     /// still running finishes on its own, unread.
     pub(crate) fn busy(&mut self) {
+        self.due = None;
         if let Some(check) = &mut self.check {
             check.restart(self.clock.now().into_std());
             self.marker_read = None;
@@ -92,8 +109,9 @@ impl JobEnd {
     }
 
     /// Advance the check on an idle poll, the reader holding no work.
-    /// `receive` receives once and returns how many units it took. Returns
-    /// `true` once the job has completed.
+    /// `receive` receives once and returns how many units it took, or `None`
+    /// when the receive failed and may succeed later. Returns `true` once the
+    /// job has completed.
     ///
     /// # Errors
     ///
@@ -103,8 +121,9 @@ impl JobEnd {
     pub(crate) fn idle(
         &mut self,
         feed: &dyn Feed,
-        mut receive: impl FnMut() -> Result<usize, SourceError>,
+        mut receive: impl FnMut() -> Result<Option<usize>, SourceError>,
     ) -> Result<bool, SourceError> {
+        self.due = None;
         if self.stop.is_set() {
             return Ok(false);
         }
@@ -119,20 +138,24 @@ impl JobEnd {
         let Some(check) = &mut self.check else {
             return Ok(false);
         };
-        if let Some(task) = &mut self.marker_read
-            && let Some(outcome) = (&mut *task).now_or_never()
+        if let Some(answer) = &mut self.marker_read
+            && let Some(outcome) = match answer.try_recv() {
+                Ok(outcome) => Some(Some(outcome)),
+                Err(oneshot::error::TryRecvError::Empty) => None,
+                Err(oneshot::error::TryRecvError::Closed) => Some(None),
+            }
         {
             self.marker_read = None;
             let read = match outcome {
-                Ok(Ok(Some(run))) => MarkerRead::Present(run),
-                Ok(Ok(None)) => MarkerRead::Absent,
-                Ok(Err(e)) if is_retryable(&e) => {
+                Some(Ok(Some(run))) => MarkerRead::Present(run),
+                Some(Ok(None)) => MarkerRead::Absent,
+                Some(Err(e)) if is_retryable(&e) => {
                     tracing::warn!(error = %e, "reading the end marker failed; reading it again");
                     MarkerRead::Failed
                 }
-                Ok(Err(e)) => return Err(e),
-                Err(e) => {
-                    tracing::warn!(error = %e, "the end marker read ended; reading it again");
+                Some(Err(e)) => return Err(e),
+                None => {
+                    tracing::warn!("the end marker read ended unanswered; reading it again");
                     MarkerRead::Failed
                 }
             };
@@ -156,15 +179,19 @@ impl JobEnd {
                     let store = Arc::clone(store);
                     let location = location.clone();
                     let waker = self.waker.clone();
-                    self.marker_read = Some(self.handle.spawn(async move {
-                        let read = read_end(store.as_ref(), &location).await;
+                    let (answer, answered) = oneshot::channel();
+                    self.marker_read = Some(answered);
+                    // The answer is sent before the wake, so the poll the
+                    // wake starts finds it.
+                    drop(self.handle.spawn(async move {
+                        let _ = answer.send(read_end(store.as_ref(), &location).await);
                         if let Some(waker) = waker {
                             waker.wake();
                         }
-                        read
                     }));
                 }
                 EndAction::ReadDepth(of) => {
+                    self.depth_of = Some(of);
                     let Some(mut reading) = feed.read_depth(of) else {
                         return Err(no_depth(feed));
                     };
@@ -174,9 +201,10 @@ impl JobEnd {
                     }
                 }
                 EndAction::Receive => {
-                    let took = receive()?;
-                    check.received(now, took > 0);
-                    if took > 0 {
+                    // A receive that failed did not find the feed empty.
+                    let took = receive()?.is_none_or(|took| took > 0);
+                    check.received(now, took);
+                    if took {
                         return Ok(false);
                     }
                 }
@@ -188,21 +216,35 @@ impl JobEnd {
                     return Ok(true);
                 }
                 EndAction::Ended(EndOutcome::Stalled(depth)) => {
+                    // A solo run's dead letters leave with the process, and
+                    // its re-run lists the whole prefix again.
+                    let next = match self.finish {
+                        Finish::Marker { .. } => "copy them into a re-run's feed",
+                        Finish::Solo { .. } => "run the job again",
+                    };
                     return Err(SourceError::Client {
                         class: ErrorClass::Fatal,
                         reason: format!(
                             "bounded feed job stalled: the dead-letter destination holds units \
-                             ({depth}); fix their cause, then copy them into a re-run's feed"
+                             ({depth}); fix their cause, then {next}"
                         ),
                     });
                 }
                 EndAction::Ended(EndOutcome::Failed(e)) => {
                     return Err(SourceError::Client {
                         class: ErrorClass::Fatal,
-                        reason: format!("reading the feed's depth: {e}"),
+                        reason: if self.depth_of == Some(DepthOf::DeadLetters) {
+                            format!("reading the depth of the feed's dead-letter destination: {e}")
+                        } else {
+                            format!("reading the feed's depth: {e}")
+                        },
                     });
                 }
-                // `Wait`: nothing to start until a read answers or falls due.
+                EndAction::Wait(due) => {
+                    self.due = due;
+                    return Ok(false);
+                }
+                // `EndAction` is non-exhaustive.
                 _ => return Ok(false),
             }
         }
@@ -268,7 +310,7 @@ mod tests {
         let receives = Cell::new(0);
         let took_one = end.idle(&feed, || {
             receives.set(receives.get() + 1);
-            Ok(1)
+            Ok(Some(1))
         });
         assert!(
             !took_one.unwrap(),
@@ -277,7 +319,7 @@ mod tests {
         assert_eq!(receives.get(), 1, "one receive per poll");
         let took_none = end.idle(&feed, || {
             receives.set(receives.get() + 1);
-            Ok(0)
+            Ok(Some(0))
         });
         assert!(took_none.unwrap(), "an empty receive lets the job complete");
         assert_eq!(receives.get(), 2);
@@ -304,11 +346,59 @@ mod tests {
         let (waker, park) = wake_channel();
         end.set_waker(waker);
         let (feed, _script) = spate_test::scripted_feed();
-        assert!(!end.idle(&feed, || Ok(0)).unwrap());
+        assert!(!end.idle(&feed, || Ok(Some(0))).unwrap());
         assert!(
             park.park(Duration::from_secs(30)),
             "the marker read did not wake the reader"
         );
+    }
+
+    /// Pins that the poll a marker read's wake starts finds the read's
+    /// answer and reads the feed, and that the reader then parks no later
+    /// than the check's next read until it holds work.
+    #[test]
+    fn the_poll_a_marker_read_wakes_reads_its_answer() {
+        use object_store::ObjectStoreExt as _;
+        let rt = runtime();
+        let store: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
+        let location = Location::parse("s3://ops/jobs/a/", "s3://data/events/").unwrap();
+        rt.block_on(store.put(
+            &location.end(),
+            b"run=0123456789abcdef0123456789abcdef\n".to_vec().into(),
+        ))
+        .unwrap();
+        let mut end = JobEnd::new(
+            Finish::Marker {
+                store,
+                location,
+                window: Duration::from_secs(60),
+            },
+            TestClock::frozen(),
+            rt.handle().clone(),
+            StopSignal::default(),
+        );
+        let (waker, park) = wake_channel();
+        end.set_waker(waker);
+        let (feed, script) = spate_test::scripted_feed();
+        assert!(!end.idle(&feed, || Ok(Some(0))).unwrap());
+        assert!(
+            park.park(Duration::from_secs(30)),
+            "the marker read finishes"
+        );
+        assert!(!end.idle(&feed, || Ok(Some(0))).unwrap());
+        assert_eq!(
+            script.depth_reads(DepthOf::Feed),
+            1,
+            "the woken poll did not find the marker read's answer"
+        );
+        let long = Duration::from_secs(60);
+        let parked = end.park_within(long);
+        assert!(
+            parked > Duration::ZERO && parked <= Duration::from_secs(15),
+            "{parked:?}"
+        );
+        end.busy();
+        assert_eq!(end.park_within(long), long);
     }
 
     /// Pins that an end marker read that fails for good, such as a body that
@@ -335,12 +425,12 @@ mod tests {
         let (waker, park) = wake_channel();
         end.set_waker(waker);
         let (feed, _script) = spate_test::scripted_feed();
-        assert!(!end.idle(&feed, || Ok(0)).unwrap());
+        assert!(!end.idle(&feed, || Ok(Some(0))).unwrap());
         assert!(
             park.park(Duration::from_secs(30)),
             "the marker read finishes"
         );
-        let err = end.idle(&feed, || Ok(0)).unwrap_err().to_string();
+        let err = end.idle(&feed, || Ok(Some(0))).unwrap_err().to_string();
         assert!(err.contains("not a lister run's end marker"), "{err}");
     }
 }

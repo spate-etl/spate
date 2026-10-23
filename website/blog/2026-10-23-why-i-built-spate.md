@@ -29,13 +29,13 @@ to walk. This meant that the only way to get more rows per second was to add
 instances, and every instance brought its own JVM, its own heap, and its own
 share of the cluster to run.
 
-The benchmark's Flink arm hits the same ceiling on the `c8gd.metal-24xl`.
-Doubling the rows per batch to 25,000 raised its throughput by 12.9%, but cut
-rows per second per core by 5.9%, because the arm spent more CPU than the bigger
-inserts saved. At 50,000 rows per batch the arm "collapses into repeated Full
-GCs". The [Flink arm's
-notes](https://github.com/spate-etl/benchmark/blob/70a6c506e3a9248618b1fdcdab509d68f690569d/entrants/flink/README.md#clickhouse-batches)
-record both runs.
+The benchmark's Flink arm hits the same ceiling on the `c8gd.metal-24xl`. Its
+[notes](https://github.com/spate-etl/benchmark/blob/70a6c506e3a9248618b1fdcdab509d68f690569d/entrants/flink/README.md)
+record that "Flink reports every subtask 100% busy with `idle = 0` while the
+cgroup uses 10.9 of its 32 cores". Doubling the rows per batch to 25,000 raised
+its throughput by 12.9%, but cut rows per second per core by 5.9%, because the
+arm spent more CPU than the bigger inserts saved. At 50,000 rows per batch the
+arm "collapses into repeated Full GCs".
 
 Spate has no garbage collector to tune around. A record is a view into the bytes
 the source read, and the operator chain allocates nothing per record. Every byte
@@ -53,6 +53,9 @@ a part on disk for every insert. Its own guidance is to insert ["ideally between
 rows"](https://clickhouse.com/docs/best-practices/selecting-an-insert-strategy)
 at a time, and many small inserts end in "too many parts" errors. The merges
 fell behind, and Flink still could not push rows through the sink fast enough.
+The benchmark's Flink arm found the same: "Raising concurrency does not help: at
+the same batch size, two requests in flight measured lower throughput and 26%
+more CPU."
 
 Spate keeps the batch size and the concurrency apart. Each ClickHouse shard has
 one sink worker that fills a batch to its row, byte, or time limit, seals it,
@@ -94,6 +97,23 @@ against an idle, single-threaded ClickHouse 25.6 server, that cut server CPU end
 to end by 70%, at about twice the client CPU per row. The [Native format
 page](/docs/user-guide/connectors/sinks/clickhouse/native-format) has the
 measurement and when the trade pays.
+
+## Compression on the pipeline threads
+
+Flink's ClickHouse connector encodes each row in its sink writer and sends each
+insert from there, so encoding and writing the request share the sink's task. In
+the benchmark's Flink arm that request goes out uncompressed.
+
+Spate splits that work. The pipeline thread that seals a chunk also compresses
+it, and the I/O workers only send what is ready. In 0.3.0 the `clickhouse` crate
+compressed each insert on the I/O workers, and with the default two of them the
+sink inserted about 19.7M rows per second with LZ4 on the benchmark machine.
+Moving the compression onto the pipeline threads lifts that to about 32M on the
+same machine, with the same two I/O workers. Those were tuning runs, so the
+benchmark page does not carry them, and the change ships in 0.4.0. About 32M is
+also the machine's own ceiling for this pipeline: at that rate neither Spate nor
+ClickHouse was using all of its cores. [Moving insert compression onto the
+pipeline threads](/blog/compression-on-the-pipeline-threads) has the runs.
 
 ## What the other tools do better
 

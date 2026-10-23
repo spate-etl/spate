@@ -26,8 +26,8 @@ transform, and wrote to ClickHouse. Throughput stopped growing well before the
 CPUs were busy. Giving the TaskManager more memory did not lift it, because the
 heap it needed to hold large batches was the heap the garbage collector then had
 to walk. This meant that the only way to get more rows per second was to add
-instances, and every instance brought its own JVM, its own heap, and its own
-share of the cluster to run.
+instances, and every instance was one more JVM with a heap of its own for the
+cluster to run.
 
 The benchmark's Flink arm hits the same ceiling on the `c8gd.metal-24xl`. Its
 [notes](https://github.com/spate-etl/benchmark/blob/70a6c506e3a9248618b1fdcdab509d68f690569d/entrants/flink/README.md)
@@ -59,10 +59,10 @@ more CPU."
 
 Spate keeps the batch size and the concurrency apart. Each ClickHouse shard has
 one sink worker that fills a batch to its row, byte, or time limit, seals it,
-and then sends up to `max_inflight` sealed batches at once across healthy
-replicas ([ADR-0006](/docs/adr/per-shard-sink-workers)). More concurrency means
-more full-sized batches in flight, so the part count follows the data volume and
-stays independent of how many requests are open.
+and then sends up to `inflight.max_per_shard` sealed batches at once across
+healthy replicas ([ADR-0006](/docs/adr/per-shard-sink-workers)). More
+concurrency means more full-sized batches in flight, so the part count follows
+the data volume and stays independent of how many requests are open.
 
 ## Flink chains operators only at matching parallelism
 
@@ -117,7 +117,7 @@ pipeline threads](/blog/compression-on-the-pipeline-threads) has the runs.
 
 ## What the other tools do better
 
-The benchmark runs three systems besides Flink, and for each one there is a case
+The benchmark runs four systems besides Spate, and for each one there is a case
 where you would choose it over Spate.
 
 - **Flink** is built for stateful computation across a cluster, and Spate has no

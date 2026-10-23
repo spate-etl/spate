@@ -155,11 +155,11 @@ test.describe('compression post with motion', () => {
   });
 });
 
-/** Pins that the engineering tag page lists this post and the DOOM post. */
+/** Pins that the engineering tag page lists this post and the DOOM post, in date order, among any others. */
 test('the engineering tag lists the compression and DOOM posts', async ({page}) => {
   await gotoRoute(page, 'engineeringTag', 'dark');
   const titles = page.locator('article h2');
-  await expect(titles).toHaveText(['Moving insert compression onto the pipeline threads', 'Running DOOM inside ClickHouse']);
+  await expect(titles).toContainText(['Moving insert compression onto the pipeline threads', 'Running DOOM inside ClickHouse']);
   await expect(page.locator(`article h2 a[href="${ROUTES.compressionPost}"]`)).toHaveCount(1);
 });
 

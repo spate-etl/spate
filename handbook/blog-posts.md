@@ -90,8 +90,9 @@ under `website/static/img/`, with the figure's point readable at that size.
 
 ## The opening
 
-The text above `<!-- truncate -->` is what the blog list and the feeds show,
-so it has to stand on its own.
+The text above `<!-- truncate -->` is what the blog list shows, so it has to
+stand on its own. A feed item carries the whole post, with the `description`
+as its summary.
 
 - The first two sentences carry the problem or the result, with its number.
 - A claim about what Spate is for may open the post when the post carries the
@@ -144,7 +145,8 @@ the easiest to dismiss as a vendor's view.
 
 ## Voice
 
-The posts already in `website/blog/` are the reference.
+Where a post already in `website/blog/` differs from these rules, the rules
+hold.
 
 - "I" for what you built, measured or decided. "You" for the reader's
   situation and what it costs them.
@@ -175,11 +177,9 @@ The posts already in `website/blog/` are the reference.
 
 ## Proof and review
 
-A snippet is written by hand, because a dated post shows the code as it stood
-on its date. Each one is built or run against the crates the post describes
-before the post merges, and the output shown is the output it printed. Every
-post merges through a pull request and review, with `draft: true` until it is
-due to go live.
+Snippets follow [`docs/STYLE.md`](../docs/STYLE.md) § 11, and the output
+shown is the output a snippet printed. Every post merges through a pull
+request and review, with `draft: true` until it is due to go live.
 
 ## Where a post is shared
 
@@ -190,9 +190,10 @@ Share a post under its own title, from your own accounts.
   Show HN is for something readers can try, and lists blog posts as off topic.
 - **Lobsters.** Its rule of thumb is that self-promotion stays under a quarter
   of an account's stories and comments over a year.
-- **This Week in Rust.** Propose a post by pull request against the issue in
-  its `drafts/` folder. A post that shows how something is done in Rust code
-  fits Rust Walkthroughs. The editors may decline an article with excessive
-  LLM output.
+- **This Week in Rust.** It does not accept an article written by an LLM, and
+  its editors may decline one with excessive LLM output. A release post is a
+  project update, which it takes only from posts on r/rust. Propose any other
+  post by pull request against the issue in its `drafts/` folder. A post that
+  shows how something is done in Rust code fits Rust Walkthroughs.
 - **Personal accounts.** One or two sentences carrying the post's result, and
   the link.

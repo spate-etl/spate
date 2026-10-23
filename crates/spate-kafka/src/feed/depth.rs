@@ -13,11 +13,15 @@ use rdkafka::error::{KafkaError, RDKafkaErrorCode};
 use rdkafka::{Offset, TopicPartitionList};
 use spate_core::feed::{Depth, DepthOf, DepthReporter, FeedError, FeedErrorKind};
 use std::sync::Arc;
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::Duration;
 
 /// The bound on each metadata and offset request.
 const REQUEST_BOUND: Duration = Duration::from_secs(5);
+
+/// How long the depth thread waits for a request before it serves its
+/// client's queued events.
+const SERVE_EVERY: Duration = Duration::from_secs(1);
 
 /// One partition of one of the feed's topics.
 pub(crate) type Partition = (Arc<str>, i32);
@@ -35,6 +39,9 @@ pub(crate) trait Offsets: Send {
     /// [`Offset::Beginning`], or the end offset for [`Offset::End`], in their
     /// order, read in one request.
     fn listed(&self, partitions: &[Partition], at: Offset) -> Result<Vec<i64>, FeedError>;
+
+    /// Serve the client's queued statistics, log lines and errors.
+    fn serve(&self) {}
 }
 
 /// The depth of the work and retry topics: each partition's end offset less
@@ -115,7 +122,15 @@ pub(crate) fn run(
     offsets: &dyn Offsets,
     requests: &Receiver<(DepthOf, DepthReporter)>,
 ) {
-    while let Ok((of, reporter)) = requests.recv() {
+    loop {
+        let (of, reporter) = match requests.recv_timeout(SERVE_EVERY) {
+            Ok(request) => request,
+            Err(RecvTimeoutError::Timeout) => {
+                offsets.serve();
+                continue;
+            }
+            Err(RecvTimeoutError::Disconnected) => return,
+        };
         if core.stopped() {
             return;
         }
@@ -173,6 +188,21 @@ impl Brokers {
     }
 }
 
+/// The distinct topics of `partitions`, quoted, for an error's text.
+fn named(partitions: &[Partition]) -> String {
+    let mut topics: Vec<&str> = Vec::new();
+    for (topic, _) in partitions {
+        if !topics.contains(&&**topic) {
+            topics.push(topic);
+        }
+    }
+    topics
+        .iter()
+        .map(|t| format!("`{t}`"))
+        .collect::<Vec<_>>()
+        .join(" and ")
+}
+
 /// Each element of `read` for `partitions`, in their order, or the first
 /// element's error.
 fn elements(
@@ -198,15 +228,31 @@ fn elements(
 }
 
 impl Offsets for Brokers {
+    fn serve(&self) {
+        // The consumer carries a `group.id`, so librdkafka queues its
+        // statistics, log lines and errors where only a poll drains them.
+        let _ = self.consumer.poll(Duration::from_millis(50));
+    }
+
     fn partitions(&self, topic: &Arc<str>) -> Result<Vec<i32>, FeedError> {
         let metadata = self
             .consumer
             .fetch_metadata(Some(topic), REQUEST_BOUND)
             .map_err(|e| error(&format!("reading the partitions of `{topic}`"), &e))?;
-        let partitions: Vec<i32> = metadata
+        let found: Vec<_> = metadata
             .topics()
             .iter()
             .filter(|t| t.name() == &**topic)
+            .collect();
+        // A refusal arrives as the topic's own error in an answered request.
+        if let Some(err) = found.iter().find_map(|t| t.error()) {
+            return Err(error(
+                &format!("reading the partitions of `{topic}`"),
+                &KafkaError::MetadataFetch(RDKafkaErrorCode::from(err)),
+            ));
+        }
+        let partitions: Vec<i32> = found
+            .iter()
             .flat_map(|t| t.partitions().iter().map(|p| p.id()))
             .collect();
         if partitions.is_empty() {
@@ -223,7 +269,15 @@ impl Offsets for Brokers {
         let read = self
             .consumer
             .committed_offsets(tpl, REQUEST_BOUND)
-            .map_err(|e| error("reading the group's committed offsets", &e))?;
+            .map_err(|e| {
+                error(
+                    &format!(
+                        "reading the group's committed offsets on {}",
+                        named(partitions)
+                    ),
+                    &e,
+                )
+            })?;
         elements(&read, partitions, "reading the group's committed offset")
     }
 
@@ -236,7 +290,7 @@ impl Offsets for Brokers {
         let read = self
             .consumer
             .offsets_for_times(tpl, REQUEST_BOUND)
-            .map_err(|e| error(doing, &e))?;
+            .map_err(|e| error(&format!("{doing} of {}", named(partitions)), &e))?;
         elements(&read, partitions, doing)?
             .into_iter()
             .zip(partitions)
@@ -332,6 +386,52 @@ mod tests {
             dead_letter: Arc::from("dead"),
             attempt: Arc::from("attempts"),
         }
+    }
+
+    /// Counts the times `run` serves the client.
+    #[derive(Default)]
+    struct Serving(std::sync::atomic::AtomicUsize);
+
+    impl Offsets for Serving {
+        fn partitions(&self, _: &Arc<str>) -> Result<Vec<i32>, FeedError> {
+            Ok(Vec::new())
+        }
+        fn committed(&self, _: &[Partition]) -> Result<Vec<Offset>, FeedError> {
+            Ok(Vec::new())
+        }
+        fn listed(&self, _: &[Partition], _: Offset) -> Result<Vec<i64>, FeedError> {
+            Ok(Vec::new())
+        }
+        fn serve(&self) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// Pins that `run` serves its client while it waits for a request, so
+    /// the client's queued statistics, log lines and errors do not pile up
+    /// over a job.
+    #[test]
+    fn the_depth_thread_serves_its_client_between_requests() {
+        let section: spate_core::config::FeedSection = serde_yaml::from_str(
+            "attempt_cap: 3\nkafka:\n  brokers: localhost:9092\n  group_id: workers\n  \
+             topic: units\n  retry_topic: units-retry\n  dead_letter_topic: units-dead\n  \
+             attempt_topic: units-attempts\n",
+        )
+        .unwrap();
+        let config = crate::feed::KafkaFeedConfig::from_section(&section).unwrap();
+        let core = Core::new(&config, std::num::NonZeroU32::MIN);
+        let serving = Serving::default();
+        let (requests, received) = std::sync::mpsc::channel::<(DepthOf, DepthReporter)>();
+        std::thread::scope(|s| {
+            let (core, serving) = (&core, &serving);
+            s.spawn(move || run(core, serving, &received));
+            spate_test::wait_until(
+                std::time::Duration::from_secs(10),
+                "the client is served",
+                || serving.0.load(std::sync::atomic::Ordering::SeqCst) > 0,
+            );
+            drop(requests);
+        });
     }
 
     /// Pins that `run` wakes the reader once it has answered a depth read,
@@ -489,6 +589,99 @@ mod tests {
         );
     }
 
+    /// Pins that an error the broker answers for one partition of a
+    /// committed-offset read fails the read, naming the partition.
+    #[test]
+    fn a_partition_error_in_a_committed_read_fails_it() {
+        use rdkafka::ClientConfig;
+        use rdkafka::mocking::MockCluster;
+        let cluster = MockCluster::new(1).expect("mock cluster");
+        cluster.create_topic("work", 1, 1).expect("create topic");
+        let consumer = ClientConfig::new()
+            .set("bootstrap.servers", cluster.bootstrap_servers())
+            .set("group.id", "depth-partition-error")
+            .create_with_context(crate::context::SourceContext::default())
+            .unwrap();
+        let reads = Brokers { consumer };
+        let e = reads.committed(&[(Arc::from("work"), 9)]).unwrap_err();
+        assert!(e.reason.contains("`work` partition 9"), "{e}");
+    }
+
+    /// Pins that a topic whose metadata lists no partitions, as an unknown
+    /// topic's does, fails the read as Retryable, so it never reads as
+    /// drained.
+    #[test]
+    fn a_topic_reporting_no_partitions_fails_the_read() {
+        use rdkafka::ClientConfig;
+        use rdkafka::mocking::MockCluster;
+        use rdkafka::types::RDKafkaRespErr;
+        let cluster = MockCluster::new(1).expect("mock cluster");
+        cluster.create_topic("dead", 1, 1).expect("create topic");
+        cluster
+            .topic_error(
+                "dead",
+                RDKafkaRespErr::RD_KAFKA_RESP_ERR_UNKNOWN_TOPIC_OR_PART,
+            )
+            .unwrap();
+        let consumer = ClientConfig::new()
+            .set("bootstrap.servers", cluster.bootstrap_servers())
+            .set("group.id", "depth-unknown")
+            .create_with_context(crate::context::SourceContext::default())
+            .unwrap();
+        let reads = Brokers { consumer };
+        let e = reads.partitions(&Arc::from("dead")).unwrap_err();
+        assert_eq!(e.kind, FeedErrorKind::Retryable, "{e}");
+        assert!(e.reason.contains("`dead`"), "{e}");
+    }
+
+    /// Pins that the depth thread reads nothing once the feed has stopped,
+    /// and the reading it drops settles Retryable.
+    #[test]
+    fn a_stopped_feed_reads_no_depth() {
+        let section: spate_core::config::FeedSection = serde_yaml::from_str(
+            "attempt_cap: 3\nkafka:\n  brokers: localhost:9092\n  group_id: workers\n  \
+             topic: units\n  retry_topic: units-retry\n  dead_letter_topic: units-dead\n  \
+             attempt_topic: units-attempts\n",
+        )
+        .unwrap();
+        let config = crate::feed::KafkaFeedConfig::from_section(&section).unwrap();
+        let core = Core::new(&config, std::num::NonZeroU32::MIN);
+        core.stop.store(true, std::sync::atomic::Ordering::Release);
+        let offsets = Scripted::default().topic("units-dead", &[(0, Offset::Invalid, 0, 0)]);
+        let (requests, received) = std::sync::mpsc::channel();
+        let (reporter, mut reading) = spate_core::feed::depth_reading();
+        requests.send((DepthOf::DeadLetters, reporter)).unwrap();
+        drop(requests);
+        run(&core, &offsets, &received);
+        assert!(offsets.calls().is_empty(), "{:?}", offsets.calls());
+        let e = reading.try_outcome().unwrap().unwrap_err();
+        assert_eq!(e.kind, FeedErrorKind::Retryable);
+    }
+
+    /// Pins that a feed which has latched a Fatal error answers a depth read
+    /// with that error, whatever the offsets read.
+    #[test]
+    fn a_latched_feed_answers_a_depth_read_with_its_error() {
+        let section: spate_core::config::FeedSection = serde_yaml::from_str(
+            "attempt_cap: 3\nkafka:\n  brokers: localhost:9092\n  group_id: workers\n  \
+             topic: units\n  retry_topic: units-retry\n  dead_letter_topic: units-dead\n  \
+             attempt_topic: units-attempts\n",
+        )
+        .unwrap();
+        let config = crate::feed::KafkaFeedConfig::from_section(&section).unwrap();
+        let core = Core::new(&config, std::num::NonZeroU32::MIN);
+        core.latch("the broker rejected the credential");
+        let offsets = Scripted::default().topic("units-dead", &[(0, Offset::Invalid, 0, 0)]);
+        let (requests, received) = std::sync::mpsc::channel();
+        let (reporter, mut reading) = spate_core::feed::depth_reading();
+        requests.send((DepthOf::DeadLetters, reporter)).unwrap();
+        drop(requests);
+        run(&core, &offsets, &received);
+        let e = reading.try_outcome().unwrap().unwrap_err();
+        assert_eq!(e.kind, FeedErrorKind::Fatal);
+        assert!(e.reason.contains("rejected the credential"), "{e}");
+    }
+
     /// Pins the reads through a consumer outside the group against the
     /// MockCluster: every partition of a two-partition topic, end offsets per
     /// partition, no commit reading as invalid, and a read of a partition the
@@ -559,5 +752,35 @@ mod tests {
             )),
             FeedErrorKind::Retryable
         );
+    }
+
+    /// Pins the class of an authorization failure a broker answers to the
+    /// committed and end offset reads: both are Fatal.
+    #[test]
+    fn a_broker_refusing_an_offset_read_on_authorization_fails_it_as_fatal() {
+        use rdkafka::ClientConfig;
+        use rdkafka::mocking::MockCluster;
+        use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
+        let cluster = MockCluster::new(1).expect("mock cluster");
+        cluster.create_topic("work", 1, 1).expect("create topic");
+        let consumer = ClientConfig::new()
+            .set("bootstrap.servers", cluster.bootstrap_servers())
+            .set("group.id", "depth-denied")
+            .create_with_context(crate::context::SourceContext::default())
+            .unwrap();
+        let reads = Brokers { consumer };
+        let one = [(Arc::from("work"), 0)];
+        cluster.request_errors(
+            RDKafkaApiKey::OffsetFetch,
+            &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_GROUP_AUTHORIZATION_FAILED],
+        );
+        let e = reads.committed(&one).unwrap_err();
+        assert_eq!(e.kind, FeedErrorKind::Fatal, "{e}");
+        cluster.request_errors(
+            RDKafkaApiKey::ListOffsets,
+            &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_TOPIC_AUTHORIZATION_FAILED],
+        );
+        let e = reads.listed(&one, Offset::End).unwrap_err();
+        assert_eq!(e.kind, FeedErrorKind::Fatal, "{e}");
     }
 }

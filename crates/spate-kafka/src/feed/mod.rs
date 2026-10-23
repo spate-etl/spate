@@ -478,8 +478,9 @@ impl KafkaFeed {
     /// [`KafkaFeedError::Unavailable`] when a read of the topics fails
     /// otherwise or the checks take longer than 30 seconds, as they do when
     /// no broker accepts a connection, and when one of the feed's consumer,
-    /// gate and follower threads cannot be started. A failed gate or consumer
-    /// start stops and joins the threads already started before it returns.
+    /// gate, follower and depth threads cannot be started. A failed gate,
+    /// consumer or depth start stops and joins the threads already started
+    /// before it returns.
     ///
     /// # Panics
     ///
@@ -584,7 +585,7 @@ fn start_depth(
     // The feed's group, never subscribed: it reads the group's committed
     // offsets without joining the group.
     let consumer = BaseConsumer::from_config_and_context(
-        &config.consumer_config(openssl_env),
+        &config.depth_config(openssl_env),
         SourceContext::default(),
     )
     .map_err(|e| {

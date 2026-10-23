@@ -10,7 +10,7 @@ mod support;
 
 use rdkafka::mocking::{MockCluster, MockCoordinator};
 use rdkafka::types::RDKafkaRespErr;
-use spate_core::feed::{Feed, FeedErrorKind, Receipt, Unit};
+use spate_core::feed::{Depth, DepthOf, Feed, FeedError, FeedErrorKind, Receipt, Unit};
 use spate_core::pipeline::ExitState;
 use spate_kafka::feed::KafkaFeedError;
 use spate_test::{WriteOutcome, wait_until};
@@ -974,4 +974,46 @@ fn a_message_with_no_unit_ends_a_bounded_job_stalled() {
         "{}",
         failure.reason
     );
+}
+
+/// Read `of` from `feed` and wait for the answer.
+fn read_depth(feed: &dyn Feed, of: DepthOf) -> Result<Depth, FeedError> {
+    let mut reading = feed.read_depth(of).expect("the Kafka feed counts");
+    let mut outcome = None;
+    wait_until(DEADLINE, "the depth read is answered", || {
+        outcome = reading.try_outcome();
+        outcome.is_some()
+    });
+    outcome.expect("answered")
+}
+
+/// Pins that a broker refusing to describe the dead-letter topic, which it
+/// answers as the topic's own error in an answered metadata request, fails
+/// the dead-letter read Fatal, so a bounded job fails where it would read
+/// the topic again every 15 s.
+#[test]
+fn a_dead_letter_topic_authorization_failure_is_fatal() {
+    let cluster = MockCluster::new(1).expect("mock cluster");
+    for topic in [WORK, RETRY, DEAD] {
+        cluster.create_topic(topic, 1, 1).expect("create topic");
+    }
+    cluster
+        .create_topic(ATTEMPT, ATTEMPT_PARTITIONS, 1)
+        .expect("create topic");
+    let group = spate_test::unique_name("dead-letter-denied");
+    let d = direct(&feed_yaml(&cluster.bootstrap_servers(), &group, "", ""));
+    assert!(
+        read_depth(&d.feed, DepthOf::DeadLetters)
+            .unwrap()
+            .is_empty()
+    );
+    cluster
+        .topic_error(
+            DEAD,
+            RDKafkaRespErr::RD_KAFKA_RESP_ERR_TOPIC_AUTHORIZATION_FAILED,
+        )
+        .unwrap();
+    let e = read_depth(&d.feed, DepthOf::DeadLetters).unwrap_err();
+    assert_eq!(e.kind, FeedErrorKind::Fatal, "{e}");
+    assert!(e.reason.contains(DEAD), "{e}");
 }

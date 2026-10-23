@@ -328,6 +328,14 @@ impl KafkaFeedConfig {
         cc
     }
 
+    /// The depth reader's librdkafka configuration: the consumer's, with no
+    /// statistics, since nothing reads the depth reader's.
+    pub(crate) fn depth_config(&self, openssl_env: bool) -> rdkafka::ClientConfig {
+        let mut cc = self.consumer_config(openssl_env);
+        cc.remove("statistics.interval.ms");
+        cc
+    }
+
     /// The producer's librdkafka configuration: the passthrough, then the
     /// properties the feed owns, which win.
     pub(crate) fn producer_config(&self, openssl_env: bool) -> rdkafka::ClientConfig {

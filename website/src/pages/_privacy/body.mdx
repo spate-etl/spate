@@ -6,13 +6,15 @@ A script on each page sends Cloudflare a short report on each page view, at `clo
 
 - the page's address, and the address of the page that linked to it;
 - timings of how the page loaded and rendered, and how much memory its scripts used;
-- your browser's engine and version, and your operating system's version.
+- your browser's engine and version, and your operating system's version;
+- a random identifier for the page load, and the time it started;
+- which element on the page was the largest to draw, and which moved while the page rendered, with the moved element's size and position.
 
 Like any request, the report also carries your IP address.
 
 ## What it does not do
 
-The site sets no cookies and stores nothing in your browser. Cloudflare [states](https://blog.cloudflare.com/privacy-first-web-analytics/) that it does not track visitors over time by IP address, user agent or any other attribute for analytics. A visit is counted as a page view whose link came from another site.
+The site sets no cookies. If you pick a light or dark theme with the switch in the header, your browser keeps that choice for this site, and the site never sends it anywhere. Cloudflare [states](https://blog.cloudflare.com/privacy-first-web-analytics/) that it does not track visitors over time by IP address, user agent or any other attribute for analytics. A visit is counted as a page view whose link came from another site.
 
 ## Opting out
 

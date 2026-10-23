@@ -197,3 +197,16 @@ Share a post under its own title, from your own accounts.
   shows how something is done in Rust code fits Rust Walkthroughs.
 - **Personal accounts.** One or two sentences carrying the post's result, and
   the link.
+
+## Measuring a post
+
+Page views are counted by Cloudflare Web Analytics, under the site
+`spate.kainth.dev` in the Cloudflare dashboard. The
+[privacy page](https://spate.kainth.dev/privacy) states what it collects.
+
+- A visit is a page view whose link came from another site. The referrer list
+  shows where a post's readers came from.
+- The counts are a floor. A browser that blocks the analytics script, or sends
+  Global Privacy Control or Do Not Track, is never counted.
+- Compare a post with earlier posts over the same number of days after each
+  went live.

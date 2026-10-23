@@ -56,6 +56,7 @@ export const FOOTER_COLUMNS: FooterColumn[] = [
       {label: 'Issues', href: `${githubUrl}/issues`},
       {label: 'Security policy', href: `${githubUrl}/blob/main/SECURITY.md`},
       {label: 'Code of conduct', href: `${githubUrl}/blob/main/CODE_OF_CONDUCT.md`},
+      {label: 'Privacy', to: '/privacy'},
       {label: 'Brand', to: '/brand'},
       {label: 'Blog', to: '/blog/'},
       {label: 'RSS', to: 'pathname:///blog/rss.xml'},

@@ -1,0 +1,21 @@
+This site counts page views with [Cloudflare Web Analytics](https://www.cloudflare.com/web-analytics/), to see which pages are read and which sites send readers here. It is the only analytics on the site.
+
+## What a page view sends
+
+A script on each page sends Cloudflare a short report on each page view, at `cloudflareinsights.com`. The report holds:
+
+- the page's address, and the address of the page that linked to it;
+- timings of how the page loaded and rendered, and how much memory its scripts used;
+- your browser's engine and version, and your operating system's version.
+
+Like any request, the report also carries your IP address.
+
+## What it does not do
+
+The site sets no cookies and stores nothing in your browser. Cloudflare [states](https://blog.cloudflare.com/privacy-first-web-analytics/) that it does not track visitors over time by IP address, user agent or any other attribute for analytics. A visit is counted as a page view whose link came from another site.
+
+## Opting out
+
+Turn on Global Privacy Control or Do Not Track in your browser. The site then does not load the analytics script, and your page views are not counted.
+
+Questions about this page go to the [issue tracker](https://github.com/spate-etl/spate/issues).

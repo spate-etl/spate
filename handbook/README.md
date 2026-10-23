@@ -8,4 +8,4 @@ link here.
 
 - [Blog posts](blog-posts.md): choosing a topic, the title and description,
   the shape of each kind of post, evidence, writing about other tools, voice,
-  and where a post is shared.
+  where a post is shared, and measuring it.

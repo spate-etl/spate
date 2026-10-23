@@ -127,6 +127,10 @@ const config: Config = {
     },
   },
 
+  // Loads the page-view beacon on the deployed hostname, unless the browser
+  // opts out; /privacy states what it sends.
+  clientModules: ['./src/analytics/clientModule.ts'],
+
   plugins: [
     // CI-only, as a standing precaution rather than for any entry currently
     // in the set (see clientRedirects above).

@@ -411,11 +411,7 @@ fn record_part(
 /// [`decode`] reads it as a notification: its key form-encoded, its ETag
 /// quoted when the store gave one, and no `versionId`. The body is ASCII
 /// when the ETag is, as one read from a header always is.
-pub(crate) fn re_enqueue_body(
-    bucket: &str,
-    overwrite: &Overwrite,
-    re_enqueues: u32,
-) -> Vec<u8> {
+pub(crate) fn re_enqueue_body(bucket: &str, overwrite: &Overwrite, re_enqueues: u32) -> Vec<u8> {
     let mut object = serde_json::json!({
         "key": form_encoded(&overwrite.key),
         "size": overwrite.size,
@@ -1302,17 +1298,26 @@ mod tests {
             other => panic!("{other:?}"),
         };
         assert_eq!(
-            version(origins(decoded(&[with_field("versionId", "3HL4kqtJ".into())]))),
+            version(origins(decoded(&[with_field(
+                "versionId",
+                "3HL4kqtJ".into()
+            )]))),
             Some("3HL4kqtJ".to_owned())
         );
-        assert_eq!(version(origins(decoded(&[created("data/a.ndjson", 10)]))), None);
+        assert_eq!(
+            version(origins(decoded(&[created("data/a.ndjson", 10)]))),
+            None
+        );
         for absent in [serde_json::Value::Null, "".into(), "null".into()] {
             let record = with_field("versionId", absent.clone());
             assert_eq!(version(origins(decoded(&[record]))), None, "{absent}");
         }
         let longest = "v".repeat(MAX_VERSION_BYTES);
         assert_eq!(
-            version(origins(decoded(&[with_field("versionId", longest.clone().into())]))),
+            version(origins(decoded(&[with_field(
+                "versionId",
+                longest.clone().into()
+            )]))),
             Some(longest)
         );
         for refused in [
@@ -1323,7 +1328,10 @@ mod tests {
             "v".repeat(MAX_VERSION_BYTES + 1).into(),
         ] {
             let reason = failed(decoded(&[with_field("versionId", refused.clone())]));
-            assert!(reason.starts_with("notification record 0: "), "{refused}: {reason}");
+            assert!(
+                reason.starts_with("notification record 0: "),
+                "{refused}: {reason}"
+            );
         }
     }
 
@@ -1337,11 +1345,17 @@ mod tests {
         };
         assert_eq!(count(origins(decoded(&[created("data/a.ndjson", 10)]))), 0);
         assert_eq!(
-            count(origins(decoded(&[with_field(RE_ENQUEUES, serde_json::Value::Null)]))),
+            count(origins(decoded(&[with_field(
+                RE_ENQUEUES,
+                serde_json::Value::Null
+            )]))),
             0
         );
         for n in [0, 7, u32::MAX] {
-            assert_eq!(count(origins(decoded(&[with_field(RE_ENQUEUES, n.into())]))), n);
+            assert_eq!(
+                count(origins(decoded(&[with_field(RE_ENQUEUES, n.into())]))),
+                n
+            );
         }
         for refused in [
             serde_json::json!(-1),
@@ -1350,7 +1364,10 @@ mod tests {
             serde_json::json!(4_294_967_296_u64),
         ] {
             let reason = failed(decoded(&[with_field(RE_ENQUEUES, refused.clone())]));
-            assert!(reason.contains("the record is unreadable"), "{refused}: {reason}");
+            assert!(
+                reason.contains("the record is unreadable"),
+                "{refused}: {reason}"
+            );
         }
     }
 
@@ -1412,6 +1429,9 @@ mod tests {
             last_modified_ms: 0,
         };
         let body = re_enqueue_body("bucket", &overwrite, 1);
-        assert_eq!(read(decode(&body, &scope(), packing())), [("data/a.ndjson".to_owned(), None, None)]);
+        assert_eq!(
+            read(decode(&body, &scope(), packing())),
+            [("data/a.ndjson".to_owned(), None, None)]
+        );
     }
 }

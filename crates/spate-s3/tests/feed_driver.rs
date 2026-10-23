@@ -1197,7 +1197,10 @@ fn a_412_re_enqueues_the_key_at_its_current_etag_before_acknowledging() {
     wait_until(DEADLINE, "the old unit is renewed while it waits", || {
         renewals_of(&script, first) >= renewed + 2
     });
-    assert!(script.acknowledged().is_empty(), "acknowledged before the publish settled");
+    assert!(
+        script.acknowledged().is_empty(),
+        "acknowledged before the publish settled"
+    );
 
     script.confirm_held_publishes();
     wait_until(DEADLINE, "both units are acknowledged", || {
@@ -1229,7 +1232,9 @@ fn a_412_mid_read_acknowledges_only_after_emitted_records_are_acknowledged() {
     let l = launch_on_store(Arc::clone(&store), Arc::new(feed), |sink| {
         sink.enqueue_global(WriteOutcome::ok().held());
     });
-    wait_until(DEADLINE, "the second window's GET is held", || store.holding());
+    wait_until(DEADLINE, "the second window's GET is held", || {
+        store.holding()
+    });
     let current = recs("current", 3);
     stage(&data, "a.ndjson", &current);
     store.release();
@@ -1241,9 +1246,11 @@ fn a_412_mid_read_acknowledges_only_after_emitted_records_are_acknowledged() {
         l.script.held_writes() == 1
     });
     let renewed = renewals_of(&script, first);
-    wait_until(DEADLINE, "the old unit is renewed while its records are held", || {
-        renewals_of(&script, first) >= renewed + 2
-    });
+    wait_until(
+        DEADLINE,
+        "the old unit is renewed while its records are held",
+        || renewals_of(&script, first) >= renewed + 2,
+    );
     assert!(
         !script.acknowledged().contains(&first),
         "acknowledged before the sink acknowledged its records"
@@ -1258,14 +1265,25 @@ fn a_412_mid_read_acknowledges_only_after_emitted_records_are_acknowledged() {
     stop(&l);
     assert!(script.failed().is_empty(), "{:?}", script.failed());
     let rows = written_rows(&l.script);
-    let read_old: Vec<String> = rows.iter().filter(|r| r.contains("old-")).cloned().collect();
-    assert!(!read_old.is_empty() && read_old.len() < old.len(), "{}", read_old.len());
+    let read_old: Vec<String> = rows
+        .iter()
+        .filter(|r| r.contains("old-"))
+        .cloned()
+        .collect();
+    assert!(
+        !read_old.is_empty() && read_old.len() < old.len(),
+        "{}",
+        read_old.len()
+    );
     assert_eq!(
         sorted(read_old.clone()),
         sorted(old[..read_old.len()].to_vec()),
         "the old rows written are the ones before the overwrite"
     );
-    let read_current: Vec<String> = rows.into_iter().filter(|r| r.contains("current-")).collect();
+    let read_current: Vec<String> = rows
+        .into_iter()
+        .filter(|r| r.contains("current-"))
+        .collect();
     assert_eq!(sorted(read_current), sorted(current));
 }
 
@@ -1345,9 +1363,16 @@ fn a_head_after_a_412_classifies_404_and_403_as_the_read_does() {
             HeadAnswer::Denied => {
                 let report = l.run.wait_exit(DEADLINE).expect("the run exits").unwrap();
                 let ExitState::Failed(failure) = report.state else {
-                    panic!("a 403 on the HEAD must fail the pipeline: {:?}", report.state);
+                    panic!(
+                        "a 403 on the HEAD must fail the pipeline: {:?}",
+                        report.state
+                    );
                 };
-                assert!(failure.reason.contains("data/a.ndjson"), "{}", failure.reason);
+                assert!(
+                    failure.reason.contains("data/a.ndjson"),
+                    "{}",
+                    failure.reason
+                );
                 assert!(script.acknowledged().is_empty());
             }
         }

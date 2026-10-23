@@ -40,13 +40,13 @@
 //! each poll that finds it holding any sends the check back to its start, so
 //! the job ends only on reads taken while this worker had nothing in hand.
 
+use crate::fetch::Overwrite;
 use crate::fetch::{FetcherParams, run_fetcher};
 use crate::framer::FramerFactory;
 use crate::job_end::JobEnd;
 use crate::lane::S3Lane;
 use crate::metrics::S3Metrics;
 use crate::split::Packing;
-use crate::fetch::Overwrite;
 use crate::split_ctx::{LANE_HANDOFF_CHUNKS, PoisonReport, SplitTracker};
 use crate::unit::{Cursor, Decoded, Origin, Part, Scope, decode, re_enqueue_body};
 use spate_core::checkpoint::AckIssuer;
@@ -1985,18 +1985,26 @@ mod tests {
 
     /// The key, ETag and re-enqueue count a published unit's body names.
     fn re_enqueued(unit: &Unit) -> (String, Option<String>, u32) {
-        let Decoded::Read(cursors) = decode(&unit.body, &scope(), crate::split::Packing {
-            target_bytes: u64::MAX,
-            compression: Compression::None,
-            delimiter: None,
-        }) else {
+        let Decoded::Read(cursors) = decode(
+            &unit.body,
+            &scope(),
+            crate::split::Packing {
+                target_bytes: u64::MAX,
+                compression: Compression::None,
+                delimiter: None,
+            },
+        ) else {
             panic!("the published unit is not read");
         };
         let part = cursors.into_iter().flatten().next().unwrap();
         let Origin::Notification { re_enqueues, .. } = part.origin else {
             panic!("the published unit is not a notification");
         };
-        (part.object[0].key.clone(), part.object[0].etag.clone(), re_enqueues)
+        (
+            part.object[0].key.clone(),
+            part.object[0].etag.clone(),
+            re_enqueues,
+        )
     }
 
     /// Deliver a pinned notification for `objects` at `re_enqueues`, start
@@ -2027,7 +2035,10 @@ mod tests {
         for _ in 0..3 {
             poll(&mut reader);
         }
-        assert!(script.acknowledged().is_empty(), "acknowledged before the publish settled");
+        assert!(
+            script.acknowledged().is_empty(),
+            "acknowledged before the publish settled"
+        );
         assert!(script.renewed().contains(&receipt));
         script.confirm_held_publishes();
         poll(&mut reader);
@@ -2037,7 +2048,11 @@ mod tests {
             re_enqueued(&script.published()[0]),
             ("data/a.ndjson".to_owned(), Some("\"new\"".to_owned()), 1)
         );
-        assert_eq!(script.published()[0].id, "n", "the re-enqueue keeps the unit's id");
+        assert_eq!(
+            script.published()[0].id,
+            "n",
+            "the re-enqueue keeps the unit's id"
+        );
     }
 
     /// Pins that a unit whose re-enqueue the feed confirmed still waits for
@@ -2051,7 +2066,10 @@ mod tests {
             poll(&mut reader);
         }
         assert_eq!(script.published().len(), 1);
-        assert!(script.acknowledged().is_empty(), "acknowledged before its lane retired");
+        assert!(
+            script.acknowledged().is_empty(),
+            "acknowledged before its lane retired"
+        );
         finish(&mut reader, lanes[0], 3);
         assert_eq!(script.acknowledged(), vec![receipt]);
         assert!(script.failed().is_empty());
@@ -2093,13 +2111,20 @@ mod tests {
     #[test]
     fn a_412_on_one_record_leaves_the_other_record_read() {
         let (mut reader, script, _rt) = reader();
-        let (receipt, lanes) =
-            open_notification(&mut reader, &script, &[("a.ndjson", 10), ("b.ndjson", 10)], 0);
+        let (receipt, lanes) = open_notification(
+            &mut reader,
+            &script,
+            &[("a.ndjson", 10), ("b.ndjson", 10)],
+            0,
+        );
         assert_eq!(lanes.len(), 2);
         report_overwrite(&reader, lanes[0], "a.ndjson", 20);
         poll(&mut reader);
         finish(&mut reader, lanes[0], 1);
-        assert!(script.acknowledged().is_empty(), "the other record is unread");
+        assert!(
+            script.acknowledged().is_empty(),
+            "the other record is unread"
+        );
         finish(&mut reader, lanes[1], 4);
         assert_eq!(script.acknowledged(), vec![receipt]);
         assert_eq!(script.published().len(), 1);
@@ -2110,8 +2135,12 @@ mod tests {
     #[test]
     fn a_poison_on_another_part_fails_an_overwritten_unit_back() {
         let (mut reader, script, _rt) = reader();
-        let (receipt, lanes) =
-            open_notification(&mut reader, &script, &[("a.ndjson", 10), ("b.ndjson", 10)], 0);
+        let (receipt, lanes) = open_notification(
+            &mut reader,
+            &script,
+            &[("a.ndjson", 10), ("b.ndjson", 10)],
+            0,
+        );
         report_overwrite(&reader, lanes[0], "a.ndjson", 20);
         poll(&mut reader);
         reader
@@ -2138,10 +2167,13 @@ mod tests {
         for kind in [FeedErrorKind::Refused, FeedErrorKind::Retryable] {
             let (mut reader, script, _rt) = reader();
             script.refuse_next_publish(kind);
-            let (receipt, lanes) =
-                open_notification(&mut reader, &script, &[("a.ndjson", 10)], 0);
+            let (receipt, lanes) = open_notification(&mut reader, &script, &[("a.ndjson", 10)], 0);
             report_overwrite(&reader, lanes[0], "a.ndjson", 20);
-            assert_eq!(lanes_revoked(poll(&mut reader)), [LaneId(lanes[0].0)], "{kind:?}");
+            assert_eq!(
+                lanes_revoked(poll(&mut reader)),
+                [LaneId(lanes[0].0)],
+                "{kind:?}"
+            );
             assert_eq!(script.failed().len(), 1, "{kind:?}");
             assert_eq!(script.failed()[0].0, receipt, "{kind:?}");
             assert!(script.acknowledged().is_empty(), "{kind:?}");
@@ -2156,7 +2188,11 @@ mod tests {
         let (_, lanes) = open_notification(&mut reader, &script, &[("a.ndjson", 10)], 0);
         report_overwrite(&reader, lanes[0], "a.ndjson", 20);
         let e = reader.poll_events(Duration::ZERO).unwrap_err();
-        assert!(e.to_string().contains("re-enqueueing an overwritten object"), "{e}");
+        assert!(
+            e.to_string()
+                .contains("re-enqueueing an overwritten object"),
+            "{e}"
+        );
     }
 
     /// Pins that a re-enqueue confirmed after the feed delivered its unit
@@ -2222,7 +2258,9 @@ mod tests {
             assert_eq!(value("spate_s3_overwrites_dropped_total"), 1.0, "{count}");
             assert_eq!(value("spate_s3_objects_overwritten_total"), 1.0, "{count}");
             assert!(
-                lines.iter().any(|l| l.contains("re-enqueue cap") && l.contains("data/a.ndjson")),
+                lines
+                    .iter()
+                    .any(|l| l.contains("re-enqueue cap") && l.contains("data/a.ndjson")),
                 "{lines:#?}"
             );
         }

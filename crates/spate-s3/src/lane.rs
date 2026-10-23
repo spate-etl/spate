@@ -1008,12 +1008,14 @@ mod tests {
     }
 
     fn overwrite() -> ChunkMsg {
-        ChunkMsg::LaneFailed(SplitFailure::Overwritten(Box::new(crate::fetch::Overwrite {
-            key: "p/a.ndjson".into(),
-            etag: Some("\"new\"".into()),
-            size: 10,
-            last_modified_ms: 2_000,
-        })))
+        ChunkMsg::LaneFailed(SplitFailure::Overwritten(Box::new(
+            crate::fetch::Overwrite {
+                key: "p/a.ndjson".into(),
+                etag: Some("\"new\"".into()),
+                size: 10,
+                last_modified_ms: 2_000,
+            },
+        )))
     }
 
     /// Pins that an overwrite with nothing framed reports the overwrite,
@@ -1038,13 +1040,19 @@ mod tests {
     fn an_overwrite_emits_the_framed_records_and_ends_after_them() {
         let mut r = rig(None);
         start(&r, 0, "p/a.ndjson");
-        send(&r, ChunkMsg::Chunk(bytes::Bytes::from_static(b"a1\na2\na3")));
+        send(
+            &r,
+            ChunkMsg::Chunk(bytes::Bytes::from_static(b"a1\na2\na3")),
+        );
         send(&r, overwrite());
         drop(r.tx.take());
         let records = poll_batch(&mut r.lane, 512).expect("the framed records");
         let bytes: Vec<&[u8]> = records.iter().map(|(_, b)| b.as_slice()).collect();
         assert_eq!(bytes, [b"a1".as_slice(), b"a2".as_slice()]);
-        assert!(r.tracker.terminal().is_none(), "decided before the batch was pushed");
+        assert!(
+            r.tracker.terminal().is_none(),
+            "decided before the batch was pushed"
+        );
         assert!(poll_batch(&mut r.lane, 512).is_none());
         assert_eq!(r.tracker.terminal(), Some(records[1].0 + 1));
         assert!(poll_batch(&mut r.lane, 512).is_none());
@@ -1059,7 +1067,10 @@ mod tests {
     fn an_overwrite_drains_its_framed_records_across_batches() {
         let mut r = rig(None);
         start(&r, 0, "p/a.ndjson");
-        send(&r, ChunkMsg::Chunk(bytes::Bytes::from_static(b"a1\na2\na3\n")));
+        send(
+            &r,
+            ChunkMsg::Chunk(bytes::Bytes::from_static(b"a1\na2\na3\n")),
+        );
         send(&r, overwrite());
         drop(r.tx.take());
         assert_eq!(poll_batch(&mut r.lane, 2).expect("two records").len(), 2);

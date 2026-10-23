@@ -489,7 +489,11 @@ mod tests {
             (notification(Some("v1")), false),
         ];
         for (origin, overwrite) in origins {
-            assert_eq!(is_overwrite(&precondition(), &origin), overwrite, "{origin:?}");
+            assert_eq!(
+                is_overwrite(&precondition(), &origin),
+                overwrite,
+                "{origin:?}"
+            );
             assert!(!is_overwrite(&not_found(), &origin), "{origin:?}");
             assert!(!is_overwrite(&denied(), &origin), "{origin:?}");
         }

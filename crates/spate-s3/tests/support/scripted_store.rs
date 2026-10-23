@@ -9,7 +9,9 @@
 use futures_util::stream::BoxStream;
 use object_store::local::LocalFileSystem;
 use object_store::path::Path;
-use object_store::{GetOptions, GetResult, ListResult, ObjectMeta, ObjectStore, PutPayload, PutResult};
+use object_store::{
+    GetOptions, GetResult, ListResult, ObjectMeta, ObjectStore, PutPayload, PutResult,
+};
 use std::collections::VecDeque;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};

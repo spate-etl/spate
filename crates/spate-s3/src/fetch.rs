@@ -457,10 +457,10 @@ async fn stream_object_ranged(
         let buffered = match fetched {
             Ok(bytes) => bytes,
             Err(e) if crate::error::is_overwrite(&e, origin) => {
-                return Err(
-                    head_after_overwrite(split, store, &path, entry, etag, retry_base, retries)
-                        .await,
-                );
+                return Err(head_after_overwrite(
+                    split, store, &path, entry, etag, retry_base, retries,
+                )
+                .await);
             }
             Err(e) => {
                 retry_or_fail(
@@ -2261,7 +2261,13 @@ mod tests {
     async fn a_notification_unit_with_a_version_id_reads_that_version() {
         let (inner, entry) = thirty_bytes().await;
         let store = Arc::new(HeadStore::new(inner.clone(), 0));
-        let msgs = fetch_from(Arc::clone(&store), entry.clone(), notified(Some("v1")), None).await;
+        let msgs = fetch_from(
+            Arc::clone(&store),
+            entry.clone(),
+            notified(Some("v1")),
+            None,
+        )
+        .await;
         assert_eq!(assembled(&msgs)[0].1.len(), 30);
         let seen = store.seen();
         assert_eq!(seen.len(), 3, "{seen:?}");
@@ -2295,7 +2301,12 @@ mod tests {
             delimiter: Some(b'\n'),
         };
         let mut origins = vec![Origin::Lister];
-        for version in [None, Some(serde_json::Value::Null), Some("".into()), Some("null".into())] {
+        for version in [
+            None,
+            Some(serde_json::Value::Null),
+            Some("".into()),
+            Some("null".into()),
+        ] {
             let mut object = serde_json::json!({ "key": "k", "size": 30 });
             if let Some(version) = version {
                 object["versionId"] = version;
@@ -2317,7 +2328,10 @@ mod tests {
             fetch_from(Arc::clone(&store), entry.clone(), origin.clone(), None).await;
             let seen = store.seen();
             assert!(!seen.is_empty());
-            assert!(seen.iter().all(|(_, version, _)| version.is_none()), "{origin:?}: {seen:?}");
+            assert!(
+                seen.iter().all(|(_, version, _)| version.is_none()),
+                "{origin:?}: {seen:?}"
+            );
         }
     }
 
@@ -2364,7 +2378,10 @@ mod tests {
             let msgs = fetch_from(Arc::clone(&store), entry, origin.clone(), None).await;
             assert_eq!(store.heads(), 0, "{origin:?}");
             assert!(
-                matches!(last_failure(msgs), SplitFailure::Poison(PoisonKind::EtagDrift, _)),
+                matches!(
+                    last_failure(msgs),
+                    SplitFailure::Poison(PoisonKind::EtagDrift, _)
+                ),
                 "{origin:?}"
             );
         }

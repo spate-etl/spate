@@ -698,6 +698,7 @@ impl Feed for SqsFeed {
             }
         };
         let attributes = Arc::clone(&self.shared.attributes);
+        let shared = Arc::clone(&self.shared);
         // Detached: the reporter settles the reading, or reads as Retryable
         // when the runtime drops the task.
         drop(self.io.spawn(async move {
@@ -721,6 +722,12 @@ impl Feed for SqsFeed {
                 )),
             };
             reporter.report(outcome);
+            // The source checks a reading only when it polls, so the answer
+            // ends its park.
+            let waker = shared.lock().waker.clone();
+            if let Some(waker) = waker {
+                waker.wake();
+            }
         }));
         Some(reading)
     }

@@ -1388,6 +1388,20 @@ async fn zero_counts_read_as_empty_from_each_queue() {
     assert_eq!(queue.attribute_reads(), vec![QUEUE_URL, DEAD_URL]);
 }
 
+/// Pins that a settled depth reading wakes the reader, so its park ends on
+/// the answer.
+#[tokio::test(start_paused = true)]
+async fn a_settled_depth_read_wakes_the_reader() {
+    let (feed, _queue) = start(MINUTE);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    assert!(depth(&feed, DepthOf::Feed).await.unwrap().is_empty());
+    assert!(
+        park.park(Duration::ZERO),
+        "the answer did not wake the reader"
+    );
+}
+
 /// Pins how a failed read of the counts maps: a fatal class reads as Fatal,
 /// a retryable one as Retryable, each naming the queue.
 #[tokio::test(start_paused = true)]

@@ -130,6 +130,12 @@ pub(crate) fn run(
             None => read,
         };
         reporter.report(read);
+        // The source checks a reading only when it polls, so the answer
+        // ends its park.
+        let waker = core.lock().waker.clone();
+        if let Some(waker) = waker {
+            waker.wake();
+        }
     }
 }
 
@@ -326,6 +332,33 @@ mod tests {
             dead_letter: Arc::from("dead"),
             attempt: Arc::from("attempts"),
         }
+    }
+
+    /// Pins that `run` wakes the reader once it has answered a depth read,
+    /// so the reader's park ends on the answer.
+    #[test]
+    fn an_answered_depth_read_wakes_the_reader() {
+        let section: spate_core::config::FeedSection = serde_yaml::from_str(
+            "attempt_cap: 3\nkafka:\n  brokers: localhost:9092\n  group_id: workers\n  \
+             topic: units\n  retry_topic: units-retry\n  dead_letter_topic: units-dead\n  \
+             attempt_topic: units-attempts\n",
+        )
+        .unwrap();
+        let config = crate::feed::KafkaFeedConfig::from_section(&section).unwrap();
+        let core = Core::new(&config, std::num::NonZeroU32::MIN);
+        let (waker, park) = spate_core::feed::wake_channel();
+        core.lock().waker = Some(waker);
+        let offsets = Scripted::default().topic("units-dead", &[(0, Offset::Invalid, 0, 0)]);
+        let (requests, received) = std::sync::mpsc::channel();
+        let (reporter, mut reading) = spate_core::feed::depth_reading();
+        requests.send((DepthOf::DeadLetters, reporter)).unwrap();
+        drop(requests);
+        run(&core, &offsets, &received);
+        assert!(reading.try_outcome().unwrap().unwrap().is_empty());
+        assert!(
+            park.park(std::time::Duration::ZERO),
+            "the answer did not wake the reader"
+        );
     }
 
     /// Pins the read order: the partitions of the work and retry topics,

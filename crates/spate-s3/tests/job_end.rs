@@ -17,7 +17,7 @@ use spate_core::pipeline::{ExitReport, ExitState};
 use spate_test::{FeedScript, ScriptedFeed, scripted_feed, wait_until};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use support::location::{LocationHooks, location_store};
@@ -655,12 +655,14 @@ fn a_fatal_depth_read_fails_the_job() {
 }
 
 /// A feed that delegates to a scripted one. It counts only what `counts`
-/// names, its receives fail retryably while `throttled` is set, and with
+/// names, its receives fail retryably while `throttled` is set, counted in
+/// `refused`, and with
 /// `pending` its dead-letter reads wait there until the test settles them.
 struct Wrapped {
     inner: ScriptedFeed,
     counts: &'static [DepthOf],
     throttled: Arc<AtomicBool>,
+    refused: Arc<AtomicUsize>,
     pending: Option<Arc<Mutex<Vec<DepthReporter>>>>,
 }
 
@@ -670,6 +672,7 @@ impl Wrapped {
             inner,
             counts,
             throttled: Arc::default(),
+            refused: Arc::default(),
             pending: None,
         }
     }
@@ -684,6 +687,7 @@ impl Feed for Wrapped {
     }
     fn receive(&self, max: usize) -> Result<Vec<Delivery>, FeedError> {
         if self.throttled.load(Ordering::SeqCst) {
+            self.refused.fetch_add(1, Ordering::SeqCst);
             return Err(FeedError::new(FeedErrorKind::Retryable, "throttled"));
         }
         self.inner.receive(max)
@@ -895,6 +899,62 @@ fn a_unit_failed_back_in_the_poll_that_took_it_restarts_the_check() {
         exited.is_none(),
         "the job ended over a failed unit: {exited:?}"
     );
+    stop(&l);
+}
+
+/// Pins that a receive of the reader's own that fails retryably while the
+/// dead-letter read is outstanding restarts the check: past the closing
+/// receive no read of the feed follows that could find the unit it missed.
+#[test]
+fn a_failed_receive_during_the_dead_letter_read_restarts_the_check() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let (store, hooks) = location_store();
+    hooks.seed(END_KEY, RUN_A.as_bytes());
+    let (inner, script) = scripted_feed();
+    let pending = Arc::new(Mutex::new(Vec::new()));
+    let feed = Wrapped {
+        pending: Some(Arc::clone(&pending)),
+        ..Wrapped::new(inner, BOTH)
+    };
+    let throttled = Arc::clone(&feed.throttled);
+    let refused = Arc::clone(&feed.refused);
+    let clock = TestClock::frozen();
+    let l = launch_bounded(&data, Arc::new(feed), &hooks, store, &clock, "");
+
+    wait_for_reads(&script, DepthOf::Feed, 1);
+    step_reads(&clock, &script, 1, STEPS);
+    // The startup probe's reading is the first.
+    wait_until(DEADLINE, "the dead-letter read starts", || {
+        pending.lock().unwrap().len() == 2
+    });
+    throttled.store(true, Ordering::SeqCst);
+    let unit = script.deliver(Unit::new("late", b"x".to_vec()));
+    let seen = refused.load(Ordering::SeqCst);
+    wait_until(
+        DEADLINE,
+        "a receive fails with the unit in the feed",
+        || refused.load(Ordering::SeqCst) >= seen + 2,
+    );
+    for reporter in pending.lock().unwrap().drain(..) {
+        reporter.report(Ok(Depth::new(
+            "the scripted dead-letter destination",
+            false,
+        )));
+    }
+    let gets = hooks.gets();
+    // A restarted window reads again one step after its last read.
+    clock.advance(STEP);
+    let mut exited = None;
+    wait_until(DEADLINE, "the run ends or reads the marker again", || {
+        exited = l.run.wait_exit(Duration::ZERO);
+        exited.is_some() || hooks.gets() > gets
+    });
+    assert!(
+        exited.is_none(),
+        "the job ended over an unread unit: {exited:?}"
+    );
+    assert!(!script.delivered().iter().any(|d| d.receipt == unit));
     stop(&l);
 }
 

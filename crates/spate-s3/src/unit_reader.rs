@@ -242,10 +242,13 @@ impl UnitReader {
         if room > 0 {
             // A unit taken and failed straight back leaves nothing held, and
             // the feed still holds it.
-            if self.receive(room)?.is_some_and(|took| took > 0)
-                && let Some(end) = &mut self.end
-            {
-                end.busy();
+            let took = self.receive(room)?;
+            if let Some(end) = &mut self.end {
+                match took {
+                    Some(0) => {}
+                    Some(_) => end.busy(),
+                    None => end.receive_failed(),
+                }
             }
             opened.extend(self.open_pending());
         }

@@ -52,6 +52,9 @@ pub(crate) struct JobEnd {
     /// When the check's next read falls due, so the reader's park ends by
     /// then. `None` while a read is outstanding or the reader holds work.
     due: Option<Instant>,
+    /// The check's closing receive took nothing, so until it ends only the
+    /// reader's own receives watch the feed.
+    closed: bool,
 }
 
 impl JobEnd {
@@ -72,6 +75,7 @@ impl JobEnd {
             depth_read: None,
             depth_of: None,
             due: None,
+            closed: false,
         }
     }
 
@@ -101,10 +105,20 @@ impl JobEnd {
     /// still running finishes on its own, unread.
     pub(crate) fn busy(&mut self) {
         self.due = None;
+        self.closed = false;
         if let Some(check) = &mut self.check {
             check.restart(self.clock.now().into_std());
             self.marker_read = None;
             self.depth_read = None;
+        }
+    }
+
+    /// A receive of the reader's own failed and may succeed later. Past the
+    /// closing receive it restarts the check, since no read of the feed
+    /// follows that could find a unit the receive missed.
+    pub(crate) fn receive_failed(&mut self) {
+        if self.closed {
+            self.busy();
         }
     }
 
@@ -207,6 +221,7 @@ impl JobEnd {
                     if took {
                         return Ok(false);
                     }
+                    self.closed = true;
                 }
                 EndAction::Ended(EndOutcome::Completed) => {
                     tracing::info!(

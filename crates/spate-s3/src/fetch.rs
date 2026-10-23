@@ -2410,6 +2410,26 @@ mod tests {
         ));
     }
 
+    /// Pins the text each split failure displays: a poison and an overwrite
+    /// name the object, and a fatal failure shows its error.
+    #[test]
+    fn a_split_failure_displays_its_cause() {
+        let poison = SplitFailure::Poison(PoisonKind::NotFound, "\"k\" is gone".into());
+        assert_eq!(poison.to_string(), "split poisoned: \"k\" is gone");
+        let overwrite = SplitFailure::Overwritten(Box::new(Overwrite {
+            key: "data/k".into(),
+            etag: None,
+            size: 1,
+            last_modified_ms: 0,
+        }));
+        assert_eq!(overwrite.to_string(), "\"data/k\" was overwritten");
+        let fatal = SplitFailure::Fatal(SourceError::Client {
+            class: ErrorClass::Fatal,
+            reason: "denied".into(),
+        });
+        assert!(fatal.to_string().contains("denied"), "{fatal}");
+    }
+
     /// Pins that a HEAD answering no ETag reports an overwrite that reads
     /// unpinned.
     #[tokio::test]

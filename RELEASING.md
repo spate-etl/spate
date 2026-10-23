@@ -50,8 +50,8 @@ already passes. What is worth reading on that pull request is the assembled
 A minor release, `X.Y.0`, needs a post on the blog; a patch release does not.
 Write it on a pull request and merge it before the dispatch, with
 `slug: releases/X.Y` and `draft: true` in its front matter.
-[`website/blog/README.md`](website/blog/README.md) has the convention, the
-shape and the voice.
+[`website/blog/README.md`](website/blog/README.md) has the convention, and
+[`handbook/blog-posts.md`](handbook/blog-posts.md) the shape and the voice.
 
 The gate and the publication are automatic. `assemble` refuses a minor release
 unless exactly one post carries the slug, and the release commit removes the

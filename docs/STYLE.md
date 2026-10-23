@@ -564,5 +564,8 @@ rendered source would change it, or break the build, as the code moves. Each
 one is built or run against the crates the post describes before the post
 merges.
 
+How a post is written, from its title to where it is shared, is in
+[`handbook/blog-posts.md`](../handbook/blog-posts.md).
+
 The benchmark's own pages, rendered from the submodule under `/benchmarks`,
 keep the benchmark repository's conventions, including its first person.

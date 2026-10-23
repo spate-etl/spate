@@ -62,7 +62,7 @@ own side channel is the extension point. See
 A [work feed](09-work-feed.mdx) moves a unit that keeps failing to its
 dead-letter destination, and stops delivering it. A bounded job reads that
 destination once its feed has stayed empty over the settling window. When it
-holds units the job is stalled: the pipeline fails with an error that starts
+holds units the job is stalled: the pipeline fails with an error that includes
 `bounded feed job stalled:` and names the destination and its count, and the
 process exits non-zero. A stalled job never reports success over a unit it did
 not read. A restart does not help, since the units sit in the dead-letter

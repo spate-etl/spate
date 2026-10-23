@@ -87,10 +87,12 @@ bounded job ends on three checks, in order:
    [`settling_window`](../07-reference/configuration.mdx#feed) sets another.
 2. Over the window, every read of the feed, at most 20 seconds apart, finds no
    unit ready, delayed or held by any reader, and the worker holds none
-   itself. A read that finds one, a read that fails, a read that comes late or
-   a unit the worker takes starts the window again.
+   itself. A read that finds one, a read that fails and may succeed later, a
+   read that comes late or a unit the worker takes starts the window again. A
+   read the feed or the job location refuses for good, such as for a missing
+   permission, fails the run.
 3. The feed's dead-letter destination is empty. When it holds units the job
-   is stalled: it fails with an error that starts `bounded feed job stalled:`
+   is stalled: it fails with an error that includes `bounded feed job stalled:`
    and names the destination and its count, and the process exits non-zero.
 
 Every worker runs the check and keeps receiving until it passes, idle or not,

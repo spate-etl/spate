@@ -628,18 +628,21 @@ A worker of a bounded job ends the job once all three hold:
   none and has no acknowledgement in flight;
 - the feed's dead-letter destination is empty, read once after the window.
 
-Each worker decides on its own reads and exits zero. A read that finds a unit,
-a read that fails or comes late, a unit the worker takes, or an `end` that
-changes or disappears starts the window again from a new read of `end`. The
-worker reads `end` only at the start and the end of a window, and its feed
-every 15 seconds within one, so that no two reads fall more than 20 seconds
-apart. A feed that cannot report its depth fails a
-bounded job at startup. The [work feed](../../../02-concepts/09-work-feed.mdx#how-a-bounded-job-ends)
-page states the rule, and each [feed's page](../../feeds/README.mdx) how it
-reads its depth.
+Each worker decides on its own reads and exits zero. A read that finds a unit, a
+read that fails retryably or comes late, a unit the worker takes, or an `end`
+that changes or disappears starts the window again from a new read of `end`. A
+read of the feed or of `end` that fails for good, such as for a missing
+permission, and an `end` that does not hold a lister run's marker fail the run
+with exit code 1. The worker reads `end` only at the start and the end of a
+window, and its feed every 15 seconds within one, so that no two reads fall more
+than 20 seconds apart. A feed that cannot report its depth fails a bounded job
+at startup. The
+[work feed](../../../02-concepts/09-work-feed.mdx#how-a-bounded-job-ends) page
+states the rule, and each [feed's page](../../feeds/README.mdx) how it reads its
+depth.
 
 When the dead-letter destination holds units, the job ends **stalled**: the
-run fails with an error that starts `bounded feed job stalled:` and names the
+run fails with an error that includes `bounded feed job stalled:` and names the
 destination and its count, and the process exits non-zero. To re-run a stalled
 job, fix what made its units fail, then start a new job at the same location on
 a fresh queue or topics, with its own dead-letter destination. Copy the dead

@@ -178,8 +178,8 @@ of [Metrics](../../METRICS.md).
 - **Dead-lettered work units** — on a pipeline that reads a
   [work feed](../02-concepts/09-work-feed.mdx), alert when the feed's
   dead-letter destination holds any unit, using the feed's own monitoring.
-  Spate reads that destination only at the end of a bounded job, and a job
-  with no job location never reads it, so no Spate metric reports a unit
+  Spate reads that destination only when a job ends on its own, and a job
+  that runs until a shutdown never reads it, so no Spate metric reports a unit
   moving there while a job runs.
 
   :::note Connector specifics

@@ -39,10 +39,12 @@ KAFKA_BROKERS=localhost:9092 \
 
 `KafkaFeed::connect` checks the feed's topics (see
 [Startup checks](#startup-checks)), then builds the feed's clients and starts
-its three threads: the consumer thread, which polls the group member; the
-follower thread, which reads the attempt topic; and the gate thread, which
+its four threads: the consumer thread, which polls the group member; the
+follower thread, which reads the attempt topic; the gate thread, which
 records each unit's attempt before the unit is read (see
-[Counting deliveries](#counting-deliveries)). The checks read from the
+[Counting deliveries](#counting-deliveries)); and the depth thread, which
+answers a bounded job's depth reads (see
+[Ending a bounded job](#ending-a-bounded-job)). The checks read from the
 brokers, so an unreachable broker fails the call within 30 seconds.
 
 ## Configuration
@@ -75,8 +77,9 @@ attempts have reached it, which moves without being read (see
 
 ## The `rdkafka` passthrough and the denylist
 
-One map configures the feed's consumer, its attempt follower, its producer,
-and the two clients its startup checks read the topics with. A property that
+One map configures the feed's consumer, its attempt follower, its depth
+reader, its producer, and the two clients its startup checks read the topics
+with. A property that
 applies to one client only draws a warning from librdkafka in the others.
 Properties the feed owns are **rejected at load time with an explanation**,
 under their own name and under `topic.<name>`. librdkafka reads
@@ -141,7 +144,7 @@ a worker refuses, so every key stays required. Its writes use `brokers`,
 passthrough, and the other three topic names serve its checks. Connecting runs
 the [startup checks](#startup-checks) a worker runs, then builds one producer
 with the settings the feed owns. The handle joins no group, starts none of the
-feed's three threads and writes no attempt record, so it takes no partition
+feed's four threads and writes no attempt record, so it takes no partition
 from the workers and charges no unit an attempt.
 
 A publish is confirmed by its delivery report and fails as

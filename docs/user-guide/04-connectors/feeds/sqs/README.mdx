@@ -195,11 +195,12 @@ again on any read that is not all zeros. Once the window passes, the worker
 reads the dead-letter queue's three counts, and any message there fails the
 job as stalled, naming the dead-letter queue.
 
-SQS's counts are estimates, and AWS documents them as taking up to a minute
-after the producers stop to settle, so `sqs` refuses a `settling_window`
-below `1m`. ElasticMQ, which the CI suite runs against, reports exact counts,
-so no test checks the window against counts that lag. A read SQS fails
-transiently starts the window again; one it refuses, such as for a missing
+SQS's counts are estimates, and AWS documents them as taking at least a minute
+after the producers stop to settle, so `sqs` refuses a `settling_window` below
+`1m`. ElasticMQ, which the CI suite runs against, reports exact counts, so no
+test checks the window against counts that lag. A read of the queue that SQS
+fails transiently starts the window again, and such a read of the dead-letter
+queue is tried again 15 seconds later. A read SQS refuses, such as for a missing
 permission, fails the job. The reads need `sqs:GetQueueAttributes` on both
 queues, which [the startup checks](#startup-checks) already need.
 

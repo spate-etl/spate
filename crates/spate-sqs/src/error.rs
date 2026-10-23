@@ -317,6 +317,62 @@ mod tests {
         }
     }
 
+    /// Pins that each typed `GetQueueAttributes` error no retry can fix is
+    /// Fatal with no code in its metadata, and that an untyped 500 stays
+    /// Retryable.
+    #[test]
+    fn a_typed_attribute_read_error_is_fatal() {
+        use aws_sdk_sqs::types::error::{
+            InvalidAddress, InvalidAttributeName, InvalidSecurity, QueueDoesNotExist,
+            UnsupportedOperation,
+        };
+        let meta = || ErrorMetadata::builder().message("scripted").build();
+        let cases = [
+            (
+                "QueueDoesNotExist",
+                GetQueueAttributesError::QueueDoesNotExist(
+                    QueueDoesNotExist::builder().meta(meta()).build(),
+                ),
+            ),
+            (
+                "InvalidAddress",
+                GetQueueAttributesError::InvalidAddress(
+                    InvalidAddress::builder().meta(meta()).build(),
+                ),
+            ),
+            (
+                "InvalidSecurity",
+                GetQueueAttributesError::InvalidSecurity(
+                    InvalidSecurity::builder().meta(meta()).build(),
+                ),
+            ),
+            (
+                "InvalidAttributeName",
+                GetQueueAttributesError::InvalidAttributeName(
+                    InvalidAttributeName::builder().meta(meta()).build(),
+                ),
+            ),
+            (
+                "UnsupportedOperation",
+                GetQueueAttributesError::UnsupportedOperation(
+                    UnsupportedOperation::builder().meta(meta()).build(),
+                ),
+            ),
+        ];
+        for (name, e) in cases {
+            assert_eq!(
+                classify("GetQueueAttributes", &service(e, 400)).class,
+                Class::Fatal,
+                "{name}"
+            );
+        }
+        let untyped = GetQueueAttributesError::generic(meta());
+        assert_eq!(
+            classify("GetQueueAttributes", &service(untyped, 500)).class,
+            Class::Retryable
+        );
+    }
+
     /// Pins the other classes: a rejected credential or a 403 is Fatal, and
     /// throttling or a 500 is Retryable.
     #[test]

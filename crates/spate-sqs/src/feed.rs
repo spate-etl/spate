@@ -27,7 +27,7 @@ use crate::queue::{
     VisibilityEntry,
 };
 use crate::startup::{self, COUNT_ATTRIBUTES, QueueAttributes, counts};
-use spate_core::config::FeedSection;
+use spate_core::config::{FeedSection, redact};
 use spate_core::feed::{
     Confirmation, Confirmer, Delivery, Depth, DepthOf, DepthReading, Feed, FeedError,
     FeedErrorKind, FeedWaker, Receipt, Unit, confirmation, depth_reading,
@@ -313,12 +313,14 @@ impl SqsFeed {
     /// # Errors
     ///
     /// [`SqsError::Config`] for a section the feed cannot read, a
-    /// `queue_url` ending in `.fifo` among them.
+    /// `queue_url` ending in `.fifo` and a `settling_window` below one
+    /// minute among them.
     /// [`SqsError::Refused`] when SQS refuses the credentials or the queue,
     /// and for a queue the feed cannot dead-letter from: one whose ARN names
     /// a FIFO queue, one with no redrive policy or one the feed cannot read,
     /// or one whose dead-letter queue cannot be read or keeps messages no
-    /// longer than the queue does.
+    /// longer than the queue does. Also when the queue or its dead-letter
+    /// queue does not report its message counts.
     /// [`SqsError::Unavailable`] when SQS does not answer in time or keeps
     /// failing transiently.
     ///
@@ -397,6 +399,12 @@ impl SqsFeed {
             max_receive_count = checked.max_receive_count,
             dead_letter_queue = %checked.dead_letter_arn,
             dead_letter_retention_seconds = %unreported(checked.dead_letter_retention),
+            visible = checked.counts.visible,
+            delayed = checked.counts.delayed,
+            in_flight = checked.counts.not_visible,
+            dead_letter_visible = checked.dead_letter_counts.visible,
+            dead_letter_delayed = checked.dead_letter_counts.delayed,
+            dead_letter_in_flight = checked.dead_letter_counts.not_visible,
             "the SQS feed is connected"
         );
         let queue = Arc::new(queue);
@@ -684,7 +692,7 @@ impl Feed for SqsFeed {
         let (url, what, unsent) = match of {
             DepthOf::DeadLetters => {
                 let url = self.shared.dead_letter_url.clone();
-                let what = format!("the dead-letter queue {url}");
+                let what = format!("the dead-letter queue {}", redact::url(&url));
                 (url, what, 0)
             }
             _ => {
@@ -693,7 +701,7 @@ impl Feed for SqsFeed {
                     st.deletes.len() + st.fails.len() + st.settling
                 };
                 let url = self.shared.queue_url.clone();
-                let what = format!("the queue {url}");
+                let what = format!("the queue {}", redact::url(&url));
                 (url, what, unsent as u64)
             }
         };

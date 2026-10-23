@@ -55,6 +55,8 @@ pub(crate) const BATCH_SHAPE: &[&str] = &[
 /// Codes for a rejected credential, signature or request.
 const REJECTED: &[&str] = &[
     "AccessDenied",
+    "InvalidAttributeName",
+    "UnsupportedOperation",
     "InvalidClientTokenId",
     "SignatureDoesNotMatch",
     "ExpiredToken",
@@ -154,7 +156,11 @@ impl TypedFatal for ReceiveMessageError {
 
 impl TypedFatal for GetQueueAttributesError {
     fn typed_fatal(&self) -> bool {
-        self.is_queue_does_not_exist() || self.is_invalid_address() || self.is_invalid_security()
+        self.is_queue_does_not_exist()
+            || self.is_invalid_address()
+            || self.is_invalid_security()
+            || self.is_invalid_attribute_name()
+            || self.is_unsupported_operation()
     }
 }
 

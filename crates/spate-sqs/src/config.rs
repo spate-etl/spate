@@ -16,7 +16,7 @@ const MIN_VISIBILITY: Duration = Duration::from_secs(3);
 const MAX_VISIBILITY: Duration = Duration::from_secs(12 * 60 * 60);
 
 /// The shortest settling window: AWS documents a queue's approximate counts
-/// as settling up to a minute after its producers stop.
+/// as taking at least a minute to settle after its producers stop.
 const MIN_SETTLING_WINDOW: Duration = Duration::from_secs(60);
 
 fn default_visibility() -> Duration {
@@ -63,8 +63,8 @@ impl SqsFeedConfig {
             && window < MIN_SETTLING_WINDOW
         {
             return Err(error(format!(
-                "`settling_window` must be at least 1m on `sqs`, whose message counts can lag \
-                 the queue by up to a minute; got {window:?}"
+                "`settling_window` must be at least 1m on `sqs`, whose message counts take at \
+                 least a minute to settle; got {window:?}"
             )));
         }
         let config: SqsFeedConfig = backend.deserialize_into()?;
@@ -195,8 +195,6 @@ mod tests {
         }
     }
 
-    /// Pins the refusals: another backend's tag, `attempt_cap`, an unknown
-    /// key, a FIFO queue and a non-HTTP URL.
     /// Pins the SQS floor on `settling_window`: `60s` loads, `59s` is
     /// refused naming the key, and a section that sets none loads.
     #[test]
@@ -215,6 +213,8 @@ mod tests {
         SqsFeedConfig::from_section(&s).expect("no window loads");
     }
 
+    /// Pins the refusals: another backend's tag, `attempt_cap`, an unknown
+    /// key, a FIFO queue and a non-HTTP URL.
     #[test]
     fn a_section_the_sqs_feed_cannot_read_is_refused() {
         let err = SqsFeedConfig::from_section(&section("memory: {}")).unwrap_err();

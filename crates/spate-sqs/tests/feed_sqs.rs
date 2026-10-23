@@ -631,13 +631,15 @@ fn startup_refuses_an_unreadable_dead_letter_queue() {
 }
 
 /// Pins the fields of the line connecting logs: the queue's default
-/// visibility timeout, both retentions, `maxReceiveCount` and the
-/// dead-letter queue's ARN.
+/// visibility timeout, both retentions, `maxReceiveCount`, the dead-letter
+/// queue's ARN and a message an earlier job left in it.
 #[test]
 #[ignore = "requires Docker"]
 fn connecting_logs_what_the_startup_checks_read() {
     let mq = ElasticMq::start().unwrap();
     let url = queue_with_dead_letter(&mq, "logged");
+    mq.send_message(&format!("{}-dlq", path_of(&url)), "left by an earlier job")
+        .unwrap();
     let mut connected = None;
     let lines = spate_test::capture_logs(tracing::Level::INFO, || {
         connected = Some(connect(&mq, &url));
@@ -653,6 +655,7 @@ fn connecting_logs_what_the_startup_checks_read() {
         "dead_letter_queue",
         "dead_letter_retention_seconds",
         ":logged-dlq",
+        "dead_letter_visible=1",
     ] {
         assert!(line.contains(field), "{field}: {line}");
     }

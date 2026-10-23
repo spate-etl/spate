@@ -1402,6 +1402,43 @@ async fn a_settled_depth_read_wakes_the_reader() {
     );
 }
 
+/// Pins that a depth reading and its error name the queues with the URL's
+/// userinfo redacted.
+#[tokio::test(start_paused = true)]
+async fn depth_text_carries_no_queue_url_userinfo() {
+    const SECRET_URL: &str = "https://ops:hunter2@sqs.eu-west-2.amazonaws.com/111122223333/jobs";
+    let section: FeedSection =
+        serde_yaml::from_str(&format!("sqs: {{ queue_url: \"{SECRET_URL}\" }}")).unwrap();
+    let config = SqsFeedConfig::from_section(&section).expect("the section is accepted");
+    let source = url::Url::parse(&config.queue_url).unwrap();
+    let dead = startup::dead_letter_url(&source, "arn:aws:sqs:eu-west-2:111122223333:jobs-dlq")
+        .unwrap()
+        .to_string();
+    let queue = Arc::new(ScriptedQueue::default());
+    let feed = SqsFeed::start(
+        Arc::clone(&queue) as Arc<dyn Queue>,
+        Arc::clone(&queue) as Arc<dyn startup::QueueAttributes>,
+        dead.clone(),
+        &config,
+        &tokio::runtime::Handle::current(),
+    );
+    let feed_depth = depth(&feed, DepthOf::Feed).await.unwrap();
+    let dead_depth = depth(&feed, DepthOf::DeadLetters).await.unwrap();
+    queue.fail_attributes(&dead, CallError::fatal("AccessDenied"));
+    let e = depth(&feed, DepthOf::DeadLetters).await.unwrap_err();
+    for text in [
+        feed_depth.to_string(),
+        dead_depth.to_string(),
+        e.to_string(),
+    ] {
+        assert!(
+            !text.contains("hunter2"),
+            "credential in depth text: {text}"
+        );
+        assert!(text.contains("sqs.eu-west-2.amazonaws.com"), "{text}");
+    }
+}
+
 /// Pins how a failed read of the counts maps: a fatal class reads as Fatal,
 /// a retryable one as Retryable, each naming the queue.
 #[tokio::test(start_paused = true)]
@@ -1460,4 +1497,70 @@ async fn an_unsent_delete_reports_in_unsent() {
         "the delete reached the queue"
     );
     assert_eq!(depth(&feed, DepthOf::Feed).await.unwrap().unsent, 0);
+}
+
+/// Pins that the settle task's batch counts in `unsent` while a fail in it
+/// is retried, after the delete taken beside it has been sent.
+#[tokio::test(start_paused = true)]
+async fn a_fail_being_retried_reports_in_unsent() {
+    let (feed, queue) = start(MINUTE);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    queue.ready(Message::new("a"));
+    queue.ready(Message::new("b"));
+    let got = receive_n(&feed, &park, 2).await;
+    queue.fail_next_visibility_call(CallError::retryable("InternalError"));
+    feed.acknowledge(got[0].receipt).unwrap();
+    feed.fail(got[1].receipt, "unreadable").unwrap();
+    settle_tasks().await;
+    assert_eq!(queue.deletes().len(), 1, "the delete was sent");
+    assert_eq!(queue.visibility().len(), 1, "the fail was tried once");
+    assert_eq!(
+        depth(&feed, DepthOf::Feed).await.unwrap().unsent,
+        2,
+        "the batch holding the fail"
+    );
+    for _ in 0..10 {
+        tokio::time::advance(Duration::from_secs(1)).await;
+        settle_tasks().await;
+    }
+    assert_eq!(queue.visibility().len(), 2, "the fail was sent again");
+    assert_eq!(depth(&feed, DepthOf::Feed).await.unwrap().unsent, 0);
+}
+
+/// Answers every attribute read without the message counts.
+#[derive(Debug)]
+struct Uncounted;
+
+impl startup::QueueAttributes for Uncounted {
+    fn attributes<'a>(
+        &'a self,
+        _queue_url: &'a str,
+        _names: &'static [&'static str],
+    ) -> BoxFuture<'a, Result<HashMap<String, String>, CallError>> {
+        Box::pin(async { Ok(HashMap::new()) })
+    }
+}
+
+/// Pins that a depth read whose reply lacks a count reads as Fatal, naming
+/// the count and the queue.
+#[tokio::test(start_paused = true)]
+async fn a_reply_without_the_counts_reads_as_fatal() {
+    let feed = SqsFeed::start(
+        Arc::new(ScriptedQueue::default()) as Arc<dyn Queue>,
+        Arc::new(Uncounted),
+        DEAD_URL.to_owned(),
+        &config(MINUTE),
+        &tokio::runtime::Handle::current(),
+    );
+    for (of, url) in [(DepthOf::Feed, QUEUE_URL), (DepthOf::DeadLetters, DEAD_URL)] {
+        let e = depth(&feed, of).await.unwrap_err();
+        assert_eq!(e.kind, FeedErrorKind::Fatal, "{of:?}");
+        assert!(
+            e.reason
+                .contains("reported no `ApproximateNumberOfMessages`")
+                && e.reason.contains(url),
+            "{e}"
+        );
+    }
 }

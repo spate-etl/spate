@@ -105,6 +105,10 @@ pub(crate) struct Checked {
     /// reads.
     pub(crate) dead_letter_url: String,
     pub(crate) dead_letter_retention: Option<u64>,
+    /// The queue's message counts at connect.
+    pub(crate) counts: Counts,
+    /// The dead-letter queue's message counts at connect.
+    pub(crate) dead_letter_counts: Counts,
 }
 
 /// The queue's `RedrivePolicy` attribute.
@@ -208,8 +212,9 @@ pub(crate) async fn check(
             )),
         })?;
 
-    counts(&source).map_err(|e| SqsError::Refused(format!("{e}: queue {arn}")))?;
-    counts(&dead)
+    let source_counts =
+        counts(&source).map_err(|e| SqsError::Refused(format!("{e}: queue {arn}")))?;
+    let dead_letter_counts = counts(&dead)
         .map_err(|e| SqsError::Refused(format!("{e}: dead-letter queue {dead_letter_arn}")))?;
     let retention = seconds(&source);
     let dead_letter_retention = seconds(&dead);
@@ -243,6 +248,8 @@ pub(crate) async fn check(
         dead_letter_arn,
         dead_letter_url: dead_letter.to_string(),
         dead_letter_retention,
+        counts: source_counts,
+        dead_letter_counts,
     })
 }
 
@@ -291,6 +298,59 @@ mod tests {
     const SOURCE: &str = "http://127.0.0.1:9324/000000000000/jobs";
     const DEAD_URL: &str = "http://127.0.0.1:9324/000000000000/jobs-dlq";
     const DEAD_ARN: &str = "arn:aws:sqs:elasticmq:000000000000:jobs-dlq";
+
+    /// A store that knows no `ApproximateNumberOfMessagesDelayed`, which SQS
+    /// answers with `InvalidAttributeName`, a 400.
+    #[derive(Debug)]
+    struct NoDelayedCount;
+
+    impl QueueAttributes for NoDelayedCount {
+        fn attributes<'a>(
+            &'a self,
+            _queue_url: &'a str,
+            names: &'static [&'static str],
+        ) -> BoxFuture<'a, Result<HashMap<String, String>, CallError>> {
+            use aws_sdk_sqs::config::http::HttpResponse;
+            use aws_sdk_sqs::error::{ErrorMetadata, SdkError};
+            use aws_sdk_sqs::operation::get_queue_attributes::GetQueueAttributesError;
+            let answer = if names.contains(&"ApproximateNumberOfMessagesDelayed") {
+                let meta = ErrorMetadata::builder()
+                    .code("InvalidAttributeName")
+                    .message("Unknown Attribute ApproximateNumberOfMessagesDelayed.")
+                    .build();
+                let raw = HttpResponse::new(400.try_into().unwrap(), "".into());
+                let e = SdkError::service_error(GetQueueAttributesError::generic(meta), raw);
+                Err(crate::error::classify("GetQueueAttributes", &e))
+            } else {
+                let policy =
+                    format!(r#"{{"deadLetterTargetArn":"{DEAD_ARN}","maxReceiveCount":5}}"#);
+                Ok([
+                    (
+                        "QueueArn",
+                        "arn:aws:sqs:elasticmq:000000000000:jobs".to_owned(),
+                    ),
+                    ("RedrivePolicy", policy),
+                ]
+                .into_iter()
+                .map(|(k, v)| (k.to_owned(), v))
+                .collect())
+            };
+            Box::pin(async move { answer })
+        }
+    }
+
+    /// Pins that a store that does not know one of the three counts is
+    /// refused at connect, where a retryable class would read as a store
+    /// that may answer later.
+    #[test]
+    fn a_store_without_a_count_is_refused() {
+        let step = Mutex::new("starting");
+        let result = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(check(&NoDelayedCount, SOURCE, &step));
+        assert!(matches!(result, Err(SqsError::Refused(_))), "{result:?}");
+    }
 
     /// The attribute names `GetQueueAttributes` accepts on a standard queue.
     const STANDARD_NAMES: &[&str] = &[

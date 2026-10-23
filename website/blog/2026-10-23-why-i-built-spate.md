@@ -4,7 +4,6 @@ description: "Flink 2.2.1 ran a Kafka to ClickHouse pipeline at 547k rows/s per 
 slug: why-i-built-spate
 authors: [marcus]
 tags: [engineering]
-draft: true
 ---
 
 Spate is a streaming ETL framework in Rust, for pipelines like Kafka to Avro to

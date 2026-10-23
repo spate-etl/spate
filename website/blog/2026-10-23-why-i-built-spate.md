@@ -13,9 +13,9 @@ shape. One instance hit a ceiling long before the machine did, and garbage
 collection meant a bigger instance would not help, so adding instances was the
 only way forward.
 
-On the published benchmark, the same pipeline runs at 547k rows per second per
-core on Flink 2.2.1 and 1.61M on Spate 0.3.0, with each system held to 32 cores
-on the same `c8gd.metal-24xl`.
+On the [published benchmark](/benchmarks), the same pipeline runs at 547k rows
+per second per core on Flink 2.2.1 and 1.61M on Spate 0.3.0, with each system
+held to 32 cores on the same `c8gd.metal-24xl`.
 
 <!-- truncate -->
 
@@ -76,12 +76,12 @@ crossing it was still serialized.
 
 Spate has no stages to match. Each pipeline thread owns a set of partitions and
 runs the whole path itself: poll, decode, transform, route, and encode into the
-sink's wire format. The operator chain compiles to one loop, with one dynamic
-call per batch ([ADR-0004](/docs/adr/static-operator-chain)). The encoded rows
-then go into the queue of the shard they belong to, so 32 pipeline threads feed
-one sink without a record ever being serialized between operators. [The
-architecture page](/docs/user-guide/concepts/architecture) has the thread model
-in full.
+sink's wire format. The operator chain compiles to one loop, so the operators
+call each other directly, with no dispatch between them
+([ADR-0004](/docs/adr/static-operator-chain)). The encoded rows then go into the
+queue of the shard they belong to, so 32 pipeline threads feed one sink without
+a record ever being serialized between operators. [The architecture
+page](/docs/user-guide/concepts/architecture) has the thread model in full.
 
 ## Moving the column pivot off ClickHouse
 
@@ -94,8 +94,8 @@ Spate's ClickHouse sink can do that pivot itself. With `format: native` it
 encodes columnar blocks on the pipeline threads, which scale with the client
 machine, and ClickHouse receives them ready to write. On a development laptop
 against an idle, single-threaded ClickHouse 25.6 server, that cut server CPU end
-to end by 70%, at about twice the client CPU per row. The [Native format
-page](/docs/user-guide/connectors/sinks/clickhouse/native-format) has the
+to end by 70%, at about twice the encode CPU per row on the client. The [Native
+format page](/docs/user-guide/connectors/sinks/clickhouse/native-format) has the
 measurement and when the trade pays.
 
 ## Compression on the pipeline threads
@@ -110,15 +110,17 @@ compressed each insert on the I/O workers, and with the default two of them the
 sink inserted about 19.7M rows per second with LZ4 on the benchmark machine.
 Moving the compression onto the pipeline threads lifts that to about 32M on the
 same machine, with the same two I/O workers. Those were tuning runs, so the
-benchmark page does not carry them, and the change ships in 0.4.0. About 32M is
-also the machine's own ceiling for this pipeline: at that rate neither Spate nor
-ClickHouse was using all of its cores. [Moving insert compression onto the
-pipeline threads](/blog/compression-on-the-pipeline-threads) has the runs.
+benchmark page does not carry them, and the change will ship in 0.4.0. At that
+rate Spate used about 21 of its 32 cores and ClickHouse about 15, so something
+outside both caps the rate. That is
+[benchmark#106](https://github.com/spate-etl/benchmark/issues/106). [Moving
+insert compression onto the pipeline
+threads](/blog/compression-on-the-pipeline-threads) has the runs.
 
 ## What the other tools do better
 
-The benchmark runs four systems besides Spate, and for each one there is a case
-where you would choose it over Spate.
+The [benchmark](/benchmarks) runs four systems besides Spate, and for each one
+there is a case where you would choose it over Spate.
 
 - **Flink** is built for stateful computation across a cluster, and Spate has no
   windowing, no stateful operators, and no general DAG.

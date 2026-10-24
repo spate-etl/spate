@@ -207,3 +207,35 @@ pub fn re_enqueue_body(
 pub fn quoted(etag: &str) -> String {
     crate::unit::quoted(etag.to_owned())
 }
+
+/// A storage notification in `bucket` with one `ObjectCreated:Put` record
+/// carrying each field given and leaving out each one that is `None`.
+#[must_use]
+pub fn notification_body(
+    bucket: &str,
+    key: &str,
+    size: Option<u64>,
+    etag: Option<&str>,
+    version: Option<&str>,
+    re_enqueues: Option<u32>,
+) -> Vec<u8> {
+    let mut object = serde_json::json!({ "key": key });
+    if let Some(size) = size {
+        object["size"] = size.into();
+    }
+    if let Some(etag) = etag {
+        object["eTag"] = etag.into();
+    }
+    if let Some(version) = version {
+        object["versionId"] = version.into();
+    }
+    let mut record = serde_json::json!({
+        "eventName": "ObjectCreated:Put",
+        "s3": { "bucket": { "name": bucket }, "object": object },
+    });
+    if let Some(n) = re_enqueues {
+        record["spateReEnqueues"] = n.into();
+    }
+    serde_json::to_vec(&serde_json::json!({ "Records": [record] }))
+        .expect("a JSON value always serialises")
+}

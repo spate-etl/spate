@@ -533,7 +533,9 @@ decides:
   than 1,024 bytes, or holding a space or a control byte, fails the message.
   A failed precondition on a read that names a version fails the unit back.
 - A failed precondition (`412`) on a read that names no version means the
-  object was overwritten. The read stops, and the source sends a HEAD for the
+  object was overwritten. So does a `416` on such a read, which RustFS sends
+  for a range past the end of a smaller new object before it checks the
+  precondition. The read stops, and the source sends a HEAD for the
   key. It publishes a notification unit for the key at the ETag and size the
   HEAD reports, under the old unit's id, with a re-enqueue count one higher
   than the old unit's. On SQS the new unit goes to the queue, and on Kafka to
@@ -544,11 +546,12 @@ decides:
   pinned to fails the unit back. A HEAD that reports size 0 acknowledges the
   unit with nothing published.
 - A publish the feed refuses, or cannot confirm, fails the old unit back, and
-  its next delivery reads the object again.
+  its next delivery reads the object again. A publish the feed answers as
+  fatal, such as a send its permissions deny, fails the pipeline.
 
 An object overwritten while it is read delivers the records read before the
-overwrite, and the rest of that version is never read. Each `412` costs one
-HEAD and one feed message. A key overwritten faster than it is read is
+overwrite, and the rest of that version is never read. Each range read under
+the old ETag costs one HEAD, and the key costs one feed message per delivery. A key overwritten faster than it is read is
 re-enqueued on every overwrite up to the cap, and its last version is read once
 for each unit still in the chain. Two notifications for one overwritten key
 start two chains.
@@ -962,7 +965,6 @@ noted per family.
 | `spate_s3_source_bytes_decoded_total` | counter | | Bytes after decompression; for a byte-range split, the bytes of the records it owns. Equals `bytes_read` for uncompressed objects read whole; the ratio is the effective compression. |
 | `spate_s3_source_get_retries_total` | counter | | Object GET and HEAD attempts beyond the first (transient failures, resumed with ranged reads). A rising rate means a flaky store or network; an exhausted attempt budget poisons the split rather than failing the pipeline. |
 | `spate_s3_source_objects_failed_total` | counter | `reason` | Objects, or byte ranges of one, that poisoned their split: `not_found` (deleted after planning, or a key that is not a valid object path), `etag_drift` (overwritten under the `If-Match` pin, or content shorter than committed progress; a notification unit's re-enqueued overwrite is counted in `objects_overwritten_total` instead), `undecodable` (corrupt/truncated content, over the per-object record limit, or unverifiable without an ETag), `retries_exhausted`. Each report hands the split back; quarantine at the attempt cap shows up in `spate_coordination_splits_quarantined`. |
-
 | `spate_s3_source_objects_overwritten_total` | counter | | Objects a notification unit's read found overwritten under its ETag pin, once per object and delivery, whether re-enqueued or not. See [Reading a notification's object](#reading-a-notifications-object). |
 | `spate_s3_source_overwrites_dropped_total` | counter | | Of those, the objects whose unit was at the re-enqueue cap and was acknowledged without a re-enqueue. A non-zero value means an overwrite may have been dropped. |
 

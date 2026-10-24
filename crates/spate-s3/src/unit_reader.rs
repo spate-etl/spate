@@ -343,9 +343,15 @@ impl UnitReader {
             };
             lane.last_committed = Some(watermark);
             let delivery = lane.delivery;
-            if lane.tracker.terminal() == Some(watermark)
-                && self.deliveries[&delivery].failing.is_none()
-            {
+            if lane.tracker.terminal() != Some(watermark) {
+                continue;
+            }
+            // A lane sends its overwrite report before it decides
+            // end-of-input, so once its terminal is seen the report is in the
+            // channel; reading it here keeps the unit from being finished
+            // before its re-enqueue is published.
+            self.read_reports();
+            if self.deliveries[&delivery].failing.is_none() {
                 self.retire(partition);
                 if self.deliveries[&delivery].finished() {
                     self.acknowledge(delivery)?;
@@ -368,29 +374,7 @@ impl UnitReader {
     /// reports, refused fails, finished lanes and units), then renew every
     /// unit still held.
     fn settle(&mut self) -> Result<(), SourceError> {
-        while let Ok(report) = self.poison_rx.try_recv() {
-            if let Some(overwrite) = report.overwrite {
-                self.on_overwrite(PartitionId(report.epoch.0 as u32), *overwrite);
-                continue;
-            }
-            if let Some(m) = &self.parts.metrics {
-                m.objects_failed(report.kind).increment(1);
-            }
-            let partition = PartitionId(report.epoch.0 as u32);
-            let Some(lane) = self.lanes.get(&partition) else {
-                continue;
-            };
-            let Some(held) = self.deliveries.get_mut(&lane.delivery) else {
-                continue;
-            };
-            tracing::warn!(
-                unit = %held.unit,
-                reason = report.kind.reason_label(),
-                detail = %report.reason,
-                "object-level failure; failing the unit back to the feed"
-            );
-            held.failing = Some(report.reason);
-        }
+        self.read_reports();
         self.check_re_enqueues()?;
         let failing: Vec<u32> = self
             .deliveries
@@ -425,8 +409,17 @@ impl UnitReader {
             })
             .map(|(&partition, _)| partition)
             .collect();
+        // As in `commit`: a lane that decided end-of-input since the first
+        // read has its report in the channel now.
+        self.read_reports();
         for partition in ended {
-            self.retire(partition);
+            let failing = self
+                .lanes
+                .get(&partition)
+                .is_none_or(|lane| self.deliveries[&lane.delivery].failing.is_some());
+            if !failing {
+                self.retire(partition);
+            }
         }
         // A unit is acknowledged here when its last lane retired in this
         // sweep, or when an earlier acknowledge was answered `Retryable`.
@@ -460,6 +453,35 @@ impl UnitReader {
         Ok(())
     }
 
+    /// Read every report the lanes sent: an overwrite goes to
+    /// [`on_overwrite`](Self::on_overwrite), and any other report marks its
+    /// unit failing.
+    fn read_reports(&mut self) {
+        while let Ok(report) = self.poison_rx.try_recv() {
+            if let Some(overwrite) = report.overwrite {
+                self.on_overwrite(PartitionId(report.epoch.0 as u32), *overwrite);
+                continue;
+            }
+            if let Some(m) = &self.parts.metrics {
+                m.objects_failed(report.kind).increment(1);
+            }
+            let partition = PartitionId(report.epoch.0 as u32);
+            let Some(lane) = self.lanes.get(&partition) else {
+                continue;
+            };
+            let Some(held) = self.deliveries.get_mut(&lane.delivery) else {
+                continue;
+            };
+            tracing::warn!(
+                unit = %held.unit,
+                reason = report.kind.reason_label(),
+                detail = %report.reason,
+                "object-level failure; failing the unit back to the feed"
+            );
+            held.failing = Some(report.reason);
+        }
+    }
+
     /// Handle a lane's report that `overwrite.key` was overwritten while
     /// the lane on `partition` read it: drop the key's unopened parts, and
     /// re-enqueue the key once per delivery unless the unit is at the cap.
@@ -471,17 +493,26 @@ impl UnitReader {
         let Some(held) = self.deliveries.get_mut(&lane.delivery) else {
             return;
         };
-        // A failing unit is read again from its start, and a key already
-        // re-enqueued by another of its ranges needs no second unit.
-        if held.failing.is_some() || held.overwritten.contains_key(&overwrite.key) {
+        // A key another of its ranges reported is counted and re-enqueued
+        // once.
+        if held.overwritten.contains_key(&overwrite.key) {
             return;
         }
         held.pending.retain(|cursor| cursor.key() != overwrite.key);
         if let Some(m) = &self.parts.metrics {
             m.objects_overwritten.increment(1);
         }
-        let re_enqueue = if overwrite.size == 0 {
-            // An empty object has no records to read.
+        let re_enqueue = if held.failing.is_some() {
+            // The unit goes back to the feed and is read again from its
+            // start, which reads the key's current content.
+            ReEnqueue::Done
+        } else if overwrite.size == 0 {
+            tracing::info!(
+                unit = %held.unit,
+                key = %overwrite.key,
+                "an object was overwritten while it was read and is now empty; nothing to \
+                 re-enqueue"
+            );
             ReEnqueue::Done
         } else if re_enqueues >= self.parts.re_enqueue_cap {
             if let Some(m) = &self.parts.metrics {
@@ -530,11 +561,17 @@ impl UnitReader {
                     Some(Err(e)) if e.kind == FeedErrorKind::Fatal => {
                         return Err(feed_error("re-enqueueing an overwritten object", &e));
                     }
-                    Some(Err(e)) => {
-                        held.failing.get_or_insert_with(|| {
-                            format!("re-enqueueing an overwritten object failed: {e}")
-                        });
+                    Some(Err(e)) if held.failing.is_none() => {
+                        tracing::warn!(
+                            unit = %held.unit,
+                            error = %e,
+                            "the feed did not store the re-enqueue of an overwritten object; \
+                             failing the unit back to the feed"
+                        );
+                        held.failing =
+                            Some(format!("re-enqueueing an overwritten object failed: {e}"));
                     }
+                    Some(Err(_)) => {}
                 }
             }
         }
@@ -2161,7 +2198,7 @@ mod tests {
     }
 
     /// Pins that a re-enqueue the feed refuses, or cannot confirm, fails the
-    /// unit back, never acknowledged.
+    /// unit back with a WARN naming it, never acknowledged.
     #[test]
     fn a_refused_or_retryable_re_enqueue_fails_the_unit_back() {
         for kind in [FeedErrorKind::Refused, FeedErrorKind::Retryable] {
@@ -2169,10 +2206,16 @@ mod tests {
             script.refuse_next_publish(kind);
             let (receipt, lanes) = open_notification(&mut reader, &script, &[("a.ndjson", 10)], 0);
             report_overwrite(&reader, lanes[0], "a.ndjson", 20);
-            assert_eq!(
-                lanes_revoked(poll(&mut reader)),
-                [LaneId(lanes[0].0)],
-                "{kind:?}"
+            let mut revoked = Vec::new();
+            let lines = spate_test::capture_logs(tracing::Level::WARN, || {
+                revoked = lanes_revoked(poll(&mut reader));
+            });
+            assert_eq!(revoked, [LaneId(lanes[0].0)], "{kind:?}");
+            assert!(
+                lines
+                    .iter()
+                    .any(|l| l.contains("did not store the re-enqueue") && l.contains("unit=n")),
+                "{lines:#?}"
             );
             assert_eq!(script.failed().len(), 1, "{kind:?}");
             assert_eq!(script.failed()[0].0, receipt, "{kind:?}");
@@ -2310,15 +2353,98 @@ mod tests {
     }
 
     /// Pins that an object overwritten to no bytes is acknowledged without a
-    /// re-enqueue, since it holds no record.
+    /// re-enqueue, since it holds no record, with an INFO line naming the
+    /// key, and that one overwritten to a single byte is re-enqueued.
     #[test]
     fn an_overwrite_to_size_0_is_acknowledged_without_a_re_enqueue() {
         let (mut reader, script, _rt) = reader();
         let (receipt, lanes) = open_notification(&mut reader, &script, &[("a.ndjson", 10)], 0);
         report_overwrite(&reader, lanes[0], "a.ndjson", 0);
-        poll(&mut reader);
+        let lines = spate_test::capture_logs(tracing::Level::INFO, || {
+            poll(&mut reader);
+        });
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("is now empty") && l.contains("data/a.ndjson")),
+            "{lines:#?}"
+        );
         finish(&mut reader, lanes[0], 3);
         assert_eq!(script.acknowledged(), vec![receipt]);
         assert!(script.published().is_empty());
+
+        let (mut one_byte, script, _rt) = self::reader();
+        let (_, lanes) = open_notification(&mut one_byte, &script, &[("a.ndjson", 10)], 0);
+        report_overwrite(&one_byte, lanes[0], "a.ndjson", 1);
+        poll(&mut one_byte);
+        assert_eq!(
+            script.published().len(),
+            1,
+            "a one-byte object is re-enqueued"
+        );
+    }
+
+    /// Pins that a commit reaching the reader before a poll has read the
+    /// lane's overwrite report does not acknowledge the unit: the commit
+    /// reads the report and publishes the re-enqueue, and the unit is
+    /// acknowledged once the feed confirms it.
+    #[test]
+    fn a_commit_before_the_overwrite_report_is_read_waits_for_the_re_enqueue() {
+        let (mut reader, script, _rt) = reader_holding(1);
+        script.hold_publishes();
+        let (receipt, lanes) = open_notification(&mut reader, &script, &[("a.ndjson", 10)], 0);
+        report_overwrite(&reader, lanes[0], "a.ndjson", 20);
+        finish(&mut reader, lanes[0], 3);
+        assert!(
+            script.acknowledged().is_empty(),
+            "acknowledged before the re-enqueue"
+        );
+        assert_eq!(script.published().len(), 1);
+        script.confirm_held_publishes();
+        poll(&mut reader);
+        assert_eq!(script.acknowledged(), vec![receipt]);
+    }
+
+    /// Pins that an overwrite reported for a unit already failing back is
+    /// counted once and not re-enqueued: the redelivered unit reads the key's
+    /// current content.
+    #[test]
+    fn an_overwrite_on_a_failing_unit_is_counted_and_not_re_enqueued() {
+        let pipeline = unique_name("reader");
+        let rendered = render_local(|| {
+            let metrics =
+                S3Metrics::new(&Meter::with_namespace("s3", pipeline.clone(), "src", "s3"));
+            let (feed, script) = scripted_feed();
+            let (mut reader, _rt) = reader_over(Arc::new(feed), None, Some(metrics));
+            let (receipt, lanes) = open_notification(
+                &mut reader,
+                &script,
+                &[("a.ndjson", 10), ("b.ndjson", 10)],
+                0,
+            );
+            reader
+                .poison_tx
+                .send(PoisonReport {
+                    split: SplitId::new("gone").unwrap(),
+                    epoch: LeaseEpoch(u64::from(lanes[1].0)),
+                    kind: PoisonKind::NotFound,
+                    reason: "gone".into(),
+                    overwrite: None,
+                })
+                .unwrap();
+            report_overwrite(&reader, lanes[0], "a.ndjson", 20);
+            poll(&mut reader);
+            assert!(script.published().is_empty());
+            assert_eq!(script.failed().len(), 1);
+            assert_eq!(script.failed()[0].0, receipt);
+        });
+        assert_eq!(
+            metric_value(
+                &rendered,
+                "spate_s3_objects_overwritten_total",
+                &[("pipeline", pipeline.as_str())]
+            ),
+            Some(1.0)
+        );
     }
 }

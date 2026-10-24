@@ -115,14 +115,35 @@ pub(crate) fn reason(e: &object_store::Error) -> String {
 }
 
 /// Whether `e`, failing a read of a part from `origin`, means the key was
-/// overwritten under its ETag pin: a failed precondition on a notification
-/// unit that names no version.
+/// overwritten under its ETag pin: a failed precondition, or a range the
+/// store cannot satisfy, on a notification unit that names no version.
 ///
-/// The read then re-enqueues the key at its current ETag. A version-named
-/// read and a lister's unit keep [`poison_kind`]'s classification.
+/// RustFS answers a ranged GET that starts past the end of a smaller new
+/// object with 416 before it checks `If-Match`. The read then re-enqueues
+/// the key at its current ETag. A version-named read and a lister's unit keep
+/// [`classify`]'s and [`poison_kind`]'s classification.
 pub(crate) fn is_overwrite(e: &object_store::Error, origin: &Origin) -> bool {
-    matches!(e, object_store::Error::Precondition { .. })
+    (matches!(e, object_store::Error::Precondition { .. }) || range_not_satisfiable(e))
         && matches!(origin, Origin::Notification { version: None, .. })
+}
+
+/// Whether `e` is a request the store answered with 416.
+///
+/// object_store reports it as `Generic` and keeps the error type that holds
+/// the status private, so this matches a link in the chain by its message.
+/// The tests against a local server fail if that text changes.
+fn range_not_satisfiable(e: &object_store::Error) -> bool {
+    let mut link: Option<&(dyn std::error::Error + 'static)> = Some(e);
+    while let Some(error) = link {
+        if error
+            .to_string()
+            .contains("Server returned non-2xx status code: 416 ")
+        {
+            return true;
+        }
+        link = error.source();
+    }
+    false
 }
 
 /// Classify an object-level (non-pipeline-fatal, non-retryable) failure
@@ -497,5 +518,34 @@ mod tests {
             assert!(!is_overwrite(&not_found(), &origin), "{origin:?}");
             assert!(!is_overwrite(&denied(), &origin), "{origin:?}");
         }
+    }
+
+    /// Pins that a GET the store answers with 416, as RustFS does for a range
+    /// past the end of a smaller new object, is an overwrite on a
+    /// notification unit naming no version, and stays a retryable read
+    /// failure for a lister's unit or a version-named read.
+    #[tokio::test]
+    async fn a_416_on_a_notification_read_is_an_overwrite() {
+        use object_store::ObjectStore as _;
+        let store = crate::test_servers::store_at(&crate::test_servers::status_server(
+            "416 Range Not Satisfiable",
+        ));
+        let e = store
+            .get_opts(&"k".into(), object_store::GetOptions::default())
+            .await
+            .unwrap_err();
+        assert!(matches!(e, object_store::Error::Generic { .. }), "{e:?}");
+        assert_eq!(classify(&e), ErrorClass::Retryable, "{e}");
+        assert!(is_overwrite(&e, &notification(None)), "{e}");
+        assert!(!is_overwrite(&e, &notification(Some("v1"))), "{e}");
+        assert!(!is_overwrite(&e, &Origin::Lister), "{e}");
+        let other = crate::test_servers::store_at(&crate::test_servers::status_server(
+            "500 Internal Server Error",
+        ));
+        let e = other
+            .get_opts(&"k".into(), object_store::GetOptions::default())
+            .await
+            .unwrap_err();
+        assert!(!is_overwrite(&e, &notification(None)), "{e}");
     }
 }

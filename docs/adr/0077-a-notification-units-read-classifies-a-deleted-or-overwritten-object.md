@@ -47,8 +47,9 @@ notification. An unpinned re-read can splice two versions under a further
 overwrite.
 
 For a unit from a notification, a 404 on the object read poisons the unit, and
-a 403 fails the pipeline. A precondition failure on a key without versioning
-stops the read, reads the key's current ETag with a HEAD, and publishes a unit
+a 403 fails the pipeline. A precondition failure on a key without versioning,
+or a 416 a store sends for a range past the end of a smaller new object before
+it checks the precondition, stops the read, reads the key's current ETag with a HEAD, and publishes a unit
 for the key at that ETag through the feed trait
 ([ADR-0066](0066-a-feed-trait-replaces-the-split-coordination-traits.md)).
 Once the feed confirms the new unit and the sink has acknowledged every record
@@ -59,11 +60,11 @@ the work topic, where it starts its own attempt count
 ([ADR-0070](0070-on-kafka-a-units-attempt-is-recorded-before-the-unit-is-read.md)).
 It carries a re-enqueue count one higher than the old unit's. A unit whose
 re-enqueue count has reached the cap is, on a 412, acknowledged without
-re-enqueueing, and the worker counts it in a metric; the key's later versions
-arrive through their own notifications. The cap is the `feed:` section's
+re-enqueueing, and the worker counts its object in a metric; the key's later
+versions arrive through their own notifications. The cap is the `feed:` section's
 `attempt_cap`, which the feed-section record settles, and 10 when the section
 sets none or the backend refuses the key. The worker also counts in a metric
-each unit whose read a 412 cut short. A HEAD that answers 404 is handled as a
+each object whose read a 412 cut short, once per delivery. A HEAD that answers 404 is handled as a
 404 on the read, and one that answers 403 as a 403. A HEAD that reports the
 ETag the read was pinned to poisons the unit, since a unit at that ETag fails
 the same way. A publish the feed refuses or cannot confirm fails the old unit
@@ -83,13 +84,14 @@ read that names a version poisons the unit.
 - Bad, because an object overwritten while its unit is read delivers the
   records read before the overwrite, and the rest of that version is never
   ingested.
-- Bad, because each 412 costs one HEAD and one more queue message. A key
+- Bad, because each range read under the old ETag costs one HEAD, and each
+  overwritten key one more queue message per delivery. A key
   overwritten faster than its read is re-enqueued on every overwrite up to
   the cap, and its final version is read once for each unit still in the
   chain. Two notifications for one overwritten key start two chains.
 - Bad, because an overwrite that sent no notification is lost once its key
   has been re-enqueued as many times as the cap. The metric counts each such
-  unit. A message forged with a count at the cap drops only its own key's
+  object. A message forged with a count at the cap drops only its own key's
   re-enqueue, which a writer to the queue could do as well by sending nothing.
 - Bad, because a KMS denial on one object fails each worker that receives its
   unit, until `maxReceiveCount` dead-letters it.

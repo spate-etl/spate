@@ -33,8 +33,9 @@
 //! object whose store returns no ETag cannot be resumed mid-stream safely
 //! and poisons the split on a mid-object break instead.
 //!
-//! A failed precondition on a notification unit that names no version is
-//! an overwrite ([`is_overwrite`](crate::error::is_overwrite)). The fetcher
+//! A failed precondition on a notification unit that names no version, or a
+//! range the store cannot satisfy on one, is an overwrite
+//! ([`is_overwrite`](crate::error::is_overwrite)). The fetcher
 //! HEADs the key and reports its current content as
 //! [`SplitFailure::Overwritten`], so the reader can re-enqueue the key.
 
@@ -458,7 +459,7 @@ async fn stream_object_ranged(
             Ok(bytes) => bytes,
             Err(e) if crate::error::is_overwrite(&e, origin) => {
                 return Err(head_after_overwrite(
-                    split, store, &path, entry, etag, retry_base, retries,
+                    split, store, &path, entry, etag, delivered, retry_base, retries,
                 )
                 .await);
             }
@@ -643,20 +644,27 @@ fn version_of(origin: &Origin) -> Option<String> {
     }
 }
 
-/// HEAD `path` after a read pinned to `pinned` failed its precondition, and
-/// report what the key holds now.
+/// HEAD `path` after the store refused a read at byte `delivered` pinned to
+/// `pinned` (see [`is_overwrite`](crate::error::is_overwrite)), and report
+/// what the key holds now.
 ///
 /// A HEAD answering the pinned ETag poisons the split as `EtagDrift`, since
 /// re-enqueueing at the same content would fail the same way. Any other
 /// answer, an absent ETag included, is [`SplitFailure::Overwritten`]. A HEAD
 /// that fails is classified as a read is: 404 poisons, 401 and 403 are
-/// fatal, and a transient failure is retried on the read's budget.
+/// fatal, and a transient failure is retried on the read's budget. Its
+/// reason says the HEAD failed.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "internal seam beside the read loops, which carry the same context"
+)]
 async fn head_after_overwrite(
     split: &SplitId,
     store: &Arc<dyn ObjectStore>,
     path: &Path,
     entry: &ObjectEntry,
     pinned: &str,
+    delivered: u64,
     retry_base: Duration,
     retries: Option<&spate_core::metrics::Counter>,
 ) -> SplitFailure {
@@ -669,8 +677,9 @@ async fn head_after_overwrite(
                     return SplitFailure::Poison(
                         PoisonKind::EtagDrift,
                         format!(
-                            "split {split}: reading \"{}\" failed its precondition, and the \
-                             object still reports the ETag {pinned} it was pinned to",
+                            "split {split}: the store refused reading \"{}\" at byte \
+                             {delivered} under its ETag pin, and the object still reports the \
+                             ETag {pinned}",
                             entry.key
                         ),
                     );
@@ -683,10 +692,32 @@ async fn head_after_overwrite(
                 }));
             }
             Err(e) => {
-                if let Err(failure) =
-                    retry_or_fail(split, entry, &e, 0, &mut attempt, retry_base, retries).await
+                if let Err(failure) = retry_or_fail(
+                    split,
+                    entry,
+                    &e,
+                    delivered,
+                    &mut attempt,
+                    retry_base,
+                    retries,
+                )
+                .await
                 {
-                    return failure;
+                    let headed = |reason: String| {
+                        format!("{reason} (the HEAD after the store refused the pinned read)")
+                    };
+                    return match failure {
+                        SplitFailure::Poison(kind, reason) => {
+                            SplitFailure::Poison(kind, headed(reason))
+                        }
+                        SplitFailure::Fatal(SourceError::Client { class, reason }) => {
+                            SplitFailure::Fatal(SourceError::Client {
+                                class,
+                                reason: headed(reason),
+                            })
+                        }
+                        other => other,
+                    };
                 }
             }
         }
@@ -2063,8 +2094,10 @@ mod tests {
     #[derive(Debug)]
     struct HeadStore {
         inner: InMemory,
-        /// The GET, counted from 1 and HEADs not counted, that answers 412.
+        /// The GET, counted from 1 and HEADs not counted, that answers 412,
+        /// or 416 when `range_refused` is set.
         precondition_on: u32,
+        range_refused: bool,
         gets: AtomicU32,
         /// Answers for the HEADs, in order; the inner store answers once
         /// the script is spent.
@@ -2079,10 +2112,16 @@ mod tests {
             HeadStore {
                 inner,
                 precondition_on,
+                range_refused: false,
                 gets: AtomicU32::new(0),
                 heads: std::sync::Mutex::new(std::collections::VecDeque::new()),
                 seen: std::sync::Mutex::new(Vec::new()),
             }
+        }
+
+        fn refusing_the_range(mut self) -> HeadStore {
+            self.range_refused = true;
+            self
         }
 
         fn head_answers(self, answers: Vec<object_store::Result<ObjectMeta>>) -> HeadStore {
@@ -2149,6 +2188,13 @@ mod tests {
                 return self.inner.get_opts(location, options).await;
             }
             if self.gets.fetch_add(1, Ordering::Relaxed) + 1 == self.precondition_on {
+                if self.range_refused {
+                    return Err(object_store::Error::Generic {
+                        store: "head",
+                        source: "Server returned non-2xx status code: 416 Range Not Satisfiable: "
+                            .into(),
+                    });
+                }
                 return Err(object_store::Error::Precondition {
                     path: location.to_string(),
                     source: "overwritten".into(),
@@ -2444,29 +2490,54 @@ mod tests {
     }
 
     /// Pins that a HEAD after a 412 is classified as a read is: 404 poisons
-    /// the split as `NotFound`, and 403 fails the pipeline.
+    /// the split as `NotFound`, and 403 fails the pipeline, each reason
+    /// naming the HEAD and the byte the read stopped at.
     #[tokio::test]
     async fn a_head_after_a_412_classifies_404_and_403_as_a_read_does() {
         let (inner, entry) = thirty_bytes().await;
-        let store = Arc::new(HeadStore::new(inner.clone(), 1).head_answers(vec![Err(
+        let store = Arc::new(HeadStore::new(inner.clone(), 2).head_answers(vec![Err(
             object_store::Error::NotFound {
                 path: "k".into(),
                 source: "gone".into(),
             },
         )]));
         let msgs = fetch_from(store, entry.clone(), notified(None), None).await;
-        assert!(matches!(
-            last_failure(msgs),
-            SplitFailure::Poison(PoisonKind::NotFound, _)
-        ));
-        let store = Arc::new(HeadStore::new(inner, 1).head_answers(vec![Err(
+        let SplitFailure::Poison(PoisonKind::NotFound, reason) = last_failure(msgs) else {
+            panic!("a 404 on the HEAD must poison as not_found");
+        };
+        assert!(reason.contains("at byte 10"), "{reason}");
+        assert!(reason.contains("the HEAD after"), "{reason}");
+        let store = Arc::new(HeadStore::new(inner, 2).head_answers(vec![Err(
             object_store::Error::PermissionDenied {
                 path: "k".into(),
                 source: "denied".into(),
             },
         )]));
         let msgs = fetch_from(store, entry, notified(None), None).await;
-        assert!(matches!(last_failure(msgs), SplitFailure::Fatal(_)));
+        let SplitFailure::Fatal(e) = last_failure(msgs) else {
+            panic!("a 403 on the HEAD must be fatal");
+        };
+        assert!(e.to_string().contains("the HEAD after"), "{e}");
+    }
+
+    /// Pins that a ranged GET a notification unit's read is refused with 416,
+    /// as RustFS answers past the end of a smaller new object, HEADs the key
+    /// and reports the overwrite, without retrying the GET.
+    #[tokio::test]
+    async fn a_416_on_a_notification_read_heads_the_key_and_reports_the_overwrite() {
+        let (inner, entry) = thirty_bytes().await;
+        let store = Arc::new(
+            HeadStore::new(inner, 2)
+                .refusing_the_range()
+                .head_answers(vec![Ok(meta(Some("new"), 5))]),
+        );
+        let msgs = fetch_from(Arc::clone(&store), entry, notified(None), None).await;
+        let SplitFailure::Overwritten(overwrite) = last_failure(msgs) else {
+            panic!("a 416 on a notification read must report an overwrite");
+        };
+        assert_eq!(overwrite.size, 5);
+        assert_eq!(store.heads(), 1);
+        assert_eq!(store.seen().len(), 3, "two GETs and the HEAD, no retry");
     }
 
     /// Pins that a transient HEAD failure after a 412 is retried and counted

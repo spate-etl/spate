@@ -240,7 +240,7 @@ impl<W: ShardWriter> ShardWorker<W> {
         // other batch. Nothing here may *block* on the in-flight semaphore: an
         // `.await` in `dispatch` suspends `run` outside both `select!`s, where
         // neither the drain deadline nor finished write tasks are polled, and a
-        // sink whose writes never return then deadlocks shutdown (#83). Intake
+        // sink whose writes never return then deadlocks shutdown. Intake
         // is gated on this being empty, which bounds it to one `recv_many` pass
         // plus the drain force-seal.
         let mut waiting: VecDeque<(u64, SealedBatch, Instant)> = VecDeque::new();
@@ -714,7 +714,7 @@ impl<W: ShardWriter> ShardWorker<W> {
     /// suspend `run` outside both of its `select!`s, where neither the drain
     /// deadline nor finished write tasks are polled; with every permit held by
     /// a write that does not return, nothing would ever wake it and shutdown
-    /// would deadlock (#83). The permit wait belongs in a `select!` arm, and
+    /// would deadlock. The permit wait belongs in a `select!` arm, and
     /// the arm's guard on `waiting` reproduces the backpressure a blocking
     /// acquire would provide.
     ///

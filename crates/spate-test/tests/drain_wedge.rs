@@ -1,4 +1,4 @@
-//! Shutdown must terminate while the sink is down (#83), asserted through a
+//! Shutdown must terminate while the sink is down, asserted through a
 //! whole `PipelineRuntime` rather than at `SinkPool` level.
 //!
 //! The unit tests in `spate-core` cover `SinkPool::drain` in isolation and the
@@ -9,8 +9,8 @@
 //!
 //! The sink here is not hung but *down*: every write fails retryably and
 //! `retry.max_attempts` defaults to 0 (unbounded), so each write task retries
-//! for the length of the outage and never releases its in-flight permit. That
-//! is the routine reachability of #83, with no exotic client behavior needed.
+//! for the length of the outage and never releases its in-flight permit.
+//! This is a routine outage path to the same deadlock, without a hung client.
 
 use spate_core::config::PipelineConfig;
 use spate_core::deser::Owned;
@@ -118,7 +118,7 @@ fn shutdown_terminates_while_every_permit_is_held_by_a_failing_sink() {
     // deadline-honoring drain is never a flake and a wedge is unambiguous.
     let report = run
         .wait_exit(Duration::from_secs(30))
-        .expect("pipeline did not exit while its sink was down (#83)")
+        .expect("pipeline did not exit during shutdown while its sink was down")
         .expect("run");
     let exited_in = started.elapsed();
 

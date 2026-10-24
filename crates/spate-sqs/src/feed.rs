@@ -1289,13 +1289,12 @@ async fn renewal_task(shared: Arc<Shared>) {
 /// `Err` when the feed has stopped.
 async fn send_hand_backs(shared: &Shared) -> Result<(), ()> {
     loop {
-        let (chunk, dropped): (Vec<Settle>, bool) = {
+        let chunk: Vec<Settle> = {
             let mut st = shared.lock();
             if st.fatal.is_some() || st.abandoned {
                 return Err(());
             }
             let now = Instant::now();
-            let queued = st.hand_backs.len();
             st.hand_backs.retain(|s| now < s.deadline);
             if let Some(bound) = st.close_bound()
                 && now >= bound
@@ -1303,16 +1302,14 @@ async fn send_hand_backs(shared: &Shared) -> Result<(), ()> {
                 let n = std::mem::take(&mut st.hand_backs).len();
                 st.dropped(n);
             }
-            let dropped = st.hand_backs.len() < queued;
             let n = st.hand_backs.len().min(BATCH_ENTRIES);
             st.handing_back += n;
-            (st.hand_backs.drain(..n).collect(), dropped)
+            st.hand_backs.drain(..n).collect()
         };
         let Some(oldest) = chunk.iter().map(|s| s.deadline).min() else {
-            // A close waits on what is unsent, and dropping changed it.
-            if dropped {
-                shared.progress.notify_one();
-            }
+            // A close waits on what is unsent, which the drops above may
+            // have emptied.
+            shared.progress.notify_one();
             return Ok(());
         };
         let entries: Vec<VisibilityEntry> = chunk

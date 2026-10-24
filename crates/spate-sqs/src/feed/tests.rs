@@ -2359,8 +2359,11 @@ async fn a_close_that_drops_a_delete_settles_err() {
     feed.acknowledge(d.receipt).unwrap();
     let mut closed = feed.close(Duration::from_secs(10)).unwrap();
     settle_tasks().await;
-    let e = closed.try_outcome().unwrap().unwrap_err();
-    assert!(e.to_string().contains(" 1 "), "{e}");
+    let e = closed.try_outcome().unwrap().unwrap_err().reason;
+    assert!(
+        e.starts_with("the close gave up 1 of its deletes, fails and hand-backs unapplied"),
+        "{e}"
+    );
 }
 
 /// Pins that `close` sends the fails still queued, bounded by the close.
@@ -2427,10 +2430,9 @@ async fn a_close_reaching_its_bound_with_entries_unsent_settles_err() {
     assert!(closed.try_outcome().is_none(), "settled before the bound");
     // tokio rounds a timer up to the next millisecond.
     step(Duration::from_millis(200)).await;
-    let e = closed.try_outcome().unwrap().unwrap_err();
+    let e = closed.try_outcome().unwrap().unwrap_err().reason;
     assert!(
-        e.to_string()
-            .contains("1 deletes, fails or hand-backs unsent"),
+        e.starts_with("the close reached its bound with 1 deletes, fails or hand-backs unsent;"),
         "{e}"
     );
 }

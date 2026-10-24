@@ -82,7 +82,7 @@ for the parsing caveats.
 |---|---|---|---|
 | `interval` | duration | `5s` | How often committable watermarks are flushed to the source, and the cadence at which partial chunk buffers are sealed (while the pipeline is unblocked, a below-target chunk is sealed within ~one interval). Not a durability boundary (the sink write is); shorter intervals narrow the post-crash replay window and tighten worst-case commit lag. Must be ≥ `100ms`. |
 | `max_pending_batches` | integer | `1024` | Hard ceiling on unacknowledged batches per partition: at the limit, the partition's lanes are skipped at the poll boundary until acknowledgments retire batches ([Backpressure](../02-concepts/03-backpressure.mdx#the-checkpoint-ceiling)). Must be ≥ 1. |
-| `drain_timeout` | duration | `25s` | Shutdown/rebalance drain budget for in-flight sink batches. Keep comfortably below `terminationGracePeriodSeconds` ([Docker](../05-deployment/docker.mdx)). Must be `> 0`. |
+| `drain_timeout` | duration | `25s` | Shutdown/rebalance drain budget for in-flight sink batches. Keep comfortably below `terminationGracePeriodSeconds` ([Docker](../05-deployment/docker.mdx)). Must be `> 0`, and more than `5s` with a feed that hands back ([Graceful shutdown](../03-guides/graceful-shutdown.mdx#the-drain-choreography)). |
 | `stalled_fail_after` | duration | `120s` | A partition watermark stalled behind a *failed* batch this long fails the pipeline, so a permanent sink failure becomes restart-and-replay instead of consuming while committing nothing. Must be `> 0`. |
 
 ## `backpressure:`

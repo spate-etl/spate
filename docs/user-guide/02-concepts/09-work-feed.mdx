@@ -53,6 +53,11 @@ receipt, and a source keys the units it holds by receipt:
 - **A duplicate is read again in full.** A second delivery of a unit the
   source already holds is read again from its start, beside the first. No
   feed deduplicates by unit id.
+- **A unit a stopping worker hands back is delivered again.** On a graceful
+  stop, a source on a feed that hands back returns each unit it has not read
+  to its end, and another reader takes it at once and reads it from its
+  start. A handed-back unit is not a failure
+  ([Graceful shutdown](../03-guides/graceful-shutdown.mdx#the-drain-choreography)).
 
 A call with a receipt the feed no longer honors, because the unit was
 delivered again or already settled, answers `Gone`. The source lets go of that

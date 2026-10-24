@@ -294,6 +294,15 @@ Your source follows these rules:
   the run on `Stalled` or `Failed`, and on a marker read that cannot succeed.
   A feed whose `read_depth` returns `None` cannot end a bounded job, so refuse
   it in `open`.
+- **On a feed that hands back, read on what you hold when the stop begins.**
+  When `SourceCtx::stop` is set and `Feed::hands_back` answers `true`, call
+  `stop_receiving` once, receive nothing more, and keep reading and renewing
+  the units you hold. Answer `reading_on_stop` with whether any held unit is
+  not yet read to its end. The runtime calls `stop_reading` once, at the first
+  `false` or at the stop reserve (`STOP_RESERVE`, 5s before the drain
+  deadline): `hand_back` every unit you have not read to its end there, and let
+  go of it. A unit read to its end stays held and is acknowledged by the final
+  commit. A failed run calls `stop_reading` at once, with no reading.
 
 The scripted feed in `spate-test` lets a test play the feed's side. This
 reader, from [`spate-test/tests/feed.rs`](repo:crates/spate-test/tests/feed.rs),
@@ -305,9 +314,11 @@ renewal answers `Gone`:
 
 `FeedScript` also scripts a duplicate delivery (`deliver` with an id already
 delivered), a dead letter, a publish that is refused or held until the test
-confirms it, and the answers to depth reads (`answer_depth`). It records every
-acknowledgment, failure, renewal, depth read and `Gone` answer for the test to
-assert on.
+confirms it, and the answers to depth reads (`answer_depth`). With
+`hand_back_on_stop` it answers `hands_back` with `true`. It records every
+acknowledgment, failure, renewal, depth read, `Gone` answer, `stop_receiving`
+call (`stopped_receiving`), hand-back (`handed_back`) and close bound
+(`closes`) for the test to assert on.
 
 To implement a feed backend, keep every method free of waits:
 
@@ -329,6 +340,14 @@ To implement a feed backend, keep every method free of waits:
   are estimates, and count in `unsent` the acknowledgments and failures you
   have accepted and not yet applied. The default returns `None`, and such a
   feed serves continuous jobs only.
+- Answer `hands_back` with `true` if a stopping reader can return a unit for
+  another reader to take at once. Then `stop_receiving` stops your receive
+  task, `hand_back` returns one held unit without counting it as a failure,
+  and `close` sends what you still have queued and gives up what you hold,
+  within the bound it is given, settling the `Confirmation` it returns when
+  done. The runtime calls `close` once, after the final commit. Startup
+  refuses a `checkpoint.drain_timeout` no longer than `STOP_RESERVE` for such
+  a feed. The defaults answer `false` and do nothing.
 
 A backend also answers to its name in the `feed:` section:
 

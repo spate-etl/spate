@@ -1,14 +1,15 @@
 //! Process assembly: threads, runtimes, observability, and the run loop.
 
-use super::controller::{ControllerContext, ControllerSignal, run_controller};
+use super::controller::{CLOSE_SHARE, ControllerContext, ControllerSignal, run_controller};
 use super::driver::{DriverContext, DriverExit, DriverParams, run_driver};
 use super::{DriverEvent, ExitReport, ExitState, FatalErrorReport, SinkRuntime, ThreadControl};
 use crate::admin::{AdminServer, HealthState, HealthThresholds};
 use crate::backpressure::{BackpressureParams, InflightBudget, WatermarkController};
 use crate::checkpoint::Checkpointer;
+use crate::clock::{Clock, SystemClock};
 use crate::config::{MetricsExporter, PinningMode, PipelineConfig};
 use crate::feed::memory::MemoryFeed;
-use crate::feed::{Feed, FeedOrigin};
+use crate::feed::{Feed, FeedOrigin, STOP_RESERVE};
 use crate::metrics::{
     self, BackpressureMetrics, CheckpointMetrics, ComponentLabels, E2eBasis, Exporter,
     InflightBudgetMetrics, IoBusySampler, IoRuntimeMetrics, Meter, MetricRole, MetricsHandle,
@@ -106,7 +107,11 @@ pub struct PipelineRuntime<S: Source> {
     chains: Box<dyn FnMut(usize) -> Box<dyn RunnableChain> + Send>,
     sink: SinkRuntime,
     budget: Arc<InflightBudget>,
+    // Set by a stop request; the controller reads on to the reserve.
+    stop: Arc<AtomicBool>,
+    // Set when the drain begins; the drivers read it.
     shutdown: Arc<AtomicBool>,
+    stop_clock: Arc<dyn Clock + Send + Sync>,
     options: RuntimeOptions,
     io: Option<tokio::runtime::Runtime>,
     feed: Option<Arc<dyn Feed>>,
@@ -139,7 +144,9 @@ impl<S: Source + 'static> PipelineRuntime<S> {
             chains: Box::new(chains),
             sink,
             budget,
+            stop: Arc::new(AtomicBool::new(false)),
             shutdown: Arc::new(AtomicBool::new(false)),
+            stop_clock: Arc::new(SystemClock),
             options: RuntimeOptions::default(),
             io: None,
             feed: None,
@@ -198,7 +205,17 @@ impl<S: Source + 'static> PipelineRuntime<S> {
     /// A handle that triggers a graceful drain.
     #[must_use]
     pub fn shutdown_handle(&self) -> ShutdownHandle {
-        ShutdownHandle(Arc::clone(&self.shutdown))
+        ShutdownHandle(Arc::clone(&self.stop))
+    }
+
+    /// Read a graceful stop's reserve and deadlines on `clock`, so a test
+    /// moves them by hand.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_stop_clock(mut self, clock: Arc<dyn Clock + Send + Sync>) -> Self {
+        self.stop_clock = clock;
+        self
     }
 
     /// Effective pipeline thread count: the config override, else
@@ -257,6 +274,7 @@ impl<S: Source + 'static> PipelineRuntime<S> {
                 .configure_coordination(section)
                 .map_err(|e| StartError::Config(e.to_string()))?;
         }
+        let mut kept_feed = None;
         match (&self.config.feed, self.feed.take()) {
             (Some(section), given) => {
                 let (feed, origin) = match given {
@@ -274,6 +292,15 @@ impl<S: Source + 'static> PipelineRuntime<S> {
                         )));
                     }
                 };
+                let drain_timeout = self.config.checkpoint.drain_timeout;
+                if feed.hands_back() && drain_timeout <= STOP_RESERVE {
+                    return Err(StartError::Config(format!(
+                        "checkpoint.drain_timeout must be more than {STOP_RESERVE:?}, the stop \
+                         reserve of the `{}` feed; found {drain_timeout:?}",
+                        feed.backend()
+                    )));
+                }
+                kept_feed = Some(Arc::clone(&feed));
                 self.source
                     .configure_feed(section, feed, origin)
                     .map_err(|e| StartError::Config(e.to_string()))?;
@@ -363,11 +390,11 @@ impl<S: Source + 'static> PipelineRuntime<S> {
         // the already-running drivers instead of leaking them.
 
         if self.options.handle_signals {
-            let shutdown = Arc::clone(&self.shutdown);
+            let stop = Arc::clone(&self.stop);
             io.spawn(async move {
                 wait_for_signal().await;
                 tracing::info!("shutdown signal received; draining");
-                shutdown.store(true, Ordering::Relaxed);
+                stop.store(true, Ordering::Relaxed);
             });
         }
 
@@ -558,7 +585,14 @@ impl<S: Source + 'static> PipelineRuntime<S> {
             events_rx,
             to_main: to_main_tx,
             sink_drained_rx,
+            stop: Arc::clone(&self.stop),
             shutdown: Arc::clone(&self.shutdown),
+            stop_clock: Arc::clone(&self.stop_clock),
+            close_share: if kept_feed.as_ref().is_some_and(|f| f.hands_back()) {
+                CLOSE_SHARE
+            } else {
+                Duration::ZERO
+            },
             health: Arc::clone(&health),
             commit_interval: self.config.checkpoint.interval,
             drain_timeout: self.config.checkpoint.drain_timeout,
@@ -607,7 +641,7 @@ impl<S: Source + 'static> PipelineRuntime<S> {
             metrics::io_busy_reading(&io_runtime_metrics).0,
         );
 
-        let (mut state, final_watermarks) = loop {
+        let (mut state, final_watermarks, close_by) = loop {
             let (busy, workers) = metrics::io_busy_reading(&io_runtime_metrics);
             sample_io_busy(
                 &mut io_busy,
@@ -628,13 +662,13 @@ impl<S: Source + 'static> PipelineRuntime<S> {
                         }
                     }
                     if let Some(drain) = drain_fn.take() {
-                        let budget = sink_deadline.saturating_duration_since(Instant::now());
+                        let budget = sink_deadline.saturating_duration_since(self.stop_clock.now());
                         sink_drain = Some(io.block_on(drain(budget)));
                     }
                     let _ = sink_drained_tx.send(());
                 }
                 Ok(ControllerSignal::Finished(report)) => {
-                    break (report.state, report.final_watermarks);
+                    break (report.state, report.final_watermarks, Some(report.close_by));
                 }
                 Err(crossbeam_channel::RecvTimeoutError::Timeout)
                     if !controller_handle.is_finished() =>
@@ -663,6 +697,7 @@ impl<S: Source + 'static> PipelineRuntime<S> {
                             reason: "controller thread panicked".into(),
                         }),
                         Vec::new(),
+                        None,
                     );
                 }
             }
@@ -678,6 +713,16 @@ impl<S: Source + 'static> PipelineRuntime<S> {
             state = ExitState::Failed(report);
         }
 
+        // After the final commit, and before the source drops: the source's
+        // drop releases its handle, and this one keeps the feed alive for its
+        // close.
+        if let (Some(feed), Some(close_by)) = (&kept_feed, close_by) {
+            close_feed(
+                &io,
+                feed.as_ref(),
+                close_by.saturating_duration_since(self.stop_clock.now()),
+            );
+        }
         if let Some(tx) = &admin_stop_tx {
             let _ = tx.send(true);
         }
@@ -736,6 +781,29 @@ pub(super) fn sample_io_busy(
             "the I/O runtime's workers have been saturated for five minutes; if the \
              sink queues are filling, raise `pipeline.io_threads`"
         );
+    }
+}
+
+/// Close `feed` and wait for it at most `within`. A close that fails or does
+/// not settle in time leaves the units the feed held to its redelivery.
+fn close_feed(io: &tokio::runtime::Runtime, feed: &dyn Feed, within: Duration) {
+    let Some(confirmation) = feed.close(within) else {
+        return;
+    };
+    // The timer is built inside `block_on`, where the runtime's reactor is.
+    match io.block_on(async { tokio::time::timeout(within, confirmation).await }) {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::warn!(
+            feed = feed.backend(),
+            error = %e,
+            "the feed did not close cleanly; the units it still held return through redelivery"
+        ),
+        Err(_) => tracing::warn!(
+            feed = feed.backend(),
+            ?within,
+            "the feed did not close before the drain deadline; the units it still held return \
+             through redelivery"
+        ),
     }
 }
 

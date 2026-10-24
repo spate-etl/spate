@@ -170,3 +170,31 @@ fn a_published_unit_redelivered_twice_counts_three() {
     script.redeliver(second);
     assert_eq!(feed.receive(8).unwrap()[0].deliveries, 3);
 }
+
+/// Pins the scripted feed's stop calls: it hands back only once told to,
+/// records each stop call in order, and lets go of a handed-back delivery.
+#[test]
+fn a_scripted_feed_records_hand_backs_and_closes() {
+    let (feed, script) = scripted_feed();
+    let feed: Arc<dyn Feed> = Arc::new(feed);
+    assert!(!feed.hands_back());
+    script.hand_back_on_stop();
+    assert!(feed.hands_back());
+
+    let first = script.deliver(Unit::new("a", b"a".to_vec()));
+    let second = script.deliver(Unit::new("b", b"b".to_vec()));
+    let kept = script.deliver(Unit::new("c", b"c".to_vec()));
+    assert_eq!(feed.receive(8).unwrap().len(), 3);
+    feed.stop_receiving();
+    feed.hand_back(first).unwrap();
+    feed.hand_back(second).unwrap();
+    assert_eq!(feed.hand_back(first).unwrap_err().kind, FeedErrorKind::Gone);
+    let mut closed = feed.close(Duration::from_secs(2)).expect("the feed closes");
+    assert!(matches!(closed.try_outcome(), Some(Ok(()))));
+
+    assert_eq!(script.stopped_receiving(), 1);
+    assert_eq!(script.handed_back(), vec![first, second]);
+    assert_eq!(script.held(), vec![kept]);
+    assert_eq!(script.closes(), vec![Duration::from_secs(2)]);
+    assert_eq!(script.gone(), vec![first]);
+}

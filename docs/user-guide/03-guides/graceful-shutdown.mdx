@@ -14,6 +14,21 @@ during the drain means for your data, see
 
 ## The drain choreography
 
+A source that reads its work units from a feed that hands back first reads on
+what it holds. It receives no more units, and keeps reading and renewing the
+units it holds until each is read to its end or until 5s before the drain
+deadline. It then hands back every unit it has not read to its end, so another
+instance can take that unit at once instead of waiting out the feed's
+redelivery delay. The deadline counts from the stop, so this reading spends
+from the same `checkpoint.drain_timeout`. Any other source starts the drain at
+once.
+
+:::note Connector specifics
+How each feed hands units back and closes:
+[SQS](../04-connectors/feeds/sqs/README.mdx#stop) ·
+[Kafka](../04-connectors/feeds/kafka/README.mdx#stop).
+:::
+
 Shutdown deliberately reuses the same drain path as a full partition
 revocation, one choreography tested constantly by every rebalance:
 
@@ -34,6 +49,8 @@ revocation, one choreography tested constantly by every rebalance:
    in-flight writes. At the deadline a worker aborts whatever is still
    writing and abandons it (see below); a worker that somehow fails to do
    that is force-aborted a second later, so this step always terminates.
+   With a feed that hands back, this step ends one second before the
+   deadline, which leaves that second for the feed's close in step 4.
 4. **Offsets commit.** The controller drains the checkpointer and runs a
    final synchronous commit + `flush_commits`, committing only watermarks
    that cover durably written data, per the at-least-once invariant. A
@@ -42,7 +59,11 @@ revocation, one choreography tested constantly by every rebalance:
    [S3 source](../04-connectors/sources/s3/README.mdx) does, runs this commit
    under one budget, `coordination.op_timeout`, for all its splits together.
    Splits it does not reach before the budget ends keep their last committed
-   position, and the next owner may replay records from it.
+   position, and the next owner may replay records from it. The runtime then
+   closes the pipeline's feed: the feed sends the acknowledgments it still
+   has queued and gives up the units it holds, within what is left of the
+   deadline. A unit it cannot give up in time comes back after the feed's
+   redelivery delay.
 5. **The source closes.** A coordinated source departs its job: it hands
    back its splits, its leadership and its membership, so peers take over
    without waiting out a lease. The departure is bounded by
@@ -64,7 +85,9 @@ Keep `drain_timeout` comfortably **below**
 `terminationGracePeriodSeconds`. Steps 1 to 3 run inside the budget; the
 gap has to absorb what follows it: the pool's one-second backstop, the
 final commit (step 4), the source closing (step 5) and process teardown.
-The defaults (25s vs 30s) encode this; if you raise one, raise the other. A
+The defaults (25s vs 30s) encode this; if you raise one, raise the other.
+With a feed that hands back, the stop's reading and the feed's close also run
+inside the budget, and startup refuses a `drain_timeout` of 5s or less. A
 coordinated source that forwards `Source::commit_final` can take up to
 `coordination.op_timeout` (10s by default) for the final commit against a
 slow store, and up to `op_timeout` again to close. Where a slow store at
@@ -96,7 +119,9 @@ A SIGKILL mid-drain is still safe for data (nothing uncommitted is lost;
 it replays), but it forfeits the clean commit, so the restart replays more
 than it needed to. A SIGKILL while the source closes costs what a crash costs
 for whatever it had not handed back: those leases expire, and each takeover of
-one of those splits consumes a delivery attempt.
+one of those splits consumes a delivery attempt. In the same way, a SIGKILL
+before a feed's hand-back leaves each unit the instance held to come back
+after the feed's redelivery delay.
 
 ## Exit codes via `ExitReport`
 

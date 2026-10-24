@@ -92,7 +92,8 @@ livenessProbe:  { httpGet: { path: /healthz, port: 9090 }, periodSeconds: 10 }
 On SIGTERM the pipeline runs the same drain choreography as a consumer
 rebalance: stop the lanes, flush the operator chains, give in-flight sink
 batches `checkpoint.drain_timeout` (default **25s**) to complete, commit
-offsets synchronously, close the source, exit. The details live in
+offsets synchronously, close the source, exit. A source on a feed that hands
+back first reads on the units it holds, inside the same budget. The details live in
 [Graceful shutdown](../03-guides/graceful-shutdown.mdx).
 
 :::warning

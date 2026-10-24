@@ -221,6 +221,8 @@ pub struct SourceCtx {
     pub per_partition_detail: bool,
     /// The run's stop. A coordinated source passes it to
     /// [`CoordinationDriver::set_stop`](crate::coordination::driver::CoordinationDriver::set_stop).
+    /// A feed-reading source reads it to stop receiving and to answer
+    /// [`Source::reading_on_stop`].
     pub stop: StopSignal,
 }
 
@@ -398,6 +400,28 @@ pub trait Source: Send {
     /// Resume fetching for `lanes`.
     fn resume(&mut self, lanes: &[LaneId]) -> Result<(), SourceError> {
         let _ = lanes;
+        Ok(())
+    }
+
+    /// Whether the source is still reading units it holds after a graceful
+    /// stop began. The controller asks on each pass between the stop and the
+    /// drain, and begins the drain on the first `false` or at
+    /// [`STOP_RESERVE`](crate::feed::STOP_RESERVE) before the deadline. Never
+    /// waits. The default returns `false`, so the drain begins at once.
+    fn reading_on_stop(&mut self) -> bool {
+        false
+    }
+
+    /// End the stop's reading: hand back every unit not read to its end.
+    /// Called once, after the last [`reading_on_stop`](Self::reading_on_stop)
+    /// on a graceful stop, or at once when the run fails, and before the
+    /// pipeline threads drain. Never waits. The default does nothing.
+    ///
+    /// # Errors
+    ///
+    /// The runtime logs an error and goes on with the drain; units it did not
+    /// hand back return through redelivery.
+    fn stop_reading(&mut self) -> Result<(), SourceError> {
         Ok(())
     }
 }

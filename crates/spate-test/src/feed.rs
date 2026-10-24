@@ -4,8 +4,8 @@
 //! handle. The test scripts deliveries, redeliveries, duplicates,
 //! dead-lettering, publish outcomes and depth reads, the source under test
 //! reads through the trait, and the script observes every acknowledgement,
-//! failure, renewal, publish and depth read. There is no queue and no clock,
-//! and behavior is deterministic.
+//! failure, renewal, publish, depth read and stop call. There is no queue and
+//! no clock, and behavior is deterministic.
 
 use spate_core::feed::{
     Confirmation, Confirmer, Delivery, Depth, DepthOf, DepthReading, Feed, FeedError,
@@ -13,6 +13,7 @@ use spate_core::feed::{
 };
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
 
 #[derive(Default)]
 struct State {
@@ -43,6 +44,11 @@ struct State {
     dead_letter_depths: VecDeque<Result<Depth, FeedError>>,
     feed_depth_reads: usize,
     dead_letter_depth_reads: usize,
+    /// The answer to `hands_back`.
+    hands_back: bool,
+    stopped_receiving: usize,
+    handed_back: Vec<Receipt>,
+    closes: Vec<Duration>,
     waker: Option<FeedWaker>,
 }
 
@@ -289,6 +295,60 @@ impl FeedScript {
         state.wake();
     }
 
+    /// Make the feed answer [`hands_back`](Feed::hands_back) with `true`, as a
+    /// backend does whose stopping reader reads to the stop reserve and hands
+    /// back the rest. A scripted feed answers `false` until this is called.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use spate_core::feed::{Feed, Unit};
+    /// use std::time::Duration;
+    ///
+    /// let (feed, script) = spate_test::scripted_feed();
+    /// assert!(!feed.hands_back());
+    /// script.hand_back_on_stop();
+    /// assert!(feed.hands_back());
+    ///
+    /// let receipt = script.deliver(Unit::new("day-1", b"2026-10-01".to_vec()));
+    /// feed.receive(8).unwrap();
+    /// feed.stop_receiving();
+    /// feed.hand_back(receipt).unwrap();
+    /// feed.close(Duration::from_secs(1));
+    /// assert_eq!(script.stopped_receiving(), 1);
+    /// assert_eq!(script.handed_back(), vec![receipt]);
+    /// assert!(script.held().is_empty());
+    /// assert_eq!(script.closes(), vec![Duration::from_secs(1)]);
+    /// ```
+    pub fn hand_back_on_stop(&self) {
+        let mut state = self.lock();
+        state.hands_back = true;
+        state.wake();
+    }
+
+    /// How many times the feed was told to [`stop_receiving`](Feed::stop_receiving).
+    /// The feed keeps answering `receive` after it, so a test sees whether
+    /// the reader stopped asking.
+    #[must_use]
+    pub fn stopped_receiving(&self) -> usize {
+        self.lock().stopped_receiving
+    }
+
+    /// Every receipt handed back, in order. A handed-back delivery is no
+    /// longer held.
+    #[must_use]
+    pub fn handed_back(&self) -> Vec<Receipt> {
+        self.lock().handed_back.clone()
+    }
+
+    /// The bound of every [`close`](Feed::close), in order. A close settles
+    /// at once and lets go of nothing, so [`held`](Self::held) still shows
+    /// what the reader held.
+    #[must_use]
+    pub fn closes(&self) -> Vec<Duration> {
+        self.lock().closes.clone()
+    }
+
     /// How many depth reads of `of` the feed has answered.
     #[must_use]
     pub fn depth_reads(&self, of: DepthOf) -> usize {
@@ -453,6 +513,29 @@ impl Feed for ScriptedFeed {
         let (reporter, reading) = depth_reading();
         reporter.report(answer);
         Some(reading)
+    }
+
+    fn hands_back(&self) -> bool {
+        self.lock().hands_back
+    }
+
+    fn stop_receiving(&self) {
+        self.lock().stopped_receiving += 1;
+    }
+
+    fn hand_back(&self, receipt: Receipt) -> Result<(), FeedError> {
+        self.lock().on_held(receipt, |state| {
+            state.held.remove(&receipt);
+            state.handed_back.push(receipt);
+            Ok(())
+        })
+    }
+
+    fn close(&self, within: Duration) -> Option<Confirmation> {
+        self.lock().closes.push(within);
+        let (confirmer, confirmation) = confirmation();
+        confirmer.confirm();
+        Some(confirmation)
     }
 }
 

@@ -108,7 +108,9 @@ sink batches under `checkpoint.drain_timeout`, then commit synchronously.
 Triggered identically by SIGTERM (all lanes) and by a rebalance revocation
 (the revoked lanes), via a `DrainBarrier` the owning pipeline threads
 arrive at. Batches still unwritten at the deadline are abandoned loudly and
-replay after restart.
+replay after restart. On SIGTERM, a source on a feed that
+[hands back](#hand-back) first reads on what it holds, inside the same
+deadline.
 
 ### Epoch
 
@@ -134,8 +136,9 @@ every record in it. When the unit's input was replaced while it was read, the
 source may acknowledge it once the feed holds a unit naming the input's
 current state and the sink has acknowledged every record read from it; past
 the source's re-enqueue cap it acknowledges the unit without one and counts
-it. The in-process feed (`MemoryFeed`) serves one instance and
-keeps nothing across a restart.
+it. On a graceful stop, a feed that [hands back](#hand-back) takes the units a
+source has not read to its end. The in-process feed (`MemoryFeed`) serves one
+instance and keeps nothing across a restart.
 
 ### Fencing token
 
@@ -154,6 +157,15 @@ once per chunk, on the pipeline thread that sealed it. Each output decodes on
 its own, and outputs concatenated in seal order form a legal body. The
 [budget](#budget--in-flight-bytes) and `max_bytes` count the bytes before the
 codec.
+
+### Hand back
+
+What a stopping source does with a [work unit](#work-unit) it has not read to
+its end: it returns the unit to its [feed](#feed) unread, so another instance
+can take it at once. A handed-back unit is not a failure and does not move
+toward the dead-letter destination. A source reads the units it holds until
+5s before the [drain](#drain) deadline, the stop reserve, then hands back the
+rest. A feed that hands back is one whose `Feed::hands_back` answers `true`.
 
 ### Job location
 

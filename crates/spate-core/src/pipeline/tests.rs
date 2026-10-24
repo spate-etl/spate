@@ -19,10 +19,16 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 fn test_sink() -> (SinkRuntime, Arc<AtomicBool>) {
+    test_sink_recording(Arc::default())
+}
+
+/// [`test_sink`], recording the budget each drain is given into `budgets`.
+fn test_sink_recording(budgets: Arc<Mutex<Vec<Duration>>>) -> (SinkRuntime, Arc<AtomicBool>) {
     let (queues, receivers) = shard_queues(1, 8);
     let drained = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&drained);
-    let drain: super::SinkDrainFn = Box::new(move |_budget| {
+    let drain: super::SinkDrainFn = Box::new(move |budget| {
+        budgets.lock().unwrap().push(budget);
         Box::pin(async move {
             let _receivers = receivers;
             flag.store(true, Ordering::Relaxed);
@@ -52,6 +58,10 @@ struct Harness {
     /// sink worker.
     sink_failures: SinkFailures,
     shutdown: super::runtime::ShutdownHandle,
+    /// Every WARN `run` logged on its own thread.
+    warnings: Warnings,
+    /// The budget each sink drain was given.
+    sink_budgets: Arc<Mutex<Vec<Duration>>>,
     join: std::thread::JoinHandle<Result<ExitReport, super::runtime::StartError>>,
 }
 
@@ -84,9 +94,29 @@ fn start_with(
     customize: impl FnOnce(PipelineRuntime<FakeSource>) -> PipelineRuntime<FakeSource>,
     mode_factory: impl Fn(Arc<ChainShared>, Arc<Mutex<SourceLog>>) -> FakeChain + Send + 'static,
 ) -> Harness {
+    start_prepared(
+        config,
+        options,
+        |_| {},
+        |runtime, _| customize(runtime),
+        mode_factory,
+    )
+}
+
+/// [`start_with`], with `prepare` run on the source's log before `run`
+/// starts, for settings `run` reads at startup.
+fn start_prepared(
+    config: PipelineConfig,
+    options: RuntimeOptions,
+    prepare: impl FnOnce(&mut SourceLog),
+    customize: impl FnOnce(PipelineRuntime<FakeSource>, &SharedLog) -> PipelineRuntime<FakeSource>,
+    mode_factory: impl Fn(Arc<ChainShared>, Arc<Mutex<SourceLog>>) -> FakeChain + Send + 'static,
+) -> Harness {
     let (source, shared, script) = FakeSource::new();
+    prepare(&mut shared.lock().unwrap());
     let chain_shared = Arc::new(ChainShared::default());
-    let (sink, drained) = test_sink();
+    let sink_budgets = Arc::new(Mutex::new(Vec::new()));
+    let (sink, drained) = test_sink_recording(Arc::clone(&sink_budgets));
     let sink_failures = sink.failures.clone();
     let budget = Arc::new(crate::backpressure::InflightBudget::new());
     let budget_for_test = Arc::clone(&budget);
@@ -102,9 +132,16 @@ fn start_with(
         budget,
     )
     .with_options(options);
-    let runtime = customize(runtime);
+    let runtime = customize(runtime, &shared);
     let shutdown = runtime.shutdown_handle();
-    let join = std::thread::spawn(move || runtime.run());
+    let warnings = Warnings::default();
+    let layer = warnings.clone();
+    std::sync::LazyLock::force(&BYSTANDER);
+    let join = std::thread::spawn(move || {
+        use tracing_subscriber::layer::SubscriberExt;
+        let subscriber = tracing_subscriber::registry().with(layer);
+        tracing::subscriber::with_default(subscriber, || runtime.run())
+    });
     Harness {
         budget: budget_for_test,
         shared,
@@ -113,6 +150,8 @@ fn start_with(
         drained,
         sink_failures,
         shutdown,
+        warnings,
+        sink_budgets,
         join,
     }
 }
@@ -2331,4 +2370,365 @@ fn an_unset_thread_count_starts_the_derived_number_of_drivers() {
             "{cores} cores, io_threads: {io_threads}"
         );
     }
+}
+
+// ------------------------------------------------------ graceful stop --
+
+/// A config whose stop has `drain_timeout` to run in.
+fn stop_config(drain_timeout: Duration) -> PipelineConfig {
+    let mut cfg = test_config(1);
+    cfg.checkpoint.drain_timeout = drain_timeout;
+    cfg
+}
+
+/// Start a run whose source answers `reading_on_stop` with `read_on_stop`
+/// and logs its lanes' drops, on the stop clock `clock`.
+fn start_stopping(
+    cfg: PipelineConfig,
+    read_on_stop: bool,
+    clock: &Arc<crate::clock::TestClock>,
+    feed: impl FnOnce(&SharedLog) -> Option<Arc<dyn crate::feed::Feed>>,
+    mode_factory: impl Fn(Arc<ChainShared>, Arc<Mutex<SourceLog>>) -> FakeChain + Send + 'static,
+) -> Harness {
+    let clock = Arc::clone(clock);
+    start_prepared(
+        cfg,
+        test_options(),
+        |log| {
+            log.read_on_stop = read_on_stop;
+            log.log_lane_drops = true;
+            log.accept_feed = true;
+        },
+        move |runtime, log| {
+            let runtime = runtime.with_stop_clock(clock);
+            match feed(log) {
+                Some(feed) => runtime.with_feed(feed),
+                None => runtime,
+            }
+        },
+        mode_factory,
+    )
+}
+
+fn joined(h: &Harness) {
+    wait_for("run() to return", Duration::from_secs(10), || {
+        h.join.is_finished()
+    });
+}
+
+/// Pins that startup refuses a drain timeout no longer than the stop reserve
+/// for a feed that hands back, under any backend key, before the source
+/// opens, and accepts it for one that does not.
+#[test]
+fn a_feed_refuses_a_drain_timeout_within_the_read_reserve() {
+    for backend in ["sqs", "kafka"] {
+        let mut cfg = stop_config(crate::feed::STOP_RESERVE);
+        cfg.feed = feed_section(&format!("{backend}: {{}}"));
+        let h = start_with(
+            cfg,
+            test_options(),
+            |runtime| runtime.with_feed(Arc::new(HandingBack::new(backend))),
+            ok_chain,
+        );
+        let err = config_error_before_open(h);
+        assert!(
+            err.contains("checkpoint.drain_timeout")
+                && err.contains("5s")
+                && err.contains(&format!("`{backend}`")),
+            "{err}"
+        );
+    }
+
+    let clock = crate::clock::TestClock::frozen();
+    let completes = |cfg: PipelineConfig, feed: Option<Arc<dyn crate::feed::Feed>>| {
+        let h = start_stopping(cfg, false, &clock, |_| feed, ok_chain);
+        h.script.lock().unwrap().push_back(Script::Drained);
+        joined(&h);
+        let report = h.join.join().unwrap().expect("the run starts");
+        assert_eq!(report.state, ExitState::Completed);
+    };
+    let mut cfg = stop_config(crate::feed::STOP_RESERVE + Duration::from_millis(1));
+    cfg.feed = feed_section("sqs: {}");
+    completes(cfg, Some(Arc::new(HandingBack::new("sqs"))));
+    for drain_timeout in [crate::feed::STOP_RESERVE, Duration::from_secs(3)] {
+        let mut cfg = stop_config(drain_timeout);
+        cfg.feed = feed_section("memory: {}");
+        completes(cfg, None);
+    }
+    let mut cfg = stop_config(crate::feed::STOP_RESERVE);
+    cfg.feed = feed_section("memory: {}");
+    completes(cfg, Some(Arc::new(crate::feed::memory::MemoryFeed::new())));
+}
+
+/// Pins that a stop reads on while the source answers `reading_on_stop`
+/// until the reserve before the deadline, in the draining state, and calls
+/// `stop_reading` at the reserve, before the drivers drop their lanes.
+#[test]
+fn a_stop_reads_on_until_the_reserve_then_hands_back() {
+    let drain_timeout = Duration::from_secs(600);
+    let mut cfg = stop_config(drain_timeout);
+    cfg.metrics.exporter = crate::config::MetricsExporter::Prometheus;
+    let pipeline_name = cfg.pipeline.name.clone();
+    let handle = install_prometheus(&cfg);
+    let clock = crate::clock::TestClock::frozen();
+    let h = start_stopping(cfg, true, &clock, |_| None, ok_chain);
+    assign_one_lane(&h, std::slice::from_ref(&(0..10)));
+    wait_for("payloads consumed", Duration::from_secs(5), || {
+        h.chain.consumed.load(Ordering::Relaxed) == 10
+    });
+
+    h.shutdown.trigger();
+    wait_for("the read phase", Duration::from_secs(5), || {
+        h.shared.lock().unwrap().reading_on_stop_calls > 0
+    });
+    clock.advance(drain_timeout - crate::feed::STOP_RESERVE - Duration::from_millis(1));
+    let asked = h.shared.lock().unwrap().reading_on_stop_calls;
+    wait_for("three more passes", Duration::from_secs(5), || {
+        h.shared.lock().unwrap().reading_on_stop_calls >= asked + 3
+    });
+    assert_eq!(h.shared.lock().unwrap().stop_reading_calls, 0);
+    let draining = format!(r#"spate_pipeline_state{{pipeline="{pipeline_name}","#);
+    let rendered = handle.render();
+    assert!(
+        rendered.lines().any(|l| l.starts_with(&draining)
+            && l.contains(r#"state="draining""#)
+            && l.ends_with(" 1")),
+        "{rendered}"
+    );
+
+    clock.advance(Duration::from_millis(1));
+    joined(&h);
+    let report = h.join.join().unwrap().unwrap();
+    assert_eq!(report.state, ExitState::Completed);
+    let log = h.shared.lock().unwrap();
+    assert_eq!(log.stop_reading_calls, 1);
+    let at = |entry: &str| log.log.iter().position(|e| e == entry);
+    assert!(
+        at("stop_reading") < at("lane-dropped") && at("lane-dropped").is_some(),
+        "{:?}",
+        log.log
+    );
+    // With no feed that hands back, the sink drains to the deadline itself.
+    assert_eq!(
+        *h.sink_budgets.lock().unwrap(),
+        vec![crate::feed::STOP_RESERVE]
+    );
+}
+
+/// Pins that a source with nothing left to read ends the read phase on the
+/// first pass, so the stop drains without waiting for the reserve.
+#[test]
+fn a_stop_with_nothing_left_to_read_drains_at_once() {
+    let clock = crate::clock::TestClock::frozen();
+    let h = start_stopping(
+        stop_config(Duration::from_secs(600)),
+        false,
+        &clock,
+        |_| None,
+        ok_chain,
+    );
+    assign_one_lane(&h, std::slice::from_ref(&(0..10)));
+    h.shutdown.trigger();
+    joined(&h);
+    let report = h.join.join().unwrap().unwrap();
+    assert_eq!(report.state, ExitState::Completed);
+    let log = h.shared.lock().unwrap();
+    assert_eq!((log.reading_on_stop_calls, log.stop_reading_calls), (1, 1));
+}
+
+/// Pins that a batch blocked when the stop begins keeps retrying through the
+/// read phase and is delivered, where the drain would abandon it for replay.
+#[test]
+fn a_batch_blocked_during_the_read_phase_is_not_abandoned() {
+    let open = Arc::new(AtomicBool::new(false));
+    let unblock = Arc::clone(&open);
+    let clock = crate::clock::TestClock::frozen();
+    let h = start_stopping(
+        stop_config(Duration::from_secs(600)),
+        true,
+        &clock,
+        |_| None,
+        move |shared, log| FakeChain {
+            shared,
+            log,
+            mode: ChainMode::BlockUntil(Arc::clone(&unblock)),
+            batches_seen: 0,
+        },
+    );
+    assign_one_lane(&h, std::slice::from_ref(&(0..10)));
+    wait_for(
+        "the blocked batch pauses the lane",
+        Duration::from_secs(5),
+        || !h.shared.lock().unwrap().pauses.is_empty(),
+    );
+    h.shutdown.trigger();
+    let asked = h.shared.lock().unwrap().reading_on_stop_calls;
+    wait_for("the read phase", Duration::from_secs(5), || {
+        h.shared.lock().unwrap().reading_on_stop_calls >= asked + 3
+    });
+    open.store(true, Ordering::Relaxed);
+    wait_for("the batch is taken", Duration::from_secs(5), || {
+        h.chain.consumed.load(Ordering::Relaxed) == 10
+    });
+    h.shared.lock().unwrap().read_on_stop = false;
+    joined(&h);
+    let report = h.join.join().unwrap().unwrap();
+    assert_eq!(report.state, ExitState::Completed);
+    assert_eq!(report.final_watermarks, vec![(PartitionId(0), 10)]);
+}
+
+/// Pins that a failed run reads nothing more and hands back at once.
+#[test]
+fn a_failure_drain_hands_back_without_reading_on() {
+    let clock = crate::clock::TestClock::frozen();
+    let h = start_stopping(
+        stop_config(Duration::from_secs(600)),
+        true,
+        &clock,
+        |_| None,
+        |shared, log| FakeChain {
+            shared,
+            log,
+            mode: ChainMode::FatalAtBatch(1),
+            batches_seen: 0,
+        },
+    );
+    assign_one_lane(&h, std::slice::from_ref(&(0..10)));
+    joined(&h);
+    let report = h.join.join().unwrap().unwrap();
+    assert!(matches!(report.state, ExitState::Failed(_)), "{report:?}");
+    let log = h.shared.lock().unwrap();
+    assert_eq!((log.reading_on_stop_calls, log.stop_reading_calls), (0, 1));
+}
+
+/// Pins that a source whose run ends drained hands nothing back.
+#[test]
+fn a_drained_run_does_not_stop_reading() {
+    let clock = crate::clock::TestClock::frozen();
+    let h = start_stopping(
+        stop_config(Duration::from_secs(600)),
+        true,
+        &clock,
+        |_| None,
+        ok_chain,
+    );
+    h.script.lock().unwrap().push_back(Script::Drained);
+    joined(&h);
+    assert_eq!(h.join.join().unwrap().unwrap().state, ExitState::Completed);
+    assert_eq!(h.shared.lock().unwrap().stop_reading_calls, 0);
+}
+
+/// Pins that the runtime closes a feed it was given once, after the final
+/// commit's flush.
+#[test]
+fn the_runtime_closes_its_feed_after_the_final_commit() {
+    let clock = crate::clock::TestClock::frozen();
+    let mut cfg = stop_config(Duration::from_secs(600));
+    cfg.feed = feed_section("sqs: {}");
+    let kept = Arc::new(Mutex::new(None::<Arc<HandingBack>>));
+    let keep = Arc::clone(&kept);
+    let h = start_stopping(
+        cfg,
+        false,
+        &clock,
+        move |log| {
+            let feed = Arc::new(HandingBack::new("sqs").logging_into(Arc::clone(log)));
+            *keep.lock().unwrap() = Some(Arc::clone(&feed));
+            Some(feed)
+        },
+        ok_chain,
+    );
+    assign_one_lane(&h, std::slice::from_ref(&(0..10)));
+    wait_for("payloads consumed", Duration::from_secs(5), || {
+        h.chain.consumed.load(Ordering::Relaxed) == 10
+    });
+    h.shutdown.trigger();
+    joined(&h);
+    assert_eq!(h.join.join().unwrap().unwrap().state, ExitState::Completed);
+    let feed = kept.lock().unwrap().take().unwrap();
+    assert_eq!(feed.closes.lock().unwrap().len(), 1);
+    let log = h.shared.lock().unwrap();
+    let close = log.log.iter().position(|e| e == "close");
+    let last_flush = log.log.iter().rposition(|e| e == "flush_commits");
+    assert!(last_flush.is_some() && close > last_flush, "{:?}", log.log);
+    assert_eq!(
+        log.log.last().map(String::as_str),
+        Some("close"),
+        "{:?}",
+        log.log
+    );
+}
+
+/// Pins that the close's bound is what is left of the stop's deadline, read
+/// on the stop clock: the whole reserve when the read phase ran to it.
+#[test]
+fn the_close_gets_the_rest_of_the_deadline() {
+    let drain_timeout = Duration::from_secs(600);
+    let clock = crate::clock::TestClock::frozen();
+    let mut cfg = stop_config(drain_timeout);
+    cfg.feed = feed_section("sqs: {}");
+    let kept = Arc::new(Mutex::new(None::<Arc<HandingBack>>));
+    let keep = Arc::clone(&kept);
+    let h = start_stopping(
+        cfg,
+        true,
+        &clock,
+        move |_| {
+            let feed = Arc::new(HandingBack::new("sqs"));
+            *keep.lock().unwrap() = Some(Arc::clone(&feed));
+            Some(feed)
+        },
+        ok_chain,
+    );
+    h.shutdown.trigger();
+    wait_for("the read phase", Duration::from_secs(5), || {
+        h.shared.lock().unwrap().reading_on_stop_calls > 0
+    });
+    clock.advance(drain_timeout - crate::feed::STOP_RESERVE);
+    joined(&h);
+    assert_eq!(h.join.join().unwrap().unwrap().state, ExitState::Completed);
+    let feed = kept.lock().unwrap().take().unwrap();
+    assert_eq!(
+        *feed.closes.lock().unwrap(),
+        vec![crate::feed::STOP_RESERVE]
+    );
+    // The sink drain ends a second early, which leaves that second to the
+    // close when the sink drains slower than this one.
+    assert_eq!(
+        *h.sink_budgets.lock().unwrap(),
+        vec![crate::feed::STOP_RESERVE - Duration::from_secs(1)]
+    );
+}
+
+/// Pins that a close that never settles ends the run at the deadline, with
+/// a warning, and leaves the exit state alone.
+#[test]
+fn a_close_that_never_settles_ends_at_the_deadline() {
+    let drain_timeout = Duration::from_secs(600);
+    let clock = crate::clock::TestClock::frozen();
+    let mut cfg = stop_config(drain_timeout);
+    cfg.feed = feed_section("sqs: {}");
+    let h = start_stopping(
+        cfg,
+        true,
+        &clock,
+        |_| Some(Arc::new(HandingBack::new("sqs").holding_its_close())),
+        ok_chain,
+    );
+    h.shutdown.trigger();
+    wait_for("the read phase", Duration::from_secs(5), || {
+        h.shared.lock().unwrap().reading_on_stop_calls > 0
+    });
+    clock.advance(drain_timeout + Duration::from_secs(1));
+    joined(&h);
+    assert_eq!(h.join.join().unwrap().unwrap().state, ExitState::Completed);
+    let warnings = h.warnings.0.lock().unwrap().clone();
+    assert!(
+        warnings
+            .iter()
+            .any(|fields| fields.iter().any(|(name, value)| {
+                name == "message" && value.contains("did not close before the drain deadline")
+            })),
+        "{warnings:#?}"
+    );
 }

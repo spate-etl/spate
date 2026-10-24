@@ -229,7 +229,9 @@ pub struct CheckpointSection {
     /// stalled partition can accumulate.
     pub max_pending_batches: usize,
     /// Shutdown/rebalance drain budget. Must be comfortably below the pod's
-    /// `terminationGracePeriodSeconds`.
+    /// `terminationGracePeriodSeconds`, and more than
+    /// [`STOP_RESERVE`](crate::feed::STOP_RESERVE) with a feed that
+    /// [hands back](crate::feed::Feed::hands_back).
     #[serde(with = "humantime_serde")]
     pub drain_timeout: Duration,
     /// A partition watermark stalled behind a failed batch for longer than

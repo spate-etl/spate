@@ -295,6 +295,8 @@ is the lever, not `chunk.target_bytes`.
   a stalled partition can accumulate, alongside (and independent of) the
   byte budget.
 - `drain_timeout` (default **25s**): the shutdown/rebalance drain budget.
+  With a feed that hands back, a stop's reading of the units it holds runs
+  inside it too, and it must be more than 5s.
   Keep it below `terminationGracePeriodSeconds`. See [Docker](docker.mdx)
   and [Graceful shutdown](../03-guides/graceful-shutdown.mdx).
 - `stalled_fail_after` (default **120s**): a partition watermark stalled

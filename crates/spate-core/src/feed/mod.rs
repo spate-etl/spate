@@ -330,7 +330,7 @@ pub trait Feed: Send + Sync {
     /// are the backend's to give back. The default does nothing.
     fn stop_receiving(&self) {}
 
-    /// Return a held unit unread, for another reader to take at once. The
+    /// Return a held unit for another reader to take at once. The
     /// delivery does not count as a failure, and the unit does not move to
     /// the dead-letter destination.
     ///

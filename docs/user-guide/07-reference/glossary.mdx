@@ -161,7 +161,7 @@ codec.
 ### Hand back
 
 What a stopping source does with a [work unit](#work-unit) it has not read to
-its end: it returns the unit to its [feed](#feed) unread, so another instance
+its end: it returns the unit to its [feed](#feed), so another instance
 can take it at once. A handed-back unit is not a failure and does not move
 toward the dead-letter destination. A source reads the units it holds until
 5s before the [drain](#drain) deadline, the stop reserve, then hands back the

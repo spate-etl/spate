@@ -498,7 +498,7 @@ mod tests {
 
     proptest! {
         /// Pins `partition_of` to the masked hash taken modulo the partition
-        /// count, for every identity and every non-zero count.
+        /// count, for identities of up to 63 bytes and every non-zero count.
         #[test]
         fn partition_of_is_the_masked_murmur2_remainder(
             identity in proptest::collection::vec(any::<u8>(), 0..64),

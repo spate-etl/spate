@@ -26,8 +26,8 @@ mod dispatch;
 pub(crate) mod leaf;
 mod lowcard;
 
-use crate::schema::RowSchema;
-use crate::schema::typeparse::ChType;
+use crate::schema::typeparse::{self, ChType};
+use crate::schema::{RowSchema, probe};
 use bytes::BytesMut;
 use column::ColumnWriter;
 use dispatch::RowDispatchSer;
@@ -192,13 +192,7 @@ impl NativeSchema {
             table: "<static schema>".into(),
             columns: specs
                 .iter()
-                .map(|(n, t)| {
-                    (
-                        (*n).to_string(),
-                        crate::schema::typeparse::parse(t),
-                        (*t).to_string(),
-                    )
-                })
+                .map(|(n, t)| ((*n).to_string(), typeparse::parse(t), (*t).to_string()))
                 .collect(),
         })
     }
@@ -351,7 +345,7 @@ where
         // check requires a named struct) and skipped here (Native also accepts
         // tuple rows).
         if !self.checked {
-            if let Ok(fields) = crate::schema::probe::probe_row(&rec.payload) {
+            if let Ok(fields) = probe::probe_row(&rec.payload) {
                 crate::schema::check_first_record(&self.schema.expected, &fields)
                     .map_err(|diff| NativeError::FirstRecord(diff).into_sink_error())?;
             }

@@ -23,6 +23,7 @@ use spate_core::record::{PartitionId, RawPayload, Record};
 use spate_core::sink::{EncodedChunk, RowEncoder, shard_queues};
 use spate_core::source::PayloadBatch;
 use std::sync::Arc;
+use tokio::sync::mpsc;
 
 /// The terminal record type: one SKU per row.
 #[derive(Debug, serde::Serialize, ClickHouseRow)]
@@ -104,7 +105,7 @@ impl<'buf> PayloadBatch<'buf> for VecBatch<'buf> {
 
 /// Decode the single-`String`-column RowBinary rows in one queue: each row
 /// is a one-byte length prefix (all test SKUs are short) plus UTF-8.
-fn drain_skus(rx: &mut tokio::sync::mpsc::Receiver<EncodedChunk>) -> Vec<String> {
+fn drain_skus(rx: &mut mpsc::Receiver<EncodedChunk>) -> Vec<String> {
     let mut out = Vec::new();
     while let Ok(chunk) = rx.try_recv() {
         let mut rest = &chunk.frame[..];

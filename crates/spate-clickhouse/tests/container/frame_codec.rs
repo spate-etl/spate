@@ -8,8 +8,10 @@ use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::header::{CONNECTION, CONTENT_LENGTH, HOST, TRANSFER_ENCODING};
+use hyper::server::conn::http1;
 use hyper::{Request, Response};
 use hyper_util::client::legacy::Client as HyperClient;
+use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use spate_clickhouse::{Compression, NativeEncoder, serialize_row};
 use spate_core::error::{ErrorClass, SinkError};
@@ -364,7 +366,7 @@ impl Proxy {
                         let state = Arc::clone(&state);
                         async move { state.relay(req).await }
                     });
-                    let _ = hyper::server::conn::http1::Builder::new()
+                    let _ = http1::Builder::new()
                         .serve_connection(TokioIo::new(stream), service)
                         .await;
                 });
@@ -391,7 +393,7 @@ impl Drop for Proxy {
 
 struct Relay {
     upstream: String,
-    client: HyperClient<hyper_util::client::legacy::connect::HttpConnector, Full<Bytes>>,
+    client: HyperClient<HttpConnector, Full<Bytes>>,
     inserts: Arc<Mutex<Vec<Bytes>>>,
     lose_first: Mutex<bool>,
 }

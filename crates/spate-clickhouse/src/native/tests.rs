@@ -4,6 +4,7 @@
 //! server round-trip (`tests/container.rs`) is the ground-truth oracle.
 
 use super::{NativeEncoder, NativeSchema};
+use crate::schema::typeparse;
 use serde::Serialize;
 use spate_core::deser::Owned;
 use std::sync::Arc;
@@ -450,13 +451,7 @@ mod first_record_check {
             table: "`t`".into(),
             columns: cols
                 .iter()
-                .map(|(n, t)| {
-                    (
-                        (*n).to_string(),
-                        crate::schema::typeparse::parse(t),
-                        (*t).to_string(),
-                    )
-                })
+                .map(|(n, t)| ((*n).to_string(), typeparse::parse(t), (*t).to_string()))
                 .collect(),
         };
         NativeSchema::from_row_schema(&expected).expect("schema builds")

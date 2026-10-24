@@ -5,6 +5,7 @@ use crate::config::TlsSection;
 use hyper_util::client::legacy::Client as HyperClient;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
+use rustls::crypto::aws_lc_rs;
 use rustls::pki_types::CertificateDer;
 use rustls::pki_types::pem::PemObject;
 use rustls::{CertificateError, ClientConfig, RootCertStore};
@@ -74,7 +75,7 @@ fn add_root_ca(roots: &mut RootCertStore, path: &Path) -> Result<(), ConfigError
 pub(crate) fn client_config(roots: RootCertStore) -> ClientConfig {
     // rustls has no process-wide default provider when a build enables both
     // `ring` and `aws-lc-rs`.
-    ClientConfig::builder_with_provider(Arc::new(rustls::crypto::aws_lc_rs::default_provider()))
+    ClientConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
         .with_safe_default_protocol_versions()
         .expect("aws-lc-rs supports rustls's default protocol versions")
         .with_root_certificates(roots)

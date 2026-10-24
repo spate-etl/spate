@@ -18,8 +18,9 @@ use std::io;
 use std::path::Path;
 use std::time::Duration;
 use support::{
-    Launched, LineFramer, PipelineYaml, captured_rows, key_of, launch_customized, line_framer,
-    line_starts, lines_bytes, ranged_spec, recs, sorted, test_options,
+    Launched, LineFramer, PipelineYaml, captured_rows, key_of, launch_customized,
+    launch_customized_on_clock, line_framer, line_starts, lines_bytes, ranged_spec, recs, sorted,
+    test_options,
 };
 
 fn config_yaml(data: &Path) -> PipelineYaml {
@@ -359,11 +360,19 @@ fn shutdown_releases_splits_still_held() {
         .source("chunk_bytes", "16KiB")
         .section("backpressure: { max_inflight_bytes: 4KiB }")
         .build();
-    let l = launch_scripted_coordinator(&yaml, coordinator, |sink| {
-        for _ in 0..30 {
-            sink.enqueue_global(WriteOutcome::ok().after(Duration::from_millis(150)));
-        }
-    });
+    // On a frozen stop clock, a coordinated source that read on at the stop
+    // would hold the run past the exit deadline.
+    let l = launch_customized_on_clock(
+        &yaml,
+        test_options(),
+        |sink| {
+            for _ in 0..30 {
+                sink.enqueue_global(WriteOutcome::ok().after(Duration::from_millis(150)));
+            }
+        },
+        spate_core::clock::TestClock::frozen(),
+        move |source, _io| line_framer(source).with_coordinator(Box::new(coordinator)),
+    );
     wait_until(Duration::from_secs(30), "rows flow", || {
         !captured_rows(&l.script).is_empty()
     });
@@ -372,7 +381,11 @@ fn shutdown_releases_splits_still_held() {
     // source's teardown hands the still-held split back (Drop → release)
     // so peers claim it without waiting out a lease.
     l.shutdown.trigger();
-    let report = l.run.join().expect("run exits");
+    let report = l
+        .run
+        .wait_exit(Duration::from_secs(30))
+        .expect("the run exits")
+        .expect("run exits");
     assert_eq!(report.state, ExitState::Completed, "drain completes");
     assert_eq!(script.released(), vec![id], "the held split was released");
 }

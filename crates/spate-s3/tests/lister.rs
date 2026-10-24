@@ -7,13 +7,14 @@
 mod support;
 
 use spate_core::checkpoint::Checkpointer;
+use spate_core::clock::TestClock as StopClock;
 use spate_core::clock::tokio::TestClock;
 use spate_core::config::{ConfigError, FeedSection, PipelineConfig};
 use spate_core::feed::{Confirmation, Delivery, Feed, FeedError, FeedWaker, Receipt, Unit};
 use spate_core::pipeline::{ExitReport, ExitState};
 use spate_core::source::{Source, SourceCtx, SourceEvent};
 use spate_s3::{S3Source, SplitDescriptor, split_id_for, split_id_for_range};
-use spate_test::{ScriptedFeed, scripted_feed, wait_until};
+use spate_test::{ScriptedFeed, WriteOutcome, scripted_feed, wait_until};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -23,7 +24,8 @@ use support::location::{LocationHooks, OnCreate, location_store};
 use support::spy::{SpyOptions, spying_local_store};
 use support::{
     Launched, PipelineYaml, captured_rows, fingerprint, launch_customized, launch_with_feed,
-    line_framer, lines_bytes, recs, sorted, stop, test_options, unit_over,
+    launch_with_feed_on_clock, line_framer, lines_bytes, recs, sorted, stage_two_ranges, stop,
+    test_options, unit_over,
 };
 
 const DEADLINE: Duration = Duration::from_secs(30);
@@ -48,6 +50,19 @@ fn launch_worker(
     store: Option<Arc<dyn object_store::ObjectStore>>,
     clock: Option<Arc<TestClock>>,
 ) -> Launched {
+    launch_worker_on(data, feed, location, store, clock, None)
+}
+
+/// [`launch_worker`] with the runtime's stop timed on `stop_clock` when
+/// given.
+fn launch_worker_on(
+    data: &Path,
+    feed: ScriptedFeed,
+    location: Option<&str>,
+    store: Option<Arc<dyn object_store::ObjectStore>>,
+    clock: Option<Arc<TestClock>>,
+    stop_clock: Option<Arc<StopClock>>,
+) -> Launched {
     let mut section = "feed:\n  scripted: {}\n".to_owned();
     if let Some(location) = location {
         section.push_str(&format!("  location: {location}\n"));
@@ -55,22 +70,23 @@ fn launch_worker(
     let yaml = PipelineYaml::file("s3-job-location", data)
         .section(&section)
         .build();
-    launch_with_feed(
-        &yaml,
-        test_options(),
-        |_| {},
-        Arc::new(feed),
-        move |source, _io| {
-            let mut source = line_framer(source);
-            if let Some(store) = store {
-                source = source.with_location_store(store);
-            }
-            if let Some(clock) = clock {
-                source = source.with_clock(clock);
-            }
-            source
-        },
-    )
+    let make_source = move |source, _io| {
+        let mut source = line_framer(source);
+        if let Some(store) = store {
+            source = source.with_location_store(store);
+        }
+        if let Some(clock) = clock {
+            source = source.with_clock(clock);
+        }
+        source
+    };
+    let feed = Arc::new(feed);
+    match stop_clock {
+        Some(stop_clock) => {
+            launch_with_feed_on_clock(&yaml, test_options(), |_| {}, feed, stop_clock, make_source)
+        }
+        None => launch_with_feed(&yaml, test_options(), |_| {}, feed, make_source),
+    }
 }
 
 fn exit(l: &Launched) -> ExitReport {
@@ -248,29 +264,38 @@ fn a_transient_location_error_is_retried_within_the_window() {
 }
 
 /// Pins that a stop during the wait ends the run at the next poll, before
-/// the window and with nothing received.
+/// the window and with nothing received, on a feed that hands back as on
+/// one that does not: holding nothing, the stop reads nothing on.
 #[test]
 fn a_stop_during_the_fingerprint_wait_ends_the_run() {
-    let dir = tempfile::tempdir().unwrap();
-    let data = data_dir(&dir);
-    let (store, hooks) = location_store();
-    let (feed, script) = scripted_feed();
-    script.deliver(unit_over(&data, "a.ndjson"));
-    let clock = TestClock::frozen();
+    for hands_back in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let data = data_dir(&dir);
+        let (store, hooks) = location_store();
+        let (feed, script) = scripted_feed();
+        if hands_back {
+            script.hand_back_on_stop();
+        }
+        script.deliver(unit_over(&data, "a.ndjson"));
+        let clock = TestClock::frozen();
 
-    let l = launch_worker(
-        &data,
-        feed,
-        Some(LOCATION),
-        Some(store),
-        Some(Arc::clone(&clock)),
-    );
-    wait_for_gets(&hooks, 1);
-    l.shutdown.trigger();
-    clock.advance(POLL);
-    let report = exit(&l);
-    assert_eq!(report.state, ExitState::Completed);
-    assert!(script.delivered().is_empty(), "nothing was received");
+        let l = launch_worker_on(
+            &data,
+            feed,
+            Some(LOCATION),
+            Some(store),
+            Some(Arc::clone(&clock)),
+            Some(StopClock::frozen()),
+        );
+        wait_for_gets(&hooks, 1);
+        l.shutdown.trigger();
+        clock.advance(POLL);
+        let report = exit(&l);
+        assert_eq!(report.state, ExitState::Completed);
+        assert!(script.delivered().is_empty(), "nothing was received");
+        assert_eq!(script.stopped_receiving(), usize::from(hands_back));
+        assert!(script.handed_back().is_empty());
+    }
 }
 
 /// Pins that a worker's own `compression` enters the fingerprint it
@@ -732,6 +757,18 @@ impl Feed for Observing {
     }
     fn read_depth(&self, of: spate_core::feed::DepthOf) -> Option<spate_core::feed::DepthReading> {
         self.inner.read_depth(of)
+    }
+    fn hands_back(&self) -> bool {
+        self.inner.hands_back()
+    }
+    fn stop_receiving(&self) {
+        self.inner.stop_receiving();
+    }
+    fn hand_back(&self, receipt: Receipt) -> Result<(), FeedError> {
+        self.inner.hand_back(receipt)
+    }
+    fn close(&self, within: std::time::Duration) -> Option<Confirmation> {
+        self.inner.close(within)
     }
 }
 
@@ -1680,6 +1717,89 @@ fn a_solo_run_reads_while_it_lists() {
     stop(&l);
     let both: Vec<String> = a.iter().chain(&b).cloned().collect();
     assert_eq!(sorted(captured_rows(&l.script)), sorted(both));
+}
+
+/// A scripted feed that names itself `memory`, so a section naming the
+/// in-process feed runs its solo lister over the script.
+struct AsMemory(ScriptedFeed);
+
+impl Feed for AsMemory {
+    fn backend(&self) -> &str {
+        "memory"
+    }
+    fn set_waker(&self, waker: FeedWaker) {
+        self.0.set_waker(waker);
+    }
+    fn receive(&self, max: usize) -> Result<Vec<Delivery>, FeedError> {
+        self.0.receive(max)
+    }
+    fn renew(&self, receipt: Receipt) -> Result<(), FeedError> {
+        self.0.renew(receipt)
+    }
+    fn acknowledge(&self, receipt: Receipt) -> Result<(), FeedError> {
+        self.0.acknowledge(receipt)
+    }
+    fn fail(&self, receipt: Receipt, reason: &str) -> Result<(), FeedError> {
+        self.0.fail(receipt, reason)
+    }
+    fn publish(&self, unit: Unit) -> Confirmation {
+        self.0.publish(unit)
+    }
+    fn read_depth(&self, of: spate_core::feed::DepthOf) -> Option<spate_core::feed::DepthReading> {
+        self.0.read_depth(of)
+    }
+    fn hands_back(&self) -> bool {
+        self.0.hands_back()
+    }
+    fn stop_receiving(&self) {
+        self.0.stop_receiving();
+    }
+    fn hand_back(&self, receipt: Receipt) -> Result<(), FeedError> {
+        self.0.hand_back(receipt)
+    }
+    fn close(&self, within: Duration) -> Option<Confirmation> {
+        self.0.close(within)
+    }
+}
+
+/// Pins that a solo run stopped once it has received its first listed unit
+/// acknowledges that unit and receives no other unit its lister published.
+#[test]
+fn a_stopping_solo_run_receives_nothing_more_from_its_lister() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    stage_two_ranges(&data, "a.ndjson");
+    fs::write(data.join("b.ndjson"), lines_bytes(&recs("b", 2))).unwrap();
+    fs::write(data.join("c.ndjson"), lines_bytes(&recs("c", 2))).unwrap();
+    let (feed, script) = scripted_feed();
+    script.hand_back_on_stop();
+    let yaml = PipelineYaml::file("s3-solo-stop", &data)
+        .section("feed:\n  memory: {}\n  units_held: 1\n")
+        .build();
+    let l = launch_with_feed_on_clock(
+        &yaml,
+        test_options(),
+        |sink| sink.enqueue_global(WriteOutcome::ok().held()),
+        Arc::new(AsMemory(feed)),
+        StopClock::frozen(),
+        |source, _io| line_framer(source),
+    );
+    // The lister cuts `a.ndjson` into two range units.
+    wait_until(DEADLINE, "the lister publishes the prefix", || {
+        script.published().len() == 4
+    });
+    wait_until(DEADLINE, "the first write is held", || {
+        l.script.held_writes() == 1
+    });
+    l.shutdown.trigger();
+    wait_until(DEADLINE, "the stop begins", || {
+        script.stopped_receiving() == 1
+    });
+    l.script.release_held();
+    assert_eq!(exit(&l).state, ExitState::Completed);
+    assert_eq!(script.delivered().len(), 1, "received after the stop began");
+    assert!(script.handed_back().is_empty());
+    assert_eq!(script.acknowledged().len(), 1);
 }
 
 /// Pins that a solo run stops at a shutdown while its listing never ends.

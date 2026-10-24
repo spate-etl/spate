@@ -395,6 +395,18 @@ impl Feed for Tagged {
     fn read_depth(&self, of: spate_core::feed::DepthOf) -> Option<spate_core::feed::DepthReading> {
         self.inner.read_depth(of)
     }
+    fn hands_back(&self) -> bool {
+        self.inner.hands_back()
+    }
+    fn stop_receiving(&self) {
+        self.inner.stop_receiving();
+    }
+    fn hand_back(&self, receipt: Receipt) -> Result<(), FeedError> {
+        self.inner.hand_back(receipt)
+    }
+    fn close(&self, within: std::time::Duration) -> Option<Confirmation> {
+        self.inner.close(within)
+    }
 }
 
 /// A worker on a durable feed, continuous or bounded, reads the units

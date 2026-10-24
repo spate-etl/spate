@@ -22,7 +22,9 @@
 //! there and refuses a mismatch, and the job ends on the lister's end marker
 //! once the feed reads empty over a settling window. A solo run on the
 //! in-process feed the runtime built ends once its lister has finished and
-//! the feed reads empty.
+//! the feed reads empty. On a graceful stop over a feed that hands back, the
+//! reader reads on to the stop reserve and hands back what it has not read
+//! to its end; see `unit_reader`.
 //!
 //! No coordination backend appears in this crate's public API or in its
 //! cargo features. The store comes from the `coordination:` section through
@@ -1006,6 +1008,21 @@ impl Source for S3Source {
             State::Created => {}
         }
         Ok(())
+    }
+
+    fn reading_on_stop(&mut self) -> bool {
+        match &mut self.state {
+            State::Feed(reader) => reader.reading_on_stop(),
+            // A coordinated source stops through `Drop`.
+            State::Open(_) | State::Created => false,
+        }
+    }
+
+    fn stop_reading(&mut self) -> Result<(), SourceError> {
+        match &mut self.state {
+            State::Feed(reader) => reader.stop_reading(),
+            State::Open(_) | State::Created => Ok(()),
+        }
     }
 }
 

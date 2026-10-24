@@ -35,6 +35,15 @@
 //! re-enqueue cap the reader publishes nothing and counts the key. A publish
 //! the feed refuses, or cannot confirm, fails the unit back.
 //!
+//! On a feed that [hands back](Feed::hands_back), a stop reads on. The reader
+//! calls [`Feed::stop_receiving`] once when the stop begins and receives
+//! nothing more. It keeps reading and renewing what it holds, and opens
+//! pending ranges into the room left. At [`stop_reading`](UnitReader::stop_reading)
+//! it keeps each unit read to its end (every part opened, every lane at
+//! end-of-input, no failure, no unconfirmed re-enqueue) for the final commit,
+//! and hands back the rest. On any other feed the stop does none of this.
+//! [`spate_core::feed`]'s "Stopping" section gives the order.
+//!
 //! A bounded job's reader holds a [`JobEnd`]. Each poll that finds the reader
 //! holding no delivery, lane or unsent request advances its end check, and
 //! each poll that finds it holding any sends the check back to its start, so
@@ -130,6 +139,19 @@ impl HeldUnit {
     fn idle(&self) -> bool {
         self.lanes.is_empty() && self.pending.is_empty()
     }
+
+    /// Every part has opened and every lane still held is `ended`, with no
+    /// failure and no unconfirmed re-enqueue. A stop keeps such a unit for
+    /// the final commit.
+    fn read_to_its_end(&self, ended: impl Fn(PartitionId) -> bool) -> bool {
+        self.failing.is_none()
+            && self.pending.is_empty()
+            && !self
+                .overwritten
+                .values()
+                .any(|r| matches!(r, ReEnqueue::Publishing(_)))
+            && self.lanes.iter().all(|&partition| ended(partition))
+    }
 }
 
 /// One lane the reader holds, reading one part of a delivery.
@@ -182,6 +204,10 @@ pub(crate) struct UnitReader {
     /// The end check of a bounded job; `None` on a job that runs until a
     /// shutdown.
     end: Option<JobEnd>,
+    /// The feed's [`Feed::hands_back`], read once as the runtime reads it.
+    hands_back: bool,
+    /// A stop has begun: the reader receives nothing more.
+    stopping: bool,
 }
 
 impl std::fmt::Debug for UnitReader {
@@ -211,6 +237,7 @@ impl UnitReader {
             end.set_waker(waker.clone());
         }
         let (poison_tx, poison_rx) = std::sync::mpsc::channel();
+        let hands_back = feed.hands_back();
         UnitReader {
             feed,
             park,
@@ -229,6 +256,8 @@ impl UnitReader {
             poison_tx,
             poison_rx,
             end,
+            hands_back,
+            stopping: false,
         }
     }
 
@@ -273,7 +302,7 @@ impl UnitReader {
         // nothing sends none.
         let mut opened = self.open_pending();
         let room = self.room();
-        if room > 0 {
+        if room > 0 && !self.stopping {
             // A unit taken and failed straight back leaves nothing held, and
             // the feed still holds it.
             let took = self.receive(room)?;
@@ -301,7 +330,10 @@ impl UnitReader {
         if !partitions.is_empty() {
             return Ok(SourceEvent::CommitReady { partitions });
         }
-        if !self.holds_work()
+        // A stopping reader runs no end check, whose closing receive would
+        // otherwise read the skipped receive as one that took nothing.
+        if !self.stopping
+            && !self.holds_work()
             && let Some(mut end) = self.end.take()
         {
             let feed = Arc::clone(&self.feed);
@@ -320,6 +352,119 @@ impl UnitReader {
             .map_or(timeout, |end| end.park_within(timeout));
         self.park.park(timeout);
         Ok(SourceEvent::Idle)
+    }
+
+    /// Whether a stopping reader reads on: a held unit is not read to its
+    /// end, or a fail waits for the feed. The first call begins the stop. A
+    /// feed that does not hand back reads nothing on.
+    ///
+    /// The controller calls this only while the stop is set. It reads the
+    /// lanes' reports, so an overwrite publishes its re-enqueue here, and
+    /// makes only non-waiting feed calls.
+    pub(crate) fn reading_on_stop(&mut self) -> bool {
+        if !self.hands_back {
+            return false;
+        }
+        self.begin_stop();
+        let ended = self.ended_then_reports();
+        !self.unsent_fails.is_empty()
+            || self
+                .deliveries
+                .values()
+                .any(|held| !held.read_to_its_end(|p| ended.contains(&p)))
+    }
+
+    /// End a stop's reading: hand back every held unit not read to its end,
+    /// settle the rest, and let go of every failing unit. A unit kept stays
+    /// held for the final commit. A feed that does not hand back is left as
+    /// it is.
+    ///
+    /// Makes only non-waiting feed calls.
+    ///
+    /// # Errors
+    ///
+    /// A fatal answer from the feed. A fatal hand-back leaves the units not
+    /// yet handed back held, for the feed's close.
+    pub(crate) fn stop_reading(&mut self) -> Result<(), SourceError> {
+        if !self.hands_back {
+            return Ok(());
+        }
+        self.begin_stop();
+        let ended = self.ended_then_reports();
+        let mut first = self.check_re_enqueues().err();
+        let unread: Vec<u32> = self
+            .deliveries
+            .iter()
+            .filter(|(_, held)| {
+                held.failing.is_none() && !held.read_to_its_end(|p| ended.contains(&p))
+            })
+            .map(|(&delivery, _)| delivery)
+            .collect();
+        let handed_back = unread.len();
+        for delivery in unread {
+            let receipt = self.deliveries[&delivery].receipt;
+            match self.feed.hand_back(receipt) {
+                Ok(()) => {}
+                Err(e) if e.kind == FeedErrorKind::Gone => {}
+                Err(e) if e.kind == FeedErrorKind::Retryable => {
+                    tracing::warn!(
+                        %receipt,
+                        error = %e,
+                        "handing back a held unit failed; the feed's close gives it up"
+                    );
+                }
+                Err(e) => return Err(feed_error("handing back a held unit", &e)),
+            }
+            self.release(delivery);
+        }
+        // After the hand-back, so a fatal answer here leaves nothing unread
+        // held.
+        if let Err(e) = self.settle() {
+            first.get_or_insert(e);
+        }
+        // Counted after the settle, whose renewal can let a kept unit go.
+        let kept = self
+            .deliveries
+            .values()
+            .filter(|held| held.failing.is_none())
+            .count();
+        tracing::info!(
+            kept,
+            handed_back,
+            "the stop handed back the units not read to their end"
+        );
+        let failing: Vec<u32> = self
+            .deliveries
+            .iter()
+            .filter(|(_, held)| held.failing.is_some())
+            .map(|(&delivery, _)| delivery)
+            .collect();
+        for delivery in failing {
+            self.release(delivery);
+        }
+        first.map_or(Ok(()), Err)
+    }
+
+    /// The lanes that have decided end-of-input, then every report the lanes
+    /// sent. A lane sends its overwrite report before it decides, so each
+    /// lane in the set has its report read.
+    fn ended_then_reports(&mut self) -> BTreeSet<PartitionId> {
+        let ended = self
+            .lanes
+            .iter()
+            .filter(|(_, lane)| lane.tracker.terminal().is_some())
+            .map(|(&partition, _)| partition)
+            .collect();
+        self.read_reports();
+        ended
+    }
+
+    /// Begin the stop once: the feed receives nothing more for this reader.
+    fn begin_stop(&mut self) {
+        if !self.stopping {
+            self.stopping = true;
+            self.feed.stop_receiving();
+        }
     }
 
     /// Whether the reader holds a delivery, a lane, a lane on its way out or
@@ -601,9 +746,9 @@ impl UnitReader {
         self.settle_remaining(&lane);
     }
 
-    /// Let go of a failed delivery or one answered `Gone`: its lanes leave
-    /// through a drain barrier, since records they emitted may be in flight,
-    /// and its unopened parts are dropped.
+    /// Let go of a delivery that failed, was answered `Gone`, or was handed
+    /// back: its lanes leave through a drain barrier, since records they
+    /// emitted may be in flight, and its unopened parts are dropped.
     fn release(&mut self, delivery: u32) {
         let Some(held) = self.deliveries.remove(&delivery) else {
             return;
@@ -740,7 +885,10 @@ impl UnitReader {
             range_bytes: parts.range_bytes,
             tx,
             pause: Arc::clone(&pause),
-            // A delivery is never handed over part-read.
+            // A held lane's fetcher is never stopped: stopped before its
+            // object starts, the lane ends at terminal 0 and its unit is
+            // acknowledged unread. A handed-back lane's fetcher ends when the
+            // drain drops the lane.
             stop: Arc::new(AtomicBool::new(false)),
             retry_base: parts.retry_base,
             retries: parts.metrics.as_ref().map(|m| m.get_retries.clone()),
@@ -888,23 +1036,62 @@ mod tests {
         (reader, script, rt)
     }
 
+    /// A reader over a scripted feed that hands back, with the default
+    /// `units_held`.
+    fn stopping_reader() -> (UnitReader, FeedScript, tokio::runtime::Runtime) {
+        let (feed, script) = scripted_feed();
+        script.hand_back_on_stop();
+        let (reader, rt) = reader_over(Arc::new(feed), None, None);
+        (reader, script, rt)
+    }
+
+    /// A reader over a scripted feed that hands back, holding at most
+    /// `units_held`.
+    fn stopping_reader_holding(
+        units_held: usize,
+    ) -> (UnitReader, FeedScript, tokio::runtime::Runtime) {
+        let (feed, script) = scripted_feed();
+        script.hand_back_on_stop();
+        let (reader, rt) = reader_over(Arc::new(feed), Some(units_held), None);
+        (reader, script, rt)
+    }
+
+    /// A reader over a [`Refusing`] feed that hands back.
+    fn stopping_refusing() -> (
+        UnitReader,
+        Arc<Refusing>,
+        FeedScript,
+        tokio::runtime::Runtime,
+    ) {
+        let (inner, script) = scripted_feed();
+        script.hand_back_on_stop();
+        let feed = Arc::new(Refusing::new(inner));
+        let (reader, rt) = reader_over(Arc::clone(&feed) as Arc<dyn Feed>, None, None);
+        (reader, feed, script, rt)
+    }
+
     /// A [`Feed`] over a scripted feed whose `receive`, `acknowledge` and
     /// `fail` answer the error kind set for them, without reaching the
-    /// script.
+    /// script, and whose `hand_back` answers the kind set for one receipt.
+    /// It records the `max` of every `receive`.
     struct Refusing {
         inner: ScriptedFeed,
+        receives: Mutex<Vec<usize>>,
         receive: Mutex<Option<FeedErrorKind>>,
         acknowledge: Mutex<Option<FeedErrorKind>>,
         fail: Mutex<Option<FeedErrorKind>>,
+        hand_back: Mutex<Option<(Receipt, FeedErrorKind)>>,
     }
 
     impl Refusing {
         fn new(inner: ScriptedFeed) -> Refusing {
             Refusing {
                 inner,
+                receives: Mutex::new(Vec::new()),
                 receive: Mutex::new(None),
                 acknowledge: Mutex::new(None),
                 fail: Mutex::new(None),
+                hand_back: Mutex::new(None),
             }
         }
 
@@ -926,6 +1113,7 @@ mod tests {
         }
 
         fn receive(&self, max: usize) -> Result<Vec<Delivery>, FeedError> {
+            self.receives.lock().unwrap().push(max);
             Refusing::answer(&self.receive)?;
             self.inner.receive(max)
         }
@@ -953,6 +1141,27 @@ mod tests {
             of: spate_core::feed::DepthOf,
         ) -> Option<spate_core::feed::DepthReading> {
             self.inner.read_depth(of)
+        }
+
+        fn hands_back(&self) -> bool {
+            self.inner.hands_back()
+        }
+
+        fn stop_receiving(&self) {
+            self.inner.stop_receiving();
+        }
+
+        fn hand_back(&self, receipt: Receipt) -> Result<(), FeedError> {
+            if let Some((refused, kind)) = *self.hand_back.lock().unwrap()
+                && refused == receipt
+            {
+                return Err(FeedError::new(kind, "refused by the test"));
+            }
+            self.inner.hand_back(receipt)
+        }
+
+        fn close(&self, within: Duration) -> Option<Confirmation> {
+            self.inner.close(within)
         }
     }
 
@@ -1977,6 +2186,601 @@ mod tests {
         assert_idle(poll(&mut reader));
         *feed.receive.lock().unwrap() = None;
         assert_eq!(lanes_added(poll(&mut reader)).len(), 1);
+    }
+
+    /// Pins that a reader with no room left asks the feed for nothing,
+    /// and receives again into the room a finished unit frees.
+    #[test]
+    fn a_full_reader_asks_the_feed_for_no_units() {
+        let (inner, script) = scripted_feed();
+        let feed = Arc::new(Refusing::new(inner));
+        let (mut reader, _rt) = reader_over(Arc::clone(&feed) as Arc<dyn Feed>, Some(1), None);
+        script.deliver(descriptor_unit(0));
+        script.deliver(descriptor_unit(1));
+        start(&mut reader);
+        let lane = partitions(&lanes_added(poll(&mut reader)))[0];
+        for _ in 0..3 {
+            poll(&mut reader);
+        }
+        assert_eq!(
+            *feed.receives.lock().unwrap(),
+            vec![1],
+            "a receive with no room"
+        );
+        finish(&mut reader, lane, 3);
+        lanes_retired(poll(&mut reader));
+        assert_eq!(lanes_added(poll(&mut reader)).len(), 1);
+        assert_eq!(*feed.receives.lock().unwrap(), vec![1, 1]);
+    }
+
+    // ------------------------------------------------------------ stop --
+
+    /// A poison report for the lane on `partition`.
+    fn report_poison(reader: &UnitReader, partition: PartitionId) {
+        reader
+            .poison_tx
+            .send(PoisonReport {
+                split: SplitId::new("poisoned").unwrap(),
+                epoch: LeaseEpoch(u64::from(partition.0)),
+                kind: PoisonKind::NotFound,
+                reason: "gone".into(),
+                overwrite: None,
+            })
+            .unwrap();
+    }
+
+    /// Pins that `stop_reading` hands back each unit with a lane short of
+    /// end-of-input or a range not yet opened, keeps a unit whose every lane
+    /// has decided end-of-input for the commit that acknowledges it, and
+    /// logs the counts.
+    #[test]
+    fn stop_reading_hands_back_only_units_not_read_to_their_end() {
+        let (mut reader, script, _rt) = stopping_reader_holding(4);
+        let c = script.deliver(ranged_unit("c", 2));
+        let d = script.deliver(ranged_unit("d", 4));
+        start(&mut reader);
+        let lanes = partitions(&lanes_added(poll(&mut reader)));
+        assert_eq!(lanes.len(), 4, "two ranges of c, two of d");
+        let (pa, a, ta) = hold_one(&mut reader, &script);
+        let (_, b, _) = hold_one(&mut reader, &script);
+        ta.set_terminal(5);
+        reader.lanes[&lanes[0]].tracker.set_terminal(2);
+        reader.lanes[&lanes[2]].tracker.set_terminal(2);
+        reader.lanes[&lanes[3]].tracker.set_terminal(2);
+        let logs = spate_test::capture_logs(tracing::Level::INFO, || {
+            reader.stop_reading().unwrap();
+        });
+        assert_eq!(script.handed_back(), vec![c, d, b]);
+        assert_eq!(script.held(), vec![a]);
+        assert!(script.acknowledged().is_empty());
+        reader.commit(&[(pa, 5)]).unwrap();
+        assert_eq!(script.acknowledged(), vec![a]);
+        assert_eq!(
+            logs.iter()
+                .filter(|l| l.contains("kept=1") && l.contains("handed_back=3"))
+                .count(),
+            1,
+            "{logs:?}"
+        );
+    }
+
+    /// Pins that `reading_on_stop` reads on while a held unit has a lane
+    /// short of end-of-input, an unconfirmed re-enqueue or an unsent fail,
+    /// and not once each held lane has decided, though unacknowledged.
+    #[test]
+    fn reading_on_stop_answers_whether_a_held_unit_is_unread() {
+        let (mut reader, script, _rt) = stopping_reader();
+        start(&mut reader);
+        assert!(!reader.reading_on_stop(), "nothing held");
+        let (_, _, tracker) = hold_one(&mut reader, &script);
+        assert!(reader.reading_on_stop());
+        tracker.set_terminal(3);
+        assert!(
+            !reader.reading_on_stop(),
+            "its lane has decided end-of-input"
+        );
+        hold_one(&mut reader, &script);
+        assert!(reader.reading_on_stop());
+
+        let (mut reader, script, _rt) = stopping_reader();
+        script.hold_publishes();
+        let (_, lanes) = open_notification(&mut reader, &script, &[("a.ndjson", 10)], 0);
+        report_overwrite(&reader, lanes[0], "a.ndjson", 20);
+        poll(&mut reader);
+        finish(&mut reader, lanes[0], 3);
+        assert!(reader.reading_on_stop(), "its re-enqueue is unconfirmed");
+        script.confirm_held_publishes();
+        poll(&mut reader);
+        assert!(!reader.reading_on_stop());
+
+        let (mut reader, feed, script, _rt) = stopping_refusing();
+        *feed.fail.lock().unwrap() = Some(FeedErrorKind::Retryable);
+        script.deliver(Unit::new("unreadable", b"not a unit".to_vec()));
+        start(&mut reader);
+        poll(&mut reader);
+        assert!(reader.reading_on_stop(), "a fail waits for the feed");
+        *feed.fail.lock().unwrap() = None;
+        poll(&mut reader);
+        assert!(!reader.reading_on_stop());
+    }
+
+    /// Pins that a reader over a feed that does not hand back neither reads
+    /// on nor hands back at the stop, whether or not `reading_on_stop` came
+    /// first.
+    #[test]
+    fn a_feed_that_does_not_hand_back_reads_nothing_on_at_the_stop() {
+        for ask_first in [true, false] {
+            let (mut reader, script, _rt) = reader();
+            start(&mut reader);
+            let (p, receipt, _) = hold_one(&mut reader, &script);
+            if ask_first {
+                assert!(!reader.reading_on_stop());
+            }
+            reader.stop_reading().unwrap();
+            assert_eq!(script.stopped_receiving(), 0);
+            assert!(script.handed_back().is_empty());
+            assert_eq!(script.held(), vec![receipt]);
+            assert!(reader.lanes.contains_key(&p), "the lane is still held");
+        }
+    }
+
+    /// Pins that a stopping reader receives nothing, neither into the room
+    /// it has left nor through the end check of a solo run, and reports no
+    /// `Drained`.
+    #[test]
+    fn a_stopping_reader_receives_nothing() {
+        let (mut reader, script, _rt) = stopping_reader();
+        start(&mut reader);
+        hold_one(&mut reader, &script);
+        assert!(reader.reading_on_stop());
+        script.deliver(descriptor_unit(0));
+        for _ in 0..3 {
+            poll(&mut reader);
+        }
+        assert_eq!(script.delivered().len(), 1, "received while stopping");
+
+        // The feed's depth reads empty, so the end check would run its
+        // closing receive.
+        let (mut reader, script, rt) = stopping_reader();
+        end_solo(&mut reader, &rt);
+        start(&mut reader);
+        assert!(!reader.reading_on_stop());
+        script.deliver(descriptor_unit(0));
+        for _ in 0..3 {
+            script.answer_depth(
+                spate_core::feed::DepthOf::Feed,
+                Ok(spate_core::feed::Depth::new("empty", false)),
+            );
+            assert!(!matches!(poll(&mut reader), SourceEvent::Drained));
+        }
+        assert!(script.delivered().is_empty(), "the end check received");
+    }
+
+    /// Pins that a stop calls `stop_receiving` once, whether it begins at
+    /// `reading_on_stop` or at `stop_reading`, and whether or not anything
+    /// is held.
+    #[test]
+    fn stop_receiving_is_sent_once_per_stop() {
+        let (mut reader, script, _rt) = stopping_reader();
+        start(&mut reader);
+        hold_one(&mut reader, &script);
+        for _ in 0..3 {
+            reader.reading_on_stop();
+            poll(&mut reader);
+        }
+        reader.stop_reading().unwrap();
+        assert_eq!(script.stopped_receiving(), 1);
+
+        let (mut reader, script, _rt) = stopping_reader();
+        start(&mut reader);
+        let (_, receipt, _) = hold_one(&mut reader, &script);
+        reader.stop_reading().unwrap();
+        assert_eq!(script.stopped_receiving(), 1);
+        assert_eq!(script.handed_back(), vec![receipt]);
+
+        let (mut reader, script, _rt) = stopping_reader();
+        start(&mut reader);
+        assert!(!reader.reading_on_stop());
+        assert_eq!(script.stopped_receiving(), 1);
+    }
+
+    /// Pins how `stop_reading` settles each answer to a hand-back: `Gone`
+    /// and `Retryable` let the unit go and the hand-back goes on, and any
+    /// other kind fails the call and leaves the units not yet handed back
+    /// held.
+    #[test]
+    fn a_hand_back_answer_settles_by_its_kind() {
+        let (mut reader, _feed, script, _rt) = stopping_refusing();
+        start(&mut reader);
+        let (_, first, _) = hold_one(&mut reader, &script);
+        let (_, second, _) = hold_one(&mut reader, &script);
+        script.redeliver(first);
+        reader.stop_reading().unwrap();
+        assert!(script.gone().contains(&first));
+        assert_eq!(script.handed_back(), vec![second]);
+        assert!(reader.deliveries.is_empty());
+
+        let (mut reader, feed, script, _rt) = stopping_refusing();
+        start(&mut reader);
+        let (_, first, _) = hold_one(&mut reader, &script);
+        let (_, second, _) = hold_one(&mut reader, &script);
+        *feed.hand_back.lock().unwrap() = Some((first, FeedErrorKind::Retryable));
+        let logs = spate_test::capture_logs(tracing::Level::WARN, || {
+            reader.stop_reading().unwrap();
+        });
+        assert_eq!(script.handed_back(), vec![second]);
+        assert!(reader.deliveries.is_empty(), "both let go");
+        assert!(
+            logs.iter().any(|l| l.contains(&first.to_string())),
+            "{logs:?}"
+        );
+
+        let (mut reader, feed, script, _rt) = stopping_refusing();
+        start(&mut reader);
+        let (_, first, _) = hold_one(&mut reader, &script);
+        let (_, second, _) = hold_one(&mut reader, &script);
+        *feed.hand_back.lock().unwrap() = Some((first, FeedErrorKind::Fatal));
+        let Err(SourceError::Client { reason, .. }) = reader.stop_reading() else {
+            panic!("a fatal hand-back did not fail the call");
+        };
+        assert!(reason.contains("handing back"), "{reason}");
+        assert!(script.handed_back().is_empty());
+        assert!(script.held().contains(&second), "left held for the close");
+    }
+
+    /// Pins that a unit handed back with its ranges in flight counts no
+    /// object failure, is never acknowledged once its lanes end, and takes
+    /// its lanes' counts back from `objects_remaining`.
+    #[test]
+    fn a_handed_back_unit_counts_no_object_failure() {
+        let run = |hand_back: bool| {
+            let pipeline = unique_name("reader");
+            let rendered = render_local(|| {
+                let metrics =
+                    S3Metrics::new(&Meter::with_namespace("s3", pipeline.clone(), "src", "s3"));
+                let (feed, script) = scripted_feed();
+                script.hand_back_on_stop();
+                let (mut reader, _rt) = reader_over(Arc::new(feed), Some(2), Some(metrics));
+                script.deliver(ranged_unit("a", 2));
+                start(&mut reader);
+                let lanes = partitions(&lanes_added(poll(&mut reader)));
+                let trackers: Vec<Arc<SplitTracker>> = lanes
+                    .iter()
+                    .map(|p| Arc::clone(&reader.lanes[p].tracker))
+                    .collect();
+                if hand_back {
+                    reader.stop_reading().unwrap();
+                }
+                for (p, tracker) in lanes.iter().zip(&trackers) {
+                    tracker.set_terminal(3);
+                    reader.commit(&[(*p, 3)]).unwrap();
+                }
+                assert!(script.failed().is_empty());
+                assert!(script.gone().is_empty());
+                assert_eq!(
+                    script.acknowledged().len(),
+                    usize::from(!hand_back),
+                    "acknowledged once its lanes end unless handed back"
+                );
+            });
+            if hand_back {
+                for kind in [
+                    PoisonKind::NotFound,
+                    PoisonKind::EtagDrift,
+                    PoisonKind::Undecodable,
+                    PoisonKind::RetriesExhausted,
+                ] {
+                    assert_eq!(
+                        metric_value(
+                            &rendered,
+                            "spate_s3_objects_failed_total",
+                            &[("pipeline", &pipeline), ("reason", kind.reason_label())],
+                        ),
+                        Some(0.0),
+                        "{kind:?}"
+                    );
+                }
+            }
+            objects_remaining(&rendered, &pipeline)
+        };
+        assert_eq!(run(true), 0.0, "each handed-back lane takes its count back");
+        assert_eq!(run(false), 0.0, "each retired lane takes its count back");
+    }
+
+    /// Pins that a hand-back takes its lanes' counts out of
+    /// `objects_remaining` at once, and a kept unit's at its commit.
+    #[test]
+    fn a_hand_back_settles_objects_remaining() {
+        let run = |commit: bool| {
+            let pipeline = unique_name("reader");
+            let rendered = render_local(|| {
+                let metrics =
+                    S3Metrics::new(&Meter::with_namespace("s3", pipeline.clone(), "src", "s3"));
+                let (feed, script) = scripted_feed();
+                script.hand_back_on_stop();
+                let (mut reader, _rt) = reader_over(Arc::new(feed), Some(2), Some(metrics));
+                script.deliver(descriptor_unit(0));
+                script.deliver(descriptor_unit(1));
+                start(&mut reader);
+                let lanes = partitions(&lanes_added(poll(&mut reader)));
+                reader.lanes[&lanes[0]].tracker.set_terminal(5);
+                reader.stop_reading().unwrap();
+                assert_eq!(script.handed_back().len(), 1);
+                if commit {
+                    reader.commit(&[(lanes[0], 5)]).unwrap();
+                }
+            });
+            objects_remaining(&rendered, &pipeline)
+        };
+        assert_eq!(run(false), 1.0, "the kept unit's lane");
+        assert_eq!(run(true), 0.0);
+    }
+
+    /// Pins how `stop_reading` settles each state a held unit can be in:
+    /// the sweep acknowledges what only it can, a failing unit is failed and
+    /// never handed back, an unconfirmed re-enqueue is handed back, and a
+    /// fatal answer in the sweep comes after the hand-back.
+    #[test]
+    fn stop_reading_settles_each_held_state() {
+        // A lane that emitted nothing.
+        let (mut reader, script, _rt) = stopping_reader();
+        start(&mut reader);
+        let (_, r, t) = hold_one(&mut reader, &script);
+        t.set_terminal(0);
+        reader.stop_reading().unwrap();
+        assert_eq!(script.acknowledged(), vec![r], "terminal 0");
+        assert!(script.handed_back().is_empty());
+
+        // The last watermark arrived before end-of-input.
+        let (mut reader, script, _rt) = stopping_reader();
+        start(&mut reader);
+        let (p, r, t) = hold_one(&mut reader, &script);
+        reader.commit(&[(p, 5)]).unwrap();
+        t.set_terminal(5);
+        reader.stop_reading().unwrap();
+        assert_eq!(
+            script.acknowledged(),
+            vec![r],
+            "committed before its terminal"
+        );
+
+        // A unit with nothing to read whose acknowledge was refused once.
+        let (mut reader, feed, script, _rt) = stopping_refusing();
+        *feed.acknowledge.lock().unwrap() = Some(FeedErrorKind::Retryable);
+        let test_event = br#"{"Service":"Amazon S3","Event":"s3:TestEvent","Bucket":"bucket"}"#;
+        let r = script.deliver(Unit::new("test-event", test_event.to_vec()));
+        start(&mut reader);
+        poll(&mut reader);
+        poll(&mut reader);
+        assert!(script.acknowledged().is_empty());
+        *feed.acknowledge.lock().unwrap() = None;
+        reader.stop_reading().unwrap();
+        assert_eq!(script.acknowledged(), vec![r], "nothing to read");
+        assert!(script.handed_back().is_empty());
+
+        // A poison report no poll has read.
+        let (mut reader, script, _rt) = stopping_reader();
+        let r = script.deliver(descriptor_unit(0));
+        start(&mut reader);
+        let lanes = partitions(&lanes_added(poll(&mut reader)));
+        report_poison(&reader, lanes[0]);
+        reader.stop_reading().unwrap();
+        assert_eq!(script.failed().len(), 1);
+        assert_eq!(script.failed()[0].0, r);
+        assert!(
+            script.handed_back().is_empty(),
+            "a failing unit was handed back"
+        );
+
+        // A failing unit whose fail the feed refuses for now.
+        let (mut reader, feed, script, _rt) = stopping_refusing();
+        script.deliver(descriptor_unit(0));
+        start(&mut reader);
+        let lanes = partitions(&lanes_added(poll(&mut reader)));
+        *feed.fail.lock().unwrap() = Some(FeedErrorKind::Retryable);
+        report_poison(&reader, lanes[0]);
+        reader.stop_reading().unwrap();
+        assert!(script.handed_back().is_empty());
+        assert!(reader.lanes.is_empty(), "its lane is still held");
+        assert!(reader.deliveries.is_empty(), "the unit is still held");
+
+        // An undecodable unit whose fail waits.
+        let (mut reader, feed, script, _rt) = stopping_refusing();
+        *feed.fail.lock().unwrap() = Some(FeedErrorKind::Retryable);
+        script.deliver(Unit::new("unreadable", b"not a unit".to_vec()));
+        start(&mut reader);
+        poll(&mut reader);
+        *feed.fail.lock().unwrap() = None;
+        reader.stop_reading().unwrap();
+        assert_eq!(script.failed().len(), 1);
+        assert!(script.handed_back().is_empty());
+        assert!(reader.unsent_fails.is_empty());
+
+        // A re-enqueue the feed has not confirmed.
+        let (mut reader, script, _rt) = stopping_reader();
+        script.hold_publishes();
+        let (r, lanes) = open_notification(&mut reader, &script, &[("a.ndjson", 10)], 0);
+        report_overwrite(&reader, lanes[0], "a.ndjson", 20);
+        poll(&mut reader);
+        finish(&mut reader, lanes[0], 3);
+        reader.stop_reading().unwrap();
+        assert_eq!(script.handed_back(), vec![r]);
+        assert!(script.acknowledged().is_empty());
+
+        // One id delivered twice, read to its end once.
+        for lapsed in [false, true] {
+            let (mut reader, script, _rt) = stopping_reader();
+            start(&mut reader);
+            let (_, first, t) = hold_one(&mut reader, &script);
+            let (_, second, _) = hold_one(&mut reader, &script);
+            t.set_terminal(3);
+            if lapsed {
+                script.redeliver(first);
+            }
+            reader.stop_reading().unwrap();
+            assert_eq!(script.handed_back(), vec![second]);
+            if lapsed {
+                assert!(script.gone().contains(&first));
+            } else {
+                assert_eq!(script.held(), vec![first]);
+            }
+        }
+
+        // A fatal acknowledge in the sweep, after the hand-back.
+        let (mut reader, feed, script, _rt) = stopping_refusing();
+        start(&mut reader);
+        let (_, _, t) = hold_one(&mut reader, &script);
+        let (_, unread, _) = hold_one(&mut reader, &script);
+        t.set_terminal(0);
+        *feed.acknowledge.lock().unwrap() = Some(FeedErrorKind::Fatal);
+        assert!(reader.stop_reading().is_err());
+        assert_eq!(script.handed_back(), vec![unread]);
+    }
+
+    /// Pins that `stop_reading` renews each kept unit once and no unit it
+    /// hands back.
+    #[test]
+    fn a_kept_unit_is_renewed_once_at_the_hand_back() {
+        let (mut reader, script, _rt) = stopping_reader();
+        start(&mut reader);
+        let (_, kept, t) = hold_one(&mut reader, &script);
+        hold_one(&mut reader, &script);
+        t.set_terminal(3);
+        reader.stop_reading().unwrap();
+        assert_eq!(script.renewed(), vec![kept]);
+    }
+
+    /// Pins that a stopping reader opens a held unit's pending ranges into
+    /// the room its finished ranges leave, receives nothing, and reads on
+    /// until the last range ends; and that `stop_reading` hands back a unit
+    /// with ranges still pending.
+    #[test]
+    fn a_unit_cut_into_more_ranges_than_units_held_opens_its_ranges_while_stopping() {
+        let (mut reader, script, _rt) = stopping_reader_holding(1);
+        let receipt = script.deliver(ranged_unit("a", 3));
+        script.deliver(descriptor_unit(0));
+        start(&mut reader);
+        let mut lane = partitions(&lanes_added(poll(&mut reader)))[0];
+        for range in 0..3 {
+            assert!(reader.reading_on_stop(), "range {range}");
+            finish(&mut reader, lane, 3);
+            lanes_retired(poll(&mut reader));
+            if range < 2 {
+                lane = partitions(&lanes_added(poll(&mut reader)))[0];
+            }
+        }
+        assert_eq!(script.acknowledged(), vec![receipt]);
+        assert!(!reader.reading_on_stop());
+        assert_eq!(script.delivered().len(), 1, "received while stopping");
+
+        let pipeline = unique_name("reader");
+        let rendered = render_local(|| {
+            let metrics =
+                S3Metrics::new(&Meter::with_namespace("s3", pipeline.clone(), "src", "s3"));
+            let (feed, script) = scripted_feed();
+            script.hand_back_on_stop();
+            let (mut reader, _rt) = reader_over(Arc::new(feed), Some(1), Some(metrics));
+            let receipt = script.deliver(ranged_unit("a", 3));
+            start(&mut reader);
+            lanes_added(poll(&mut reader));
+            reader.stop_reading().unwrap();
+            assert_eq!(script.handed_back(), vec![receipt]);
+            assert_eq!(lanes_revoked(poll(&mut reader)).len(), 1);
+            assert_idle(poll(&mut reader));
+        });
+        assert_eq!(objects_remaining(&rendered, &pipeline), 0.0);
+    }
+
+    /// Pins that `reading_on_stop` reads on for a unit whose lane reported an
+    /// overwrite and then decided end-of-input since the last poll, so the
+    /// stop waits for the re-enqueue to confirm.
+    #[test]
+    fn reading_on_stop_reads_an_overwrite_sent_before_the_terminal() {
+        let (mut reader, script, _rt) = stopping_reader();
+        script.hold_publishes();
+        let (r, lanes) = open_notification(&mut reader, &script, &[("a.ndjson", 10)], 0);
+        report_overwrite(&reader, lanes[0], "a.ndjson", 20);
+        reader.lanes[&lanes[0]].tracker.set_terminal(3);
+        assert!(reader.reading_on_stop(), "its re-enqueue is unconfirmed");
+        assert_eq!(script.published().len(), 1);
+        script.confirm_held_publishes();
+        reader.commit(&[(lanes[0], 3)]).unwrap();
+        poll(&mut reader);
+        assert!(!reader.reading_on_stop());
+        reader.stop_reading().unwrap();
+        assert_eq!(script.acknowledged(), vec![r]);
+        assert!(script.handed_back().is_empty());
+    }
+
+    /// Pins that a fatal answer to a re-enqueue that the stop reads first
+    /// fails `stop_reading`, after the unit is handed back.
+    #[test]
+    fn a_fatal_re_enqueue_read_at_the_stop_fails_stop_reading() {
+        let (mut reader, script, _rt) = stopping_reader();
+        script.refuse_next_publish(FeedErrorKind::Fatal);
+        let (r, lanes) = open_notification(&mut reader, &script, &[("a.ndjson", 10)], 0);
+        report_overwrite(&reader, lanes[0], "a.ndjson", 20);
+        let outcome = reader.stop_reading();
+        assert_eq!(script.published().len(), 1, "the re-enqueue was published");
+        assert_eq!(script.handed_back(), vec![r]);
+        let Err(SourceError::Client { reason, .. }) = outcome else {
+            panic!("a fatal re-enqueue at the stop did not fail the call: {outcome:?}");
+        };
+        assert!(reason.contains("re-enqueueing"), "{reason}");
+    }
+
+    /// Pins that a unit whose hand-back the feed answers `Gone` is let go in
+    /// the hand-back and its lane revoked, though the feed still renews it.
+    #[test]
+    fn a_hand_back_answered_gone_lets_the_unit_go() {
+        let (mut reader, feed, script, _rt) = stopping_refusing();
+        start(&mut reader);
+        let (p, first, _) = hold_one(&mut reader, &script);
+        *feed.hand_back.lock().unwrap() = Some((first, FeedErrorKind::Gone));
+        reader.stop_reading().unwrap();
+        assert!(reader.deliveries.is_empty(), "the unit is still held");
+        assert!(!reader.lanes.contains_key(&p), "its lane is still held");
+        assert_eq!(lanes_revoked(poll(&mut reader)).len(), 1);
+    }
+
+    /// Pins that the stop's log counts as kept only the units held for the
+    /// final commit: no failing unit, and no unit its renewal at the stop
+    /// lets go.
+    #[test]
+    fn the_stop_counts_as_kept_only_units_held_for_the_final_commit() {
+        let (mut reader, script, _rt) = stopping_reader_holding(2);
+        script.deliver(descriptor_unit(0));
+        script.deliver(descriptor_unit(1));
+        start(&mut reader);
+        let lanes = partitions(&lanes_added(poll(&mut reader)));
+        reader.lanes[&lanes[0]].tracker.set_terminal(5);
+        report_poison(&reader, lanes[1]);
+        let logs = spate_test::capture_logs(tracing::Level::INFO, || {
+            reader.stop_reading().unwrap();
+        });
+        assert_eq!(script.failed().len(), 1);
+        assert!(script.handed_back().is_empty());
+        assert!(
+            logs.iter()
+                .any(|l| l.contains("kept=1") && l.contains("handed_back=0")),
+            "a failing unit counted: {logs:?}"
+        );
+
+        let (mut reader, script, _rt) = stopping_reader();
+        start(&mut reader);
+        let (_, a, ta) = hold_one(&mut reader, &script);
+        ta.set_terminal(5);
+        script.redeliver(a);
+        let logs = spate_test::capture_logs(tracing::Level::INFO, || {
+            reader.stop_reading().unwrap();
+        });
+        assert!(script.gone().contains(&a), "the renewal was answered Gone");
+        assert!(reader.deliveries.is_empty(), "the unit was let go");
+        assert!(
+            logs.iter()
+                .any(|l| l.contains("kept=0") && l.contains("handed_back=0")),
+            "a unit let go counted: {logs:?}"
+        );
     }
 
     // ------------------------------------------------------ overwrites --

@@ -343,9 +343,10 @@ code. On the
 in-process feed the run lists the prefix itself; see
 [A solo run on the in-process feed](#a-solo-run-on-the-in-process-feed). Every delivery is
 read in full, resuming from no earlier delivery, and the unit is acknowledged
-once the sink has acknowledged every record in it. A notification unit whose
-object is overwritten while it is read is the exception, as
-[Reading a notification's object](#reading-a-notifications-object) describes.
+once the sink has acknowledged every record in it. Two units are the
+exceptions: a notification unit whose object is overwritten while it is read,
+as [Reading a notification's object](#reading-a-notifications-object)
+describes, and a unit handed back at a [graceful stop](#a-graceful-stop).
 
 ```yaml
 feed:
@@ -379,7 +380,7 @@ folder marker `dir/`, gets none.
 Each range in progress takes one slot of `units_held`. Deliveries received
 alongside a large object wait until all of its ranges have opened, and the
 deliveries held stay at or below `units_held`. A waiting delivery is held
-unread. SQS ends every hold 12 hours after the receive, so a delivery still
+unread, and a stop on a feed that hands back hands it back unread. SQS ends every hold 12 hours after the receive, so a delivery still
 waiting then goes back to the queue unread, one receive closer to
 `maxReceiveCount`. On Kafka a waiting delivery's offset holds back its
 partition's commit point.
@@ -399,6 +400,27 @@ run given a `MemoryFeed` in code, and any job on a durable feed with no
 `location`, ends at a shutdown. A lister run ends once it has published the
 listing. Without a `feed:` section the source plans
 splits as described above.
+
+### A graceful stop
+
+On a graceful stop with a feed that
+[hands back](../../../07-reference/glossary.mdx#hand-back), the source receives
+no more units. It keeps reading and renewing the units it holds, and opens
+their remaining byte ranges as `units_held` allows, until each is read to its
+end or until 5s before the drain deadline. A unit is read to its end once every
+part and range has opened and reached its end of input, with no object failure
+and no re-enqueue the feed has yet to confirm. Such a unit stays held and is
+acknowledged once the sink has acknowledged every record in it.
+
+The source then hands back every other unit it holds, including a delivery
+still waiting for its ranges to open. Another instance reads a handed-back unit
+from its start, so records read from it before the stop reach the sink twice.
+A unit with an object failure is failed back to the feed. A failed run hands
+back at once, with no reading.
+[Graceful shutdown](../../../03-guides/graceful-shutdown.mdx#the-drain-choreography)
+describes the drain around it. None of the built-in
+[feeds](../../feeds/README.mdx) hands back, so on each of them the source
+starts the drain at once.
 
 ### A solo run on the in-process feed
 

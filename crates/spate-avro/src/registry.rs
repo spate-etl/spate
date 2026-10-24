@@ -33,6 +33,7 @@
 use crate::cache::{CompiledSchema, Lookup, SchemaCache};
 use crate::config::AvroConfigError;
 use reqwest::{StatusCode, Url};
+use rustls::crypto::aws_lc_rs;
 use rustls::pki_types::CertificateDer;
 use rustls::pki_types::pem::PemObject;
 use rustls::{AlertDescription, CertificateError, ClientConfig, RootCertStore};
@@ -420,7 +421,7 @@ fn root_store(system: impl FnOnce() -> CertificateResult) -> RootCertStore {
 fn client_config(roots: RootCertStore) -> ClientConfig {
     // rustls has no process-wide default provider when a build enables both
     // `ring` and `aws-lc-rs`.
-    ClientConfig::builder_with_provider(Arc::new(rustls::crypto::aws_lc_rs::default_provider()))
+    ClientConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
         .with_safe_default_protocol_versions()
         .expect("aws-lc-rs supports rustls's default protocol versions")
         .with_root_certificates(roots)
@@ -679,6 +680,7 @@ mod tests {
     use super::*;
     use http_body_util::Full;
     use hyper::body::Bytes;
+    use hyper::server::conn::http1;
     use spate_test_support::{TestCa, native_certs, pem};
 
     const SCHEMA: &str = r#"{"type":"record","name":"E","fields":[{"name":"id","type":"long"}]}"#;
@@ -703,7 +705,7 @@ mod tests {
                     let body = Full::new(Bytes::from(body.clone()));
                     async move { Ok::<_, std::convert::Infallible>(hyper::Response::new(body)) }
                 });
-                let _ = hyper::server::conn::http1::Builder::new()
+                let _ = http1::Builder::new()
                     .serve_connection(hyper_util::rt::TokioIo::new(tls), respond)
                     .await;
             }

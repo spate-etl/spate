@@ -20,6 +20,7 @@ use spate_core::deser::{Deserializer, EmitRecord};
 use spate_core::record::{Flow, Record};
 use spate_test::raw_payload;
 use std::collections::HashMap;
+use std::f32::consts::PI;
 use std::fmt::Debug;
 
 struct Collected<T>(Vec<Record<T>>);
@@ -298,7 +299,7 @@ fn scalars_fixed_enum_and_logical_types_are_identical() {
         ("b".into(), Value::Boolean(true)),
         ("i".into(), Value::Int(-42)),
         ("l".into(), Value::Long(i64::MIN)),
-        ("f".into(), Value::Float(std::f32::consts::PI)),
+        ("f".into(), Value::Float(PI)),
         ("d".into(), Value::Double(f64::NAN)),
         ("s".into(), Value::String("héllo → wörld".into())),
         ("by".into(), Value::Bytes(vec![0, 255, 128])),

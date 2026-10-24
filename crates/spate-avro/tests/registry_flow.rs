@@ -9,6 +9,7 @@ use apache_avro::Schema;
 use apache_avro::to_avro_datum;
 use http_body_util::Full;
 use hyper::body::Bytes;
+use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use spate_avro::{AvroDeserializerBuilder, AvroMode, AvroSettings, AvroValue, RegistrySection};
@@ -126,9 +127,7 @@ impl StubRegistry {
                             )
                         }
                     });
-                    let _ = hyper::server::conn::http1::Builder::new()
-                        .serve_connection(io, service)
-                        .await;
+                    let _ = http1::Builder::new().serve_connection(io, service).await;
                 });
             }
         });
@@ -730,7 +729,7 @@ async fn serve_recording() -> (std::net::SocketAddr, Seen) {
                         ))))
                     }
                 });
-                let _ = hyper::server::conn::http1::Builder::new()
+                let _ = http1::Builder::new()
                     .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
                     .await;
             });

@@ -909,8 +909,8 @@ impl Feed for SqsFeed {
     /// unit just handed back, it waits up to a second after the last
     /// hand-back for that receive, and hands back what it took. The
     /// confirmation is rejected when an entry was given up unapplied, and
-    /// with the feed's Fatal error once it has stopped. `None` once
-    /// [`abandon`](SqsFeed::abandon)ed.
+    /// with the feed's Fatal error once it has stopped. `None` after the
+    /// test-only `abandon`.
     fn close(&self, within: Duration) -> Option<Confirmation> {
         let (confirmer, confirmation) = confirmation();
         {

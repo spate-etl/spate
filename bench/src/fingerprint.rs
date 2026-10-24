@@ -64,6 +64,7 @@
 //! correct answer in both cases.
 
 use std::collections::BTreeMap;
+use std::env::consts::{ARCH, OS};
 
 use serde::{Deserialize, Serialize};
 
@@ -272,7 +273,7 @@ impl Host {
     #[must_use]
     pub fn detect() -> Self {
         Self {
-            os: format!("{}/{}", std::env::consts::OS, std::env::consts::ARCH),
+            os: format!("{}/{}", OS, ARCH),
             cpu: cpu_brand(),
             cores: std::thread::available_parallelism().map_or(0, std::num::NonZeroUsize::get),
             label: std::env::var("SPATE_BENCH_HOST").unwrap_or_else(|_| "local".to_owned()),

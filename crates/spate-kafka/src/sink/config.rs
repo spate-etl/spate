@@ -583,6 +583,7 @@ pub fn build(cfg: KafkaSinkConfig) -> Result<KafkaSink, ConfigError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::security::tests::assert_ca_cases;
 
     fn section(body: &str) -> ComponentConfig {
         spate_test::component_config("kafka", body)
@@ -870,7 +871,7 @@ mod tests {
     /// override, and keep a named CA as given. Regression for #825.
     #[test]
     fn sink_ca_default_reads_the_openssl_environment() {
-        crate::security::tests::assert_ca_cases(
+        assert_ca_cases(
             "sink::config::tests::sink_ca_default_reads_the_openssl_environment",
             |rdkafka| {
                 let mut cfg = KafkaSinkConfig::new("localhost:9092", "orders");

@@ -339,6 +339,7 @@ impl KafkaSourceConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::security::tests::assert_ca_cases;
     use spate_core::config::ComponentConfig;
 
     fn section(body: &str) -> ComponentConfig {
@@ -671,7 +672,7 @@ mod tests {
     /// keeps a named CA as given. Regression for #825.
     #[test]
     fn source_ca_default_reads_the_openssl_environment() {
-        crate::security::tests::assert_ca_cases(
+        assert_ca_cases(
             "config::tests::source_ca_default_reads_the_openssl_environment",
             |rdkafka| {
                 let mut cfg = KafkaSourceConfig::new("localhost:9092", "orders", "spate");

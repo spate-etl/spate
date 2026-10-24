@@ -393,6 +393,7 @@ pub(crate) fn report_class(code: Option<RDKafkaErrorCode>) -> ErrorClass {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sink::frame::write_message;
 
     fn test_writer(statistics_enabled: bool) -> KafkaWriter {
         KafkaWriter::new(
@@ -537,8 +538,7 @@ mod tests {
     fn parse_messages_rejects_row_count_mismatch() {
         use bytes::BytesMut;
         let mut frame = BytesMut::new();
-        crate::sink::frame::write_message(&mut frame, None, std::iter::empty(), Some(b"p"))
-            .unwrap();
+        write_message(&mut frame, None, std::iter::empty(), Some(b"p")).unwrap();
         let batch = SealedBatch {
             frames: vec![frame.freeze()],
             rows: 2, // claims two, frame holds one
@@ -582,8 +582,7 @@ mod tests {
 
         fn one_row() -> SealedBatch {
             let mut frame = bytes::BytesMut::new();
-            crate::sink::frame::write_message(&mut frame, None, std::iter::empty(), Some(b"p"))
-                .unwrap();
+            write_message(&mut frame, None, std::iter::empty(), Some(b"p")).unwrap();
             SealedBatch {
                 frames: vec![frame.freeze()],
                 rows: 1,

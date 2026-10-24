@@ -18,6 +18,7 @@ use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::client::DefaultClientContext;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use spate_core::clock::TestClock as StopClock;
+use spate_core::clock::tokio::TestClock;
 use spate_core::feed::STOP_RESERVE;
 use spate_core::pipeline::ExitState;
 use spate_kafka::feed::{KafkaFeed, KafkaFeedError, KafkaFeedPublisher};
@@ -659,7 +660,7 @@ fn a_dead_letter_topic_entry_ends_the_job_stalled() {
     list_once(publisher_on(&section), &data, &section);
     produce_raw(&brokers, WORK, &[(None, b"keyless")]);
 
-    let clock = spate_core::clock::tokio::TestClock::frozen();
+    let clock = TestClock::frozen();
     let worker = launch_bounded(KafkaFeed::connect, &data, &section, &clock);
     wait_until(
         DEADLINE,
@@ -719,8 +720,8 @@ fn a_bounded_job_ends_once_every_workers_partitions_are_committed() {
         "the units span both partitions"
     );
 
-    let clock_a = spate_core::clock::tokio::TestClock::frozen();
-    let clock_b = spate_core::clock::tokio::TestClock::frozen();
+    let clock_a = TestClock::frozen();
+    let clock_b = TestClock::frozen();
     let a = launch_bounded(KafkaFeed::connect, &data, &section, &clock_a);
     let b = launch_bounded(KafkaFeed::connect, &data, &section, &clock_b);
     wait_until(DEADLINE, "every row is written once between them", || {

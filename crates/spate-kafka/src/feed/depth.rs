@@ -310,6 +310,8 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc;
 
     /// Offsets per partition, scripted, and every call in order.
     #[derive(Default)]
@@ -390,7 +392,7 @@ mod tests {
 
     /// Counts the times `run` serves the client.
     #[derive(Default)]
-    struct Serving(std::sync::atomic::AtomicUsize);
+    struct Serving(AtomicUsize);
 
     impl Offsets for Serving {
         fn partitions(&self, _: &Arc<str>) -> Result<Vec<i32>, FeedError> {
@@ -403,7 +405,7 @@ mod tests {
             Ok(Vec::new())
         }
         fn serve(&self) {
-            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.0.fetch_add(1, Ordering::SeqCst);
         }
     }
 
@@ -421,14 +423,14 @@ mod tests {
         let config = crate::feed::KafkaFeedConfig::from_section(&section).unwrap();
         let core = Core::new(&config, std::num::NonZeroU32::MIN);
         let serving = Serving::default();
-        let (requests, received) = std::sync::mpsc::channel::<(DepthOf, DepthReporter)>();
+        let (requests, received) = mpsc::channel::<(DepthOf, DepthReporter)>();
         std::thread::scope(|s| {
             let (core, serving) = (&core, &serving);
             s.spawn(move || run(core, serving, &received));
             spate_test::wait_until(
                 std::time::Duration::from_secs(10),
                 "the client is served",
-                || serving.0.load(std::sync::atomic::Ordering::SeqCst) > 0,
+                || serving.0.load(Ordering::SeqCst) > 0,
             );
             drop(requests);
         });
@@ -449,7 +451,7 @@ mod tests {
         let (waker, park) = spate_core::feed::wake_channel();
         core.lock().waker = Some(waker);
         let offsets = Scripted::default().topic("units-dead", &[(0, Offset::Invalid, 0, 0)]);
-        let (requests, received) = std::sync::mpsc::channel();
+        let (requests, received) = mpsc::channel();
         let (reporter, mut reading) = spate_core::feed::depth_reading();
         requests.send((DepthOf::DeadLetters, reporter)).unwrap();
         drop(requests);
@@ -686,9 +688,9 @@ mod tests {
         .unwrap();
         let config = crate::feed::KafkaFeedConfig::from_section(&section).unwrap();
         let core = Core::new(&config, std::num::NonZeroU32::MIN);
-        core.stop.store(true, std::sync::atomic::Ordering::Release);
+        core.stop.store(true, Ordering::Release);
         let offsets = Scripted::default().topic("units-dead", &[(0, Offset::Invalid, 0, 0)]);
-        let (requests, received) = std::sync::mpsc::channel();
+        let (requests, received) = mpsc::channel();
         let (reporter, mut reading) = spate_core::feed::depth_reading();
         requests.send((DepthOf::DeadLetters, reporter)).unwrap();
         drop(requests);
@@ -712,7 +714,7 @@ mod tests {
         let core = Core::new(&config, std::num::NonZeroU32::MIN);
         core.latch("the broker rejected the credential");
         let offsets = Scripted::default().topic("units-dead", &[(0, Offset::Invalid, 0, 0)]);
-        let (requests, received) = std::sync::mpsc::channel();
+        let (requests, received) = mpsc::channel();
         let (reporter, mut reading) = spate_core::feed::depth_reading();
         requests.send((DepthOf::DeadLetters, reporter)).unwrap();
         drop(requests);

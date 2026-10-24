@@ -26,6 +26,8 @@ use rdkafka::producer::Producer as _;
 use rdkafka::{Offset, TopicPartitionList};
 use spate_core::error::ErrorClass;
 use std::collections::BTreeSet;
+#[cfg(test)]
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -268,9 +270,7 @@ impl Gate {
             return Ok(Read::Late);
         }
         #[cfg(test)]
-        self.core
-            .gate_reads
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.core.gate_reads.fetch_add(1, Ordering::SeqCst);
         let (lwm, hwm) = match self.producer.client().fetch_watermarks(
             &self.core.topics.attempt,
             partition,
@@ -288,9 +288,7 @@ impl Gate {
                 return Ok(Read::Late);
             }
             #[cfg(test)]
-            self.core
-                .gate_reads
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.core.gate_reads.fetch_add(1, Ordering::SeqCst);
             *mark = match self.list_offset(partition, at) {
                 Ok(offset) => offset,
                 Err(e) => return self.failed(partition, &e),
@@ -486,6 +484,7 @@ mod tests {
     use rdkafka::config::FromClientConfigAndContext;
     use rdkafka::error::RDKafkaErrorCode as C;
     use std::num::NonZeroU32;
+    use std::sync::mpsc;
 
     /// Pins that the wait after a pass that put units back is skipped on a
     /// feed that stopped or latched before the wait began, whose notify has
@@ -513,7 +512,7 @@ mod tests {
             } else {
                 drop(core.latch("probe"));
             }
-            let (tx, rx) = std::sync::mpsc::channel();
+            let (tx, rx) = mpsc::channel();
             std::thread::spawn(move || {
                 gate.rest();
                 let _ = tx.send(());

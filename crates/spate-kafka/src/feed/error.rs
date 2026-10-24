@@ -32,6 +32,7 @@ pub enum KafkaFeedError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::feed::config::KafkaFeedConfig;
     use spate_core::config::FeedSection;
 
     /// Pins that a config error converts with its text unchanged, and the
@@ -39,7 +40,7 @@ mod tests {
     #[test]
     fn each_error_renders_its_cause() {
         let section: FeedSection = serde_yaml::from_str("memory: {}").unwrap();
-        let config = crate::feed::config::KafkaFeedConfig::from_section(&section).unwrap_err();
+        let config = KafkaFeedConfig::from_section(&section).unwrap_err();
         let text = config.to_string();
         let err: KafkaFeedError = config.into();
         assert!(matches!(err, KafkaFeedError::Config(_)));

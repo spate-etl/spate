@@ -13,6 +13,8 @@ use spate_core::checkpoint::Checkpointer;
 use spate_core::source::{Source, SourceCtx, SourceEvent, SourceLane};
 use spate_kafka::{KafkaSource, KafkaSourceConfig};
 use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use support::{await_assignment, broker, drain_lane, produce};
 use testcontainers::runners::SyncRunner;
@@ -119,7 +121,7 @@ fn real_broker_revocation_commit_persists_revoked_offsets() {
 
     // A second member joins, forcing an eager revoke.
     let brokers2 = brokers.clone();
-    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop = Arc::new(AtomicBool::new(false));
     let stop2 = std::sync::Arc::clone(&stop);
     let joiner = std::thread::spawn(move || {
         let c: BaseConsumer = ClientConfig::new()
@@ -129,7 +131,7 @@ fn real_broker_revocation_commit_persists_revoked_offsets() {
             .create()
             .expect("second consumer");
         c.subscribe(&[TOPIC]).expect("subscribe");
-        while !stop2.load(std::sync::atomic::Ordering::Relaxed) {
+        while !stop2.load(Ordering::Relaxed) {
             let _ = c.poll(Duration::from_millis(100));
         }
     });
@@ -182,7 +184,7 @@ fn real_broker_revocation_commit_persists_revoked_offsets() {
         },
     );
 
-    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    stop.store(true, Ordering::Relaxed);
     joiner.join().expect("joiner thread");
 }
 

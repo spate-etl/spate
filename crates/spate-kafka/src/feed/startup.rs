@@ -27,10 +27,12 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::num::NonZeroU32;
 use std::pin::Pin;
+use std::sync::mpsc;
 use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::task::Poll;
 use std::time::{Duration, Instant};
+use tokio::sync::oneshot;
 
 /// How long the checks may take, every step included.
 pub(crate) const CONNECT_BOUND: Duration = Duration::from_secs(30);
@@ -134,7 +136,7 @@ impl TopicAdmin for Brokers {
         }
         let reader = Arc::clone(&self.reader);
         let name = topic.to_owned();
-        let (tx, rx) = tokio::sync::oneshot::channel();
+        let (tx, rx) = oneshot::channel();
         // `fetch_metadata` blocks, so it runs on a thread of its own, which
         // ends with the read at most `CONNECT_BOUND` later even when the
         // connect bound has already passed.
@@ -443,9 +445,9 @@ pub(crate) async fn bounded<T>(
     checks: impl Future<Output = Result<T, KafkaFeedError>>,
 ) -> Result<T, KafkaFeedError> {
     // `Some` carries a rejection's text, `None` the bound passing.
-    let (fire, mut fired) = tokio::sync::oneshot::channel::<Option<String>>();
+    let (fire, mut fired) = oneshot::channel::<Option<String>>();
     // Held until `checks` ends: dropping it ends the timing thread.
-    let (_finished, done) = std::sync::mpsc::channel::<()>();
+    let (_finished, done) = mpsc::channel::<()>();
     let deadline = Instant::now() + limit;
     std::thread::Builder::new()
         .name("spate-kafka-feed-bound".to_owned())
@@ -489,6 +491,7 @@ pub(crate) async fn bounded<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::feed::config::KafkaFeedConfig;
     use RDKafkaErrorCode as C;
 
     const WORK: &str = "units";
@@ -619,13 +622,13 @@ mod tests {
     }
 
     /// The section the topics above come from.
-    fn config() -> crate::feed::config::KafkaFeedConfig {
+    fn config() -> KafkaFeedConfig {
         let section = serde_yaml::from_str(&format!(
             "kafka:\n  brokers: localhost:9092\n  group_id: workers\n  topic: {WORK}\n  \
              retry_topic: {RETRY}\n  dead_letter_topic: {DEAD}\n  attempt_topic: {ATTEMPTS}\n"
         ))
         .unwrap();
-        crate::feed::config::KafkaFeedConfig::from_section(&section).unwrap()
+        KafkaFeedConfig::from_section(&section).unwrap()
     }
 
     fn run(admin: &Scripted) -> Result<Checked, KafkaFeedError> {
@@ -940,7 +943,7 @@ mod tests {
         limit: Duration,
         rejection: Option<&'static str>,
     ) -> Option<Result<Checked, KafkaFeedError>> {
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             let admin = Scripted {
                 hangs: Some(hangs),
@@ -1137,7 +1140,7 @@ mod tests {
              statistics_interval: 0s\n  rdkafka:\n{rdkafka}"
         ))
         .unwrap();
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             let io = multi_thread();
             let _ = tx.send(connect(&section, io.handle(), limit));

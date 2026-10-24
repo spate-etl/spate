@@ -11,6 +11,7 @@ mod support;
 use rdkafka::mocking::{MockCluster, MockCoordinator};
 use rdkafka::types::RDKafkaRespErr;
 use spate_core::clock::TestClock as StopClock;
+use spate_core::clock::tokio::TestClock;
 use spate_core::feed::{Depth, DepthOf, Feed, FeedError, FeedErrorKind, Receipt, Unit};
 use spate_core::pipeline::ExitState;
 use spate_kafka::feed::KafkaFeedError;
@@ -917,7 +918,7 @@ fn a_bounded_job_on_kafka_ends_completed() {
     let section = bounded_section(&brokers, &group, &dir);
     list_once(publisher_on_mock(&section), &data, &section);
 
-    let clock = spate_core::clock::tokio::TestClock::frozen();
+    let clock = TestClock::frozen();
     let worker = launch_bounded(ON_MOCK, &data, &section, &clock);
     wait_until(DEADLINE, "the unit is read and committed", || {
         written(&worker.script) == sorted(rows.clone())
@@ -940,7 +941,7 @@ fn a_bounded_job_that_published_nothing_ends_completed() {
     let section = bounded_section(&brokers, &group, &dir);
     list_once(publisher_on_mock(&section), &data, &section);
 
-    let clock = spate_core::clock::tokio::TestClock::frozen();
+    let clock = TestClock::frozen();
     let worker = launch_bounded(ON_MOCK, &data, &section, &clock);
     let report = run_to_exit(&worker, &clock);
     assert_eq!(report.state, ExitState::Completed);
@@ -959,7 +960,7 @@ fn a_message_with_no_unit_ends_a_bounded_job_stalled() {
     list_once(publisher_on_mock(&section), &data, &section);
     produce_raw(&brokers, WORK, &[(None, b"keyless")]);
 
-    let clock = spate_core::clock::tokio::TestClock::frozen();
+    let clock = TestClock::frozen();
     let worker = launch_bounded(ON_MOCK, &data, &section, &clock);
     wait_until(
         DEADLINE,

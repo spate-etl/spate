@@ -12,6 +12,7 @@ use rdkafka::message::{Headers, Message};
 use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
 use rdkafka::{Offset, TopicPartitionList};
 use spate_core::clock::TestClock as StopClock;
+use spate_core::clock::tokio::TestClock;
 use spate_core::config::{FeedSection, PipelineConfig};
 use spate_core::feed::{
     Confirmation, Delivery, DepthOf, DepthReading, Feed, FeedError, FeedErrorKind, FeedWaker,
@@ -713,7 +714,7 @@ pub(crate) fn launch_bounded(
     connect: Connect,
     data: &Path,
     section_yaml: &str,
-    clock: &Arc<spate_core::clock::tokio::TestClock>,
+    clock: &Arc<TestClock>,
 ) -> Worker {
     let source = format!("  s3:\n    url: \"file://{}/\"\n", data.display());
     let clock = Arc::clone(clock);
@@ -791,10 +792,7 @@ fn stage_with_etag(data: &Path, name: &str, rows: &[String]) -> Unit {
 /// # Panics
 ///
 /// When the worker has not exited after 80 steps.
-pub(crate) fn run_to_exit(
-    worker: &Worker,
-    clock: &spate_core::clock::tokio::TestClock,
-) -> spate_core::pipeline::ExitReport {
+pub(crate) fn run_to_exit(worker: &Worker, clock: &TestClock) -> spate_core::pipeline::ExitReport {
     for _ in 0..80 {
         let reads = worker.recording.depth_reads();
         clock.advance(STEP);

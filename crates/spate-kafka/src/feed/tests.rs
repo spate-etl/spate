@@ -25,6 +25,7 @@ use spate_core::feed::{Feed, FeedError, FeedErrorKind, Receipt, Unit, confirmati
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 /// The attempt topic's partition count in these tests.
@@ -666,7 +667,7 @@ fn an_inline_fatal_enqueue_settles_without_deadlock() {
     // fatal error and the poll thread reporting it.
     let fresh = Arc::new(Core::new(&config, TWO));
     let (core, sender) = (Arc::clone(&fresh), Arc::clone(&producer));
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         let mut confirmation =
             super::publish_unit(&core, &sender, &Unit::new("u", b"body".to_vec()));
@@ -1153,7 +1154,7 @@ fn a_replaced_copy_at_the_gate_leaves_the_buffer_count() {
 /// Run `f` on a thread of its own and report whether it returned within
 /// `limit`.
 fn returns_within(limit: Duration, f: impl FnOnce() + Send + 'static) -> bool {
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         f();
         let _ = tx.send(());
@@ -1355,7 +1356,7 @@ fn a_feed_that_ends_during_a_pass_ends_it_before_the_next_read() {
         }
         let gate = super::gate::Gate::new(Arc::clone(&core), producer, config.delivery_timeout)
             .with_step(STEP);
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             gate.pass();
             let _ = tx.send(());
@@ -1542,6 +1543,8 @@ mod cluster {
     use super::super::consumer::{self, Driver, POLL_BATCH};
     use super::super::gate::Gate;
     use super::super::inflight::Tp;
+    use super::super::producer::FeedProducerContext;
+    use super::super::startup::{CONNECT_BOUND, Scope};
     use super::super::write::Producer;
     use super::super::{Core, Gating, KafkaFeed, READY_CAPACITY};
     use super::{TWO, returns_within};
@@ -1556,6 +1559,8 @@ mod cluster {
     use spate_test::wait_until;
     use std::collections::BTreeSet;
     use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+    use std::sync::mpsc;
     use std::thread::JoinHandle;
     use std::time::Duration;
 
@@ -1590,8 +1595,8 @@ mod cluster {
         KafkaFeed::connect_with(
             &section(brokers, group),
             io.handle(),
-            crate::feed::startup::Scope::Existence,
-            crate::feed::startup::CONNECT_BOUND,
+            Scope::Existence,
+            CONNECT_BOUND,
         )
         .unwrap()
     }
@@ -2268,7 +2273,7 @@ mod cluster {
         let producer: Producer =
             rdkafka::config::FromClientConfigAndContext::from_config_and_context(
                 &config.producer_config(false),
-                crate::feed::producer::FeedProducerContext::new(Arc::clone(&core)),
+                FeedProducerContext::new(Arc::clone(&core)),
             )
             .unwrap();
         {
@@ -2320,7 +2325,7 @@ mod cluster {
         let producer: Producer =
             rdkafka::config::FromClientConfigAndContext::from_config_and_context(
                 &config.producer_config(false),
-                crate::feed::producer::FeedProducerContext::new(Arc::clone(&core)),
+                FeedProducerContext::new(Arc::clone(&core)),
             )
             .unwrap();
         {
@@ -2378,7 +2383,7 @@ mod cluster {
         let producer: Producer =
             rdkafka::config::FromClientConfigAndContext::from_config_and_context(
                 &config.producer_config(false),
-                crate::feed::producer::FeedProducerContext::new(Arc::clone(&core)),
+                FeedProducerContext::new(Arc::clone(&core)),
             )
             .unwrap();
         let on = |partition| {
@@ -2432,7 +2437,7 @@ mod cluster {
         let producer: Producer =
             rdkafka::config::FromClientConfigAndContext::from_config_and_context(
                 &config.producer_config(false),
-                crate::feed::producer::FeedProducerContext::new(Arc::clone(&core)),
+                FeedProducerContext::new(Arc::clone(&core)),
             )
             .unwrap();
         let on = |partition| {
@@ -2493,7 +2498,7 @@ mod cluster {
         let producer: Producer =
             rdkafka::config::FromClientConfigAndContext::from_config_and_context(
                 &config.producer_config(false),
-                crate::feed::producer::FeedProducerContext::new(Arc::clone(&core)),
+                FeedProducerContext::new(Arc::clone(&core)),
             )
             .unwrap();
         let offset = (0..)
@@ -2557,7 +2562,7 @@ mod cluster {
         let producer: Producer =
             rdkafka::config::FromClientConfigAndContext::from_config_and_context(
                 &config.producer_config(false),
-                crate::feed::producer::FeedProducerContext::new(Arc::clone(&core)),
+                FeedProducerContext::new(Arc::clone(&core)),
             )
             .unwrap();
         {
@@ -2622,7 +2627,7 @@ mod cluster {
         let producer: Producer =
             rdkafka::config::FromClientConfigAndContext::from_config_and_context(
                 &config.producer_config(false),
-                crate::feed::producer::FeedProducerContext::new(Arc::clone(&core)),
+                FeedProducerContext::new(Arc::clone(&core)),
             )
             .unwrap();
         {
@@ -2703,7 +2708,7 @@ mod cluster {
         let producer: Producer =
             rdkafka::config::FromClientConfigAndContext::from_config_and_context(
                 &config.producer_config(false),
-                crate::feed::producer::FeedProducerContext::new(Arc::clone(&core)),
+                FeedProducerContext::new(Arc::clone(&core)),
             )
             .unwrap();
         let on = |partition| {
@@ -2801,7 +2806,7 @@ mod cluster {
         let producer: Producer =
             rdkafka::config::FromClientConfigAndContext::from_config_and_context(
                 &config.producer_config(false),
-                crate::feed::producer::FeedProducerContext::new(Arc::clone(&core)),
+                FeedProducerContext::new(Arc::clone(&core)),
             )
             .unwrap();
         {
@@ -2853,7 +2858,7 @@ mod cluster {
         let producer: Producer =
             rdkafka::config::FromClientConfigAndContext::from_config_and_context(
                 &config.producer_config(false),
-                crate::feed::producer::FeedProducerContext::new(Arc::clone(&core)),
+                FeedProducerContext::new(Arc::clone(&core)),
             )
             .unwrap();
         let offset = (0..)
@@ -2878,7 +2883,7 @@ mod cluster {
         }
         let gate = Gate::new(Arc::clone(&core), producer, Duration::from_secs(3600))
             .with_step(Duration::from_secs(3600));
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             gate.pass();
             let _ = tx.send(());
@@ -2929,7 +2934,7 @@ mod cluster {
         let producer: Producer =
             rdkafka::config::FromClientConfigAndContext::from_config_and_context(
                 &config.producer_config(false),
-                crate::feed::producer::FeedProducerContext::new(Arc::clone(&core)),
+                FeedProducerContext::new(Arc::clone(&core)),
             )
             .unwrap();
         let gate = Gate::new(
@@ -3007,7 +3012,7 @@ mod cluster {
         let producer: Producer =
             rdkafka::config::FromClientConfigAndContext::from_config_and_context(
                 &config.producer_config(false),
-                crate::feed::producer::FeedProducerContext::new(Arc::clone(&core)),
+                FeedProducerContext::new(Arc::clone(&core)),
             )
             .unwrap();
         let gate = Gate::new(
@@ -3431,7 +3436,7 @@ mod cluster {
         wait_until(
             DEADLINE,
             "the pass takes the unit and begins a read",
-            || core.gate_reads.load(std::sync::atomic::Ordering::SeqCst) > 0,
+            || core.gate_reads.load(Ordering::SeqCst) > 0,
         );
         feed.stop_receiving();
         pass.join().unwrap();
@@ -3565,8 +3570,8 @@ mod cluster {
         KafkaFeedPublisher::connect_with(
             &section_with(brokers, "publisher", rdkafka),
             io.handle(),
-            crate::feed::startup::Scope::Existence,
-            crate::feed::startup::CONNECT_BOUND,
+            Scope::Existence,
+            CONNECT_BOUND,
         )
         .unwrap()
     }

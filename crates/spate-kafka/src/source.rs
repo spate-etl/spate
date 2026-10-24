@@ -75,6 +75,7 @@ use spate_core::record::PartitionId;
 use spate_core::source::{DrainBarrier, LaneId, Source, SourceCtx, SourceEvent};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 /// Bound on the committed-offset read made before each assignment.
@@ -935,10 +936,7 @@ impl Source for KafkaSource {
 impl Drop for KafkaSource {
     fn drop(&mut self) {
         if let Some(consumer) = &self.consumer {
-            consumer
-                .context()
-                .closing
-                .store(true, std::sync::atomic::Ordering::Release);
+            consumer.context().closing.store(true, Ordering::Release);
             let deferred_revoke = self.pending_unassign
                 || consumer
                     .context()

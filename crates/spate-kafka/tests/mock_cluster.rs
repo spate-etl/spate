@@ -12,6 +12,8 @@ use spate_core::source::{PayloadBatch, Source, SourceCtx, SourceEvent, SourceLan
 use spate_kafka::{KafkaSource, KafkaSourceConfig};
 use spate_test::wait_until;
 use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use support::{
     await_assignment, corrupt_batch, drain_lane, produce, produce_batch, serve_events, v1_message,
@@ -381,7 +383,7 @@ fn second_member_triggers_revoke_then_fresh_assignment() {
     // A second member joins; keep polling it from a helper thread so its
     // side of the rebalance completes.
     let brokers2 = brokers.clone();
-    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop = Arc::new(AtomicBool::new(false));
     let stop2 = std::sync::Arc::clone(&stop);
     let joiner = std::thread::spawn(move || {
         let c: BaseConsumer = ClientConfig::new()
@@ -391,7 +393,7 @@ fn second_member_triggers_revoke_then_fresh_assignment() {
             .create()
             .expect("second consumer");
         c.subscribe(&[TOPIC]).expect("subscribe");
-        while !stop2.load(std::sync::atomic::Ordering::Relaxed) {
+        while !stop2.load(Ordering::Relaxed) {
             let _ = c.poll(Duration::from_millis(100));
         }
     });
@@ -436,7 +438,7 @@ fn second_member_triggers_revoke_then_fresh_assignment() {
             _ => {}
         }
     }
-    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    stop.store(true, Ordering::Relaxed);
     joiner.join().expect("joiner thread");
 
     assert!(revoked, "revocation observed");

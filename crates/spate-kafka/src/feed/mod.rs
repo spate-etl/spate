@@ -74,7 +74,10 @@ use spate_core::feed::{
 use startup::TopicAdmin as _;
 use std::collections::{HashMap, VecDeque};
 use std::num::NonZeroU32;
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 use write::{Destination, Failure, Finish, Move, Outgoing, Producer, Tombstone, Write, WriteClass};
@@ -231,7 +234,7 @@ pub(crate) struct Core {
     /// How many watermark calls the gate has begun, counted just before
     /// each `fetch_watermarks` and each `list_offset`.
     #[cfg(test)]
-    gate_reads: std::sync::atomic::AtomicUsize,
+    gate_reads: AtomicUsize,
 }
 
 impl Core {
@@ -245,7 +248,7 @@ impl Core {
             attempt_partitions,
             ledger: Arc::new((Mutex::new(Ledger::new(attempt_partitions)), Condvar::new())),
             #[cfg(test)]
-            gate_reads: std::sync::atomic::AtomicUsize::new(0),
+            gate_reads: AtomicUsize::new(0),
         }
     }
 
@@ -456,7 +459,7 @@ pub struct KafkaFeed {
     gate: Option<std::thread::JoinHandle<()>>,
     follower: Option<std::thread::JoinHandle<()>>,
     /// Hands depth reads to the depth thread, which ends once this drops.
-    depth: Option<Mutex<std::sync::mpsc::Sender<(DepthOf, DepthReporter)>>>,
+    depth: Option<Mutex<mpsc::Sender<(DepthOf, DepthReporter)>>>,
 }
 
 impl std::fmt::Debug for KafkaFeed {
@@ -600,7 +603,7 @@ impl KafkaFeed {
 fn start_depth(
     config: &KafkaFeedConfig,
     core: &Arc<Core>,
-) -> Result<std::sync::mpsc::Sender<(DepthOf, DepthReporter)>, KafkaFeedError> {
+) -> Result<mpsc::Sender<(DepthOf, DepthReporter)>, KafkaFeedError> {
     let openssl_env = crate::security::openssl_env_overrides();
     // The feed's group, never subscribed: it reads the group's committed
     // offsets without joining the group.
@@ -614,7 +617,7 @@ fn start_depth(
             redacted_client_error(&e)
         ))
     })?;
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (tx, rx) = mpsc::channel();
     let core = Arc::clone(core);
     std::thread::Builder::new()
         .name("spate-kafka-feed-depth".to_owned())

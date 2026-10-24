@@ -2447,4 +2447,119 @@ mod tests {
             Some(1.0)
         );
     }
+
+    /// A [`Feed`] over a scripted feed that runs a hook inside its next
+    /// `fail`, placing what a lane thread does at that point of the sweep.
+    struct FailHook {
+        inner: ScriptedFeed,
+        hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    }
+
+    impl Feed for FailHook {
+        fn backend(&self) -> &str {
+            self.inner.backend()
+        }
+
+        fn set_waker(&self, waker: FeedWaker) {
+            self.inner.set_waker(waker);
+        }
+
+        fn receive(&self, max: usize) -> Result<Vec<Delivery>, FeedError> {
+            self.inner.receive(max)
+        }
+
+        fn renew(&self, receipt: Receipt) -> Result<(), FeedError> {
+            self.inner.renew(receipt)
+        }
+
+        fn acknowledge(&self, receipt: Receipt) -> Result<(), FeedError> {
+            self.inner.acknowledge(receipt)
+        }
+
+        fn fail(&self, receipt: Receipt, reason: &str) -> Result<(), FeedError> {
+            if let Some(hook) = self.hook.lock().unwrap().take() {
+                hook();
+            }
+            self.inner.fail(receipt, reason)
+        }
+
+        fn publish(&self, unit: Unit) -> Confirmation {
+            self.inner.publish(unit)
+        }
+
+        fn read_depth(
+            &self,
+            of: spate_core::feed::DepthOf,
+        ) -> Option<spate_core::feed::DepthReading> {
+            self.inner.read_depth(of)
+        }
+    }
+
+    /// Pins the sweep's second report read: a lane that reports an overwrite
+    /// and decides end-of-input with nothing framed after the sweep's first
+    /// read is not retired before its report is read, so its unit is
+    /// acknowledged only after the re-enqueue is published and confirmed.
+    #[test]
+    fn an_overwrite_reported_during_the_sweep_is_re_enqueued() {
+        let (inner, script) = scripted_feed();
+        let feed = Arc::new(FailHook {
+            inner,
+            hook: Mutex::new(None),
+        });
+        let (mut reader, _rt) = reader_over(Arc::clone(&feed) as Arc<dyn Feed>, None, None);
+        script.hold_publishes();
+        let failing = script.deliver(Unit::new("x", pinned_notification(&[("x.ndjson", 10)], 0)));
+        let overwritten =
+            script.deliver(Unit::new("y", pinned_notification(&[("y.ndjson", 10)], 0)));
+        start(&mut reader);
+        let lanes = partitions(&lanes_added(poll(&mut reader)));
+        assert_eq!(lanes.len(), 2);
+        let (px, py) = (lanes[0], lanes[1]);
+        assert_ne!(delivery_of(&reader, px), delivery_of(&reader, py));
+        reader
+            .poison_tx
+            .send(PoisonReport {
+                split: SplitId::new("gone").unwrap(),
+                epoch: LeaseEpoch(u64::from(px.0)),
+                kind: PoisonKind::NotFound,
+                reason: "gone".into(),
+                overwrite: None,
+            })
+            .unwrap();
+        // The lane on `py` sends its overwrite report and then decides
+        // end-of-input with nothing framed, while the sweep fails `x` back.
+        let tx = reader.poison_tx.clone();
+        let tracker = Arc::clone(&reader.lanes[&py].tracker);
+        *feed.hook.lock().unwrap() = Some(Box::new(move || {
+            tx.send(PoisonReport {
+                split: SplitId::new("overwritten").unwrap(),
+                epoch: LeaseEpoch(u64::from(py.0)),
+                kind: PoisonKind::EtagDrift,
+                reason: "overwritten".into(),
+                overwrite: Some(Box::new(Overwrite {
+                    key: "data/y.ndjson".into(),
+                    etag: Some("\"new\"".into()),
+                    size: 20,
+                    last_modified_ms: 1_000,
+                })),
+            })
+            .unwrap();
+            tracker.set_terminal(0);
+        }));
+        for _ in 0..4 {
+            reader.poll_events(Duration::ZERO).unwrap();
+        }
+        assert_eq!(script.failed().len(), 1);
+        assert_eq!(script.failed()[0].0, failing);
+        assert!(
+            !script.acknowledged().contains(&overwritten),
+            "acknowledged with no re-enqueue confirmed"
+        );
+        assert_eq!(script.published().len(), 1, "the key is re-enqueued");
+        script.confirm_held_publishes();
+        for _ in 0..2 {
+            reader.poll_events(Duration::ZERO).unwrap();
+        }
+        assert_eq!(script.acknowledged(), vec![overwritten]);
+    }
 }

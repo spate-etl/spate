@@ -147,7 +147,7 @@ pub(crate) fn murmur2(data: &[u8]) -> u32 {
 /// The attempt-topic partition of `identity`, out of `partitions`: Kafka's
 /// Java default partitioner, and librdkafka's `murmur2` partitioner.
 pub(crate) fn partition_of(identity: &[u8], partitions: NonZeroU32) -> i32 {
-    let partition = (murmur2(identity) & 0x7fff_ffff) % partitions.get();
+    let partition = (murmur2(identity) & 0x7fff_ffff) % partitions;
     i32::try_from(partition).expect("a value under 2^31 fits an i32")
 }
 
@@ -440,6 +440,7 @@ impl Follower {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     fn topics() -> Topics {
         Topics {
@@ -481,6 +482,33 @@ mod tests {
         assert_eq!(partition_of(b"giberish123456789", three), 2);
         assert_eq!(partition_of(b"units/0/0", NonZeroU32::new(2).unwrap()), 1);
         assert_eq!(partition_of(b"kafka", NonZeroU32::MIN), 0);
+    }
+
+    /// Pins the sign-bit mask and the full `u32` range: `unaligned[2..]` hashes
+    /// with bit 31 set, so an unmasked remainder by 3 would be 0, not 1. The
+    /// empty identity hashes below 2^31, so its remainder is the hash itself.
+    #[test]
+    fn partition_of_clears_the_sign_bit_and_takes_the_full_range() {
+        let unaligned = b"PreAmbleWillBeRemoved,ThePrePartThatIs";
+        let three = NonZeroU32::new(3).unwrap();
+        assert_eq!(partition_of(&unaligned[2..], three), 1);
+        assert_eq!(partition_of(b"", NonZeroU32::MAX), 275_646_681);
+        assert_eq!(partition_of(b"kafka", NonZeroU32::MAX), 0x5067_cf64);
+    }
+
+    proptest! {
+        /// Pins `partition_of` to the masked hash taken modulo the partition
+        /// count, for every identity and every non-zero count.
+        #[test]
+        fn partition_of_is_the_masked_murmur2_remainder(
+            identity in proptest::collection::vec(any::<u8>(), 0..64),
+            partitions in 1u32..=u32::MAX,
+        ) {
+            let n = NonZeroU32::new(partitions).unwrap();
+            let expected = i32::try_from((murmur2(&identity) & 0x7fff_ffff) % partitions)
+                .expect("a value under 2^31 fits an i32");
+            prop_assert_eq!(partition_of(&identity, n), expected);
+        }
     }
 
     /// Pins the version-1 bytes: the literal value reads as its count, a

@@ -2601,21 +2601,38 @@ fn a_failure_drain_hands_back_without_reading_on() {
     assert_eq!((log.reading_on_stop_calls, log.stop_reading_calls), (0, 1));
 }
 
-/// Pins that a source whose run ends drained hands nothing back.
+/// Pins that a source whose run ends drained hands nothing back, and that a
+/// drain no stop began runs to `drain_timeout` from its own start: the sink
+/// to a second before it, the feed's close to the end.
 #[test]
 fn a_drained_run_does_not_stop_reading() {
+    let drain_timeout = Duration::from_secs(600);
     let clock = crate::clock::TestClock::frozen();
+    let mut cfg = stop_config(drain_timeout);
+    cfg.feed = feed_section("sqs: {}");
+    let kept = Arc::new(Mutex::new(None::<Arc<HandingBack>>));
+    let keep = Arc::clone(&kept);
     let h = start_stopping(
-        stop_config(Duration::from_secs(600)),
+        cfg,
         true,
         &clock,
-        |_| None,
+        move |_| {
+            let feed = Arc::new(HandingBack::new("sqs"));
+            *keep.lock().unwrap() = Some(Arc::clone(&feed));
+            Some(feed)
+        },
         ok_chain,
     );
     h.script.lock().unwrap().push_back(Script::Drained);
     joined(&h);
     assert_eq!(h.join.join().unwrap().unwrap().state, ExitState::Completed);
     assert_eq!(h.shared.lock().unwrap().stop_reading_calls, 0);
+    let feed = kept.lock().unwrap().take().unwrap();
+    assert_eq!(*feed.closes.lock().unwrap(), vec![drain_timeout]);
+    assert_eq!(
+        *h.sink_budgets.lock().unwrap(),
+        vec![drain_timeout - Duration::from_secs(1)]
+    );
 }
 
 /// Pins that the runtime closes a feed it was given once, after the final
@@ -2731,4 +2748,45 @@ fn a_close_that_never_settles_ends_at_the_deadline() {
             })),
         "{warnings:#?}"
     );
+}
+
+/// Pins that a source keeping `Source::reading_on_stop`'s default reads
+/// nothing on after the stop, so it drains without waiting for the reserve.
+#[test]
+fn a_source_that_does_not_read_on_drains_at_once() {
+    struct Plain(FakeSource);
+    impl Source for Plain {
+        type Lane = FakeLane;
+        fn open(&mut self, ctx: SourceCtx) -> Result<(), SourceError> {
+            self.0.open(ctx)
+        }
+        fn poll_events(&mut self, timeout: Duration) -> Result<SourceEvent<FakeLane>, SourceError> {
+            self.0.poll_events(timeout)
+        }
+        fn commit(&mut self, watermarks: &[(PartitionId, i64)]) -> Result<(), SourceError> {
+            self.0.commit(watermarks)
+        }
+    }
+    let (inner, shared, _script) = FakeSource::new();
+    let chain_shared = Arc::new(ChainShared::default());
+    let (sink, _drained) = test_sink();
+    let log = Arc::clone(&shared);
+    let runtime = PipelineRuntime::new(
+        stop_config(Duration::from_secs(600)),
+        Plain(inner),
+        move |_thread| {
+            Box::new(ok_chain(Arc::clone(&chain_shared), Arc::clone(&log)))
+                as Box<dyn RunnableChain>
+        },
+        sink,
+        Arc::new(crate::backpressure::InflightBudget::new()),
+    )
+    .with_options(test_options())
+    .with_stop_clock(crate::clock::TestClock::frozen());
+    runtime.shutdown_handle().trigger();
+    let join = std::thread::spawn(move || runtime.run());
+    wait_for("run() to return", Duration::from_secs(10), || {
+        join.is_finished()
+    });
+    assert_eq!(join.join().unwrap().unwrap().state, ExitState::Completed);
 }

@@ -186,13 +186,14 @@ fn a_scripted_feed_records_hand_backs_and_closes() {
     let kept = script.deliver(Unit::new("c", b"c".to_vec()));
     assert_eq!(feed.receive(8).unwrap().len(), 3);
     feed.stop_receiving();
+    feed.stop_receiving();
     feed.hand_back(first).unwrap();
     feed.hand_back(second).unwrap();
     assert_eq!(feed.hand_back(first).unwrap_err().kind, FeedErrorKind::Gone);
     let mut closed = feed.close(Duration::from_secs(2)).expect("the feed closes");
     assert!(matches!(closed.try_outcome(), Some(Ok(()))));
 
-    assert_eq!(script.stopped_receiving(), 1);
+    assert_eq!(script.stopped_receiving(), 2);
     assert_eq!(script.handed_back(), vec![first, second]);
     assert_eq!(script.held(), vec![kept]);
     assert_eq!(script.closes(), vec![Duration::from_secs(2)]);

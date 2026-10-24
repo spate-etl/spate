@@ -2,6 +2,7 @@
 
 use std::io::{BufRead as _, BufReader};
 use std::process::{Child, Command, ExitStatus};
+use std::sync::mpsc;
 
 /// Runs the test `name`, given as its full libtest path, in a new process of
 /// the current test binary, and panics unless it ran and passed.
@@ -65,7 +66,7 @@ impl ChildTest {
             .spawn()
             .unwrap_or_else(|e| panic!("spawn {command:?}: {e}"));
         let stdout = child.stdout.take().expect("the child's stdout");
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = mpsc::channel();
         // libtest prints `running N tests` before it starts any. The rest of
         // the output is read and dropped, so a full pipe never blocks the
         // child.
@@ -216,7 +217,7 @@ mod tests {
             .downcast::<String>()
             .expect("a message");
         assert!(message.contains("matched 2 tests, not 1"), "{message}");
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             let _ = reader.read_to_end(&mut Vec::new());
             let _ = tx.send(());

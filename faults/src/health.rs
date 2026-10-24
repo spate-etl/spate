@@ -82,6 +82,7 @@ pub fn watch(
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc;
 
     fn target<'a>(
         container: &'a str,
@@ -130,7 +131,7 @@ mod tests {
         ];
         let polls = std::thread::scope(|s| {
             // Inside the scope, so a failed wait drops `tx` and the poller ends.
-            let (tx, rx) = std::sync::mpsc::channel();
+            let (tx, rx) = mpsc::channel();
             let (targets, path) = (&targets, &path);
             let poller = s.spawn(move || watch(targets, path, Duration::from_millis(5), &rx));
             spate_test::wait_until(Duration::from_secs(10), "four health lines", || {

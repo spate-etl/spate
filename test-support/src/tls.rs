@@ -5,6 +5,7 @@ use rcgen::{
     BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
     KeyUsagePurpose,
 };
+use rustls::crypto::aws_lc_rs;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::server::WebPkiClientVerifier;
 use rustls::{RootCertStore, ServerConfig};
@@ -115,7 +116,7 @@ impl TestCa {
     /// Panics when the configuration cannot be built.
     #[must_use]
     pub fn server_config(&self, clients: Option<&TestCa>) -> Arc<ServerConfig> {
-        let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+        let provider = Arc::new(aws_lc_rs::default_provider());
         let builder = ServerConfig::builder_with_provider(provider.clone())
             .with_safe_default_protocol_versions()
             .unwrap();
@@ -144,7 +145,8 @@ impl TestCa {
 #[must_use]
 pub fn pem(label: &str, der: &[u8]) -> String {
     use base64::Engine as _;
-    let body = base64::engine::general_purpose::STANDARD.encode(der);
+    use base64::engine::general_purpose::STANDARD;
+    let body = STANDARD.encode(der);
     let mut out = format!("-----BEGIN {label}-----\n");
     for line in body.as_bytes().chunks(64) {
         out.push_str(std::str::from_utf8(line).unwrap());
@@ -232,7 +234,7 @@ mod tests {
     ) -> rustls::ConfigBuilder<ClientConfig, rustls::client::WantsClientCert> {
         let mut roots = RootCertStore::empty();
         roots.add(ca.der()).unwrap();
-        ClientConfig::builder_with_provider(Arc::new(rustls::crypto::aws_lc_rs::default_provider()))
+        ClientConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
             .with_safe_default_protocol_versions()
             .unwrap()
             .with_root_certificates(roots)

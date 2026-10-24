@@ -278,6 +278,7 @@ impl Drop for Workers {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::mpsc;
 
     fn sleeper(workers: &mut Workers) -> libc::pid_t {
         let dir = tempfile::tempdir().unwrap();
@@ -295,7 +296,7 @@ mod tests {
         let pid = sleeper(&mut workers);
         // SAFETY: `kill` takes no pointers; `pid` is our unreaped child.
         assert_eq!(unsafe { libc::kill(pid, libc::SIGSTOP) }, 0);
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             drop(workers);
             let _ = tx.send(());

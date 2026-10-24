@@ -99,7 +99,7 @@ ADR-0054 cuts them, and each range in progress counts toward the units it holds
 `an_event_name_with_or_without_the_s3_prefix_is_accepted`,
 `a_record_for_another_bucket_or_prefix_is_dead_lettered`,
 `a_size_zero_record_is_acknowledged_without_a_unit`,
-`a_test_event_and_a_removal_are_acknowledged_without_a_unit`,
+`a_test_event_and_a_name_that_creates_nothing_are_acknowledged_without_a_unit`,
 `a_key_path_parse_rejects_or_rewrites_is_dead_lettered`,
 `an_unknown_notification_shape_is_dead_lettered`,
 `an_unquoted_event_etag_is_sent_quoted`,

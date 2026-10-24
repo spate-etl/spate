@@ -878,10 +878,12 @@ mod tests {
     }
 
     /// Pins that the S3 test event and a record that creates nothing, for
-    /// any bucket, are acknowledged with no part, an event name that only
-    /// begins with `ObjectCreated` included.
+    /// any bucket, are acknowledged with no part. A name creates only when
+    /// `ObjectCreated:` opens it after at most one `s3:`, so one that only
+    /// begins with `ObjectCreated`, or holds `ObjectCreated:` after anything
+    /// other than one `s3:`, creates nothing.
     #[test]
-    fn a_test_event_and_a_removal_are_acknowledged_without_a_unit() {
+    fn a_test_event_and_a_name_that_creates_nothing_are_acknowledged_without_a_unit() {
         let test_event = serde_json::json!({
             "Service": "Amazon S3",
             "Event": "s3:TestEvent",
@@ -899,6 +901,9 @@ mod tests {
             "ObjectRemoved:Delete",
             "s3:ObjectRemoved:DeleteMarkerCreated",
             "ObjectCreatedButNot",
+            "xObjectCreated:Put",
+            "s3:s3:ObjectCreated:Put",
+            "ObjectRemoved:ObjectCreated:Put",
         ] {
             acknowledged(decoded(&[record(
                 event,

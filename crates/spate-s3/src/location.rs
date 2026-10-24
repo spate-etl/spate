@@ -1088,4 +1088,25 @@ mod tests {
             "{reason}"
         );
     }
+
+    /// Pins that a location error on a long store error names the TLS
+    /// rejection behind it after the cut, with the hint after that.
+    #[test]
+    fn a_long_store_error_keeps_its_tls_rejection_at_the_job_location() {
+        let location = accepted("s3://ops/jobs/a/");
+        let e = object_store::Error::Generic {
+            store: "S3",
+            source: Box::new(crate::test_servers::LongTls(rustls::Error::AlertReceived(
+                rustls::AlertDescription::HandshakeFailure,
+            ))),
+        };
+        for shown in [
+            read_error(&location, &location.fingerprint(), &e).to_string(),
+            io_error(&location, &location.fingerprint(), &e).to_string(),
+        ] {
+            assert!(shown.contains("…: "), "{shown}");
+            assert!(shown.contains("HandshakeFailure"), "{shown}");
+            assert!(shown.len() < 1024, "{} bytes", shown.len());
+        }
+    }
 }

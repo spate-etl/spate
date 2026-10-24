@@ -177,3 +177,19 @@ pub(crate) async fn serve(ca: &TestCa, clients: Option<&TestCa>) -> String {
     let addr = spate_test_support::serve_tls(ca.server_config(clients), |_| async {}).await;
     format!("https://{addr}")
 }
+
+/// An error whose text is 1 MiB, with a TLS rejection behind it.
+#[derive(Debug)]
+pub(crate) struct LongTls(pub(crate) rustls::Error);
+
+impl std::fmt::Display for LongTls {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&"x".repeat(1 << 20))
+    }
+}
+
+impl std::error::Error for LongTls {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
+}

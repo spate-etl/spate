@@ -659,6 +659,37 @@ mod tests {
         assert!(err.reason.ends_with('…'), "{}", err.reason);
     }
 
+    /// A listing of a prefix that encodes past the bound, still failing 503
+    /// after the plan budget, names the status and the store's code.
+    #[test]
+    fn a_long_prefix_listing_keeps_the_status() {
+        let rt = runtime();
+        let body = format!(
+            "<Error><Code>SlowDown</Code><Message>{}</Message></Error>",
+            "x".repeat(64 * 1024)
+        );
+        let url = crate::test_servers::sequence_server(vec![("503 Service Unavailable", body)]);
+        let mut p = filtering_planner(&url, rt.handle().clone(), 64 * MB);
+        // The prefix as `source.rs` derives it from a configured `url`.
+        let configured = url::Url::parse(&format!("s3://b/p/{}/", "数".repeat(60))).unwrap();
+        let (_, prefix) = object_store::ObjectStoreScheme::parse(&configured).unwrap();
+        p.prefix = Some(prefix);
+        let err = (1..=MAX_ATTEMPTS)
+            .map(|n| p.plan(PlanContext::new(None, u64::from(n))).unwrap_err())
+            .last()
+            .unwrap();
+        assert_eq!(err.kind, CoordinationErrorKind::Fatal, "{}", err.reason);
+        assert!(err.reason.contains("plan attempts"), "{}", err.reason);
+        assert!(
+            err.reason.contains("503 Service Unavailable"),
+            "{}",
+            err.reason
+        );
+        assert!(err.reason.contains("SlowDown"), "{}", err.reason);
+        assert!(err.reason.ends_with('…'), "{}", err.reason);
+        assert!(err.reason.len() < 4096, "{} bytes", err.reason.len());
+    }
+
     /// A 64 KiB `AccessDenied` error body.
     fn large_body() -> String {
         format!(

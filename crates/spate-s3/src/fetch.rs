@@ -996,7 +996,11 @@ mod tests {
                     .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
                     .is_ok()
             {
-                return Err(Self::generic("injected get failure past the range end"));
+                return Err(Self::generic(
+                    self.error_text
+                        .as_deref()
+                        .unwrap_or("injected get failure past the range end"),
+                ));
             }
             let result = self.inner.get_opts(location, options).await?;
             if self
@@ -1802,7 +1806,7 @@ mod tests {
         assert!(reason.contains('…'), "{reason}");
     }
 
-    /// One `p/a` entry with an ETag, read from a local server answering
+    /// One entry under `key` with an ETag, read from a local server answering
     /// every request with `status` and `body`; returns the lane's failure.
     async fn read_answered(status: &'static str, body: String, key: &str) -> SplitFailure {
         let url = crate::test_servers::sequence_server(vec![(status, body)]);
@@ -1850,7 +1854,7 @@ mod tests {
     }
 
     /// A multibyte error body is cut on a character: 512 characters of the
-    /// store's text and the `…`.
+    /// store's body and the `…`.
     #[tokio::test]
     async fn a_multibyte_error_body_is_cut_on_a_character() {
         let body = format!(
@@ -1863,18 +1867,17 @@ mod tests {
         };
         let reason = e.to_string();
         let text = reason
-            .split_once("failed at byte 0: ")
+            .split_once("403 Forbidden: ")
             .map(|(_, text)| text)
-            .expect("the store's text follows the byte");
+            .expect("the store's body follows the status");
         assert_eq!(text.chars().count(), 512 + 1, "{text}");
         assert!(text.ends_with("é…"), "{text}");
     }
 
-    /// On a key long enough to push the status past the cut, the reason
-    /// still names the key in full and the kind of failure, and the store's
-    /// text stays within the bound.
+    /// A refused read of a key longer than the bound names the key, the kind
+    /// of failure and the status, with the store's body cut to the bound.
     #[tokio::test]
-    async fn a_long_key_refusal_keeps_the_kind_of_failure() {
+    async fn a_long_key_refusal_keeps_the_status() {
         let key = format!("p/{}", "k".repeat(1000));
         let failure = read_answered("403 Forbidden", large_body("AccessDenied"), &key).await;
         let SplitFailure::Fatal(e) = failure else {
@@ -1886,8 +1889,13 @@ mod tests {
             reason.contains("lacked the necessary privileges"),
             "{reason}"
         );
+        assert!(reason.contains("403 Forbidden: <Error>"), "{reason}");
         assert!(reason.ends_with('…'), "{reason}");
-        assert!(reason.len() < 2048 + key.len(), "{} bytes", reason.len());
+        assert!(
+            reason.len() < 2048 + 2 * key.len(),
+            "{} bytes",
+            reason.len()
+        );
     }
 
     /// Pins that a TLS rejection on a read of a long key is still named.
@@ -1926,6 +1934,35 @@ mod tests {
         };
         assert!(reason.contains("attempts"), "{reason}");
         assert!(reason.contains("xxxx"), "{reason}");
+        assert!(reason.ends_with('…'), "{reason}");
+        assert_cut(&reason);
+    }
+
+    /// A read of a key that encodes past the bound, failing 503 past its
+    /// attempt budget, names the status and the store's code.
+    #[tokio::test(start_paused = true)]
+    async fn a_read_of_a_long_key_past_the_budget_keeps_the_status() {
+        let text = format!(
+            "Error performing GET http://127.0.0.1/b/p/{} in 1ms - Server returned non-2xx \
+             status code: 503 Service Unavailable: <Error><Code>SlowDown</Code><Message>{}",
+            "%E6%95%B0".repeat(60),
+            "x".repeat(64 * 1024)
+        );
+        let flaky = FlakyStore {
+            error_text: Some(text),
+            ..FlakyStore::new(seeded(&[("p/a", b"0123456789")]).await)
+        };
+        flaky.fail_gets.store(MAX_ATTEMPTS, Ordering::Relaxed);
+        let store: Arc<dyn ObjectStore> = Arc::new(flaky);
+        let slice = listed(&store).await;
+        let msgs = collect_fetch(store, slice, 0, 64, 64).await;
+        let Some(ChunkMsg::LaneFailed(SplitFailure::Poison(PoisonKind::RetriesExhausted, reason))) =
+            msgs.into_iter().last()
+        else {
+            panic!("a read failing past its budget must poison as retries_exhausted");
+        };
+        assert!(reason.contains("503 Service Unavailable"), "{reason}");
+        assert!(reason.contains("SlowDown"), "{reason}");
         assert!(reason.ends_with('…'), "{reason}");
         assert_cut(&reason);
     }

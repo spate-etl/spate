@@ -38,6 +38,7 @@ use spate_core::source::LaneId;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
+use std::sync::mpsc as std_mpsc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -266,8 +267,8 @@ pub(crate) struct SplitCtx {
     retry_base: Duration,
     metrics: Option<S3Metrics>,
     splits: BTreeMap<SplitId, SplitState>,
-    poison_tx: std::sync::mpsc::Sender<PoisonReport>,
-    poison_rx: std::sync::mpsc::Receiver<PoisonReport>,
+    poison_tx: std_mpsc::Sender<PoisonReport>,
+    poison_rx: std_mpsc::Receiver<PoisonReport>,
 }
 
 impl std::fmt::Debug for SplitCtx {
@@ -295,7 +296,7 @@ impl SplitCtx {
         retry_base: Duration,
         metrics: Option<S3Metrics>,
     ) -> SplitCtx {
-        let (poison_tx, poison_rx) = std::sync::mpsc::channel();
+        let (poison_tx, poison_rx) = std_mpsc::channel();
         SplitCtx {
             store,
             handle,

@@ -38,6 +38,7 @@ use spate_core::feed::FeedWaker;
 use spate_core::record::{PartitionId, RawPayload};
 use spate_core::source::{LaneId, PayloadBatch, SourceLane};
 use std::sync::Arc;
+use std::sync::mpsc as std_mpsc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TryRecvError;
@@ -125,7 +126,7 @@ pub struct S3Lane {
     /// end-of-input decision.
     tracker: Arc<SplitTracker>,
     /// Side channel for object-level failures (see the module docs).
-    poison_tx: std::sync::mpsc::Sender<PoisonReport>,
+    poison_tx: std_mpsc::Sender<PoisonReport>,
     /// Wakes the control plane. Signalled on the two edges it would
     /// otherwise only notice between waits: end-of-input, and poison.
     /// Never on the per-record path.
@@ -174,7 +175,7 @@ impl S3Lane {
         split: SplitId,
         epoch: LeaseEpoch,
         tracker: Arc<SplitTracker>,
-        poison_tx: std::sync::mpsc::Sender<PoisonReport>,
+        poison_tx: std_mpsc::Sender<PoisonReport>,
         waker: impl Into<LaneWaker>,
         metrics: Option<S3Metrics>,
     ) -> S3Lane {
@@ -661,7 +662,7 @@ mod tests {
         lane: S3Lane,
         tx: Option<mpsc::Sender<ChunkMsg>>,
         tracker: Arc<SplitTracker>,
-        poison_rx: std::sync::mpsc::Receiver<PoisonReport>,
+        poison_rx: std_mpsc::Receiver<PoisonReport>,
         _rt: tokio::runtime::Runtime,
     }
 
@@ -674,7 +675,7 @@ mod tests {
         let (tx, rx) = mpsc::channel(64);
         let checkpointer = Checkpointer::new();
         let tracker = Arc::new(SplitTracker::new());
-        let (poison_tx, poison_rx) = std::sync::mpsc::channel();
+        let (poison_tx, poison_rx) = std_mpsc::channel();
         let lane = S3Lane::new(
             LaneId(0),
             PartitionId(0),

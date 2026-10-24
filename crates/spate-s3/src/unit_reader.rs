@@ -71,6 +71,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc as std_mpsc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -199,8 +200,8 @@ pub(crate) struct UnitReader {
     retired: Vec<LaneId>,
     /// `fail`s for undecodable units that the feed answered `Retryable`.
     unsent_fails: Vec<(Receipt, String)>,
-    poison_tx: std::sync::mpsc::Sender<PoisonReport>,
-    poison_rx: std::sync::mpsc::Receiver<PoisonReport>,
+    poison_tx: std_mpsc::Sender<PoisonReport>,
+    poison_rx: std_mpsc::Receiver<PoisonReport>,
     /// The end check of a bounded job; `None` on a job that runs until a
     /// shutdown.
     end: Option<JobEnd>,
@@ -236,7 +237,7 @@ impl UnitReader {
         if let Some(end) = &mut end {
             end.set_waker(waker.clone());
         }
-        let (poison_tx, poison_rx) = std::sync::mpsc::channel();
+        let (poison_tx, poison_rx) = std_mpsc::channel();
         let hands_back = feed.hands_back();
         UnitReader {
             feed,
@@ -973,6 +974,7 @@ mod tests {
     use crate::split_ctx::PoisonKind;
     use crate::testutil::TestLineFramer;
     use spate_core::checkpoint::Checkpointer;
+    use spate_core::clock::tokio::{Clock, TestClock};
     use spate_core::feed::{Confirmation, Unit};
     use spate_core::metrics::{Meter, render_local};
     use spate_core::source::SourceLane as _;
@@ -1171,7 +1173,7 @@ mod tests {
     fn end_solo(reader: &mut UnitReader, rt: &tokio::runtime::Runtime) {
         let mut end = JobEnd::new(
             crate::job_end::Finish::Solo { finished: true },
-            spate_core::clock::tokio::TestClock::frozen(),
+            TestClock::frozen(),
             rt.handle().clone(),
             spate_core::source::StopSignal::default(),
         );
@@ -1294,10 +1296,7 @@ mod tests {
     fn end_windowed(
         reader: &mut UnitReader,
         script: &FeedScript,
-    ) -> (
-        Arc<spate_core::clock::tokio::TestClock>,
-        tokio::runtime::Runtime,
-    ) {
+    ) -> (Arc<TestClock>, tokio::runtime::Runtime) {
         use object_store::ObjectStoreExt as _;
         let io = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
@@ -1313,14 +1312,14 @@ mod tests {
             b"run=0123456789abcdef0123456789abcdef\n".to_vec().into(),
         ))
         .unwrap();
-        let clock = spate_core::clock::tokio::TestClock::frozen();
+        let clock = TestClock::frozen();
         let mut end = JobEnd::new(
             crate::job_end::Finish::Marker {
                 store,
                 location,
                 window: Duration::from_secs(60),
             },
-            Arc::clone(&clock) as Arc<dyn spate_core::clock::tokio::Clock>,
+            Arc::clone(&clock) as Arc<dyn Clock>,
             io.handle().clone(),
             spate_core::source::StopSignal::default(),
         );
@@ -1419,7 +1418,7 @@ mod tests {
                 location,
                 window: Duration::from_secs(60),
             },
-            spate_core::clock::tokio::TestClock::frozen(),
+            TestClock::frozen(),
             io.handle().clone(),
             spate_core::source::StopSignal::default(),
         );

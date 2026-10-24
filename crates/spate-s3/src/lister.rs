@@ -506,10 +506,12 @@ mod tests {
     use crate::config::Compression;
     use crate::split::SplitDescriptor;
     use crate::testutil::HookStore;
+    use spate_core::feed::memory::MemoryFeed;
     use spate_core::feed::{
         Confirmer, Delivery, FeedError, FeedWaker, Receipt, Unit, confirmation,
     };
     use std::sync::Mutex;
+    use std::sync::atomic::Ordering;
     use std::time::Duration;
 
     const DEADLINE: Duration = Duration::from_secs(30);
@@ -599,7 +601,7 @@ mod tests {
             .unwrap()
             .to_string();
         assert!(err.contains("read as absent twice"), "{err}");
-        assert_eq!(store.creates.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(store.creates.load(Ordering::SeqCst), 2);
     }
 
     /// Pins that a 403 on the end marker's HEAD, a read, names
@@ -1749,7 +1751,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(feed.keys(), ["data/c"]);
-        assert_eq!(job.ops.creates.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(job.ops.creates.load(Ordering::SeqCst), 0);
     }
 
     /// Pins that a checkpoint found beside no fingerprint is deleted with an
@@ -2047,7 +2049,7 @@ mod tests {
         )
         .unwrap();
         assert!(is_marker(&rt.block_on(job.end()).unwrap()));
-        assert_eq!(job.ops.creates.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(job.ops.creates.load(Ordering::SeqCst), 0);
     }
 
     /// Pins that a refused end marker write fails the run as fatal, naming
@@ -2515,7 +2517,7 @@ mod tests {
             &[("data/a", 7), ("data/d//dbl.ndjson", 7)],
             None,
         )]);
-        let feed = spate_core::feed::memory::MemoryFeed::new();
+        let feed = MemoryFeed::new();
         let mut source = stub_source(&rt, &endpoint);
         source
             .configure_feed(

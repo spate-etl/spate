@@ -819,6 +819,8 @@ mod tests {
     use object_store::{GetResult, GetResultPayload, PutPayload};
     use std::fmt;
     use std::sync::atomic::AtomicU32;
+    use std::sync::atomic::AtomicU64;
+    use std::sync::mpsc as std_mpsc;
 
     fn entry(key: &str, size: u64, etag: Option<&str>) -> ObjectEntry {
         ObjectEntry {
@@ -2115,7 +2117,7 @@ mod tests {
             origin: Origin::Lister,
         }));
         let tracker = Arc::new(SplitTracker::new());
-        let (poison_tx, poison_rx) = std::sync::mpsc::channel();
+        let (poison_tx, poison_rx) = std_mpsc::channel();
         let mut lane = S3Lane::new(
             spate_core::source::LaneId(0),
             spate_core::record::PartitionId(0),
@@ -2307,7 +2309,7 @@ mod tests {
         ));
         let store: Arc<dyn ObjectStore> = flaky.clone();
         let slice = listed(&store).await;
-        let trimmed = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let trimmed = Arc::new(AtomicU64::new(0));
         let (tx, mut rx) = mpsc::channel(64);
         let task = tokio::spawn(run_fetcher(FetcherParams {
             split: SplitId::new("s3-test").unwrap(),
@@ -2849,7 +2851,7 @@ mod tests {
             source: "503".into(),
         };
         let (inner, entry) = thirty_bytes().await;
-        let retried = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let retried = Arc::new(AtomicU64::new(0));
         let store = Arc::new(
             HeadStore::new(inner.clone(), 1)
                 .head_answers(vec![Err(transient()), Ok(meta(Some("new"), 30))]),

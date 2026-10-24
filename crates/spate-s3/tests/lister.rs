@@ -8,8 +8,9 @@ mod support;
 
 use spate_core::checkpoint::Checkpointer;
 use spate_core::clock::TestClock as StopClock;
-use spate_core::clock::tokio::TestClock;
+use spate_core::clock::tokio::{Clock, Sleep, TestClock};
 use spate_core::config::{ConfigError, FeedSection, PipelineConfig};
+use spate_core::feed::memory::MemoryFeed;
 use spate_core::feed::{Confirmation, Delivery, Feed, FeedError, FeedWaker, Receipt, Unit};
 use spate_core::pipeline::{ExitReport, ExitState};
 use spate_core::source::{Source, SourceCtx, SourceEvent};
@@ -18,6 +19,7 @@ use spate_test::{ScriptedFeed, WriteOutcome, scripted_feed, wait_until};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use support::location::{LocationHooks, OnCreate, location_store};
@@ -411,21 +413,20 @@ fn a_stop_during_a_read_that_never_answers_ends_the_run() {
 #[derive(Debug)]
 struct PastWakeups {
     inner: Arc<TestClock>,
-    asked: std::sync::atomic::AtomicBool,
-    wakeups: std::sync::atomic::AtomicUsize,
+    asked: AtomicBool,
+    wakeups: AtomicUsize,
 }
 
-impl spate_core::clock::tokio::Clock for PastWakeups {
+impl Clock for PastWakeups {
     fn now(&self) -> tokio::time::Instant {
         self.inner.now()
     }
 
-    fn sleep_until(&self, deadline: tokio::time::Instant) -> spate_core::clock::tokio::Sleep {
+    fn sleep_until(&self, deadline: tokio::time::Instant) -> Sleep {
         if deadline <= self.inner.now() {
-            self.asked.store(true, std::sync::atomic::Ordering::SeqCst);
+            self.asked.store(true, Ordering::SeqCst);
         }
-        self.wakeups
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.wakeups.fetch_add(1, Ordering::SeqCst);
         self.inner.sleep_until(deadline)
     }
 }
@@ -443,8 +444,8 @@ fn a_read_in_flight_is_checked_at_the_next_step_only() {
     let test_clock = TestClock::frozen();
     let clock = Arc::new(PastWakeups {
         inner: Arc::clone(&test_clock),
-        asked: std::sync::atomic::AtomicBool::new(false),
-        wakeups: std::sync::atomic::AtomicUsize::new(0),
+        asked: AtomicBool::new(false),
+        wakeups: AtomicUsize::new(0),
     });
     let yaml = PipelineYaml::file("s3-job-location-steps", &data)
         .section(&format!(
@@ -461,20 +462,20 @@ fn a_read_in_flight_is_checked_at_the_next_step_only() {
             move |s, _| {
                 line_framer(s)
                     .with_location_store(store)
-                    .with_clock(clock as Arc<dyn spate_core::clock::tokio::Clock>)
+                    .with_clock(clock as Arc<dyn Clock>)
             },
         )
     };
     wait_for_gets(&hooks, 1);
     test_clock.advance(POLL);
     wait_until(DEADLINE, "the wait re-arms past the first step", || {
-        clock.wakeups.load(std::sync::atomic::Ordering::SeqCst) >= 2
+        clock.wakeups.load(Ordering::SeqCst) >= 2
     });
     l.shutdown.trigger();
     test_clock.advance(POLL);
     assert_eq!(exit(&l).state, ExitState::Completed);
     assert!(
-        !clock.asked.load(std::sync::atomic::Ordering::SeqCst),
+        !clock.asked.load(Ordering::SeqCst),
         "the wait asked for a wakeup already reached"
     );
 }
@@ -494,7 +495,7 @@ fn a_location_failing_every_read_reports_the_last_error_at_the_window() {
     let mut source =
         line_framer(S3Source::from_component_config(&config.source, rt.handle().clone()).unwrap())
             .with_location_store(store)
-            .with_clock(Arc::clone(&clock) as Arc<dyn spate_core::clock::tokio::Clock>);
+            .with_clock(Arc::clone(&clock) as Arc<dyn Clock>);
     let (feed, _script) = scripted_feed();
     source
         .configure_feed(
@@ -610,7 +611,7 @@ fn the_fingerprint_wait_logs_the_location_and_window() {
     let mut source =
         line_framer(S3Source::from_component_config(&config.source, rt.handle().clone()).unwrap())
             .with_location_store(store)
-            .with_clock(Arc::clone(&clock) as Arc<dyn spate_core::clock::tokio::Clock>);
+            .with_clock(Arc::clone(&clock) as Arc<dyn Clock>);
     let mut section = FeedSection::new(spate_test::component_config("scripted", "{}"));
     section.location = Some(LOCATION.to_owned());
     let (feed, _script) = scripted_feed();
@@ -1490,7 +1491,7 @@ fn a_lister_run_refuses_the_in_process_feed() {
     fs::write(data.join("a.ndjson"), lines_bytes(&recs("a", 5))).unwrap();
     let rt = runtime();
     let (store, hooks) = location_store();
-    let feed = spate_core::feed::memory::MemoryFeed::new();
+    let feed = MemoryFeed::new();
     let err = lister_source(&data, &rt, "")
         .with_location_store(store)
         .list_once(&section("memory", None), Arc::new(feed.clone()))
@@ -1511,7 +1512,7 @@ fn a_lister_run_refuses_a_feed_the_section_does_not_name() {
     fs::write(data.join("a.ndjson"), lines_bytes(&recs("a", 5))).unwrap();
     let rt = runtime();
     let (store, hooks) = location_store();
-    let feed = spate_core::feed::memory::MemoryFeed::new();
+    let feed = MemoryFeed::new();
     let err = lister_source(&data, &rt, "")
         .with_location_store(store)
         .list_once(&section("scripted", Some(LOCATION)), Arc::new(feed.clone()))
@@ -1646,10 +1647,7 @@ fn a_solo_run_warns_that_it_lists_from_the_beginning() {
     let rt = runtime();
     let solo = "lists and reads the prefix from the beginning";
     for (backend, feed) in [
-        (
-            "memory",
-            Arc::new(spate_core::feed::memory::MemoryFeed::new()) as Arc<dyn Feed>,
-        ),
+        ("memory", Arc::new(MemoryFeed::new()) as Arc<dyn Feed>),
         ("scripted", Arc::new(scripted_feed().0) as Arc<dyn Feed>),
     ] {
         let mut source = lister_source(&data, &rt, "");
@@ -1694,7 +1692,7 @@ fn a_solo_run_reads_while_it_lists() {
         list_gate: Some(1),
         ..SpyOptions::default()
     });
-    let feed = spate_core::feed::memory::MemoryFeed::new();
+    let feed = MemoryFeed::new();
     let yaml = PipelineYaml::file("s3-solo-lister", &data)
         .section("feed:\n  memory: {}\n")
         .build();
@@ -1833,7 +1831,7 @@ fn a_dropped_solo_source_stops_its_lister() {
     source
         .configure_feed(
             &section("memory", None),
-            Arc::new(spate_core::feed::memory::MemoryFeed::new()),
+            Arc::new(MemoryFeed::new()),
             spate_core::feed::FeedOrigin::Section,
         )
         .unwrap();
@@ -1862,7 +1860,7 @@ fn a_failed_solo_listing_fails_the_run() {
 }
 
 /// The in-process feed, except that a publish panics.
-struct PanickingPublish(spate_core::feed::memory::MemoryFeed);
+struct PanickingPublish(MemoryFeed);
 
 impl Feed for PanickingPublish {
     fn backend(&self) -> &str {
@@ -1907,7 +1905,7 @@ fn a_panicked_solo_lister_fails_the_run() {
         &yaml,
         test_options(),
         |_| {},
-        Arc::new(PanickingPublish(spate_core::feed::memory::MemoryFeed::new())),
+        Arc::new(PanickingPublish(MemoryFeed::new())),
         move |source, _io| line_framer(source).with_store(store),
     );
     let reason = failure_reason(&exit(&l));

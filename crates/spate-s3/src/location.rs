@@ -495,6 +495,7 @@ fn is_retryable(e: &SourceError) -> bool {
 mod tests {
     use super::*;
     use crate::testutil::HookStore;
+    use spate_core::clock::tokio::TestClock;
 
     const SOURCE: &str = "s3://data-bucket/events/";
 
@@ -1014,7 +1015,7 @@ mod tests {
             ..HookStore::default()
         };
         let location = accepted("s3://ops/jobs/a/");
-        let clock = spate_core::clock::tokio::TestClock::frozen();
+        let clock = TestClock::frozen();
         let settled = await_fingerprint(
             &store,
             &location,

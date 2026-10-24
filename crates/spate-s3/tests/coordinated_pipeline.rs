@@ -10,6 +10,7 @@
 
 mod support;
 
+use spate_coordination::store::memory::MemoryStore;
 use spate_core::pipeline::ExitState;
 use spate_test::{SinkScript, WriteOutcome, wait_until};
 use std::fs;
@@ -39,7 +40,7 @@ fn throttled_config_yaml(data: &std::path::Path) -> String {
 /// Launch one coordinated instance with a LIST-counting data store.
 fn launch_instance(
     yaml: &str,
-    store: &spate_coordination::store::memory::MemoryStore,
+    store: &MemoryStore,
     instance: &str,
     pre: impl FnOnce(&SinkScript),
 ) -> (Launched, Arc<AtomicUsize>) {
@@ -189,7 +190,7 @@ fn an_instance_joining_a_finished_job_drains_without_reading() {
 /// instance can over-claim (hold every split) before its peer joins.
 fn launch_revocable_instance(
     yaml: &str,
-    store: &spate_coordination::store::memory::MemoryStore,
+    store: &MemoryStore,
     instance: &str,
     max_in_flight: u32,
     pre: impl FnOnce(&SinkScript),

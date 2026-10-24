@@ -28,6 +28,7 @@ use spate_test::{
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use support::scripted_store::{HeadAnswer, ScriptedStore};
@@ -1622,7 +1623,7 @@ fn a_feed_that_does_not_hand_back_drains_at_once_on_a_stop() {
 /// A scripted feed whose `renew` answers `Fatal` once the test says so.
 struct FatalRenew {
     inner: spate_test::ScriptedFeed,
-    fatal: std::sync::atomic::AtomicBool,
+    fatal: AtomicBool,
 }
 
 impl Feed for FatalRenew {
@@ -1636,7 +1637,7 @@ impl Feed for FatalRenew {
         self.inner.receive(max)
     }
     fn renew(&self, receipt: Receipt) -> Result<(), FeedError> {
-        if self.fatal.load(std::sync::atomic::Ordering::Relaxed) {
+        if self.fatal.load(Ordering::Relaxed) {
             return Err(FeedError::new(
                 FeedErrorKind::Fatal,
                 "the test fails the run",
@@ -1679,7 +1680,7 @@ fn a_failed_run_hands_back_its_unread_units_at_once() {
     let receipt = script.deliver(unit);
     let feed = Arc::new(FatalRenew {
         inner,
-        fatal: std::sync::atomic::AtomicBool::new(false),
+        fatal: AtomicBool::new(false),
     });
     let l = launch_stopping(
         &data,
@@ -1689,7 +1690,7 @@ fn a_failed_run_hands_back_its_unread_units_at_once() {
     wait_until(DEADLINE, "the first write is held", || {
         l.script.held_writes() == 1
     });
-    feed.fatal.store(true, std::sync::atomic::Ordering::Relaxed);
+    feed.fatal.store(true, Ordering::Relaxed);
     wait_until(DEADLINE, "the unit is handed back", || {
         script.handed_back() == vec![receipt]
     });

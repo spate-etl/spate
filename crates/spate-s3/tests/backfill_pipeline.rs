@@ -18,6 +18,7 @@
 
 mod support;
 
+use spate_coordination::store::memory::MemoryStore;
 use spate_core::pipeline::{ExitState, RuntimeOptions};
 use spate_test::{WriteOutcome, wait_until};
 use std::fs;
@@ -205,7 +206,7 @@ fn restart_replays_fully_on_an_ephemeral_store() {
 /// split can ever be committed complete. Stop it as soon as the plan is
 /// durable. What is left behind is a planned, wholly incomplete job, and
 /// the mutation then happens with no pipeline running at all.
-fn plan_only_run(fx: &Fixture, store: &spate_coordination::store::memory::MemoryStore) {
+fn plan_only_run(fx: &Fixture, store: &MemoryStore) {
     let l = launch_tuned(
         &fx.config_yaml(""),
         test_options(),
@@ -234,9 +235,7 @@ fn plan_only_run(fx: &Fixture, store: &spate_coordination::store::memory::Memory
 }
 
 /// Every split progress record in the store, decoded as JSON.
-fn split_progress(
-    store: &spate_coordination::store::memory::MemoryStore,
-) -> Vec<serde_json::Value> {
+fn split_progress(store: &MemoryStore) -> Vec<serde_json::Value> {
     use spate_coordination::store::{CoordinationStore as _, Keyspace};
     let rt = tokio::runtime::Runtime::new().expect("runtime");
     rt.block_on(store.list(Keyspace::Durable, "split."))
@@ -247,7 +246,7 @@ fn split_progress(
 }
 
 /// Run the planned job to its terminal state and assert it stalled.
-fn assert_stalls(fx: &Fixture, store: &spate_coordination::store::memory::MemoryStore) {
+fn assert_stalls(fx: &Fixture, store: &MemoryStore) {
     let l = launch_tuned(
         &fx.config_yaml(""),
         test_options(),

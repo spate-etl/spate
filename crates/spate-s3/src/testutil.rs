@@ -9,6 +9,7 @@
 use spate_core::framing::RecordFramer;
 use std::collections::VecDeque;
 use std::io;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Newline-delimited [`RecordFramer`]: split on `\n`, strip one trailing `\r`,
 /// skip whitespace-only lines, keep an unterminated final line, bounded per
@@ -145,7 +146,7 @@ pub(crate) struct HookStore {
     /// that ignores `If-None-Match` does.
     pub(crate) creates_overwrite: bool,
     /// Conditional creates so far.
-    pub(crate) creates: std::sync::atomic::AtomicUsize,
+    pub(crate) creates: AtomicUsize,
     /// The offset of each offset listing, in order.
     pub(crate) offsets: std::sync::Mutex<Vec<object_store::path::Path>>,
     /// Where stored PUTs and DELETEs are logged.
@@ -186,8 +187,7 @@ impl object_store::ObjectStore for HookStore {
         }
         let mut opts = opts;
         if matches!(opts.mode, object_store::PutMode::Create) {
-            self.creates
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.creates.fetch_add(1, Ordering::SeqCst);
             if self.creates_exist {
                 return Err(object_store::Error::AlreadyExists {
                     path: location.to_string(),

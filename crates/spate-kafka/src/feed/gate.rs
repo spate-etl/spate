@@ -425,9 +425,18 @@ impl Gate {
 /// below the attempt cap, with its receipt still held, or its move to the
 /// dead-letter topic at the cap, with its receipt released. `None`, giving
 /// back its share of `admitting`, when its partition was given up or the
-/// copy was replaced since.
+/// copy was replaced since, and when the feed has stopped receiving, which
+/// puts `entry` back at the gate with no attempt recorded.
 pub(crate) fn admission(core: &Core, entry: Gating) -> Option<Write> {
     let mut st = core.lock();
+    // A pass that took its deliveries before the stop admits none of them.
+    if st.stopping {
+        st.admitting = st.admitting.saturating_sub(1);
+        if st.tracker.held(entry.receipt).is_some() {
+            st.gating.push_back(entry);
+        }
+        return None;
+    }
     // The state lock first, then the ledger's.
     let count = attempt::lock(&core.ledger).count(entry.identity.as_bytes());
     let partition = partition_of(entry.identity.as_bytes(), core.attempt_partitions);

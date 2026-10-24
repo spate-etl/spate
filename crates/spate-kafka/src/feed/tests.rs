@@ -1444,6 +1444,69 @@ fn stopping_a_latched_feed_logs_nothing() {
     );
 }
 
+/// Pins that a gate pass with nothing it may take waits a step before it
+/// returns, so the gate thread does not spin: on an idle feed, and on a
+/// stopping feed with a delivery at the gate. A step of an hour that has
+/// not ended after 500 ms is the property.
+#[test]
+fn a_gate_pass_with_nothing_to_take_waits_a_step() {
+    for stopping in [false, true] {
+        let feed = idle_feed();
+        if stopping {
+            {
+                let mut st = feed.core.lock();
+                st.tracker.assign([tp(0)]);
+                let receipt = st.tracker.deliver(&tp(0), 0).unwrap();
+                st.gating.push_back(Gating {
+                    receipt,
+                    unit: Unit::new("u0", b"body".to_vec()),
+                    identity: identity(&feed.core, 0),
+                });
+            }
+            feed.stop_receiving();
+        }
+        let gate = super::gate::Gate::new(
+            Arc::clone(&feed.core),
+            feed.producer.clone(),
+            Duration::from_secs(3600),
+        )
+        .with_step(Duration::from_secs(3600));
+        assert!(
+            !returns_within(Duration::from_millis(500), move || gate.pass()),
+            "a pass with nothing to take returned at once (stopping: {stopping})"
+        );
+        super::stop(&feed.core);
+    }
+}
+
+/// Pins that the stop line counts every unit the feed holds for the
+/// reader: buffered, at the gate and with its attempt write in flight.
+#[test]
+fn the_stop_line_counts_every_unit_held_for_the_reader() {
+    let feed = idle_feed();
+    {
+        let mut st = feed.core.lock();
+        st.tracker.assign([tp(0)]);
+        let buffered = st.tracker.deliver(&tp(0), 1).unwrap();
+        let unit = ready(&feed.core, buffered, 1);
+        st.ready.push_back(unit);
+        let at_gate = st.tracker.deliver(&tp(0), 2).unwrap();
+        st.gating.push_back(Gating {
+            receipt: at_gate,
+            unit: Unit::new("u2", Vec::new()),
+            identity: identity(&feed.core, 2),
+        });
+    }
+    // The gate has taken offset 3 and its attempt write is in flight.
+    let _admitting = gated(&feed.core, 3);
+    let lines = spate_test::capture_logs(tracing::Level::INFO, || feed.stop_receiving());
+    let stop = lines
+        .iter()
+        .find(|l| l.contains("the Kafka feed stopped receiving"))
+        .unwrap_or_else(|| panic!("no stop line: {lines:#?}"));
+    assert!(stop.contains("buffered=3"), "{stop}");
+}
+
 /// Pins that a latch rejects a close the consumer thread has not taken:
 /// with no consumer thread, only the latch can settle it.
 #[test]
@@ -3314,7 +3377,7 @@ mod cluster {
     }
 
     /// Pins that a close whose last commit the broker refuses rejects as
-    /// Retryable naming the commit.
+    /// Retryable naming the commit, and that the warning names the close.
     #[test]
     fn a_close_whose_commit_fails_rejects() {
         let cluster = cluster_with(1);
@@ -3331,11 +3394,163 @@ mod cluster {
             &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_OFFSET_METADATA_TOO_LARGE],
         );
         let mut closing = feed.close(Duration::from_secs(10)).expect("a close");
-        consumer::run(d);
+        let lines = spate_test::capture_logs(tracing::Level::WARN, || consumer::run(d));
         let err = closing.try_outcome().expect("settled").unwrap_err();
         assert_eq!(err.kind, FeedErrorKind::Retryable);
         assert!(err.reason.contains("last commit failed"), "{}", err.reason);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("committing the feed's offsets failed")
+                    && l.contains("commit=\"on close\"")),
+            "{lines:#?}"
+        );
         assert_eq!(committed(&brokers, &group), None);
+    }
+
+    /// Pins that a gate pass under way when the feed stops receiving admits
+    /// none of what it took: the unit goes back to the gate with no attempt
+    /// record. The broker's round trip is slowed so the pass is still
+    /// reading watermarks when the stop lands.
+    #[test]
+    fn a_pass_under_way_at_the_stop_admits_nothing() {
+        let cluster = cluster_with(1);
+        let brokers = cluster.bootstrap_servers();
+        let group = spate_test::unique_name("stop-mid-pass");
+        let (config, core, producer, mut d) = parts_for(&brokers, &group);
+        let feed = feed_over(&core, &producer, None);
+        drive(&mut d, "the unit waits at the gate", |d| {
+            d.core.lock().gating.len() == 1
+        });
+        cluster
+            .broker_round_trip_time(1, Duration::from_millis(500))
+            .unwrap();
+        let gate = Gate::new(Arc::clone(&core), producer.clone(), config.delivery_timeout)
+            .with_step(Duration::from_secs(5));
+        let pass = std::thread::spawn(move || gate.pass());
+        wait_until(
+            DEADLINE,
+            "the pass takes the unit and begins a read",
+            || core.gate_reads.load(std::sync::atomic::Ordering::SeqCst) > 0,
+        );
+        feed.stop_receiving();
+        pass.join().unwrap();
+        cluster.broker_round_trip_time(1, Duration::ZERO).unwrap();
+        let st = core.lock();
+        assert_eq!(st.gating.len(), 1, "the unit left the gate");
+        assert_eq!(st.admitting, 0);
+        assert!(st.ready.is_empty(), "the unit was admitted");
+    }
+
+    /// Pins that a close sends the tombstone a confirmed dead-letter write
+    /// queued, so the last commit passes the dead-lettered unit and the
+    /// next owner does not move a second copy.
+    #[test]
+    fn a_close_commits_past_a_unit_dead_lettered_before_it() {
+        let cluster = cluster_with(1);
+        let brokers = cluster.bootstrap_servers();
+        let group = spate_test::unique_name("close-dead-letter");
+        let section: FeedSection = serde_yaml::from_str(&format!(
+            "attempt_cap: 1\nkafka:\n  brokers: \"{brokers}\"\n  group_id: {group}\n  \
+             topic: units\n  retry_topic: units-retry\n  dead_letter_topic: units-dead\n  \
+             attempt_topic: {ATTEMPTS}\n  statistics_interval: 0s\n  rdkafka:\n    \
+             session.timeout.ms: \"6000\"\n    heartbeat.interval.ms: \"2000\"\n"
+        ))
+        .unwrap();
+        let config = KafkaFeedConfig::from_section(&section).unwrap();
+        let (core, producer, mut d) = super::super::parts(&config, TWO).unwrap();
+        let feed = feed_over(&core, &producer, None);
+        let admission = admission(&config, &core, &producer, STEP);
+        drive(&mut d, "the unit is buffered", |d| {
+            d.core.lock().ready.len() == 1
+        });
+        let delivery = feed.receive(1).unwrap().pop().unwrap();
+        // At the cap: the unit goes to the dead-letter topic, and its
+        // tombstone is queued once that write is confirmed. Stopping the
+        // gate and the follower first would set the stop flag, which
+        // queues no tombstone.
+        feed.fail(delivery.receipt, "a test failure").unwrap();
+        wait_until(DEADLINE, "the dead-letter write is confirmed", || {
+            !core.lock().resends.is_empty()
+        });
+        admission.stop();
+        let mut closing = feed.close(Duration::from_secs(10)).expect("a close");
+        consumer::run(d);
+        assert_eq!(closing.try_outcome(), Some(Ok(())));
+        assert_eq!(committed(&brokers, &group), Some(1));
+    }
+
+    /// Pins that a latch landing after the consumer thread has taken the
+    /// close rejects the close with the latched error.
+    #[test]
+    fn a_latch_during_the_close_rejects_it_with_the_latched_error() {
+        let cluster = cluster_with(2);
+        let brokers = cluster.bootstrap_servers();
+        let group = spate_test::unique_name("close-latch");
+        let (config, core, producer, mut d) = parts_for(&brokers, &group);
+        let feed = feed_over(&core, &producer, None);
+        let admission = admission(&config, &core, &producer, STEP);
+        let deliveries = received(&mut d, &feed, admission, 2);
+        // The tombstone, the commit and the leave each wait out the round
+        // trip, so the latch lands while the thread is still closing.
+        cluster
+            .broker_round_trip_time(1, Duration::from_millis(500))
+            .unwrap();
+        feed.acknowledge(deliveries[0].receipt).unwrap();
+        let mut closing = feed.close(Duration::from_secs(10)).expect("a close");
+        let thread = std::thread::spawn(move || consumer::run(d));
+        wait_until(DEADLINE, "the consumer thread takes the close", || {
+            core.lock().close.is_none()
+        });
+        core.latch("a test latch");
+        thread.join().expect("the consumer thread ends");
+        let err = closing.try_outcome().expect("settled").unwrap_err();
+        assert_eq!(err.kind, FeedErrorKind::Fatal, "{}", err.reason);
+        assert_eq!(err.reason, "a test latch");
+    }
+
+    /// Pins that a close settles only once the consumer is gone: the
+    /// confirmation's waker runs after the consumer's context is released.
+    #[test]
+    fn a_close_settles_after_the_consumer_has_left() {
+        use std::future::Future as _;
+        use std::sync::{Mutex, Weak};
+        use std::task::{Context, Wake, Waker};
+
+        struct Probe {
+            context: Weak<crate::context::SourceContext>,
+            at_settle: Mutex<Option<usize>>,
+        }
+        impl Wake for Probe {
+            fn wake(self: Arc<Self>) {
+                *self.at_settle.lock().unwrap() = Some(self.context.strong_count());
+            }
+        }
+
+        let cluster = cluster_with(0);
+        let brokers = cluster.bootstrap_servers();
+        let group = spate_test::unique_name("close-after-leave");
+        let (_, core, producer, mut d) = parts_for(&brokers, &group);
+        drive(&mut d, "the driver owns its partitions", |d| owns(d) == 2);
+        let probe = Arc::new(Probe {
+            context: Arc::downgrade(d.consumer.context()),
+            at_settle: Mutex::new(None),
+        });
+        let feed = feed_over(&core, &producer, None);
+        let mut closing = feed.close(Duration::from_secs(10)).expect("a close");
+        let waker = Waker::from(Arc::clone(&probe));
+        assert!(
+            std::pin::Pin::new(&mut closing)
+                .poll(&mut Context::from_waker(&waker))
+                .is_pending()
+        );
+        consumer::run(d);
+        assert_eq!(closing.try_outcome(), Some(Ok(())));
+        assert_eq!(
+            *probe.at_settle.lock().unwrap(),
+            Some(0),
+            "the close settled while the consumer was still held"
+        );
     }
 
     use super::super::KafkaFeedPublisher;

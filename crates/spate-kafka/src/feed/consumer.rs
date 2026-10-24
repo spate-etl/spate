@@ -140,6 +140,9 @@ pub(crate) fn run(mut d: Driver) {
         let wait = close
             .as_ref()
             .map_or(STOP_SETTLE, |c| close_flush(c.within));
+        // A tombstone queued once its dead-letter write was confirmed goes
+        // out with the flush, so the last commit can pass its unit.
+        d.resend_due();
         // Confirmed tombstones finish their offsets before the last commit.
         // The flush polls the producer from this thread, beside the
         // producer's own poll thread. Each report is still taken once, and

@@ -1432,6 +1432,18 @@ fn a_unit_at_the_gate_when_the_stop_begins_gets_no_attempt_record() {
     assert_eq!(feed.core.gate_reads.load(Ordering::SeqCst), 0);
 }
 
+/// Pins that stopping a latched feed logs no stop line.
+#[test]
+fn stopping_a_latched_feed_logs_nothing() {
+    let feed = idle_feed();
+    feed.core.latch("a test latch");
+    let lines = spate_test::capture_logs(tracing::Level::INFO, || feed.stop_receiving());
+    assert!(
+        !lines.iter().any(|l| l.contains("stopped receiving")),
+        "{lines:#?}"
+    );
+}
+
 /// Pins that a latch rejects a close the consumer thread has not taken:
 /// with no consumer thread, only the latch can settle it.
 #[test]
@@ -3091,7 +3103,8 @@ mod cluster {
 
     /// Pins that once the feed stops receiving, the consumer pauses every
     /// partition it owns and keeps them paused with its buffer empty, and
-    /// that the stop logs one line counting what it held for the reader.
+    /// that the stop logs one line counting what it held for the reader,
+    /// however often it is called.
     #[test]
     fn a_stopping_feed_keeps_its_partitions_paused_once_its_buffer_drains() {
         let cluster = cluster_with(0);
@@ -3100,7 +3113,10 @@ mod cluster {
         let (_, core, producer, mut d) = parts_for(&brokers, &group);
         let feed = feed_over(&core, &producer, None);
         drive(&mut d, "the driver owns its partitions", |d| owns(d) == 2);
-        let lines = spate_test::capture_logs(tracing::Level::INFO, || feed.stop_receiving());
+        let lines = spate_test::capture_logs(tracing::Level::INFO, || {
+            feed.stop_receiving();
+            feed.stop_receiving();
+        });
         let stops: Vec<&String> = lines
             .iter()
             .filter(|l| l.contains("the Kafka feed stopped receiving"))

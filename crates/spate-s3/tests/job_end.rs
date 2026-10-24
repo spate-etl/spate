@@ -7,6 +7,7 @@
 
 mod support;
 
+use spate_core::clock::TestClock as StopClock;
 use spate_core::clock::tokio::TestClock;
 use spate_core::feed::memory::MemoryFeed;
 use spate_core::feed::{
@@ -14,7 +15,7 @@ use spate_core::feed::{
     FeedErrorKind, FeedWaker, Receipt, Unit, depth_reading,
 };
 use spate_core::pipeline::{ExitReport, ExitState};
-use spate_test::{FeedScript, ScriptedFeed, scripted_feed, wait_until};
+use spate_test::{FeedScript, ScriptedFeed, SinkScript, WriteOutcome, scripted_feed, wait_until};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -23,7 +24,8 @@ use std::time::Duration;
 use support::location::{LocationHooks, location_store};
 use support::{
     Launched, PipelineYaml, captured_rows, fingerprint, launch_customized, launch_with_feed,
-    line_framer, lines_bytes, recs, sorted, stop, test_options, unit_over,
+    launch_with_feed_on_clock, line_framer, lines_bytes, recs, sorted, stop, test_options,
+    two_range_unit, unit_over,
 };
 
 const DEADLINE: Duration = Duration::from_secs(30);
@@ -54,7 +56,20 @@ fn launch_bounded(
     extra: &str,
 ) -> Launched {
     hooks.seed(FINGERPRINT_KEY, fingerprint(data, "Auto", "0a").as_bytes());
-    launch_unlisted(data, feed, store, clock, extra)
+    launch_job(data, feed, store, clock, extra, |_| {}, None)
+}
+
+/// [`launch_bounded`] with the runtime's stop timed on `stop_clock`.
+fn launch_bounded_on_clock(
+    data: &Path,
+    feed: Arc<dyn Feed>,
+    hooks: &LocationHooks,
+    store: Arc<dyn object_store::ObjectStore>,
+    clock: &Arc<TestClock>,
+    stop_clock: Arc<StopClock>,
+) -> Launched {
+    hooks.seed(FINGERPRINT_KEY, fingerprint(data, "Auto", "0a").as_bytes());
+    launch_job(data, feed, store, clock, "", |_| {}, Some(stop_clock))
 }
 
 /// [`launch_bounded`] before any lister run has written the fingerprint.
@@ -65,23 +80,35 @@ fn launch_unlisted(
     clock: &Arc<TestClock>,
     extra: &str,
 ) -> Launched {
+    launch_job(data, feed, store, clock, extra, |_| {}, None)
+}
+
+fn launch_job(
+    data: &Path,
+    feed: Arc<dyn Feed>,
+    store: Arc<dyn object_store::ObjectStore>,
+    clock: &Arc<TestClock>,
+    extra: &str,
+    pre: impl FnOnce(&SinkScript),
+    stop_clock: Option<Arc<StopClock>>,
+) -> Launched {
     let yaml = PipelineYaml::file("s3-job-end", data)
         .section(&format!(
             "feed:\n  scripted: {{}}\n  location: {LOCATION}\n{extra}"
         ))
         .build();
     let clock = Arc::clone(clock);
-    launch_with_feed(
-        &yaml,
-        test_options(),
-        |_| {},
-        feed,
-        move |source, _io| {
-            line_framer(source)
-                .with_location_store(store)
-                .with_clock(clock)
-        },
-    )
+    let make_source = move |source, _io| {
+        line_framer(source)
+            .with_location_store(store)
+            .with_clock(clock)
+    };
+    match stop_clock {
+        Some(stop_clock) => {
+            launch_with_feed_on_clock(&yaml, test_options(), pre, feed, stop_clock, make_source)
+        }
+        None => launch_with_feed(&yaml, test_options(), pre, feed, make_source),
+    }
 }
 
 /// Depth reads of `of` the end check has taken: the worker's startup also
@@ -607,23 +634,79 @@ fn a_settling_window_without_a_location_is_refused() {
 }
 
 /// Pins that a shutdown during the window ends the run `Completed` through
-/// the shutdown, and that no read of the feed follows it.
+/// the shutdown, and that no read of the feed follows it, on a feed that
+/// hands back as on one that does not: holding nothing, the stop reads
+/// nothing on and hands nothing back.
 #[test]
 fn a_stop_during_the_window_ends_without_draining() {
+    for hands_back in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let data = data_dir(&dir);
+        let (store, hooks) = location_store();
+        hooks.seed(END_KEY, RUN_A.as_bytes());
+        let (feed, script) = scripted_feed();
+        if hands_back {
+            script.hand_back_on_stop();
+        }
+        let clock = TestClock::frozen();
+        let l = launch_bounded_on_clock(
+            &data,
+            Arc::new(feed),
+            &hooks,
+            store,
+            &clock,
+            StopClock::frozen(),
+        );
+
+        wait_for_reads(&script, DepthOf::Feed, 1);
+        let reads = step_reads(&clock, &script, 1, 3);
+        stop(&l);
+        clock.advance(STEP * STEPS as u32);
+        assert_eq!(check_reads(&script, DepthOf::Feed), reads);
+        assert_eq!(check_reads(&script, DepthOf::DeadLetters), 0);
+        assert_eq!(script.stopped_receiving(), usize::from(hands_back));
+        assert!(script.handed_back().is_empty());
+    }
+}
+
+/// Pins that a bounded job stopped while its last unit still has a range to
+/// read reads that range to its end and acknowledges the unit, and reads no
+/// end marker and no depth while it does.
+#[test]
+fn a_bounded_job_stopping_on_its_last_unit_reads_no_marker_or_depth() {
     let dir = tempfile::tempdir().unwrap();
     let data = data_dir(&dir);
     let (store, hooks) = location_store();
-    hooks.seed(END_KEY, RUN_A.as_bytes());
+    let (unit, _) = two_range_unit(&data);
     let (feed, script) = scripted_feed();
-    let clock = TestClock::frozen();
-    let l = launch_bounded(&data, Arc::new(feed), &hooks, store, &clock, "");
-
-    wait_for_reads(&script, DepthOf::Feed, 1);
-    let reads = step_reads(&clock, &script, 1, 3);
-    stop(&l);
-    clock.advance(STEP * STEPS as u32);
-    assert_eq!(check_reads(&script, DepthOf::Feed), reads);
-    assert_eq!(check_reads(&script, DepthOf::DeadLetters), 0);
+    script.hand_back_on_stop();
+    let receipt = script.deliver(unit);
+    hooks.seed(FINGERPRINT_KEY, fingerprint(&data, "Auto", "0a").as_bytes());
+    let l = launch_job(
+        &data,
+        Arc::new(feed),
+        store,
+        &TestClock::frozen(),
+        "  units_held: 1\n",
+        |sink| sink.enqueue_global(WriteOutcome::ok().held()),
+        Some(StopClock::frozen()),
+    );
+    wait_until(DEADLINE, "the first write is held", || {
+        l.script.held_writes() == 1
+    });
+    l.shutdown.trigger();
+    wait_until(DEADLINE, "the stop begins", || {
+        script.stopped_receiving() == 1
+    });
+    let gets = hooks.gets();
+    let feed_reads = script.depth_reads(DepthOf::Feed);
+    let dead_letter_reads = script.depth_reads(DepthOf::DeadLetters);
+    l.script.release_held();
+    assert_eq!(exit(&l).state, ExitState::Completed);
+    assert_eq!(script.acknowledged(), vec![receipt]);
+    assert_eq!(hooks.gets(), gets, "an end marker read during the stop");
+    assert_eq!(script.depth_reads(DepthOf::Feed), feed_reads);
+    assert_eq!(script.depth_reads(DepthOf::DeadLetters), dead_letter_reads);
 }
 
 /// Pins that a depth read the feed refuses for good, such as for a missing
@@ -716,6 +799,18 @@ impl Feed for Wrapped {
             return Some(reading);
         }
         self.inner.read_depth(of)
+    }
+    fn hands_back(&self) -> bool {
+        self.inner.hands_back()
+    }
+    fn stop_receiving(&self) {
+        self.inner.stop_receiving();
+    }
+    fn hand_back(&self, receipt: Receipt) -> Result<(), FeedError> {
+        self.inner.hand_back(receipt)
+    }
+    fn close(&self, within: std::time::Duration) -> Option<Confirmation> {
+        self.inner.close(within)
     }
 }
 

@@ -3,16 +3,18 @@
 //! in-process feed, over real files, and the feed observes every
 //! acknowledgment, failure, renewal and `Gone` answer. Each run attaches its
 //! feed with `with_feed`, a job with no end check, so each test ends it with a
-//! shutdown.
+//! shutdown. The stop tests give the feed to the pipeline instead, so the
+//! runtime checks and closes it, and time the stop on a clock they move.
 
 mod support;
 
 use spate_core::checkpoint::Checkpointer;
+use spate_core::clock::TestClock;
 use spate_core::config::PipelineConfig;
 use spate_core::error::{ErrorClass, SourceError};
 use spate_core::feed::memory::{FeedCounts, MemoryFeed};
 use spate_core::feed::{
-    Confirmation, Delivery, Feed, FeedError, FeedErrorKind, FeedWaker, Receipt, Unit,
+    Confirmation, Delivery, Feed, FeedError, FeedErrorKind, FeedWaker, Receipt, STOP_RESERVE, Unit,
 };
 use spate_core::ops::chain_owned;
 use spate_core::pipeline::{ExitState, Pipeline, RuntimeOptions};
@@ -31,8 +33,9 @@ use std::time::Duration;
 use support::scripted_store::{HeadAnswer, ScriptedStore};
 use support::spy::{SpyOptions, spying_local_store};
 use support::{
-    Launched, PipelineYaml, captured_rows, key_of, launch_customized, line_framer, lines_bytes,
-    recs, sorted, stop, test_options, unit_over,
+    DRAIN_TIMEOUT, Launched, PipelineYaml, captured_rows, etag_of, key_of, launch_customized,
+    launch_customized_on_clock, launch_with_feed_on_clock, line_framer, lines_bytes, recs, sorted,
+    stop, test_options, two_range_unit, unit_over,
 };
 
 const DEADLINE: Duration = Duration::from_secs(30);
@@ -364,19 +367,6 @@ fn a_feed_refuses_coordination_on_the_same_source() {
     assert!(reason.contains("coordinator"), "{reason}");
 }
 
-/// The ETag the file store reports for the staged object `name`.
-fn etag_of(data: &Path, name: &str) -> String {
-    use object_store::ObjectStoreExt as _;
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .unwrap();
-    let key = key_of(data, name);
-    let meta = rt
-        .block_on(object_store::local::LocalFileSystem::new().head(&key.as_str().into()))
-        .unwrap();
-    meta.e_tag.expect("the file store reports an ETag")
-}
-
 /// Pins that the source over a feed reads a whole-object unit in the byte
 /// ranges its `split_target_bytes` cuts: with a 1 MiB target, a unit over an
 /// object of 1 MiB + 64 KiB with an ETag is read by two ranged lanes, the
@@ -677,6 +667,18 @@ impl Feed for FirstCallRetryable {
     fn read_depth(&self, of: spate_core::feed::DepthOf) -> Option<spate_core::feed::DepthReading> {
         self.inner.read_depth(of)
     }
+    fn hands_back(&self) -> bool {
+        self.inner.hands_back()
+    }
+    fn stop_receiving(&self) {
+        self.inner.stop_receiving();
+    }
+    fn hand_back(&self, receipt: Receipt) -> Result<(), FeedError> {
+        self.inner.hand_back(receipt)
+    }
+    fn close(&self, within: std::time::Duration) -> Option<Confirmation> {
+        self.inner.close(within)
+    }
 }
 
 /// Pins that an `acknowledge` or `fail` answered `Retryable` is sent again:
@@ -746,6 +748,18 @@ impl Feed for RetryableReceiveAndRenew {
 
     fn read_depth(&self, of: spate_core::feed::DepthOf) -> Option<spate_core::feed::DepthReading> {
         self.inner.read_depth(of)
+    }
+    fn hands_back(&self) -> bool {
+        self.inner.hands_back()
+    }
+    fn stop_receiving(&self) {
+        self.inner.stop_receiving();
+    }
+    fn hand_back(&self, receipt: Receipt) -> Result<(), FeedError> {
+        self.inner.hand_back(receipt)
+    }
+    fn close(&self, within: std::time::Duration) -> Option<Confirmation> {
+        self.inner.close(within)
     }
 }
 
@@ -1114,13 +1128,34 @@ fn launch_on_store(
     feed: Arc<dyn Feed>,
     pre: impl FnOnce(&SinkScript),
 ) -> Launched {
-    let yaml = PipelineYaml::endpoint("s3-overwrite-test", "http://127.0.0.1:9")
+    launch_customized(
+        &overwrite_yaml(),
+        test_options(),
+        pre,
+        move |source, _io| line_framer(source).with_store(store).with_feed(feed),
+    )
+}
+
+/// [`launch_on_store`] with the stop timed on `clock`.
+fn launch_on_store_on_clock(
+    store: Arc<ScriptedStore>,
+    feed: Arc<dyn Feed>,
+    clock: Arc<TestClock>,
+) -> Launched {
+    launch_customized_on_clock(
+        &overwrite_yaml(),
+        test_options(),
+        |_| {},
+        clock,
+        move |source, _io| line_framer(source).with_store(store).with_feed(feed),
+    )
+}
+
+fn overwrite_yaml() -> String {
+    PipelineYaml::endpoint("s3-overwrite-test", "http://127.0.0.1:9")
         .source("chunk_bytes", "64KiB")
         .source("prefetch_bytes", "64KiB")
-        .build();
-    launch_customized(&yaml, test_options(), pre, move |source, _io| {
-        line_framer(source).with_store(store).with_feed(feed)
-    })
+        .build()
 }
 
 /// A notification in bucket `b` creating `data/<name>` at `size` bytes,
@@ -1431,6 +1466,251 @@ fn a_412_unit_with_an_unsettled_publish_is_not_acknowledged_at_shutdown() {
     });
     stop(&l);
     assert!(script.acknowledged().is_empty());
+}
+
+// ------------------------------------------------------------------ stop --
+
+/// A run over `data` that holds one unit at a time from a `scripted` feed
+/// section, with its stop timed on `clock` and its first write held.
+fn launch_stopping(data: &Path, feed: Arc<dyn Feed>, clock: Arc<TestClock>) -> Launched {
+    let yaml = PipelineYaml::file("s3-feed-stop", data)
+        .section("feed:\n  scripted: {}\n  units_held: 1\n")
+        .build();
+    launch_with_feed_on_clock(
+        &yaml,
+        test_options(),
+        |sink| sink.enqueue_global(WriteOutcome::ok().held()),
+        feed,
+        clock,
+        |source, _io| line_framer(source),
+    )
+}
+
+fn exit_state(l: &Launched) -> ExitState {
+    l.run
+        .wait_exit(DEADLINE)
+        .expect("the run exits")
+        .unwrap()
+        .state
+}
+
+/// Pins the stop on a feed that hands back, end to end: the source receives
+/// nothing more, reads on and renews the unit it holds until the reserve,
+/// then hands it back with a range unread, and the runtime closes the feed
+/// after the drain.
+#[test]
+fn a_stopping_reader_reads_on_until_the_reserve_then_hands_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let (unit, _) = two_range_unit(&data);
+    let (feed, script) = scripted_feed();
+    script.hand_back_on_stop();
+    let receipt = script.deliver(unit);
+    let clock = TestClock::frozen();
+    let l = launch_stopping(&data, Arc::new(feed), Arc::clone(&clock));
+    wait_until(DEADLINE, "the first write is held", || {
+        l.script.held_writes() == 1
+    });
+    l.shutdown.trigger();
+    wait_until(DEADLINE, "the stop begins", || {
+        script.stopped_receiving() == 1
+    });
+    let renewals = renewals_of(&script, receipt);
+    wait_until(DEADLINE, "the held unit is renewed", || {
+        renewals_of(&script, receipt) > renewals
+    });
+    assert!(
+        script.handed_back().is_empty(),
+        "handed back before the reserve"
+    );
+    clock.advance(DRAIN_TIMEOUT - STOP_RESERVE);
+    wait_until(DEADLINE, "the unit is handed back", || {
+        script.handed_back() == vec![receipt]
+    });
+    l.script.release_held();
+    assert_eq!(exit_state(&l), ExitState::Completed);
+    assert!(script.acknowledged().is_empty());
+    assert!(script.gone().is_empty());
+    assert_eq!(script.stopped_receiving(), 1);
+    assert_eq!(script.closes().len(), 1);
+}
+
+/// Pins that a unit read to its end during the stop is acknowledged and
+/// never handed back, that the stop then drains with the reserve not
+/// reached, and that a unit delivered after the stop began is not received.
+#[test]
+fn a_unit_finished_during_the_stop_is_acknowledged_and_not_handed_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let (unit, rows) = two_range_unit(&data);
+    stage(&data, "late.ndjson", &recs("late", 2));
+    let (feed, script) = scripted_feed();
+    script.hand_back_on_stop();
+    let receipt = script.deliver(unit);
+    let l = launch_stopping(&data, Arc::new(feed), TestClock::frozen());
+    wait_until(DEADLINE, "the first write is held", || {
+        l.script.held_writes() == 1
+    });
+    l.shutdown.trigger();
+    wait_until(DEADLINE, "the stop begins", || {
+        script.stopped_receiving() == 1
+    });
+    script.deliver(unit_over(&data, "late.ndjson"));
+    l.script.release_held();
+    assert_eq!(exit_state(&l), ExitState::Completed);
+    assert_eq!(script.acknowledged(), vec![receipt]);
+    assert!(script.handed_back().is_empty());
+    assert_eq!(script.delivered().len(), 1, "received after the stop began");
+    assert_eq!(
+        sorted(captured_rows(&l.script)),
+        sorted(rows),
+        "each row is written once"
+    );
+}
+
+/// Pins that a stop on a feed that does not hand back drains at once: it
+/// neither reads on nor hands back.
+#[test]
+fn a_feed_that_does_not_hand_back_drains_at_once_on_a_stop() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let (unit, _) = two_range_unit(&data);
+    let (feed, script) = scripted_feed();
+    script.deliver(unit);
+    let l = launch_stopping(&data, Arc::new(feed), TestClock::frozen());
+    wait_until(DEADLINE, "the first write is held", || {
+        l.script.held_writes() == 1
+    });
+    l.shutdown.trigger();
+    l.script.release_held();
+    assert_eq!(exit_state(&l), ExitState::Completed);
+    assert_eq!(script.stopped_receiving(), 0);
+    assert!(script.handed_back().is_empty());
+}
+
+/// A scripted feed whose `renew` answers `Fatal` once the test says so.
+struct FatalRenew {
+    inner: spate_test::ScriptedFeed,
+    fatal: std::sync::atomic::AtomicBool,
+}
+
+impl Feed for FatalRenew {
+    fn backend(&self) -> &str {
+        self.inner.backend()
+    }
+    fn set_waker(&self, waker: FeedWaker) {
+        self.inner.set_waker(waker);
+    }
+    fn receive(&self, max: usize) -> Result<Vec<Delivery>, FeedError> {
+        self.inner.receive(max)
+    }
+    fn renew(&self, receipt: Receipt) -> Result<(), FeedError> {
+        if self.fatal.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(FeedError::new(
+                FeedErrorKind::Fatal,
+                "the test fails the run",
+            ));
+        }
+        self.inner.renew(receipt)
+    }
+    fn acknowledge(&self, receipt: Receipt) -> Result<(), FeedError> {
+        self.inner.acknowledge(receipt)
+    }
+    fn fail(&self, receipt: Receipt, reason: &str) -> Result<(), FeedError> {
+        self.inner.fail(receipt, reason)
+    }
+    fn publish(&self, unit: Unit) -> Confirmation {
+        self.inner.publish(unit)
+    }
+    fn hands_back(&self) -> bool {
+        self.inner.hands_back()
+    }
+    fn stop_receiving(&self) {
+        self.inner.stop_receiving();
+    }
+    fn hand_back(&self, receipt: Receipt) -> Result<(), FeedError> {
+        self.inner.hand_back(receipt)
+    }
+    fn close(&self, within: Duration) -> Option<Confirmation> {
+        self.inner.close(within)
+    }
+}
+
+/// Pins that a failed run on a feed that hands back hands back its unread
+/// unit at once, with no reading.
+#[test]
+fn a_failed_run_hands_back_its_unread_units_at_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let (unit, _) = two_range_unit(&data);
+    let (inner, script) = scripted_feed();
+    script.hand_back_on_stop();
+    let receipt = script.deliver(unit);
+    let feed = Arc::new(FatalRenew {
+        inner,
+        fatal: std::sync::atomic::AtomicBool::new(false),
+    });
+    let l = launch_stopping(
+        &data,
+        Arc::clone(&feed) as Arc<dyn Feed>,
+        TestClock::frozen(),
+    );
+    wait_until(DEADLINE, "the first write is held", || {
+        l.script.held_writes() == 1
+    });
+    feed.fatal.store(true, std::sync::atomic::Ordering::Relaxed);
+    wait_until(DEADLINE, "the unit is handed back", || {
+        script.handed_back() == vec![receipt]
+    });
+    l.script.release_held();
+    assert!(matches!(exit_state(&l), ExitState::Failed(_)));
+    assert!(script.acknowledged().is_empty());
+    assert_eq!(script.stopped_receiving(), 1);
+}
+
+/// Pins that a unit whose re-enqueue the feed has not confirmed by the
+/// reserve is handed back and never acknowledged, and that one confirmed
+/// during the stop is acknowledged and not handed back.
+#[test]
+fn a_412_unit_still_publishing_at_the_reserve_is_handed_back() {
+    for confirm in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let data = data_dir(&dir);
+        stage(&data, "a.ndjson", &recs("old", 4));
+        let (old_etag, old_size) = (etag_of(&data, "a.ndjson"), size_of(&data, "a.ndjson"));
+        stage(&data, "a.ndjson", &recs("current", 5));
+
+        let (feed, script) = scripted_feed();
+        script.hand_back_on_stop();
+        script.hold_publishes();
+        let receipt = script.deliver(pinned_notification("a.ndjson", old_size, &old_etag, 0));
+        let clock = TestClock::frozen();
+        let l = launch_on_store_on_clock(
+            ScriptedStore::new(dir.path()),
+            Arc::new(feed),
+            Arc::clone(&clock),
+        );
+        wait_until(DEADLINE, "the key is re-enqueued", || {
+            script.published().len() == 1
+        });
+        l.shutdown.trigger();
+        wait_until(DEADLINE, "the stop begins", || {
+            script.stopped_receiving() == 1
+        });
+        if confirm {
+            script.confirm_held_publishes();
+        } else {
+            clock.advance(DRAIN_TIMEOUT - STOP_RESERVE);
+        }
+        assert_eq!(exit_state(&l), ExitState::Completed, "confirm: {confirm}");
+        if confirm {
+            assert_eq!(script.acknowledged(), vec![receipt]);
+            assert!(script.handed_back().is_empty());
+        } else {
+            assert_eq!(script.handed_back(), vec![receipt]);
+            assert!(script.acknowledged().is_empty());
+        }
+    }
 }
 
 fn rt_block_on<F: std::future::Future>(f: F) -> F::Output {

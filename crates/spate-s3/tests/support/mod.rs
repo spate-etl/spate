@@ -12,6 +12,7 @@ pub(crate) mod spy;
 use object_store::ObjectStoreExt as _;
 use spate_coordination::store::memory::MemoryStore;
 use spate_coordination::{CoordinationConfig, StoreCoordinator};
+use spate_core::clock::TestClock;
 use spate_core::config::PipelineConfig;
 use spate_core::coordination::SplitSpec;
 use spate_core::feed::{Feed, Unit};
@@ -301,7 +302,19 @@ pub(crate) fn launch_customized(
     pre: impl FnOnce(&SinkScript),
     make_source: impl FnOnce(S3Source, tokio::runtime::Handle) -> S3Source,
 ) -> Launched {
-    launch_inner(yaml, options, pre, None, make_source)
+    launch_inner(yaml, options, pre, None, None, make_source)
+}
+
+/// [`launch_customized`] with the runtime's stop timed on `clock`, which the
+/// test moves by hand.
+pub(crate) fn launch_customized_on_clock(
+    yaml: &str,
+    options: RuntimeOptions,
+    pre: impl FnOnce(&SinkScript),
+    clock: Arc<TestClock>,
+    make_source: impl FnOnce(S3Source, tokio::runtime::Handle) -> S3Source,
+) -> Launched {
+    launch_inner(yaml, options, pre, None, Some(clock), make_source)
 }
 
 /// [`launch_customized`] with `feed` passed to `Pipeline::feed`, for the
@@ -313,7 +326,20 @@ pub(crate) fn launch_with_feed(
     feed: Arc<dyn Feed>,
     make_source: impl FnOnce(S3Source, tokio::runtime::Handle) -> S3Source,
 ) -> Launched {
-    launch_inner(yaml, options, pre, Some(feed), make_source)
+    launch_inner(yaml, options, pre, Some(feed), None, make_source)
+}
+
+/// [`launch_with_feed`] with the runtime's stop timed on `clock`, which the
+/// test moves by hand.
+pub(crate) fn launch_with_feed_on_clock(
+    yaml: &str,
+    options: RuntimeOptions,
+    pre: impl FnOnce(&SinkScript),
+    feed: Arc<dyn Feed>,
+    clock: Arc<TestClock>,
+    make_source: impl FnOnce(S3Source, tokio::runtime::Handle) -> S3Source,
+) -> Launched {
+    launch_inner(yaml, options, pre, Some(feed), Some(clock), make_source)
 }
 
 fn launch_inner(
@@ -321,6 +347,7 @@ fn launch_inner(
     options: RuntimeOptions,
     pre: impl FnOnce(&SinkScript),
     feed: Option<Arc<dyn Feed>>,
+    stop_clock: Option<Arc<TestClock>>,
     make_source: impl FnOnce(S3Source, tokio::runtime::Handle) -> S3Source,
 ) -> Launched {
     let mut config = PipelineConfig::from_str(yaml).expect("config parses");
@@ -362,6 +389,10 @@ fn launch_inner(
         .runtime_options(options)
         .into_runtime(source)
         .expect("runtime assembles");
+    let runtime = match stop_clock {
+        Some(clock) => runtime.with_stop_clock(clock),
+        None => runtime,
+    };
     let shutdown = runtime.shutdown_handle();
     let run = PipelineRun::spawn(move || runtime.run());
     Launched {
@@ -404,6 +435,46 @@ pub(crate) fn unit_over(data: &Path, name: &str) -> Unit {
     };
     let body = SplitDescriptor::new(vec![object]).encode().unwrap();
     Unit::new(name, body)
+}
+
+/// The default `checkpoint.drain_timeout`, from which a stop's reserve
+/// falls `STOP_RESERVE` early.
+pub(crate) const DRAIN_TIMEOUT: Duration = Duration::from_secs(25);
+
+/// The ETag the file store reports for the staged object `name`.
+pub(crate) fn etag_of(data: &Path, name: &str) -> String {
+    use object_store::ObjectStoreExt as _;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let key = key_of(data, name);
+    let meta = rt
+        .block_on(object_store::local::LocalFileSystem::new().head(&key.as_str().into()))
+        .unwrap();
+    meta.e_tag.expect("the file store reports an ETag")
+}
+
+/// Stage `name`, an object with an ETag that the 1 MiB target cuts into two
+/// ranges, and return its rows.
+pub(crate) fn stage_two_ranges(data: &Path, name: &str) -> Vec<String> {
+    // 1,088 lines of 1 KiB: the ranges are [0, 557056) and [557056, 1114112).
+    let pad = "p".repeat(1024 - 20);
+    let rows: Vec<String> = (0..1088)
+        .map(|i| format!("{{\"k\":\"{i:04}\",\"p\":\"{pad}\"}}"))
+        .collect();
+    fs::write(data.join(name), lines_bytes(&rows)).unwrap();
+    rows
+}
+
+/// Stage `big.ndjson` as [`stage_two_ranges`] does, and return a unit over
+/// it pinned to its ETag, and its rows.
+pub(crate) fn two_range_unit(data: &Path) -> (Unit, Vec<String>) {
+    let rows = stage_two_ranges(data, "big.ndjson");
+    let mut unit = unit_over(data, "big.ndjson");
+    let mut descriptor = SplitDescriptor::decode(&unit.body).unwrap();
+    descriptor.objects[0].etag = Some(etag_of(data, "big.ndjson"));
+    unit.body = descriptor.encode().unwrap();
+    (unit, rows)
 }
 
 pub(crate) fn launch(yaml: &str, options: RuntimeOptions) -> Launched {

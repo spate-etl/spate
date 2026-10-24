@@ -34,7 +34,8 @@ pub struct RecordMeta {
     /// Source offset (e.g. Kafka offset) of the originating payload.
     pub offset: i64,
     /// Event time in milliseconds since the epoch, as reported by the
-    /// source (e.g. the Kafka message timestamp).
+    /// source (e.g. the Kafka message timestamp). `i64::MAX` means the source
+    /// did not provide an event time.
     pub event_time_ms: i64,
     /// Stable hash of the message key, when the source provides one; used
     /// by key-based shard routing.
@@ -77,7 +78,7 @@ pub struct RawPayload<'buf> {
     pub partition: PartitionId,
     /// Source offset.
     pub offset: i64,
-    /// Source-reported event time (ms since epoch).
+    /// Source-reported event time (ms since epoch), or `i64::MAX` when absent.
     pub timestamp_ms: i64,
 }
 

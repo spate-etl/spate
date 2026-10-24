@@ -66,7 +66,8 @@ const IO_BUSY_INTERVAL: Duration = Duration::from_secs(5);
 pub struct ShutdownHandle(Arc<AtomicBool>);
 
 impl ShutdownHandle {
-    /// Begin the drain. Idempotent.
+    /// Begin the graceful stop: a source that reads on what it holds
+    /// finishes first, then the drain runs. Idempotent.
     pub fn trigger(&self) {
         self.0.store(true, Ordering::Relaxed);
     }

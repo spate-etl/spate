@@ -73,9 +73,9 @@ pub(crate) struct DriverContext<L> {
     pub health: Arc<HealthState>,
     pub bp_metrics: BackpressureMetrics,
     pub source_metrics: SourceMetrics,
-    /// The process-wide shutdown flag: checked inside long-running inner
-    /// loops (blocked-batch retries) so a wedged batch cannot defer
-    /// shutdown to the barrier timeout.
+    /// The drain's flag, set once the drain begins: checked inside
+    /// long-running inner loops (blocked-batch retries) so a wedged batch
+    /// cannot defer shutdown to the barrier timeout.
     pub shutdown: Arc<AtomicBool>,
 }
 

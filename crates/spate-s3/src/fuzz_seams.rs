@@ -2,7 +2,12 @@
 //! composite offset codec, the object framer, the trim of a ranged read, and
 //! the decoder of a feed delivery's body.
 //!
-//! Follows the rules [`bench_seams`](crate::bench_seams) states.
+//! Follows the first two rules [`bench_seams`](crate::bench_seams) states:
+//! the `testing` feature with `#[doc(hidden)]`, and functions with no type of
+//! this crate's own. Beside the entry points, a target may call one predicate
+//! the source applies when the rule behind it belongs to a dependency. A
+//! target that predicts with such a predicate checks that the source applies
+//! it, and the predicate's own tests pin its rule.
 
 use crate::config::Compression;
 use crate::framer::{Codec, ObjectFramer};

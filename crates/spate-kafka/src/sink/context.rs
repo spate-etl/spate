@@ -449,7 +449,7 @@ pub(crate) mod tests {
         use rdkafka::ClientConfig;
         use rdkafka::producer::{Producer, ThreadedProducer};
         let producer: ThreadedProducer<ErrorCalls> = ClientConfig::new()
-            .set("bootstrap.servers", "127.0.0.1:1")
+            .set("bootstrap.servers", crate::testutil::refused_broker())
             .create_with_context(ErrorCalls::default())
             .expect("producer");
         let context = Arc::clone(producer.context());

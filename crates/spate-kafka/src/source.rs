@@ -1061,16 +1061,15 @@ mod tests {
         assert_eq!(owned, vec![0, 1]);
     }
 
-    /// An opened source against an unreachable broker (open never contacts
-    /// one), with `lanes` pre-seeded into the assignment map.
+    /// An opened source against a broker that refuses connections, with `lanes`
+    /// pre-seeded into the assignment map.
     fn opened_source(lanes: &[(u32, i32)]) -> KafkaSource {
         opened_source_with(test_config(), lanes)
     }
 
-    /// [`opened_source`] with a configuration of the test's own. The brokers
-    /// are unreachable either way.
+    /// [`opened_source`] with a configuration of the test's own.
     fn opened_source_with(mut cfg: KafkaSourceConfig, lanes: &[(u32, i32)]) -> KafkaSource {
-        cfg.brokers = "127.0.0.1:1".into();
+        cfg.brokers = crate::testutil::refused_broker();
         let mut source = KafkaSource::new(cfg);
         let cp = Checkpointer::new();
         source.open(SourceCtx::new(cp.handle())).expect("open");
@@ -1519,7 +1518,7 @@ mod tests {
         #[test]
         fn an_error_after_the_deadline_is_reported_by_its_age() {
             let mut cfg = test_config();
-            cfg.brokers = "127.0.0.1:1".into();
+            cfg.brokers = crate::testutil::refused_broker();
             let mut source = KafkaSource::new(cfg);
             let cp = Checkpointer::new();
             source.open(SourceCtx::new(cp.handle())).expect("open");
@@ -1546,7 +1545,7 @@ mod tests {
         #[test]
         fn the_startup_deadline_names_the_last_consumer_error() {
             let mut cfg = test_config();
-            cfg.brokers = "127.0.0.1:1".into();
+            cfg.brokers = crate::testutil::refused_broker();
             let mut source = KafkaSource::new(cfg);
             let cp = Checkpointer::new();
             source.open(SourceCtx::new(cp.handle())).expect("open");

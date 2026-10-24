@@ -8,6 +8,7 @@ use crate::client;
 use crate::error::{CallError, Class, classify};
 use crate::startup::QueueAttributes;
 use aws_sdk_sqs::Client;
+use aws_sdk_sqs::config::retry::RetryConfig;
 use aws_sdk_sqs::types::{
     ChangeMessageVisibilityBatchRequestEntry, DeleteMessageBatchRequestEntry,
     MessageAttributeValue, MessageSystemAttributeName, QueueAttributeName,
@@ -252,9 +253,10 @@ impl Queue for SdkQueue {
             // see every failed attempt to know that SQS may hold the unit.
             let out = call
                 .customize()
-                .config_override(aws_sdk_sqs::config::Builder::default().retry_config(
-                    aws_sdk_sqs::config::retry::RetryConfig::standard().with_max_attempts(1),
-                ))
+                .config_override(
+                    aws_sdk_sqs::config::Builder::default()
+                        .retry_config(RetryConfig::standard().with_max_attempts(1)),
+                )
                 .send()
                 .await
                 .map_err(|e| classify("SendMessageBatch", &e))?;

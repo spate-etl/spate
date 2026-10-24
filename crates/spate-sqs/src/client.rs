@@ -179,7 +179,8 @@ pub(crate) fn trust_roots(loaded: CertificateResult) -> (String, bool) {
 
 fn push_pem(out: &mut String, der: &[u8]) {
     use base64::Engine as _;
-    let body = base64::engine::general_purpose::STANDARD.encode(der);
+    use base64::engine::general_purpose::STANDARD;
+    let body = STANDARD.encode(der);
     out.push_str("-----BEGIN CERTIFICATE-----\n");
     for line in body.as_bytes().chunks(64) {
         out.push_str(std::str::from_utf8(line).expect("base64 is ASCII"));

@@ -2790,3 +2790,20 @@ fn a_source_that_does_not_read_on_drains_at_once() {
     });
     assert_eq!(join.join().unwrap().unwrap().state, ExitState::Completed);
 }
+
+/// Pins that a source whose `open` failed is not asked to hand back.
+#[test]
+fn a_source_that_failed_to_open_is_not_asked_to_stop_reading() {
+    let clock = crate::clock::TestClock::frozen();
+    let h = start_prepared(
+        stop_config(Duration::from_secs(600)),
+        test_options(),
+        |log| log.fail_open = true,
+        move |runtime, _| runtime.with_stop_clock(clock),
+        ok_chain,
+    );
+    joined(&h);
+    let report = h.join.join().unwrap().unwrap();
+    assert!(matches!(report.state, ExitState::Failed(_)), "{report:?}");
+    assert_eq!(h.shared.lock().unwrap().stop_reading_calls, 0);
+}

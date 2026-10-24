@@ -63,6 +63,8 @@ pub(crate) struct SourceLog {
     /// When set, a dropped lane logs `lane-dropped`, which a stop's drain
     /// does once the drivers have their `Shutdown`.
     pub(crate) log_lane_drops: bool,
+    /// When set, `open` fails fatally.
+    pub(crate) fail_open: bool,
 }
 
 pub(crate) enum Script {
@@ -128,6 +130,12 @@ impl Source for FakeSource {
     fn open(&mut self, ctx: SourceCtx) -> Result<(), SourceError> {
         {
             let mut log = self.shared.lock().unwrap();
+            if log.fail_open {
+                return Err(SourceError::Client {
+                    class: ErrorClass::Fatal,
+                    reason: "scripted open failure".into(),
+                });
+            }
             log.opened = true;
             log.stage_metrics_attached = ctx.stage_metrics.is_some();
         }

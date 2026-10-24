@@ -4628,6 +4628,7 @@ dependencies = [
  "arbitrary",
  "bytes",
  "flate2",
+ "http",
  "libfuzzer-sys",
  "serde",
  "serde_json",

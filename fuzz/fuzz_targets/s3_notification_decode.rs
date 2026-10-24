@@ -8,8 +8,8 @@
 //! read, or failing its message. A message with a failing record must read
 //! nothing. Any other message must read exactly the predicted parts, in
 //! order. Each part's key is under the prefix, accepted by `addressable` and
-//! equal to the key before it was encoded. Each ETag is quoted and can be sent
-//! as a header value. Raw bytes are left to `s3_unit_decode`.
+//! equal to the key before it was encoded. Each ETag is quoted and accepted by
+//! `http` as a header value. Raw bytes are left to `s3_unit_decode`.
 //!
 //! The prediction follows the decoder's order in the one place order shows: a
 //! zero size drops a created record after the bucket, key decoding, prefix
@@ -18,6 +18,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
+use http::HeaderValue;
 use libfuzzer_sys::fuzz_target;
 use serde_json::{Map, Value, json};
 use spate_s3::fuzz_seams::{DecodedUnit, addressable, decode_unit};
@@ -153,7 +154,7 @@ fuzz_target!(|input: Input| {
                 "the ETag {etag:?} of {key:?} is not quoted"
             );
             assert!(
-                sendable(etag),
+                HeaderValue::from_str(etag).is_ok(),
                 "the ETag {etag:?} of {key:?} cannot be sent"
             );
         }
@@ -260,7 +261,11 @@ fn predict(
         Some(0) => return Outcome::Drop,
         Some(_) => {}
     }
-    if !addressable(&key) || etag.as_deref().is_some_and(|e| !sendable(e)) {
+    if !addressable(&key)
+        || etag
+            .as_deref()
+            .is_some_and(|e| HeaderValue::from_str(e).is_err())
+    {
         return Outcome::Fail;
     }
     let etag = etag.map(|e| {
@@ -341,11 +346,4 @@ fn created(name: &str) -> bool {
 
 fn s3_tag(prefixed: bool) -> &'static str {
     if prefixed { "s3:" } else { "" }
-}
-
-/// Whether `http` accepts `value` in a header: no control byte but a tab.
-fn sendable(value: &str) -> bool {
-    value
-        .bytes()
-        .all(|b| b == b'\t' || (b >= 0x20 && b != 0x7f))
 }

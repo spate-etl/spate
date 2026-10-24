@@ -17,6 +17,7 @@ libfuzzer-sys = { workspace = true }
 arbitrary = { workspace = true }
 bytes = { workspace = true }
 flate2 = { workspace = true }
+http = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 zstd = { workspace = true }

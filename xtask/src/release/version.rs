@@ -12,6 +12,8 @@ use std::path::Path;
 use clap::Subcommand;
 use serde::Deserialize;
 
+use crate::checks::scratch::unique_name;
+use crate::checks::{changelog, semver_checks};
 use crate::run::{self, Error, Outcome, Step};
 
 const MANIFEST: &str = "Cargo.toml";
@@ -645,7 +647,7 @@ pub(crate) fn missing_metadata(metadata: &str) -> Result<Vec<String>, Error> {
 /// judged by comparing the two values, so an annotation or a lowering is not a
 /// raise.
 pub(crate) fn derive(root: &Path) -> Result<(Version, String), Error> {
-    let last = crate::checks::semver_checks::last_tag(root)?;
+    let last = semver_checks::last_tag(root)?;
     if last.is_empty() {
         return Err(Error::msg(
             "no vX.Y.Z tag; the first release of a repository is cut by hand",
@@ -672,7 +674,7 @@ pub(crate) fn derive(root: &Path) -> Result<(Version, String), Error> {
         )));
     }
 
-    if crate::checks::changelog::breaking_announced(root)? {
+    if changelog::breaking_announced(root)? {
         return Ok((
             cur.next(Bump::Minor),
             "minor bump (a changelog fragment opens with **Breaking:**)".to_owned(),
@@ -766,7 +768,7 @@ fn replace_all(root: &Path, files: &[(&str, String)]) -> Outcome {
         .iter()
         .try_for_each(|(rel, text)| {
             let path = root.join(rel);
-            let tmp = path.with_file_name(crate::checks::scratch::unique_name(&format!(
+            let tmp = path.with_file_name(unique_name(&format!(
                 ".{}",
                 path.file_name().unwrap_or_default().to_string_lossy()
             )));

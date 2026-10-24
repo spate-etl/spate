@@ -26,6 +26,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
+use crate::checks::changelog;
 use crate::checks::scratch::Scratch;
 use crate::run::{self, Completed, Error, Outcome, Step, Streams};
 
@@ -480,7 +481,7 @@ fn removed_since(root: &Path, tag: &str) -> Vec<String> {
 /// Reports a break, passing it where the release being prepared announces one.
 fn verdict(root: &Path, breaking: &[String]) -> Outcome {
     let list: String = breaking.iter().map(|b| format!(" {b}")).collect();
-    if crate::checks::changelog::breaking_announced(root)? {
+    if changelog::breaking_announced(root)? {
         println!("{TOOL}: breaking against the registry:{list}");
         println!(
             "  A changelog fragment announces a break in this release; the next release derives as a minor."

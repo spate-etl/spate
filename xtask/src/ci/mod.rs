@@ -11,6 +11,7 @@ use std::path::Path;
 use event::Diff;
 pub(crate) use scope::Scope;
 
+use crate::checks::container_image;
 use crate::repo_root;
 
 /// Classifies the current event and writes the job selections to stdout and,
@@ -87,7 +88,7 @@ pub(crate) fn merge_base(root: &Path, base: &str) -> Option<String> {
 /// live in the repository's `ci/clickhouse/`, so adding or repointing one
 /// needs no edit here.
 fn extra_clickhouse_lanes(root: &Path) -> Result<Vec<String>, String> {
-    crate::checks::container_image::extra_lanes(root, "clickhouse").map_err(|e| e.message)
+    container_image::extra_lanes(root, "clickhouse").map_err(|e| e.message)
 }
 
 #[cfg(test)]

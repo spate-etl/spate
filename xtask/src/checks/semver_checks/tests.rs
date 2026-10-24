@@ -420,7 +420,7 @@ fn the_crates_are_the_sorted_directories_under_crates() {
 /// directory beside the crates never reaches the index.
 #[test]
 fn discovery_takes_directories_that_are_not_dotted() {
-    let scratch = crate::checks::scratch::Scratch::new("spate-xtask-semver-crates").unwrap();
+    let scratch = Scratch::new("spate-xtask-semver-crates").unwrap();
     let crates = scratch.join("crates");
     for name in ["beta", "alpha", ".hidden"] {
         std::fs::create_dir_all(crates.join(name)).unwrap();

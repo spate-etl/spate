@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use clap::Subcommand;
 
+use crate::checks::scratch::{Scratch, unique_name};
 use crate::run::{self, Error, Outcome, Step, Streams};
 use io::{CratesIo, DryForge, DryGit, Gh, Git, Host, LocalWorkspace, ProcessGit, Workspace};
 use version::Version;
@@ -175,7 +176,7 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: ReleaseCommand) -> Outco
             match (&out, dry_run) {
                 (Some(dir), _) => sequence::stage(&host, &prepared, dir)?,
                 (None, true) => {
-                    let scratch = crate::checks::scratch::Scratch::new("spate-release-stage")?;
+                    let scratch = Scratch::new("spate-release-stage")?;
                     sequence::stage(&host, &prepared, scratch.dir())?;
                 }
                 (None, false) => {}
@@ -409,8 +410,7 @@ fn dry_run(root: &Path, version: &str, keep: bool, stand_in_post: bool) -> Outco
             "the working tree is not clean; a release is assembled from committed state only",
         ));
     }
-    let parent =
-        std::env::temp_dir().join(crate::checks::scratch::unique_name("spate-release-dry-run"));
+    let parent = std::env::temp_dir().join(unique_name("spate-release-dry-run"));
     let tree = parent.join(format!("v{version}"));
     std::fs::create_dir_all(&parent)
         .map_err(|e| Error::msg(format!("{}: {e}", parent.display())))?;

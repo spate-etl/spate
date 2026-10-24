@@ -16,6 +16,8 @@ use std::path::Path;
 
 use clap::Subcommand;
 
+use crate::checks::container_image::{Mode, pull_all};
+use crate::checks::{adr, attribution, changelog, docsrs, site_check, subject, sync_labels};
 use crate::run::{self, Error, Outcome, Step};
 
 pub(crate) use lint::TidyCheck;
@@ -278,11 +280,9 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: Command) -> Outcome {
         Command::Test => test(root, explain, &Select::Workspace),
         Command::Doctest => doctest(root, explain, &Select::Workspace),
         Command::Doc => doc(root, explain, &Select::Workspace),
-        Command::Docsrs { toolchain } => {
-            crate::checks::docsrs::run(root, explain, toolchain.nightly())
-        }
+        Command::Docsrs { toolchain } => docsrs::run(root, explain, toolchain.nightly()),
         Command::IntegrationTest => {
-            crate::checks::container_image::pull_all(root, explain)?;
+            pull_all(root, explain)?;
             run::run(
                 root,
                 explain,
@@ -329,30 +329,24 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: Command) -> Outcome {
                 ["deny", "--all-features", "--locked", "check", "all"],
             ),
         ),
-        Command::Attribution => crate::checks::attribution::generate(root, explain),
+        Command::Attribution => attribution::generate(root, explain),
         Command::Tidy { check, list } => lint::tidy(root, explain, check, list),
         Command::Adr { cmd } => match cmd {
-            AdrCommand::New { slug } => crate::checks::adr::new(root, explain, &slug),
+            AdrCommand::New { slug } => adr::new(root, explain, &slug),
         },
         Command::Changelog { cmd } => match &cmd {
-            ChangelogCommand::New { kind, slug } => {
-                crate::checks::changelog::new(root, explain, kind, slug)
-            }
-            ChangelogCommand::Build { version } => {
-                crate::checks::changelog::build(root, explain, version)
-            }
-            ChangelogCommand::Notes { version } => {
-                crate::checks::changelog::notes(root, explain, version)
-            }
+            ChangelogCommand::New { kind, slug } => changelog::new(root, explain, kind, slug),
+            ChangelogCommand::Build { version } => changelog::build(root, explain, version),
+            ChangelogCommand::Notes { version } => changelog::notes(root, explain, version),
         },
-        Command::CommitMsg { file } => crate::checks::subject::commit_msg(root, explain, &file),
+        Command::CommitMsg { file } => subject::commit_msg(root, explain, &file),
         Command::Hooks { cmd } => match cmd {
             HooksCommand::Install => hooks::install(root, explain),
         },
         Command::BugReport(args) => issue_form::bug_report(root, explain, &args),
         Command::Fuzz { cmd } => fuzz::dispatch(root, explain, cmd),
         Command::Mutants { since, in_place } => mutants::run(root, explain, &since, in_place),
-        Command::SiteCheck => crate::checks::site_check::check(root, explain),
+        Command::SiteCheck => site_check::check(root, explain),
         Command::Docs { serve } => docs::dispatch(root, explain, serve),
         Command::Release { cmd } => crate::release::dispatch(root, explain, cmd),
         Command::CiChanges { classify_paths } => {
@@ -387,7 +381,7 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: Command) -> Outcome {
         Command::SyncLabels { dry_run, repo } => {
             // `DRY_RUN=true` is how the workflow selects it on a pull request.
             let dry_run = dry_run || std::env::var("DRY_RUN").as_deref() == Ok("true");
-            crate::checks::sync_labels::sync(root, explain, dry_run, repo.as_deref())
+            sync_labels::sync(root, explain, dry_run, repo.as_deref())
         }
     }
 }
@@ -424,8 +418,7 @@ fn container_image(root: &Path, explain: bool, args: &ImageArgs) -> Outcome {
 }
 
 /// The mode a pair of flags selects.
-fn image_mode(r#ref: bool, pull: bool) -> crate::checks::container_image::Mode {
-    use crate::checks::container_image::Mode;
+fn image_mode(r#ref: bool, pull: bool) -> Mode {
     if pull {
         Mode::Pull
     } else if r#ref {

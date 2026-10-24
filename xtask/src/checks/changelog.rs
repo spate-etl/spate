@@ -15,6 +15,9 @@ mod requirements;
 
 use crate::checks::adr::is_slug;
 use crate::checks::scratch::Scratch;
+use crate::checks::semver_checks;
+use crate::release::post;
+use crate::release::version::Version;
 use crate::run::{self, Completed, Error, Outcome, Step, Streams};
 
 /// The prefix on every line this check writes for itself.
@@ -919,11 +922,11 @@ pub(crate) fn notes_text(root: &Path, version: &str) -> Result<String, Error> {
     }
     let text =
         std::fs::read_to_string(&path).map_err(|e| Error::msg(format!("{CHANGELOG}: {e}")))?;
-    let post = match crate::release::version::Version::parse(version) {
+    let post = match Version::parse(version) {
         Some(parsed) => {
             let manifest = std::fs::read_to_string(root.join("Cargo.toml"))
                 .map_err(|e| Error::msg(format!("Cargo.toml: {e}")))?;
-            crate::release::post::url(&manifest, parsed)?
+            post::url(&manifest, parsed)?
         }
         None => None,
     };
@@ -1849,7 +1852,7 @@ pub(crate) fn breaking_announced(root: &Path) -> Result<bool, Error> {
     }
 
     let manifest = run::capture(root, &Step::new("git", ["show", "HEAD:Cargo.toml"]))?;
-    let version = crate::checks::semver_checks::workspace_version(&manifest);
+    let version = semver_checks::workspace_version(&manifest);
     let Some(tag) = previous_tag(root) else {
         return Ok(false);
     };

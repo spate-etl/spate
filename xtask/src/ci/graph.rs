@@ -9,6 +9,8 @@ use std::process::Command;
 
 use serde::Deserialize;
 
+use crate::checks::gungraun;
+
 /// The wall-clock benchmark harness. Crates dev-depend on it for their
 /// `benches/*_wall.rs` targets, and cargo builds no bench target for an
 /// `#[ignore]`d test, so the edge reaches no container suite.
@@ -131,7 +133,7 @@ impl Graph {
             container_pkgs: container_test_owners(root, &members)?,
             semver_pkgs,
             fuzz_pkgs: fuzz_dependencies(&meta, &members),
-            bench_pkgs: crate::checks::gungraun::owners(root),
+            bench_pkgs: gungraun::owners(root),
             #[cfg(test)]
             features: meta
                 .packages

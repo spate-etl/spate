@@ -4,6 +4,8 @@ use std::path::Path;
 
 use clap::ValueEnum;
 
+use crate::checks::{adr, changelog, gungraun, perf_report, subject, supported_versions};
+use crate::release::version;
 use crate::run::{self, Outcome, Step};
 
 #[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
@@ -96,18 +98,16 @@ fn one_check(root: &Path, explain: bool, check: TidyCheck) -> Outcome {
             explain,
             &Step::new("cargo", ["test", "-p", "spate-xtask", "--locked"]),
         ),
-        TidyCheck::Changelog => crate::checks::changelog::check(root, explain),
-        TidyCheck::Title => crate::checks::subject::check_title(root, explain),
-        TidyCheck::Adr => crate::checks::adr::check(root, explain),
-        TidyCheck::PerfReport => crate::checks::perf_report::self_test(explain),
-        TidyCheck::GungraunBenches => crate::checks::gungraun::check(root, explain),
+        TidyCheck::Changelog => changelog::check(root, explain),
+        TidyCheck::Title => subject::check_title(root, explain),
+        TidyCheck::Adr => adr::check(root, explain),
+        TidyCheck::PerfReport => perf_report::self_test(explain),
+        TidyCheck::GungraunBenches => gungraun::check(root, explain),
         TidyCheck::Transclusions => script(root, explain, "transclude.sh", "--check"),
-        TidyCheck::SupportedVersions => crate::checks::supported_versions::check(root, explain),
-        TidyCheck::ReleaseVersion => crate::release::version::dispatch(
-            root,
-            explain,
-            &crate::release::version::VersionCommand::Check,
-        ),
+        TidyCheck::SupportedVersions => supported_versions::check(root, explain),
+        TidyCheck::ReleaseVersion => {
+            version::dispatch(root, explain, &version::VersionCommand::Check)
+        }
     }
 }
 

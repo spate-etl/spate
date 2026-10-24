@@ -1674,7 +1674,7 @@ fn a_crate_list_with_nested_parentheses_is_kept_whole() {
 /// workspace manifest names, and a patch release's body links no post.
 #[test]
 fn a_minor_release_body_links_its_post() {
-    let scratch = crate::checks::scratch::Scratch::new("spate-xtask-notes-post").unwrap();
+    let scratch = Scratch::new("spate-xtask-notes-post").unwrap();
     std::fs::write(
         scratch.join("Cargo.toml"),
         "[workspace.package]\nversion = \"0.4.1\"\nhomepage = \"https://example.test\"\n",

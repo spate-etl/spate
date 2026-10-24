@@ -20,6 +20,7 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
+use crate::checks::container_image;
 use crate::run::{Error, Outcome};
 
 const HEADING: &str = "## Supported";
@@ -45,8 +46,7 @@ pub(crate) fn check(root: &Path, explain: bool) -> Outcome {
         return Ok(());
     }
 
-    let resolve =
-        |service: &str, lane: &str| crate::checks::container_image::tagged_for(root, service, lane);
+    let resolve = |service: &str, lane: &str| container_image::tagged_for(root, service, lane);
     let mut failures = 0;
     for (service, page) in &pairs {
         if let Err(e) = check_page(root, &ci_root, service, page, &resolve) {

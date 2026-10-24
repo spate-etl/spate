@@ -12,6 +12,7 @@ use serde::Deserialize;
 use super::version::Version;
 use crate::checks::scratch::Scratch;
 use crate::checks::semver_checks::{UA, fetch_index};
+use crate::checks::{attribution, changelog, semver_checks};
 use crate::run::{self, Error, Outcome, Step};
 
 /// The identity the release commit and tag carry.
@@ -207,7 +208,7 @@ impl Git for ProcessGit<'_> {
     }
 
     fn last_tag(&self) -> Result<String, Error> {
-        crate::checks::semver_checks::last_tag(self.root)
+        semver_checks::last_tag(self.root)
     }
 
     fn subject(&self) -> Result<String, Error> {
@@ -804,8 +805,8 @@ impl Workspace for LocalWorkspace<'_> {
     fn generate(&self, version: Version) -> Outcome {
         let v = version.to_string();
         super::version::bump(self.root, false, &v)?;
-        crate::checks::changelog::build(self.root, false, &v)?;
-        crate::checks::attribution::generate(self.root, false)
+        changelog::build(self.root, false, &v)?;
+        attribution::generate(self.root, false)
     }
 
     fn blog(&self) -> PathBuf {
@@ -813,7 +814,7 @@ impl Workspace for LocalWorkspace<'_> {
     }
 
     fn notes(&self, version: Version) -> Result<String, Error> {
-        crate::checks::changelog::notes_text(self.root, &version.to_string())
+        changelog::notes_text(self.root, &version.to_string())
     }
 
     fn package(&self, excludes: &[String]) -> Outcome {

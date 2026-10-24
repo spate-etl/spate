@@ -60,6 +60,8 @@ mod tests {
 
     use super::{FLOOR, clears_floor, count_files};
     use crate::checks::scratch::Scratch;
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
 
     /// Writes `n` empty files under `dir`, spread over nested directories.
     fn populate(dir: &Path, n: usize) {
@@ -113,8 +115,8 @@ mod tests {
         let build = scratch.join("build");
         std::fs::create_dir_all(&build).unwrap();
         std::fs::write(build.join("index.html"), "").unwrap();
-        std::os::unix::fs::symlink(build.join("index.html"), build.join("link.html")).unwrap();
-        std::os::unix::fs::symlink(&build, build.join("loop")).unwrap();
+        symlink(build.join("index.html"), build.join("link.html")).unwrap();
+        symlink(&build, build.join("loop")).unwrap();
         assert_eq!(count_files(&build).unwrap(), 1);
     }
 

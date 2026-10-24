@@ -2,18 +2,21 @@
 //!
 //! A unit's body comes from a queue or topic, so whoever can publish there
 //! chooses its bytes. The target builds a `Records` message for a source
-//! reading `bucket` under one of a few prefixes. Its records' keys, sizes,
-//! ETags and event names take the shapes the decoder's rules distinguish, and
-//! the target predicts each record's outcome from how it was built: dropped,
-//! read, or failing its message. A message with a failing record must read
-//! nothing. Any other message must read exactly the predicted parts, in
-//! order. Each part's key is under the prefix, accepted by `addressable` and
-//! equal to the key before it was encoded. Each ETag is quoted and accepted by
-//! `http` as a header value. Raw bytes are left to `s3_unit_decode`.
+//! reading `bucket` under one of a few prefixes. Its records' event names,
+//! keys, sizes, ETags, versions and re-enqueue counts take the shapes the
+//! decoder's rules distinguish, and the target predicts each record's outcome
+//! from how it was built: dropped, read, or failing its message. A message
+//! with a failing record must read nothing. Any other message must read
+//! exactly the predicted parts, in order. Each part's key is under the prefix,
+//! accepted by `addressable` and equal to the key before it was encoded. Each
+//! ETag is quoted and accepted by `http` as a header value. Raw bytes are left
+//! to `s3_unit_decode`.
 //!
-//! The prediction follows the decoder's order in the one place order shows: a
-//! zero size drops a created record after the bucket, key decoding, prefix
-//! and size checks, and before the `addressable` and ETag checks.
+//! The prediction follows the decoder's order where it decides between
+//! dropping a record and failing its message. A record whose fields do not
+//! deserialise fails even at size 0. A size of 0 then drops the record after
+//! the bucket, key decoding, prefix and size checks, and before the
+//! `addressable`, ETag and `versionId` checks.
 
 #![no_main]
 
@@ -26,6 +29,8 @@ use std::fmt::Write as _;
 
 const BUCKET: &str = "bucket";
 const PREFIXES: [&str; 3] = ["", "data", "a/b"];
+/// The longest `versionId` the source reads.
+const MAX_VERSION_BYTES: usize = 1024;
 
 #[derive(Arbitrary, Debug)]
 struct Input {
@@ -43,6 +48,8 @@ struct Record {
     key: Key,
     size: Size,
     etag: Etag,
+    version: Version,
+    re_enqueues: ReEnqueues,
     event_time: Option<String>,
 }
 
@@ -104,11 +111,37 @@ enum Etag {
     Quoted(String),
 }
 
+/// A record's `versionId`.
+#[derive(Arbitrary, Debug)]
+enum Version {
+    Absent,
+    Null,
+    NullText,
+    Value(String),
+    /// A run of `v` from 1,000 to 1,049 bytes, either side of the cap.
+    Long(u8),
+    NotString(i64),
+}
+
+/// A record's `spateReEnqueues`.
+#[derive(Arbitrary, Debug)]
+enum ReEnqueues {
+    Absent,
+    Null,
+    Count(u32),
+    /// More than `u32::MAX`.
+    Over(u32),
+    Text(String),
+}
+
+/// One part as `(key, etag, version, re_enqueues)`.
+type Part = (String, Option<String>, Option<String>, u32);
+
 /// What the decoder must do with one record.
 #[derive(Debug)]
 enum Outcome {
     Drop,
-    Read(String, Option<String>),
+    Read(Part),
     Fail,
 }
 
@@ -137,12 +170,15 @@ fuzz_target!(|input: Input| {
         );
         return;
     }
-    let parts: Vec<(String, Option<String>)> = match decoded {
-        DecodedUnit::Read(parts) => parts.into_iter().map(|p| (p.key, p.etag)).collect(),
+    let parts: Vec<Part> = match decoded {
+        DecodedUnit::Read(parts) => parts
+            .into_iter()
+            .map(|p| (p.key, p.etag, p.version, p.re_enqueues))
+            .collect(),
         DecodedUnit::Acknowledge => Vec::new(),
         DecodedUnit::Fail => panic!("failed; expected {outcomes:?}"),
     };
-    for (key, etag) in &parts {
+    for (key, etag, _, _) in &parts {
         assert!(
             prefix.is_empty() || key.starts_with(&format!("{prefix}/")),
             "the part {key:?} is outside the prefix {prefix:?}"
@@ -159,10 +195,10 @@ fuzz_target!(|input: Input| {
             );
         }
     }
-    let expected: Vec<(String, Option<String>)> = outcomes
+    let expected: Vec<Part> = outcomes
         .into_iter()
         .filter_map(|o| match o {
-            Outcome::Read(key, etag) => Some((key, etag)),
+            Outcome::Read(part) => Some(part),
             Outcome::Drop | Outcome::Fail => None,
         })
         .collect();
@@ -201,6 +237,9 @@ fn build(record: &Record, prefix: &str) -> (Value, Outcome) {
     if let Some(etag) = &etag {
         object.insert("eTag".to_owned(), json!(etag));
     }
+    if let Some(version) = record.version.json() {
+        object.insert("versionId".to_owned(), version);
+    }
     let bucket = if record.other_bucket { "other" } else { BUCKET };
     let s3 = if record.unreadable {
         json!(7)
@@ -210,6 +249,9 @@ fn build(record: &Record, prefix: &str) -> (Value, Outcome) {
     let mut value = json!({ "eventVersion": "2.1", "s3": s3 });
     if let Some(time) = &record.event_time {
         value["eventTime"] = json!(time);
+    }
+    if let Some(count) = record.re_enqueues.json() {
+        value["spateReEnqueues"] = count;
     }
     let name = match &record.event {
         Event::Created { s3_prefix, suffix } => {
@@ -243,6 +285,10 @@ fn predict(
     size: Option<u64>,
     etag: Option<String>,
 ) -> Outcome {
+    let (Some(version), Some(re_enqueues)) = (record.version.text(), record.re_enqueues.count())
+    else {
+        return Outcome::Fail;
+    };
     if record.unreadable || record.other_bucket {
         return Outcome::Fail;
     }
@@ -268,6 +314,12 @@ fn predict(
     {
         return Outcome::Fail;
     }
+    let version = version.filter(|v| !v.is_empty() && v != "null");
+    if version.as_deref().is_some_and(|v| {
+        v.len() > MAX_VERSION_BYTES || v.bytes().any(|b| b == b' ' || b.is_ascii_control())
+    }) {
+        return Outcome::Fail;
+    }
     let etag = etag.map(|e| {
         if e.len() >= 2 && e.starts_with('"') && e.ends_with('"') {
             e
@@ -275,7 +327,7 @@ fn predict(
             format!("\"{e}\"")
         }
     });
-    Outcome::Read(key, etag)
+    Outcome::Read((key, etag, version, re_enqueues))
 }
 
 impl Key {
@@ -321,6 +373,52 @@ impl Char {
         match self {
             Char::Special(i) => SPECIAL[usize::from(*i) % SPECIAL.len()],
             Char::Any(c) => *c,
+        }
+    }
+}
+
+impl Version {
+    /// The `versionId` written, `None` to leave the field out.
+    fn json(&self) -> Option<Value> {
+        match self {
+            Version::Absent => None,
+            Version::Null => Some(Value::Null),
+            Version::NullText => Some(json!("null")),
+            Version::Value(v) => Some(json!(v)),
+            Version::Long(n) => Some(json!("v".repeat(1000 + usize::from(*n) % 50))),
+            Version::NotString(n) => Some(json!(n)),
+        }
+    }
+
+    /// The string the record carries, `Some(None)` for none, and `None` when
+    /// the field does not deserialise as a string.
+    fn text(&self) -> Option<Option<String>> {
+        match self {
+            Version::Absent | Version::Null => Some(None),
+            Version::NotString(_) => None,
+            _ => Some(self.json().and_then(|v| v.as_str().map(str::to_owned))),
+        }
+    }
+}
+
+impl ReEnqueues {
+    /// The `spateReEnqueues` written, `None` to leave the field out.
+    fn json(&self) -> Option<Value> {
+        match self {
+            ReEnqueues::Absent => None,
+            ReEnqueues::Null => Some(Value::Null),
+            ReEnqueues::Count(n) => Some(json!(n)),
+            ReEnqueues::Over(n) => Some(json!(u64::from(u32::MAX) + 1 + u64::from(*n))),
+            ReEnqueues::Text(s) => Some(json!(s)),
+        }
+    }
+
+    /// The count the record carries, `None` when it is not a `u32`.
+    fn count(&self) -> Option<u32> {
+        match self {
+            ReEnqueues::Absent | ReEnqueues::Null => Some(0),
+            ReEnqueues::Count(n) => Some(*n),
+            ReEnqueues::Over(_) | ReEnqueues::Text(_) => None,
         }
     }
 }

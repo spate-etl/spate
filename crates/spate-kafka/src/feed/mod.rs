@@ -68,8 +68,8 @@ use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::producer::ThreadedProducer;
 use spate_core::config::FeedSection;
 use spate_core::feed::{
-    Confirmation, Delivery, DepthOf, DepthReading, DepthReporter, Feed, FeedError, FeedErrorKind,
-    FeedWaker, Receipt, Unit, confirmation, depth_reading,
+    Confirmation, Confirmer, Delivery, DepthOf, DepthReading, DepthReporter, Feed, FeedError,
+    FeedErrorKind, FeedWaker, Receipt, Unit, confirmation, depth_reading,
 };
 use startup::TopicAdmin as _;
 use std::collections::{HashMap, VecDeque};
@@ -150,6 +150,20 @@ pub(crate) struct State {
     /// Writes to send again, each with the instant it is due.
     pub(crate) resends: Vec<(Instant, Write)>,
     pub(crate) waker: Option<FeedWaker>,
+    /// Set by `stop_receiving` or `close`: the consumer keeps every owned
+    /// partition paused and the gate admits nothing.
+    pub(crate) stopping: bool,
+    /// The runtime's close, for the consumer thread to settle once it has
+    /// left the group.
+    pub(crate) close: Option<Closing>,
+}
+
+/// A close the consumer thread has not settled yet.
+#[derive(Debug)]
+pub(crate) struct Closing {
+    pub(crate) confirmer: Confirmer,
+    /// What the runtime gave the close.
+    pub(crate) within: Duration,
 }
 
 impl State {
@@ -205,8 +219,8 @@ pub(crate) struct Core {
     state: Mutex<State>,
     /// Paired with `state`: the gate waits on it for deliveries.
     gate_wake: Condvar,
-    /// Set when the feed is dropped; the consumer, gate and follower
-    /// threads exit on it.
+    /// Set when the feed is closed or dropped; the consumer, gate and
+    /// follower threads exit on it.
     stop: AtomicBool,
     topics: Topics,
     attempt_cap: NonZeroU32,
@@ -253,11 +267,12 @@ impl Core {
     }
 
     /// Make the feed answer every later call with a Fatal error built from
-    /// `reason`, drop the writes waiting to be sent again, and wake the
-    /// reader. The consumer thread then commits nothing more and ends. The
-    /// first latch wins. Returns the latched error.
+    /// `reason`, drop the writes waiting to be sent again, reject a close
+    /// the consumer thread has not taken, and wake the reader. The consumer
+    /// thread then commits nothing more and ends. The first latch wins.
+    /// Returns the latched error.
     pub(crate) fn latch(&self, reason: &str) -> FeedError {
-        let (error, first, waker) = {
+        let (error, first, waker, close) = {
             let mut st = self.lock();
             let first = st.fatal.is_none();
             let error = st
@@ -265,10 +280,13 @@ impl Core {
                 .get_or_insert_with(|| FeedError::new(FeedErrorKind::Fatal, reason))
                 .clone();
             st.resends.clear();
-            (error, first, st.waker.clone())
+            (error, first, st.waker.clone(), st.close.take())
         };
         if first {
             tracing::error!(error = %error.reason, "the Kafka feed stopped");
+        }
+        if let Some(close) = close {
+            close.confirmer.reject(error.clone());
         }
         if let Some(waker) = waker {
             waker.wake();
@@ -417,11 +435,13 @@ impl Drop for LatchOnPanic {
 /// attempt cap, before its offset is. A message with no key, or a key that
 /// is not UTF-8, names no unit and goes to the dead-letter topic at once.
 ///
-/// Dropping the feed waits up to 1 s for its writes in flight, commits what
-/// has finished, leaves the group and stops its threads. Units not yet
-/// finished are delivered again to the next owner of their partition. A
-/// feed that stopped on a Fatal error commits nothing more, so every unit
-/// since its last commit is delivered again.
+/// The runtime's [`close`](Feed::close) waits up to half of what it is
+/// given for the feed's writes in flight, commits each partition up to its
+/// first unfinished unit, leaves the group and stops the feed's threads. A
+/// feed dropped without a close does the same with a 1 s wait for its
+/// writes. Units not yet finished are delivered again to the next owner of
+/// their partition. A feed that stopped on a Fatal error commits nothing
+/// more, so every unit since its last commit is delivered again.
 ///
 /// [`read_depth`](Feed::read_depth) reports the group's lag on the work and
 /// retry topics, or the sum of the dead-letter topic's end offsets, read on
@@ -909,6 +929,61 @@ impl Feed for KafkaFeed {
                 .send((of, reporter));
         }
         Some(reading)
+    }
+
+    /// `true`. A unit handed back stays held, and the next owner of its
+    /// partition reads it once this worker leaves the group at the close.
+    fn hands_back(&self) -> bool {
+        true
+    }
+
+    /// Pause every partition the feed owns, and every partition a rebalance
+    /// assigns it from here on, and admit no unit at the gate. The consumer
+    /// keeps polling, so the worker stays in the group. A unit still at the
+    /// gate gets no attempt record. Units buffered and not handed out stay
+    /// unfinished, and the next owner of their partition reads them again.
+    fn stop_receiving(&self) {
+        let buffered = {
+            let mut st = self.lock();
+            if st.fatal.is_some() || st.stopping {
+                return;
+            }
+            st.stopping = true;
+            st.held_for_reader()
+        };
+        tracing::info!(
+            buffered,
+            "the Kafka feed stopped receiving; the next owner of each partition reads the units \
+             it had not handed out"
+        );
+    }
+
+    /// Wait up to half of `within` for the writes in flight, commit each
+    /// partition up to its first unfinished unit, leave the group and stop
+    /// the feed's threads, all on the consumer thread.
+    ///
+    /// The confirmation settles once the consumer has left the group. It is
+    /// rejected with the latched error when the feed has stopped on a Fatal
+    /// error, which commits nothing more, and as
+    /// [`Retryable`](FeedErrorKind::Retryable) when writes were still in
+    /// flight at the wait's end or the commit failed; the units those
+    /// writes or that commit would have finished are delivered again. A
+    /// commit or a leave that outlasts `within` still runs on the consumer
+    /// thread, and dropping the feed waits for it.
+    fn close(&self, within: Duration) -> Option<Confirmation> {
+        let (confirmer, confirmation) = confirmation();
+        {
+            let mut st = self.lock();
+            if let Some(fatal) = &st.fatal {
+                confirmer.reject(fatal.clone());
+                return Some(confirmation);
+            }
+            st.stopping = true;
+            st.close = Some(Closing { confirmer, within });
+        }
+        // With the state lock released: `stop` takes it.
+        stop(&self.core);
+        Some(confirmation)
     }
 }
 

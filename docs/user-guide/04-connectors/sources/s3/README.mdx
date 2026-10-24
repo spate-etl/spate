@@ -419,7 +419,8 @@ A unit with an object failure is failed back to the feed. A failed run hands
 back at once, with no reading.
 [Graceful shutdown](../../../03-guides/graceful-shutdown.mdx#the-drain-choreography)
 describes the drain around it. Among the built-in feeds,
-[SQS](../../feeds/sqs/README.mdx#stop) hands back. On a feed that does not,
+[SQS](../../feeds/sqs/README.mdx#stop) and
+[Kafka](../../feeds/kafka/README.mdx#stop) hand back. On a feed that does not,
 the source starts the drain at once.
 
 ### A solo run on the in-process feed

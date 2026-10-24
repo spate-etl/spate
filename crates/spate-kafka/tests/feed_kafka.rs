@@ -16,6 +16,9 @@ mod support;
 use rdkafka::ClientConfig;
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::client::DefaultClientContext;
+use rdkafka::consumer::{BaseConsumer, Consumer};
+use spate_core::clock::TestClock as StopClock;
+use spate_core::feed::STOP_RESERVE;
 use spate_core::pipeline::ExitState;
 use spate_kafka::feed::{KafkaFeed, KafkaFeedError, KafkaFeedPublisher};
 use spate_test::{WriteOutcome, wait_until};
@@ -24,9 +27,10 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use support::broker;
 use support::feed::{
-    ATTEMPT, ATTEMPT_PARTITIONS, DEAD, DEADLINE, WORK, bounded_section, committed, create_topics,
-    data_dir, exists, feed_yaml, high_watermark, launch_bounded, launch_with, list_once,
-    produce_raw, read_attempts, recs, run_to_exit, sorted, stage, written,
+    ATTEMPT, ATTEMPT_PARTITIONS, DEAD, DEADLINE, DRAIN_TIMEOUT, TWO_RANGES, WORK, bounded_section,
+    committed, create_topics, data_dir, exists, feed_yaml, high_watermark, launch_bounded,
+    launch_source, launch_stopping, launch_with, list_once, produce_raw, publish, read_attempts,
+    recs, run_to_exit, sorted, stage, two_range_unit, written,
 };
 use testcontainers::runners::SyncRunner;
 use testcontainers_modules::kafka::apache::KAFKA_PORT;
@@ -770,4 +774,93 @@ fn high_watermark_of(brokers: &str, topic: &str, partition: i32) -> i64 {
         .fetch_watermarks(topic, partition, Duration::from_secs(10))
         .expect("watermarks")
         .1
+}
+
+/// Pins the Kafka feed's half of a graceful stop against a real broker:
+/// with the stop clock frozen at the reserve, the worker hands back the
+/// unit it has not finished, the sink drains the finished one, the close
+/// commits up to the handed-back unit, and the worker leaves the group
+/// while the test still holds its feed. The session timeout is 30 s, so the
+/// group listing no member within 15 s shows a leave, not an expiry. The
+/// next worker reads the handed-back unit as its second delivery.
+#[test]
+#[ignore = "requires Docker"]
+fn a_stopping_worker_commits_finished_units_before_leaving_the_group() {
+    let container = broker().start().expect("start kafka container");
+    let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
+    let brokers = format!("127.0.0.1:{port}");
+    create_topics(&brokers);
+    let group = spate_test::unique_name("stopping");
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let finished = stage(&data, "f.ndjson", &recs("f", 1));
+    let (unfinished, rows) = two_range_unit(&data, "u");
+    let section = feed_yaml(&brokers, &group, "", "").replace(
+        "session.timeout.ms: \"6000\"",
+        "session.timeout.ms: \"30000\"",
+    );
+    let clock = StopClock::frozen();
+    let a = launch_stopping(
+        KafkaFeed::connect,
+        &data,
+        TWO_RANGES,
+        &section,
+        &clock,
+        |sink| sink.enqueue_global(WriteOutcome::ok().held()),
+    );
+    publish(&a.feed, finished);
+    wait_until(DEADLINE, "the finished unit's write is held", || {
+        a.script.held_writes() == 1
+    });
+    publish(&a.feed, unfinished);
+    wait_until(DEADLINE, "the unfinished unit is received", || {
+        a.recording.receipts().len() == 2
+    });
+    a.shutdown.trigger();
+    wait_until(DEADLINE, "the stop begins", || {
+        a.recording.stopped_receiving() == 1
+    });
+    clock.advance(DRAIN_TIMEOUT - STOP_RESERVE);
+    let receipt = a.recording.receipts()[1];
+    wait_until(DEADLINE, "the unfinished unit is handed back", || {
+        a.recording.handed_back() == [receipt]
+    });
+    a.script.release_held();
+    let report = a.run.wait_exit(DEADLINE).expect("A exits").unwrap();
+    assert_eq!(report.state, ExitState::Completed);
+    assert_eq!(committed(&brokers, &group, WORK), Some(1));
+    assert_eq!(a.recording.closes().len(), 1);
+    let probe: BaseConsumer = ClientConfig::new()
+        .set("bootstrap.servers", &brokers)
+        .create()
+        .expect("probe");
+    wait_until(Duration::from_secs(15), "A leaves the group", || {
+        let groups = probe
+            .fetch_group_list(Some(&group), Duration::from_secs(10))
+            .expect("group list");
+        groups.groups().iter().all(|g| g.members().is_empty())
+    });
+
+    let source = format!(
+        "  s3:\n    url: \"file://{}/\"\n{TWO_RANGES}",
+        data.display()
+    );
+    let b = launch_source(KafkaFeed::connect, &source, &section, |_| {});
+    wait_until(DEADLINE, "B receives the unit", || {
+        !b.recording.receipts().is_empty()
+    });
+    assert_eq!(b.recording.seen.lock().unwrap().as_slice(), [2]);
+    wait_until(DEADLINE, "B writes every row of the unit", || {
+        written(&b.script) == sorted(rows.clone())
+    });
+    let finished_rows = [written(&a.script), written(&b.script)]
+        .concat()
+        .into_iter()
+        .filter(|row| row.contains("\"f-0\""))
+        .count();
+    assert_eq!(
+        finished_rows, 1,
+        "the finished unit's row was written again"
+    );
+    assert_eq!(b.stop(), ExitState::Completed);
 }

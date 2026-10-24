@@ -17,11 +17,12 @@ during the drain means for your data, see
 A source that reads its work units from a feed that hands back first reads on
 what it holds. It receives no more units, and keeps reading and renewing the
 units it holds until each is read to its end or until 5s before the drain
-deadline. It then hands back every unit it has not read to its end, so another
-instance can take that unit at once instead of waiting out the feed's
-redelivery delay. The deadline counts from the stop, so this reading spends
-from the same `checkpoint.drain_timeout`. Any other source starts the drain at
-once.
+deadline. It then hands back every unit it has not read to its end. A feed that
+leases units frees each at once, so another instance takes it without waiting
+out the feed's redelivery delay. A feed whose positions move only by commit
+frees it when the worker leaves at the feed's close. The deadline counts from
+the stop, so this reading spends from the same `checkpoint.drain_timeout`. Any
+other source starts the drain at once.
 
 :::note Connector specifics
 How each feed stops:

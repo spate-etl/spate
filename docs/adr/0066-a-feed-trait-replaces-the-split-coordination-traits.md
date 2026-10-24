@@ -72,7 +72,9 @@ that the work-feed record describes.
   coordination traits, so no figure measures the trait this record ships.
 - Bad, because the driver's settled behaviors go with it: additive gains
   (ADR-0031), the single wait point (ADR-0037) and the bounded final commit
-  (ADR-0059). The graceful-stop record states the feed's stop.
+  (ADR-0059).
+  [The graceful-stop record](0078-a-stopping-worker-reads-to-a-reserve-before-the-drain-deadline.md)
+  states the feed's stop.
 
 ### Confirmation
 

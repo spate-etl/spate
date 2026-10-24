@@ -1,4 +1,4 @@
-//! The feed's consumer thread, one of its three: it polls the group
+//! The feed's consumer thread, one of its four: it polls the group
 //! member, hands each unit to the gate, answers rebalances, pauses when the
 //! feed holds as many units as it buffers, commits, and sends again the
 //! writes that failed.
@@ -34,6 +34,13 @@
 //! request's attempts once sent. The tracker lock is never held across a
 //! commit or any other broker call.
 //!
+//! Once the feed stops receiving, the thread keeps every owned partition
+//! paused, and pauses each partition an assignment gives it, while it goes
+//! on polling and committing. When the feed closes, or drops without a
+//! close, the thread waits for the writes in flight, commits each partition
+//! up to its first unfinished offset, and then the consumer leaves the
+//! group.
+//!
 //! Once the feed latches a Fatal error, the thread commits nothing more and
 //! ends, and the consumer leaves the group. The next owner of each
 //! partition reads it again from the last commit.
@@ -42,7 +49,7 @@ use super::attempt::PublishId;
 use super::events::Cause;
 use super::inflight::{Position, Tp};
 use super::write::{self, Destination, Finish, Move, Outgoing, Producer, Tombstone, Write};
-use super::{Core, Gating, LatchOnPanic, READY_CAPACITY, State, Topics};
+use super::{Closing, Core, Gating, LatchOnPanic, READY_CAPACITY, State, Topics};
 use crate::context::{Intent, SourceContext};
 use rdkafka::consumer::{BaseConsumer, CommitMode, Consumer};
 use rdkafka::error::{KafkaError, RDKafkaErrorCode};
@@ -66,8 +73,8 @@ pub(crate) const POLL_TIMEOUT: Duration = Duration::from_millis(100);
 /// commits.
 pub(crate) const POLL_BATCH: usize = 64;
 
-/// How long a stopping feed waits for its writes in flight before its last
-/// commit.
+/// How long a feed dropped without a close waits for its writes in flight
+/// before its last commit.
 pub(crate) const STOP_SETTLE: Duration = Duration::from_secs(1);
 
 /// The longest the committed-offset read before an assignment may take.
@@ -109,10 +116,12 @@ impl Driver {
     }
 }
 
-/// Run the consumer thread until the feed is dropped or latches.
+/// Run the consumer thread until the feed is closed, dropped or latches,
+/// then make its last commit, leave the group, and settle the close.
 pub(crate) fn run(mut d: Driver) {
+    let core = Arc::clone(&d.core);
     let _guard = LatchOnPanic {
-        core: Arc::clone(&d.core),
+        core: Arc::clone(&core),
         thread: "consumer",
     };
     while !d.core.stopped() && !d.core.latched() {
@@ -121,10 +130,16 @@ pub(crate) fn run(mut d: Driver) {
         d.serve_intents();
         d.backpressure();
         if d.last_commit.elapsed() >= COMMIT_INTERVAL {
-            d.commit_finished();
+            d.commit_finished("periodic");
         }
     }
-    if !d.core.latched() {
+    let close = core.lock().close.take();
+    let flushed = if core.latched() {
+        true
+    } else {
+        let wait = close
+            .as_ref()
+            .map_or(STOP_SETTLE, |c| close_flush(c.within));
         // Confirmed tombstones finish their offsets before the last commit.
         // The flush polls the producer from this thread, beside the
         // producer's own poll thread. Each report is still taken once, and
@@ -132,9 +147,48 @@ pub(crate) fn run(mut d: Driver) {
         // but two pollers' callbacks can interleave on the producer
         // context's one unpaired-error slot, so within this window a
         // producer error can be logged twice.
-        let _ = d.producer.flush(STOP_SETTLE);
+        d.producer.flush(wait).is_ok()
+    };
+    let committed = d.commit_finished(if close.is_some() {
+        "on close"
+    } else {
+        "on stop"
+    });
+    // The consumer leaves the group as it drops, before the close settles,
+    // so a settled close means this worker no longer holds its partitions.
+    drop(d);
+    if let Some(close) = close {
+        settle_close(&core, close, flushed, committed);
     }
-    d.commit_finished();
+}
+
+/// How long a close given `within` waits for the feed's writes in flight:
+/// half of it, so the commit and the leave keep the other half.
+pub(crate) fn close_flush(within: Duration) -> Duration {
+    within / 2
+}
+
+/// Settle `close` once the consumer has left: rejected with the latched
+/// error if the feed latched, `Retryable` if writes were still in flight
+/// at the flush's end or the last commit failed, and confirmed otherwise.
+fn settle_close(core: &Core, close: Closing, flushed: bool, committed: bool) {
+    if let Some(fatal) = core.lock().fatal.clone() {
+        close.confirmer.reject(fatal);
+    } else if !flushed {
+        close.confirmer.reject(FeedError::new(
+            FeedErrorKind::Retryable,
+            "the Kafka feed closed with writes still in flight; the units they would have \
+             finished are delivered again",
+        ));
+    } else if !committed {
+        close.confirmer.reject(FeedError::new(
+            FeedErrorKind::Retryable,
+            "the Kafka feed's last commit failed; the units it would have committed are \
+             delivered again",
+        ));
+    } else {
+        close.confirmer.confirm();
+    }
 }
 
 impl Driver {
@@ -272,12 +326,12 @@ impl Driver {
         }
         self.assigned_once = true;
         let tps = self.tps(tpl);
-        let full = {
+        let pause = {
             let mut st = self.core.lock();
             st.tracker.assign(tps.iter().cloned());
-            st.held_for_reader() >= READY_CAPACITY
+            st.stopping || st.held_for_reader() >= READY_CAPACITY
         };
-        if full {
+        if pause {
             self.pause(tps.clone());
         }
         tracing::info!(
@@ -358,14 +412,19 @@ impl Driver {
 
     /// Pause every owned partition while the feed holds as many units as
     /// it buffers, those at the gate and those with their attempt write in
-    /// flight included, and resume what this thread paused once that count
-    /// is down to half.
+    /// flight included, or once it stops receiving, and resume what this
+    /// thread paused once that count is down to half, unless it is
+    /// stopping.
     pub(crate) fn backpressure(&mut self) {
-        let (len, owned): (usize, Vec<Tp>) = {
+        let (len, stopping, owned): (usize, bool, Vec<Tp>) = {
             let st = self.core.lock();
-            (st.held_for_reader(), st.tracker.owned().cloned().collect())
+            (
+                st.held_for_reader(),
+                st.stopping,
+                st.tracker.owned().cloned().collect(),
+            )
         };
-        if len >= READY_CAPACITY {
+        if stopping || len >= READY_CAPACITY {
             let more: Vec<Tp> = owned
                 .into_iter()
                 .filter(|tp| !self.paused.contains(tp))
@@ -395,16 +454,17 @@ impl Driver {
         }
     }
 
-    pub(crate) fn commit_finished(&mut self) {
+    /// Commit the commit points that moved. `false` when the feed has
+    /// latched or the commit failed, `true` when it succeeded or nothing
+    /// moved. `what` names the commit in a failure's log line.
+    pub(crate) fn commit_finished(&mut self, what: &str) -> bool {
         // After a `BadMessage` latch, librdkafka may have skipped an offset,
         // and a commit point could pass the unit there.
         if self.core.latched() {
-            return;
+            return false;
         }
         self.last_commit = Instant::now();
-        commit_moved(&self.core, |points| {
-            commit(&self.consumer, points, "periodic")
-        });
+        commit_moved(&self.core, |points| commit(&self.consumer, points, what))
     }
 }
 
@@ -492,15 +552,18 @@ pub(crate) fn commit_revoked(core: &Core, tps: &[Tp], commit: impl FnOnce(&[(Tp,
 }
 
 /// Hand the commit points that moved to `commit` with the lock released. A
-/// commit that fails leaves them to be taken again.
-pub(crate) fn commit_moved(core: &Core, commit: impl FnOnce(&[(Tp, i64)]) -> bool) {
+/// commit that fails leaves them to be taken again. `false` when the commit
+/// failed.
+pub(crate) fn commit_moved(core: &Core, commit: impl FnOnce(&[(Tp, i64)]) -> bool) -> bool {
     let points = core.lock().tracker.take_commits();
     if points.is_empty() {
-        return;
+        return true;
     }
-    if !commit(&points) {
+    let committed = commit(&points);
+    if !committed {
         core.lock().tracker.untake(&points);
     }
+    committed
 }
 
 /// Commit `points` synchronously. `false` when the commit failed, which is

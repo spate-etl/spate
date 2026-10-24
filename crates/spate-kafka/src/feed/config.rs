@@ -25,6 +25,12 @@ const ATTEMPT_CAP: NonZeroU32 = NonZeroU32::new(10).expect("non-zero");
 const DENYLIST: &[(&str, &str)] = &[
     ("group.id", "owned by the typed `group_id` field"),
     (
+        "group.instance.id",
+        "a static member sends no LeaveGroup when it closes, so its \
+         partitions wait out `session.timeout.ms` before another member reads \
+         them",
+    ),
+    (
         "group.protocol",
         "the feed runs the classic consumer group protocol with eager \
          assignment",
@@ -462,6 +468,7 @@ mod tests {
         // from it.
         for key in [
             "group.id",
+            "group.instance.id",
             "group.protocol",
             "partition.assignment.strategy",
             "auto.offset.reset",

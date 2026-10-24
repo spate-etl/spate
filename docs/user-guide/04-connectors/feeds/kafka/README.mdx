@@ -90,6 +90,7 @@ because passthrough and feed values apply in unspecified order.
 | Denied property | Why |
 |---|---|
 | `group.id` | Owned by the typed `group_id` field. |
+| `group.instance.id` | A static member sends no LeaveGroup when it closes, so its partitions wait out `session.timeout.ms` before another member reads them. |
 | `group.protocol` | The feed runs the classic consumer group protocol with eager assignment. |
 | `partition.assignment.strategy` | The feed relies on eager assignment, under which a rebalance revokes every partition before it assigns any. Any value is refused. |
 | `auto.offset.reset` | A partition with no committed offset starts at its earliest offset. |
@@ -467,19 +468,43 @@ gives the measured gate latency and memory per record.
 
 ## Stop
 
-Dropping the feed waits up to 1 s for its writes in flight to be confirmed,
-then commits each partition up to its first unfinished offset and leaves the
-group. An acknowledged unit whose tombstone is not confirmed within that
-second is read again after the stop, and that read counts. One acknowledged
-on its `attempt_cap`-th read goes to the dead-letter topic without being read
-instead. A dead-letter
-write confirmed during the stop is not followed by a tombstone, so the next
-owner finds the unit's record at the cap and moves another copy to the
-dead-letter topic without reading it. Units waiting at the gate, buffered for
-the reader or being read, and writes still waiting for their report, are read
-again by the next owner of their partition. A feed that stopped on an error
-commits nothing more and leaves the group at once, so every unit since its
-last commit is read again.
+A stop follows
+[the drain choreography](../../../03-guides/graceful-shutdown.mdx#the-drain-choreography).
+Once it begins, the feed pauses every partition it owns, and every partition a
+rebalance assigns it from then on. A unit still waiting at the gate gets no
+attempt record. The consumer keeps polling, so the worker stays in the group
+while its reader finishes what it holds.
+
+A unit the reader hands back stays held. Its offset never finishes, so the
+partition's commit stays below it, and the next owner of the partition reads it
+once the worker leaves the group. Units buffered for the reader and not handed
+out are read again the same way, and so are units still being read; each has
+used an attempt.
+
+After the final commit the runtime closes the feed within what is left of
+`checkpoint.drain_timeout`. The feed waits up to half of that time for its
+writes in flight to be confirmed, commits each partition up to its first
+unfinished offset, and then leaves the group. An acknowledged unit whose
+tombstone is not confirmed by then is read again after the stop, and that read
+counts. One acknowledged on its `attempt_cap`-th read goes to the dead-letter
+topic without being read instead. A dead-letter write confirmed during the
+close is not followed by a tombstone, so the next owner finds the unit's record
+at the cap and moves another copy to the dead-letter topic without reading it.
+
+The commit can wait up to `session.timeout.ms` for a coordinator and up to
+`socket.timeout.ms` for each attempt once sent, and the leave up to 5 seconds
+for its answer. Either can run past the drain deadline, on the feed's consumer
+thread, and dropping the feed waits for them. A worker killed before it leaves
+keeps its partitions until `session.timeout.ms` lapses (see
+[No lease](#no-lease)).
+
+A feed dropped without a close waits up to 1 s for its writes in flight, then
+commits and leaves the group the same way. A feed that stopped on an error
+commits nothing more and leaves the group at once, so every unit since its last
+commit is read again.
+
+Startup refuses a `checkpoint.drain_timeout` of `5s` or less with the Kafka
+feed (see [`checkpoint:`](../../../07-reference/configuration.mdx#checkpoint)).
 
 ## Message mapping
 

@@ -161,11 +161,13 @@ codec.
 ### Hand back
 
 What a stopping source does with a [work unit](#work-unit) it has not read to
-its end: it returns the unit to its [feed](#feed), so another instance
-can take it at once. A handed-back unit is not a failure. A feed that counts
-deliveries toward a dead-letter limit counts it as any delivery. A source
-reads the units it holds until 5s before the [drain](#drain) deadline, the
-stop reserve, then hands back the rest. A feed that hands back is one whose `Feed::hands_back` answers `true`.
+its end: it returns the unit to its [feed](#feed) for another instance to read.
+A feed that leases units frees it at once, and a feed whose positions move only
+by commit frees it when the worker leaves at the feed's close. A handed-back
+unit is not a failure. A feed that counts deliveries toward a dead-letter limit
+counts it as any delivery. A source reads the units it holds until 5s before the
+[drain](#drain) deadline, the stop reserve, then hands back the rest. A feed
+that hands back is one whose `Feed::hands_back` answers `true`.
 
 ### Job location
 

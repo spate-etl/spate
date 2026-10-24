@@ -3,6 +3,7 @@
 //! readers of committed offsets and of the retry, dead-letter and attempt
 //! topics.
 
+use object_store::ObjectStoreExt as _;
 use rdkafka::ClientConfig;
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::client::DefaultClientContext;
@@ -10,6 +11,7 @@ use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::message::{Headers, Message};
 use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
 use rdkafka::{Offset, TopicPartitionList};
+use spate_core::clock::TestClock as StopClock;
 use spate_core::config::{FeedSection, PipelineConfig};
 use spate_core::feed::{
     Confirmation, Delivery, DepthOf, DepthReading, Feed, FeedError, FeedErrorKind, FeedWaker,
@@ -57,18 +59,53 @@ pub(crate) fn feed_yaml(brokers: &str, group: &str, section: &str, body: &str) -
 }
 
 /// A [`Feed`] that passes every call to the Kafka feed, records each
-/// delivery's count, and counts the reads of the feed's depth.
+/// delivery's count and receipt, counts the reads of the feed's depth, and
+/// records the stop's calls.
 #[derive(Clone)]
 pub(crate) struct Recording {
     pub(crate) inner: Arc<KafkaFeed>,
     pub(crate) seen: Arc<Mutex<Vec<u32>>>,
+    receipts: Arc<Mutex<Vec<Receipt>>>,
     pub(crate) depth_reads: Arc<AtomicUsize>,
+    stops: Arc<AtomicUsize>,
+    handed_back: Arc<Mutex<Vec<Receipt>>>,
+    closes: Arc<Mutex<Vec<Duration>>>,
 }
 
 impl Recording {
+    fn new(inner: Arc<KafkaFeed>) -> Recording {
+        Recording {
+            inner,
+            seen: Arc::default(),
+            receipts: Arc::default(),
+            depth_reads: Arc::default(),
+            stops: Arc::default(),
+            handed_back: Arc::default(),
+            closes: Arc::default(),
+        }
+    }
+
     /// Reads of the feed's depth, the startup probe included.
     pub(crate) fn depth_reads(&self) -> usize {
         self.depth_reads.load(Ordering::SeqCst)
+    }
+
+    /// Each delivery's receipt, in the order received.
+    pub(crate) fn receipts(&self) -> Vec<Receipt> {
+        self.receipts.lock().unwrap().clone()
+    }
+
+    pub(crate) fn stopped_receiving(&self) -> usize {
+        self.stops.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn handed_back(&self) -> Vec<Receipt> {
+        self.handed_back.lock().unwrap().clone()
+    }
+
+    /// What each close was given.
+    pub(crate) fn closes(&self) -> Vec<Duration> {
+        self.closes.lock().unwrap().clone()
     }
 }
 
@@ -87,6 +124,10 @@ impl Feed for Recording {
             .lock()
             .unwrap()
             .extend(got.iter().map(|d| d.deliveries));
+        self.receipts
+            .lock()
+            .unwrap()
+            .extend(got.iter().map(|d| d.receipt));
         Ok(got)
     }
 
@@ -111,6 +152,25 @@ impl Feed for Recording {
             self.depth_reads.fetch_add(1, Ordering::SeqCst);
         }
         self.inner.read_depth(of)
+    }
+
+    fn hands_back(&self) -> bool {
+        self.inner.hands_back()
+    }
+
+    fn stop_receiving(&self) {
+        self.stops.fetch_add(1, Ordering::SeqCst);
+        self.inner.stop_receiving();
+    }
+
+    fn hand_back(&self, receipt: Receipt) -> Result<(), FeedError> {
+        self.handed_back.lock().unwrap().push(receipt);
+        self.inner.hand_back(receipt)
+    }
+
+    fn close(&self, within: Duration) -> Option<Confirmation> {
+        self.closes.lock().unwrap().push(within);
+        self.inner.close(within)
     }
 }
 
@@ -187,39 +247,63 @@ pub(crate) fn launch_source(
     feed_section: &str,
     pre: impl FnOnce(&SinkScript),
 ) -> Worker {
-    launch_customized(connect, source_yaml, feed_section, pre, |source| source)
+    launch_customized(
+        connect,
+        source_yaml,
+        feed_section,
+        pre,
+        |source| source,
+        CHECKPOINT,
+        None,
+    )
 }
+
+/// The `checkpoint:` section a worker reads unless a test gives its own.
+pub(crate) const CHECKPOINT: &str = "{ interval: 100ms }";
+
+/// The drain timeout a worker's stop runs under: the default, which
+/// [`CHECKPOINT`] leaves alone.
+pub(crate) const DRAIN_TIMEOUT: Duration = Duration::from_secs(25);
 
 /// The pipeline file a worker over `source_yaml` reads.
 pub(crate) fn pipeline_yaml(source_yaml: &str, feed_section: &str) -> String {
+    pipeline_yaml_with(source_yaml, feed_section, CHECKPOINT)
+}
+
+/// [`pipeline_yaml`] with `checkpoint` as its `checkpoint:` section.
+pub(crate) fn pipeline_yaml_with(
+    source_yaml: &str,
+    feed_section: &str,
+    checkpoint: &str,
+) -> String {
     format!(
         "pipeline: {{ name: kafka-feed, threads: 1 }}\nadmin: {{ listen: none }}\n\
-         checkpoint: {{ interval: 100ms }}\nmetrics: {{ exporter: none }}\n\
+         checkpoint: {checkpoint}\nmetrics: {{ exporter: none }}\n\
          source:\n{source_yaml}\
          sink: {{ capture: {{ chunk: {{ target_bytes: 64 }} }} }}\n{feed_section}"
     )
 }
 
-/// [`launch_source`], with `customize` applied to the source.
+/// [`launch_source`], with `customize` applied to the source, the
+/// `checkpoint:` section `checkpoint`, and the stop timed on `stop_clock`
+/// when one is given.
 pub(crate) fn launch_customized(
     connect: Connect,
     source_yaml: &str,
     feed_section: &str,
     pre: impl FnOnce(&SinkScript),
     customize: impl FnOnce(S3Source) -> S3Source,
+    checkpoint: &str,
+    stop_clock: Option<Arc<StopClock>>,
 ) -> Worker {
-    let yaml = pipeline_yaml(source_yaml, feed_section);
+    let yaml = pipeline_yaml_with(source_yaml, feed_section, checkpoint);
     let mut config = PipelineConfig::from_str(&yaml).unwrap();
     config.pipeline.name = spate_test::unique_name(&config.pipeline.name);
     let pipeline = Pipeline::from_config(config).unwrap();
     let section = pipeline.config().feed.clone().unwrap();
     let io = pipeline.io_handle();
     let feed = Arc::new(connect(&section, &io).unwrap());
-    let recording = Recording {
-        inner: Arc::clone(&feed),
-        seen: Arc::default(),
-        depth_reads: Arc::default(),
-    };
+    let recording = Recording::new(Arc::clone(&feed));
     let source = customize(
         S3Source::from_component_config(&pipeline.config().source, io)
             .unwrap()
@@ -253,6 +337,10 @@ pub(crate) fn launch_customized(
         })
         .into_runtime(source)
         .unwrap();
+    let runtime = match stop_clock {
+        Some(clock) => runtime.with_stop_clock(clock),
+        None => runtime,
+    };
     let shutdown = runtime.shutdown_handle();
     let run = PipelineRun::spawn(move || runtime.run());
     Worker {
@@ -635,7 +723,66 @@ pub(crate) fn launch_bounded(
         section_yaml,
         |_| {},
         move |s| s.with_clock(clock),
+        CHECKPOINT,
+        None,
     )
+}
+
+/// [`launch_source`] over the files under `data` with `source_extra`
+/// appended to the `s3:` section, connected with `connect`, and the stop
+/// timed on `clock`.
+pub(crate) fn launch_stopping(
+    connect: Connect,
+    data: &Path,
+    source_extra: &str,
+    feed_section: &str,
+    clock: &Arc<StopClock>,
+    pre: impl FnOnce(&SinkScript),
+) -> Worker {
+    let source = format!(
+        "  s3:\n    url: \"file://{}/\"\n{source_extra}",
+        data.display()
+    );
+    launch_customized(
+        connect,
+        &source,
+        feed_section,
+        pre,
+        |source| source,
+        CHECKPOINT,
+        Some(Arc::clone(clock)),
+    )
+}
+
+/// The source setting under which [`two_range_unit`] is read in two ranges.
+pub(crate) const TWO_RANGES: &str = "    split_target_bytes: 1MiB\n";
+
+/// Stage a unit read in two byte ranges under [`TWO_RANGES`], named
+/// `prefix`, and return it with its rows: 68 lines of 16 KiB, 1 MiB + 64 KiB.
+pub(crate) fn two_range_unit(data: &Path, prefix: &str) -> (Unit, Vec<String>) {
+    let pad = "p".repeat(16 * 1024 - 24);
+    let rows: Vec<String> = (0..68)
+        .map(|i| format!("{{\"k\":\"{prefix}-{i:04}\",\"pad\":\"{pad}\"}}"))
+        .collect();
+    let unit = stage_with_etag(data, &format!("{prefix}.ndjson"), &rows);
+    (unit, rows)
+}
+
+/// [`stage`], with the ETag the file store reports in the descriptor, so a
+/// unit over an object above `split_target_bytes` is read in ranges.
+fn stage_with_etag(data: &Path, name: &str, rows: &[String]) -> Unit {
+    let unit = stage(data, name, rows);
+    let mut descriptor = SplitDescriptor::decode(&unit.body).unwrap();
+    let object = &mut descriptor.objects[0];
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let path = object_store::path::Path::parse(&object.key).unwrap();
+    let meta = rt
+        .block_on(object_store::local::LocalFileSystem::new().head(&path))
+        .unwrap();
+    object.etag = Some(meta.e_tag.expect("the file store reports an ETag"));
+    Unit::new(name, descriptor.encode().unwrap())
 }
 
 /// Step `clock` until the worker exits, waiting after each step for its

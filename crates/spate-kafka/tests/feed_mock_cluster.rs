@@ -10,6 +10,7 @@ mod support;
 
 use rdkafka::mocking::{MockCluster, MockCoordinator};
 use rdkafka::types::RDKafkaRespErr;
+use spate_core::clock::TestClock as StopClock;
 use spate_core::feed::{Depth, DepthOf, Feed, FeedError, FeedErrorKind, Receipt, Unit};
 use spate_core::pipeline::ExitState;
 use spate_kafka::feed::KafkaFeedError;
@@ -18,8 +19,9 @@ use std::time::{Duration, Instant};
 use support::feed::{
     ATTEMPT, ATTEMPT_PARTITIONS, COMMIT_PERIOD, DEAD, DEADLINE, ON_MOCK, RETRY, WORK,
     bounded_section, committed, data_dir, direct, exists, feed_yaml, high_watermark,
-    high_watermarks, launch, launch_bounded, list_once, produce_raw, publish, publish_to,
-    publisher_on_mock, read_attempts, read_topic, recs, run_to_exit, sorted, stage, written,
+    high_watermarks, launch, launch_bounded, launch_customized, launch_stopping, list_once,
+    produce_raw, publish, publish_to, publisher_on_mock, read_attempts, read_topic, recs,
+    run_to_exit, sorted, stage, written,
 };
 use support::{corrupt_batch, produce_batch};
 
@@ -1016,4 +1018,65 @@ fn a_dead_letter_topic_authorization_failure_is_fatal() {
     let e = read_depth(&d.feed, DepthOf::DeadLetters).unwrap_err();
     assert_eq!(e.kind, FeedErrorKind::Fatal, "{e}");
     assert!(e.reason.contains(DEAD), "{e}");
+}
+
+/// Pins that startup refuses a `checkpoint.drain_timeout` within the stop's
+/// reserve on the Kafka feed, naming the key and the feed.
+#[test]
+fn startup_refuses_a_drain_timeout_within_the_stop_reserve() {
+    let cluster = cluster(1);
+    let brokers = cluster.bootstrap_servers();
+    let group = spate_test::unique_name("reserve");
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let source = format!("  s3:\n    url: \"file://{}/\"\n", data.display());
+    let worker = launch_customized(
+        ON_MOCK,
+        &source,
+        &feed_yaml(&brokers, &group, "", ""),
+        |_| {},
+        |source| source,
+        "{ interval: 100ms, drain_timeout: 5s }",
+        None,
+    );
+    let e = worker
+        .run
+        .wait_exit(DEADLINE)
+        .expect("the run exits")
+        .unwrap_err();
+    let message = e.to_string();
+    assert!(
+        message.contains("checkpoint.drain_timeout") && message.contains("`kafka`"),
+        "{message}"
+    );
+}
+
+/// Pins that a stopping worker holding no unit stops receiving and closes
+/// its feed without reading on: the run completes with the stop clock never
+/// moved toward the reserve.
+#[test]
+fn a_worker_holding_nothing_stops_without_reading_on() {
+    let cluster = cluster(1);
+    let brokers = cluster.bootstrap_servers();
+    let group = spate_test::unique_name("idle-stop");
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let clock = StopClock::frozen();
+    let worker = launch_stopping(
+        ON_MOCK,
+        &data,
+        "",
+        &feed_yaml(&brokers, &group, "", ""),
+        &clock,
+        |_| {},
+    );
+    worker.shutdown.trigger();
+    let report = worker
+        .run
+        .wait_exit(DEADLINE)
+        .expect("the run exits")
+        .unwrap();
+    assert_eq!(report.state, ExitState::Completed);
+    assert_eq!(worker.recording.stopped_receiving(), 1);
+    assert_eq!(worker.recording.closes().len(), 1);
 }

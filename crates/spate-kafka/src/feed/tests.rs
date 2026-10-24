@@ -485,13 +485,14 @@ fn a_publish_only_handle_reports_no_depth() {
     assert!(publisher.read_depth(DepthOf::DeadLetters).is_none());
 }
 
-/// Pins the publisher's receive side: it names the `kafka` backend,
-/// refuses a read as Fatal naming the worker's constructor, names no
-/// delivery for a receipt, and keeps no waker.
+/// Pins the publisher's receive side: it names the `kafka` backend, does
+/// not hand back, refuses a read as Fatal naming the worker's constructor,
+/// names no delivery for a receipt, and keeps no waker.
 #[test]
 fn a_publisher_answers_the_receive_side() {
     let publisher = idle_publisher();
     assert_eq!(publisher.backend(), "kafka");
+    assert!(!publisher.hands_back());
     let err = publisher.receive(8).unwrap_err();
     assert_eq!(err.kind, FeedErrorKind::Fatal);
     assert!(err.reason.contains("KafkaFeed::connect"), "{}", err.reason);
@@ -1379,6 +1380,84 @@ fn a_feed_that_ends_during_a_pass_ends_it_before_the_next_read() {
     }
 }
 
+/// Pins that the feed answers `hands_back` with `true`, so a stopping
+/// worker reads to the stop reserve and startup checks its drain timeout.
+#[test]
+fn a_kafka_feed_hands_back() {
+    assert!(idle_feed().hands_back());
+}
+
+/// Pins the close's flush share: half of what the close is given, so the
+/// commit and the leave keep the other half.
+#[test]
+fn the_close_flush_keeps_half_of_its_time_for_the_commit() {
+    for (within, flush) in [(0, 0), (500, 250), (1000, 500), (10_000, 5000)] {
+        assert_eq!(
+            super::consumer::close_flush(Duration::from_millis(within)),
+            Duration::from_millis(flush)
+        );
+    }
+}
+
+/// Pins that a gate pass begun after the feed stops receiving takes no
+/// delivery: the unit stays at the gate, the pass begins no watermark read,
+/// and no attempt record is written for it.
+#[test]
+fn a_unit_at_the_gate_when_the_stop_begins_gets_no_attempt_record() {
+    let feed = idle_feed();
+    {
+        let mut st = feed.core.lock();
+        st.tracker.assign([tp(0)]);
+        let receipt = st.tracker.deliver(&tp(0), 0).unwrap();
+        st.gating.push_back(Gating {
+            receipt,
+            unit: Unit::new("u0", b"body".to_vec()),
+            identity: identity(&feed.core, 0),
+        });
+    }
+    feed.stop_receiving();
+    let gate = super::gate::Gate::new(
+        Arc::clone(&feed.core),
+        feed.producer.clone(),
+        Duration::from_secs(3600),
+    )
+    .with_step(Duration::from_millis(10));
+    assert!(
+        returns_within(Duration::from_secs(10), move || gate.pass()),
+        "the pass did not return"
+    );
+    let st = feed.core.lock();
+    assert_eq!(st.gating.len(), 1, "the unit left the gate");
+    assert_eq!(st.admitting, 0);
+    assert_eq!(feed.core.gate_reads.load(Ordering::SeqCst), 0);
+}
+
+/// Pins that a latch rejects a close the consumer thread has not taken:
+/// with no consumer thread, only the latch can settle it.
+#[test]
+fn a_latch_settles_a_close_the_consumer_thread_has_not_taken() {
+    let feed = idle_feed();
+    let mut closing = feed.close(Duration::from_secs(10)).expect("a close");
+    assert!(closing.try_outcome().is_none(), "settled before the latch");
+    feed.core.latch("a test latch");
+    let err = closing.try_outcome().expect("settled").unwrap_err();
+    assert_eq!(err.kind, FeedErrorKind::Fatal);
+    assert_eq!(err.reason, "a test latch");
+}
+
+/// Pins that `close` returns at once while no broker answers: it only
+/// stores the close and stops the feed's threads.
+#[test]
+fn a_close_returns_while_the_broker_is_down() {
+    let feed = idle_feed();
+    assert!(
+        returns_within(Duration::from_secs(10), move || {
+            drop(feed.close(Duration::from_secs(1)));
+        }),
+        "the close did not return"
+    );
+}
+
 mod cluster {
     //! The feed against rdkafka's in-process MockCluster, where a test reads
     //! the feed's buffer and ownership directly.
@@ -1387,6 +1466,7 @@ mod cluster {
     use super::super::config::KafkaFeedConfig;
     use super::super::consumer::{self, Driver, POLL_BATCH};
     use super::super::gate::Gate;
+    use super::super::inflight::Tp;
     use super::super::write::Producer;
     use super::super::{Core, Gating, KafkaFeed, READY_CAPACITY};
     use super::{TWO, returns_within};
@@ -1837,7 +1917,7 @@ mod cluster {
         });
         acknowledge_first(&d);
         d.core.latch("a test latch");
-        d.commit_finished();
+        d.commit_finished("periodic");
         assert_eq!(
             committed(&brokers, &group),
             None,
@@ -1924,13 +2004,13 @@ mod cluster {
             RDKafkaApiKey::OffsetCommit,
             &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_OFFSET_METADATA_TOO_LARGE],
         );
-        d.commit_finished();
+        d.commit_finished("periodic");
         assert_eq!(
             committed(&brokers, &group),
             None,
             "the refused commit landed"
         );
-        d.commit_finished();
+        d.commit_finished("periodic");
         assert_eq!(committed(&brokers, &group), Some(1));
         admission.stop();
     }
@@ -2985,6 +3065,261 @@ mod cluster {
                 "{held} units held"
             );
         }
+    }
+
+    /// A feed over `core` and `producer`, with `thread` as its consumer
+    /// thread and no other thread.
+    fn feed_over(
+        core: &Arc<Core>,
+        producer: &Producer,
+        thread: Option<JoinHandle<()>>,
+    ) -> KafkaFeed {
+        KafkaFeed {
+            core: Arc::clone(core),
+            producer: producer.clone(),
+            thread,
+            gate: None,
+            follower: None,
+            depth: None,
+        }
+    }
+
+    /// The partitions `core`'s tracker owns.
+    fn owned_tps(core: &Core) -> BTreeSet<Tp> {
+        core.lock().tracker.owned().cloned().collect()
+    }
+
+    /// Pins that once the feed stops receiving, the consumer pauses every
+    /// partition it owns and keeps them paused with its buffer empty, and
+    /// that the stop logs one line counting what it held for the reader.
+    #[test]
+    fn a_stopping_feed_keeps_its_partitions_paused_once_its_buffer_drains() {
+        let cluster = cluster_with(0);
+        let brokers = cluster.bootstrap_servers();
+        let group = spate_test::unique_name("stop-paused");
+        let (_, core, producer, mut d) = parts_for(&brokers, &group);
+        let feed = feed_over(&core, &producer, None);
+        drive(&mut d, "the driver owns its partitions", |d| owns(d) == 2);
+        let lines = spate_test::capture_logs(tracing::Level::INFO, || feed.stop_receiving());
+        let stops: Vec<&String> = lines
+            .iter()
+            .filter(|l| l.contains("the Kafka feed stopped receiving"))
+            .collect();
+        assert_eq!(stops.len(), 1, "{lines:#?}");
+        assert!(stops[0].contains("buffered=0"), "{lines:#?}");
+        d.poll();
+        d.serve_intents();
+        d.backpressure();
+        let owned = owned_tps(&core);
+        assert_eq!(owned.len(), 2);
+        assert_eq!(d.paused, owned);
+    }
+
+    /// Pins that a partition assigned while the feed stops receiving is
+    /// paused at once, after a revocation and after a rebalance error alike,
+    /// though both resume what the thread had paused.
+    #[test]
+    fn a_partition_assigned_while_the_feed_stops_is_paused() {
+        let cluster = cluster_with(0);
+        let brokers = cluster.bootstrap_servers();
+        let group = spate_test::unique_name("stop-assigned");
+        let (_, core, producer, mut d) = parts_for(&brokers, &group);
+        let feed = feed_over(&core, &producer, None);
+        drive(&mut d, "the driver owns its partitions", |d| owns(d) == 2);
+        feed.stop_receiving();
+        let assigned = d.consumer.assignment().unwrap();
+        let intents = |d: &Driver, intent: Intent| {
+            d.consumer
+                .context()
+                .intents
+                .lock()
+                .unwrap()
+                .push_back(intent);
+        };
+        intents(&d, Intent::Revoke(assigned.clone()));
+        d.serve_intents();
+        assert!(d.paused.is_empty(), "the revocation resumed nothing");
+        intents(&d, Intent::Assign(assigned.clone()));
+        d.serve_intents();
+        assert_eq!(d.paused, owned_tps(&core), "after a revocation");
+        // The error arm of the rebalance callback, as librdkafka calls it.
+        d.consumer.context().rebalance(
+            &d.consumer,
+            RDKafkaRespErr::RD_KAFKA_RESP_ERR_REBALANCE_IN_PROGRESS,
+            &mut TopicPartitionList::new(),
+        );
+        d.serve_intents();
+        assert!(d.paused.is_empty(), "the rebalance error resumed nothing");
+        intents(&d, Intent::Assign(assigned));
+        d.serve_intents();
+        let owned = owned_tps(&core);
+        assert_eq!(owned.len(), 2);
+        assert_eq!(d.paused, owned, "after a rebalance error");
+    }
+
+    /// Wait until `n` units are buffered, receive them all in the order of
+    /// their ids, which is their offsets' order, and stop the follower and
+    /// the gate. The gate buffers units in the order their attempt writes
+    /// are confirmed, which spreads them over two partitions.
+    fn received(
+        d: &mut Driver,
+        feed: &KafkaFeed,
+        admission: Admission,
+        n: usize,
+    ) -> Vec<spate_core::feed::Delivery> {
+        drive(d, "the units are buffered", |d| {
+            d.core.lock().ready.len() == n
+        });
+        admission.stop();
+        let mut deliveries = feed.receive(n).unwrap();
+        assert_eq!(deliveries.len(), n);
+        deliveries.sort_by(|a, b| a.unit.id.cmp(&b.unit.id));
+        deliveries
+    }
+
+    /// Pins the close's order: it waits for the tombstone in flight,
+    /// commits the offset that tombstone finishes, and leaves the group
+    /// before it settles. The broker's round trip is slowed so the
+    /// tombstone is confirmed hundreds of milliseconds after it is sent; a
+    /// close that commits at once commits the unit's own offset. The mock
+    /// refuses a commit from a member that has left, so the commit landing
+    /// shows it came first.
+    #[test]
+    fn a_close_commits_what_finished_then_leaves() {
+        let cluster = cluster_with(2);
+        let brokers = cluster.bootstrap_servers();
+        let group = spate_test::unique_name("close-commit");
+        let (config, core, producer, mut d) = parts_for(&brokers, &group);
+        let feed = feed_over(&core, &producer, None);
+        let admission = admission(&config, &core, &producer, STEP);
+        let deliveries = received(&mut d, &feed, admission, 2);
+        cluster
+            .broker_round_trip_time(1, Duration::from_millis(300))
+            .unwrap();
+        feed.acknowledge(deliveries[0].receipt).unwrap();
+        let mut closing = feed.close(Duration::from_secs(10)).expect("a close");
+        consumer::run(d);
+        assert_eq!(closing.try_outcome(), Some(Ok(())));
+        assert_eq!(committed(&brokers, &group), Some(1));
+        assert!(returns_within(Duration::from_secs(10), move || drop(feed)));
+    }
+
+    /// Pins that a handed-back unit holds its partition's commit point: the
+    /// close commits below it though a later unit finished.
+    #[test]
+    fn a_handed_back_unit_holds_its_partitions_commit_point() {
+        let cluster = cluster_with(3);
+        let brokers = cluster.bootstrap_servers();
+        let group = spate_test::unique_name("close-handed-back");
+        let (config, core, producer, mut d) = parts_for(&brokers, &group);
+        let feed = feed_over(&core, &producer, None);
+        let admission = admission(&config, &core, &producer, STEP);
+        let deliveries = received(&mut d, &feed, admission, 3);
+        feed.acknowledge(deliveries[0].receipt).unwrap();
+        feed.hand_back(deliveries[1].receipt).unwrap();
+        feed.acknowledge(deliveries[2].receipt).unwrap();
+        let mut closing = feed.close(Duration::from_secs(10)).expect("a close");
+        consumer::run(d);
+        assert_eq!(closing.try_outcome(), Some(Ok(())));
+        assert_eq!(committed(&brokers, &group), Some(1));
+    }
+
+    /// Pins that closing a latched feed settles at once with the latched
+    /// error, and that the consumer thread then commits nothing.
+    #[test]
+    fn closing_a_latched_feed_settles_with_its_error_and_commits_nothing() {
+        let cluster = cluster_with(1);
+        let brokers = cluster.bootstrap_servers();
+        let group = spate_test::unique_name("close-latched");
+        let (config, core, producer, mut d) = parts_for(&brokers, &group);
+        let feed = feed_over(&core, &producer, None);
+        let admission = admission(&config, &core, &producer, STEP);
+        drive(&mut d, "the unit is buffered", |d| {
+            !d.core.lock().ready.is_empty()
+        });
+        admission.stop();
+        acknowledge_first(&d);
+        core.latch("a test latch");
+        let mut closing = feed.close(Duration::from_secs(10)).expect("a close");
+        let err = closing.try_outcome().expect("settled").unwrap_err();
+        assert_eq!(err.kind, FeedErrorKind::Fatal);
+        assert_eq!(err.reason, "a test latch");
+        consumer::run(d);
+        assert_eq!(committed(&brokers, &group), None);
+    }
+
+    /// Pins that a close reaching a consumer thread that holds nothing
+    /// settles `Ok` once the thread has ended, the stop waking its loop.
+    #[test]
+    fn an_idle_close_settles_ok_and_leaves() {
+        let cluster = cluster_with(0);
+        let brokers = cluster.bootstrap_servers();
+        let group = spate_test::unique_name("close-idle");
+        let (_, core, producer, mut d) = parts_for(&brokers, &group);
+        drive(&mut d, "the driver owns its partitions", |d| owns(d) == 2);
+        let thread = std::thread::spawn(move || consumer::run(d));
+        let feed = feed_over(&core, &producer, Some(thread));
+        let mut closing = feed.close(Duration::from_secs(10)).expect("a close");
+        wait_until(DEADLINE, "the close settles", || {
+            closing.try_outcome().is_some()
+        });
+        assert_eq!(closing.try_outcome(), Some(Ok(())));
+        let thread = feed.thread.as_ref().expect("the consumer thread");
+        wait_until(DEADLINE, "the consumer thread ends", || {
+            thread.is_finished()
+        });
+    }
+
+    /// Pins that a close given no time rejects as Retryable when a
+    /// tombstone is still in flight, and commits nothing past its unit.
+    #[test]
+    fn a_close_with_no_time_left_commits_only_what_was_confirmed() {
+        let cluster = cluster_with(2);
+        let brokers = cluster.bootstrap_servers();
+        let group = spate_test::unique_name("close-no-time");
+        let (config, core, producer, mut d) = parts_for(&brokers, &group);
+        let feed = feed_over(&core, &producer, None);
+        let admission = admission(&config, &core, &producer, STEP);
+        let deliveries = received(&mut d, &feed, admission, 2);
+        cluster
+            .broker_round_trip_time(1, Duration::from_millis(300))
+            .unwrap();
+        feed.acknowledge(deliveries[0].receipt).unwrap();
+        let mut closing = feed.close(Duration::ZERO).expect("a close");
+        consumer::run(d);
+        let err = closing.try_outcome().expect("settled").unwrap_err();
+        assert_eq!(err.kind, FeedErrorKind::Retryable);
+        assert!(
+            err.reason.contains("writes still in flight"),
+            "{}",
+            err.reason
+        );
+        assert_ne!(committed(&brokers, &group), Some(1));
+    }
+
+    /// Pins that a close whose last commit the broker refuses rejects as
+    /// Retryable naming the commit.
+    #[test]
+    fn a_close_whose_commit_fails_rejects() {
+        let cluster = cluster_with(1);
+        let brokers = cluster.bootstrap_servers();
+        let group = spate_test::unique_name("close-commit-fails");
+        let (config, core, producer, mut d) = parts_for(&brokers, &group);
+        let feed = feed_over(&core, &producer, None);
+        let admission = admission(&config, &core, &producer, STEP);
+        let deliveries = received(&mut d, &feed, admission, 1);
+        feed.acknowledge(deliveries[0].receipt).unwrap();
+        // A code librdkafka does not retry on its own.
+        cluster.request_errors(
+            RDKafkaApiKey::OffsetCommit,
+            &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_OFFSET_METADATA_TOO_LARGE],
+        );
+        let mut closing = feed.close(Duration::from_secs(10)).expect("a close");
+        consumer::run(d);
+        let err = closing.try_outcome().expect("settled").unwrap_err();
+        assert_eq!(err.kind, FeedErrorKind::Retryable);
+        assert!(err.reason.contains("last commit failed"), "{}", err.reason);
+        assert_eq!(committed(&brokers, &group), None);
     }
 
     use super::super::KafkaFeedPublisher;

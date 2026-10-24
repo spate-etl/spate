@@ -340,14 +340,14 @@ To implement a feed backend, keep every method free of waits:
   are estimates, and count in `unsent` the acknowledgments and failures you
   have accepted and not yet applied. The default returns `None`, and such a
   feed serves continuous jobs only.
-- Answer `hands_back` with `true` if a stopping reader can return a unit for
-  another reader to take at once. Then `stop_receiving` stops your receive
-  task, `hand_back` returns one held unit without counting it as a failure,
-  and `close` sends what you still have queued and gives up what you hold,
-  within the bound it is given, settling the `Confirmation` it returns when
-  done. The runtime calls `close` once, after the final commit. Startup
-  refuses a `checkpoint.drain_timeout` no longer than `STOP_RESERVE` for such
-  a feed. The defaults answer `false` and do nothing.
+- Answer `hands_back` with `true` if a stopping reader should read your units on
+  to the stop reserve and then return the ones it has not finished. Then
+  `stop_receiving` stops your receive task, `hand_back` returns one held unit
+  without counting it as a failure, and `close` sends what you still have queued
+  and gives up what you hold, within the bound it is given, settling the
+  `Confirmation` it returns when done. The runtime calls `close` once, after the
+  final commit. Startup refuses a `checkpoint.drain_timeout` no longer than
+  `STOP_RESERVE` for such a feed. The defaults answer `false` and do nothing.
 
 A backend also answers to its name in the `feed:` section:
 

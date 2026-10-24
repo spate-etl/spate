@@ -105,13 +105,15 @@ the process.
   dead-letter queue after `maxReceiveCount` receives. See
   [the connector page](feeds/sqs/README.mdx) and
   [how a stop runs](feeds/sqs/README.mdx#stop).
-- **Kafka (feed)** — a unit's offset is committed only after every record in
-  it is acknowledged and its attempt record is tombstoned, or after the write
-  moving it to the retry or dead-letter topic is confirmed; a unit whose
-  worker stops is read again by the next owner of its partition. The attempt
-  cap counts every read, each recorded before it starts, and a unit at the cap
-  moves to the dead-letter topic unread. See
-  [the connector page](feeds/kafka/README.mdx).
+- **Kafka (feed)** — a unit's offset is committed only after every record in it
+  is acknowledged and its attempt record is tombstoned, or after the write
+  moving it to the retry or dead-letter topic is confirmed; a unit a stopping
+  worker has not finished is read again by the next owner of its partition once
+  the worker leaves the group, and one whose worker crashed once the session
+  timeout lapses. The attempt cap counts every read, each recorded before it
+  starts, and a unit at the cap moves to the dead-letter topic unread. See
+  [the connector page](feeds/kafka/README.mdx) and
+  [how a stop runs](feeds/kafka/README.mdx#stop).
 - **Memory / Capture (test)** — deterministic, in-process, and honest about
   the same contracts: commits only advance past durably "written" data, so
   tests can assert the at-least-once behavior itself. Not for production.

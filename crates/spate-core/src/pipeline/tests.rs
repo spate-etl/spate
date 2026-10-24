@@ -2862,6 +2862,41 @@ fn a_stop_during_a_blocked_revocation_drains_at_once() {
     joined(&h);
     assert_eq!(h.join.join().unwrap().unwrap().state, ExitState::Completed);
     assert_eq!(h.chain.consumed.load(Ordering::Relaxed), 0);
+    assert_revoked_while_blocked(&h.shared);
+}
+
+/// The lane's batch blocked and its revocation reached the controller.
+fn assert_revoked_while_blocked(shared: &SharedLog) {
+    let log = shared.lock().unwrap();
+    assert!(!log.pauses.is_empty(), "the batch never blocked");
+    let revoked = log.log.iter().position(|e| e == "revoke-delivered");
+    let stopped = log.log.iter().position(|e| e == "stop_reading");
+    assert!(revoked.is_some() && revoked < stopped, "{:?}", log.log);
+}
+
+/// Pins that a stop request names whether it is set and when it was first
+/// asked for.
+#[test]
+fn a_stop_request_reports_its_trigger() {
+    let clock = crate::clock::TestClock::frozen();
+    let runtime = PipelineRuntime::new(
+        test_config(1),
+        FakeSource::new().0,
+        |_thread| unreachable!("the runtime does not run"),
+        test_sink().0,
+        Arc::new(crate::backpressure::InflightBudget::new()),
+    )
+    .with_stop_clock(Arc::clone(&clock) as _);
+    let handle = runtime.shutdown_handle();
+    assert!(
+        format!("{handle:?}").contains("set: false, at: None"),
+        "{handle:?}"
+    );
+    handle.trigger();
+    clock.advance(Duration::from_secs(1));
+    handle.trigger();
+    let printed = format!("{handle:?}");
+    assert!(printed.contains("set: true, at: Some("), "{printed}");
 }
 
 /// Pins that a revocation during the stop's reading, waiting on a blocked
@@ -2886,6 +2921,7 @@ fn a_revocation_during_the_read_phase_ends_at_the_reserve() {
     joined(&h);
     assert_eq!(h.join.join().unwrap().unwrap().state, ExitState::Completed);
     assert_eq!(h.shared.lock().unwrap().stop_reading_calls, 1);
+    assert_revoked_while_blocked(&h.shared);
 }
 
 /// Pins that the drain deadline counts from the trigger: a stop asked for

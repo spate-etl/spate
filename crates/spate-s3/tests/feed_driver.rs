@@ -1381,6 +1381,37 @@ fn a_head_after_a_412_classifies_404_and_403_as_the_read_does() {
     }
 }
 
+/// A HEAD after a 412 that fails 404 with a 64 KiB error fails the unit back
+/// with the store's text cut to a bound, behind the key and ahead of the
+/// HEAD's suffix. Regression for #1305.
+#[test]
+fn a_head_after_a_412_with_a_large_error_is_failed_back_cut() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    stage(&data, "a.ndjson", &recs("old", 4));
+    let (old_etag, old_size) = (etag_of(&data, "a.ndjson"), size_of(&data, "a.ndjson"));
+    stage(&data, "a.ndjson", &recs("current", 5));
+
+    let (feed, script) = scripted_feed();
+    script.deliver(pinned_notification("a.ndjson", old_size, &old_etag, 0));
+    let store = ScriptedStore::new(dir.path());
+    store.answer_head(HeadAnswer::NotFound);
+    store.head_error_text("x".repeat(64 * 1024));
+    let l = launch_on_store(Arc::clone(&store), Arc::new(feed), |_| {});
+    wait_until(DEADLINE, "the unit is failed back", || {
+        !script.failed().is_empty()
+    });
+    stop(&l);
+    let (_, reason) = &script.failed()[0];
+    assert!(reason.contains("data/a.ndjson"), "{reason}");
+    assert!(reason.contains('…'), "{reason}");
+    assert!(
+        reason.ends_with("(the HEAD after the store refused the pinned read)"),
+        "{reason}"
+    );
+    assert!(reason.len() < 2048, "{} bytes", reason.len());
+}
+
 /// Pins that a lister's unit over an object overwritten under its pin is
 /// failed back without a HEAD or a re-enqueue.
 #[test]

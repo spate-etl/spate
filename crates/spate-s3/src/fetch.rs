@@ -604,7 +604,7 @@ async fn stream_object_streaming(
                                     "split {split}: reading \"{}\" failed mid-object at byte \
                                      {delivered}: {}",
                                     entry.key,
-                                    crate::error::reason(&e)
+                                    crate::error::bounded_reason(&e)
                                 ),
                             }));
                         }
@@ -613,8 +613,9 @@ async fn stream_object_streaming(
                             format!(
                                 "split {split}: read of \"{}\" failed mid-object at byte \
                                  {delivered} and the store reports no ETag to pin a \
-                                 resumed read to: {e}",
-                                entry.key
+                                 resumed read to: {}",
+                                entry.key,
+                                crate::error::bounded_reason(&e)
                             ),
                         ));
                     }
@@ -770,7 +771,7 @@ async fn retry_or_fail(
         let reason = format!(
             "split {split}: reading \"{}\" failed at byte {delivered}: {}",
             entry.key,
-            crate::error::reason(e)
+            crate::error::bounded_reason(e)
         );
         return Err(if crate::error::is_pipeline_fatal(e) {
             SplitFailure::Fatal(SourceError::Client {
@@ -790,8 +791,9 @@ async fn retry_or_fail(
             PoisonKind::RetriesExhausted,
             format!(
                 "split {split}: reading \"{}\" still failing at byte {delivered} after \
-             {MAX_ATTEMPTS} attempts: {e}",
-                entry.key
+             {MAX_ATTEMPTS} attempts: {}",
+                entry.key,
+                crate::error::bounded_reason(e)
             ),
         ));
     }
@@ -803,7 +805,7 @@ async fn retry_or_fail(
         key = %entry.key,
         attempt = *attempt,
         delivered,
-        error = %e,
+        error = %crate::error::bounded_reason(e),
         "transient object read failure; backing off and resuming with a ranged get"
     );
     tokio::time::sleep(backoff).await;
@@ -852,8 +854,9 @@ mod tests {
     /// retryable error, failing the first `fail_past_gets` bounded GETs that
     /// end past byte `fail_past` the same way, and cutting the first
     /// `cut_streams` result streams after `cut_after` bytes (with a retryable
-    /// error, or `PermissionDenied` when `cut_fatal` is set). Records every
-    /// requested range in `ranges` for read-path assertions.
+    /// error, or `PermissionDenied` when `cut_fatal` is set). `error_text`,
+    /// when set, replaces the injected errors' text. Records every requested
+    /// range in `ranges` for read-path assertions.
     #[derive(Debug)]
     struct FlakyStore {
         inner: InMemory,
@@ -863,6 +866,7 @@ mod tests {
         cut_streams: AtomicU32,
         cut_after: usize,
         cut_fatal: bool,
+        error_text: Option<String>,
         gets: AtomicU32,
         ranges: std::sync::Mutex<Vec<RangeKind>>,
         /// Payload streams drained to completion (a cut or abandoned body
@@ -881,6 +885,7 @@ mod tests {
                 cut_streams: AtomicU32::new(0),
                 cut_after: 0,
                 cut_fatal: false,
+                error_text: None,
                 gets: AtomicU32::new(0),
                 ranges: std::sync::Mutex::new(Vec::new()),
                 bodies_drained: Arc::new(AtomicU32::new(0)),
@@ -931,14 +936,14 @@ mod tests {
             }
         }
 
-        fn cut_error(fatal: bool) -> object_store::Error {
+        fn cut_error(fatal: bool, text: Option<&str>) -> object_store::Error {
             if fatal {
                 object_store::Error::PermissionDenied {
                     path: "k".into(),
-                    source: "injected permission loss".into(),
+                    source: text.unwrap_or("injected permission loss").to_owned().into(),
                 }
             } else {
-                Self::generic("injected stream cut")
+                Self::generic(text.unwrap_or("injected stream cut"))
             }
         }
     }
@@ -980,7 +985,9 @@ mod tests {
                 .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
                 .is_ok()
             {
-                return Err(Self::generic("injected get failure"));
+                return Err(Self::generic(
+                    self.error_text.as_deref().unwrap_or("injected get failure"),
+                ));
             }
             if let Some(GetRange::Bounded(r)) = &options.range
                 && r.end > self.fail_past
@@ -999,6 +1006,7 @@ mod tests {
             {
                 let cut_after = self.cut_after;
                 let cut_fatal = self.cut_fatal;
+                let error_text = self.error_text.clone();
                 let GetResult {
                     payload,
                     meta,
@@ -1016,13 +1024,16 @@ mod tests {
                     let out: Vec<object_store::Result<Bytes>> = match item {
                         Ok(bytes) => {
                             if sent >= cut_after {
-                                vec![Err(Self::cut_error(cut_fatal))]
+                                vec![Err(Self::cut_error(cut_fatal, error_text.as_deref()))]
                             } else {
                                 let take = bytes.len().min(cut_after - sent);
                                 sent += take;
                                 let mut out = vec![Ok(bytes.slice(0..take))];
                                 if sent >= cut_after {
-                                    out.push(Err(Self::cut_error(cut_fatal)));
+                                    out.push(Err(Self::cut_error(
+                                        cut_fatal,
+                                        error_text.as_deref(),
+                                    )));
                                 }
                                 out
                             }
@@ -1532,9 +1543,18 @@ mod tests {
     /// Run a fetcher over one no-ETag object whose stream is cut after
     /// `cut_after` bytes, returning the terminal `LaneFailed` failure.
     async fn no_etag_mid_stream_failure(cut_fatal: bool) -> SplitFailure {
+        no_etag_mid_stream_failure_with(cut_fatal, None).await
+    }
+
+    /// [`no_etag_mid_stream_failure`] with the cut's error text replaced.
+    async fn no_etag_mid_stream_failure_with(
+        cut_fatal: bool,
+        error_text: Option<String>,
+    ) -> SplitFailure {
         let flaky = FlakyStore {
             cut_after: 4,
             cut_fatal,
+            error_text,
             ..FlakyStore::new(seeded(&[("p/a", b"0123456789")]).await)
         };
         flaky.cut_streams.store(1, Ordering::Relaxed);
@@ -1765,6 +1785,214 @@ mod tests {
             panic!("expected a pipeline-fatal lane failure");
         };
         assert!(e.to_string().contains("HandshakeFailure"), "{e}");
+    }
+
+    /// A store error body of 64 KiB, as an `AccessDenied` or `NoSuchKey` XML
+    /// document quotes it.
+    fn large_body(code: &str) -> String {
+        format!(
+            "<Error><Code>{code}</Code><Message>{}</Message></Error>",
+            "x".repeat(64 * 1024)
+        )
+    }
+
+    /// The store's text in `reason` is cut: under 2 KiB, marked `…`.
+    fn assert_cut(reason: &str) {
+        assert!(reason.len() < 2048, "{} bytes", reason.len());
+        assert!(reason.contains('…'), "{reason}");
+    }
+
+    /// One `p/a` entry with an ETag, read from a local server answering
+    /// every request with `status` and `body`; returns the lane's failure.
+    async fn read_answered(status: &'static str, body: String, key: &str) -> SplitFailure {
+        let url = crate::test_servers::sequence_server(vec![(status, body)]);
+        let store: Arc<dyn ObjectStore> = Arc::new(crate::test_servers::store_at(&url));
+        let slice = vec![entry(key, 10, Some("\"e\""))];
+        match collect_fetch(store, slice, 0, 64, 64)
+            .await
+            .into_iter()
+            .last()
+        {
+            Some(ChunkMsg::LaneFailed(failure)) => failure,
+            other => panic!("a refused read must fail the lane: {other:?}"),
+        }
+    }
+
+    /// A read refused 403 with a 64 KiB body is pipeline-fatal, and its
+    /// reason carries the status and the store's text cut to the bound.
+    /// Regression for #1305.
+    #[tokio::test]
+    async fn a_refused_read_with_a_large_body_is_fatal_and_cut() {
+        let failure = read_answered("403 Forbidden", large_body("AccessDenied"), "p/a").await;
+        let SplitFailure::Fatal(e) = failure else {
+            panic!("a 403 read must be fatal, got: {failure}");
+        };
+        let reason = e.to_string();
+        assert!(reason.contains("p/a"), "{reason}");
+        assert!(reason.contains("403 Forbidden"), "{reason}");
+        assert!(reason.contains("AccessDenied"), "{reason}");
+        assert!(reason.ends_with('…'), "{reason}");
+        assert_cut(&reason);
+    }
+
+    /// A read answered 404 with a 64 KiB body poisons the split as
+    /// `NotFound`, with the store's text cut to the bound.
+    #[tokio::test]
+    async fn a_missing_object_with_a_large_body_poisons_and_cut() {
+        let failure = read_answered("404 Not Found", large_body("NoSuchKey"), "p/a").await;
+        let SplitFailure::Poison(PoisonKind::NotFound, reason) = failure else {
+            panic!("a 404 read must poison as not_found, got: {failure}");
+        };
+        assert!(reason.contains("p/a"), "{reason}");
+        assert!(reason.contains("NoSuchKey"), "{reason}");
+        assert!(reason.ends_with('…'), "{reason}");
+        assert_cut(&reason);
+    }
+
+    /// A multibyte error body is cut on a character: 512 characters of the
+    /// store's text and the `…`.
+    #[tokio::test]
+    async fn a_multibyte_error_body_is_cut_on_a_character() {
+        let body = format!(
+            "<Error><Message>{}</Message></Error>",
+            "é".repeat(64 * 1024)
+        );
+        let failure = read_answered("403 Forbidden", body, "p/a").await;
+        let SplitFailure::Fatal(e) = failure else {
+            panic!("a 403 read must be fatal, got: {failure}");
+        };
+        let reason = e.to_string();
+        let text = reason
+            .split_once("failed at byte 0: ")
+            .map(|(_, text)| text)
+            .expect("the store's text follows the byte");
+        assert_eq!(text.chars().count(), 512 + 1, "{text}");
+        assert!(text.ends_with("é…"), "{text}");
+    }
+
+    /// On a key long enough to push the status past the cut, the reason
+    /// still names the key in full and the kind of failure, and the store's
+    /// text stays within the bound.
+    #[tokio::test]
+    async fn a_long_key_refusal_keeps_the_kind_of_failure() {
+        let key = format!("p/{}", "k".repeat(1000));
+        let failure = read_answered("403 Forbidden", large_body("AccessDenied"), &key).await;
+        let SplitFailure::Fatal(e) = failure else {
+            panic!("a 403 read must be fatal, got: {failure}");
+        };
+        let reason = e.to_string();
+        assert!(reason.contains(&format!("\"{key}\"")), "{reason}");
+        assert!(
+            reason.contains("lacked the necessary privileges"),
+            "{reason}"
+        );
+        assert!(reason.ends_with('…'), "{reason}");
+        assert!(reason.len() < 2048 + key.len(), "{} bytes", reason.len());
+    }
+
+    /// Pins that a TLS rejection on a read of a long key is still named.
+    #[tokio::test]
+    async fn a_tls_rejection_on_a_long_key_is_still_named() {
+        let addr =
+            spate_test::tls_alert_server(b"", u8::from(rustls::AlertDescription::HandshakeFailure));
+        let store: Arc<dyn ObjectStore> = Arc::new(crate::test_servers::tls_store_at(
+            &format!("https://{addr}"),
+            &crate::test_servers::TestCa::new("any"),
+        ));
+        let slice = vec![entry(&format!("p/{}", "k".repeat(1000)), 10, Some("\"e\""))];
+        let msgs = collect_fetch(store, slice, 0, 64, 64).await;
+        let Some(ChunkMsg::LaneFailed(SplitFailure::Fatal(e))) = msgs.into_iter().last() else {
+            panic!("expected a pipeline-fatal lane failure");
+        };
+        assert!(e.to_string().contains("HandshakeFailure"), "{e}");
+    }
+
+    /// A read failing past its attempt budget poisons the split with the
+    /// last error's text cut to the bound.
+    #[tokio::test(start_paused = true)]
+    async fn a_read_failing_past_the_budget_with_a_large_error_is_cut() {
+        let flaky = FlakyStore {
+            error_text: Some("x".repeat(64 * 1024)),
+            ..FlakyStore::new(seeded(&[("p/a", b"0123456789")]).await)
+        };
+        flaky.fail_gets.store(MAX_ATTEMPTS, Ordering::Relaxed);
+        let store: Arc<dyn ObjectStore> = Arc::new(flaky);
+        let slice = listed(&store).await;
+        let msgs = collect_fetch(store, slice, 0, 64, 64).await;
+        let Some(ChunkMsg::LaneFailed(SplitFailure::Poison(PoisonKind::RetriesExhausted, reason))) =
+            msgs.into_iter().last()
+        else {
+            panic!("a read failing past its budget must poison as retries_exhausted");
+        };
+        assert!(reason.contains("attempts"), "{reason}");
+        assert!(reason.contains("xxxx"), "{reason}");
+        assert!(reason.ends_with('…'), "{reason}");
+        assert_cut(&reason);
+    }
+
+    /// A mid-object failure without an ETag, fatal or poison, carries the
+    /// store's text cut to the bound.
+    #[tokio::test]
+    async fn a_mid_object_failure_with_a_large_error_is_cut() {
+        let text = Some("x".repeat(64 * 1024));
+        let SplitFailure::Fatal(e) = no_etag_mid_stream_failure_with(true, text.clone()).await
+        else {
+            panic!("PermissionDenied mid-stream must be pipeline-fatal");
+        };
+        let reason = e.to_string();
+        assert!(
+            reason.contains("p/a") && reason.contains("mid-object"),
+            "{reason}"
+        );
+        assert!(reason.ends_with('…'), "{reason}");
+        assert_cut(&reason);
+        let SplitFailure::Poison(PoisonKind::Undecodable, reason) =
+            no_etag_mid_stream_failure_with(false, text).await
+        else {
+            panic!("a generic mid-stream break is split poison");
+        };
+        assert!(
+            reason.contains("p/a") && reason.contains("mid-object"),
+            "{reason}"
+        );
+        assert!(reason.ends_with('…'), "{reason}");
+        assert_cut(&reason);
+    }
+
+    /// Each transient read failure's log line carries the store's text cut
+    /// to the bound.
+    #[test]
+    fn a_retried_read_logs_its_store_error_cut() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .unwrap();
+        let lines = spate_test::capture_logs(tracing::Level::WARN, || {
+            rt.block_on(async {
+                let flaky = FlakyStore {
+                    error_text: Some("x".repeat(64 * 1024)),
+                    ..FlakyStore::new(seeded(&[("p/a", b"0123456789")]).await)
+                };
+                flaky.fail_gets.store(2, Ordering::Relaxed);
+                let store: Arc<dyn ObjectStore> = Arc::new(flaky);
+                let slice = listed(&store).await;
+                let msgs = collect_fetch(store, slice, 0, 64, 64).await;
+                assert_eq!(
+                    assembled(&msgs),
+                    vec![("p/a".to_string(), b"0123456789".to_vec())]
+                );
+            });
+        });
+        let retried: Vec<_> = lines
+            .iter()
+            .filter(|l| l.contains("transient object read failure"))
+            .collect();
+        assert_eq!(retried.len(), 2, "{lines:?}");
+        for line in retried {
+            assert!(line.contains("xxxx…"), "{line}");
+            assert!(line.len() < 2048, "{} bytes", line.len());
+        }
     }
 
     // ---------------------------------------------- ranged reads, end to end --
@@ -2518,6 +2746,40 @@ mod tests {
             panic!("a 403 on the HEAD must be fatal");
         };
         assert!(e.to_string().contains("the HEAD after"), "{e}");
+    }
+
+    /// A HEAD after a 412 that fails with a 64 KiB error, 404 or 403, keeps
+    /// the HEAD's suffix behind the store's text cut to the bound.
+    #[tokio::test]
+    async fn a_failed_head_with_a_large_error_keeps_its_suffix() {
+        let big = || "x".repeat(64 * 1024);
+        let suffix = "(the HEAD after the store refused the pinned read)";
+        let (inner, entry) = thirty_bytes().await;
+        let store = Arc::new(HeadStore::new(inner.clone(), 2).head_answers(vec![Err(
+            object_store::Error::NotFound {
+                path: "k".into(),
+                source: big().into(),
+            },
+        )]));
+        let msgs = fetch_from(store, entry.clone(), notified(None), None).await;
+        let SplitFailure::Poison(PoisonKind::NotFound, reason) = last_failure(msgs) else {
+            panic!("a 404 on the HEAD must poison as not_found");
+        };
+        assert!(reason.ends_with(suffix), "{reason}");
+        assert_cut(&reason);
+        let store = Arc::new(HeadStore::new(inner, 2).head_answers(vec![Err(
+            object_store::Error::PermissionDenied {
+                path: "k".into(),
+                source: big().into(),
+            },
+        )]));
+        let msgs = fetch_from(store, entry, notified(None), None).await;
+        let SplitFailure::Fatal(e) = last_failure(msgs) else {
+            panic!("a 403 on the HEAD must be fatal");
+        };
+        let reason = e.to_string();
+        assert!(reason.ends_with(suffix), "{reason}");
+        assert_cut(&reason);
     }
 
     /// Pins that a ranged GET a notification unit's read is refused with 416,

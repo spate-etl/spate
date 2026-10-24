@@ -162,7 +162,7 @@ impl SplitPlanner for S3Planner {
                     CoordinationErrorKind::Fatal
                 };
                 let attempts = self.consecutive_failures;
-                let reason = crate::error::reason(&e);
+                let reason = crate::error::bounded_reason(&e);
                 return Err(CoordinationError::new(
                     kind,
                     if kind == CoordinationErrorKind::Fatal && attempts >= MAX_ATTEMPTS {
@@ -621,6 +621,50 @@ mod tests {
         assert_eq!(err.kind, CoordinationErrorKind::Retryable, "{}", err.reason);
         let plan = p.plan(PlanContext::new(None, 2)).unwrap();
         assert_eq!(members(&plan), [vec!["data/a.ndjson"]]);
+    }
+
+    /// A listing refused 403 with a 64 KiB error body fails the plan as
+    /// `Fatal`, with the store's text cut to a bound. Regression for #1305.
+    #[test]
+    fn a_large_listing_error_body_is_cut() {
+        let rt = runtime();
+        let url = crate::test_servers::sequence_server(vec![("403 Forbidden", large_body())]);
+        let mut p = filtering_planner(&url, rt.handle().clone(), 64 * MB);
+        let err = p.plan(PlanContext::new(None, 1)).unwrap_err();
+        assert_eq!(err.kind, CoordinationErrorKind::Fatal, "{}", err.reason);
+        assert!(err.reason.len() < 2048, "{} bytes", err.reason.len());
+        assert!(err.reason.ends_with('…'), "{}", err.reason);
+        assert!(err.reason.contains("403 Forbidden"), "{}", err.reason);
+        assert!(err.reason.contains("AccessDenied"), "{}", err.reason);
+    }
+
+    /// A listing still failing after the plan budget carries the store's
+    /// text cut to a bound.
+    #[test]
+    fn a_listing_still_failing_after_the_budget_is_cut() {
+        let rt = runtime();
+        let body = format!(
+            "<Error><Code>SlowDown</Code><Message>{}</Message></Error>",
+            "x".repeat(64 * 1024)
+        );
+        let url = crate::test_servers::sequence_server(vec![("503 Service Unavailable", body)]);
+        let mut p = filtering_planner(&url, rt.handle().clone(), 64 * MB);
+        let err = (1..=MAX_ATTEMPTS)
+            .map(|n| p.plan(PlanContext::new(None, u64::from(n))).unwrap_err())
+            .last()
+            .unwrap();
+        assert_eq!(err.kind, CoordinationErrorKind::Fatal, "{}", err.reason);
+        assert!(err.reason.contains("plan attempts"), "{}", err.reason);
+        assert!(err.reason.len() < 2048, "{} bytes", err.reason.len());
+        assert!(err.reason.ends_with('…'), "{}", err.reason);
+    }
+
+    /// A 64 KiB `AccessDenied` error body.
+    fn large_body() -> String {
+        format!(
+            "<Error><Code>AccessDenied</Code><Message>{}</Message></Error>",
+            "x".repeat(64 * 1024)
+        )
     }
 
     /// Keys that differ only in CR, LF or CRLF decode to one key, which is

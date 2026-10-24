@@ -14,12 +14,11 @@
 //! for a lister run, and a solo run on the in-process feed runs it with no
 //! location.
 
-use crate::error::classify;
+use crate::error::{bounded_reason, classify};
 use crate::fetch::ObjectEntry;
 use crate::listing::{UnaddressableKeys, addressable};
 use crate::location::{
-    LOCATION_OBJECT_MAX_BYTES, Location, bounded_reason, compare, io_error, read_error,
-    read_object, starts_with,
+    LOCATION_OBJECT_MAX_BYTES, Location, compare, io_error, read_error, read_object, starts_with,
 };
 use crate::split::Packing;
 use crate::unit::units;
@@ -2353,6 +2352,30 @@ mod tests {
         assert!(err.to_string().contains("listing"), "{err}");
         assert!(script.published().is_empty());
         assert_eq!(rt.block_on(job.end()), None);
+    }
+
+    /// Pins that a listing refused with a 64 KiB error body fails the run
+    /// with the store's text cut to a bound.
+    #[test]
+    fn a_refused_listing_with_a_large_body_is_cut() {
+        let rt = runtime();
+        let body = format!(
+            "<Error><Code>AccessDenied</Code><Message>{}</Message></Error>",
+            "x".repeat(64 * 1024)
+        );
+        let endpoint = crate::test_servers::sequence_server(vec![("403 Forbidden", body)]);
+        let job = Job::new();
+        let (feed, _script) = spate_test::scripted_feed();
+        let err = stub_source(&rt, &endpoint)
+            .with_location_store(Arc::clone(&job.ops) as Arc<dyn ObjectStore>)
+            .list_once(&scripted_section(), Arc::new(feed))
+            .unwrap_err();
+        assert_eq!(class(&err), ErrorClass::Fatal, "{err}");
+        let shown = err.to_string();
+        assert!(shown.contains("listing"), "{shown}");
+        assert!(shown.contains("403 Forbidden"), "{shown}");
+        assert!(shown.contains('…'), "{shown}");
+        assert!(shown.len() < 2048, "{} bytes", shown.len());
     }
 
     /// Pins the cadence `list_once` gives the lister: over 1,001 keys the

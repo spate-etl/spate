@@ -106,12 +106,22 @@ fn delete_rejected(e: &object_store::Error) -> bool {
         && text.ends_with("(code: AccessDenied)")
 }
 
-/// `e`'s message, with the TLS rejection behind it appended.
-pub(crate) fn reason(e: &object_store::Error) -> String {
-    match spate_core::tls_rejection!(rustls, e) {
-        Some(tls) => format!("{e}: {tls}"),
-        None => e.to_string(),
+/// The most of a store's error text an S3 source error carries. A store can
+/// answer an error with a body of any size, which `object_store` quotes whole.
+const ERROR_TEXT_MAX_CHARS: usize = 512;
+
+/// `e`'s message cut to [`ERROR_TEXT_MAX_CHARS`] characters, with `…` where
+/// it was cut, and the TLS rejection behind it appended whole.
+pub(crate) fn bounded_reason(e: &object_store::Error) -> String {
+    let mut text = e.to_string();
+    if let Some((cut, _)) = text.char_indices().nth(ERROR_TEXT_MAX_CHARS) {
+        text.truncate(cut);
+        text.push('…');
     }
+    if let Some(tls) = spate_core::tls_rejection!(rustls, e) {
+        text = format!("{text}: {tls}");
+    }
+    text
 }
 
 /// Whether `e`, failing a read of a part from `origin`, means the key was
@@ -409,7 +419,7 @@ mod tests {
                 assert_eq!(classify(&e), expected, "{e:?}");
                 assert_eq!(is_pipeline_fatal(&e), expected == ErrorClass::Fatal, "{e}");
                 if expected == ErrorClass::Fatal {
-                    assert!(reason(&e).contains(&name), "{}", reason(&e));
+                    assert!(bounded_reason(&e).contains(&name), "{}", bounded_reason(&e));
                 }
             }
         }
@@ -434,7 +444,11 @@ mod tests {
                 ),
                 "{e:?}"
             );
-            assert!(reason(&e).contains("UnknownIssuer"), "{}", reason(&e));
+            assert!(
+                bounded_reason(&e).contains("UnknownIssuer"),
+                "{}",
+                bounded_reason(&e)
+            );
         }
     }
 
@@ -447,7 +461,61 @@ mod tests {
         let url = crate::test_servers::serve(&server, Some(&clients)).await;
         let e = list_error(&crate::test_servers::tls_store_at(&url, &server)).await;
         assert_eq!(classify(&e), ErrorClass::Fatal, "{e:?}");
-        assert!(reason(&e).contains("CertificateRequired"), "{}", reason(&e));
+        assert!(
+            bounded_reason(&e).contains("CertificateRequired"),
+            "{}",
+            bounded_reason(&e)
+        );
+    }
+
+    /// Pins the bound's edge: an error of exactly 512 characters is kept
+    /// whole, and one of 513 is cut to 512 and `…`, on ASCII and multibyte
+    /// text alike.
+    #[test]
+    fn the_bound_keeps_512_characters_whole_and_cuts_513() {
+        let generic = |text: String| object_store::Error::Generic {
+            store: "S3",
+            source: text.into(),
+        };
+        let head = generic(String::new()).to_string().chars().count();
+        let exact = generic("x".repeat(512 - head));
+        assert_eq!(bounded_reason(&exact), exact.to_string());
+        for tail in ["x", "é"] {
+            let over = generic(format!("{}{tail}", "x".repeat(512 - head)));
+            let want = over.to_string().chars().take(512).collect::<String>() + "…";
+            assert_eq!(bounded_reason(&over), want);
+        }
+    }
+
+    /// An error whose text is 1 MiB, with a TLS rejection behind it.
+    #[derive(Debug)]
+    struct LongTls(rustls::Error);
+
+    impl std::fmt::Display for LongTls {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(&"x".repeat(1 << 20))
+        }
+    }
+
+    impl std::error::Error for LongTls {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.0)
+        }
+    }
+
+    /// The TLS rejection behind a long error is named after the cut.
+    #[test]
+    fn a_long_error_keeps_its_tls_rejection() {
+        let e = object_store::Error::Generic {
+            store: "S3",
+            source: Box::new(LongTls(rustls::Error::AlertReceived(
+                rustls::AlertDescription::HandshakeFailure,
+            ))),
+        };
+        let shown = bounded_reason(&e);
+        assert!(shown.contains("HandshakeFailure"), "{shown}");
+        assert!(shown.contains('…'), "{shown}");
+        assert!(shown.len() < 1024, "{} bytes", shown.len());
     }
 
     fn notification(version: Option<&str>) -> Origin {

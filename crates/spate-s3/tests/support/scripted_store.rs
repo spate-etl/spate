@@ -50,6 +50,8 @@ pub(crate) struct ScriptedStore {
     holding: AtomicBool,
     release: watch::Sender<bool>,
     heads: Mutex<VecDeque<HeadAnswer>>,
+    /// The text of a scripted HEAD's error, when set.
+    head_text: Mutex<Option<String>>,
     seen: Mutex<Vec<Seen>>,
 }
 
@@ -75,6 +77,7 @@ impl ScriptedStore {
             holding: AtomicBool::new(false),
             release: watch::channel(false).0,
             heads: Mutex::new(VecDeque::new()),
+            head_text: Mutex::new(None),
             seen: Mutex::new(Vec::new()),
         })
     }
@@ -97,6 +100,11 @@ impl ScriptedStore {
     /// Answer the next HEAD with `answer` (repeat to script a sequence).
     pub(crate) fn answer_head(&self, answer: HeadAnswer) {
         self.heads.lock().unwrap().push_back(answer);
+    }
+
+    /// Give each scripted HEAD's error the text `text`.
+    pub(crate) fn head_error_text(&self, text: String) {
+        *self.head_text.lock().unwrap() = Some(text);
     }
 
     /// Every request, in order.
@@ -143,14 +151,15 @@ impl ObjectStore for ScriptedStore {
         if options.head {
             let answer = self.heads.lock().unwrap().pop_front();
             let path = location.to_string();
+            let text = self.head_text.lock().unwrap().clone();
             return match answer {
                 Some(HeadAnswer::NotFound) => Err(object_store::Error::NotFound {
                     path,
-                    source: "scripted 404".into(),
+                    source: text.unwrap_or_else(|| "scripted 404".to_owned()).into(),
                 }),
                 Some(HeadAnswer::Denied) => Err(object_store::Error::PermissionDenied {
                     path,
-                    source: "scripted 403".into(),
+                    source: text.unwrap_or_else(|| "scripted 403".to_owned()).into(),
                 }),
                 None => self.inner.get_opts(location, options).await,
             };

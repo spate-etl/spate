@@ -33,7 +33,10 @@ max_line_length = 80
 [{CHANGELOG.md,changelog.d/**.md}]
 max_line_length = off
 
-# Raw fuzz inputs are bytes; trimming or appending a newline changes the input.
+# Raw fuzz inputs are bytes. Re-encoding, converting line endings, trimming or
+# appending a newline all change the input.
 [fuzz/corpus/**]
+charset = unset
+end_of_line = unset
 insert_final_newline = unset
 trim_trailing_whitespace = unset

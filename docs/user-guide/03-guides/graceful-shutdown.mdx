@@ -52,19 +52,20 @@ revocation, one choreography tested constantly by every rebalance:
    that is force-aborted a second later, so this step always terminates.
    With a feed that hands back, this step ends one second before the
    deadline, which leaves that second for the feed's close in step 4.
-4. **Offsets commit.** The controller drains the checkpointer and runs a
-   final synchronous commit + `flush_commits`, committing only watermarks
-   that cover durably written data, per the at-least-once invariant. A
-   coordinated source that forwards `Source::commit_final` to
-   `CoordinationDriver::commit_final`, as the built-in
-   [S3 source](../04-connectors/sources/s3/README.mdx) does, runs this commit
-   under one budget, `coordination.op_timeout`, for all its splits together.
-   Splits it does not reach before the budget ends keep their last committed
-   position, and the next owner may replay records from it. The runtime then
-   closes a feed that hands back: the feed sends the acknowledgments it still
-   has queued and gives up the units it holds, within what is left of the
-   deadline. A unit it cannot give up in time comes back after the feed's
-   redelivery delay.
+4. **Offsets commit.** The controller drains the checkpointer and runs a final
+   synchronous commit + `flush_commits`, committing only watermarks that cover
+   durably written data, per the at-least-once invariant. A coordinated source
+   that forwards `Source::commit_final` to `CoordinationDriver::commit_final`,
+   as the built-in [S3 source](../04-connectors/sources/s3/README.mdx) does,
+   runs this commit under one budget, `coordination.op_timeout`, for all its
+   splits together. Splits it does not reach before the budget ends keep their
+   last committed position, and the next owner may replay records from it. The
+   runtime then closes a feed that hands back: the feed sends the
+   acknowledgments it still has queued and gives up the units it holds, within
+   what is left of the deadline. A unit it cannot give up in time comes back
+   after the feed's redelivery delay. A feed whose backend gives a commit or a
+   group leave no bound can finish them after the deadline, and `run` waits for
+   it; the connector page's "Stop" section says when.
 5. **The source closes.** A coordinated source departs its job: it hands
    back its splits, its leadership and its membership, so peers take over
    without waiting out a lease. The departure is bounded by
@@ -82,26 +83,25 @@ Kubernetes, SIGTERM starts both this drain and the pod's
 kubelet sends SIGKILL. The rule:
 
 :::warning
-Keep `drain_timeout` comfortably **below**
-`terminationGracePeriodSeconds`. Steps 1 to 3 run inside the budget; the
-gap has to absorb what follows it: the pool's one-second backstop, the
-final commit (step 4), the source closing (step 5) and process teardown.
-The defaults (25s vs 30s) encode this; if you raise one, raise the other.
-With a feed that hands back, the stop's reading and the feed's close also run
-inside the budget, and startup refuses a `drain_timeout` of 5s or less. A
-coordinated source that forwards `Source::commit_final` can take up to
-`coordination.op_timeout` (10s by default) for the final commit against a
-slow store, and up to `op_timeout` again to close. Where a slow store at
-shutdown is likely, size the gap to at least twice `op_timeout` plus a few
-seconds. At the default that is more than the 5s gap. The same sizing holds
-when the store stopped answering before SIGTERM, because the stop ends any
-wait on the store already under way. A coordinated source that does not
-forward `Source::commit_final` can take up to three times `op_timeout` for
-each split in turn at the final commit. One whose `open` does not pass
-`SourceCtx::stop` to `CoordinationDriver::set_stop` can wait as long for a
-commit already under way at SIGTERM, and one whose coordinator ignores
-`SplitCoordinator::set_stop` can wait up to three times `op_timeout` for the
-one command under way
+Keep `drain_timeout` comfortably **below** `terminationGracePeriodSeconds`.
+Steps 1 to 3 run inside the budget; the gap has to absorb what follows it: the
+pool's one-second backstop, the final commit (step 4), the source closing (step
+5) and process teardown. The defaults (25s vs 30s) encode this; if you raise
+one, raise the other. With a feed that hands back, the stop's reading and the
+feed's close also run inside the budget, and startup refuses a `drain_timeout`
+of 5s or less. A feed's close that outlasts what is left of the budget falls
+into the gap too. A coordinated source that forwards `Source::commit_final` can
+take up to `coordination.op_timeout` (10s by default) for the final commit
+against a slow store, and up to `op_timeout` again to close. Where a slow store
+at shutdown is likely, size the gap to at least twice `op_timeout` plus a few
+seconds. At the default that is more than the 5s gap. The same sizing holds when
+the store stopped answering before SIGTERM, because the stop ends any wait on
+the store already under way. A coordinated source that does not forward
+`Source::commit_final` can take up to three times `op_timeout` for each split in
+turn at the final commit. One whose `open` does not pass `SourceCtx::stop` to
+`CoordinationDriver::set_stop` can wait as long for a commit already under way
+at SIGTERM, and one whose coordinator ignores `SplitCoordinator::set_stop` can
+wait up to three times `op_timeout` for the one command under way
 ([Custom sources](../06-extending/custom-source.mdx#3-delegate-the-choreography-coordinationdriver)).
 Keep `op_timeout` above about (2N + 3) times your store's write latency,
 where N is the number of splits an instance holds (at most `max_in_flight`).

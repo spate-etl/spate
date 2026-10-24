@@ -1,17 +1,15 @@
-//! Feed-unit decoding over arbitrary bytes, and over storage notifications
-//! built from arbitrary records.
+//! Feed-unit decoding over storage notifications built from arbitrary records.
 //!
 //! A unit's body comes from a queue or topic, so whoever can publish there
-//! chooses its bytes. The target drives two arms against a source reading
-//! `bucket` under one of a few prefixes. The bytes arm asserts only that
-//! `decode_unit` returns. The structured arm builds a `Records` message whose
-//! keys, sizes, ETags and event names take the shapes the decoder's rules
-//! distinguish, and predicts each record's outcome from how it was built:
-//! dropped, read, or failing its message. A message with a failing record
-//! must read nothing. Any other message must read exactly the predicted
-//! parts, in order, each with a key under the prefix that `addressable`
-//! accepts and that equals the key before it was encoded, and an ETag that is
-//! quoted and can be sent as a header value.
+//! chooses its bytes. The target builds a `Records` message for a source
+//! reading `bucket` under one of a few prefixes. Its records' keys, sizes,
+//! ETags and event names take the shapes the decoder's rules distinguish, and
+//! the target predicts each record's outcome from how it was built: dropped,
+//! read, or failing its message. A message with a failing record must read
+//! nothing. Any other message must read exactly the predicted parts, in
+//! order. Each part's key is under the prefix, accepted by `addressable` and
+//! equal to the key before it was encoded. Each ETag is quoted and can be sent
+//! as a header value. Raw bytes are left to `s3_unit_decode`.
 //!
 //! The prediction follows the decoder's order in the one place order shows: a
 //! zero size drops a created record after the bucket, key decoding, prefix
@@ -30,7 +28,6 @@ const PREFIXES: [&str; 3] = ["", "data", "a/b"];
 
 #[derive(Arbitrary, Debug)]
 struct Input {
-    bytes: Vec<u8>,
     prefix: u8,
     records: Vec<Record>,
     envelope: bool,
@@ -116,8 +113,6 @@ enum Outcome {
 
 fuzz_target!(|input: Input| {
     let prefix = PREFIXES[usize::from(input.prefix) % PREFIXES.len()];
-    let _ = decode_unit(&input.bytes, BUCKET, prefix);
-
     let mut values = Vec::with_capacity(input.records.len());
     let mut outcomes = Vec::with_capacity(input.records.len());
     for record in &input.records {

@@ -70,7 +70,8 @@ and `cargo xtask tidy title` rejects a subject carrying a type or `!`.
 ## More information
 
 - Landed in [#730](https://github.com/spate-etl/spate/pull/730).
-- The release-time entry for root requirements landed in [#745](https://github.com/spate-etl/spate/pull/745).
+- The release-time entry for root requirements landed in
+  [#745](https://github.com/spate-etl/spate/pull/745).
 - [ADR-0045](0045-rust-task-runner.md) is the runner these checks live in.
 - `changelog.d/README.md` states when a fragment is required and how the marker
   is written.

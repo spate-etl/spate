@@ -48,8 +48,8 @@ consumer opts into, not a type they receive by accident from a framework
 signature.
 
 The `metrics` facade is the **one sanctioned exception**, for the reasons in
-[ADR-0008](0008-metrics-facade.md): the instrumentation API *is* that facade, and
-wrapping it would create a second vocabulary for the same concepts.
+[ADR-0008](0008-metrics-facade.md): the instrumentation API *is* that facade,
+and wrapping it would create a second vocabulary for the same concepts.
 
 ### Consequences
 

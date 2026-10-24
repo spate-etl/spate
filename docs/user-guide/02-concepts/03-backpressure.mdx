@@ -169,10 +169,10 @@ waits at the source, not in process memory.
 
 ## Further reading
 
-- [ADR-0006](../../adr/0006-per-shard-sink-workers.md) — why one shard dispatches
-  several sealed batches at once, which is the term that dominates the sizing
-  rule, and why a shard whose writes are parked back-pressures the source
-  instead of shedding load.
+- [ADR-0006](../../adr/0006-per-shard-sink-workers.md) — why one shard
+  dispatches several sealed batches at once, which is the term that dominates
+  the sizing rule, and why a shard whose writes are parked back-pressures the
+  source instead of shedding load.
 - [Architecture](01-architecture.mdx) — where the queues and budget sit in
   the process.
 - [Monitoring](../05-deployment/monitoring.mdx) — alerting on pressure

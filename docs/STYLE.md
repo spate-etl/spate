@@ -382,18 +382,18 @@ Everywhere:
   subject, in the page's own vocabulary. Review holds the length and the
   absence of `title:`.
 - **Internal links are relative and extension-qualified** (`../foo/bar.mdx`).
-  `onBrokenLinks: 'throw'` fails the build on a stale link, so `cargo xtask docs` is
-  the correctness gate for any move or rename.
+  `onBrokenLinks: 'throw'` fails the build on a stale link, so
+  `cargo xtask docs` is the correctness gate for any move or rename.
 - **A link to a file in this repository uses the `repo:` scheme** — a
   repository-relative path, which the build resolves against the checkout and
   turns into a URL on the hosting service. A path that does not exist fails the
   build, the same tier as a stale internal link; a directory resolves to the
-  tree view rather than the file view. `cargo xtask tidy transclusions` holds the same
-  rule without a site build. Two constraints follow from how it is resolved.
-  The scheme addresses a file, never lines within one, so render the lines as a
-  fence (§ 10). The offline check also reads text rather than a syntax tree, so
-  documentation *of* the form belongs inside a fence, where both it and § 10's
-  `file=` are skipped.
+  tree view rather than the file view. `cargo xtask tidy transclusions` holds
+  the same rule without a site build. Two constraints follow from how it is
+  resolved. The scheme addresses a file, never lines within one, so render the
+  lines as a fence (§ 10). The offline check also reads text rather than a
+  syntax tree, so documentation *of* the form belongs inside a fence, where both
+  it and § 10's `file=` are skipped.
 - **Moving or renaming a page changes its URL** (URLs are path-derived). Add a
   `{ from, to }` entry to the `clientRedirects` plugin in
   `website/docusaurus.config.ts` for every moved page to keep old links alive.
@@ -438,11 +438,11 @@ rewriting; changing what the record claims was decided is.
 Everything else follows the rest of this file: sentence case, relative
 extension-qualified links, and an em-dash gloss on every `## Related` entry.
 
-`cargo xtask tidy adr` holds the mechanical half. It checks that numbers are unique
-and never reused, that statuses come from the permitted set, that no
+`cargo xtask tidy adr` holds the mechanical half. It checks that numbers are
+unique and never reused, that statuses come from the permitted set, that no
 placeholder is left unfilled, and that every record is present in
-`docs/adr/README.mdx`. Whether a decision warranted a record at all is
-review's job.
+`docs/adr/README.mdx`. Whether a decision warranted a record at all is review's
+job.
 
 ## 10. Code examples
 
@@ -494,8 +494,8 @@ from what renders, so they cost the reader nothing:
 A file that does not exist, a region with no matching pair of markers, and a
 fence carrying both `file=` and hand-written content each fail the build
 outright, the same tier as a stale link (§ 8), and for the same reason. An
-unchecked pointer rots. `cargo xtask tidy transclusions` holds the same rule without
-a site build.
+unchecked pointer rots. `cargo xtask tidy transclusions` holds the same rule
+without a site build.
 
 Prefer a source under `crates/spate/examples/`, because a reader can run it.
 Reach past that only for something an example cannot show (a connector's own
@@ -534,9 +534,9 @@ An exemption is a claim review checks, not a default.
 
 A page may also render a fence from a file under `examples/`, the tree a reader
 deploys from. Nothing compiles those files, so the clippy argument above does
-not reach them. `cargo xtask tidy transclusions` still fails when the region moves.
-Dependency automation edits these files and reads no documentation page, so a
-copy of the lines it maintains falls behind at the next bump (§ 5).
+not reach them. `cargo xtask tidy transclusions` still fails when the region
+moves. Dependency automation edits these files and reads no documentation page,
+so a copy of the lines it maintains falls behind at the next bump (§ 5).
 `examples/docker/Dockerfile` is the worked case, with image pins that move on a
 schedule the page cannot follow.
 

@@ -23,8 +23,8 @@ Two distinct steps turn source bytes into records:
   (an S3 backfill runs the format's framer over each object so it can checkpoint
   mid-object). A message source like Kafka does no framing, because the message
   boundary is the record boundary. Framing is a *format* concern, so the framer
-  is owned by the format crate (`spate-json`'s `NdjsonFramer`, ...) and wired into
-  a streaming source in code, leaving the source format-agnostic.
+  is owned by the format crate (`spate-json`'s `NdjsonFramer`, ...) and wired
+  into a streaming source in code, leaving the source format-agnostic.
 - **Deserialization** — decoding one framed payload into a typed record. This is
   also the *format*, and it is identical whatever the source: the same JSON or
   Avro decoder serves Kafka and S3 alike.
@@ -56,6 +56,6 @@ payloads (Kafka, or any other source that does not frame) instead lets the
 deserializer frame, so `framing: ndjson` / `array` then apply. The rule is:
 exactly one side frames.
 
-Deserialization is a small trait; the same [Extending](../../06-extending/README.mdx)
-guide covers writing your own decoder, and the framing seam (`RecordFramer`) that
-sits in front of it.
+Deserialization is a small trait; the same
+[Extending](../../06-extending/README.mdx) guide covers writing your own
+decoder, and the framing seam (`RecordFramer`) that sits in front of it.

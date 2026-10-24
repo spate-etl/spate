@@ -27,9 +27,9 @@ and `batch.max_bytes` count once frames are coded.
   frame
 - Code inside `write_batch`, as before
 - Code on the I/O runtime through `spawn_blocking`
-- A framework step at seal: a `FrameCodec` the sink supplies, run by the terminal
-  stage once per sealed chunk, carried to every chain in the `ShardQueues` it
-  already receives
+- A framework step at seal: a `FrameCodec` the sink supplies, run by the
+  terminal stage once per sealed chunk, carried to every chain in the
+  `ShardQueues` it already receives
 
 ## Decision outcome
 
@@ -96,7 +96,8 @@ queue interaction stays `try_send` plus park. The contract is pinned by tests:
 `parked_chunks_release_their_raw_bytes_on_drop`,
 `a_codec_failure_is_fatal_and_keeps_the_rows`,
 `an_oversized_row_does_not_pin_its_buffer` and
-`split_branches_keep_their_queues_codec` in `crates/spate-core/src/ops/tests.rs`;
+`split_branches_keep_their_queues_codec` in
+`crates/spate-core/src/ops/tests.rs`;
 `each_sinks_frame_codec_reaches_every_chain` in
 `crates/spate-core/src/pipeline/builder.rs`; `max_bytes_counts_raw_bytes`,
 `settle_releases_what_the_handoff_budgeted` and

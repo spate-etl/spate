@@ -36,13 +36,13 @@ These decisions define this stage:
   nanoseconds and zero allocations per record (see
   [ADR-0013](../../adr/0013-zero-copy-seam.md)).
 
-The chain's terminal stage routes each record to a shard and encodes it into
-the sink's wire format (encoding is CPU work, so it happens *on the pipeline
-thread*), then hands the chunk to that shard's bounded queue with `try_send`,
-never a blocking send. When the sink supplies a frame codec, such as a
-compressor, the pipeline thread also runs it on each chunk as the chunk seals. When a queue is full, the pipeline thread asks the
-controller to pause its lanes, and the controller keeps calling `poll_events`;
-see
+The chain's terminal stage routes each record to a shard and encodes it into the
+sink's wire format (encoding is CPU work, so it happens
+*on the pipeline thread*), then hands the chunk to that shard's bounded queue
+with `try_send`, never a blocking send. When the sink supplies a frame codec,
+such as a compressor, the pipeline thread also runs it on each chunk as the
+chunk seals. When a queue is full, the pipeline thread asks the controller to
+pause its lanes, and the controller keeps calling `poll_events`; see
 [Backpressure](03-backpressure.mdx).
 
 <BackpressureDiagram />
@@ -77,17 +77,17 @@ What a lane is, and the knob that sets how many there are:
 A single shared multi-thread tokio runtime (default 2 workers,
 `pipeline.io_threads` in YAML) hosts everything asynchronous:
 
-- **Sink shard workers** — one per shard. Each accumulates encoded chunks
-  into batches (bounded by `max_rows` / `max_bytes` / `linger`), seals
-  them, and dispatches up to `max_per_shard` concurrent flushes rotating
-  across healthy replicas, retrying the same sealed batch on failure. See
-  the [ClickHouse connector](../04-connectors/sinks/clickhouse/README.mdx) for the
+- **Sink shard workers** — one per shard. Each accumulates encoded chunks into
+  batches (bounded by `max_rows` / `max_bytes` / `linger`), seals them, and
+  dispatches up to `max_per_shard` concurrent flushes rotating across healthy
+  replicas, retrying the same sealed batch on failure. See the
+  [ClickHouse connector](../04-connectors/sinks/clickhouse/README.mdx) for the
   concrete sink.
 - **The admin HTTP server** — `/metrics`, `/healthz`, `/readyz`. See
   [Monitoring](../05-deployment/monitoring.mdx).
-- **Async edge work** — a schema-registry fetch, a coordination heartbeat. Connectors
-  get a handle to this runtime before `run` via `pipeline.io_handle()` and
-  `pipeline.block_on(..)`.
+- **Async edge work** — a schema-registry fetch, a coordination heartbeat.
+  Connectors get a handle to this runtime before `run` via
+  `pipeline.io_handle()` and `pipeline.block_on(..)`.
 
 The builder constructs this runtime in `Pipeline::from_config` and the
 pipeline runtime adopts it. There is exactly one I/O runtime per process,
@@ -134,9 +134,10 @@ Non-goals).
 
 ## Further reading
 
-- [ADR-0003](../../adr/0003-poll-based-source-api.md) and [ADR-0004](../../adr/0004-static-operator-chain.md) — the canonical
-  versions of the source abstraction and the operator chain, with the
-  trade-offs and the measurements behind them.
+- [ADR-0003](../../adr/0003-poll-based-source-api.md) and
+  [ADR-0004](../../adr/0004-static-operator-chain.md) — the canonical versions
+  of the source abstraction and the operator chain, with the trade-offs and the
+  measurements behind them.
 - [Custom sources](../06-extending/custom-source.mdx) /
   [Custom sinks](../06-extending/custom-sink.mdx) — implementing the seams
   this page describes.

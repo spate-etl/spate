@@ -85,8 +85,8 @@ and the breaker surface writes that fail; this one succeeds.
   sink writes to every replica, so a replica down at deploy time is a degraded
   deployment, but this is startup behaviour that used to be opt-in.
 - Bad, because every existing pipeline breaks: `validate_schema` leaves the
-  configuration, `with_row` becomes an async step, `ClickHouseSink::validate_schema`
-  and `ClickHouseEncoder::new` are gone.
+  configuration, `with_row` becomes an async step,
+  `ClickHouseSink::validate_schema` and `ClickHouseEncoder::new` are gone.
 - Bad, because `NativeSchema::from_columns`, the static no-fetch path, now
   compares the row against the types the caller declared rather than only their
   names. Those are the strings its blocks put on the wire, so a disagreement it
@@ -98,12 +98,13 @@ and the breaker surface writes that fail; this one succeeds.
 
 ### Confirmation
 
-A container test, `rowbinary_header::a_same_width_alter_is_rejected_rather_than_silently_miswritten`,
-which is the reproduction from #410: it writes a batch, alters
-`Decimal(18, 4)` to `Decimal(18, 2)` and `DateTime64(3)` to `DateTime64(6)`,
-and asserts the next write fails with code 117. Putting the sink back on plain
-`RowBinary` — the format keyword and the body's header together — makes that
-write succeed, which is the defect.
+A container test,
+`rowbinary_header::a_same_width_alter_is_rejected_rather_than_silently_miswritten`,
+which is the reproduction from #410: it writes a batch, alters `Decimal(18, 4)`
+to `Decimal(18, 2)` and `DateTime64(3)` to `DateTime64(6)`, and asserts the next
+write fails with code 117. Putting the sink back on plain `RowBinary` — the
+format keyword and the body's header together — makes that write succeed, which
+is the defect.
 
 Structurally, `ClickHouseSink` is reachable only through `with_row`, which
 fetches, so a sink whose writer has no header cannot be constructed.

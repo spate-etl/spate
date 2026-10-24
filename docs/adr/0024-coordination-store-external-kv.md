@@ -12,10 +12,10 @@ description: "Coordination state lives in an external low-latency KV store behin
 ## Context and problem statement
 
 Coordinating several instances over a shared body of work needs somewhere to put
-the durable record of who owns what. An earlier design put it in the object store
-the backfill was already reading, using conditional writes as the compare-and-set
-primitive. That needed **zero extra infrastructure**, which is a strong argument
-and was the argument at the time.
+the durable record of who owns what. An earlier design put it in the object
+store the backfill was already reading, using conditional writes as the
+compare-and-set primitive. That needed **zero extra infrastructure**, which is a
+strong argument and was the argument at the time.
 
 Then the requirement changed. What began as "coordinate one object-storage
 backfill" became "a general work-distribution seam" that any broker-less source
@@ -46,8 +46,8 @@ protocol fast, not to make it correct. That separation is what keeps the trait
 small: compare-and-set, a TTL keyspace, watch, and list, six primitives in all,
 so a Redis or etcd backend is one implementation away.
 
-This reverses a decision taken and implemented; the earlier design's pull request
-was closed unmerged. The reversal is recorded rather than dropped,
+This reverses a decision taken and implemented; the earlier design's pull
+request was closed unmerged. The reversal is recorded rather than dropped,
 because the reasoning that led to it was sound for the requirement it was given.
 
 ### Consequences

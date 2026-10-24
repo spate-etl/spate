@@ -133,8 +133,8 @@ holds for a delivery bound for any broker. The batch fails once
 `checkpoint.stalled_fail_after` elapses. The `sink write failed` warning ends
 with how long ago the rejection arrived and librdkafka's text, such as
 `a broker rejected the connection 33.5300315s ago: … Invalid username or password`.
-The `sink probe failed` warning carries the same text, and `/readyz` reports
-not ready.
+The `sink probe failed` warning carries the same text, and `/readyz` reports not
+ready.
 
 Any other timed-out delivery is retryable. Under the default
 [`retry` settings](../07-reference/configuration.mdx#sink-pool) the pipeline

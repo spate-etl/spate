@@ -11,9 +11,9 @@ The Kafka sink (`spate-kafka`, feature `kafka` on the `spate` facade) is the
 producer half of the Kafka connector: pipelines terminate in a Kafka topic,
 running Kafka → operator chain → Kafka for filter/reshape/fan-out. It is built
 on `rdkafka` with exactly **one producer per sink instance**, and a batch
-acknowledges only once **every** message's delivery report has confirmed,
-which is what lets the framework commit source offsets past it. Rationale
-and the ack wiring are in [ADR-0016](../../../../adr/0016-kafka-sink-ack-wiring.md).
+acknowledges only once **every** message's delivery report has confirmed, which
+is what lets the framework commit source offsets past it. Rationale and the ack
+wiring are in [ADR-0016](../../../../adr/0016-kafka-sink-ack-wiring.md).
 
 Construct it from the pipeline's opaque section, and terminate the chain
 with one of the sink's encoder helpers: `encoder_bytes` for payload
@@ -41,10 +41,10 @@ which needs a broker on `KAFKA_BROKERS`:
 
 The `sink: { kafka: ... }` section deserializes into `KafkaSinkConfig`
 ([`spate-kafka/src/sink/config.rs`](repo:crates/spate-kafka/src/sink/config.rs));
-unknown fields are rejected with the offending key, and the retry/breaker
-values are validated at load
-against the framework's [sink-pool rules](../../../07-reference/configuration.mdx#sink-pool)
-(a bad multiplier or zero threshold fails startup, naming the key).
+unknown fields are rejected with the offending key, and the retry/breaker values
+are validated at load against the framework's
+[sink-pool rules](../../../07-reference/configuration.mdx#sink-pool) (a bad
+multiplier or zero threshold fails startup, naming the key).
 
 ```yaml
 sink:
@@ -183,8 +183,9 @@ which records the figure it was measured at).
 
 ## Dependency note
 
-`spate-kafka` deliberately re-exports nothing from `rdkafka`, so its types stay out
-of public signatures so `rdkafka` major bumps are not breaking changes here (see
+`spate-kafka` deliberately re-exports nothing from `rdkafka`, so its types stay
+out of public signatures so `rdkafka` major bumps are not breaking changes here
+(see
 [ADR-0011](../../../../adr/0011-msrv-and-dependency-policy.md)).
 
 ## Metrics

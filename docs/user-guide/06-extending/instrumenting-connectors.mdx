@@ -68,8 +68,9 @@ alone. Records, bytes, poll duration, rebalance counts, and active lanes are
 all recorded by the runtime from the events your source returns, so a source
 that also increments `rebalance_assigned` makes the counter read double.
 
-:::danger Take the handle from `SourceCtx`, publish only measured values, and clean up what you lose
-Every one of these is scar tissue.
+:::danger Take the handle from `SourceCtx`
+Publish only measured values, and clean up what you lose. Every one of these is
+scar tissue.
 
 **Take the handle from `SourceCtx`.** A builder the runtime cannot reach is
 dead code, not an option: the runtime registers the series either way, so a
@@ -132,12 +133,12 @@ repeat the plumbing. Pick a stable, low-cardinality
 
 ## Owning a metric family
 
-When the taxonomy lacks something your connector or pipeline needs,
-register it through a [`Meter`](../07-reference/README.mdx). A `Meter` is a
-small, cloneable scope bound to one component's three standard labels: every
-handle it mints inherits them, and its name is **auto-prefixed under the `spate_`
-umbrella**, so your series sit right alongside the framework's and an operator
-finds the whole pipeline's telemetry under one greppable `spate_` root.
+When the taxonomy lacks something your connector or pipeline needs, register it
+through a [`Meter`](../07-reference/README.mdx). A `Meter` is a small, cloneable
+scope bound to one component's three standard labels: every handle it mints
+inherits them, and its name is **auto-prefixed under the `spate_` umbrella**, so
+your series sit right alongside the framework's and an operator finds the whole
+pipeline's telemetry under one greppable `spate_` root.
 
 A connector claims a namespace segment of its own; a pipeline author reaches
 for `Meter::new` and the shared `spate_custom_` bucket instead. Either way you
@@ -158,12 +159,12 @@ The rules the `Meter` enforces for you:
 - **You never type the prefix.** `Meter::new(...)` uses the `custom` namespace
   (`spate_custom_*`), the bucket for pipeline-author metrics;
   `Meter::with_namespace(...)` claims a connector segment
-  (`spate_<namespace>_*`). The namespace is validated once at construction and **cannot
-  be a reserved framework stage root** (`source`, `sink`, `deser`, …), so a
-  custom family can never collide with a current or future framework metric.
-  This is the shape Prometheus's own `namespace_subsystem_name` convention
-  describes: a single application prefix, with everything below it owned by
-  the application.
+  (`spate_<namespace>_*`). The namespace is validated once at construction and
+  **cannot be a reserved framework stage root** (`source`, `sink`, `deser`, …),
+  so a custom family can never collide with a current or future framework
+  metric. This is the shape Prometheus's own `namespace_subsystem_name`
+  convention describes: a single application prefix, with everything below it
+  owned by the application.
 - **Standard labels are automatic.** The `extra` slice is `&[]` for none;
   values are `SharedString`, so `"prod".into()` and an owned `String` from
   config both work. Push per-instance identity (a topic, a shard) into `extra`
@@ -298,10 +299,10 @@ connector never wires the pipeline name, the labels, or the prefix.
   so it must be a distinct, non-reserved segment: the defaults (`"source"`,
   `"custom"`) opt out (see below), and `"custom"` in particular is reserved for
   pipeline-author metrics.
-- **Receive the `Meter`.** A source reads `Option<Meter>` from
-  `SourceCtx` in `open`; a sink's writer overrides
-  `ShardWriter::attach_metrics(&mut self, Option<Meter>)` (called once before the
-  writer is shared). The runtime scopes it by **role**, `source` or `sink`
+- **Receive the `Meter`.** A source reads `Option<Meter>` from `SourceCtx` in
+  `open`; a sink's writer overrides
+  `ShardWriter::attach_metrics(&mut self, Option<Meter>)` (called once before
+  the writer is shared). The runtime scopes it by **role**, `source` or `sink`
   derived from the wiring position, so one crate's source families land under
   `spate_<namespace>_source_*` and its sink families under
   `spate_<namespace>_sink_*`, under distinct names. The connector's code is

@@ -11,19 +11,21 @@ description: "The S3 lister checkpoints a key once the feed confirmed every unit
 
 ## Context and problem statement
 
-The S3 source's lister ([the lister-run record](0075-the-lister-runs-once-per-job-apart-from-the-worker-replicas.md)) walks a prefix and publishes
-units to the feed. A lister that stops has to resume without losing a key.
-`ListObjectsV2` takes `StartAfter`, and `object_store` sends it on every page
-beside the continuation token. Stores differ in list order: SeaweedFS walks its
-directory tree, and resuming there after a key that is also a directory prefix
-(`q/r` beside `q/r/s`) skips that directory. The lister reads through
-`object_store`, whose `Path` strips a trailing `/` and rejects some keys. On
-the S3 path the source's connector takes each object `Path` cannot address out
-of the listing page before `object_store` parses it, so every key the listing
-yields is addressable and its `Path` string is the raw key; a key ending in
-`/`, a folder marker included, reaches the lister only through that record.
-`object_store` sends no `StartAfter` to an S3 directory bucket and compares
-keys itself there, in its trait default and on `LocalFileSystem`.
+The S3 source's lister
+([the lister-run record](0075-the-lister-runs-once-per-job-apart-from-the-worker-replicas.md))
+walks a prefix and publishes units to the feed. A lister that stops has to
+resume without losing a key. `ListObjectsV2` takes `StartAfter`, and
+`object_store` sends it on every page beside the continuation token. Stores
+differ in list order: SeaweedFS walks its directory tree, and resuming there
+after a key that is also a directory prefix (`q/r` beside `q/r/s`) skips that
+directory. The lister reads through `object_store`, whose `Path` strips a
+trailing `/` and rejects some keys. On the S3 path the source's connector takes
+each object `Path` cannot address out of the listing page before `object_store`
+parses it, so every key the listing yields is addressable and its `Path` string
+is the raw key; a key ending in `/`, a folder marker included, reaches the
+lister only through that record. `object_store` sends no `StartAfter` to an S3
+directory bucket and compares keys itself there, in its trait default and on
+`LocalFileSystem`.
 
 ## Considered options
 

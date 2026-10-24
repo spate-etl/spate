@@ -44,9 +44,9 @@ so fan-out allocates nothing. Erasure happens exactly once, at the boundary,
 where a single virtual call delivers an entire batch.
 
 Per-operator dynamic dispatch was rejected because it defeats cross-operator
-inlining, which is worth more than the dispatch itself. Pull-based iterators were
-rejected because `flat_map` in a pull model has to buffer its children, which
-reintroduces the per-record allocation the design exists to avoid.
+inlining, which is worth more than the dispatch itself. Pull-based iterators
+were rejected because `flat_map` in a pull model has to buffer its children,
+which reintroduces the per-record allocation the design exists to avoid.
 
 ### Consequences
 

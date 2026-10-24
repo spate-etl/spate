@@ -150,8 +150,13 @@ that comes with holding acknowledgment handles.
 
 ## Related
 
-- [Writing a source](custom-source.mdx) — `Source`, `SourceLane` and the framing seam, with the contracts that keep a source live under backpressure
-- [Writing a sink](custom-sink.mdx) — `RowEncoder` and `ShardWriter` together, and what a connector owes on teardown
-- [Writing operators](custom-operators.mdx) — composing the chain, and why a borrowing family reaches for `map_rec` instead of `map`
-- [Delivery guarantees](../02-concepts/02-delivery-guarantees.mdx) — what an `AckRef` means and when it resolves
-- [ADR-0013](../../adr/0013-zero-copy-seam.md) — why the boundary is shaped this way, and the measurements behind it
+- [Writing a source](custom-source.mdx) — `Source`, `SourceLane` and the framing
+  seam, with the contracts that keep a source live under backpressure
+- [Writing a sink](custom-sink.mdx) — `RowEncoder` and `ShardWriter` together,
+  and what a connector owes on teardown
+- [Writing operators](custom-operators.mdx) — composing the chain, and why a
+  borrowing family reaches for `map_rec` instead of `map`
+- [Delivery guarantees](../02-concepts/02-delivery-guarantees.mdx) — what an
+  `AckRef` means and when it resolves
+- [ADR-0013](../../adr/0013-zero-copy-seam.md) — why the boundary is shaped this
+  way, and the measurements behind it

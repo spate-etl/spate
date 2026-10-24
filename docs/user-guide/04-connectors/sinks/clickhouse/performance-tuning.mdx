@@ -49,22 +49,22 @@ sink:
       linger: 1s            # …or this long after the first row, at low volume
 ```
 
-One sealed batch is one `INSERT`, and on a `MergeTree` table **one insert is
-one part**, up to the point where the server splits a large insert into several
-blocks (see [`max_insert_block_size`](#clickhouse-max_insert_block_size) below;
-a very large insert becomes a handful of parts, which is still healthy). So
-`batch.max_rows` / `max_bytes` directly set your part size, and
-ClickHouse strongly prefers large parts: fewer parts mean fewer background merges
-(less write amplification and CPU), faster queries, and no risk of the
-"too many parts" backpressure. **Raise these** until a batch holds a substantial
-part (hundreds of thousands to a few million rows, tens to a few hundred MB),
-bounded by the memory a sealed batch occupies in flight and the
-latency `linger` adds at low volume (a partial batch waits up to `linger` before
-it ships). **Lower them** only if per-row latency matters more than part health,
-or if memory is tight. Avoid tiny batches, since many small parts are the most common
-self-inflicted ClickHouse performance problem. `linger` only bites below the
-size thresholds, where it bounds staleness on a quiet stream; set it to the
-freshness your consumers need.
+One sealed batch is one `INSERT`, and on a `MergeTree` table
+**one insert is one part**, up to the point where the server splits a large
+insert into several blocks (see
+[`max_insert_block_size`](#clickhouse-max_insert_block_size) below; a very large
+insert becomes a handful of parts, which is still healthy). So `batch.max_rows`
+/ `max_bytes` directly set your part size, and ClickHouse strongly prefers large
+parts: fewer parts mean fewer background merges (less write amplification and
+CPU), faster queries, and no risk of the "too many parts" backpressure.
+**Raise these** until a batch holds a substantial part (hundreds of thousands to
+a few million rows, tens to a few hundred MB), bounded by the memory a sealed
+batch occupies in flight and the latency `linger` adds at low volume (a partial
+batch waits up to `linger` before it ships). **Lower them** only if per-row
+latency matters more than part health, or if memory is tight. Avoid tiny
+batches, since many small parts are the most common self-inflicted ClickHouse
+performance problem. `linger` only bites below the size thresholds, where it
+bounds staleness on a quiet stream; set it to the freshness your consumers need.
 
 ## Writer parallelism: shards and in-flight
 
@@ -78,19 +78,19 @@ sink:
       max_per_shard: 2
 ```
 
-Each shard is one **writer** with its own insert stream; `inflight.max_per_shard`
-is how many sealed batches that writer keeps in flight at once. Together they set
-your insert concurrency (`shards × max_per_shard`). Concurrency matters because a
-synchronous insert spends real time waiting on the server's round-trip. While
-one batch is being written and confirmed, another can be building or in flight,
-so the writer is not idle. **Raise** `max_per_shard` (2 → 3–4) to overlap that
-round-trip; **add shards** to spread load across real ClickHouse shards, or to
-open more concurrent connections to a single powerful server. **Stop raising**
-once the server is the bottleneck. Past the point where ClickHouse is CPU- or
-IO-bound, more concurrent inserts add contention and context-switching and
-throughput flattens or dips. If your ClickHouse is a single modest node, a
-handful of writers is plenty; if it is a large cluster, scale shards toward its
-capacity.
+Each shard is one **writer** with its own insert stream;
+`inflight.max_per_shard` is how many sealed batches that writer keeps in flight
+at once. Together they set your insert concurrency (`shards × max_per_shard`).
+Concurrency matters because a synchronous insert spends real time waiting on the
+server's round-trip. While one batch is being written and confirmed, another can
+be building or in flight, so the writer is not idle. **Raise** `max_per_shard`
+(2 → 3–4) to overlap that round-trip; **add shards** to spread load across real
+ClickHouse shards, or to open more concurrent connections to a single powerful
+server. **Stop raising** once the server is the bottleneck. Past the point where
+ClickHouse is CPU- or IO-bound, more concurrent inserts add contention and
+context-switching and throughput flattens or dips. If your ClickHouse is a
+single modest node, a handful of writers is plenty; if it is a large cluster,
+scale shards toward its capacity.
 
 ## I/O threads
 
@@ -106,17 +106,19 @@ interleaving them at their await points. Writers do **not** serialize when
 `io_threads` is below `shards × max_per_shard`; the default of **2** runs far
 more than two inserts at once. So leave it at the default until you have a
 concrete reason to raise it. That reason is **CPU work on the I/O runtime**, not
-insert count. Compression is not part of that work, because the pipeline
-threads compress each chunk when it seals. The I/O workers write the
-compressed bytes to the sockets, with TLS when the URL is `https://`, and at
-very high byte rates that work can still saturate two workers and become the
-limit. Raise `io_threads` then, but sparingly, because the derived pipeline-thread count is
-`available_parallelism` minus the I/O reserve, so each odd-numbered I/O worker (the
-first, the third, and so on) takes one hot-path thread, down to the floor of 1 (see
+insert count. Compression is not part of that work, because the pipeline threads
+compress each chunk when it seals. The I/O workers write the compressed bytes to
+the sockets, with TLS when the URL is `https://`, and at very high byte rates
+that work can still saturate two workers and become the limit. Raise
+`io_threads` then, but sparingly, because the derived pipeline-thread count is
+`available_parallelism` minus the I/O reserve, so each odd-numbered I/O worker
+(the first, the third, and so on) takes one hot-path thread, down to the floor
+of 1 (see
 [Deployment tuning](../../../05-deployment/tuning.mdx)).
-On a host where ClickHouse runs **locally**, remember the server needs cores too:
-client threads (pipeline `threads` + `io_threads`) and the server compete for the
-same machine, so oversubscribing the client starves the server it is feeding.
+On a host where ClickHouse runs **locally**, remember the server needs cores
+too: client threads (pipeline `threads` + `io_threads`) and the server compete
+for the same machine, so oversubscribing the client starves the server it is
+feeding.
 
 ## Backpressure budget
 
@@ -147,18 +149,18 @@ checkpoint:
   max_pending_batches: 1024
 ```
 
-Batches not yet acknowledged by every sink leg are tracked for the
-at-least-once watermark, and `max_pending_batches` is a hard per-partition
-ceiling on that tracking, and a partition at the ceiling stops being polled until
+Batches not yet acknowledged by every sink leg are tracked for the at-least-once
+watermark, and `max_pending_batches` is a hard per-partition ceiling on that
+tracking, and a partition at the ceiling stops being polled until
 acknowledgments retire batches. Under very high insert rates, especially with
 many small parts, a partition can sit at the ceiling before ClickHouse is
-saturated. The signals are a `partition at the pending-batch ceiling` warning
-in the logs and `spate_checkpoint_pending_batches` plateauing at the configured
+saturated. The signals are a `partition at the pending-batch ceiling` warning in
+the logs and `spate_checkpoint_pending_batches` plateauing at the configured
 value while `spate_sink_errors_total` stays quiet. When that is the shape,
 prefer fixing it by writing **larger** batches first (fewer, bigger inserts
-retire acknowledgments faster); **raise the limit** when large batches alone
-are not enough; the cost is the memory the pending acknowledgments occupy and
-a larger replay after a crash.
+retire acknowledgments faster); **raise the limit** when large batches alone are
+not enough; the cost is the memory the pending acknowledgments occupy and a
+larger replay after a crash.
 
 ## Wire format
 
@@ -172,14 +174,12 @@ sink:
 does the row→column pivot. `native` does that pivot on the **client** and hands
 ClickHouse finished columnar blocks. That moves the row→column work off the
 server and onto the client, and can compress smaller on the wire, at the cost of
-more client CPU. Whether that is a net win depends on your workload and where the
-bottleneck sits.
-**Reach for `native`** when ClickHouse is the CPU bottleneck or your network
-egress is the constraint (cross-region, metered), and **keep `rowbinary`** when
-client CPU is what's scarce, then measure. The
+more client CPU. Whether that is a net win depends on your workload and where
+the bottleneck sits. **Reach for `native`** when ClickHouse is the CPU
+bottleneck or your network egress is the constraint (cross-region, metered), and
+**keep `rowbinary`** when client CPU is what's scarce, then measure. The
 [Native format](./native-format.mdx) guide carries the full trade, and
-[ClickHouse column types](./column-types.mdx) carries what each format
-writes.
+[ClickHouse column types](./column-types.mdx) carries what each format writes.
 
 ## Compression
 
@@ -193,16 +193,17 @@ This compresses the HTTP insert body and the responses to the sink's queries.
 The sink compresses each chunk on the pipeline thread that sealed it, so
 compression costs pipeline-thread CPU and scales with `pipeline.threads`. On a
 host where the pipeline threads are already the limit, compression costs rows
-per second, and `zstd` costs more of them than `lz4`. Under `zstd` each
-pipeline thread keeps one compression context per compressing sink, outside
+per second, and `zstd` costs more of them than `lz4`. Under `zstd` each pipeline
+thread keeps one compression context per compressing sink, outside
 `backpressure.max_inflight_bytes`. Its size grows with the level and with
-[`chunk.target_bytes`](../../../07-reference/configuration.mdx#chunk), from about
-0.6 MiB at the defaults to tens of MiB at high levels with large chunks. `lz4`
-is cheap and a good default on most links. `zstd` (optionally `zstd:N`) compresses smaller for a bit more CPU, worth
-it on metered or cross-region links where bandwidth, not CPU, is the limit. `off`
-saves client CPU on a fast, trusted LAN where the wire is not the bottleneck.
-Match the choice to whichever of client CPU or bandwidth is scarce; it does not
-affect on-disk storage, only the traffic between the sink and the server.
+[`chunk.target_bytes`](../../../07-reference/configuration.mdx#chunk), from
+about 0.6 MiB at the defaults to tens of MiB at high levels with large chunks.
+`lz4` is cheap and a good default on most links. `zstd` (optionally `zstd:N`)
+compresses smaller for a bit more CPU, worth it on metered or cross-region links
+where bandwidth, not CPU, is the limit. `off` saves client CPU on a fast,
+trusted LAN where the wire is not the bottleneck. Match the choice to whichever
+of client CPU or bandwidth is scarce; it does not affect on-disk storage, only
+the traffic between the sink and the server.
 
 ## ClickHouse `async_insert`
 
@@ -252,9 +253,9 @@ deliberately.
 ## Deduplication and the part-pressure guards
 
 Deduplication is always on (the at-least-once contract). On a plain (non-
-replicated) `MergeTree` table, ClickHouse's dedup window defaults to **0**, which
-silently disables it. Set `non_replicated_deduplication_window` on the table
-(replicated tables keep a window by default) so a retried batch is
+replicated) `MergeTree` table, ClickHouse's dedup window defaults to **0**,
+which silently disables it. Set `non_replicated_deduplication_window` on the
+table (replicated tables keep a window by default) so a retried batch is
 deduplicated:
 
 ```sql

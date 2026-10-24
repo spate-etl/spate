@@ -15,16 +15,15 @@ record was durably written by the sink(s) *and* committed. An
 unacknowledged tail converts the exit into a failure, so an incomplete
 backfill is never reported as done.
 
-Work is planned as
-[**splits**](../../../07-reference/glossary.mdx#split). The fleet's
-elected leader lists the prefix once and packs the sorted listing into
+Work is planned as [**splits**](../../../07-reference/glossary.mdx#split). The
+fleet's elected leader lists the prefix once and packs the sorted listing into
 splits of roughly `split_target_bytes`, with deterministic ids and
 self-contained descriptors (member keys, sizes, ETags). A split is a batch of
 whole objects, or one byte range of a
-[large object](#large-objects-and-byte-ranges). Workers lease splits through the coordination store and read them
-straight from the descriptors, so **workers never list**. Solo and
-multi-worker are the same code path; the only difference is which
-coordination store the coordinator points at.
+[large object](#large-objects-and-byte-ranges). Workers lease splits through the
+coordination store and read them straight from the descriptors, so
+**workers never list**. Solo and multi-worker are the same code path; the only
+difference is which coordination store the coordinator points at.
 
 Built on the [`object_store`](https://crates.io/crates/object_store)
 client (internal only, with no `object_store` types in the public API), so
@@ -94,9 +93,9 @@ framer (e.g. `NdjsonFramer::new(max_record_bytes)`), not in this table.
 
 A stale config still carrying `lanes` (read parallelism is the coordinator's
 `max_in_flight`, one data lane per in-flight split; see
-[Read parallelism on a solo run](#read-parallelism-on-a-solo-run)) or the source's own
-`checkpoint:` block (progress lives in the coordination store) fails at load
-with the offending key. The pipeline-level
+[Read parallelism on a solo run](#read-parallelism-on-a-solo-run)) or the
+source's own `checkpoint:` block (progress lives in the coordination store)
+fails at load with the offending key. The pipeline-level
 [`checkpoint:`](../../../07-reference/configuration.mdx#checkpoint) section is
 unaffected and still governs commit cadence.
 
@@ -170,11 +169,11 @@ spelling in the file:
 invalid configuration: source.s3.store."Bucket" cannot be overridden: owned by the typed `url` field
 ```
 
-For an S3 URL (`s3://`, `s3a://`, or an `https://` URL on an `amazonaws.com`
-or `r2.cloudflarestorage.com` host), a key that `object_store` does not
-recognize as an S3 option also fails at load. Every spelling and case `object_store` accepts is
-recognized. A misspelled `endpoint` would otherwise leave the client on the
-default AWS endpoint with the configured credentials:
+For an S3 URL (`s3://`, `s3a://`, or an `https://` URL on an `amazonaws.com` or
+`r2.cloudflarestorage.com` host), a key that `object_store` does not recognize
+as an S3 option also fails at load. Every spelling and case `object_store`
+accepts is recognized. A misspelled `endpoint` would otherwise leave the client
+on the default AWS endpoint with the configured credentials:
 
 ```text
 invalid configuration: source.s3.store."endpont" is not an object_store S3 option
@@ -237,8 +236,9 @@ these permissions besides `s3:GetObject`:
   names a version and the read sends it. Without it every such unit fails the
   pipeline. It can be scoped to the source's prefix, and it lets anyone who
   can write to the feed have a past version of an object there read.
-- The feed's send permission, for the unit it re-enqueues after an
-  overwrite. The [SQS feed](../../feeds/sqs/README.mdx#security-credentials-permissions-and-tls)
+- The feed's send permission, for the unit it re-enqueues after an overwrite.
+  The
+  [SQS feed](../../feeds/sqs/README.mdx#security-credentials-permissions-and-tls)
   and [Kafka feed](../../feeds/kafka/README.mdx#startup-checks) pages name it.
 
 RustFS and Ceph RGW have not been tested with a role that lacks list
@@ -335,17 +335,17 @@ The split count still sets how evenly the lanes divide over threads; see
 ## Reading from a feed
 
 A [`feed:` section](../../../07-reference/configuration.mdx#feed) moves the
-source onto the feed path. It reads [work units](../../../07-reference/glossary.mdx#work-unit)
-from the feed the section names. On a durable feed it lists nothing itself:
-a bounded job's units come from a [lister run](#the-lister-run), and a
-continuous job's from [storage notifications](#storage-notifications) or
-code. On the
-in-process feed the run lists the prefix itself; see
-[A solo run on the in-process feed](#a-solo-run-on-the-in-process-feed). Every delivery is
-read in full, resuming from no earlier delivery, and the unit is acknowledged
-once the sink has acknowledged every record in it. Two units are the
-exceptions: a notification unit whose object is overwritten while it is read,
-as [Reading a notification's object](#reading-a-notifications-object)
+source onto the feed path. It reads
+[work units](../../../07-reference/glossary.mdx#work-unit) from the feed the
+section names. On a durable feed it lists nothing itself: a bounded job's units
+come from a [lister run](#the-lister-run), and a continuous job's from
+[storage notifications](#storage-notifications) or code. On the in-process feed
+the run lists the prefix itself; see
+[A solo run on the in-process feed](#a-solo-run-on-the-in-process-feed). Every
+delivery is read in full, resuming from no earlier delivery, and the unit is
+acknowledged once the sink has acknowledged every record in it. Two units are
+the exceptions: a notification unit whose object is overwritten while it is
+read, as [Reading a notification's object](#reading-a-notifications-object)
 describes, and a unit handed back at a [graceful stop](#a-graceful-stop).
 
 ```yaml
@@ -356,20 +356,20 @@ feed:
 
 ### Work units
 
-A unit the lister publishes names one object or one byte range of one object,
-as an encoded `SplitDescriptor`, and a notification message is one unit with
-one part per non-empty created object (see [Storage notifications](#storage-notifications)).
-A unit whose body is neither, or a descriptor naming more than one object, is
-failed back to the feed. Nothing packs on the feed path. A whole-object part is
-cut into byte ranges on the conditions in
-[Large objects and byte ranges](#large-objects-and-byte-ranges), with the ETag
-taken from the descriptor or the notification, so a part with no ETag is read
-whole on one lane. A unit naming a byte range is failed back when its range is
-cut on a delimiter other than the framer's, or when `compression` decodes its
-object. The unit is acknowledged once, after every part and range has been read
-and committed. An object failure on one range fails the whole unit back, and its
-other parts and ranges stop. An overwrite of a notification unit's object
-stops that object's ranges and re-enqueues the object once, as
+A unit the lister publishes names one object or one byte range of one object, as
+an encoded `SplitDescriptor`, and a notification message is one unit with one
+part per non-empty created object (see
+[Storage notifications](#storage-notifications)). A unit whose body is neither,
+or a descriptor naming more than one object, is failed back to the feed. Nothing
+packs on the feed path. A whole-object part is cut into byte ranges on the
+conditions in [Large objects and byte ranges](#large-objects-and-byte-ranges),
+with the ETag taken from the descriptor or the notification, so a part with no
+ETag is read whole on one lane. A unit naming a byte range is failed back when
+its range is cut on a delimiter other than the framer's, or when `compression`
+decodes its object. The unit is acknowledged once, after every part and range
+has been read and committed. An object failure on one range fails the whole unit
+back, and its other parts and ranges stop. An overwrite of a notification unit's
+object stops that object's ranges and re-enqueues the object once, as
 [Reading a notification's object](#reading-a-notifications-object) describes.
 
 The lister publishes no unit for an object of size 0, which holds no records.
@@ -380,10 +380,10 @@ folder marker `dir/`, gets none.
 Each range in progress takes one slot of `units_held`. Deliveries received
 alongside a large object wait until all of its ranges have opened, and the
 deliveries held stay at or below `units_held`. A waiting delivery is held
-unread, and a stop on a feed that hands back hands it back unread. SQS ends every hold 12 hours after the receive, so a delivery still
-waiting then goes back to the queue unread, one receive closer to
-`maxReceiveCount`. On Kafka a waiting delivery's offset holds back its
-partition's commit point.
+unread, and a stop on a feed that hands back hands it back unread. SQS ends
+every hold 12 hours after the receive, so a delivery still waiting then goes
+back to the queue unread, one receive closer to `maxReceiveCount`. On Kafka a
+waiting delivery's offset holds back its partition's commit point.
 
 `units_held` bounds the lanes the source reads at once, one per whole object or
 range, and with them its read parallelism. The default is 96. On a durable
@@ -503,29 +503,29 @@ latency from 1970.
 
 A notification names an object, and its read pins the ETag the notification
 carries. An object deleted before it is read fails that read on every delivery,
-so the feed dead-letters its message at the cap. An object overwritten before
-or during its read is re-enqueued at its current ETag when its notification
-carries an ETag, and is read in its new contents when the notification carries
-none. A
+so the feed dead-letters its message at the cap. An object overwritten before or
+during its read is re-enqueued at its current ETag when its notification carries
+an ETag, and is read in its new contents when the notification carries none. A
 notification's unit is a unit of its own, with the feed message's id (the SQS
 `MessageId`, or the Kafka message key), so an object that both a listing and a
-notification announce is read twice. A unit the source re-enqueues keeps the
-id of the unit it replaces. A store
-sends no notification for an object written before the bucket's notification
-configuration takes effect; on AWS S3 that window lasted at least 181 seconds
-after the configuration was written, in one measured run ([ADR-0072](../../../../adr/0072-missed-storage-notifications-are-not-reconciled-by-re-listing.md)).
+notification announce is read twice. A unit the source re-enqueues keeps the id
+of the unit it replaces. A store sends no notification for an object written
+before the bucket's notification configuration takes effect; on AWS S3 that
+window lasted at least 181 seconds after the configuration was written, in one
+measured run
+([ADR-0072](../../../../adr/0072-missed-storage-notifications-are-not-reconciled-by-re-listing.md)).
 Spate does not re-list to find a notification the store never sent.
 
 Each store needs its own settings for its notifications to arrive:
 
-- **AWS S3.** The bucket's notification configuration sends
-  `s3:ObjectCreated:*` to the queue
+- **AWS S3.** The bucket's notification configuration sends `s3:ObjectCreated:*`
+  to the queue
   ([AWS](https://docs.aws.amazon.com/AmazonS3/latest/userguide/ways-to-add-notification-config-to-bucket.html)).
   A later `PutBucketNotificationConfiguration` from another tool replaces the
   bucket's whole configuration, this rule with it
   ([AWS](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketNotificationConfiguration.html)).
-  The queue's own settings are on the [SQS feed](../../feeds/sqs/README.mdx#storage-notifications)
-  page.
+  The queue's own settings are on the
+  [SQS feed](../../feeds/sqs/README.mdx#storage-notifications) page.
 - **RustFS.** The Kafka notification target needs a `queue_dir`. Without one,
   an event that fails to send is lost
   ([RustFS](https://docs.rustfs.com/en/operations/event-notifications)).
@@ -572,11 +572,11 @@ decides:
   fatal, such as a send its permissions deny, fails the pipeline.
 
 An object overwritten while it is read delivers the records read before the
-overwrite, and the rest of that version is never read. Each range read under
-the old ETag costs one HEAD, and the key costs one feed message per delivery. A key overwritten faster than it is read is
-re-enqueued on every overwrite up to the cap, and its last version is read once
-for each unit still in the chain. Two notifications for one overwritten key
-start two chains.
+overwrite, and the rest of that version is never read. Each range read under the
+old ETag costs one HEAD, and the key costs one feed message per delivery. A key
+overwritten faster than it is read is re-enqueued on every overwrite up to the
+cap, and its last version is read once for each unit still in the chain. Two
+notifications for one overwritten key start two chains.
 
 :::danger An overwrite can be dropped at the re-enqueue cap
 A unit whose re-enqueue count has reached the cap is acknowledged on a `412`
@@ -619,17 +619,17 @@ takes a new location.
 
 The lister's checkpoint is the object named `checkpoint` there. It holds the
 last listed key for which the feed has confirmed every unit of it and of every
-key listed before it; the [SQS](../../feeds/sqs/README.mdx#message-mapping)
-and [Kafka](../../feeds/kafka/README.mdx#message-mapping) feed pages say when
-a publish is confirmed. The lister rewrites it at most once every 1,000 listed
+key listed before it; the [SQS](../../feeds/sqs/README.mdx#message-mapping) and
+[Kafka](../../feeds/kafka/README.mdx#message-mapping) feed pages say when a
+publish is confirmed. The lister rewrites it at most once every 1,000 listed
 keys and once when its listing ends. A run whose location holds `checkpoint`
 beside its own fingerprint lists only the keys after it, through
 `ListObjectsV2`'s `StartAfter`, and logs the key at INFO. A run that finds no
 fingerprint deletes a `checkpoint` it finds, logs that at INFO, creates the
 fingerprint and lists the whole prefix. A run that stops publishes the units
-after the last checkpoint again. A lister on a `file://` source, or on an S3 directory bucket
-(`aws_s3_express`, or `AWS_S3_EXPRESS` in the environment), keeps no
-checkpoint and logs a WARN: every run lists the prefix from the start.
+after the last checkpoint again. A lister on a `file://` source, or on an S3
+directory bucket (`aws_s3_express`, or `AWS_S3_EXPRESS` in the environment),
+keeps no checkpoint and logs a WARN: every run lists the prefix from the start.
 
 Resume finds every key while the store lists keys in the same order in the run
 that wrote `checkpoint` and in the run that resumes from it. AWS S3
@@ -652,22 +652,23 @@ again. To start a job over, delete the whole location prefix.
 :::
 
 The fingerprint covers the unit format version, `url`, `compression`,
-`split_target_bytes` and the framer's resync delimiter. At startup a worker of
-a bounded job reads `fingerprint` every five seconds until it appears, and
+`split_target_bytes` and the framer's resync delimiter. At startup a worker of a
+bounded job reads `fingerprint` every five seconds until it appears, and
 compares it with its own before it receives a unit. A worker whose fingerprint
 differs fails startup, and the error prints both. A worker that finds none
 within one settling window, five minutes unless the `feed:` section's
-`settling_window` sets another, exits non-zero. A read the store fails retryably is logged
-at WARN and tried again at the next step. The exit error names the last
-failed read's error, says "none appeared" when the reads found nothing, and
-says the store answered no read when it answered none within the window. While it waits a worker holds no unit and reports not ready on
-`/readyz`, and a shutdown ends the wait within one step, a read in flight
-included. On a feed that records an attempt before a unit is read, such as the
-[Kafka feed](../../feeds/kafka/README.mdx#counting-deliveries), the feed
-spends an attempt on each unit it readies for a waiting worker, and each
-rebalance of the group during the wait spends another. A fleet started well
-before its lister, or a worker restarting into a refusal, can move the head of
-each partition to the dead-letter destination unread.
+`settling_window` sets another, exits non-zero. A read the store fails retryably
+is logged at WARN and tried again at the next step. The exit error names the
+last failed read's error, says "none appeared" when the reads found nothing, and
+says the store answered no read when it answered none within the window. While
+it waits a worker holds no unit and reports not ready on `/readyz`, and a
+shutdown ends the wait within one step, a read in flight included. On a feed
+that records an attempt before a unit is read, such as the
+[Kafka feed](../../feeds/kafka/README.mdx#counting-deliveries), the feed spends
+an attempt on each unit it readies for a waiting worker, and each rebalance of
+the group during the wait spends another. A fleet started well before its
+lister, or a worker restarting into a refusal, can move the head of each
+partition to the dead-letter destination unread.
 
 The location's store is built from its URL with the source's `store` options
 and the environment, so it shares the endpoint, region and credentials those
@@ -704,13 +705,13 @@ worker started before its lister fails at once and a lister at a new location
 fails on the absent fingerprint. The error says so. Write access at the location
 decides where a lister run resumes. The lister creates `fingerprint` only when
 absent, so a lister whose `store` sets `aws_conditional_put: disabled` fails.
-Run one lister per location: a second lister with another fingerprint is
-refused when it reads the first's fingerprint, and, when both read before
-either wrote one, by the conditional create on a store that honors
-`If-None-Match`, which the CI suite checks on RustFS only. The location needs read-after-write and
-read-after-delete consistency, which means `consistency_mode = "consistent"`
-on Garage and one zone on Ceph RGW. A `file://` location serves the processes
-of one host.
+Run one lister per location: a second lister with another fingerprint is refused
+when it reads the first's fingerprint, and, when both read before either wrote
+one, by the conditional create on a store that honors `If-None-Match`, which the
+CI suite checks on RustFS only. The location needs read-after-write and
+read-after-delete consistency, which means `consistency_mode = "consistent"` on
+Garage and one zone on Ceph RGW. A `file://` location serves the processes of
+one host.
 
 ### How a bounded job ends
 
@@ -825,24 +826,24 @@ never self-terminates; stop it with a signal drain).
 
 ## Offsets, progress, resume
 
-A lane's `i64` offset packs *(member ordinal within the split, record
-index within the object)*, which keeps one monotonic offset stream per
-split across object boundaries, the same watermark contract every other
-source honors. A byte-range split has one member, at ordinal 0, and counts
-record indexes from the first record its range owns. `commit` routes acked watermarks into **per-split fenced
-progress records** in the coordination store; each carries a versioned
-key/ETag pin for its position. Fencing means a split's previous owner can
-never overwrite its successor's progress. A stale commit loses the CAS,
-writes nothing, and the split replays its uncommitted tail on the
-new owner.
+A lane's `i64` offset packs
+*(member ordinal within the split, record index within the object)*, which keeps
+one monotonic offset stream per split across object boundaries, the same
+watermark contract every other source honors. A byte-range split has one member,
+at ordinal 0, and counts record indexes from the first record its range owns.
+`commit` routes acked watermarks into **per-split fenced progress records** in
+the coordination store; each carries a versioned key/ETag pin for its position.
+Fencing means a split's previous owner can never overwrite its successor's
+progress. A stale commit loses the CAS, writes nothing, and the split replays
+its uncommitted tail on the new owner.
 
-On a gain with carried progress, the source drift-checks the progress
-against the split's descriptor (key and ETag at the watermark's ordinal;
-a mid-object resume with no pin anywhere is refused), replays the
-in-progress object or byte range from its start discarding exactly the
-committed record count, and continues. Delivery is **at-least-once**. Everything after the
-last committed watermark replays after a crash or forced revocation; duplicates are
-possible, loss is not.
+On a gain with carried progress, the source drift-checks the progress against
+the split's descriptor (key and ETag at the watermark's ordinal; a mid-object
+resume with no pin anywhere is refused), replays the in-progress object or byte
+range from its start discarding exactly the committed record count, and
+continues. Delivery is **at-least-once**. Everything after the last committed
+watermark replays after a crash or forced revocation; duplicates are possible,
+loss is not.
 
 Limits: ~1.1 × 10¹² records per object or byte range (2⁴⁰ − 2); an object
 that overflows it **poisons its split** before any offset can be corrupted:
@@ -879,12 +880,13 @@ split record again.
 
 ## Decoding records
 
-The source frames records but is **format-agnostic**. It streams object
-bytes through a [`RecordFramer`](../../../06-extending/custom-source.mdx#framing-turning-bytes-into-records)
+The source frames records but is **format-agnostic**. It streams object bytes
+through a
+[`RecordFramer`](../../../06-extending/custom-source.mdx#framing-turning-bytes-into-records)
 supplied by the caller, and **deserialization stays in the operator chain**.
 Framing a byte stream is a format concern, so the framer is owned by the format
-crate: for NDJSON, that is
-[`spate-json`](../../formats/json/README.mdx)'s `NdjsonFramer`.
+crate: for NDJSON, that is [`spate-json`](../../formats/json/README.mdx)'s
+`NdjsonFramer`.
 
 `with_framer` takes a factory rather than a framer, because framers are
 per-object stateful and each object gets a fresh one; the bound the framer is

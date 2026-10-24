@@ -61,8 +61,8 @@ sink fetched when the row type was supplied.
 The row is an ordinary `serde::Serialize` struct, the same one RowBinary
 takes.
 [`kafka_avro_flatmap_clickhouse.rs`](repo:crates/spate/examples/kafka_avro_flatmap_clickhouse.rs)
-decodes a placed order and fans it out into one such row per line; it needs
-a Kafka topic of Avro orders and the target table, and runs with
+decodes a placed order and fans it out into one such row per line; it needs a
+Kafka topic of Avro orders and the target table, and runs with
 `cargo run --release -p spate --features kafka,clickhouse,avro --example kafka_avro_flatmap_clickhouse`:
 
 ```rust file=crates/spate/examples/kafka_avro_flatmap_clickhouse.rs region=record

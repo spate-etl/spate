@@ -129,12 +129,12 @@ states the rule.
 
 A source emits `RawPayload`s; a deserializer decodes one payload into records.
 For a **message** source the message boundary *is* the record boundary, so
-nothing extra is needed. For a **streaming** source (an object-storage
-backfill, an HTTP chunked body, a WebSocket stream) one transfer is a large
-byte stream that must be cut into records *before* the deserializer sees them.
-That cutting is **framing**. The *seam* is transport-agnostic and lives in
-`spate_core::framing`, but the concrete framer is a property of the **format**, so
-it is owned by the format crate and handed to a source at assembly time. The
+nothing extra is needed. For a **streaming** source (an object-storage backfill,
+an HTTP chunked body, a WebSocket stream) one transfer is a large byte stream
+that must be cut into records *before* the deserializer sees them. That cutting
+is **framing**. The *seam* is transport-agnostic and lives in
+`spate_core::framing`, but the concrete framer is a property of the **format**,
+so it is owned by the format crate and handed to a source at assembly time. The
 trait is quoted here to be read rather than run. You implement it in a format
 crate, and each method's contract is cut to the one line that matters at this
 distance:
@@ -152,8 +152,8 @@ pub trait RecordFramer: Send {
 A framer **must be a pure function of the byte stream**. The record sequence
 must not depend on how bytes arrive in chunks, so a source that resumes by
 record index replays deterministically. The framer is owned by the **format**
-crate, not the source. A newline-delimited format ships a line framer
-and a container format ships a block framer. `FramerWriter` bridges a `Write`-based
+crate, not the source. A newline-delimited format ships a line framer and a
+container format ships a block framer. `FramerWriter` bridges a `Write`-based
 decompressor to a framer so compression stays orthogonal. A streaming source
 takes its framer at construction and stays format-agnostic, so every streaming
 source reuses every format's framer. Worked reference:
@@ -237,26 +237,26 @@ generic, so no registration is needed
 
 ## Feed-reading sources
 
-A source whose input is a queue of [work units](../07-reference/glossary.mdx#work-unit)
-reads it through the `Feed` trait in
-[`spate-core/src/feed/mod.rs`](repo:crates/spate-core/src/feed/mod.rs). The
-[feed](../07-reference/glossary.mdx#feed) delivers each unit at least once,
+A source whose input is a queue of
+[work units](../07-reference/glossary.mdx#work-unit) reads it through the `Feed`
+trait in [`spate-core/src/feed/mod.rs`](repo:crates/spate-core/src/feed/mod.rs).
+The [feed](../07-reference/glossary.mdx#feed) delivers each unit at least once,
 and the source acknowledges a unit when it is done with it. The trait is
 synchronous, so `poll_events` drives it from the controller thread.
-[Work feed](../02-concepts/09-work-feed.mdx) explains the model behind the
-rules below.
+[Work feed](../02-concepts/09-work-feed.mdx) explains the model behind the rules
+below.
 
-The pipeline file names the feed in its [`feed:` section](../07-reference/configuration.mdx#feed).
-Accept the section in `configure_feed`. The runtime calls it before `open`,
-with the section, the feed it names, and the feed's `FeedOrigin`: `Section`
-when the runtime built the feed, `Given` when code passed it to
-`Pipeline::feed` and may still publish into it. Keep the feed, and read the
-section's common keys, such as `units_held`. The default `configure_feed`
-refuses the section, so a source that reads no feed fails at startup when one
-is set.
-The runtime builds the in-process feed for `feed: { memory: {} }` and logs
-nothing about who publishes to it, since only the source knows. A source that
-does not publish to the feed it reads says so in its own log when it opens.
+The pipeline file names the feed in its
+[`feed:` section](../07-reference/configuration.mdx#feed). Accept the section in
+`configure_feed`. The runtime calls it before `open`, with the section, the feed
+it names, and the feed's `FeedOrigin`: `Section` when the runtime built the
+feed, `Given` when code passed it to `Pipeline::feed` and may still publish into
+it. Keep the feed, and read the section's common keys, such as `units_held`. The
+default `configure_feed` refuses the section, so a source that reads no feed
+fails at startup when one is set. The runtime builds the in-process feed for
+`feed: { memory: {} }` and logs nothing about who publishes to it, since only
+the source knows. A source that does not publish to the feed it reads says so in
+its own log when it opens.
 
 Your source follows these rules:
 
@@ -366,11 +366,12 @@ is the smallest complete backend. Worked reference:
 ## Coordination-aware sources
 
 A broker-less source can let several pipeline replicas divide its work by
-plugging into the [coordination seam](../02-concepts/07-source-coordination.mdx).
-You implement two small traits, *what the work is* and *how to read one
-piece of it*, and embed the framework's `CoordinationDriver`, which owns
-the assignment choreography, fencing bookkeeping, and completion
-tracking. Everything below is the complete wiring, rendered from
+plugging into the
+[coordination seam](../02-concepts/07-source-coordination.mdx). You implement
+two small traits, *what the work is* and *how to read one piece of it*, and
+embed the framework's `CoordinationDriver`, which owns the assignment
+choreography, fencing bookkeeping, and completion tracking. Everything below is
+the complete wiring, rendered from
 [`custom_coordinated_source.rs`](repo:crates/spate/examples/custom_coordinated_source.rs),
 where two instances divide a synthetic 1,000-row ledger over a shared in-memory
 store, in one process and with nothing installed:
@@ -423,8 +424,8 @@ receive the descriptors and never re-enumerate.
   re-runs the planner on the replan interval; carry a cursor between runs with
   `SplitPlan::with_planner_state` and read it back from `ctx.planner_state`.
 
-Measure each encoded descriptor's raw byte length against the portable budget
-in [`SplitSpec`](https://docs.rs/spate-core/latest/spate_core/coordination/struct.SplitSpec.html).
+Measure each encoded descriptor's raw byte length against the portable budget in
+[`SplitSpec`](https://docs.rs/spate-core/latest/spate_core/coordination/struct.SplitSpec.html).
 The stored spec adds padded-base64 expansion and a JSON envelope, so raw bytes
 alone do not measure the complete stored value. Reduce the metadata carried by
 each split when its descriptor exceeds that allowance.
@@ -545,14 +546,14 @@ uncommitted tail under the next owner.
 #### The drift check: `validate_resume`
 
 Carried progress describes the split as it stood when the progress was written.
-The two come apart whenever a replan moves an id's bounds under progress
-already committed against them, as when a job is restarted against a different
-input size or a planner's ranges shift, and the resume point then counts
-records the split no longer covers. A watermark alone cannot reveal that,
-because a number in range looks the same either way. So a commit pins the descriptor it
-was produced against, and `LedgerCtx`'s implementation, one method of the
-`SplitSource` impl above, re-reads that pin as well as the watermark's place
-in the range:
+The two come apart whenever a replan moves an id's bounds under progress already
+committed against them, as when a job is restarted against a different input
+size or a planner's ranges shift, and the resume point then counts records the
+split no longer covers. A watermark alone cannot reveal that, because a number
+in range looks the same either way. So a commit pins the descriptor it was
+produced against, and `LedgerCtx`'s implementation, one method of the
+`SplitSource` impl above, re-reads that pin as well as the watermark's place in
+the range:
 
 ```rust file=crates/spate/examples/custom_coordinated_source.rs region=validate_resume
 ```
@@ -593,13 +594,13 @@ attempt cap instead.
   each split in turn. A `SplitCoordinator` that wraps another forwards
   `set_stop`; the trait's default ignores it.
 - **`flush_commits` stays the default no-op.** A commit that returns `Ok` is
-  durable in the store for every partition the source still holds. When the store defers a split's commit after a
-  transient failure, `driver.commit` still sends the other splits and then
-  returns a retryable error, so the runtime keeps every position of that
-  commit and sends it again on the next tick or in the final commit. The
-  deferred commit may already be in the store. Either way it holds only
-  acknowledged positions, so a crash before the resend can widen replay and
-  loses no data.
+  durable in the store for every partition the source still holds. When the
+  store defers a split's commit after a transient failure, `driver.commit` still
+  sends the other splits and then returns a retryable error, so the runtime
+  keeps every position of that commit and sends it again on the next tick or in
+  the final commit. The deferred commit may already be in the store. Either way
+  it holds only acknowledged positions, so a crash before the resend can widen
+  replay and loses no data.
 - **`commit_final` forwards to `driver.commit_final`.** The driver then sends
   the final commit of a stop under one `coordination.op_timeout` budget for
   every split together, and returns the partitions whose commit it
@@ -702,11 +703,11 @@ backend, the shape is the same: build a
 Some of those arguments carry more than their names suggest:
 
 - **`instance_id` must be unique across live workers**, and it defaults to a
-  fresh random id per run. Set it to something stable per replica (the pod
-  name, the ordinal, whatever your scheduler guarantees) and a restart
-  after a crash reclaims its own splits without waiting a lease out. Two live processes
-  sharing one id is detected and fatal, so a value stable across *replicas*
-  is worse than no value at all.
+  fresh random id per run. Set it to something stable per replica (the pod name,
+  the ordinal, whatever your scheduler guarantees) and a restart after a crash
+  reclaims its own splits without waiting a lease out. Two live processes
+  sharing one id is detected and fatal, so a value stable across *replicas* is
+  worse than no value at all.
 - **`lease_duration` and the store's TTL must agree**, which is why the example
   builds both from one constant. `StoreCoordinator::new` fails fast on a
   divergence: heartbeats pace from the config while expiry runs on the store's

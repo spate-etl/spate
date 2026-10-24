@@ -4,8 +4,8 @@ description: "The JSON deserializer decodes single, NDJSON, and array framings i
 
 # JSON format
 
-The JSON deserializer (`spate-json`, feature `json` on the `spate` facade) decodes
-JSON payloads carried by a source into records, either serde types or
+The JSON deserializer (`spate-json`, feature `json` on the `spate` facade)
+decodes JSON payloads carried by a source into records, either serde types or
 dynamically-typed values. The framings map onto the framework's "one payload →
 0..N records" contract, and `serde_json` (stable 1.x) parses by default.
 
@@ -81,11 +81,11 @@ record-level error, handled by `on_error`:
 - **`fail`** — surface a decode error on the first bad record.
 
 :::note `on_error: fail` and the chain's policy
-`fail` makes the deserializer *return* a decode error; whether that **stops** the
-pipeline or **drops the payload** is then the chain's deserializer error policy
-(`ErrorPolicy`, default `Skip`). Set the chain's policy to `Fail`
-(`.deser_error_policy(ErrorPolicy::Fail)`) for a bad record to stop the pipeline.
-The common case, per-record **skip**, needs no chain-side change.
+`fail` makes the deserializer *return* a decode error; whether that **stops**
+the pipeline or **drops the payload** is then the chain's deserializer error
+policy (`ErrorPolicy`, default `Skip`). Set the chain's policy to `Fail`
+(`.deser_error_policy(ErrorPolicy::Fail)`) for a bad record to stop the
+pipeline. The common case, per-record **skip**, needs no chain-side change.
 :::
 
 Undecodable data that stops the pipeline replays under at-least-once; replay
@@ -93,8 +93,9 @@ never loses records.
 
 ## Fidelity & features
 
-- `reject_duplicate_keys` (config) turns `serde_json`'s silent last-value-wins on
-  duplicate object keys into a hard error, a guard against upstream corruption.
+- `reject_duplicate_keys` (config) turns `serde_json`'s silent last-value-wins
+  on duplicate object keys into a hard error, a guard against upstream
+  corruption.
 - The `float-roundtrip` Cargo feature makes `f64` values survive
   text→float→text exactly.
 - The `raw-value` feature exposes `serde_json`'s `RawValue` for late/partial
@@ -115,12 +116,13 @@ rejected.
 ## Backends
 
 Decoding uses `serde_json` (stable 1.x) by default. The byte-slice → value step
-sits behind an internal seam, so the opt-in **`simd`** Cargo feature (`json-simd`
-on the `spate` facade) swaps in [`simd-json`](https://github.com/simd-lite/simd-json),
-a SIMD-accelerated parser, with no change to the builder API; `build_serde` and
-`build_value` are identical either way. `from_reader` is never used on the hot
-path. Decoding always operates on the in-memory payload slice, which is both
-faster and lets the parser see the whole document at once.
+sits behind an internal seam, so the opt-in **`simd`** Cargo feature
+(`json-simd` on the `spate` facade) swaps in
+[`simd-json`](https://github.com/simd-lite/simd-json), a SIMD-accelerated
+parser, with no change to the builder API; `build_serde` and `build_value` are
+identical either way. `from_reader` is never used on the hot path. Decoding
+always operates on the in-memory payload slice, which is both faster and lets
+the parser see the whole document at once.
 
 `simd` decodes faster than `serde_json` on the single-document and array
 framings, where one large document is parsed in a pass; the margin narrows on
@@ -138,10 +140,10 @@ repository no longer carries). The
 always runs on `serde_json`, so duplicate-key handling is identical either
 way.
 
-The backends differ on some valid numbers. `simd-json` **rejects integer literals
-outside the `i64`/`u64` range** (which `serde_json` accepts, coercing to `f64`)
-and normalizes `-0` to `0`. Both backends reject a NUL byte after a number and
-underscore separators in numbers as malformed JSON.
+The backends differ on some valid numbers. `simd-json`
+**rejects integer literals outside the `i64`/`u64` range** (which `serde_json`
+accepts, coercing to `f64`) and normalizes `-0` to `0`. Both backends reject a
+NUL byte after a number and underscore separators in numbers as malformed JSON.
 
 The parsers also enforce different nesting limits: `serde_json` has a recursion
 limit of 128, while `simd-json` limits nested arrays and objects to 1024. With
@@ -186,7 +188,7 @@ wrap every decoder. See [Metrics](../../../../METRICS.md).
   payloads this format decodes.
 - [S3 source](../../sources/s3/README.mdx) — a streaming source, which takes
   this crate's `NdjsonFramer` to cut objects into records.
-- [Error handling](../../../02-concepts/04-error-handling.mdx) — Skip vs Fail for
-  undecodable payloads.
+- [Error handling](../../../02-concepts/04-error-handling.mdx) — Skip vs Fail
+  for undecodable payloads.
 - [Backpressure](../../../02-concepts/03-backpressure.mdx) — how a held batch
   interacts with flow control.

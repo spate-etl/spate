@@ -7,7 +7,8 @@ description: "The Makefile and most of scripts/ move to cargo xtask, so a CI ste
 - **Status:** accepted
 - **Date:** 2026-09-18 (the record precedes the implementation it describes)
 - **Supersedes:** —
-- **Superseded by:** [ADR-0062](0062-the-release-sequence-is-rust-in-xtask.md), for the paragraph keeping the release scripts in `scripts/`
+- **Superseded by:** [ADR-0062](0062-the-release-sequence-is-rust-in-xtask.md),
+  for the paragraph keeping the release scripts in `scripts/`
 
 ## Context and problem statement
 

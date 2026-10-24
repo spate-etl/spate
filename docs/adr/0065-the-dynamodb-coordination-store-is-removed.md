@@ -47,8 +47,9 @@ clock and that a key's revisions strictly increase.
 polls and how its table is laid out. Nothing replaces them, so they are
 deprecated.
 
-The polled watch ([ADR-0050](0050-coordination-stores-may-declare-a-polled-watch.md))
-and the delete-revision rule of
+The polled watch
+([ADR-0050](0050-coordination-stores-may-declare-a-polled-watch.md)) and the
+delete-revision rule of
 [ADR-0061](0061-a-watch-delete-orders-above-what-its-handle-has-seen.md) stay.
 The polled test double in `spate-coordination`'s tests declares both, and the
 regression tests that model a view lagging the store run over it.

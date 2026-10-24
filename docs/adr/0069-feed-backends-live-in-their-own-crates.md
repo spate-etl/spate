@@ -32,14 +32,14 @@ removed the AWS SDK from the dependency graph.
 
 ## Decision outcome
 
-Chosen options: "The SQS backend in a new `spate-sqs` crate and the Kafka
-feed in `spate-kafka`", and "`main()` passes the `feed:` section to the
-backend crate's constructor and hands the feed it returns to
-`Pipeline::feed`". The first, because a second queue-fed source then reuses
-both backends unchanged, and a build pulls in an SQS client or librdkafka only
-when it selects that backend. Backends inside `spate-s3` would be repeated by every
-later queue-fed source. A thin HTTP client would make Spate maintain request
-signing, retries and instance credentials.
+Chosen options: "The SQS backend in a new `spate-sqs` crate and the Kafka feed
+in `spate-kafka`", and "`main()` passes the `feed:` section to the backend
+crate's constructor and hands the feed it returns to `Pipeline::feed`". The
+first, because a second queue-fed source then reuses both backends unchanged,
+and a build pulls in an SQS client or librdkafka only when it selects that
+backend. Backends inside `spate-s3` would be repeated by every later queue-fed
+source. A thin HTTP client would make Spate maintain request signing, retries
+and instance credentials.
 
 The in-process feed lives beside the feed trait in `spate-core`. A source
 names no backend, and a new backend touches no source. A pipeline's `feed:`
@@ -47,12 +47,13 @@ section names the backend by its key; the runtime builds the in-process feed
 from it, and `main()` builds any other backend from the section and passes it
 to `Pipeline::feed`.
 
-ADR-0049 rejected an option where `main` decodes the section. Under the
-second option `main()` decodes none of the backend's keys. The backend crate's constructor decodes
-and checks its own section, and `run()` refuses a passed-in feed whose backend
-differs from the section's key. A registry in `spate-core` would name backend crates in
-core, which INV-6 rules out. A registry in the facade would need a hook in
-`spate-core` for the runtime to call, to save `main()` one call.
+ADR-0049 rejected an option where `main` decodes the section. Under the second
+option `main()` decodes none of the backend's keys. The backend crate's
+constructor decodes and checks its own section, and `run()` refuses a passed-in
+feed whose backend differs from the section's key. A registry in `spate-core`
+would name backend crates in core, which INV-6 rules out. A registry in the
+facade would need a hook in `spate-core` for the runtime to call, to save
+`main()` one call.
 
 ### Consequences
 

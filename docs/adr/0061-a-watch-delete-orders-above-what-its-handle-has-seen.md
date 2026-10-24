@@ -6,10 +6,12 @@ description: "A watch delete orders above every revision of the key its own hand
 
 - **Status:** accepted
 - **Date:** 2026-10-05
-- **Supersedes:** [ADR-0058](0058-a-dynamodb-ephemeral-write-leaves-its-predecessors-removal-revision.md)
+- **Supersedes:**
+  [ADR-0058](0058-a-dynamodb-ephemeral-write-leaves-its-predecessors-removal-revision.md)
   (the #959 consequence)
-- **Superseded by:** [ADR-0065](0065-the-dynamodb-coordination-store-is-removed.md)
-  (DynamoDB re-create exception)
+- **Superseded by:**
+  [ADR-0065](0065-the-dynamodb-coordination-store-is-removed.md) (DynamoDB
+  re-create exception)
 
 ## Context and problem statement
 

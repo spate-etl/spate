@@ -158,11 +158,11 @@ watermarks never advance past them. The final commit therefore commits only
 what was written, and the abandoned data **replays after restart**. An
 abandon costs duplicate-tolerant replay, never silent loss.
 
-Batch dedup tokens do not survive a restart
-(re-batching changes boundaries), so replayed rows land again. Design
-target tables to tolerate duplicates. See
+Batch dedup tokens do not survive a restart (re-batching changes boundaries), so
+replayed rows land again. Design target tables to tolerate duplicates. See
 [Delivery guarantees](../02-concepts/02-delivery-guarantees.mdx) and the
-[ClickHouse connector](../04-connectors/sinks/clickhouse/README.mdx) deduplication notes.
+[ClickHouse connector](../04-connectors/sinks/clickhouse/README.mdx)
+deduplication notes.
 
 ## Why the drain always terminates
 

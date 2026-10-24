@@ -1,0 +1,19 @@
+# Markdown lint for docs/. Pages are MDX once Docusaurus reads them, so `.md`
+# files are linted as MDX too.
+#
+# Only MD013 is enabled for now: 80-column wrapping with `rumdl fmt`. Tables,
+# code blocks and headings are not wrapped (they cannot be) and are exempt.
+# The `docs/STYLE.md` rules join this list when they are added.
+
+[global]
+flavor = "mdx"
+enable = ["MD013"]
+include = ["docs/**/*.md", "docs/**/*.mdx"]
+
+[MD013]
+line-length = 80
+reflow = true
+reflow-mode = "default"
+code-blocks = false
+tables = false
+headings = false

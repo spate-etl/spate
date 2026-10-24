@@ -17,11 +17,11 @@ followed by full assignment. Applied to coordinated sources it is badly wrong in
 two ways.
 
 A worker that merely *gains* a split would have to drain and reassign every lane
-it already holds, so a routine gain crashes commits that are mid-flight and costs
-a re-read of every uncommitted tail. And a split that finishes has to wait for
-its final acknowledgments to be noticed on a commit tick, so completion costs a
-tick quantum. With several splits in flight, that is a meaningful fraction of a
-short job.
+it already holds, so a routine gain crashes commits that are mid-flight and
+costs a re-read of every uncommitted tail. And a split that finishes has to wait
+for its final acknowledgments to be noticed on a commit tick, so completion
+costs a tick quantum. With several splits in flight, that is a meaningful
+fraction of a short job.
 
 ## Considered options
 

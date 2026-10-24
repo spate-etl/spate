@@ -43,11 +43,14 @@ drives the feed from the controller thread and waits only by parking on the
 `FeedPark` the backend signals, for at most its poll timeout, so INV-2 holds.
 
 The trait also publishes a unit and reports through a `Confirmation` when the
-feed has stored it, which the lister ([the lister-resume record](0074-a-lister-resumes-after-the-last-key-it-checkpointed-once-the-feed-confirmed-it.md)) and a worker
-re-enqueueing a unit ([the notification-read record](0077-a-notification-units-read-classifies-a-deleted-or-overwritten-object.md)) use. Methods take `&self`,
-so one `Arc<dyn Feed>` serves a reader and a publisher. Every operation carries
-only `spate-core` and `std` types. No rdkafka delivery result, AWS SDK error or
-`object_store` type appears in a public signature, so INV-6 holds.
+feed has stored it, which the lister
+([the lister-resume record](0074-a-lister-resumes-after-the-last-key-it-checkpointed-once-the-feed-confirmed-it.md))
+and a worker re-enqueueing a unit
+([the notification-read record](0077-a-notification-units-read-classifies-a-deleted-or-overwritten-object.md))
+use. Methods take `&self`, so one `Arc<dyn Feed>` serves a reader and a
+publisher. Every operation carries only `spate-core` and `std` types. No rdkafka
+delivery result, AWS SDK error or `object_store` type appears in a public
+signature, so INV-6 holds.
 
 A second delivery of a unit the worker holds arrives under a new receipt and is
 read again from its start. INV-1 allows the duplicate, and no backend

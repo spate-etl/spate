@@ -14,10 +14,10 @@ description: "Acknowledgments are a refcounted per-batch handle resolving as del
 At-least-once delivery ([ADR-0002](0002-at-least-once-delivery.md)) requires
 knowing, for every source offset, whether the data behind it has been durably
 written. That is complicated by everything the chain is allowed to do to a
-record between source and sink: `filter` drops it, `flat_map` turns it into many,
-and a multi-sink split sends it to more than one destination. Each of those has
-a different correct answer for "has this been delivered", and the accounting
-runs on the per-record path, so it has to be close to free.
+record between source and sink: `filter` drops it, `flat_map` turns it into
+many, and a multi-sink split sends it to more than one destination. Each of
+those has a different correct answer for "has this been delivered", and the
+accounting runs on the per-record path, so it has to be close to free.
 
 ## Considered options
 

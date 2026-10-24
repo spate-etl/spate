@@ -95,30 +95,28 @@ the frames) happens when the worker calls it, not when the future is polled:
 ```
 
 - **`Ok` is the durable-ack point.** Return `Ok(())` only after the target
-  system has durably accepted the batch: a synchronous server ack, a
-  delivery confirmation, or here, after printing. The framework releases the batch's
-  acknowledgments on `Ok`, letting the source watermark advance
-  past that data. Return `Ok` early and a crash loses records, violating
-  at-least-once.
+  system has durably accepted the batch: a synchronous server ack, a delivery
+  confirmation, or here, after printing. The framework releases the batch's
+  acknowledgments on `Ok`, letting the source watermark advance past that data.
+  Return `Ok` early and a crash loses records, violating at-least-once.
 - **Retries reuse the sealed batch unchanged**, rotating across healthy
   replicas with capped exponential backoff. `SealedBatch::dedup_token` is
   deterministic per batch: pass it to the target if it supports
   deduplication so same-boundary retries are idempotent (see
   [Delivery guarantees](../02-concepts/02-delivery-guarantees.mdx) for what
   dedup tokens do and do not cover).
-- **Classify errors honestly.** Retryable errors get retried; a `Fatal`
-  error abandons the batch (its acks fail, the partition watermark stalls,
-  and `checkpoint.stalled_fail_after` eventually fails the pipeline so the
-  data replays after restart). The error's message is the reason that
-  failure reports, so make it name the cause. A rejected credential or TLS handshake is
+- **Classify errors honestly.** Retryable errors get retried; a `Fatal` error
+  abandons the batch (its acks fail, the partition watermark stalls, and
+  `checkpoint.stalled_fail_after` eventually fails the pipeline so the data
+  replays after restart). The error's message is the reason that failure
+  reports, so make it name the cause. A rejected credential or TLS handshake is
   `Fatal`, and a failure to obtain credentials or reach the server is
   `Retryable`
   ([ADR-0047](../../adr/0047-a-rejected-credential-or-tls-handshake-is-fatal.md)).
-  `spate::error::find_source` finds the TLS library's error behind the
-  client's wrappers, and `spate::error::TLS_REJECTION_ALERTS` lists the
-  alerts that reject a handshake. With a rustls client,
-  `spate::tls_rejection!(rustls, &err)` applies the whole TLS part of the
-  rule.
+  `spate::error::find_source` finds the TLS library's error behind the client's
+  wrappers, and `spate::error::TLS_REJECTION_ALERTS` lists the alerts that
+  reject a handshake. With a rustls client,
+  `spate::tls_rejection!(rustls, &err)` applies the whole TLS part of the rule.
 - One writer instance is shared by every shard worker (`Send + Sync`); the
   per-replica state lives in `Endpoint`.
 
@@ -182,8 +180,9 @@ workers, their queues and their metric labels from the topology it carries.
   count the bytes before the codec, so sizing does not depend on the codec.
 
 Construct the struct via `new` plus the `with_*` methods. It is
-`#[non_exhaustive]`, so fields can grow without breaking you. Queue depth between
-pipeline threads and shard workers is the builder's knob, not the bundle's:
+`#[non_exhaustive]`, so fields can grow without breaking you. Queue depth
+between pipeline threads and shard workers is the builder's knob, not the
+bundle's:
 `Pipeline::sink_with(bundle, SinkOptions::default().with_queue_capacity(n))`.
 
 ## The connector pattern: implementing `SinkBundle`
@@ -202,12 +201,13 @@ codec when its configuration compresses:
 ```
 
 `Pipeline::sink` accepts anything implementing `SinkBundle`, and `SinkParts`
-itself implements it, which is why hand-rolled sinks skip the impl. The
-only bound anywhere is `ShardWriter`, so your connector's client types
-never appear in framework APIs (the dependency policy in
-[ADR-0011](../../adr/0011-msrv-and-dependency-policy.md)). Connector-specific flows the framework
-cannot name, such as a pre-flight schema check that produces the encoder's row
-schema, stay concrete pre-steps in your factory, before `into_parts`.
+itself implements it, which is why hand-rolled sinks skip the impl. The only
+bound anywhere is `ShardWriter`, so your connector's client types never appear
+in framework APIs (the dependency policy in
+[ADR-0011](../../adr/0011-msrv-and-dependency-policy.md)). Connector-specific
+flows the framework cannot name, such as a pre-flight schema check that produces
+the encoder's row schema, stay concrete pre-steps in your factory, before
+`into_parts`.
 
 If your connector deserializes a YAML body, don't name a field `chunk`: that
 key is **framework-reserved** inside every component body (it carries the

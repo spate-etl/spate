@@ -94,14 +94,13 @@ threads are the limit. Each odd-numbered worker (the first, the third, and
 so on) takes one core from the derived pipeline-thread count, down to its
 floor of 1.
 
-Read `spate_pipeline_io_busy_ratio` before raising `io_threads`: a value that stays
-near 1 means the I/O workers are saturated
-([Metrics](../../METRICS.md#pipeline--process)). It averages the last 5
-minutes (since start while shorter) and updates every 5 seconds. A worker
-records its busy time about every 31 polls, so once the window is full a
-reading can be off by up to that much busy time: a few percent for polls under
-about 500 ms and about 10% at 1 s polls. Longer
-polls read late and unevenly.
+Read `spate_pipeline_io_busy_ratio` before raising `io_threads`: a value that
+stays near 1 means the I/O workers are saturated
+([Metrics](../../METRICS.md#pipeline--process)). It averages the last 5 minutes
+(since start while shorter) and updates every 5 seconds. A worker records its
+busy time about every 31 polls, so once the window is full a reading can be off
+by up to that much busy time: a few percent for polls under about 500 ms and
+about 10% at 1 s polls. Longer polls read late and unevenly.
 
 ## Sink batching: `batch.max_rows` / `batch.max_bytes` / `batch.linger`
 
@@ -182,12 +181,13 @@ Read-ahead buffering and how to cap it:
 ## Chunk sizing: `chunk.target_bytes` {#chunk-sizing}
 
 Set per sink in YAML as `sink.<type>.chunk.target_bytes`, or per branch as
-`sinks.<name>.chunk.target_bytes` ([configuration reference](../07-reference/configuration.mdx#chunk)).
-It never affects delivery correctness, because a partial chunk is sealed on
-every commit tick and at most defers a commit by ~one interval, so it is a
-deploy-time knob you can retune without a rebuild. `SinkOptions::with_chunk` is
-the code-level equivalent for pipelines assembled programmatically (one or the
-other, not both).
+`sinks.<name>.chunk.target_bytes`
+([configuration reference](../07-reference/configuration.mdx#chunk)). It never
+affects delivery correctness, because a partial chunk is sealed on every commit
+tick and at most defers a commit by ~one interval, so it is a deploy-time knob
+you can retune without a rebuild. `SinkOptions::with_chunk` is the code-level
+equivalent for pipelines assembled programmatically (one or the other, not
+both).
 
 The chain terminal encodes rows into a per-shard buffer and seals a **chunk**
 once it reaches `target_bytes` (default **64 KiB**), then hands it to that
@@ -213,8 +213,8 @@ tick bounds that hold to the checkpoint period.
 
 ## Queues: `SinkOptions::queue_capacity`
 
-The bounded chunk queue between pipeline threads and each shard worker,
-default **8** chunks (chunks target 64 KiB, see [`chunk.target_bytes`](#chunk-sizing)).
+The bounded chunk queue between pipeline threads and each shard worker, default
+**8** chunks (chunks target 64 KiB, see [`chunk.target_bytes`](#chunk-sizing)).
 This is a code-level knob (`Pipeline::sink_with(bundle, SinkOptions)`, see
 [Assembling a pipeline](../03-guides/assembling-a-pipeline.mdx)) and not a YAML
 key; unlike `chunk`, it stays in code, with deploy-time exposure a possible
@@ -262,8 +262,9 @@ contains](../../METRICS.md#what-a-flush-contains)).
 
 - **Pauses high, write p99 flat and low** → the queue is throttling a sink that
   has headroom. Raise `queue_capacity` and watch the pauses reach zero.
-  `spate_sink_permit_wait_duration_seconds` confirms it: if the flush p99 you are
-  worried about is mostly permit wait, no amount of server tuning will move it.
+  `spate_sink_permit_wait_duration_seconds` confirms it: if the flush p99 you
+  are worried about is mostly permit wait, no amount of server tuning will move
+  it.
 - **Pauses high, write p99 high** → the sink is behind. Depth will buy
   throughput but cost latency; add shards or `inflight.max_per_shard` instead.
 
@@ -326,6 +327,7 @@ its own affair. Scale horizontally by replicas, and see
 :::note Connector specifics
 What a lane is, and what bounds how many there are:
 [Kafka source](../04-connectors/sources/kafka/README.mdx#lanes-partitions-on-pipeline-threads)
-· [S3 source](../04-connectors/sources/s3/README.mdx#sizing-splits-against-pipelinethreads)
+·
+[S3 source](../04-connectors/sources/s3/README.mdx#sizing-splits-against-pipelinethreads)
 · [Datagen source](../04-connectors/sources/datagen/README.mdx#configuration).
 :::

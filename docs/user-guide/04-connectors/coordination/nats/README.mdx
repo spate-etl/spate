@@ -48,13 +48,13 @@ at startup, naming the feature.
 
 Construction is synchronous and lazy, so the connection and bucket provisioning
 happen on the first store operation, which is the coordinator's startup probe.
-An unreachable server therefore rides the startup retry budget. Misconfiguration,
-such as a `servers` entry that is not a URL or joins several with commas, fails
-startup with a fatal error that names the cause, and so does a credential
-rejected on the first connection, or a certificate or TLS handshake rejected by
-the last server it tries. After startup, the store fails with a fatal error
-once every server has failed since the last successful connection, each with a
-rejection as its latest failure.
+An unreachable server therefore rides the startup retry budget.
+Misconfiguration, such as a `servers` entry that is not a URL or joins several
+with commas, fails startup with a fatal error that names the cause, and so does
+a credential rejected on the first connection, or a certificate or TLS handshake
+rejected by the last server it tries. After startup, the store fails with a
+fatal error once every server has failed since the last successful connection,
+each with a rejection as its latest failure.
 
 ## Configuration
 
@@ -198,8 +198,8 @@ services:
       # the pipeline file sets instance_id: "${HOSTNAME}", unique per replica
 ```
 
-For production, run a 3-node cluster with JetStream and set `replicas: 3` in
-the `nats` body so the buckets survive losing a node. The client learns the other
+For production, run a 3-node cluster with JetStream and set `replicas: 3` in the
+`nats` body so the buckets survive losing a node. The client learns the other
 nodes from the first server it reaches, so one reachable entry in `servers` is
 enough. List more than one, or a DNS name that resolves to every node, so the
 first connection survives a node being down.
@@ -208,7 +208,8 @@ The worker never changes an existing bucket's replica count. To change it for a
 running job, run `nats kv edit <bucket> --replicas <n>` on both of the job's
 buckets, then set `replicas` to the same value.
 
-Set [`sync_interval`](https://docs.nats.io/reference/config/jetstream/sync_interval)
+Set
+[`sync_interval`](https://docs.nats.io/reference/config/jetstream/sync_interval)
 in each server's configuration file:
 
 ```text
@@ -256,8 +257,9 @@ a worker the lost write had fenced can then win its next compare-and-swap.
 ## Metrics
 
 This store registers no families of its own. Its round-trips appear in the
-framework's coordination families: `spate_coordination_store_op_duration_seconds`
-by `op`, and `spate_coordination_writes_total{outcome="conflict"}` for lost
+framework's coordination families:
+`spate_coordination_store_op_duration_seconds` by `op`, and
+`spate_coordination_writes_total{outcome="conflict"}` for lost
 compare-and-swaps, which is fencing working as designed and alarming only in
 bulk. See [Metrics](../../../../METRICS.md) § Coordination.
 

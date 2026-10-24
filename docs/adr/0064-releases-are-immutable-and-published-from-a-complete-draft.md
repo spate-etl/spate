@@ -19,11 +19,11 @@ tag could also be moved or deleted after the release named it. A consumer who
 downloaded an asset could not tell whether it was the one the release run
 attached.
 
-GitHub's immutable releases lock a published release's assets and tag, refuse
-to reuse the tag of a deleted one, and sign a release attestation that names
-the tag, the digest of the tag's git object and each asset's digest. Assets can be added only while a
-release is a draft. The question is whether releases adopt it, and how
-`finish` assembles a release so nothing is missing when it locks.
+GitHub's immutable releases lock a published release's assets and tag, refuse to
+reuse the tag of a deleted one, and sign a release attestation that names the
+tag, the digest of the tag's git object and each asset's digest. Assets can be
+added only while a release is a draft. The question is whether releases adopt
+it, and how `finish` assembles a release so nothing is missing when it locks.
 
 ## Considered options
 

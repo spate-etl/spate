@@ -12,9 +12,9 @@ description: "Leader-computed sticky assignment on split weight replaces peer-to
 ## Context and problem statement
 
 [ADR-0023](0023-dynamic-work-stealing-coordination.md) distributed splits by
-peer-to-peer stealing: each worker leased toward a target and stole pairwise from
-over-loaded peers. Its convergence argument was sound. The pairwise rule does
-converge to within one split and cannot oscillate.
+peer-to-peer stealing: each worker leased toward a target and stole pairwise
+from over-loaded peers. Its convergence argument was sound. The pairwise rule
+does converge to within one split and cannot oscillate.
 
 Four days of building on it produced a series of defects, and they all had the
 same shape: **state visible to neither side of a negotiation.** Splits promised
@@ -69,8 +69,8 @@ abandoned is a signal worth acting on.
   problem, pauses rebalancing until a new one is elected.
 - Bad, because a rebalance is a decision made *for* a worker rather than by it,
   so a worker that declines to comply has to be forced eventually
-  ([ADR-0039](0039-split-revocation-cooperative-then-forced.md)) where previously
-  it could decline.
+  ([ADR-0039](0039-split-revocation-cooperative-then-forced.md)) where
+  previously it could decline.
 
 ### Confirmation
 
@@ -82,9 +82,9 @@ unchanged and still rests entirely on
 ## More information
 
 - Landed in `e79dfc2` (#64).
-- Supersedes [ADR-0023](0023-dynamic-work-stealing-coordination.md), whose record
-  is kept: the reasoning that led there was sound for what was known at the time,
-  and the convergence proof was correct about a property that turned out not to
-  be the problem.
+- Supersedes [ADR-0023](0023-dynamic-work-stealing-coordination.md), whose
+  record is kept: the reasoning that led there was sound for what was known at
+  the time, and the convergence proof was correct about a property that turned
+  out not to be the problem.
 - [Work assignment](../user-guide/02-concepts/08-work-assignment.mdx) — the
   normative specification.

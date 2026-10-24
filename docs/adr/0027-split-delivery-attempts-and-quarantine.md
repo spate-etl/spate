@@ -7,7 +7,11 @@ description: "Only non-graceful tenancy ends count toward a split's quarantine t
 - **Status:** accepted
 - **Date:** 2026-07-17 (recorded 2026-08-06 from the decision log)
 - **Supersedes:** —
-- **Superseded by:** [ADR-0070](0070-on-kafka-a-units-attempt-is-recorded-before-the-unit-is-read.md), for which tenancy ends count; [ADR-0076](0076-a-bounded-job-on-a-feed-ends-on-an-empty-feed-and-a-checked-dead-letter-destination.md), for a quarantined split blocking completion
+- **Superseded by:**
+  [ADR-0070](0070-on-kafka-a-units-attempt-is-recorded-before-the-unit-is-read.md),
+  for which tenancy ends count;
+  [ADR-0076](0076-a-bounded-job-on-a-feed-ends-on-an-empty-feed-and-a-checked-dead-letter-destination.md),
+  for a quarantined split blocking completion
 
 ## Context and problem statement
 
@@ -61,5 +65,5 @@ the `Stalled` outcome is structural rather than a check that could be skipped.
 ## More information
 
 - Landed in `d92b3d4` (#40).
-- [ADR-0035](0035-s3-poison-policy.md) — which failures the object-storage source
-  classifies as split-poisoning rather than pipeline-fatal.
+- [ADR-0035](0035-s3-poison-policy.md) — which failures the object-storage
+  source classifies as split-poisoning rather than pipeline-fatal.

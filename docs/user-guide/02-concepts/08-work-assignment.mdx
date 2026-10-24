@@ -334,10 +334,10 @@ the watch. On such a store:
 - **Not a fence.** See the contract above.
 - **Not exactly-once.** Forced revocations and takeovers duplicate; they
   never lose.
-- **Not work stealing.** Workers do not select work for themselves and
-  cannot take a split from a peer.
-  [ADR-0038](../../adr/0038-leader-computed-sticky-assignment.md) records
-  why, superseding [ADR-0023](../../adr/0023-dynamic-work-stealing-coordination.md).
+- **Not work stealing.** Workers do not select work for themselves and cannot
+  take a split from a peer.
+  [ADR-0038](../../adr/0038-leader-computed-sticky-assignment.md) records why,
+  superseding [ADR-0023](../../adr/0023-dynamic-work-stealing-coordination.md).
 
 ## Where this lives in the code
 

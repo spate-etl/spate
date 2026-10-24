@@ -12,8 +12,8 @@ description: "The Kafka sink encodes a private length-delimited framing for key,
 ## Context and problem statement
 
 The frozen sink contract carries a sealed batch as a list of opaque byte frames:
-the encoder produces them on the pipeline threads and the writer sends them. That
-shape came from a row-oriented destination, where a frame is rows.
+the encoder produces them on the pipeline threads and the writer sends them.
+That shape came from a row-oriented destination, where a frame is rows.
 
 Kafka's unit is not a row. It is a message, made of a key, a set of headers, a
 payload, and possibly a tombstone marker. Four fields that the contract has
@@ -52,8 +52,8 @@ signaling and drain choreography, all of which work unchanged.
 - Bad, because the connector encodes and immediately re-decodes its own data, so
   there is a serialization round trip that exists only to satisfy the seam's
   shape.
-- Bad, because a reader of the sealed batch cannot tell what is in it; the frames
-  are opaque and only the owning connector can interpret them.
+- Bad, because a reader of the sealed batch cannot tell what is in it; the
+  frames are opaque and only the owning connector can interpret them.
 
 ### Confirmation
 

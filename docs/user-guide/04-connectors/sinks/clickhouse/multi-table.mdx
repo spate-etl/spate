@@ -47,8 +47,8 @@ sinks:
 
 `sink:` and `sinks:` are mutually exclusive; a single-sink pipeline keeps using
 `sink:` (addressed as `"default"`). See the
-[configuration reference](../../../07-reference/configuration.mdx#sinks). Every key
-documented for a single [ClickHouse sink](README.mdx#configuration) applies
+[configuration reference](../../../07-reference/configuration.mdx#sinks). Every
+key documented for a single [ClickHouse sink](README.mdx#configuration) applies
 per-entry.
 
 ## Wiring: one sink, encoder, and router per table
@@ -66,18 +66,18 @@ and runs with
 ```
 
 `payments_sink` and `refunds_sink` come from the `sinks:` map's `payments` and
-`refunds` entries, resolved by `sink_config(name)`. Each mints a
-`NativeEncoder` over the row family that table receives
-(`Owned<PaymentRow>` and `Owned<RefundRow>`, two structs with different
-columns) from its own fetched schema, and a `DistributedRouter` over the same
-family from the `ShardKey` extractors `payment_key` and `refund_key`, which
-shard both tables on `order_id`. Sharding both on the same key is what keeps an
-order's payment and its refund on one shard, so a join across the two tables
-stays local, but only while the two sinks also carry the same `shards` topology.
-Placement is the key's hash over the shard weights, so scaling one table's
-shard list without the other separates the rows the shared key was chosen to
-keep together. The split's input family is `Owned<StorefrontEvent>`, the sum type the
-chain decodes the union into. See the concept page for the
+`refunds` entries, resolved by `sink_config(name)`. Each mints a `NativeEncoder`
+over the row family that table receives (`Owned<PaymentRow>` and
+`Owned<RefundRow>`, two structs with different columns) from its own fetched
+schema, and a `DistributedRouter` over the same family from the `ShardKey`
+extractors `payment_key` and `refund_key`, which shard both tables on
+`order_id`. Sharding both on the same key is what keeps an order's payment and
+its refund on one shard, so a join across the two tables stays local, but only
+while the two sinks also carry the same `shards` topology. Placement is the
+key's hash over the shard weights, so scaling one table's shard list without the
+other separates the rows the shared key was chosen to keep together. The split's
+input family is `Owned<StorefrontEvent>`, the sum type the chain decodes the
+union into. See the concept page for the
 [routing DSL walkthrough](../../../02-concepts/06-multi-sink.mdx#the-routing-dsl).
 
 ## What carries over per table, unchanged
@@ -90,16 +90,18 @@ Each branch is a full ClickHouse sink, so everything on the
   chooses its own.
 - **Direct-to-shard writes** with `wait_end_of_query=1`; a table's write is its
   own durable-ack point. The split holds the source batch until *every* table it
-  touched has acked (see [delivery](../../../02-concepts/06-multi-sink.mdx#at-least-once-across-destinations-is-free)).
+  touched has acked (see
+  [delivery](../../../02-concepts/06-multi-sink.mdx#at-least-once-across-destinations-is-free)).
 - **Per-batch `insert_deduplication_token`** per table. The same
   [window warning](README.mdx#deduplication-tokens-and-the-window-warning)
   applies: set `non_replicated_deduplication_window` on **every** target table,
   or retries duplicate silently.
 - **Replica rotation, circuit breaker, readiness probe** per table. `/readyz`
   reports connected only when every table's replicas probe healthy.
-- **Metrics per table**: each sink's `spate_sink_*` series carry the sink name as
-  their `component` label, so `spate_sink_records_total{component="payments"}`
-  and `{component="refunds"}` are distinct.
+- **Metrics per table**: each sink's `spate_sink_*` series carry the sink name
+  as their `component` label, so
+  `spate_sink_records_total{component="payments"}` and `{component="refunds"}`
+  are distinct.
 
 ## Per-table part tuning and the checkpoint-lag cost
 
@@ -133,6 +135,9 @@ with its cluster.
 
 ## Related
 
-- [Multi-sink split](../../../02-concepts/06-multi-sink.mdx) — the concept, the routing DSL, and the at-least-once and write-size trade.
-- [ClickHouse sink](README.mdx) — everything a single sink does, which each branch inherits.
-- [Configuration reference](../../../07-reference/configuration.mdx#sinks) — the `sinks:` map.
+- [Multi-sink split](../../../02-concepts/06-multi-sink.mdx) — the concept, the
+  routing DSL, and the at-least-once and write-size trade.
+- [ClickHouse sink](README.mdx) — everything a single sink does, which each
+  branch inherits.
+- [Configuration reference](../../../07-reference/configuration.mdx#sinks) — the
+  `sinks:` map.

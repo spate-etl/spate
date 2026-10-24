@@ -136,8 +136,8 @@ not ask for. Set `fetch.max.bytes` explicitly whenever you lower the byte cap.
 When a partition's queue crosses a threshold, librdkafka stops fetching it and
 waits `fetch.queue.backoff.ms` (default **1000**) before reconsidering. With a
 shallow queue and a fast consumer, the backoff becomes the limiter instead of
-the queue size: the queue drains in milliseconds and then idles. If a memory limit
-forces you to cap prefetch, drop this to a few tens of milliseconds so the
+the queue size: the queue drains in milliseconds and then idles. If a memory
+limit forces you to cap prefetch, drop this to a few tens of milliseconds so the
 partition is re-offered promptly.
 
 ### Diagnosing it
@@ -146,20 +146,20 @@ partition is re-offered promptly.
 `queued.min.messages`, re-measure, and see whether throughput moves. These
 series are still worth reading, with their limits understood:
 
-`spate_kafka_source_fetch_queue_messages` is the local queue depth. A value at or
-near **zero** means the pipeline is draining the queue as fast as the broker
+`spate_kafka_source_fetch_queue_messages` is the local queue depth. A value at
+or near **zero** means the pipeline is draining the queue as fast as the broker
 refills it, i.e. the source is **broker-bound** rather than chain- or
 sink-bound. It does *not* separate "prefetch is too shallow" from "prefetch is
 fine and the broker is the limit": in the source-ceiling study it reads ~0 both
 at the shallow depth that runs 22x slow *and* at the recommended depth. Use it
-to decide whether the bottleneck is upstream or downstream of the source, not
-to size the queue.
+to decide whether the bottleneck is upstream or downstream of the source, not to
+size the queue.
 
 `sum(spate_source_lag_records)` is the total consumer lag across the partitions
 this member owns; the family is per-partition, so it must be aggregated in the
 query. A lag that is large and not shrinking is the signal that catching up
-matters at all, since prefetch depth is only worth tuning when there is a backlog to
-prefetch.
+matters at all, since prefetch depth is only worth tuning when there is a
+backlog to prefetch.
 
 :::note Prefetch only matters when there is a backlog
 A consumer caught up with its producers is tail-following, so nothing is
@@ -267,8 +267,8 @@ diminishing returns from the fetch path, not a cliff.
 `MODE=perthread` (several `BaseConsumer`s in one process instead of one client
 with several drain threads) wins only while fetch-bound (+108% at four threads
 with no work) and loses heavily once work is present (−56% at 5 µs). This says
-nothing about **replicas**, since separate pods do not share a NIC, a page cache or a
-CPU, and a single-box rig cannot measure that. See
+nothing about **replicas**, since separate pods do not share a NIC, a page cache
+or a CPU, and a single-box rig cannot measure that. See
 [More replicas](#when-you-have-run-out-of-vertical-headroom).
 :::
 

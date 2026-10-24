@@ -41,9 +41,9 @@ records, the plan record and a verdict marker. A worker reads the records of a
 split it is assigned and has not seen. The leader re-reads each assigned
 runnable split that shows no lease every poll interval, reads the spec of any
 split it has seen without one, and is the only worker that reconciles, over the
-split records only. A new leader lists every split and spec record before it plans or
-publishes. A worker that reports the job terminal writes the marker, and a
-worker that sees it judges from a listing.
+split records only. A new leader lists every split and spec record before it
+plans or publishes. A worker that reports the job terminal writes the marker,
+and a worker that sees it judges from a listing.
 
 The safety boundary of [ADR-0026](0026-coordination-fencing.md) is unchanged:
 ownership moves only through the progress record's compare-and-swap, and these
@@ -73,7 +73,8 @@ multi-worker scenarios run over the polled test store in default CI.
 ## More information
 
 - Landed in #815.
-- The user guide's [work assignment](../user-guide/02-concepts/08-work-assignment.mdx#discovery)
+- The user guide's
+  [work assignment](../user-guide/02-concepts/08-work-assignment.mdx#discovery)
   page describes discovery on each kind of store.
 - This record qualifies ADR-0024's consequence that "`watch` exists, so a worker
   learns about a change instead of discovering it on its next poll": on a store

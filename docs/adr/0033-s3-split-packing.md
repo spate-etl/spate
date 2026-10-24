@@ -31,9 +31,9 @@ share physical locality, get scattered across splits.
 
 ## Decision outcome
 
-Chosen option: "Listing-order first-fit with a bounded lookback", because it is a
-pure function of the listing order: packing holds only a bounded window of open
-bins, and objects that listed together stay together.
+Chosen option: "Listing-order first-fit with a bounded lookback", because it is
+a pure function of the listing order: packing holds only a bounded window of
+open bins, and objects that listed together stay together.
 
 Three parameters carry the design. A lookback of ten bins is enough to place a
 small object well without unbounded search. Each object is charged

@@ -45,8 +45,8 @@ declares what it needs, and the deployer's binary decides what supplies it.
 
 ### Consequences
 
-- Good, because a new coordinated source implements a planner and a split reader,
-  not a distributed protocol.
+- Good, because a new coordinated source implements a planner and a split
+  reader, not a distributed protocol.
 - Good, because a coordination bug is fixed once, in a component with its own
   test suite, rather than in each connector.
 - Bad, because the driver has to anticipate what sources need, and a source with

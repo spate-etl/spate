@@ -32,13 +32,13 @@ refusing it must not be able to pin a rebalance open.
 ## Decision outcome
 
 Chosen option: "Cooperative first with a bounded wait, then forced", because it
-takes the cheap path when it is available and keeps the rebalance bounded when it
-is not.
+takes the cheap path when it is available and keeps the rebalance bounded when
+it is not.
 
 The leader stops assigning the split. The owner stops intake at a safe boundary,
 chases its tail to a final fenced commit, and releases, **replaying nothing**. A
-source that declines, or whose drain outruns the deadline, has its release forced
-and its uncommitted tail replays under the next owner.
+source that declines, or whose drain outruns the deadline, has its release
+forced and its uncommitted tail replays under the next owner.
 
 This deliberately reverses the earlier "no driver-side deadline" decision taken
 with the negotiated handoff. That decision was correct while the request was

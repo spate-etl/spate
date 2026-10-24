@@ -84,7 +84,8 @@ startup WARN says so.
 - Bad, because a solo run on the in-process feed holds one unit for each
   listed part not yet read, in memory and outside `units_held`, and lists from
   the beginning after a restart.
-- Neutral, because the end marker's run id is what [the bounded-job record](0076-a-bounded-job-on-a-feed-ends-on-an-empty-feed-and-a-checked-dead-letter-destination.md)
+- Neutral, because the end marker's run id is what
+  [the bounded-job record](0076-a-bounded-job-on-a-feed-ends-on-an-empty-feed-and-a-checked-dead-letter-destination.md)
   reads, and the deployment shape of a bounded job's workers is that record's,
   since a feed worker never ends by itself.
 - Neutral, because `a_timed_out_produce_holds_the_checkpoint`, which ADR-0074's

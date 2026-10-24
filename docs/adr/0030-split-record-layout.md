@@ -38,12 +38,12 @@ Recomputing the specification on demand was rejected because it would make every
 claim re-list the source.
 
 A second problem is solved alongside it. The count of planned splits is
-**recounted from an authoritative listing at every publish**, rather than carried
-forward. Without that, a leader that crashed between seeding the split records
-and publishing the plan would leave the two permanently disagreeing, and terminal
-detection ("are all splits complete?") would be wrong forever with nothing to
-correct it. Recounting makes that failure self-healing: the next publish observes
-what exists.
+**recounted from an authoritative listing at every publish**, rather than
+carried forward. Without that, a leader that crashed between seeding the split
+records and publishing the plan would leave the two permanently disagreeing, and
+terminal detection ("are all splits complete?") would be wrong forever with
+nothing to correct it. Recounting makes that failure self-healing: the next
+publish observes what exists.
 
 ### Consequences
 

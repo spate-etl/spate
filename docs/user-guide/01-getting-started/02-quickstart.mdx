@@ -45,11 +45,11 @@ Then the builder itself:
 ```rust file=crates/spate/examples/memory_pipeline.rs region=init
 ```
 
-`Pipeline::from_config` owns process initialization. It installs the
-metrics exporter *before any metric handle can exist* and builds the shared
-tokio I/O runtime the sink workers run on. Telemetry init is idempotent and first-call-wins. Call
-`spate::telemetry::init` yourself first if you want pretty logs instead of
-the builder's JSON default. The why behind this ordering is in
+`Pipeline::from_config` owns process initialization. It installs the metrics
+exporter *before any metric handle can exist* and builds the shared tokio I/O
+runtime the sink workers run on. Telemetry init is idempotent and
+first-call-wins. Call `spate::telemetry::init` yourself first if you want pretty
+logs instead of the builder's JSON default. The why behind this ordering is in
 [Architecture](../02-concepts/01-architecture.mdx).
 
 ## 3. Source and sink
@@ -82,10 +82,10 @@ Things to notice:
   monomorphize into one loop, with a single virtual call per *batch* at the
   chain boundary. See [Architecture](../02-concepts/01-architecture.mdx).
 - `.into_runtime(source)` instead of `.run(source)` hands you the runtime
-  *before* it starts, so you can grab a `ShutdownHandle` and spawn the run.
-  That is the pattern for [testing pipelines](../03-guides/testing-pipelines.mdx).
-  Production binaries usually call `.run(source)`, which blocks until
-  SIGTERM or a fatal error.
+  *before* it starts, so you can grab a `ShutdownHandle` and spawn the run. That
+  is the pattern for [testing pipelines](../03-guides/testing-pipelines.mdx).
+  Production binaries usually call `.run(source)`, which blocks until SIGTERM or
+  a fatal error.
 
 ## 5. Drive it and observe the guarantee
 
@@ -95,11 +95,11 @@ committed watermark to cover the last offset:
 ```rust file=crates/spate/examples/memory_pipeline.rs region=drive
 ```
 
-`wait_committed` observes the at-least-once contract: the watermark
-advances only after the sink acknowledged the data durably. The filtered
-empty word counts as delivered too, since an intentional drop must not
-stall the commit. [Delivery guarantees](../02-concepts/02-delivery-guarantees.mdx)
-explains the machinery.
+`wait_committed` observes the at-least-once contract: the watermark advances
+only after the sink acknowledged the data durably. The filtered empty word
+counts as delivered too, since an intentional drop must not stall the commit.
+[Delivery guarantees](../02-concepts/02-delivery-guarantees.mdx) explains the
+machinery.
 
 Finally, read back what the sink captured:
 

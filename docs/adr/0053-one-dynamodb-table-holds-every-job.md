@@ -7,7 +7,8 @@ description: "One operator-provisioned DynamoDB table holds every job, keyed by 
 - **Status:** deprecated
 - **Date:** 2026-09-29
 - **Supersedes:** —
-- **Superseded by:** [ADR-0057](0057-a-deleted-dynamodb-ephemeral-key-leaves-a-revision-floor.md)
+- **Superseded by:**
+  [ADR-0057](0057-a-deleted-dynamodb-ephemeral-key-leaves-a-revision-floor.md)
   (partition keys)
 
 ## Context and problem statement
@@ -84,8 +85,9 @@ one table see nothing of each other, against DynamoDB Local.
 there. In `crates/spate-coordination/src/store/dynamodb/tests.rs`,
 `startup_rejects_the_wrong_schema_an_lsi_and_replicas`,
 `a_missing_table_is_created_only_when_allowed` and `a_meta_mismatch_is_fatal`
-pin the same checks over the in-memory table, and `a_write_that_landed_resolves_won`
-reads the items back at `job#d` and `job#e`. Nothing pins the IAM condition.
+pin the same checks over the in-memory table, and
+`a_write_that_landed_resolves_won` reads the items back at `job#d` and `job#e`.
+Nothing pins the IAM condition.
 
 ## Evidence
 

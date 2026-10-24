@@ -7,7 +7,9 @@ description: "Object-storage failures are classified by scope: an unreadable obj
 - **Status:** accepted
 - **Date:** 2026-07-18 (recorded 2026-08-06 from the decision log)
 - **Supersedes:** —
-- **Superseded by:** [ADR-0077](0077-a-notification-units-read-classifies-a-deleted-or-overwritten-object.md), for a precondition failure on a notification unit
+- **Superseded by:**
+  [ADR-0077](0077-a-notification-units-read-classifies-a-deleted-or-overwritten-object.md),
+  for a precondition failure on a notification unit
 
 ## Context and problem statement
 
@@ -15,8 +17,9 @@ An object-storage backfill fails in two very different ways, and the framework
 has to tell them apart.
 
 One object may be unreadable: deleted after planning, changed underneath a
-version precondition, corrupt, or too large for the read budget. That affects one
-split, and killing a fleet-wide backfill over it wastes everything already done.
+version precondition, corrupt, or too large for the read budget. That affects
+one split, and killing a fleet-wide backfill over it wastes everything already
+done.
 
 Or the credentials may be wrong, or the endpoint misconfigured. That affects
 every object on every instance, and retrying it is a fleet spinning against a

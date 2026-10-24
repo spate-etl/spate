@@ -4,25 +4,26 @@ description: "Every metric family and its labels, plus alerting starting points 
 
 # Metrics
 
-Spate instruments every pipeline stage through the [`metrics`](https://crates.io/crates/metrics)
-facade. The framework installs an exporter selected by the `metrics` config
-section: `prometheus` exposes a scrape endpoint on the admin server, which the
-`admin` section binds; `none` disables export, and that endpoint answers 404.
-Pipeline authors and connectors register their own metrics through the same
-facade, and anything recorded is exported alongside the framework's. The
-recommended path is a `Meter`: it attaches the three standard labels below and
-**auto-prefixes the name `spate_<namespace>_`**, so custom series live under the
-same `spate_` umbrella and an operator finds everything under one root. You pass a
-local name (`schema_fetches_total`); the `Meter` adds the prefix. The namespace
-is `custom` for pipeline-author metrics (`spate_custom_*`) or a segment a
-connector claims (`spate_kafka_*`), and it can never be one of the framework's
-reserved stage roots (`source`, `deser`, `operator`, `queue`, `backpressure`,
-`sink`, `checkpoint`, `coordination`, `e2e`, `pipeline`), so custom families
-cannot collide with a framework metric. A built-in source or sink receives its
-`Meter` from the runtime, scoped by its declared `component_type` and its role
-(`spate_<component_type>_source_*` / `_sink_*`), so a connector that is both a
-source and a sink keeps its families apart. Dropping to the raw `metrics` macros is the escape hatch for
-a metric you deliberately want *outside* the `spate_` namespace. See
+Spate instruments every pipeline stage through the
+[`metrics`](https://crates.io/crates/metrics) facade. The framework installs an
+exporter selected by the `metrics` config section: `prometheus` exposes a scrape
+endpoint on the admin server, which the `admin` section binds; `none` disables
+export, and that endpoint answers 404. Pipeline authors and connectors register
+their own metrics through the same facade, and anything recorded is exported
+alongside the framework's. The recommended path is a `Meter`: it attaches the
+three standard labels below and **auto-prefixes the name `spate_<namespace>_`**,
+so custom series live under the same `spate_` umbrella and an operator finds
+everything under one root. You pass a local name (`schema_fetches_total`); the
+`Meter` adds the prefix. The namespace is `custom` for pipeline-author metrics
+(`spate_custom_*`) or a segment a connector claims (`spate_kafka_*`), and it can
+never be one of the framework's reserved stage roots (`source`, `deser`,
+`operator`, `queue`, `backpressure`, `sink`, `checkpoint`, `coordination`,
+`e2e`, `pipeline`), so custom families cannot collide with a framework metric. A
+built-in source or sink receives its `Meter` from the runtime, scoped by its
+declared `component_type` and its role (`spate_<component_type>_source_*` /
+`_sink_*`), so a connector that is both a source and a sink keeps its families
+apart. Dropping to the raw `metrics` macros is the escape hatch for a metric you
+deliberately want *outside* the `spate_` namespace. See
 [Instrumenting connectors](user-guide/06-extending/instrumenting-connectors.mdx).
 
 ## Conventions
@@ -261,8 +262,8 @@ seal ─────────────────────────
 
 Note where the span starts. `linger` and the chunk's time in the shard queue
 both elapse *before* the seal, so neither is in this histogram. If you are
-budgeting end-to-end freshness rather than commit lag, `spate_e2e_latency_seconds`
-is the family that spans them.
+budgeting end-to-end freshness rather than commit lag,
+`spate_e2e_latency_seconds` is the family that spans them.
 
 So a rising flush p99 is not evidence about the sink. It is equally consistent
 with a sink that has not slowed down at all while the shard queues behind its
@@ -486,11 +487,14 @@ Configured on the exporter, by name suffix or full name:
   replica set, not the server. Keep a flush-duration alert too if you have a
   commit-lag SLO, since that is the family the watermark waits on, but do not
   read it as sink latency.
-- `increase(spate_coordination_split_lease_headroom_seconds_bucket{le="2.5"}[15m]) > 0`
-  at the default 30s lease — a worker came within 2.5s of self-fencing a
-  split, on its own clock. Use a bucket boundary from
-  [Histogram buckets](#histogram-buckets) at or below the margin you want;
-  any other `le` matches no series.
-Each connector adds alerts over its own families; those live in the
-connector's `## Metrics` section, indexed under
-[Connector families](#connector-families).
+- A worker came within 2.5s of self-fencing a split, on its own clock. At the
+  default 30s lease, alert on this expression:
+
+  ```promql
+  increase(spate_coordination_split_lease_headroom_seconds_bucket{le="2.5"}[15m]) > 0
+  ```
+
+  Use a bucket boundary from [Histogram buckets](#histogram-buckets) at or below
+  the margin you want; any other `le` matches no series. Each connector adds
+  alerts over its own families; those live in the connector's `## Metrics`
+  section, indexed under [Connector families](#connector-families).

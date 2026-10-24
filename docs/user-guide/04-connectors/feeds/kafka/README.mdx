@@ -116,11 +116,15 @@ through, and set how long a member that dies keeps its partitions (see
 <SecuringKafka />
 
 A SASL authentication failure or a rejected TLS handshake, as listed above,
-fails connecting. `KafkaFeed::connect` and `KafkaFeedPublisher::connect`
-return `KafkaFeedError::Refused` as soon as the client reports the rejection,
-naming the read under way and librdkafka's text, such as
-`… SSL handshake failed: … certificate verify failed …` or
-`… SASL authentication error: Authentication failed: Invalid username or password …`.
+fails connecting. `KafkaFeed::connect` and `KafkaFeedPublisher::connect` return
+`KafkaFeedError::Refused` as soon as the client reports the rejection, naming
+the read under way and librdkafka's text, such as these:
+
+```text
+… SSL handshake failed: … certificate verify failed …
+… SASL authentication error: Authentication failed: Invalid username or password …
+```
+
 A refused or reset connection stays retryable: the checks wait for a broker the
 client can use, and fail with `KafkaFeedError::Unavailable` once their bound
 passes.
@@ -167,25 +171,27 @@ error naming `KafkaFeed::connect`.
 
 ## Topics
 
-Create the four topics before the first worker starts. The feed never
-creates a topic, and connecting refuses a missing one (see
-[Startup checks](#startup-checks)). A topic can still go missing after the
-feed connects, as when it is deleted while the feed runs. librdkafka holds a
-write to a topic it has not yet seen in metadata. Once `topic.metadata.propagation.max.ms` (30 s by default) has passed
-since the worker first wrote to the topic, the next metadata response that
-lacks it marks the topic missing, and every write still held then stops the
-feed. After that, a publish to the missing work topic is reported to its
-caller as retryable, and an attempt, tombstone, retry or dead-letter write is
-sent again until the topic exists, with its partition committing nothing past
-it meanwhile. A write that times out while held is handled the same way. A
-deleted attempt topic also stops the feed through its follower, whose read of
-the topic then fails with an error the feed treats as fatal.
+Create the four topics before the first worker starts. The feed never creates a
+topic, and connecting refuses a missing one (see
+[Startup checks](#startup-checks)). A topic can still go missing after the feed
+connects, as when it is deleted while the feed runs. librdkafka holds a write to
+a topic it has not yet seen in metadata. Once
+`topic.metadata.propagation.max.ms` (30 s by default) has passed since the
+worker first wrote to the topic, the next metadata response that lacks it marks
+the topic missing, and every write still held then stops the feed. After that, a
+publish to the missing work topic is reported to its caller as retryable, and an
+attempt, tombstone, retry or dead-letter write is sent again until the topic
+exists, with its partition committing nothing past it meanwhile. A write that
+times out while held is handled the same way. A deleted attempt topic also stops
+the feed through its follower, whose read of the topic then fails with an error
+the feed treats as fatal.
 
-The work topic's partitions bound how many workers read at once: each partition of the
-work and retry topics is read by one member of the group.
+The work topic's partitions bound how many workers read at once: each partition
+of the work and retry topics is read by one member of the group.
 
-The feed reads the codecs the [Kafka source](../../sources/kafka/README.mdx#compression-codecs)
-reads, and a batch it cannot read stops the feed in the same cases.
+The feed reads the codecs the
+[Kafka source](../../sources/kafka/README.mdx#compression-codecs) reads, and a
+batch it cannot read stops the feed in the same cases.
 
 Kafka deletes a message when its topic's retention ends, whether or not the
 group has read it. A unit deleted before it is read is lost, which INV-1 places
@@ -262,22 +268,22 @@ the feed's clients joins the group, and refuse topics the feed cannot run on:
 - an attempt topic that reports no partitions;
 - a work topic whose `message.timestamp.type` is anything but `LogAppendTime`.
 
-The attempt topic's partition count, read here, places each attempt record.
-The checks read through two clients built from `brokers` and the `rdkafka`
+The attempt topic's partition count, read here, places each attempt record. The
+checks read through two clients built from `brokers` and the `rdkafka`
 passthrough, one for metadata and an admin client for configuration, with
-`allow.auto.create.topics` off, so reading a missing topic does not create
-it. The client's identity needs the `Describe` and `DescribeConfigs`
-operations on the four topics, and `Read` and `Write` on the attempt topic
-once the feed runs. A read the cluster refuses as unauthorized,
-or for an invalid topic name, fails with `KafkaFeedError::Refused`. So does a
-topic the cluster describes no configuration entry for, which is what a
-client without `DescribeConfigs` on it receives, and a rejected credential or
-TLS handshake (see [Security](#security-tls-mtls-sasl)). Any other failed
-read fails with `KafkaFeedError::Unavailable`. The checks take at most 30 seconds, and an
-error past that bound names the read under way. A publish-only handle's
-identity needs these operations on the four topics too, and `Write` on the
-work topic (see [A publish-only handle](#a-publish-only-handle)). A worker
-whose source publishes units, such as the
+`allow.auto.create.topics` off, so reading a missing topic does not create it.
+The client's identity needs the `Describe` and `DescribeConfigs` operations on
+the four topics, and `Read` and `Write` on the attempt topic once the feed runs.
+A read the cluster refuses as unauthorized, or for an invalid topic name, fails
+with `KafkaFeedError::Refused`. So does a topic the cluster describes no
+configuration entry for, which is what a client without `DescribeConfigs` on it
+receives, and a rejected credential or TLS handshake (see
+[Security](#security-tls-mtls-sasl)). Any other failed read fails with
+`KafkaFeedError::Unavailable`. The checks take at most 30 seconds, and an error
+past that bound names the read under way. A publish-only handle's identity needs
+these operations on the four topics too, and `Write` on the work topic (see
+[A publish-only handle](#a-publish-only-handle)). A worker whose source
+publishes units, such as the
 [S3 source](../../sources/s3/README.mdx#reading-a-notifications-object)
 re-enqueueing an overwritten object, needs `Write` on the work topic as well.
 Each unit published there starts its own delivery count.
@@ -289,8 +295,8 @@ topic's `message.timestamp.type` and the attempt topic's partition count; a
 publish-only handle logs its own line.
 
 The checks run only when the feed connects. A topic whose policy, partition
-count or timestamp type changes later goes unnoticed, and a topic deleted later is handled as
-[Topics](#topics) describes.
+count or timestamp type changes later goes unnoticed, and a topic deleted later
+is handled as [Topics](#topics) describes.
 
 ## How a unit finishes
 

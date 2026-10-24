@@ -14,11 +14,11 @@ description: "A non-generic Pipeline builder performs initialization in its cons
 Assembling a pipeline by hand meant installing telemetry, installing the metrics
 exporter, building an I/O runtime, constructing a source and a sink, wiring
 queues, and running the whole thing, in an order where several steps are
-silently wrong if taken out of sequence. The sharpest was metrics: a handle binds
-to whichever recorder exists when it is constructed, so anything built before
-`metrics::install` records into the void, with no error and no missing series to
-notice. The ordering was documented, which is another way of saying it had to be
-remembered.
+silently wrong if taken out of sequence. The sharpest was metrics: a handle
+binds to whichever recorder exists when it is constructed, so anything built
+before `metrics::install` records into the void, with no error and no missing
+series to notice. The ordering was documented, which is another way of saying it
+had to be remembered.
 
 ## Considered options
 
@@ -30,19 +30,19 @@ remembered.
 
 ## Decision outcome
 
-Chosen option: "A non-generic builder whose constructor performs initialization",
-because it converts the ordering hazards from documented into
+Chosen option: "A non-generic builder whose constructor performs
+initialization", because it converts the ordering hazards from documented into
 **unconstructible**. `Pipeline::from_config` installs telemetry and the exporter
-and builds the I/O runtime before it returns, so a builder cannot be held without
-a live recorder. It refuses to be constructed inside an async runtime, because it
-owns a blocking one.
+and builds the I/O runtime before it returns, so a builder cannot be held
+without a live recorder. It refuses to be constructed inside an async runtime,
+because it owns a blocking one.
 
 Four design points, each earned by a specific footgun:
 
 - **Coarse typestate.** One session-like state object rather than
-  state-parameter generics, so the builder stays nameable and storable. Typestate
-  generics would make `Pipeline` un-nameable in a struct field, which is where
-  people put it.
+  state-parameter generics, so the builder stays nameable and storable.
+  Typestate generics would make `Pipeline` un-nameable in a struct field, which
+  is where people put it.
 - **One I/O runtime.** The builder's runtime moves into the pipeline runtime
   rather than `run()` building a second one, which had been silently doubling
   `io_threads` behind the thread-reservation arithmetic.
@@ -56,8 +56,8 @@ Four design points, each earned by a specific footgun:
 
 The registry was rejected on principle: topology is code-defined, and a
 tag-to-constructor registry would reintroduce it as data, the thing
-[ADR-0009](0009-yaml-configuration-with-opaque-passthrough.md) deliberately keeps
-YAML out of.
+[ADR-0009](0009-yaml-configuration-with-opaque-passthrough.md) deliberately
+keeps YAML out of.
 
 Nothing in the builder touches the data path. It assembles the cold path and
 passes the user's chain factory through unchanged, so the chain stays fully

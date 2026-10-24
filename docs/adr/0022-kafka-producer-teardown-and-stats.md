@@ -16,8 +16,8 @@ something.
 
 Teardown: the sink holds a producer with messages queued and in flight, and each
 carries a raw opaque pointer to its batch's countdown
-([ADR-0016](0016-kafka-sink-ack-wiring.md)). Dropping that naively would leak the
-countdowns and could hang shutdown waiting for messages that will never be
+([ADR-0016](0016-kafka-sink-ack-wiring.md)). Dropping that naively would leak
+the countdowns and could hang shutdown waiting for messages that will never be
 reported on.
 
 Statistics: librdkafka reports produce-queue depth both in aggregate and per

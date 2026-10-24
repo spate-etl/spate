@@ -46,11 +46,11 @@ Acknowledging a 412 alone drops the only unit for a key whose overwrite sent no
 notification. An unpinned re-read can splice two versions under a further
 overwrite.
 
-For a unit from a notification, a 404 on the object read poisons the unit, and
-a 403 fails the pipeline. A precondition failure on a key without versioning,
-or a 416 a store sends for a range past the end of a smaller new object before
-it checks the precondition, stops the read, reads the key's current ETag with a HEAD, and publishes a unit
-for the key at that ETag through the feed trait
+For a unit from a notification, a 404 on the object read poisons the unit, and a
+403 fails the pipeline. A precondition failure on a key without versioning, or a
+416 a store sends for a range past the end of a smaller new object before it
+checks the precondition, stops the read, reads the key's current ETag with a
+HEAD, and publishes a unit for the key at that ETag through the feed trait
 ([ADR-0066](0066-a-feed-trait-replaces-the-split-coordination-traits.md)).
 Once the feed confirms the new unit and the sink has acknowledged every record
 already emitted from the old one, the old unit is acknowledged without
@@ -61,14 +61,15 @@ the work topic, where it starts its own attempt count
 It carries a re-enqueue count one higher than the old unit's. A unit whose
 re-enqueue count has reached the cap is, on a 412, acknowledged without
 re-enqueueing, and the worker counts its object in a metric; the key's later
-versions arrive through their own notifications. The cap is the `feed:` section's
-`attempt_cap`, which the feed-section record settles, and 10 when the section
-sets none or the backend refuses the key. The worker also counts in a metric
-each object whose read a 412 cut short, once per delivery. A HEAD that answers 404 is handled as a
-404 on the read, and one that answers 403 as a 403. A HEAD that reports the
-ETag the read was pinned to poisons the unit, since a unit at that ETag fails
-the same way. A publish the feed refuses or cannot confirm fails the old unit
-back. Units from the lister keep ADR-0035's classification.
+versions arrive through their own notifications. The cap is the `feed:`
+section's `attempt_cap`, which the feed-section record settles, and 10 when the
+section sets none or the backend refuses the key. The worker also counts in a
+metric each object whose read a 412 cut short, once per delivery. A HEAD that
+answers 404 is handled as a 404 on the read, and one that answers 403 as a 403.
+A HEAD that reports the ETag the read was pinned to poisons the unit, since a
+unit at that ETag fails the same way. A publish the feed refuses or cannot
+confirm fails the old unit back. Units from the lister keep ADR-0035's
+classification.
 
 A notification unit carries the object's ETag. The worker sends that ETag in
 `If-Match` in its quoted form, adding the quotes when the event leaves them

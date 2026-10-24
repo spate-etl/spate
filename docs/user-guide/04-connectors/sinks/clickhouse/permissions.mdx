@@ -41,10 +41,10 @@ a Distributed table, which the sink never inserts through.
 Every insert sets `insert_deduplicate`, `insert_deduplication_token`,
 `wait_end_of_query`, `input_format_with_names_use_header` and
 `input_format_with_types_use_header` (these are managed by the sink and cannot
-be overridden), plus any keys from your `settings:` map. A `readonly = 1` profile,
-or a settings **constraint** that pins any of these, fails the write. Keep the
-writer's profile at `readonly = 0` and leave those settings unconstrained. The
-tokens are what make retries idempotent; see the
+be overridden), plus any keys from your `settings:` map. A `readonly = 1`
+profile, or a settings **constraint** that pins any of these, fails the write.
+Keep the writer's profile at `readonly = 0` and leave those settings
+unconstrained. The tokens are what make retries idempotent; see the
 [dedup-window warning](./README.mdx#deduplication-tokens-and-the-window-warning).
 :::
 

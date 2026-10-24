@@ -15,11 +15,12 @@ Under `compression: lz4` or `zstd`, the ClickHouse sink's `clickhouse` client
 compressed every frame inside `InsertFormatted::send`, on the two-worker I/O
 runtime that also runs every shard worker and socket write. At high byte rates
 that work saturated the I/O runtime while the pipeline threads sat idle, and a
-retry compressed each frame again. [ADR-0067](0067-a-sink-codes-each-sealed-chunk-on-the-pipeline-thread.md)
-gives a sink a `FrameCodec` that runs once per sealed chunk on the pipeline
-thread. The question is how the ClickHouse sink produces a compressed insert
-body the server accepts from that hook, and what the writer does with frames
-the hook did not make.
+retry compressed each frame again.
+[ADR-0067](0067-a-sink-codes-each-sealed-chunk-on-the-pipeline-thread.md) gives
+a sink a `FrameCodec` that runs once per sealed chunk on the pipeline thread.
+The question is how the ClickHouse sink produces a compressed insert body the
+server accepts from that hook, and what the writer does with frames the hook did
+not make.
 
 ## Considered options
 
@@ -56,14 +57,14 @@ The zstd method keeps one `CCtx` per codec instance, which is one per pipeline
 thread per sink, and resets it per chunk, so no block depends on another.
 
 lz4 is lz4_flex, declared with exactly the client's features
-(`default-features = false, features = ["std"]`). Features unify into one
-copy, and the default `safe-encode` costs 34–41% more instructions per block,
-for the client's codec as well as the sink's. liblz4 was not taken: its
-wall-clock gain over lz4_flex was not consistent across platforms, and it adds
-a C dependency while the client still pulls in lz4_flex. zstd is declared directly
-in the crate with `default-features = false`, because a member's flag is
-ignored on a `workspace = true` entry that keeps the defaults, and the
-workspace entry keeps them for the S3 source.
+(`default-features = false, features = ["std"]`). Features unify into one copy,
+and the default `safe-encode` costs 34–41% more instructions per block, for the
+client's codec as well as the sink's. liblz4 was not taken: its wall-clock gain
+over lz4_flex was not consistent across platforms, and it adds a C dependency
+while the client still pulls in lz4_flex. zstd is declared directly in the crate
+with `default-features = false`, because a member's flag is ignored on a
+`workspace = true` entry that keeps the defaults, and the workspace entry keeps
+them for the S3 source.
 
 The writer checks every frame before it opens a request: at least the 25 bytes
 of checksum and header, the configured method byte, and a recorded size that

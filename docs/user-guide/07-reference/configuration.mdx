@@ -35,9 +35,10 @@ sink:
 
 **Conventions used in this appendix.** Keys are shown in `backticks`. A Default
 cell is one of exactly three forms (`docs/STYLE.md` § 3): `required`, a
-backticked literal, or `none` for optional-and-unset. Durations use humantime syntax
-(`5s`, `100ms`, `2m`); byte sizes accept binary suffixes (`256MiB`, `1GiB`) or a
-plain integer for bytes. Framework-section defaults are the exact values from
+backticked literal, or `none` for optional-and-unset. Durations use humantime
+syntax (`5s`, `100ms`, `2m`); byte sizes accept binary suffixes (`256MiB`,
+`1GiB`) or a plain integer for bytes. Framework-section defaults are the exact
+values from
 [`spate-core/src/config/mod.rs`](repo:crates/spate-core/src/config/mod.rs); the
 sink-pool and code-level defaults come from
 [`spate-core/src/sink/config.rs`](repo:crates/spate-core/src/sink/config.rs) and
@@ -125,8 +126,9 @@ Every sink connector maps its `batch`, `inflight`, `retry`, and `breaker`
 sub-sections onto the framework's `SinkPoolConfig`
 ([`spate-core/src/sink/config.rs`](repo:crates/spate-core/src/sink/config.rs)).
 The keys and defaults are **framework-owned and identical across sinks**, and
-this table is their single source of truth; each connector page shows only the keys
-it adds on top. See [Tuning](../05-deployment/tuning.mdx) for how to size them.
+this table is their single source of truth; each connector page shows only the
+keys it adds on top. See [Tuning](../05-deployment/tuning.mdx) for how to size
+them.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
@@ -170,9 +172,9 @@ sleeping between attempts on an available replica (`0` when it is not backing
 off), so a patient policy stays legible on a dashboard instead of looking like
 an idle shard. Alert above `(1 - jitter) × retry.max` rather than at
 `retry.max`, because the sleep is jittered downwards, so the gauge never sits
-exactly on the ceiling. When every replica is quarantined the shard sleeps waiting for
-the earliest of a probe window and an in-flight probe reporting, and this gauge
-reads `0`; `spate_sink_shard_healthy` covers that state.
+exactly on the ceiling. When every replica is quarantined the shard sleeps
+waiting for the earliest of a probe window and an in-flight probe reporting, and
+this gauge reads `0`; `spate_sink_shard_healthy` covers that state.
 
 Connectors add their own keys on top of these; a client-level timeout, for
 instance, is the connector's own, not the shared pool's. Those live on the
@@ -205,9 +207,10 @@ sink:
 
 Each `sinks.<name>.chunk` is independent, so a split tunes every destination
 separately. The knob can instead be set in code via `SinkOptions::with_chunk`
-(the install-time counterpart to the [code-level knobs](#code-level-knobs-not-yaml)
-below); setting **both** the YAML `chunk:` block and `with_chunk` on one sink is
-a load error, since it is declared in exactly one place.
+(the install-time counterpart to the
+[code-level knobs](#code-level-knobs-not-yaml) below); setting **both** the YAML
+`chunk:` block and `with_chunk` on one sink is a load error, since it is
+declared in exactly one place.
 
 :::note
 `chunk` is a **framework-reserved key** inside any sink body: the framework
@@ -218,9 +221,9 @@ key is rejected on a `source`/`deserializer` section).
 
 ## `source:`, `deserializer:`, `sink:`
 
-Each is a single-key mapping in which the key selects the component and the
-body belongs to it. The framework requires exactly one `source`, exactly one of `sink` **or**
-`sinks`, and treats `deserializer` as optional.
+Each is a single-key mapping in which the key selects the component and the body
+belongs to it. The framework requires exactly one `source`, exactly one of
+`sink` **or** `sinks`, and treats `deserializer` as optional.
 
 | Section | Required | Body documented in |
 |---|---|---|
@@ -250,20 +253,20 @@ configuration.
 For the worked `sinks:` example and the routing DSL, see
 [Configuring pipelines](../03-guides/configuring-pipelines.mdx#multiple-named-sinks)
 and [multi-sink split](../02-concepts/06-multi-sink.mdx);
-[ClickHouse multi-table](../04-connectors/sinks/clickhouse/multi-table.mdx) shows the
-connector end-to-end.
+[ClickHouse multi-table](../04-connectors/sinks/clickhouse/multi-table.mdx)
+shows the connector end-to-end.
 
 ## `coordination:` {#coordination}
 
-Optional. The coordinator of a [coordinated source](../02-concepts/07-source-coordination.mdx):
-the store its instances share, and the coordinator's tuning. Without the
-section a coordinated source runs solo over an in-process store with these
-defaults. A section that selects the
-[in-process store](../04-connectors/coordination/README.mdx) runs solo with its
-own tuning, and no other process shares that store. Set on a source that does
-not coordinate, the section fails startup. These keys are checked when
-the pipeline starts, before the source opens and before the pipeline threads
-run.
+Optional. The coordinator of a
+[coordinated source](../02-concepts/07-source-coordination.mdx): the store its
+instances share, and the coordinator's tuning. Without the section a coordinated
+source runs solo over an in-process store with these defaults. A section that
+selects the [in-process store](../04-connectors/coordination/README.mdx) runs
+solo with its own tuning, and no other process shares that store. Set on a
+source that does not coordinate, the section fails startup. These keys are
+checked when the pipeline starts, before the source opens and before the
+pipeline threads run.
 
 :::warning Deprecated
 The `coordination:` section is deprecated, and v0.4.0 removes it. A pipeline
@@ -307,18 +310,17 @@ Optional. The [feed](glossary.mdx#feed) a feed-reading source reads its
 [work units](glossary.mdx#work-unit) from. One key names the backend, and its
 body holds that backend's own keys. `units_held` applies whatever the backend;
 `attempt_cap` applies to the in-process feed and the
-[Kafka feed](../04-connectors/feeds/kafka/README.mdx), and a backend that
-cannot honor it refuses it; a source that re-enqueues units caps them at it,
-and its page says so. `location` names a job location for a source
-that reads one, and `settling_window` times the end of a job that names one;
-the in-process feed refuses both. Set on a source that reads no feed, the section fails startup, and a file
-that sets both `feed:` and [`coordination:`](#coordination) fails to load.
-The common keys and the backend count are checked when the file loads, and so
-are a `location` or a `settling_window` beside `memory` and a
-`settling_window` out of range, which the runtime also refuses when code
-passes the feed. The
-`memory` body is checked when the pipeline starts, before the source opens,
-unless code passes a feed to `Pipeline::feed`.
+[Kafka feed](../04-connectors/feeds/kafka/README.mdx), and a backend that cannot
+honor it refuses it; a source that re-enqueues units caps them at it, and its
+page says so. `location` names a job location for a source that reads one, and
+`settling_window` times the end of a job that names one; the in-process feed
+refuses both. Set on a source that reads no feed, the section fails startup, and
+a file that sets both `feed:` and [`coordination:`](#coordination) fails to
+load. The common keys and the backend count are checked when the file loads, and
+so are a `location` or a `settling_window` beside `memory` and a
+`settling_window` out of range, which the runtime also refuses when code passes
+the feed. The `memory` body is checked when the pipeline starts, before the
+source opens, unless code passes a feed to `Pipeline::feed`.
 
 ```yaml
 feed:

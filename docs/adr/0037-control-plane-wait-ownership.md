@@ -16,13 +16,13 @@ to block. The obvious place is the backend: it holds the store connection and
 the watch subscription, so it knows when a coordination event arrives.
 
 But coordination events are not the only thing worth waking for. A lane reaching
-**end of input**, on a pipeline thread and entirely outside the backend's view, is
-what triggers a terminal commit and frees the split. A backend that owns the wait
-can only ever be woken by half the things that matter.
+**end of input**, on a pipeline thread and entirely outside the backend's view,
+is what triggers a terminal commit and frees the split. A backend that owns the
+wait can only ever be woken by half the things that matter.
 
 That is not hypothetical: a finishing lane was noticed only between waits, so
-every split completion sat out the remainder of one. Capping the wait bounded the
-damage, at the cost of polling the control plane two hundred times a second.
+every split completion sat out the remainder of one. Capping the wait bounded
+the damage, at the cost of polling the control plane two hundred times a second.
 
 ## Considered options
 
@@ -44,11 +44,11 @@ The backend's poll takes no timeout and must not block. The driver hands it a
 single-slot waker, which lanes clone and signal on two edges: end of input, and
 poison.
 
-The waker setter is deliberately **not defaulted**. A default would let a backend
-silently skip it and park internally, which is strictly the worst arrangement.
-The backend parks *and* the driver parks on top, so a wakeup has to traverse
-both. Making it required means a backend that has not thought about this does not
-compile.
+The waker setter is deliberately **not defaulted**. A default would let a
+backend silently skip it and park internally, which is strictly the worst
+arrangement. The backend parks *and* the driver parks on top, so a wakeup has to
+traverse both. Making it required means a backend that has not thought about
+this does not compile.
 
 ### Consequences
 
@@ -71,5 +71,5 @@ silent double-park.
 ## More information
 
 - Landed in `84e1583` (#49).
-- [ADR-0029](0029-framework-owned-coordination-driver.md) — the driver this makes
-  responsible for waiting.
+- [ADR-0029](0029-framework-owned-coordination-driver.md) — the driver this
+  makes responsible for waiting.

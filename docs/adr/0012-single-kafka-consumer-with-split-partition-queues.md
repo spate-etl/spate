@@ -44,17 +44,17 @@ The choreography this obliged us to implement was verified on a spike before the
 decision was taken, because the failure modes are not obvious from the API. As
 understood at the time:
 
-- **Assign.** The rebalance callback runs on the controller's main-queue poll and
-  only receives a `&BaseConsumer`, so it pauses all assigned partitions there,
-  stopping fetch before it starts, which is what prevents pre-split messages
-  landing on the main queue. After the callback returns, the controller splits
-  every partition queue, distributes them, and resumes. Anything that still
-  arrives on the main queue is routed defensively rather than dropped.
+- **Assign.** The rebalance callback runs on the controller's main-queue poll
+  and only receives a `&BaseConsumer`, so it pauses all assigned partitions
+  there, stopping fetch before it starts, which is what prevents pre-split
+  messages landing on the main queue. After the callback returns, the controller
+  splits every partition queue, distributes them, and resumes. Anything that
+  still arrives on the main queue is routed defensively rather than dropped.
 - **Revoke.** Trip the drain barrier, flush and acknowledge, commit
   synchronously, then drop the revoked queues. Dropping a `PartitionQueue`
-  restores forwarding to the main queue, so the drop has to come last. Queues are
-  re-split after **every** rebalance; retained-partition queues happen to keep
-  working across eager rebalances, but nothing relies on that.
+  restores forwarding to the main queue, so the drop has to come last. Queues
+  are re-split after **every** rebalance; retained-partition queues happen to
+  keep working across eager rebalances, but nothing relies on that.
 - The consumer lives in an `Arc` from the start, because `split_partition_queue`
   requires it. `enable.partition.eof` is forced off.
 

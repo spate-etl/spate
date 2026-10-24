@@ -6,7 +6,8 @@ description: "The release scripts move into xtask behind traits a test can fail,
 
 - **Status:** accepted
 - **Date:** 2026-10-10
-- **Supersedes:** [ADR-0045](0045-rust-task-runner.md), the paragraph keeping `release.sh` and `release-version.sh` in `scripts/`
+- **Supersedes:** [ADR-0045](0045-rust-task-runner.md), the paragraph keeping
+  `release.sh` and `release-version.sh` in `scripts/`
 - **Superseded by:** —
 
 ## Context and problem statement

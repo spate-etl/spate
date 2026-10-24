@@ -7,14 +7,14 @@ description: "The Kafka source: one consumer per process, its partitions split i
 import SecuringKafka from '../../_securing-kafka.mdx';
 import LoggingKafka from '../../_logging-kafka.mdx';
 
-The Kafka source (`spate-kafka`, feature `kafka` on the `spate` facade) is
-built on `rdkafka` with a **single consumer per process**: one
-consumer-group member per pod, whose assigned partitions are split into
-per-partition queues (`split_partition_queue`) and fanned across pipeline
-threads as lanes. Payload borrows stay local to the polling thread, with zero
-copies out of librdkafka's buffers. Rationale and the validated trade-offs
-(group scale, unified drain choreography, ~3% vs per-thread consumers) are
-in [ADR-0012](../../../../adr/0012-single-kafka-consumer-with-split-partition-queues.md).
+The Kafka source (`spate-kafka`, feature `kafka` on the `spate` facade) is built
+on `rdkafka` with a **single consumer per process**: one consumer-group member
+per pod, whose assigned partitions are split into per-partition queues
+(`split_partition_queue`) and fanned across pipeline threads as lanes. Payload
+borrows stay local to the polling thread, with zero copies out of librdkafka's
+buffers. Rationale and the validated trade-offs (group scale, unified drain
+choreography, ~3% vs per-thread consumers) are in
+[ADR-0012](../../../../adr/0012-single-kafka-consumer-with-split-partition-queues.md).
 
 Construct it from the pipeline's opaque section:
 
@@ -287,8 +287,8 @@ reserved roots and the series-ownership rules.
 - [Performance tuning](./performance-tuning.mdx) — prefetch depth (the dominant
   throughput term for a backlogged consumer), thread sizing, and how to scale
   past one consumer.
-- [Configuring pipelines](../../../03-guides/configuring-pipelines.mdx) — how the
-  opaque section reaches this connector.
+- [Configuring pipelines](../../../03-guides/configuring-pipelines.mdx) — how
+  the opaque section reaches this connector.
 - [Graceful shutdown](../../../03-guides/graceful-shutdown.mdx) — the drain
   choreography rebalances share.
 - [Monitoring](../../../05-deployment/monitoring.mdx) — consumer lag and

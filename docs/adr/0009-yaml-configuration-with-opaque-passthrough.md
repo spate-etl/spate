@@ -69,12 +69,12 @@ diligence.
 
 `deny_unknown_fields` at every level of the typed section, and a validation
 denylist for passthrough properties that would break framework guarantees, for
-example `enable.auto.offset.store`, which would let the client commit offsets the
-checkpointer has not authorized.
+example `enable.auto.offset.store`, which would let the client commit offsets
+the checkpointer has not authorized.
 
 ## More information
 
 - Landed in `c8973e6`; the `yaml_serde` provenance was recorded in `2008877`
   after the library question was investigated.
-- [Configuration reference](../user-guide/07-reference/configuration.mdx) — every
-  framework-owned key.
+- [Configuration reference](../user-guide/07-reference/configuration.mdx) —
+  every framework-owned key.

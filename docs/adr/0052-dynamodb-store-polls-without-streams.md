@@ -75,12 +75,13 @@ over the polled store in default CI and against DynamoDB Local in
 
 ## Evidence
 
-The [cost model on #17](https://github.com/spate-etl/spate/issues/17#issuecomment-5879131523)
+The
+[cost model on #17](https://github.com/spate-etl/spate/issues/17#issuecomment-5879131523)
 prices the lease poll at `W × ⌈(W × L × 184 B + W × 157 B + 164 B) / 4 KiB⌉ / P`
 read units per second for `W` workers with `L` lanes polling every `P` seconds,
 from serialized record sizes. At 10M rows per second with 64 MiB splits the
-model gives 27 workers and 148.5 read units per second of
-lease polling, out of 322 in all.
+model gives 27 workers and 148.5 read units per second of lease polling, out of
+322 in all.
 
 A real-table run in #819 checked the model: three 10-minute windows against an
 on-demand table in `eu-west-2`, every worker in one process on a laptop with

@@ -13,8 +13,8 @@ description: "Oversized Kafka records are rejected at encode time under the conf
 
 A single record can be too large for the broker to accept. That is a
 **record-level** problem, one bad record among many good ones, and
-[ADR-0010](0010-skip-or-fail-record-error-policies.md) says record-level problems
-get a Skip or Fail policy.
+[ADR-0010](0010-skip-or-fail-record-error-policies.md) says record-level
+problems get a Skip or Fail policy.
 
 But the write path has no per-record policy available to it. A sealed batch is
 all-or-nothing: the writer either sends it or does not, and by the time the

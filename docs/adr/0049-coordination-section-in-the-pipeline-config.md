@@ -80,8 +80,8 @@ used.
 ### Confirmation
 
 `PipelineRuntime::run` calls the hook before the admin server binds or the
-pipeline threads start, and `crates/spate-core/src/pipeline/tests.rs` pins that an
-uncoordinated source fails startup with a section set. `crates/spate-s3`'s
+pipeline threads start, and `crates/spate-core/src/pipeline/tests.rs` pins that
+an uncoordinated source fails startup with a section set. `crates/spate-s3`'s
 `coordinated_pipeline` tests pin that the section builds the coordinator and
 that a section plus `with_coordinator` fails startup, and its
 `coordination_metrics` test that the section-built coordinator publishes the

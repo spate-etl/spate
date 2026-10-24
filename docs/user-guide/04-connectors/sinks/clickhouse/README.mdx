@@ -174,13 +174,14 @@ outside the table.
 
 ## RowBinary on pipeline threads
 
-Encoding is CPU work, so it happens on the pipeline threads:
-`ClickHouseEncoder` (the sink's `RowEncoder`) serializes each row to RowBinary
-using the crate's own serializer. Its type parameter is the record *family*,
-not the row type, so owned rows are wrapped as `Owned<Row>` (e.g.
+Encoding is CPU work, so it happens on the pipeline threads: `ClickHouseEncoder`
+(the sink's `RowEncoder`) serializes each row to RowBinary using the crate's own
+serializer. Its type parameter is the record *family*, not the row type, so
+owned rows are wrapped as `Owned<Row>` (e.g.
 `ClickHouseEncoder::<Owned<OrderRow>>::with_schema(sink.schema())`), while the
-encode path itself needs only `Row: serde::Serialize`. Sink workers on the I/O runtime only merge
-frames, seal batches, and drive inserts; they never touch a record.
+encode path itself needs only `Row: serde::Serialize`. Sink workers on the I/O
+runtime only merge frames, seal batches, and drive inserts; they never touch a
+record.
 
 :::warning
 The rows themselves carry no column names; position is everything. The row
@@ -223,30 +224,30 @@ land again. Design target tables to tolerate duplicates;
 ## Replica rotation and the circuit breaker
 
 Each shard has one worker that seals batches and dispatches up to
-`inflight.max_per_shard` concurrent writes, rotating round-robin across
-that shard's **healthy** replicas. A write that fails with a retryable error
-retries the *same sealed batch* (same token) on the next healthy replica with
-capped exponential backoff. A fatal error, such as a certificate that does not
-verify or a rejected password, abandons the batch instead. Per-replica circuit
-breakers quarantine a replica after `failure_threshold` consecutive failures
-for `open_for`, then admit trial writes again. The first probe to succeed closes the breaker, and
-`half_open_probes` caps how many probes run concurrently in one half-open
-episode rather than how many must succeed. ClickHouse wants few big inserts,
-so per-shard workers (rather than per-replica) keep batches full-sized while
-`max_per_shard` still provides replica parallelism.
+`inflight.max_per_shard` concurrent writes, rotating round-robin across that
+shard's **healthy** replicas. A write that fails with a retryable error retries
+the *same sealed batch* (same token) on the next healthy replica with capped
+exponential backoff. A fatal error, such as a certificate that does not verify
+or a rejected password, abandons the batch instead. Per-replica circuit breakers
+quarantine a replica after `failure_threshold` consecutive failures for
+`open_for`, then admit trial writes again. The first probe to succeed closes the
+breaker, and `half_open_probes` caps how many probes run concurrently in one
+half-open episode rather than how many must succeed. ClickHouse wants few big
+inserts, so per-shard workers (rather than per-replica) keep batches full-sized
+while `max_per_shard` still provides replica parallelism.
 
 ## Durability and replica loss
 
 The sink writes to **one** healthy replica per shard and relies on
 `ReplicatedMergeTree` (via ClickHouse Keeper) to replicate the part to the
-shard's other replicas and to heal a replica that was down when it returns.
-This is the client-side equivalent of `internal_replication=true`, where the
-sink never *fans out* a block to several replicas as a delivery strategy (that is
-the `internal_replication=false` footgun, where replicas drift).
-Cross-replica **retries** are the one deliberate exception. A write that fails
-with a retryable error re-sends the same sealed batch to the next healthy replica, and the deduplication token
-makes an ambiguous double-landing a server-side no-op rather than a
-duplicate.
+shard's other replicas and to heal a replica that was down when it returns. This
+is the client-side equivalent of `internal_replication=true`, where the sink
+never *fans out* a block to several replicas as a delivery strategy (that is the
+`internal_replication=false` footgun, where replicas drift). Cross-replica
+**retries** are the one deliberate exception. A write that fails with a
+retryable error re-sends the same sealed batch to the next healthy replica, and
+the deduplication token makes an ambiguous double-landing a server-side no-op
+rather than a duplicate.
 
 Replication is **asynchronous** by default (`insert_quorum=0`), which is the
 right posture for high-throughput streams. That creates a boundary:
@@ -347,5 +348,5 @@ and `spate_sink_write_duration_seconds{outcome}` for insert latency. See
   needs (minimal `INSERT`, plus the conditional system-table reads).
 - [Tuning](../../../05-deployment/tuning.mdx) — batch sizing and its coupling to
   `backpressure.max_inflight_bytes` (the sizing rule).
-- [Graceful shutdown](../../../03-guides/graceful-shutdown.mdx) — what happens to
-  in-flight batches at the drain deadline.
+- [Graceful shutdown](../../../03-guides/graceful-shutdown.mdx) — what happens
+  to in-flight batches at the drain deadline.

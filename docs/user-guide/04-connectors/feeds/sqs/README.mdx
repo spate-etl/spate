@@ -7,11 +7,11 @@ description: "The Amazon SQS feed: work units in a standard queue, renewed while
 The Amazon SQS feed (`spate-sqs`, feature `sqs` on the `spate` facade) carries
 [work units](../../../07-reference/glossary.mdx#work-unit) in one SQS standard
 queue that every worker of a pipeline reads. A received unit stays hidden from
-the other workers while its reader renews it, is deleted once every record in
-it is acknowledged, and returns to the queue when its reader fails it or
-stops. The queue's redrive policy moves a unit that keeps failing to the
-dead-letter queue. The backend lives in its own crate so that a source names
-no backend ([ADR-0069](../../../../adr/0069-feed-backends-live-in-their-own-crates.md)).
+the other workers while its reader renews it, is deleted once every record in it
+is acknowledged, and returns to the queue when its reader fails it or stops. The
+queue's redrive policy moves a unit that keeps failing to the dead-letter queue.
+The backend lives in its own crate so that a source names no backend
+([ADR-0069](../../../../adr/0069-feed-backends-live-in-their-own-crates.md)).
 
 Construct it from the pipeline's opaque section, with the I/O runtime handle,
 and pass it to `Pipeline::feed`:

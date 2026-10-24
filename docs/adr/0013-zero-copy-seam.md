@@ -15,7 +15,8 @@ description: "Untyped payload batches cross the one erasure boundary so borrowed
 the pipeline, so the chain can be stored as a trait object. That runs into a
 Rust limitation: a trait object cannot be parameterized by a lifetime that
 varies per call, and the record type here *is* lifetime-parameterized, because
-records borrow from the source's buffers ([ADR-0003](0003-poll-based-source-api.md)).
+records borrow from the source's buffers
+([ADR-0003](0003-poll-based-source-api.md)).
 
 Storing `Box` of a chain whose record type is `Record<'buf, T>` is not
 expressible. The naive fix, making records owned at the boundary, is a copy per
@@ -72,10 +73,11 @@ implementation tried.
 
 ## Evidence
 
-The borrowed arm emits a record roughly every 10 ns and allocates a fixed handful
-per *batch*, none per record, where the owned equivalent allocates once per
-record. Measured by `crates/spate-core/benches/chain_wall.rs`, held to absolute
-bounds by `crates/spate-core/tests/chain_alloc.rs` under a counting allocator.
+The borrowed arm emits a record roughly every 10 ns and allocates a fixed
+handful per *batch*, none per record, where the owned equivalent allocates once
+per record. Measured by `crates/spate-core/benches/chain_wall.rs`, held to
+absolute bounds by `crates/spate-core/tests/chain_alloc.rs` under a counting
+allocator.
 
 The allocation contrast is what that rig establishes. **Its two arms fan out
 differently, so a wall-clock ratio between them is not a quantity it measures.**
@@ -91,7 +93,7 @@ spike-measured and hand-recorded, with no committed rig.
   sink capacity (which engages backpressure) from an upstream dependency such as
   a schema fetch (retried without pausing the source, counted on
   `spate_deser_not_ready_total`); the boundary returns a resume cursor so
-  already-pushed records are never re-run through the operators; the trait gained
-  flush and drain hooks; and a raw payload carries the message key for shard
-  routing.
+  already-pushed records are never re-run through the operators; the trait
+  gained flush and drain hooks; and a raw payload carries the message key for
+  shard routing.
 - [ADR-0004](0004-static-operator-chain.md) — the chain this is the boundary of.

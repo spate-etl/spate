@@ -32,11 +32,12 @@ commit of unwritten data.
 
 ### Backpressure watermarks (high / low)
 
-The hysteresis thresholds on the in-flight byte [budget](#budget--in-flight-bytes):
-sources pause when usage crosses `high_ratio` × budget and may resume once
-it falls below `low_ratio` × budget and at least `min_pause` has elapsed.
-Unrelated to the [checkpoint watermark](#watermark), which is the same word
-for a different mechanism. See [Backpressure](../02-concepts/03-backpressure.mdx).
+The hysteresis thresholds on the in-flight byte
+[budget](#budget--in-flight-bytes): sources pause when usage crosses
+`high_ratio` × budget and may resume once it falls below `low_ratio` × budget
+and at least `min_pause` has elapsed. Unrelated to the
+[checkpoint watermark](#watermark), which is the same word for a different
+mechanism. See [Backpressure](../02-concepts/03-backpressure.mdx).
 
 ### Budget / in-flight bytes
 
@@ -56,14 +57,13 @@ virtual call per batch. Built by the chain factory you pass to
 
 ### Chunk
 
-The handoff unit between a pipeline thread and a shard worker: rows encoded
-(by the `RowEncoder`) into a frame targeting `ChunkConfig::target_bytes`
-(default 64 KiB), then coded by the sink's [frame codec](#frame-codec) if it has one,
-carrying its rows' acks as an [`AckSet`](#ackset).
-A chunk seals when it reaches the target, on every commit tick
-(`checkpoint.interval`), or on an idle lull, so while the pipeline is
-unblocked, a slow-filling buffer holds its acks for at most ~one checkpoint
-period. Workers merge chunks into
+The handoff unit between a pipeline thread and a shard worker: rows encoded (by
+the `RowEncoder`) into a frame targeting `ChunkConfig::target_bytes` (default 64
+KiB), then coded by the sink's [frame codec](#frame-codec) if it has one,
+carrying its rows' acks as an [`AckSet`](#ackset). A chunk seals when it reaches
+the target, on every commit tick (`checkpoint.interval`), or on an idle lull, so
+while the pipeline is unblocked, a slow-filling buffer holds its acks for at
+most ~one checkpoint period. Workers merge chunks into
 [sealed batches](#sealed-batch), so chunk size does not bound insert size.
 
 ### Component / `component_type` labels

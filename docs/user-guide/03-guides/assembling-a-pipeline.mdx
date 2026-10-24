@@ -78,13 +78,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 3. **The I/O runtime** — a tokio runtime with `pipeline.io_threads` workers
    (thread name `spate-io`) that will host sink workers and the admin server.
 
-The constructor does process init because **metric handles bind to the
-recorder present at the moment they are constructed**. A handle built before
-the exporter exists records into the void, with no error and missing
-series. Because the constructor installs the exporter, every handle built
-afterwards, framework or custom, records into the process's recorder. Under
-`exporter: prometheus` that recorder always exists. (Rationale: [ADR-0014](../../adr/0014-pipeline-builder-as-primary-assembly.md) and
-§ Metrics.)
+The constructor does process init because **metric handles bind to the recorder
+present at the moment they are constructed**. A handle built before the exporter
+exists records into the void, with no error and missing series. Because the
+constructor installs the exporter, every handle built afterwards, framework or
+custom, records into the process's recorder. Under `exporter: prometheus` that
+recorder always exists. (Rationale:
+[ADR-0014](../../adr/0014-pipeline-builder-as-primary-assembly.md) and §
+Metrics.)
 
 :::warning
 `Pipeline::from_config` must be called **outside any async runtime**,
@@ -111,10 +112,10 @@ I/O runtime is already alive, so:
 - `pipeline.io_handle()` — a `tokio::runtime::Handle` for background tasks
   that must start before `run` (a schema-registry fetcher, say). A connector
   that needs one says so on its page.
-- `pipeline.block_on(future)` — run an async pre-flight step to completion
-  on the I/O runtime, blocking the current thread. The canonical use is a
-  sink that reads the destination's schema before the chain exists
-  (see [Schema validation](../04-connectors/sinks/clickhouse/schema-validation.mdx)):
+- `pipeline.block_on(future)` — run an async pre-flight step to completion on
+  the I/O runtime, blocking the current thread. The canonical use is a sink that
+  reads the destination's schema before the chain exists (see
+  [Schema validation](../04-connectors/sinks/clickhouse/schema-validation.mdx)):
 
 ```rust file=crates/spate/examples/kafka_avro_to_clickhouse.rs region=sink
 ```

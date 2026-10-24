@@ -7,8 +7,10 @@ description: "Each handle may judge lease expiry on its own clock, and the Dynam
 - **Status:** superseded
 - **Date:** 2026-09-29
 - **Supersedes:** —
-- **Superseded by:** [ADR-0057](0057-a-deleted-dynamodb-ephemeral-key-leaves-a-revision-floor.md)
-  (revision consequence), [ADR-0065](0065-the-dynamodb-coordination-store-is-removed.md)
+- **Superseded by:**
+  [ADR-0057](0057-a-deleted-dynamodb-ephemeral-key-leaves-a-revision-floor.md)
+  (revision consequence),
+  [ADR-0065](0065-the-dynamodb-coordination-store-is-removed.md)
 
 ## Context and problem statement
 

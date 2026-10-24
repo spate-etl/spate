@@ -70,14 +70,14 @@ that cannot tolerate duplicates needs the replay-safe design
 ## Dead-lettering
 
 A feed counts the deliveries of each unit. A unit that reaches the feed's
-delivery cap without an acknowledgment moves to its dead-letter destination
-and is not delivered again, except in a window its backend's page describes. A unit that fails on every reader, such as one
-naming an object that no longer exists, ends there after a bounded number of
-attempts. A feed that counts only the deliveries its reader reported as failed
-does not count one whose reader stopped first, so a unit that stops every
-reader is delivered again without bound. Each backend's page says which it
-counts. The in-process feed keeps its dead letters in memory, with exact
-counts of the units it holds in each state.
+delivery cap without an acknowledgment moves to its dead-letter destination and
+is not delivered again, except in a window its backend's page describes. A unit
+that fails on every reader, such as one naming an object that no longer exists,
+ends there after a bounded number of attempts. A feed that counts only the
+deliveries its reader reported as failed does not count one whose reader stopped
+first, so a unit that stops every reader is delivered again without bound. Each
+backend's page says which it counts. The in-process feed keeps its dead letters
+in memory, with exact counts of the units it holds in each state.
 
 Dead-lettering is a property of the feed. The
 [record-level error policies](04-error-handling.mdx) still decide what happens
@@ -117,8 +117,11 @@ share its feed with storage notifications: notifications keep the window from
 closing, and an object both announce is read twice.
 
 :::note Connector specifics
-Re-running a stalled job: [S3](../04-connectors/sources/s3/README.mdx#how-a-bounded-job-ends).
-How each feed reads its depth: [Amazon SQS](../04-connectors/feeds/sqs/README.mdx#ending-a-bounded-job) · [Kafka](../04-connectors/feeds/kafka/README.mdx#ending-a-bounded-job).
+Re-running a stalled job:
+[S3](../04-connectors/sources/s3/README.mdx#how-a-bounded-job-ends). How each
+feed reads its depth:
+[Amazon SQS](../04-connectors/feeds/sqs/README.mdx#ending-a-bounded-job) ·
+[Kafka](../04-connectors/feeds/kafka/README.mdx#ending-a-bounded-job).
 :::
 
 ## How the control plane waits
@@ -135,8 +138,8 @@ when a unit becomes ready, for at most its poll timeout. A source can also hand
 that signal to its lanes, so a lane that reaches the end of its input or cannot
 read its unit ends the wait at once. A wait consumes the signal, and a receive
 that takes nothing raises none, so the control plane receives what it has room
-for before it waits. A source holds a bounded number of units at once and receives only
-while it holds fewer.
+for before it waits. A source holds a bounded number of units at once and
+receives only while it holds fewer.
 
 ## Related
 

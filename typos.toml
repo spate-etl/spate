@@ -1,0 +1,7 @@
+# Words the docs use on purpose. `mis` starts hyphenated words such as
+# `mis-ordering` and `mis-set`. `intervall` and `endpont` are misspelled keys
+# that the docs show being rejected, so the text must keep them.
+[default.extend-words]
+mis = "mis"
+intervall = "intervall"
+endpont = "endpont"

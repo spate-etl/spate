@@ -45,9 +45,9 @@ objects stays slow for the whole run, and adding an instance does nothing until
 the next job.
 
 A leader-elected worker runs the source's planner. Workers lease splits toward
-`min(max_in_flight, fair share)`, heartbeat at a third of the lease TTL, and when
-nothing is unclaimed, steal pairwise from a victim holding more than one above
-their own count.
+`min(max_in_flight, fair share)`, heartbeat at a third of the lease TTL, and
+when nothing is unclaimed, steal pairwise from a victim holding more than one
+above their own count.
 
 Fine-grained planner-sized splits and stealing attack skew from two directions:
 smaller units mean less variance per unit, and stealing corrects whatever

@@ -41,8 +41,8 @@ sink:
     password: "${CLICKHOUSE_PASSWORD}"     # quote the site — see interpolation caveats
 ```
 
-Interpolation is textual and pre-parse, so **quote the value site** when a secret
-may contain YAML-significant characters. The four `${...}` forms and the
+Interpolation is textual and pre-parse, so **quote the value site** when a
+secret may contain YAML-significant characters. The four `${...}` forms and the
 quoting rules are in
 [Configuring pipelines](configuring-pipelines.mdx#environment-interpolation).
 

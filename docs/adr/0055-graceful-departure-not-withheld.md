@@ -52,9 +52,10 @@ path meaning "immediately".
 
 ### Confirmation
 
-`a_departure_leaves_nothing_to_expire` (`crates/spate-coordination/tests/scenarios/mod.rs`)
-pins that a departure clears every owner and deletes the presence key, on every
-store. `a_departed_workers_splits_are_withheld_for_the_grace_window` and
+`a_departure_leaves_nothing_to_expire`
+(`crates/spate-coordination/tests/scenarios/mod.rs`) pins that a departure
+clears every owner and deletes the presence key, on every store.
+`a_departed_workers_splits_are_withheld_for_the_grace_window` and
 `a_zero_rebalance_delay_reassigns_immediately`
 (`crates/spate-coordination/tests/multi_worker.rs`) pin the crash path and its
 zero.

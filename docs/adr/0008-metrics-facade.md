@@ -17,9 +17,9 @@ question is whether that type is a framework-owned abstraction wrapping some
 backend, or the ecosystem's own facade.
 
 There is a complication. The `metrics` crate is 0.x, and
-[ADR-0011](0011-msrv-and-dependency-policy.md)'s dependency policy says 0.x types
-must not appear in our public API, because their breaking releases would become
-ours.
+[ADR-0011](0011-msrv-and-dependency-policy.md)'s dependency policy says 0.x
+types must not appear in our public API, because their breaking releases would
+become ours.
 
 ## Considered options
 

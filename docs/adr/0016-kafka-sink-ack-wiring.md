@@ -17,8 +17,9 @@ work that way: a produce call enqueues a message locally and returns, and
 durability is reported later, per message, through a delivery-report callback.
 
 So the connector has to turn N per-message reports into one per-batch outcome,
-without blocking the callback, which librdkafka invokes from its own poll thread,
-and without allocating per message at batch sizes reaching hundreds of thousands.
+without blocking the callback, which librdkafka invokes from its own poll
+thread, and without allocating per message at batch sizes reaching hundreds of
+thousands.
 
 ## Considered options
 

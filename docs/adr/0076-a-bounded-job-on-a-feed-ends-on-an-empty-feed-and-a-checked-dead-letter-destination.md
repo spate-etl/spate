@@ -172,5 +172,6 @@ than the five-minute default and the one-minute floor the SQS feed sets.
 - The feed-section record — the finished `feed:` section, `settling_window`
   among its keys.
 - [Work feed](../user-guide/02-concepts/09-work-feed.mdx#how-a-bounded-job-ends)
-  and [S3 source](../user-guide/04-connectors/sources/s3/README.mdx#how-a-bounded-job-ends)
+  and
+  [S3 source](../user-guide/04-connectors/sources/s3/README.mdx#how-a-bounded-job-ends)
   — the end check and re-running a stalled job.

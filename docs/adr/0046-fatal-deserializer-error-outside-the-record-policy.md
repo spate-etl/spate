@@ -12,12 +12,13 @@ description: "A deserializer can return a fatal error that stops the pipeline wh
 ## Context and problem statement
 
 A deserializer's errors reach the chain as record-level failures, which the
-stage's Skip or Fail policy settles ([ADR-0010](0010-skip-or-fail-record-error-policies.md)).
-Some failures are not about the payload. A schema registry that rejects the
-credentials or the certificate fails every payload that needs a fetch. Under
-the default Skip policy, reporting that as a record error drops and acks the
-whole stream. Reporting it as `NotReady` holds the batch forever, with only a
-log line to show for it.
+stage's Skip or Fail policy settles
+([ADR-0010](0010-skip-or-fail-record-error-policies.md)). Some failures are not
+about the payload. A schema registry that rejects the credentials or the
+certificate fails every payload that needs a fetch. Under the default Skip
+policy, reporting that as a record error drops and acks the whole stream.
+Reporting it as `NotReady` holds the batch forever, with only a log line to show
+for it.
 
 ## Considered options
 

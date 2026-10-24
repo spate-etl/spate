@@ -20,7 +20,8 @@ depends on the source:
 Which kind each shipped source is, and how to wire it:
 [Kafka source](../04-connectors/sources/kafka/README.mdx) (brokered) ·
 [S3 source](../04-connectors/sources/s3/README.mdx#scaling-out-and-the-solo-default)
-(coordinated, or [feed-reading](../04-connectors/sources/s3/README.mdx#reading-from-a-feed)) ·
+(coordinated, or
+[feed-reading](../04-connectors/sources/s3/README.mdx#reading-from-a-feed)) ·
 [Datagen source](../04-connectors/sources/datagen/README.mdx#delivery-semantics)
 (neither, since every replica generates its own stream from offset 0).
 :::
@@ -29,11 +30,11 @@ Which kind each shipped source is, and how to wire it:
 
 Every worker runs one binary and one pipeline file, keeps no volume and never
 lists. The job's [lister](../07-reference/glossary.mdx#lister) is a run of the
-same binary in lister mode: it reads the workers' pipeline file, builds no
-sink, lists the input once, publishes its units to the feed and exits. Its
-checkpoint sits at the [job location](../07-reference/glossary.mdx#job-location),
-so no process needs a volume. Nothing elects a leader, and nothing fences a
-second lister run, so run one per job.
+same binary in lister mode: it reads the workers' pipeline file, builds no sink,
+lists the input once, publishes its units to the feed and exits. Its checkpoint
+sits at the [job location](../07-reference/glossary.mdx#job-location), so no
+process needs a volume. Nothing elects a leader, and nothing fences a second
+lister run, so run one per job.
 
 On Kubernetes:
 
@@ -51,13 +52,13 @@ On Kubernetes:
   a stopped worker held then has no reader when the feed delivers it again.
 - **Continuous workers as a `Deployment`.**
 
-Start the lister first, or the workers at most one settling window (five
-minutes unless `settling_window` sets another) before it: a worker of a bounded job exits when no job fingerprint
-appears at the job location within that window. On a feed that charges a
-delivery attempt to a worker waiting for the fingerprint, start the lister
-first. A lister run builds its feed with the backend's publish-only handle
-where it has one, so it joins no group the workers read and is charged no
-attempt.
+Start the lister first, or the workers at most one settling window (five minutes
+unless `settling_window` sets another) before it: a worker of a bounded job
+exits when no job fingerprint appears at the job location within that window. On
+a feed that charges a delivery attempt to a worker waiting for the fingerprint,
+start the lister first. A lister run builds its feed with the backend's
+publish-only handle where it has one, so it joins no group the workers read and
+is charged no attempt.
 
 :::note Connector specifics
 [S3 source](../04-connectors/sources/s3/README.mdx#the-lister-run): the lister
@@ -107,13 +108,13 @@ Deployment carries a narrow set of guarantees:
 A plain `Deployment`, with no StatefulSet, no persistent volumes and no
 per-replica configuration:
 
-- **`instance_id` from the pod name.** Expose it through the downward
-  API as `POD_NAME` and set `instance_id: "${POD_NAME}"`. It must be unique
-  per live replica; a stable identity lets a pod restarted after a crash
-  reclaim its own splits instantly instead of waiting out the lease. Two live processes
-  sharing an id is detected and fatal. The id charset is `[A-Za-z0-9_-]`,
-  1–128 bytes, so a pod name containing dots is rejected at startup; name
-  the pods without dots.
+- **`instance_id` from the pod name.** Expose it through the downward API as
+  `POD_NAME` and set `instance_id: "${POD_NAME}"`. It must be unique per live
+  replica; a stable identity lets a pod restarted after a crash reclaim its own
+  splits instantly instead of waiting out the lease. Two live processes sharing
+  an id is detected and fatal. The id charset is `[A-Za-z0-9_-]`, 1–128 bytes,
+  so a pod name containing dots is rejected at startup; name the pods without
+  dots.
 - **`terminationGracePeriodSeconds` > drain timeout.** A SIGTERM'd
   replica drains, commits, and hands back its splits, leadership and
   membership on the way out, so peers take the work over without a lease

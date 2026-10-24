@@ -23,7 +23,8 @@ safety-relevant, the store's clock would be in the correctness path.
 
 ## Considered options
 
-- Lease TTL as the ownership boundary: the lease is valid, therefore the write is
+- Lease TTL as the ownership boundary: the lease is valid, therefore the write
+  is
 - Watch events as the ownership signal
 - A monotonically increasing revision on the durable record, checked by
   compare-and-set on every write, with TTLs and watches carrying only latency
@@ -34,12 +35,13 @@ Chosen option: "A revision on the durable record, checked by compare-and-set on
 every write", because it is the only one of the three that does not put a clock
 in the correctness path.
 
-Every claim, fence and commit targets the split's progress record and carries the
-revision it expects. An ownership change bumps an epoch. A worker whose epoch is
-stale loses its compare-and-set, and **a fenced commit writes nothing**. It then
-receives a `Lost` event and stops. It does not matter how long the worker was
-paused, whether its lease had expired, or whether it ever saw the watch event
-telling it so: it cannot write, because the revision moved.
+Every claim, fence and commit targets the split's progress record and carries
+the revision it expects. An ownership change bumps an epoch. A worker whose
+epoch is stale loses its compare-and-set, and
+**a fenced commit writes nothing**. It then receives a `Lost` event and stops.
+It does not matter how long the worker was paused, whether its lease had
+expired, or whether it ever saw the watch event telling it so: it cannot write,
+because the revision moved.
 
 Leaders are fenced the same way. A new leader's generation bump moves the plan
 record's revision, so a deposed leader's plan write loses its compare-and-set.

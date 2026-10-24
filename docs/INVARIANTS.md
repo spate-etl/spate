@@ -12,8 +12,8 @@ checklist a reviewer ticks against.
 
 The template cites exactly the set defined here, and nothing anywhere cites a
 number this file does not define. A citation carries the identifier and none of
-the wording, so any exception to a property belongs in its statement below rather
-than only where it is cited.
+the wording, so any exception to a property belongs in its statement below
+rather than only where it is cited.
 
 Most changes touch none of these. A change that touches one is not thereby
 wrong; it needs to say how the property still holds, and that is the review.
@@ -74,8 +74,8 @@ year ago still means what it said.
 
 An invariant states a property; it does not argue for it. The argument is in the
 decision record that established it. [`adr/`](adr/README.mdx) indexes them, and
-each record's `Confirmation` section names the invariant, test or gate that holds
-it.
+each record's `Confirmation` section names the invariant, test or gate that
+holds it.
 
 One documentation page is normative rather than descriptive:
 [`user-guide/02-concepts/08-work-assignment.mdx`](user-guide/02-concepts/08-work-assignment.mdx).

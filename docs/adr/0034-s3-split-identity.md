@@ -51,12 +51,12 @@ a single-shot invocation) can mint identical ids for the same work.
 
 ### Consequences
 
-- Good, because the id is fixed-length and portable whatever the member keys look
-  like.
+- Good, because the id is fixed-length and portable whatever the member keys
+  look like.
 - Good, because an overwrite becomes new work instead of inheriting the previous
   object's progress.
-- Bad, because the id is opaque: an operator looking at a stuck split cannot tell
-  from its id which objects it covers, and has to look up the spec record.
+- Bad, because the id is opaque: an operator looking at a stuck split cannot
+  tell from its id which objects it covers, and has to look up the spec record.
 - Bad, because a packing change orphans all existing progress. That is correct,
   since the splits are different, but it means a packing tweak is a full re-run,
   not a rolling change.

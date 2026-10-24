@@ -9,8 +9,10 @@ description: "A deleted DynamoDB lease or presence key leaves a revision floor t
 - **Supersedes:** [ADR-0051](0051-lease-expiry-judged-by-each-observer.md)
   (revision consequence), [ADR-0053](0053-one-dynamodb-table-holds-every-job.md)
   (partition keys)
-- **Superseded by:** [ADR-0058](0058-a-dynamodb-ephemeral-write-leaves-its-predecessors-removal-revision.md)
-  (watch-delete consequences), [ADR-0065](0065-the-dynamodb-coordination-store-is-removed.md)
+- **Superseded by:**
+  [ADR-0058](0058-a-dynamodb-ephemeral-write-leaves-its-predecessors-removal-revision.md)
+  (watch-delete consequences),
+  [ADR-0065](0065-the-dynamodb-coordination-store-is-removed.md)
 
 ## Context and problem statement
 
@@ -112,17 +114,16 @@ In `crates/spate-coordination/src/store/dynamodb/tests.rs`,
 `a_recreate_on_a_lagging_clock_lands_above_the_watch_delete`,
 `a_floor_answer_leaves_the_watch_delete_at_the_floor`,
 `a_delete_raises_the_floor_before_removing_the_key`,
-`a_failed_floor_raise_keeps_the_key` and
-`a_job_started_at_layout_1_is_refused` pin the floor over the
-in-memory table, and `a_recreated_key_between_two_polls_is_repaired_on_the_watch`
-pins the repair once a floor is collected. In
+`a_failed_floor_raise_keeps_the_key` and `a_job_started_at_layout_1_is_refused`
+pin the floor over the in-memory table, and
+`a_recreated_key_between_two_polls_is_repaired_on_the_watch` pins the repair
+once a floor is collected. In
 `crates/spate-coordination/src/store/dynamodb/test_http.rs`,
 `a_create_checks_the_floor_in_one_transaction`,
 `a_cancelled_create_retries_above_the_floor_it_returned` and
 `a_create_that_meets_a_floor_twice_is_retryable` pin the request and how its
-cancellation reasons are read.
-`a_create_lands_above_a_floor_on_dynamodb_local` and
-`the_store_contract_holds_over_dynamodb_local` in
+cancellation reasons are read. `a_create_lands_above_a_floor_on_dynamodb_local`
+and `the_store_contract_holds_over_dynamodb_local` in
 `crates/spate-coordination/tests/dynamodb_integration.rs` run the transaction
 against DynamoDB Local.
 

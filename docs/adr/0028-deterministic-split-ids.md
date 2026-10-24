@@ -39,8 +39,9 @@ The conservative alphabet works everywhere, so a new backend never needs an
 escaping scheme.
 
 Sequential ids were rejected because allocation requires a leader to be
-authoritative, which [ADR-0025](0025-embedded-consensus-rejected.md) deliberately
-avoids. Random ids were rejected because they make replanning destructive.
+authoritative, which [ADR-0025](0025-embedded-consensus-rejected.md)
+deliberately avoids. Random ids were rejected because they make replanning
+destructive.
 
 ### Consequences
 

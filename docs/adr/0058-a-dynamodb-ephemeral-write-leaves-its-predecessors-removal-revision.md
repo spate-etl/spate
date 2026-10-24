@@ -6,10 +6,13 @@ description: "A DynamoDB lease renewal or takeover of R writes R + 2 or above. S
 
 - **Status:** superseded
 - **Date:** 2026-10-04
-- **Supersedes:** [ADR-0057](0057-a-deleted-dynamodb-ephemeral-key-leaves-a-revision-floor.md)
+- **Supersedes:**
+  [ADR-0057](0057-a-deleted-dynamodb-ephemeral-key-leaves-a-revision-floor.md)
   (watch-delete consequences)
-- **Superseded by:** [ADR-0061](0061-a-watch-delete-orders-above-what-its-handle-has-seen.md)
-  (the #959 consequence), [ADR-0065](0065-the-dynamodb-coordination-store-is-removed.md)
+- **Superseded by:**
+  [ADR-0061](0061-a-watch-delete-orders-above-what-its-handle-has-seen.md)
+  (the #959 consequence),
+  [ADR-0065](0065-the-dynamodb-coordination-store-is-removed.md)
 
 ## Context and problem statement
 

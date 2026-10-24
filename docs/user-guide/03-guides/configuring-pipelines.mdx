@@ -74,9 +74,9 @@ These top-level sections belong to the framework:
   hysteresis: `max_inflight_bytes`, `high_ratio`, `low_ratio`, `min_pause`.
 - **`metrics`** — exporter selection and observability knobs: `exporter`,
   `per_partition_detail`, `e2e_basis`.
-- **`coordination`** — the store a coordinated source's instances share, or
-  the in-process store of a solo run, and the coordinator's tuning: `store`, `instance_id`, `lease_duration`,
-  `max_in_flight` and the rest
+- **`coordination`** — the store a coordinated source's instances share, or the
+  in-process store of a solo run, and the coordinator's tuning: `store`,
+  `instance_id`, `lease_duration`, `max_in_flight` and the rest
   ([reference](../07-reference/configuration.mdx#coordination)).
 - **`feed`** — the work feed a feed-reading source reads: one backend key,
   plus `units_held`, `attempt_cap`, `location` and `settling_window`
@@ -173,8 +173,8 @@ historical label `component="sink"`). The precise rules (reserved names, label
 equivalence) are tabulated in the
 [configuration reference](../07-reference/configuration.mdx#sinks). See
 [multi-sink split](../02-concepts/06-multi-sink.mdx) for the routing DSL and
-[ClickHouse multi-table](../04-connectors/sinks/clickhouse/multi-table.mdx) for the
-connector end-to-end.
+[ClickHouse multi-table](../04-connectors/sinks/clickhouse/multi-table.mdx) for
+the connector end-to-end.
 
 ## Building a config in code
 

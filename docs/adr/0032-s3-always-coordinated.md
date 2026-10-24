@@ -35,14 +35,14 @@ project a dual path is pure liability: twice the surface for a capability
 (durable solo resume) that a durable coordination store already provides.
 
 A solo run gets an in-process store, linked unconditionally, so no configuration
-or feature flag is needed to run one instance. Its progress is **ephemeral**, and
-that is warned about rather than hidden: a single instance that restarts re-reads
-from the beginning. An operator who wants durable solo resume points the source
-at a durable coordination store, which is the same mechanism the multi-instance
-case uses rather than a second one.
+or feature flag is needed to run one instance. Its progress is **ephemeral**,
+and that is warned about rather than hidden: a single instance that restarts
+re-reads from the beginning. An operator who wants durable solo resume points
+the source at a durable coordination store, which is the same mechanism the
+multi-instance case uses rather than a second one.
 
-Removing single-instance operation entirely was rejected as needlessly hostile to
-the simplest case.
+Removing single-instance operation entirely was rejected as needlessly hostile
+to the simplest case.
 
 ### Consequences
 
@@ -64,7 +64,7 @@ a separate suite.
 
 ## More information
 
-- Landed in `84e1583` (#49). The manifest and its schema were deleted in the same
-  change.
+- Landed in `84e1583` (#49). The manifest and its schema were deleted in the
+  same change.
 - [ADR-0024](0024-coordination-store-external-kv.md) — the store trait the
   in-process implementation satisfies.
